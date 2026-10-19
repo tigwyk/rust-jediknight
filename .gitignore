@@ -1,0 +1,7 @@
+target/
+scrap/
+
+
+# local run logs
+shot.log
+shot.err

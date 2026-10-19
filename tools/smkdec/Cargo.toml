@@ -1,0 +1,9 @@
+[package]
+name = "smkdec"
+version = "0.1.0"
+edition = "2021"
+
+# Built for i686-pc-windows-msvc: the install's SMACKW32.DLL is a 32-bit image, so a 64-bit
+# process cannot load it (LoadLibrary fails with ERROR_BAD_EXE_FORMAT, 193). This helper is
+# the 32-bit side of that boundary and has no dependencies at all.
+[workspace]

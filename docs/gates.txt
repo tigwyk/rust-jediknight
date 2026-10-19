@@ -1,0 +1,90 @@
+Gates — every check this port has, run against the retail install
+===============================================================
+
+Recorded at round 85. Target: `G:\Games\Star Wars Jedi Knight - Dark Forces 2`
+(GOG, plaintext JK.EXE, image base 0x400000,
+sha256 12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44).
+
+`cargo test` -> 71 passed, 0 failed.
+`cargo clippy --release --all-targets` -> 56 warnings, no errors.
+
+Each flag below is a gate: it asserts on the live runtime (or the shipped data) and exits
+non-zero if the behaviour drifts. `FAILURES: 0 / 34`.
+
+flag                                                   exit  what it prints
+-------------------------------------------------------------------------------------------------
+--check                                                  0  --- all checks passed ---
+--audit                                                  0  --- audit passed ---            (all 35 levels)
+--ui-audit                                               0  --- ui audit passed ---
+--walk all                                               0  34/34 levels with a start kept the walker inside
+                                                             its sector, 1201 sector crossings, 1 without a start
+--rules --level 01narshadda.jkl                          0  apex 2.57 / 2.81 closed form; pushed true beside,
+                                                             false 27 units past the wall's end
+--animate                                                0  117 of 117 placed actors move between frame 0 and
+                                                             mid-loop (worst 0.038)
+--cog-check                                              0  --- cog check passed ---        (every level's scripts)
+--triggers                                               0  --- triggers check passed ---
+--sleep                                                  0  --- sleep check passed ---
+--live-check                                             0  the body stands in sector 339 at z -0.78 on a floor at
+                                                             -1.13 (0.00 below it); a body that cannot reach a
+                                                             floor fails here instead of showing a black screen
+--live-check                                             0  --- live check passed ---
+--ai                                                     0  --- ai check passed ---
+--hit                                                    0  --- hit check passed ---
+--fire +bryarbolt                                        0  --- fire check passed ---
+--pickup                                                 0  --- pickup check passed ---
+--weapon +elaser                                         0  --- weapon check passed ---
+--bins                                                   0  --- bins check passed ---
+--mana --level 01narshadda.jkl                           0  0 -> 20.0 in one second, clamps at 400
+--ammo --level 01narshadda.jkl                           0  bin 11 (energy); 3 rounds fired -> 3, then dry
+--collide --level 01narshadda.jkl                        0  the ported search: 4 of 352 placed things stand on
+                                                             a floor in another sector (215 -> 222), and a wall
+                                                             sweep keeps 0.32 of the 0.35 radius
+--winding                                                0  966 of 87377 drawn surfaces wind against their own
+                                                             normal; 91233 normals point into their room, 0 away
+--move                                                   0  34 level(s), 0 fell through, 0 barely moved, 189
+                                                             units travelled in 180 frames each -- the sweep-based
+                                                             move neither wedges nor leaves the world. Held forward
+                                                             in the window, the body walks the walkway, descends
+                                                             into the room below and lands: z -13.65 on floor -14.00
+--controls --level 01narshadda.jkl                       0  W follows the camera and D is to its right on 15
+                                                             yaw/pitch pairs (forward 6.67, strafe 4.67 = 70%);
+                                                             120 px right turns 24.1 deg right, 80 px up raises
+                                                             the pitch, the clamp is the template limit, and
+                                                             the pointer locks with no screen open
+--feel                                                   0  walk 6.67 u/s at drag 3: 0.73 after 0.05 s,
+                                                             5.55 after 0.5 s, 6.27 after 2 s; released
+                                                             2.45 -> 1.80 in 0.1 s; strafe 70%, back 50%,
+                                                             run 200%, crouch 50%
+--pull --level 01narshadda.jkl                           0  the shipped script end to end: `activated` -> Ok
+                                                             with a 0.33 s pulse, `pulse` targets the
+                                                             item (FirstThingInView + HasLOS +
+                                                             ThingViewDot), `deactivated` clears gravity
+                                                             and ApplyForce gives velocity [-30.0, 0, 0]
+--music                                                  0  --- music check passed ---
+--fade --level 01narshadda.jkl                           0  music 0.00 -> 1.00 -> 0.00 in 4 s of game time
+--smk                                                    0  --- smk check passed ---
+--campaign                                               0  --- campaign check passed ---
+--transition                                             0  --- transition check passed ---
+--save                                                   0  wrote 9320 bytes (version 6), round-tripped
+--ui-tables                                              0  41 screens; 39 name a click and a hover wav
+--ui-visible                                             0  --- ui visible check passed ---
+--force-screen                                           0  --- force screen check passed ---
+--map-shot <png>                                         0  --- map panel check passed ---
+--load-bar 55 <png>                                      0  the engine's own frame and fill colour
+--cmp 01narsh.cmp                                        0  --- cmp check passed ---
+--die                                                    0  --- die check passed ---
+--flow                                                   0  --- flow check passed ---
+
+Two checks are visual and are A/B rather than textual:
+
+  * the colormap material vs `StandardMaterial`: 0.00% of 230400 sampled pixels differ,
+    on 01narshadda.jkl and 02narshadda.jkl (`--shot` twice, `--standard-material` for the B side);
+  * portal occlusion vs `--no-cull`: 0.000% differ over 230400 sampled pixels, with 11 of the
+    21 sectors in the frustum hidden.
+
+Deliberately excluded from the suite: `--ir`, `--frames` without `--shot`, and `--play`. Each
+opens a window and runs until it closes, so a sweep would hang on them; `--shot`/`--map-shot`
+are the deterministic capture paths (fixed 1/60 dt in capture mode).
+ --audio-state  prints the mute decision and master gain, then exits before any audio device exists (verify silence without playing it)
+ --fall  drop the body from the spawn and check the impact against sqrt(2gh) and the damage against (v-2.5)^2*45

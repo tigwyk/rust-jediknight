@@ -1,0 +1,38 @@
+# Roadmap — what a drop-in single-player replacement still needs
+
+The gate for every stage is the install itself: retail `JK.EXE` (GOG, plaintext) for code and
+constants, the shipped data for content, and a runnable check that fails when the stage
+regresses. `--audit` stays the whole-install gate; each stage adds its own check on top.
+
+Scope: **single-player campaign**. Multiplayer (networking, protocol, dedicated servers) is
+not in this roadmap; say so rather than half-build it.
+
+What already works is in the README status table. This is the remainder, in dependency order.
+
+| # | stage | missing today | gate |
+|---|---|---|---|
+| 1 sector/portal visibility | **done**: the `.cmp` colormap material is the default at measured parity (0.00% pixel difference vs `StandardMaterial`), and **portal occlusion is on** — the portal graph is symmetric (a shared surface was only linked in one direction), the cull picks the sector seed that agrees with the frustum (level 1 offers 339/218/102), and the culled frame is **0.000%** different from `--no-cull` over 230,400 pixels (§16.1, §16.13) | `ponytail`: the seed choice is a heuristic — a level where every candidate disagrees loses occlusion; a true point-in-sector test is the upgrade | a room, its portals and its neighbours render |
+| 2 player parity | **motion, controls and the collision maths are the engine's**: speed ramp with `ApplyDrag` at 50 Hz (`--feel`), `lvec`/`rvec` so W/D match the camera, mouse look with the template pitch clamp and a cursor lock (`--controls`), the ported sweep with the moving-into-surface guard driving the floor probe and the lateral move (`--move`: 34 levels, 0 fell through, 0 frozen, 189 units; window: walks, descends, lands) | the lateral sweep stays sector-scoped, so a body can pass through walls its sector does not list, and level 1's unrailed walkway edge lets it descend a room; attach/thrust projection (`sithThing_AttachThingToSurface` + `UpdateAttachedThingPhysics`) is the fix and is unported | attach/detach so surfaces hold the body |
+| 3 | .key/.pup animation + puppets | **done**: the `stand` state of every placed actor animates (1684 of 1697; level 1 117/117), 11 puppets / 121 keyframes at the key's own 15 fps, and a death state (`kyftdeth.key`, 45 frames) plays once and holds. Other puppet states (walk/run/attack) are not wired | `--animate` |
+| 4 COG verbs | **the force family is the targeting and impulse set the shipped scripts name**: `FirstThingInView`/`NextThingInView` (cone + type-bit mask), `HasLOS`, `ThingViewDot`, `ApplyForce`, `VectorNorm`, `ClearPhysicsFlags`, `Set/Clear/GetActorFlags`, `SetActorWeapon`/`GetActorWeapon`, `SetLifeLeft`/`GetLifeLeft`, `GetItemFlags`, `BitTest`, `SkillTarget`, `GetThingSignature`, `PlayMode`, `AmputateJoint`, `GetParam` — 15 of these were missing and each was named by `cog\force_pull.cog` or `cog\force_grip.cog` (§16.5) | pull/grip's *engine* side is now script-faithful; the arm/disarm path (`SkillTarget` returning a dropped weapon for an actor) is simplified to "items throw, actors do not" | the script layer drives a level end to end |
+| 5 | combat | **complete for single-player, and the force powers now follow the shipped scripts**: the pull *highlights* with `jkSetTarget` and then `ApplyForce`s the item at **30 units/s** toward the player with gravity cleared (`--pull`: `velocity [-30.0, 0.0, 0.0]`), grip damages `damage * rank / 2` every 0.5 s while holding the victim with actor flag `0x40000`. Firing, hits, death, pickups, ammo, mana all gated | `SkillTarget`'s disarm branch is simplified; grip has no separate check yet | the remaining force powers, then stage 6 AI |
+| 6 AI | **instincts reach the live runtime** (117 actors, 17 template classes) and the chase now **steers through portals** instead of pressing into walls: `Runtime::portals` is built from the `adjoin`/`mirror` pairs (1206 on level 1) and the tick heads for the doorway that shortcuts the way when `segment_blocked` says the straight line is shut (`--ai` asserts the heading) (§16.12) | still open: the steering is greedy, not a search (two doors, wrong pick); instinct scheduler weights, `accuracy=` spread, reaction times | actors close on you through the doorway |
+| 7 audio parity | **done**: `.snd` radii drive `snd::volume` over 375 clips; `PlaySong(from, to, num)` keeps the range and wraps it; the pulse/timer queue runs; the **music fade** ramps 0.00 to 1.00 and back through the soundtrack's own `crossed`→`SetPulse`→`SetMusicVol` chain (`--fade`); and the **menu's own wavs** are parsed from `jkGuiMenu` (`soundHover` 0x2C, `soundClick` 0x30) and played on hover/click — 39 of 41 screens, both names present in the archives (`--ui-sounds`) (§16.10, §18.3d) | nothing known | a shot across the room is quieter, the bar fades its track in as you cross the door, and the menus click |
+| 8 | .smk cutscenes | **working**: JK.EXE delegates Smacker to `SMACKW32.DLL` (nine ordinals), so the port calls the install's own DLL through `tools/smkdec`, decodes each `.smk` and plays it in the UI canvas; sequencing follows `episode.jk`'s cutscene list and `--smk` gates both (29 of 768 palette bytes still differ from libsmacker) | `ponytail`: the palette comes out one or two entries off in a few frames | a cutscene plays from the episode order |
+| 9 | campaign flow | **done**: the engine's own `.jks` savegame container is recovered from JK.EXE's writer (`0x4da9c0`), reader (`0x4dab70`) and record writer (`0x4f4210`) — header at `+0x20` payload length, record type `0x0C` — and `--save` writes a version-6 file and reads it back (9320 bytes, thing records intact); the campaign graph and the level transition are gated (`--campaign`, `--transition`) | no shipped `.jks` exists in the GOG install to round-trip a *real* save against (`player/` holds only `dummy.txt`); payload field layouts are kept verbatim rather than modelled | a new game reaches level 1 and a finished level resolves the next |
+| 10 UI panels | **every single-player custom element draws** from recovered geometry: the map (`jkMap_DrawCircle`), objectives, the force-star run, the loading bar and the title text, all gated (`--map-shot`, `--ui-visible`, `--load-bar`, `--force-screen`) | **nothing left in scope**: the "missing" model window and power grid both belong to `edit_character` (`bkBuildMulti.bm`), a multiplayer screen — asking the tables which screen owns each draw callback settles it (`--ui-tables`) | the character screen renders its model |
+
+Each stage lands with: the recovered constants or code addresses cited in
+`docs/formats.md` (or a new section), a check that fails if the behaviour drifts, and the
+README status row flipped from "not started"/"parsed" to "working".
+
+## Notes on the hard ones
+
+- **The map screen** is not 2D: `jkGuiMap_DrawMapScreen` renders the level through the
+  engine's camera into an offscreen buffer (`sithMap_DrawCircle`) and blits it. Stage 10's map
+  work therefore depends on having a usable world render path that can draw offscreen.
+- **Savegames** are the engine's own `.dat`/`.par` formats, present in the archives per
+  `docs/formats.md`'s format table but not read yet. Stage 9 needs them for real save/load,
+  not a private format.
+- **Cogs are the game's scripting layer.** Stage 4 unblocks most of what looks like missing
+  gameplay: pickups, objectives, counters, weapons on the floor, scripted spawns.
