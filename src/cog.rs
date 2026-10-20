@@ -853,6 +853,10 @@ pub struct Vm {
     /// The thing the script instance is placed on (`GetSourceRef`); 0 when it is
     /// level-wide, which is every instance this level's parse exposes.
     pub source: i64,
+    /// This cog's own index in the world's cog list — `pCog->idx`, which `GetSelfCog` returns and
+    /// scripts compare against `GetMasterCog()`. The VM holds it because the world does not know
+    /// which of its scripts is calling.
+    pub cog_index: i32,
     /// This cog's pulse, as the engine keeps it (`SITH_COG_PULSE_SET`): `SetPulse(seconds)` sets
     /// the interval and the next due time, and every cog tick that is due sends the `pulse` message.
     pub pulse: Option<(f32, f32)>,
@@ -888,6 +892,7 @@ impl Vm {
             sender_ref: 0,
             sender_type: 0,
             source: 0,
+            cog_index: -1,
             pulse: None,
             timer: None,
             now: 0.0,
@@ -1260,6 +1265,9 @@ impl Vm {
                 None => Value::Num(0.0),
             },
             "getsenderid" => Value::Num(self.sender as f64),
+            // `sithCogFunction_GetSelfCog` is `pCog->idx`, and the master scripts compare it with
+            // `GetMasterCog()`, so it has to be this VM's own index rather than the world's answer.
+            "getselfcog" => Value::Num(self.cog_index as f64),
             "getsenderref" => Value::Num(self.sender_ref as f64),
             "getsendertype" => Value::Num(self.sender_type as f64),
             "print" => {
@@ -1393,6 +1401,20 @@ end
         vm.run_label(&cog, "activate").expect("runs");
         assert_eq!(vm.var("locked"), Value::Num(1.0));
         assert_eq!(vm.trace.calls.get("IsMoving").copied(), Some(1));
+    }
+
+    /// `GetSelfCog` is `pCog->idx`, and the shipped master/sidekick scripts compare it with
+    /// `GetMasterCog()`, so the VM has to answer with its own index rather than a constant 0.
+    #[test]
+    fn a_cog_answers_with_its_own_index() {
+        let cog = parse("symbols\nmessage startup\nend\ncode\nstartup:\n\tPrint(GetSelfCog());\n\treturn;\nend\n")
+            .expect("parses");
+        let mut vm = Vm::new();
+        vm.cog_index = 7;
+        vm.run_label(&cog, "startup").expect("runs");
+        assert_eq!(vm.trace.prints, vec!["7".to_string()]);
+        // A VM nobody indexed answers -1, which is the engine's "no cog" index.
+        assert_eq!(Vm::new().call_verb("GetSelfCog", Vec::new()), Value::Num(-1.0));
     }
 
     #[test]

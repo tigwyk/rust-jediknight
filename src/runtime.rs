@@ -386,6 +386,9 @@ pub struct Runtime {
     /// `sithWeapon_SetFireWait` arms `nextFire = now + wait`, and a negative wait clears both.
     pub fire_wait: f32,
     pub next_fire: f32,
+    /// `SetMasterCog`/`GetMasterCog`: the engine keeps one global master cog index
+    /// (`sithCog_g_pMasterCog`), which sidekick and `endlevel` scripts compare with `GetSelfCog()`.
+    pub master_cog: Option<i32>,
     /// Per-actor instinct classes, keyed by thing index: what the `.ai` said and what this
     /// build does with it (see `ai_tick`).
     pub ai: BTreeMap<usize, crate::ai::Ai>,
@@ -712,6 +715,7 @@ impl Runtime {
             time: 0.0,
             fire_wait: 0.0,
             next_fire: 0.0,
+            master_cog: None,
             ai: BTreeMap::new(),
             template_weapon: level
                 .templates
@@ -922,6 +926,8 @@ impl Runtime {
                 | "aisetmovepos"
                 | "aisetmovething"
                 | "aisetlookpos"
+                | "getmastercog"
+                | "setmastercog"
                 | "setfirewait"
                 | "setgoalflags"
                 | "cleargoalflags"
@@ -2281,6 +2287,15 @@ impl Runtime {
                 Value::Nil
             }
             "getactorflags" => Value::Num(self.actor_flags.get(&ti(0)).copied().unwrap_or(0) as f64),
+            // `sithCogFunction_GetMasterCog` pushes the master's cog index, or -1 when none is set;
+            // `SetMasterCog` stores one and clears it when the index resolves to no cog, which is
+            // what `sithCog_GetCogByIndex(-1)` returning NULL does. `GetSelfCog` is the VM's own.
+            "getmastercog" => Value::Num(self.master_cog.unwrap_or(-1) as f64),
+            "setmastercog" => {
+                let cog = idx(0) as i32;
+                self.master_cog = (cog >= 0).then_some(cog);
+                Value::Nil
+            }
             // The engine's arm only forwards to `sithWeapon_SetFireWait` when the thing is the
             // player (`FUN_00507930`), which is what keeps a scripted wait from arming everyone's
             // weapon. The negative case is the engine's own "clear" branch.
@@ -2919,6 +2934,7 @@ mod tests {
             time: 0.0,
             fire_wait: 0.0,
             next_fire: 0.0,
+            master_cog: None,
             ai: BTreeMap::new(),
             template_weapon: BTreeMap::new(),
             ai_shot_interval: 1.0,
@@ -3209,6 +3225,13 @@ mod tests {
         assert_eq!(rt.call("GetInv", &[Value::Num(0.0), Value::Num(100.0)]), Value::Num(3.0));
         rt.call("ClearGoalFlags", &[Value::Num(0.0), Value::Num(0.0), Value::Num(1.0)]);
         assert_eq!(rt.call("GetInv", &[Value::Num(0.0), Value::Num(100.0)]), Value::Num(2.0));
+        // `SetMasterCog`/`GetMasterCog` are the engine's one global master index; unset is -1, and
+        // the shipped scripts only clear it by resolving an index to no cog.
+        assert_eq!(rt.call("GetMasterCog", &[]), Value::Num(-1.0));
+        rt.call("SetMasterCog", &[Value::Num(4.0)]);
+        assert_eq!(rt.call("GetMasterCog", &[]), Value::Num(4.0));
+        rt.call("SetMasterCog", &[Value::Num(-1.0)]);
+        assert_eq!(rt.call("GetMasterCog", &[]), Value::Num(-1.0));
     }
 
     /// `sithThing_CreateThing` places a spawned thing at `marker.position + markerOrient * (insertDiff)`.

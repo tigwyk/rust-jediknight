@@ -3,8 +3,8 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **33 gates, 82 tests, 0 failures.** Stubbed script surface:
-**62 verbs, 494 call sites across the 34 shipped levels** (706 before this run of state setters).
+The port's checks at the time of writing: **33 gates, 83 tests, 0 failures.** Stubbed script surface:
+**59 verbs, 457 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -72,17 +72,17 @@ both multiplayer-only screens.
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — plus sector light animation. 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 62 below | the 62 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 59 below | the 59 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 62 stubbed cog verbs
+## 3. The 59 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (494 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 62.
+over the 34 levels from `--cog-check` (457 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 59.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -93,7 +93,7 @@ any error.
 | --- | --- | --- |
 | AI (5) | 78 | `aisetmoveframe` 34, `aisetlookframe` 31, `aisetfiretarget` 8, `aiflee` 3, `aisetclass` 2 |
 | Thing properties and flags (12) | 82 | `setmountwait` 25, `returnex` 12, `setthinglight` 10, `clearthingflags` 9, `thinglightanim` 9, `jkclearflags` 4, `syncsurface` 4, `syncthingpos` 3, `setthingrotvel` 2, `newcoloreffect` 2, `createthingatpos` 1, `teleportthing` 1 |
-| Cog introspection and goal state (5) | 62 | `getgoalframe` 24, `getselfcog` 18, `setmastercog` 16, `getmastercog` 3, `loadtemplate` 1 |
+| Cog introspection and goal state (2) | 25 | `getgoalframe` 24, `loadtemplate` 1 |
 | Weapons and projectiles (3) | 31 | `jksetsaberinfo` 15, `autoselectweapon` 14, `fireprojectile` 2 |
 | Face and thing modes (5) | 45 | `setfacegeomode` 18, `getfacegeomode` 16, `getthinggeomode` 4, `setthingcurgeomode` 4, `setfacelightmode` 3 |
 | Sectors, adjoins, sky (3) | 15 | `slideceilingsky` 10, `setsectorthrust` 4, `slidehorizonsky` 1 |
@@ -136,9 +136,22 @@ The `runtime.rs` sleep row is the one that bites: it changes script behaviour, n
 
 Ordered by risk per hour, using the call counts in section 3 rather than subsystem size.
 
-1. **Fix the wrong-by-default getters.** `getselfcog` 18, `getmastercog` 3, `getgoalframe` 24. These need the
-   calling cog's identity, which `Runtime::call` does not receive, so the fix is in the VM layer. (Done:
-   `getleveltime`, `gethealth`, `isthingvisible`, `get/setthingmass`, `setthinguserdata`, `setthingtimer`.)
+1. **Fix the wrong-by-default getters.** ~~`getselfcog`, `getmastercog`~~ — **done**: the VM answers
+   `getselfcog` with its own index in the level's cog list, and `setmastercog`/`getmastercog` are the
+   world's one global master (`-1` unset), which is what `01_endlevel.cog` registers at startup
+   (`SetMasterCOG(GetSelfCOG())`). Still open: `getgoalframe` (24), which needs things that are path
+   movers, and `loadtemplate` (1). (Also done earlier: `getleveltime`, `gethealth`, `isthingvisible`,
+   `get/setthingmass`, `setthinguserdata`, `setthingtimer`.)
+   **Next in this area — the level-end chain.** `SetMasterCOG`/`GetSelfCOG` are only half of it, and
+   the other half *works by accident*: a level's `goal*.cog` scripts report a completed objective with
+   `SendMessage(GetMasterCOG(), user0)`, and this port broadcasts that message as `#N` where `N` is
+   resolved against the *receiving* script's `message:` list. Two scripts that declare the same
+   messages in the same order line up, which is why `--run 01narshadda` reaches `01_endlevel.cog`'s
+   `user0` (goal completed, `Sleep(3.0)`, `jkEndLevel(1)`) — but a script with a different declaration
+   order would get the wrong label. The engine pops a **cog index** and a message **type id**
+   (`SITH_MESSAGE_USER0` = 27, `activate` = 1, `startup` = 3; `user0`…`user7` = 27…34), so the fix is a
+   cog-addressed queue (one producer, one consumer) plus those ids. That is the shortest path to
+   "a level can be finished on purpose rather than by luck".
 2. **Timer queue for `sleep`/`settimer`/`setpulse`** (section 4). It is the one ceiling that changes what
    scripts do, and it sits under every verb that waits.
 3. ~~**Sector and adjoin flags**~~ — **done** (section 6): `setadjoinflags`/`clearadjoinflags`/
@@ -153,7 +166,7 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    puppet, and `--ai` asserts the walk, the arrival and the turn. `setfirewait` (a weapon verb, kept here
    because it was the same shape) arms the player's cooldown, `fire_player` reads it, and
    `setgoalflags`/`cleargoalflags` OR and mask the goal counters (`SITHBIN_GOAL00` = 100) that
-   `endlevel.cog` records objectives in — 212 calls gone, 494 stubbed, down from 706. What is left of
+   `endlevel.cog` records objectives in — 249 calls gone, 457 stubbed, down from 706. What is left of
    the group needs data the port does not have: `aisetmoveframe` (34) and `aisetlookframe` (31) index
    `actor->aFrames`, a numbered waypoint table; `aisetfiretarget` (8) needs actors that shoot at
    something other than the player; `aiflee` (3) needs the flee state; `setmountwait` (25) needs the

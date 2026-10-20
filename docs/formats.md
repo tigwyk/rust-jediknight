@@ -2600,6 +2600,31 @@ AI (`ai*`), weapon, music or message-bus verbs — stages 5–7.
 deferred groups is stubbed more than 40 times, so a verb that regresses to "answered with 0"
 fails the build rather than quietly doing nothing.
 
+**A cog now knows its own index.** `GetSelfCog` is `pCog->idx` (`sithCogFunction.c:996`); the port
+answers it from the VM's own position in the level's cog list, which is the order the engine creates
+them in. `SetMasterCog`/`GetMasterCog` are the engine's **one global** master index
+(`sithCog_g_pMasterCog`, `-1` when unset, and cleared when the index resolves to no cog), so those
+two live on the world rather than the VM.
+
+That closes the level-end chain's registration half, which `01_endlevel.cog` needs at startup:
+`SetMasterCOG(GetSelfCOG())`, then `SetGoalFlags(player, 0, 1)`. Its `user0` handler is the goal
+complete — `SetGoalFlags(player, 0, 2)`, `Accomplish1.wav`, freeze and invuln the player,
+`Sleep(3.0)`, `jkEndLevel(1)`. The message that reaches it (`SendMessage(GetMasterCOG(), user0)` from
+a goal script) does arrive today, and `--run 01narshadda` shows the handler running:
+
+```text
+  [01_endlevel.cog user0] sound Accomplish1.wav at 1.00
+```
+
+It arrives by *coincidence*, and that is the next thing to fix. `sithCogFunction_SendMessage` pops a
+**cog index** and a message **type id** (`SITH_MESSAGE_USER0` = 27, `activate` = 1, `startup` = 3,
+`timer` = 4, `pulse` = 13, `user0`…`user7` = 27…34); this port reads argument 0 as a thing and
+argument 1 as a label, and when the name is numeric it carries `#N` and resolves `N` against the
+*receiving* script's `message:` list. Two scripts that declare the same messages in the same order
+therefore line up, which is why `user0` reaches `user0` here — a script with a different declaration
+order would get the wrong label. The fix is contained: a cog-addressed queue (one producer, one
+consumer) plus the type ids, with the sender's own index carried for `GetSenderID`.
+
 Two conventions, stated because they are *not* the engine's full behaviour:
 
 - `GetSourceRef` answers 0. Retail stores the source in the thing's `cog=` field, which this

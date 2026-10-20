@@ -7026,6 +7026,9 @@ fn run_level(
         }
         let script = &scripts[&inst.script];
         let mut vm = cog::Vm::with_world(world.clone());
+        // `GetSelfCog` answers the instance's index in the level's cog list, the same number the
+        // engine's `pCog->idx` holds: scripts compare it against sender refs and the master cog.
+        vm.cog_index = vms.len() as i32;
         script.bind(&mut vm, &inst.values);
         // Plenty of shipped scripts are purely event driven and declare no `startup`;
         // the engine simply has nothing to call at level load.
@@ -11406,6 +11409,9 @@ fn setup(
                 }
             }
         }
+        // `GetSelfCog` is the instance's own index in the level's cog list, which is the order the
+        // engine creates them in — so this is the same number a script compares against.
+        vm.cog_index = sim.instances.len() as i32;
         sim.instances.push((inst.script.clone(), vm));
     }
     let moving = sim.world.borrow().things.iter().filter(|t| t.is_moving()).count();
