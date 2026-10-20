@@ -2956,7 +2956,9 @@ fn main() {
             sim_world.borrow_mut().set_bin(11, 50.0);
             vm.sender_ref = player as i64;
             vm.sender = player as i64;
-            for label in ["activated", "fire"] {
+            // `selected:` is where a weapon cog sets its first-person model and mesh (`jkSetPOVModel`,
+            // `jkSetWeaponMesh`); `activated:` is the draw that arms it.
+            for label in ["selected", "activated", "fire"] {
                 let outcome = script
                     .label(label)
                     .map(|_| vm.run_label(script, label))
@@ -2974,6 +2976,24 @@ fn main() {
             );
             assert!(rt.weapon_cog.is_some(), "`activated:` did not arm the weapon cog");
             assert!(spawned > 0, "the bryar's `fire:` spawned nothing");
+            // The first-person model the cog named has to resolve to real geometry, or
+            // `draw_viewmodel` has nothing to draw. The engine's own name is `bryv.3do`, from the
+            // cog's `povModel=` symbol.
+            let pov = rt.pov_model.get(&player).cloned();
+            let mut vertices = 0usize;
+            let mut materials = 0usize;
+            if let Some(name) = &pov
+                && let Some(raw) = gobs.read(name)
+            {
+                let model = tdo::parse(&String::from_utf8_lossy(&raw));
+                vertices = model.meshes.iter().map(|m| m.vertices.len()).sum();
+                materials = model.materials.len();
+            }
+            println!(
+                "weapons: the cog named first-person model {pov:?} -- {vertices} vertices, {materials} material(s)"
+            );
+            assert!(pov.is_some(), "`activated:` did not name a first-person model");
+            assert!(vertices > 0, "the named first-person model is empty");
         }
         println!("--- weapons check passed ---");
         return;
@@ -8021,6 +8041,7 @@ fn main() {
         .insert_resource(Archives(gobs))
         .insert_resource(Screens(menus))
         .insert_resource(SaberBlade::default())
+        .insert_resource(Viewmodel::default())
         .insert_resource(PendingRestore::default())
         .insert_resource(SaveLoad::default())
         .insert_resource(SaveDir(
@@ -8118,10 +8139,11 @@ fn main() {
                     actors_follow_runtime,
                     things_follow_geomode,
                     adopt_carried,
-                    adopt_carried,
                     autosave,
                     restore_pending,
                     load_item_cogs,
+                    saber_blade,
+                    draw_viewmodel,
                     billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
@@ -8658,6 +8680,17 @@ impl Overlay {
 
 #[derive(Component)]
 struct OverlayQuad;
+
+/// The first-person weapon model currently drawn, and the `.3do` it came from.
+#[derive(Resource, Default)]
+struct Viewmodel {
+    name: Option<String>,
+    entity: Option<Entity>,
+}
+
+/// The viewmodel entity itself, spawned by [`draw_viewmodel`].
+#[derive(Component)]
+struct ViewmodelMesh;
 
 /// The spawned lightsaber blade entity, once `jkSetSaberInfo` armed one.
 #[derive(Resource, Default)]
@@ -14019,6 +14052,89 @@ fn autosave(
 /// Where this build writes its saves: `BK_SAVE_DIR`, else `saves` beside the game's data.
 #[derive(Resource)]
 struct SaveDir(std::path::PathBuf);
+
+/// The first-person weapon model a weapon cog named with `jkSetPOVModel`.
+///
+/// The engine draws the cog's `povModel` (the bryar's is `bryv.3do`) in front of the eye and plays
+/// its `jkPlayPOVKey` keyframe on it. This draws the model, held off the view like a weapon in hand,
+/// and follows `jkSetWaggle`'s sway. It is one mesh per weapon change, rebuilt only when the name
+/// changes, because a `.3do` parse and pose per frame would cost more than it shows.
+fn draw_viewmodel(
+    mut commands: Commands,
+    archives: Option<Res<Archives>>,
+    sim: Option<Res<Sim>>,
+    mut view: Option<ResMut<Viewmodel>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut drawn: Query<&mut Transform, With<ViewmodelMesh>>,
+    camera: Query<&GlobalTransform, (With<Camera3d>, Without<OverlayQuad>)>,
+) {
+    let (Some(gobs), Some(sim), Some(view)) = (archives, sim, view.as_mut()) else { return };
+    let want = {
+        let rt = sim.world.borrow();
+        let player = rt.player_thing();
+        // The saber is its own blade (`saber_blade`), so a weapon model would be a second object.
+        let weapon = rt.current_weapon();
+        rt.pov_model
+            .get(&player)
+            .filter(|_| !crate::runtime::Runtime::is_saber(&weapon))
+            .cloned()
+    };
+    if want == view.name && (want.is_none() || view.entity.is_some()) {
+        // Still the same weapon: only the sway moves.
+        if let (Some(entity), Some(rt)) = (view.entity, Some(sim.world.borrow()))
+            && let Ok(mut transform) = drawn.get_mut(entity)
+            && let Some(camera) = camera.iter().next()
+        {
+            let sway = rt.waggle.get(&rt.player_thing()).copied().unwrap_or([0.0; 3]);
+            let placement = view_offset(camera);
+            transform.translation = placement.0 + camera.right().as_vec3() * sway[0] as f32;
+        }
+        return;
+    }
+    if let Some(entity) = view.entity.take() {
+        commands.entity(entity).despawn();
+    }
+    view.name = want.clone();
+    let Some(name) = want else { return };
+    let Some(raw) = gobs.0.read(&name) else {
+        println!("viewmodel: `{name}` is not in the archives");
+        return;
+    };
+    let model = tdo::parse(&String::from_utf8_lossy(&raw));
+    let material = model
+        .materials
+        .iter()
+        .position(|mat| gobs.0.read(mat).is_some())
+        .unwrap_or(0) as i32;
+    let mesh = meshes.add(model_mesh(&model, material, (1.0, 1.0)));
+    let material = materials.add(StandardMaterial {
+        base_color: bevy::color::Color::WHITE,
+        perceptual_roughness: 0.7,
+        cull_mode: None,
+        ..default()
+    });
+    let Some(camera) = camera.iter().next() else { return };
+    let (translation, rotation) = view_offset(camera);
+    let entity = commands
+        .spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform {
+            translation,
+            rotation,
+            ..default()
+        }, ViewmodelMesh))
+        .id();
+    view.entity = Some(entity);
+    println!("viewmodel: drew `{name}` ({} meshes, material `{}`)", model.meshes.len(), model.materials.first().cloned().unwrap_or_default());
+}
+
+/// Where a first-person weapon sits relative to the view: low and right, angled in.
+fn view_offset(camera: &GlobalTransform) -> (Vec3, Quat) {
+    let forward = camera.forward().as_vec3();
+    let right = camera.right().as_vec3();
+    let up = camera.up().as_vec3();
+    let translation = camera.translation() + forward * 0.42 + right * 0.16 - up * 0.14;
+    (translation, Quat::from_rotation_arc(Vec3::Z, forward))
+}
 
 /// The player's lightsaber blade, drawn from the eye when `jkSetSaberInfo` armed one.
 ///

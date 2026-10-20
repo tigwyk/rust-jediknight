@@ -327,6 +327,10 @@ flag                                                   exit  what it prints
                                                              spawns 2 things through `FireProjectile`
                                                              and spends 1 of 50 rounds from bin 11 --
                                                              the script firing the gun, not the port)
+                                                             (also: its `selected:` names
+                                                             `bryv.3do`, which resolves to 117
+                                                             vertices and 15 materials for
+                                                             `draw_viewmodel`)
 --ui-tables                                              0  41 screens; 39 name a click and a hover wav
 --ui-visible                                             0  --- ui visible check passed ---
 --force-screen                                           0  --- force screen check passed ---
