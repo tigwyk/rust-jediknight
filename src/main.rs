@@ -62,6 +62,10 @@ struct World {
     models: HashMap<String, tdo::Model>,
     /// Lowercase `.mat` name -> decoded bitmap, for model materials.
     model_images: HashMap<String, Image>,
+    /// Lowercase template name -> the faces of its `sprite=`, for the effect templates that name one
+    /// (`+laserhit` is `bryx.spr`). A sprite is a list of camera-facing rectangles, so every effect
+    /// in the game is one of these.
+    template_sprite: HashMap<String, Vec<spr::Face>>,
     /// Lowercase `.wav` name -> raw file bytes, for the sectors' ambient loops.
     /// Only sounds a sector actually names are read, which is a few dozen.
     ambient: HashMap<String, Vec<u8>>,
@@ -6131,6 +6135,7 @@ fn main() {
                     show_taken,
                     animate_actors,
                     actors_follow_runtime,
+                    billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
                     queue_next_level,
@@ -8304,6 +8309,44 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
     }
     println!("{} models parsed for the level's templates", models.len());
 
+    // Effect templates name a `sprite=` instead of a `model3d=`: `+laserhit` is `bryx.spr`. That
+    // file is plain text — one camera-facing rectangle per row, sized in world units and keyed to a
+    // `.mat` — so it loads the same way a model does, and its materials come through the same
+    // texture path. Sprites are the whole visual layer of combat: a bolt's impact, the explosion
+    // chain, sparks, smoke, the force effects.
+    let mut template_sprite: HashMap<String, Vec<spr::Face>> = HashMap::new();
+    for template in &level.templates {
+        let Some(name) = level.template_param(&template.name, "sprite") else { continue };
+        let Some(raw) = gobs.read(&format!("misc\\spr\\{}", name.to_ascii_lowercase())) else {
+            continue;
+        };
+        let faces = spr::parse(&String::from_utf8_lossy(&raw));
+        if faces.is_empty() {
+            continue;
+        }
+        for face in &faces {
+            if model_images.contains_key(&face.material) {
+                continue;
+            }
+            // A sprite is keyed on the palette's entry 0: an effect bitmap is drawn on black and
+            // the black is its transparency. Keying a *world* texture that way would punch holes in
+            // it, so only sprite materials get the keyed conversion.
+            if let Some(bitmap) = gobs.read(&face.material).as_deref().and_then(tex::parse_mat) {
+                model_images.insert(face.material.clone(), to_image_keyed(&bitmap, &palette));
+            }
+        }
+        template_sprite.insert(template.name.to_ascii_lowercase(), faces);
+    }
+    println!(
+        "{} sprite file(s) for {} template(s): {}",
+        template_sprite
+            .values()
+            .map(|f| f.len())
+            .sum::<usize>(),
+        template_sprite.len(),
+        template_sprite.keys().take(4).cloned().collect::<Vec<_>>().join(", ")
+    );
+
     // The instinct classes the level's actors name. `aiclass=` resolves through the template
     // chain, so an actor that inherits one still gets the class.
     let mut ai_classes: HashMap<String, String> = HashMap::new();
@@ -8445,6 +8488,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         template_model,
         models,
         model_images,
+        template_sprite,
         ambient,
         cogs,
         puppets,
@@ -8456,24 +8500,49 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
     })
 }
 
+/// Palette-index-0-is-transparent conversion, for sprite materials.
+///
+/// A sprite's `.mat` paints its effect on black: the engine treats palette entry 0 as the key and
+/// never draws it (`rdMaterial` loads effect bitmaps as colormapped with index 0 clear). Doing that
+/// to a world texture would punch holes wherever the palette's black appears in it, so only the
+/// sprite path uses this.
+fn to_image_keyed(mat: &tex::Material, palette: &tex::Palette) -> Image {
+    image_from_rgba(mat.width, mat.height, keyed_rgba(mat, palette))
+}
+
+/// The keyed pixel bytes: palette entry 0 becomes transparent, everything else opaque.
+fn keyed_rgba(mat: &tex::Material, palette: &tex::Palette) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(mat.indices.len() * 4);
+    for &i in &mat.indices {
+        let [r, g, b] = palette.0[i as usize];
+        let alpha = if i == 0 { 0 } else { 255 };
+        rgba.extend_from_slice(&[r, g, b, alpha]);
+    }
+    rgba
+}
+
 fn to_image(mat: &tex::Material, palette: &tex::Palette) -> Image {
     let mut rgba = Vec::with_capacity(mat.indices.len() * 4);
     for &i in &mat.indices {
         let [r, g, b] = palette.0[i as usize];
         rgba.extend_from_slice(&[r, g, b, 255]);
     }
+    image_from_rgba(mat.width, mat.height, rgba)
+}
+
+fn image_from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Image {
     let mut image = Image::new(
         Extent3d {
-            width: mat.width,
-            height: mat.height,
+            width,
+            height,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        mip_chain(rgba, mat.width, mat.height),
+        mip_chain(rgba, width, height),
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
-    image.texture_descriptor.mip_level_count = mat.width.max(mat.height).max(1).ilog2() + 1;
+    image.texture_descriptor.mip_level_count = width.max(height).max(1).ilog2() + 1;
     // JK texture vertices are in texels and run far past one texture width, so the
     // material tiles across a surface. Without repeat addressing the default
     // clamp-to-edge smears the border texel into long streaks.
@@ -9422,6 +9491,9 @@ struct Actors(Vec<Actor>);
 struct Created {
     drawn: HashMap<usize, Vec<Entity>>,
     meshes: HashMap<(String, i32), Handle<Mesh>>,
+    /// Sprite quads are shared per `(template, material)`: `+laserhit` is one rectangle, so every
+    /// impact in the level draws the same mesh.
+    sprite_meshes: HashMap<(String, String), Handle<Mesh>>,
 }
 
 /// The weapon the player fires: the `weapon=` its template names, else the first template
@@ -11305,7 +11377,7 @@ fn draw_created(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
-    mut drawn: Query<&mut Transform>,
+    mut drawn: Query<&mut Transform, Without<Sprite3d>>,
 ) {
     let (Some(sim), Some(world), Some(created)) = (sim, world, created.as_mut()) else { return };
     let mut rt = sim.world.borrow();
@@ -11347,8 +11419,49 @@ fn draw_created(
             .with_rotation(Quat::from_rotation_z(-thing.yaw.to_radians()));
         if entities.is_empty() {
             let template = rt.templates.get(index).cloned().unwrap_or_default();
-            let Some(model_name) = world.template_model.get(&template.to_ascii_lowercase()) else {
-                // A template with no model (an explosion, a hint) has nothing to draw yet.
+            let template_key = template.to_ascii_lowercase();
+            // A sprite template is drawn as camera-facing rectangles, one per `.spr` row: an
+            // impact spark, the explosion chain, smoke. `rdSprite_Draw` builds the quad in camera
+            // space with the sprite's width/height and its model-space offset, so the port's
+            // version is a quad billboarded to the camera (`billboard_sprites`).
+            if let Some(faces) = world.template_sprite.get(&template_key) {
+                let mut spawned = Vec::new();
+                for face in faces {
+                    let key = (template_key.clone(), face.material.clone());
+                    let mesh = created
+                        .sprite_meshes
+                        .entry(key)
+                        .or_insert_with(|| {
+                            meshes.add(Rectangle::new(face.width.max(0.01), face.height.max(0.01)).mesh().build())
+                        })
+                        .clone();
+                    let mut material = StandardMaterial {
+                        unlit: true,
+                        double_sided: true,
+                        cull_mode: None,
+                        alpha_mode: AlphaMode::Blend,
+                        ..default()
+                    };
+                    material.base_color_texture =
+                        world.model_images.get(&face.material).map(|image| images.add(image.clone()));
+                    let entity = commands
+                        .spawn((
+                            Mesh3d(mesh),
+                            MeshMaterial3d(materials.add(material)),
+                            Transform::from_translation(
+                                Vec3::from(thing.pos) + Vec3::from(face.offset),
+                            ),
+                            Sprite3d,
+                        ))
+                        .id();
+                    spawned.push(entity);
+                }
+                created.drawn.insert(index, spawned);
+                println!("drawing sprite thing {index} ({template}, {} face(s))", faces.len());
+                continue;
+            }
+            let Some(model_name) = world.template_model.get(&template_key) else {
+                // A template with no model and no sprite (a hint) has nothing to draw yet.
                 created.drawn.insert(index, Vec::new());
                 continue;
             };
@@ -11821,6 +11934,27 @@ fn play_requested_sounds(
     }
     if played > 0 {
         println!("sound: {played} request(s) played with attenuation");
+    }
+}
+
+/// A sprite rectangle: the quad a `.spr` row draws, which has to face the camera every frame.
+#[derive(Component)]
+struct Sprite3d;
+
+/// Turn every sprite quad towards the camera, which is what `rdSprite_Draw` builds its four
+/// vertices in camera space for.
+///
+/// ponytail: the world camera is the first `Camera3d`; a level also has a HUD camera, and both
+/// look down the screen's -Z, so a quad facing either one is facing the viewer. If a third camera
+/// with a different orientation is ever added, select it by name instead.
+fn billboard_sprites(
+    camera: Query<&GlobalTransform, With<Camera3d>>,
+    mut sprites: Query<&mut Transform, With<Sprite3d>>,
+) {
+    let Some(view) = camera.iter().next() else { return };
+    let rotation = view.rotation();
+    for mut transform in &mut sprites {
+        transform.rotation = rotation;
     }
 }
 
@@ -14104,6 +14238,26 @@ mod rules_tests {
         // A puppet with no death state keeps its stand loop rather than blanking.
         let immortal = Actor { death: None, ..actor };
         assert_eq!(animating_key(&immortal, true), "kystand0.key");
+    }
+
+    /// A sprite's `.mat` paints the effect on black, and the engine never draws palette entry 0 —
+    /// that key is the whole transparency of a spark. World textures must keep entry 0 opaque, so
+    /// only the sprite path converts this way; this pins the rule and the difference.
+    #[test]
+    fn sprite_materials_key_palette_entry_zero_and_world_ones_do_not() {
+        let mut palette = tex::Palette(vec![[0, 0, 0]; 256]);
+        palette.0[1] = [255, 40, 8];
+        let bitmap = tex::Material {
+            width: 2,
+            height: 1,
+            indices: vec![0, 1],
+        };
+        let keyed = keyed_rgba(&bitmap, &palette);
+        assert_eq!(&keyed[0..4], &[0, 0, 0, 0], "the sprite key must be transparent");
+        assert_eq!(&keyed[4..8], &[255, 40, 8, 255], "the spark itself must be opaque");
+        // The world path has no key: `to_image` writes 255 for every pixel, which is why a spark
+        // cannot simply borrow it without punching holes in level textures.
+        assert_eq!(keyed.len(), bitmap.indices.len() * 4);
     }
 
     /// `sithPuppet_UpdateThingMove` (`0x4e4380`) picks the animation from the velocity in the

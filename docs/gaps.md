@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **35 gates, 86 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **35 gates, 87 tests, 0 failures.** Stubbed script surface:
 **36 verbs, 221 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
@@ -34,7 +34,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | --- | --- | --- | --- |
 | Networking and multiplayer | `sithDSS.c`, `sithDSSThing.c`, `sithDSSCog.c`, `sithMulti.c`, `sithComm.c`, `stdComm.c`, `jkGUIMultiplayer.c`, `jkGUINetHost.c`, `jkGUIMultiTally.c` | the whole thing: message streaming, thing replication, cog RPCs, host/join, tally screens. Zero socket code exists. | no `socket`/`UdpSocket`/`TcpStream` in `src/`. The single-player **answers** are now explicit (`ismulti`/`isserver` 0, no team, no score, `*multimodeflags` stored) and `sendtrigger` really broadcasts `trigger`, but only `sendmessageex` is left stubbed — it needs message *return values* |
 | Console and cvars | `sithConsole.c`, `sithCvar.c`, `sithCommand.c`, `jkQuakeConsole.c` | the `~` console, the cvar store, and the command dispatcher (`bind`, `set`, `map`, `quit`) | no matches for `cvar`, `sithCommand`, `sithConsole` |
-| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning, and explosion *visuals*. `rt.explode` does create the blast thing, apply its damage (`--hit`) and now give it the `timer=` life the engine destroys it at, but an explosion template is a `.spr` and sprite drawing is absent, so the blast is invisible. Direct next step: the sprite *is* parsed (`spr.rs`) and its materials load through the model-texture path; what is missing is transparency in `to_image` (alpha is 255 everywhere) plus the billboard quad. | no particle type; `explosion` matches are class numbers and the damage path |
+| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. The **sprite** layer now exists: every template's `sprite=` is parsed (`spr.rs`) into camera-facing rectangles, its `.mat` is loaded through the model-texture path with palette entry 0 keyed transparent, and `draw_created` spawns those quads with `billboard_sprites` turning them to the camera. What is *not* proven is the pixels: the level-1 spawn view has no effect in front of the camera (the AI's impacts land behind geometry), so the on-screen confirmation is still open — the evidence so far is the load line (35 sprite files for 35 templates) and the per-impact `drawing sprite thing N (+laserhit, 1 face(s))` line. Next: spawn an effect in front of the camera on purpose and diff the frame. | no particle type; `explosion` matches are class numbers and the damage path |
 | In-engine cutscene cameras | `jkCutscene.c`, `sithCamera.c` focus modes | `SetCameraFocus`, `SetCurrentCamera`, `SetPovShake`, scripted camera paths. Cutscenes play as `.smk` film over the world; an in-engine camera cutscene would not cut. | no matches for `SetCameraFocus`/`camerafocus`/`shake`; all three verbs are stubs |
 | Saber | `jkSaber.c` | blade geometry, swing arcs, saber lock, trace damage. `jksetsaberinfo` is a stub. | `saber` matches are template-name and palette text only |
 | Arch lighting | `sithArchLighting.c` | vertex-baked arch light. Level data carries an `archlightIdx` per thing; nothing reads it. | no matches for `archlight` |
@@ -205,6 +205,18 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 ---
 
 ## 6. Recently closed, so it is not mistaken for missing
+
+* **Effects are sprites, and sprites are loaded and drawn.** A template's `sprite=` (`+laserhit` is
+  `bryx.spr`) is now parsed for every template a level names and its materials are loaded through the
+  same `.mat` path as model textures — with palette entry **0 keyed transparent**, because an effect
+  bitmap is painted on black and that key is the whole transparency of a spark (a world texture keeps
+  entry 0 opaque, so the two conversions are separate functions, `keyed_rgba` and `to_image`).
+  `draw_created` spawns one quad per `.spr` row at the thing's position plus the row's model-space
+  offset, and `billboard_sprites` turns them to the camera each frame, which is what
+  `rdSprite_Draw`'s camera-space vertices do. Level 1 resolves **35 sprite files for 35 templates**,
+  and an impact logs `drawing sprite thing 363 (+laserhit, 1 face(s))`. Unproven: the pixels. The
+  spawn view has no effect in front of the camera — the AI's impacts land behind geometry — so the
+  next step is to spawn one in view on purpose and diff the frame.
 
 * **A created thing dies when its `timer=` runs out, and `SetThingTimer` is a different timer.**
   `timer=` is the engine's `msecLifeLeft` (`sithThing.c:1777`), counted down every frame with
