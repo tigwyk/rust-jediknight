@@ -14047,6 +14047,9 @@ fn sync_player_thing(player: Option<Res<Player>>, sim: Option<Res<Sim>>) {
     let eye = player.pos + Vec3::Z * player.eye;
     rt.things[index].pos = [eye.x, eye.y, eye.z];
     rt.things[index].yaw = player.yaw.to_degrees();
+    // The aim's pitch: `fire` shoots along the shooter's orientation, so without this the player's
+    // shots left level however far up or down the view was pointed.
+    rt.things[index].pitch = player.pitch.to_degrees();
     rt.things[index].sector = player.sector as i32;
 }
 

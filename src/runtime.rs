@@ -2606,14 +2606,24 @@ impl Runtime {
         let src = self.thing(shooter)?;
         let (pos, yaw, sector) = (src.pos, src.yaw, src.sector);
         let speed = self.template_vel.get(&template).copied().unwrap_or([0.0; 3]);
-        // The template's velocity is in the thing's own frame: forward is +Y there, and
-        // a JK yaw of `a` faces `(cos a, sin a, 0)`. `spread` is the aim error an AI instinct
-        // carries: it turns the whole shot, so a missed shot is a shot that flies wide.
+        // The template's velocity is in the thing's own frame: forward is +Y there. `spread` is the
+        // aim error an AI instinct carries: it turns the whole shot, so a missed shot flies wide.
+        //
+        // The shot flies along the shooter's whole **orientation**, not just its yaw: the engine's
+        // `senderOrient` carries pitch too (an actor's `headPYR` on top of it). Yaw alone meant every
+        // shot left level, however the player was aiming.
+        let pitch = src.pitch;
         let (sin, cos) = (yaw.to_radians() + spread).sin_cos();
+        let flat = [speed[1] * cos - speed[0] * sin, speed[1] * sin + speed[0] * cos];
+        // Pitch tilts that horizontal aim up or down and the template's own z rides along, so a shot
+        // aimed 30 degrees up leaves with `speed * sin(30)` in z. `rotate_by_angles` is the engine's
+        // `rdMatrix_Build34`, whose yaw starts at +Y; this world's camera yaw starts at +X, so the
+        // rotation is written out here rather than reused.
+        let (sp, cp) = pitch.to_radians().sin_cos();
         let forward = [
-            speed[1] * cos - speed[0] * sin,
-            speed[1] * sin + speed[0] * cos,
-            speed[2],
+            flat[0] * cp,
+            flat[1] * cp,
+            (flat[0] * flat[0] + flat[1] * flat[1]).sqrt() * sp + speed[2] * cp,
         ];
         let health = self.template_health.get(&template).copied().unwrap_or(1.0);
         let kind = self.template_types.get(&template).copied().unwrap_or(3);
@@ -6135,6 +6145,34 @@ mod tests {
         let steady = rt.fire(0, &bolt).expect("projectile");
         rt.step(5.0);
         assert_eq!(rt.things[steady].damage, 30.0);
+    }
+
+    /// A shot flies along the shooter's orientation, not just its yaw: `sithWeapon_FireProjectile`
+    /// transforms the direction by the shooter's own matrix, which carries pitch. Firing level
+    /// whatever the aim was the bug this pins shut.
+    #[test]
+    fn a_shot_follows_the_shooters_aim() {
+        let mut rt = door_runtime();
+        let bolt = "+bryarbolt".to_string();
+        rt.template_vel.insert(bolt.clone(), [0.0, 4.0, 0.0]);
+        rt.template_damage.insert(bolt.clone(), 1.0);
+
+        // Level: the template's own heading, z untouched.
+        let shot = rt.fire(0, &bolt).expect("projectile");
+        assert!((rt.things[shot].vel[0] - 4.0).abs() < 1e-3, "vel {:?}", rt.things[shot].vel);
+        assert!(rt.things[shot].vel[2].abs() < 1e-3, "a level shot rose: {:?}", rt.things[shot].vel);
+
+        // Aimed 30 degrees up: the speed splits the way `sin`/`cos` say it must.
+        rt.things[0].pitch = 30.0;
+        let shot = rt.fire(0, &bolt).expect("projectile");
+        let vel = rt.things[shot].vel;
+        assert!((vel[0] - 4.0 * 30f32.to_radians().cos()).abs() < 1e-3, "vel {vel:?}");
+        assert!((vel[2] - 4.0 * 30f32.to_radians().sin()).abs() < 1e-3, "vel {vel:?}");
+
+        // And down again, which is the half a player notices on a ledge.
+        rt.things[0].pitch = -45.0;
+        let shot = rt.fire(0, &bolt).expect("projectile");
+        assert!(rt.things[shot].vel[2] < -2.5, "vel {:?}", rt.things[shot].vel);
     }
 
     #[test]
