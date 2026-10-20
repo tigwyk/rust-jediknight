@@ -2543,6 +2543,12 @@ impl Runtime {
             shots.push((index, weapon, error));
             if let Some(thing) = self.things.get_mut(index) {
                 thing.yaw = sy.atan2(sx).to_degrees();
+                // `sithActor_UpdateAimJoints`: the aim points at the target in **three** dimensions.
+                // Without the elevation an actor shoots level at a player standing on a ledge and the
+                // bolt passes underneath — the bug the player had until round 109.
+                let dz = shooting_at[2] - from[2];
+                let flat = (sx * sx + sy * sy).sqrt().max(1e-4);
+                thing.pitch = dz.atan2(flat).to_degrees().clamp(-60.0, 60.0);
                 // `sithAICmd_PrimaryFire`: a burst of `fltArg[8]` shots `intArg[9]` apart, then the
                 // shot delay jittered by ±20% (`(1.2 - 0.2 * frand) * fltArg[0]`).
                 if thing.ai_burst > 0.0 {
