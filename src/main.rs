@@ -3410,9 +3410,38 @@ fn main() {
         for name in &names {
             let Some(raw) = gobs.read(name) else { continue };
             let table = uni::parse(&String::from_utf8_lossy(&raw));
+            if std::env::var_os("BK_UNI_TRACE").is_some() {
+                println!(
+                    "uni:   {name}: {} string(s), {} malformed, table {}",
+                    table.strings.len(),
+                    table.malformed,
+                    table.is_table()
+                );
+                let head = String::from_utf8_lossy(&raw);
+                for line in head.lines().take(4) {
+                    println!("uni:     | {line}");
+                }
+            }
             if let Some(value) = table.get(&key) {
                 println!("uni: `{key}` = {value:?}  ({name})");
                 found += 1;
+            }
+            // A key that is not exactly what was asked for is still worth seeing: a prefix search is
+            // how `GOAL_00058` (and not `GOAL_00001`) gets found.
+            let near: Vec<(String, String)> = table
+                .strings
+                .iter()
+                .filter(|(candidate, _)| {
+                    candidate.to_ascii_uppercase().contains(&key.to_ascii_uppercase())
+                })
+                .take(12)
+                .cloned()
+                .collect();
+            for (candidate, value) in near {
+                if candidate == key {
+                    continue;
+                }
+                println!("uni:   near `{candidate}` = {value:?}  ({name})");
             }
         }
         println!("uni: {found} of {} string file(s) carry `{key}`", names.len());
