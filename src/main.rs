@@ -3096,7 +3096,13 @@ fn main() {
                 "AISetMovePos",
                 &[cog::Value::Num(actor as f64), cog::Value::Vec(goal.map(f64::from))],
             );
+            // Stop when the destination is dropped (arrival), not after a fixed count: once the
+            // actor arrives it goes back to its instincts, which walks it away from the point and
+            // would make a later measurement look like a shortfall.
             for _ in 0..120 {
+                if !rt.ai_move.contains_key(&actor) {
+                    break;
+                }
                 rt.ai_tick(player, 1.0 / 30.0);
             }
             let end = rt.things[actor].pos;
@@ -3115,12 +3121,54 @@ fn main() {
                 !rt.ai_move.contains_key(&actor),
                 "the scripted destination survived arrival"
             );
-            // A look target turns a standing actor even with nothing in sight.
+            // The last-known-position chase: an actor that loses sight walks to where it last saw
+            // its target, and forgets the spot once it is there. Without it an actor forgets an
+            // enemy the instant they round a corner.
+            {
+                // The player is 40 units into another room by now, so the memory is a spot the
+                // actor cannot see and cannot walk to in a straight line: the route is the proof
+                // the memory drives the legs.
+                let spot = rt.things[player].pos;
+                rt.ai_last_seen.insert(actor, spot);
+                rt.ai_route.remove(&actor);
+                rt.things[actor].vel = [0.0; 3];
+                let start = rt.things[actor].pos;
+                rt.ai_tick(player, 1.0 / 30.0);
+                let taken = rt.ai_route.get(&actor).map(|r| r.len()).unwrap_or(0);
+                let moved = ((rt.things[actor].pos[0] - start[0]).powi(2)
+                    + (rt.things[actor].pos[1] - start[1]).powi(2)).sqrt();
+                println!(
+                    "  chase: a remembered spot it cannot see is walked to on a route of {taken} waypoint(s), {moved:.2} units in one tick"
+                );
+                assert!(moved > 0.001, "the actor did not move toward the remembered spot");
+                // The line to the spot may be open (it walks straight) or walled off (it routes);
+                // either way the memory is what the legs follow.
+                let to_spot = [spot[0] - start[0], spot[1] - start[1]];
+                let to_step = [rt.things[actor].pos[0] - start[0], rt.things[actor].pos[1] - start[1]];
+                assert!(
+                    to_spot[0] * to_step[0] + to_spot[1] * to_step[1] > 0.0,
+                    "the actor walked away from the remembered spot"
+                );
+                // Standing on the spot forgets it.
+                let here = rt.things[actor].pos;
+                rt.ai_last_seen.insert(actor, here);
+                rt.ai_tick(player, 1.0 / 30.0);
+                println!(
+                    "  chase: standing on the remembered spot forgets it ({})",
+                    !rt.ai_last_seen.contains_key(&actor)
+                );
+                assert!(
+                    !rt.ai_last_seen.contains_key(&actor),
+                    "the actor kept a spot it was standing on"
+                );
+            }
+            rt.ai_last_seen.remove(&actor);
             let look = [end[0], end[1] + 2.0, end[2]];
             rt.call(
                 "AISetLookPos",
                 &[cog::Value::Num(actor as f64), cog::Value::Vec(look.map(f64::from))],
             );
+            println!("  debug: look {:?} move {:?} chase {:?} last {:?}", rt.ai_look.get(&actor), rt.ai_move.get(&actor), rt.ai_chase.get(&actor), rt.ai_last_seen.get(&actor));
             rt.ai_tick(player, 1.0 / 30.0);
             let facing = rt.things[actor].yaw;
             println!("  scripted: AISetLookPos -> now facing {facing:.0} deg (+90 is +Y)");

@@ -194,7 +194,9 @@ flag                                                   exit  what it prints
                                                              apart, and a follower told to walk
                                                              to a thing across that wall takes
                                                              the same route through doorway
-                                                             [5, 8, 6]
+                                                             [5, 8, 6]; a remembered spot it
+                                                             cannot see drives the legs, and
+                                                             standing on it forgets it
 --endlevel                                               0  the level's own trigger: `01_goal0.cog`
                                                              waits on `sighted` from thing 204 (8t88),
                                                              the draw sends it, the goal messages master

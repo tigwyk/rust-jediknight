@@ -582,6 +582,9 @@ pub struct Runtime {
     pub ai_move: BTreeMap<usize, [f32; 3]>,
     pub ai_chase: BTreeMap<usize, usize>,
     pub ai_look: BTreeMap<usize, [f32; 3]>,
+    /// Where an actor last had the player in view (`sithAI`'s last known position). Losing sight
+    /// means "walk there", and arriving clears it.
+    pub ai_last_seen: BTreeMap<usize, [f32; 3]>,
     /// Per actor, the doorway centres it is walking through when its straight line is walled off,
     /// from `Collision::route`. A waypoint is popped on arrival, and a scripted destination starts
     /// again with an empty route.
@@ -1005,6 +1008,7 @@ impl Runtime {
             ai_chase: BTreeMap::new(),
             ai_look: BTreeMap::new(),
             ai_route: BTreeMap::new(),
+            ai_last_seen: BTreeMap::new(),
             ai_fire_target: BTreeMap::new(),
             ai_flee: BTreeMap::new(),
             ai_classes: BTreeMap::new(),
@@ -1875,8 +1879,16 @@ impl Runtime {
                 .get(&index)
                 .and_then(|t| self.things.get(*t).map(|t| t.pos))
                 .filter(|at| self.solids.as_ref().is_none_or(|s| !s.segment_blocked(from, *at)));
-            if scripted.is_none() && !sighted && aim.is_none() {
-                // Out of sight: the actor stands where it is, turning to a scripted look target.
+            // Where the actor last had the player in view: `sithAI` keeps the last seen position
+            // and walks to it once the target disappears behind something. Without that an actor
+            // forgets an enemy the instant they round a corner.
+            if sighted {
+                self.ai_last_seen.insert(index, target);
+            }
+            let remembered = self.ai_last_seen.get(&index).copied();
+            if scripted.is_none() && !sighted && aim.is_none() && remembered.is_none() {
+                // Out of sight and nothing remembered: the actor stands where it is, turning to a
+                // scripted look target.
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.ai_target = None;
                     if let Some(yaw) = look_yaw {
@@ -1924,7 +1936,10 @@ impl Runtime {
             }
             // `AISetFireTarget`: what this actor shoots at, when a script names it. Sight is still
             // needed, but of *that* thing — `00_AITurnCoat.cog` turns an actor on a victim it can see.
-            let want = scripted.unwrap_or(target);
+            // A script's destination wins; otherwise the chase is the player while in sight and the
+            // last place they were seen once they are not.
+            let chase = if sighted { target } else { remembered.unwrap_or(target) };
+            let want = scripted.unwrap_or(chase);
             // A route in hand wins over the destination: each waypoint is a doorway centre the search
             // found, and reaching one pops it. When the route is empty the destination is the goal
             // again, which is what makes the last leg (doorway -> target) a straight walk.
@@ -1961,6 +1976,10 @@ impl Runtime {
             let dx = goal[0] - from[0];
             let dy = goal[1] - from[1];
             let reach = (dx * dx + dy * dy).sqrt();
+            // Arrival is measured against the **destination**, not the doorway the actor is aiming
+            // at: a waypoint is a place on the way, and stopping at one dropped a script's order.
+            let destination_reach =
+                ((want[0] - from[0]).powi(2) + (want[1] - from[1]).powi(2)).sqrt();
 
             if reach > standoff && speed > 0.0 {
                 let step = (speed * dt).min(reach - standoff);
@@ -1996,9 +2015,19 @@ impl Runtime {
                     thing.yaw = dy.atan2(dx).to_degrees();
                 }
             }
+            // Standing on the remembered spot and finding nobody there forgets the target — the
+            // engine's last-known-position chase giving up.
+            if !sighted
+                && scripted.is_none()
+                && remembered.is_some()
+                && destination_reach <= self.ai_standoff
+            {
+                self.ai_last_seen.remove(&index);
+                self.ai_route.remove(&index);
+            }
             // Arriving clears the scripted destination, the way the engine drops
             // `SITHAI_MODE_MOVING` when the puppet reaches `movePos`, so it returns to its instincts.
-            if scripted.is_some() && reach <= self.ai_standoff {
+            if scripted.is_some() && destination_reach <= self.ai_standoff {
                 self.ai_move.remove(&index);
                 self.ai_chase.remove(&index);
             }
@@ -4661,6 +4690,7 @@ mod tests {
             ai_chase: BTreeMap::new(),
             ai_look: BTreeMap::new(),
             ai_route: BTreeMap::new(),
+            ai_last_seen: BTreeMap::new(),
             ai_fire_target: BTreeMap::new(),
             ai_flee: BTreeMap::new(),
             ai_classes: BTreeMap::new(),
