@@ -155,7 +155,17 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 
 ## 6. Recently closed, so it is not mistaken for missing
 
-* **The status bar sits at the bottom of the screen, where the game puts it.** Both corner panels were
+* **A doorway whose far side cannot hold the body is now a wall, and crossings land where the body
+  can stand.** Two separate refusals kept level 1's start impassable: the crossing only advanced past
+  the sphere's *contact* point, leaving the origin a radius short of the far room's copy of the
+  doorway plane ("outside", so `sithIntersect_IsSphereInSector` undid it for 522 of 700 frames), and
+  a closed door's slab is thinner than the body (`sector 337` is 0.05 deep against 0.065), so no
+  origin inside it is legal and the body re-crossed it 713 times. `Solids::doorway_advance` now
+  advances `contact + min(radius, far-room depth / 2)`, retries two longer reaches because the two
+  rooms' copies of the plane differ by 3 mm, and returns `None` for a room shallower than the body —
+  which `sweep_rooms` treats as a wall. Level 1's start went from 522 refused frames to **0**, and
+  the body walks out of the alcove onto sector 349's floor. `--move` 302 → **459 units**, still 0
+  falls and 0 stuck bodies; `--walk all` 34/34 contained.* **The status bar sits at the bottom of the screen, where the game puts it.** Both corner panels were
   blitted at `y = 0`, so the health and force gauges ran along the top edge. The engine anchors them to
   the bottom: `jkHud_leftBlitY = Video_format.height - HUD_SCALED(statusLeft height)` and
   `jkHud_rightBlitY = Video_format.height - HUD_SCALED(statusRight height)` (`jkHud.c:147`–`151`), with

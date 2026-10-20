@@ -807,7 +807,15 @@ impl Solids {
                 // A closed opening is not an opening: `SearchForSurfaceCollisions` falls through to
                 // its plain-surface test when the adjoin's MOVE bit is clear (or the sector's adjoins
                 // are hidden), so a force field stops a body exactly like a wall does.
-                if gates.passable(sector, portal.adjoin, portal.link) {
+                //
+                // An opening whose far side cannot hold the body is a wall too. A door's *slab* is a
+                // sector like any other, and a closed one is thinner than the body's radius (level 1's
+                // `337` is 0.05 wide against 0.065), so no origin position inside it is legal: crossing
+                // in put the body outside its own sector, `MoveThing`'s restore undid it, and the body
+                // re-crossed on the next frame — 713 times in 700.
+                let lands_inside = gates.passable(sector, portal.adjoin, portal.link)
+                    && self.doorway_advance(from, dir, t, radius, portal.adjoin).is_some();
+                if lands_inside {
                     if door.is_none_or(|(dt, _)| t < dt) {
                         door = Some((t, portal.adjoin));
                     }
@@ -832,13 +840,13 @@ impl Solids {
                     // almost run out — measured: with the cap the body came to rest 0.009 past the contact
                     // point, still 0.056 short of the plane, and was refused on every frame. Clearing one
                     // radius is below the collision radius, so it cannot put the body through anything.
-                    let advance = dt + radius + 1e-3;
+                    let advance = self.doorway_advance_logged(from, dir, dt, radius, adjoin).unwrap_or(dt + 1e-4);
                     from = [from[0] + dir[0] * advance, from[1] + dir[1] * advance, from[2] + dir[2] * advance];
                     left = (left - dt).max(0.0);
                     sector = adjoin;
                 }
                 (None, Some((dt, adjoin))) => {
-                    let advance = dt + radius + 1e-3;
+                    let advance = self.doorway_advance_logged(from, dir, dt, radius, adjoin).unwrap_or(dt + 1e-4);
                     from = [from[0] + dir[0] * advance, from[1] + dir[1] * advance, from[2] + dir[2] * advance];
                     left = (left - dt).max(0.0);
                     sector = adjoin;
@@ -848,6 +856,81 @@ impl Solids {
         }
         (closest, sector, [from[0] + dir[0] * left, from[1] + dir[1] * left, from[2]])
     }
+    /// How far to step a body that is crossing a doorway, from its contact point.
+    ///
+    /// Two constraints, and they disagree on thin geometry:
+    /// * the origin has to end up **past** the doorway's plane, because `IsSphereInSector` is an
+    ///   infinite-plane test and a radius short of it is "outside" — that wants `radius`;
+    /// * the origin has to end up **inside** the far room, and a door sector can be thinner than the
+    ///   body's radius (level 1's `sector 337` is `0.05` wide against a `0.065` radius, so the contact
+    ///   point is already past its far face) — that wants no more than half the room's depth.
+    ///
+    /// So: clear the plane, but never more than halfway into a shallow room where the two would
+    /// otherwise contradict. And because each room keeps its **own copy** of the opening's plane —
+    /// level 1's copies differ by 3 mm — a couple of longer reaches are tried before the opening is
+    /// called unusable.
+    ///
+    /// `None` means nowhere the body can stand: a closed door's slab, thinner than the body's radius.
+    /// The caller treats such an opening as a wall (see `sweep_rooms`).
+    fn doorway_advance(
+        &self,
+        from: [f32; 3],
+        dir: [f32; 3],
+        contact: f32,
+        radius: f32,
+        adjoin: usize,
+    ) -> Option<f32> {
+        // The doorway plane sits one radius beyond the contact point.
+        let plane = [
+            from[0] + dir[0] * (contact + radius),
+            from[1] + dir[1] * (contact + radius),
+            from[2] + dir[2] * (contact + radius),
+        ];
+        // The far room's nearest plane ahead of that point is its far wall (or the other side of a door
+        // slab): travelling toward a plane means moving along its outward normal.
+        let mut depth = f32::INFINITY;
+        for plane_of in self.sectors.get(adjoin).into_iter().flatten() {
+            let along = dot(dir, plane_of.normal);
+            if along <= 1e-4 {
+                continue;
+            }
+            let to_plane = -dot(sub(plane, plane_of.point), plane_of.normal) / along;
+            if to_plane > 1e-4 {
+                depth = depth.min(to_plane);
+            }
+        }
+        // A room shallower than the body cannot hold it, however legal its origin's position looks: a
+        // closed door's slab is exactly that (level 1's `337` is 0.05 deep against a 0.13 body). Such an
+        // opening is a wall — otherwise the body stands *inside the door*.
+        if depth < 2.0 * radius {
+            return None;
+        }
+        let base = contact + (radius + 1e-3).min(depth * 0.5);
+        for extra in [0.0f32, 0.01, radius] {
+            let advance = base + extra;
+            let landing = [
+                from[0] + dir[0] * advance,
+                from[1] + dir[1] * advance,
+                from[2] + dir[2] * advance,
+            ];
+            if self.inside_sector(adjoin, [landing[0], landing[1], landing[2] - radius], 0.0) {
+                return Some(advance);
+            }
+        }
+        None
+    }
+
+    /// [`Self::doorway_advance`], with a trace on `BK_SECTOR_TRACE`.
+    fn doorway_advance_logged(&self, from: [f32; 3], dir: [f32; 3], contact: f32, radius: f32, adjoin: usize) -> Option<f32> {
+        let advance = self.doorway_advance(from, dir, contact, radius, adjoin);
+        if std::env::var_os("BK_SECTOR_TRACE").is_some() {
+            eprintln!(
+                "sector trace: doorway into {adjoin} from {from:?} dir {dir:?} contact {contact:.4} -> advance {advance:?}"
+            );
+        }
+        advance
+    }
+
     /// `sithCollision_MoveThing` for a walking body: sweep horizontally, slide along what was hit, and
     /// lift over a low step.
     ///

@@ -1783,22 +1783,25 @@ gate had to be anchored on the roomiest sector rather than the spawn, because le
 walkplayer stands in a 0.3-unit crawlspace and a body lifted above its own ceiling is
 (correctly) outside its sector.
 
-**The open item, with its numbers.** A body crossing a doorway has to end up *past* the far room's
-copy of the doorway plane — the origin is what `IsSphereInSector` tests, and a radius short is
-"outside" — and it has to end up *inside* the far room, which a door sector thinner than the body's
-radius cannot provide. Both are visible on level 1 in the first two seconds of the walk:
+**Doorway crossings, and why a door slab is a wall.** A body crossing a doorway has to end up *past*
+the far room's copy of the doorway plane (the origin is what `IsSphereInSector` tests, and a radius
+short is "outside"), and it has to end up somewhere the far room can hold it. The port now does both,
+in `Solids::doorway_advance`:
 
-- the alcove door (sector 339 → 349, plane at `y = -5.15`) refused the body for 522 of 700 frames
-  while the crossing only advanced past the sphere's contact point. The sweep now reports **the
-  position it ended at**, not just the sector, and the crossing clears the plane: the body walks out
-  of the alcove into sector 349 and stands on the floor at `-1.30`. Travel went from 302 to
-  **382 units** over 34 levels × 8 headings.
-- it then meets `sector 337`, a door slab **0.05 units wide**. Contact is at a radius (0.065) from its
-  east face, which is already past its west face at 0.05, so no origin position is legal and the
-  containment rule refuses it (494 frames remain). The fix is one expression: advance
-  `dt + min(radius + 1e-3, far-room depth / 2)`, so the origin lands in the middle of a thin slab
-  instead of through it. The far room's depth is the distance from the near doorway plane to its
-  nearest plane along the direction of travel.
+- the advance is `contact + min(radius + 1e-3, far-room depth / 2)`, where the depth is measured from
+  the opening's plane to the far room's nearest plane along the direction of travel;
+- a **room shallower than the body is not entered at all** — a closed door's slab is exactly that
+  (level 1's `337` is 0.05 deep against a 0.13 body), so the opening is treated as a wall instead of
+  letting the body stand inside the door;
+- the two rooms keep their own copy of the opening's plane and they do not coincide exactly (level 1:
+  3 mm), so two longer reaches are tried before an opening is called unusable;
+- and the sweep reports **the position it ended at**, not just the sector, because discarding the
+  crossing's advance was what left the body a radius short of the plane.
+
+Measured on level 1's start: 522 refusals in 700 frames became **0**, and the body walks out of the
+alcove into sector 349 and stands on its floor. `--move` went from 302 to **459 units** over 34
+levels × 8 headings, `--walk all` reports 34/34 contained with 639 sector crossings, and all 31 gates
+pass.
 
 ---
 

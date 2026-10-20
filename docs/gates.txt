@@ -49,8 +49,8 @@ flag                                                   exit  what it prints
                                                              exits 60: 0 unreachable by click, 0 screen(s)
                                                              with no way out on the cursor
 --walk all                                               0  34/34 levels kept the walker inside the tracked
-                                                             sector with the engine's own facing; 15 had the hull
-                                                             test agree, 584 sector crossings, 1 without a start.
+                                                             sector with the engine's own facing; 14 had the hull
+                                                             test agree, 639 sector crossings, 1 without a start.
                                                              The "contained" column asks `inside_sector` — the
                                                              same call the rule makes, box short-circuit included.
 --scale                                                  0  model scale 1.0: 2x3door 0.30 x 0.20 model
@@ -97,7 +97,7 @@ flag                                                   exit  what it prints
 --winding                                                0  966 of 87377 drawn surfaces wind against their own
                                                              normal; 91233 normals point into their room, 0 away
 --move                                                   0  34 levels x 8 headings, 0 fell through, 0 stuck,
-                                                             291 units travelled (1.1 per heading) -- the engine's
+                                                             459 units travelled (1.7 per heading) -- the engine's
                                                              own rule: `MoveThing`'s restore on a failed
                                                              `IsSphereInSector`, asked at the body's origin. A
                                                              level counts as stuck only when every heading is
