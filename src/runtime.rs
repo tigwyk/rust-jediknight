@@ -3774,6 +3774,44 @@ impl Runtime {
         self.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")).unwrap_or(0)
     }
 
+    /// `jkPlayer_GetJediRank` (`0x4074d0`) is `PlayerGetInvItemAmount(0x14)` truncated — the rank is
+    /// the force-level bin, and the tally screen draws that many stars.
+    pub fn jedi_rank(&self) -> i32 {
+        self.inv.get(&20).copied().unwrap_or(0.0) as i32
+    }
+
+    /// `(secrets found, secrets in the level)`: bins 70 and 71, which `jkGuiSingleTally_Show`
+    /// (`0x417e30`) reads straight out of the inventory.
+    pub fn secrets(&self) -> (i32, i32) {
+        (
+            self.inv.get(&70).copied().unwrap_or(0.0) as i32,
+            self.inv.get(&71).copied().unwrap_or(0.0) as i32,
+        )
+    }
+
+    /// `jkPlayer_CalcAlignment` (`0x405cf0`), read from JK.EXE rather than guessed: the multipliers
+    /// are the floats at `0x52206c` (6.25) and `0x522070` (−6.25), the clamp is ±100 (`0x522064`,
+    /// `0x522068`), the secrets term is `−20` (`0x522074`) and the ratio scale is 100 (`0x522064`).
+    ///
+    /// Dark-side powers (bins 30–33) count against the alignment and light-side ones (25–28) for it.
+    /// A player who found no secrets is spared the ratio term (`0x522054` is 0.0).
+    pub fn alignment(&self) -> f32 {
+        let mut value = 0.0f32;
+        for bin in 30..34 {
+            value -= self.inv.get(&bin).copied().unwrap_or(0.0) * 6.25;
+        }
+        for bin in 25..29 {
+            value -= self.inv.get(&bin).copied().unwrap_or(0.0) * -6.25;
+        }
+        let (found, total) = (self.inv.get(&72).copied().unwrap_or(0.0), self.inv.get(&73).copied().unwrap_or(0.0));
+        if total <= 0.0 {
+            value += 20.0;
+        } else {
+            value = value - (found / total) * 100.0 + 20.0;
+        }
+        value.clamp(-100.0, 100.0)
+    }
+
     /// The screen effect the live `color_effects` add up to: `(filter, tint, add, alpha)` for
     /// `ui::Canvas::apply_screen_effect`. An effect fades **in** over its `fade` seconds — the scripts
     /// own shape (`newColorEffect(..., 1.0)` then `FreeColorEffect` when the power ends) — and the
@@ -6504,6 +6542,35 @@ mod tests {
         rt.call("jkStringClear", &[]);
         rt.call("jkStringConcatAsciiString", &[Value::Str("x".repeat(200))]);
         assert!(rt.string_buffer.is_empty(), "the 128-character cap did not hold");
+    }
+
+    /// The tally screen's numbers, from the engine's own formulas and the constants read out of
+    /// JK.EXE at `0x522054`–`0x522074` rather than guessed.
+    #[test]
+    fn the_tally_reads_rank_secrets_and_alignment_from_the_inventory() {
+        let mut rt = door_runtime();
+        rt.inv.insert(20, 3.0);
+        assert_eq!(rt.jedi_rank(), 3, "the rank is the force-level bin");
+        rt.inv.insert(70, 2.0);
+        rt.inv.insert(71, 5.0);
+        assert_eq!(rt.secrets(), (2, 5));
+
+        // A dark-side power at level 2 costs 12.5; the secrets ratio (2 of 5) costs 40 and the
+        // constant adds 20 back: 0 - 12.5 - 40 + 20.
+        rt.inv.insert(30, 2.0);
+        rt.inv.insert(72, 2.0);
+        rt.inv.insert(73, 5.0);
+        assert!((rt.alignment() - (-32.5)).abs() < 1e-3, "alignment {}", rt.alignment());
+
+        // A light-side power at level 1 is worth +6.25 the other way.
+        rt.inv.clear();
+        rt.inv.insert(25, 1.0);
+        rt.inv.insert(73, 0.0);
+        assert!((rt.alignment() - 26.25).abs() < 1e-3, "alignment {}", rt.alignment());
+
+        // The clamp is the engine's: never past 100 either way.
+        rt.inv.insert(25, 40.0);
+        assert!((rt.alignment() - 100.0).abs() < 1e-3, "alignment {}", rt.alignment());
     }
 
     /// A weapon template found by its own `inv=` rather than by a name hint: the engine types it

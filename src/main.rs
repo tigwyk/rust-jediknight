@@ -9970,6 +9970,15 @@ fn refresh_overlay(
                 let name = screen.art.get(usize::try_from(index).ok()?)?;
                 bm::parse(&gobs.read(&format!("ui\\bm\\{name}"))?)
             };
+            // The tally screen's force stars, which `jkGuiSingleTally_ForceStarsRender` draws from
+            // `jkPlayer_GetJediRank` — the force-level bin. Nothing fed this, so the end-of-level
+            // screen showed no stars at all however far the player had trained.
+            let star_art = gobs.read("ui\\bm\\foStars.bm").and_then(|d| bm::parse(&d));
+            let rank = sim.as_deref().map(|sim| sim.world.borrow().jedi_rank()).unwrap_or(0);
+            let stars = star_art
+                .as_ref()
+                .filter(|_| screen.items.iter().any(|i| matches!(i.panel(), Some(menus::Panel::ForceStars))))
+                .map(|art| (art, rank));
             let checkbox = screen.art.iter().position(|n| n.eq_ignore_ascii_case("check.bm")).map(|i| i as i32);
             // A run-time dialog's lines are literal text, not keys.
             let lines = overlay.lines.clone();
@@ -9979,10 +9988,9 @@ fn refresh_overlay(
                 art: &art,
                 checkbox,
                 palette: &assets.palette,
-                stars: None,
+                stars,
                 text: &text,
-                // The in-game map panel wants the live level and the player's pose, which this
-                // path does not carry; `--map-shot` is where the panel is drawn for real.
+                map: live_map,
                 ..ui::Look::default()
             };
             let backdrop = ui::Backdrop { base: &base, panel: panel.as_ref() };
