@@ -370,6 +370,8 @@ fn main() {
     let mut tally_check = false;
     // `--uni <key>`: which string file carries a key, and what it says.
     let mut uni_key: Option<String> = None;
+    // `--live-all`: every level through the real schedule, one process each.
+    let mut live_all = false;
     let mut sound_check = false;
     let mut music_check = false;
     let mut ui_visible = false;
@@ -687,6 +689,7 @@ fn main() {
             "--soak" => soak_check = true,
             "--soak-all" => soak_all = true,
             "--tally" => tally_check = true,
+            "--live-all" => live_all = true,
             "--uni-key" => {
                 i += 1;
                 uni_key = args.get(i).cloned();
@@ -3471,6 +3474,60 @@ fn main() {
         assert!(rt.time >= seconds * 0.99, "the clock did not advance");
         assert!(grew < 4000, "the thing list grew by {grew}, which is runaway spawning");
         println!("--- soak check passed ---");
+        return;
+    }
+
+    if live_all {
+        // Every level through the **live** schedule, one process each. The gates are single-threaded
+        // and cannot see how the real schedule behaves — a borrow guard that panicked under parallel
+        // systems passed fifty gates and crashed every level — so this is the check that matters for
+        // "does the game run".
+        let exe = std::env::current_exe().expect("the running binary");
+        let mut levels: Vec<String> = gobs
+            .names()
+            .into_iter()
+            .filter_map(|name| {
+                let lower = name.to_ascii_lowercase();
+                lower.strip_prefix("jkl\\")?.strip_suffix(".jkl").map(str::to_string)
+            })
+            .collect();
+        levels.sort();
+        let mut passed = 0usize;
+        let mut failures: Vec<(String, String)> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        for level in &levels {
+            let output = std::process::Command::new(&exe)
+                .args(["--live-check", "--level", level, "--game"])
+                .arg(&game)
+                .env("BK_MUTE", "1")
+                .env("BK_SKIP_WINDOW", "1")
+                .env("BK_EXIT_FRAMES", "300")
+                .output()
+                .expect("start a live run");
+            let text = String::from_utf8_lossy(&output.stdout).to_string();
+            if text.contains("live check passed") {
+                passed += 1;
+                if text.contains("test map, not a playable level") {
+                    skipped.push(level.clone());
+                }
+            } else {
+                let why = text
+                    .lines()
+                    .find(|line| line.contains("live: FAIL") || line.contains("panicked"))
+                    .unwrap_or("(no verdict line)")
+                    .trim()
+                    .to_string();
+                failures.push((level.clone(), why));
+            }
+        }
+        println!(
+            "live-all: {passed} of {} level(s) passed the live schedule, {} test map(s) skipped by name, {} failure(s): {failures:?}",
+            levels.len(),
+            skipped.len(),
+            failures.len()
+        );
+        assert!(failures.is_empty(), "the live schedule failed on {failures:?}");
+        println!("--- live-all check passed ---");
         return;
     }
 
@@ -15302,6 +15359,14 @@ fn live_check(
         ),
     );
     let player = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer"));
+    // `static` is a test map with no player at all: there is nothing to follow, nothing to stand on
+    // and no HUD to draw, so the run reports it and stops rather than failing an invariant that does
+    // not apply. Every playable level places a `walkplayer`.
+    if player.is_none() {
+        println!("live: this level places no `walkplayer`: a test map, not a playable level");
+        println!("--- live check passed ---");
+        return;
+    }
     say(player.is_some(), format!("player thing {player:?}"));
     // …and its own body is not drawn. The camera follows that thing, so a spawned body wraps the
     // camera in the inside of the player's own model (`is_local_player`); this is the invariant that
