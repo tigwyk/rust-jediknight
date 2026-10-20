@@ -3834,12 +3834,13 @@ fn main() {
                 }
             }
         }
-        // Which of those links a script can actually hear: a linked script needs a `used` label for
-        // the player's use action, a `touched` label for a pickup, and so on.
+        // Which of those links a script can actually hear. The label is `activate`, not `used`: no shipped
+        // cog declares `used` (0 of 540), 82 declare `activate`, and that is what the runtime sends when
+        // the player uses a linked thing. `touched` is the pickup's label and does exist.
         let (mut used, mut touched) = (0usize, 0usize);
         for inst in &world.level.cogs {
             let Some(script) = world.cogs.get(&inst.script) else { continue };
-            if script.label("used").is_some() {
+            if script.label("activate").is_some() {
                 used += 1;
             }
             if script.label("touched").is_some() {
@@ -3847,7 +3848,7 @@ fn main() {
             }
         }
         println!("triggers: {} sector link(s), {surfaces} surface link(s), {things} thing link(s) on this level", links.len());
-        println!("triggers: {used} script(s) with a `used` label, {touched} with `touched`");
+        println!("triggers: {used} script(s) with an `activate` label, {touched} with `touched`");
         // Every message label the level's scripts declare, with how many scripts carry it: this is
         // the set of events the level actually waits on, which is what the event layer has to feed.
         let mut events: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
