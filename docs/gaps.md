@@ -457,3 +457,13 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
   width. It wants 2.0 units now.
 
 | Known defect | level m5 | **four weapon pickups rise out of the world**: m5railgun and m5concrifle carry el= in their templates and the thing-motion path integrates velocity with no gravity and no surface stop, so they climb ~10 units/s from z −0.2 to +39 in four seconds (--soak-all reports it; BK_SOAK_TRACE names them) | the motion path needs sithPhysics' gravity and collision, or el restricted to the types the engine launches (debris, particles, explosions) |
+
+### Why gravity for goods is not a one-line fix (round 120)
+
+Measured, twice:
+
+1. **Gravity alone** (goods with move=physics, type 4/5) drops 231 of level 1's bodies out of the world. The x/y resolver cannot stop a fall.
+2. **Gravity + a vertical stop** is still wrong: Solids::floor_below(sector, pos) returns None for every good on level 1 — the sector-keyed plane list finds no downward-facing plane under them — and Solids::support(pos, radius, drop), which is what the walker uses, catches only some (169 -> 68 bodies still leaving).
+
+So the prerequisite is not 'add gravity' but 'give goods a ground test that works for their radius and their sectors'. support depends on face coverage (over_face) at the body's radius; items are 0.05-0.10 units, and the coverage test is calibrated for the player. Naming that is the deliverable; the m5 defect stays reported.
+
