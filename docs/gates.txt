@@ -85,6 +85,13 @@ flag                                                   exit  what it prints
                                                              t=10, none immediately after, one
                                                              at t=10.6 for a 0.5 s rate)
                                                              0->1 and holster on 1->0)
+--soak                                                 0  --- soak check passed ---
+                                                             20 s of level time (599 steps) with the
+                                                             level's 42 scripts running alongside
+                                                             physics and AI: 3 things spawned, 0
+                                                             non-finite positions, clock 20.0. The
+                                                             only gate that runs the pieces together
+                                                             instead of one at a time
 --cog-check                                              0  --- cog check passed ---        (every level's scripts, and every label each one declares:
                                                              the deep pass is what found `AutosaveGame`, the
                                                              `jkString*` buffer, `StopKey`, `LoadSound` and
