@@ -796,6 +796,10 @@ pub struct Runtime {
     /// `misc\items.dat`'s `cog=` column: inventory bin -> the script that bin runs. The loader fills
     /// it once, because the runtime has no file access.
     pub item_cog: BTreeMap<i32, String>,
+    /// Inventory bin -> the `cog_index` of the VM running that bin's script, filled by the loader when
+    /// it starts one. `UseBin` needs it: the engine sends the bin's message to *its own cog*, and the
+    /// runtime cannot see the app's instance list.
+    pub bin_cog_index: BTreeMap<i32, i32>,
     /// Item scripts waiting to be instantiated: a bin went from empty to held, so its cog should
     /// start. The app owns the VMs, so the runtime only names them.
     pub pending_cogs: Vec<String>,
@@ -1104,6 +1108,7 @@ impl Runtime {
             saber_enabled: true,
             saber_cam: 0,
             item_cog: BTreeMap::new(),
+            bin_cog_index: BTreeMap::new(),
             pending_cogs: Vec::new(),
             spawned_cogs: std::collections::BTreeSet::new(),
             messages: Vec::new(),
@@ -3734,6 +3739,23 @@ impl Runtime {
     /// `fire` message only goes out when the clock has passed it. A mashed or held trigger
     /// therefore cannot outpace the script that owns the weapon. Returns whether a message
     /// was queued.
+    /// `UseBin(bin)`: switch an inventory item on, which is `sithInventory_ActivateBin`'s message —
+    /// the bin's own cog gets `activated` with the player as the source, and *it* decides what the
+    /// item does (`cog_item_bacta.cog` heals 30 and spends one). Returns whether a message went out.
+    ///
+    /// `ponytail:` this is the mechanism, not the input. Retail reaches it through the inventory
+    /// screen, which the port does not draw yet, so nothing calls this from a key — `--use-item`
+    /// drives it.
+    pub fn use_bin(&mut self, bin: i32) -> bool {
+        let Some(cog) = self.bin_cog_index.get(&bin).copied() else {
+            return false;
+        };
+        let player = self.player_thing();
+        self.messages
+            .push(("activated".to_string(), Some(player), Some(cog), [0.0; 2]));
+        true
+    }
+
     pub fn try_fire_weapon(&mut self, player: usize) -> bool {
         let Some((cog, rate, _)) = self.weapon_cog else { return false };
         if self.time < self.weapon_ready {
@@ -5813,6 +5835,7 @@ mod tests {
             saber_enabled: true,
             saber_cam: 0,
             item_cog: BTreeMap::new(),
+            bin_cog_index: BTreeMap::new(),
             pending_cogs: Vec::new(),
             spawned_cogs: std::collections::BTreeSet::new(),
             messages: Vec::new(),

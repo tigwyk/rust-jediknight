@@ -107,6 +107,13 @@ flag                                                   exit  what it prints
                                                              reacts: level 1's links watch
                                                              sectors off the walk, so 0
                                                              messages -- the router is next
+--use-item                                             0  --- use-item check passed ---
+                                                             UseBin(40) sends `activated` to
+                                                             the bacta script's own cog and the
+                                                             script heals: health 40 -> 70, bin
+                                                             40 3 -> 2, availability kept. The
+                                                             mechanism only -- no key calls it
+                                                             yet (the inventory screen is next)
 --engine-audit                                         0  --- engine-audit check passed ---
                                                              ranks the decompilation's 2,379
                                                              functions by size and reports the

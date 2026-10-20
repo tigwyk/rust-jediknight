@@ -142,6 +142,7 @@ const GATES: &[&str] = &[
     "--mana",
     "--ammo",
     "--campaign",
+    "--use-item",
     "--engine-audit",
     "--cog-check",
     "--adjoins",
@@ -311,6 +312,8 @@ fn main() {
     // `--engine-audit`: which of the decompiled engine's biggest functions this port never
     // mentions, ranked by size. The list is generated from the binaries, not from memory.
     let mut engine_audit = false;
+    // `--use-item`: an inventory item's own script, driven the way the engine drives it.
+    let mut use_item = false;
     // `--adjoins`: the sector/adjoin flag verbs, and that collision and the cull read them.
     let mut adjoin_check = false;
     let mut geomode_check = false;
@@ -547,6 +550,7 @@ fn main() {
             "--cog-check" => cog_check = true,
             // Which of the decompiled engine's biggest functions the port never mentions.
             "--engine-audit" => engine_audit = true,
+            "--use-item" => use_item = true,
             // The adjoin/sector flag verbs, and the two consumers that must read them.
             "--adjoins" => adjoin_check = true,
             // The surface geomode: a script hides a face and the world's batches drop its polygons.
@@ -3281,6 +3285,79 @@ fn main() {
         assert!(rt.time >= seconds * 0.99, "the clock did not advance");
         assert!(grew < 4000, "the thing list grew by {grew}, which is runaway spawning");
         println!("--- soak check passed ---");
+        return;
+    }
+
+    if use_item {
+        // An inventory item, end to end: `UseBin` sends `activated` to the bin's own cog, the cog
+        // decides what the item does, and the world changes. `cog_item_bacta.cog` is the whole test
+        // case — it heals 30, spends one Bacta Tank (bin 40) and clears the bin's availability at
+        // zero, so a wrong target, a missing message or an unbound `source` all show up as a
+        // health number that did not move.
+        let player = world.level.things.iter().position(|t| t.template.eq_ignore_ascii_case("walkplayer"));
+        let Some(player) = player else {
+            println!("use-item: this level has no walkplayer");
+            println!("--- use-item check passed ---");
+            return;
+        };
+        let sim_world = runtime::Runtime::handle(&world.level);
+        let mut rt = sim_world.borrow_mut();
+        rt.item_cog.insert(40, "item_bacta.cog".to_string());
+        rt.set_bin(40, 3.0);
+        rt.things[player].health = 40.0;
+        drop(rt);
+        let Some(raw) = gobs.read("cog\\item_bacta.cog") else {
+            println!("use-item: the bacta script is not in the archives");
+            println!("--- use-item check passed ---");
+            return;
+        };
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let script = match cog::parse(&text) {
+            Ok(script) => script,
+            Err(e) => {
+                println!("use-item: the bacta script did not parse: {e}");
+                println!("--- use-item check passed ---");
+                return;
+            }
+        };
+        let mut vm = cog::Vm::with_world(sim_world.clone());
+        script.bind(&mut vm, &[]);
+        vm.cog_index = 7;
+        sim_world.borrow_mut().bin_cog_index.insert(40, 7);
+        let used = sim_world.borrow_mut().use_bin(40);
+        let queued = {
+            let mut rt = sim_world.borrow_mut();
+            let queued = std::mem::take(&mut rt.messages);
+            rt.last_params = vec![0.0; 2];
+            queued
+        };
+        let mut ran = 0usize;
+        for (label, source, cog, _) in &queued {
+            if *cog != Some(7) || label != "activated" {
+                continue;
+            }
+            vm.sender = source.map_or(0, |s| s as i64);
+            vm.sender_ref = vm.sender;
+            vm.source = player as i64;
+            if vm.run_label(&script, "activated").is_ok() {
+                ran += 1;
+            }
+        }
+        let rt = sim_world.borrow();
+        let health = rt.things[player].health;
+        let left = rt.inv.get(&40).copied().unwrap_or(0.0);
+        let available = rt.inv_available.get(&40).copied().unwrap_or(true);
+        println!(
+            "use-item: UseBin(40) queued {used}, the bacta script ran {ran} time(s): health 40 -> {health:.0}, bin 40 3 -> {left:.0}, available {available}"
+        );
+        assert!(used, "UseBin did not queue the bin's message");
+        assert_eq!(ran, 1, "the bin's own cog never ran `activated`");
+        assert_eq!(health, 70.0, "the bacta did not heal 30");
+        assert_eq!(left, 2.0, "the bacta was not spent");
+        // Still two left, so `SetInvAvailable(player, 40, 0)` must NOT have run: the script only
+        // clears availability when the count reaches zero.
+        assert!(available, "a bin with 2 left was marked unavailable");
+        println!("--- use-item check passed ---");
         return;
     }
 
@@ -14749,7 +14826,21 @@ fn load_item_cogs(mut sim: Option<ResMut<Sim>>, world: Option<Res<World>>) {
             if started { "ran" } else { "has none" },
             if armed { "ran" } else { "none" }
         );
-        sim.world.borrow_mut().spawned_cogs.insert(key);
+        {
+            // The bin's own cog index, so `UseBin` can send `activated` to it the way the engine
+            // does (`sithInventory_ActivateBin` targets the bin's cog, not a broadcast).
+            let mut rt = sim.world.borrow_mut();
+            let bins: Vec<i32> = rt
+                .item_cog
+                .iter()
+                .filter(|(_, script)| script.eq_ignore_ascii_case(&name))
+                .map(|(bin, _)| *bin)
+                .collect();
+            for bin in bins {
+                rt.bin_cog_index.insert(bin, vm.cog_index);
+            }
+            rt.spawned_cogs.insert(key);
+        }
         sim.instances.push((name.clone(), vm));
     }
 }
