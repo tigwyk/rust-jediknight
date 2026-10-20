@@ -268,6 +268,16 @@ pub struct SurfaceState {
     pub light_rate: f32,
 }
 
+/// [`Runtime::carry`]: the player's own state, which survives a level change.
+#[derive(Clone, Debug, Default)]
+pub struct CarryOver {
+    pub inv: BTreeMap<i32, f32>,
+    pub weapon: Option<String>,
+    pub cur_bin: i32,
+    pub saber: Option<SaberInfo>,
+    pub jk_flags: u32,
+}
+
 /// `jkSetSaberInfo`'s blade, as `jkSaber_InitializeSaberInfo` stores it: the two blade materials,
 /// the base and tip radii, the length, and the three spark templates a hit spawns.
 #[derive(Clone, Debug, Default)]
@@ -3087,6 +3097,38 @@ impl Runtime {
         self.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")).unwrap_or(0)
     }
 
+    /// What the player keeps across a level change.
+    ///
+    /// The engine's `jkPlayer_*` state survives the level load — inventory, the armed bin, the
+    /// selected weapon, the saber, the `jkFlags` the force scripts set. This build rebuilds the whole
+    /// runtime from the incoming `.jkl`, so those pieces have to be handed over explicitly instead of
+    /// coming out of the thing list.
+    pub fn carry(&self) -> CarryOver {
+        let player = self.player_thing();
+        CarryOver {
+            inv: self.inv.clone(),
+            weapon: self.weapon.clone(),
+            cur_bin: self.cur_bin,
+            saber: self.saber.get(&player).cloned(),
+            jk_flags: self.things.get(player).map(|t| t.jk_flags).unwrap_or(0),
+        }
+    }
+
+    /// Put [`Self::carry`]'s state onto this (freshly built) level's player.
+    pub fn adopt(&mut self, carry: &CarryOver) {
+        self.inv = carry.inv.clone();
+        self.weapon = carry.weapon.clone();
+        self.cur_bin = carry.cur_bin;
+        if let Some(blade) = &carry.saber {
+            let player = self.player_thing();
+            self.saber.insert(player, blade.clone());
+        }
+        let player = self.player_thing();
+        if let Some(thing) = self.things.get_mut(player) {
+            thing.jk_flags = carry.jk_flags;
+        }
+    }
+
     /// The thing the view follows, when a script has pointed a camera away from the player.
     ///
     /// The engine's camera table is seven slots (`sithCamera_g_aCameras[7]`); `SetCameraFocus(slot,
@@ -5184,6 +5226,43 @@ mod tests {
         // Script text is collected, not dropped.
         rt.call("jkPrintUNIString", &[Value::Str("GUI_NOPE".into())]);
         assert_eq!(rt.prints, vec!["GUI_NOPE".to_string()]);
+    }
+
+    #[test]
+    fn the_player_keeps_its_inventory_and_saber_across_a_level_change() {
+        // `jkPlayer_*` state outlives the level: the runtime is rebuilt from the incoming `.jkl`, so
+        // `carry`/`adopt` are what put the inventory, the armed bin, the weapon and the blade back on
+        // the new level's player.
+        let mut leaving = door_runtime();
+        leaving.call("SetInv", &[Value::Num(0.0), Value::Num(2.0), Value::Num(3.0)]);
+        leaving.call("SetInv", &[Value::Num(0.0), Value::Num(14.0), Value::Num(50.0)]);
+        leaving.weapon = Some("+bryarbolt".to_string());
+        leaving.cur_bin = 2;
+        leaving.call(
+            "jkSetSaberInfo",
+            &[
+                Value::Num(0.0),
+                Value::Str("side.mat".into()),
+                Value::Str("tip.mat".into()),
+                Value::Num(0.003),
+                Value::Num(0.001),
+                Value::Num(0.1),
+                Value::Str("+wall".into()),
+                Value::Str("+blood".into()),
+                Value::Str("+spark".into()),
+            ],
+        );
+        let carry = leaving.carry();
+        let mut arriving = door_runtime();
+        assert!(arriving.inv.is_empty(), "the new level's inventory started dirty");
+        arriving.adopt(&carry);
+        assert_eq!(arriving.inv.get(&2).copied(), Some(3.0), "the inventory did not carry");
+        assert_eq!(arriving.inv.get(&14).copied(), Some(50.0), "the force mana did not carry");
+        assert_eq!(arriving.weapon.as_deref(), Some("+bryarbolt"), "the weapon did not carry");
+        assert_eq!(arriving.cur_bin, 2, "the armed bin did not carry");
+        let blade = arriving.saber.get(&arriving.player_thing()).cloned().unwrap_or_default();
+        assert_eq!(blade.side, "side.mat", "the saber did not carry onto the new player");
+        assert!((blade.length - 0.1).abs() < 1e-6, "the carried blade lost its length");
     }
 
     #[test]

@@ -7615,6 +7615,7 @@ fn main() {
                     animate_actors,
                     actors_follow_runtime,
                     things_follow_geomode,
+                    adopt_carried,
                     billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
@@ -7779,6 +7780,15 @@ fn swap_level(world: &mut bevy::prelude::World) {
         next.level.things.len(),
         next.level.sectors.len()
     );
+    // What the *player* keeps: the engine's `jkPlayer_*` state outlives the level, and this build
+    // rebuilds the runtime from the incoming `.jkl`, so it has to be taken off the old one first.
+    // `setup` puts it back on the new level's player.
+    let carried = world
+        .get_resource::<Sim>()
+        .map(|sim| sim.world.borrow().carry());
+    if let Some(carried) = carried {
+        world.insert_resource(Carried(carried));
+    }
     // Everything the old level spawned, and nothing else: the cameras, lights and overlay are
     // not tagged `LevelEntity`.
     let stale: Vec<Entity> = world
@@ -7830,6 +7840,27 @@ fn swap_level(world: &mut bevy::prelude::World) {
     let setup_id = world.register_system(setup);
     let _ = world.run_system(setup_id);
 }
+
+/// Put the player's carried state onto the level that just loaded.
+///
+/// Its own system rather than part of `setup`, because `setup` is already at Bevy's parameter limit
+/// and because `Sim` arrives through `Commands` — by the next frame both exist.
+fn adopt_carried(mut commands: Commands, carried: Option<Res<Carried>>, sim: Option<Res<Sim>>) {
+    let (Some(carried), Some(sim)) = (carried, sim) else { return };
+    sim.world.borrow_mut().adopt(&carried.0);
+    println!(
+        "level: the player carries over {} inventory bin(s), weapon {:?}, saber {}",
+        carried.0.inv.len(),
+        carried.0.weapon,
+        carried.0.saber.is_some()
+    );
+    commands.remove_resource::<Carried>();
+}
+
+/// [`runtime::CarryOver`] in flight: `swap_level` takes the player's state off the level it is
+/// leaving and `setup` puts it on the one it is building.
+#[derive(Resource)]
+struct Carried(runtime::CarryOver);
 
 /// The screens recovered from the executable.
 #[derive(Resource, Deref)]
