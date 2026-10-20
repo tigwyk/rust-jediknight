@@ -3116,6 +3116,38 @@ resolves a name to an index, answers `-1` for a name the level does not have, st
 the change reaches the vertex data. On `09fuelstation` the level's own two `00_matanim.cog` calls walk
 **2 material cels** in the first second.
 
+### Scrolling: `SlideWall` moves the texture *and* what stands on it
+
+`SlideWall(surface, vector, scale)` (`sithCogFunctionSurface_SlideWall`) is a pair of numbers with two
+jobs. It records `scrollVector = -(vector * scale * 0.1)` on the surface, and the engine then uses that
+one vector twice:
+
+```c
+// sithSurface_Update: the texture
+texVertOffset.x += scrollVector.x * deltaSecs;    // mod 1024
+// sithThing.c: whatever is attached to the surface
+rdVector_ScaleAdd3Acc(&pThing->field_268, &v8, secDeltaTime);
+```
+
+So a conveyor is both — the belt texture crawls and the body on it is carried. The port does the same:
+`Runtime::SurfaceState.slide` is the vector, the mesh's UVs get `slide * time` (the runtime does not
+integrate: from the clock, `texVertOffset` *is* `rate * time`, and the engine's 1024 wrap is
+`rem_euclid`), and `walk_player` adds `slide * dt` to the body while it stands on that surface.
+`BK_SCROLL_TRACE=1` prints the carry. The shipped belts are `00_conveyor.cog` and level 2's
+`02_cratelift.cog`/`02_cratepuzzle_a.cog` — ten surfaces between them.
+
+The sky is the same mechanism one level up: `SlideHorizonSky(x, y)` and `SlideCeilingSky(x, y)` take a
+**speed pair**, keep one world-wide offset per kind (`sithWorld.horizonSkyOffset`/`ceilingSkyOffset`),
+and every sky face of that kind moves by it. The port stores `sky_scroll[kind]` and adds
+`rate * time` to the UVs of surfaces carrying `SURFFLAG_SKY` (0x200) or `SURFFLAG_CEILING_SKY` (0x400).
+The *dome* the port draws as a backdrop is its own stand-in and does not scroll.
+
+`ponytail:` the mesh is rebuilt whole, so a scroll re-lays the world at **15 Hz** rather than every
+frame — the offset is computed from the clock, so the only cost is that the mesh shows an offset up to
+66 ms old, and the alternative is a per-vertex scroll channel in the shader. `--scroll` is the gate: it
+checks the scaling and the negation, that the UVs move, that the body is carried, and that a sky face
+takes the world offset.
+
 ### Scripted light: `SetSectorLight` and `SurfaceLightAnim`
 
 A level's light is baked into its vertices, so both of these are **extra** light on top of that baked

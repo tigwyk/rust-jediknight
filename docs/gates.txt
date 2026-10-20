@@ -30,7 +30,12 @@ whatever is on screen, and `--gates` passes it to every child. A gate that forge
 ends without a verdict instead of sitting on the main menu forever — which is what five flags that
 do not exist in this binary used to do, because a hand-written flag list had invented them.
 
-`FAILURES: 0 / 37` (`--gates`: `gates: 0 of 37 failed`).
+`BK_SKIP_WINDOW=1` skips the one window gate and prints it as **skipped**, not as a pass. It exists
+because `--live-check` needs a display that is actually presenting: with no focused desktop the app
+sits in presentation after its setup output and never reaches the hundredth frame its verdict is
+gated on, so the sweep would hang instead of finishing. Everything else is headless and unaffected.
+
+`FAILURES: 0 / 38` (`--gates`: `gates: 0 of 38 failed`, or `0 of 37` with `BK_SKIP_WINDOW=1`).
 
 flag                                                   exit  what it prints
 -------------------------------------------------------------------------------------------------
@@ -102,6 +107,12 @@ flag                                                   exit  what it prints
                                                              player is POV; a shot's SetPOVShake kick (1 deg
                                                              at 80 deg/s) decays to 0.6 in 5 ms and to
                                                              nothing in a second
+--scroll                                                 0  SlideWall('0 1', 10) records (0, -1) level
+                                                             units/s (scaled by 0.1 and negated), the mesh
+                                                             UVs move by one texel after a second, a body on
+                                                             the surface is carried 0.0167 units a frame at
+                                                             60 fps, and SlideCeilingSky(0.5, 0) moves every
+                                                             ceiling-sky face by 1 texel a second
 --triggers                                               0  --- triggers check passed ---
 --sleep                                                  0  --- sleep check passed ---
 --live-check                                             0  the body stands in sector 339 at z -1.17 on a floor at

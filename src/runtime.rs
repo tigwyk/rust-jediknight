@@ -372,6 +372,12 @@ pub struct Runtime {
     /// material currently draws — `rdMaterial.curCelNum`, which a surface with no cel of its own uses.
     pub material_anims: Vec<(i32, f32, f32, f32)>,
     pub material_cel: BTreeMap<i32, f32>,
+    /// The last 15 Hz bucket a scrolling surface asked the renderer to re-lay its texture in.
+    pub scroll_bucket: i32,
+    /// `SlideHorizonSky(x, y)` / `SlideCeilingSky(x, y)`: the rate the sky backdrop moves at, in
+    /// texels a second, for `[horizon, ceiling]`. The engine keeps one world-wide offset per kind
+    /// (`sithWorld.horizonSkyOffset`) and moves it by this vector; the offsets are `rate * time`.
+    pub sky_scroll: [[f32; 2]; 2],
     /// `sithWeapon_secMountWait`: when the equipped weapon finishes mounting, as an absolute clock time
     /// (the engine stores `wait + gameTime` in a global, not per thing).
     pub mount_wait_until: f32,
@@ -876,6 +882,8 @@ impl Runtime {
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            scroll_bucket: 0,
+            sky_scroll: [[0.0; 2]; 2],
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
             template_weapon: level
@@ -1012,6 +1020,23 @@ impl Runtime {
         }
     }
 
+    /// A scrolling surface (`SlideWall`) needs its texture re-laid, and the mesh is rebuilt whole, so
+    /// the epoch moves at a fixed **15 Hz** rather than every frame: the offset itself is computed
+    /// from the clock (`slide * time`), so the only cost of the slower epoch is that the mesh shows an
+    /// offset up to 66 ms old. `ponytail:` the real fix is a per-vertex scroll channel in the shader.
+    fn bump_scroll_epoch(&mut self) {
+        if !self.surfaces.iter().any(|s| s.slide != [0.0; 2])
+            && self.sky_scroll.iter().all(|rate| *rate == [0.0; 2])
+        {
+            return;
+        }
+        let bucket = (self.time * 15.0) as i32;
+        if bucket != self.scroll_bucket {
+            self.scroll_bucket = bucket;
+            self.surface_epoch += 1;
+        }
+    }
+
     /// `SetPOVShake`'s offsets decay toward zero at their own rate, the way `sithCamera_Update`
     /// subtracts `delta * dt` from every component and clamps at 0 — so a shot's recoil is a kick
     /// that recovers rather than an offset that sticks.
@@ -1084,6 +1109,7 @@ impl Runtime {
         self.decay_damage(dt);
         self.advance_surface_cels();
         self.advance_material_cels();
+        self.bump_scroll_epoch();
         self.advance_lights(dt);
         self.decay_shake(dt);
         // `timer=`/`SetLifeLeft` expiry: `sithThing_Update` counts `msecLifeLeft` down and calls
@@ -1398,6 +1424,8 @@ impl Runtime {
                 | "getsecondaryfocus"
                 | "setpovshake"
                 | "materialanim"
+                | "slidehorizonsky"
+                | "slideceilingsky"
                 | "sectorthrust"
                 | "destroything"
                 | "settimerex"
@@ -2515,9 +2543,17 @@ impl Runtime {
             "getwallcel" => Value::Num(self.surface(idx(0)).map(|s| s.cel).unwrap_or(0.0) as f64),
             // `SlideWall(surface, u, v)`: offset the texture, which is how a scrolling
             // panel or a conveyor is drawn.
+            // `SlideWall(surface, vector, scale)`: `sithCogFunctionSurface_SlideWall` scales the
+            // vector by `scale * 0.1`, negates it, and records it as the surface's scroll vector —
+            // which the engine uses for **two** things: the texture offset, and the velocity of
+            // anything standing on the surface (`sithThing.c` adds `scrollVector * dt` to a thing
+            // attached to a scrolling surface). A conveyor is both at once.
             "slidewall" => {
+                let vec = args.get(1).map(vec3).unwrap_or([0.0; 3]);
+                let scale = num(2) as f32 * 0.1;
                 if let Some(s) = self.surface_mut(idx(0)) {
-                    s.slide = [num(1) as f32, num(2) as f32];
+                    s.slide = [-vec[0] * scale, -vec[1] * scale];
+                    self.surface_epoch += 1;
                 }
                 Value::Nil
             }
@@ -3059,6 +3095,15 @@ impl Runtime {
                     .map(|t| t as f64)
                     .unwrap_or(-1.0),
             ),
+            // `SlideHorizonSky(x, y)` / `SlideCeilingSky(x, y)`: `sithSurface_SlideHorizonSky` keeps
+            // one world-wide offset per sky kind and the update walks it by this vector, so it is a
+            // pair of speeds rather than a per-surface one. `[0]` is the horizon, `[1]` the ceiling.
+            "slidehorizonsky" | "slideceilingsky" => {
+                let kind = usize::from(verb.eq_ignore_ascii_case("slideceilingsky"));
+                self.sky_scroll[kind] = [num(0) as f32, num(1) as f32];
+                self.surface_epoch += 1;
+                Value::Nil
+            }
             // `SetPOVShake(posOffset, angleOffset, posDelta, angleDelta)`: the offset the view takes
             // on, and the rate it walks back to zero at (`sithCamera_SetPOVShake`).
             "setpovshake" => {
@@ -3737,6 +3782,8 @@ mod tests {
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            scroll_bucket: 0,
+            sky_scroll: [[0.0; 2]; 2],
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
             template_weapon: BTreeMap::new(),

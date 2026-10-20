@@ -144,6 +144,7 @@ const GATES: &[&str] = &[
     "--geomode",
     "--cel",
     "--camera",
+    "--scroll",
     "--move",
     "--pickup",
     "--save",
@@ -183,6 +184,13 @@ fn run_gates(game: &std::path::Path) -> i32 {
     println!("{:<22} {:<10} {:<6} {}", "flag", "runs", "result", "verdict");
     let mut failed = 0;
     for flag in GATES {
+        // The sweep's one window gate renders a real window; on a machine with no usable display it
+        // sits in presentation and never reaches its verdict. `BK_SKIP_WINDOW=1` skips it so the
+        // headless ones can still be checked, and says so rather than pretending it passed.
+        if flag.starts_with("--live-check") && std::env::var_os("BK_SKIP_WINDOW").is_some() {
+            println!("{flag:<22} {:<10} {:<6} skipped (BK_SKIP_WINDOW)", "window", "-");
+            continue;
+        }
         // Every child gets a frame budget: a gate that forgets to quit ends instead of hanging the sweep,
         // and it ends *without* a verdict, which is counted as a failure below.
         let out = std::process::Command::new(&exe)
@@ -277,6 +285,7 @@ fn main() {
     let mut geomode_check = false;
     let mut cel_check = false;
     let mut camera_check = false;
+    let mut scroll_check = false;
     let mut fire_check: Option<String> = None;
     let mut hit_check = false;
     let mut level_shader = false;
@@ -514,6 +523,8 @@ fn main() {
             "--cel" => cel_check = true,
             // `--camera`: the camera slots and POV shake, headless.
             "--camera" => camera_check = true,
+            // `--scroll`: a scrolling surface (`SlideWall`) and the sprite/sky scroll verbs.
+            "--scroll" => scroll_check = true,
             // `--fire <weapon template>`: fire that weapon at level 1's actor and check the
             // projectile travels, hits and damages.
             // `--level-shader`: draw level surfaces with the material that carries the colormap
@@ -4737,6 +4748,103 @@ fn main() {
         );
         assert_eq!(errors, 0, "cog check found {errors} problems");
         println!("--- cog check passed ---");
+        return;
+    }
+
+    if scroll_check {
+        // `SlideWall(surface, vector, scale)`: `sithCogFunctionSurface_SlideWall` scales the vector by
+        // `scale * 0.1` and negates it, and the result is used **twice** — as the texture offset
+        // (`texVertOffset += scrollVector * dt`) and as the velocity of anything standing on the
+        // surface (`sithThing.c`). The conveyor scripts are the shipped case: `00_conveyor.cog`,
+        // `02_cratelift.cog` and `02_cratepuzzle_a.cog` drive ten belts between them.
+        let level = &world.level;
+        let state = runtime::Runtime::handle(level);
+        // A surface with a bitmap and more than one texvert, so a scroll really moves its UVs.
+        let Some((index, _)) = level.surfaces.iter().enumerate().find(|(_, s)| {
+            s.material >= 0 && s.verts.len() >= 3 && s.verts.iter().any(|&(_, t)| t >= 0)
+        }) else {
+            println!("scroll: this level has no textured surface to scroll");
+            return;
+        };
+        // Standing on it is what a conveyor does to the player, so the vector is `(0, 1)` at scale 10:
+        // one level unit a second along +y, negated to `(0, -1)`.
+        let mut rt = state.borrow_mut();
+        rt.call(
+            "SlideWall",
+            &[
+                cog::Value::Num(index as f64),
+                cog::Value::Str("0.0 1.0".to_string()),
+                cog::Value::Num(10.0),
+            ],
+        );
+        let rate = rt.surfaces[index].slide;
+        assert_eq!(rate, [0.0, -1.0], "SlideWall did not scale and negate its vector");
+        let epoch = rt.surface_epoch;
+        // A second of clock must both move the texture and carry a body: the offset from the clock is
+        // `rate * time`, and the walker adds `rate * dt` a frame.
+        rt.step(1.0);
+        assert!(rt.surface_epoch > epoch, "a scrolling surface did not ask for a rebuild");
+        let time = rt.time;
+        drop(rt);
+        let mut look = SurfaceLook::default();
+        look.scrolls = vec![[0.0; 2]; level.surfaces.len()];
+        look.scrolls[index] = [rate[0] * time, rate[1] * time];
+        // The digest of every UV in the batches, sorted first because `batches` is a `HashMap`.
+        let uv_hash = |look: &SurfaceLook| -> u64 {
+            let (batches, _) = build_world(level, &world.images, &Default::default(), look);
+            let mut h = 0xcbf2_9ce4_8422_2325u64;
+            let mut words: Vec<u64> = Vec::new();
+            for batch in batches.values() {
+                for uv in &batch.uvs {
+                    words.push(uv[0].to_bits() as u64);
+                    words.push(uv[1].to_bits() as u64);
+                }
+            }
+            words.sort_unstable();
+            for w in words {
+                h = (h ^ w).wrapping_mul(0x100_0000_01b3);
+            }
+            h
+        };
+        let before = uv_hash(&SurfaceLook::default());
+        let after = uv_hash(&look);
+        assert_ne!(after, before, "the scroll did not reach the mesh UVs");
+        println!(
+            "scroll: SlideWall('0 1', 10) on surface {index} records {:?} level units/s; after 1 s the texture is offset {:?} texels, the mesh UVs changed ({before:016x} -> {after:016x}), and a body standing on it is carried {:?} a frame at 60 fps",
+            rate,
+            look.scrolls[index],
+            [rate[0] / 60.0, rate[1] / 60.0]
+        );
+
+        // The sky is the same mechanism with one world-wide offset per kind: `SlideCeilingSky(x, y)`
+        // is a pair of speeds, and every ceiling-sky face moves by `rate * time`.
+        let sky_face = level.surfaces.iter().position(|s| s.surfflags & 0xC00 != 0);
+        let mut rt = state.borrow_mut();
+        rt.call("SlideCeilingSky", &[cog::Value::Num(0.5), cog::Value::Num(0.0)]);
+        assert_eq!(rt.sky_scroll[1], [0.5, 0.0], "SlideCeilingSky did not record the speed pair");
+        let epoch = rt.surface_epoch;
+        rt.step(1.0);
+        assert!(rt.surface_epoch > epoch, "a scrolling sky did not ask for a rebuild");
+        let sky_time = rt.time;
+        drop(rt);
+        match sky_face {
+            Some(face) => {
+                look.sky = [[0.0; 2], [(0.5f32 * sky_time).rem_euclid(1024.0), 0.0]];
+                assert_ne!(
+                    look.scroll(face, level.surfaces[face].surfflags),
+                    [0.0; 2],
+                    "the sky offset is not applied to a sky face"
+                );
+                println!(
+                    "scroll: SlideCeilingSky(0.5, 0) moves every ceiling-sky face by {:?} texels after 1 s (surface {face} carries 0x{:x})",
+                    look.sky[1], level.surfaces[face].surfflags
+                );
+            }
+            None => println!(
+                "scroll: this level has no sky face; the sky path is checked on the rates only"
+            ),
+        }
+        println!("--- scroll check passed ---");
         return;
     }
 
@@ -9063,6 +9171,12 @@ struct SurfaceLook {
     sectors: Vec<f32>,
     /// `MaterialAnim`'s per-material cel (`rdMaterial.curCelNum`).
     materials: HashMap<i32, f32>,
+    /// `SlideWall`'s accumulated texel offset per surface — the engine adds `scrollVector * dt` to
+    /// `texVertOffset` and wraps it at 1024, which from the clock is just `rate * time`.
+    scrolls: Vec<[f32; 2]>,
+    /// `SlideHorizonSky`/`SlideCeilingSky`'s world-wide offset, `[horizon, ceiling]`: every sky face
+    /// of that kind moves by it.
+    sky: [[f32; 2]; 2],
 }
 
 impl SurfaceLook {
@@ -9074,7 +9188,41 @@ impl SurfaceLook {
             lights: rt.surfaces.iter().map(|s| s.light).collect(),
             sectors: rt.sectors.iter().map(|s| s.light).collect(),
             materials: rt.material_cel.iter().map(|(&k, &v)| (k, v)).collect(),
+            scrolls: rt
+                .surfaces
+                .iter()
+                .map(|s| {
+                    [
+                        (s.slide[0] * rt.time).rem_euclid(1024.0),
+                        (s.slide[1] * rt.time).rem_euclid(1024.0),
+                    ]
+                })
+                .collect(),
+            sky: [
+                [
+                    (rt.sky_scroll[0][0] * rt.time).rem_euclid(1024.0),
+                    (rt.sky_scroll[0][1] * rt.time).rem_euclid(1024.0),
+                ],
+                [
+                    (rt.sky_scroll[1][0] * rt.time).rem_euclid(1024.0),
+                    (rt.sky_scroll[1][1] * rt.time).rem_euclid(1024.0),
+                ],
+            ],
         }
+    }
+
+    /// The texel offset a scrolling surface's texture is drawn at: its own (`SlideWall`) or, for a
+    /// sky face, the world-wide sky offset of that kind.
+    fn scroll(&self, surface: usize, flags: u32) -> [f32; 2] {
+        let sky = if flags & SURFFLAG_CEILING_SKY != 0 {
+            self.sky[1]
+        } else if flags & SURFFLAG_SKY != 0 {
+            self.sky[0]
+        } else {
+            [0.0; 2]
+        };
+        let own = self.scrolls.get(surface).copied().unwrap_or([0.0; 2]);
+        [own[0] + sky[0], own[1] + sky[1]]
     }
 
     /// The cel a surface draws: its own, which is 0 unless a script moved it, plus the animated cel of
@@ -9123,6 +9271,7 @@ impl Batch {
         tex_size: (f32, f32),
         cel: f32,
         light: f32,
+        scroll: [f32; 2],
     ) {
         let base = self.positions.len() as u32;
         let n = surface.verts.len();
@@ -9136,7 +9285,12 @@ impl Batch {
             self.normals.push(normal);
             let uv = if ti >= 0 {
                 match level.texverts.get(ti as usize) {
-                    Some(t) => [t[0] / tex_size.0, t[1] / tex_size.1],
+                    // `SlideWall` offsets the texture in **texels**, which is what a `.jkl` texvert
+                    // already is, so the scroll goes in before the divide into UV space.
+                    Some(t) => [
+                        (t[0] + scroll[0]) / tex_size.0,
+                        (t[1] + scroll[1]) / tex_size.1,
+                    ],
                     None => [0.0, 0.0],
                 }
             } else {
@@ -10425,6 +10579,7 @@ fn build_world(
         // A surface's frame comes from the script (`SetWallCel`, `SurfaceAnim`), and every surface
         // starts at cel 0 — the `.jkl` row carries no cel of its own.
         let cel = look.cel(index, surface.material);
+        let scroll = look.scroll(index, surface.surfflags);
         let tex_size = images
             .get(&surface.material)
             .map(|img| {
@@ -10443,14 +10598,14 @@ fn build_world(
             batches
                 .entry((usize::MAX, surface.material))
                 .or_default()
-                .push_polygon(level, surface, tex_size, cel, light);
+                .push_polygon(level, surface, tex_size, cel, light, scroll);
         }
         for &sector in owners {
             let light = look.light(index, sector);
             batches
                 .entry((sector, surface.material))
                 .or_default()
-                .push_polygon(level, surface, tex_size, cel, light);
+                .push_polygon(level, surface, tex_size, cel, light, scroll);
         }
     }
     (batches, skipped)
@@ -14481,7 +14636,30 @@ fn walk_player(
         player.step_rollover = rollover;
         steps
     };
-    let dir = player.vel;
+    // A scrolling surface carries whatever stands on it: `sithThing.c` adds
+    // `scrollVector * dt` to the velocity of a thing attached to a `SITH_SURFACE_SCROLLING` surface,
+    // and that velocity goes through the same move. `SlideWall` is how a conveyor is built, and level
+    // 2's crate puzzle is the shipped case. The surface is read from where the body stood when this
+    // frame began, so the carry joins the walk instead of being overwritten by it.
+    let mut carry = [0.0; 2];
+    if let Some(sim) = sim.as_deref() {
+        let feet = [player.pos.x, player.pos.y, player.pos.z - player.rules.radius + 0.01];
+        if let Some((_, surface)) = solids.0.floor_surface(player.sector, feet) {
+            carry = sim
+                .world
+                .borrow()
+                .surfaces
+                .get(surface)
+                .map(|s| s.slide)
+                .unwrap_or([0.0; 2]);
+            if carry != [0.0; 2] && std::env::var_os("BK_SCROLL_TRACE").is_some() {
+                println!(
+                    "scroll: surface {surface} carries the body at {carry:?} level units/second"
+                );
+            }
+        }
+    }
+    let dir = [player.vel[0] + carry[0], player.vel[1] + carry[1]];
 
     if live && keys.just_pressed(KeyCode::Space) && player.grounded {
         player.vy = player.rules.jump_velocity(crouch);

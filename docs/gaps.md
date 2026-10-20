@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **36 gates, 91 tests, 0 failures.** Stubbed script surface:
-**34 verbs, 173 call sites across the 34 shipped levels** (706 before this run of state setters).
+**32 verbs, 162 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -66,23 +66,24 @@ both multiplayer-only screens.
 | Damage | health, shields, two-way, death and respawn, `DAMAGE_DECAY`, and the engine's damage **kind** — a `SithDamageType` bitmask — with `SITH_AF_INVULNERABLE` honoured and its fall exemption (`--endlevel` watches the flag go set and clear around the level-end sleep) | the kinds are carried but unused elsewhere: the engine picks a hurt sound per type (`SITH_SC_HURTENERGY`/`HURTFIRE`/`HURTMAGIC`/`HURTSPECIAL`), scales limb hits by 0.1 when the sender has an actor parent, and lets a cog's `damaged` handler return a replacement amount. None of those three are ported |
 | Force powers | the bins and the verbs the shipped `force_*.cog` scripts call; jump, speed, healing, seeing, pull and grip run | no structural gap, but the *effects* are unverified beyond jump and speed: nothing drives `force_pull.cog`'s grip in a test, and `setpovshake`/`setthingrotvel` are stubs those scripts would want. `force jump`'s velocity once reached `SetThingVel` as zero — fixed, but the path has no assertion of its own |
 | Sound | 2D playback of `.wav`/`.snd`, one music track, `--audio-state`, per-sink mute, `create`-class sounds | 3D positional and velocity mixing (`sithSoundMixer.c`), sound classes with mode ranges, `changesoundpitch`/`changesoundvol`/`sectorsound`, ambient-loop bookkeeping beyond a count |
-| Surfaces and sectors | the flags, `SURFFLAG_SKY`/`SURFFLAG_CEILING_SKY`, adjoin state, `sithPhysics_FindFloor`, thrust values, and the script-side switches — `setsectorflags`/`setadjoinflags`/`clearadjoinflags`/`setsectoradjoins` now reach collision and the cull (§6). **Texture cels, material cels and scripted light reach the renderer**: `SetWallCel`/`SurfaceAnim`, `MaterialAnim` and `SetSectorLight`/`SurfaceLightAnim` are baked into the mesh (`Runtime::surface_epoch` -> `rebuild_surfaces` -> the vertex colour -> `level.wesl`). Level 1's neon sign and its five 5 fps surfaces step, `09fuelstation`'s two `00_matanim.cog` calls walk `09sign.mat`, and level 2's seven force fields ramp their light; `--cel` runs the shipped scripts and watches all three | `SlideWall`/water scroll UVs and the sky scroll (`slideceilingsky`/`slidehorizonsky`) — neither has a term in the mesh yet, `setsectorthrust` |
-| Sky | unlit sky faces plus a dome, and the camera's clear colour | sky scrolling (`slidehorizonsky`, `slideceilingsky`), the sky's own parallax and rotation (`sithRenderSky.c`) |
+| Surfaces and sectors | the flags, `SURFFLAG_SKY`/`SURFFLAG_CEILING_SKY`, adjoin state, `sithPhysics_FindFloor`, thrust values, and the script-side switches — `setsectorflags`/`setadjoinflags`/`clearadjoinflags`/`setsectoradjoins` now reach collision and the cull (§6). **Texture cels, material cels, scripted light and scroll reach the renderer**: `SetWallCel`/`SurfaceAnim`, `MaterialAnim`, `SetSectorLight`/`SurfaceLightAnim` and `SlideWall` are baked into the mesh (`Runtime::surface_epoch` -> `rebuild_surfaces` -> the vertex colour and UVs -> `level.wesl`). A scrolling surface also **carries the body standing on it** (§6), which is what a conveyor is; level 1's neon sign and its five 5 fps surfaces step, `09fuelstation`'s two `00_matanim.cog` calls walk `09sign.mat`, and level 2's seven force fields ramp their light | `setsectorthrust` (needs thrust simulation) |
+| Sky | unlit sky faces plus a dome, and the camera's clear colour; `SlideHorizonSky`/`SlideCeilingSky` scroll the sky **faces** | the sky's own parallax and rotation (`sithRenderSky.c`), and the dome is a port stand-in that does not scroll |
+
 | Models and materials | `.3do` parse, geosets, materials, `RADIUS`, `insertOffset`, mipmaps, the light ramp, `--winding` | `setthingmodel` (swap a model at runtime), per-surface material animation, the geometric-mode verbs (`*geomode`), and no back-face culling for models (§4 — model interiors render when the camera clips in) |
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — plus sector light animation. 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 34 below | the 34 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 32 below | the 32 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 34 stubbed cog verbs
+## 3. The 32 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (173 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 34.
+over the 34 levels from `--cog-check` (162 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 32.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -96,7 +97,7 @@ takes the wrong branch without any error.
 | Cog introspection and goal state (1) | 1 | `loadtemplate` 1 |
 | Weapons and projectiles (3) | 31 | `jksetsaberinfo` 15, `autoselectweapon` 14, `fireprojectile` 2 |
 | Face and thing modes (3) | 11 | `getthinggeomode` 4, `setthingcurgeomode` 4, `setfacelightmode` 3 |
-| Sectors, adjoins, sky (3) | 15 | `slideceilingsky` 10, `setsectorthrust` 4, `slidehorizonsky` 1 |
+| Sectors, adjoins, sky (2) | 4 | `setsectorthrust` 4 |
 | Models (1) | 6 | `setthingmodel` 6 (CTF scripts only) |
 | Attachments and parents (3) | 8 | `attachthingtothing` 6, `getthingparent` 1, `setthingattachflags` 1 |
 | Sound (3) | 14 | `changesoundvol` 5, `sectorsound` 5, `changesoundpitch` 4 |
