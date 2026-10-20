@@ -2689,6 +2689,9 @@ impl Runtime {
         template: &str,
         spread: f32,
     ) -> Option<usize> {
+        // Every shot the runtime spawns, counted where it is actually spawned. A check that samples
+        // live things misses a bolt that dies between two frames, and at 10 fps that is most of them.
+        self.shots_fired += 1;
         let template = template.to_ascii_lowercase();
         let src = self.thing(shooter)?;
         let (pos, yaw, sector) = (src.pos, src.yaw, src.sector);
@@ -4156,6 +4159,21 @@ impl Runtime {
     }
 
     pub fn call(&mut self, verb: &str, args: &[Value]) -> Value {
+        if std::env::var_os("BK_VERB_TRACE").is_some() {
+            eprintln!("verb: {verb} {args:?}");
+            if verb.eq_ignore_ascii_case("getthinghealth") {
+                for arg in args {
+                    if let Value::Num(n) = arg {
+                        let at = *n as usize;
+                        eprintln!(
+                            "verb:   thing {at} = {:?} health {:?}",
+                            self.templates.get(at),
+                            self.things.get(at).map(|t| t.health)
+                        );
+                    }
+                }
+            }
+        }
         let num = |i: usize| args.get(i).map(|v| v.num()).unwrap_or(0.0);
         let idx = |i: usize| num(i) as i64;
         // Thing indices are `i64` in a script and `usize` in the tables; a negative index is simply

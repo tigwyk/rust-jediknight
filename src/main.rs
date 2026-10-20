@@ -145,6 +145,9 @@ const GATES: &[&str] = &[
     "--ammo",
     "--campaign",
     "--tally",
+    // The only gate that drives real input through the live schedule. It needs a window (the walker
+    // queries the world camera) and is skipped, like `--live-check`, in a headless sweep.
+    "--live-play --start 01narshadda",
     "--muzzle",
     "--use-item",
     "--engine-audit",
@@ -15104,6 +15107,11 @@ fn deliver_cog_messages(
                     continue;
                 }
                 vm.sender = sender.map_or(0, |s| s as i64);
+                // **Source as well as sender.** `GetSourceRef()` is what a message handler reads to
+                // find the thing that caused it — `cog_weap_bryar.cog`'s `fire:` does
+                // `player = GetSourceRef(); if (GetThingHealth(player) <= 0) Return;` — and this loop
+                // set only the sender, so every weapon's `fire:` saw source 0 and returned at once.
+                vm.source = sender.map_or(0, |s| s as i64);
                 // `SendMessageEx`'s parameters, the same two words a `damaged` handler gets.
                 handle.borrow_mut().last_params = params.to_vec();
                 if vm.run_label(script, &label).is_ok() {
