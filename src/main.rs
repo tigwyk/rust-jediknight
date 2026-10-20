@@ -144,6 +144,7 @@ const GATES: &[&str] = &[
     "--mana",
     "--ammo",
     "--campaign",
+    "--muzzle",
     "--use-item",
     "--engine-audit",
     "--cog-check",
@@ -316,6 +317,8 @@ fn main() {
     let mut engine_audit = false;
     // `--use-item`: an inventory item's own script, driven the way the engine drives it.
     let mut use_item = false;
+    // `--muzzle`: a shot leaves the shooter where its own template says, not a guessed unit.
+    let mut muzzle_check = false;
     // `--adjoins`: the sector/adjoin flag verbs, and that collision and the cull read them.
     let mut adjoin_check = false;
     let mut geomode_check = false;
@@ -553,6 +556,7 @@ fn main() {
             // Which of the decompiled engine's biggest functions the port never mentions.
             "--engine-audit" => engine_audit = true,
             "--use-item" => use_item = true,
+            "--muzzle" => muzzle_check = true,
             // The adjoin/sector flag verbs, and the two consumers that must read them.
             "--adjoins" => adjoin_check = true,
             // The surface geomode: a script hides a face and the world's batches drop its polygons.
@@ -3332,6 +3336,81 @@ fn main() {
         return;
     }
 
+    if muzzle_check {
+        // A shot's origin: the shooter's own `fireoffset=`, rotated into its facing and scaled out
+        // of model units. One borrow for the whole check — a gate that takes a second borrow of a
+        // world it already holds deadlocks (round 106 did exactly that twice).
+        let sim_world = runtime::Runtime::handle(&world.level);
+        let (shooter, shooter_name, offset, at) = {
+            let mut rt = sim_world.borrow_mut();
+            let found = rt
+                .template_fire_offset
+                .iter()
+                .find(|(name, offset)| {
+                    // A body big enough that the offset clears it, and a template the level places.
+                    offset[1] > 0.03
+                        && rt
+                            .templates
+                            .iter()
+                            .any(|t| t.eq_ignore_ascii_case(name))
+                })
+                .map(|(name, offset)| (name.clone(), *offset));
+            let Some((name, offset)) = found else {
+                println!("muzzle: this level names no `fireoffset=` on a placed template");
+                println!("--- muzzle check passed ---");
+                return;
+            };
+            let shooter = rt
+                .templates
+                .iter()
+                .position(|t| t.eq_ignore_ascii_case(&name))
+                .expect("the template was just found");
+            // Face +X from the origin so the expected position is arithmetic, not a rotation.
+            rt.things[shooter].pos = [0.0, 0.0, 0.0];
+            rt.things[shooter].yaw = 0.0;
+            // A projectile with a real velocity: the muzzle is rotated along the shot, so a template
+            // with zero `vel=` would put every shot at the shooter's feet.
+            let bolt_name = rt
+                .template_vel
+                .iter()
+                .find(|(_, v)| v[0].abs() + v[1].abs() > 0.0)
+                .map(|(n, _)| n.clone());
+            let bolt = None::<usize>.or_else(|| bolt_name.clone().and_then(|n| rt.fire(shooter as i64, &n))).or_else(|| {
+                // `fire` needs a projectile template; any of the level's own will do, because the
+                // muzzle is the shooter's.
+                let bolt_name = rt
+                    .template_vel
+                    .keys()
+                    .find(|n| n.contains("laser") || n.contains("bolt"))
+                    .cloned();
+                bolt_name.and_then(|n| rt.fire(shooter as i64, &n))
+            });
+            let Some(bolt) = bolt else {
+                println!("muzzle: the level has no projectile template to fire");
+                println!("--- muzzle check passed ---");
+                return;
+            };
+            (shooter, name, offset, rt.things[bolt].pos)
+        };
+        let _ = shooter;
+        // Yaw 0 faces +X, so the template's y is forward and x is to the left of that.
+        let want = [offset[1] * 10.0, -offset[0] * 10.0, offset[2] * 10.0];
+        println!(
+            "muzzle: `{shooter_name}` names fireoffset=({:.6}/{:.6}/{:.6}); its shot starts at {at:?}, the offset puts it at {want:?}",
+            offset[0], offset[1], offset[2]
+        );
+        // The default fallback is one unit ahead; a template with an offset must not be using it.
+        assert!(
+            (at[0] - want[0]).abs() < 0.5 && (at[1] - want[1]).abs() < 0.5,
+            "the shot started at {at:?}, not at the shooter's own offset {want:?}"
+        );
+        assert!(
+            (at[0] - 1.0).abs() > 0.01 || (at[1]).abs() > 0.01,
+            "the shot used the one-unit-ahead fallback"
+        );
+        println!("--- muzzle check passed ---");
+        return;
+    }
     if use_item {
         // An inventory item, end to end: `UseBin` sends `activated` to the bin's own cog, the cog
         // decides what the item does, and the world changes. `cog_item_bacta.cog` is the whole test

@@ -122,6 +122,9 @@ pub struct ThingState {
     /// parent's own frame — `sithThing_AttachThingToThing` stores exactly that offset (in
     /// `field_4C`), so a moving parent carries the child.
     pub attach: Option<usize>,
+    /// The thing that fired this projectile, so `impacts` can skip it: the engine carries the
+    /// owner on the shot, and a muzzle inside the shooter's own body radius needs it.
+    pub owner: Option<usize>,
     pub attach_offset: [f32; 3],
     /// `SetThingAttachFlags`: stored, and `SITH_ATTACH_NOMOVE` (0x2) is the one read.
     pub attach_flags: u32,
@@ -1082,6 +1085,7 @@ impl Runtime {
                         .unwrap_or(0),
                     jk_flags: 0,
                     attach: None,
+                    owner: None,
                     attach_offset: [0.0; 3],
                     attach_flags: 0,
                     spin: None,
@@ -1518,6 +1522,7 @@ impl Runtime {
         self.things.push(ThingState {
             pos,
             insert,
+            owner: None,
             pitch: angles[0],
             yaw: angles[1],
             roll: angles[2],
@@ -2626,14 +2631,23 @@ impl Runtime {
             pos: {
                 let len = (forward[0] * forward[0] + forward[1] * forward[1]).sqrt().max(1e-4);
                 let ahead = [forward[0] / len, forward[1] / len];
-                let offset = self
-                    .template_fire_offset
-                    .get(&template)
+                // The offset belongs to the **shooter's** template (`reeyeesgun`, `greedo`):
+                // `fireoffset=` is where that gun leaves that body, not where the bolt is born. The
+                // bolt templates carry none, so reading theirs silently used the fallback.
+                let shooter_template = usize::try_from(shooter)
+                    .ok()
+                    .and_then(|i| self.templates.get(i))
+                    .map(|t| t.to_ascii_lowercase());
+                let offset = shooter_template
+                    .as_ref()
+                    .and_then(|t| self.template_fire_offset.get(t))
                     .copied()
                     // Model units to level units: a `.3do` node carries a 10x scale.
                     .map(|o| [o[0] * 10.0, o[1] * 10.0, o[2] * 10.0]);
                 match offset {
-                    Some([x, y, z]) if y > 0.75 => [
+                    // The real offset, even when it sits inside the shooter's body: `impacts` skips
+                    // the owner, so nothing needs the old "push it out" distance.
+                    Some([x, y, z]) => [
                         pos[0] + ahead[0] * y - ahead[1] * x,
                         pos[1] + ahead[1] * y + ahead[0] * x,
                         pos[2] + z,
@@ -2646,6 +2660,7 @@ impl Runtime {
                 }
             },
             insert: [0.0; 3],
+            owner: usize::try_from(shooter).ok(),
             yaw,
             pitch: 0.0,
             roll: 0.0,
@@ -2968,6 +2983,13 @@ impl Runtime {
             }
             for (other, thing) in self.things.iter().enumerate() {
                 let armed = self.types.get(other).copied() == Some(2) || Some(other) == player_thing;
+                // A shot never hits the body that fired it: the engine's projectile carries its
+                // owner and skips it. Distance alone cannot do this — the shipped `fireoffset=` puts
+                // the muzzle *inside* the shooter's body radius (`greedo` 0.55 ahead, body 0.6 plus
+                // the bolt's 0.15), so "spawn it a unit ahead" only ever papered over this check.
+                if shot.owner == Some(other) {
+                    continue;
+                }
                 if !armed || other == index || thing.destroyed {
                     continue;
                 }
@@ -3318,7 +3340,8 @@ impl Runtime {
         let kind = self.template_types.get(&explode).copied().unwrap_or(3);
         self.things.push(ThingState {
             pos: at,
-                    insert: [0.0; 3],
+            insert: [0.0; 3],
+            owner: None,
             yaw: 0.0,
             pitch: 0.0,
             roll: 0.0,
@@ -5801,6 +5824,7 @@ mod tests {
             things: vec![ThingState {
                 pos: [0.0; 3],
                 insert: [0.0; 3],
+                owner: None,
                 yaw: 0.0,
                 pitch: 0.0,
                 roll: 0.0,

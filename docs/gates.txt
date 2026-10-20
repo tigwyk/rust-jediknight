@@ -107,6 +107,12 @@ flag                                                   exit  what it prints
                                                              reacts: level 1's links watch
                                                              sectors off the walk, so 0
                                                              messages -- the router is next
+--muzzle                                               0  --- muzzle check passed ---
+                                                             a shot starts at the shooter's own
+                                                             fireoffset= (greedo: 0.55 ahead, the
+                                                             real number), not a guessed unit
+                                                             ahead of the eye. The lateral sign is
+                                                             unverified here
 --use-item                                             0  --- use-item check passed ---
                                                              UseBin(40) sends `activated` to
                                                              the bacta script's own cog and the
