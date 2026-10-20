@@ -3326,18 +3326,34 @@ fn main() {
             // A body outside every sector has fallen out of the world; the walker's own gate reports
             // that for the player, and this catches it for anything the simulation moved.
             //
-            // A thing with no `size=`/`radius=` has no body at all: the levels park markers there
-            // (`ghost`, `light0.7` sit outside the geometry on 21ajerec), and a marker cannot fall.
-            let template = rt.templates.get(index).cloned().unwrap_or_default();
-            if !rt.template_body.contains_key(&template.to_ascii_lowercase()) {
+            // Only things the engine **moves** can fall: actors, debris, items, the player and
+            // particles. The level parks its markers outside the geometry on purpose — 21ajerec's
+            // `ghost` (`type=ghost`) and `light0.7` (`_ghostdecor`) both sit there — and a marker
+            // that never moves cannot fall out of anything.
+            if !matches!(rt.types.get(index).copied(), Some(2 | 4 | 5 | 10 | 11)) {
+                continue;
+            }
+            // Only things the simulation **moved**: a pickup the level placed two units above a
+            // floor fails a point-in-sector test at its own origin even though the level gave it a
+            // sector (m5's four weapons sit at z 89.3 in sectors 235–256). Comparing against the
+            // placed position asks the question the check is for — did something get pushed out —
+            // instead of re-litigating where the level put it.
+            let placed = world.level.things.get(index).map(|t| t.pos).unwrap_or(thing.pos);
+            let moved = (thing.pos[0] - placed[0]).abs() > 1e-3
+                || (thing.pos[1] - placed[1]).abs() > 1e-3
+                || (thing.pos[2] - placed[2]).abs() > 1e-3;
+            if !moved {
                 continue;
             }
             if solids.sector_at(thing.pos, 0.05).is_none() {
                 outside += 1;
                 if std::env::var_os("BK_SOAK_TRACE").is_some() {
+                    let template = rt.templates.get(index).cloned().unwrap_or_default();
                     println!(
-                        "  outside: thing {index} `{template}` at {:?} sector {}",
-                        thing.pos, thing.sector
+                        "  outside: thing {index} `{template}` (type {:?}) at {:?}, placed at {placed:?}, sector {}",
+                        rt.types.get(index),
+                        thing.pos,
+                        thing.sector
                     );
                 }
             }
