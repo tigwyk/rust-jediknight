@@ -5145,6 +5145,20 @@ fn main() {
         // the very flags `collide::Gates` reads to decide a doorway is a wall.
         let handle = runtime::Runtime::handle(&world.level);
         handle.borrow_mut().wire_links(&world.level.cogs, &world.cogs);
+        // Every instance runs `startup` at load, as the engine does — and a door's whole state lives
+        // there: `cog_00_door.cog`'s `startup` reads `GetThingSector(door0)` into the *local*
+        // `doorSector` and shuts that sector, which is what `activate` later reopens. A first version of
+        // this probe skipped it and measured a door that did nothing, because its sector symbol was
+        // still empty.
+        for inst in &world.level.cogs {
+            let Some(script) = world.cogs.get(&inst.script) else { continue };
+            if script.label("startup").is_none() {
+                continue;
+            }
+            let mut vm = cog::Vm::with_world(handle.clone());
+            script.bind(&mut vm, &inst.values);
+            let _ = vm.run_label(script, "startup");
+        }
         let candidates: Vec<(usize, usize)> = {
             let rt = handle.borrow();
             rt.thing_links
@@ -5196,7 +5210,10 @@ fn main() {
                 let adjoins = rt.adjoin_flags.iter().zip(before.1.iter()).filter(|(a, b)| a != b).count();
                 (sectors, adjoins)
             };
-            println!("door: candidate cog {instance} on thing {thing}: {ran} label(s) ran, flags changed {changed:?}");
+            let name = world.level.cogs.get(*instance).map(|c| c.script.clone()).unwrap_or_default();
+            let frame = { let mut rt = handle.borrow_mut(); rt.call("GetCurFrame", &[cog::Value::Num(*thing as f64)]) };
+            let moving = { let mut rt = handle.borrow_mut(); rt.call("IsThingMoving", &[cog::Value::Num(*thing as f64)]) };
+            println!("door: {name} (cog {instance}, thing {thing}): {ran} label(s) ran, frame {frame:?}, moving {moving:?}, flags {changed:?}");
             if changed.0 + changed.1 > 0 {
                 outcome = Some((*instance, *thing, ran, changed));
                 break;
