@@ -15341,6 +15341,8 @@ fn live_play_drive(
     // first click can still land inside a scripted `SetFireWait` cooldown. Fifteen frames was too
     // short for the shot to land at all (01narshadda reported 0 with the shorter phase).
     const FIRE_FRAMES: u32 = 30;
+    // Long enough for a jump to rise and land: `jkPlayer`'s jump is a short hop.
+    const JUMP_FRAMES: u32 = 40;
     let state = playing.get_or_insert_with(|| LivePlayState {
         start: player.as_deref().map(|p| p.pos),
         ..Default::default()
@@ -15407,6 +15409,26 @@ fn live_play_drive(
         }
         return;
     }
+    // Jump: one real press of Space, then watch the body leave the ground and come back. `Space` is
+    // read with `just_pressed && grounded`, so a held key would jump once and never again.
+    if (WALK_FRAMES + FIRE_FRAMES + 1..=WALK_FRAMES + FIRE_FRAMES + JUMP_FRAMES).contains(&state.frame)
+    {
+        if state.frame == WALK_FRAMES + FIRE_FRAMES + 1 {
+            state.jump_base = player.as_deref().map(|p| p.pos.z);
+        }
+        // Pressed on alternate frames, not once: the walker jumps on `just_pressed && grounded`, and on
+        // a heavy map the body can be a hair off the floor on any given frame (dt 0.1 there), so a
+        // single press lands on the one frame it is refused. This is a player mashing jump.
+        if state.frame % 2 == 0 {
+            keys.press(KeyCode::Space);
+        } else {
+            keys.release(KeyCode::Space);
+        }
+        if let (Some(base), Some(player)) = (state.jump_base, player.as_deref()) {
+            state.jump_peak = state.jump_peak.max(player.pos.z - base);
+        }
+        return;
+    }
     buttons.release(MouseButton::Left);
     let (start, walked) = (state.start, state.walked);
     let moved = match (start, walked) {
@@ -15428,6 +15450,11 @@ fn live_play_drive(
     );
     println!("live-play: {FIRE_FRAMES} frames of left click added {fired} thing(s) to the world");
     println!("live-play: largest single-frame displacement seen {:.2}", state.max_moved);
+    let landed = player.as_deref().and_then(|p| state.jump_base.map(|base| p.pos.z - base));
+    println!(
+        "live-play: Space lifted the body {:.2} units (highest {:.2}, now {:?})",
+        state.jump_peak, state.jump_peak, landed.map(|z| (z * 1000.0).round() / 1000.0)
+    );
     let mut failed = 0;
     if moved.0 < 0.05 && state.max_moved >= 0.05 {
         println!("live-play: FAIL the body moves and snaps back (max {:.2})", state.max_moved);
@@ -15456,6 +15483,12 @@ fn live_play_drive(
     } else if fired == 0 {
         println!("live-play: the trigger is armed with nothing to fire (no cog, empty clip)");
     }
+    // A jump has to leave the ground; landing is reported but not required, because a body that starts
+    // over a drop stays airborne and that is the map's business.
+    if state.jump_peak < 0.2 {
+        println!("live-play: FAIL Space did not lift the body (peak {:.2})", state.jump_peak);
+        failed += 1;
+    }
     if failed > 0 {
         exit.write(AppExit::error());
         return;
@@ -15472,6 +15505,8 @@ struct LivePlayState {
     walked: Option<Vec3>,
     things_before: usize,
     things_peak: usize,
+    jump_base: Option<f32>,
+    jump_peak: f32,
 }
 
 /// the resources the game itself is running.
