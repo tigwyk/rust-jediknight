@@ -146,6 +146,8 @@ pub const PULL_SPEED: f32 = 12.0;
 pub const PULL_RANGE: f32 = 30.0;
 /// See [PULL_SPEED].
 pub const PULL_REACH: f32 = 2.0;
+/// `SITHBIN_GOAL00` (`types_enums.h`): the first of the goal counters `SetGoalFlags` writes.
+pub const GOAL_BIN: i32 = 100;
 /// A template's `type=` word as the engine's `SithThingType` number.
 ///
 /// From `types_enums.h`: camera 1, actor 2, weapon 3, debris 4, item 5, explosion 6,
@@ -909,6 +911,8 @@ impl Runtime {
                 | "aiclearmode"
                 | "aisetmovespeed"
                 | "setfirewait"
+                | "setgoalflags"
+                | "cleargoalflags"
                 | "setthingflags"
                 | "getthinghealth"
                 | "gethealth"
@@ -1314,6 +1318,14 @@ impl Runtime {
         let shot = self.fire(index as i64, weapon)?;
         self.next_fire = self.time + self.fire_wait.max(0.0);
         Some(shot)
+    }
+
+    /// The goal counters `SetGoalFlags`/`ClearGoalFlags` write: bins from `SITHBIN_GOAL00` (100), the
+    /// same map `SetInv`/`GetInv` use, so a script reads back exactly what another one set.
+    pub fn goal_flags(&mut self, bin: i32, flags: u32, clear: bool) {
+        let entry = self.inv.entry(GOAL_BIN + bin).or_insert(0.0);
+        let value = *entry as u32;
+        *entry = (if clear { value & !flags } else { value | flags }) as f32;
     }
 
     /// The engine's inventory bins (`enum SITHBIN`, `types_enums.h`). Force powers are bins
@@ -2680,6 +2692,20 @@ impl Runtime {
                 *self.inv.entry(idx(1) as i32).or_default() += num(2) as f32;
                 Value::Nil
             }
+            // `SetGoalFlags(player, bin, flags)` ORs flags into a goal counter: the engine keeps them
+            // as inventory bins starting at `SITHBIN_GOAL00` (100), and `endlevel.cog` records its
+            // objectives there. `ClearGoalFlags` is the same with an inverse mask. The engine also
+            // gates on the thing being the player; every shipped call already passes `player`, and a
+            // silently swallowed write is the failure mode this port exists to avoid, so it is not
+            // repeated here.
+            "setgoalflags" => {
+                self.goal_flags(idx(1) as i32, idx(2) as u32, false);
+                Value::Nil
+            }
+            "cleargoalflags" => {
+                self.goal_flags(idx(1) as i32, idx(2) as u32, true);
+                Value::Nil
+            }
             "clearinv" => {
                 self.inv.clear();
                 Value::Nil
@@ -3105,6 +3131,13 @@ mod tests {
         rt.time = 0.6;
         assert!(rt.player_fire(0, "+bryarbolt").is_some());
         assert_eq!(rt.next_fire, 1.1);
+        // `SetGoalFlags` ORs into the goal bins (`SITHBIN_GOAL00` = 100), and `ClearGoalFlags` masks
+        // back out, so what a script set is what another script reads.
+        rt.call("SetGoalFlags", &[Value::Num(0.0), Value::Num(0.0), Value::Num(1.0)]);
+        rt.call("SetGoalFlags", &[Value::Num(0.0), Value::Num(0.0), Value::Num(2.0)]);
+        assert_eq!(rt.call("GetInv", &[Value::Num(0.0), Value::Num(100.0)]), Value::Num(3.0));
+        rt.call("ClearGoalFlags", &[Value::Num(0.0), Value::Num(0.0), Value::Num(1.0)]);
+        assert_eq!(rt.call("GetInv", &[Value::Num(0.0), Value::Num(100.0)]), Value::Num(2.0));
     }
 
     /// `sithThing_CreateThing` places a spawned thing at `marker.position + markerOrient * (insertDiff)`.
