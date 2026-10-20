@@ -17,6 +17,10 @@
 pub struct Material {
     pub width: u32,
     pub height: u32,
+    /// `num_texinfo` at header offset 12: the number of **cels** (animation frames) the bitmap
+    /// holds, stacked vertically. A sprite `.mat` is a strip of them — `bryx.mat` carries a spark's
+    /// frames — and a world texture is one cel.
+    pub cels: u32,
     /// One palette index per pixel, row-major, top row first.
     pub indices: Vec<u8>,
 }
@@ -70,6 +74,7 @@ pub fn parse_mat(data: &[u8]) -> Option<Material> {
     Some(Material {
         width,
         height,
+        cels: u32::from_le_bytes(data[0xc..0x10].try_into().ok()?).clamp(1, 64),
         indices: data[MAT_HEADER..MAT_HEADER + pixels].to_vec(),
     })
 }

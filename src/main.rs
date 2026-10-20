@@ -66,6 +66,9 @@ struct World {
     /// (`+laserhit` is `bryx.spr`). A sprite is a list of camera-facing rectangles, so every effect
     /// in the game is one of these.
     template_sprite: HashMap<String, Vec<spr::Face>>,
+    /// Lowercase `.mat` name -> its cel count from the `.mat` header. A sprite draws one cel of the
+    /// strip at a time; the count is the engine's (`num_texinfo`), not the bitmap's aspect.
+    sprite_cels: HashMap<String, u32>,
     /// Lowercase `.wav` name -> raw file bytes, for the sectors' ambient loops.
     /// Only sounds a sector actually names are read, which is a few dozen.
     ambient: HashMap<String, Vec<u8>>,
@@ -8323,6 +8326,10 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
     // texture path. Sprites are the whole visual layer of combat: a bolt's impact, the explosion
     // chain, sparks, smoke, the force effects.
     let mut template_sprite: HashMap<String, Vec<spr::Face>> = HashMap::new();
+    // Material -> how many cels its bitmap holds, straight out of the `.mat` header
+    // (`num_texinfo`, offset 12). A sprite draws one cel at a time and this is the only reliable
+    // count: the bitmap's height does not divide evenly by its width (`bryx.mat` is 8 x 78).
+    let mut sprite_cels: HashMap<String, u32> = HashMap::new();
     for template in &level.templates {
         let Some(name) = level.template_param(&template.name, "sprite") else { continue };
         let Some(raw) = gobs.read(&format!("misc\\spr\\{}", name.to_ascii_lowercase())) else {
@@ -8348,18 +8355,19 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
                 if std::env::var_os("BK_SPRITE_TRACE").is_some() {
                     let clear = keyed.chunks(4).filter(|p| p[3] == 0).count();
                     println!(
-                        "  sprite `{}`: {}x{} ({} cel(s) of {}), {} of {} pixels keyed clear, {:.2}x{:.2} world units",
+                        "  sprite `{}`: {}x{}, header says {} cel(s) (height/cels = {}), {} of {} pixels keyed clear, {:.2}x{:.2} world units",
                         face.material,
                         bitmap.width,
                         bitmap.height,
-                        bitmap.height / bitmap.width.max(1),
-                        bitmap.width,
+                        bitmap.cels,
+                        bitmap.height / bitmap.cels,
                         clear,
                         bitmap.indices.len(),
                         face.width,
                         face.height
                     );
                 }
+                sprite_cels.insert(face.material.clone(), bitmap.cels);
                 model_images.insert(face.material.clone(), image_from_rgba(bitmap.width, bitmap.height, keyed));
             }
         }
@@ -8517,6 +8525,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         models,
         model_images,
         template_sprite,
+        sprite_cels,
         ambient,
         cogs,
         puppets,
@@ -11522,16 +11531,9 @@ fn draw_created(
             if let Some(faces) = world.template_sprite.get(&template_key) {
                 let mut spawned = Vec::new();
                 for face in faces {
-                    // One cel of the strip: `cels` is the image's height over its width, which is
-                    // how all 35 shipped sprites are authored (`bryx.mat` 8 x 78 = 9 frames).
-                    let cels = world
-                        .model_images
-                        .get(&face.material)
-                        .map(|image| {
-                            let size = image.texture_descriptor.size;
-                            (size.height as f32 / size.width.max(1) as f32).max(1.0)
-                        })
-                        .unwrap_or(1.0);
+                    // One cel of the strip: the count comes from the `.mat` header, because the
+                    // engine's cels are not square (`bryx.mat` is 8 x 78 for 6 frames).
+                    let cels = world.sprite_cels.get(&face.material).copied().unwrap_or(1) as f32;
                     let key = (template_key.clone(), face.material.clone());
                     let mesh = created
                         .sprite_meshes
@@ -14398,6 +14400,7 @@ mod rules_tests {
         let bitmap = tex::Material {
             width: 2,
             height: 1,
+            cels: 1,
             indices: vec![0, 1],
         };
         let keyed = keyed_rgba(&bitmap, &palette);

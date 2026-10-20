@@ -2941,12 +2941,24 @@ errors worth recording, because both looked like renderer bugs:
   frames — `17EAC891…` with, `7881579F…` without — and the spark is visible at the crosshair.
 
 What is left of the sprite layer is the **cel geometry**. A sprite `.mat` is a strip of animation
-frames: `bryx.mat` is 8 x 78 for an 8-wide spark, `detx.mat` 8 x 82, `destruct8.mat` 8 x 239.
-`rdSprite_Draw` maps one cel with `texVertOffset`; drawing the whole strip onto the quad shows every
-frame at once. `sprite_quad` now takes a cel index and a cel count, but the count is only *guessed* as
-height-over-width, and the visible result says that guess is wrong — the "single cel" still shows a
-2 x 2 block of frames, so the real cel grid is in the `.mat` header (the engine's `rdMaterial` cel
-table, not the bitmap's aspect) and needs reading from there.
+frames and `rdSprite_Draw` maps one with `texVertOffset`. `sprite_quad` takes a cel index and a cel
+count, and the count now comes from the `.mat` header's own `num_texinfo` (offset 12) rather than the
+bitmap's aspect — `tex::Material::cels` — but the two disagree with each other and with the picture:
+
+```text
+sprite `bryx.mat`:     8x78, header says  8 cel(s) (height/cels = 9)
+sprite `detx.mat`:     8x82, header says 13 cel(s) (height/cels = 6)
+sprite `debrisx.mat`:  8x78, header says 12 cel(s) (height/cels = 6)
+sprite `bowx.mat`:     8x81, header says  8 cel(s) (height/cels = 10)
+```
+
+`bryx` divides 78 rows into 8 cels only if a cel is 9.75 tall, and the picture of a "single cel" still
+shows a 2 x 2 block of frames. So the header holds a **per-cel table** rather than one width/height
+pair: `rdMaterialHeader` in the engine's own layout (`magic`, `revision`, `type`, `num_texinfo`,
+`num_textures`, then an `rdTexFormat`-shaped tail) is followed by one `rdTexinfoHeader` per cel, and
+the 140-byte block this port reads as a flat header has the per-cel sizes inside it — offsets 0x74 and
+0x78 are where the *first* cel's width and height happen to be, which is why single-cel world textures
+have worked all along. Reading that table is the next step.
 
 `BK_SPRITE_TRACE=1` prints the per-material numbers and the billboard's camera-space position;
 `BK_SPRITE_DEBUG=1` draws the quad untextured red; `BK_SPRITE_AHEAD` moves it.
