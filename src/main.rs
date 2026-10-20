@@ -5105,6 +5105,49 @@ fn main() {
         rt.things[index].destroyed = true;
         println!("hit: the player took {carried:.0}, {left:.0} health left");
         assert!(left < health_before, "the player took no damage");
+
+        // The saber: `jkSetSaberInfo` gives the player a blade, and a swing traces it as a segment
+        // `length * 10` long (a model unit is a tenth of a level unit, which is why a doorway is
+        // 0.30 and a body 0.60). No ammunition, no projectile, and a cooldown between swings.
+        {
+            let before = rt.things[actor_index].health;
+            rt.call(
+                "jkSetSaberInfo",
+                &[
+                    cog::Value::Num(player as f64),
+                    cog::Value::Str("saberyellow0.mat".into()),
+                    cog::Value::Str("saberyellow1.mat".into()),
+                    cog::Value::Num(0.020),
+                    cog::Value::Num(0.001),
+                    cog::Value::Num(0.120),
+                    cog::Value::Str("+wallspark".into()),
+                    cog::Value::Str("+bloodspark".into()),
+                    cog::Value::Str("+saberspark".into()),
+                ],
+            );
+            // Stand the player a stride away, facing the actor, and swing.
+            rt.things[player].pos = [actor_pos[0] - 0.8, actor_pos[1], actor_pos[2]];
+            rt.things[player].yaw = 0.0;
+            rt.time += 1.0;
+            let hit = rt.saber_swing(player);
+            let after = rt.things[actor_index].health;
+            // A second swing inside the cooldown must do nothing.
+            let again = rt.saber_swing(player);
+            let after_again = rt.things[actor_index].health;
+            println!(
+                "hit: a saber swing 0.8 units out reaches {hit:?} for {:.0} damage ({before:.0} -> {after:.0} health), and a second swing inside the {:.2} s cooldown does nothing ({again:?}, {after_again:.0})",
+                runtime::Runtime::SABER_DAMAGE,
+                runtime::Runtime::SABER_SWING_WAIT
+            );
+            assert!(hit.contains(&actor_index), "the swing did not reach an actor 0.8 units out");
+            assert!(after < before, "the saber did no damage");
+            assert!(again.is_empty(), "the swing cooldown did not hold");
+            assert_eq!(after_again, after, "a second swing inside the cooldown did damage");
+            // And it does not reach across the room.
+            rt.time += 1.0;
+            rt.things[player].pos = [actor_pos[0] - 4.0, actor_pos[1], actor_pos[2]];
+            assert!(rt.saber_swing(player).is_empty(), "the blade reached four units");
+        }
         println!("--- hit check passed ---");
         return;
     }
@@ -7657,6 +7700,7 @@ fn main() {
         .add_plugins(level_mat::LevelMaterialPlugin)
         .insert_resource(Archives(gobs))
         .insert_resource(Screens(menus))
+        .insert_resource(SaberBlade::default())
         .insert_resource(Overlay::new(boot_menu).with_pending(pending_id))
         .insert_resource(world)
         .insert_resource(MusicDir(game.join("MUSIC")))
@@ -7748,6 +7792,7 @@ fn main() {
                     actors_follow_runtime,
                     things_follow_geomode,
                     adopt_carried,
+                    saber_blade,
                     billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
@@ -8163,6 +8208,14 @@ impl Overlay {
 
 #[derive(Component)]
 struct OverlayQuad;
+
+/// The spawned lightsaber blade entity, once `jkSetSaberInfo` armed one.
+#[derive(Resource, Default)]
+struct SaberBlade(Option<Entity>);
+
+/// The blade entity itself, spawned by [`saber_blade`].
+#[derive(Component)]
+struct SaberBladeMesh;
 
 /// The run condition on the world's own systems: nothing simulates while a screen is open.
 ///
@@ -13331,6 +13384,13 @@ fn fire_player(
     if rt.time < rt.next_fire {
         return;
     }
+    // The saber is not a projectile: a swing traces the blade and spends no ammo. `jkSetSaberInfo`
+    // is what gives the player one, and the ending scripts hand it out on the light path.
+    if runtime::Runtime::is_saber(&weapon) && rt.saber.contains_key(&index) {
+        let hit = rt.saber_swing(index);
+        println!("swung {weapon}: {} thing(s) in reach", hit.len());
+        return;
+    }
     // Ammo: the weapon's own powerup cog names the bin it spends (`ammobin(Int)` in `pow_*.cog`), so
     // the count is a bin like any other. The spend is `Runtime::spend`, the same call `--ammo` checks.
     if let Some(bin) = ammo_bin.as_ref().and_then(|a| a.0)
@@ -13341,6 +13401,66 @@ fn fire_player(
     }
     if let Some(shot) = rt.player_fire(index, &weapon) {
         println!("fired {weapon} (thing {shot})");
+    }
+}
+
+/// The player's lightsaber blade, drawn from the eye when `jkSetSaberInfo` armed one.
+///
+/// The engine hangs a polyline of `length` from the player's hand; this build has no first-person
+/// weapon model, so the blade is a thin emissive quad along the view — long enough to read as a
+/// lightsaber, short enough not to fill the screen. `Runtime::SABER_MODEL_SCALE` is the model-to-level
+/// factor the swing uses, so what is drawn and what is hit are the same blade.
+fn saber_blade(
+    mut commands: Commands,
+    sim: Option<Res<Sim>>,
+    mut blade: Option<ResMut<SaberBlade>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    camera: Query<&GlobalTransform, (With<Camera3d>, Without<OverlayQuad>)>,
+    mut drawn: Query<&mut Transform, With<SaberBladeMesh>>,
+) {
+    let (Some(sim), Some(blade)) = (sim, blade.as_mut()) else { return };
+    let Some(view) = camera.iter().next() else { return };
+    let armed = {
+        let rt = sim.world.borrow();
+        let player = rt.player_thing();
+        let blade_info = rt.saber.get(&player).cloned();
+        let weapon = rt.current_weapon();
+        blade_info.filter(|_| crate::runtime::Runtime::is_saber(&weapon))
+    };
+    match armed {
+        Some(info) => {
+            let reach = (info.length * 10.0).max(0.4);
+            let entity = *blade.0.get_or_insert_with(|| {
+                let mesh = meshes.add(Cuboid::new(0.03, 0.03, reach));
+                let material = materials.add(StandardMaterial {
+                    base_color: bevy::color::Color::srgb(0.7, 0.85, 1.0),
+                    emissive: bevy::color::LinearRgba::rgb(2.5, 3.0, 4.0),
+                    unlit: true,
+                    cull_mode: None,
+                    ..default()
+                });
+                commands.spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform::default(), SaberBladeMesh)).id()
+            });
+            // Out of the eye and down the view, a little to the right of centre: the hilt is in the
+            // player's hand even though this build draws no hand.
+            if let Ok(mut transform) = drawn.get_mut(entity) {
+                let forward = view.forward().as_vec3();
+                let right = view.right().as_vec3();
+                let up = view.up().as_vec3();
+                let hilt = view.translation()
+                    + forward * 0.35
+                    + right * 0.22
+                    - up * 0.18;
+                transform.translation = hilt + forward * (reach * 0.5);
+                transform.rotation = Quat::from_rotation_arc(Vec3::Z, forward);
+            }
+        }
+        None => {
+            if let Some(entity) = blade.0.take() {
+                commands.entity(entity).despawn();
+            }
+        }
     }
 }
 

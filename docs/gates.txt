@@ -222,7 +222,11 @@ flag                                                   exit  what it prints
                                                              (also: an impact effect is a thing with a
                                                              `timer=`: `+laserhit` at 0.5 s is still there
                                                              after 0.33 s and gone after 1.33 s, which is
-                                                             `sithThing_Update` destroying it)
+                                                             `sithThing_Update` destroying it; a saber
+                                                             swing 0.8 units out reaches the
+                                                             actor for 35 (25 -> 0 health), the
+                                                             0.45 s cooldown holds, and nothing
+                                                             four units away is touched
 --fire +bryarbolt                                        0  --- fire check passed ---
                                                              (also: `SetMountWait` refuses the
                                                              trigger until its deadline passes)

@@ -218,6 +218,7 @@ pub const GOAL_BIN: i32 = 100;
 /// `SithDamageType`: what kind of hurt, as a bitmask. Only the bits this port distinguishes.
 pub const DAMAGE_IMPACT: u32 = 0x01;
 pub const DAMAGE_ENERGY: u32 = 0x02;
+pub const DAMAGE_SABER: u32 = 0x10;
 pub const DAMAGE_FALL: u32 = 0x40;
 /// `SITH_AF_INVULNERABLE`: `actor->flags` bit 3. `sithActor_DamageActor` checks it before anything
 /// else, so `SetActorFlags(player, 0x8)` is how a script makes someone untouchable.
@@ -2369,6 +2370,62 @@ impl Runtime {
     /// The weapon the player fires: what a pickup gave them, else the level's default.
     pub fn current_weapon(&self) -> String {
         self.weapon.clone().unwrap_or_else(|| self.default_weapon.clone())
+    }
+
+    /// Whether `weapon` is the lightsaber. The engine's saber is bin 10 and its blade is a thing of
+    /// its own, so a template name is as close as this build gets to the question.
+    pub fn is_saber(weapon: &str) -> bool {
+        weapon.to_ascii_lowercase().contains("sab")
+    }
+
+    /// How long a swing takes. `jkSaber.c`'s timing lives in the swing keyframes, which this build does
+    /// not play, so one number stands in for the whole animation.
+    pub const SABER_SWING_WAIT: f32 = 0.45;
+    /// Damage of one swing. The engine's own numbers are per blade section against the victim's
+    /// `saberDamage`; that table is not recovered, so this is one value with the same order as a bolt.
+    pub const SABER_DAMAGE: f32 = 35.0;
+
+    /// One saber swing: everything inside the blade's swept cylinder takes `DAMAGE_SABER`.
+    ///
+    /// `jkSaber.c` keeps the blade as a polyline of `length` from the hilt with a `base_rad` and a
+    /// `tip_rad`, and a swing traces it against the world. This build has the same numbers from
+    /// `jkSetSaberInfo`, in **model** units (a `.3do` node carries a 10x scale, which is why a
+    /// doorway is 0.30 level units and a body 0.60), so the blade is `length * 10` level units long.
+    ///
+    /// Returns the things it hit.
+    pub fn saber_swing(&mut self, player: usize) -> Vec<usize> {
+        if self.time < self.saber_wait {
+            return Vec::new();
+        }
+        let Some(blade) = self.saber.get(&player).cloned() else { return Vec::new() };
+        let Some(src) = self.things.get(player) else { return Vec::new() };
+        let (from, yaw) = (src.pos, src.yaw);
+        let reach = (blade.length * 10.0).max(0.4);
+        let radius = (blade.base_rad * 10.0).max(0.05) + 0.3;
+        let (sin, cos) = yaw.to_radians().sin_cos();
+        let mut hit = Vec::new();
+        for (index, thing) in self.things.iter().enumerate() {
+            // The player's own body is not a target, nor is anything already gone or an item: a swing
+            // goes through a health pack without smashing it.
+            if index == player || thing.destroyed {
+                continue;
+            }
+            if self.types.get(index).copied() == Some(5) {
+                continue;
+            }
+            let (px, py) = (thing.pos[0] - from[0], thing.pos[1] - from[1]);
+            let along = (px * cos + py * sin).clamp(0.0, reach);
+            let (dx, dy) = (px - cos * along, py - sin * along);
+            let dz = thing.pos[2] - from[2];
+            if (dx * dx + dy * dy + dz * dz).sqrt() <= radius {
+                hit.push(index);
+            }
+        }
+        self.saber_wait = self.time + Self::SABER_SWING_WAIT;
+        for &index in &hit {
+            self.damage_typed(index as i64, Self::SABER_DAMAGE, DAMAGE_SABER);
+        }
+        hit
     }
 
     /// A shot from the player, refused while `SetFireWait`'s cooldown is running. The engine arms
