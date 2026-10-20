@@ -245,6 +245,21 @@ fn run_gates(game: &std::path::Path) -> i32 {
     if failed == 0 { 0 } else { 1 }
 }
 
+/// The next argument as a value, or `None` when it is another flag.
+///
+/// Every handler that takes a parameter has the same trap: `--save --level 01` once wrote a file
+/// called `--level`, and `--hud` did it again two rounds later. One rule, in one place, so a third
+/// copy cannot get it wrong. A **single** dash is still a value (`--walk -45` is a heading), which is
+/// why this checks for two.
+fn arg_value<'a>(args: &'a [String], i: &mut usize) -> Option<&'a String> {
+    let next = args.get(*i + 1)?;
+    if next.starts_with("--") {
+        return None;
+    }
+    *i += 1;
+    Some(next)
+}
+
 fn main() {
     let mut game = PathBuf::from(DEFAULT_GAME);
     let mut level_name: Option<String> = None;
@@ -392,18 +407,9 @@ fn main() {
             }
             "--audit" => audit_only = true,
             "--episodes" => episodes_only = true,
-            "--stand" => {
-                i += 1;
-                stand = args.get(i).cloned();
-            }
-            "--near" => {
-                i += 1;
-                near = args.get(i).cloned();
-            }
-            "--shot" => {
-                i += 1;
-                shot = args.get(i).cloned();
-            }
+            "--stand" => stand = arg_value(&args, &mut i).cloned(),
+            "--near" => near = arg_value(&args, &mut i).cloned(),
+            "--shot" => shot = arg_value(&args, &mut i).cloned(),
             "--fall" => fall_check = true,
         "--falldeath" => falldeath_check = true,
         "--door" => door_check = true,
@@ -414,15 +420,15 @@ fn main() {
             // `--shot-at "x,y,z"`: put the capture camera exactly there, looking along +x unless
             // `--shot-yaw` says otherwise. A deterministic vantage is the only way to compare two frames.
             "--shot-at" => {
-                i += 1;
-                shot_at = args.get(i).cloned().and_then(|s| {
+                shot_at = arg_value(&args, &mut i).cloned().and_then(|s| {
                     let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
                     (v.len() == 4).then(|| ([v[0], v[1], v[2]], v[3]))
                 });
             }
             "--frames" => {
-                i += 1;
-                shot_frame = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(30);
+                shot_frame = arg_value(&args, &mut i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(30);
             }
             "--sim" => sim = true,
             // `--pose <model> <key> <frame>`: one model, posed from one keyframe.
@@ -439,8 +445,7 @@ fn main() {
             // collision for that many frames and report where it ends up. No window.
             // `--walk all` does it for every level in the install.
             "--walk" => {
-                i += 1;
-                walk = Some(match args.get(i).map(String::as_str) {
+                walk = Some(match arg_value(&args, &mut i).map(String::as_str) {
                     Some("all") => Walk::All,
                     other => Walk::Frames(
                         other.and_then(|v| v.parse().ok()).unwrap_or(120),
@@ -448,8 +453,9 @@ fn main() {
                 });
             }
             "--look" => {
-                i += 1;
-                look = args.get(i).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                look = arg_value(&args, &mut i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0.0);
             }
             "--names" => {
                 i += 1;
@@ -500,16 +506,11 @@ fn main() {
                 menu_open = Some(name);
             }
             "--hud" => {
-                i += 1;
-                // A following flag is not a filename: `--hud --level 01` used to write a PNG named
-                // `--level`, the same trap `--save` had.
-                match args.get(i) {
-                    Some(v) if !v.starts_with("--") => hud_out = Some(v.clone()),
-                    _ => {
-                        i -= 1;
-                        hud_out = Some("hud.png".to_string());
-                    }
-                }
+                hud_out = Some(
+                    arg_value(&args, &mut i)
+                        .cloned()
+                        .unwrap_or_else(|| "hud.png".to_string()),
+                );
             }
             "--sft" => {
                 let name = args.get(i + 1).cloned();
@@ -17445,6 +17446,36 @@ fn template_counts(level: &jkl::Level) -> Vec<(String, usize)> {
     let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     ranked
+}
+
+#[cfg(test)]
+mod arg_value_tests {
+    use super::arg_value;
+
+    /// The trap this helper exists for: a flag must never be taken as the previous flag's value,
+    /// while a negative number still is one.
+    #[test]
+    fn a_following_flag_is_not_a_value() {
+        let args: Vec<String> = ["--hud", "--level", "01narshadda", "--walk", "-45"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // `i` points at the flag: `--hud` is followed by `--level`, another flag, so it has no value
+        // and the index must not move — that is exactly the `--hud --level 01` bug.
+        let mut i = 0;
+        assert_eq!(arg_value(&args, &mut i), None);
+        assert_eq!(i, 0, "the index moved past a flag");
+        // A real value is taken and the index moves with it.
+        i = 1;
+        assert_eq!(arg_value(&args, &mut i).map(String::as_str), Some("01narshadda"));
+        assert_eq!(i, 2);
+        // A single dash is a value, not a flag: `--walk -45` is a heading.
+        i = 3;
+        assert_eq!(arg_value(&args, &mut i).map(String::as_str), Some("-45"));
+        // Nothing after the last argument.
+        i = 5;
+        assert_eq!(arg_value(&args, &mut i), None);
+    }
 }
 
 #[cfg(test)]
