@@ -4842,6 +4842,51 @@ fn main() {
         println!("ammo: bin {bin} holds {start:.0} at spawn; three rounds fired -> {fired}, then dry");
         assert_eq!(fired, 3, "the weapon fired {fired} rounds from 3");
         assert_eq!(rt.inv.get(&bin).copied(), Some(0.0), "the bin did not empty");
+        // The rounds must follow the **armed** bin: `AmmoBin` is resolved once from `walkplayer`'s
+        // default weapon, so a player who switched to the stormtrooper rifle charged the bryar's
+        // clip for the rifle's shots.
+        {
+            // A diagnostic first: which bins name a script at all, so an empty answer says whether
+            // `items.dat` or the cog lookup failed.
+            let named: Vec<(i32, String, bool)> = (1..=26)
+                .filter_map(|armed| {
+                    let cog = world.item_cogs.get(&armed)?.clone();
+                    let found = world.cogs.keys().any(|k| {
+                        k.rsplit(['\\', '/']).next().is_some_and(|f| f.eq_ignore_ascii_case(
+                            cog.rsplit(['\\', '/']).next().unwrap_or(&cog),
+                        ))
+                    });
+                    Some((armed, cog, found))
+                })
+                .collect();
+            println!("ammo: bins naming an item script: {named:?}");
+            let mut switched: Vec<(i32, i32)> = (1..=26)
+                .filter_map(|armed| ammo_bin_for_bin(&world, armed).map(|rounds| (armed, rounds)))
+                .collect();
+            switched.sort();
+            println!("ammo: bin -> rounds for this level: {switched:?}");
+            assert!(
+                switched.len() >= 2,
+                "only {} bin(s) name an `ammobin`, so a weapon switch cannot move the rounds",
+                switched.len()
+            );
+            // Two weapons may share a round bin — the bryar and the stormtrooper rifle both spend
+            // power cells — so the claim is that the map is not a constant, not that every bin
+            // differs.
+            let mut round_bins: Vec<i32> = switched.iter().map(|(_, rounds)| *rounds).collect();
+            round_bins.sort_unstable();
+            round_bins.dedup();
+            assert!(
+                round_bins.len() >= 2,
+                "every weapon spends bin {round_bins:?}, so switching changes nothing"
+            );
+            let (armed, rounds) = switched[1];
+            assert_eq!(
+                ammo_bin_for_bin(&world, armed),
+                Some(rounds),
+                "the armed bin's rounds are not stable"
+            );
+        }
         println!("--- ammo check passed ---");
         return;
     }
@@ -11769,6 +11814,27 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
             cogs.insert(name.clone(), script);
         }
     }
+    // The item scripts `misc\items.dat` names are not placed instances and not template cogs: the
+    // loader missed them, so `ammo_bin_for_bin` could not read `pow_*`/`weap_*`'s own `ammobin` and
+    // every weapon appeared to spend the level's default bin. Parsing them here makes the whole item
+    // table available to the same map.
+    let item_scripts: Vec<String> = gobs
+        .read("misc\\items.dat")
+        .map(|d| hud::items(&String::from_utf8_lossy(&d)))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|def| def.cog)
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    for name in &item_scripts {
+        if cogs.contains_key(name) {
+            continue;
+        }
+        let Some(raw) = gobs.read(name) else { continue };
+        if let Ok(script) = cog::parse(&String::from_utf8_lossy(&raw)) {
+            cogs.insert(name.clone(), script);
+        }
+    }
     println!("{} placed script instances", level.cogs.len());
     println!("{} things on a keyframe path, {} with flags, {} moving", level.things.iter().filter(|t| t.frames.len() > 1).count(), level.things.iter().filter(|t| t.flags != 0).count(), level.things.iter().filter(|t| t.vel != [0.0; 3]).count());
 
@@ -14237,6 +14303,51 @@ fn collect_verbs(body: &[cog::Stmt], out: &mut Vec<String>) {
     }
 }
 
+/// The ammo bin an **armed bin** spends: `misc\items.dat` names that bin's item cog, and the cog's
+/// own `ammobin(Int)` symbol names the rounds (`pow_bryar.cog` declares one).
+///
+/// This is the chain the engine uses — the bin is chosen by the player, so the rounds have to follow
+/// the choice. `ammo_bin_for` below answers the different question of what the *level's* default
+/// weapon spends, which is only the right answer until the player switches.
+fn ammo_bin_for_bin(world: &World, bin: i32) -> Option<i32> {
+    // The rounds a bin spends are declared by that bin's **powerup** script: `pow_bryar.cog` carries
+    // `bin=2` and `ammobin=11`. `items.dat` names the *weapon* script (`weap_bryar.cog`), whose
+    // `fire:` hard-codes the round bin instead of declaring it, so the powerup pair is the only
+    // declarative source.
+    let declared = world.cogs.values().find_map(|script| {
+        let sym = |name: &str| {
+            script
+                .symbols
+                .iter()
+                .find(|s| s.name.eq_ignore_ascii_case(name))
+                .and_then(|s| s.init.as_deref())
+                .and_then(|raw| raw.trim().parse::<i32>().ok())
+        };
+        if sym("bin") == Some(bin) { sym("ammobin") } else { None }
+    });
+    if declared.is_some() {
+        return declared;
+    }
+    let cog_name = world.item_cogs.get(&bin)?.to_ascii_lowercase();
+    // `items.dat` names the script as the archive path it lives at (`cog\pow_bryar.cog`), while the
+    // loader keys `world.cogs` by the name a template carries (`pow_bryar.cog`), so match on the file
+    // name rather than the whole path.
+    let file = cog_name.rsplit(['\\', '/']).next().unwrap_or(&cog_name).to_string();
+    let script = world.cogs.get(&cog_name).or_else(|| world.cogs.get(&file)).or_else(|| {
+        world
+            .cogs
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(&file))
+            .map(|(_, script)| script)
+    })?;
+    script
+        .symbols
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case("ammobin"))
+        .and_then(|s| s.init.as_deref())
+        .and_then(|raw| raw.trim().parse().ok())
+}
+
 /// The ammo bin the player's weapon spends: the weapon's `cog=`, that cog's `ammobin` symbol, and the
 /// value the level's own instance gave it.
 ///
@@ -14875,9 +14986,9 @@ fn health_follows_damage(
     let shields = rt.player_shields;
     // The status bar's ammo readout is the weapon's own bin (`--ammo` resolves which), so it runs out
     // when the weapon does. `-999` is the engine's "no ammo" marker, drawn as `:::`.
-    let ammo = ammo_bin
-        .as_ref()
-        .and_then(|a| a.0)
+    // The readout follows the bin the player has armed; `AmmoBin` is only the level's default.
+    let ammo = ammo_bin_for_bin(&world, rt.cur_bin)
+        .or_else(|| ammo_bin.as_ref().and_then(|a| a.0))
         .map(|bin| rt.inv.get(&bin).copied().unwrap_or(0.0).round() as i32)
         .unwrap_or(-999);
     if (player.health - health).abs() > 0.01 || (player.shields - shields).abs() > 0.01 {
@@ -15107,6 +15218,7 @@ fn fire_player(
     player: Option<Res<Player>>,
     gun: Option<Res<Gun>>,
     sim: Option<Res<Sim>>,
+    world: Option<Res<World>>,
     ammo_bin: Option<Res<AmmoBin>>,
 ) {
     *frame += 1;
@@ -15156,9 +15268,14 @@ fn fire_player(
         println!("swung {weapon}: {} thing(s) in reach", hit.len());
         return;
     }
-    // Ammo: the weapon's own powerup cog names the bin it spends (`ammobin(Int)` in `pow_*.cog`), so
-    // the count is a bin like any other. The spend is `Runtime::spend`, the same call `--ammo` checks.
-    if let Some(bin) = ammo_bin.as_ref().and_then(|a| a.0)
+    // Ammo: the bin follows the **armed** bin, not the level's default weapon. `AmmoBin` was resolved
+    // once at load from `walkplayer`'s `weapon=`, so switching guns charged the bryar's clip for the
+    // stormtrooper rifle's shots — and refused to fire the rifle once that clip was empty.
+    let bin = world
+        .as_deref()
+        .and_then(|world| ammo_bin_for_bin(world, rt.cur_bin))
+        .or_else(|| ammo_bin.as_ref().and_then(|a| a.0));
+    if let Some(bin) = bin
         && !rt.spend(bin)
     {
         println!("fired {weapon}: out of ammo (bin {bin} is empty)");
