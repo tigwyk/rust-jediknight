@@ -206,13 +206,26 @@ pub struct SurfaceState {
     pub slide: [f32; 2],
     /// When the next cel is due, on the runtime's clock — the engine's `rdSurface.field_30`.
     pub next: f32,
+    /// `SurfaceLightAnim`'s extra light, added to the level's baked intensity: `start` when the ramp
+    /// begins, `end` where it settles, and the rate it walks at.
+    pub light: f32,
+    pub light_end: f32,
+    pub light_rate: f32,
 }
 
 #[derive(Clone)]
 pub struct SectorState {
     /// `SetSectorThrust(sector, vector)`: the force the sector applies.
     pub thrust: [f32; 3],
+    /// `SetSectorLight(sector, value, time)`: the **extra** light the sector carries, on top of what
+    /// the level baked into its vertices. Zero is the level's own lighting, which is why every sector
+    /// starts there and a door that adds `0.5` brightens its room by half.
     pub light: f32,
+    /// Where the fade started, where it is going and how fast, for a non-zero `time` argument. A
+    /// rate of 0 is a settled value.
+    pub light_from: f32,
+    pub light_end: f32,
+    pub light_rate: f32,
     pub tint: [f32; 3],
     pub colormap: i32,
 }
@@ -334,7 +347,7 @@ pub struct Runtime {
     /// Bumped when a surface's **cel** changes (`SetWallCel`, or an animation stepping), which the
     /// renderer bakes into the mesh the same way. Separate from `geomode_epoch` so a per-frame
     /// animation does not look like a stream of geometry changes.
-    pub cel_epoch: u32,
+    pub surface_epoch: u32,
     /// Per surface, how many cels its material holds (`num_texinfo`), where an animation wraps. The
     /// runtime cannot read a `.mat`, so the loader hands this over; absent means 1, i.e. nothing to
     /// animate.
@@ -783,7 +796,7 @@ impl Runtime {
             sectors: level
                 .sectors
                 .iter()
-                .map(|_| SectorState { thrust: [0.0; 3], light: 0.0, tint: [0.0; 3], colormap: 0 })
+                .map(|_| SectorState { thrust: [0.0; 3], light: 0.0, light_from: 0.0, light_end: 0.0, light_rate: 0.0, tint: [0.0; 3], colormap: 0 })
                 .collect(),
             sector_flags: level.sectors.iter().map(|s| s.flags).collect(),
             adjoin_flags: level.adjoins.iter().map(|a| a.flags).collect(),
@@ -812,7 +825,7 @@ impl Runtime {
                     } else {
                         [0.0; 3]
                     };
-                    SurfaceState { center, cel: 0.0, anim: 0.0, slide: [0.0; 2], next: 0.0 }
+                    SurfaceState { center, cel: 0.0, anim: 0.0, slide: [0.0; 2], next: 0.0, light: 0.0, light_end: 0.0, light_rate: 0.0 }
                 })
                 .collect(),
             sounds: Vec::new(),
@@ -830,7 +843,7 @@ impl Runtime {
             play_key: BTreeMap::new(),
             face_geomode: BTreeMap::new(),
             geomode_epoch: 0,
-            cel_epoch: 0,
+            surface_epoch: 0,
             surface_cels: Vec::new(),
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
@@ -903,7 +916,7 @@ impl Runtime {
     /// ping-pong/bounce flags, which no shipped surface's `flags` word carries). A rate of 0 is a
     /// still surface.
     ///
-    /// The renderer bakes a cel into the mesh, so a step bumps `cel_epoch` — measured at 1.4 ms to
+    /// The renderer bakes a cel into the mesh, so a step bumps `surface_epoch` — measured at 1.4 ms to
     /// re-batch all of level 1's 4595 surfaces, i.e. under 2% of a frame at 15 fps. `ponytail:` the
     /// whole world is re-batched rather than the sectors holding the animated surface, which is the
     /// same ceiling `SetFaceGeoMode` already lives with.
@@ -932,7 +945,50 @@ impl Runtime {
             changed = true;
         }
         if changed {
-            self.cel_epoch += 1;
+            self.surface_epoch += 1;
+        }
+    }
+
+    /// `SurfaceLightAnim` and a fading `SetSectorLight`: both ramp a light term onto the level's
+    /// baked intensity and then settle, so a door's room brightens once and stays bright.
+    fn advance_lights(&mut self, dt: f32) {
+        let mut changed = false;
+        for surface in self.surfaces.iter_mut() {
+            if surface.light_rate == 0.0 {
+                continue;
+            }
+            surface.light += surface.light_rate * dt;
+            // Walking past the target means arriving; a rate is one-shot, like the engine's anim
+            // records (`field_44`/`field_40`), which free themselves when the value reaches its end.
+            let arrived = if surface.light_rate > 0.0 {
+                surface.light >= surface.light_end
+            } else {
+                surface.light <= surface.light_end
+            };
+            if arrived {
+                surface.light = surface.light_end;
+                surface.light_rate = 0.0;
+            }
+            changed = true;
+        }
+        for sector in self.sectors.iter_mut() {
+            if sector.light_rate == 0.0 {
+                continue;
+            }
+            sector.light += sector.light_rate * dt;
+            let arrived = if sector.light_rate > 0.0 {
+                sector.light >= sector.light_end
+            } else {
+                sector.light <= sector.light_end
+            };
+            if arrived {
+                sector.light = sector.light_end;
+                sector.light_rate = 0.0;
+            }
+            changed = true;
+        }
+        if changed {
+            self.surface_epoch += 1;
         }
     }
 
@@ -943,6 +999,7 @@ impl Runtime {
         self.time += dt;
         self.decay_damage(dt);
         self.advance_surface_cels();
+        self.advance_lights(dt);
         // `timer=`/`SetLifeLeft` expiry: `sithThing_Update` counts `msecLifeLeft` down and calls
         // `sithThing_DestroyDyingThing` when it reaches zero. Without this an impact spark lives
         // forever, and a corpse never goes away.
@@ -1247,6 +1304,7 @@ impl Runtime {
                 | "stopsurfaceanim"
                 | "sectorlight"
                 | "getsectorlight"
+                | "surfacelightanim"
                 | "sectorthrust"
                 | "destroything"
                 | "settimerex"
@@ -2294,6 +2352,21 @@ impl Runtime {
     /// Run one verb against the world. Argument order follows the shipped scripts; a
     /// verb whose real arity differs simply does nothing useful here, and the
     /// interpreter records it.
+    /// `SetSectorLight(sector, value, time)`: set the sector's extra light, fading over `time`
+    /// seconds when that is positive (`sithSurface_SetSectorLight` builds the same rate from the
+    /// value it is leaving).
+    fn set_sector_light(&mut self, index: i64, value: f32, time: f32) {
+        if let Some(s) = self.sector_mut(index) {
+            s.light_from = s.light;
+            s.light_end = value;
+            s.light_rate = if time > 0.0 { (value - s.light) / time } else { 0.0 };
+            if s.light_rate == 0.0 {
+                s.light = value;
+            }
+            self.surface_epoch += 1;
+        }
+    }
+
     pub fn call(&mut self, verb: &str, args: &[Value]) -> Value {
         let num = |i: usize| args.get(i).map(|v| v.num()).unwrap_or(0.0);
         let idx = |i: usize| num(i) as i64;
@@ -2327,7 +2400,7 @@ impl Runtime {
                     s.cel = num(1) as f32;
                     // The renderer folds a surface's cel into the mesh it already built, so a change
                     // has to ask for a rebuild the way a geomode change does.
-                    self.cel_epoch += 1;
+                    self.surface_epoch += 1;
                 }
                 Value::Nil
             }
@@ -2361,11 +2434,26 @@ impl Runtime {
                 Value::Nil
             }
             "sectorlight" => {
-                let value = num(1) as f32;
-                if let Some(s) = self.sector_mut(idx(0)) {
-                    s.light = value;
-                }
+                self.set_sector_light(idx(0), num(1) as f32, args.get(2).map(|v| v.num() as f32).unwrap_or(0.0));
                 Value::Nil
+            }
+            // `SurfaceLightAnim(surface, start, end, fps)`: `sithCogFunctionSurface_SurfaceLightAnim`
+            // sets the surface's extra light to `start` and ramps it to `end` over `fps * 0.5`
+            // seconds, answering the surface index (or -1 when the arguments make no ramp).
+            "surfacelightanim" => {
+                let (start, end, fps) = (num(1) as f32, num(2) as f32, num(3) as f32);
+                if end < start || fps <= 0.0 {
+                    return Value::Num(-1.0);
+                }
+                let index = idx(0);
+                if let Some(s) = self.surface_mut(index) {
+                    s.light = start;
+                    s.light_end = end;
+                    s.light_rate = (end - start) / (fps * 0.5);
+                    self.surface_epoch += 1;
+                    return Value::Num(index as f64);
+                }
+                Value::Num(-1.0)
             }
             "getsectorlight" => Value::Num(self.sectors.get(idx(0) as usize).map(|s| s.light).unwrap_or(0.0) as f64),
             // `SectorThrust(sector, vector)`: the force the sector applies to things in
@@ -3203,9 +3291,8 @@ impl Runtime {
                 Value::Nil
             }
             "setsectorlight" => {
-                if let Some(s) = self.sector_mut(idx(0)) {
-                    s.light = num(1) as f32;
-                }
+                // The spelling every shipped script uses. `sectorlight` below is its alias.
+                self.set_sector_light(idx(0), num(1) as f32, args.get(2).map(|v| v.num() as f32).unwrap_or(0.0));
                 Value::Nil
             }
             "setsectortint" => {
@@ -3430,7 +3517,7 @@ mod tests {
             messages: Vec::new(),
             caller_cog: -1,
             messages_sent: 0,
-            sectors: vec![SectorState { thrust: [0.0; 3], light: 0.0, tint: [0.0; 3], colormap: 0 }],
+            sectors: vec![SectorState { thrust: [0.0; 3], light: 0.0, light_from: 0.0, light_end: 0.0, light_rate: 0.0, tint: [0.0; 3], colormap: 0 }],
             sector_flags: vec![0],
             adjoin_flags: vec![0x7],
             surface_adjoin: vec![0],
@@ -3451,7 +3538,7 @@ mod tests {
             play_key: BTreeMap::new(),
             face_geomode: BTreeMap::new(),
             geomode_epoch: 0,
-            cel_epoch: 0,
+            surface_epoch: 0,
             surface_cels: Vec::new(),
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
@@ -3693,18 +3780,21 @@ mod tests {
             anim: 0.0,
             slide: [0.0; 2],
             next: 0.0,
+            light: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
         });
         let index = rt.surfaces.len() - 1;
         // The material's cel count comes from the `.mat`; 3 cels here.
         rt.surface_cels = vec![1; index];
         rt.surface_cels.push(3);
-        let epoch = rt.cel_epoch;
+        let epoch = rt.surface_epoch;
         // `SurfaceAnim(surface, 15)`: a cel every 1/15 s. Half a second is 7 steps of 1/15,
         // so cel 7, and 7 % 3 = 1.
         rt.call("SurfaceAnim", &[Value::Num(index as f64), Value::Num(15.0)]);
         rt.step(0.5);
         assert_eq!(rt.surfaces[index].cel, 1.0);
-        assert!(rt.cel_epoch > epoch, "a cel step did not ask for a rebuild");
+        assert!(rt.surface_epoch > epoch, "a cel step did not ask for a rebuild");
         // A material with one cel never advances, whatever the rate says.
         rt.surface_cels[index] = 1;
         rt.step(1.0);
@@ -3712,10 +3802,70 @@ mod tests {
     }
 
     #[test]
+    fn a_sector_light_fades_and_a_surface_light_ramps_once() {
+        let mut rt = door_runtime();
+        // `SetSectorLight(sector, 0.5, 2)`: half a unit of extra light over two seconds.
+        rt.sectors.push(SectorState {
+            thrust: [0.0; 3],
+            light: 0.0,
+            light_from: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
+            tint: [0.0; 3],
+            colormap: 0,
+        });
+        let sector = rt.sectors.len() - 1;
+        rt.call(
+            "SetSectorLight",
+            &[Value::Num(sector as f64), Value::Num(0.5), Value::Num(2.0)],
+        );
+        assert_eq!(rt.sectors[sector].light, 0.0, "a fade should not snap to its target");
+        rt.step(1.0);
+        assert!((rt.sectors[sector].light - 0.25).abs() < 1e-5);
+        rt.step(1.0);
+        assert!((rt.sectors[sector].light - 0.5).abs() < 1e-5);
+        // Settled: the rate is one-shot, so a long step does not overshoot.
+        rt.step(10.0);
+        assert!((rt.sectors[sector].light - 0.5).abs() < 1e-5);
+
+        // `SurfaceLightAnim(surface, 0.2, 1.0, 0.5)`: `cog_00_forcefield.cog`'s startup ramp,
+        // `(1.0 - 0.2) / (0.5 * 0.5)` = 3.2 a second, so 0.25 s lands at 1.0 and stops.
+        rt.surfaces.push(SurfaceState {
+            center: [0.0; 3],
+            cel: 0.0,
+            anim: 0.0,
+            slide: [0.0; 2],
+            next: 0.0,
+            light: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
+        });
+        let surface = rt.surfaces.len() - 1;
+        let answer = rt.call(
+            "SurfaceLightAnim",
+            &[Value::Num(surface as f64), Value::Num(0.2), Value::Num(1.0), Value::Num(0.5)],
+        );
+        assert_eq!(answer, Value::Num(surface as f64), "the verb answers the surface index");
+        assert_eq!(rt.surfaces[surface].light, 0.2);
+        rt.step(0.1);
+        assert!((rt.surfaces[surface].light - 0.52).abs() < 1e-4);
+        rt.step(0.2);
+        assert!((rt.surfaces[surface].light - 1.0).abs() < 1e-5);
+        rt.step(1.0);
+        assert!((rt.surfaces[surface].light - 1.0).abs() < 1e-5, "the ramp kept walking");
+        // A backwards ramp is no ramp: the engine answers -1 and leaves the surface alone.
+        let refused = rt.call(
+            "SurfaceLightAnim",
+            &[Value::Num(surface as f64), Value::Num(1.0), Value::Num(0.0), Value::Num(1.0)],
+        );
+        assert_eq!(refused, Value::Num(-1.0));
+    }
+
+    #[test]
     fn the_new_world_verbs_act_on_the_world() {
         let mut rt = door_runtime();
         // A surface's cel round-trips, and its centre is whatever the level said.
-        rt.surfaces.push(SurfaceState { center: [1.0, 2.0, 3.0], cel: 0.0, anim: 0.0, slide: [0.0; 2], next: 0.0 });
+        rt.surfaces.push(SurfaceState { center: [1.0, 2.0, 3.0], cel: 0.0, anim: 0.0, slide: [0.0; 2], next: 0.0, light: 0.0, light_end: 0.0, light_rate: 0.0 });
         rt.call("SetWallCel", &[Value::Num(0.0), Value::Num(4.0)]);
         assert_eq!(rt.call("GetWallCel", &[Value::Num(0.0)]), Value::Num(4.0));
         assert_eq!(rt.call("SurfaceCenter", &[Value::Num(0.0)]), Value::Vec([1.0, 2.0, 3.0]));

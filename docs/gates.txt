@@ -5,7 +5,7 @@ Recorded at round 85. Target: `G:\Games\Star Wars Jedi Knight - Dark Forces 2`
 (GOG, plaintext JK.EXE, image base 0x400000,
 sha256 12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44).
 
-`cargo test` -> 90 passed, 0 failed.
+`cargo test` -> 91 passed, 0 failed.
 `cargo clippy --release --all-targets` -> 56 warnings, no errors.
 
 Each flag below is a gate: it asserts on the live runtime (or the shipped data) and exits
@@ -85,9 +85,13 @@ flag                                                   exit  what it prints
 --cel                                                    0  29 of 3393 drawn surface(s) in level 1 use a
                                                              multi-cel material; SetWallCel 1 changes the
                                                              vertex data the shader reads and bumps the
-                                                             cel epoch a rebuild watches; after 1 s of
+                                                             surface epoch a rebuild watches; after 1 s of
                                                              clock the level's own `01_neonsign.cog` has
-                                                             stepped surface 765 from cel 0 to 2 (2 fps)
+                                                             stepped surface 765 from cel 0 to 2 (2 fps);
+                                                             `SetSectorLight 0.5` plus a `SurfaceLightAnim`
+                                                             ramp to 1 changes the vertex light, lands on 1
+                                                             and stops, and a level whose scripts ramp their
+                                                             own lights shows them move (level 2: 7)
 --triggers                                               0  --- triggers check passed ---
 --sleep                                                  0  --- sleep check passed ---
 --live-check                                             0  the body stands in sector 339 at z -1.17 on a floor at

@@ -3047,6 +3047,33 @@ animation stepping a few times a second rides the rebuild path at under 2% of a 
 `SetFaceGeoMode` already had), and `SlideWall`/water **scroll** offsets are still not applied — the
 mesh bakes no scroll term, so a conveyor's texture moves in retail and not here.
 
+### Scripted light: `SetSectorLight` and `SurfaceLightAnim`
+
+A level's light is baked into its vertices, so both of these are **extra** light on top of that baked
+term, which is exactly how the engine carries them (`SithSector.extraLight` and
+`rdSurface::extraLight`, summed with the level ambient into a clamped 0..1 light level that multiplies
+the vertex intensity). Zero therefore means "as the mapper built it", and every sector and surface
+starts there.
+
+* **`SetSectorLight(sector, value, time)`** — `sithSurface_SetSectorLight`: a positive `time` fades
+  over that many seconds, 0 snaps. `cog_00_door.cog` opens with
+  `SetSectorLight(doorSector, lightValue, 0.0)` and `lightValue = 0.5`, so a door adds half a unit of
+  light to the room it serves — the door scripts of every level do this (`02_pipedoor`, `03_doorkey`,
+  `10_hatch`, `10_powercore`, …).
+* **`SurfaceLightAnim(surface, start, end, fps)`** — `sithCogFunctionSurface_SurfaceLightAnim` sets the
+  surface's light to `start` and ramps it to `end` at `(end - start) / (fps * 0.5)` per second,
+  answering the surface index (`-1` when `end < start` or `fps <= 0`). It is a **one-shot** ramp: the
+  animation frees itself when the value reaches `end`. `cog_00_forcefield.cog`'s `startup` is
+  `SurfaceLightAnim(surf0, minLight, maxLight, period)` with `0.2 / 1.0 / 0.5`, i.e. a force field that
+  brightens over a quarter second when it comes up.
+
+Both live in `Runtime::advance_lights` as a rate plus an end value, and both bump `surface_epoch`, so
+they ride the same rebuild the cels do. In the mesh the light is the vertex colour's rgb: the baked
+intensity through the `.cmp` ramp, multiplied by `(1 + surface light + sector light)`. `--cel` checks
+the arithmetic (a `0 -> 1` ramp at 2 fps lands on 0.5 after half a second and then stops) and the data
+path, and running a level's own startup scripts shows the shipped calls arriving: level 2 moves **7
+surface lights** (its force fields) in the first second.
+
 ### Damage decays in flight
 
 The engine's `sithWeapon_Update` decays a projectile's damage as it flies, when the weapon's
