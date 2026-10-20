@@ -2834,6 +2834,28 @@ fn main() {
         let inside = [at[0] + 3.0, at[1], at[2]];
         let outside = [at[0] + 8.0, at[1], at[2]];
         let behind = [at[0] - 3.0, at[1], at[2]];
+        // The instinct's own numbers drive the shot: `fltArg[0]` is the delay in ms, `fltArg[2]`
+        // the maximum range it will fire from. `rydefault.ai` says 750 ms and 3.5 units, so the
+        // 3-unit shot below is inside its range and the 8-unit one is outside both its range and
+        // its sight — which is why far is 0 here for two different reasons.
+        let pf = rt
+            .ai
+            .get(&actor)
+            .and_then(|ai| ai.instinct("PrimaryFire"))
+            .map(|i| (i.weight, i.args.clone()));
+        let (delay_ms, max_dist) = pf
+            .as_ref()
+            .map(|(weight, args)| (*weight as f32, args.get(1).copied().unwrap_or(0.0) as f32))
+            .unwrap_or((0.0, 0.0));
+        println!(
+            "  instinct: PrimaryFire fires every {delay_ms:.0} ms, out to {max_dist:.2} units, with {:.0}% aim error",
+            pf.as_ref().and_then(|(_, a)| a.get(2)).copied().unwrap_or(0.0) * 100.0
+        );
+        assert!(delay_ms >= 100.0, "the instinct's shot delay did not come from the .ai");
+        assert!(
+            (3.0..=7.0).contains(&max_dist),
+            "the instinct's firing range did not come from the .ai ({max_dist})"
+        );
         let mut shots = |pos: [f32; 3]| {
             rt.things[player].pos = pos;
             let before = rt.things.len();

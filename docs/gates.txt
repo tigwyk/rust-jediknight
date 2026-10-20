@@ -189,6 +189,9 @@ flag                                                   exit  what it prints
                                                              behind it, `AIFlee` grows the gap 3.00 ->
                                                              3.30 in a second with no shots, and
                                                              `AISetClass` moves sightdist 5.0 -> 7.0;
+                                                             `PrimaryFire` fires on the .ai's
+                                                             own 750 ms delay out to its own
+                                                             3.50 units with 20% aim error;
                                                              the route search crosses sectors 0
                                                              -> 2, walled off but 1 doorway
                                                              apart, and a follower told to walk

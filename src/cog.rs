@@ -1428,7 +1428,7 @@ enum Flow {
 
 /// Deterministic stand-in for the engine's RNG: scripts call `Rand()` to pick
 /// variants, and reproducible runs are worth more than true randomness here.
-fn pseudo_random() -> f64 {
+pub fn pseudo_random() -> f64 {
     use std::cell::Cell;
     thread_local! {
         static SEED: Cell<u32> = const { Cell::new(0x1234_5678) };

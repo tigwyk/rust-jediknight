@@ -95,6 +95,9 @@ pub struct ThingState {
     /// Seconds until this actor's AI may fire again; its instinct class lives in
     /// `Runtime::ai`.
     pub ai_wait: f32,
+    /// Shots left in the current burst: `sithAICmd_PrimaryFire`'s `fltArg[8]` counter. While it is
+    /// positive the wait is the burst gap (`fltArg[9]`), not the full shot delay.
+    pub ai_burst: f32,
     /// Set by `ThingState::step` on the tick a frame path reaches its target frame, so the caller
     /// can send `arrived` (the message a door or lift script waits on).
     pub arrived: bool,
@@ -747,7 +750,8 @@ impl Runtime {
                     extra_speed: 0.0,
                     ai_target: None,
                     ai_wait: 0.0,
-            arrived: false,
+                    ai_burst: 0.0,
+                    arrived: false,
                     phys_flags: template_phys_flags
                         .get(&t.template.to_ascii_lowercase())
                         .copied()
@@ -1183,6 +1187,7 @@ impl Runtime {
             extra_speed: 0.0,
             ai_target: None,
             ai_wait: 0.0,
+            ai_burst: 0.0,
             arrived: false,
             min_damage: self
                 .template_min_damage
@@ -1826,7 +1831,7 @@ impl Runtime {
         self.walked.clear();
         self.walk_vel.clear();
         self.via_portal.clear();
-        let mut shots: Vec<(usize, String)> = Vec::new();
+        let mut shots: Vec<(usize, String, f32)> = Vec::new();
         // Every actor with an instinct class, **plus** any actor a script gave a destination to.
         // `AISetMovePos`/`AISetMoveFrame` are gated on `controlType == SITH_CT_AI` in the engine, which
         // an actor has whether or not its template names an `aiclass=` — level 1's 8t88 has no class but
@@ -2034,9 +2039,55 @@ impl Runtime {
             // The instinct that fires. An actor whose class has no `PrimaryFire` never
             // shoots, however close the player is, and a scripted walk does not shoot at what it
             // cannot see. A scripted fire target replaces the player as what it shoots at.
+            //
+            // The numbers are the `.ai` file's own (`sithAICmd_PrimaryFire`):
+            //   fltArg[0] shot delay in ms      fltArg[1] minDot   fltArg[2] maxDistToFire
+            //   fltArg[3] aim error fraction    fltArg[4] minDist  fltArg[8] burst count
+            //   intArg[9] ms between burst shots
+            // so a `peddefault.ai` gunner and a `rydefault.ai` one fire at different rates, from
+            // different ranges and with different accuracy — as the shipped files say.
             let shooting_at = aim.unwrap_or(target);
             let can_see = if aim.is_some() { true } else { sighted };
-            if !can_see || !ready || ai.as_ref().and_then(|ai| ai.instinct("PrimaryFire")).is_none() {
+            if !can_see || !ready {
+                continue;
+            }
+            let Some(primary) = ai.as_ref().and_then(|ai| ai.instinct("PrimaryFire")).cloned() else {
+                continue;
+            };
+            // The parser stores the first number as `weight`; the engine reads the whole list as
+            // `fltArg[0..9]`, so `fltArg[k]` is `weight` for k 0 and `args[k - 1]` after that.
+            let arg = |k: usize| {
+                if k == 0 {
+                    primary.weight as f32
+                } else {
+                    primary.args.get(k - 1).copied().unwrap_or(0.0) as f32
+                }
+            };
+            let (delay_ms, min_dot, max_dist, error, min_dist) =
+                (arg(0), arg(1), arg(2), arg(3), arg(4));
+            let (burst, burst_ms) = (arg(8), arg(9));
+            let (sx, sy) = (shooting_at[0] - from[0], shooting_at[1] - from[1]);
+            let range = (sx * sx + sy * sy).sqrt();
+            if range > max_dist.max(0.001) || range < min_dist {
+                continue;
+            }
+            // A script that names a fire target is telling the actor to shoot *that*, so it turns to
+            // it first — `00_AITurnCoat.cog` turns an actor on the victim behind it.
+            if aim.is_some()
+                && let Some(thing) = self.things.get_mut(index)
+            {
+                thing.yaw = sy.atan2(sx).to_degrees();
+            }
+            let yaw = self.things.get(index).map(|t| t.yaw).unwrap_or(yaw);
+            // `minDot`: the actor fires only once it is facing the target, which is what makes it
+            // turn before shooting rather than snap.
+            let facing = yaw.to_radians().sin_cos();
+            let dot = if range > 1e-4 {
+                (facing.1 * sx + facing.0 * sy) / range
+            } else {
+                1.0
+            };
+            if dot < min_dot {
                 continue;
             }
             let Some(weapon) = self
@@ -2046,16 +2097,23 @@ impl Runtime {
             else {
                 continue;
             };
-            let dx = shooting_at[0] - from[0];
-            let dy = shooting_at[1] - from[1];
-            shots.push((index, weapon));
+            shots.push((index, weapon, error));
             if let Some(thing) = self.things.get_mut(index) {
-                thing.yaw = dy.atan2(dx).to_degrees();
-                thing.ai_wait = self.ai_shot_interval;
+                thing.yaw = sy.atan2(sx).to_degrees();
+                // `sithAICmd_PrimaryFire`: a burst of `fltArg[8]` shots `intArg[9]` apart, then the
+                // shot delay jittered by ±20% (`(1.2 - 0.2 * frand) * fltArg[0]`).
+                if thing.ai_burst > 0.0 {
+                    thing.ai_burst -= 1.0;
+                    thing.ai_wait = burst_ms / 1000.0;
+                } else {
+                    thing.ai_burst = (burst - 1.0).max(0.0);
+                    let jitter = 1.2 - 0.2 * crate::cog::pseudo_random() as f32;
+                    thing.ai_wait = delay_ms / 1000.0 * jitter;
+                }
             }
         }
-        for (index, weapon) in shots {
-            if self.fire(index as i64, &weapon).is_some() {
+        for (index, weapon, error) in shots {
+            if self.fire_spread(index as i64, &weapon, error).is_some() {
                 fired += 1;
             }
         }
@@ -2074,14 +2132,38 @@ impl Runtime {
         }
     }
 
+    /// [`Self::fire`] with the actor's aim error: `sithAICmd_PrimaryFire` passes
+    /// `percentageErrorInAim` and the engine spreads the shot inside that fraction of a right
+    /// angle. A missed shot is a shot that flies wide, which is what makes a firefight survivable.
+    pub fn fire_spread(&mut self, shooter: i64, template: &str, error: f32) -> Option<usize> {
+        let spread = if error > 0.0 {
+            // A fresh heading inside +/- `error` of a right angle, jittered around the aim line.
+            let r = crate::cog::pseudo_random() as f32;
+            ((r - 0.5) * 2.0) * error * std::f32::consts::FRAC_PI_2
+        } else {
+            0.0
+        };
+        self.fire_with_spread(shooter, template, spread)
+    }
+
     pub fn fire(&mut self, shooter: i64, template: &str) -> Option<usize> {
+        self.fire_with_spread(shooter, template, 0.0)
+    }
+
+    fn fire_with_spread(
+        &mut self,
+        shooter: i64,
+        template: &str,
+        spread: f32,
+    ) -> Option<usize> {
         let template = template.to_ascii_lowercase();
         let src = self.thing(shooter)?;
         let (pos, yaw, sector) = (src.pos, src.yaw, src.sector);
         let speed = self.template_vel.get(&template).copied().unwrap_or([0.0; 3]);
         // The template's velocity is in the thing's own frame: forward is +Y there, and
-        // a JK yaw of `a` faces `(cos a, sin a, 0)`.
-        let (sin, cos) = yaw.to_radians().sin_cos();
+        // a JK yaw of `a` faces `(cos a, sin a, 0)`. `spread` is the aim error an AI instinct
+        // carries: it turns the whole shot, so a missed shot is a shot that flies wide.
+        let (sin, cos) = (yaw.to_radians() + spread).sin_cos();
         let forward = [
             speed[1] * cos - speed[0] * sin,
             speed[1] * sin + speed[0] * cos,
@@ -2135,6 +2217,7 @@ impl Runtime {
             extra_speed: 0.0,
             ai_target: None,
             ai_wait: 0.0,
+            ai_burst: 0.0,
             arrived: false,
             min_damage: self.template_min_damage.get(&key).copied().unwrap_or(damage),
             decay: if self.template_decay.contains(&key) {
@@ -2709,6 +2792,7 @@ impl Runtime {
             extra_speed: 0.0,
             ai_target: None,
             ai_wait: 0.0,
+            ai_burst: 0.0,
             arrived: false,
         });
         let index = self.things.len() - 1;
@@ -4622,7 +4706,8 @@ mod tests {
                 extra_speed: 0.0,
                 ai_target: None,
                 ai_wait: 0.0,
-            arrived: false,
+                ai_burst: 0.0,
+                arrived: false,
             }],
             templates: vec!["walkplayer".into()],
             types: vec![10],
