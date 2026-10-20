@@ -96,7 +96,7 @@ Three ceilings came with the last of them, and they are marked in the code:
 | verb | what is real | what is a stand-in |
 | --- | --- | --- |
 | `SetThingRotVel` | the angular velocity is integrated every step and the angles wrap | nothing |
-| `NewColorEffect` / `Modify` / `Free` | the handle, the three channels, the fade, and the create/modify/free round trip | the **draw**: there is no palette-effect screen pass yet, so nothing is tinted |
+| `NewColorEffect` / `Modify` / `Free` | the handle, the three channels, the fade, and the create/modify/free round trip; **and the draw**: the effect is blended over the HUD canvas each frame (`ui::Canvas::apply_screen_effect`, unit-tested against `stdPalEffects_GatherEffects`' filter = quarter-channel and zero-tint rules) | the *world* is not tinted — the blend is applied to the 2D canvas, so a force-seeing view dims the HUD and the backdrops, not the 3D scene |
 | `SetThingModel` | the override is stored and a *created* thing is drawn with it | a thing the level **placed** keeps the mesh built at load |
 
 ---

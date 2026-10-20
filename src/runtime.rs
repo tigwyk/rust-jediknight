@@ -3187,6 +3187,41 @@ impl Runtime {
         self.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")).unwrap_or(0)
     }
 
+    /// The screen effect the live `color_effects` add up to: `(filter, tint, add, alpha)` for
+    /// `ui::Canvas::apply_screen_effect`. An effect fades **in** over its `fade` seconds — the scripts
+    /// own shape (`newColorEffect(..., 1.0)` then `FreeColorEffect` when the power ends) — and the
+    /// channels combine by multiplying the tints and summing the adds, which is what a stack of
+    /// palette effects does at scan-out.
+    pub fn screen_effect(&self) -> Option<([bool; 3], [f32; 3], [f32; 3], f32)> {
+        let mut filter = [true; 3];
+        let mut tint = [1.0f32; 3];
+        let mut add = [0.0f32; 3];
+        let mut alpha = 0.0f32;
+        for effect in self.color_effects.values() {
+            // `fade` of 0 means "already fully in".
+            let progress = if effect.fade > 0.0 {
+                ((self.time - effect.started) / effect.fade).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            if progress <= 0.0 {
+                continue;
+            }
+            // An effect whose `tint` is all zero is not tinting at all (`GatherEffects` checks for
+            // exactly that), and a channel is full only while every effect keeps it.
+            let tinting = effect.tint != [0.0; 3];
+            for k in 0..3 {
+                filter[k] &= effect.filter[k] != 0;
+                if tinting {
+                    tint[k] *= effect.tint[k];
+                }
+                add[k] += effect.add[k] as f32;
+            }
+            alpha = alpha.max(progress);
+        }
+        (alpha > 0.0).then_some((filter, tint, add, alpha))
+    }
+
     /// What the player keeps across a level change.
     ///
     /// The engine's `jkPlayer_*` state survives the level load — inventory, the armed bin, the
@@ -5383,6 +5418,39 @@ mod tests {
         // Script text is collected, not dropped.
         rt.call("jkPrintUNIString", &[Value::Str("GUI_NOPE".into())]);
         assert_eq!(rt.prints, vec!["GUI_NOPE".to_string()]);
+    }
+
+    #[test]
+    fn colour_effects_combine_the_way_the_palette_effect_table_does() {
+        let mut rt = door_runtime();
+        assert!(rt.screen_effect().is_none(), "a fresh level has no screen effect");
+        // Force seeing: red out of the filter, no tint, no add, a one-second fade **in**.
+        let handle = rt.call(
+            "NewColorEffect",
+            &[
+                Value::Num(0.0),
+                Value::Num(1.0),
+                Value::Num(1.0),
+                Value::Num(0.0),
+                Value::Num(0.0),
+                Value::Num(0.0),
+                Value::Num(0.0),
+                Value::Num(0.0),
+                Value::Num(0.0),
+                Value::Num(1.0),
+            ],
+        );
+        rt.time = 0.5;
+        let (filter, tint, add, alpha) = rt.screen_effect().expect("an effect");
+        assert_eq!(filter, [false, true, true], "the filter channels are wrong");
+        assert_eq!(tint, [1.0; 3], "an all-zero tint must not tint");
+        assert_eq!(add, [0.0; 3], "there is no additive term");
+        assert!((alpha - 0.5).abs() < 1e-6, "the fade is not half in at half a second: {alpha}");
+        rt.time = 2.0;
+        assert_eq!(rt.screen_effect().map(|e| e.3), Some(1.0), "the fade did not finish");
+        // Freeing it removes the effect entirely.
+        rt.call("FreeColorEffect", &[handle]);
+        assert!(rt.screen_effect().is_none(), "a freed effect is still applied");
     }
 
     #[test]

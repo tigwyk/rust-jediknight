@@ -295,6 +295,45 @@ impl Canvas {
         Self { width, height, rgba: vec![0; (width * height * 4) as usize] }
     }
 
+    /// Blend a screen effect over everything already drawn.
+    ///
+    /// `stdPalEffects` applies its effect at *scan-out*: the framebuffer is unchanged and the palette
+    /// lookup is filtered, tinted and biased. `stdPalEffects_GatherEffects` is precise about what the
+    /// three channels mean, and this follows it:
+    ///
+    /// - `filter[k] == false` divides that channel by **four** (`>> 2`), it does not drop it — force
+    ///   seeing's `(0, 1, 1)` dims red and leaves green and blue, which is the blue-grey view.
+    /// - an all-zero `tint` means "no tint at all"; otherwise it multiplies.
+    /// - `add` (0..255) is added after that.
+    ///
+    /// `alpha` is how far in the effect has faded.
+    pub fn apply_screen_effect(
+        &mut self,
+        filter: [bool; 3],
+        tint: [f32; 3],
+        add: [f32; 3],
+        alpha: f32,
+    ) {
+        if alpha <= 0.0 {
+            return;
+        }
+        let alpha = alpha.clamp(0.0, 1.0);
+        let tinted = tint != [0.0; 3];
+        for pixel in self.rgba.chunks_exact_mut(4) {
+            for k in 0..3 {
+                let mut wanted = pixel[k] as f32;
+                if !filter[k] {
+                    wanted /= 4.0;
+                }
+                if tinted {
+                    wanted *= tint[k];
+                }
+                wanted = (wanted + add[k]).clamp(0.0, 255.0);
+                pixel[k] = (pixel[k] as f32 * (1.0 - alpha) + wanted * alpha).round() as u8;
+            }
+        }
+    }
+
     /// Copy an 8-bit indexed bitmap in, each pixel drawn as `scale` x `scale` block.
     pub fn blit_indexed(
         &mut self,
@@ -520,6 +559,26 @@ pub fn map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `stdPalEffects_GatherEffects`: an unset filter channel is divided by four, not dropped, and an
+    /// all-zero tint means no tint at all.
+    #[test]
+    fn a_filter_dims_a_channel_and_a_zero_tint_does_nothing() {
+        let mut canvas = Canvas::new(1, 1);
+        canvas.rgba[0..4].copy_from_slice(&[200, 100, 40, 255]);
+        // Force seeing: `newColorEffect(0, 1, 1, 0, 0, 0, 0, 0, 0, 1.0)` — red out of the filter.
+        canvas.apply_screen_effect([false, true, true], [0.0; 3], [0.0; 3], 1.0);
+        assert_eq!(&canvas.rgba[0..3], &[50, 100, 40], "red must be quartered, green and blue kept");
+        // A tint scales; a zero tint is skipped entirely, which is the case above.
+        canvas.apply_screen_effect([true; 3], [0.5, 1.0, 2.0], [0.0; 3], 1.0);
+        assert_eq!(&canvas.rgba[0..3], &[25, 100, 80], "the tint did not scale the channels");
+        // `add` biases after the tint, and an alpha of 0 is a no-op.
+        canvas.apply_screen_effect([true; 3], [1.0; 3], [10.0, 0.0, 0.0], 1.0);
+        assert_eq!(canvas.rgba[0], 35, "the additive bias did not apply");
+        let before = canvas.rgba.clone();
+        canvas.apply_screen_effect([false; 3], [2.0; 3], [99.0; 3], 0.0);
+        assert_eq!(canvas.rgba, before, "an alpha of 0 changed the pixels");
+    }
 
     /// A screen whose two rows sit in a 640x480 canvas, drawn with a 2x2 font and a
     /// two-entry grey palette.

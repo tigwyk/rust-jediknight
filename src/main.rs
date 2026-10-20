@@ -832,6 +832,11 @@ fn main() {
         ];
         let mut canvas = ui::Canvas::new(640, 480);
         hud::draw(&mut canvas, &gobs, &palette, &hud);
+        // A capture aid for the screen effect: `BK_HUD_TINT` puts a force-seeing style filter over
+        // the status bar so the pass can be seen and hashed without a window (`--hud`).
+        if std::env::var_os("BK_HUD_TINT").is_some() {
+            canvas.apply_screen_effect([false, true, true], [0.0, 1.0, 1.0], [0.0, 0.0, 0.0], 1.0);
+        }
         let image = Image::new(
             Extent3d { width: canvas.width, height: canvas.height, depth_or_array_layers: 1 },
             TextureDimension::D2,
@@ -8326,6 +8331,13 @@ fn refresh_overlay(
             ui::draw_screen(&mut overlay.canvas, &screen, &backdrop, &assets.strings, &look, lit);
         }
         None => hud::draw(&mut overlay.canvas, &gobs.0, &assets.palette, &hud),
+    }
+    // `NewColorEffect`: force seeing's blue filter, IR goggles, a blinding flash. Applied over the
+    // finished canvas because a 32-bit buffer has no palette to filter.
+    if let Some(sim) = sim.as_ref()
+        && let Some((filter, tint, add, alpha)) = sim.world.borrow().screen_effect()
+    {
+        overlay.canvas.apply_screen_effect(filter, tint, add, alpha);
     }
     if let Some(mut image) = images.get_mut(overlay.image.id()) {
         if let Some(data) = image.data.as_mut() {
