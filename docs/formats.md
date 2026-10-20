@@ -3082,6 +3082,40 @@ animation stepping a few times a second rides the rebuild path at under 2% of a 
 `SetFaceGeoMode` already had), and `SlideWall`/water **scroll** offsets are still not applied — the
 mesh bakes no scroll term, so a conveyor's texture moves in retail and not here.
 
+### A material's cel: `MaterialAnim`
+
+The cel table is per **material** too, not just per surface. `rdMaterial` carries a `curCelNum`, and
+`rdActive.c` picks the texinfo with
+
+```c
+int cel = pProcEntry->wallCel;
+if (cel == -1) cel = pMaterial->curCelNum;
+```
+
+— a surface with no cel of its own draws whatever cel its material is on. That is what
+`MaterialAnim(material, fps, mode)` animates (`sithSurface_MaterialAnim`): it builds an animation
+record flagged `SITH_SURFACE_METAL` whose step assigns `material->curCelNum = wallCel`, with the
+starting cel from `mode` (`& 4` -> 2, `& 2` -> 1, else 0), `15 fps` when the rate is not positive, and
+a wrap at the material's own `num_texinfo`.
+
+Its argument is a **material name**, not an index: the level binds `animmat` to `09sign.mat` and the
+script says `materialanim(animmat, fps, 1)`. Shipped users:
+
+```text
+09fuelstation  00_matanim.cog  09sign.mat   5 fps     (a lit sign that cycles)
+14tower        00_matanim.cog  00wcomp2.mat 5 fps
+16a/16bescape  00_matanim.cog  00Tfuel.mat  9 fps     (the 8-cel fuel tank)
+m4             00_matanim.cog  00t_Wre.mat  1 fps
+pow_mana.cog   MaterialAnim(twinkle_mat, 4, 1)        (the mana pickup's shimmer)
+```
+
+The port keeps `(material, cel, next due, fps)` per call, wraps at the material's cel count, and draws
+`(surface cel + material cel) % cels` — the surface's own cel is 0 unless `SetWallCel`/`SurfaceAnim`
+moved it, so this is the engine's `cel == -1` rule in the common case. `--cel` checks it: the verb
+resolves a name to an index, answers `-1` for a name the level does not have, steps at its rate, and
+the change reaches the vertex data. On `09fuelstation` the level's own two `00_matanim.cog` calls walk
+**2 material cels** in the first second.
+
 ### Scripted light: `SetSectorLight` and `SurfaceLightAnim`
 
 A level's light is baked into its vertices, so both of these are **extra** light on top of that baked

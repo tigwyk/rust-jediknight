@@ -86,12 +86,14 @@ flag                                                   exit  what it prints
                                                              multi-cel material; SetWallCel 1 changes the
                                                              vertex data the shader reads and bumps the
                                                              surface epoch a rebuild watches; after 1 s of
-                                                             clock the level's own `01_neonsign.cog` has
-                                                             stepped surface 765 from cel 0 to 2 (2 fps);
-                                                             `SetSectorLight 0.5` plus a `SurfaceLightAnim`
-                                                             ramp to 1 changes the vertex light, lands on 1
-                                                             and stops, and a level whose scripts ramp their
-                                                             own lights shows them move (level 2: 7)
+                                                             clock the level's own 15 `SurfaceAnim` calls
+                                                             have stepped 12 surfaces (765: cel 0 -> 2 at
+                                                             2 fps); `SetSectorLight 0.5` plus a
+                                                             `SurfaceLightAnim` ramp to 1 changes the vertex
+                                                             light, lands on 1 and stops (level 2 ramps 7 of
+                                                             its own); `MaterialAnim` resolves a material
+                                                             name, answers -1 for an unknown one, and steps
+                                                             its cel (level 9's own two calls walk 2)
 --camera                                                 0  17b_Camera.cog startup points camera slot 0 at
                                                              thing 38 (`droidcam`, `ghostCam`) at
                                                              [2.03, -2.83, 2.56], so the view is not the

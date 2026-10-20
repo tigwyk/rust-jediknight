@@ -364,6 +364,14 @@ pub struct Runtime {
     /// runtime cannot read a `.mat`, so the loader hands this over; absent means 1, i.e. nothing to
     /// animate.
     pub surface_cels: Vec<u32>,
+    /// The same table by **material**: `MaterialAnim(material, fps, mode)` wraps at the material's own
+    /// cel count, and the level's material names are what its argument carries (`09sign.mat`).
+    pub material_cels: BTreeMap<i32, u32>,
+    pub material_names: BTreeMap<String, i32>,
+    /// The material animations a script asked for, as `(material, cel, next due, fps)`, and what each
+    /// material currently draws — `rdMaterial.curCelNum`, which a surface with no cel of its own uses.
+    pub material_anims: Vec<(i32, f32, f32, f32)>,
+    pub material_cel: BTreeMap<i32, f32>,
     /// `sithWeapon_secMountWait`: when the equipped weapon finishes mounting, as an absolute clock time
     /// (the engine stores `wait + gameTime` in a global, not per thing).
     pub mount_wait_until: f32,
@@ -864,6 +872,10 @@ impl Runtime {
             geomode_epoch: 0,
             surface_epoch: 0,
             surface_cels: Vec::new(),
+            material_cels: BTreeMap::new(),
+            material_names: BTreeMap::new(),
+            material_anims: Vec::new(),
+            material_cel: BTreeMap::new(),
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
             template_weapon: level
@@ -968,6 +980,38 @@ impl Runtime {
         }
     }
 
+    /// `sithSurface_MaterialAnim`: a material's own cel walks at `fps` and every surface of that
+    /// material that has no cel of its own draws it (`rdActive`'s `cel == -1` rule). The engine keeps
+    /// the record on the same animation list as the surface cels and dispatches by flag
+    /// (`SITH_SURFACE_METAL` -> `material->curCelNum`), which is what this walk is.
+    fn advance_material_cels(&mut self) {
+        let now = self.time;
+        let mut changed = false;
+        for (material, cel, next, fps) in self.material_anims.iter_mut() {
+            let cels = self.material_cels.get(material).copied().unwrap_or(1);
+            if cels < 2 {
+                continue;
+            }
+            let step = 1.0 / fps.max(0.001);
+            if *next <= 0.0 {
+                *next = now + step;
+                continue;
+            }
+            if now < *next {
+                continue;
+            }
+            let elapsed = now - *next;
+            *cel += (elapsed / step).floor() + 1.0;
+            *next = step + now - elapsed % step;
+            *cel %= cels as f32;
+            self.material_cel.insert(*material, *cel);
+            changed = true;
+        }
+        if changed {
+            self.surface_epoch += 1;
+        }
+    }
+
     /// `SetPOVShake`'s offsets decay toward zero at their own rate, the way `sithCamera_Update`
     /// subtracts `delta * dt` from every component and clamps at 0 — so a shot's recoil is a kick
     /// that recovers rather than an offset that sticks.
@@ -1039,6 +1083,7 @@ impl Runtime {
         self.time += dt;
         self.decay_damage(dt);
         self.advance_surface_cels();
+        self.advance_material_cels();
         self.advance_lights(dt);
         self.decay_shake(dt);
         // `timer=`/`SetLifeLeft` expiry: `sithThing_Update` counts `msecLifeLeft` down and calls
@@ -1352,6 +1397,7 @@ impl Runtime {
                 | "getprimaryfocus"
                 | "getsecondaryfocus"
                 | "setpovshake"
+                | "materialanim"
                 | "sectorthrust"
                 | "destroything"
                 | "settimerex"
@@ -2944,6 +2990,38 @@ impl Runtime {
             "getgoalframe" => Value::Num(
                 self.thing(idx(0)).and_then(|t| t.target).map_or(0.0, |(frame, _)| frame as f64),
             ),
+            // `MaterialAnim(material, fps, mode)`: `sithCogFunction_MaterialAnim` builds an animation
+            // record whose discrete arm sets `material->curCelNum`, so every surface of that material
+            // without a cel of its own animates. The starting cel comes from `mode` (`& 4` -> 2,
+            // `& 2` -> 1, else 0) and a non-positive rate is the engine's 15 fps.
+            "materialanim" => {
+                let fps = if num(1) > 0.0 { num(1) as f32 } else { 15.0 };
+                let mode = idx(2) as i32;
+                // The argument is a material *name* (`materialanim(animmat, fps, 1)` with
+                // `animmat` bound to `09sign.mat` by the level).
+                let name = match args.first() {
+                    Some(Value::Str(s)) => s.trim().to_ascii_lowercase(),
+                    Some(v) => format!("{}", v.num() as i64),
+                    None => return Value::Num(-1.0),
+                };
+                let Some(&material) = self.material_names.get(&name) else {
+                    return Value::Num(-1.0);
+                };
+                let cel = if mode & 4 != 0 {
+                    2.0
+                } else if mode & 2 != 0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                let next = self.time + 1.0 / fps;
+                self.material_anims.push((material, cel, next, fps));
+                self.material_cel.insert(material, cel);
+                self.surface_epoch += 1;
+                // The engine answers the animation record's index; the material's own index is the
+                // handle this port has for the same thing.
+                Value::Num(material as f64)
+            }
             // ---- the camera slots and POV shake ----
             //
             // `SetCameraFocus(slot, thing)`: `sithCogFunction_SetCameraFocus` bounds the slot to
@@ -3655,6 +3733,10 @@ mod tests {
             geomode_epoch: 0,
             surface_epoch: 0,
             surface_cels: Vec::new(),
+            material_cels: BTreeMap::new(),
+            material_names: BTreeMap::new(),
+            material_anims: Vec::new(),
+            material_cel: BTreeMap::new(),
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
             template_weapon: BTreeMap::new(),

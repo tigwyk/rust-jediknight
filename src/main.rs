@@ -4884,6 +4884,11 @@ fn main() {
         };
         let mut look = SurfaceLook::default();
         look.cels = vec![0.0f32; level.surfaces.len()];
+        look.counts = level
+            .surfaces
+            .iter()
+            .map(|s| world.material_cels.get(&s.material).copied().unwrap_or(1) as f32)
+            .collect();
         look.lights = vec![0.0f32; level.surfaces.len()];
         look.sectors = vec![0.0f32; level.sectors.len()];
         let first = hash(&look);
@@ -4964,7 +4969,17 @@ fn main() {
                 .iter()
                 .map(|s| world.material_cels.get(&s.material).copied().unwrap_or(1))
                 .collect();
+            // What the loader hands over, or the animation has no count to wrap at.
+            state.borrow_mut().material_cels = world.material_cels.clone().into_iter().collect();
+            state.borrow_mut().material_names = level
+                .materials
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (name.trim().to_ascii_lowercase(), index as i32))
+                .collect();
             let mut started = 0usize;
+            let mut asked = 0usize;
+            let mut asked_materials = 0usize;
             for inst in &level.cogs {
                 let Some(data) = gobs.read(&inst.script) else { continue };
                 let Ok(script) = cog::parse(&String::from_utf8_lossy(&data)) else { continue };
@@ -4974,6 +4989,23 @@ fn main() {
                     let _ = vm.run_label(&script, "startup");
                     started += 1;
                 }
+                // Only a `startup` that actually called the verb earns the assertion below: many
+                // levels name `SurfaceAnim` in a `used:`/`touched:` label that never runs here. The
+                // trace keys are the spelling in the script (`SurfaceAnim`), so match case-blind.
+                asked += vm
+                    .trace
+                    .calls
+                    .iter()
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("surfaceanim"))
+                    .map(|(_, count)| *count)
+                    .sum::<usize>();
+                asked_materials += vm
+                    .trace
+                    .calls
+                    .iter()
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("materialanim"))
+                    .map(|(_, count)| *count)
+                    .sum::<usize>();
             }
             let before: Vec<f32> = state.borrow().surfaces.iter().map(|s| s.cel).collect();
             let light_before: Vec<f32> = state.borrow().surfaces.iter().map(|s| s.light).collect();
@@ -4990,6 +5022,7 @@ fn main() {
                 .zip(&sector_before)
                 .filter(|(s, before)| (s.light - *before).abs() > 1e-4)
                 .count();
+            let moved_materials = state.borrow().material_cel.values().filter(|cel| **cel != 0.0).count();
             let example = before
                 .iter()
                 .zip(&after)
@@ -4997,9 +5030,16 @@ fn main() {
                 .map(|i| format!("surface {i}: {} -> {}", before[i], after[i]))
                 .unwrap_or_else(|| "none".to_string());
             println!(
-                "cel: {started} startup script(s) ran; after 1 s, {moved} surface(s) stepped ({example}), {lit} surface light(s) and {relit} sector light(s) moved"
+                "cel: {started} startup script(s) ran, {asked} `SurfaceAnim` and {asked_materials} `MaterialAnim` call(s) among them; after 1 s, {moved} surface(s) stepped ({example}), {lit} surface light(s) and {relit} sector light(s) moved, and {moved_materials} material cel(s) walked"
             );
-            assert!(moved > 0, "a shipped SurfaceAnim script never moved a cel");
+            assert!(
+                asked == 0 || moved > 0,
+                "a startup script called SurfaceAnim but no cel moved"
+            );
+            assert!(
+                asked_materials == 0 || moved_materials > 0,
+                "a startup script called MaterialAnim but no material cel moved"
+            );
         } else {
             println!("cel: no placed script calls SurfaceAnim here; the animation path is untested on this level");
         }
@@ -5045,6 +5085,48 @@ fn main() {
         println!(
             "cel: SetSectorLight 0.5 + SurfaceLightAnim(0 -> 1) changed the vertex light ({first:016x} -> {lit:016x}), ramp landed at {surface_light} and stopped"
         );
+
+        // `MaterialAnim(material, fps, mode)`: a *material* walces its cels, and every surface of that
+        // material with no cel of its own draws them. `00_matanim.cog` is the shipped case — level 9
+        // runs `materialanim(animmat, 5, 1)` on `09sign.mat`, level 16a on `00Tfuel.mat`.
+        {
+            let name = level.materials.get(material as usize).cloned().unwrap_or_default();
+            let mut rt = world_state.borrow_mut();
+            rt.material_cels = world.material_cels.clone().into_iter().collect();
+            rt.material_names = level
+                .materials
+                .iter()
+                .enumerate()
+                .map(|(index, m)| (m.trim().to_ascii_lowercase(), index as i32))
+                .collect();
+            let answer = rt.call(
+                "MaterialAnim",
+                &[
+                    cog::Value::Str(name.clone()),
+                    cog::Value::Num(4.0),
+                    cog::Value::Num(1.0),
+                ],
+            );
+            assert_eq!(answer, cog::Value::Num(material as f64), "the verb did not resolve the material");
+            let start = rt.material_cel.get(&material).copied().unwrap_or(-1.0);
+            // 4 fps: a cel every 250 ms, so 300 ms is one step and takes cel 0 to 1 (of the material's
+            // own count) — the shipped `09sign.mat` has 2.
+            rt.step(0.3);
+            let stepped = rt.material_cel.get(&material).copied().unwrap_or(-1.0);
+            assert_ne!(stepped, start, "MaterialAnim did not walk the material cel");
+            look.materials.insert(material, stepped);
+            let animated = hash(&look);
+            assert_ne!(animated, lit, "a material cel change did not reach the vertex data");
+            // A name the level does not have is refused, like the engine's "Bad material index".
+            let missing = rt.call(
+                "MaterialAnim",
+                &[cog::Value::Str("no_such.mat".to_string()), cog::Value::Num(4.0)],
+            );
+            assert_eq!(missing, cog::Value::Num(-1.0));
+            println!(
+                "cel: MaterialAnim on `{name}` answered material {material}, stepped its cel {start} -> {stepped} at 4 fps, and that changed the vertex data ({lit:016x} -> {animated:016x}); an unknown name answers -1"
+            );
+        }
         println!("--- cel check passed ---");
         return;
     }
@@ -8975,8 +9057,12 @@ const SURFFLAG_CEILING_SKY: u32 = 0x400;
 #[derive(Default)]
 struct SurfaceLook {
     cels: Vec<f32>,
+    /// Each surface's material cel count, so `(own cel + material cel)` wraps where the shader expects.
+    counts: Vec<f32>,
     lights: Vec<f32>,
     sectors: Vec<f32>,
+    /// `MaterialAnim`'s per-material cel (`rdMaterial.curCelNum`).
+    materials: HashMap<i32, f32>,
 }
 
 impl SurfaceLook {
@@ -8984,13 +9070,26 @@ impl SurfaceLook {
     fn of(rt: &runtime::Runtime) -> Self {
         SurfaceLook {
             cels: rt.surfaces.iter().map(|s| s.cel).collect(),
+            counts: rt.surface_cels.iter().map(|&c| c as f32).collect(),
             lights: rt.surfaces.iter().map(|s| s.light).collect(),
             sectors: rt.sectors.iter().map(|s| s.light).collect(),
+            materials: rt.material_cel.iter().map(|(&k, &v)| (k, v)).collect(),
         }
     }
 
-    fn cel(&self, surface: usize) -> f32 {
-        self.cels.get(surface).copied().unwrap_or(0.0).max(0.0)
+    /// The cel a surface draws: its own, which is 0 unless a script moved it, plus the animated cel of
+    /// its material — `rdActive` uses the material's (`cel == -1`) when the surface has none of its
+    /// own, and every shipped surface starts there.
+    fn cel(&self, surface: usize, material: i32) -> f32 {
+        let own = self.cels.get(surface).copied().unwrap_or(0.0).max(0.0);
+        let material = self.materials.get(&material).copied().unwrap_or(0.0);
+        let total = own + material;
+        let count = self.counts.get(surface).copied().unwrap_or(1.0).max(1.0);
+        if count > 1.0 {
+            total % count
+        } else {
+            0.0
+        }
     }
 
     /// The factor the level's baked vertex light is multiplied by: the engine adds a surface's and a
@@ -10325,7 +10424,7 @@ fn build_world(
         }
         // A surface's frame comes from the script (`SetWallCel`, `SurfaceAnim`), and every surface
         // starts at cel 0 — the `.jkl` row carries no cel of its own.
-        let cel = look.cel(index);
+        let cel = look.cel(index, surface.material);
         let tex_size = images
             .get(&surface.material)
             .map(|img| {
@@ -12809,6 +12908,18 @@ fn setup(
         .iter()
         .map(|s| world.material_cels.get(&s.material).copied().unwrap_or(1))
         .collect();
+    // `MaterialAnim` names its material (`09sign.mat`) and wraps at that material's cel count, so the
+    // runtime needs the names and the per-material table too.
+    {
+        let mut rt = sim.world.borrow_mut();
+        rt.material_cels = world.material_cels.clone().into_iter().collect();
+        rt.material_names = level
+            .materials
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.trim().to_ascii_lowercase(), index as i32))
+            .collect();
+    }
     for inst in &level.cogs {
         let Some(script) = world.cogs.get(&inst.script) else { continue };
         let mut vm = cog::Vm::with_world(sim.world.clone());
