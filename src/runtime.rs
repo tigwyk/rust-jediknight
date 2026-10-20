@@ -1488,6 +1488,73 @@ impl Runtime {
     }
 
 
+    /// Which cog instances a level's own `cogs` section links to its things, surfaces and sectors.
+    ///
+    /// A level's `cogs` rows carry one value per non-local symbol, and the script's `symbols` section
+    /// says what kind each one is: `surface 12`, `thing 5`, `sector 3` are indices into the level. The
+    /// engine calls this `sithCog_LinkCogToSurface` / `_ToThing` / `_ToSector`; the port had the three
+    /// tables declared, initialised empty and read, with nothing ever writing to them, so no message
+    /// from the world reached a script. Fills them once, in table order.
+    ///
+    /// `ponytail:` the link id and mask are carried but not filtered on, which is the same simplification
+    /// `sector_messages` documents — every link to that target hears the message.
+    pub fn wire_links(
+        &mut self,
+        cogs: &[crate::jkl::CogInstance],
+        scripts: &std::collections::HashMap<String, crate::cog::Cog>,
+    ) {
+        if !(self.thing_links.is_empty() && self.surface_links.is_empty() && self.sector_links.is_empty()) {
+            return;
+        }
+        for (index, inst) in cogs.iter().enumerate() {
+            let Some(script) = scripts.get(&inst.script) else { continue };
+            let mut values = inst.values.iter();
+            for symbol in &script.symbols {
+                if symbol.local || symbol.kind == crate::cog::SymKind::Message {
+                    continue;
+                }
+                let Some(raw) = values.next() else { break };
+                let Ok(target) = raw.trim().parse::<usize>() else { continue };
+                let link = symbol.linkid.unwrap_or(0) as i32;
+                match symbol.kind {
+                    crate::cog::SymKind::Thing => self.thing_links.push((index, link, target)),
+                    crate::cog::SymKind::Surface => self.surface_links.push((index, link, target)),
+                    crate::cog::SymKind::Sector => self.sector_links.push((index, link, target)),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// The player's use action on a *thing*: the nearest thing a script links, in front of the eye.
+    ///
+    /// The engine's use is a look, not a touch (`sithPlayer`'s `use`), so the same cone the surface path
+    /// uses applies. It answers with the thing it used, if any.
+    pub fn use_thing(&mut self, eye: [f32; 3], facing: [f32; 2], reach: f32) -> Option<usize> {
+        let mut best: Option<(usize, f32)> = None;
+        for (_, _, target) in &self.thing_links {
+            let Some(thing) = self.things.get(*target) else { continue };
+            let (dx, dy) = (thing.pos[0] - eye[0], thing.pos[1] - eye[1]);
+            let flat = (dx * dx + dy * dy).sqrt();
+            if flat > reach {
+                continue;
+            }
+            if flat > 0.01 && (dx / flat) * facing[0] + (dy / flat) * facing[1] < 0.3 {
+                continue;
+            }
+            if best.is_none_or(|(_, d)| flat < d) {
+                best = Some((*target, flat));
+            }
+        }
+        let (target, _) = best?;
+        for (instance, _, linked) in &self.thing_links {
+            if *linked == target {
+                self.pending_messages.push((*instance, "used"));
+            }
+        }
+        Some(target)
+    }
+
     /// The portal that best shortcuts the way from `from` to `target`, by the sum of the two legs.
     ///
     /// `ponytail:` greedy, not a search: it picks the doorway that looks closest on both legs and

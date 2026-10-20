@@ -9779,11 +9779,21 @@ fn use_key(
     }
     let eye = [player.pos.x, player.pos.y, player.pos.z];
     let facing = [player.yaw.cos(), player.yaw.sin()];
-    let hit = sim.world.borrow_mut().activate_near(eye, facing, 3.0);
+    // Things first: a door's script is linked with `thing` symbols, and using it is what sends `used`
+    // (`sithPlayer`'s use action). Surfaces are the other kind of link, and a level may have both.
+    let mut rt = sim.world.borrow_mut();
+    let used_thing = rt.use_thing(eye, facing, 3.0);
+    let used_surface = if used_thing.is_none() {
+        rt.activate_near(eye, facing, 3.0)
+    } else {
+        None
+    };
+    drop(rt);
     *said += 1;
-    match hit {
-        Some(surface) => println!("use: activated surface {surface}"),
-        None => println!("use: nothing linked within reach"),
+    match (used_thing, used_surface) {
+        (Some(thing), _) => println!("use: activated thing {thing}"),
+        (None, Some(surface)) => println!("use: activated surface {surface}"),
+        (None, None) => println!("use: nothing linked within reach"),
     }
 }
 
@@ -11687,6 +11697,20 @@ fn setup(
     // on the first frame, when the resource exists.
     // The player's motion comes from the level's own `walkplayer` template, which is why
     // the numbers differ per level: `-walk` sweeps use the same rules.
+    // The link layer: which script hears a thing's `used`, a surface's `activate`, a sector's
+    // `entered`. It is what makes a level's own doors and switches work, and it is built from the
+    // level's `cogs` section plus each script's `symbols`.
+    {
+        let handle = runtime::Runtime::handle(&world.level);
+        let mut rt = handle.borrow_mut();
+        rt.wire_links(&world.level.cogs, &world.cogs);
+        println!(
+            "links: {} thing, {} surface, {} sector link(s) wired from the level's scripts",
+            rt.thing_links.len(),
+            rt.surface_links.len(),
+            rt.sector_links.len()
+        );
+    }
     let rules = Rules::from_level(level);
     println!("rules: {}", rules.describe());
     commands.insert_resource(Player {
