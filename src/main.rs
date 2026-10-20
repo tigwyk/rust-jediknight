@@ -156,6 +156,7 @@ const GATES: &[&str] = &[
     "--transition",
     "--weapon +elaser",
     "--audio-state",
+    "--sound",
     "--episodes",
     "--fire +bryarbolt",
 ];
@@ -2542,6 +2543,112 @@ fn main() {
         assert!((behind - near * 0.7).abs() < 1e-5, "the rear pan is not 0.3");
         // And the shipped data covers a real range of radii, not one constant.
         assert!(widest.3 > 1.0, "no .snd entry has a fade radius above one unit");
+        // `ChangeSoundVol`/`ChangeSoundPitch` name a **channel** the `PlaySound*` verbs answered, and
+        // `SectorSound` replaces a sector's ambient. `sithCogFunctionSound_ChangeVolume` clamps to
+        // [0, 1.5] and ignores a non-positive fade; `ChangePitch` needs a positive pitch *and* time.
+        let sound_level = gobs
+            .read(&level_name)
+            .or_else(|| start_level(&gobs).and_then(|n| gobs.read(&n)));
+        if let Some(raw) = sound_level {
+            let level = jkl::parse(&String::from_utf8_lossy(&raw));
+            let state = runtime::Runtime::handle(&level);
+            let mut rt = state.borrow_mut();
+            let before = rt.sound_volume.len();
+            let channel = rt.call(
+                "PlaySoundLocal",
+                &[cog::Value::Str("test.wav".to_string()), cog::Value::Num(0.5)],
+            );
+            let channel = match channel {
+                cog::Value::Num(n) if n >= 0.0 => n as usize,
+                other => panic!("PlaySoundLocal answered {other:?}, not a channel"),
+            };
+            println!(
+                "sound: PlaySoundLocal answered channel {channel} (there were {before}), starting at volume {:.2}",
+                rt.sound_volume[channel]
+            );
+            assert_eq!(rt.sound_volume[channel], 0.5, "the channel did not take the play volume");
+            // A fade: half a second to 0.0 from 0.5, so a quarter second lands at 0.25.
+            rt.call(
+                "ChangeSoundVol",
+                &[
+                    cog::Value::Num(channel as f64),
+                    cog::Value::Num(0.0),
+                    cog::Value::Num(0.5),
+                ],
+            );
+            rt.step(0.25);
+            let mid = rt.sound_volume[channel];
+            rt.step(0.25);
+            let end = rt.sound_volume[channel];
+            println!(
+                "sound: ChangeSoundVol(channel {channel}, 0.0, 0.5 s) fades 0.50 -> {mid:.2} after a quarter second and {end:.2} after half, then stops ({})",
+                rt.sound_fade.is_empty()
+            );
+            assert!((mid - 0.25).abs() < 0.05, "the fade did not halve in half the time: {mid}");
+            assert_eq!(end, 0.0, "the fade did not land on its target");
+            assert!(rt.sound_fade.is_empty(), "the fade did not clear itself");
+            // The clamp and the engine's guard: `ChangeVolume` acts only for a positive fade, then
+            // clamps the target to [0, 1.5].
+            rt.call(
+                "ChangeSoundVol",
+                &[cog::Value::Num(channel as f64), cog::Value::Num(9.0), cog::Value::Num(1.0)],
+            );
+            rt.step(1.0);
+            println!(
+                "sound: ChangeSoundVol(9.0 over 1 s) lands on {:.1}, the engine's 1.5 ceiling",
+                rt.sound_volume[channel]
+            );
+            assert_eq!(rt.sound_volume[channel], 1.5, "the volume was not clamped to 1.5");
+            rt.call(
+                "ChangeSoundVol",
+                &[cog::Value::Num(channel as f64), cog::Value::Num(0.2), cog::Value::Num(-1.0)],
+            );
+            assert_eq!(rt.sound_volume[channel], 1.5, "a negative fade changed the volume anyway");
+            rt.call(
+                "ChangeSoundVol",
+                &[cog::Value::Num(channel as f64), cog::Value::Num(0.2), cog::Value::Num(0.0)],
+            );
+            assert_eq!(rt.sound_volume[channel], 1.5, "a zero fade changed the volume anyway");
+            // `ChangeSoundPitch` needs a positive pitch and a positive time.
+            for (pitch, time) in [(0.0, 1.0), (0.5, 0.0)] {
+                rt.call(
+                    "ChangeSoundPitch",
+                    &[
+                        cog::Value::Num(channel as f64),
+                        cog::Value::Num(pitch),
+                        cog::Value::Num(time),
+                    ],
+                );
+                assert_eq!(rt.sound_pitch[channel], 1.0, "an impossible pitch ramp was accepted");
+            }
+            rt.call(
+                "ChangeSoundPitch",
+                &[
+                    cog::Value::Num(channel as f64),
+                    cog::Value::Num(0.5),
+                    cog::Value::Num(1.0),
+                ],
+            );
+            println!(
+                "sound: ChangeSoundPitch(channel {channel}, 0.5, 1 s) sets the rate to {:.1}; a zero pitch or zero time is refused",
+                rt.sound_pitch[channel]
+            );
+            assert_eq!(rt.sound_pitch[channel], 0.5);
+            // `SectorSound` writes the sector's ambient, which the ambience system prefers.
+            rt.call(
+                "SectorSound",
+                &[
+                    cog::Value::Num(0.0),
+                    cog::Value::Str("wind".to_string()),
+                    cog::Value::Num(0.3),
+                ],
+            );
+            let (name, volume) = rt.sector_ambient.get(&0).cloned().expect("a sector ambient");
+            println!(
+                "sound: SectorSound(sector 0) sets the ambient to `{name}` at {volume:.1}, which overrides the level's own"
+            );
+            assert_eq!((name.as_str(), volume), ("wind", 0.3));
+        }
         println!("--- sound check passed ---");
         return;
     }
@@ -11782,11 +11889,19 @@ fn play_menu_wav(name: &str, sim: &Option<Res<Sim>>, bank: &Option<Res<SoundBank
     if !bank.clips.contains_key(&name.to_ascii_lowercase()) {
         return;
     }
-    sim.world.borrow_mut().sounds.push(runtime::SoundRequest {
-        name: name.to_ascii_lowercase(),
-        volume: 1.0,
-        pos: None,
-    });
+    {
+        let mut rt = sim.world.borrow_mut();
+        let channel = rt.sound_volume.len();
+        rt.sound_volume.push(1.0);
+        rt.sound_pitch.push(1.0);
+        rt.sounds.push(runtime::SoundRequest {
+            name: name.to_ascii_lowercase(),
+            volume: 1.0,
+            pos: None,
+            channel,
+            pitch: 1.0,
+        });
+    }
 }
 
 
@@ -13232,7 +13347,14 @@ fn play_requested_sounds(
     bank: Option<Res<SoundBank>>,
 ) {
     let (Some(sim), Some(player), Some(bank)) = (sim, player, bank) else { return };
-    let requests = std::mem::take(&mut sim.world.borrow_mut().sounds);
+    let (requests, channel_volume, channel_pitch_of) = {
+        let mut rt = sim.world.borrow_mut();
+        (
+            std::mem::take(&mut rt.sounds),
+            rt.sound_volume.clone(),
+            rt.sound_pitch.clone(),
+        )
+    };
     if requests.is_empty() {
         return;
     }
@@ -13258,11 +13380,25 @@ fn play_requested_sounds(
         if gain <= 0.002 {
             continue;
         }
+        // `ChangeSoundVol`/`ChangeSoundPitch` act on a *channel* of the mixer. A one-shot mixer cannot
+        // ramp a sound that is already playing, but a request that arrives after the change reads the
+        // channel's own volume and rate — which is what `sithSoundMixer_FadeVolume`/`SetPitch` leave
+        // behind for the next play.
+        let (channel_volume, channel_pitch) = channel_volume
+            .get(request.channel)
+            .copied()
+            .map(|v| (v.max(0.0), 1.0))
+            .unwrap_or((1.0, 1.0));
+        let channel_pitch = channel_pitch_of
+            .get(request.channel)
+            .copied()
+            .unwrap_or(channel_pitch);
         commands.spawn((
             AudioPlayer::new(clip.clone()),
             PlaybackSettings {
                 mode: PlaybackMode::Despawn,
-                volume: Volume::Linear(gain * sound_gain()),
+                volume: Volume::Linear(gain * channel_volume * sound_gain()),
+                speed: channel_pitch.clamp(0.01, 4.0),
                 ..default()
             },
         ));
@@ -13389,11 +13525,17 @@ fn ai_shots(
 fn ambient_follows_view(
     mut commands: Commands,
     world: Option<Res<World>>,
+    sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
     mut ambience: ResMut<Ambience>,
 ) {
     let (Some(world), Some(player)) = (world, player) else { return };
-    let wanted = world.level.sectors.get(player.sector).and_then(|s| s.sound.clone());
+    // `SectorSound` may have replaced the sector's ambient: the script's override wins over the
+    // level's own (`sithSoundMixer_SetSectorAmbientSound` writes the sector itself).
+    let wanted = sim
+        .map(|sim| sim.world.borrow().sector_ambient.get(&(player.sector as i32)).cloned())
+        .unwrap_or_default()
+        .or_else(|| world.level.sectors.get(player.sector).and_then(|s| s.sound.clone()));
     if let Some((name, entity)) = ambience.playing.clone() {
         if wanted.as_ref().is_some_and(|(wanted, _)| *wanted == name) {
             return;

@@ -35,7 +35,7 @@ because `--live-check` needs a display that is actually presenting: with no focu
 sits in presentation after its setup output and never reaches the hundredth frame its verdict is
 gated on, so the sweep would hang instead of finishing. Everything else is headless and unaffected.
 
-`FAILURES: 0 / 41` (`--gates`: `gates: 0 of 41 failed`, or `0 of 40` with `BK_SKIP_WINDOW=1`).
+`FAILURES: 0 / 42` (`--gates`: `gates: 0 of 42 failed`, or `0 of 41` with `BK_SKIP_WINDOW=1`).
 
 flag                                                   exit  what it prints
 -------------------------------------------------------------------------------------------------
@@ -119,6 +119,17 @@ flag                                                   exit  what it prints
                                                              the surface is carried 0.0167 units a frame at
                                                              60 fps, and SlideCeilingSky(0.5, 0) moves every
                                                              ceiling-sky face by 1 texel a second
+--sound                                                   0  the `.snd` attenuation curve, and the
+                                                             channel verbs: `PlaySoundLocal`
+                                                             answers channel 0 at volume 0.50,
+                                                             `ChangeSoundVol(0.0, 0.5 s)` fades
+                                                             0.50 -> 0.25 -> 0.00 and clears, 9.0
+                                                             over a second lands on the 1.5 ceiling,
+                                                             a zero or negative fade is a no-op,
+                                                             `ChangeSoundPitch(0.5, 1 s)` sets the rate
+                                                             and refuses an impossible ramp, and
+                                                             `SectorSound(0, wind, 0.3)` overrides the
+                                                             level's ambient
 --things                                                  0  `TeleportThing` copies the whole pose
                                                              (position *and* angles, [7,8,9] at
                                                              10/20/30 deg); `CreateThingAtPos`

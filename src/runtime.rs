@@ -42,6 +42,11 @@ pub struct SoundRequest {
     pub volume: f32,
     /// World position the sound comes from, when the verb named one.
     pub pos: Option<[f32; 3]>,
+    /// The channel `PlaySound*` answered with: what `ChangeSoundVol`/`ChangeSoundPitch` name
+    /// (`sithSoundMixer_GetChannelHandle`).
+    pub channel: usize,
+    /// `ChangeSoundPitch`'s multiplier for this channel (`sithSoundMixer_SetPitch`).
+    pub pitch: f32,
 }
 
 /// `RotatePivot(thing, frame, seconds)`: spin a thing about the pivot its own `frame=` entry names.
@@ -414,6 +419,15 @@ pub struct Runtime {
     pub material_cel: BTreeMap<i32, f32>,
     /// `SetRespawnMask`: the player's respawn mask, i.e. which items a dying player keeps.
     pub player_respawn_mask: u32,
+    /// Per sound channel, the volume `ChangeSoundVol` sets, and its in-flight fade
+    /// `(target, rate)`. The mixer reads the volume; the fade advances in `step`.
+    pub sound_volume: Vec<f32>,
+    pub sound_pitch: Vec<f32>,
+    pub sound_fade: BTreeMap<usize, (f32, f32)>,
+    /// `SectorSound(sector, sound, volume)`: a sector's ambient sound as a script overrode it,
+    /// which the ambience system prefers over the level's own (`sithSoundMixer_SetSectorAmbientSound`
+    /// writes `sector->hAmbientSound`/`ambientSoundVolume`).
+    pub sector_ambient: BTreeMap<i32, (String, f32)>,
     /// Per thing, the amount the last `damage_typed` applied, so a `damaged` handler that answers
     /// with a smaller number can be honoured after the fact (`amend_damage`).
     pub damage_applied: BTreeMap<usize, f32>,
@@ -944,6 +958,10 @@ impl Runtime {
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            sound_volume: Vec::new(),
+            sound_pitch: Vec::new(),
+            sound_fade: BTreeMap::new(),
+            sector_ambient: BTreeMap::new(),
             player_respawn_mask: 0,
             damage_applied: BTreeMap::new(),
             scroll_bucket: 0,
@@ -1207,6 +1225,26 @@ impl Runtime {
         }
     }
 
+    /// Advance `ChangeSoundVol`'s fades: the mixer reads `sound_volume`, so the ramp lives here.
+    fn advance_sound_fades(&mut self, dt: f32) {
+        let done: Vec<usize> = self
+            .sound_fade
+            .iter()
+            .filter_map(|(channel, (target, rate))| {
+                let volume = self.sound_volume.get_mut(*channel)?;
+                *volume += rate * dt;
+                let arrived = if *rate > 0.0 { *volume >= *target } else { *volume <= *target };
+                if arrived {
+                    *volume = *target;
+                }
+                arrived.then_some(*channel)
+            })
+            .collect();
+        for channel in done {
+            self.sound_fade.remove(&channel);
+        }
+    }
+
     /// `SetPOVShake`'s offsets decay toward zero at their own rate, the way `sithCamera_Update`
     /// subtracts `delta * dt` from every component and clamps at 0 — so a shot's recoil is a kick
     /// that recovers rather than an offset that sticks.
@@ -1283,6 +1321,7 @@ impl Runtime {
         self.advance_lights(dt);
         self.decay_shake(dt);
         self.advance_thing_lights(dt);
+        self.advance_sound_fades(dt);
         // `timer=`/`SetLifeLeft` expiry: `sithThing_Update` counts `msecLifeLeft` down and calls
         // `sithThing_DestroyDyingThing` when it reaches zero. Without this an impact spark lives
         // forever, and a corpse never goes away.
@@ -1685,6 +1724,9 @@ impl Runtime {
                 | "syncsurface"
                 | "syncthingscale"
                 | "syncthinglook"
+                | "changesoundvol"
+                | "changesoundpitch"
+                | "sectorsound"
                 | "thinglight"
                 | "setthinglight"
                 | "thinglightanim"
@@ -1712,8 +1754,6 @@ impl Runtime {
                 | "getphysicsflags"
                 | "setphysicsflags"
                 | "clearphysicsflags"
-                | "detachthing"
-                | "rotatepivot"
                 | "jkgetflags"
                 | "jksetflags"
                 | "jksetpersuasioninfo"
@@ -3835,7 +3875,6 @@ impl Runtime {
                 }
                 Value::Nil
             }
-            "detachthing" => Value::Nil,
 
             "jkgetflags" => Value::Num(self.thing(idx(0)).map(|t| t.jk_flags as f64).unwrap_or(0.0)),
             "jksetflags" => {
@@ -4118,9 +4157,62 @@ impl Runtime {
                     None
                 };
                 if !name.is_empty() {
-                    self.sounds.push(SoundRequest { name, volume, pos });
+                    // `PlaySound*` answers the **channel**, which is what `ChangeSoundVol` and
+                    // `ChangeSoundPitch` take — `sithSoundMixer_PlaySound` returns one and the shipped
+                    // scripts store it (`02_crowstart.cog`).
+                    let channel = self.sound_volume.len();
+                    self.sound_volume.push(volume);
+                    self.sound_pitch.push(1.0);
+                    self.sounds.push(SoundRequest { name, volume, pos, channel, pitch: 1.0 });
+                    Value::Num(channel as f64)
+                } else {
+                    Value::Num(-1.0)
                 }
-                Value::Num(0.0)
+            }
+            // `ChangeSoundVol(channel, volume, fade)`: `sithCogFunctionSound_ChangeVolume` acts only
+            // when the fade is positive, clamps to [0, 1.5], and ramps the channel's volume — every
+            // shipped call passes a real time (`1.0`, `2.5`, `8.7`), so a zero fade really is a no-op.
+            "changesoundvol" => {
+                let channel = usize::try_from(idx(0)).ok();
+                let volume = (num(1) as f32).clamp(0.0, 1.5);
+                let fade = num(2) as f32;
+                if let Some(channel) = channel
+                    && channel < self.sound_volume.len()
+                    && fade > 0.0
+                {
+                    let rate = (volume - self.sound_volume[channel]) / fade;
+                    self.sound_fade.insert(channel, (volume, rate));
+                }
+                Value::Nil
+            }
+            // `ChangeSoundPitch(channel, pitch, fade)`: `sithCogFunctionSound_ChangePitch` needs both a
+            // positive pitch and a positive time, then ramps the channel's playback rate.
+            "changesoundpitch" => {
+                let channel = usize::try_from(idx(0)).ok();
+                let pitch = num(1) as f32;
+                let fade = num(2) as f32;
+                if let Some(channel) = channel
+                    && channel < self.sound_pitch.len()
+                    && pitch > 0.0
+                    && fade > 0.0
+                {
+                    self.sound_pitch[channel] = pitch;
+                }
+                Value::Nil
+            }
+            // `SectorSound(sector, sound, volume)`: `sithSoundMixer_SetSectorAmbientSound` replaces the
+            // sector's ambient sound and its volume — level 3's paddle pool swaps in `wind` at 0.3.
+            "sectorsound" => {
+                let sector = idx(0) as i32;
+                let name = match args.get(1) {
+                    Some(Value::Str(s)) => s.to_ascii_lowercase(),
+                    _ => String::new(),
+                };
+                let volume = num(2) as f32;
+                if !name.is_empty() {
+                    self.sector_ambient.insert(sector, (name, volume));
+                }
+                Value::Nil
             }
             // `Sleep` parks the script until a clock fires; the world records the wait
             // but there is no scheduler to resume it, so the script runs straight on.
@@ -4346,6 +4438,10 @@ mod tests {
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            sound_volume: Vec::new(),
+            sound_pitch: Vec::new(),
+            sound_fade: BTreeMap::new(),
+            sector_ambient: BTreeMap::new(),
             player_respawn_mask: 0,
             damage_applied: BTreeMap::new(),
             scroll_bucket: 0,
