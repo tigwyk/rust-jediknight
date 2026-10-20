@@ -313,6 +313,10 @@ pub struct Runtime {
     pub user_data: std::collections::BTreeMap<usize, f32>,
     pub force: std::collections::BTreeMap<usize, [f32; 3]>,
     pub actor_weapon: std::collections::BTreeMap<usize, i32>,
+    /// `PlayKey`: which of the script's own `keyframe` symbols a thing plays instead of its puppet's
+    /// own state track — (keyfile, flags, start frame). Level 1's TIE bomber swaps in `01VTieB.key`
+    /// the moment the player sees it.
+    pub play_key: std::collections::BTreeMap<usize, (String, i32, i32)>,
     /// `PlayMode`: which animation a script asked a thing to play.
     pub play_mode: std::collections::BTreeMap<usize, i32>,
     /// `GetThingSignature`: a stable id per thing, so a timer can tell "still the same thing" from
@@ -743,6 +747,7 @@ impl Runtime {
             next_fire: 0.0,
             master_cog: None,
             multi_mode_flags: 0,
+            play_key: BTreeMap::new(),
             ai: BTreeMap::new(),
             template_weapon: level
                 .templates
@@ -971,6 +976,9 @@ impl Runtime {
                 | "setmultimodeflags"
                 | "clearmultimodeflags"
                 | "sendtrigger"
+                | "playkey"
+                | "stopanim"
+                | "jumptoframe"
                 | "setfirewait"
                 | "setgoalflags"
                 | "cleargoalflags"
@@ -2496,11 +2504,38 @@ impl Runtime {
                 }
                 Value::Nil
             }
+            // `PlayKey(thing, key, flags, frame)` — `sithPuppet_PlayKey` swaps a puppet's animation for
+            // one of the script's own `keyframe` symbols. Level 1's TIE bomber plays `01VTieB.key` from
+            // frame 0x14 the moment the player sees it; `StopAnim` drops back to the puppet's own state
+            // track and `JumpToFrame` moves the start of the clip the script already asked for.
+            "playkey" => {
+                let thing = ti(0);
+                let key = args.get(1).map(render).unwrap_or_default();
+                if key.is_empty() {
+                    self.play_key.remove(&thing);
+                } else {
+                    let flags = args.get(2).map(|v| v.num() as i32).unwrap_or(0);
+                    let frame = args.get(3).map(|v| v.num() as i32).unwrap_or(0);
+                    self.play_key.insert(thing, (key.to_ascii_lowercase(), flags, frame));
+                }
+                Value::Num(0.0)
+            }
+            "stopanim" => {
+                self.play_key.remove(&ti(0));
+                Value::Nil
+            }
+            "jumptoframe" => {
+                let thing = ti(0);
+                if let Some(entry) = self.play_key.get_mut(&thing) {
+                    entry.2 = idx(1) as i32;
+                }
+                Value::Nil
+            }
+            // `GetGoalFrame` (`sithCogFunctionThing.c:540`) answers `thing->goalframe`, which
+            // `MoveToFrame` sets and `sithTrackThing_Arrivedidk` **resets to 0 the moment the piece
+            // arrives** — so a script sees the destination only while the thing is still moving.
+            // That is the value `MoveToFrame(elevator, 1 - GetGoalFrame(elevator), speed)` reverses.
             "getgoalframe" => Value::Num(
-                // `GetGoalFrame` (`sithCogFunctionThing.c:540`) answers `thing->goalframe`, which
-                // `MoveToFrame` sets and `sithTrackThing_Arrivedidk` **resets to 0 the moment the piece
-                // arrives** — so a script sees the destination only while the thing is still moving.
-                // That is the value `MoveToFrame(elevator, 1 - GetGoalFrame(elevator), speed)` reverses.
                 self.thing(idx(0)).and_then(|t| t.target).map_or(0.0, |(frame, _)| frame as f64),
             ),
             // ---- the network verbs, answered for a single-player build ----
@@ -3133,6 +3168,7 @@ mod tests {
             next_fire: 0.0,
             master_cog: None,
             multi_mode_flags: 0,
+            play_key: BTreeMap::new(),
             ai: BTreeMap::new(),
             template_weapon: BTreeMap::new(),
             ai_shot_interval: 1.0,
@@ -3467,6 +3503,30 @@ mod tests {
             "the trigger broadcast is not on the queue: {:?}",
             rt.messages
         );
+        // `PlayKey` swaps a puppet's animation for one of the script's own `keyframe` symbols — level
+        // 7's `07_rahnlines.cog` startup calls `PlayKey(camera1, keyfile, 1, 2)`. `StopAnim` drops it
+        // and `JumpToFrame` moves the start of the clip the script already asked for.
+        assert_eq!(
+            rt.call(
+                "PlayKey",
+                &[
+                    Value::Num(0.0),
+                    Value::Str("01VTieB.key".into()),
+                    Value::Num(1.0),
+                    Value::Num(20.0)
+                ]
+            ),
+            Value::Num(0.0)
+        );
+        assert_eq!(
+            rt.play_key.get(&0).cloned(),
+            Some(("01vtieb.key".to_string(), 1, 20)),
+            "the scripted key is not stored lowercased with its start frame"
+        );
+        rt.call("JumpToFrame", &[Value::Num(0.0), Value::Num(4.0)]);
+        assert_eq!(rt.play_key.get(&0).map(|entry| entry.2), Some(4));
+        rt.call("StopAnim", &[Value::Num(0.0)]);
+        assert!(rt.play_key.is_empty(), "StopAnim left the scripted key in place");
         // `GetGoalFrame` reports a path mover's destination, and 0 for a thing that is not moving.
         assert_eq!(rt.call("GetGoalFrame", &[Value::Num(0.0)]), Value::Num(0.0));
         rt.things[0].target = Some((1.0, 8.0));

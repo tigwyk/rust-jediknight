@@ -7431,6 +7431,10 @@ fn run_level(
         w.sounds.len(),
         w.inv.len()
     );
+    // `PlayKey`: a script swapping a puppet's animation track for one of its own `keyframe` symbols.
+    for (thing, (key, flags, frame)) in &w.play_key {
+        println!("animation: thing {thing} plays `{key}` (flags {flags}, from frame {frame})");
+    }
     // One concrete before/after: a thing the scripts moved off its authored position.
     if let Some((i, now)) = w.things.iter().enumerate().find(|(i, t)| {
         level.things.get(*i).is_some_and(|src| src.pos != t.pos)
@@ -9199,6 +9203,8 @@ struct Actor {
     parts: Vec<(Handle<Mesh>, i32, (f32, f32))>,
     /// The frame number last written, so a still frame is not rebuilt.
     drawn: i32,
+    /// Which keyfile `drawn` belongs to, so a `PlayKey` swap forces a rebuild on the same frame.
+    drawn_key: String,
     /// Whether the death animation has been started.
     dying: bool,
     /// Where its parts were last drawn, so a runtime move can be applied as a delta.
@@ -9369,6 +9375,7 @@ fn spawn_models(
                 death,
                 parts: std::mem::take(&mut actor_parts),
                 drawn: i32::MIN,
+                drawn_key: String::new(),
                 dying: false,
                 drawn_at: Vec3::from(thing.pos),
             });
@@ -10065,13 +10072,31 @@ fn animate_actors(
         })
         .unwrap_or_default();
     for actor in &mut actors.0 {
-        let key_name = if dead.contains(&actor.thing) {
-            actor.dying = true;
-            animating_key(actor, true)
-        } else if actor.dying {
-            animating_key(actor, true)
+        // A script can replace the puppet's own state track with one of its `keyframe` symbols
+        // (`PlayKey`): level 1's TIE bomber swaps in `01VTieB.key` from frame 0x14 when the player
+        // first sees it. Without a script entry the puppet's `stand`/`death` choice stands.
+        let scripted = sim
+            .as_deref()
+            .and_then(|sim| sim.world.borrow().play_key.get(&actor.thing).cloned());
+        let key_name = if let Some((key, _, _)) = &scripted {
+            if actor.drawn_key != *key {
+                actor.drawn = -1;
+                actor.drawn_key = key.clone();
+            }
+            key.as_str()
         } else {
-            animating_key(actor, false)
+            if !actor.drawn_key.is_empty() {
+                actor.drawn = -1;
+                actor.drawn_key.clear();
+            }
+            if dead.contains(&actor.thing) {
+                actor.dying = true;
+                animating_key(actor, true)
+            } else if actor.dying {
+                animating_key(actor, true)
+            } else {
+                animating_key(actor, false)
+            }
         };
         let (Some(model), Some(key)) = (world.models.get(&actor.model), world.keys.get(key_name))
         else {
@@ -10080,11 +10105,15 @@ fn animate_actors(
         // Loop over the keyfile's own frame count: the `.pup` row's last two numbers are
         // event markers, not a loop range (`stand kystand0.key 0x00 0 0` on a 31-frame file).
         // A dying actor plays to its last frame and stays there; a living one loops.
+        // ponytail: a scripted clip is offset by its start frame but has no own epoch, so the
+        // `PlayKey(..., frame)` start looks like a loop offset rather than a timed track; `flags` is
+        // recorded and not interpreted.
         let last = key.frames.max(1) as f32 - 1.0;
+        let start = scripted.as_ref().map_or(0.0, |(_, _, frame)| *frame as f32);
         let frame = if actor.dying {
-            ((now * key.fps).min(last)).floor() as i32
+            ((now * key.fps + start).min(last)).floor() as i32
         } else {
-            ((now * key.fps) % (last + 1.0)).floor() as i32
+            ((now * key.fps + start) % (last + 1.0)).floor() as i32
         };
         if frame == actor.drawn {
             continue;
@@ -13712,6 +13741,7 @@ mod rules_tests {
             death: Some("kyftdeth.key".into()),
             parts: Vec::new(),
             drawn: i32::MIN,
+            drawn_key: String::new(),
             dying: false,
             drawn_at: Vec3::ZERO,
         };

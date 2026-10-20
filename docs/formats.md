@@ -771,7 +771,27 @@ door: 00_door.cog (cog 0, thing 4): 1 label(s) ran, frame Num(0.0), moving Num(1
 door: after 3 s the piece sits at frame Num(1.0) and reports goal Num(0.0)
 ```
 
-**Thing flags are a word that gets ORed and masked, never assigned.** `SetThingFlags` is
+**`PlayKey` swaps a puppet's animation for one of the script's own keyframe symbols.**
+`PlayKey(thing, key, flags, frame)` is `sithPuppet_PlayKey`: the thing's puppet stops playing its
+`.pup` state track (`stand`, `death`) and plays the `.key` the script names instead, from the frame it
+names. Level 1's TIE bomber is the case a player meets: `01_tiebomber.cog` plays `01VTieB.key` from
+frame 0x14 the moment the player is *sighted* by it. `StopAnim` drops the override and `JumpToFrame`
+moves the start of the clip already asked for.
+
+The runtime stores `(key, flags, frame)` per thing and `animate_actors` prefers it over the puppet's
+own state, forcing a mesh rebuild when the key changes on the same frame number. `--run` reports what a
+level's scripts asked for, which is how level 7's cutscene camera shows up:
+
+```text
+animation: thing 29 plays `yucamera.key` (flags 1, from frame 2)
+```
+
+`ponytail:` two ceilings. A scripted clip is offset by its start frame but has **no own epoch**, so the
+start looks like a loop offset rather than a timed track; `flags` is stored and not interpreted. And the
+level-7 case is `PlayKey` on a *camera* — a cutscene camera path, which belongs to the unported
+in-engine camera gap rather than to puppet animation.
+
+ `SetThingFlags` is
 `thing->flags |= flags` and `ClearThingFlags` is `thing->flags &= ~flags`
 (`sithCogFunctionThing.c:1334`). The port assigned the word outright, which drops every bit the level or
 the renderer had already set — `SITH_TF_INCAMFOV` (0x100000) among them, so a script touching one flag

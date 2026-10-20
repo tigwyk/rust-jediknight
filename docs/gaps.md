@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **34 gates, 85 tests, 0 failures.** Stubbed script surface:
-**43 verbs, 302 call sites across the 34 shipped levels** (706 before this run of state setters).
+**40 verbs, 284 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -56,7 +56,7 @@ both multiplayer-only screens.
 | Thing attachment | the impact half of `sithThing_AttachThingToSurface`: `(v-2.5)^2*45` above a 2.5 threshold, applied to the runtime's player (`--fall`) | the *record*: `attach_flags`, `attachedSurface`, the surface-info snapshot, scroll-velocity transfer on a scrolling surface, and the `entered`/`exited` cog messages on a `COG_LINKED` surface |
 | Physics | velocity integration with `ApplyDrag`, gravity, jump, fall, step, spawn clearance — for the player | `physicsRolloverFrames`/`OLDSTEP_DELTA_50FPS` accumulation (the port uses the frame's `dt`), angular velocity, `SITH_PF_USEANGULARTHRUST`, rotation of things (`sithCollision_RotateThing`), scripted movement of things, and every non-player thing: placed props are static |
 | Walk sweep | the walker runs the window's own `walker_step` on all 34 levels (`--walk all`), 20 s each: **34/34 stayed inside the tracked sector** over 639 doorway crossings, and on 14 levels the level's own hull test agreed | the tracked sector can still lag where sector hulls overlap, so `inside_sector` is the arbiter rather than the file's own hull |
-| Puppets and animation | `stand` and `death`, `.key` interpolation with parent chains and pivots, `frame=` paths for doors and lifts | the rest of the state machine — `walk`, `run`, `walkback`, `strafe`, `crouch`, `jump`, `attack`, `holster`, `draw`, `victim` — and `sithAnimClass` layering, so an actor never changes pose in reaction to anything. `playkey`/`stopanim`/`jumptoframe` are stubs |
+| Puppets and animation | `stand` and `death`, `.key` interpolation with parent chains and pivots, `frame=` paths for doors and lifts, and `PlayKey`/`StopAnim`/`JumpToFrame` — a script can replace the puppet's state track with one of its own `keyframe` symbols (level 1's TIE bomber plays `01VTieB.key` from frame 0x14 when the player sees it) | the rest of the state machine — `walk`, `run`, `walkback`, `strafe`, `crouch`, `jump`, `attack`, `holster`, `draw`, `victim` — and `sithAnimClass` layering, so an actor never changes pose in reaction to anything. A scripted clip has no own epoch and its `flags` are not interpreted |
 | AI | the `.ai` parser (instincts, flags, moves), actor spawning, `sightdist`/`fov` deciding whether an armed actor fires its own `weapon=`, scripted destinations — `AISetMovePos`/`AISetMoveThing`/`AISetLookPos`/`AISetMoveSpeed` make a placed actor patrol or follow — and the **frame list** verbs (`AISetMoveFrame`/`AISetLookFrame` index the thing's own `numframes=`/`frame=` entries, which class-less actors like level 1's 8t88 use). `--ai` fires a level-1 actor at 3 units, not at 8, not from behind, then walks one onto a scripted point and turns it; `--endlevel` shows 8t88 walking to his frame | the runtime: instinct **scheduler** (weights, priority, interruption), **awareness** (no hearing, no alert propagation), **pathfinding** (steering is greedy — it picks the doorway that looks closest on both legs), `accuracy=` spread, aim-joint tracking |
 | Actors | placement, health, shields, death, `--ai` | aim joints (`sithActor_UpdateAimJoints`), head pitch as a separate channel, force-power state, mount waits |
 | Camera | position `thing + 0xb8 + thing[0x168]` (eye offset, level units), orientation from the view angles at `thing + 0x15c/0x160/0x164`, the engine's yaw basis (column 1 = forward, confirmed at run time), the first-person velocity roll (`clamp(5 * dot(vel, right), -8, 8)`, constants at `0x522ddc`/`0x522de0`/`0x522de4`), the projection (**90 deg horizontal** from `buffer + 0x08`, vertical derived: 73.74 at 4:3, 58.72 at 16:9), and a third-person chase camera at the engine's follow height (0.2 above the body, `0x522dec`), toggled with `C` | the **player's own body is not drawn**, so third person shows the level from behind the player rather than the player: `spawn_models` skips the local model on purpose (`cull_mode: None` would wrap it around the first-person eye). Drawing it needs spawn + yaw rotation + hiding in first person. Also the engine's own follow case (`0x4c59ce`) is a spectator orbit spun at 8 deg/s and is not reproduced; view bob (`0x4051e0`) and screen shake (`DAT_008ee5b8/bc/c0`) are unported |
@@ -72,17 +72,17 @@ both multiplayer-only screens.
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — plus sector light animation. 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 43 below | the 43 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 40 below | the 40 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 43 stubbed cog verbs
+## 3. The 40 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (302 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 43.
+over the 34 levels from `--cog-check` (284 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 40.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -97,7 +97,7 @@ takes the wrong branch without any error.
 | Weapons and projectiles (3) | 31 | `jksetsaberinfo` 15, `autoselectweapon` 14, `fireprojectile` 2 |
 | Face and thing modes (5) | 45 | `setfacegeomode` 18, `getfacegeomode` 16, `getthinggeomode` 4, `setthingcurgeomode` 4, `setfacelightmode` 3 |
 | Sectors, adjoins, sky (3) | 15 | `slideceilingsky` 10, `setsectorthrust` 4, `slidehorizonsky` 1 |
-| Animation and models (6) | 48 | `surfacelightanim` 18, `playkey` 13, `materialanim` 6, `setthingmodel` 6, `stopanim` 4, `jumptoframe` 1 |
+| Animation and models (3) | 30 | `surfacelightanim` 18, `materialanim` 6, `setthingmodel` 6 |
 | Attachments and parents (3) | 8 | `attachthingtothing` 6, `getthingparent` 1, `setthingattachflags` 1 |
 | Camera (3) | 24 | `setcamerafocus` 11, `setcurrentcamera` 11, `setpovshake` 2 |
 | Sound (3) | 14 | `changesoundvol` 5, `sectorsound` 5, `changesoundpitch` 4 |
