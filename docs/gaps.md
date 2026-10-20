@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **35 gates, 88 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **35 gates, 89 tests, 0 failures.** Stubbed script surface:
 **36 verbs, 221 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
@@ -34,7 +34,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | --- | --- | --- | --- |
 | Networking and multiplayer | `sithDSS.c`, `sithDSSThing.c`, `sithDSSCog.c`, `sithMulti.c`, `sithComm.c`, `stdComm.c`, `jkGUIMultiplayer.c`, `jkGUINetHost.c`, `jkGUIMultiTally.c` | the whole thing: message streaming, thing replication, cog RPCs, host/join, tally screens. Zero socket code exists. | no `socket`/`UdpSocket`/`TcpStream` in `src/`. The single-player **answers** are now explicit (`ismulti`/`isserver` 0, no team, no score, `*multimodeflags` stored) and `sendtrigger` really broadcasts `trigger`, but only `sendmessageex` is left stubbed — it needs message *return values* |
 | Console and cvars | `sithConsole.c`, `sithCvar.c`, `sithCommand.c`, `jkQuakeConsole.c` | the `~` console, the cvar store, and the command dispatcher (`bind`, `set`, `map`, `quit`) | no matches for `cvar`, `sithCommand`, `sithConsole` |
-| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. **Sprites draw, with their real artwork**: every template's `sprite=` is parsed (`spr.rs`), its `.mat` loads through the cel-table reader in `tex.rs` with palette entry 0 keyed transparent, `draw_created` spawns one billboarded quad per row and `billboard_sprites` faces it at the camera — confirmed on screen (`--sprite +laserhit` + `BK_WALK_FORWARD=1` gives a different frame hash from the same frame without it). What is left is the **cel animation**: the material's frames decode now (`bryx.mat` is eight 32 x 32 cels), but `draw_created` always draws cel 0 instead of walking them at the rate the engine derives from `num_texinfo / msecLifeLeft` (`sithExplosion_CreateThing`). | no particle type (`sithParticle`'s own things); `explosion` matches are class numbers and the damage path |
+| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. **Sprites draw, with their real artwork and animation**: every template's `sprite=` is parsed (`spr.rs`), its `.mat` loads through the cel-table reader in `tex.rs` with palette entry 0 keyed transparent, `draw_created` spawns one billboarded quad per row and `billboard_sprites` faces it at the camera. The frames walk with the thing's life (`Runtime::sprite_cel`: `typeflags & 0x1` arms it, frame *k* holds for the *k*-th `life / cels` slice), which is what `sithExplosion_CreateThing` does through `sithSurface_sub_4F00A0`. | no particle type (`sithParticle`'s own things — smoke, embers and dust are separate things the engine spawns); `explosion` matches are class numbers and the damage path |
 | In-engine cutscene cameras | `jkCutscene.c`, `sithCamera.c` focus modes | `SetCameraFocus`, `SetCurrentCamera`, `SetPovShake`, scripted camera paths. Cutscenes play as `.smk` film over the world; an in-engine camera cutscene would not cut. | no matches for `SetCameraFocus`/`camerafocus`/`shake`; all three verbs are stubs |
 | Saber | `jkSaber.c` | blade geometry, swing arcs, saber lock, trace damage. `jksetsaberinfo` is a stub. | `saber` matches are template-name and palette text only |
 | Arch lighting | `sithArchLighting.c` | vertex-baked arch light. Level data carries an `archlightIdx` per thing; nothing reads it. | no matches for `archlight` |
@@ -233,10 +233,17 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
   offset, and `billboard_sprites` turns them to the camera each frame, which is what
   `rdSprite_Draw`'s camera-space vertices do. Level 1 resolves **35 sprite files for 35 templates**
   (13 distinct materials), and an impact logs `drawing sprite thing 363 (+laserhit, 1 face(s))`.
-  **Only cel 0 is drawn**: the engine animates the rest from the thing's life
-  (`sithExplosion_CreateThing` sets the rate `num_texinfo / msecLifeLeft * 1000`), which is left as a
-  `ponytail:` ceiling — the spark is the right shape and the right size now, it just does not flick
-  through its eight frames.
+
+* **A sprite walks its frames over the thing's life.** `sithExplosion_CreateThing` arms the animation
+  with `num_texinfo / msecLifeLeft * 1000` cels per second when the template's `typeflags` carry
+  `SITHEXPLOSION_FLAG_ANIMATED_SPRITE` (0x1) — one cel per `life / cels` seconds — and
+  `explosionParams.msecLifeLeft` is the life the thing was *created* with. `Runtime` now keeps that
+  as `life_total` beside `life_left`, and `sprite_cel` scales it: `+laserhit` (`typeflags=0x33`,
+  `timer=0.5`, `bryx.mat` eight cels) is eight frames over half a second. `draw_created` swaps the
+  quad's mesh as the frame changes, and a live impact prints the walk with `BK_SPRITE_TRACE=1`:
+  `sprite thing 366 (+laserhit) draws cel 3 of 8`. The clock and the placement of a moving sprite
+  weapon (`+force_dest_p1`) ride along in the same branch, since sprite quads are outside the
+  `Transform` query the model things use.
 
 * **A created thing dies when its `timer=` runs out, and `SetThingTimer` is a different timer.**
   `timer=` is the engine's `msecLifeLeft` (`sithThing.c:1777`), counted down every frame with

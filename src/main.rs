@@ -9523,9 +9523,9 @@ struct Actors(Vec<Actor>);
 struct Created {
     drawn: HashMap<usize, Vec<Entity>>,
     meshes: HashMap<(String, i32), Handle<Mesh>>,
-    /// Sprite quads are shared per `(template, material)`: `+laserhit` is one rectangle, so every
-    /// impact in the level draws the same mesh.
-    sprite_meshes: HashMap<(String, String), Handle<Mesh>>,
+    /// Sprite quads are shared per `(template, material, cel)`: `+laserhit` is one rectangle of
+    /// eight frames, so every impact in the level drawing the same frame reuses one mesh.
+    sprite_meshes: HashMap<(String, String, u32), Handle<Mesh>>,
 }
 
 /// The weapon the player fires: the `weapon=` its template names, else the first template
@@ -11477,6 +11477,10 @@ fn draw_created(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut drawn: Query<&mut Transform, Without<Sprite3d>>,
+    // A sprite's frame is a different mesh, and `drawn` cannot see sprite quads (`billboard_sprites`
+    // owns their rotation), so the cel and the placement of a *moving* sprite weapon
+    // (`+force_dest_p1`) are updated here instead.
+    mut quads: Query<(&mut Mesh3d, &mut Transform), With<Sprite3d>>,
 ) {
     let (Some(sim), Some(world), Some(created)) = (sim, world, created.as_mut()) else { return };
     let mut rt = sim.world.borrow();
@@ -11516,9 +11520,9 @@ fn draw_created(
         }
         let transform = Transform::from_translation(Vec3::from(thing.pos))
             .with_rotation(Quat::from_rotation_z(-thing.yaw.to_radians()));
+        let template = rt.templates.get(index).cloned().unwrap_or_default();
+        let template_key = template.to_ascii_lowercase();
         if entities.is_empty() {
-            let template = rt.templates.get(index).cloned().unwrap_or_default();
-            let template_key = template.to_ascii_lowercase();
             // A sprite template is drawn as camera-facing rectangles, one per `.spr` row: an
             // impact spark, the explosion chain, smoke. `rdSprite_Draw` builds the quad in camera
             // space with the sprite's width/height and its model-space offset, so the port's
@@ -11527,12 +11531,12 @@ fn draw_created(
                 let mut spawned = Vec::new();
                 for face in faces {
                     // One cel of the strip. The count comes from the material's cel table.
-                    let cels = world.sprite_cels.get(&face.material).copied().unwrap_or(1) as f32;
-                    let key = (template_key.clone(), face.material.clone());
+                    let cels = world.sprite_cels.get(&face.material).copied().unwrap_or(1);
+                    let key = (template_key.clone(), face.material.clone(), 0);
                     let mesh = created
                         .sprite_meshes
                         .entry(key)
-                        .or_insert_with(|| meshes.add(sprite_quad(face.width, face.height, cels, 0)))
+                        .or_insert_with(|| meshes.add(sprite_quad(face.width, face.height, cels as f32, 0)))
                         .clone();
                     let mut material = StandardMaterial {
                         unlit: true,
@@ -11615,6 +11619,30 @@ fn draw_created(
                 println!("drawing created thing {index} ({template})");
             }
             created.drawn.insert(index, spawned);
+        } else if let Some(faces) = world.template_sprite.get(&template_key) {
+            // The sprite's frame comes from the thing's life, so a spark walks its eight cels as
+            // it burns out (`Runtime::sprite_cel`).
+            for (entity, face) in entities.iter().zip(faces) {
+                let cels = world.sprite_cels.get(&face.material).copied().unwrap_or(1);
+                let cel = rt.sprite_cel(index, cels);
+                let key = (template_key.clone(), face.material.clone(), cel);
+                let mesh = created
+                    .sprite_meshes
+                    .entry(key)
+                    .or_insert_with(|| {
+                        meshes.add(sprite_quad(face.width, face.height, cels as f32, cel))
+                    })
+                    .clone();
+                if let Ok((mut quad, mut tf)) = quads.get_mut(*entity) {
+                    if quad.0 != mesh {
+                        quad.0 = mesh;
+                    }
+                    tf.translation = Vec3::from(thing.pos) + Vec3::from(face.offset);
+                }
+                if std::env::var_os("BK_SPRITE_TRACE").is_some() {
+                    println!("  sprite thing {index} ({template}) draws cel {cel} of {cels}");
+                }
+            }
         } else {
             for entity in entities {
                 if let Ok(mut tf) = drawn.get_mut(entity) {

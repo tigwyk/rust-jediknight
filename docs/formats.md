@@ -2968,14 +2968,43 @@ sprite `bowx.mat`:    64x512 strip,  8 cel(s) of 64x64, 29004 of 32768 pixels ke
 The high "keyed clear" counts are the shape of the artwork — an effect painted on black, which is
 exactly what palette entry 0 means for a sprite.
 
-**The port draws cel 0 only.** The engine animates the rest per thing: `sithExplosion_CreateThing`
-gives an animated explosion sprite the rate `num_texinfo / msecLifeLeft * 1000` (cels per second)
-through `sithSurface_sub_4F00A0`, so an 8-cel spark with a 0.5 s `timer=` walks all eight frames over
-its life. That is `ponytail:` left out on purpose — combat effects are outside this build's lane —
-and the hook is `draw_created`, which already knows the cel count.
+Which frame is drawn comes from the thing's life, not a clock of its own — the next section.
 
-`BK_SPRITE_TRACE=1` prints the per-material numbers and the billboard's camera-space position;
-`BK_SPRITE_DEBUG=1` draws the quad untextured red; `BK_SPRITE_AHEAD` moves it.
+`BK_SPRITE_TRACE=1` prints the per-material numbers, the billboard's camera-space position and the
+cel each quad is drawing; `BK_SPRITE_DEBUG=1` draws the quad untextured red; `BK_SPRITE_AHEAD`
+moves it.
+
+### A sprite's frames are walked over the thing's life
+
+`sithExplosion_CreateThing` animates an explosion's sprite only when its template's `typeflags` carry
+**`SITHEXPLOSION_FLAG_ANIMATED_SPRITE` = 0x1**, and then at
+
+```c
+sithSurface_sub_4F00A0(pThing, (flex_d_t)num_texinfo / (flex_d_t)pThing->msecLifeLeft * 1000.0, 0x200000);
+```
+
+cels per second — one cel per `life / cels` seconds, so frame *k* is up for the *k*-th slice of the
+thing's life and the last frame is still up when it dies. `pThing->explosionParams.msecLifeLeft` is
+the life the thing was **created** with, which is why the port keeps a `life_total` next to
+`life_left`: `Runtime::sprite_cel` scales the remaining life against it.
+
+Level 1's spark is the whole rule in one line of `jkl_01narshadda.jkl`:
+
+```text
++laserhit  _explosion  thingflags=0x1 light=0.2 timer=0.500000 sprite=bryx.spr typeflags=0x33 ...
+```
+
+`0x33 & 0x1` arms it and `bryx.mat` has eight 32 × 32 cels, so the spark is eight frames over half a
+second. `BK_SPRITE_TRACE=1` on a live impact prints the walk:
+
+```text
+  sprite thing 366 (+laserhit) draws cel 3 of 8
+  sprite thing 366 (+laserhit) draws cel 4 of 8
+  sprite thing 366 (+laserhit) draws cel 6 of 8
+```
+
+`+laserhit`, `+grenade_exp` (0x17), `+force_dest1..4` (0x53), `twinkle` (0x11) and `+watersplash`
+(0x1) all carry the bit; `bubble` (a physics bubble, `typeflags` absent, one cel) does not need it.
 
 ### Damage decays in flight
 

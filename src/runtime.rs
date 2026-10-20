@@ -314,6 +314,9 @@ pub struct Runtime {
     pub actor_speed: std::collections::BTreeMap<usize, f32>,
     pub item_flags: std::collections::BTreeMap<usize, u32>,
     pub life_left: std::collections::BTreeMap<usize, f32>,
+    /// The life a thing was created with — `explosionParams.msecLifeLeft` in the engine, captured
+    /// so a sprite's frame count can be spread over the thing's whole life rather than a guess.
+    pub life_total: std::collections::BTreeMap<usize, f32>,
     /// `Get/SetThingMass` and `Get/SetThingUserData`: plain per-thing values a script stores.
     pub mass: std::collections::BTreeMap<usize, f32>,
     pub user_data: std::collections::BTreeMap<usize, f32>,
@@ -378,6 +381,9 @@ pub struct Runtime {
     pub template_body: BTreeMap<String, (f32, f32)>,
     pub template_rate: BTreeMap<String, f32>,
     pub template_decay: std::collections::BTreeSet<String>,
+    /// Templates whose `typeflags` carry `SITHEXPLOSION_FLAG_ANIMATED_SPRITE` (`0x1`), the bit
+    /// `sithExplosion_CreateThing` tests before it walks a sprite's cels.
+    pub template_sprite_anim: std::collections::BTreeSet<String>,
 
     /// An item template's `inv=` bin and `count=`, and the bin stand-in used when the level
     /// leaves the inventory number to the item's own cog.
@@ -678,6 +684,7 @@ impl Runtime {
             actor_speed: Default::default(),
             item_flags: Default::default(),
             life_left: Default::default(),
+            life_total: Default::default(),
             mass: Default::default(),
             user_data: Default::default(),
             force: Default::default(),
@@ -724,6 +731,22 @@ impl Runtime {
                             u32::from_str_radix(raw.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
                         })
                         .is_some_and(|flags| flags & 0x4000 != 0)
+                })
+                .map(|t| t.name.to_ascii_lowercase())
+                .collect(),
+            // Bit 0 of the same word: `SITHEXPLOSION_FLAG_ANIMATED_SPRITE`, which is what makes
+            // an impact spark walk its frames instead of showing the first one for its whole life.
+            template_sprite_anim: level
+                .templates
+                .iter()
+                .filter(|t| {
+                    level
+                        .template_param(&t.name, "typeflags")
+                        .and_then(|raw| {
+                            let raw = raw.trim();
+                            u32::from_str_radix(raw.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+                        })
+                        .is_some_and(|flags| flags & 0x1 != 0)
                 })
                 .map(|t| t.name.to_ascii_lowercase())
                 .collect(),
@@ -879,6 +902,7 @@ impl Runtime {
             .collect();
         for index in expired {
             self.life_left.remove(&index);
+            self.life_total.remove(&index);
             if let Some(thing) = self.things.get_mut(index) {
                 thing.destroyed = true;
             }
@@ -1916,7 +1940,28 @@ impl Runtime {
         let Some(template) = self.templates.get(index).map(|t| t.to_ascii_lowercase()) else { return };
         if let Some(secs) = self.template_timer.get(&template).copied() {
             self.life_left.insert(index, secs);
+            self.life_total.insert(index, secs);
         }
+    }
+
+    /// The cel a sprite thing draws, out of `cels`.
+    ///
+    /// `sithExplosion_CreateThing` animates an explosion's sprite only when its template's
+    /// `typeflags` carry `SITHEXPLOSION_FLAG_ANIMATED_SPRITE` (0x1), and at
+    /// `num_texinfo / msecLifeLeft * 1000` frames per second — one cel per `life / cels` seconds,
+    /// so frame `k` is up for the k-th `life / cels` slice of the thing's life. `+laserhit` is
+    /// `typeflags=0x33 timer=0.5 sprite=bryx.spr`, i.e. eight frames over half a second.
+    pub fn sprite_cel(&self, index: usize, cels: u32) -> u32 {
+        let template = self.templates.get(index).map(|t| t.to_ascii_lowercase());
+        if cels < 2 || !template.is_some_and(|t| self.template_sprite_anim.contains(&t)) {
+            return 0;
+        }
+        let Some(total) = self.life_total.get(&index).copied().filter(|t| *t > 0.0) else {
+            return 0;
+        };
+        let left = self.life_left.get(&index).copied().unwrap_or(0.0);
+        let progress = ((total - left) / total).clamp(0.0, 1.0);
+        ((progress * cels as f32) as u32).min(cels - 1)
     }
 
     /// What a projectile leaves behind: the `explode=` template, spawned where it landed.
@@ -3387,6 +3432,7 @@ mod tests {
             actor_speed: Default::default(),
             item_flags: Default::default(),
             life_left: Default::default(),
+            life_total: Default::default(),
             mass: Default::default(),
             user_data: Default::default(),
             force: Default::default(),
@@ -3402,6 +3448,7 @@ mod tests {
             solids: None,
             template_rate: BTreeMap::new(),
             template_decay: std::collections::BTreeSet::new(),
+            template_sprite_anim: std::collections::BTreeSet::new(),
 
             adjoins_changes: 0,
             things_moved: 0,
@@ -3548,6 +3595,30 @@ mod tests {
         assert_eq!(rt.damage(0, 30.0), 70.0);
         assert_eq!(rt.damage(0, 80.0), 0.0);
         assert!(rt.things[0].destroyed);
+    }
+
+    #[test]
+    fn a_sprite_explosion_walks_its_cels_over_its_life() {
+        let mut rt = door_runtime();
+        // A spark like `+laserhit`: `typeflags=0x1` animates the sprite, `timer=0.5` bounds it.
+        rt.template_timer.insert("walkplayer".to_string(), 0.5);
+        rt.template_sprite_anim.insert("walkplayer".to_string());
+        let Value::Num(index) = rt.call("CreateThing", &[Value::Str("walkplayer".into()), Value::Num(0.0)])
+        else {
+            panic!("CreateThing returned no index")
+        };
+        let index = index as usize;
+        // Just created: the first frame, for one eighth of half a second.
+        assert_eq!(rt.sprite_cel(index, 8), 0);
+        rt.life_left.insert(index, 0.375);
+        assert_eq!(rt.sprite_cel(index, 8), 2);
+        // The last frame is still drawn at the moment the thing dies, not one past it.
+        rt.life_left.insert(index, 0.0);
+        assert_eq!(rt.sprite_cel(index, 8), 7);
+        // One cel is no animation, and the typeflag is what arms it at all.
+        assert_eq!(rt.sprite_cel(index, 1), 0);
+        rt.template_sprite_anim.clear();
+        assert_eq!(rt.sprite_cel(index, 8), 0);
     }
 
     #[test]
