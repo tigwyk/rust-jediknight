@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **36 gates, 91 tests, 0 failures.** Stubbed script surface:
-**35 verbs, 203 call sites across the 34 shipped levels** (706 before this run of state setters).
+**35 verbs, 179 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -35,7 +35,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | Networking and multiplayer | `sithDSS.c`, `sithDSSThing.c`, `sithDSSCog.c`, `sithMulti.c`, `sithComm.c`, `stdComm.c`, `jkGUIMultiplayer.c`, `jkGUINetHost.c`, `jkGUIMultiTally.c` | the whole thing: message streaming, thing replication, cog RPCs, host/join, tally screens. Zero socket code exists. | no `socket`/`UdpSocket`/`TcpStream` in `src/`. The single-player **answers** are now explicit (`ismulti`/`isserver` 0, no team, no score, `*multimodeflags` stored) and `sendtrigger` really broadcasts `trigger`, but only `sendmessageex` is left stubbed — it needs message *return values* |
 | Console and cvars | `sithConsole.c`, `sithCvar.c`, `sithCommand.c`, `jkQuakeConsole.c` | the `~` console, the cvar store, and the command dispatcher (`bind`, `set`, `map`, `quit`) | no matches for `cvar`, `sithCommand`, `sithConsole` |
 | Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. **Sprites draw, with their real artwork and animation**: every template's `sprite=` is parsed (`spr.rs`), its `.mat` loads through the cel-table reader in `tex.rs` with palette entry 0 keyed transparent, `draw_created` spawns one billboarded quad per row and `billboard_sprites` faces it at the camera. The frames walk with the thing's life (`Runtime::sprite_cel`: `typeflags & 0x1` arms it, frame *k* holds for the *k*-th `life / cels` slice), which is what `sithExplosion_CreateThing` does through `sithSurface_sub_4F00A0`. | no particle type (`sithParticle`'s own things — smoke, embers and dust are separate things the engine spawns); `explosion` matches are class numbers and the damage path |
-| In-engine cutscene cameras | `jkCutscene.c`, `sithCamera.c` focus modes | `SetCameraFocus`, `SetCurrentCamera`, `SetPovShake`, scripted camera paths. Cutscenes play as `.smk` film over the world; an in-engine camera cutscene would not cut. | no matches for `SetCameraFocus`/`camerafocus`/`shake`; all three verbs are stubs |
+| In-engine cutscene cameras | `jkCutscene.c`, `sithCamera.c` focus modes | **The focus models work**: seven camera slots, `SetCameraFocus(slot, thing)` + `SetCurrentCamera(slot)` move the view onto that thing (aimed by its own own yaw/pitch), `GetCameraMode`/`GetPrimaryFocus`/`GetSecondaryFocus` read back, and `SetPOVShake` adds the recoil offset that decays at its own rate. Level 17b's `17b_Camera.cog` cutscene runs end to end: the view cuts to `ghostCam`, and after the script's `Sleep(6.0)` it hands the view back to the player. | `CycleCamera`, `SetCameraZoom`, path-driven camera dollies beyond `PlayKey` (a camera on a `.key` track follows its thing but has no path timing of its own), and the secondary-focus framing |
 | Saber | `jkSaber.c` | blade geometry, swing arcs, saber lock, trace damage. `jksetsaberinfo` is a stub. | `saber` matches are template-name and palette text only |
 | Arch lighting | `sithArchLighting.c` | vertex-baked arch light. Level data carries an `archlightIdx` per thing; nothing reads it. | no matches for `archlight` |
 | Track things | `sithTrackThing.c` | things that ride a `.key` track (free paths, camera dollies). The port interpolates `frame=` lists, which covers doors and lifts but not a path with its own timing. `pathmoveresume` is a stub. | no matches for `TrackThing`/`MT_PATH` |
@@ -81,7 +81,7 @@ both multiplayer-only screens.
 ## 3. The 35 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (203 still stubbed, out of 706 the scripts make). Each verb is in exactly
+over the 34 levels from `--cog-check` (179 still stubbed, out of 706 the scripts make). Each verb is in exactly
 one group, and the groups sum to 35.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
@@ -99,7 +99,6 @@ takes the wrong branch without any error.
 | Sectors, adjoins, sky (3) | 15 | `slideceilingsky` 10, `setsectorthrust` 4, `slidehorizonsky` 1 |
 | Animation and models (2) | 12 | `materialanim` 6, `setthingmodel` 6 |
 | Attachments and parents (3) | 8 | `attachthingtothing` 6, `getthingparent` 1, `setthingattachflags` 1 |
-| Camera (3) | 24 | `setcamerafocus` 11, `setcurrentcamera` 11, `setpovshake` 2 |
 | Sound (3) | 14 | `changesoundvol` 5, `sectorsound` 5, `changesoundpitch` 4 |
 | Multiplayer (1) | 3 | `sendmessageex` 3 |
 | Misc (4) | 27 | `rotatepivot` 10, `pathmoveresume` 7, `jkgetchoice` 7, `setrespawnmask` 3 |
@@ -190,7 +189,12 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    distance moved instead of the clock. What is left of the state machine is the armed-mode axis and
    the reactions (`crouch`, `jump`, `fire`, `hit`, turns).
 7. **Attachments and parenting.** Needed by carried weapons, passengers, and any script that moves a child.
-8. **Camera focus and shake.** It is what makes in-engine cutscenes and several force powers read as intended.
+8. ~~**Camera focus and shake.**~~ — **done**: seven camera slots with `SetCameraFocus`/`SetCurrentCamera`
+   and their getters, and `SetPOVShake` as an offset that decays at its own rate. Level 17b's cutscene is the
+   end-to-end case: `17b_Camera.cog` startup cuts the view to `ghostCam`, and `Sleep(6.0)` later hands it
+   back to the player (`--camera`, and `BK_CAMERA_TRACE=1` on a live run prints both). What is left of the
+   group is `CycleCamera`, `SetCameraZoom` and the secondary-focus framing, which no shipped single-player
+   script uses.
 9. **Level 1's first frame is a wall of polygons, and it is the level's own start.** The walker spawns at
    the first thing of type PLAYER (thing 0, `(-10.44, -5.45, -1.13)`, sector 339) — the engine's own rule
    (`sithPlayer_Initialize` takes the first `SITH_THING_PLAYER` in list order), so this is not a wrong

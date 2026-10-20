@@ -341,6 +341,18 @@ pub struct Runtime {
     /// `GEOMETRY_NONE` — the surface is not drawn at all, which is how a script makes broken glass
     /// vanish or a slashable panel open. Anything else draws normally.
     pub face_geomode: std::collections::BTreeMap<usize, i32>,
+    /// The engine's seven camera slots (`sithCamera_g_aCameras[7]`). `SetCameraFocus(slot, thing)`
+    /// points one at a thing and `SetCurrentCamera(slot)` picks which the view follows; slot 0 is
+    /// POV, which is the default, so an untouched world looks out of the player's own eyes.
+    pub camera_focus: [Option<usize>; 7],
+    pub camera_secondary: [Option<usize>; 7],
+    pub current_camera: usize,
+    /// `SetPOVShake(posOffset, angleOffset, posDelta, angleDelta)`: the offset the view gets and the
+    /// rate it decays at, back to zero. Every weapon script in the game calls it on a shot.
+    pub shake_pos: [f32; 3],
+    pub shake_angle: [f32; 3],
+    pub shake_pos_rate: f32,
+    pub shake_angle_rate: f32,
     /// Bumped on every geomode change, so the renderer knows to rebuild the world's batches instead
     /// of scanning the map each frame.
     pub geomode_epoch: u32,
@@ -842,6 +854,13 @@ impl Runtime {
             multi_mode_flags: 0,
             play_key: BTreeMap::new(),
             face_geomode: BTreeMap::new(),
+            camera_focus: [None; 7],
+            camera_secondary: [None; 7],
+            current_camera: 0,
+            shake_pos: [0.0; 3],
+            shake_angle: [0.0; 3],
+            shake_pos_rate: 0.0,
+            shake_angle_rate: 0.0,
             geomode_epoch: 0,
             surface_epoch: 0,
             surface_cels: Vec::new(),
@@ -949,6 +968,27 @@ impl Runtime {
         }
     }
 
+    /// `SetPOVShake`'s offsets decay toward zero at their own rate, the way `sithCamera_Update`
+    /// subtracts `delta * dt` from every component and clamps at 0 — so a shot's recoil is a kick
+    /// that recovers rather than an offset that sticks.
+    fn decay_shake(&mut self, dt: f32) {
+        let steps = [self.shake_pos_rate * dt, self.shake_angle_rate * dt];
+        for (offset, step) in [(&mut self.shake_pos, steps[0]), (&mut self.shake_angle, steps[1])] {
+            if step == 0.0 {
+                continue;
+            }
+            for v in offset.iter_mut() {
+                *v = if *v < 0.0 {
+                    (*v + step).min(0.0)
+                } else if *v > 0.0 {
+                    (*v - step).max(0.0)
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+
     /// `SurfaceLightAnim` and a fading `SetSectorLight`: both ramp a light term onto the level's
     /// baked intensity and then settle, so a door's room brightens once and stays bright.
     fn advance_lights(&mut self, dt: f32) {
@@ -1000,6 +1040,7 @@ impl Runtime {
         self.decay_damage(dt);
         self.advance_surface_cels();
         self.advance_lights(dt);
+        self.decay_shake(dt);
         // `timer=`/`SetLifeLeft` expiry: `sithThing_Update` counts `msecLifeLeft` down and calls
         // `sithThing_DestroyDyingThing` when it reaches zero. Without this an impact spark lives
         // forever, and a corpse never goes away.
@@ -1305,6 +1346,12 @@ impl Runtime {
                 | "sectorlight"
                 | "getsectorlight"
                 | "surfacelightanim"
+                | "setcamerafocus"
+                | "setcurrentcamera"
+                | "getcameramode"
+                | "getprimaryfocus"
+                | "getsecondaryfocus"
+                | "setpovshake"
                 | "sectorthrust"
                 | "destroything"
                 | "settimerex"
@@ -2349,9 +2396,21 @@ impl Runtime {
         self.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")).unwrap_or(0)
     }
 
-    /// Run one verb against the world. Argument order follows the shipped scripts; a
-    /// verb whose real arity differs simply does nothing useful here, and the
-    /// interpreter records it.
+    /// The thing the view follows, when a script has pointed a camera away from the player.
+    ///
+    /// The engine's camera table is seven slots (`sithCamera_g_aCameras[7]`); `SetCameraFocus(slot,
+    /// thing)` points one at a thing and `SetCurrentCamera(slot)` picks it. `None` means the player's
+    /// own eyes, which is both the default and what a focus on the player means.
+    pub fn camera_focus_thing(&self) -> Option<usize> {
+        let focus = self.camera_focus.get(self.current_camera).copied().flatten()?;
+        (focus != self.player_thing()).then_some(focus)
+    }
+
+    /// What the camera's own shake adds to the view and to the aim, in level units and degrees.
+    pub fn camera_shake(&self) -> ([f32; 3], [f32; 3]) {
+        (self.shake_pos, self.shake_angle)
+    }
+
     /// `SetSectorLight(sector, value, time)`: set the sector's extra light, fading over `time`
     /// seconds when that is positive (`sithSurface_SetSectorLight` builds the same rate from the
     /// value it is leaving).
@@ -2367,6 +2426,9 @@ impl Runtime {
         }
     }
 
+    /// Run one verb against the world. Argument order follows the shipped scripts; a
+    /// verb whose real arity differs simply does nothing useful here, and the
+    /// interpreter records it.
     pub fn call(&mut self, verb: &str, args: &[Value]) -> Value {
         let num = |i: usize| args.get(i).map(|v| v.num()).unwrap_or(0.0);
         let idx = |i: usize| num(i) as i64;
@@ -2882,6 +2944,52 @@ impl Runtime {
             "getgoalframe" => Value::Num(
                 self.thing(idx(0)).and_then(|t| t.target).map_or(0.0, |(frame, _)| frame as f64),
             ),
+            // ---- the camera slots and POV shake ----
+            //
+            // `SetCameraFocus(slot, thing)`: `sithCogFunction_SetCameraFocus` bounds the slot to
+            // 0..6 and stores the thing; the three-argument spelling carries a secondary focus.
+            "setcamerafocus" => {
+                let slot = idx(0);
+                if (0..7).contains(&slot) {
+                    self.camera_focus[slot as usize] = usize::try_from(idx(1)).ok();
+                    self.camera_secondary[slot as usize] = usize::try_from(idx(2)).ok();
+                }
+                Value::Nil
+            }
+            // `SetCurrentCamera(slot)` (registered as `setcurrentcamera`): which slot the view uses.
+            "setcurrentcamera" => {
+                let slot = idx(0);
+                if (0..7).contains(&slot) {
+                    self.current_camera = slot as usize;
+                }
+                Value::Nil
+            }
+            "getcameramode" => Value::Num(self.current_camera as f64),
+            "getprimaryfocus" => Value::Num(
+                self.camera_focus
+                    .get(idx(0).max(0) as usize)
+                    .copied()
+                    .flatten()
+                    .map(|t| t as f64)
+                    .unwrap_or(-1.0),
+            ),
+            "getsecondaryfocus" => Value::Num(
+                self.camera_secondary
+                    .get(idx(0).max(0) as usize)
+                    .copied()
+                    .flatten()
+                    .map(|t| t as f64)
+                    .unwrap_or(-1.0),
+            ),
+            // `SetPOVShake(posOffset, angleOffset, posDelta, angleDelta)`: the offset the view takes
+            // on, and the rate it walks back to zero at (`sithCamera_SetPOVShake`).
+            "setpovshake" => {
+                self.shake_pos = args.first().map(vec3).unwrap_or([0.0; 3]);
+                self.shake_angle = args.get(1).map(vec3).unwrap_or([0.0; 3]);
+                self.shake_pos_rate = num(2) as f32;
+                self.shake_angle_rate = num(3) as f32;
+                Value::Nil
+            }
             // ---- the network verbs, answered for a single-player build ----
             //
             // `sithNet_isMulti` and `sithNet_isServer` are both false in a one-player game, so these are
@@ -3537,6 +3645,13 @@ mod tests {
             multi_mode_flags: 0,
             play_key: BTreeMap::new(),
             face_geomode: BTreeMap::new(),
+            camera_focus: [None; 7],
+            camera_secondary: [None; 7],
+            current_camera: 0,
+            shake_pos: [0.0; 3],
+            shake_angle: [0.0; 3],
+            shake_pos_rate: 0.0,
+            shake_angle_rate: 0.0,
             geomode_epoch: 0,
             surface_epoch: 0,
             surface_cels: Vec::new(),

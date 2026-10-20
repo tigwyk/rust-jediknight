@@ -811,9 +811,44 @@ animation: thing 29 plays `yucamera.key` (flags 1, from frame 2)
 ```
 
 `ponytail:` two ceilings. A scripted clip is offset by its start frame but has **no own epoch**, so the
-start looks like a loop offset rather than a timed track; `flags` is stored and not interpreted. And the
-level-7 case is `PlayKey` on a *camera* — a cutscene camera path, which belongs to the unported
-in-engine camera gap rather than to puppet animation.
+start looks like a loop offset rather than a timed track; `flags` is stored and not interpreted. A camera
+on such a path does follow it now (the view rides the camera *thing*, and `PlayKey` moves the thing), but
+the clip has no independent timing of its own.
+
+### The view can be handed to a camera
+
+The engine keeps **seven camera slots** (`sithCamera_g_aCameras[7]`) and the scripts address them by
+number. `SetCameraFocus(slot, thing)` points one at a thing, `SetCurrentCamera(slot)` picks which the view
+uses, and `GetCameraMode`/`GetPrimaryFocus`/`GetSecondaryFocus` read them back. Slot 0 is POV, so a world
+whose scripts say nothing looks out of the player's own eyes; a focus **on the player** is POV again,
+which is how a cutscene hands the view back.
+
+`SetPOVShake(posOffset, angleOffset, posDelta, angleDelta)` is the other half: it *sets* an offset added to
+the view (position in level units, angles in degrees, `x` = pitch) and a rate the offset walks back to zero
+at, component by component and sign-aware — `sithCamera_Update` subtracts `delta * dt` from a positive
+component, adds it to a negative one, and clamps at 0. Every weapon script in the game calls it on a shot
+(`cog_weap_bryar.cog`: `SetPOVShake('0.0 -.003 0.0', '1.0 0.0 0.0', .05, 80.0)` — a degree of recoil that
+is gone in 12 ms and a 3 mm dip that takes 60 ms).
+
+Level 17b is the end-to-end case, and it runs at level start:
+
+```text
+17b_Camera.cog:  SetCameraFocus(0, ghostCam); SetCurrentCamera(0);
+                 Sleep(2.0); PlayKey(ghostCam, camKey, 1, 0x4); Sleep(6.0);
+                 SetCameraFocus(0, jkGetLocalPlayer());
+```
+
+`BK_CAMERA_TRACE=1` on a live run shows both halves:
+
+```text
+camera: eye Vec3(2.025202, -2.825, 2.56034) look [-0.0, 1.0, 0.0] scripted Some(38)
+camera: eye Vec3(2.7063901, -2.74772, -0.17788601) look [-1.0, 0.0, 0.0] scripted None
+```
+
+— the first is `ghostCam` 2.7 units up, the second is the player's own eye after the script's `Sleep(6.0)`
+resumed and re-focused on `jkGetLocalPlayer()`. `--camera` is the headless gate: it runs a level's placed
+`startup` scripts and requires that one of them moved the view, checks the slot getters, and pins the shake
+decay (1° at 80°/s is 0.6° after 5 ms and 0 after a second).
 
  `SetThingFlags` is
 `thing->flags |= flags` and `ClearThingFlags` is `thing->flags &= ~flags`

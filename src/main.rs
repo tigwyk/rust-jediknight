@@ -143,6 +143,7 @@ const GATES: &[&str] = &[
     "--adjoins",
     "--geomode",
     "--cel",
+    "--camera",
     "--move",
     "--pickup",
     "--save",
@@ -275,6 +276,7 @@ fn main() {
     let mut adjoin_check = false;
     let mut geomode_check = false;
     let mut cel_check = false;
+    let mut camera_check = false;
     let mut fire_check: Option<String> = None;
     let mut hit_check = false;
     let mut level_shader = false;
@@ -510,6 +512,8 @@ fn main() {
             "--geomode" => geomode_check = true,
             // `--cel`: a surface's cel reaches the mesh the level shader draws.
             "--cel" => cel_check = true,
+            // `--camera`: the camera slots and POV shake, headless.
+            "--camera" => camera_check = true,
             // `--fire <weapon template>`: fire that weapon at level 1's actor and check the
             // projectile travels, hits and damages.
             // `--level-shader`: draw level surfaces with the material that carries the colormap
@@ -4733,6 +4737,99 @@ fn main() {
         );
         assert_eq!(errors, 0, "cog check found {errors} problems");
         println!("--- cog check passed ---");
+        return;
+    }
+
+    if camera_check {
+        // The camera slots (`sithCamera_g_aCameras[7]`) and `SetPOVShake`. What matters is not that
+        // the numbers are stored but that (a) a shipped level's own startup script points the view at
+        // a thing, which is how every in-engine cutscene works, and (b) the shake decays the way
+        // `sithCamera_Update` does instead of sticking.
+        let level = &world.level;
+        let state = runtime::Runtime::handle(level);
+        let mut scripted: Option<(String, usize)> = None;
+        for inst in &level.cogs {
+            let Some(data) = gobs.read(&inst.script) else { continue };
+            let Ok(script) = cog::parse(&String::from_utf8_lossy(&data)) else { continue };
+            let mut vm = cog::Vm::with_world(state.clone());
+            script.bind(&mut vm, &inst.values);
+            // Only `startup`: the cutscenes that run on a trigger are driven by whatever fires them.
+            // The focus is recorded for the script that *changed* it, not for every later script that
+            // still sees the leftover.
+            let before = state.borrow().camera_focus_thing();
+            if script.label("startup").is_some() {
+                let _ = vm.run_label(&script, "startup");
+            }
+            let after = state.borrow().camera_focus_thing();
+            if after.is_some() && after != before {
+                scripted = after.map(|thing| (inst.script.clone(), thing));
+            }
+        }
+        let player = state.borrow().player_thing();
+        println!(
+            "camera: {} placed script(s), player is thing {player}, current slot {}",
+            level.cogs.len(),
+            state.borrow().current_camera
+        );
+        match scripted {
+            Some((script, thing)) => {
+                let (template, pos) = {
+                    let rt = state.borrow();
+                    (
+                        rt.templates.get(thing).cloned().unwrap_or_default(),
+                        rt.things.get(thing).map(|t| t.pos).unwrap_or([0.0; 3]),
+                    )
+                };
+                println!(
+                    "camera: `{script}` startup points slot {} at thing {thing} (`{template}`) at {pos:?}, so the view is not the player's",
+                    state.borrow().current_camera
+                );
+                assert_ne!(thing, player, "the scripted camera is the player, which is POV");
+            }
+            None => println!("camera: this level's startup scripts aim no camera; the verbs check below still runs"),
+        }
+
+        // The slots are addressable and read back: focus slot 3 on another thing, select it, then
+        // put slot 0 back on the player, which is POV again.
+        let other = level.things.len().min(3);
+        let mut rt = state.borrow_mut();
+        rt.call("SetCameraFocus", &[cog::Value::Num(3.0), cog::Value::Num(other as f64)]);
+        rt.call("SetCurrentCamera", &[cog::Value::Num(3.0)]);
+        assert_eq!(rt.call("GetCameraMode", &[]), cog::Value::Num(3.0));
+        assert_eq!(
+            rt.call("GetPrimaryFocus", &[cog::Value::Num(3.0)]),
+            cog::Value::Num(other as f64)
+        );
+        assert_eq!(rt.camera_focus_thing(), Some(other));
+        rt.call("SetCameraFocus", &[cog::Value::Num(3.0), cog::Value::Num(player as f64)]);
+        assert_eq!(rt.camera_focus_thing(), None, "a focus on the player must be plain POV");
+
+        // `SetPOVShake('0 -.003 0', '1 0 0', .05, 80)`: a kick that recovers. The angle decays at 80
+        // degrees a second, so 5 ms takes a degree down to 0.6, and the position at 0.05/s takes
+        // 60 ms to settle.
+        rt.call(
+            "SetPovShake",
+            &[
+                cog::Value::Str("0.0 -0.003 0.0".to_string()),
+                cog::Value::Str("1.0 0.0 0.0".to_string()),
+                cog::Value::Num(0.05),
+                cog::Value::Num(80.0),
+            ],
+        );
+        let (pos, angle) = rt.camera_shake();
+        assert_eq!(pos, [0.0, -0.003, 0.0]);
+        assert_eq!(angle, [1.0, 0.0, 0.0]);
+        rt.step(0.005);
+        let (_, angle) = rt.camera_shake();
+        assert!((angle[0] - 0.6).abs() < 1e-3, "the angle did not decay at its rate: {angle:?}");
+        rt.step(1.0);
+        let (pos, angle) = rt.camera_shake();
+        assert_eq!(pos, [0.0; 3], "the position offset did not settle");
+        assert_eq!(angle, [0.0; 3], "the angle offset did not settle");
+        println!(
+            "camera: slots and shake: focus 3 -> thing {other} reads back, a focus on the player is POV, and a shot's kick (1 deg, 80 deg/s) decays to 0.6 in 5 ms and to nothing in a second"
+        );
+        println!("--- camera check passed ---");
         return;
     }
 
@@ -14439,7 +14536,43 @@ fn walk_player(
         look = target - third_eye;
     }
 
+    // A script can point the camera at a thing of its own (`SetCameraFocus(slot, camera)` +
+    // `SetCurrentCamera(slot)`): `00_fallcamera.cog` cuts to a camera watching the fall,
+    // `06_max.cog` and the C3 levels cut to placed cameras, and `00_cameratricks.cog` focuses a
+    // camera thing for a scripted shot. The view then *is* that thing, aimed by its own angles.
+    if let Some(focus) = runtime.as_ref().and_then(|rt| rt.camera_focus_thing()) {
+        if let Some(thing) = runtime.as_ref().and_then(|rt| rt.things.get(focus)) {
+            let (forward, _) = yaw_axes(thing.yaw);
+            let pitch = thing.pitch.to_radians();
+            eye = Vec3::from(thing.pos);
+            look = Vec3::new(
+                forward[0] * pitch.cos(),
+                forward[1] * pitch.cos(),
+                pitch.sin(),
+            );
+        }
+    }
+    // `SetPOVShake`: the offset a shot or an earthquake kicks the view by, decaying back to zero.
+    // The engine adds the angle offset to the view angles; the port rotates the aim it already has,
+    // which is the same thing and also works while a scripted camera is in charge.
+    if let Some((pos, angle)) = runtime.as_ref().map(|rt| rt.camera_shake()) {
+        eye += Vec3::from(pos);
+        if angle != [0.0; 3] {
+            let turn = Quat::from_rotation_z(-angle[2].to_radians());
+            let right = look.cross(Vec3::Z).try_normalize().unwrap_or(Vec3::X);
+            let nod = Quat::from_axis_angle(right, angle[0].to_radians());
+            look = (turn * nod * look).try_normalize().unwrap_or(look);
+        }
+    }
+
     tf.translation = eye;
+    if std::env::var_os("BK_CAMERA_TRACE").is_some() {
+        println!(
+            "camera: eye {eye:?} look {:?} scripted {:?}",
+            look.to_array(),
+            runtime.as_ref().and_then(|rt| rt.camera_focus_thing())
+        );
+    }
     if let Some(dir) = look.try_normalize() {
         *tf = tf.looking_to(dir, Vec3::Z);
         // The engine's own strafe lean (see camera_lean): the up axis tilts toward the right column.

@@ -30,7 +30,7 @@ whatever is on screen, and `--gates` passes it to every child. A gate that forge
 ends without a verdict instead of sitting on the main menu forever — which is what five flags that
 do not exist in this binary used to do, because a hand-written flag list had invented them.
 
-`FAILURES: 0 / 36` (`--gates`: `gates: 0 of 36 failed`).
+`FAILURES: 0 / 37` (`--gates`: `gates: 0 of 37 failed`).
 
 flag                                                   exit  what it prints
 -------------------------------------------------------------------------------------------------
@@ -92,6 +92,14 @@ flag                                                   exit  what it prints
                                                              ramp to 1 changes the vertex light, lands on 1
                                                              and stops, and a level whose scripts ramp their
                                                              own lights shows them move (level 2: 7)
+--camera                                                 0  17b_Camera.cog startup points camera slot 0 at
+                                                             thing 38 (`droidcam`, `ghostCam`) at
+                                                             [2.03, -2.83, 2.56], so the view is not the
+                                                             player's; focus slot 3 reads back through
+                                                             GetPrimaryFocus/GetCameraMode, a focus on the
+                                                             player is POV; a shot's SetPOVShake kick (1 deg
+                                                             at 80 deg/s) decays to 0.6 in 5 ms and to
+                                                             nothing in a second
 --triggers                                               0  --- triggers check passed ---
 --sleep                                                  0  --- sleep check passed ---
 --live-check                                             0  the body stands in sector 339 at z -1.17 on a floor at
