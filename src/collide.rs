@@ -109,6 +109,10 @@ pub const SECTOR_ADJOINS_OFF: u32 = 0x80;
 /// `SithSectorFlag` 0x2: the sector is a water volume. `sithPhysics.c:43` halves movement inside
 /// one, which is what `SetSectorFlags(sector, 2)` sets up.
 pub const SECTOR_UNDERWATER: u32 = 0x2;
+/// `SITH_SECTOR_FALLDEATH` 0x40: falling faster than 3 u/s in one of these kills the player
+/// (`sithPlayer.c:255`, `decomp/004c89d0_sithPlayer_Update.c:82`). The engine's own answer to
+/// falling out of the world.
+pub const SECTOR_FALLDEATH: u32 = 0x40;
 
 /// What the level's scripts have switched: each sector's flag word and each adjoin row's.
 ///

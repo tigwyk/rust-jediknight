@@ -1728,7 +1728,7 @@ Everything in this list is from the shipped binary, not from its decompilation:
 | the mover | `0x4e7670` | moves the thing and every attached thing recursively, calling `MoveThing` per sub-step |
 | wedged player | `0x4e7950` → `0x4f61a0` | when the slide loop runs past 3 iterations on a *player*, the engine zeroes its physics state — velocity, forces, attached-surface data — instead of leaving it pinned |
 | `sithPhysics_FindFloor` | `0x4f5550` | a **radius-0 ray** along the thing's up axis, `1.1 ×` the thing's last floor gap (`2 ×` for some move types), flags `0x2802`; a `BOTTOM` contact sets the thing's floor state |
-| fall death | `sithPlayer_Update` | `vel.z < -3.0` **and** the current sector has `SITH_SECTOR_FALLDEATH` (`0x40`) → the player dies after a fade, which is the engine's answer to falling out of the world |
+| fall death | `sithPlayer_Update` (`decomp/004c89d0_sithPlayer_Update.c:80`, `sithPlayer.c:251`) | `vel.z < -3.0` **and** the current sector has `SITH_SECTOR_FALLDEATH` (`0x40`) → the body is marked `SITH_AF_FALLKILLED`, the palette runs down at 0.7 a second, and at zero `sithPlayer_KillPlayer` takes it. Implemented: `fall_death_rule` + the fade in `walk_player`, and `respawn_after_death` puts the body back at the level's start. Level 1 ships **32** of those sectors, so it is a rule a player meets |
 
 Two things followed from that: the window now moves the body **once per 0.02 s sub-step**
 (the velocity integration already used the engine's rollover, but the sweep was taking a

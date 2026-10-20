@@ -119,6 +119,7 @@ const GATES: &[&str] = &[
     "--feel",
     "--flow",
     "--fall",
+    "--falldeath",
     "--hit",
     "--live-check",
     "--mana",
@@ -232,6 +233,7 @@ fn main() {
     let mut sound_on = false;
     let mut audio_state = false;
     let mut fall_check = false;
+    let mut falldeath_check = false;
     let mut shot_at: Option<([f32; 3], f32)> = None;
 
     let mut sim = false;
@@ -356,6 +358,7 @@ fn main() {
                 shot = args.get(i).cloned();
             }
             "--fall" => fall_check = true,
+        "--falldeath" => falldeath_check = true,
             "--mute" => muted_flag = true,
             "--sound-on" => sound_on = true,
             "--audio-state" => audio_state = true,
@@ -5114,6 +5117,25 @@ fn main() {
         return;
     }
 
+    if falldeath_check {
+        // `SITH_SECTOR_FALLDEATH` (0x40) is what separates "fell off a ledge" from "fell out of the
+        // world": `sithPlayer_Update` kills a body falling faster than 3 u/s while inside one. Level 1
+        // ships 32 of them, so this is a rule a player meets, not a corner case.
+        let flagged = world
+            .level
+            .sectors
+            .iter()
+            .filter(|s| s.flags & collide::SECTOR_FALLDEATH != 0)
+            .count();
+        assert!(flagged > 0, "{level_name} ships no FALLDEATH sector");
+        assert!(fall_death_rule(4.0, collide::SECTOR_FALLDEATH), "a fast fall in a flagged sector must kill");
+        assert!(!fall_death_rule(2.0, collide::SECTOR_FALLDEATH), "a slow descent is not a fall death");
+        assert!(!fall_death_rule(4.0, 0), "a fast fall in an ordinary room is a landing, not a death");
+        println!("fall death: {flagged} sector(s) carry 0x40; 4.0 u/s inside one kills, 2.0 u/s and an unflagged sector do not");
+        println!("--- fall death check passed ---");
+        return;
+    }
+
     if rules_only {
         // What the player's own template says the motion is, per level.
         let rules = Rules::from_level(&world.level);
@@ -5493,6 +5515,7 @@ fn main() {
                     deliver_crossed,
                     use_key,
                     apply_fall_damage,
+                    respawn_after_death,
                     walk_player,
                     cull_sectors,
                     sky_follows_camera,
@@ -10177,8 +10200,7 @@ struct PulseCount(usize);
 /// is the runtime's.
 /// Apply fall damage the walker recorded: the runtime owns the player's health, so the impact surfaces
 /// there on the next frame (`sithCollision_FallHurt` → `sithThing_DamageThing`).
-fn apply_fall_damage(sim: Option<Res<Sim>>, player: Option<ResMut<Player>>) {
-    let (Some(sim), Some(mut player)) = (sim, player) else { return };
+fn apply_fall_damage(sim: Option<Res<Sim>>, player: Option<ResMut<Player>>) {    let (Some(sim), Some(mut player)) = (sim, player) else { return };
     if player.fall_damage <= 0.0 {
         return;
     }
@@ -10193,6 +10215,33 @@ fn apply_fall_damage(sim: Option<Res<Sim>>, player: Option<ResMut<Player>>) {
     };
     let left = rt.damage(index as i64, damage);
     println!("fall: {damage:.0} damage, {left:.0} health left");
+}
+
+/// `sithPlayer_KillPlayer`: once the runtime says the player is dead, put the body back at the level's
+/// start. The live position lives on `Player`; the spawn is the runtime's own `walkplayer` record, which
+/// the walker never moves — so the level file stays the source of where the player starts.
+fn respawn_after_death(sim: Option<Res<Sim>>, player: Option<ResMut<Player>>) {
+    let (Some(sim), Some(mut player)) = (sim, player) else { return };
+    let mut rt = sim.world.borrow_mut();
+    if !rt.player_dead {
+        return;
+    }
+    let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")) else {
+        return;
+    };
+    let spawn = rt.things[index].pos;
+    let sector = rt.things[index].sector;
+    let (shields, health) = rt.respawn_player(spawn);
+    player.pos = Vec3::from(spawn);
+    player.vy = 0.0;
+    player.vel = [0.0; 2];
+    player.grounded = false;
+    player.fall_killed = false;
+    player.fall_fade = 1.0;
+    if sector >= 0 {
+        player.sector = sector as usize;
+    }
+    println!("death: back at the level's start, {health:.0} health, {shields:.0} shields");
 }
 fn health_follows_damage(
     sim: Option<Res<Sim>>,
@@ -11643,6 +11692,8 @@ fn setup(
         extra_speed: 0.0,
         vel: [0.0; 2],
         step_rollover: 0.0,
+        fall_killed: false,
+        fall_fade: 1.0,
         pos: Vec3::from(start),
         vy: 0.0,
         yaw: player_yaw,
@@ -11671,6 +11722,7 @@ struct Collision(collide::Solids);
 #[cfg(test)]
 mod fall_tests {
     use super::fall_damage;
+    use super::fall_death_rule;
 
     /// `sithCollision_FallHurt`: `(vel - 2.5)^2 * 45`, and nothing at all below a 1.0 threshold.
     #[test]
@@ -11685,6 +11737,18 @@ mod fall_tests {
         assert!((fall_damage(5.0) - 281.25).abs() < 1e-4, "{}", fall_damage(5.0));
         assert!((fall_damage(10.0) - 2531.25).abs() < 1e-3, "{}", fall_damage(10.0));
     }
+
+    /// The fall death is the sector's flag, not the speed alone: a fast fall in an ordinary room is a
+    /// landing (`FallHurt` handles it), a fast fall in a `FALLDEATH` sector is the end of the level.
+    #[test]
+    fn fall_death_needs_a_fast_fall_and_a_flagging_sector() {
+        let flagged = crate::collide::SECTOR_FALLDEATH;
+        assert!(fall_death_rule(3.1, flagged), "a 3.1 u/s fall in a flagged sector kills");
+        assert!(!fall_death_rule(3.0, flagged), "exactly 3.0 is the engine's `vel.z < -3.0`");
+        assert!(!fall_death_rule(3.1, 0), "an ordinary room does not kill, however fast the fall");
+        assert!(!fall_death_rule(3.1, crate::collide::SECTOR_UNDERWATER), "water is not a fall death");
+        assert!(fall_death_rule(8.0, flagged | crate::collide::SECTOR_UNDERWATER), "the flag is a bit");
+    }
 }
 fn fall_damage(impact: f32) -> f32 {
     // `sithThing_AttachThingToSurface` only calls `FallHurt` when `-dot(vel, normal) > 2.5`, and `FallHurt`
@@ -11696,6 +11760,15 @@ fn fall_damage(impact: f32) -> f32 {
     }
     let d = (impact - 2.5) * (impact - 2.5) * 45.0;
     if d > 1.0 { d } else { 0.0 }
+}
+
+/// `sithPlayer_Update`'s fall-death test (`decomp/004c89d0_sithPlayer_Update.c:80`, `sithPlayer.c:251`):
+/// a body falling faster than 3 u/s **inside a `SITH_SECTOR_FALLDEATH` sector**. The sector is what
+/// separates "fell off a ledge" from "fell out of the world".
+///
+/// It lives here, not in the walk system, so the rule can be checked without a running world.
+fn fall_death_rule(engine_vy: f32, sector_flags: u32) -> bool {
+    engine_vy > 3.0 && sector_flags & collide::SECTOR_FALLDEATH != 0
 }
 /// Fallbacks for the body, used only when a level's `walkplayer` names no `size=`/`eyeoffset=`.
 ///
@@ -11919,6 +11992,11 @@ struct Player {
     vel: [f32; 2],
     /// Leftover time for the fixed 50 Hz physics step (`OLDSTEP_TARGET_FPS`).
     step_rollover: f32,
+    /// `SITH_AF_FALLKILLED`: the player fell too fast in a `SITH_SECTOR_FALLDEATH` sector and is dying.
+    /// The palette fades at 0.7 a second and death follows (`sithPlayer.c:265`).
+    fall_killed: bool,
+    /// The palette fade the fall death runs down, 1 → 0 (`sithPlayer.c:267`).
+    fall_fade: f32,
 }
 
 /// Where to put the player: the level's `walkplayer` position, nudged out of anything it overlaps.
@@ -12712,6 +12790,29 @@ fn walk_player(
     player.sector = sector;
     player.pos = Vec3::from(pos);
     player.grounded = player.vy == 0.0;
+    // The engine's fall death (`sithPlayer.c:251`, `decomp/004c89d0_sithPlayer_Update.c:80`): falling
+    // faster than 3 u/s inside a sector flagged `SITH_SECTOR_FALLDEATH` marks the player
+    // `SITH_AF_FALLKILLED` and the palette runs down at 0.7 a second; at zero, `sithPlayer_KillPlayer`.
+    if !player.fall_killed
+        && fall_death_rule(
+            -player.vy / physics_scale().max(1.0).sqrt(),
+            gates.sectors.get(player.sector).copied().unwrap_or(0),
+        )
+    {
+        player.fall_killed = true;
+        player.fall_fade = 1.0;
+        println!("fall death: the player fell out of the level; the palette starts to fade");
+    }
+    if player.fall_killed {
+        player.fall_fade -= dt * 0.7;
+        if player.fall_fade <= 0.0 {
+            // `sithPlayer_KillPlayer` takes the whole player: lethal damage is this port's death path
+            // (`--die`), and `respawn_after_death` puts the body back at the level's start.
+            player.fall_killed = false;
+            player.fall_fade = 1.0;
+            player.fall_damage += 1000.0;
+        }
+    }
     // Water halves movement: the engine reads the surface under the feet (`SITH_SURFACE_WATER`
     // 0x20000 / `VERYDEEPWATER` 0x100000) and the sector's own `SITH_SECTOR_UNDERWATER` — the bit
     // `SetSectorFlags(sector, 2)` sets for the shipped "passthru layer" water.
