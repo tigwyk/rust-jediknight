@@ -12858,6 +12858,12 @@ fn animate_actors(
         if dead.contains(&actor.thing) {
             actor.dying = true;
         }
+        // An actor that just fired plays its puppet's `fire` track: the engine's
+        // `sithPuppet_UpdateThingMove` picks the action track over the stride, and an actor that
+        // keeps walking while shooting is the sliding soldier the trace made obvious.
+        let firing = sim
+            .as_deref()
+            .is_some_and(|sim| sim.world.borrow().just_fired(actor.thing));
         // The state name, which is what decides the keyfile below. A scripted clip has no state
         // of its own, so it gets the empty name and always wins.
         let state = if scripted.is_some() {
@@ -12865,7 +12871,7 @@ fn animate_actors(
         } else if actor.dying {
             "death"
         } else {
-            locomotion_state(vel, pose.unwrap_or(0.0))
+            actor_state(vel, pose.unwrap_or(0.0), firing, |name| actor.states.contains_key(name))
         };
         if actor.state.as_str() != state {
             let next = match &scripted {
@@ -12976,6 +12982,19 @@ fn locomotion_state(vel: Vec3, yaw_deg: f32) -> &'static str {
     } else {
         "strafeleft"
     }
+}
+
+/// The state an actor plays: its action track while it is shooting, else the stride.
+///
+/// `sithPuppet_UpdateThingMove` prefers the action track (`fire`) over the locomotion one, and falls
+/// back to the stride when the puppet ships no such row — a droid with no `fire` row still walks and
+/// shoots, it just does not animate the shot. `has` is the puppet's own state list, which keeps this
+/// a pure function the tests can drive without a Bevy world.
+fn actor_state(vel: Vec3, yaw_deg: f32, firing: bool, has: impl Fn(&str) -> bool) -> &'static str {
+    if firing && has("fire") {
+        return "fire";
+    }
+    locomotion_state(vel, yaw_deg)
 }
 
 /// Which keyfile an actor plays: its `stand` loop, or its `death` animation once dead (a
@@ -17216,6 +17235,29 @@ fn template_counts(level: &jkl::Level) -> Vec<(String, usize)> {
     let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     ranked
+}
+
+#[cfg(test)]
+mod actor_state_tests {
+    use super::actor_state;
+    use bevy::math::Vec3;
+
+    /// A shooting actor plays its `fire` track; a puppet without one falls back to the stride
+    /// rather than to nothing.
+    #[test]
+    fn shooting_picks_the_fire_track_when_the_puppet_has_one() {
+        let still = Vec3::ZERO;
+        let stormtrooper = |name: &str| ["stand", "walk", "run", "fire"].contains(&name);
+        let droid = |name: &str| ["stand", "walk"].contains(&name);
+        assert_eq!(actor_state(still, 0.0, false, stormtrooper), "stand");
+        assert_eq!(actor_state(still, 0.0, true, stormtrooper), "fire");
+        // A puppet with no `fire` row keeps its own state: it shoots without animating the shot.
+        assert_eq!(actor_state(still, 0.0, true, droid), "stand");
+        // Movement still loses to the action track, which is the engine's ordering.
+        let running = Vec3::new(1.0, 0.0, 0.0);
+        assert_eq!(actor_state(running, 0.0, false, stormtrooper), "run");
+        assert_eq!(actor_state(running, 0.0, true, stormtrooper), "fire");
+    }
 }
 
 #[cfg(test)]

@@ -777,6 +777,9 @@ pub struct Runtime {
     pub waggle: BTreeMap<usize, [f32; 3]>,
     /// `.key` name -> frame count, for `GetKeyLen`. The loader fills it.
     pub key_lengths: BTreeMap<String, f32>,
+    /// The level time each actor last fired, so the renderer can play its `fire` track. The engine
+    /// picks the action track from `sithPuppet_UpdateThingMove`, which this build has no analogue of.
+    pub last_shot: BTreeMap<usize, f32>,
     /// `SetArmedMode`/`SetMajorMode`: the puppet's armed state and its major mode.
     pub armed_mode: BTreeMap<usize, u32>,
     pub major_mode: BTreeMap<usize, u32>,
@@ -1083,6 +1086,7 @@ impl Runtime {
             pov_key: BTreeMap::new(),
             waggle: BTreeMap::new(),
             key_lengths: BTreeMap::new(),
+            last_shot: BTreeMap::new(),
             armed_mode: BTreeMap::new(),
             major_mode: BTreeMap::new(),
             cur_weapon_thing: None,
@@ -2485,6 +2489,9 @@ impl Runtime {
         }
         for (index, weapon, error) in shots {
             if self.fire_spread(index as i64, &weapon, error).is_some() {
+                // The renderer plays a puppet's `fire` track off this: the engine's
+                // `sithPuppet_UpdateThingMove` picks the action track while the actor is shooting.
+                self.last_shot.insert(index, self.time);
                 fired += 1;
             }
         }
@@ -3580,6 +3587,12 @@ impl Runtime {
             Some((line, until)) if self.time < *until => Some(line),
             _ => None,
         }
+    }
+
+    /// Whether `thing` fired within the last quarter second — long enough for the puppet's `fire`
+    /// track to have started, which is what the renderer switches to.
+    pub fn just_fired(&self, thing: usize) -> bool {
+        self.last_shot.get(&thing).is_some_and(|at| self.time - at < 0.25)
     }
 
     /// Append to the `jkString*` buffer, respecting the engine's 128-character cap.
@@ -5689,6 +5702,7 @@ mod tests {
             pov_key: BTreeMap::new(),
             waggle: BTreeMap::new(),
             key_lengths: BTreeMap::new(),
+            last_shot: BTreeMap::new(),
             armed_mode: BTreeMap::new(),
             major_mode: BTreeMap::new(),
             cur_weapon_thing: None,
