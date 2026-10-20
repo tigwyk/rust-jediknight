@@ -624,8 +624,11 @@ fn main() {
                 i += 1;
                 let arg = args.get(i).cloned().unwrap_or_default();
                 // No path: round-trip through the temp directory. An empty name is not a path, and
-                // `--save` on its own used to fail with `NotFound` when the writer reached it.
-                save_check = Some(if arg.is_empty() {
+                // `--save` on its own used to fail with `NotFound` when the writer reached it. A
+                // following flag is not a path either: `--save --level 01narshadda` used to write a
+                // file literally named `--level` in the working directory.
+                save_check = Some(if arg.is_empty() || arg.starts_with("--") {
+                    i -= 1;
                     std::env::temp_dir().join("bevi-knight-save.jks").display().to_string()
                 } else {
                     arg
