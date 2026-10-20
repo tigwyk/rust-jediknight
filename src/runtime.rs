@@ -582,6 +582,11 @@ pub struct Runtime {
     pub types: Vec<i32>,
     /// Template name -> thing type, for `CreateThing` to give the new thing its type.
     pub template_types: BTreeMap<String, i32>,
+    /// A template's `move=`: `physics` goods fall and slide, `path` things follow keyframes, and a
+    /// projectile flies its own `vel=`. Gravity applies only to the first kind.
+    pub template_move: BTreeMap<String, String>,
+    /// World gravity, from the level's own `World Gravity` line: what pulls a physics thing down.
+    pub gravity: f32,
     /// A template's `health=`/`maxhealth=`, so a created thing starts with real health.
     pub template_health: BTreeMap<String, f32>,
     /// A template's `vel=` — a projectile's launch speed — and its `damage=`.
@@ -1123,6 +1128,15 @@ impl Runtime {
                 .collect(),
             template_types,
             template_health,
+            template_move: level
+                .templates
+                .iter()
+                .filter_map(|t| {
+                    level.template_param(&t.name, "move")
+                        .map(|m| (t.name.to_ascii_lowercase(), m.to_string()))
+                })
+                .collect(),
+            gravity: level.gravity,
             prints: Vec::new(),
             hud_message: None,
             string_buffer: String::new(),
@@ -1853,6 +1867,11 @@ impl Runtime {
         // `sithPhysics.c`: a body in a `SITH_SECTOR_USETHRUST` sector gets `thrust * dt` added to its
         // velocity each step, exactly like gravity. Level 21's core tube lifts what stands in it.
         let thrust: Vec<[f32; 3]> = self.sectors.iter().map(|s| s.thrust).collect();
+        // `ponytail:` gravity for the physics goods is **not** a line: the collision resolve below
+        // corrects only x and y, so a settling item sinks straight through the floor — tried this
+        // round, and 231 of level 1's bodies left the world. `sithPhysics` resolves the vertical axis
+        // against the sector's surfaces first; that is the prerequisite, not gravity itself. m5's four
+        // weapon pickups rise because a thrust sector accelerates them and nothing pulls back.
         for (i, t) in self.things.iter_mut().enumerate() {
             if let Some(drive) = usize::try_from(t.sector).ok().and_then(|s| thrust.get(s)).copied()
                 && drive != [0.0; 3]
@@ -5971,6 +5990,8 @@ mod tests {
             types: vec![10],
             template_types: BTreeMap::from([("walkplayer".to_string(), 10)]),
             template_health: BTreeMap::from([("walkplayer".to_string(), 100.0)]),
+            template_move: BTreeMap::new(),
+            gravity: 4.0,
             template_vel: BTreeMap::new(),
             template_damage: BTreeMap::new(),
             template_inv: BTreeMap::new(),
