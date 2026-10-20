@@ -5298,9 +5298,14 @@ impl Runtime {
             // arms a weapon cog (`sithWeapon_ActivateWeapon`), `DeactivateWeapon` clears it, and
             // `ChangeFireRate` replaces the rate `fire:` computes from `fireWait / powerBoost`.
             "activateweapon" => {
-                let cog = idx(1) as i32;
-                let rate = num(2) as f32;
-                let mode = idx(3) as i32;
+                // `ActivateWeapon(player, rate, mode)` — **three** arguments, and the cog is not one of
+                // them: the engine arms the script that called it (`sithWeapon_ActivateWeapon` takes
+                // the caller). Reading `idx(1)` as a cog made every weapon arm cog **0**, so the
+                // `fire:` message went to an unrelated script and the player's trigger produced
+                // nothing on every level (`cog_weap_bryar.cog` calls exactly this three-argument form).
+                let cog = self.caller_cog;
+                let rate = num(1) as f32;
+                let mode = idx(2) as i32;
                 if (0..2).contains(&mode) {
                     self.weapon_cog = Some((cog, rate, mode));
                     self.weapon_rate = rate;
@@ -6676,6 +6681,10 @@ mod tests {
         // without needing the app's message pump.
         rt.messages.clear();
         rt.weapon_cog = None;
+        // `ActivateWeapon(player, rate, mode)` arms the **calling** cog, so a direct `call` has to
+        // say who is calling — the VM sets this before every verb (`cog.rs` does it) and the
+        // trigger message is addressed to that instance.
+        rt.caller_cog = 5;
         assert!(!rt.try_fire_weapon(rt.player_thing()), "an unarmed trigger fired");
         rt.call(
             "ActivateWeapon",
@@ -6685,6 +6694,9 @@ mod tests {
                 Value::Num(0.0),
             ],
         );
+        // The rate is the weapon&#39;s real one now (`ActivateWeapon`'s second argument), and arming
+        // waits that long before the first shot is accepted.
+        rt.time += 1.0;
         assert!(rt.try_fire_weapon(rt.player_thing()), "the armed trigger refused to fire");
         // The point of switching: what fires next is the new gun's shot.
         assert_eq!(rt.current_weapon(), "stlaser", "the armed weapon did not change");

@@ -15385,7 +15385,14 @@ fn live_play_drive(
         }
     }
     if (WALK_FRAMES + 1..=WALK_FRAMES + FIRE_FRAMES).contains(&state.frame) {
-        buttons.press(MouseButton::Left);
+        // Toggled: `fire_player` acts on `just_pressed`, so a held button fires once. Alternating
+        // press/release gives the trigger a fresh `just_pressed` every other frame, which is also
+        // what a player clicking repeatedly produces.
+        if state.frame % 2 == 0 {
+            buttons.press(MouseButton::Left);
+        } else {
+            buttons.release(MouseButton::Left);
+        }
         // Peak, not delta: a bolt that hits a wall is destroyed within the same 30 frames, so the
         // count at the end says nothing about whether the trigger worked.
         if let Some(sim) = sim.as_deref() {
@@ -15922,6 +15929,12 @@ fn fire_player(
     let _ = &gun.0;
     // A scripted `SetFireWait` locks the trigger until its cooldown runs out. Checked before the ammo
     // is spent, so a refused shot costs nothing.
+    if std::env::var_os("BK_FIRE_TRACE").is_some() {
+        eprintln!(
+            "fire trace: click reached rt, time {:.2} next_fire {:.2} weapon_cog {:?} weapon {weapon}",
+            rt.time, rt.next_fire, rt.weapon_cog.map(|(c, _, _)| c)
+        );
+    }
     if rt.time < rt.next_fire {
         return;
     }
