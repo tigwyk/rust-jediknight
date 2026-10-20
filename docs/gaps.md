@@ -188,6 +188,16 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 6. **Puppet locomotion states.** Visible, and the state data is already loaded; the pose code is real.
 7. **Attachments and parenting.** Needed by carried weapons, passengers, and any script that moves a child.
 8. **Camera focus and shake.** It is what makes in-engine cutscenes and several force powers read as intended.
+9. **Level 1's first frame is a wall of polygons, and it is the level's own start.** The walker spawns at
+   the first thing of type PLAYER (thing 0, `(-10.44, -5.45, -1.13)`, sector 339) — the engine's own rule
+   (`sithPlayer_Initialize` takes the first `SITH_THING_PLAYER` in list order), so this is not a wrong
+   pick: the level's other 11 `walkplayer` rows carry `thingflags=0x20080501` (multiplayer starts) and
+   thing 0 carries none. But a `00table` sits **0.16** units away, a `tuskensoused` patron 0.15, a
+   `reyeesbhgun` 0.27, columns either side, and the eye is at `pos + PLAYER_EYE`, so the view is inside a
+   cantina table with a body at arm's length. `BK_MODEL_SCALE=0.01` renders the room cleanly and the
+   geometry is right, so the blocker is a thing model drawn at the eye, not the world. Unproven whether
+   retail draws the same frame (nothing here says the start point is wrong); the way to settle it is a
+   retail reference frame at level start, then either the port's draw offset follows or the start stays.
 
 ---
 
