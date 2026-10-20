@@ -2500,6 +2500,37 @@ reports which placed scripts in a level do this — level 17b's `darkjedi_yun2.c
 `ponytail:` a settled hit is *amended*, not replayed, so a handler can only reduce damage; a script
 asking for more than was applied is ignored (no shipped one does).
 
+### A thing can ride another thing, and turn about a pivot
+
+`AttachThingToThing(child, parent)` is how the engine makes a thing follow another, and the twenty
+shipped calls are functional rather than decorative: a crate on a lift (`00_elev_doors5.cog`), a
+catwalk on a ship (`09_donefueling.cog`), the sphere `force_absorb.cog` hangs on the player, and the
+orbiting camera of `00_cameratricks.cog`. `sithThing_AttachThingToThing` stores the child's offset in
+the **parent's own frame** (`rdMatrix_TransformVectorOrtho34` into `field_4C`), so the parent's motion
+carries the child and its rotation swings the child around it; `DetachThing` (a negative parent)
+ends the ride.
+
+`RotatePivot(thing, frame, seconds)` turns a thing about the pivot its **own `frame=` table** names:
+`sithCogFunctionThing_RotatePivot` takes the frame's position as the point to turn around and its
+angles as the rotation, and `sithTrackThing_RotatePivot` sets the rate to `1 / seconds` (a zero
+duration is one second, a negative one turns the other way). `Runtime` keeps the spin as
+`(centre, angles, duration, done)` plus the pose it started from, so progress is a function of time
+rather than an accumulator that drifts. Together with attachments this is the orbiting camera:
+`AttachThingToThing(camera1, fulcrum)` then `RotatePivot(fulcrum, 1, orbittime)` swings the camera
+around the fulcrum, which is the pair level 7 and `00_cameratricks.cog` use.
+
+**The pivot gate caught a sign error in the attachment rotation.** `update_attachments` rotated the
+child by hand as `(x cos + y sin, -x sin + y cos)` — a rotation by *minus* the parent's yaw — which
+agrees with nothing: this world's own convention is that a yaw of `a` faces `(-sin a, cos a)`, i.e.
+`Quat::from_rotation_z(+a)` applied to `+Y`. The attach gate had encoded the same flipped expectation,
+so both agreed and neither was right; the orbiting-camera case in the same gate disagreed with it and
+exposed it. Both now use `Quat::from_rotation_z(yaw)`, and the gate asserts a half-turn lands the
+rider at `(1.41, 1.41)`.
+
+`ponytail:` the engine's child *list* (several children per thing, chains resolving in list order) is
+one level deep here, in index order. And pitch/roll turn the thing without moving the arm it swings
+on — every shipped `RotatePivot` pivots on yaw.
+
 **Force seeing: the script was running and the mode verbs were falling through.** `--force seeing`
 spent its mana (400 → 370, the script's own `ChangeInv(player, 14, -30)`) and called
 `EnableIRMode`, `DisableIRMode`, `ClearMapModeFlags` and `ChangeSoundVol` — and none of the mode

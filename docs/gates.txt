@@ -116,8 +116,13 @@ flag                                                   exit  what it prints
 --attach                                                  0  `AttachThingToThing(child, parent)` keeps
                                                              the offset: parent at [2,0,0] puts the
                                                              child at [3,0,0.5], a 90 deg parent turn
-                                                             swings it to [2,-1,0.5] and back, and
-                                                             detaching stops the ride; level 9
+                                                             swings it to [2,1,0.5] and back, and
+                                                             detaching stops the ride; a
+                                                             `RotatePivot(0, 2 s)` turns the body
+                                                             about its frame's pivot (45 deg and
+                                                             [0.71, 0.71] after a second, +Y after
+                                                             two) and the attached thing rides at
+                                                             twice the radius; level 9
                                                              (`09_donefueling.cog`) and 16a
                                                              (`16a_crowarm.cog`) place one
 --damage-return                                          0  thing 19 was hit for 100; `GetParam(0)`

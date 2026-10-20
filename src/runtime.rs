@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 
+use bevy::math::{Quat, Vec3};
+
 use crate::cog::Value;
 use crate::collide::{Gates, SECTOR_ADJOINS_OFF};
 use crate::jkl::Level;
@@ -40,6 +42,26 @@ pub struct SoundRequest {
     pub volume: f32,
     /// World position the sound comes from, when the verb named one.
     pub pos: Option<[f32; 3]>,
+}
+
+/// `RotatePivot(thing, frame, seconds)`: spin a thing about the pivot its own `frame=` entry names.
+///
+/// The engine keeps this on the track parameters (`curOrient.scale` is the pivot, `moveFrameDeltaAngles`
+/// the rotation, `field_54 = 1 / seconds` the rate), which is what this is. The shipped users are an
+/// orbiting camera (a fulcrum the camera is attached to, `00_cameratricks.cog`), level 3's pool
+/// paddles and level 6's swinging door.
+#[derive(Clone)]
+pub struct PivotSpin {
+    /// The frame's position: what the thing turns *around*.
+    pub centre: [f32; 3],
+    /// The frame's angles, in degrees: the rotation it turns *by*.
+    pub angles: [f32; 3],
+    pub duration: f32,
+    pub done: f32,
+    /// The pose the spin started from, so the whole turn is a function of progress rather than an
+    /// accumulation that drifts.
+    pub start_pos: [f32; 3],
+    pub start_angles: [f32; 3],
 }
 
 #[derive(Clone)]
@@ -91,6 +113,8 @@ pub struct ThingState {
     pub attach_offset: [f32; 3],
     /// `SetThingAttachFlags`: stored, and `SITH_ATTACH_NOMOVE` (0x2) is the one read.
     pub attach_flags: u32,
+    /// `RotatePivot`'s in-flight spin, if any.
+    pub spin: Option<PivotSpin>,
 }
 
 impl ThingState {
@@ -687,6 +711,7 @@ impl Runtime {
                     attach: None,
                     attach_offset: [0.0; 3],
                     attach_flags: 0,
+                    spin: None,
                 })
                 .collect(),
             templates: level.things.iter().map(|t| t.template.clone()).collect(),
@@ -1286,6 +1311,35 @@ impl Runtime {
                 self.pending_messages.push((instance, "blocked", [0.0; 2]));
             }
         }
+        // `RotatePivot`: a thing turning about the pivot its frame names, a whole turn of `seconds`.
+        // The pose is a function of progress from the pose it started at, so a long frame cannot
+        // drift the way an accumulator would.
+        for index in 0..self.things.len() {
+            let Some(spin) = self.things[index].spin.clone() else { continue };
+            let done = (spin.done + dt).min(spin.duration);
+            let t = (done / spin.duration.max(1e-4)).clamp(0.0, 1.0);
+            let angles = [
+                spin.angles[0] * t,
+                spin.angles[1] * t,
+                spin.angles[2] * t,
+            ];
+            // A positive yaw turns +Y toward -X, which is this world's own convention (`yaw_axes` in
+            // the renderer). Pitch is degrees above the horizon. `ponytail:` pitch and roll turn the
+            // *thing* but not the arm it swings on; every shipped `RotatePivot` pivots on yaw.
+            let turn = Quat::from_rotation_z(angles[1].to_radians());
+            let d = Vec3::from(spin.start_pos) - Vec3::from(spin.centre);
+            let orbited = Vec3::from(spin.centre) + turn * d;
+            if let Some(thing) = self.things.get_mut(index) {
+                thing.pos = [orbited.x, orbited.y, orbited.z];
+                thing.pitch = spin.start_angles[0] + angles[0];
+                thing.yaw = spin.start_angles[1] + angles[1];
+                thing.roll = spin.start_angles[2] + angles[2];
+                thing.spin = if done >= spin.duration { None } else { Some(PivotSpin { done, ..spin }) };
+            }
+            if !moved.contains(&index) {
+                moved.push(index);
+            }
+        }
         // Attached things follow their parent: `sithThing_AttachThingToThing` stores the offset in the
         // parent's own frame (`rdMatrix_TransformVectorOrtho34` into `field_4C`), and the parent's
         // motion carries the child from there. A crate riding a lift and a catwalk hanging off a ship
@@ -1308,12 +1362,11 @@ impl Runtime {
                 continue;
             };
             let offset = self.things[index].attach_offset;
-            let (sin, cos) = from.1.to_radians().sin_cos();
-            let next = [
-                from.0[0] + offset[0] * cos + offset[1] * sin,
-                from.0[1] - offset[0] * sin + offset[1] * cos,
-                from.0[2] + offset[2],
-            ];
+            // The parent's own rotation, in this world's convention: a positive yaw turns +Y toward
+            // -X (see `yaw_axes` in the renderer), which is `from_rotation_z(+yaw)`.
+            let turn = Quat::from_rotation_z(from.1.to_radians());
+            let orbited = Vec3::from(from.0) + turn * Vec3::from(offset);
+            let next = [orbited.x, orbited.y, orbited.z];
             let sector = from.2;
             if let Some(thing) = self.things.get_mut(index) {
                 thing.pos = next;
@@ -1460,6 +1513,7 @@ impl Runtime {
                 | "attachthingtothing"
                 | "attachthingtothingex"
                 | "detachthing"
+                | "rotatepivot"
                 | "getthingparent"
                 | "setthingattachflags"
                 | "aisetfiretarget"
@@ -1532,6 +1586,7 @@ impl Runtime {
                 | "setphysicsflags"
                 | "clearphysicsflags"
                 | "detachthing"
+                | "rotatepivot"
                 | "jkgetflags"
                 | "jksetflags"
                 | "jksetpersuasioninfo"
@@ -1821,6 +1876,7 @@ impl Runtime {
             attach: None,
             attach_offset: [0.0; 3],
             attach_flags: 0,
+            spin: None,
             extra_speed: 0.0,
             ai_target: None,
             ai_wait: 0.0,
@@ -2359,6 +2415,7 @@ impl Runtime {
             attach: None,
             attach_offset: [0.0; 3],
             attach_flags: 0,
+            spin: None,
             extra_speed: 0.0,
             ai_target: None,
             ai_wait: 0.0,
@@ -2693,8 +2750,9 @@ impl Runtime {
             child_pos[2] - parent_pos[2],
         ];
         // Into the parent's frame: the inverse of the rotation `update_attachments` applies.
-        let (sin, cos) = parent_yaw.to_radians().sin_cos();
-        let offset = [d[0] * cos - d[1] * sin, d[0] * sin + d[1] * cos, d[2]];
+        let inverse = Quat::from_rotation_z(-parent_yaw.to_radians());
+        let local = inverse * Vec3::from(d);
+        let offset = [local.x, local.y, local.z];
         if let Some(thing) = self.things.get_mut(child) {
             thing.attach = Some(parent);
             thing.attach_offset = offset;
@@ -2897,6 +2955,45 @@ impl Runtime {
             "setthingattachflags" => {
                 if let Some(thing) = usize::try_from(idx(0)).ok().and_then(|i| self.things.get_mut(i)) {
                     thing.attach_flags = idx(1) as u32;
+                }
+                Value::Nil
+            }
+            // `RotatePivot(thing, frame, seconds)`: `sithCogFunctionThing_RotatePivot` takes the
+            // *frame* from the thing's `frame=` table — its position is the pivot to turn around and
+            // its angles the rotation to turn by — and `sithTrackThing_RotatePivot` sets the rate to
+            // `1 / seconds`. A zero `seconds` means 1 second and a negative one turns the other way,
+            // which is the engine's own two adjustments. It requires a path thing with that frame
+            // loaded; so does this.
+            "rotatepivot" => {
+                let Some(index) = usize::try_from(idx(0)).ok() else { return Value::Nil };
+                let Some(frame) = self
+                    .things
+                    .get(index)
+                    .and_then(|t| usize::try_from(idx(1)).ok().and_then(|f| t.frames.get(f)))
+                    .copied()
+                else {
+                    return Value::Nil;
+                };
+                let mut angles = [frame[3], frame[4], frame[5]];
+                let mut seconds = num(2) as f32;
+                if seconds == 0.0 {
+                    seconds = 1.0;
+                }
+                if seconds < 0.0 {
+                    angles = [-angles[0], -angles[1], -angles[2]];
+                    seconds = -seconds;
+                }
+                if let Some(thing) = self.things.get_mut(index) {
+                    thing.spin = Some(PivotSpin {
+                        centre: [frame[0], frame[1], frame[2]],
+                        angles,
+                        duration: seconds,
+                        done: 0.0,
+                        start_pos: thing.pos,
+                        start_angles: [thing.pitch, thing.yaw, thing.roll],
+                    });
+                    // The frame path is done with: the engine sets `curframe = -1`.
+                    thing.target = None;
                 }
                 Value::Nil
             }
@@ -3640,6 +3737,7 @@ impl Runtime {
                     attach: None,
                     attach_offset: [0.0; 3],
                     attach_flags: 0,
+                    spin: None,
                     extra_speed: 0.0,
                     ai_target: None,
                     ai_wait: 0.0,
@@ -4009,6 +4107,7 @@ mod tests {
                 attach: None,
                 attach_offset: [0.0; 3],
                 attach_flags: 0,
+                spin: None,
                 extra_speed: 0.0,
                 ai_target: None,
                 ai_wait: 0.0,

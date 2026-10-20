@@ -4924,7 +4924,7 @@ fn main() {
             "attach: parent yaw 90 puts it at {turned:?}, back at {back:?}"
         );
         assert!(
-            (turned[0] - 2.0).abs() < 1e-3 && (turned[1] + 1.0).abs() < 1e-3,
+            (turned[0] - 2.0).abs() < 1e-3 && (turned[1] - 1.0).abs() < 1e-3,
             "the parent's rotation did not swing the attached thing: {turned:?}"
         );
         assert!(
@@ -4959,6 +4959,53 @@ fn main() {
             attaching.len(),
             attaching.first().map(|n| format!(" (first: {n})")).unwrap_or_default()
         );
+        // `RotatePivot(thing, frame, seconds)`: the thing turns about the pivot its own frame names,
+        // and anything attached to it comes along — which is exactly the orbiting camera of
+        // `00_cameratricks.cog` (`AttachThingToThing(camera1, fulcrum)` + `RotatePivot(fulcrum, 1, …)`)
+        // and level 3's pool paddles. The frame's position is the pivot and its angles the turn.
+        rt.things[actor].pos = [1.0, 0.0, 0.0];
+        rt.things[actor].yaw = 0.0;
+        rt.things[actor].frames = vec![[0.0, 0.0, 0.0, 0.0, 90.0, 0.0]];
+        rt.things[child].pos = [2.0, 0.0, 0.0];
+        rt.call(
+            "AttachThingToThing",
+            &[cog::Value::Num(child as f64), cog::Value::Num(actor as f64)],
+        );
+        rt.call(
+            "RotatePivot",
+            &[
+                cog::Value::Num(actor as f64),
+                cog::Value::Num(0.0),
+                cog::Value::Num(2.0),
+            ],
+        );
+        // Half of a 90-degree turn over two seconds: the pivot is the origin, so the body orbits from
+        // +X to +Y and the attached thing rides at twice the radius.
+        rt.step(1.0);
+        let (half, riding) = (rt.things[actor].pos, rt.things[child].pos);
+        let (half_yaw, riding_yaw) = (rt.things[actor].yaw, rt.things[child].yaw);
+        rt.step(1.0);
+        let (end, done) = (rt.things[actor].pos, rt.things[actor].spin.is_none());
+        rt.step(1.0);
+        let still = rt.things[actor].pos;
+        println!(
+            "pivot: RotatePivot(0, 2 s) turns the body about the origin: after 1 s {half:?} at {half_yaw:.0} deg, after 2 s {end:?}; the attached thing rides at {riding:?} ({riding_yaw:.0} deg), and a finished spin stops ({done}, {still:?})"
+        );
+        assert!(
+            (half[0] - 0.7071).abs() < 0.01 && (half[1] - 0.7071).abs() < 0.01,
+            "half of a 90 deg turn about the origin is not at 45 deg on the orbit: {half:?}"
+        );
+        assert!((half_yaw - 45.0).abs() < 0.5, "the body did not turn with its orbit: {half_yaw}");
+        assert!(
+            (end[0]).abs() < 0.01 && (end[1] - 1.0).abs() < 0.01,
+            "a full 90 deg turn did not land on +Y: {end:?}"
+        );
+        assert!(
+            (riding[0] - 1.4142).abs() < 0.02 && (riding[1] - 1.4142).abs() < 0.02,
+            "the attached thing did not orbit with its parent: {riding:?}"
+        );
+        assert!(done, "the spin did not finish");
+        assert_eq!(still, end, "a finished spin kept turning");
         println!("--- attach check passed ---");
         return;
     }
