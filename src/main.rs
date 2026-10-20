@@ -205,7 +205,11 @@ fn run_gates(game: &std::path::Path) -> i32 {
         // The sweep's one window gate renders a real window; on a machine with no usable display it
         // sits in presentation and never reaches its verdict. `BK_SKIP_WINDOW=1` skips it so the
         // headless ones can still be checked, and says so rather than pretending it passed.
-        if flag.starts_with("--live-check") && std::env::var_os("BK_SKIP_WINDOW").is_some() {
+        // Both live gates need the camera entity the walker queries: without a window there is no
+        // camera, no walk, and no verdict — a failure that says nothing about the code.
+        if (flag.starts_with("--live-check") || flag.starts_with("--live-play"))
+            && std::env::var_os("BK_SKIP_WINDOW").is_some()
+        {
             println!("{flag:<22} {:<10} {:<6} skipped (BK_SKIP_WINDOW)", "window", "-");
             continue;
         }
@@ -15370,11 +15374,26 @@ fn live_play_drive(
             keys.release(key);
         }
         if let Some(sim) = sim.as_deref() {
-            state.things_before = sim.world.borrow().things.len();
+            // Live things, not the vector length: a slot freed earlier in the same frame is reused, so
+            // the length can stay the same while a bolt is very much in flight (09fuelstation fired
+            // `+econcbullet` and the count did not move).
+            state.things_before = sim
+                .world
+                .borrow()
+                .things
+                .iter()
+                .filter(|t| !t.destroyed)
+                .count();
         }
     }
     if (WALK_FRAMES + 1..=WALK_FRAMES + FIRE_FRAMES).contains(&state.frame) {
         buttons.press(MouseButton::Left);
+        // Peak, not delta: a bolt that hits a wall is destroyed within the same 30 frames, so the
+        // count at the end says nothing about whether the trigger worked.
+        if let Some(sim) = sim.as_deref() {
+            let live = sim.world.borrow().things.iter().filter(|t| !t.destroyed).count();
+            state.things_peak = state.things_peak.max(live);
+        }
         return;
     }
     buttons.release(MouseButton::Left);
@@ -15386,10 +15405,7 @@ fn live_play_drive(
         (Some(a), Some(b)) => (((b - a).truncate().length()), a, b),
         _ => (0.0, Vec3::ZERO, Vec3::ZERO),
     };
-    let fired = sim
-        .as_deref()
-        .map(|sim| sim.world.borrow().things.len().saturating_sub(state.things_before))
-        .unwrap_or(0);
+    let fired = state.things_peak.saturating_sub(state.things_before);
     println!(
         "live-play: W for {WALK_FRAMES} frames moved the body {:.2} units ({:?} -> {:?})",
         moved.0, moved.1, moved.2
@@ -15423,6 +15439,7 @@ struct LivePlayState {
     start: Option<Vec3>,
     walked: Option<Vec3>,
     things_before: usize,
+    things_peak: usize,
 }
 
 /// the resources the game itself is running.
