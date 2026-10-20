@@ -151,6 +151,7 @@ const GATES: &[&str] = &[
     "--move",
     "--pickup",
     "--save",
+    "--quicksave",
     "--sleep",
     "--triggers",
     "--transition",
@@ -325,6 +326,7 @@ fn main() {
     let mut force_check: Option<String> = None;
     let mut ai_check = false;
     let mut save_check: Option<String> = None;
+    let mut quicksave_check = false;
     let mut sound_check = false;
     let mut music_check = false;
     let mut ui_visible = false;
@@ -634,6 +636,8 @@ fn main() {
                     arg
                 });
             }
+            // `--quicksave`: the `F5`/`F9` path, end to end, without a window.
+            "--quicksave" => quicksave_check = true,
             // `--sound`: the `.snd` classes' own fade radii, and the volume curve over them.
             "--sound" => sound_check = true,
             // `--music`: which songs the shipped scripts ask for, and what the install has.
@@ -2859,6 +2863,44 @@ fn main() {
             let _ = std::fs::remove_file(&path);
         }
         println!("--- save check passed ---");
+        return;
+    }
+
+    if quicksave_check {
+        // The `F5`/`F9` path without a window: write a quicksave, change the world, read the file
+        // back the way `read_save` does, and restore it. The level name the file carries is what
+        // decides between an in-place load and a level load, so that is checked too.
+        let sim_world = runtime::Runtime::handle(&world.level);
+        let mut rt = sim_world.borrow_mut();
+        let player = rt.player_thing();
+        let dir = std::env::var_os("BK_SAVE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let path = dir.join("bevi-knight-quicksave.jks");
+        rt.call("SetInv", &[cog::Value::Num(player as f64), cog::Value::Num(2.0), cog::Value::Num(4.0)]);
+        rt.things[player].health = 55.0;
+        rt.time = 90.25;
+        let bytes = write_snapshot(&path, &level_name, &rt).expect("write the quicksave");
+        // Change everything the save holds, then load it back.
+        rt.call("SetInv", &[cog::Value::Num(player as f64), cog::Value::Num(2.0), cog::Value::Num(0.0)]);
+        rt.things[player].health = 5.0;
+        rt.time = 0.0;
+        let (saved_level, snapshot) = read_save(&path).expect("read the quicksave back");
+        let same_level = saved_level == level_name;
+        rt.restore(&snapshot);
+        println!(
+            "quicksave: {bytes} bytes in `{}` names level `{saved_level}` (in place: {same_level}), restoring health {:.0}, inventory bin 2 = {:.0}, clock {:.2} s",
+            path.display(),
+            rt.things[player].health,
+            rt.inv.get(&2).copied().unwrap_or(0.0),
+            rt.time
+        );
+        assert!(same_level, "the quicksave did not name the level it was written on");
+        assert_eq!(rt.things[player].health, 55.0, "the loaded save lost the player's health");
+        assert_eq!(rt.inv.get(&2).copied(), Some(4.0), "the loaded save lost the inventory");
+        assert_eq!(rt.time, 90.25, "the loaded save lost the clock");
+        let _ = std::fs::remove_file(&path);
+        println!("--- quicksave check passed ---");
         return;
     }
 
@@ -7793,6 +7835,7 @@ fn main() {
         .insert_resource(Archives(gobs))
         .insert_resource(Screens(menus))
         .insert_resource(SaberBlade::default())
+        .insert_resource(PendingRestore::default())
         .insert_resource(SaveDir(
             std::env::var_os("BK_SAVE_DIR")
                 .map(std::path::PathBuf::from)
@@ -7844,8 +7887,7 @@ fn main() {
                 auto_shot,
                 trace_state,
                 swap_level,
-                (ui_input, ui_mouse, apply_pending, refresh_overlay, cutscene::play_cutscene)
-                    .chain(),
+                (ui_input, ui_mouse, apply_pending, refresh_overlay, cutscene::play_cutscene, quick_save)
             ),
         )
         .insert_resource(TriggerCount::default())
@@ -7891,6 +7933,7 @@ fn main() {
                     adopt_carried,
                     adopt_carried,
                     autosave,
+                    restore_pending,
                     billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
@@ -8120,6 +8163,77 @@ fn swap_level(world: &mut bevy::prelude::World) {
 ///
 /// Its own system rather than part of `setup`, because `setup` is already at Bevy's parameter limit
 /// and because `Sim` arrives through `Commands` — by the next frame both exist.
+/// A savegame waiting for its level to finish loading: `F9` sets this when the save is for another
+/// level, and this system puts it back once that level exists.
+#[derive(Resource, Default)]
+struct PendingRestore(Option<runtime::Snapshot>);
+
+/// Read a savegame's level name and state payload.
+fn read_save(path: &std::path::Path) -> Option<(String, runtime::Snapshot)> {
+    let bytes = std::fs::read(path).ok()?;
+    let save = jks::Save::read(&bytes).ok()?;
+    let payload = save.sections.iter().find(|s| s.kind() == runtime::SAVE_SECTION)?;
+    Some((save.level.clone(), runtime::Snapshot::from_bytes(&payload.data)?))
+}
+
+/// `F5` writes a quicksave, `F9` loads one.
+///
+/// The save carries the level it belongs to. Loading the *same* level restores in place; loading
+/// another one asks for that level first and hands the snapshot to [`restore_pending`].
+fn quick_save(
+    keys: Res<ButtonInput<KeyCode>>,
+    sim: Option<Res<Sim>>,
+    dir: Option<Res<SaveDir>>,
+    plan: Option<Res<FlowPlan>>,
+    mut pending_level: ResMut<PendingLevel>,
+    mut pending: ResMut<PendingRestore>,
+) {
+    let (Some(sim), Some(dir)) = (sim, dir) else { return };
+    let path = dir.0.join("quicksave.jks");
+    if keys.just_pressed(KeyCode::F5) {
+        let rt = sim.world.borrow();
+        let level = plan.as_ref().map(|p| p.level.clone()).unwrap_or_default();
+        match write_snapshot(&path, &level, &rt) {
+            Ok(bytes) => println!("quicksave: wrote {bytes} bytes to `{}`", path.display()),
+            Err(e) => println!("quicksave: could not write `{}`: {e}", path.display()),
+        }
+    }
+    if keys.just_pressed(KeyCode::F9) {
+        let Some((level, snapshot)) = read_save(&path) else {
+            println!("quicksave: no save at `{}`", path.display());
+            return;
+        };
+        let here = plan.as_ref().map(|p| p.level.clone()).unwrap_or_default();
+        // The level name a `.jks` carries is the one the level file has, which is what the archive
+        // index takes (`jkl\01narshadda.jkl`), so it can be handed straight to a load.
+        if level == here || level.is_empty() {
+            sim.world.borrow_mut().restore(&snapshot);
+            println!("quicksave: loaded `{}` in place ({} things)", path.display(), snapshot.things.len());
+        } else {
+            pending.0 = Some(snapshot);
+            pending_level.0 = Some(level.clone());
+            println!("quicksave: loading level `{level}` before restoring `{}`", path.display());
+        }
+    }
+}
+
+/// Put a loaded savegame onto the level that just finished loading.
+fn restore_pending(
+    mut commands: Commands,
+    mut pending: ResMut<PendingRestore>,
+    sim: Option<Res<Sim>>,
+    world: Option<Res<World>>,
+) {
+    let (Some(snapshot), Some(sim), Some(world)) = (pending.0.take(), sim, world) else { return };
+    sim.world.borrow_mut().restore(&snapshot);
+    println!(
+        "quicksave: restored {} thing(s) onto the loaded level ({} things)",
+        snapshot.things.len(),
+        world.level.things.len()
+    );
+    commands.remove_resource::<PendingRestore>();
+}
+
 fn adopt_carried(mut commands: Commands, carried: Option<Res<Carried>>, sim: Option<Res<Sim>>) {
     let (Some(carried), Some(sim)) = (carried, sim) else { return };
     sim.world.borrow_mut().adopt(&carried.0);

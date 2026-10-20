@@ -297,6 +297,13 @@ flag                                                   exit  what it prints
                                                              flag the story levels use, writing
                                                              25986 bytes that restore 352 of 352
                                                              things at the saved clock
+--quicksave                                              0  --- quicksave check passed ---
+                                                             `F5` writes 25986 bytes naming the
+                                                             level it was taken on, and loading
+                                                             it back restores health 55, the
+                                                             inventory and the clock; the level
+                                                             name is what decides between an
+                                                             in-place restore and a level load
 --ui-tables                                              0  41 screens; 39 name a click and a hover wav
 --ui-visible                                             0  --- ui visible check passed ---
 --force-screen                                           0  --- force screen check passed ---
