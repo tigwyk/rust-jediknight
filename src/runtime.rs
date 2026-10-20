@@ -984,6 +984,7 @@ impl Runtime {
                 | "stopanim"
                 | "jumptoframe"
                 | "setmountwait"
+                | "jkclearflags"
                 | "setfirewait"
                 | "setgoalflags"
                 | "cleargoalflags"
@@ -2677,6 +2678,14 @@ impl Runtime {
                 }
                 Value::Nil
             }
+            // `jkClearFlags` is the mask side of `jkSetFlags` (`thing->jkFlags &= ~flags`), used by the
+            // dark-jedi cutscene scripts to drop the 0x20 (disarmed?) bit once they have fired.
+            "jkclearflags" => {
+                if let Some(thing) = self.thing_mut(idx(0)) {
+                    thing.jk_flags &= !(idx(1) as u32);
+                }
+                Value::Nil
+            }
             "jksetpersuasioninfo" => Value::Nil,
             // Sound lengths: the scripts compare a power's hold time against a clip's
             // length to decide whether to cut the sound off. Without the mixer's metadata
@@ -3549,6 +3558,13 @@ mod tests {
         rt.things[0].target = Some((1.0, 8.0));
         assert_eq!(rt.call("GetGoalFrame", &[Value::Num(0.0)]), Value::Num(1.0));
         rt.things[0].target = None;
+        // `jkSetFlags`/`jkClearFlags` OR and mask the *JK* flag word, which is separate from the engine's
+        // thing flags above; the dark-jedi cutscene scripts set and clear 0x20 through it.
+        rt.things[0].jk_flags = 0;
+        rt.call("JkSetFlags", &[Value::Num(0.0), Value::Num(32.0)]);
+        assert_eq!(rt.call("JkGetFlags", &[Value::Num(0.0)]), Value::Num(32.0));
+        rt.call("JkClearFlags", &[Value::Num(0.0), Value::Num(32.0)]);
+        assert_eq!(rt.call("JkGetFlags", &[Value::Num(0.0)]), Value::Num(0.0));
         // `SetMasterCog`/`GetMasterCog` are the engine's one global master index; unset is -1, and
         // the shipped scripts only clear it by resolving an index to no cog.
         assert_eq!(rt.call("GetMasterCog", &[]), Value::Num(-1.0));
