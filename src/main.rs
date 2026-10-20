@@ -372,6 +372,8 @@ fn main() {
     let mut uni_key: Option<String> = None;
     // `--live-all`: every level through the real schedule, one process each.
     let mut live_all = false;
+    // `--live-play`: press the real keys in the live schedule and require movement and a shot.
+    let mut live_play = false;
     let mut sound_check = false;
     let mut music_check = false;
     let mut ui_visible = false;
@@ -690,6 +692,7 @@ fn main() {
             "--soak-all" => soak_all = true,
             "--tally" => tally_check = true,
             "--live-all" => live_all = true,
+            "--live-play" => live_play = true,
             "--uni-key" => {
                 i += 1;
                 uni_key = args.get(i).cloned();
@@ -9324,6 +9327,7 @@ fn main() {
         .insert_resource(FadeTest(fade_test))
         .insert_resource(IrFromStart(ir_from_start))
         .insert_resource(LiveCheckState { enabled: live, ..Default::default() })
+        .insert_resource(LivePlay { enabled: live_play })
         .insert_resource(PulseCount::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
@@ -9378,7 +9382,7 @@ fn main() {
                     deliver_crossed,
                     use_key,
                     apply_fall_damage,
-                    walk_player,
+                    (live_play_drive.before(walk_player), walk_player),
                     cull_sectors,
                     rebuild_surfaces,
                     sky_follows_camera,
@@ -15285,6 +15289,99 @@ fn infrared_follows_force(
 ///
 /// Two bugs in a row passed every gate because each check constructed its own runtime: `--fire` never
 /// called the impact scan, and `.ai` instincts went into a throwaway `Runtime::handle`. This looks at
+/// `--live-play`: does a **key press** move the body and a **mouse click** fire? Every other check
+/// either drives the runtime directly (`--walk`, `--fire`) or inspects resources (`--live-check`),
+/// so nothing proved that the input path into the live schedule works. This presses the real keys.
+#[derive(Resource, Default)]
+struct LivePlay {
+    enabled: bool,
+}
+
+fn live_play_drive(
+    state: Res<LivePlay>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut buttons: ResMut<ButtonInput<MouseButton>>,
+    mut playing: Local<Option<LivePlayState>>,
+    player: Option<Res<Player>>,
+    sim: Option<Res<Sim>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !state.enabled {
+        return;
+    }
+    const WALK_FRAMES: u32 = 90;
+    const FIRE_FRAMES: u32 = 30;
+    let state = playing.get_or_insert_with(|| LivePlayState {
+        start: player.as_deref().map(|p| p.pos),
+        ..Default::default()
+    });
+    state.frame += 1;
+    // Tracked every frame, not only at the end: if the body moves and then snaps back, the summary
+    // at the end says "moved 0.00" and hides the cause.
+    if let (Some(start), Some(player)) = (state.start, player.as_deref()) {
+        state.max_moved = state.max_moved.max((player.pos - start).length());
+    }
+    if state.frame <= WALK_FRAMES {
+        // Held, not tapped: the walker reads `just_pressed`/`pressed`, and a released key moves nothing.
+        keys.press(KeyCode::KeyW);
+        return;
+    }
+    if state.frame == WALK_FRAMES + 1 {
+        state.walked = player.as_deref().map(|p| p.pos);
+        keys.release(KeyCode::KeyW);
+        if let Some(sim) = sim.as_deref() {
+            state.things_before = sim.world.borrow().things.len();
+        }
+    }
+    if (WALK_FRAMES + 1..=WALK_FRAMES + FIRE_FRAMES).contains(&state.frame) {
+        buttons.press(MouseButton::Left);
+        return;
+    }
+    buttons.release(MouseButton::Left);
+    let (start, walked) = (state.start, state.walked);
+    let moved = match (start, walked) {
+        (Some(a), Some(b)) => ((b - a).length(), a, b),
+        _ => (0.0, Vec3::ZERO, Vec3::ZERO),
+    };
+    let fired = sim
+        .as_deref()
+        .map(|sim| sim.world.borrow().things.len().saturating_sub(state.things_before))
+        .unwrap_or(0);
+    println!(
+        "live-play: W for {WALK_FRAMES} frames moved the body {:.2} units ({:?} -> {:?})",
+        moved.0, moved.1, moved.2
+    );
+    println!("live-play: {FIRE_FRAMES} frames of left click added {fired} thing(s) to the world");
+    println!("live-play: largest single-frame displacement seen {:.2}", state.max_moved);
+    let mut failed = 0;
+    if moved.0 < 0.05 && state.max_moved >= 0.05 {
+        println!("live-play: FAIL the body moves and snaps back (max {:.2})", state.max_moved);
+        failed += 1;
+    } else if moved.0 < 0.05 {
+        println!("live-play: FAIL the body did not move at all");
+        failed += 1;
+    }
+    if fired == 0 {
+        println!("live-play: FAIL the trigger produced no projectile");
+        failed += 1;
+    }
+    if failed > 0 {
+        exit.write(AppExit::error());
+        return;
+    }
+    println!("--- live-play check passed ---");
+    exit.write(AppExit::Success);
+}
+
+#[derive(Default)]
+struct LivePlayState {
+    frame: u32,
+    max_moved: f32,
+    start: Option<Vec3>,
+    walked: Option<Vec3>,
+    things_before: usize,
+}
+
 /// the resources the game itself is running.
 fn live_check(
     state: Res<LiveCheckState>,
