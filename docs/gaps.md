@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **35 gates, 87 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **35 gates, 88 tests, 0 failures.** Stubbed script surface:
 **36 verbs, 221 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
@@ -34,7 +34,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | --- | --- | --- | --- |
 | Networking and multiplayer | `sithDSS.c`, `sithDSSThing.c`, `sithDSSCog.c`, `sithMulti.c`, `sithComm.c`, `stdComm.c`, `jkGUIMultiplayer.c`, `jkGUINetHost.c`, `jkGUIMultiTally.c` | the whole thing: message streaming, thing replication, cog RPCs, host/join, tally screens. Zero socket code exists. | no `socket`/`UdpSocket`/`TcpStream` in `src/`. The single-player **answers** are now explicit (`ismulti`/`isserver` 0, no team, no score, `*multimodeflags` stored) and `sendtrigger` really broadcasts `trigger`, but only `sendmessageex` is left stubbed — it needs message *return values* |
 | Console and cvars | `sithConsole.c`, `sithCvar.c`, `sithCommand.c`, `jkQuakeConsole.c` | the `~` console, the cvar store, and the command dispatcher (`bind`, `set`, `map`, `quit`) | no matches for `cvar`, `sithCommand`, `sithConsole` |
-| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. **Sprites draw**: every template's `sprite=` is parsed (`spr.rs`), its `.mat` loads through the model-texture path with palette entry 0 keyed transparent, `draw_created` spawns one billboarded quad per row and `billboard_sprites` faces it at the camera — confirmed on screen (`--sprite +laserhit` + `BK_WALK_FORWARD=1` gives a different frame hash from the same frame without it). What is left is the **cel table**: a sprite `.mat` is a strip of frames, `sprite_quad` takes a cel index and count, and the count comes from the header's `num_texinfo` (`tex::Material::cels`) — but it disagrees with the bitmap (8 cels for 78 rows of 8-wide cels) and a "single cel" still shows a 2 x 2 block, so the per-cel `rdTexinfoHeader` table inside the 140-byte header has to be read (0x74/0x78 are only the *first* cel's width/height, which is why single-cel world textures work). | no particle type (`sithParticle`'s own things); `explosion` matches are class numbers and the damage path |
+| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. **Sprites draw, with their real artwork**: every template's `sprite=` is parsed (`spr.rs`), its `.mat` loads through the cel-table reader in `tex.rs` with palette entry 0 keyed transparent, `draw_created` spawns one billboarded quad per row and `billboard_sprites` faces it at the camera — confirmed on screen (`--sprite +laserhit` + `BK_WALK_FORWARD=1` gives a different frame hash from the same frame without it). What is left is the **cel animation**: the material's frames decode now (`bryx.mat` is eight 32 x 32 cels), but `draw_created` always draws cel 0 instead of walking them at the rate the engine derives from `num_texinfo / msecLifeLeft` (`sithExplosion_CreateThing`). | no particle type (`sithParticle`'s own things); `explosion` matches are class numbers and the damage path |
 | In-engine cutscene cameras | `jkCutscene.c`, `sithCamera.c` focus modes | `SetCameraFocus`, `SetCurrentCamera`, `SetPovShake`, scripted camera paths. Cutscenes play as `.smk` film over the world; an in-engine camera cutscene would not cut. | no matches for `SetCameraFocus`/`camerafocus`/`shake`; all three verbs are stubs |
 | Saber | `jkSaber.c` | blade geometry, swing arcs, saber lock, trace damage. `jksetsaberinfo` is a stub. | `saber` matches are template-name and palette text only |
 | Arch lighting | `sithArchLighting.c` | vertex-baked arch light. Level data carries an `archlightIdx` per thing; nothing reads it. | no matches for `archlight` |
@@ -214,15 +214,15 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
   `Vec3(0.026, -0.037, -1.485)` once fixed — and the capture sat inside level 1's spawn prop (§5.9), so
   anything 1.5 units ahead was legitimately occluded. Walking into the open first and comparing frames
   with and without the effect shows it: `17EAC891…` with, `7881579F…` without. **`draw_created` was
-  never broken, and projectiles have been drawing all along.** What remains is not a grid at all:
-  `rdMaterial_LoadEntry` (`0x44a260`) reads a 76-byte header, a 24-byte `rdTexinfoHeader` per cel
-  (+16 when `texture_type & 8`), then **one texture per cel** with its own header. The port's flat
-  140-byte header is the *first* cel's texture header, so a sprite's `+0x74`/`+0x78` land inside the
-  second cel's texinfo — and the file sizes prove it: `bryx.mat` is **8780** bytes while the flat read
-  accounts for **764** (`140 + 624`), leaving **8064 bytes** of real pixels, 1008 per cel. Those
-  pixels are currently noise, so the 2 x 2 block in the screenshots is noise too. Next: `tex::parse_mat`
-  walking the cel table (`docs/formats.md` §5 has the layout, the measured words and the 1008-per-cel
-  figure a parser has to reproduce).
+  never broken, and projectiles have been drawing all along.** The last fault was the *bitmap*: the
+  port read the material with a flat 140-byte header, which is only the first cel's texture header.
+  `tex::parse_mat` now walks the whole table `rdMaterial_LoadEntry` (`0x44a260`) defines — 76-byte
+  header, a 24-byte `rdTexinfo` per cel (+16 when `texture_type & 8`), then one 24-byte texture record
+  **followed by that bitmap's mip chain** — and the cels turn out to be separate bitmaps, not a strip:
+  `bryx.mat` is 8780 bytes = `76 + 8*40 + 8*(24 + 1024)`, i.e. eight **32 x 32** frames. World
+  textures are untouched by the rewrite (one cel puts its bitmap at 140, exactly where the flat read
+  had it). `docs/formats.md` §5 has the layout and the walk that lands on the length of all 1983
+  shipped materials.
 
 * **Effects are sprites, and sprites are loaded and drawn.** A template's `sprite=` (`+laserhit` is
   `bryx.spr`) is now parsed for every template a level names and its materials are loaded through the
@@ -231,13 +231,12 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
   entry 0 opaque, so the two conversions are separate functions, `keyed_rgba` and `to_image`).
   `draw_created` spawns one quad per `.spr` row at the thing's position plus the row's model-space
   offset, and `billboard_sprites` turns them to the camera each frame, which is what
-  `rdSprite_Draw`'s camera-space vertices do. Level 1 resolves **35 sprite files for 35 templates**,
-  and an impact logs `drawing sprite thing 363 (+laserhit, 1 face(s))`. **Not on screen yet:** the
-  in-view check `--sprite +laserhit` (one effect thing 1.5 units in front of the camera) captures a
-  frame byte-identical to the same frame without it. A sprite `.mat` is a *cel strip* — `bryx.mat`
-  is 8x78, about nine frames — and the port maps the whole strip onto one quad; but that does not
-  explain zero pixels, so the blend path is the second suspect. Both are written up in
-  `docs/formats.md` §16.5, and `BK_SPRITE_TRACE=1` prints the numbers that found them.
+  `rdSprite_Draw`'s camera-space vertices do. Level 1 resolves **35 sprite files for 35 templates**
+  (13 distinct materials), and an impact logs `drawing sprite thing 363 (+laserhit, 1 face(s))`.
+  **Only cel 0 is drawn**: the engine animates the rest from the thing's life
+  (`sithExplosion_CreateThing` sets the rate `num_texinfo / msecLifeLeft * 1000`), which is left as a
+  `ponytail:` ceiling — the spark is the right shape and the right size now, it just does not flick
+  through its eight frames.
 
 * **A created thing dies when its `timer=` runs out, and `SetThingTimer` is a different timer.**
   `timer=` is the engine's `msecLifeLeft` (`sithThing.c:1777`), counted down every frame with

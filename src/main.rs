@@ -8348,50 +8348,23 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
             // it, so only sprite materials get the keyed conversion.
             if let Some(bitmap) = gobs.read(&face.material).as_deref().and_then(tex::parse_mat) {
                 let keyed = keyed_rgba(&bitmap, &palette);
-                // A sprite `.mat` is a vertical **strip of animation cels**, not one image:
-                // `bryx.mat` is 8x78 for an 8-wide spark, so it holds ~9 frames stacked. The quad
-                // in `draw_created` maps the whole strip onto one small rectangle today, which is
-                // why a spark is not visibly on screen yet — the cel sub-rect is the missing piece.
+                // The material's cels arrive packed into one column, cel 0 at the top, so a quad
+                // can address frame `k` with `v = k / cels` (`sprite_quad`).
                 if std::env::var_os("BK_SPRITE_TRACE").is_some() {
                     let clear = keyed.chunks(4).filter(|p| p[3] == 0).count();
                     println!(
-                        "  sprite `{}`: {}x{}, header says {} cel(s) (height/cels = {}), {} of {} pixels keyed clear, {:.2}x{:.2} world units",
+                        "  sprite `{}`: {}x{} strip, {} cel(s) of {}x{}, {} of {} pixels keyed clear, {:.2}x{:.2} world units",
                         face.material,
                         bitmap.width,
                         bitmap.height,
                         bitmap.cels,
-                        bitmap.height / bitmap.cels,
+                        bitmap.width,
+                        bitmap.height / bitmap.cels.max(1),
                         clear,
                         bitmap.indices.len(),
                         face.width,
                         face.height
                     );
-                    // The engine reads a **76-byte** material header (`rdMaterial_LoadEntry`: one
-                    // `fileRead(_, buf, 0x4c)`), then one 24-byte `rdTexinfoHeader` per cel, then an
-                    // optional 16-byte extended header per cel. Print the first two so the layout can
-                    // be checked against the file instead of assumed from the flat 140-byte header
-                    // this port's bitmap read uses.
-                    if let Some(raw) = gobs.read(&face.material) {
-                        let word = |at: usize| {
-                            raw.get(at..at + 4)
-                                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                                .unwrap_or(0)
-                        };
-                        println!(
-                            "    {} bytes: header: rev {} type {:#x} cels {} textures {}; texinfo@76 type {:#x}; flat read says {}x{} starting 140 ({} + {} = {})",
-                            raw.len(),
-                            word(4),
-                            word(8),
-                            word(12),
-                            word(16),
-                            word(76),
-                            bitmap.width,
-                            bitmap.height,
-                            140,
-                            bitmap.indices.len(),
-                            140 + bitmap.indices.len()
-                        );
-                    }
                 }
                 sprite_cels.insert(face.material.clone(), bitmap.cels);
                 model_images.insert(face.material.clone(), image_from_rgba(bitmap.width, bitmap.height, keyed));
@@ -8563,17 +8536,13 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
     })
 }
 
-/// Palette-index-0-is-transparent conversion, for sprite materials.
+/// The keyed pixel bytes, for sprite materials: palette entry 0 becomes transparent, everything else
+/// opaque.
 ///
 /// A sprite's `.mat` paints its effect on black: the engine treats palette entry 0 as the key and
 /// never draws it (`rdMaterial` loads effect bitmaps as colormapped with index 0 clear). Doing that
 /// to a world texture would punch holes wherever the palette's black appears in it, so only the
 /// sprite path uses this.
-fn to_image_keyed(mat: &tex::Material, palette: &tex::Palette) -> Image {
-    image_from_rgba(mat.width, mat.height, keyed_rgba(mat, palette))
-}
-
-/// The keyed pixel bytes: palette entry 0 becomes transparent, everything else opaque.
 fn keyed_rgba(mat: &tex::Material, palette: &tex::Palette) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(mat.indices.len() * 4);
     for &i in &mat.indices {
@@ -11557,8 +11526,7 @@ fn draw_created(
             if let Some(faces) = world.template_sprite.get(&template_key) {
                 let mut spawned = Vec::new();
                 for face in faces {
-                    // One cel of the strip: the count comes from the `.mat` header, because the
-                    // engine's cels are not square (`bryx.mat` is 8 x 78 for 6 frames).
+                    // One cel of the strip. The count comes from the material's cel table.
                     let cels = world.sprite_cels.get(&face.material).copied().unwrap_or(1) as f32;
                     let key = (template_key.clone(), face.material.clone());
                     let mesh = created

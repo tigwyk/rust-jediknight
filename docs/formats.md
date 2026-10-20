@@ -438,96 +438,63 @@ is the engine's do-nothing class: parameters, no instincts.
 
 ## 5. `.mat` material — **observed**
 
-Binary. `MAT ` magic, `u32` version (`50`), then a 140-byte header carrying the
-bitmap dimensions at `+0x74` (width) and `+0x78` (height), then
-`width * height` bytes of 8-bit palette indices.
-
-**That is right for a single-cel material and wrong for a multi-cel one**, and the engine's own
-loader says why. `rdMaterial_LoadEntry` (`0x44a260`) reads a **76-byte** header — `magic`,
-`revision` (`0x32`), `type`, `num_texinfo`, `num_textures`, then a 56-byte `rdTexFormat` — then one
-**24-byte `rdTexinfoHeader` per cel**, plus a further **16 bytes per cel** when that header's
-`texture_type & 8` is set, and then one `rdTexture` per cel, each with its own header and pixel data:
+Binary. `rdMaterial_LoadEntry` (`0x44a260`) is the layout authority, and it is not a flat file: a
+**76-byte** header, a table of **24-byte `rdTexinfo`** cels (plus **16 bytes** each when the cel
+header's `texture_type & 8` is set), then one **24-byte `rdTexture`** record per bitmap
+*immediately followed by that bitmap's own mip chain* — the texture records are interleaved with
+pixel data, not gathered in a second table:
 
 ```text
-76-byte material header
-24 bytes per cel  (+16 when texture_type & 8)
-then, per cel: a texture header (width at +0x10, height at +0x14) and width*height palette bytes
+76-byte material header: "MAT ", revision 0x32, type, num_texinfo, num_textures,
+                         56-byte rdTexFormat
+num_texinfo x 24 bytes   (+16 when texture_type & 8; the extension's 4th word
+                          names the rdTexture this cel draws)
+num_textures x [24 bytes: width, height, colorkey(?), .., mip count at +20
+                then the mip chain: width*height bytes, then half-size each level]
 ```
 
-For a single-cel material that puts the texture header at `76 + 24 = 100`, its width and height at
-`116` and `120` — **`0x74` and `0x78`** — and the pixels at `140`. So the flat offsets this port has
-always used are the *first* cel's, which is exactly why every world texture works and every sprite is
-garbage: a sprite material's `+0x74`/`+0x78` land inside the *second* cel's texinfo header, whose
-words were read as "8 × 78". Measured on the shipped sprites with `BK_SPRITE_TRACE=1`:
+**The walk lands on the file length exactly for every shipped material** — 1983 of them, less the
+768-byte palette that follows when `type & 1` — which is what pins the layout:
+`76 + n_texinfo*(24 or 40) + sum over textures of (24 + mips) == size (- 768)`. Every level of
+every material is 8-bit indexed, so a mip is `(width >> level) * (height >> level)` bytes.
 
-```text
-sprite `bryx.mat`: rev 50 type 0x2 cels 8 textures 8; texinfo@76 type 0x8
-```
+The per-file "trailing data" that an earlier revision of this section recorded as *unknown* is
+that mip chain, and it is derived from the dimensions after all:
 
-`cels == textures` — one texture per cel — and `texture_type & 8` is set, so each cel's entry is
-`24 + 16 = 40` bytes. The file sizes then say the flat read cannot be the bitmap at all:
-
-```text
-8780 bytes: rev 50 type 0x2 cels 8 textures 8; texinfo@76 type 0x8; flat read says 8x78 starting
-            140 (140 + 624 = 764)
-54156 bytes: cels 13 textures 13; flat read says 8x82 (140 + 656 = 796)
-33356 bytes: cels  8 textures  8; flat read says 8x81 (140 + 648 = 788)
-```
-
-`bryx.mat` is **8780** bytes while the flat read accounts for **764** of them: the port has been
-decoding the first 624 bytes of a file ten times that size, as dimensions taken from the second cel's
-texinfo header. What is left of the file is real pixel data — `8780 - 716 = 8064` bytes once the
-76-byte header and two 40-byte-per-cel tables are subtracted, i.e. **1008 bytes per cel** — which is
-the number a parser has to reproduce (1008 = 16 x 63 = 24 x 42 = 32 x 31.5, so the cel is not
-power-of-two and has to come from the texture header, not from arithmetic).
-
-The frames are **separate textures**, not one vertical strip, so `tex::parse_mat` needs to walk the
-cel table: header, one texinfo per cel, one texture entry per cel, then each texture's own header
-(width at `+0x10`, height at `+0x14` in the single-cel case) and pixels. Until it does, a sprite's
-pixels are whatever those bytes happen to be — the "2 x 2 block of frames" in the sprite screenshots is
-noise, not an animation.
-
-Verified on the shipped single-cel materials — `140 + width * height == file length` for
-files with no trailing data:
-
-| file | size | w | h | `140 + w*h` |
+| file | size | w × h | mips | `140 + w*h + mips` |
 |---|---|---|---|---|
-| `00cab01.mat` | 8332 | 64 | 128 | 8332 ✓ |
-| `00cab02.mat` | 8332 | 64 | 128 | 8332 ✓ |
-| `00dbig2.mat` | 65676 | 256 | 256 | 65676 ✓ |
-| `00dwjam2.mat` | 16524 | 128 | 128 | 16524 ✓ |
-| `00fmtl1.mat` | 16524 | 128 | 128 | 16524 ✓ |
-| `01colm.mat` | 2188 | 16 | 128 | 2188 ✓ |
+| `01wbolts.mat` | 11020 | 64 × 128 | 4 | 8192 + 2048 + 512 + 128 = 10880 ✓ |
+| `00wbig1.MAT` | 21900 | 64 × 256 | 4 | 16384 + 4096 + 1024 + 256 = 21760 ✓ |
+| `01f01.mat` | 5580 | 64 × 64 | 4 | 4096 + 1024 + 256 + 64 = 5440 ✓ |
+| `00cab01.mat` | 8332 | 64 × 128 | 1 | 8192 ✓ |
 
-**Many materials carry extra data after the bitmap**, by an amount that is not
-derived from the dimensions — so `file length == 140 + w*h` is *not* a safe
-test and rejects about half the world's textures:
+Mip counts across the shipped set: 1 (1555 textures), 3 (18), 4 (582).
 
-| file | size | w | h | trailing bytes |
-|---|---|---|---|---|
-| `01wbolts.mat` | 11020 | 64 | 128 | 2828 |
-| `00wbig1.MAT` | 21900 | 64 | 256 | 5516 |
-| `01f01.mat` | 5580 | 64 | 64 | 1484 |
-| `01WTECH3.mat` | 2860 | 64 | 32 | 812 |
-| `dflt.mat` | 1484 | 32 | 32 | 460 |
-| `conpclip.mat` | 268 | 8 | 16 | 0 |
+**A single-cel material's bitmap is at 140**, because `76 + 40 + 24 = 140`: the one cel carries the
+16-byte extension, so its record is 40 bytes, then the texture's 24-byte record, then mip 0. That
+is why the flat read every earlier revision used (`width` at `+0x74`, `height` at `+0x78`, pixels at
+140) is *correct for every world texture* — all 1857 single-cel materials in the game have the
+extension — and wrong for every sprite: a sprite's `+0x74`/`+0x78` land in its **second cel's**
+texinfo header, whose words decode as nonsense dimensions (`bryx.mat` "8 × 78").
 
-The bitmap is at the fixed offset 140 in every case; the tail is ignored. That
-was established by a spatial-coherence test (mean absolute difference between
-horizontally adjacent decoded pixels) comparing a 140-byte header against a
-"pixels are last" hypothesis — offset 140 won on `01wbolts` (13.3 vs 15.2),
-`01f01` (11.2 vs 13.8) and `dflt` (1.7 vs 2.9), and `conpclip` has zero trailing
-bytes so both agree. The role of the tail is **unknown**.
+Cels are **separate bitmaps, not a vertical strip**. `bryx.mat` is 8780 bytes = 76 + 8×40 + 8×(24 +
+1024): eight cels of **32 × 32**, not an 8-wide strip. 90 shipped materials have more than one cel
+(13 is the maximum, `detx.mat`); all of them that carry a bitmap use one size for every cel. Those
+90 materials are exactly the animated effects — an impact spark (`bryx`, 8 cels), the explosion
+chains (`detx` 13, `debrisx` 12), the bowcaster bolt (`bowx` 8).
 
-Reading the bitmap at offset 140 instead of requiring an exact length match took
-level 1 from 55 resolved surfaces out of 3393 to all 3393. **observed**
+`tex::parse_mat` walks the whole table and packs the cels into one column (cel 0 at the top), so a
+quad addresses cel `k` with `v = k / cels` (`sprite_quad`) and a world texture is unchanged:
+1 cel, same bitmap, same offset 140.
 
-A few small files (`00gsmoke.mat`, 172 bytes) are texture-less materials whose
-header is not a bitmap description at all (the "width" field reads as the float
-bit pattern `0x3F800000`); the parser's dimension sanity bounds reject them.
+**49 shipped materials carry no bitmap at all**, and parse as `None` — the right answer for a material
+with no texture. 36 are 100-byte colour-only materials (`mat\00red.mat`, `3do\mat\rsglow.mat`: the
+76-byte header plus one texinfo and nothing else) that a surface or an effect uses for its own colour,
+and 13 are the animated-effect names that list cels but no images (`mat\00explosion.mat`, 220 bytes,
+6 texinfos and 0 textures; `mat\00ramp1.mat`, 196 bytes, 5 and 0; `mat\00twinkle.mat`, 11 cels). Of
+the 77 bitmap-bearing materials with more than one cel, **all** use one size for every cel.
 
-Note the materials embed their own bitmap — a level's world textures are *not*
-separate `.bm` files.
+Note the materials embed their own bitmap — a level's world textures are *not* separate `.bm` files.
 
 ---
 
@@ -1404,7 +1371,7 @@ shows up as a column of zeroes rather than a silent gap:
 
 | ext | files | decoded | note |
 |---|---|---|---|
-| `.mat` | 1983 | 1932 | 51 are bitmap-less effect materials, by design |
+| `.mat` | 1983 | 1934 | 49 are bitmap-less effect materials, by design |
 | `.wav` | 644 | **644** | PCM WAV, played by Bevy's decoder |
 | `.cog` | 540 | **540** | game logic, source text (§14) |
 | `.key` | 504 | **504** | keyframe animation, 8439 nodes / 72587 entries |
@@ -1451,10 +1418,11 @@ Three findings the sweep forced out:
    alone silently collapses them, so only one episode's campaign is visible. The
    index now keeps every occurrence per path and lookups use the last, which
    matches the game's later-archive-wins load order.
-2. **Not every material has a bitmap.** `00RED.mat` is 100 bytes — shorter than
-   the 140-byte header — holding only `MAT `, version 50 and zeroed fields. It is
-   a valid material used for effect surfaces (force fields), not a corrupt file:
-   51 of 1983 materials are bitmap-less by design.
+2. **Not every material has a bitmap.** `mat\00red.mat` is 100 bytes — the 76-byte header and one
+   texinfo cel, `num_textures == 0` — and holds no image. It is a valid material used for effect
+   surfaces (force fields), not a corrupt file: 49 of 1983 materials are bitmap-less by design.
+   `--audit` reports 1934 of 1983 decoded, and the walk lands on the file length for every one of
+   them (§5).
 3. **`static.jkl` has no geometry at all** — 0 vertices, 0 surfaces, 15 asset
    references. It is a legitimate asset-only level, so an empty world is not a
    validation failure.
@@ -2985,25 +2953,26 @@ errors worth recording, because both looked like renderer bugs:
   first (`BK_WALK_FORWARD=1`, 120 frames) and comparing with and without the effect gives different
   frames — `17EAC891…` with, `7881579F…` without — and the spark is visible at the crosshair.
 
-What is left of the sprite layer is the **cel geometry**. A sprite `.mat` is a strip of animation
-frames and `rdSprite_Draw` maps one with `texVertOffset`. `sprite_quad` takes a cel index and a cel
-count, and the count now comes from the `.mat` header's own `num_texinfo` (offset 12) rather than the
-bitmap's aspect — `tex::Material::cels` — but the two disagree with each other and with the picture:
+What was left of the sprite layer was the **cel geometry**, and it is now read from the material's
+own table (§5): `bryx.mat` is eight separate 32 × 32 bitmaps, not an 8-wide strip, and the parser
+packs them into one column so `sprite_quad`'s `v = k / cels` addresses the right frame. The
+materials now decode as the animated effects they are:
 
 ```text
-sprite `bryx.mat`:     8x78, header says  8 cel(s) (height/cels = 9)
-sprite `detx.mat`:     8x82, header says 13 cel(s) (height/cels = 6)
-sprite `debrisx.mat`:  8x78, header says 12 cel(s) (height/cels = 6)
-sprite `bowx.mat`:     8x81, header says  8 cel(s) (height/cels = 10)
+sprite `bryx.mat`:    32x256 strip,  8 cel(s) of 32x32, 7797 of  8192 pixels keyed clear
+sprite `detx.mat`:    64x832 strip, 13 cel(s) of 64x64, 31998 of 53248 pixels keyed clear
+sprite `debrisx.mat`: 32x384 strip, 12 cel(s) of 32x32,  8267 of 12288 pixels keyed clear
+sprite `bowx.mat`:    64x512 strip,  8 cel(s) of 64x64, 29004 of 32768 pixels keyed clear
 ```
 
-`bryx` divides 78 rows into 8 cels only if a cel is 9.75 tall, and the picture of a "single cel" still
-shows a 2 x 2 block of frames. So the header holds a **per-cel table** rather than one width/height
-pair: `rdMaterialHeader` in the engine's own layout (`magic`, `revision`, `type`, `num_texinfo`,
-`num_textures`, then an `rdTexFormat`-shaped tail) is followed by one `rdTexinfoHeader` per cel, and
-the 140-byte block this port reads as a flat header has the per-cel sizes inside it — offsets 0x74 and
-0x78 are where the *first* cel's width and height happen to be, which is why single-cel world textures
-have worked all along. Reading that table is the next step.
+The high "keyed clear" counts are the shape of the artwork — an effect painted on black, which is
+exactly what palette entry 0 means for a sprite.
+
+**The port draws cel 0 only.** The engine animates the rest per thing: `sithExplosion_CreateThing`
+gives an animated explosion sprite the rate `num_texinfo / msecLifeLeft * 1000` (cels per second)
+through `sithSurface_sub_4F00A0`, so an 8-cel spark with a 0.5 s `timer=` walks all eight frames over
+its life. That is `ponytail:` left out on purpose — combat effects are outside this build's lane —
+and the hook is `draw_created`, which already knows the cel count.
 
 `BK_SPRITE_TRACE=1` prints the per-material numbers and the billboard's camera-space position;
 `BK_SPRITE_DEBUG=1` draws the quad untextured red; `BK_SPRITE_AHEAD` moves it.
