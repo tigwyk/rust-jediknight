@@ -71,6 +71,10 @@ flag                                                   exit  what it prints
                                                              picks walk/run/walkback/strafe from the velocity
                                                              `ai_tick` walked at, and 128 of level 1's actors
                                                              ship a `walk` row to play it with
+                                                             (also: the level's puppets define 34
+                                                             state names; turnleft/turnright x226 are
+                                                             now played, and drawgun/holster x24
+                                                             correct round 85's "no draw tracks")
 --cog-check                                              0  --- cog check passed ---        (every level's scripts, and every label each one declares:
                                                              the deep pass is what found `AutosaveGame`, the
                                                              `jkString*` buffer, `StopKey`, `LoadSound` and

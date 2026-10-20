@@ -7484,6 +7484,28 @@ fn main() {
             "  locomotion: {walkable} actor(s) ship a `walk` key and {running} a `run` key, so a moving body plays its own stride"
         );
         println!("  hit: {flinches} actor(s) ship a `hit` track");
+        // Which states the level's puppets actually define, so the next one to port is chosen from
+        // data rather than from a guess about what looks wrong.
+        {
+            let mut seen: std::collections::BTreeMap<String, usize> = Default::default();
+            for thing in &world.level.things {
+                let Some(puppet) = world
+                    .level
+                    .template_param(&thing.template, "puppet")
+                    .map(|n| n.to_ascii_lowercase())
+                    .and_then(|name| world.puppets.get(&name))
+                else {
+                    continue;
+                };
+                for state in &puppet.states {
+                    *seen.entry(state.name.to_ascii_lowercase()).or_default() += 1;
+                }
+            }
+            let mut ranked: Vec<(String, usize)> = seen.into_iter().collect();
+            ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            let names: Vec<String> = ranked.iter().map(|(n, c)| format!("{n} x{c}")).collect();
+            println!("  states the level's puppets define: {}", names.join(", "));
+        }
         println!(
             "  armed: {armed} actor(s) ship a mode-1 (weapon drawn) set, which `SetArmedMode` selects; {draws} ship mount/dismount tracks"
         );
@@ -12031,6 +12053,9 @@ struct Actor {
     dying: bool,
     /// Where its parts were last drawn, so a runtime move can be applied as a delta.
     drawn_at: Vec3,
+    /// The yaw drawn last frame, so a body turning in place can play its `turnleft`/`turnright`
+    /// track — `sithPuppet_UpdateThingMove` picks those from the body's angular velocity.
+    drawn_yaw: Option<f32>,
 }
 
 /// Every placed actor with a puppet (`walkplayer`, stormtroopers, droids), animated by
@@ -12226,6 +12251,7 @@ fn spawn_models(
                 drawn_key: String::new(),
                 dying: false,
                 drawn_at: Vec3::from(thing.pos),
+                drawn_yaw: None,
             });
         }
     }
@@ -13030,6 +13056,22 @@ fn animate_actors(
                 (rt.just_fired(actor.thing), rt.just_hit(actor.thing), armed)
             })
             .unwrap_or((false, false, 0));
+        // How fast the body is turning, in degrees per second: a body that turns in place plays its
+        // `turnleft`/`turnright` track, which 226 of level 1's puppets ship and no code played.
+        let yaw_now = pose.unwrap_or(0.0);
+        let turn = actor
+            .drawn_yaw
+            .map(|before| {
+                let mut delta = (yaw_now - before) % 360.0;
+                if delta > 180.0 {
+                    delta -= 360.0;
+                } else if delta < -180.0 {
+                    delta += 360.0;
+                }
+                delta / dt.max(1e-4)
+            })
+            .unwrap_or(0.0);
+        actor.drawn_yaw = Some(yaw_now);
         // The state name, which is what decides the keyfile below. A scripted clip has no state
         // of its own, so it gets the empty name and always wins.
         let state = if scripted.is_some() {
@@ -13037,7 +13079,7 @@ fn animate_actors(
         } else if actor.dying {
             "death"
         } else {
-            actor_state(vel, pose.unwrap_or(0.0), firing, hit, armed, |name| {
+            actor_state(vel, pose.unwrap_or(0.0), firing, hit, turn, armed, |name| {
                 actor.states.contains_key(&(name.to_string(), armed))
                     || actor.states.contains_key(&(name.to_string(), 0))
             })
@@ -13165,6 +13207,7 @@ fn actor_state(
     yaw_deg: f32,
     firing: bool,
     hit: bool,
+    turn: f32,
     armed: usize,
     has: impl Fn(&str) -> bool,
 ) -> &'static str {
@@ -13175,6 +13218,15 @@ fn actor_state(
     }
     if firing && has("fire") {
         return "fire";
+    }
+    // A body pivoting in place turns; one that is walking uses its stride instead — locomotion wins
+    // over a turn while the body is moving.
+    let moving = horizontal_speed(vel) > 0.02;
+    if !moving && turn.abs() > 40.0 {
+        let wanted = if turn > 0.0 { "turnleft" } else { "turnright" };
+        if has(wanted) {
+            return wanted;
+        }
     }
     locomotion_state(vel, yaw_deg)
 }
@@ -17529,25 +17581,34 @@ mod actor_state_tests {
         let stormtrooper = |name: &str| ["stand", "walk", "run", "fire"].contains(&name);
         let droid = |name: &str| ["stand", "walk"].contains(&name);
         let unarmed = 0;
-        assert_eq!(actor_state(still, 0.0, false, false, unarmed, stormtrooper), "stand");
-        assert_eq!(actor_state(still, 0.0, true, false, unarmed, stormtrooper), "fire");
+        assert_eq!(actor_state(still, 0.0, false, false, 0.0, unarmed, stormtrooper), "stand");
+        assert_eq!(actor_state(still, 0.0, true, false, 0.0, unarmed, stormtrooper), "fire");
         // A puppet with no `fire` row keeps its own state: it shoots without animating the shot.
-        assert_eq!(actor_state(still, 0.0, true, false, unarmed, droid), "stand");
+        assert_eq!(actor_state(still, 0.0, true, false, 0.0, unarmed, droid), "stand");
         // Movement still loses to the action track, which is the engine's ordering.
         let running = Vec3::new(1.0, 0.0, 0.0);
-        assert_eq!(actor_state(running, 0.0, false, false, unarmed, stormtrooper), "run");
-        assert_eq!(actor_state(running, 0.0, true, false, unarmed, stormtrooper), "fire");
+        assert_eq!(actor_state(running, 0.0, false, false, 0.0, unarmed, stormtrooper), "run");
+        assert_eq!(actor_state(running, 0.0, true, false, 0.0, unarmed, stormtrooper), "fire");
         // The armed set is what `SetArmedMode(thing, 1)` selects: mode 1 rows are the same
         // animation with the weapon drawn, and a state without one falls back to mode 0.
         let armed = 1;
         let drawn = |name: &str| ["stand", "walk", "run"].contains(&name);
-        assert_eq!(actor_state(still, 0.0, false, false, armed, drawn), "stand");
-        assert_eq!(actor_state(still, 0.0, true, false, armed, |_| false), "stand");
+        assert_eq!(actor_state(still, 0.0, false, false, 0.0, armed, drawn), "stand");
+        assert_eq!(actor_state(still, 0.0, true, false, 0.0, armed, |_| false), "stand");
         // A hit interrupts a shot and a stride; a puppet with no `hit` row is unaffected.
-        assert_eq!(actor_state(still, 0.0, false, true, unarmed, stormtrooper), "stand");
+        assert_eq!(actor_state(still, 0.0, false, true, 0.0, unarmed, stormtrooper), "stand");
         let flinching = |name: &str| ["stand", "walk", "run", "fire", "hit"].contains(&name);
-        assert_eq!(actor_state(still, 0.0, false, true, unarmed, flinching), "hit");
-        assert_eq!(actor_state(running, 0.0, true, true, unarmed, flinching), "hit");
+        // A body pivoting in place turns; one that is walking does not, and a puppet with no turn
+        // row keeps its stride.
+        let turning = |name: &str| ["stand", "walk", "run", "turnleft", "turnright"].contains(&name);
+        assert_eq!(actor_state(still, 0.0, false, false, 120.0, unarmed, turning), "turnleft");
+        assert_eq!(actor_state(still, 0.0, false, false, -120.0, unarmed, turning), "turnright");
+        assert_eq!(actor_state(running, 0.0, false, false, 120.0, unarmed, turning), "run");
+        assert_eq!(actor_state(still, 0.0, false, false, 120.0, unarmed, stormtrooper), "stand");
+        // A slow pivot is not a turn: the threshold keeps a settling yaw from flickering.
+        assert_eq!(actor_state(still, 0.0, false, false, 10.0, unarmed, turning), "stand");
+        assert_eq!(actor_state(still, 0.0, false, true, 0.0, unarmed, flinching), "hit");
+        assert_eq!(actor_state(running, 0.0, true, true, 0.0, unarmed, flinching), "hit");
     }
 }
 
@@ -17669,6 +17730,7 @@ mod rules_tests {
             drawn_key: String::new(),
             dying: false,
             drawn_at: Vec3::ZERO,
+            drawn_yaw: None,
         };
         assert_eq!(animating_key(&actor, false), "kystand0.key");
         assert_eq!(animating_key(&actor, true), "kyftdeth.key");
