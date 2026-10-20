@@ -10516,6 +10516,11 @@ fn fire_player(
     rt.things[index].pitch = player.pitch.to_degrees();
     let weapon = rt.current_weapon();
     let _ = &gun.0;
+    // A scripted `SetFireWait` locks the trigger until its cooldown runs out. Checked before the ammo
+    // is spent, so a refused shot costs nothing.
+    if rt.time < rt.next_fire {
+        return;
+    }
     // Ammo: the weapon's own powerup cog names the bin it spends (`ammobin(Int)` in `pow_*.cog`), so
     // the count is a bin like any other. The spend is `Runtime::spend`, the same call `--ammo` checks.
     if let Some(bin) = ammo_bin.as_ref().and_then(|a| a.0)
@@ -10524,7 +10529,7 @@ fn fire_player(
         println!("fired {weapon}: out of ammo (bin {bin} is empty)");
         return;
     }
-    if let Some(shot) = rt.fire(index as i64, &weapon) {
+    if let Some(shot) = rt.player_fire(index, &weapon) {
         println!("fired {weapon} (thing {shot})");
     }
 }

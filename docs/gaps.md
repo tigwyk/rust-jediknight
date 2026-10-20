@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **33 gates, 82 tests, 0 failures.** Stubbed script surface:
-**67 verbs, 589 call sites across the 34 shipped levels** (706 before the AI state setters).
+**66 verbs, 564 call sites across the 34 shipped levels** (706 before the AI state setters and `setfirewait`).
 
 Two rules for reading this file:
 
@@ -62,7 +62,7 @@ both multiplayer-only screens.
 | Camera | position `thing + 0xb8 + thing[0x168]` (eye offset, level units), orientation from the view angles at `thing + 0x15c/0x160/0x164`, the engine's yaw basis (column 1 = forward, confirmed at run time), the first-person velocity roll (`clamp(5 * dot(vel, right), -8, 8)`, constants at `0x522ddc`/`0x522de0`/`0x522de4`), the projection (**90 deg horizontal** from `buffer + 0x08`, vertical derived: 73.74 at 4:3, 58.72 at 16:9), and a third-person chase camera at the engine's follow height (0.2 above the body, `0x522dec`), toggled with `C` | the **player's own body is not drawn**, so third person shows the level from behind the player rather than the player: `spawn_models` skips the local model on purpose (`cull_mode: None` would wrap it around the first-person eye). Drawing it needs spawn + yaw rotation + hiding in first person. Also the engine's own follow case (`0x4c59ce`) is a spectator orbit spun at 8 deg/s and is not reproduced; view bob (`0x4051e0`) and screen shake (`DAT_008ee5b8/bc/c0`) are unported |
 | `use` and the link tables | `Runtime::wire_links` fills all three tables from a level's `cogs` section plus each script's `symbols` (level 1: **37 thing, 44 surface, 10 sector** links), so a script now hears `used`, `activate`, `entered` and `exited`. The E key sends `used` to the nearest linked thing in front of the eye (`Runtime::use_thing`) and falls back to the nearest linked surface (`activate_near`) | was: nothing ever filled a link table, so `use` reached nothing and no message left the world. **Closed:** `--door` runs the whole chain in one process — use action, `activate` message, the level's own script, the flag — and `00_door.cog` on thing 4 clears its sector's ADJOINS bit and starts the piece moving. What it took: `activate` not `used`, a `startup` pass before any message (a door's `doorSector` is set there), and **one kept VM per instance** (locals live in the VM; a fresh one per label lost `doorSector`). Was: `cog_00_door.cog`'s `activate` reaches `CheckStatus`/`OpenDoors` and something there takes the do-nothing branch. The probe now runs every instance's `startup` first (a door's `doorSector` and `numDoors` are set there, and skipping it measured a door with an empty symbol) and prints the script, the frame and `IsThingMoving` per candidate: `00_door.cog` on thing 4 answers `frame 0, moving 1`, so `activate`'s `if (moveStatus) return;` is what stops it — the door thinks a piece is already moving. `01_*` lifts report moving 0 and still change no flag, and one `00_door.cog` (cog 13) runs **0 labels**, so its `activate` call fails outright. Next: why `IsThingMoving` is 1 for a door at frame 0 (is the piece on a path, or is `door0[i]` binding the wrong thing?) and why one label does not run. Note the message label too — no shipped cog declares `used` (0 of 540), 82 declare `activate`, so `use` must send `activate`. Level 1's doors are wired the *thing* way — `cog_00_door.cog` declares `thing door0..door3 linkid=0..3 mask=0x405` and answers with `setsectoradjoins` — so the door chain is: populate the link tables from the COG `symbols` section, then send `SITH_MESSAGE_USED`/`ENTERED` to the linked instances. 32 shipped cogs call the adjoin/sector verbs and every one of them is waiting on a message nothing sends |
 | Items and inventory | bins, maxima, activated/available flags, pickups through each item's own script, respawn | item *use*, respawn masks (`setrespawnmask`), pickup sounds (`setmountwait` is in §3) |
-| Weapons | a fired bolt flies with the template's `vel=`, stops at the sector graph, applies `damage=` with `SITH_WF_DAMAGE_DECAY`, a kill plays `death`; ammo bins; `--hit` two-way damage | alt fire (`weapon2`), fire offsets, muzzle flashes, `autoselectweapon`, `setfirewait`, per-weapon animation, and ammo as `weaponData` describes it (the bin→projectile mapping is a name heuristic, §4) |
+| Weapons | a fired bolt flies with the template's `vel=`, stops at the sector graph, applies `damage=` with `SITH_WF_DAMAGE_DECAY`, a kill plays `death`; ammo bins; the player's `setfirewait` cooldown; `--hit` two-way damage | alt fire (`weapon2`), fire offsets, muzzle flashes, `autoselectweapon`, per-weapon animation, and ammo as `weaponData` describes it (the bin→projectile mapping is a name heuristic, §4) |
 | Damage | health, shields, two-way, death and respawn, `DAMAGE_DECAY` | damage **types**: the engine carries a `SITH_DAMAGE_*` bitmask (impact/energy/fire/force) that decides shield versus health and force absorption. The port passes a plain float |
 | Force powers | the bins and the verbs the shipped `force_*.cog` scripts call; jump, speed, healing, seeing, pull and grip run | no structural gap, but the *effects* are unverified beyond jump and speed: nothing drives `force_pull.cog`'s grip in a test, and `setpovshake`/`setthingrotvel` are stubs those scripts would want. `force jump`'s velocity once reached `SetThingVel` as zero — fixed, but the path has no assertion of its own |
 | Sound | 2D playback of `.wav`/`.snd`, one music track, `--audio-state`, per-sink mute, `create`-class sounds | 3D positional and velocity mixing (`sithSoundMixer.c`), sound classes with mode ranges, `changesoundpitch`/`changesoundvol`/`sectorsound`, ambient-loop bookkeeping beyond a count |
@@ -72,17 +72,17 @@ both multiplayer-only screens.
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — plus sector light animation. 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 67 below | the 67 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 66 below | the 66 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 67 stubbed cog verbs
+## 3. The 66 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (589 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 67.
+over the 34 levels from `--cog-check` (564 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 66.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -94,7 +94,7 @@ any error.
 | AI (8) | 123 | `aisetmoveframe` 34, `aisetlookframe` 31, `aisetlookpos` 21, `aisetmovepos` 12, `aisetmovething` 12, `aisetfiretarget` 8, `aiflee` 3, `aisetclass` 2 |
 | Thing properties and flags (12) | 82 | `setmountwait` 25, `returnex` 12, `setthinglight` 10, `clearthingflags` 9, `thinglightanim` 9, `jkclearflags` 4, `syncsurface` 4, `syncthingpos` 3, `setthingrotvel` 2, `newcoloreffect` 2, `createthingatpos` 1, `teleportthing` 1 |
 | Cog introspection and goal state (6) | 87 | `setgoalflags` 25, `getgoalframe` 24, `getselfcog` 18, `setmastercog` 16, `getmastercog` 3, `loadtemplate` 1 |
-| Weapons and projectiles (4) | 56 | `setfirewait` 25, `jksetsaberinfo` 15, `autoselectweapon` 14, `fireprojectile` 2 |
+| Weapons and projectiles (3) | 31 | `jksetsaberinfo` 15, `autoselectweapon` 14, `fireprojectile` 2 |
 | Face and thing modes (5) | 45 | `setfacegeomode` 18, `getfacegeomode` 16, `getthinggeomode` 4, `setthingcurgeomode` 4, `setfacelightmode` 3 |
 | Sectors, adjoins, sky (3) | 15 | `slideceilingsky` 10, `setsectorthrust` 4, `slidehorizonsky` 1 |
 | Animation and models (6) | 48 | `surfacelightanim` 18, `playkey` 13, `materialanim` 6, `setthingmodel` 6, `stopanim` 4, `jumptoframe` 1 |
@@ -148,12 +148,13 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    which colours every combat test.
 5. **AI verbs, state setters only.** 240 calls across 11 verbs. Store the mode, speed and look/move targets so
    scripts stop silently failing; the scheduler, awareness and pathfinding are a separate project after this.
-   **Started:** `aisetmode`/`aiclearmode` are the actor-flag arms now, and `aisetmovespeed` stores a
-   clamped 0..2 multiplier that the AI step applies to the template's walking speed (117 calls gone; 589
-   stubbed, down from 706). The rest cannot be aliased — each of `aisetmoveframe` (34), `aisetlookframe`
-   (31), `setfirewait` (25), `setgoalflags` (25), `setmountwait` (25) needs a value stored *and* a reader:
-   `setfirewait`'s reader is the window's fire path, and the two `*frame` verbs need pose frames the puppet
-   does not have yet (§2, puppets).
+   **Started:** `aisetmode`/`aiclearmode` are the actor-flag arms now, `aisetmovespeed` stores a
+   clamped 0..2 multiplier that the AI step applies to the template's walking speed, and `setfirewait`
+   arms the player's weapon cooldown (`sithWeapon_SetFireWait`'s `nextFire = now + wait`), which
+   `fire_player` reads before it spends ammo (142 calls gone; 564 stubbed, down from 706). The rest
+   cannot be aliased — each of `aisetmoveframe` (34), `aisetlookframe` (31), `setgoalflags` (25),
+   `setmountwait` (25) needs a value stored *and* a reader, and the two `*frame` verbs need pose frames
+   the puppet does not have yet (§2, puppets).
 6. **Puppet locomotion states.** Visible, and the state data is already loaded; the pose code is real.
 7. **Attachments and parenting.** Needed by carried weapons, passengers, and any script that moves a child.
 8. **Camera focus and shake.** It is what makes in-engine cutscenes and several force powers read as intended.

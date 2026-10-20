@@ -380,6 +380,10 @@ pub struct Runtime {
     pub bin_wait: BTreeMap<i32, f32>,
     /// Seconds this world has been stepped, which the hold timers read.
     pub time: f32,
+    /// `SetFireWait`: the player's weapon cooldown, and the level time the next shot is allowed at.
+    /// `sithWeapon_SetFireWait` arms `nextFire = now + wait`, and a negative wait clears both.
+    pub fire_wait: f32,
+    pub next_fire: f32,
     /// Per-actor instinct classes, keyed by thing index: what the `.ai` said and what this
     /// build does with it (see `ai_tick`).
     pub ai: BTreeMap<usize, crate::ai::Ai>,
@@ -698,6 +702,8 @@ impl Runtime {
             bin_active: BTreeMap::new(),
             bin_wait: BTreeMap::new(),
             time: 0.0,
+            fire_wait: 0.0,
+            next_fire: 0.0,
             ai: BTreeMap::new(),
             template_weapon: level
                 .templates
@@ -902,6 +908,7 @@ impl Runtime {
                 | "aisetmode"
                 | "aiclearmode"
                 | "aisetmovespeed"
+                | "setfirewait"
                 | "setthingflags"
                 | "getthinghealth"
                 | "gethealth"
@@ -1296,6 +1303,17 @@ impl Runtime {
     /// The weapon the player fires: what a pickup gave them, else the level's default.
     pub fn current_weapon(&self) -> String {
         self.weapon.clone().unwrap_or_else(|| self.default_weapon.clone())
+    }
+
+    /// A shot from the player, refused while `SetFireWait`'s cooldown is running. The engine arms
+    /// `nextFire` on the shot rather than measuring from the click, so the wait starts when it fires.
+    pub fn player_fire(&mut self, index: usize, weapon: &str) -> Option<usize> {
+        if self.time < self.next_fire {
+            return None;
+        }
+        let shot = self.fire(index as i64, weapon)?;
+        self.next_fire = self.time + self.fire_wait.max(0.0);
+        Some(shot)
     }
 
     /// The engine's inventory bins (`enum SITHBIN`, `types_enums.h`). Force powers are bins
@@ -2209,6 +2227,22 @@ impl Runtime {
                 Value::Nil
             }
             "getactorflags" => Value::Num(self.actor_flags.get(&ti(0)).copied().unwrap_or(0) as f64),
+            // The engine's arm only forwards to `sithWeapon_SetFireWait` when the thing is the
+            // player (`FUN_00507930`), which is what keeps a scripted wait from arming everyone's
+            // weapon. The negative case is the engine's own "clear" branch.
+            "setfirewait" => {
+                if self.types.get(ti(0)).copied() == Some(10) {
+                    let wait = num(1) as f32;
+                    if wait < 0.0 {
+                        self.fire_wait = -1.0;
+                        self.next_fire = -1.0;
+                    } else {
+                        self.fire_wait = wait;
+                        self.next_fire = self.time + wait;
+                    }
+                }
+                Value::Nil
+            }
             // `sithCogFunctionAI_AISetMoveSpeed` clamps to 0..2 and stores it on the actor; the AI
             // step multiplies by it. The clamp is the engine's, so it is applied on the way in.
             "aisetmovespeed" => {
@@ -2789,6 +2823,8 @@ mod tests {
             bin_active: BTreeMap::new(),
             bin_wait: BTreeMap::new(),
             time: 0.0,
+            fire_wait: 0.0,
+            next_fire: 0.0,
             ai: BTreeMap::new(),
             template_weapon: BTreeMap::new(),
             ai_shot_interval: 1.0,
@@ -3061,6 +3097,14 @@ mod tests {
         // `AISetMoveSpeed` stores a speed multiplier for the AI step, clamped to the engine's 0..2.
         rt.call("AISetMoveSpeed", &[Value::Num(0.0), Value::Num(5.0)]);
         assert_eq!(rt.actor_speed.get(&0).copied(), Some(2.0));
+        // `SetFireWait` arms the player's weapon cooldown: a shot inside it is refused, and the wait
+        // re-arms from the shot itself, which is what `nextFire = now + wait` means.
+        rt.call("SetFireWait", &[Value::Num(0.0), Value::Num(0.5)]);
+        assert_eq!(rt.next_fire, 0.5);
+        assert!(rt.player_fire(0, "+bryarbolt").is_none());
+        rt.time = 0.6;
+        assert!(rt.player_fire(0, "+bryarbolt").is_some());
+        assert_eq!(rt.next_fire, 1.1);
     }
 
     /// `sithThing_CreateThing` places a spawned thing at `marker.position + markerOrient * (insertDiff)`.
