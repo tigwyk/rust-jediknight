@@ -567,6 +567,10 @@ pub struct Runtime {
     pub template_damage: BTreeMap<String, f32>,
     /// A projectile's `explode=` template: the thing the engine spawns where it lands.
     pub template_explode: BTreeMap<String, String>,
+    /// A template's `fireoffset=(x/y/z)`: where its shots leave the shooter, in model units
+    /// (x lateral, y forward, z up) and the shooter's own frame. The port used a flat unit ahead of
+    /// the eye as a stand-in; the shipped templates carry the real numbers.
+    pub template_fire_offset: BTreeMap<String, [f32; 3]>,
     /// A projectile's `mindamage=`, its `rate=` (damage lost per second while flying) and
     /// whether its typeflags carry `SITH_WF_DAMAGE_DECAY` (0x4000).
     pub template_min_damage: BTreeMap<String, f32>,
@@ -986,6 +990,17 @@ impl Runtime {
                     .map(|e| (t.name.to_ascii_lowercase(), e.to_ascii_lowercase()))
             })
             .collect();
+        // `fireoffset=(x/y/z)`: where a shot leaves the shooter, in the template's own frame and
+        // model units (x lateral, y forward, z up). The port spawned every bolt a flat unit ahead
+        // of the eye as a stand-in; the shipped templates carry the real numbers.
+        let template_fire_offset: BTreeMap<String, [f32; 3]> = level
+            .templates
+            .iter()
+            .filter_map(|t| {
+                let raw = level.template_param(&t.name, "fireoffset")?;
+                vec_param(Some(raw)).map(|v| (t.name.to_ascii_lowercase(), v))
+            })
+            .collect();
         // A thing's body: `size=x/y/z` gives the half-extents, so the radius is the larger of x/y
         // and the height is twice z; `radius=` alone gives a cylinder of the default height.
         let template_body: BTreeMap<String, (f32, f32)> = level
@@ -1154,6 +1169,7 @@ impl Runtime {
                 .collect(),
             template_body,
             template_explode,
+            template_fire_offset,
             template_timer,
             thing_timer: BTreeMap::new(),
             player_shields: 100.0,
@@ -2603,18 +2619,31 @@ impl Runtime {
         }
         let key = template.clone();
         self.things.push(ThingState {
-            // Out of the body, so the projectile does not start inside the shooter. The
-            // engine's muzzle is the template's `fireoffset=`; this world's stand-in is a unit
-            // ahead of the eye. It has to clear the shooter's own body radius (0.6 + the bolt's
-            // 0.15), or the shot lands on the thing that fired it on the frame it is created —
-            // which is exactly what `--hit` caught.
+            // The engine's muzzle is the template's `fireoffset=`, in model units and the shooter's
+            // frame (x lateral, y forward, z up). A template that names no offset — or one so short
+            // the bolt would start inside the shooter's own body (0.6 + the bolt's 0.15, which is
+            // what `--hit` caught) — falls back to a unit ahead of the eye.
             pos: {
                 let len = (forward[0] * forward[0] + forward[1] * forward[1]).sqrt().max(1e-4);
-                [
-                    pos[0] + forward[0] / len * 1.0,
-                    pos[1] + forward[1] / len * 1.0,
-                    pos[2] + 0.1,
-                ]
+                let ahead = [forward[0] / len, forward[1] / len];
+                let offset = self
+                    .template_fire_offset
+                    .get(&template)
+                    .copied()
+                    // Model units to level units: a `.3do` node carries a 10x scale.
+                    .map(|o| [o[0] * 10.0, o[1] * 10.0, o[2] * 10.0]);
+                match offset {
+                    Some([x, y, z]) if y > 0.75 => [
+                        pos[0] + ahead[0] * y - ahead[1] * x,
+                        pos[1] + ahead[1] * y + ahead[0] * x,
+                        pos[2] + z,
+                    ],
+                    _ => [
+                        pos[0] + ahead[0] * 1.0,
+                        pos[1] + ahead[1] * 1.0,
+                        pos[2] + 0.1,
+                    ],
+                }
             },
             insert: [0.0; 3],
             yaw,
@@ -5923,6 +5952,7 @@ mod tests {
             thing_timer: BTreeMap::new(),
             template_body: BTreeMap::new(),
             template_explode: BTreeMap::new(),
+            template_fire_offset: BTreeMap::new(),
             player_shields: 100.0,
             player_dead: false,
             ir_mode: false,
