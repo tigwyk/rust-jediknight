@@ -368,6 +368,8 @@ fn main() {
     // `--soak-all`: every level in the archives, one process each.
     let mut soak_all = false;
     let mut tally_check = false;
+    // `--uni <key>`: which string file carries a key, and what it says.
+    let mut uni_key: Option<String> = None;
     let mut sound_check = false;
     let mut music_check = false;
     let mut ui_visible = false;
@@ -685,6 +687,10 @@ fn main() {
             "--soak" => soak_check = true,
             "--soak-all" => soak_all = true,
             "--tally" => tally_check = true,
+            "--uni-key" => {
+                i += 1;
+                uni_key = args.get(i).cloned();
+            }
             // `--sound`: the `.snd` classes' own fade radii, and the volume curve over them.
             "--sound" => sound_check = true,
             // `--music`: which songs the shipped scripts ask for, and what the install has.
@@ -2523,6 +2529,7 @@ fn main() {
         calls.dedup();
         let mut names: Vec<String> = calls.iter().map(|(_, song)| song.clone()).collect();
         names.sort();
+        println!("uni: string file(s): {names:?}");
         names.dedup();
         println!(
             "music: {} PlaySong call(s) with a literal song across the scripts, {} distinct name(s)",
@@ -3388,6 +3395,34 @@ fn main() {
         return;
     }
 
+    if let Some(key) = uni_key {
+        // `--uni <key>`: which `.uni` carries this key, and what it says. The engine merges every
+        // string file into one table (`jkStrings`), and a key that lives in a file the port does not
+        // read is invisible even though the screen asks for it.
+        let mut found = 0usize;
+        let mut names: Vec<String> = gobs
+            .names()
+            .into_iter()
+            .filter(|name| name.to_ascii_lowercase().ends_with(".uni"))
+            .collect();
+        names.sort();
+        println!("uni: string file(s): {names:?}");
+        for name in &names {
+            let Some(raw) = gobs.read(name) else { continue };
+            let table = uni::parse(&String::from_utf8_lossy(&raw));
+            if let Some(value) = table.get(&key) {
+                println!("uni: `{key}` = {value:?}  ({name})");
+                found += 1;
+            }
+        }
+        println!("uni: {found} of {} string file(s) carry `{key}`", names.len());
+        if found == 0 {
+            println!("uni: the key is missing from every string file this build reads");
+        }
+        println!("--- uni check passed ---");
+        return;
+    }
+
     if tally_check {
         // The end-of-level screen, end to end: the engine's own formulas on a real runtime, the rows
         // `jkGuiSingleTally_Show` fills at run time, and pixels drawn — the panel used to show a
@@ -3401,7 +3436,7 @@ fn main() {
             std::process::exit(1);
         };
         let strings = uni::parse(&String::from_utf8_lossy(
-            &gobs.read("ui\\jedi.uni").unwrap_or_default(),
+            &gobs.read("ui\\jkstrings.uni").unwrap_or_default(),
         ));
         let sim_world = runtime::Runtime::handle(&world.level);
         let (rank, alignment, found, total) = {
@@ -3432,7 +3467,11 @@ fn main() {
             assert!(dark[0].ends_with('D'), "a negative alignment is not dark: {:?}", dark[0]);
             println!("tally: the dark side reads {:?}", dark[0]);
         }
-        assert!(rows[1].contains('2') && rows[1].contains('5'), "the secrets row is {:?}", rows[1]);
+        assert!(
+            rows[1].contains("Secrets Found") && rows[1].contains("2/5"),
+            "the secrets row is {:?}",
+            rows[1]
+        );
         // Every row has to draw: count non-background pixels inside each element's own rect.
         let (base, panel) = load_backdrop(&gobs, screen, None).expect("the tally backdrop");
         let menu_fonts = load_fonts(&gobs, &menus);
@@ -9503,8 +9542,14 @@ fn tally_lines(
             .map(|s| s.to_string())
             .unwrap_or_else(|| "No secrets found".to_string())
     } else {
+        // The shipped label is a **caption** with no placeholders (`"Secrets Found:"` in
+        // `ui\jkstrings.uni`), and the engine appends the counts: `sprintf("%ls %d/%d")`. Filling
+        // placeholders alone drew the caption and dropped the numbers.
         match strings.get("GUI_SECRETS_FOUND") {
-            Some(format) => fill_numbers(format, &[found, total]),
+            Some(format) if format.contains('%') => {
+                format!("{} {found}/{total}", fill_numbers(format, &[found, total]))
+            }
+            Some(format) => format!("{} {found}/{total}", format.trim_end()),
             None => format!("{found} of {total} secrets found"),
         }
     };
@@ -16835,6 +16880,7 @@ fn setup(
         .or_else(|| {
             let mut names: Vec<&str> = level.templates.iter().map(|t| t.name.as_str()).collect();
             names.sort();
+        println!("uni: string file(s): {names:?}");
             names.into_iter().find(|name| is_weapon(name)).map(|name| name.to_string())
         })
         .unwrap_or_else(|| "+bryarbolt".to_string());
