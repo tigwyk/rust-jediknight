@@ -233,6 +233,11 @@ flag                                                   exit  what it prints
                                                              3.50 units with 20% aim error;
                                                              the route search crosses sectors 0
                                                              -> 2, walled off but 1 doorway
+                                                             and one order walked to the end:
+                                                             the waypoint list drains after 66
+                                                             ticks (it never did before, so a
+                                                             routed actor stalled on its first
+                                                             doorway)
                                                              apart, and a follower told to walk
                                                              to a thing across that wall takes
                                                              the same route through doorway

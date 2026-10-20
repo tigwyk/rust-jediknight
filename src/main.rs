@@ -3107,9 +3107,10 @@ fn main() {
             let gates = rt.gates();
             let mut found = None;
             for (_, _, sector) in &rt.sector_links {
+                // The player's own sector is already "entered", so steering there walks nowhere:
+                // take a link that is somewhere else and reachable.
                 if *sector == from {
-                    found = Some((Vec::new(), *sector));
-                    break;
+                    continue;
                 }
                 if let Some(route) = solids.route(from, *sector, gates) {
                     found = Some((route, *sector));
@@ -3118,6 +3119,7 @@ fn main() {
             }
             found.unwrap_or((Vec::new(), from))
         };
+        let mut leg = 0usize;
         if std::env::var_os("BK_SOAK_TRACE").is_some() {
             println!("soak: routing sector -> {watched} in {} waypoint(s)", route.len());
         }
@@ -3129,12 +3131,22 @@ fn main() {
                 let mut rt = sim_world.borrow_mut();
                 let before = rt.things.get(player).and_then(|t| usize::try_from(t.sector).ok());
                 if let Some(thing) = rt.things.get_mut(player) {
-                    // Head for the watched sector's centre, with collision; a blocked heading tries the
-                    // same step fanned left and right. `route` says a path to it exists, but following
-                    // it needs the AI's own waypoint follower (`ai_route`): my ad-hoc "first waypoint
-                    // further than 0.15" left the player stuck, which `BK_SOAK_TRACE` shows as a run
-                    // with no sector crossings at all.
-                    let goal = world.level.sectors.get(watched).map(|s| s.center);
+                    // Follow the route the way `ai_tick` does: aim at the current waypoint, advance
+                    // only on arrival, and fall back to the sector centre once the list is spent.
+                    // (A "first waypoint further than 0.15" version skipped ahead and left the
+                    // player stuck with no sector crossings at all — `BK_SOAK_TRACE` showed it.)
+                    while let Some(point) = route.get(leg) {
+                        let dx = point[0] - thing.pos[0];
+                        let dy = point[1] - thing.pos[1];
+                        if (dx * dx + dy * dy).sqrt() > 0.2 {
+                            break;
+                        }
+                        leg += 1;
+                    }
+                    let goal = route
+                        .get(leg)
+                        .copied()
+                        .or_else(|| world.level.sectors.get(watched).map(|s| s.center));
                     if let Some(goal) = goal {
                         let dx = goal[0] - thing.pos[0];
                         let dy = goal[1] - thing.pos[1];
@@ -3675,6 +3687,26 @@ fn main() {
                     first.map(|p| [p[0].round(), p[1].round(), p[2].round()])
                 );
                 assert!(!taken.is_empty(), "the blocked follower kept no route");
+                // Keep walking the same order: the route has to *drain* — the actor aims at the
+                // doorway, pops it on arrival, then walks the last leg to the destination. Before
+                // this the list never shrank, so a routed actor stalled on its first doorway.
+                let mut drained_at = None;
+                for tick in 0..900 {
+                    rt.ai_tick(player, 1.0 / 30.0);
+                    if rt.ai_route.get(&actor).is_none_or(|r| r.is_empty()) {
+                        drained_at = Some(tick);
+                        break;
+                    }
+                }
+                let goal = rt.ai_move.get(&actor).copied();
+                let at = rt.things[actor].pos;
+                let reach = goal.map(|g| {
+                    ((g[0] - at[0]).powi(2) + (g[1] - at[1]).powi(2)).sqrt()
+                });
+                println!(
+                    "ai: walking one order drains the route after {drained_at:?} tick(s) and leaves the actor {reach:?} from the goal"
+                );
+                assert!(drained_at.is_some(), "the route never drained: a waypoint is not popped");
                 // The tick may pick a different (equally short) doorway than the gate's search did,
                 // because a point can sit in two hulls; what must hold is that it turned toward the
                 // doorway it kept.

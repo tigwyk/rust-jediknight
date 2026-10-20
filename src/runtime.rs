@@ -2387,6 +2387,24 @@ impl Runtime {
                 }
                 walked += 1;
                 self.walked.push(index);
+                // A waypoint is a doorway centre the route search found: reaching it pops the list so
+                // the next frame aims at the one after, and an empty list hands the goal back to the
+                // destination. Without this an actor walked to the first doorway and stalled there,
+                // because `first()` never changed.
+                if route_goal.is_some() && (reach - step) <= 0.05 {
+                    let empty = match self.ai_route.get_mut(&index) {
+                        Some(route) => {
+                            if !route.is_empty() {
+                                route.remove(0);
+                            }
+                            route.is_empty()
+                        }
+                        None => false,
+                    };
+                    if empty {
+                        self.ai_route.remove(&index);
+                    }
+                }
                 // The velocity this body is walking at, which is what the renderer needs to pick
                 // its puppet state — a position delta cannot tell a stride from a collision push.
                 let dt = dt.max(1e-4);
