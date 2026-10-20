@@ -10067,6 +10067,14 @@ impl Overlay {
 #[derive(Component)]
 struct OverlayQuad;
 
+/// The camera the player looks through. The overlay screens spawn their own `Camera3d`s (the HUD at
+/// order 2 and the screen tint at order 1), so "the `Camera3d`" is ambiguous: `walk_player` used
+/// `single_mut()` on `(With<Camera3d>, Without<OverlayQuad>)`, which matched three entities and
+/// returned early every frame. The result was a body that never moved, however the keys were
+/// pressed. A marker on the world camera is the smallest fix that names it.
+#[derive(Component)]
+struct WorldCamera;
+
 /// The first-person weapon model currently drawn, and the `.3do` it came from.
 #[derive(Resource, Default)]
 struct Viewmodel {
@@ -11983,6 +11991,7 @@ fn pose_view(
                                 mut textures: ResMut<Assets<Image>>| {
         commands.spawn((
             Camera3d::default(),
+            WorldCamera,
 
             Transform::from_translation(eye).looking_at(centre, Vec3::Z),
         ));
@@ -15304,10 +15313,16 @@ fn live_play_drive(
     mut playing: Local<Option<LivePlayState>>,
     player: Option<Res<Player>>,
     sim: Option<Res<Sim>>,
+    cam: Query<Entity, (With<Camera3d>, Without<OverlayQuad>)>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if !state.enabled {
         return;
+    }
+    // `walk_player` returns early when `cam.single_mut()` fails, which would leave the body frozen no
+    // matter what the keyboard says. Say how many cameras the query sees before blaming input.
+    if std::env::var_os("BK_LIVE_PLAY_TRACE").is_some() {
+        println!("live-play: {} camera(s) match the walker's query", cam.iter().count());
     }
     const WALK_FRAMES: u32 = 90;
     const FIRE_FRAMES: u32 = 30;
@@ -17007,7 +17022,7 @@ fn setup(
     mut audio: ResMut<Assets<AudioSource>>,
     // The overlay camera is tagged `OverlayQuad`, so this answers "is there a world camera
     // yet?" — false on the first load, true when a level swap re-runs this system.
-    cameras: Query<(), (With<Camera3d>, Without<OverlayQuad>)>,
+    cameras: Query<(), (With<Camera3d>, With<WorldCamera>)>,
 ) {
 
     let level = &world.level;
@@ -17503,6 +17518,7 @@ fn setup(
         let up = Vec3::Y; // a plan view of a Z-up world: Z would be parallel to the view
         commands.spawn((
             Camera3d::default(),
+            WorldCamera,
 
             // The far plane has to reach the sky dome, which is centred on the camera at radius 600.
             Projection::Perspective(PerspectiveProjection {
@@ -17539,6 +17555,7 @@ fn setup(
                 println!("framing `{template}` at {target} (thing sector {}, room {room:?})", t.sector);
                 commands.spawn((
                     Camera3d::default(),
+                    WorldCamera,
                     EngineFov,
                     Transform::from_translation(eye).looking_at(target, Vec3::Z),
                 ));
@@ -17547,6 +17564,7 @@ fn setup(
                 println!("no thing with template `{template}`; using default view");
                 commands.spawn((
                     Camera3d::default(),
+                    WorldCamera,
                     EngineFov,
                     Transform::from_translation(eye).looking_at(eye + aim.normalize(), Vec3::Z),
                 ));
@@ -17559,6 +17577,7 @@ fn setup(
         );
         commands.spawn((
             Camera3d::default(),
+            WorldCamera,
             EngineFov,
             Transform::from_translation(eye).looking_at(eye + aim.normalize(), Vec3::Z),
         ));
@@ -18641,7 +18660,7 @@ fn walk_player(
     overlay: Option<Res<Overlay>>,
     // The overlay camera is a `Camera3d` too, so it must be excluded or `single_mut` fails and
     // the walker's view never moves (which is what happened for every round before this one).
-    mut cam: Query<&mut Transform, (With<Camera3d>, Without<OverlayQuad>)>,
+    mut cam: Query<&mut Transform, (With<Camera3d>, With<WorldCamera>)>,
 ) {
     let (Some(solids), Some(player)) = (solids, player.as_mut()) else { return };
     // `--overview` and `--near` exist to frame a fixed shot; a walker would fight them.
@@ -18678,6 +18697,10 @@ fn walk_player(
     // This borrow must be taken after the `vel`/`extra_speed` hand-off above, which holds the
     // runtime mutably, and it must cover the three reads below (the sweep, the trace and water).
     // `BK_GATES_OPEN=1` ignores the scripts' switches, which is how the walk can be A/B'd.
+    // The guard is dropped at the end of this block, deliberately: `rt.gates()` is all the walk needs
+    // from the runtime, and holding it for the rest of the function re-entered the runtime deeper down
+    // — a same-thread double borrow that the fail-fast `World::take` panics on. It was invisible while
+    // the walker never ran (the camera query matched three entities); fixing that exposed this.
     let runtime = sim.as_deref().map(|s| s.world.borrow());
     let gates = if std::env::var_os("BK_GATES_OPEN").is_some() {
         collide::Gates::default()
@@ -18989,22 +19012,30 @@ fn walk_player(
     // `SetCurrentCamera(slot)`): `00_fallcamera.cog` cuts to a camera watching the fall,
     // `06_max.cog` and the C3 levels cut to placed cameras, and `00_cameratricks.cog` focuses a
     // camera thing for a scripted shot. The view then *is* that thing, aimed by its own angles.
-    if let Some(focus) = runtime.as_ref().and_then(|rt| rt.camera_focus_thing()) {
-        if let Some(thing) = runtime.as_ref().and_then(|rt| rt.things.get(focus)) {
-            let (forward, _) = yaw_axes(thing.yaw);
-            let pitch = thing.pitch.to_radians();
-            eye = Vec3::from(thing.pos);
-            look = Vec3::new(
-                forward[0] * pitch.cos(),
-                forward[1] * pitch.cos(),
-                pitch.sin(),
-            );
-        }
+    // Read once, with the guard dropped again: the one at the top of the function was removed because
+    // holding it re-entered the runtime and tripped the fail-fast `World::take`.
+    let focus_camera = runtime
+        .as_ref()
+        .and_then(|rt| {
+            rt.camera_focus_thing()
+                .and_then(|focus| rt.things.get(focus).map(|t| (t.pos, t.yaw, t.pitch)))
+        });
+    let shake = runtime.as_ref().map(|rt| rt.camera_shake()).unwrap_or(([0.0; 3], [0.0; 3]));
+    if let Some((pos, yaw, pitch)) = focus_camera {
+        let (forward, _) = yaw_axes(yaw);
+        let pitch = pitch.to_radians();
+        eye = Vec3::from(pos);
+        look = Vec3::new(
+            forward[0] * pitch.cos(),
+            forward[1] * pitch.cos(),
+            pitch.sin(),
+        );
     }
     // `SetPOVShake`: the offset a shot or an earthquake kicks the view by, decaying back to zero.
     // The engine adds the angle offset to the view angles; the port rotates the aim it already has,
     // which is the same thing and also works while a scripted camera is in charge.
-    if let Some((pos, angle)) = runtime.as_ref().map(|rt| rt.camera_shake()) {
+    {
+        let (pos, angle) = shake;
         eye += Vec3::from(pos);
         if angle != [0.0; 3] {
             let turn = Quat::from_rotation_z(-angle[2].to_radians());
@@ -19019,7 +19050,7 @@ fn walk_player(
         println!(
             "camera: eye {eye:?} look {:?} scripted {:?}",
             look.to_array(),
-            runtime.as_ref().and_then(|rt| rt.camera_focus_thing())
+            focus_camera.map(|_| "a scripted camera").unwrap_or("none")
         );
     }
     if let Some(dir) = look.try_normalize() {
