@@ -107,6 +107,9 @@ flag                                                   exit  what it prints
                                                              reacts: level 1's links watch
                                                              sectors off the walk, so 0
                                                              messages -- the router is next
+--live-play --start 01narshadda                         1  --- live-play check passed ---
+                                                             W for 90 frames moves the body, 30
+                                                             frames of left click add things
 --tally                                                 0  --- tally check passed ---
                                                              the end-of-level rows carry rank,
                                                              secrets and the stars label; the light/
