@@ -59,6 +59,9 @@ struct World {
     /// any of them with `SetWallCel`/`SurfaceAnim`, so the level shader needs the count to map a cel
     /// onto the packed strip.
     material_cels: HashMap<i32, u32>,
+    /// `misc\items.dat`'s `cog=` column: inventory bin -> the script that bin runs. Read once at
+    /// load and handed to the runtime, which has no file access.
+    item_cogs: std::collections::BTreeMap<i32, String>,
     /// Material indices whose `tex_type & 2` marks them as portal materials: `sithSurface.c` refuses to
     /// give those a geometry mode, so the engine never draws them. Drawing one seals a doorway.
     /// Lowercase template name -> lowercase `.3do` name.
@@ -2903,6 +2906,34 @@ fn main() {
             .count();
         println!("items: {present} of those cogs are in the archives");
         assert!(defs.len() > 20, "the item table did not parse ({} bins)", defs.len());
+        // The bin -> script handoff: giving the player a weapon bin asks for its script, and the
+        // script is one the level's own script table can run.
+        {
+            let sim_world = runtime::Runtime::handle(&world.level);
+            let mut rt = sim_world.borrow_mut();
+            rt.item_cog = defs
+                .iter()
+                .filter_map(|def| def.cog.clone().map(|cog| (def.id, cog)))
+                .collect();
+            let player = rt.player_thing();
+            rt.call(
+                "SetInv",
+                &[cog::Value::Num(player as f64), cog::Value::Num(2.0), cog::Value::Num(1.0)],
+            );
+            let asked = rt.pending_cogs.clone();
+            println!(
+                "items: bin 2 going from empty to held asks for {:?} (it was already held: {})",
+                asked,
+                rt.spawned_cogs.len()
+            );
+            assert_eq!(asked, vec!["weap_bryar.cog".to_string()], "the bin did not name its script");
+            // And the same bin twice asks once.
+            rt.call(
+                "SetInv",
+                &[cog::Value::Num(player as f64), cog::Value::Num(2.0), cog::Value::Num(2.0)],
+            );
+            assert_eq!(rt.pending_cogs.len(), 1, "a held bin asked for its script twice");
+        }
         println!("--- items check passed ---");
         return;
     }
@@ -7984,6 +8015,7 @@ fn main() {
                     adopt_carried,
                     autosave,
                     restore_pending,
+                    load_item_cogs,
                     billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
@@ -10590,6 +10622,13 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
     Ok(World {
         level,
         images,
+        item_cogs: gobs
+            .read("misc\\items.dat")
+            .map(|d| hud::items(&String::from_utf8_lossy(&d)))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|def| def.cog.map(|cog| (def.id, cog)))
+            .collect(),
         material_cels,
         template_model,
         models,
@@ -13797,6 +13836,42 @@ fn write_snapshot(
     Ok(bytes.len())
 }
 
+/// Start the item script a newly-held inventory bin names.
+///
+/// `misc\items.dat` gives every weapon bin a `cog=`; the engine starts it when the player acquires
+/// the item, and that script then owns the weapon's own messages. `Runtime::set_bin` names the
+/// scripts and this system builds the VMs — the runtime has no file access, and the VMs belong to
+/// `Sim`.
+fn load_item_cogs(mut sim: Option<ResMut<Sim>>, world: Option<Res<World>>) {
+    let (Some(sim), Some(world)) = (sim.as_mut(), world) else { return };
+    let pending: Vec<String> = std::mem::take(&mut sim.world.borrow_mut().pending_cogs);
+    if pending.is_empty() {
+        return;
+    }
+    for name in pending {
+        let key = name.to_ascii_lowercase();
+        let Some(script) = world.cogs.get(&key) else {
+            println!("items: `{name}` is named by `items.dat` but was not loaded from the level");
+            continue;
+        };
+        let mut vm = cog::Vm::with_world(sim.world.clone());
+        script.bind(&mut vm, &[]);
+        vm.cog_index = sim.instances.len() as i32;
+        let started = if script.label("startup").is_some() {
+            vm.run_label(script, "startup").is_ok()
+        } else {
+            false
+        };
+        println!(
+            "items: started `{name}` for the player (cog {}, startup {})",
+            vm.cog_index,
+            if started { "ran" } else { "has none" }
+        );
+        sim.world.borrow_mut().spawned_cogs.insert(key);
+        sim.instances.push((name.clone(), vm));
+    }
+}
+
 /// `AutosaveGame()`: the first system to see the flag writes the checkpoint and clears it.
 fn autosave(
     sim: Option<Res<Sim>>,
@@ -14871,7 +14946,9 @@ fn setup(
         reported: 0.0,
     };
     // How many cels each surface's material has, so `SurfaceAnim` knows where to wrap. The runtime
-    // has no file access, so the loader hands the counts over once.
+    // has no file access, so the loader hands the counts over once. The inventory's own `cog=`
+    // column comes over the same way, so a pickup can name the script that bin runs.
+    sim.world.borrow_mut().item_cog = world.item_cogs.clone();
     sim.world.borrow_mut().surface_cels = level
         .surfaces
         .iter()

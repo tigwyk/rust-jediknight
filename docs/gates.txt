@@ -311,7 +311,10 @@ flag                                                   exit  what it prints
                                                              `cog=` (`weap_fists.cog`, `weap_bryar.cog`, …) and
                                                              all 24 cogs are in the archives -- the table the
                                                              engine registers inventory bins from, with the
-                                                             column this build had been dropping
+                                                             column this build had been dropping;
+                                                             bin 2 going from empty to held
+                                                             asks for `weap_bryar.cog`, and a
+                                                             held bin does not ask twice
 --ui-tables                                              0  41 screens; 39 name a click and a hover wav
 --ui-visible                                             0  --- ui visible check passed ---
 --force-screen                                           0  --- force screen check passed ---

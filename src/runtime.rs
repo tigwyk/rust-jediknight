@@ -759,6 +759,14 @@ pub struct Runtime {
     /// `LoadSound`'s table: the sound paths scripts have asked for, in order, so the verb can answer a
     /// stable id the way the engine answers `sithSound->id`.
     pub loaded_sounds: Vec<String>,
+    /// `misc\items.dat`'s `cog=` column: inventory bin -> the script that bin runs. The loader fills
+    /// it once, because the runtime has no file access.
+    pub item_cog: BTreeMap<i32, String>,
+    /// Item scripts waiting to be instantiated: a bin went from empty to held, so its cog should
+    /// start. The app owns the VMs, so the runtime only names them.
+    pub pending_cogs: Vec<String>,
+    /// Item scripts already running, so a bin that goes to zero and back does not start a second.
+    pub spawned_cogs: std::collections::BTreeSet<String>,
     /// Script-to-script messages queued by `SendMessage`: `(label, sending cog, target cog)`.
     /// The engine's arm is `SendMessage(cogIdx, messageType)` — `sithCogFunction_SendMessage` —
     /// so the target is a **cog index**, not a thing, and the label is either a name or `#N`
@@ -1038,6 +1046,9 @@ impl Runtime {
             hud_message: None,
             string_buffer: String::new(),
             loaded_sounds: Vec::new(),
+            item_cog: BTreeMap::new(),
+            pending_cogs: Vec::new(),
+            spawned_cogs: std::collections::BTreeSet::new(),
             messages: Vec::new(),
             caller_cog: -1,
             messages_sent: 0,
@@ -2547,7 +2558,8 @@ impl Runtime {
             thing.destroyed = true;
         }
         if self.thing(player).is_some() {
-            *self.inv.entry(bin).or_default() += count;
+            let held = self.inv.get(&bin).copied().unwrap_or(0.0) + count;
+            self.set_bin(bin, held);
         }
         self.note_taken(index, &template);
         Some((bin, count))
@@ -3571,6 +3583,23 @@ impl Runtime {
             sector.light_from = *light;
             sector.light_end = *light;
             sector.light_rate = 0.0;
+        }
+    }
+
+    /// Write an inventory bin and, when it goes from empty to held, ask for that bin's item script.
+    ///
+    /// `jkHudInv_ItemDatLoad` gives every weapon bin a `cog=`, and the engine starts that script when
+    /// the player acquires the item — the script then owns the weapon's own messages (`autoselect:`,
+    /// `selected:`, `activated:`). The runtime cannot build a VM, so it names the script and the app
+    /// starts it; `spawned_cogs` keeps a bin that drops to zero and comes back from starting twice.
+    pub fn set_bin(&mut self, bin: i32, amount: f32) {
+        let was = self.inv.insert(bin, amount).unwrap_or(0.0);
+        if was <= 0.0
+            && amount > 0.0
+            && let Some(cog) = self.item_cog.get(&bin).cloned()
+            && !self.spawned_cogs.contains(&cog)
+        {
+            self.pending_cogs.push(cog);
         }
     }
 
@@ -5289,7 +5318,7 @@ impl Runtime {
                 Value::Nil
             }
             "setinv" => {
-                self.inv.insert(idx(1) as i32, num(2) as f32);
+                self.set_bin(idx(1) as i32, num(2) as f32);
                 Value::Nil
             }
             "changeinv" => {
@@ -5451,6 +5480,9 @@ mod tests {
             hud_message: None,
             string_buffer: String::new(),
             loaded_sounds: Vec::new(),
+            item_cog: BTreeMap::new(),
+            pending_cogs: Vec::new(),
+            spawned_cogs: std::collections::BTreeSet::new(),
             messages: Vec::new(),
             caller_cog: -1,
             messages_sent: 0,
