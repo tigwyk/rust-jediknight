@@ -1549,7 +1549,8 @@ impl Runtime {
         let (target, _) = best?;
         for (instance, _, linked) in &self.thing_links {
             if *linked == target {
-                self.pending_messages.push((*instance, "used"));
+                // `activate`, not `used`: no shipped cog declares a `used` label (0 of 540), while 82 of them -- every door, switch and item -- answer `activate`. It is also what the surface half of this action already sends.
+                self.pending_messages.push((*instance, "activate"));
             }
         }
         Some(target)

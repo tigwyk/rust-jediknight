@@ -234,6 +234,7 @@ fn main() {
     let mut audio_state = false;
     let mut fall_check = false;
     let mut falldeath_check = false;
+    let mut door_check = false;
     let mut shot_at: Option<([f32; 3], f32)> = None;
 
     let mut sim = false;
@@ -359,6 +360,7 @@ fn main() {
             }
             "--fall" => fall_check = true,
         "--falldeath" => falldeath_check = true,
+        "--door" => door_check = true,
             "--mute" => muted_flag = true,
             "--sound-on" => sound_on = true,
             "--audio-state" => audio_state = true,
@@ -5133,6 +5135,83 @@ fn main() {
         assert!(!fall_death_rule(4.0, 0), "a fast fall in an ordinary room is a landing, not a death");
         println!("fall death: {flagged} sector(s) carry 0x40; 4.0 u/s inside one kills, 2.0 u/s and an unflagged sector do not");
         println!("--- fall death check passed ---");
+        return;
+    }
+
+    if door_check {
+        // The whole chain, in one process and on the level's own scripts: the player's use action picks
+        // the nearest linked *thing* (`Runtime::use_thing`), the message queue carries `used` to the
+        // script that owns the link, and the script answers with `setsectoradjoins`/`setadjoinflags` —
+        // the very flags `collide::Gates` reads to decide a doorway is a wall.
+        let handle = runtime::Runtime::handle(&world.level);
+        handle.borrow_mut().wire_links(&world.level.cogs, &world.cogs);
+        let candidates: Vec<(usize, usize)> = {
+            let rt = handle.borrow();
+            rt.thing_links
+                .iter()
+                .filter_map(|(instance, _, thing)| {
+                    let inst = world.level.cogs.get(*instance)?;
+                    let script = world.cogs.get(&inst.script)?;
+                    script.label("activate").is_some().then_some((*instance, *thing))
+                })
+                .collect()
+        };
+        assert!(!candidates.is_empty(), "no linked thing in this level listens on `activate`");
+        let mut outcome = None;
+        for (instance, thing) in &candidates {
+            let eye = {
+                let rt = handle.borrow();
+                let Some(t) = rt.things.get(*thing) else { continue };
+                [t.pos[0] + 1.0, t.pos[1], t.pos[2]]
+            };
+            // Look straight at it from one unit away: the use action is a look, not a touch.
+            let facing = [-1.0f32, 0.0];
+            let (_used, before) = {
+                let mut rt = handle.borrow_mut();
+                let before = (rt.sector_flags.clone(), rt.adjoin_flags.clone());
+                let used = rt.use_thing(eye, facing, 3.0);
+                (used, before)
+            };
+            // Another linked thing can be nearer than the one this candidate names; what matters is that
+            // the use action finds *a* linked thing, and that its script changes the world.
+            // Drain exactly as `deliver_thing_messages` does, so this is the real path and not a shortcut.
+            let pending: Vec<(usize, &'static str)> = {
+                let mut rt = handle.borrow_mut();
+                std::mem::take(&mut rt.pending_messages)
+            };
+            let mut ran = 0;
+            for (inst, label) in &pending {
+                let Some(data) = world.level.cogs.get(*inst) else { continue };
+                let Some(script) = world.cogs.get(&data.script) else { continue };
+                let mut vm = cog::Vm::with_world(handle.clone());
+                script.bind(&mut vm, &data.values);
+                vm.source = *thing as i64;
+                if script.label(label).is_some() && vm.run_label(script, label).is_ok() {
+                    ran += 1;
+                }
+            }
+            let changed = {
+                let rt = handle.borrow();
+                let sectors = rt.sector_flags.iter().zip(before.0.iter()).filter(|(a, b)| a != b).count();
+                let adjoins = rt.adjoin_flags.iter().zip(before.1.iter()).filter(|(a, b)| a != b).count();
+                (sectors, adjoins)
+            };
+            println!("door: candidate cog {instance} on thing {thing}: {ran} label(s) ran, flags changed {changed:?}");
+            if changed.0 + changed.1 > 0 {
+                outcome = Some((*instance, *thing, ran, changed));
+                break;
+            }
+        }
+        let Some((instance, thing, ran, (sectors, adjoins))) = outcome else {
+            panic!(
+                "{} linked thing(s) listen on `activate`, none of them changed a door flag: the chain from use to the sweep is broken",
+                candidates.len()
+            );
+        };
+        println!(
+            "door: cog {instance} on thing {thing}; {ran} message(s) run; {sectors} sector flag(s) and {adjoins} adjoin flag(s) changed by the level's own script"
+        );
+        println!("--- door check passed ---");
         return;
     }
 
