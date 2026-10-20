@@ -455,3 +455,5 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 * The huge orange polygons are the level's freighter (`01frt.3do`, 110 units long), not broken geometry.
 * The camera used to spawn inside an NPC: the clearance rule wanted `radius * 2` = 0.7, exactly an NPC's
   width. It wants 2.0 units now.
+
+| Known defect | level m5 | **four weapon pickups rise out of the world**: m5railgun and m5concrifle carry el= in their templates and the thing-motion path integrates velocity with no gravity and no surface stop, so they climb ~10 units/s from z −0.2 to +39 in four seconds (--soak-all reports it; BK_SOAK_TRACE names them) | the motion path needs sithPhysics' gravity and collision, or el restricted to the types the engine launches (debris, particles, explosions) |
