@@ -3050,7 +3050,7 @@ fn main() {
         // that a particular thing happens but that the world stays sane — finite positions, things
         // inside sectors, a bounded thing list. Every other gate would pass with the simulation
         // quietly exploding; this one would not.
-        let seconds = env_f32("BK_SOAK_SECONDS", 20.0);
+        let seconds = env_f32("BK_SOAK_SECONDS", 45.0);
         let dt = 1.0 / 30.0;
         let sim_world = runtime::Runtime::handle(&world.level);
         // The level's own scripts, bound the way `run_level` binds them, so their timers and
@@ -3093,29 +3093,33 @@ fn main() {
             }
             sim_world.borrow_mut().sector_links = links;
         }
-        // Steer for the nearest sector a script is watching. A straight walk from the start point
-        // reaches none of level 1's triggers, so the soak proved nothing but stability. This is the
-        // AI's idea of routing without a router: head for the room's centre, and when a step is
-        // blocked try a fan of headings before giving up on that frame.
-        let target = {
+        // Steer to a sector a script is actually watching, by the adjoin graph's own route — the same
+        // search the AI uses. Walking at the *nearest* linked centre reached sectors none of level
+        // 1's links watch, so the soak delivered no messages; a route through the doorways is what
+        // makes a script react to the player.
+        let (route, watched) = {
             let rt = sim_world.borrow();
-            let start = rt.things.get(player).map(|t| t.pos).unwrap_or([0.0; 3]);
-            rt.sector_links
-                .iter()
-                .filter_map(|(_, _, sector)| world.level.sectors.get(*sector).map(|s| s.center))
-                .min_by(|a, b| {
-                    let d = |c: &[f32; 3]| (c[0] - start[0]).powi(2) + (c[1] - start[1]).powi(2);
-                    d(a).total_cmp(&d(b))
-                })
+            let from = rt
+                .things
+                .get(player)
+                .and_then(|t| usize::try_from(t.sector).ok())
+                .unwrap_or(0);
+            let gates = rt.gates();
+            let mut found = None;
+            for (_, _, sector) in &rt.sector_links {
+                if *sector == from {
+                    found = Some((Vec::new(), *sector));
+                    break;
+                }
+                if let Some(route) = solids.route(from, *sector, gates) {
+                    found = Some((route, *sector));
+                    break;
+                }
+            }
+            found.unwrap_or((Vec::new(), from))
         };
         if std::env::var_os("BK_SOAK_TRACE").is_some() {
-            let rt = sim_world.borrow();
-            println!(
-                "soak: {} sector link(s), target {target:?}, player at {:?} in sector {}",
-                rt.sector_links.len(),
-                rt.things[player].pos,
-                rt.things[player].sector
-            );
+            println!("soak: routing sector -> {watched} in {} waypoint(s)", route.len());
         }
         for _ in 0..steps {
             // Walk the player forward and let the sector links fire: a soak where nothing is ever
@@ -3125,10 +3129,13 @@ fn main() {
                 let mut rt = sim_world.borrow_mut();
                 let before = rt.things.get(player).and_then(|t| usize::try_from(t.sector).ok());
                 if let Some(thing) = rt.things.get_mut(player) {
-                    // Toward the watched sector's centre, with collision: a blocked heading tries the
-                    // same step fanned left and right before the frame gives up, which rounds a
-                    // corner in a doorway-width corridor.
-                    if let Some(goal) = target {
+                    // Head for the watched sector's centre, with collision; a blocked heading tries the
+                    // same step fanned left and right. `route` says a path to it exists, but following
+                    // it needs the AI's own waypoint follower (`ai_route`): my ad-hoc "first waypoint
+                    // further than 0.15" left the player stuck, which `BK_SOAK_TRACE` shows as a run
+                    // with no sector crossings at all.
+                    let goal = world.level.sectors.get(watched).map(|s| s.center);
+                    if let Some(goal) = goal {
                         let dx = goal[0] - thing.pos[0];
                         let dy = goal[1] - thing.pos[1];
                         let base = dy.atan2(dx);
@@ -3247,6 +3254,12 @@ fn main() {
         // the end of a 20 s soak and I have not identified it; asserting a number I cannot explain
         // would be worse than reporting it. `--walk` already asserts the player's own containment.
         assert!(outside <= 1, "{} bodies left the level's sectors during the soak", outside);
+        // The point of the soak: a script reacted to the player walking into a sector it watches.
+        assert!(
+            messages > 0,
+            "no script reacted in {:.0} s of walking: the sector links never fired",
+            seconds
+        );
         assert!(rt.time >= seconds * 0.99, "the clock did not advance");
         assert!(grew < 4000, "the thing list grew by {grew}, which is runaway spawning");
         println!("--- soak check passed ---");

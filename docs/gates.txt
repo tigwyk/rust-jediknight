@@ -86,6 +86,18 @@ flag                                                   exit  what it prints
                                                              at t=10.6 for a 0.5 s rate)
                                                              0->1 and holster on 1->0)
 --soak                                                 0  --- soak check passed ---
+                                                             45 s at the walking speed it now
+                                                             uses: the player reaches a sector a
+                                                             script watches and 40 messages are
+                                                             delivered, so this row proves a
+                                                             script *reacts*, not just that the
+                                                             world stays sane. Holding a mask
+                                                             return would be a bug, not a
+                                                             status
+                                                             (BK_SOAK_TRACE shows the walk; the
+                                                             assertion is level 1 -- level 2's
+                                                             links are out of a straight-line
+                                                             walk's reach)
                                                              20 s of level time (599 steps) with the level's 10 sector links built the way
                                                              `setup` builds them, and the
                                                              level's 42 scripts running alongside
