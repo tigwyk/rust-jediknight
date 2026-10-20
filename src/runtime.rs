@@ -3045,9 +3045,31 @@ impl Runtime {
         if !(0..=26).contains(&bin) {
             return false;
         }
+        // Arming is a pair of messages, not a field: the engine's `sithInventory_ActivateBin` sends
+        // `activated` to the bin's item cog, and the weapon cog's own `activated:` label is what
+        // calls `ActivateWeapon` (`cog_weap_bryar.cog:105`). Nothing in this build did that, so
+        // `weapon_cog` stayed None after a switch and the trigger did nothing.
+        let previous = self.cur_bin;
+        if previous != bin
+            && let Some(cog) = self.bin_cog_index.get(&previous).copied()
+        {
+            self.messages
+                .push(("deactivated".to_string(), Some(self.player_thing()), Some(cog), [0.0; 2]));
+        }
         self.cur_bin = bin;
         if let Some(weapon) = self.weapon_for_bin(bin) {
             self.weapon = Some(weapon);
+        }
+        if previous != bin
+            && let Some(cog) = self.bin_cog_index.get(&bin).copied()
+        {
+            let player = self.player_thing();
+            // `selected:` runs the mount animation and sets the first-person model; `activated:`
+            // arms the trigger.
+            for message in ["selected", "activated"] {
+                self.messages
+                    .push((message.to_string(), Some(player), Some(cog), [0.0; 2]));
+            }
         }
         true
     }
@@ -6491,6 +6513,9 @@ mod tests {
         rt.inv.insert(2, 1.0);
         rt.inv.insert(3, 1.0);
         rt.inv.insert(5, 1.0);
+        // The item cogs the app's loader would have recorded, so arming has somewhere to go.
+        rt.bin_cog_index.insert(2, 7);
+        rt.bin_cog_index.insert(3, 8);
         for name in ["bryarblaster", "stlaser"] {
             rt.template_types.insert(name.to_string(), 3);
             rt.template_damage.insert(name.to_string(), 20.0);
@@ -6498,6 +6523,22 @@ mod tests {
         rt.select_bin(2);
         assert_eq!(rt.cycle_weapon(1), 3, "next went the wrong way");
         assert_eq!(rt.cur_bin, 3);
+        // Arming is a message pair: the old bin's cog is told `deactivated`, the new one gets
+        // `selected` and `activated` — and `activated:` is where the weapon cog calls
+        // `ActivateWeapon`, so without these the trigger stays dead after a switch.
+        let queued: Vec<&str> = rt
+            .messages
+            .iter()
+            .map(|(message, _, _, _)| message.as_str())
+            .collect();
+        assert!(
+            queued.contains(&"activated"),
+            "nothing was told to arm the newly selected bin: {queued:?}"
+        );
+        assert!(
+            queued.contains(&"selected"),
+            "the mount animation was never asked for: {queued:?}"
+        );
         // The point of switching: what fires next is the new gun's shot.
         assert_eq!(rt.current_weapon(), "stlaser", "the armed weapon did not change");
         assert_eq!(rt.cycle_weapon(1), 2, "cycling did not wrap");
