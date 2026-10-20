@@ -313,6 +313,13 @@ pub struct Runtime {
     pub user_data: std::collections::BTreeMap<usize, f32>,
     pub force: std::collections::BTreeMap<usize, [f32; 3]>,
     pub actor_weapon: std::collections::BTreeMap<usize, i32>,
+    /// `SetFaceGeoMode`: per-surface draw mode (`sithSurface_SetGeoMode`). 0 is
+    /// `GEOMETRY_NONE` — the surface is not drawn at all, which is how a script makes broken glass
+    /// vanish or a slashable panel open. Anything else draws normally.
+    pub face_geomode: std::collections::BTreeMap<usize, i32>,
+    /// Bumped on every geomode change, so the renderer knows to rebuild the world's batches instead
+    /// of scanning the map each frame.
+    pub geomode_epoch: u32,
     /// `sithWeapon_secMountWait`: when the equipped weapon finishes mounting, as an absolute clock time
     /// (the engine stores `wait + gameTime` in a global, not per thing).
     pub mount_wait_until: f32,
@@ -392,6 +399,10 @@ pub struct Runtime {
     /// Surface → the adjoin row it carries (`-1` for a wall), so a script's `surface` symbol
     /// reaches its `pAdjoin` without the runtime holding the whole level.
     pub surface_adjoin: Vec<i32>,
+    /// Each face's `geometryMode` as the loader sets it: the `.jkl` `geo` column, forced to
+    /// `GEOMETRY_NONE` for a face with no material (`sithSurface.c:225`–`237`). A script's
+    /// `SetFaceGeoMode` overrides it in `face_geomode`; `GetFaceGeoMode` reads both.
+    pub surface_geomode: Vec<i32>,
     /// Per-surface state, indexed the way `.jkl` surfaces are: cels, animation, slides.
     pub surfaces: Vec<SurfaceState>,
     /// Sounds a script asked for, in order: the wav, its volume, and where it came from.
@@ -716,6 +727,11 @@ impl Runtime {
             sector_flags: level.sectors.iter().map(|s| s.flags).collect(),
             adjoin_flags: level.adjoins.iter().map(|a| a.flags).collect(),
             surface_adjoin: level.surfaces.iter().map(|s| s.adjoin).collect(),
+            surface_geomode: level
+                .surfaces
+                .iter()
+                .map(|s| if s.material >= 0 { s.geo.max(0) } else { 0 })
+                .collect(),
             surfaces: level
                 .surfaces
                 .iter()
@@ -751,6 +767,8 @@ impl Runtime {
             master_cog: None,
             multi_mode_flags: 0,
             play_key: BTreeMap::new(),
+            face_geomode: BTreeMap::new(),
+            geomode_epoch: 0,
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
             template_weapon: level
@@ -985,6 +1003,8 @@ impl Runtime {
                 | "jumptoframe"
                 | "setmountwait"
                 | "jkclearflags"
+                | "setfacegeomode"
+                | "getfacegeomode"
                 | "setfirewait"
                 | "setgoalflags"
                 | "cleargoalflags"
@@ -2010,6 +2030,17 @@ impl Runtime {
         Some([frames[0], frames[1], frames[2]])
     }
 
+    /// The mode a surface is drawn with: the script's `SetFaceGeoMode` override, else the level's own
+    /// `geo` column. Untouched faces are **not** 0 — `09_fuelexplode.cog` reads
+    /// `GetFaceGeoMode(GetSenderRef()) == 0` to bail out of a fuel-pipe chain that is already gone, so
+    /// answering 0 for every face retired that whole level's set piece.
+    pub fn face_geomode_at(&self, surface: usize) -> i32 {
+        self.face_geomode
+            .get(&surface)
+            .copied()
+            .unwrap_or_else(|| self.surface_geomode.get(surface).copied().unwrap_or(0))
+    }
+
     /// `actor->flags & SITH_AF_INVULNERABLE` with the engine's fall exception.
     fn invulnerable(&self, index: usize, kind: u32) -> bool {
         kind != DAMAGE_FALL
@@ -2514,6 +2545,23 @@ impl Runtime {
                 }
                 Value::Nil
             }
+            // `SetFaceGeoMode(surface, mode)` / `GetFaceGeoMode(surface)`: `sithSurface_SetGeoMode`.
+            // Mode 0 is `GEOMETRY_NONE` — `00_breakingglass.cog` sets it on the glass it shatters and
+            // `00_slashablefaces.cog` sets 4 back when the panel is intact — so the renderer has to stop
+            // drawing those polygons, not just record the number.
+            "setfacegeomode" => {
+                let surface = ti(0);
+                // Retail keeps `GEOMETRY_NONE` on a face the level does not draw and ignores the
+                // argument (`FUN_00500790`: `if (surface->face.material == 0) surface->geoMode = 0`).
+                let drawn = self.surface_geomode.get(surface).copied().unwrap_or(0) != 0;
+                let mode = if drawn { idx(1) as i32 } else { 0 };
+                if self.face_geomode.get(&surface).copied() != Some(mode) {
+                    self.face_geomode.insert(surface, mode);
+                    self.geomode_epoch = self.geomode_epoch.wrapping_add(1);
+                }
+                Value::Nil
+            }
+            "getfacegeomode" => Value::Num(self.face_geomode_at(ti(0)) as f64),
             "setmountwait" => {
                 // `sithWeapon_SetMountWait` stores `secWait + gameTime` in one global, and the fire path
                 // refuses until that clock passes. `SetMountWait(player, 0)` — what every shipped
@@ -3180,6 +3228,7 @@ mod tests {
             sector_flags: vec![0],
             adjoin_flags: vec![0x7],
             surface_adjoin: vec![0],
+            surface_geomode: Vec::new(),
             surfaces: Vec::new(),
             sounds: Vec::new(),
             timers: 0.0,
@@ -3194,6 +3243,8 @@ mod tests {
             master_cog: None,
             multi_mode_flags: 0,
             play_key: BTreeMap::new(),
+            face_geomode: BTreeMap::new(),
+            geomode_epoch: 0,
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
             template_weapon: BTreeMap::new(),

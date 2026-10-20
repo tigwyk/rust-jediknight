@@ -3,8 +3,8 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **34 gates, 85 tests, 0 failures.** Stubbed script surface:
-**38 verbs, 255 call sites across the 34 shipped levels** (706 before this run of state setters).
+The port's checks at the time of writing: **35 gates, 85 tests, 0 failures.** Stubbed script surface:
+**36 verbs, 221 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -72,17 +72,17 @@ both multiplayer-only screens.
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — plus sector light animation. 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 38 below | the 38 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 36 below | the 36 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 38 stubbed cog verbs
+## 3. The 36 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (255 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 38.
+over the 34 levels from `--cog-check` (221 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 36.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -95,7 +95,7 @@ takes the wrong branch without any error.
 | Thing properties and flags (9) | 44 | `returnex` 12, `setthinglight` 10, `thinglightanim` 9, `syncsurface` 4, `syncthingpos` 3, `setthingrotvel` 2, `newcoloreffect` 2, `createthingatpos` 1, `teleportthing` 1 |
 | Cog introspection and goal state (1) | 1 | `loadtemplate` 1 |
 | Weapons and projectiles (3) | 31 | `jksetsaberinfo` 15, `autoselectweapon` 14, `fireprojectile` 2 |
-| Face and thing modes (5) | 45 | `setfacegeomode` 18, `getfacegeomode` 16, `getthinggeomode` 4, `setthingcurgeomode` 4, `setfacelightmode` 3 |
+| Face and thing modes (3) | 11 | `getthinggeomode` 4, `setthingcurgeomode` 4, `setfacelightmode` 3 |
 | Sectors, adjoins, sky (3) | 15 | `slideceilingsky` 10, `setsectorthrust` 4, `slidehorizonsky` 1 |
 | Animation and models (3) | 30 | `surfacelightanim` 18, `materialanim` 6, `setthingmodel` 6 |
 | Attachments and parents (3) | 8 | `attachthingtothing` 6, `getthingparent` 1, `setthingattachflags` 1 |
@@ -192,6 +192,16 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 ---
 
 ## 6. Recently closed, so it is not mistaken for missing
+
+* **A face can be hidden, and an untouched face reports that it is drawn.** `SetFaceGeoMode(surface, 0)`
+  is `GEOMETRY_NONE`: `00_breakingglass.cog` shatters glass with it and the force-field switches open
+  passages with it. The port stores the mode, forces `0` on a face the level does not draw (retail's own
+  branch in `FUN_00500790`), drops the polygons in `build_world`, and re-batches the `(sector, material)`
+  meshes in place when the mode changes. The default is the half that changes behaviour:
+  `GetFaceGeoMode` answers the `.jkl` row's own `geo` column, not `0`, and level 9's fuel chain is the
+  consumer — `09_fuelexplode.cog:57` bails out of its `crossed` handler on a `0`. `--geomode` hides a
+  7-vertex face (8898 → 8893 drawn triangles) and asserts an untouched face reads its `geo` 4 while a
+  material-less face stays 0 even when asked for 4.
 
 * **Level 1 ends when you see 8t88, from the level's own scripts.** `sithRender_RenderThing` sends
   `sighted` the first time it draws a `CAPTURED` thing, so the port latches that in `cull_sectors`

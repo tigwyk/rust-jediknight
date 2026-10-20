@@ -2773,6 +2773,42 @@ The port's messages carry no parameters, so the four arguments are dropped — t
 branch on. Every shipped `SendTrigger` caller lives in a multiplayer script (`ctf_main`, `c3_largelevel*`,
 `c2_breakingglass`), so this is fidelity for those levels rather than something a campaign level exercises.
 
+**A face's draw mode is state the renderer acts on, and its default is not 0.**
+`SetFaceGeoMode(surface, mode)` stores `face->geometryMode` and then calls `sithSurface_SyncSurface`
+(`FUN_00500790`) — the engine re-syncs the geometry, it does not just remember a number. The modes are
+`erdGeometryMode` (`types_enums.h`): 0 `NONE`, 1 `VERTEX`, 2 `WIREFRAME`, 3 `SOLID`, 4 `FULL`, 5 "use
+whatever the renderer is set to". 223 shipped call sites across 21 scripts: 0 ×151 (`00_breakingglass.cog`
+shatters glass with it, `03_paddlepool.cog` and the `*ffieldswitch` scripts open and close passages),
+5 ×32, 3 ×30, 4 ×10 (`00_slashablefaces.cog` sets 4 back while its panel is intact). Two retail branches
+are worth naming because both are easy to lose: a face whose material is null keeps `GEOMETRY_NONE` and
+the argument is ignored, and the loader *derives* the initial mode rather than trusting the row —
+`sithSurface.c:225`–`237` reads the `.jkl` `geo` column, then forces `SOLID` on an opaque material and
+`NONE` when there is none.
+
+So the default is what the consumer reads. `GetFaceGeoMode` on a face no script has touched answers the
+level's own `geo`, never 0, and that is load-bearing: level 9's fuel chain opens its `crossed` handler
+with `if (GetFaceGeoMode(GetSenderRef()) == 0) return; // Face not rendered, fuel at different level, exit`
+(`09_fuelexplode.cog:57`), so answering 0 for every untouched face retired that level's set piece
+silently — the script is only reachable when the face still reports it is drawn. Across all 35 levels
+the column already agrees with the loader's rule: 90,567 faces ship `geo` 4 and 666 ship 3, every one of
+them with a material, and 35,406 ship 0, every one without. The port keeps that derived default in
+`Runtime::surface_geomode`, lets `face_geomode` override it, and reads both through
+`Runtime::face_geomode_at`.
+
+Hiding has to reach the mesh, not the table. `build_world` skips hidden faces, `SurfaceBatches` keeps the
+`(sector, material)` mesh handles, and `rebuild_surfaces` re-batches them when `geomode_epoch` changes —
+patched in place, so the entities and their portal-driven `Visibility` survive. `--geomode` is the gate:
+
+```text
+geomode: surface 0 (7 verts, sector 0) hidden: 8898 -> 8893 triangles (want 8893);
+         untouched face 3 is geo 4, a material-less face stays 0
+```
+
+The 7-vertex face is one fan of 5 triangles; a material-less face keeps 0 even when the script passes 4.
+ponytail: a change re-batches the whole world instead of the touched sector — a level has a few thousand
+surfaces and a change happens when the player breaks something, so it is a hitch when it happens, not a
+per-frame cost.
+
 ## 16.5 Firing a weapon — **observed**, first slice
 A weapon is a template, and firing it is `CreateThing` of that template at the shooter with
 the template's own launch velocity. Level 1's own weapons:

@@ -129,6 +129,7 @@ const GATES: &[&str] = &[
     "--campaign",
     "--cog-check",
     "--adjoins",
+    "--geomode",
     "--move",
     "--pickup",
     "--save",
@@ -236,8 +237,7 @@ fn main() {
     let mut audio_state = false;
     let mut fall_check = false;
     let mut falldeath_check = false;
-    let mut door_check = false;
-    let mut shot_at: Option<([f32; 3], f32)> = None;
+    let mut door_check = false;    let mut shot_at: Option<([f32; 3], f32)> = None;
 
     let mut sim = false;
     let mut dump: Option<String> = None;
@@ -260,6 +260,7 @@ fn main() {
     let mut cog_check = false;
     // `--adjoins`: the sector/adjoin flag verbs, and that collision and the cull read them.
     let mut adjoin_check = false;
+    let mut geomode_check = false;
     let mut fire_check: Option<String> = None;
     let mut hit_check = false;
     let mut level_shader = false;
@@ -490,6 +491,8 @@ fn main() {
             "--cog-check" => cog_check = true,
             // The adjoin/sector flag verbs, and the two consumers that must read them.
             "--adjoins" => adjoin_check = true,
+            // The surface geomode: a script hides a face and the world's batches drop its polygons.
+            "--geomode" => geomode_check = true,
             // `--fire <weapon template>`: fire that weapon at level 1's actor and check the
             // projectile travels, hits and damages.
             // `--level-shader`: draw level surfaces with the material that carries the colormap
@@ -4686,6 +4689,87 @@ fn main() {
         return;
     }
 
+    if geomode_check {
+        // `SetFaceGeoMode(surface, 0)` is `GEOMETRY_NONE`: `00_breakingglass.cog` shatters glass with
+        // it and `00_slashablefaces.cog` sets 4 back when a panel is intact. The claim to test is not
+        // that the mode is stored — it is that the polygons leave the world's batches, which is what
+        // `rebuild_surfaces` patches in place.
+        let level = &world.level;
+        let claims = collide::surface_claims(level);
+        let (index, verts, sector) = level
+            .surfaces
+            .iter()
+            .enumerate()
+            .find(|(i, s)| {
+                s.material >= 0 && s.verts.len() >= 3 && claims.get(*i).is_some_and(|c| c.len() == 1)
+            })
+            .map(|(i, s)| (i, s.verts.len(), claims[i][0]))
+            .expect("no drawn surface with a single claiming sector");
+        let triangles = |hidden: &std::collections::BTreeSet<usize>| -> usize {
+            build_world(level, &Default::default(), hidden)
+                .0
+                .values()
+                .map(|batch| batch.indices.len() / 3)
+                .sum()
+        };
+        let before = triangles(&Default::default());
+        let state = runtime::Runtime::handle(level);
+        let set = {
+            let mut rt = state.borrow_mut();
+            let out = rt.call(
+                "SetFaceGeoMode",
+                &[cog::Value::Num(index as f64), cog::Value::Num(0.0)],
+            );
+            (out, rt.geomode_epoch)
+        };
+        assert_eq!(set.0, cog::Value::Nil);
+        let read_back = {
+            let mut rt = state.borrow_mut();
+            rt.call("GetFaceGeoMode", &[cog::Value::Num(index as f64)])
+        };
+        assert_eq!(read_back, cog::Value::Num(0.0), "GetFaceGeoMode did not read the mode back");
+        assert!(set.1 > 0, "the geomode change did not bump the rebuild epoch");
+        // An untouched face answers the level's own `geo` column, not 0. `09_fuelexplode.cog` reads
+        // `GetFaceGeoMode(GetSenderRef()) == 0` to skip a fuel pipe that is already gone, so a blanket
+        // 0 retires that whole set piece. A face with no material answers 0 and keeps it, which is
+        // what retail's `SetFaceGeoMode` stores for it (`FUN_00500790`).
+        let (other, other_geo) = level
+            .surfaces
+            .iter()
+            .enumerate()
+            .find(|(i, s)| *i != index && s.material >= 0 && s.geo > 0)
+            .map(|(i, s)| (i, s.geo))
+            .expect("no second drawn surface");
+        let blank = level
+            .surfaces
+            .iter()
+            .position(|s| s.material < 0)
+            .expect("no face without a material");
+        let (other_read, blank_read) = {
+            let mut rt = state.borrow_mut();
+            let other = rt.call("GetFaceGeoMode", &[cog::Value::Num(other as f64)]);
+            rt.call("SetFaceGeoMode", &[cog::Value::Num(blank as f64), cog::Value::Num(4.0)]);
+            (other, rt.call("GetFaceGeoMode", &[cog::Value::Num(blank as f64)]))
+        };
+        assert_eq!(
+            other_read,
+            cog::Value::Num(other_geo as f64),
+            "an untouched face did not answer its own `geo` column"
+        );
+        assert_eq!(blank_read, cog::Value::Num(0.0), "a face with no material took a draw mode");
+        let hidden: std::collections::BTreeSet<usize> = std::iter::once(index).collect();
+        let after = triangles(&hidden);
+        let want = before - (verts - 2);
+        println!(
+            "geomode: surface {index} ({verts} verts, sector {sector}) hidden: {before} -> {after} triangles (want {want}); untouched face {other} is geo {other_geo}, a material-less face stays 0"
+        );
+        assert_eq!(
+            after, want,
+            "hiding one surface did not remove exactly the {verts} verts' triangles"
+        );
+        return;
+    }
+
     if adjoin_check {
         // `--adjoins`: the three verbs that switch a passage, and the two consumers that have to
         // read them. The point is not that the flags get stored — it is that a body stops at a
@@ -5954,6 +6038,7 @@ fn main() {
                     apply_fall_damage,
                     walk_player,
                     cull_sectors,
+                    rebuild_surfaces,
                     sky_follows_camera,
                     ambient_follows_view,
                     play_exit,
@@ -8384,14 +8469,18 @@ fn is_sky_surface(surface: &jkl::Surface) -> bool {
 const SURFFLAG_CEILING_SKY: u32 = 0x400;
 
 /// One accumulated triangle batch per material.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Batch {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
-}
+}/// The world's surface batches: which mesh asset draws which `(sector, material)`. A script's
+/// `SetFaceGeoMode` has to stop drawing polygons, so the rebuild patches these meshes in place
+/// rather than respawning the sector's entities.
+#[derive(Resource, Default)]
+struct SurfaceBatches(Vec<((usize, i32), Handle<Mesh>)>);
 
 impl Batch {
     fn push_polygon(
@@ -8660,7 +8749,7 @@ fn audit(gobs: &gob::GobSet) -> Result<(), String> {
         // Build the actual draw geometry, headless: a level whose surfaces pass the
         // index checks can still produce no triangles (degenerate or collinear
         // polygons), and that would render as an empty world with no error.
-        let (batches, _) = build_world(&level, &Default::default());
+        let (batches, _) = build_world(&level, &Default::default(), &Default::default());
         let world_tris: usize = batches.values().map(|b| b.indices.len() / 3).sum();
         let empty_batches = batches.values().filter(|b| b.indices.is_empty()).count();
         if textured > 0 && world_tris == 0 {
@@ -9639,14 +9728,14 @@ fn newell(points: &[[f32; 3]]) -> Option<[f32; 3]> {
 fn build_world(
     level: &jkl::Level,
     images: &HashMap<i32, Image>,
+    hidden: &std::collections::BTreeSet<usize>,
 ) -> (HashMap<(usize, i32), Batch>, usize) {
     let claims = collide::surface_claims(level);
     let mut batches: HashMap<(usize, i32), Batch> = HashMap::new();
     let mut skipped = 0usize;
     for (index, surface) in level.surfaces.iter().enumerate() {
-        // Not drawn: no material, or not a polygon. `tex_type & 2` is *not* the portal test — it means
-        // "has UVs" (`rdModel3.c` reads it exactly that way, and every ordinary wall texture sets it).
-        if surface.material < 0 || surface.verts.len() < 3 {
+        // Not drawn: no material, not a polygon, or a script set its geomode to `GEOMETRY_NONE`.
+        if surface.material < 0 || surface.verts.len() < 3 || hidden.contains(&index) {
             skipped += 1;
             continue;
         }
@@ -9674,6 +9763,52 @@ fn build_world(
         }
     }
     (batches, skipped)
+}
+
+/// Rebuild the world's surface batches when a script hides or restores a surface.
+///
+/// `SetFaceGeoMode(surface, 0)` is `GEOMETRY_NONE` (`00_breakingglass.cog` shatters glass with it,
+/// `00_slashablefaces.cog` sets 4 back when a panel is intact), so the polygons have to leave the
+/// mesh. The entities stay: their `(sector, material)` key is unchanged, only the geometry in it is.
+/// ponytail: the whole world is re-batched per change, not the one sector — a level has a few thousand
+/// surfaces and a change happens when the player breaks something, so the once-off cost is a hitch,
+/// not a frame-rate problem. Narrow it to the touched sectors if that ever shows.
+fn rebuild_surfaces(
+    sim: Option<Res<Sim>>,
+    world: Option<Res<World>>,
+    batches: Option<Res<SurfaceBatches>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut seen: Local<u32>,
+) {
+    let (Some(sim), Some(world), Some(batches)) = (sim, world, batches) else { return };
+    let (epoch, hidden) = {
+        let rt = sim.world.borrow();
+        (
+            rt.geomode_epoch,
+            rt.face_geomode
+                .iter()
+                .filter(|(_, mode)| **mode == 0)
+                .map(|(surface, _)| *surface)
+                .collect::<std::collections::BTreeSet<usize>>(),
+        )
+    };
+    if epoch == *seen {
+        return;
+    }
+    *seen = epoch;
+    let (built, _) = build_world(&world.level, &world.images, &hidden);
+    let mut patched = 0usize;
+    for (key, handle) in &batches.0 {
+        let Some(batch) = built.get(key).cloned() else { continue };
+        if let Some(mut mesh) = meshes.get_mut(handle) {
+            *mesh = to_mesh(batch);
+            patched += 1;
+        }
+    }
+    println!(
+        "surfaces: geomode changed, {patched} batch(es) rebuilt with {} surface(s) hidden",
+        hidden.len()
+    );
 }
 
 /// Triangles a model contributes, counting each face as `nverts - 2`.
@@ -11632,7 +11767,10 @@ fn setup(
     println!("sound bank: {} clips with fade radii", bank.clips.len());
     commands.insert_resource(bank);
 
-    let (batches, skipped) = build_world(level, &world.images);
+    // Surfaces a script has hidden before the world was built (`GEOMETRY_NONE`). Scripts start before
+    // the meshes are built, so a level that hides glass in `startup` is already accounted for here;
+    // anything later goes through `rebuild_surfaces`.
+    let (batches, skipped) = build_world(level, &world.images, &Default::default());
     let no_mat = level.surfaces.iter().filter(|s| s.material < 0).count();
     let few_verts = level.surfaces.iter().filter(|s| s.verts.len() < 3).count();
     println!(
@@ -11666,6 +11804,7 @@ fn setup(
         }
     };
     let mut by_sector: Vec<Vec<Entity>> = vec![Vec::new(); level.sectors.len()];
+    let mut surface_batches = SurfaceBatches::default();
     for ((sector, mat_idx), batch) in batches {
         if batch.indices.is_empty() {
             continue;
@@ -11695,6 +11834,7 @@ fn setup(
             })
             .clone();
         let mesh_handle = meshes.add(to_mesh(batch));
+        surface_batches.0.push(((sector, mat_idx), mesh_handle.clone()));
         if shader_on {
             let shaded = shader_handles
                 .entry(mat_idx)
@@ -11732,6 +11872,7 @@ fn setup(
 
     let (entities, actors) = spawn_models(&mut commands, &world, &mut meshes, &mut materials, &mut images);
     commands.insert_resource(Actors(actors));
+    commands.insert_resource(surface_batches);
     commands.insert_resource(Created::default());
     // The player's weapon: the template's own `weapon=`, else the first template that is
     // a projectile — a weapon type with a launch velocity and a damage value.

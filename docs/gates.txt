@@ -30,7 +30,7 @@ whatever is on screen, and `--gates` passes it to every child. A gate that forge
 ends without a verdict instead of sitting on the main menu forever — which is what five flags that
 do not exist in this binary used to do, because a hand-written flag list had invented them.
 
-`FAILURES: 0 / 34` (`--gates`: `gates: 0 of 34 failed`).
+`FAILURES: 0 / 35` (`--gates`: `gates: 0 of 35 failed`).
 
 flag                                                   exit  what it prints
 -------------------------------------------------------------------------------------------------
@@ -73,6 +73,12 @@ flag                                                   exit  what it prints
                                                              rooms from the cull; SetSectorFlags(sector, 2)
                                                              makes the sector water and SetSectorAdjoins(0)
                                                              shuts its doorways
+--geomode                                                0  SetFaceGeoMode(surface, 0) on a surface only one
+                                                             sector claims hides it: 8898 -> 8893 drawn
+                                                             triangles (want 8893, one 7-vert fan fewer),
+                                                             GetFaceGeoMode reads 0 back and the change
+                                                             bumps the epoch that `rebuild_surfaces`
+                                                             re-batches on
 --triggers                                               0  --- triggers check passed ---
 --sleep                                                  0  --- sleep check passed ---
 --live-check                                             0  the body stands in sector 339 at z -1.17 on a floor at
