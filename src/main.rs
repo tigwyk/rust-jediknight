@@ -3668,6 +3668,68 @@ fn main() {
                 println!("pickup: this level has no second weapon to rank `AutoSelectWeapon` against");
             }
         }
+        // `SetThingRotVel(thing, vector)`: the engine integrates `angularVelocity` every physics step.
+        // One second at 90 deg/s has to be 90 degrees, and the angle wraps rather than growing.
+        {
+            rt.things[item].rot_vel = [0.0; 3];
+            rt.things[item].yaw = 0.0;
+            rt.call(
+                "SetThingRotVel",
+                &[cog::Value::Num(item as f64), cog::Value::Vec([0.0, 90.0, 0.0])],
+            );
+            for _ in 0..30 {
+                rt.step(1.0 / 30.0);
+            }
+            let turned = rt.things[item].yaw;
+            // Four more seconds at 90 deg/s: 450 degrees, so the angle wraps to 90, and a spin that
+            // never wrapped would read 450.
+            for _ in 0..120 {
+                rt.step(1.0 / 30.0);
+            }
+            let wrapped = rt.things[item].yaw;
+            println!(
+                "pickup: `SetThingRotVel` 90 deg/s turns a thing {turned:.1} deg in a second and wraps ({wrapped:.1} after five)"
+            );
+            assert!((turned - 90.0).abs() < 2.0, "the thing turned {turned:.1} deg, not 90");
+            // 5 s at 90 deg/s is 450 degrees: wrapped to 90. A spin that never wrapped would read 450.
+            assert!(
+                (wrapped - 90.0).abs() < 2.0,
+                "five seconds of spin did not wrap to 90 deg ({wrapped:.1})"
+            );
+            rt.things[item].rot_vel = [0.0; 3];
+        }
+        // `NewColorEffect` answers a handle and keeps the request; the fade is measured from the level
+        // clock, which is what `FreeColorEffect` and a future screen pass read.
+        {
+            let handle = rt.call(
+                "NewColorEffect",
+                &[
+                    cog::Value::Num(0.0),
+                    cog::Value::Num(1.0),
+                    cog::Value::Num(0.0),
+                    cog::Value::Num(0.0),
+                    cog::Value::Num(0.0),
+                    cog::Value::Num(0.0),
+                    cog::Value::Num(0.0),
+                    cog::Value::Num(0.0),
+                    cog::Value::Num(0.0),
+                    cog::Value::Num(1.0),
+                ],
+            );
+            let made = handle.num() as i32;
+            let effect = rt.color_effects.get(&made).cloned().unwrap_or_default();
+            let freed = rt.call("FreeColorEffect", &[handle.clone()]);
+            let again = rt.call("FreeColorEffect", &[handle.clone()]);
+            println!(
+                "pickup: `NewColorEffect` made handle {made} (filter {:?}, fade {:.1} s), freed it ({freed:?}) and refused a second free ({again:?})",
+                effect.filter, effect.fade
+            );
+            assert!(made > 0, "the effect handle was not a real handle");
+            assert_eq!(effect.filter, [0, 1, 0], "the filter channels landed in the wrong slots");
+            assert!((effect.fade - 1.0).abs() < 1e-6, "the fade is not the script's");
+            assert_eq!(freed, cog::Value::Num(1.0), "FreeColorEffect did not free it");
+            assert_eq!(again, cog::Value::Num(0.0), "a freed effect was freed twice");
+        }
         // Respawn: a powerup with `respawn=` comes back after its countdown.
         let respawn_item = rt
             .things
@@ -13329,7 +13391,14 @@ fn draw_created(
         }
         let transform = Transform::from_translation(Vec3::from(thing.pos))
             .with_rotation(Quat::from_rotation_z(-thing.yaw.to_radians()));
-        let template = rt.templates.get(index).cloned().unwrap_or_default();
+        // `SetThingModel` swaps the mesh a script wants drawn in place of the template's
+        // (`ctf_main`'s team bodies). A thing the level itself placed keeps the mesh built at load —
+        // replacing that means despawning and rebuilding its entities.
+        let template = rt
+            .thing_model
+            .get(&index)
+            .cloned()
+            .unwrap_or_else(|| rt.templates.get(index).cloned().unwrap_or_default());
         let template_key = template.to_ascii_lowercase();
         if entities.is_empty() {
             // A sprite template is drawn as camera-facing rectangles, one per `.spr` row: an

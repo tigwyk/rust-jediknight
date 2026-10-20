@@ -127,6 +127,10 @@ pub struct ThingState {
     pub attach_flags: u32,
     /// `RotatePivot`'s in-flight spin, if any.
     pub spin: Option<PivotSpin>,
+    /// `SetThingRotVel`: `physicsParams.angularVelocity`, in degrees per second about the thing's
+    /// own axes. The engine integrates it into the orientation every physics step, which is how a
+    /// hurled crate tumbles.
+    pub rot_vel: [f32; 3],
     /// `ThingLight`/`SetThingLight`/`ThingLightAnim`: how much light this thing emits. Retail uses it
     /// in the dynamic-light pass, which this build does not have, so it is summed into the light of
     /// the sector the thing stands in — a lamp brightens its room and a broken one stops.
@@ -140,10 +144,18 @@ impl ThingState {
     /// One animation step: advance `frame` toward the target and re-derive the pose.
     /// Returns whether the thing moved.
     pub fn step(&mut self, dt: f32) -> bool {
+        // `SetThingRotVel`'s angular velocity, integrated the way `sithPhysics` integrates it: the
+        // orientation advances by `rotVel * dt` every step, and the angles wrap so a long spin does
+        // not drift into a huge number.
+        if self.rot_vel != [0.0; 3] {
+            self.yaw = (self.yaw + self.rot_vel[1] * dt).rem_euclid(360.0);
+            self.pitch = (self.pitch + self.rot_vel[0] * dt).rem_euclid(360.0);
+            self.roll = (self.roll + self.rot_vel[2] * dt).rem_euclid(360.0);
+        }
         // `PathMovePause` keeps the destination: the thing stands still where the pause caught it
         // and `PathMoveResume` carries on toward the same frame.
         if self.paused {
-            return false;
+            return self.rot_vel != [0.0; 3];
         }
         let Some((target, speed)) = self.target else { return false };
         let delta = target - self.frame;
@@ -266,6 +278,20 @@ pub struct SurfaceState {
     pub light: f32,
     pub light_end: f32,
     pub light_rate: f32,
+}
+
+/// `NewColorEffect`'s screen effect: `stdPalEffects`' filter/tint/add channels and a fade.
+#[derive(Clone, Debug, Default)]
+pub struct ColorEffect {
+    /// Per-channel mask (0/1) — the `filter` arguments.
+    pub filter: [i32; 3],
+    pub tint: [f32; 3],
+    /// Additive brightness, in the engine's 0..255 scale.
+    pub add: [i32; 3],
+    /// Seconds until it expires.
+    pub fade: f32,
+    /// The level time it was created at, so the fade can be measured.
+    pub started: f32,
 }
 
 /// [`Runtime::carry`]: the player's own state, which survives a level change.
@@ -650,6 +676,15 @@ pub struct Runtime {
     pub last_hold: f32,
     /// `AddDynamicTint`: the last screen tint a script asked for.
     pub tint: [f32; 3],
+    /// `NewColorEffect`'s live screen effects, keyed by the handle the verb answered. Each carries the
+    /// engine's three channels — a per-channel `filter`, a `tint` and an additive `add` — plus the fade
+    /// in seconds after which it expires (`stdPalEffects_*`).
+    pub color_effects: BTreeMap<i32, ColorEffect>,
+    /// The handle `NewColorEffect` hands out next; the engine's palette-effect table starts at 1.
+    pub next_color_effect: i32,
+    /// `SetThingModel`: the `.3do` a thing should be drawn with instead of its template's, when a
+    /// script swaps one (`ctf_main`'s team models are the only callers).
+    pub thing_model: BTreeMap<usize, String>,
     /// The thing a pull or grip is holding, from `jkSetTarget`. `step` drags it toward the player and
     /// `jkEndTarget` releases it — the engine keeps this in `jkPlayer.c`, which this tree does not
     /// carry, so the drag itself is calibrated (§16.5).
@@ -791,6 +826,7 @@ impl Runtime {
                     attach_offset: [0.0; 3],
                     attach_flags: 0,
                     spin: None,
+            rot_vel: [0.0; 3],
             paused: false,
                     light: 0.0,
                     light_end: 0.0,
@@ -1063,6 +1099,9 @@ impl Runtime {
                 .collect(),
             last_hold: 0.0,
             tint: [0.0; 3],
+            color_effects: BTreeMap::new(),
+            next_color_effect: 1,
+            thing_model: BTreeMap::new(),
             force_target: None,
             force_target_tint: Vec::new(),
             weapon: None,
@@ -1212,6 +1251,7 @@ impl Runtime {
             attach_offset: [0.0; 3],
             attach_flags: 0,
             spin: None,
+            rot_vel: [0.0; 3],
             paused: false,
             light: 0.0,
             light_end: 0.0,
@@ -1806,6 +1846,11 @@ impl Runtime {
                 | "loadtemplate"
                 | "setfacelightmode"
                 | "pathmoveresume"
+                | "setthingmodel"
+                | "newcoloreffect"
+                | "modifycoloreffect"
+                | "freecoloreffect"
+                | "setthingrotvel"
                 | "autoselectweapon"
                 | "jkgetchoice"
                 | "jksetsaberinfo"
@@ -2245,6 +2290,7 @@ impl Runtime {
             attach_offset: [0.0; 3],
             attach_flags: 0,
             spin: None,
+            rot_vel: [0.0; 3],
             paused: false,
             light: 0.0,
             light_end: 0.0,
@@ -2862,6 +2908,7 @@ impl Runtime {
             attach_offset: [0.0; 3],
             attach_flags: 0,
             spin: None,
+            rot_vel: [0.0; 3],
             paused: false,
             light: 0.0,
             light_end: 0.0,
@@ -4331,6 +4378,17 @@ impl Runtime {
                 }
                 Value::Nil
             }
+            // `SetThingRotVel(thing, vector)`: `sithCogFunctionThing_SetThingRotVel` stores the vector as
+            // `physicsParams.angularVelocity`, and only for a physics thing.
+            "setthingrotvel" => {
+                if let Some(thing) = self.thing_mut(idx(0))
+                    && thing.phys_flags != u32::MAX
+                {
+                    let v = args.get(1).map(vec3).unwrap_or([0.0; 3]);
+                    thing.rot_vel = v;
+                }
+                Value::Nil
+            }
             // `AutoSelectWeapon(player, kind)`: `sithCogFunction_AutoSelectWeapon` answers the bin
             // `sithWeapon_AutoSelect` picked, or -1.
             "autoselectweapon" => Value::Num(self.auto_select_weapon(idx(1) as i32) as f64),
@@ -4702,6 +4760,55 @@ impl Runtime {
                 self.tint = [num(1) as f32, num(2) as f32, num(3) as f32];
                 Value::Nil
             }
+            // `NewColorEffect(filterR, filterG, filterB, tintR, tintG, tintB, addR, addG, addB, fade)`:
+            // ten arguments, answered with a handle. The engine's `stdPalEffects` table applies the
+            // filter/tint/add to the palette and fades it out over `fade` seconds; this build keeps
+            // the request (the draw is the screen-effect pass it does not have yet) so a script can
+            // create, modify and free one and read back the same arithmetic.
+            "newcoloreffect" => {
+                let handle = self.next_color_effect;
+                self.next_color_effect += 1;
+                self.color_effects.insert(
+                    handle,
+                    ColorEffect {
+                        filter: [idx(0) as i32, idx(1) as i32, idx(2) as i32],
+                        tint: [num(3) as f32, num(4) as f32, num(5) as f32],
+                        add: [idx(6) as i32, idx(7) as i32, idx(8) as i32],
+                        fade: num(9) as f32,
+                        started: self.time,
+                    },
+                );
+                Value::Num(handle as f64)
+            }
+            // `ModifyColorEffect`: change one that exists, answering 1 or 0.
+            "modifycoloreffect" => {
+                let handle = idx(0) as i32;
+                let Some(effect) = self.color_effects.get_mut(&handle) else {
+                    return Value::Num(0.0);
+                };
+                effect.filter = [idx(1) as i32, idx(2) as i32, idx(3) as i32];
+                effect.tint = [num(4) as f32, num(5) as f32, num(6) as f32];
+                effect.add = [idx(7) as i32, idx(8) as i32, idx(9) as i32];
+                effect.fade = num(10) as f32;
+                effect.started = self.time;
+                Value::Num(1.0)
+            }
+            // `FreeColorEffect`: drop one, answering 1 or 0.
+            "freecoloreffect" => Value::Num(
+                self.color_effects.remove(&(idx(0) as i32)).map(|_| 1.0).unwrap_or(0.0),
+            ),
+            // `SetThingModel(thing, model)`: `sithThing_SetThingModel` swaps the thing's mesh. The CTF
+            // scripts are the only callers, swapping a player's body for their team's model. The
+            // renderer resolves a *created* thing through this override; a thing the level placed keeps
+            // the mesh built at load, because replacing it means despawning and rebuilding its entities.
+            "setthingmodel" => {
+                if let Ok(thing) = usize::try_from(idx(0))
+                    && let Some(Value::Str(model)) = args.get(1)
+                {
+                    self.thing_model.insert(thing, model.clone());
+                }
+                Value::Nil
+            }
             "setinv" => {
                 self.inv.insert(idx(1) as i32, num(2) as f32);
                 Value::Nil
@@ -4841,6 +4948,7 @@ mod tests {
                 attach_offset: [0.0; 3],
                 attach_flags: 0,
                 spin: None,
+            rot_vel: [0.0; 3],
             paused: false,
                 light: 0.0,
                 light_end: 0.0,
@@ -4927,6 +5035,9 @@ mod tests {
             template_speed: BTreeMap::new(),
             last_hold: 0.0,
             tint: [0.0; 3],
+            color_effects: BTreeMap::new(),
+            next_color_effect: 1,
+            thing_model: BTreeMap::new(),
             force_target: None,
             force_target_tint: Vec::new(),
             saber: BTreeMap::new(),
