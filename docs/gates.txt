@@ -1,5 +1,8 @@
 Gates — every check this port has, run against the retail install
 ===============================================================
+Every row must print a verdict line (`--- X check passed ---`): the sweep fails a gate
+that exits 0 without one, headless or windowed. A row that only prints numbers is not
+proving anything, and seven rows were doing exactly that until this rule tightened.
 
 Recorded at round 85. Target: `G:\Games\Star Wars Jedi Knight - Dark Forces 2`
 (GOG, plaintext JK.EXE, image base 0x400000,

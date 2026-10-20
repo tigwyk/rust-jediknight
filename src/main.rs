@@ -226,10 +226,11 @@ fn run_gates(game: &std::path::Path) -> i32 {
             Err(e) => ("error", e.to_string()),
         };
         let ok = out.as_ref().map(|o| o.status.success()).unwrap_or(false);
-        // A gate proves itself with a verdict line. A row that opened a window and printed none ran the
-        // game loop (whatever flag it thought it was) and asserts nothing.
+        // A gate proves itself with a verdict line — **headless too**. A headless gate that exits 0
+        // without one has run something that asserts nothing (an early return, a flag that fell
+        // through), and the sweep used to call that a pass.
         let verdict_ok = verdict != "(no verdict)";
-        let passed = ok && (mode == "headless" || verdict_ok);
+        let passed = ok && verdict_ok;
         if !passed {
             failed += 1;
         }
@@ -6837,6 +6838,7 @@ fn main() {
             after, want,
             "hiding one surface did not remove exactly the {verts} verts' triangles"
         );
+        println!("--- geomode check passed ---");
         return;
     }
 
@@ -7546,6 +7548,7 @@ fn main() {
             checked == 0 || walkable * 2 > checked,
             "only {walkable} of {checked} actors ship a locomotion key"
         );
+        println!("--- animate check passed ---");
         return;
     }
 
@@ -8030,6 +8033,7 @@ fn main() {
                 "jump apex {apex:.2} drifts from {want_apex:.2}"
             );
         }
+        println!("--- rules check passed ---");
         return;
     }
 
@@ -8080,6 +8084,7 @@ fn main() {
             shot.is_some() || shot_at.is_some(),
             if forced_off || !audible { 0.0 } else { env_f32("BK_VOLUME", 0.05) }
         );
+        println!("--- audio-state check passed ---");
         return;
     }
     MUTED.store(forced_off || !audible, std::sync::atomic::Ordering::Relaxed);
@@ -9633,6 +9638,8 @@ fn print_scale(world: &World) {
             actor / storey
         );
     }
+    // A gate proves itself with a verdict line; the sweep fails a row that has none.
+    println!("--- scale check passed ---");
 }
 
 fn print_episodes(gobs: &gob::GobSet) {
@@ -9667,6 +9674,7 @@ fn print_episodes(gobs: &gob::GobSet) {
             );
         }
     }
+    println!("--- episodes check passed ---");
 }
 
 /// Lowercase template name -> lowercase `.3do` name, for every template that
@@ -10483,6 +10491,7 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
         "summary: {kept}/{} levels with a start kept the walker inside its sector, {agreed} had the hull test agree, {transitions} sector crossings, {no_start} without a start",
         levels.len() - no_start
     );
+    println!("--- walk check passed ---");
 }
 
 /// `--pose <model.3do> <anim.key> <frame>`: draw one model posed from one keyframe.
