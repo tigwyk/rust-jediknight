@@ -721,8 +721,6 @@ pub struct Runtime {
     /// else knows how fast a body is walking: the AI writes positions, and a collision push can
     /// move an actor further in one frame than a stride would.
     pub walk_vel: std::collections::BTreeMap<usize, [f32; 2]>,
-    /// Actors that steered through a portal on the last `ai_tick`, so a check can see the pathing.
-    pub via_portal: Vec<usize>,
     /// Force seeing's infrared mode, and the map-mode flags the same script clears.
     ///
     /// `force_seeing.cog` does the timing and the mana (`ChangeInv(player, 14, -30)`); the engine
@@ -905,9 +903,6 @@ pub struct Runtime {
     pub autosave: bool,
     /// `SetMusicVol(v)`, 0..1 — the scripts fade this from a `pulse`.
     pub music_volume: f32,
-    /// How long an actor waits between shots. The engine's instinct scheduler decides with
-    /// the file's weights; this build uses a fixed cadence, which is a documented stand-in.
-    pub ai_shot_interval: f32,
     /// The last hold time `DeactivateBin` reported, kept so a caller can inspect it after
     /// the entry has been popped.
     pub last_hold: f32,
@@ -1154,7 +1149,6 @@ impl Runtime {
             map_mode_flags: 0,
             walked: Vec::new(),
             walk_vel: BTreeMap::new(),
-            via_portal: Vec::new(),
             sector_links: Vec::new(),
             surface_links: Vec::new(),
             mana_regen: MANA_REGEN,
@@ -1333,7 +1327,6 @@ impl Runtime {
                         .map(|w| (t.name.to_ascii_lowercase(), w.to_ascii_lowercase()))
                 })
                 .collect(),
-            ai_shot_interval: 1.0,
             ai_standoff: 0.25,
             ai_move: BTreeMap::new(),
             ai_chase: BTreeMap::new(),
@@ -2203,16 +2196,15 @@ impl Runtime {
     /// `vel=(0/4/0)` for `+bryarbolt`, i.e. 4 units per second down the model's +Y.
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
-    /// The engine runs an instinct scheduler over the `.ai` file's weights; this build uses
-    /// the fields whose meaning is not in doubt — `sightdist=`, `fov=` — and a fixed
-    /// `ai_shot_interval` cadence between shots. Returns how many shots were fired.
+    /// The engine runs an instinct scheduler over the `.ai` file's weights; this build uses the
+    /// fields whose meaning is not in doubt — `sightdist=`, `fov=`, and `PrimaryFire`'s own shot
+    /// delay — and no scheduler. Returns how many shots were fired.
     pub fn ai_tick(&mut self, player: usize, dt: f32) -> usize {
         let Some(target) = self.things.get(player).map(|t| t.pos) else { return 0 };
         let mut fired = 0;
         let mut walked = 0;
         self.walked.clear();
         self.walk_vel.clear();
-        self.via_portal.clear();
         let mut shots: Vec<(usize, String, f32)> = Vec::new();
         // Every actor with an instinct class, **plus** any actor a script gave a destination to.
         // `AISetMovePos`/`AISetMoveFrame` are gated on `controlType == SITH_CT_AI` in the engine, which
@@ -2375,15 +2367,11 @@ impl Runtime {
                     from[1] + dy / reach * step,
                     from[2],
                 ];
-                let mut via_portal = false;
                 let heading = (dx, dy);
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.pos = next;
                     thing.ai_target = Some(goal);
                     thing.yaw = heading.1.atan2(heading.0).to_degrees();
-                    if via_portal {
-                        self.via_portal.push(index);
-                    }
                 }
                 walked += 1;
                 self.walked.push(index);
@@ -5831,7 +5819,6 @@ mod tests {
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
             template_weapon: BTreeMap::new(),
-            ai_shot_interval: 1.0,
             ai_standoff: 0.25,
             ai_move: BTreeMap::new(),
             ai_chase: BTreeMap::new(),
@@ -5872,7 +5859,6 @@ mod tests {
             map_mode_flags: 0,
             walked: Vec::new(),
             walk_vel: BTreeMap::new(),
-            via_portal: Vec::new(),
             sector_links: Vec::new(),
             surface_links: Vec::new(),
             mana_regen: MANA_REGEN,
