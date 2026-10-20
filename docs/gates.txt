@@ -107,6 +107,10 @@ flag                                                   exit  what it prints
                                                              reacts: level 1's links watch
                                                              sectors off the walk, so 0
                                                              messages -- the router is next
+--tally                                                 0  --- tally check passed ---
+                                                             the end-of-level rows carry rank,
+                                                             secrets and the stars label; the light/
+                                                             dark letter is the engine's 0.0 rule
 --muzzle                                               0  --- muzzle check passed ---
                                                              a shot starts at the shooter's own
                                                              fireoffset= (greedo: 0.55 ahead, the
