@@ -34,7 +34,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | --- | --- | --- | --- |
 | Networking and multiplayer | `sithDSS.c`, `sithDSSThing.c`, `sithDSSCog.c`, `sithMulti.c`, `sithComm.c`, `stdComm.c`, `jkGUIMultiplayer.c`, `jkGUINetHost.c`, `jkGUIMultiTally.c` | the whole thing: message streaming, thing replication, cog RPCs, host/join, tally screens. Zero socket code exists. | no `socket`/`UdpSocket`/`TcpStream` in `src/`. The single-player **answers** are now explicit (`ismulti`/`isserver` 0, no team, no score, `*multimodeflags` stored) and `sendtrigger` really broadcasts `trigger`, but only `sendmessageex` is left stubbed — it needs message *return values* |
 | Console and cvars | `sithConsole.c`, `sithCvar.c`, `sithCommand.c`, `jkQuakeConsole.c` | the `~` console, the cvar store, and the command dispatcher (`bind`, `set`, `map`, `quit`) | no matches for `cvar`, `sithCommand`, `sithConsole` |
-| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning, and explosion *visuals*. `rt.explode` does create the blast thing and apply its damage (`--hit`), but an explosion template is a `.spr` and sprite drawing is absent, so the blast is invisible. | no particle type; `explosion` matches are class numbers and the damage path |
+| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning, and explosion *visuals*. `rt.explode` does create the blast thing, apply its damage (`--hit`) and now give it the `timer=` life the engine destroys it at, but an explosion template is a `.spr` and sprite drawing is absent, so the blast is invisible. Direct next step: the sprite *is* parsed (`spr.rs`) and its materials load through the model-texture path; what is missing is transparency in `to_image` (alpha is 255 everywhere) plus the billboard quad. | no particle type; `explosion` matches are class numbers and the damage path |
 | In-engine cutscene cameras | `jkCutscene.c`, `sithCamera.c` focus modes | `SetCameraFocus`, `SetCurrentCamera`, `SetPovShake`, scripted camera paths. Cutscenes play as `.smk` film over the world; an in-engine camera cutscene would not cut. | no matches for `SetCameraFocus`/`camerafocus`/`shake`; all three verbs are stubs |
 | Saber | `jkSaber.c` | blade geometry, swing arcs, saber lock, trace damage. `jksetsaberinfo` is a stub. | `saber` matches are template-name and palette text only |
 | Arch lighting | `sithArchLighting.c` | vertex-baked arch light. Level data carries an `archlightIdx` per thing; nothing reads it. | no matches for `archlight` |
@@ -205,6 +205,18 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 ---
 
 ## 6. Recently closed, so it is not mistaken for missing
+
+* **A created thing dies when its `timer=` runs out, and `SetThingTimer` is a different timer.**
+  `timer=` is the engine's `msecLifeLeft` (`sithThing.c:1777`), counted down every frame with
+  `sithThing_DestroyDyingThing` at zero (`sithThing.c:224`) — it is what makes an impact spark a
+  spark (`+laserhit` ships `timer=0.5`) and what takes a corpse away (`SetLifeLeft(_, 30)` in 92
+  shipped scripts). Nothing counted it down, so every impact added a thing to `rt.things` for the
+  rest of the session while `draw_created` walked the growing range each frame. The other half of
+  the bug was an alias: `SetThingTimer` was wired to `setlifeleft`, but the engine stores a
+  **separate** absolute deadline in `pThing->timer` and sends the `timer` (4) message from
+  `sithCog_UpdateThingTimer` — under the alias, `03_thinglight.cog`'s scripted timers would have
+  destroyed their own lights. Both are now what the engine says, and `--hit` asserts a 0.5 s
+  effect is alive at 0.33 s and gone at 1.33 s.
 
 * **A moving actor plays its own walk, not an idle glide.** `sithPuppet_UpdateThingMove` (`0x4e4380`)
   transforms the thing's velocity into its own frame and picks the puppet state by the dominant axis:

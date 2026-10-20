@@ -104,9 +104,15 @@ flag                                                   exit  what it prints
                                                              thing 4 answers `activate` by clearing its sector's
                                                              ADJOINS bit and moving the piece to frame 1;
                                                              `GetGoalFrame` reports 1 while it moves and
-                                                             0 after it arrives (0.0/1.0 lifecycle)--falldeath                                              0  32 sector(s) of level 1 carry SITH_SECTOR_FALLDEATH
+                                                             0 after it arrives (0.0/1.0 lifecycle)
+--falldeath                                              0  32 sector(s) of level 1 carry SITH_SECTOR_FALLDEATH
                                                              (0x40); 4.0 u/s inside one kills, 2.0 u/s and an
-                                                             unflagged sector do not -- `sithPlayer.c:251`--hit                                                    0  --- hit check passed ---
+                                                             unflagged sector do not -- `sithPlayer.c:251`
+--hit                                                    0  --- hit check passed ---
+                                                             (also: an impact effect is a thing with a
+                                                             `timer=`: `+laserhit` at 0.5 s is still there
+                                                             after 0.33 s and gone after 1.33 s, which is
+                                                             `sithThing_Update` destroying it)
 --fire +bryarbolt                                        0  --- fire check passed ---
                                                              (also: `SetMountWait` refuses the
                                                              trigger until its deadline passes)

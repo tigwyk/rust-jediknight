@@ -2875,6 +2875,47 @@ fire: `+bryarbolt` damage 30, vel [0.0, 4.0, 0.0], from thing 0 at (...) toward 
 `+stlaser` (6 u/s) and `+elaser` (12 damage) resolve the same way, so the inherited fields walk
 the template chain.
 
+### An effect is a thing with a `timer=`, and that is its whole lifetime
+
+`explode=` names a template, and that template is created at the impact point — `+laserhit` on
+level 1's bryar bolt:
+
+```text
++laserhit      _explosion  thingflags=0x1 light=0.2 timer=0.500000 sprite=bryx.spr
+                           soundclass=exp_laserhit.snd typeflags=0x33 blasttime=0.3 maxlight=0.4
+```
+
+There is no separate "effect" object: it is a thing, and what ends it is **`timer=`**.
+`THINGPARAM_TIMER` (`sithThing.c:1777`) stores `timer * 1000` in `msecLifeLeft`, and
+`sithThing_Update` (`sithThing.c:224`–`233`) subtracts the frame time and calls
+`sithThing_DestroyDyingThing` at zero. `SetLifeLeft(thing, secs)` writes the same field
+(`sithCogFunctionThing.c:1764`), which is why 92 shipped scripts use it on corpses — 30 to 200
+seconds — and `GetLifeLeft` reads it back in seconds.
+
+Without the countdown a created thing never leaves, which is what the port did: every impact
+added an entry to `rt.things` for the rest of the session and `draw_created` walked that growing
+range every frame. Now `Runtime::arm_life` gives a created thing the life its template asks for,
+`step` counts it down and marks it destroyed, and `draw_created` already despawns the entities of
+a destroyed created thing. `--hit` pins it against the shipped timer:
+
+```text
+hit: `+laserhit` (timer 0.5 s) is still solid after 0.33 s and gone after 1.33 s
+```
+
+`SetThingTimer` is **not** this field, and the port had aliased the two: the engine stores an
+absolute deadline in `pThing->timer`, sets `SITH_TF_TIMERSET`, and `sithCog_UpdateThingTimer`
+sends the `timer` (4) message when it passes — `03_thinglight.cog` and `12_thinglight.cog`
+rotate colours on it. Under the old alias every scripted timer would have destroyed the thing it
+armed. `Runtime::thing_timer` holds the deadline and `step` queues `timer` to the thing's own
+instances.
+
+Still invisible: the sprite itself. `bryx.spr` is parsed (`spr.rs`: one row per camera-facing
+rectangle with `width`/`height`/offset, keyed to a `.mat`) and the materials are loadable through
+the same path as model textures, but drawing needs transparency — `to_image` writes alpha 255 for
+every pixel, so a spark's black background would come out as a black quad. The `.mat` `type` word
+(`tex::tex_type`, offset 8) carries the engine's transparency bit; that, and the billboard itself,
+are the next step.
+
 ### Damage decays in flight
 
 The engine's `sithWeapon_Update` decays a projectile's damage as it flies, when the weapon's

@@ -4437,6 +4437,30 @@ fn main() {
                 println!("hit: the blast took {damage:.0} off the actor, {left:.0} health left");
                 assert!(left < before, "the blast dealt no damage");
             }
+            // `timer=` is the thing's life left: `THINGPARAM_TIMER` stores it in `msecLifeLeft` and
+            // `sithThing_Update` destroys the thing when it runs out (`sithThing.c:224`). The impact
+            // spark ships `timer=0.5`, so it has to be alive a third of a second in and gone by the
+            // time a second has passed — otherwise every shot in the game leaves furniture behind.
+            let blast_template = rt.templates[blast].clone().to_ascii_lowercase();
+            let timer = rt.template_timer.get(&blast_template).copied().unwrap_or(0.0);
+            assert!(timer > 0.0, "`{blast_template}` ships no `timer=`, so there is nothing to expire");
+            for _ in 0..10 {
+                rt.step(dt);
+            }
+            assert!(
+                !rt.things[blast].destroyed,
+                "`{blast_template}` vanished before its {timer:.1} s timer"
+            );
+            for _ in 0..30 {
+                rt.step(dt);
+            }
+            println!(
+                "hit: `{blast_template}` (timer {timer:.1} s) is still solid after 0.33 s and gone after 1.33 s"
+            );
+            assert!(
+                rt.things[blast].destroyed,
+                "`{blast_template}` outlived its {timer:.1} s timer"
+            );
         }
 
         // Now the other direction: an actor's bolt has to be able to hit the *player*.

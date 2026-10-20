@@ -273,6 +273,12 @@ pub struct Runtime {
     pub template_min_damage: BTreeMap<String, f32>,
     /// `maxhealth=`, the ceiling `HealThing` clamps to.
     pub template_max_health: BTreeMap<String, f32>,
+    /// `timer=`: how long a created thing lives, in seconds, before `sithThing_Update` destroys it.
+    /// An impact effect's whole lifetime is this field.
+    pub template_timer: BTreeMap<String, f32>,
+    /// `SetThingTimer`'s deadline per thing, on the world clock: the engine's `pThing->timer` plus
+    /// `SITH_TF_TIMERSET`. When it passes, the thing's own scripts get the `timer` message.
+    pub thing_timer: BTreeMap<usize, f32>,
     /// The player's shield bar (`SITHBIN_SHIELDS`, 0..=200) and whether health has reached 0.
     pub player_shields: f32,
     pub player_dead: bool,
@@ -553,6 +559,19 @@ impl Runtime {
                     .map(|flags| (t.name.to_ascii_lowercase(), flags))
             })
             .collect();
+        // `timer=` is the thing's life left, in seconds: `THINGPARAM_TIMER` stores
+        // `lifeLeftSec * 1000` in `msecLifeLeft` and `sithThing_Update` destroys the thing when it
+        // runs out. It is what makes an impact spark a spark — `+laserhit` ships `timer=0.5`.
+        let template_timer: BTreeMap<String, f32> = level
+            .templates
+            .iter()
+            .filter_map(|t| {
+                level
+                    .template_f32(&t.name, "timer")
+                    .filter(|secs| *secs >= 0.0)
+                    .map(|secs| (t.name.to_ascii_lowercase(), secs))
+            })
+            .collect();
         Self {
             things: level
                 .things
@@ -642,6 +661,8 @@ impl Runtime {
                 .collect(),
             template_body,
             template_explode,
+            template_timer,
+            thing_timer: BTreeMap::new(),
             player_shields: 100.0,
             player_dead: false,
             ir_mode: false,
@@ -845,6 +866,37 @@ impl Runtime {
         let mut moved = Vec::new();
         self.time += dt;
         self.decay_damage(dt);
+        // `timer=`/`SetLifeLeft` expiry: `sithThing_Update` counts `msecLifeLeft` down and calls
+        // `sithThing_DestroyDyingThing` when it reaches zero. Without this an impact spark lives
+        // forever, and a corpse never goes away.
+        let expired: Vec<usize> = self
+            .life_left
+            .iter_mut()
+            .filter_map(|(index, left)| {
+                *left -= dt;
+                (*left <= 0.0).then_some(*index)
+            })
+            .collect();
+        for index in expired {
+            self.life_left.remove(&index);
+            if let Some(thing) = self.things.get_mut(index) {
+                thing.destroyed = true;
+            }
+        }
+        // `SetThingTimer`'s deadline passed: `sithCog_UpdateThingTimer` sends `timer` (4) to the
+        // thing's own scripts, which is how `03_thinglight.cog` rotates its colours.
+        let due: Vec<usize> = self
+            .thing_timer
+            .iter()
+            .filter(|(_, at)| **at <= self.time)
+            .map(|(index, _)| *index)
+            .collect();
+        for index in due {
+            self.thing_timer.remove(&index);
+            for instance in self.thing_instances(index) {
+                self.pending_messages.push((instance, "timer"));
+            }
+        }
         // Force mana regenerates. `force_heal.cog` spends `20 * rank` of bin 14 and the shipped
         // scripts expect the pool to come back; the *rate* is calibrated (§16.5) because the engine's
         // own tick lives in `jkPlayer.c`, which this source tree does not carry.
@@ -1398,7 +1450,9 @@ impl Runtime {
         });
         self.templates.push(template);
         self.types.push(kind);
-        Some(self.things.len() - 1)
+        let index = self.things.len() - 1;
+        self.arm_life(index);
+        Some(index)
     }
 
     /// `TakeItem(item, player)`: the item leaves the world and the player's inventory bin
@@ -1852,6 +1906,19 @@ impl Runtime {
         Some(next)
     }
 
+    /// Give a thing the life its template's `timer=` asks for, if it has one.
+    ///
+    /// `THINGPARAM_TIMER` (`sithThing.c:1777`) stores `lifeLeftSec * 1000` in `msecLifeLeft`, and
+    /// `sithThing_Update` counts it down and destroys the thing at zero. Every created thing gets
+    /// this: an impact spark ships `timer=0.5` and a corpse's script calls `SetLifeLeft(_, 30)`,
+    /// so without it both would stay in the world forever.
+    fn arm_life(&mut self, index: usize) {
+        let Some(template) = self.templates.get(index).map(|t| t.to_ascii_lowercase()) else { return };
+        if let Some(secs) = self.template_timer.get(&template).copied() {
+            self.life_left.insert(index, secs);
+        }
+    }
+
     /// What a projectile leaves behind: the `explode=` template, spawned where it landed.
     ///
     /// `sithExplosion` creates the template at the impact point and that thing's own `damage=`
@@ -1892,6 +1959,7 @@ impl Runtime {
         let index = self.things.len() - 1;
         self.templates.push(explode.clone());
         self.types.push(kind);
+        self.arm_life(index);
         Some(index)
     }
 
@@ -2700,8 +2768,21 @@ impl Runtime {
                 self.user_data.insert(ti(0), num(1) as f32);
                 Value::Nil
             }
-            // `SetThingTimer` writes the same expiry `SetLifeLeft` does.
-            "setthingtimer" => self.call("setlifeleft", args),
+            // `SetThingTimer(thing, secs)` arms the thing's **own** timer, which is a different
+            // field from the life left: `sithCogFunctionThing_SetThingTimer` stores an absolute
+            // deadline in `pThing->timer` and sets `SITH_TF_TIMERSET`, and `sithCog_UpdateThingTimer`
+            // then sends the `timer` message to the thing's scripts. Aliasing it to `setlifeleft`
+            // would have made every scripted timer a death sentence.
+            "setthingtimer" => {
+                let thing = ti(0);
+                let secs = num(1).max(0.0) as f32;
+                if secs == 0.0 {
+                    self.thing_timer.remove(&thing);
+                } else {
+                    self.thing_timer.insert(thing, self.time + secs);
+                }
+                Value::Nil
+            }
             "getlifeleft" => Value::Num(self.life_left.get(&ti(0)).copied().unwrap_or(0.0) as f64),
             "setlifeleft" => {
                 self.life_left.insert(ti(0), num(1) as f32);
@@ -2873,7 +2954,9 @@ impl Runtime {
                 });
                 self.templates.push(template);
                 self.types.push(kind);
-                Value::Num((self.things.len() - 1) as f64)
+                let index = self.things.len() - 1;
+                self.arm_life(index);
+                Value::Num(index as f64)
             }
             // `DamageThing(thing, damage)`: the health bookkeeping only. Death, the
             // killer's credit and the `killed` messages belong to combat (stage 5).
@@ -3283,6 +3366,8 @@ mod tests {
             template_respawn: BTreeMap::new(),
             template_min_damage: BTreeMap::new(),
             template_max_health: BTreeMap::new(),
+            template_timer: BTreeMap::new(),
+            thing_timer: BTreeMap::new(),
             template_body: BTreeMap::new(),
             template_explode: BTreeMap::new(),
             player_shields: 100.0,
@@ -3512,8 +3597,14 @@ mod tests {
         assert_eq!(rt.call("GetThingMass", &[t.clone()]), Value::Num(3.0));
         rt.call("SetThingUserData", &[t.clone(), Value::Num(7.0)]);
         assert_eq!(rt.call("GetThingUserData", &[t.clone()]), Value::Num(7.0));
-        rt.call("SetThingTimer", &[t.clone(), Value::Num(4.0)]);
+        // `SetLifeLeft` is the life field; `SetThingTimer` is the separate deadline that sends the
+        // `timer` message and leaves the life alone (`sithCogFunctionThing_SetThingTimer`).
+        rt.call("SetLifeLeft", &[t.clone(), Value::Num(4.0)]);
         assert_eq!(rt.call("GetLifeLeft", &[t.clone()]), Value::Num(4.0));
+        rt.call("SetThingTimer", &[t.clone(), Value::Num(2.0)]);
+        assert_eq!(rt.call("GetLifeLeft", &[t.clone()]), Value::Num(4.0));
+        // The clock is at 12.5, so the deadline lands at 14.5 and the life field is untouched.
+        assert_eq!(rt.thing_timer.get(&0).copied(), Some(14.5));
         assert_eq!(rt.call("IsThingVisible", &[t.clone()]), Value::Num(1.0));
         rt.call("DestroyThing", &[t.clone()]);
         assert_eq!(rt.call("IsThingVisible", &[t]), Value::Num(0.0));
