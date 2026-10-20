@@ -3666,6 +3666,39 @@ fn main() {
         );
         assert_eq!(save_row, nav::Step::SaveGame, "the Save row does not save");
         assert_eq!(load_row, nav::Step::LoadGame, "the Load row does not load");
+        // Slots: two saves kept apart. Before this the only path was `quicksave.jks`, so a second
+        // save overwrote the first and there was nothing for a slot picker to list.
+        {
+            let a = slot_path(&dir, 0);
+            let b = slot_path(&dir, 3);
+            assert_ne!(a, b, "two slots share one file");
+            // The outer `rt` guard is still alive, so the writes use it and it is dropped before the
+            // probe below takes a borrow — a second borrow of a held world is a deadlock.
+            rt.things[player].health = 77.0;
+            write_snapshot(&a, &level_name, &rt).expect("save slot 0");
+            rt.things[player].health = 22.0;
+            write_snapshot(&b, &level_name, &rt).expect("save slot 3");
+            drop(rt);
+            let (_, one) = read_save(&a).expect("read slot 0");
+            let (_, three) = read_save(&b).expect("read slot 3");
+            let health = |snapshot: &runtime::Snapshot| {
+                let other = runtime::Runtime::handle(&world.level);
+                let mut probe = other.borrow_mut();
+                probe.restore(snapshot);
+                probe.things[player].health
+            };
+            println!(
+                "quicksave: slot 0 holds {:.0} health and slot 3 holds {:.0}, in `{}` and `{}`",
+                health(&one),
+                health(&three),
+                a.display(),
+                b.display()
+            );
+            assert_eq!(health(&one), 77.0, "slot 0 did not keep its own save");
+            assert_eq!(health(&three), 22.0, "slot 3 did not keep its own save");
+            let _ = std::fs::remove_file(&a);
+            let _ = std::fs::remove_file(&b);
+        }
         println!("--- quicksave check passed ---");
         return;
     }
@@ -8805,6 +8838,7 @@ fn main() {
         .insert_resource(Viewmodel::default())
         .insert_resource(PendingRestore::default())
         .insert_resource(SaveLoad::default())
+        .insert_resource(SaveSlot::default())
         .insert_resource(SaveDir(
             std::env::var_os("BK_SAVE_DIR")
                 .map(std::path::PathBuf::from)
@@ -9131,6 +9165,24 @@ fn swap_level(world: &mut bevy::prelude::World) {
     let _ = world.run_system(setup_id);
 }
 
+/// How many save slots the game offers. Retail's Load screen lists them; this build names them
+/// `slot0.jks`..`slot7.jks` beside the old `quicksave.jks`, which slot 0 keeps using so an existing
+/// save still loads.
+const SLOTS: usize = 8;
+
+/// Which slot `F5`/`F9` and the pause menu's Save and Load rows use. `[` and `]` move it.
+#[derive(Resource, Default, Clone, Copy)]
+struct SaveSlot(usize);
+
+/// A slot's file: slot 0 is the historical `quicksave.jks`.
+fn slot_path(dir: &std::path::Path, slot: usize) -> std::path::PathBuf {
+    if slot == 0 {
+        dir.join("quicksave.jks")
+    } else {
+        dir.join(format!("slot{slot}.jks"))
+    }
+}
+
 /// What the pause menu asked for: `GUI_SAVE` writes the quicksave, `GUI_LOAD` reads it.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
 enum SaveLoad {
@@ -9167,9 +9219,25 @@ fn quick_save(
     // The pause menu's Save and Load rows arrive the same way the keys do: `activate` inserts the
     // request, and this system is the one that holds the runtime, the directory and the plan.
     mut menu: ResMut<SaveLoad>,
+    slot_res: Option<ResMut<SaveSlot>>,
 ) {
     let (Some(sim), Some(dir)) = (sim, dir) else { return };
-    let path = dir.0.join("quicksave.jks");
+    // Save slots: `quicksave.jks` was the only place a game could go, so a second save overwrote the
+    // first and retail's slot list had nothing to show. `[`/`]` move the slot, and the current one
+    // is named in the message so the player can see where a save went.
+    let Some(mut slot_res) = slot_res else { return };
+    let mut slot = slot_res.0;
+    if keys.just_pressed(KeyCode::BracketLeft) {
+        slot = (slot + SLOTS - 1) % SLOTS;
+        slot_res.0 = slot;
+        println!("quicksave: slot {slot}");
+    }
+    if keys.just_pressed(KeyCode::BracketRight) {
+        slot = (slot + 1) % SLOTS;
+        slot_res.0 = slot;
+        println!("quicksave: slot {slot}");
+    }
+    let path = slot_path(&dir.0, slot);
     let asked = *menu;
     let save = keys.just_pressed(KeyCode::F5) || asked == SaveLoad::Save;
     let load = keys.just_pressed(KeyCode::F9) || asked == SaveLoad::Load;
