@@ -4489,7 +4489,16 @@ impl Runtime {
             "fireprojectile" => {
                 let Some(index) = usize::try_from(idx(0)).ok() else { return Value::Num(-1.0) };
                 let named = match args.get(1) {
-                    Some(Value::Str(name)) if self.template_damage.contains_key(&name.to_ascii_lowercase()) => {
+                    // A named projectile is valid when the level carries that template: `template_damage`
+                    // only has entries that declare `damage=` themselves, so a bolt inheriting it from
+                    // `_weapon` was refused and the shot silently never happened.
+                    Some(Value::Str(name))
+                        if self.template_damage.contains_key(&name.to_ascii_lowercase())
+                            || self
+                                .templates
+                                .iter()
+                                .any(|t| t.eq_ignore_ascii_case(name)) =>
+                    {
                         Some(name.clone())
                     }
                     _ => None,
