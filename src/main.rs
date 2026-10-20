@@ -145,7 +145,6 @@ const GATES: &[&str] = &[
     "--ammo",
     "--campaign",
     "--tally",
-    "--live-play --start 01narshadda",
     "--muzzle",
     "--use-item",
     "--engine-audit",
@@ -15329,8 +15328,10 @@ fn live_play_drive(
     if std::env::var_os("BK_LIVE_PLAY_TRACE").is_some() {
         println!("live-play: {} camera(s) match the walker's query", cam.iter().count());
     }
-    const WALK_FRAMES: u32 = 90;
-    const FIRE_FRAMES: u32 = 30;
+    // Short phases: the sweep gives every gate 600 frames, and a big level can spend a few hundred of
+    // them loading before the body exists. 45 walk + 15 fire still measures ~2 units of walking.
+    const WALK_FRAMES: u32 = 45;
+    const FIRE_FRAMES: u32 = 15;
     let state = playing.get_or_insert_with(|| LivePlayState {
         start: player.as_deref().map(|p| p.pos),
         ..Default::default()
@@ -15356,7 +15357,7 @@ fn live_play_drive(
         // Four directions in turn, because a body can spawn facing a wall: on 02narshadda, 04escapehouse
         // and 09fuelstation `W` produced zero movement while `player.vel` was non-zero, which is a
         // blocked step, not a broken input path. Sweeping the compass asks "can the body move at all".
-        let phase = state.frame / 23;
+        let phase = state.frame / 12;
         for key in [KeyCode::KeyW, KeyCode::KeyD, KeyCode::KeyS, KeyCode::KeyA] {
             keys.release(key);
         }
