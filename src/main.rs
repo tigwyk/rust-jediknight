@@ -9882,7 +9882,12 @@ fn use_key(
 ) {
     let (Some(sim), Some(player)) = (sim, player) else { return };
     if !keys.just_pressed(KeyCode::KeyE) {
-        return;
+        // `BK_USE=1` presses it once, so a door can be exercised without a keyboard: the use action is
+        // the only input a level's own door scripts need (`sithPlayer`'s use).
+        let forced = std::env::var_os("BK_USE").is_some() && *said == 0;
+        if !forced {
+            return;
+        }
     }
     let eye = [player.pos.x, player.pos.y, player.pos.z];
     let facing = [player.yaw.cos(), player.yaw.sin()];
@@ -11741,13 +11746,38 @@ fn setup(
         start[2] += env_f32("BK_SPAWN_LIFT", 0.0);
         println!("walker: BK_SPAWN_SECTOR put the body at {start:?} in sector {sector}");
     }
+    // `BK_SPAWN_THING=<n>` stands the body half a unit in front of thing `n`, facing it — the way the
+    // engine's use action needs (`sithPlayer`'s look, not a touch). `BK_YAW=<degrees>` overrides where
+    // the walk heads, so `BK_WALK_FORWARD` can push through a door the script has just opened.
+    let mut forced_yaw = None;
+    if let Ok(want) = std::env::var("BK_SPAWN_THING")
+        && let Ok(want) = want.parse::<usize>()
+    {
+        let at = runtime::Runtime::handle(&world.level)
+            .borrow()
+            .things
+            .get(want)
+            .map(|t| (t.pos, t.yaw));
+        if let Some((pos, yaw)) = at {
+            let (sin, cos) = yaw.to_radians().sin_cos();
+            start = [pos[0] - cos * 0.5, pos[1] - sin * 0.5, pos[2] + PLAYER_RADIUS];
+            sector = solids.sector_at(start, PLAYER_RADIUS).unwrap_or(sector);
+            forced_yaw = Some(yaw);
+            println!("walker: BK_SPAWN_THING put the body at {start:?} facing {yaw:.1} deg, in sector {sector}");
+        }
+    }
+    if let Ok(degrees) = std::env::var("BK_YAW")
+        && let Ok(degrees) = degrees.parse::<f32>()
+    {
+        forced_yaw = Some(degrees);
+    }
 
     // Seed the body onto the floor it stands over. The level's `walkplayer` z is the floor
     // surface itself (level 1: `-0.78` against a walkway top at `-0.75`), so a body placed exactly
     // there is 0.03 *below* the face and gravity then drops it through — the camera ends up in the
     // slab. Probing from 0.2 above puts the feet on the face instead.
 
-    let player_yaw = facing.unwrap_or_else(|| yaw.unwrap_or_else(|| aim.z.atan2(aim.x)));
+    let player_yaw = forced_yaw.unwrap_or_else(|| facing.unwrap_or_else(|| yaw.unwrap_or_else(|| aim.z.atan2(aim.x))));
     // The camera sits at `position + eyeOffset` (`sithCamera.c`), and the template's
     // `eyeoffset=(x/y/z)` is the offset in **model** units, so `MODEL_SCALE` takes it into level units:
     // `walkplayer`'s `0.037 x 10 = 0.37` above the body centre, which is itself one radius above the floor.
