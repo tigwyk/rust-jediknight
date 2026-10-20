@@ -361,6 +361,10 @@ flag                                                   exit  what it prints
                                                              `GUI_LOAD` rows dispatch to the same
                                                              two paths (`SaveGame`/`LoadGame`)
 --items                                                  0  60 bins in `misc\items.dat`, 24 of them name a
+                                                             and the held-bin loop: an active
+                                                             bin with a delay fires its own
+                                                             cog once, re-arms, and stops on
+                                                             DeactivateBin
                                                              `cog=` (`weap_fists.cog`, `weap_bryar.cog`, …) and
                                                              all 24 cogs are in the archives -- the table the
                                                              engine registers inventory bins from, with the

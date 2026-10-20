@@ -845,6 +845,14 @@ pub struct Runtime {
     pub inv_activated: BTreeMap<i32, bool>,
     pub bin_active: BTreeMap<i32, f32>,
     pub bin_wait: BTreeMap<i32, f32>,
+    /// Bins waiting to send their own cog a `fire`: `(due, bin, cog, player)`.
+    ///
+    /// `sithInventory_ActivateBin` keeps the bin's `activationDelaySecs` and `sithInventory_SendFire`
+    /// re-sends `fire` to the bin's cog every delay while it stays active — that loop is how a held
+    /// force power keeps working (lightning's damage every 0.3 s). The port stored the activation
+    /// (for `DeactivateBin`'s hold time) and never sent the message, so an item script's own effect
+    /// never ran.
+    pub bin_due: Vec<(f32, i32, i32, usize, f32)>,
     /// Seconds this world has been stepped, which the hold timers read.
     pub time: f32,
     /// `SetFireWait`: the player's weapon cooldown, and the level time the next shot is allowed at.
@@ -1284,6 +1292,7 @@ impl Runtime {
             inv_available: BTreeMap::new(),
             inv_activated: BTreeMap::new(),
             bin_active: BTreeMap::new(),
+            bin_due: Vec::new(),
             bin_wait: BTreeMap::new(),
             time: 0.0,
             fire_wait: 0.0,
@@ -1674,6 +1683,26 @@ impl Runtime {
     pub fn step(&mut self, dt: f32) -> Vec<usize> {
         let mut moved = Vec::new();
         self.time += dt;
+        // `sithInventory_SendFire`: an active bin with a delay sends its own cog a `fire` every delay,
+        // which is what makes a held force power keep doing its thing. Re-armed while the bin stays in
+        // `bin_active`, so `DeactivateBin` ends the loop.
+        if !self.bin_due.is_empty() {
+            let mut still: Vec<(f32, i32, i32, usize, f32)> = Vec::with_capacity(self.bin_due.len());
+            for (due, bin, cog, player, delay) in std::mem::take(&mut self.bin_due) {
+                if !self.bin_active.contains_key(&bin) {
+                    continue;
+                }
+                if self.time >= due {
+                    self.messages
+                        .push(("fire".to_string(), Some(player), Some(cog), [bin as f64, 0.0]));
+                    // `binWait = now + activationDelaySecs` in the engine: the cadence repeats.
+                    still.push((self.time + delay.max(0.01), bin, cog, player, delay));
+                } else {
+                    still.push((due, bin, cog, player, delay));
+                }
+            }
+            self.bin_due = still;
+        }
         self.decay_damage(dt);
         self.advance_surface_cels();
         self.advance_material_cels();
@@ -4430,11 +4459,28 @@ impl Runtime {
             // `DeactivateBin(player, 21)` found nothing and the jump came out as 0.
             "activatebin" => {
                 let bin = if num(2) > 0.0 { idx(2) } else { idx(1) };
+                let delay = num(1).max(0.0) as f32;
                 self.bin_active.insert(bin as i32, self.time);
+                // `sithInventory_ActivateBin`: with a delay the bin's own cog gets a `fire` when the
+                // delay is up, and `sithInventory_SendFire` keeps sending it while the bin is active.
+                // The cog is the caller, which is how the engine's `SendMessageEx(… SENDERTYPE_SYSTEM)`
+                // target works out.
+                if delay > 0.0 && self.caller_cog >= 0 {
+                    self.bin_due.push((
+                        self.time + delay,
+                        bin as i32,
+                        self.caller_cog,
+                        idx(0) as usize,
+                        delay,
+                    ));
+                }
                 Value::Nil
             }
             "deactivatebin" => {
-                let held = self.bin_active.remove(&(idx(1) as i32)).map(|at| self.time - at).unwrap_or(0.0);
+                let bin = idx(1) as i32;
+                // `DeactivateBin` ends the loop as well as reporting the hold.
+                self.bin_due.retain(|(_, b, _, _, _)| *b != bin);
+                let held = self.bin_active.remove(&bin).map(|at| self.time - at).unwrap_or(0.0);
                 self.last_hold = held;
                 Value::Num(held as f64)
             }
@@ -5784,6 +5830,7 @@ mod tests {
             inv_available: BTreeMap::new(),
             inv_activated: BTreeMap::new(),
             bin_active: BTreeMap::new(),
+            bin_due: Vec::new(),
             bin_wait: BTreeMap::new(),
             time: 0.0,
             fire_wait: 0.0,

@@ -3345,6 +3345,45 @@ fn main() {
             );
             assert_eq!(rt.pending_cogs.len(), 1, "a held bin asked for its script twice");
         }
+        // `sithInventory_ActivateBin` + `sithInventory_SendFire`: a bin activated with a delay sends
+        // its own cog a `fire` when the delay is up, and keeps doing it while the bin stays active —
+        // the loop a held force power or a charge-up item runs on. Nothing sent that message before,
+        // so an item script's own effect never ran.
+        {
+            let held = runtime::Runtime::handle(&world.level);
+            let player = held.borrow().player_thing();
+            let mut rt = held.borrow_mut();
+            let now = rt.time;
+            rt.messages.clear();
+            rt.bin_active.insert(22, now);
+            rt.bin_due.push((now + 0.3, 22, 0, player, 0.3));
+            let fired = |rt: &runtime::Runtime| {
+                rt.messages
+                    .iter()
+                    .filter(|(name, _, cog, params)| {
+                        name == "fire" && *cog == Some(0) && params[0] == 22.0
+                    })
+                    .count()
+            };
+            rt.step(0.31);
+            let first = fired(&rt);
+            rt.messages.clear();
+            rt.step(0.31);
+            let second = fired(&rt);
+            rt.call("DeactivateBin", &[cog::Value::Num(player as f64), cog::Value::Num(22.0)]);
+            rt.messages.clear();
+            rt.step(1.0);
+            let after = rt.messages.len();
+            println!(
+                "items: a held bin fires {first} time(s), re-arms to {second}, and {after} message(s) after release"
+            );
+            assert_eq!(first, 1, "the bin's first self-message never fired");
+            assert_eq!(second, 1, "the bin did not re-arm while held");
+            assert_eq!(after, 0, "the bin kept firing after DeactivateBin");
+            rt.bin_active.remove(&22);
+            rt.bin_due.clear();
+            rt.time = now;
+        }
         println!("--- items check passed ---");
         return;
     }
