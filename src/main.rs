@@ -2027,7 +2027,7 @@ fn main() {
                 if queued.is_empty() {
                     break;
                 }
-                for (name, sender, target) in queued {
+                for (name, sender, target, params) in queued {
                     for (script_name, vm) in &mut vms {
                         if let Some(target) = target
                             && vm.cog_index != target
@@ -5946,6 +5946,39 @@ fn main() {
                 lamps.first().map(|n| format!(" (first: {n})")).unwrap_or_default()
             );
         }
+        // `SetFaceLightMode(surface, 0)`: `RD_LIGHTMODE_FULLYLIT` ignores the bake, so the face is
+        // drawn white whatever its vertex intensities say. That is how the CTF force fields glow.
+        {
+            let mut rt = world_state.borrow_mut();
+            // A face the level baked dark, so "fully lit" is a visible change rather than a no-op.
+            let dark = (0..rt.surfaces.len())
+                .find(|s| {
+                    level
+                        .surfaces
+                        .get(*s)
+                        .is_some_and(|f| f.intensities.iter().any(|i| *i < 0.5))
+                })
+                .expect("a face the level baked dark");
+            let before = SurfaceLook::of(&rt);
+            let mode = rt.call(
+                "GetFaceLightMode",
+                &[cog::Value::Num(dark as f64)],
+            );
+            rt.call(
+                "SetFaceLightMode",
+                &[cog::Value::Num(dark as f64), cog::Value::Num(0.0)],
+            );
+            let after = SurfaceLook::of(&rt);
+            let read = rt.call("GetFaceLightMode", &[cog::Value::Num(dark as f64)]);
+            println!(
+                "cel: SetFaceLightMode(surface {dark}, 0) makes it FULLYLIT — GetFaceLightMode {mode:?} -> {read:?}, and the draw stops darkening it ({:?} -> {:?})",
+                before.fullbright(dark),
+                after.fullbright(dark)
+            );
+            assert!(!before.fullbright(dark), "the face was fully lit before the call");
+            assert!(after.fullbright(dark), "the face was not fully lit after the call");
+            assert_eq!(read, cog::Value::Num(0.0), "the light mode did not read back");
+        }
         println!("--- cel check passed ---");
         return;
     }
@@ -8762,14 +8795,14 @@ fn run_level(
     let mut script_messages = 0usize;
     let mut delivered_messages = 0usize;
     for _round in 0..8 {
-        let queued: Vec<(String, Option<usize>, Option<i32>)> = {
+        let queued: Vec<(String, Option<usize>, Option<i32>, [f64; 2])> = {
             let mut w = world.borrow_mut();
             std::mem::take(&mut w.messages)
         };
         if queued.is_empty() {
             break;
         }
-        for (name, sender, cog) in queued {
+        for (name, sender, cog, params) in queued {
             script_messages += 1;
             for (script_name, vm) in &mut vms {
                 // `SendMessage` addresses a cog (`sithCogFunction_SendMessage` pops a cog index and
@@ -8794,6 +8827,8 @@ fn run_level(
                 }
                 vm.sender = sender.unwrap_or(0) as i64;
                 vm.sender_ref = sender.unwrap_or(0) as i64;
+                // `SendMessageEx`'s two parameters: what this handler's `GetParam` reads.
+                world.borrow_mut().last_params = params.to_vec();
                 let before_sounds = world.borrow().sounds.len();
                 match vm.run_label(script, &name) {
                     Ok(_) => delivered_messages += 1,
@@ -9887,6 +9922,9 @@ struct SurfaceLook {
     /// `ThingLight`'s light summed per sector: retail lights a radius around the thing, and this
     /// build's baked sector light is the granularity it has, so the sum is added to the sector's own.
     thing_light: Vec<f32>,
+    /// `SetFaceLightMode`: a face whose mode is `RD_LIGHTMODE_FULLYLIT` (0) is drawn at full
+    /// brightness whatever the bake says — that is what makes the CTF force fields glow.
+    light_modes: Vec<i32>,
     /// `SlideWall`'s accumulated texel offset per surface — the engine adds `scrollVector * dt` to
     /// `texVertOffset` and wraps it at 1024, which from the clock is just `rate * time`.
     scrolls: Vec<[f32; 2]>,
@@ -9925,6 +9963,9 @@ impl SurfaceLook {
                 ],
             ],
             thing_light: rt.thing_light_by_sector(),
+            light_modes: (0..rt.surfaces.len())
+                .map(|s| rt.face_light_mode.get(&s).copied().unwrap_or(3))
+                .collect(),
         }
     }
 
@@ -9955,6 +9996,11 @@ impl SurfaceLook {
         } else {
             0.0
         }
+    }
+
+    /// `RD_LIGHTMODE_FULLYLIT`: the face is drawn at full brightness whatever the bake says.
+    fn fullbright(&self, surface: usize) -> bool {
+        self.light_modes.get(surface).copied() == Some(0)
     }
 
     /// The factor the level's baked vertex light is multiplied by: the engine adds a surface's and a
@@ -9992,6 +10038,7 @@ impl Batch {
         cel: f32,
         light: f32,
         scroll: [f32; 2],
+        fullbright: bool,
     ) {
         let base = self.positions.len() as u32;
         let n = surface.verts.len();
@@ -10027,7 +10074,7 @@ impl Batch {
             // with the sky pass, unshaded. Passing the baked value through renders
             // every open sky as black. `surfflags & 0x200` is what the shipped
             // levels mark them with — ordinary faces are 0x0/0x4/0x5.
-            let l = if is_sky_surface(surface) {
+            let l = if is_sky_surface(surface) || fullbright {
                 1.0
             } else {
                 // Through the `.cmp` light ramp, not a linear scale: the tables carry the level's
@@ -11318,14 +11365,14 @@ fn build_world(
             batches
                 .entry((usize::MAX, surface.material))
                 .or_default()
-                .push_polygon(level, surface, tex_size, cel, light, scroll);
+                .push_polygon(level, surface, tex_size, cel, light, scroll, look.fullbright(index));
         }
         for &sector in owners {
             let light = look.light(index, sector as i32);
             batches
                 .entry((sector, surface.material))
                 .or_default()
-                .push_polygon(level, surface, tex_size, cel, light, scroll);
+                .push_polygon(level, surface, tex_size, cel, light, scroll, look.fullbright(index));
         }
     }
     (batches, skipped)
@@ -12232,15 +12279,18 @@ fn deliver_cog_messages(
     mut count: Option<ResMut<TriggerCount>>,
 ) {
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
+    // The handle, not the field: `instances` is borrowed mutably for the whole loop and a scoring
+    // verb borrows this same runtime.
+    let handle = sim.world.clone();
     let mut fired = 0usize;
     // A script may answer with another message, so drain until quiet. Bounded, because two scripts
     // that greet each other forever must not wedge a frame.
     for _round in 0..8 {
-        let queued = std::mem::take(&mut sim.world.borrow_mut().messages);
+        let queued = std::mem::take(&mut handle.borrow_mut().messages);
         if queued.is_empty() {
             break;
         }
-        for (name, sender, cog) in queued {
+        for (name, sender, cog, params) in queued {
             for (script_name, vm) in &mut sim.instances {
                 if let Some(target) = cog
                     && vm.cog_index != target
@@ -12261,6 +12311,8 @@ fn deliver_cog_messages(
                     continue;
                 }
                 vm.sender = sender.map_or(0, |s| s as i64);
+                // `SendMessageEx`'s parameters, the same two words a `damaged` handler gets.
+                handle.borrow_mut().last_params = params.to_vec();
                 if vm.run_label(script, &label).is_ok() {
                     fired += 1;
                 }

@@ -426,6 +426,9 @@ pub struct Runtime {
     /// material currently draws — `rdMaterial.curCelNum`, which a surface with no cel of its own uses.
     pub material_anims: Vec<(i32, f32, f32, f32)>,
     pub material_cel: BTreeMap<i32, f32>,
+    /// `SetFaceLightMode`: a face's lighting mode, where 0 is `RD_LIGHTMODE_FULLYLIT` — drawn at full
+    /// brightness — and everything else is the bake this build always does.
+    pub face_light_mode: BTreeMap<usize, i32>,
     /// `GetThingGeoMode`/`SetThingCurGeoMode`: a thing's draw mode, where 0 is not drawn. The
     /// renderer watches `geomode_epoch` and hides the entities of a thing whose mode is 0.
     pub thing_geomode: BTreeMap<usize, i32>,
@@ -520,7 +523,7 @@ pub struct Runtime {
     /// (a message number resolved against the receiving script's `message:` list). A target of
     /// `None` is what an unset master cog produces; the port then broadcasts rather than dropping
     /// the message, because that is the only delivery the shipped scripts have today.
-    pub messages: Vec<(String, Option<usize>, Option<i32>)>,
+    pub messages: Vec<(String, Option<usize>, Option<i32>, [f64; 2])>,
     /// The cog asking the world a question right now: what `SendMessage` records as the sender, and
     /// what `GetSenderID` answers in the receiver (`pCog->idx` in the engine's call). The VM sets it
     /// before each world verb, because only the VM knows which script is running.
@@ -971,6 +974,7 @@ impl Runtime {
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            face_light_mode: BTreeMap::new(),
             thing_geomode: BTreeMap::new(),
             sound_volume: Vec::new(),
             sound_pitch: Vec::new(),
@@ -1752,6 +1756,9 @@ impl Runtime {
                 | "syncthinglook"
                 | "pathmovepause"
                 | "setsectorthrust"
+                | "sendmessageex"
+                | "loadtemplate"
+                | "setfacelightmode"
                 | "pathmoveresume"
                 | "getthinggeomode"
                 | "setthingcurgeomode"
@@ -3367,6 +3374,44 @@ impl Runtime {
                 }
                 Value::Nil
             }
+            // `LoadTemplate(name)`: `sithCogFunction_LoadTemplate` answers the template's index, or -1.
+            // A cog then hands that value straight to `CreateThing`, and this port's `CreateThing`
+            // takes the **name**, so the name is what a found template answers — the handle a script
+            // stores (`water = LoadTemplate("+superenerg")` in `10_powercore.cog`) works either way.
+            "loadtemplate" => {
+                let name = match args.first() {
+                    Some(Value::Str(s)) => s.to_ascii_lowercase(),
+                    _ => String::new(),
+                };
+                if self.template_types.contains_key(&name) || self.template_health.contains_key(&name) {
+                    Value::Str(name)
+                } else if let Some((name, _)) = self
+                    .template_health
+                    .iter()
+                    .find(|(known, _)| known.eq_ignore_ascii_case(&name))
+                {
+                    Value::Str(name.clone())
+                } else {
+                    Value::Num(-1.0)
+                }
+            }
+            // `SetFaceLightMode(surface, mode)`: `renderData`'s per-face `lightingMode`. Only
+            // `RD_LIGHTMODE_FULLYLIT` (0) changes what this build draws — the face is drawn at full
+            // brightness, which is how the CTF force fields are made to glow — while `GOURAUD` (3)
+            // and the other modes are the bake the port always does.
+            "setfacelightmode" => {
+                if let Ok(surface) = usize::try_from(idx(0)) {
+                    self.face_light_mode.insert(surface, idx(1) as i32);
+                    self.geomode_epoch = self.geomode_epoch.wrapping_add(1);
+                }
+                Value::Nil
+            }
+            "getfacelightmode" => Value::Num(
+                usize::try_from(idx(0))
+                    .ok()
+                    .map(|i| self.face_light_mode.get(&i).copied().unwrap_or(3) as f64)
+                    .unwrap_or(0.0),
+            ),
             // `ThingLight(thing, value, time)`: `sithCogFunctionThing_ThingLight` sets the thing's own
             // light outright when `time` is 0 and otherwise ramps it there over `time` seconds
             // (`sithSurface_SetThingLight(pThing, light, time, 0)`). A negative value is ignored, which
@@ -3417,6 +3462,24 @@ impl Runtime {
             // The id is carried as `#N` and resolved against the receiving script's `message:` list,
             // as before; a negative cog (an unset master) broadcasts, which is the only delivery the
             // shipped start-of-level scripts have until every level's endlevel startup has run.
+            // `SendMessageEx(cog, message, senderType, senderRef, p0, p1)`: the same bus with the
+            // message's two parameters. The shipped callers pass zeros (`03_goals.cog` and friends
+            // telling the master cog which objective finished), but the parameters are what the
+            // receiver's `GetParam(0)`/`GetParam(1)` read, so they are carried.
+            "sendmessageex" => {
+                let cog = (idx(0) >= 0).then(|| idx(0) as i32);
+                let name = match args.get(1) {
+                    Some(Value::Str(s)) => s.clone(),
+                    Some(value) => format!("#{}", value.num() as i64),
+                    None => "message 0".to_string(),
+                };
+                let sender = (self.caller_cog >= 0).then_some(self.caller_cog as usize);
+                let params = [num(4), num(5)];
+                self.messages.push((name, sender, cog, params));
+                self.messages_sent += 1;
+                Value::Nil
+            }
+            // `SendMessage(cog, message)`: `sithCogFunction_SendMessage` pops a **cog index** and a
             "sendmessage" => {
                 let cog = (idx(0) >= 0).then(|| idx(0) as i32);
                 let name = match args.get(1) {
@@ -3430,7 +3493,7 @@ impl Runtime {
                     None => "message 0".to_string(),
                 };
                 let sender = (self.caller_cog >= 0).then_some(self.caller_cog as usize);
-                self.messages.push((name, sender, cog));
+                self.messages.push((name, sender, cog, [0.0; 2]));
                 self.messages_sent += 1;
                 Value::Nil
             }
@@ -3863,7 +3926,7 @@ impl Runtime {
             // the part a listener branches on (`message trigger`).
             "sendtrigger" => {
                 let sender = (self.caller_cog >= 0).then_some(self.caller_cog as usize);
-                self.messages.push(("#40".to_string(), sender, None));
+                self.messages.push(("#40".to_string(), sender, None, [0.0; 2]));
                 self.messages_sent += 1;
                 Value::Nil
             }
@@ -4530,6 +4593,7 @@ mod tests {
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            face_light_mode: BTreeMap::new(),
             thing_geomode: BTreeMap::new(),
             geomode_epoch: 0,
             sound_volume: Vec::new(),
@@ -4999,7 +5063,7 @@ mod tests {
         assert!(
             rt.messages
                 .iter()
-                .any(|(name, sender, cog)| name == "#40" && *sender == Some(3) && cog.is_none()),
+                .any(|(name, sender, cog, _)| name == "#40" && *sender == Some(3) && cog.is_none()),
             "the trigger broadcast is not on the queue: {:?}",
             rt.messages
         );
@@ -5054,7 +5118,7 @@ mod tests {
         rt.call("SendMessage", &[Value::Num(3.0), Value::Num(27.0)]);
         assert_eq!(
             rt.messages,
-            vec![("#27".to_string(), Some(5), Some(3))]
+            vec![("#27".to_string(), Some(5), Some(3), [0.0; 2])]
         );
     }
 

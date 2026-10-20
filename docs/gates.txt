@@ -104,7 +104,11 @@ flag                                                   exit  what it prints
                                                              `ThingLightAnim(0 -> 1, period 4)` ramps
                                                              over period/2 = 2 s (0.50 then 1.00) and
                                                              stops; level 1 places
-                                                             `01_TieBomber.cog`, which lights one
+                                                             `01_TieBomber.cog`, which lights one;
+                                                             `SetFaceLightMode(surface, 0)` makes
+                                                             that face FULLYLIT (`GetFaceLightMode`
+                                                             3 -> 0) so the draw stops darkening it,
+                                                             which is how a CTF force field glows
 --camera                                                 0  17b_Camera.cog startup points camera slot 0 at
                                                              thing 38 (`droidcam`, `ghostCam`) at
                                                              [2.03, -2.83, 2.56], so the view is not the
