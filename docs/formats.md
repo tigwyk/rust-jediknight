@@ -3104,6 +3104,19 @@ and stopping at a 0.25-unit standoff. `--ai` measures it:
   chase: walked 0.35 units in 1 s, now 0.25 units away (standoff 0.2), turned 80.0 deg
 ```
 
+A **scripted destination** overrules the chase, which is what makes a placed actor walk a route
+instead of standing until it sees the player. `AISetMovePos(actor, pos)` stores a point,
+`AISetMoveThing(actor, thing)` stores a thing and re-reads its position every tick (so a follower
+follows), and `AISetLookPos(actor, pos)` is a standing turn — `00_AIPatrol.cog` is built from those
+two plus `AISetMoveSpeed`, polling its own position on a 1 s pulse to know when to reverse. Arriving
+(within the standoff) drops the destination, the way the engine clears `SITHAI_MODE_MOVING`; the look
+target persists until a script replaces it. `--ai` proves both:
+
+```text
+  scripted: AISetMovePos -> walked 0.71 units, stopped 0.24 short (arrival radius 0.25), destination still set false
+  scripted: AISetLookPos -> now facing 90 deg (+90 is +Y)
+```
+
 Two bugs the chase exposed, both worth keeping:
 
 - The firing cadence gated the **whole tick**, so an actor that had just fired stood still for
@@ -3117,8 +3130,10 @@ every frame. Level 1's spawn is a walled room, so nothing fires there: the check
 behaviour with controlled geometry rather than hoping a player walks into a sightline.
 
 Not done: the instinct scheduler (weights, `LookForTarget` search, `Listen`, `Follow`,
-`OpenDoors`), pathfinding and `.ai` `maxstep`, `accuracy=` spread on the shot, and any reaction
-to being hit.
+`OpenDoors`), pathfinding and `.ai` `maxstep`, `accuracy=` spread on the shot, any reaction
+to being hit, and the actor frame table (`actor->aFrames` / `loadedFrames`) that
+`AISetMoveFrame`/`AISetLookFrame` index into, so a scripted route here is a point, not a numbered
+waypoint.
 
 ## 16.9 JK.EXE by Ghidra: savegames and cutscenes
 

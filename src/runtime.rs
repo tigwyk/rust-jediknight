@@ -389,6 +389,12 @@ pub struct Runtime {
     /// Per-actor instinct classes, keyed by thing index: what the `.ai` said and what this
     /// build does with it (see `ai_tick`).
     pub ai: BTreeMap<usize, crate::ai::Ai>,
+    /// `AISetMovePos` / `AISetMoveThing` / `AISetLookPos`: the scripted destination, the thing to
+    /// follow instead of a fixed point, and the spot a standing actor turns to face. The engine keeps
+    /// the same three on the actor block (`movePos`, `pMoveThing`, look frame) — see `ai_tick`.
+    pub ai_move: BTreeMap<usize, [f32; 3]>,
+    pub ai_chase: BTreeMap<usize, usize>,
+    pub ai_look: BTreeMap<usize, [f32; 3]>,
     /// Per-template `weapon=` — the template an actor fires.
     pub template_weapon: BTreeMap<String, String>,
     /// How close an actor walks to the player before it stops: this build's standoff, since
@@ -718,6 +724,9 @@ impl Runtime {
                 .collect(),
             ai_shot_interval: 1.0,
             ai_standoff: 0.25,
+            ai_move: BTreeMap::new(),
+            ai_chase: BTreeMap::new(),
+            ai_look: BTreeMap::new(),
             level_complete: false,
             music: None,
             music_volume: 1.0,
@@ -910,6 +919,9 @@ impl Runtime {
                 | "aisetmode"
                 | "aiclearmode"
                 | "aisetmovespeed"
+                | "aisetmovepos"
+                | "aisetmovething"
+                | "aisetlookpos"
                 | "setfirewait"
                 | "setgoalflags"
                 | "cleargoalflags"
@@ -1089,24 +1101,43 @@ impl Runtime {
             thing.ai_wait = (thing.ai_wait - dt).max(0.0);
             let ready = thing.ai_wait <= 0.0;
             let (from, yaw) = (thing.pos, thing.yaw);
-            if !ai.sees(from, yaw, target) {
-                // Out of sight: the actor stands where it is.
+            // A scripted destination wins over the chase: `AISetMovePos`/`AISetMoveThing` are how
+            // `00_AIPatrol.cog` and the sidekick scripts walk a puppet somewhere. `AISetMoveThing`
+            // keeps a *thing* rather than a point, and the engine re-reads its position every tick
+            // (`sithAI.c:1018`) — that is what makes a follower follow.
+            let scripted = self
+                .ai_chase
+                .get(&index)
+                .and_then(|t| self.things.get(*t))
+                .map(|t| t.pos)
+                .or_else(|| self.ai_move.get(&index).copied());
+            let look = self.ai_look.get(&index).copied();
+            // `AISetLookPos` is a standing turn: it decides facing whenever the legs are not carrying
+            // the actor somewhere, which is how `00_AIPatrol.cog` reverses at the end of each leg.
+            let look_yaw = look.map(|l| (l[1] - from[1]).atan2(l[0] - from[0]).to_degrees());
+            let sighted = ai.sees(from, yaw, target);
+            if scripted.is_none() && !sighted {
+                // Out of sight: the actor stands where it is, turning to a scripted look target.
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.ai_target = None;
+                    if let Some(yaw) = look_yaw {
+                        thing.yaw = yaw;
+                    }
                 }
                 continue;
             }
-            // In sight. Close the distance until the actor is at its standoff, turning to
-            // face the player as it walks — the `.ai` has no pathfinder here, so this is a
-            // straight line in the open, marked as such.
-            let dx = target[0] - from[0];
-            let dy = target[1] - from[1];
+            // Where the legs go: the scripted destination, else the player. In the open this is a
+            // straight line — the `.ai` has no pathfinder here, marked as such in §16.12.
+            let goal = scripted.unwrap_or(target);
+            let dx = goal[0] - from[0];
+            let dy = goal[1] - from[1];
             let reach = (dx * dx + dy * dy).sqrt();
             // `sithAI.c:814` steps the actor by `maxThrust * dt * moveSpeed`, so a scripted
             // `AISetMoveSpeed` scales the template's walking speed rather than replacing it.
             let speed = self.template_speed.get(&ai_template).copied().unwrap_or(0.0)
                 * self.actor_speed.get(&index).copied().unwrap_or(1.0);
-            let standoff = self.ai_standoff;
+            // A scripted destination is walked all the way onto; the chase stops at its standoff.
+            let standoff = if scripted.is_some() { 0.0 } else { self.ai_standoff };
 
             if reach > standoff && speed > 0.0 {
                 let step = (speed * dt).min(reach - standoff);
@@ -1123,7 +1154,7 @@ impl Runtime {
                 let mut via_portal = false;
                 if let Some(solids) = &self.solids
                     && solids.segment_blocked(from, next)
-                    && let Some(centre) = self.best_portal(from, target)
+                    && let Some(centre) = self.best_portal(from, goal)
                 {
                     let (px, py) = (centre[0] - from[0], centre[1] - from[1]);
                     let plen = (px * px + py * py).sqrt().max(0.001);
@@ -1134,7 +1165,7 @@ impl Runtime {
                 }
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.pos = next;
-                    thing.ai_target = Some(target);
+                    thing.ai_target = Some(goal);
                     thing.yaw = heading.1.atan2(heading.0).to_degrees();
                     if via_portal {
                         self.via_portal.push(index);
@@ -1144,11 +1175,22 @@ impl Runtime {
                 self.walked.push(index);
             } else if let Some(thing) = self.things.get_mut(index) {
                 thing.ai_target = None;
-                thing.yaw = dy.atan2(dx).to_degrees();
+                if let Some(yaw) = look_yaw {
+                    thing.yaw = yaw;
+                } else if reach > 0.001 {
+                    thing.yaw = dy.atan2(dx).to_degrees();
+                }
+            }
+            // Arriving clears the scripted destination, the way the engine drops
+            // `SITHAI_MODE_MOVING` when the puppet reaches `movePos`, so it returns to its instincts.
+            if scripted.is_some() && reach <= self.ai_standoff {
+                self.ai_move.remove(&index);
+                self.ai_chase.remove(&index);
             }
             // The instinct that fires. An actor whose class has no `PrimaryFire` never
-            // shoots, however close the player is.
-            if !ready || ai.instinct("PrimaryFire").is_none() {
+            // shoots, however close the player is, and a scripted walk does not shoot at what it
+            // cannot see.
+            if !sighted || !ready || ai.instinct("PrimaryFire").is_none() {
                 continue;
             }
             let Some(weapon) = self
@@ -2261,6 +2303,32 @@ impl Runtime {
                 self.actor_speed.insert(ti(0), (num(1) as f32).clamp(0.0, 2.0));
                 Value::Nil
             }
+            // `AISetMovePos(actor, pos)` stores the destination; `sithAI_SetMoveThing` copies it into
+            // `movePos` and raises `SITHAI_MODE_MOVING`, which `ai_tick` now walks on. The engine
+            // gates both on the thing having an actor; a script calling it on a non-actor gets
+            // nothing, and so does this port, because `ai_tick` only iterates things with an `.ai`.
+            "aisetmovepos" | "aisetlookpos" => {
+                let pos = match args.get(1) {
+                    Some(Value::Vec(xyz)) => [xyz[0] as f32, xyz[1] as f32, xyz[2] as f32],
+                    _ => [0.0; 3],
+                };
+                let table = if verb.eq_ignore_ascii_case("aisetmovepos") {
+                    &mut self.ai_move
+                } else {
+                    &mut self.ai_look
+                };
+                table.insert(ti(0), pos);
+                Value::Nil
+            }
+            // `AISetMoveThing(actor, thing)`: a *live* destination. The engine re-reads the thing's
+            // position each tick, so the actor keeps following a moving target.
+            "aisetmovething" => {
+                let (actor, destination) = (ti(0), ti(1));
+                if destination != usize::MAX {
+                    self.ai_chase.insert(actor, destination);
+                }
+                Value::Nil
+            }
             "getthingsignature" => Value::Num(
                 self.signature.get(ti(0)).copied().unwrap_or(0) as f64,
             ),
@@ -2855,6 +2923,9 @@ mod tests {
             template_weapon: BTreeMap::new(),
             ai_shot_interval: 1.0,
             ai_standoff: 0.25,
+            ai_move: BTreeMap::new(),
+            ai_chase: BTreeMap::new(),
+            ai_look: BTreeMap::new(),
             level_complete: false,
             music: None,
             music_volume: 1.0,

@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **33 gates, 82 tests, 0 failures.** Stubbed script surface:
-**65 verbs, 539 call sites across the 34 shipped levels** (706 before this run of state setters).
+**62 verbs, 494 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -55,9 +55,9 @@ both multiplayer-only screens.
 | --- | --- | --- |
 | Thing attachment | the impact half of `sithThing_AttachThingToSurface`: `(v-2.5)^2*45` above a 2.5 threshold, applied to the runtime's player (`--fall`) | the *record*: `attach_flags`, `attachedSurface`, the surface-info snapshot, scroll-velocity transfer on a scrolling surface, and the `entered`/`exited` cog messages on a `COG_LINKED` surface |
 | Physics | velocity integration with `ApplyDrag`, gravity, jump, fall, step, spawn clearance — for the player | `physicsRolloverFrames`/`OLDSTEP_DELTA_50FPS` accumulation (the port uses the frame's `dt`), angular velocity, `SITH_PF_USEANGULARTHRUST`, rotation of things (`sithCollision_RotateThing`), scripted movement of things, and every non-player thing: placed props are static |
-| Walk sweep | the walker runs the window's own walker_step on all 34 levels (--walk all), 20 s each | the tracked sector lags when sector hulls overlap: 20aboc/20bboc end near a sliver that claims sector 47 while the tracker still says 49, which is why --walk all reads 32/34 contained instead of 34/34 |
+| Walk sweep | the walker runs the window's own `walker_step` on all 34 levels (`--walk all`), 20 s each: **34/34 stayed inside the tracked sector** over 639 doorway crossings, and on 14 levels the level's own hull test agreed | the tracked sector can still lag where sector hulls overlap, so `inside_sector` is the arbiter rather than the file's own hull |
 | Puppets and animation | `stand` and `death`, `.key` interpolation with parent chains and pivots, `frame=` paths for doors and lifts | the rest of the state machine — `walk`, `run`, `walkback`, `strafe`, `crouch`, `jump`, `attack`, `holster`, `draw`, `victim` — and `sithAnimClass` layering, so an actor never changes pose in reaction to anything. `playkey`/`stopanim`/`jumptoframe` are stubs |
-| AI | the `.ai` parser (instincts, flags, moves), actor spawning, and `sightdist`/`fov` deciding whether an armed actor fires its own `weapon=` — `--ai` fires a level-1 actor at 3 units, not at 8, not from behind; 17 actor templates in level 1 name an instinct class | the runtime: instinct **scheduler** (weights, priority, interruption), **awareness** (no hearing, no alert propagation), **pathfinding** (steering is greedy — it picks the doorway that looks closest on both legs), `accuracy=` spread, aim-joint tracking, and the 11 `aiset*` verbs (43 calls each) |
+| AI | the `.ai` parser (instincts, flags, moves), actor spawning, `sightdist`/`fov` deciding whether an armed actor fires its own `weapon=`, and scripted destinations — `AISetMovePos`/`AISetMoveThing`/`AISetLookPos`/`AISetMoveSpeed` make a placed actor patrol or follow — so `--ai` fires a level-1 actor at 3 units, not at 8, not from behind, then walks one onto a scripted point and turns it; 17 actor templates in level 1 name an instinct class | the runtime: instinct **scheduler** (weights, priority, interruption), **awareness** (no hearing, no alert propagation), **pathfinding** (steering is greedy — it picks the doorway that looks closest on both legs), `accuracy=` spread, aim-joint tracking, and the frame-table verbs (`aisetmoveframe`/`aisetlookframe`, which need `actor->aFrames`) |
 | Actors | placement, health, shields, death, `--ai` | aim joints (`sithActor_UpdateAimJoints`), head pitch as a separate channel, force-power state, mount waits |
 | Camera | position `thing + 0xb8 + thing[0x168]` (eye offset, level units), orientation from the view angles at `thing + 0x15c/0x160/0x164`, the engine's yaw basis (column 1 = forward, confirmed at run time), the first-person velocity roll (`clamp(5 * dot(vel, right), -8, 8)`, constants at `0x522ddc`/`0x522de0`/`0x522de4`), the projection (**90 deg horizontal** from `buffer + 0x08`, vertical derived: 73.74 at 4:3, 58.72 at 16:9), and a third-person chase camera at the engine's follow height (0.2 above the body, `0x522dec`), toggled with `C` | the **player's own body is not drawn**, so third person shows the level from behind the player rather than the player: `spawn_models` skips the local model on purpose (`cull_mode: None` would wrap it around the first-person eye). Drawing it needs spawn + yaw rotation + hiding in first person. Also the engine's own follow case (`0x4c59ce`) is a spectator orbit spun at 8 deg/s and is not reproduced; view bob (`0x4051e0`) and screen shake (`DAT_008ee5b8/bc/c0`) are unported |
 | `use` and the link tables | `Runtime::wire_links` fills all three tables from a level's `cogs` section plus each script's `symbols` (level 1: **37 thing, 44 surface, 10 sector** links), so a script now hears `used`, `activate`, `entered` and `exited`. The E key sends `used` to the nearest linked thing in front of the eye (`Runtime::use_thing`) and falls back to the nearest linked surface (`activate_near`) | was: nothing ever filled a link table, so `use` reached nothing and no message left the world. **Closed:** `--door` runs the whole chain in one process — use action, `activate` message, the level's own script, the flag — and `00_door.cog` on thing 4 clears its sector's ADJOINS bit and starts the piece moving. What it took: `activate` not `used`, a `startup` pass before any message (a door's `doorSector` is set there), and **one kept VM per instance** (locals live in the VM; a fresh one per label lost `doorSector`). Was: `cog_00_door.cog`'s `activate` reaches `CheckStatus`/`OpenDoors` and something there takes the do-nothing branch. The probe now runs every instance's `startup` first (a door's `doorSector` and `numDoors` are set there, and skipping it measured a door with an empty symbol) and prints the script, the frame and `IsThingMoving` per candidate: `00_door.cog` on thing 4 answers `frame 0, moving 1`, so `activate`'s `if (moveStatus) return;` is what stops it — the door thinks a piece is already moving. `01_*` lifts report moving 0 and still change no flag, and one `00_door.cog` (cog 13) runs **0 labels**, so its `activate` call fails outright. Next: why `IsThingMoving` is 1 for a door at frame 0 (is the piece on a path, or is `door0[i]` binding the wrong thing?) and why one label does not run. Note the message label too — no shipped cog declares `used` (0 of 540), 82 declare `activate`, so `use` must send `activate`. Level 1's doors are wired the *thing* way — `cog_00_door.cog` declares `thing door0..door3 linkid=0..3 mask=0x405` and answers with `setsectoradjoins` — so the door chain is: populate the link tables from the COG `symbols` section, then send `SITH_MESSAGE_USED`/`ENTERED` to the linked instances. 32 shipped cogs call the adjoin/sector verbs and every one of them is waiting on a message nothing sends |
@@ -72,17 +72,17 @@ both multiplayer-only screens.
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — plus sector light animation. 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 65 below | the 65 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 62 below | the 62 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 65 stubbed cog verbs
+## 3. The 62 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (539 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 65.
+over the 34 levels from `--cog-check` (494 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 62.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -91,7 +91,7 @@ any error.
 
 | group | calls | verbs, most-called first |
 | --- | --- | --- |
-| AI (8) | 123 | `aisetmoveframe` 34, `aisetlookframe` 31, `aisetlookpos` 21, `aisetmovepos` 12, `aisetmovething` 12, `aisetfiretarget` 8, `aiflee` 3, `aisetclass` 2 |
+| AI (5) | 78 | `aisetmoveframe` 34, `aisetlookframe` 31, `aisetfiretarget` 8, `aiflee` 3, `aisetclass` 2 |
 | Thing properties and flags (12) | 82 | `setmountwait` 25, `returnex` 12, `setthinglight` 10, `clearthingflags` 9, `thinglightanim` 9, `jkclearflags` 4, `syncsurface` 4, `syncthingpos` 3, `setthingrotvel` 2, `newcoloreffect` 2, `createthingatpos` 1, `teleportthing` 1 |
 | Cog introspection and goal state (5) | 62 | `getgoalframe` 24, `getselfcog` 18, `setmastercog` 16, `getmastercog` 3, `loadtemplate` 1 |
 | Weapons and projectiles (3) | 31 | `jksetsaberinfo` 15, `autoselectweapon` 14, `fireprojectile` 2 |
@@ -146,16 +146,18 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    for real. Only `setsectorthrust` (4 calls) is left, and it needs thrust simulation, not a flag store.
 4. **Damage types.** Small, with a documented bitmask (`SITH_DAMAGE_*`); shields currently absorb everything,
    which colours every combat test.
-5. **AI verbs, state setters only.** 240 calls across 11 verbs. Store the mode, speed and look/move targets so
-   scripts stop silently failing; the scheduler, awareness and pathfinding are a separate project after this.
-   **Started:** `aisetmode`/`aiclearmode` are the actor-flag arms now, `aisetmovespeed` stores a
-   clamped 0..2 multiplier that the AI step applies to the template's walking speed, `setfirewait`
-   arms the player's weapon cooldown (`sithWeapon_SetFireWait`'s `nextFire = now + wait`), which
-   `fire_player` reads before it spends ammo, and `setgoalflags`/`cleargoalflags` OR and mask the goal
-   counters (`SITHBIN_GOAL00` = 100) that `endlevel.cog` records objectives in (167 calls gone; 539
-   stubbed, down from 706). The rest cannot be aliased — each of `aisetmoveframe` (34), `aisetlookframe`
-   (31), `setmountwait` (25) needs a value stored *and* a reader, and the two `*frame` verbs need pose
-   frames the puppet does not have yet (§2, puppets).
+5. **AI verbs.** 240 calls across 11 verbs. **Mostly done:** `aisetmode`/`aiclearmode` are the actor-flag
+   arms, `aisetmovespeed` stores a clamped 0..2 multiplier the AI step applies to the template's walking
+   speed, `aisetmovepos`/`aisetmovething`/`aisetlookpos` are the scripted destination, follower and
+   standing turn that `ai_tick` now walks and faces — which is what makes `00_AIPatrol.cog` walk its
+   puppet, and `--ai` asserts the walk, the arrival and the turn. `setfirewait` (a weapon verb, kept here
+   because it was the same shape) arms the player's cooldown, `fire_player` reads it, and
+   `setgoalflags`/`cleargoalflags` OR and mask the goal counters (`SITHBIN_GOAL00` = 100) that
+   `endlevel.cog` records objectives in — 212 calls gone, 494 stubbed, down from 706. What is left of
+   the group needs data the port does not have: `aisetmoveframe` (34) and `aisetlookframe` (31) index
+   `actor->aFrames`, a numbered waypoint table; `aisetfiretarget` (8) needs actors that shoot at
+   something other than the player; `aiflee` (3) needs the flee state; `setmountwait` (25) needs the
+   weapon raise.
 6. **Puppet locomotion states.** Visible, and the state data is already loaded; the pose code is real.
 7. **Attachments and parenting.** Needed by carried weapons, passengers, and any script that moves a child.
 8. **Camera focus and shake.** It is what makes in-engine cutscenes and several force powers read as intended.

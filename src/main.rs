@@ -2629,6 +2629,52 @@ fn main() {
             rt.ai_standoff
         );
         assert!(turned > 1.0, "the actor did not turn toward the player");
+        // Scripted legs: `AISetMovePos` walks the puppet onto a point and drops the destination when
+        // it gets there, and `AISetLookPos` turns a standing one. `00_AIPatrol.cog` is built from
+        // exactly these two plus `AISetMoveSpeed`, so this is what makes a patroler patrol.
+        {
+            rt.things[player].pos = [at[0] + 40.0, at[1], at[2]];
+            rt.things[actor].pos = at;
+            // The same direction the chase just proved walkable, so a wall cannot be mistaken for a
+            // broken verb.
+            let goal = [at[0] + 0.5, at[1] + 0.5, at[2]];
+            rt.call(
+                "AISetMovePos",
+                &[cog::Value::Num(actor as f64), cog::Value::Vec(goal.map(f64::from))],
+            );
+            for _ in 0..120 {
+                rt.ai_tick(player, 1.0 / 30.0);
+            }
+            let end = rt.things[actor].pos;
+            let left = ((goal[0] - end[0]).powi(2) + (goal[1] - end[1]).powi(2)).sqrt();
+            println!(
+                "  scripted: AISetMovePos -> walked {:.2} units, stopped {left:.2} short (arrival radius {:.2}), destination still set {}",
+                0.5 * std::f32::consts::SQRT_2,
+                rt.ai_standoff,
+                rt.ai_move.contains_key(&actor)
+            );
+            assert!(
+                left <= rt.ai_standoff + 0.01,
+                "the actor did not walk onto its scripted destination ({left:.2} short)"
+            );
+            assert!(
+                !rt.ai_move.contains_key(&actor),
+                "the scripted destination survived arrival"
+            );
+            // A look target turns a standing actor even with nothing in sight.
+            let look = [end[0], end[1] + 2.0, end[2]];
+            rt.call(
+                "AISetLookPos",
+                &[cog::Value::Num(actor as f64), cog::Value::Vec(look.map(f64::from))],
+            );
+            rt.ai_tick(player, 1.0 / 30.0);
+            let facing = rt.things[actor].yaw;
+            println!("  scripted: AISetLookPos -> now facing {facing:.0} deg (+90 is +Y)");
+            assert!(
+                (facing - 90.0).abs() < 1.0,
+                "AISetLookPos did not turn the actor to face +Y ({facing:.1} deg)"
+            );
+        }
         assert_eq!(seen, 1, "an actor did not fire at a player inside its sight");
         assert_eq!(spawned, 1, "the shot did not create a projectile");
         assert_eq!(far, 0, "an actor fired at a player outside sightdist");
