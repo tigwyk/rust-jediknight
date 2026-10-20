@@ -35,7 +35,7 @@ because `--live-check` needs a display that is actually presenting: with no focu
 sits in presentation after its setup output and never reaches the hundredth frame its verdict is
 gated on, so the sweep would hang instead of finishing. Everything else is headless and unaffected.
 
-`FAILURES: 0 / 39` (`--gates`: `gates: 0 of 39 failed`, or `0 of 38` with `BK_SKIP_WINDOW=1`).
+`FAILURES: 0 / 40` (`--gates`: `gates: 0 of 40 failed`, or `0 of 39` with `BK_SKIP_WINDOW=1`).
 
 flag                                                   exit  what it prints
 -------------------------------------------------------------------------------------------------
@@ -113,6 +113,13 @@ flag                                                   exit  what it prints
                                                              the surface is carried 0.0167 units a frame at
                                                              60 fps, and SlideCeilingSky(0.5, 0) moves every
                                                              ceiling-sky face by 1 texel a second
+--attach                                                  0  `AttachThingToThing(child, parent)` keeps
+                                                             the offset: parent at [2,0,0] puts the
+                                                             child at [3,0,0.5], a 90 deg parent turn
+                                                             swings it to [2,-1,0.5] and back, and
+                                                             detaching stops the ride; level 9
+                                                             (`09_donefueling.cog`) and 16a
+                                                             (`16a_crowarm.cog`) place one
 --damage-return                                          0  thing 19 was hit for 100; `GetParam(0)`
                                                              answered 100 inside the handler,
                                                              `ReturnEx(damage / 2)` made the label

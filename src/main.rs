@@ -146,6 +146,7 @@ const GATES: &[&str] = &[
     "--camera",
     "--scroll",
     "--damage-return",
+    "--attach",
     "--move",
     "--pickup",
     "--save",
@@ -288,6 +289,7 @@ fn main() {
     let mut camera_check = false;
     let mut scroll_check = false;
     let mut damage_return_check = false;
+    let mut attach_check = false;
     let mut fire_check: Option<String> = None;
     let mut hit_check = false;
     let mut level_shader = false;
@@ -529,6 +531,8 @@ fn main() {
             "--scroll" => scroll_check = true,
             // `--damage-return`: a `damaged` handler's `ReturnEx` replaces the amount the engine applies.
             "--damage-return" => damage_return_check = true,
+            // `--attach`: a thing rides another (`AttachThingToThing`), and stops when detached.
+            "--attach" => attach_check = true,
             // `--fire <weapon template>`: fire that weapon at level 1's actor and check the
             // projectile travels, hits and damages.
             // `--level-shader`: draw level surfaces with the material that carries the colormap
@@ -4865,6 +4869,97 @@ fn main() {
         );
         assert_eq!(errors, 0, "cog check found {errors} problems");
         println!("--- cog check passed ---");
+        return;
+    }
+
+    if attach_check {
+        // `AttachThingToThing(child, parent)`: the child rides the parent, keeping the offset it had
+        // at the call, expressed in the parent's own frame — `sithThing_AttachThingToThing` stores
+        // exactly that (`rdMatrix_TransformVectorOrtho34` into `field_4C`), so a turning parent
+        // swings the child around it. 20 shipped calls use it, and they are functional: a crate on a
+        // lift (`00_elev_doors5.cog`), a catwalk on a ship (`09_donefueling.cog`), the sphere
+        // `force_absorb.cog` hangs on the player, and the orbiting camera of `00_cameratricks.cog`.
+        let level = &world.level;
+        let state = runtime::Runtime::handle(level);
+        let mut rt = state.borrow_mut();
+        let Some(actor) = (0..rt.things.len()).find(|i| rt.types.get(*i).copied() == Some(2)) else {
+            println!("attach: this level has no actor to hang something on");
+            return;
+        };
+        let Some(child) = (0..rt.things.len()).find(|i| *i != actor && rt.types.get(*i).copied() != Some(10)) else {
+            println!("attach: this level has no second thing to attach");
+            return;
+        };
+        rt.things[actor].pos = [0.0, 0.0, 0.0];
+        rt.things[actor].yaw = 0.0;
+        rt.things[child].pos = [1.0, 0.0, 0.5];
+        rt.call(
+            "AttachThingToThing",
+            &[cog::Value::Num(child as f64), cog::Value::Num(actor as f64)],
+        );
+        assert_eq!(
+            rt.call("GetThingParent", &[cog::Value::Num(child as f64)]),
+            cog::Value::Num(actor as f64),
+            "GetThingParent did not read the parent back"
+        );
+        // The parent moves two units along +X: the child must move with it and keep its offset.
+        rt.things[actor].pos = [2.0, 0.0, 0.0];
+        rt.step(1.0 / 30.0);
+        let carried = rt.things[child].pos;
+        println!(
+            "attach: with the parent at [2, 0, 0] the attached thing sits at {carried:?} (the offset it was attached at was [1, 0, 0.5])"
+        );
+        assert!(
+            (carried[0] - 3.0).abs() < 1e-3 && (carried[2] - 0.5).abs() < 1e-3,
+            "the attached thing did not follow its parent: {carried:?}"
+        );
+        // Turning the parent swings the child around it, and turning it back puts the child back.
+        rt.things[actor].yaw = 90.0;
+        rt.step(1.0 / 30.0);
+        let turned = rt.things[child].pos;
+        rt.things[actor].yaw = 0.0;
+        rt.step(1.0 / 30.0);
+        let back = rt.things[child].pos;
+        println!(
+            "attach: parent yaw 90 puts it at {turned:?}, back at {back:?}"
+        );
+        assert!(
+            (turned[0] - 2.0).abs() < 1e-3 && (turned[1] + 1.0).abs() < 1e-3,
+            "the parent's rotation did not swing the attached thing: {turned:?}"
+        );
+        assert!(
+            (back[0] - 3.0).abs() < 1e-3 && (back[1]).abs() < 1e-3,
+            "turning the parent back did not restore the offset: {back:?}"
+        );
+        // Detaching stops the ride.
+        rt.things[actor].pos = [5.0, 0.0, 0.0];
+        rt.call(
+            "AttachThingToThing",
+            &[cog::Value::Num(child as f64), cog::Value::Num(-1.0)],
+        );
+        rt.step(1.0 / 30.0);
+        let left = rt.things[child].pos;
+        println!("attach: after detaching, the parent moved to [5, 0, 0] and the thing stayed at {left:?}");
+        assert!(
+            (left[0] - 3.0).abs() < 1e-3,
+            "a detached thing still followed its parent: {left:?}"
+        );
+        // The shipped table: which placed scripts in this level attach things.
+        let mut attaching = Vec::new();
+        for inst in &level.cogs {
+            let Some(data) = gobs.read(&inst.script) else { continue };
+            if String::from_utf8_lossy(&data).to_ascii_lowercase().contains("attachthingtothing") {
+                attaching.push(inst.script.clone());
+            }
+        }
+        attaching.sort();
+        attaching.dedup();
+        println!(
+            "attach: {} placed script(s) in this level attach one thing to another{}",
+            attaching.len(),
+            attaching.first().map(|n| format!(" (first: {n})")).unwrap_or_default()
+        );
+        println!("--- attach check passed ---");
         return;
     }
 

@@ -84,6 +84,13 @@ pub struct ThingState {
     /// force scripts set (`0x20` while a power is mid-flash).
     pub phys_flags: u32,
     pub jk_flags: u32,
+    /// `AttachThingToThing(child, parent)`: the parent this thing rides, and where it sits in that
+    /// parent's own frame — `sithThing_AttachThingToThing` stores exactly that offset (in
+    /// `field_4C`), so a moving parent carries the child.
+    pub attach: Option<usize>,
+    pub attach_offset: [f32; 3],
+    /// `SetThingAttachFlags`: stored, and `SITH_ATTACH_NOMOVE` (0x2) is the one read.
+    pub attach_flags: u32,
 }
 
 impl ThingState {
@@ -677,6 +684,9 @@ impl Runtime {
                         .copied()
                         .unwrap_or(0),
                     jk_flags: 0,
+                    attach: None,
+                    attach_offset: [0.0; 3],
+                    attach_flags: 0,
                 })
                 .collect(),
             templates: level.things.iter().map(|t| t.template.clone()).collect(),
@@ -1276,8 +1286,44 @@ impl Runtime {
                 self.pending_messages.push((instance, "blocked", [0.0; 2]));
             }
         }
+        // Attached things follow their parent: `sithThing_AttachThingToThing` stores the offset in the
+        // parent's own frame (`rdMatrix_TransformVectorOrtho34` into `field_4C`), and the parent's
+        // motion carries the child from there. A crate riding a lift and a catwalk hanging off a ship
+        // are both this, and so is the sphere `force_absorb.cog` hangs on the player.
+        self.update_attachments(&mut moved);
         self.things_moved += moved.len();
         moved
+    }
+
+    /// Place every attached thing at `parent.position + parent.rotation * offset`, and carry the
+    /// parent's facing, which is what makes an attached thing *ride* rather than float.
+    ///
+    /// `ponytail:` one level deep and in index order, so a chain of attachments resolves only when
+    /// the parent has a lower index — the engine walks a child list instead. No shipped script
+    /// attaches a thing to a thing that is itself attached.
+    fn update_attachments(&mut self, moved: &mut Vec<usize>) {
+        for index in 0..self.things.len() {
+            let Some(parent) = self.things[index].attach else { continue };
+            let Some(from) = self.things.get(parent).map(|p| (p.pos, p.yaw, p.sector)) else {
+                continue;
+            };
+            let offset = self.things[index].attach_offset;
+            let (sin, cos) = from.1.to_radians().sin_cos();
+            let next = [
+                from.0[0] + offset[0] * cos + offset[1] * sin,
+                from.0[1] - offset[0] * sin + offset[1] * cos,
+                from.0[2] + offset[2],
+            ];
+            let sector = from.2;
+            if let Some(thing) = self.things.get_mut(index) {
+                thing.pos = next;
+                thing.yaw = from.1;
+                thing.sector = sector;
+            }
+            if !moved.contains(&index) {
+                moved.push(index);
+            }
+        }
     }
 
     /// The switched flags, for the solver: what `SetAdjoinFlags`/`ClearAdjoinFlags` and
@@ -1411,6 +1457,11 @@ impl Runtime {
                 | "bittest"
                 | "skilltarget"
                 | "getactorweapon"
+                | "attachthingtothing"
+                | "attachthingtothingex"
+                | "detachthing"
+                | "getthingparent"
+                | "setthingattachflags"
                 | "aisetfiretarget"
                 | "aiflee"
                 | "aisetclass"
@@ -1767,6 +1818,9 @@ impl Runtime {
             damage,
             phys_flags: 0,
             jk_flags: 0,
+            attach: None,
+            attach_offset: [0.0; 3],
+            attach_flags: 0,
             extra_speed: 0.0,
             ai_target: None,
             ai_wait: 0.0,
@@ -2302,6 +2356,9 @@ impl Runtime {
             decay: 0.0,
             phys_flags: 0,
             jk_flags: 0,
+            attach: None,
+            attach_offset: [0.0; 3],
+            attach_flags: 0,
             extra_speed: 0.0,
             ai_target: None,
             ai_wait: 0.0,
@@ -2608,6 +2665,43 @@ impl Runtime {
     /// Run one verb against the world. Argument order follows the shipped scripts; a
     /// verb whose real arity differs simply does nothing useful here, and the
     /// interpreter records it.
+    /// `sithThing_AttachThingToThing(child, parent)`: the child rides the parent, keeping the offset
+    /// it had at the moment of the call — expressed in the parent's own frame
+    /// (`rdMatrix_TransformVectorOrtho34` into `field_4C`), so a turning parent swings the child
+    /// around it. A negative parent detaches (`sithThing_DetachThing`).
+    fn attach_thing(&mut self, child: i64, parent: i64) {
+        let (Ok(child), Ok(parent)) = (usize::try_from(child), usize::try_from(parent)) else {
+            if let Ok(child) = usize::try_from(child)
+                && let Some(thing) = self.things.get_mut(child)
+            {
+                thing.attach = None;
+                thing.attach_flags = 0;
+            }
+            return;
+        };
+        if child == parent || self.things.get(parent).is_none() {
+            return;
+        }
+        let (child_pos, parent_pos, parent_yaw) =
+            match (self.things.get(child), self.things.get(parent)) {
+                (Some(c), Some(p)) => (c.pos, p.pos, p.yaw),
+                _ => return,
+            };
+        let d = [
+            child_pos[0] - parent_pos[0],
+            child_pos[1] - parent_pos[1],
+            child_pos[2] - parent_pos[2],
+        ];
+        // Into the parent's frame: the inverse of the rotation `update_attachments` applies.
+        let (sin, cos) = parent_yaw.to_radians().sin_cos();
+        let offset = [d[0] * cos - d[1] * sin, d[0] * sin + d[1] * cos, d[2]];
+        if let Some(thing) = self.things.get_mut(child) {
+            thing.attach = Some(parent);
+            thing.attach_offset = offset;
+            thing.attach_flags = 1; // SITH_ATTACH_THING
+        }
+    }
+
     pub fn call(&mut self, verb: &str, args: &[Value]) -> Value {
         let num = |i: usize| args.get(i).map(|v| v.num()).unwrap_or(0.0);
         let idx = |i: usize| num(i) as i64;
@@ -2773,6 +2867,37 @@ impl Runtime {
             // caller can resolve the next one through the episode graph.
             "jkendlevel" | "endlevel" => {
                 self.level_complete = idx(0) != 0 || num(0) != 0.0;
+                Value::Nil
+            }
+            // ---- attachments: a thing that rides another thing ----
+            //
+            // `AttachThingToThing(child, parent)` and its `...Ex` spelling with flags: 20 shipped
+            // calls, and they are functional — a crate riding a lift, a catwalk hanging off a ship,
+            // the sphere `force_absorb.cog` hangs on the player, and the orbiting camera of
+            // `00_cameratricks.cog`. `update_attachments` re-places the child every step.
+            "attachthingtothing" | "attachthingtothingex" => {
+                self.attach_thing(idx(0), idx(1));
+                Value::Nil
+            }
+            "detachthing" => {
+                if let Some(thing) = usize::try_from(idx(0)).ok().and_then(|i| self.things.get_mut(i)) {
+                    thing.attach = None;
+                    thing.attach_flags = 0;
+                }
+                Value::Nil
+            }
+            "getthingparent" => Value::Num(
+                usize::try_from(idx(0))
+                    .ok()
+                    .and_then(|i| self.things.get(i))
+                    .and_then(|t| t.attach)
+                    .map(|p| p as f64)
+                    .unwrap_or(-1.0),
+            ),
+            "setthingattachflags" => {
+                if let Some(thing) = usize::try_from(idx(0)).ok().and_then(|i| self.things.get_mut(i)) {
+                    thing.attach_flags = idx(1) as u32;
+                }
                 Value::Nil
             }
             // ---- the scripted AI: who an actor shoots, where it runs, which instincts it has ----
@@ -3512,6 +3637,9 @@ impl Runtime {
                     damage: self.template_damage.get(&template).copied().unwrap_or(0.0),
                     phys_flags: 0,
                     jk_flags: 0,
+                    attach: None,
+                    attach_offset: [0.0; 3],
+                    attach_flags: 0,
                     extra_speed: 0.0,
                     ai_target: None,
                     ai_wait: 0.0,
@@ -3878,6 +4006,9 @@ mod tests {
                 decay: 0.0,
                 phys_flags: 0,
                 jk_flags: 0,
+                attach: None,
+                attach_offset: [0.0; 3],
+                attach_flags: 0,
                 extra_speed: 0.0,
                 ai_target: None,
                 ai_wait: 0.0,

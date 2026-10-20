@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **39 gates, 91 tests, 0 failures.** Stubbed script surface:
-**30 verbs, 137 call sites across the 34 shipped levels** (706 before this run of state setters).
+**29 verbs, 129 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -42,7 +42,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | Event queue | `sithEvent.c` | the engine's timed event list. Pulses and timers live in `cog.rs` and cover the scripts; a non-cog timed event (thing expiry, AI tick) has nowhere to live. | no matches for `SithEvent` |
 | Overlay map and 3D map screen | `sithOverlayMap.c`, `sithMap.c`, `jkGUIMap.c`, `ui.rs` | the automap overlay and the 3D map view. The screen is a static backdrop. | `ponytail:` in `ui.rs` — no zoom/orbit transforms |
 | Scope | `jkHudScope.c` | the sniper/binos overlay | 2 incidental HUD-flag matches, no rendering |
-| Thing parenting | `sithThing.c` (`pParent`, `attachedThings`) | a child thing following its parent's transform: a gun in a hand, a passenger on a mover | `attachthingtothing`, `setthingattachflags`, `getthingparent` are all stubs |
+| Thing parenting | `sithThing.c` (`pParent`, `attachedThings`) | **`AttachThingToThing` works**: the child keeps the offset it had at the call, in the parent's own frame (`field_4C`), so a moving parent carries it and a turning one swings it around — a crate on a lift (`00_elev_doors5.cog`), a catwalk on a ship (`09_donefueling.cog`), the sphere `force_absorb.cog` hangs on the player, the orbiting camera of `00_cameratricks.cog`. `DetachThing` and `GetThingParent` round-trip, `SetThingAttachFlags` is stored (`--attach`) | the engine's child *list* (a thing may carry several children, and chains resolve in list order) — this build resolves one level in index order, `ponytail:`-marked. A gun in a hand needs the puppet's joint, which is the puppet work, not this |
 
 Multiplayer is a project of its own and is deliberately out of scope: the UI holes the docs used to list are
 both multiplayer-only screens.
@@ -73,17 +73,17 @@ both multiplayer-only screens.
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — plus sector light animation. 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 30 below | the 30 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 29 below | the 29 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 30 stubbed cog verbs
+## 3. The 29 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (137 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 30.
+over the 34 levels from `--cog-check` (129 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 29.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -98,7 +98,6 @@ takes the wrong branch without any error.
 | Face and thing modes (3) | 11 | `getthinggeomode` 4, `setthingcurgeomode` 4, `setfacelightmode` 3 |
 | Sectors, adjoins, sky (2) | 4 | `setsectorthrust` 4 |
 | Models (1) | 6 | `setthingmodel` 6 (CTF scripts only) |
-| Attachments and parents (3) | 8 | `attachthingtothing` 6, `getthingparent` 1, `setthingattachflags` 1 |
 | Sound (3) | 14 | `changesoundvol` 5, `sectorsound` 5, `changesoundpitch` 4 |
 | Multiplayer (1) | 3 | `sendmessageex` 3 |
 | Misc (4) | 27 | `rotatepivot` 10, `pathmoveresume` 7, `jkgetchoice` 7, `setrespawnmask` 3 |
@@ -197,7 +196,11 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    `ai_tick` walked the actor at, by `sithPuppet_UpdateThingMove`'s own rule, and the clip advances on
    distance moved instead of the clock. What is left of the state machine is the armed-mode axis and
    the reactions (`crouch`, `jump`, `fire`, `hit`, turns).
-7. **Attachments and parenting.** Needed by carried weapons, passengers, and any script that moves a child.
+7. ~~**Attachments and parenting.**~~ — **done for the scripted case** (`--attach`): `AttachThingToThing`
+   stores the child's offset in the parent's own frame and re-places it every step, so the twenty
+   shipped calls that make a crate ride a lift, a catwalk ride a ship, or an effect ride the player
+   all work. What is left of the group is the engine's *child list* (several children, chains) and
+   the puppet-side version — a gun in a hand is a joint, not an attachment.
 8. ~~**Camera focus and shake.**~~ — **done**: seven camera slots with `SetCameraFocus`/`SetCurrentCamera`
    and their getters, and `SetPOVShake` as an offset that decays at its own rate. Level 17b's cutscene is the
    end-to-end case: `17b_Camera.cog` startup cuts the view to `ghostCam`, and `Sleep(6.0)` later hands it
