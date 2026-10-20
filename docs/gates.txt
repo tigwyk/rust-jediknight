@@ -77,6 +77,10 @@ flag                                                   exit  what it prints
                                                              correct round 85's "no draw tracks")
                                                              (and those rows are now played:
                                                              `draw_row` returns drawgun on
+                                                             (and the trigger obeys the
+                                                             weapon's own rate: one shot at
+                                                             t=10, none immediately after, one
+                                                             at t=10.6 for a 0.5 s rate)
                                                              0->1 and holster on 1->0)
 --cog-check                                              0  --- cog check passed ---        (every level's scripts, and every label each one declares:
                                                              the deep pass is what found `AutosaveGame`, the

@@ -2974,6 +2974,25 @@ fn main() {
                     println!("weapons: `{label}` did not run: {e:?}");
                 }
             }
+            // The trigger: the weapon's own rate gates it, the way `binWait` does in the engine.
+            let (first, second, third) = {
+                let mut rt = sim_world.borrow_mut();
+                rt.time = 10.0;
+                rt.weapon_ready = 10.0;
+                rt.weapon_cog = Some((0, 0.5, 0));
+                let first = rt.try_fire_weapon(player);
+                let second = rt.try_fire_weapon(player);
+                rt.time = 10.6;
+                let third = rt.try_fire_weapon(player);
+                rt.messages.clear();
+                (first, second, third)
+            };
+            println!(
+                "weapons: trigger at t=10 fires {first}, again immediately {second}, and at t=10.6 {third} (rate 0.5 s)"
+            );
+            assert!(first, "the first pull did not fire");
+            assert!(!second, "a mashed trigger got past the weapon rate");
+            assert!(third, "the weapon never became ready again");
             let rt = sim_world.borrow();
             let spawned = rt.things.len().saturating_sub(world.level.things.len());
             println!(
@@ -14240,8 +14259,14 @@ fn fire_player(
     // A weapon cog the script armed (`ActivateWeapon` from its own `activated:`) owns the shot: send
     // it `fire` and let its policy spend the ammo and call `FireProjectile`, which is the engine's
     // split — the cog is the policy, the verb is the mechanism. Firing here as well would double it.
-    if let Some((cog, _, _)) = rt.weapon_cog {
-        rt.messages.push(("fire".to_string(), Some(index), Some(cog), [0.0; 2]));
+    if let Some((cog, rate, _)) = rt.weapon_cog {
+        // The weapon's own cadence: `ActivateWeapon`'s rate (a cog computes `fireWait / powerBoost`
+        // and `ChangeFireRate` updates it), so a held or mashed trigger cannot outpace the script.
+        // The engine gates this with the bin's `activationDelaySecs`/`binWait` — the same idea.
+        if rt.time >= rt.weapon_ready {
+            rt.messages.push(("fire".to_string(), Some(index), Some(cog), [0.0; 2]));
+            rt.weapon_ready = rt.time + rate.max(0.0);
+        }
         return;
     }
     // The saber is not a projectile: a swing traces the blade and spends no ammo. `jkSetSaberInfo`

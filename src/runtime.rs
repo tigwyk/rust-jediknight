@@ -765,6 +765,9 @@ pub struct Runtime {
     pub weapon_cog: Option<(i32, f32, i32)>,
     /// `ActivateWeapon`'s fire rate, which `ChangeFireRate` replaces and the trigger reads.
     pub weapon_rate: f32,
+    /// The level time the armed weapon may fire again: `ActivateWeapon`'s rate, which
+    /// `ChangeFireRate` updates — the engine's `binWait`/`activationDelaySecs` pair.
+    pub weapon_ready: f32,
     /// `SetAutoSwitch`/`GetAutoSwitch`: the player's weapon-auto-switch bit field.
     pub auto_switch: u32,
     /// `SetAutoPickup`/`GetAutoPickup`: the same, for items.
@@ -1081,6 +1084,7 @@ impl Runtime {
             loaded_sounds: Vec::new(),
             weapon_cog: None,
             weapon_rate: 0.0,
+            weapon_ready: 0.0,
             auto_switch: 1,
             auto_pickup: 1,
             weapon_mesh: BTreeMap::new(),
@@ -3688,6 +3692,23 @@ impl Runtime {
         }
     }
 
+    /// Pull the trigger on the armed weapon cog, honouring its own rate.
+    ///
+    /// The engine's player firing is `sithInventory_ActivateBin`: the bin's `activationDelaySecs`
+    /// (the `fireWait / powerBoost` a cog passes to `ActivateWeapon`) becomes `binWait`, and the
+    /// `fire` message only goes out when the clock has passed it. A mashed or held trigger
+    /// therefore cannot outpace the script that owns the weapon. Returns whether a message
+    /// was queued.
+    pub fn try_fire_weapon(&mut self, player: usize) -> bool {
+        let Some((cog, rate, _)) = self.weapon_cog else { return false };
+        if self.time < self.weapon_ready {
+            return false;
+        }
+        self.messages.push(("fire".to_string(), Some(player), Some(cog), [0.0; 2]));
+        self.weapon_ready = self.time + rate.max(0.0);
+        true
+    }
+
     /// Write an inventory bin and, when it goes from empty to held, ask for that bin's item script.
     ///
     /// `jkHudInv_ItemDatLoad` gives every weapon bin a `cog=`, and the engine starts that script when
@@ -4940,6 +4961,8 @@ impl Runtime {
                 if (0..2).contains(&mode) {
                     self.weapon_cog = Some((cog, rate, mode));
                     self.weapon_rate = rate;
+                    // `sithInventory_ActivateBin` starts the delay when the bin is armed.
+                    self.weapon_ready = self.time + rate.max(0.0);
                 }
                 Value::Nil
             }
@@ -5715,6 +5738,7 @@ mod tests {
             loaded_sounds: Vec::new(),
             weapon_cog: None,
             weapon_rate: 0.0,
+            weapon_ready: 0.0,
             auto_switch: 1,
             auto_pickup: 1,
             weapon_mesh: BTreeMap::new(),
