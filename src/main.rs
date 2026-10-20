@@ -2770,6 +2770,51 @@ fn main() {
             back.level,
             back.sections.len()
         );
+        // And the *state*, not just the container: take a live runtime, change it, save it into a
+        // section, and load it back onto a fresh runtime. This is the part a player notices.
+        {
+            let sim_world = runtime::Runtime::handle(&world.level);
+            let mut live = sim_world.borrow_mut();
+            let player = live.player_thing();
+            live.call("SetInv", &[cog::Value::Num(player as f64), cog::Value::Num(2.0), cog::Value::Num(3.0)]);
+            live.things[player].health = 37.0;
+            live.things[player].pos[0] += 1.25;
+            live.time = 128.5;
+            let mut saved = jks::Save::new(&level_name);
+            saved.sections.push(jks::Section::new(
+                runtime::SAVE_SECTION,
+                live.snapshot().to_bytes(),
+            ));
+            let path = std::env::temp_dir().join("bevi-knight-state.jks");
+            std::fs::write(&path, saved.write()).expect("write the state save");
+            let reread = jks::Save::read(&std::fs::read(&path).expect("re-read"))
+                .expect("the state save did not parse");
+            let payload = reread
+                .sections
+                .iter()
+                .find(|s| s.kind() == runtime::SAVE_SECTION)
+                .expect("the state section is missing");
+            let state = runtime::Snapshot::from_bytes(&payload.data).expect("the state payload");
+            let fresh_world = runtime::Runtime::handle(&world.level);
+            let mut fresh = fresh_world.borrow_mut();
+            fresh.restore(&state);
+            println!(
+                "jks: the saved state restores -- health {:.0} (was 37), {:.2} along x, inventory bin 2 = {:.0}, clock {:.2} s, {} thing(s)",
+                fresh.things[player].health,
+                fresh.things[player].pos[0] - world.level.things[player].pos[0],
+                fresh.inv.get(&2).copied().unwrap_or(0.0),
+                fresh.time,
+                state.things.len()
+            );
+            assert_eq!(fresh.things[player].health, 37.0, "the health did not restore");
+            assert!(
+                (fresh.things[player].pos[0] - live.things[player].pos[0]).abs() < 1e-4,
+                "the position did not restore"
+            );
+            assert_eq!(fresh.inv.get(&2).copied(), Some(3.0), "the inventory did not restore");
+            assert_eq!(fresh.time, 128.5, "the clock did not restore");
+            let _ = std::fs::remove_file(&path);
+        }
         println!("--- save check passed ---");
         return;
     }

@@ -286,6 +286,11 @@ flag                                                   exit  what it prints
 --campaign                                               0  --- campaign check passed ---
 --transition                                             0  --- transition check passed ---
 --save                                                   0  wrote 9320 bytes (version 6), round-tripped
+                                                             the state too: health 37, +1.25 along x,
+                                                             inventory bin 2 = 3 and the clock at
+                                                             128.5 s all restore onto a fresh
+                                                             runtime from a `SAVE_SECTION` in the
+                                                             `.jks`
 --ui-tables                                              0  41 screens; 39 name a click and a hover wav
 --ui-visible                                             0  --- ui visible check passed ---
 --force-screen                                           0  --- force screen check passed ---

@@ -215,6 +215,10 @@ pub const PULL_RANGE: f32 = 30.0;
 pub const PULL_REACH: f32 = 2.0;
 /// `SITHBIN_GOAL00` (`types_enums.h`): the first of the goal counters `SetGoalFlags` writes.
 pub const GOAL_BIN: i32 = 100;
+/// The `.jks` section kind this build puts [`Snapshot::to_bytes`]'s payload in. The engine's own
+/// records are 0x0C (things) and up; this claims an unused kind so a retail save and a port save can
+/// be told apart by their contents rather than by their name.
+pub const SAVE_SECTION: u16 = 0x1001;
 /// `SithDamageType`: what kind of hurt, as a bitmask. Only the bits this port distinguishes.
 pub const DAMAGE_IMPACT: u32 = 0x01;
 pub const DAMAGE_ENERGY: u32 = 0x02;
@@ -281,6 +285,180 @@ pub struct SurfaceState {
     pub light_rate: f32,
 }
 
+/// One thing's saved state: everything about it a save has to put back.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThingSave {
+    pub template: String,
+    pub pos: [f32; 3],
+    pub angles: [f32; 3],
+    pub sector: i32,
+    pub health: f32,
+    pub flags: u32,
+    pub jk_flags: u32,
+    pub destroyed: bool,
+    pub frame: f32,
+}
+
+/// A whole savegame: the things, what the player carries, and the clock.
+///
+/// `sithGamesave.c` writes a thing record per thing plus the player block and the per-sector and
+/// per-surface state; this is the same list, in this build's own layout (the container is still a
+/// `.jks`, so the engine's prefix is written and a retail file still parses). Cog VM state is **not**
+/// here: a save that restores the world but restarts every script is the ceiling this marks.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Snapshot {
+    pub time: f32,
+    pub things: Vec<ThingSave>,
+    pub inv: BTreeMap<i32, f32>,
+    pub weapon: Option<String>,
+    pub cur_bin: i32,
+    pub saber: Option<SaberInfo>,
+    pub adjoin_flags: Vec<u16>,
+    pub sector_light: Vec<f32>,
+}
+
+/// The snapshot's on-disk bytes. Little-endian, length-prefixed strings, one record per thing:
+/// `sithGamesave.c` writes the same information into a `.jks`, and [`crate::jks`] carries that
+/// container; this is the payload that goes inside one of its sections.
+impl Snapshot {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"BKSV");
+        out.extend_from_slice(&self.time.to_le_bytes());
+        out.extend_from_slice(&(self.things.len() as u32).to_le_bytes());
+        for thing in &self.things {
+            let name = thing.template.as_bytes();
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(name);
+            for value in thing.pos.iter().chain(thing.angles.iter()).chain([&thing.health]) {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+            out.extend_from_slice(&thing.sector.to_le_bytes());
+            out.extend_from_slice(&thing.flags.to_le_bytes());
+            out.extend_from_slice(&thing.jk_flags.to_le_bytes());
+            out.push(u8::from(thing.destroyed));
+            out.extend_from_slice(&thing.frame.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.inv.len() as u32).to_le_bytes());
+        for (bin, amount) in &self.inv {
+            out.extend_from_slice(&bin.to_le_bytes());
+            out.extend_from_slice(&amount.to_le_bytes());
+        }
+        let weapon = self.weapon.as_deref().unwrap_or("");
+        out.extend_from_slice(&(weapon.len() as u16).to_le_bytes());
+        out.extend_from_slice(weapon.as_bytes());
+        out.extend_from_slice(&self.cur_bin.to_le_bytes());
+        match &self.saber {
+            Some(blade) => {
+                out.push(1);
+                for text in [&blade.side, &blade.tip, &blade.wall_sparks, &blade.blood_sparks, &blade.saber_sparks] {
+                    let bytes = text.as_bytes();
+                    out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+                    out.extend_from_slice(bytes);
+                }
+                for value in [blade.base_rad, blade.tip_rad, blade.length] {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            None => out.push(0),
+        }
+        out.extend_from_slice(&(self.adjoin_flags.len() as u32).to_le_bytes());
+        for flag in &self.adjoin_flags {
+            out.extend_from_slice(&flag.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.sector_light.len() as u32).to_le_bytes());
+        for light in &self.sector_light {
+            out.extend_from_slice(&light.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Option<Snapshot> {
+        let mut at = Reader { data, at: 0 };
+        if at.take(4)? != b"BKSV" {
+            return None;
+        }
+        let mut save = Snapshot { time: at.f32()?, ..Snapshot::default() };
+        for _ in 0..at.u32()? {
+            save.things.push(ThingSave {
+                template: at.text()?,
+                pos: [at.f32()?, at.f32()?, at.f32()?],
+                angles: [at.f32()?, at.f32()?, at.f32()?],
+                health: at.f32()?,
+                sector: at.i32()?,
+                flags: at.u32()?,
+                jk_flags: at.u32()?,
+                destroyed: at.u8()? != 0,
+                frame: at.f32()?,
+            });
+        }
+        for _ in 0..at.u32()? {
+            save.inv.insert(at.i32()?, at.f32()?);
+        }
+        let weapon = at.text()?;
+        save.weapon = (!weapon.is_empty()).then_some(weapon);
+        save.cur_bin = at.i32()?;
+        if at.u8()? != 0 {
+            save.saber = Some(SaberInfo {
+                side: at.text()?,
+                tip: at.text()?,
+                wall_sparks: at.text()?,
+                blood_sparks: at.text()?,
+                saber_sparks: at.text()?,
+                base_rad: at.f32()?,
+                tip_rad: at.f32()?,
+                length: at.f32()?,
+            });
+        }
+        for _ in 0..at.u32()? {
+            save.adjoin_flags.push(at.u16()?);
+        }
+        for _ in 0..at.u32()? {
+            save.sector_light.push(at.f32()?);
+        }
+        Some(save)
+    }
+}
+
+/// A cursor over a snapshot's bytes.
+struct Reader<'a> {
+    data: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let slice = self.data.get(self.at..self.at + n)?;
+        self.at += n;
+        Some(slice)
+    }
+
+    fn u8(&mut self) -> Option<u8> {
+        Some(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn i32(&mut self) -> Option<i32> {
+        Some(i32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn f32(&mut self) -> Option<f32> {
+        Some(f32::from_le_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn text(&mut self) -> Option<String> {
+        let len = self.u16()? as usize;
+        String::from_utf8(self.take(len)?.to_vec()).ok()
+    }
+}
+
 /// `NewColorEffect`'s screen effect: `stdPalEffects`' filter/tint/add channels and a fade.
 #[derive(Clone, Debug, Default)]
 pub struct ColorEffect {
@@ -307,7 +485,7 @@ pub struct CarryOver {
 
 /// `jkSetSaberInfo`'s blade, as `jkSaber_InitializeSaberInfo` stores it: the two blade materials,
 /// the base and tip radii, the length, and the three spark templates a hit spawns.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SaberInfo {
     pub side: String,
     pub tip: String,
@@ -3279,6 +3457,72 @@ impl Runtime {
         (alpha > 0.0).then_some((filter, tint, add, alpha))
     }
 
+    /// Everything a savegame has to put back: the things, what the player carries, the clock and the
+    /// sector state.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            time: self.time,
+            things: self
+                .things
+                .iter()
+                .enumerate()
+                .map(|(index, thing)| ThingSave {
+                    template: self.templates.get(index).cloned().unwrap_or_default(),
+                    pos: thing.pos,
+                    angles: [thing.pitch, thing.yaw, thing.roll],
+                    sector: thing.sector,
+                    health: thing.health,
+                    flags: thing.flags,
+                    jk_flags: thing.jk_flags,
+                    destroyed: thing.destroyed,
+                    frame: thing.frame,
+                })
+                .collect(),
+            inv: self.inv.clone(),
+            weapon: self.weapon.clone(),
+            cur_bin: self.cur_bin,
+            saber: self.saber.get(&self.player_thing()).cloned(),
+            adjoin_flags: self.adjoin_flags.clone(),
+            sector_light: self.sectors.iter().map(|s| s.light).collect(),
+        }
+    }
+
+    /// Put [`Self::snapshot`] back. Things are matched **by index**, which is what a save of one level
+    /// into the same level needs; a snapshot taken on another level does not fit and is ignored by
+    /// length.
+    pub fn restore(&mut self, save: &Snapshot) {
+        self.time = save.time;
+        for (index, saved) in save.things.iter().enumerate() {
+            let Some(thing) = self.things.get_mut(index) else { break };
+            thing.pos = saved.pos;
+            thing.pitch = saved.angles[0];
+            thing.yaw = saved.angles[1];
+            thing.roll = saved.angles[2];
+            thing.sector = saved.sector;
+            thing.health = saved.health;
+            thing.flags = saved.flags;
+            thing.jk_flags = saved.jk_flags;
+            thing.destroyed = saved.destroyed;
+            thing.frame = saved.frame;
+        }
+        self.inv = save.inv.clone();
+        self.weapon = save.weapon.clone();
+        self.cur_bin = save.cur_bin;
+        if let Some(blade) = &save.saber {
+            let player = self.player_thing();
+            self.saber.insert(player, blade.clone());
+        }
+        if save.adjoin_flags.len() == self.adjoin_flags.len() {
+            self.adjoin_flags.copy_from_slice(&save.adjoin_flags);
+        }
+        for (sector, light) in self.sectors.iter_mut().zip(&save.sector_light) {
+            sector.light = *light;
+            sector.light_from = *light;
+            sector.light_end = *light;
+            sector.light_rate = 0.0;
+        }
+    }
+
     /// What the player keeps across a level change.
     ///
     /// The engine's `jkPlayer_*` state survives the level load — inventory, the armed bin, the
@@ -5475,6 +5719,50 @@ mod tests {
         // Script text is collected, not dropped.
         rt.call("jkPrintUNIString", &[Value::Str("GUI_NOPE".into())]);
         assert_eq!(rt.prints, vec!["GUI_NOPE".to_string()]);
+    }
+
+    #[test]
+    fn a_savegame_snapshot_round_trips_through_its_bytes() {
+        // A save has to survive the trip to disk and back with every field intact, not just the
+        // position: the whole point is that a player who loads gets the world they left.
+        let mut rt = door_runtime();
+        rt.time = 42.5;
+        rt.call("SetInv", &[Value::Num(0.0), Value::Num(2.0), Value::Num(3.0)]);
+        rt.call(
+            "jkSetSaberInfo",
+            &[
+                Value::Num(0.0),
+                Value::Str("side.mat".into()),
+                Value::Str("tip.mat".into()),
+                Value::Num(0.02),
+                Value::Num(0.001),
+                Value::Num(0.12),
+                Value::Str("+wall".into()),
+                Value::Str("+blood".into()),
+                Value::Str("+spark".into()),
+            ],
+        );
+        rt.things[0].pos = [1.5, -2.5, 3.5];
+        rt.things[0].yaw = 33.0;
+        rt.things[0].health = 17.0;
+        rt.things[0].destroyed = true;
+        rt.things[0].jk_flags = 3;
+        let save = rt.snapshot();
+        let bytes = save.to_bytes();
+        let back = Snapshot::from_bytes(&bytes).expect("the snapshot did not parse");
+        assert_eq!(back, save, "the snapshot changed on the way through its bytes");
+        assert_eq!(back.things[0].pos, [1.5, -2.5, 3.5]);
+        assert_eq!(back.things[0].health, 17.0);
+        assert!(back.things[0].destroyed);
+        assert_eq!(back.inv.get(&2).copied(), Some(3.0));
+        assert_eq!(back.saber.as_ref().map(|b| b.side.as_str()), Some("side.mat"));
+        // Restoring it puts the world back on a fresh runtime.
+        let mut fresh = door_runtime();
+        fresh.restore(&back);
+        assert_eq!(fresh.time, 42.5);
+        assert_eq!(fresh.things[0].pos, [1.5, -2.5, 3.5]);
+        assert_eq!(fresh.things[0].jk_flags, 3);
+        assert_eq!(fresh.inv.get(&2).copied(), Some(3.0));
     }
 
     #[test]
