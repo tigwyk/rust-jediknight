@@ -155,6 +155,7 @@ const GATES: &[&str] = &[
     "--pickup",
     "--save",
     "--items",
+    "--weapons",
     "--quicksave",
     "--sleep",
     "--triggers",
@@ -332,6 +333,7 @@ fn main() {
     let mut save_check: Option<String> = None;
     let mut quicksave_check = false;
     let mut items_check = false;
+    let mut weapons_check = false;
     let mut sound_check = false;
     let mut music_check = false;
     let mut ui_visible = false;
@@ -645,6 +647,8 @@ fn main() {
             "--quicksave" => quicksave_check = true,
             // `--items`: `misc\items.dat`, the inventory table the engine registers bins from.
             "--items" => items_check = true,
+            // `--weapons`: run the item scripts `misc\items.dat` names and report what answers.
+            "--weapons" => weapons_check = true,
             // `--sound`: the `.snd` classes' own fade radii, and the volume curve over them.
             "--sound" => sound_check = true,
             // `--music`: which songs the shipped scripts ask for, and what the install has.
@@ -2870,6 +2874,63 @@ fn main() {
             let _ = std::fs::remove_file(&path);
         }
         println!("--- save check passed ---");
+        return;
+    }
+
+    if weapons_check {
+        // The 24 item scripts `misc\items.dat` names have never been run: no level places them as
+        // instances, so `--cog-check`'s pass never reaches them and their verb surface is unknown.
+        // Run `startup` and every label each one declares, against a real level's runtime, and
+        // report what nothing answers — the same measurement that found `AutosaveGame`.
+        let table = gobs
+            .read("misc\\items.dat")
+            .map(|d| hud::items(&String::from_utf8_lossy(&d)))
+            .unwrap_or_default();
+        let sim_world = runtime::Runtime::handle(&world.level);
+        let mut ran = 0usize;
+        let mut errors = 0usize;
+        let mut unimplemented: std::collections::BTreeMap<String, usize> = Default::default();
+        for def in table.iter().filter(|d| d.cog.is_some()) {
+            let name = def.cog.as_deref().unwrap_or_default().to_ascii_lowercase();
+            let Some(script) = world.cogs.get(&name).or_else(|| {
+                gobs.read(&name)
+                    .and_then(|d| cog::parse(&String::from_utf8_lossy(&d)).ok())
+                    .map(|parsed| Box::leak(Box::new(parsed)) as &cog::Cog)
+            }) else {
+                println!("weapons: `{name}` (bin {}) did not load", def.id);
+                continue;
+            };
+            let mut vm = cog::Vm::with_world(sim_world.clone());
+            script.bind(&mut vm, &[]);
+            let labels: Vec<String> = std::iter::once("startup".to_string())
+                .chain(script.labels.iter().map(|(l, _)| l.clone()))
+                .collect();
+            for label in labels {
+                if script.label(&label).is_none() {
+                    continue;
+                }
+                match vm.run_label(script, &label) {
+                    Ok(_) => ran += 1,
+                    Err(e) if e == cog::WAITING => ran += 1,
+                    Err(_) => errors += 1,
+                }
+            }
+            for (verb, n) in &vm.trace.unimplemented {
+                *unimplemented.entry(verb.clone()).or_default() += n;
+            }
+        }
+        let total: usize = unimplemented.values().sum();
+        let mut ranked: Vec<(String, usize)> = unimplemented.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        println!(
+            "weapons: {ran} label(s) ran, {errors} error(s), {total} unimplemented verb call(s) across the item scripts"
+        );
+        for (verb, n) in ranked.iter() {
+            println!("  {verb} x{n}");
+        }
+        assert!(ran > 20, "the item scripts did not run ({ran} labels)");
+        println!("weapons: {} distinct verb(s) with no answer", ranked.len());
+        println!("--- weapons check passed ---");
         return;
     }
 
@@ -14949,6 +15010,9 @@ fn setup(
     // has no file access, so the loader hands the counts over once. The inventory's own `cog=`
     // column comes over the same way, so a pickup can name the script that bin runs.
     sim.world.borrow_mut().item_cog = world.item_cogs.clone();
+    // `GetKeyLen` answers a `.key`'s frame count, which the loader already parsed.
+    sim.world.borrow_mut().key_lengths =
+        world.keys.iter().map(|(name, key)| (name.clone(), key.frames as f32)).collect();
     sim.world.borrow_mut().surface_cels = level
         .surfaces
         .iter()

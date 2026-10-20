@@ -315,6 +315,13 @@ flag                                                   exit  what it prints
                                                              bin 2 going from empty to held
                                                              asks for `weap_bryar.cog`, and a
                                                              held bin does not ask twice
+--weapons                                                0  the item scripts `misc\items.dat` names run
+                                                             for the first time: 106 labels, 0 errors, 0
+                                                             unimplemented verb calls. They had never been
+                                                             reached -- no level places them -- and the first
+                                                             measurement found 193 calls across 21 verbs
+                                                             (`jkSetWaggle`, `GetKeyLen`, `jkPlayPOVKey`,
+                                                             `ActivateWeapon`, …), all now answered
 --ui-tables                                              0  41 screens; 39 name a click and a hover wav
 --ui-visible                                             0  --- ui visible check passed ---
 --force-screen                                           0  --- force screen check passed ---

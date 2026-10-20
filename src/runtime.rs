@@ -759,6 +759,34 @@ pub struct Runtime {
     /// `LoadSound`'s table: the sound paths scripts have asked for, in order, so the verb can answer a
     /// stable id the way the engine answers `sithSound->id`.
     pub loaded_sounds: Vec<String>,
+    /// The weapon cog armed for the player: `ActivateWeapon(thing, cog, fireRate, mode)` stores it and
+    /// the engine's weapon controls send that cog `fire`/`autofire` while the trigger is held. The
+    /// runtime records it; the app delivers the message, since the VMs live there.
+    pub weapon_cog: Option<(i32, f32, i32)>,
+    /// `ActivateWeapon`'s fire rate, which `ChangeFireRate` replaces and the trigger reads.
+    pub weapon_rate: f32,
+    /// `SetAutoSwitch`/`GetAutoSwitch`: the player's weapon-auto-switch bit field.
+    pub auto_switch: u32,
+    /// `SetAutoPickup`/`GetAutoPickup`: the same, for items.
+    pub auto_pickup: u32,
+    /// `SetWeaponMesh`/`jkSetPOVModel`/`jkSetWaggle`/`jkPlayPOVKey`: the first-person weapon's own
+    /// data. This build draws no viewmodel, so these are recorded for the pass that will.
+    pub weapon_mesh: BTreeMap<usize, String>,
+    pub pov_model: BTreeMap<usize, String>,
+    pub pov_key: BTreeMap<usize, String>,
+    pub waggle: BTreeMap<usize, [f32; 3]>,
+    /// `.key` name -> frame count, for `GetKeyLen`. The loader fills it.
+    pub key_lengths: BTreeMap<String, f32>,
+    /// `SetArmedMode`/`SetMajorMode`: the puppet's armed state and its major mode.
+    pub armed_mode: BTreeMap<usize, u32>,
+    pub major_mode: BTreeMap<usize, u32>,
+    /// `SetCurWeapon`'s weapon thing, when a script named one.
+    pub cur_weapon_thing: Option<usize>,
+    /// `GetThingClassCog`: the cog a thing's class names.
+    pub thing_class_cog: BTreeMap<usize, i32>,
+    /// `jkEnableSaber`/`jkDisableSaber`, and the saber camera the scripts switch to.
+    pub saber_enabled: bool,
+    pub saber_cam: i32,
     /// `misc\items.dat`'s `cog=` column: inventory bin -> the script that bin runs. The loader fills
     /// it once, because the runtime has no file access.
     pub item_cog: BTreeMap<i32, String>,
@@ -1046,6 +1074,21 @@ impl Runtime {
             hud_message: None,
             string_buffer: String::new(),
             loaded_sounds: Vec::new(),
+            weapon_cog: None,
+            weapon_rate: 0.0,
+            auto_switch: 1,
+            auto_pickup: 1,
+            weapon_mesh: BTreeMap::new(),
+            pov_model: BTreeMap::new(),
+            pov_key: BTreeMap::new(),
+            waggle: BTreeMap::new(),
+            key_lengths: BTreeMap::new(),
+            armed_mode: BTreeMap::new(),
+            major_mode: BTreeMap::new(),
+            cur_weapon_thing: None,
+            thing_class_cog: BTreeMap::new(),
+            saber_enabled: true,
+            saber_cam: 0,
             item_cog: BTreeMap::new(),
             pending_cogs: Vec::new(),
             spawned_cogs: std::collections::BTreeSet::new(),
@@ -2054,6 +2097,32 @@ impl Runtime {
                 | "loadtemplate"
                 | "setfacelightmode"
                 | "pathmoveresume"
+                | "activateweapon"
+                | "deactivateweapon"
+                | "changefirerate"
+                | "setautoswitch"
+                | "getautoswitch"
+                | "setautopickup"
+                | "getautopickup"
+                | "getkeylen"
+                | "jksetweaponmesh"
+                | "setweaponmesh"
+                | "jksetpovmodel"
+                | "jkplaypovkey"
+                | "jkstoppovkey"
+                | "setarmedmode"
+                | "getcurweaponmode"
+                | "setcurweapon"
+                | "setmajormode"
+                | "getmajormode"
+                | "getcurrentcamera"
+                | "getthingclasscog"
+                | "randvec"
+                | "getthingthrust"
+                | "jkenablesaber"
+                | "jkdisablesaber"
+                | "jkgetsabercam"
+                | "jksetwaggle"
                 | "stopkey"
                 | "loadsound"
                 | "jkstringclear"
@@ -4817,6 +4886,126 @@ impl Runtime {
             }
             // `SetThingRotVel(thing, vector)`: `sithCogFunctionThing_SetThingRotVel` stores the vector as
             // `physicsParams.angularVelocity`, and only for a physics thing.
+            // The weapon mechanism half of the item scripts: `ActivateWeapon(thing, cog, rate, mode)`
+            // arms a weapon cog (`sithWeapon_ActivateWeapon`), `DeactivateWeapon` clears it, and
+            // `ChangeFireRate` replaces the rate `fire:` computes from `fireWait / powerBoost`.
+            "activateweapon" => {
+                let cog = idx(1) as i32;
+                let rate = num(2) as f32;
+                let mode = idx(3) as i32;
+                if (0..2).contains(&mode) {
+                    self.weapon_cog = Some((cog, rate, mode));
+                    self.weapon_rate = rate;
+                }
+                Value::Nil
+            }
+            "deactivateweapon" => {
+                self.weapon_cog = None;
+                Value::Nil
+            }
+            "changefirerate" => {
+                self.weapon_rate = num(1) as f32;
+                if let Some((_, rate, mode)) = self.weapon_cog {
+                    self.weapon_cog = Some((self.weapon_cog.map(|c| c.0).unwrap_or(-1), rate, mode));
+                }
+                Value::Nil
+            }
+            "setautoswitch" => {
+                self.auto_switch = idx(0) as u32;
+                Value::Nil
+            }
+            "getautoswitch" => Value::Num(self.auto_switch as f64),
+            "setautopickup" => {
+                self.auto_pickup = idx(0) as u32;
+                Value::Nil
+            }
+            "getautopickup" => Value::Num(self.auto_pickup as f64),
+            // A `.key`'s length in frames, for a script that schedules an animation.
+            "getkeylen" => {
+                let key = match args.first() {
+                    Some(Value::Str(s)) => s.to_ascii_lowercase(),
+                    _ => String::new(),
+                };
+                Value::Num(self.key_lengths.get(&key).copied().unwrap_or(0.0) as f64)
+            }
+            // The first-person half: recorded, not drawn — this build has no viewmodel pass.
+            "jksetweaponmesh" | "setweaponmesh" => {
+                if let Some(Value::Str(mesh)) = args.get(1) {
+                    self.weapon_mesh.insert(ti(0), mesh.clone());
+                }
+                Value::Nil
+            }
+            "jksetpovmodel" => {
+                if let Some(Value::Str(model)) = args.get(1) {
+                    self.pov_model.insert(ti(0), model.clone());
+                }
+                Value::Nil
+            }
+            "jkplaypovkey" => {
+                if let Some(Value::Str(key)) = args.get(1) {
+                    self.pov_key.insert(ti(0), key.clone());
+                }
+                Value::Num(0.0)
+            }
+            "jkstoppovkey" => {
+                self.pov_key.remove(&ti(0));
+                Value::Nil
+            }
+            "jksetwaggle" => {
+                self.waggle.insert(ti(0), args.get(1).map(vec3).unwrap_or([0.0; 3]));
+                Value::Nil
+            }
+            // Armed state and selection, which the item scripts set when a weapon is drawn or holstered.
+            "setarmedmode" => {
+                self.armed_mode.insert(ti(0), idx(1) as u32);
+                Value::Nil
+            }
+            "getcurweaponmode" => {
+                Value::Num(self.armed_mode.get(&ti(0)).copied().unwrap_or(0) as f64)
+            }
+            "setcurweapon" => {
+                self.cur_weapon_thing = Some(ti(1));
+                Value::Nil
+            }
+            // Puppet modes: this build plays one key per thing, so the major mode is bookkeeping.
+            "setmajormode" => {
+                self.major_mode.insert(ti(0), idx(1) as u32);
+                Value::Nil
+            }
+            "getmajormode" => Value::Num(self.major_mode.get(&ti(0)).copied().unwrap_or(0) as f64),
+            // The camera slot `SetCurrentCamera` chose.
+            "getcurrentcamera" => Value::Num(self.current_camera as f64),
+            // The cog a thing's class names; -1 when it names none.
+            "getthingclasscog" => Value::Num(self.thing_class_cog.get(&ti(0)).copied().unwrap_or(-1) as f64),
+            // A random unit vector: the engine's `randvec` picks angles, not components, so the
+            // result is on the unit sphere.
+            "randvec" => {
+                let a = (crate::cog::pseudo_random() as f32) * std::f32::consts::TAU;
+                let z = (crate::cog::pseudo_random() as f32) * 2.0 - 1.0;
+                let r = (1.0 - z * z).max(0.0).sqrt();
+                Value::Vec([(r * a.cos()) as f64, (r * a.sin()) as f64, z as f64])
+            }
+            // A thing's own thrust, from its template's `maxthrust`.
+            "getthingthrust" => {
+                let template = self.templates.get(ti(0)).cloned().unwrap_or_default();
+                let thrust = self
+                    .template_speed
+                    .get(&template.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or(0.0);
+                Value::Num(thrust as f64)
+            }
+            // The saber's own camera and enable flags: the saber camera is a view this build has no
+            // renderer for, and `jkDisableSaber` turns the blade off.
+            "jkenablesaber" => {
+                self.saber_enabled = true;
+                Value::Nil
+            }
+            "jkdisablesaber" => {
+                self.saber_enabled = false;
+                Value::Nil
+            }
+            "jkgetsabercam" => Value::Num(self.saber_cam as f64),
             "setthingrotvel" => {
                 if let Some(thing) = self.thing_mut(idx(0))
                     && thing.phys_flags != u32::MAX
@@ -5480,6 +5669,21 @@ mod tests {
             hud_message: None,
             string_buffer: String::new(),
             loaded_sounds: Vec::new(),
+            weapon_cog: None,
+            weapon_rate: 0.0,
+            auto_switch: 1,
+            auto_pickup: 1,
+            weapon_mesh: BTreeMap::new(),
+            pov_model: BTreeMap::new(),
+            pov_key: BTreeMap::new(),
+            waggle: BTreeMap::new(),
+            key_lengths: BTreeMap::new(),
+            armed_mode: BTreeMap::new(),
+            major_mode: BTreeMap::new(),
+            cur_weapon_thing: None,
+            thing_class_cog: BTreeMap::new(),
+            saber_enabled: true,
+            saber_cam: 0,
             item_cog: BTreeMap::new(),
             pending_cogs: Vec::new(),
             spawned_cogs: std::collections::BTreeSet::new(),
