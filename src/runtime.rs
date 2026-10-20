@@ -3589,6 +3589,14 @@ impl Runtime {
         }
     }
 
+    /// Whether this thing's template carries a `weapon=`, which is the engine's own default for the
+    /// armed mode: a class that ships a weapon starts with it drawn.
+    pub fn thing_has_weapon(&self, thing: usize) -> bool {
+        self.templates
+            .get(thing)
+            .is_some_and(|name| self.template_weapon.contains_key(&name.to_ascii_lowercase()))
+    }
+
     /// Whether `thing` fired within the last quarter second — long enough for the puppet's `fire`
     /// track to have started, which is what the renderer switches to.
     pub fn just_fired(&self, thing: usize) -> bool {

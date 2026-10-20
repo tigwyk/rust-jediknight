@@ -7393,12 +7393,11 @@ fn main() {
             else {
                 continue;
             };
-            let states: std::collections::BTreeMap<String, &str> = puppet
+            let states: std::collections::BTreeMap<(String, usize), &str> = puppet
                 .states
                 .iter()
-                .filter(|s| s.mode == 0)
                 .filter(|s| world.keys.get(&s.key.to_ascii_lowercase()).is_some_and(key::Key::is_drawable))
-                .map(|s| (s.name.to_ascii_lowercase(), s.key.as_str()))
+                .map(|s| ((s.name.to_ascii_lowercase(), s.mode), s.key.as_str()))
                 .collect();
             let yaw = thing.yaw;
             let (sin, cos) = yaw.to_radians().sin_cos();
@@ -7413,7 +7412,7 @@ fn main() {
                 ("strafeleft", right * -0.3),
             ] {
                 assert_eq!(locomotion_state(vel, yaw), want, "{}: {want} from {vel}", thing.template);
-                if !states.contains_key(want) {
+                if !states.contains_key(&(want.to_string(), 0)) {
                     continue;
                 }
                 if want == "walk" {
@@ -7427,8 +7426,28 @@ fn main() {
             "{level_name}: {moved} of {checked} placed actors move between frame 0 and mid-loop (worst {:.3})",
             worst
         );
+        // The armed set: a puppet's mode-1 rows are the same animations with the weapon drawn, and
+        // `SetArmedMode(thing, 1)` is what selects them. The count says whether that axis does
+        // anything on a real level rather than only in the tables.
+        let mut armed = 0usize;
+        for thing in &world.level.things {
+            let Some(puppet) = world
+                .level
+                .template_param(&thing.template, "puppet")
+                .map(|n| n.to_ascii_lowercase())
+                .and_then(|name| world.puppets.get(&name))
+            else {
+                continue;
+            };
+            if puppet.states.iter().any(|s| s.mode == 1) {
+                armed += 1;
+            }
+        }
         println!(
             "  locomotion: {walkable} actor(s) ship a `walk` key and {running} a `run` key, so a moving body plays its own stride"
+        );
+        println!(
+            "  armed: {armed} actor(s) ship a mode-1 (weapon drawn) set, which `SetArmedMode` selects"
         );
         assert!(
             checked == 0 || moved * 2 > checked,
@@ -11860,7 +11879,9 @@ struct Actor {
     /// `strafeleft`, `straferight`, … The `.pup` row order is the engine's animation index, so
     /// the names are the engine's own (`sithPuppet.c`'s `animNames`). Armed modes (`mode=1`) are
     /// skipped: the port draws the unarmed puppet.
-    states: std::collections::BTreeMap<String, String>,
+    /// Name and **mode** -> the `.key` it plays. A `.pup` names the same animation twice, once for
+    /// the weapon holstered (mode 0) and once drawn (mode 1), so the key is the pair.
+    states: std::collections::BTreeMap<(String, usize), String>,
     /// The state name currently playing, so a change restarts the clip (`sithPuppet_PlayMode`
     /// resets `animStartedMs`).
     state: String,
@@ -11981,14 +12002,15 @@ fn spawn_models(
         // Every animation the puppet can play, so a state name can become a keyfile when the
         // actor starts moving. Mode 0 is the unarmed set — a `stand` lookup above already takes
         // the first row, and mode 1 is the same animations with the weapon drawn.
-        let states: std::collections::BTreeMap<String, String> = puppet
+        let states: std::collections::BTreeMap<(String, usize), String> = puppet
             .map(|puppet| {
                 puppet
                     .states
                     .iter()
-                    .filter(|s| s.mode == 0)
                     .filter(|s| world.keys.get(&s.key.to_ascii_lowercase()).is_some_and(key::Key::is_drawable))
-                    .map(|s| (s.name.to_ascii_lowercase(), s.key.to_ascii_lowercase()))
+                    .map(|s| {
+                        ((s.name.to_ascii_lowercase(), s.mode), s.key.to_ascii_lowercase())
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -12861,9 +12883,20 @@ fn animate_actors(
         // An actor that just fired plays its puppet's `fire` track: the engine's
         // `sithPuppet_UpdateThingMove` picks the action track over the stride, and an actor that
         // keeps walking while shooting is the sliding soldier the trace made obvious.
-        let firing = sim
+        let (firing, armed) = sim
             .as_deref()
-            .is_some_and(|sim| sim.world.borrow().just_fired(actor.thing));
+            .map(|sim| {
+                let rt = sim.world.borrow();
+                // `SetArmedMode(thing, 1)` is what a weapon cog calls when the weapon is drawn; a
+                // thing whose template carries a `weapon=` counts as armed until a script says
+                // otherwise, which is the engine's own default for a class that ships one.
+                let armed = match rt.armed_mode.get(&actor.thing) {
+                    Some(mode) => *mode as usize,
+                    None => usize::from(rt.thing_has_weapon(actor.thing)),
+                };
+                (rt.just_fired(actor.thing), armed)
+            })
+            .unwrap_or((false, 0));
         // The state name, which is what decides the keyfile below. A scripted clip has no state
         // of its own, so it gets the empty name and always wins.
         let state = if scripted.is_some() {
@@ -12871,14 +12904,18 @@ fn animate_actors(
         } else if actor.dying {
             "death"
         } else {
-            actor_state(vel, pose.unwrap_or(0.0), firing, |name| actor.states.contains_key(name))
+            actor_state(vel, pose.unwrap_or(0.0), firing, armed, |name| {
+                actor.states.contains_key(&(name.to_string(), armed))
+                    || actor.states.contains_key(&(name.to_string(), 0))
+            })
         };
         if actor.state.as_str() != state {
             let next = match &scripted {
                 Some((key, _, _)) => key.clone(),
                 None => actor
                     .states
-                    .get(state)
+                    .get(&(state.to_string(), armed))
+                    .or_else(|| actor.states.get(&(state.to_string(), 0)))
                     .cloned()
                     .or_else(|| Some(animating_key(actor, actor.dying).to_string()))
                     .unwrap_or_default(),
@@ -12990,7 +13027,13 @@ fn locomotion_state(vel: Vec3, yaw_deg: f32) -> &'static str {
 /// back to the stride when the puppet ships no such row — a droid with no `fire` row still walks and
 /// shoots, it just does not animate the shot. `has` is the puppet's own state list, which keeps this
 /// a pure function the tests can drive without a Bevy world.
-fn actor_state(vel: Vec3, yaw_deg: f32, firing: bool, has: impl Fn(&str) -> bool) -> &'static str {
+fn actor_state(
+    vel: Vec3,
+    yaw_deg: f32,
+    firing: bool,
+    armed: usize,
+    has: impl Fn(&str) -> bool,
+) -> &'static str {
     if firing && has("fire") {
         return "fire";
     }
@@ -17249,14 +17292,21 @@ mod actor_state_tests {
         let still = Vec3::ZERO;
         let stormtrooper = |name: &str| ["stand", "walk", "run", "fire"].contains(&name);
         let droid = |name: &str| ["stand", "walk"].contains(&name);
-        assert_eq!(actor_state(still, 0.0, false, stormtrooper), "stand");
-        assert_eq!(actor_state(still, 0.0, true, stormtrooper), "fire");
+        let unarmed = 0;
+        assert_eq!(actor_state(still, 0.0, false, unarmed, stormtrooper), "stand");
+        assert_eq!(actor_state(still, 0.0, true, unarmed, stormtrooper), "fire");
         // A puppet with no `fire` row keeps its own state: it shoots without animating the shot.
-        assert_eq!(actor_state(still, 0.0, true, droid), "stand");
+        assert_eq!(actor_state(still, 0.0, true, unarmed, droid), "stand");
         // Movement still loses to the action track, which is the engine's ordering.
         let running = Vec3::new(1.0, 0.0, 0.0);
-        assert_eq!(actor_state(running, 0.0, false, stormtrooper), "run");
-        assert_eq!(actor_state(running, 0.0, true, stormtrooper), "fire");
+        assert_eq!(actor_state(running, 0.0, false, unarmed, stormtrooper), "run");
+        assert_eq!(actor_state(running, 0.0, true, unarmed, stormtrooper), "fire");
+        // The armed set is what `SetArmedMode(thing, 1)` selects: mode 1 rows are the same
+        // animation with the weapon drawn, and a state without one falls back to mode 0.
+        let armed = 1;
+        let drawn = |name: &str| ["stand", "walk", "run"].contains(&name);
+        assert_eq!(actor_state(still, 0.0, false, armed, drawn), "stand");
+        assert_eq!(actor_state(still, 0.0, true, armed, |_| false), "stand");
     }
 }
 
@@ -17370,7 +17420,7 @@ mod rules_tests {
             model: "3do/rystr.3do".into(),
             key: "kystand0.key".into(),
             death: Some("kyftdeth.key".into()),
-            states: std::collections::BTreeMap::from([("stand".to_string(), "kystand0.key".to_string())]),
+            states: std::collections::BTreeMap::from([(("stand".to_string(), 0), "kystand0.key".to_string())]),
             state: "stand".into(),
             phase: 0.0,
             parts: Vec::new(),
