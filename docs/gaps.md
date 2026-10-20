@@ -214,10 +214,12 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
   `Vec3(0.026, -0.037, -1.485)` once fixed — and the capture sat inside level 1's spawn prop (§5.9), so
   anything 1.5 units ahead was legitimately occluded. Walking into the open first and comparing frames
   with and without the effect shows it: `17EAC891…` with, `7881579F…` without. **`draw_created` was
-  never broken, and projectiles have been drawing all along.** What remains is the *cel grid*: a
-  sprite `.mat` is a strip of frames (`bryx.mat` 8 x 78), and `sprite_quad`'s cel count is a guess at
-  height-over-width that the picture contradicts (one "cel" still shows a 2 x 2 block), so the engine's
-  `rdMaterial` cel table needs reading out of the `.mat` header.
+  never broken, and projectiles have been drawing all along.** What remains is not a grid at all:
+  `rdMaterial_LoadEntry` (`0x44a260`) reads a 76-byte header, a 24-byte `rdTexinfoHeader` per cel
+  (+16 when `texture_type & 8`), then **one texture per cel** with its own header. The port's flat
+  140-byte header is the *first* cel's texture header, so a sprite's `+0x74`/`+0x78` land inside the
+  second cel's texinfo and read its words as "8 x 78" — the pixels are noise, and the 2 x 2 block in
+  the screenshots is noise too. Next: `tex::parse_mat` walking the cel table (`docs/formats.md` §5).
 
 * **Effects are sprites, and sprites are loaded and drawn.** A template's `sprite=` (`+laserhit` is
   `bryx.spr`) is now parsed for every template a level names and its materials are loaded through the

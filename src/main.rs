@@ -8366,6 +8366,27 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
                         face.width,
                         face.height
                     );
+                    // The engine reads a **76-byte** material header (`rdMaterial_LoadEntry`: one
+                    // `fileRead(_, buf, 0x4c)`), then one 24-byte `rdTexinfoHeader` per cel, then an
+                    // optional 16-byte extended header per cel. Print the first two so the layout can
+                    // be checked against the file instead of assumed from the flat 140-byte header
+                    // this port's bitmap read uses.
+                    if let Some(raw) = gobs.read(&face.material) {
+                        let word = |at: usize| {
+                            raw.get(at..at + 4)
+                                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                                .unwrap_or(0)
+                        };
+                        println!(
+                            "    header: rev {} type {:#x} cels {} textures {}; texinfo@76 type {:#x} f8 {:#x}",
+                            word(4),
+                            word(8),
+                            word(12),
+                            word(16),
+                            word(76),
+                            word(84)
+                        );
+                    }
                 }
                 sprite_cels.insert(face.material.clone(), bitmap.cels);
                 model_images.insert(face.material.clone(), image_from_rgba(bitmap.width, bitmap.height, keyed));

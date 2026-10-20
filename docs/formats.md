@@ -442,7 +442,35 @@ Binary. `MAT ` magic, `u32` version (`50`), then a 140-byte header carrying the
 bitmap dimensions at `+0x74` (width) and `+0x78` (height), then
 `width * height` bytes of 8-bit palette indices.
 
-Verified on the shipped materials — `140 + width * height == file length` for
+**That is right for a single-cel material and wrong for a multi-cel one**, and the engine's own
+loader says why. `rdMaterial_LoadEntry` (`0x44a260`) reads a **76-byte** header — `magic`,
+`revision` (`0x32`), `type`, `num_texinfo`, `num_textures`, then a 56-byte `rdTexFormat` — then one
+**24-byte `rdTexinfoHeader` per cel**, plus a further **16 bytes per cel** when that header's
+`texture_type & 8` is set, and then one `rdTexture` per cel, each with its own header and pixel data:
+
+```text
+76-byte material header
+24 bytes per cel  (+16 when texture_type & 8)
+then, per cel: a texture header (width at +0x10, height at +0x14) and width*height palette bytes
+```
+
+For a single-cel material that puts the texture header at `76 + 24 = 100`, its width and height at
+`116` and `120` — **`0x74` and `0x78`** — and the pixels at `140`. So the flat offsets this port has
+always used are the *first* cel's, which is exactly why every world texture works and every sprite is
+garbage: a sprite material's `+0x74`/`+0x78` land inside the *second* cel's texinfo header, whose
+words were read as "8 × 78". Measured on the shipped sprites with `BK_SPRITE_TRACE=1`:
+
+```text
+sprite `bryx.mat`: rev 50 type 0x2 cels 8 textures 8; texinfo@76 type 0x8
+```
+
+`cels == textures` — one texture per cel — and `texture_type & 8` is set, so each cel's entry is
+`24 + 16 = 40` bytes and the first texture is at `76 + 8 * 40 = 396`, not 140. The frames are
+therefore **separate textures**, not one vertical strip, and `tex::parse_mat` needs to walk the cel
+table to read them. Until it does, a sprite's pixels are whatever those bytes happen to be — the
+"2 × 2 block of frames" in the sprite screenshots is noise, not an animation.
+
+Verified on the shipped single-cel materials — `140 + width * height == file length` for
 files with no trailing data:
 
 | file | size | w | h | `140 + w*h` |
