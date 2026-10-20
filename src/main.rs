@@ -144,6 +144,7 @@ const GATES: &[&str] = &[
     "--mana",
     "--ammo",
     "--campaign",
+    "--tally",
     "--muzzle",
     "--use-item",
     "--engine-audit",
@@ -366,6 +367,7 @@ fn main() {
     let mut soak_check = false;
     // `--soak-all`: every level in the archives, one process each.
     let mut soak_all = false;
+    let mut tally_check = false;
     let mut sound_check = false;
     let mut music_check = false;
     let mut ui_visible = false;
@@ -682,6 +684,7 @@ fn main() {
             // loop as a whole rather than one piece of it.
             "--soak" => soak_check = true,
             "--soak-all" => soak_all = true,
+            "--tally" => tally_check = true,
             // `--sound`: the `.snd` classes' own fade radii, and the volume curve over them.
             "--sound" => sound_check = true,
             // `--music`: which songs the shipped scripts ask for, and what the install has.
@@ -3382,6 +3385,105 @@ fn main() {
         assert!(rt.time >= seconds * 0.99, "the clock did not advance");
         assert!(grew < 4000, "the thing list grew by {grew}, which is runaway spawning");
         println!("--- soak check passed ---");
+        return;
+    }
+
+    if tally_check {
+        // The end-of-level screen, end to end: the engine's own formulas on a real runtime, the rows
+        // `jkGuiSingleTally_Show` fills at run time, and pixels drawn — the panel used to show a
+        // frame with nothing in it.
+        let Some(menus) = load_menus(&game) else {
+            eprintln!("fatal: no JK.EXE for the menu tables");
+            std::process::exit(1);
+        };
+        let Some(screen) = menus.find("quit") else {
+            eprintln!("fatal: no tally screen in the tables");
+            std::process::exit(1);
+        };
+        let strings = uni::parse(&String::from_utf8_lossy(
+            &gobs.read("ui\\jedi.uni").unwrap_or_default(),
+        ));
+        let sim_world = runtime::Runtime::handle(&world.level);
+        let (rank, alignment, found, total) = {
+            let mut rt = sim_world.borrow_mut();
+            rt.inv.insert(20, 3.0);
+            rt.inv.insert(70, 2.0);
+            rt.inv.insert(71, 5.0);
+            rt.inv.insert(72, 2.0);
+            rt.inv.insert(73, 5.0);
+            // A light-side power, so the alignment lands on the light side of zero.
+            rt.inv.insert(25, 4.0);
+            (rt.jedi_rank(), rt.alignment(), rt.secrets().0, rt.secrets().1)
+        };
+        let rows = tally_lines(screen, &strings, rank, alignment, found, total)
+            .expect("the tally screen has no force-star panel");
+        println!(
+            "tally: rank {rank}, alignment {alignment:.1}, secrets {found}/{total}; rows {rows:?}"
+        );
+        assert!(rows[0].starts_with("RANK 3"), "the rank row is {:?}", rows[0]);
+        assert!(rows[0].ends_with('L'), "a non-negative alignment is not light: {:?}", rows[0]);
+        // …and a dark-side power of the same level flips the letter.
+        {
+            let mut rt = sim_world.borrow_mut();
+            rt.inv.insert(25, 0.0);
+            rt.inv.insert(30, 4.0);
+            let dark = tally_lines(screen, &strings, rt.jedi_rank(), rt.alignment(), 2, 5)
+                .expect("rows");
+            assert!(dark[0].ends_with('D'), "a negative alignment is not dark: {:?}", dark[0]);
+            println!("tally: the dark side reads {:?}", dark[0]);
+        }
+        assert!(rows[1].contains('2') && rows[1].contains('5'), "the secrets row is {:?}", rows[1]);
+        // Every row has to draw: count non-background pixels inside each element's own rect.
+        let (base, panel) = load_backdrop(&gobs, screen, None).expect("the tally backdrop");
+        let menu_fonts = load_fonts(&gobs, &menus);
+        let palette = ui::palette_of(&base, &level_palette(&gobs, Some(level_name.as_str())));
+        let text = |index: usize| rows.get(index).cloned();
+        let look = ui::Look {
+            fonts: &menu_fonts,
+            art: &|_: i32| None,
+            checkbox: None,
+            palette: &palette,
+            stars: None,
+            text: &text,
+            ..ui::Look::default()
+        };
+        // The backdrop's own art fills every row, so counting lit pixels proves nothing. Draw twice —
+        // with the rows and with no text at all — and measure the difference: that is the text.
+        let backdrop = ui::Backdrop { base: &base, panel: panel.as_ref() };
+        let empty_strings = uni::parse("");
+        let no_text = |_: usize| None;
+        let bare = ui::Look {
+            fonts: &menu_fonts,
+            art: &|_: i32| None,
+            checkbox: None,
+            palette: &palette,
+            stars: None,
+            text: &no_text,
+            ..ui::Look::default()
+        };
+        let mut with = ui::Canvas::new(640, 480);
+        ui::draw_screen(&mut with, screen, &backdrop, &empty_strings, &look, None);
+        let mut without = ui::Canvas::new(640, 480);
+        ui::draw_screen(&mut without, screen, &backdrop, &empty_strings, &bare, None);
+        let mut drawn = Vec::new();
+        for (index, item) in screen.items.iter().enumerate().take(3) {
+            let [x, y, w, h] = item.rect;
+            let mut changed = 0usize;
+            for py in y.max(0)..(y + h).min(with.height as i32) {
+                for px in x.max(0)..(x + w).min(with.width as i32) {
+                    let at = ((py as u32 * with.width + px as u32) * 4) as usize;
+                    if with.rgba[at..at + 4] != without.rgba[at..at + 4] {
+                        changed += 1;
+                    }
+                }
+            }
+            drawn.push((index, changed));
+        }
+        println!("tally: pixels the rows themselves add {drawn:?}");
+        for (index, changed) in &drawn {
+            assert!(*changed > 20, "row {index} added {changed} pixel(s), which is no text");
+        }
+        println!("--- tally check passed ---");
         return;
     }
 
@@ -9344,6 +9446,75 @@ fn slot_path(dir: &std::path::Path, slot: usize) -> std::path::PathBuf {
     }
 }
 
+/// Fill a shipped string's `%d`/`%s` placeholders in order: the tally's secrets line is
+/// `jkStrings_GetUniStringWithFallback(GUI_SECRETS_FOUND, found, total)`, and the table stores it
+/// with its placeholders intact. Extra placeholders are left alone rather than dropped.
+fn fill_numbers(format: &str, values: &[i32]) -> String {
+    let mut out = String::with_capacity(format.len() + 8);
+    let mut next = values.iter();
+    let mut rest = format;
+    while let Some(at) = rest.find('%') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let (spec, width) = match tail[1..].chars().next() {
+            Some('d') => (true, 2),
+            Some('i') => (true, 2),
+            Some('s') => (false, 2),
+            Some('u') => (true, 2),
+            _ => (false, 1),
+        };
+        if width == 1 {
+            out.push('%');
+            rest = &tail[1..];
+            continue;
+        }
+        match next.next() {
+            Some(value) => out.push_str(&value.to_string()),
+            None => out.push_str(&tail[..width]),
+        }
+        rest = &tail[width..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The tally screen's run-time text rows: rank with its light/dark letter, the secrets found, and the
+/// "stars earned" label. `jkGuiSingleTally_Show` fills them from `jkPlayer_GetJediRank`,
+/// `sithPlayer_GetInvItemAmount(0x46/0x47)` and `jkPlayer_CalcAlignment`, and the screen carries no
+/// keys for them. `None` when this screen is not the tally.
+///
+/// Shared with the `--tally` gate so the check exercises this, not a copy of it.
+fn tally_lines(
+    screen: &menus::Screen,
+    strings: &uni::Uni,
+    rank: i32,
+    alignment: f32,
+    found: i32,
+    total: i32,
+) -> Option<Vec<String>> {
+    if !screen.items.iter().any(|i| matches!(i.panel(), Some(menus::Panel::ForceStars))) {
+        return None;
+    }
+    // `_DAT_00522150` is 0.0: a non-negative alignment shows `L`, anything below shows `D`.
+    let side = if alignment >= 0.0 { 'L' } else { 'D' };
+    let secrets = if total < 1 {
+        strings
+            .get("GUI_NO_SECRETS")
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "No secrets found".to_string())
+    } else {
+        match strings.get("GUI_SECRETS_FOUND") {
+            Some(format) => fill_numbers(format, &[found, total]),
+            None => format!("{found} of {total} secrets found"),
+        }
+    };
+    let earned = strings
+        .get("GUI_STARS_EARNED")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "Stars earned".to_string());
+    Some(vec![format!("RANK {rank}  {side}"), secrets, earned])
+}
+
 /// What the pause menu asked for: `GUI_SAVE` writes the quicksave, `GUI_LOAD` reads it.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
 enum SaveLoad {
@@ -9979,10 +10150,24 @@ fn refresh_overlay(
                 .as_ref()
                 .filter(|_| screen.items.iter().any(|i| matches!(i.panel(), Some(menus::Panel::ForceStars))))
                 .map(|art| (art, rank));
+            // The tally's rows carry no key: `tally_lines` fills them, and the gate checks it.
+            let tally_lines = sim
+                .as_deref()
+                .map(|sim| {
+                    let rt = sim.world.borrow();
+                    let (found, total) = rt.secrets();
+                    tally_lines(&screen, &assets.strings, rank, rt.alignment(), found, total)
+                })
+                .unwrap_or(None);
             let checkbox = screen.art.iter().position(|n| n.eq_ignore_ascii_case("check.bm")).map(|i| i as i32);
             // A run-time dialog's lines are literal text, not keys.
             let lines = overlay.lines.clone();
-            let text = |index: usize| lines.iter().find(|(at, _)| *at == index).map(|(_, t)| t.clone());
+            let text = |index: usize| {
+                tally_lines
+                    .as_ref()
+                    .and_then(|rows| rows.get(index).cloned())
+                    .or_else(|| lines.iter().find(|(at, _)| *at == index).map(|(_, t)| t.clone()))
+            };
             let look = ui::Look {
                 fonts: &assets.fonts,
                 art: &art,
