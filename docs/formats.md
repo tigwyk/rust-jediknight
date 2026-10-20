@@ -2729,8 +2729,19 @@ Two conventions, stated because they are *not* the engine's full behaviour:
   too, so a script comparing `GetSenderRef() == GetSourceRef()` still matches for engine-triggered
   events; `GetSenderID` does answer the calling cog now.
 
-## 16.5 Firing a weapon — **observed**, first slice
+**The network verbs answer for a single-player build, and `SendTrigger` really broadcasts.**
+`sithNet_isMulti` and `sithNet_isServer` are false in a one-player game, so `ismulti`/`isserver`, the team
+and score getters answer 0 and the setters do nothing — the engine's own answers, spelled out rather than
+left to the catch-all, because a catch-all would answer the same 0 to a getter that must *not* be 0.
+`*multimodeflags` round-trip through a stored word (`sithMulti_multiModeFlags`) so a script that sets and
+re-reads one sees its own value. `SendTrigger(thing, type, p0..p3)` (`sithCogFunction.c:1189`) broadcasts
+`SITH_MESSAGE_TRIGGER` (40) when its source is the local player; the port queues `#40` with no cog target,
+which is its broadcast, and the receiving pump resolves the id against each listener's `message:` list.
+The port's messages carry no parameters, so the four arguments are dropped — the type is what listeners
+branch on. Every shipped `SendTrigger` caller lives in a multiplayer script (`ctf_main`, `c3_largelevel*`,
+`c2_breakingglass`), so this is fidelity for those levels rather than something a campaign level exercises.
 
+## 16.5 Firing a weapon — **observed**, first slice
 A weapon is a template, and firing it is `CreateThing` of that template at the shooter with
 the template's own launch velocity. Level 1's own weapons:
 

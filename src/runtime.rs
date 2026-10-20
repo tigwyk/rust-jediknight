@@ -411,6 +411,9 @@ pub struct Runtime {
     /// `SetMasterCog`/`GetMasterCog`: the engine keeps one global master cog index
     /// (`sithCog_g_pMasterCog`), which sidekick and `endlevel` scripts compare with `GetSelfCog()`.
     pub master_cog: Option<i32>,
+    /// `sithMulti_multiModeFlags`: what the network verbs read and write. Zero in a single-player game,
+    /// and stored rather than dropped so a script that sets and re-reads a flag sees its own value.
+    pub multi_mode_flags: u32,
     /// Per-actor instinct classes, keyed by thing index: what the `.ai` said and what this
     /// build does with it (see `ai_tick`).
     pub ai: BTreeMap<usize, crate::ai::Ai>,
@@ -739,6 +742,7 @@ impl Runtime {
             fire_wait: 0.0,
             next_fire: 0.0,
             master_cog: None,
+            multi_mode_flags: 0,
             ai: BTreeMap::new(),
             template_weapon: level
                 .templates
@@ -955,6 +959,18 @@ impl Runtime {
                 | "setmastercog"
                 | "getgoalframe"
                 | "clearthingflags"
+                | "ismulti"
+                | "isserver"
+                | "getnumplayersinteam"
+                | "getteamscore"
+                | "getplayerscore"
+                | "getplayerteam"
+                | "setplayerscore"
+                | "setplayerteam"
+                | "getmultimodeflags"
+                | "setmultimodeflags"
+                | "clearmultimodeflags"
+                | "sendtrigger"
                 | "setfirewait"
                 | "setgoalflags"
                 | "cleargoalflags"
@@ -2487,6 +2503,33 @@ impl Runtime {
                 // That is the value `MoveToFrame(elevator, 1 - GetGoalFrame(elevator), speed)` reverses.
                 self.thing(idx(0)).and_then(|t| t.target).map_or(0.0, |(frame, _)| frame as f64),
             ),
+            // ---- the network verbs, answered for a single-player build ----
+            //
+            // `sithNet_isMulti` and `sithNet_isServer` are both false in a one-player game, so these are
+            // the engine's own answers, not placeholders: no team, no remote player, no score. They are
+            // spelled out because the catch-all would answer the same 0 to a getter that must *not* be 0.
+            "ismulti" | "isserver" | "getnumplayersinteam" | "getteamscore" | "getplayerscore"
+            | "getplayerteam" => Value::Num(0.0),
+            "setplayerscore" | "setplayerteam" => Value::Nil,
+            "getmultimodeflags" => Value::Num(self.multi_mode_flags as f64),
+            "setmultimodeflags" => {
+                self.multi_mode_flags |= idx(0) as u32;
+                Value::Nil
+            }
+            "clearmultimodeflags" => {
+                self.multi_mode_flags &= !(idx(0) as u32);
+                Value::Nil
+            }
+            // `SendTrigger(thing, type, p0..p3)` (`sithCogFunction.c:1189`) **broadcasts**
+            // `SITH_MESSAGE_TRIGGER` (40) when its source is the local player. This port's messages carry
+            // labels, not the four parameters, so the broadcast carries the message id alone — which is
+            // the part a listener branches on (`message trigger`).
+            "sendtrigger" => {
+                let sender = (self.caller_cog >= 0).then_some(self.caller_cog as usize);
+                self.messages.push(("#40".to_string(), sender, None));
+                self.messages_sent += 1;
+                Value::Nil
+            }
             "getthingsignature" => Value::Num(
                 self.signature.get(ti(0)).copied().unwrap_or(0) as f64,
             ),
@@ -3089,6 +3132,7 @@ mod tests {
             fire_wait: 0.0,
             next_fire: 0.0,
             master_cog: None,
+            multi_mode_flags: 0,
             ai: BTreeMap::new(),
             template_weapon: BTreeMap::new(),
             ai_shot_interval: 1.0,
@@ -3404,6 +3448,30 @@ mod tests {
             TF_INCAMFOV,
             "ClearThingFlags did not clear just that bit"
         );
+        // The network verbs answer for a single-player build (`sithNet_isMulti`/`_isServer` are false),
+        // and the mode flags are stored rather than dropped so a script re-reading one sees its own.
+        assert_eq!(rt.call("IsMulti", &[]), Value::Num(0.0));
+        assert_eq!(rt.call("IsServer", &[]), Value::Num(0.0));
+        rt.call("SetMultiModeFlags", &[Value::Num(4.0)]);
+        assert_eq!(rt.call("GetMultiModeFlags", &[]), Value::Num(4.0));
+        rt.call("ClearMultiModeFlags", &[Value::Num(4.0)]);
+        assert_eq!(rt.call("GetMultiModeFlags", &[]), Value::Num(0.0));
+        // `SendTrigger` broadcasts `trigger` (id 40) to every cog when its source is the local player.
+        rt.caller_cog = 3;
+        rt.messages.clear();
+        rt.call("SendTrigger", &vec![Value::Num(0.0); 6]);
+        assert!(
+            rt.messages
+                .iter()
+                .any(|(name, sender, cog)| name == "#40" && *sender == Some(3) && cog.is_none()),
+            "the trigger broadcast is not on the queue: {:?}",
+            rt.messages
+        );
+        // `GetGoalFrame` reports a path mover's destination, and 0 for a thing that is not moving.
+        assert_eq!(rt.call("GetGoalFrame", &[Value::Num(0.0)]), Value::Num(0.0));
+        rt.things[0].target = Some((1.0, 8.0));
+        assert_eq!(rt.call("GetGoalFrame", &[Value::Num(0.0)]), Value::Num(1.0));
+        rt.things[0].target = None;
         // `SetMasterCog`/`GetMasterCog` are the engine's one global master index; unset is -1, and
         // the shipped scripts only clear it by resolving an index to no cog.
         assert_eq!(rt.call("GetMasterCog", &[]), Value::Num(-1.0));
@@ -3415,6 +3483,7 @@ mod tests {
         // sender it records is the calling cog — which `sithCogFunction_SendMessage` passes on and the
         // receiver reads back with `GetSenderID`.
         rt.caller_cog = 5;
+        rt.messages.clear();
         rt.call("SendMessage", &[Value::Num(3.0), Value::Num(27.0)]);
         assert_eq!(
             rt.messages,
