@@ -83,8 +83,14 @@ both multiplayer-only screens.
 
 ## 3. The stubbed cog verbs — none left
 
-Every verb the shipped scripts call now gets an answer: **706 verb calls across the 34 levels, 0
-stubbed, 0 errors** (`--cog-check`).
+Every verb the shipped scripts call now gets an answer: **0 stubbed, 0 errors** across the 34 levels
+(`--cog-check`).
+
+The check runs **every label each script declares**, not just `startup` and its declared `message:`
+labels. That deep pass is the point: the startup-only count said "zero" for rounds while
+`AutosaveGame`, the whole `jkString*` buffer (`jkStringClear`/`Concat*`/`Output`), `StopKey`,
+`LoadSound` and `SyncScores` were silently returning 0 — verbs that sit behind cutscene and gameplay
+labels nothing had fired. A number that measures what a pass reaches is only as good as the pass.
 
 That was worth driving to zero rather than leaving as "harmless". An unhandled verb returns `0`, the
 catch-all arm of `Runtime::handle` — the right answer for `ismulti` and `isserver` in a

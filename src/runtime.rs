@@ -749,6 +749,13 @@ pub struct Runtime {
     pub template_respawn: BTreeMap<String, f32>,
     /// Text a script printed (`jkPrintUNIString`), in order: the `.uni` key it names.
     pub prints: Vec<String>,
+    /// `jkStringClear`/`jkStringConcat*`/`jkStringOutput`: the engine keeps one wide buffer
+    /// (`jkCog_jkstring`, 128 characters) that the concat verbs append to. A script builds a line in
+    /// pieces and `jkStringOutput` puts the finished line up.
+    pub string_buffer: String,
+    /// `LoadSound`'s table: the sound paths scripts have asked for, in order, so the verb can answer a
+    /// stable id the way the engine answers `sithSound->id`.
+    pub loaded_sounds: Vec<String>,
     /// Script-to-script messages queued by `SendMessage`: `(label, sending cog, target cog)`.
     /// The engine's arm is `SendMessage(cogIdx, messageType)` — `sithCogFunction_SendMessage` —
     /// so the target is a **cog index**, not a thing, and the label is either a name or `#N`
@@ -1025,6 +1032,8 @@ impl Runtime {
             template_types,
             template_health,
             prints: Vec::new(),
+            string_buffer: String::new(),
+            loaded_sounds: Vec::new(),
             messages: Vec::new(),
             caller_cog: -1,
             messages_sent: 0,
@@ -2030,6 +2039,19 @@ impl Runtime {
                 | "loadtemplate"
                 | "setfacelightmode"
                 | "pathmoveresume"
+                | "stopkey"
+                | "loadsound"
+                | "jkstringclear"
+                | "jkstringconcatint"
+                | "jkstringconcatflex"
+                | "jkstringconcatspace"
+                | "jkstringconcatunistring"
+                | "jkstringconcatstring"
+                | "jkstringconcatasciistring"
+                | "jkstringconcatvector"
+                | "jkstringconcatplayername"
+                | "jkstringoutput"
+                | "syncscores"
                 | "autosavegame"
                 | "setthingmodel"
                 | "newcoloreffect"
@@ -3463,6 +3485,13 @@ impl Runtime {
         (alpha > 0.0).then_some((filter, tint, add, alpha))
     }
 
+    /// Append to the `jkString*` buffer, respecting the engine's 128-character cap.
+    fn string_buffer_push(&mut self, text: &str) {
+        if self.string_buffer.chars().count() + text.chars().count() < 128 {
+            self.string_buffer.push_str(text);
+        }
+    }
+
     /// Everything a savegame has to put back: the things, what the player carries, the clock and the
     /// sector state.
     pub fn snapshot(&self) -> Snapshot {
@@ -4457,6 +4486,27 @@ impl Runtime {
                 }
                 Value::Num(0.0)
             }
+            // `StopKey(thing, handle, blendTime)`: stop the key on that puppet track. This build plays
+            // one key per thing, so any handle stops it — the engine's `track` argument only picks among
+            // several simultaneous tracks, which is the puppet work.
+            "stopkey" => {
+                self.play_key.remove(&ti(0));
+                Value::Nil
+            }
+            // `LoadSound(path)`: answer the sound's id, or -1. This build plays sounds by name, so the
+            // id is an index into the names it has been given.
+            "loadsound" => {
+                match args.first() {
+                    Some(Value::Str(path)) => {
+                        let key = path.to_ascii_lowercase();
+                        if !self.loaded_sounds.contains(&key) {
+                            self.loaded_sounds.push(key);
+                        }
+                        Value::Num(self.loaded_sounds.len() as f64)
+                    }
+                    _ => Value::Num(-1.0),
+                }
+            }
             "stopanim" => {
                 self.play_key.remove(&ti(0));
                 Value::Nil
@@ -4805,6 +4855,64 @@ impl Runtime {
                 Value::Num(self.next_in_sector(sector, after) as f64)
             }
             // Script text: the argument is a `.uni` key (`jkPrintUNIString("GUI_NOPE")`).
+            // The `jkString*` buffer: `jkCog_jkstring` is one 128-character buffer the concat verbs
+            // append to, `jkStringClear` empties, and `jkStringOutput` puts up. The engine's own cap is
+            // 128 characters (`finalLen < 0x81`), so an overlong line is dropped rather than appended.
+            "jkstringclear" => {
+                self.string_buffer.clear();
+                Value::Nil
+            }
+            "jkstringconcatint" => {
+                self.string_buffer_push(&format!("{:.0}", num(0)));
+                Value::Nil
+            }
+            "jkstringconcatflex" => {
+                self.string_buffer_push(&format!("{:.2}", num(0)));
+                Value::Nil
+            }
+            "jkstringconcatspace" => {
+                self.string_buffer_push(" ");
+                Value::Nil
+            }
+            "jkstringconcatunistring" => {
+                // A `.uni` key by number: resolve it through the install's table when the app prints,
+                // so the buffer keeps the key the script named.
+                let text = match args.first() {
+                    Some(Value::Str(s)) => s.clone(),
+                    _ => format!("COG_{:05}", num(0) as i64),
+                };
+                self.string_buffer_push(&text);
+                Value::Nil
+            }
+            "jkstringconcatstring" | "jkstringconcatasciistring" => {
+                let text = match args.first() {
+                    Some(Value::Str(s)) => s.clone(),
+                    _ => format!("{:.0}", num(0)),
+                };
+                self.string_buffer_push(&text);
+                Value::Nil
+            }
+            "jkstringconcatvector" => {
+                let v = args.first().map(vec3).unwrap_or([0.0; 3]);
+                self.string_buffer_push(&format!("{:.2} {:.2} {:.2}", v[0], v[1], v[2]));
+                Value::Nil
+            }
+            "jkstringconcatplayername" => {
+                self.string_buffer_push("Kyle");
+                Value::Nil
+            }
+            // `jkStringOutput(player, type)`: the finished line goes up. This build has no HUD text
+            // channel of its own, so it lands in the same `prints` list `jkPrintUNIString` writes.
+            "jkstringoutput" => {
+                let line = std::mem::take(&mut self.string_buffer);
+                if !line.is_empty() {
+                    self.prints.push(line);
+                }
+                Value::Nil
+            }
+            // `SyncScores`: multiplayer score replication. Single-player has no scores to sync, and
+            // the engine's own arm does nothing when `sithNet_isMulti` is clear.
+            "syncscores" => Value::Nil,
             "jkprintunistring" => {
                 if let Some(Value::Str(s)) = args.first() {
                     self.prints.push(s.clone());
@@ -5317,6 +5425,8 @@ mod tests {
             template_count: BTreeMap::new(),
             template_bins: BTreeMap::new(),
             prints: Vec::new(),
+            string_buffer: String::new(),
+            loaded_sounds: Vec::new(),
             messages: Vec::new(),
             caller_cog: -1,
             messages_sent: 0,
@@ -5732,6 +5842,31 @@ mod tests {
         // Script text is collected, not dropped.
         rt.call("jkPrintUNIString", &[Value::Str("GUI_NOPE".into())]);
         assert_eq!(rt.prints, vec!["GUI_NOPE".to_string()]);
+    }
+
+    #[test]
+    fn the_string_buffer_builds_a_line_in_pieces() {
+        // `jkCog_jkstring`: the concat verbs append, clear empties it, output puts the line up.
+        let mut rt = door_runtime();
+        rt.call("jkStringClear", &[]);
+        rt.call("jkStringConcatInt", &[Value::Num(7.0)]);
+        rt.call("jkStringConcatSpace", &[]);
+        rt.call("jkStringConcatAsciiString", &[Value::Str("secrets".into())]);
+        assert_eq!(rt.string_buffer, "7 secrets", "the buffer did not build the line");
+        rt.call("jkStringOutput", &[Value::Num(-1.0), Value::Num(-1.0)]);
+        assert_eq!(
+            rt.prints.last().map(String::as_str),
+            Some("7 secrets"),
+            "the line was not put up"
+        );
+        assert!(rt.string_buffer.is_empty(), "output must consume the buffer");
+        // A `.uni` key keeps the key the script named, for the app to resolve.
+        rt.call("jkStringConcatUniString", &[Value::Num(262.0)]);
+        assert_eq!(rt.string_buffer, "COG_00262", "the uni key was not carried through");
+        // The engine's own 128-character cap: an overlong line is dropped, not appended.
+        rt.call("jkStringClear", &[]);
+        rt.call("jkStringConcatAsciiString", &[Value::Str("x".repeat(200))]);
+        assert!(rt.string_buffer.is_empty(), "the 128-character cap did not hold");
     }
 
     #[test]

@@ -71,7 +71,10 @@ flag                                                   exit  what it prints
                                                              picks walk/run/walkback/strafe from the velocity
                                                              `ai_tick` walked at, and 128 of level 1's actors
                                                              ship a `walk` row to play it with
---cog-check                                              0  --- cog check passed ---        (every level's scripts)
+--cog-check                                              0  --- cog check passed ---        (every level's scripts, and every label each one declares:
+                                                             the deep pass is what found `AutosaveGame`, the
+                                                             `jkString*` buffer, `StopKey`, `LoadSound` and
+                                                             `SyncScores`)
 --adjoins                                                0  1206 rows: 5 start with MOVE clear, 1 AI-only,
                                                              0 not visible; 27 startup scripts shut 7 doorway
                                                              sectors; the sweep crosses sector 1 <-> 8 and

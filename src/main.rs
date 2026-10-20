@@ -9308,6 +9308,46 @@ fn run_level(
         }
     }
 
+    // Every *other* label, once. `startup` and the declared `message:` labels are what a level
+    // reaches on its own, and `AutosaveGame` sat behind a cutscene label that pass never fires — so
+    // the stub count was blind to it for a whole round of green gates. Running the remaining labels
+    // is what makes that number mean "verbs the scripts reach", not "verbs startup happens to call".
+    //
+    // Bounded per label by `cog::LABEL_BUDGET`, which every shipped label reaches its next wait well
+    // inside; a label that would not return is reported as waiting, not spun on.
+    let mut deep_ran = 0usize;
+    let mut deep_waiting = 0usize;
+    let mut deep_errors = 0usize;
+    for (name, vm) in &mut vms {
+        let script = &scripts[name];
+        let skip: std::collections::HashSet<String> = script
+            .messages()
+            .map(|m| m.name.clone())
+            .chain(std::iter::once("startup".to_string()))
+            .collect();
+        let labels: Vec<String> = script
+            .labels
+            .iter()
+            .map(|(label, _)| label.clone())
+            .filter(|label| !skip.contains(label) && !label.starts_with("message:"))
+            .collect();
+        for label in labels {
+            match vm.run_label(script, &label) {
+                Ok(_) => deep_ran += 1,
+                Err(e) if e == cog::WAITING => deep_waiting += 1,
+                Err(_) => deep_errors += 1,
+            }
+        }
+        for (verb, n) in &vm.trace.calls {
+            *verbs.entry(verb.clone()).or_default() += n;
+        }
+    }
+    if !quiet {
+        println!(
+            "labels: {deep_ran} ran, {deep_waiting} waiting, {deep_errors} error(s) — every label each script declares, not just startup and its messages"
+        );
+    }
+
     // The script-to-script bus: a `SendMessage` queues a message, and the pump delivers it
     // to every instance that declares that label. The engine addresses one cog; this
     // build's instances are level-wide, so a broadcast is what they can receive. Bounded,
