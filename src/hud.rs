@@ -74,6 +74,13 @@ pub struct ItemDef {
     pub name: String,
     pub id: i32,
     pub max: i32,
+    /// The flags column, as the file spells it (`weapon`, `force`, …). `jkHudInv_ItemDatLoad` parses
+    /// it through a keyword table into the bit word `sithInventory_RegisterType` stores, so keeping
+    /// the words is lossless and needs no transcription of that table.
+    pub flags: String,
+    /// `jkHudInv_ItemDatLoad`'s `cog <path>` pair: the script a bin runs. The engine loads it and
+    /// marks the type with bit 0x40, which is what makes a weapon or force power answer `autoselect:`.
+    pub cog: Option<String>,
 }
 
 impl ItemDef {
@@ -94,14 +101,19 @@ pub fn items(text: &str) -> Vec<ItemDef> {
         if line.is_empty() {
             continue;
         }
-        let mut fields = line.split_whitespace();
-        let (Some(name), Some(id), Some(_min), Some(max)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
+        let rest: Vec<&str> = line.split_whitespace().collect();
+        let (Some(name), Some(id), Some(max)) = (rest.first(), rest.get(1), rest.get(3)) else {
             continue;
         };
         let (Ok(id), Ok(max)) = (id.parse(), max.parse()) else { continue };
-        out.push(ItemDef { name: name.to_string(), id, max });
+        // `jkHudInv_ItemDatLoad`: name id min max flags, then `key=value` words, where
+        // `cog=<path>` names that bin's script.
+        let flags = rest.get(4).copied().unwrap_or("").to_string();
+        let cog = rest.get(5..).unwrap_or(&[]).iter().find_map(|word| {
+            let (key, value) = word.split_once('=')?;
+            key.eq_ignore_ascii_case("cog").then(|| value.to_string())
+        });
+        out.push(ItemDef { name: name.to_string(), id, max, flags, cog });
     }
     out
 }
@@ -377,6 +389,24 @@ fn load(gobs: &gob::GobSet, name: &str) -> Option<bm::Bm> {
 }
 
 #[cfg(test)]
+mod items_tests {
+    use super::*;
+
+    /// `misc\items.dat`'s own shape: a `cog=<path>` word after the flags column. The parser
+    /// used to stop at `max`, which dropped every weapon script without saying so.
+    #[test]
+    fn the_item_table_keeps_the_cog_column() {
+        let text = "# bins\nfists 1 0 1 0x024 cog=weap_fists.cog\nbacta_tank 22 0 5 0x004\n";
+        let defs = items(text);
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].cog.as_deref(), Some("weap_fists.cog"), "the cog was dropped");
+        assert_eq!(defs[0].flags, "0x024");
+        assert_eq!(defs[0].max, 1);
+        assert_eq!(defs[1].cog, None, "an item with no cog grew one");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -398,11 +428,11 @@ mod tests {
     fn item_icons_follow_the_engines_name_rule() {
         // `sprintf("ui\\bm\\ic%.5s%d.bm", name, bpp)`: the first five characters of the
         // item name, which is why the files are `icbacta8.bm` and `ickeyre8.bm`.
-        let bacta = ItemDef { name: "bactatank".into(), id: 34, max: 5 };
+        let bacta = ItemDef { name: "bactatank".into(), id: 34, max: 5, flags: String::new(), cog: None };
         assert_eq!(bacta.icon(8), "ui\\bm\\icbacta8.bm");
-        let key = ItemDef { name: "keyred".into(), id: 39, max: 1 };
+        let key = ItemDef { name: "keyred".into(), id: 39, max: 1, flags: String::new(), cog: None };
         assert_eq!(key.icon(8), "ui\\bm\\ickeyre8.bm");
-        let jump = ItemDef { name: "f_jump".into(), id: 20, max: 4 };
+        let jump = ItemDef { name: "f_jump".into(), id: 20, max: 4, flags: String::new(), cog: None };
         assert_eq!(jump.icon(16), "ui\\bm\\icf_jum16.bm");
     }
 

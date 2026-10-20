@@ -151,6 +151,7 @@ const GATES: &[&str] = &[
     "--move",
     "--pickup",
     "--save",
+    "--items",
     "--quicksave",
     "--sleep",
     "--triggers",
@@ -327,6 +328,7 @@ fn main() {
     let mut ai_check = false;
     let mut save_check: Option<String> = None;
     let mut quicksave_check = false;
+    let mut items_check = false;
     let mut sound_check = false;
     let mut music_check = false;
     let mut ui_visible = false;
@@ -638,6 +640,8 @@ fn main() {
             }
             // `--quicksave`: the `F5`/`F9` path, end to end, without a window.
             "--quicksave" => quicksave_check = true,
+            // `--items`: `misc\items.dat`, the inventory table the engine registers bins from.
+            "--items" => items_check = true,
             // `--sound`: the `.snd` classes' own fade radii, and the volume curve over them.
             "--sound" => sound_check = true,
             // `--music`: which songs the shipped scripts ask for, and what the install has.
@@ -2863,6 +2867,43 @@ fn main() {
             let _ = std::fs::remove_file(&path);
         }
         println!("--- save check passed ---");
+        return;
+    }
+
+    if items_check {
+        // `misc\items.dat` is the inventory table the engine registers its bins from
+        // (`jkHudInv_ItemDatLoad`), and the `cog` column is what makes a bin a *script* — the piece
+        // this build has never read. Printing it is how the size of that work becomes a number.
+        let text = gobs.read("misc\\items.dat").unwrap_or_default();
+        let raw = String::from_utf8_lossy(&text);
+        for line in raw.lines().filter(|l| !l.trim_start().starts_with('#')).take(6) {
+            println!("  raw: {line}");
+        }
+        let defs = hud::items(&raw);
+        let with_cog: Vec<&hud::ItemDef> = defs.iter().filter(|d| d.cog.is_some()).collect();
+        println!(
+            "items: {} bins in `misc\\items.dat`, {} of them name a `cog`",
+            defs.len(),
+            with_cog.len()
+        );
+        for def in &with_cog {
+            println!(
+                "  {:>3} {:<20} max {:>3}  {:<12} {}",
+                def.id,
+                def.name,
+                def.max,
+                def.flags,
+                def.cog.as_deref().unwrap_or("")
+            );
+        }
+        // The cogs have to be in the install for any of that to run.
+        let present = with_cog
+            .iter()
+            .filter(|d| d.cog.as_deref().is_some_and(|c| gobs.read(c).is_some()))
+            .count();
+        println!("items: {present} of those cogs are in the archives");
+        assert!(defs.len() > 20, "the item table did not parse ({} bins)", defs.len());
+        println!("--- items check passed ---");
         return;
     }
 
