@@ -2900,6 +2900,14 @@ fn main() {
         assert_eq!(rt.inv.get(&2).copied(), Some(4.0), "the loaded save lost the inventory");
         assert_eq!(rt.time, 90.25, "the loaded save lost the clock");
         let _ = std::fs::remove_file(&path);
+        // The pause menu's rows, through the recovered graph: `jkGuiEsc_Show` case 15 and 13.
+        let save_row = nav::step(0x529560, 15, "GUI_SAVE");
+        let load_row = nav::step(0x529560, 13, "GUI_LOAD");
+        println!(
+            "quicksave: the pause menu's Save row is {save_row:?} and its Load row is {load_row:?}"
+        );
+        assert_eq!(save_row, nav::Step::SaveGame, "the Save row does not save");
+        assert_eq!(load_row, nav::Step::LoadGame, "the Load row does not load");
         println!("--- quicksave check passed ---");
         return;
     }
@@ -7836,6 +7844,7 @@ fn main() {
         .insert_resource(Screens(menus))
         .insert_resource(SaberBlade::default())
         .insert_resource(PendingRestore::default())
+        .insert_resource(SaveLoad::default())
         .insert_resource(SaveDir(
             std::env::var_os("BK_SAVE_DIR")
                 .map(std::path::PathBuf::from)
@@ -8159,10 +8168,15 @@ fn swap_level(world: &mut bevy::prelude::World) {
     let _ = world.run_system(setup_id);
 }
 
-/// Put the player's carried state onto the level that just loaded.
-///
-/// Its own system rather than part of `setup`, because `setup` is already at Bevy's parameter limit
-/// and because `Sim` arrives through `Commands` — by the next frame both exist.
+/// What the pause menu asked for: `GUI_SAVE` writes the quicksave, `GUI_LOAD` reads it.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
+enum SaveLoad {
+    #[default]
+    None,
+    Save,
+    Load,
+}
+
 /// A savegame waiting for its level to finish loading: `F9` sets this when the save is for another
 /// level, and this system puts it back once that level exists.
 #[derive(Resource, Default)]
@@ -8187,10 +8201,19 @@ fn quick_save(
     plan: Option<Res<FlowPlan>>,
     mut pending_level: ResMut<PendingLevel>,
     mut pending: ResMut<PendingRestore>,
+    // The pause menu's Save and Load rows arrive the same way the keys do: `activate` inserts the
+    // request, and this system is the one that holds the runtime, the directory and the plan.
+    mut menu: ResMut<SaveLoad>,
 ) {
     let (Some(sim), Some(dir)) = (sim, dir) else { return };
     let path = dir.0.join("quicksave.jks");
-    if keys.just_pressed(KeyCode::F5) {
+    let asked = *menu;
+    let save = keys.just_pressed(KeyCode::F5) || asked == SaveLoad::Save;
+    let load = keys.just_pressed(KeyCode::F9) || asked == SaveLoad::Load;
+    if asked != SaveLoad::None {
+        *menu = SaveLoad::None;
+    }
+    if save {
         let rt = sim.world.borrow();
         let level = plan.as_ref().map(|p| p.level.clone()).unwrap_or_default();
         match write_snapshot(&path, &level, &rt) {
@@ -8198,7 +8221,7 @@ fn quick_save(
             Err(e) => println!("quicksave: could not write `{}`: {e}", path.display()),
         }
     }
-    if keys.just_pressed(KeyCode::F9) {
+    if load {
         let Some((level, snapshot)) = read_save(&path) else {
             println!("quicksave: no save at `{}`", path.display());
             return;
@@ -8234,6 +8257,10 @@ fn restore_pending(
     commands.remove_resource::<PendingRestore>();
 }
 
+/// Put the player's carried state onto the level that just loaded, or a loaded savegame onto it.
+///
+/// Its own system rather than part of `setup`, because `setup` is already at Bevy's parameter limit
+/// and because `Sim` arrives through `Commands` — by the next frame both exist.
 fn adopt_carried(mut commands: Commands, carried: Option<Res<Carried>>, sim: Option<Res<Sim>>) {
     let (Some(carried), Some(sim)) = (carried, sim) else { return };
     sim.world.borrow_mut().adopt(&carried.0);
@@ -8812,6 +8839,18 @@ fn activate(
     match step {
         nav::Step::Quit => {
             commands.write_message(AppExit::Success);
+        }
+        // The pause menu's Save and Load rows. The picker screen that would choose a slot is not
+        // built, so both act on the one slot the keys use — `quick_save` owns the file work because
+        // it is the system that holds the runtime, the save directory and the level plan together.
+        nav::Step::SaveGame | nav::Step::LoadGame => {
+            let want = if step == nav::Step::SaveGame { SaveLoad::Save } else { SaveLoad::Load };
+            commands.insert_resource(want);
+            // Saving hands the view back, as the engine does; loading leaves the menu up until the
+            // restore has happened, because a level load may have to come first.
+            if want == SaveLoad::Save {
+                overlay.show(None, 0);
+            }
         }
         nav::Step::NewGame | nav::Step::Restart => {
             // Both are "load this level from its own start point": `swap_level` despawns what the

@@ -84,6 +84,10 @@ pub enum Step {
     Restart,
     /// Leave the level and go back to the main menu.
     Abort,
+    /// Write a savegame (the pause menu's `GUI_SAVE` row).
+    SaveGame,
+    /// Read one back (the pause menu's `GUI_LOAD` row).
+    LoadGame,
     /// Nothing this build knows how to do.
     Nothing,
 }
@@ -103,6 +107,10 @@ pub const ACTS: &[(u32, i32, Step)] = &[
     // separate "Return To Game" row (id 1) for that.
     (0x529560, 14, Step::Restart),
     (0x529560, 17, Step::Abort),
+    // `jkGuiEsc_Show` case 13 and case 15: the pause menu's Load and Save rows. The retail picker
+    // screen (a list of save slots) is not built, so these act on the one slot the keys use.
+    (0x529560, 13, Step::LoadGame),
+    (0x529560, 15, Step::SaveGame),
 ];
 
 /// The screen an element opens, if the graph knows it.
@@ -191,6 +199,8 @@ mod tests {
         assert_eq!(step(0x529560, 1, "GUI_RETURN_TO_GAME"), Step::Close);
         assert_eq!(step(0x529560, 14, "GUI_RESTART"), Step::Restart);
         assert_eq!(step(0x529560, 17, "GUI_ABORT"), Step::Abort);
+        assert_eq!(step(0x529560, 15, "GUI_SAVE"), Step::SaveGame);
+        assert_eq!(step(0x529560, 13, "GUI_LOAD"), Step::LoadGame);
         // Another screen's abort is still just a close.
         assert_eq!(step(0x5365a0, 17, "GUI_ABORT"), Step::Close);
     }

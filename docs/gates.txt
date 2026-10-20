@@ -303,7 +303,10 @@ flag                                                   exit  what it prints
                                                              it back restores health 55, the
                                                              inventory and the clock; the level
                                                              name is what decides between an
-                                                             in-place restore and a level load
+                                                             in-place restore and a level load; the
+                                                             pause menu's own `GUI_SAVE` and
+                                                             `GUI_LOAD` rows dispatch to the same
+                                                             two paths (`SaveGame`/`LoadGame`)
 --ui-tables                                              0  41 screens; 39 name a click and a hover wav
 --ui-visible                                             0  --- ui visible check passed ---
 --force-screen                                           0  --- force screen check passed ---
