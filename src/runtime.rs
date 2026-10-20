@@ -4937,6 +4937,10 @@ impl Runtime {
             // weapon. The negative case is the engine's own "clear" branch.
             "setfirewait" => {
                 if self.types.get(ti(0)).copied() == Some(10) {
+                    // A trigger event as well as a cadence: a **saber**'s `fire:` has no projectile to
+                    // spawn, it swings and calls `SetFireWait` (11gorc is the saber level), so a check
+                    // that counts only projectiles calls a working trigger broken there.
+                    self.shots_fired += 1;
                     let wait = num(1) as f32;
                     if wait < 0.0 {
                         self.fire_wait = -1.0;

@@ -15322,6 +15322,7 @@ fn live_play_drive(
     mut playing: Local<Option<LivePlayState>>,
     player: Option<Res<Player>>,
     sim: Option<Res<Sim>>,
+    ammo: Option<Res<AmmoBin>>,
     cam: Query<Entity, (With<Camera3d>, Without<OverlayQuad>)>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -15435,9 +15436,25 @@ fn live_play_drive(
         println!("live-play: FAIL the body did not move at all");
         failed += 1;
     }
-    if fired == 0 {
+    // "Nothing to fire" is not a broken trigger: a bot map can start the player with an empty clip and
+    // no weapon cog armed (m10, m_boss15 — `out of ammo (bin 11 is empty)`), and a saber level swings
+    // instead of shooting. Report which one it is instead of calling the map broken.
+    let nothing_to_fire = sim
+        .as_deref()
+        .map(|sim| {
+            let rt = sim.world.borrow();
+            let bin = ammo.as_deref().and_then(|a| a.0);
+            let rounds = bin
+                .map(|bin| rt.inv.get(&bin).copied().unwrap_or(0.0))
+                .unwrap_or(0.0);
+            rt.weapon_cog.is_none() && rounds <= 0.0
+        })
+        .unwrap_or(false);
+    if fired == 0 && !nothing_to_fire {
         println!("live-play: FAIL the trigger produced no projectile");
         failed += 1;
+    } else if fired == 0 {
+        println!("live-play: the trigger is armed with nothing to fire (no cog, empty clip)");
     }
     if failed > 0 {
         exit.write(AppExit::error());
