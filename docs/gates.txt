@@ -330,6 +330,9 @@ flag                                                   exit  what it prints
                                                              (also: its `selected:` names
                                                              `bryv.3do`, which resolves to 117
                                                              vertices and 15 materials for
+                                                             `draw_viewmodel`; its
+                                                             `jkPlayPOVKey` clip resolves to
+                                                             `bryvpst1.key`, 13 frames)
                                                              `draw_viewmodel`)
 --ui-tables                                              0  41 screens; 39 name a click and a hover wav
 --ui-visible                                             0  --- ui visible check passed ---

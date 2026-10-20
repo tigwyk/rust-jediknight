@@ -2994,6 +2994,18 @@ fn main() {
             );
             assert!(pov.is_some(), "`activated:` did not name a first-person model");
             assert!(vertices > 0, "the named first-person model is empty");
+            // The clip the cog asks for with `jkPlayPOVKey` must load too, or `draw_viewmodel` animates
+            // a pose it cannot find. `selected:` plays the mount clip; a shot plays the recoil.
+            let clip = rt.pov_key.get(&player).cloned();
+            let frames = clip
+                .as_ref()
+                .and_then(|name| gobs.read(name))
+                .map(|raw| key::parse(&String::from_utf8_lossy(&raw)))
+                .map(|key| key.frames)
+                .unwrap_or(0);
+            println!("weapons: its `jkPlayPOVKey` clip is {clip:?} -- {frames} frame(s)");
+            assert!(clip.is_some(), "no first-person clip was asked for");
+            assert!(frames > 0, "the named first-person clip has no frames");
         }
         println!("--- weapons check passed ---");
         return;
@@ -7430,6 +7442,7 @@ fn main() {
         // `SetArmedMode(thing, 1)` is what selects them. The count says whether that axis does
         // anything on a real level rather than only in the tables.
         let mut armed = 0usize;
+        let mut draws = 0usize;
         for thing in &world.level.things {
             let Some(puppet) = world
                 .level
@@ -7442,12 +7455,19 @@ fn main() {
             if puppet.states.iter().any(|s| s.mode == 1) {
                 armed += 1;
             }
+            if puppet
+                .states
+                .iter()
+                .any(|s| matches!(s.name.to_ascii_lowercase().as_str(), "mount" | "dismount"))
+            {
+                draws += 1;
+            }
         }
         println!(
             "  locomotion: {walkable} actor(s) ship a `walk` key and {running} a `run` key, so a moving body plays its own stride"
         );
         println!(
-            "  armed: {armed} actor(s) ship a mode-1 (weapon drawn) set, which `SetArmedMode` selects"
+            "  armed: {armed} actor(s) ship a mode-1 (weapon drawn) set, which `SetArmedMode` selects; {draws} ship mount/dismount tracks"
         );
         assert!(
             checked == 0 || moved * 2 > checked,
@@ -8705,6 +8725,12 @@ struct OverlayQuad;
 struct Viewmodel {
     name: Option<String>,
     entity: Option<Entity>,
+    /// The `.key` the cog last asked for (`jkPlayPOVKey`), with the clip's own frame cursor. A
+    /// viewmodel clip is short (`bryvpst1.key` is one shot's recoil), so its mesh is rebuilt on each
+    /// new frame — a handful of vertices, unlike a body puppet's.
+    key: Option<String>,
+    phase: f32,
+    frame: i32,
 }
 
 /// The viewmodel entity itself, spawned by [`draw_viewmodel`].
@@ -14143,14 +14169,60 @@ fn draw_viewmodel(
             .cloned()
     };
     if want == view.name && (want.is_none() || view.entity.is_some()) {
-        // Still the same weapon: only the sway moves.
-        if let (Some(entity), Some(rt)) = (view.entity, Some(sim.world.borrow()))
-            && let Ok(mut transform) = drawn.get_mut(entity)
-            && let Some(camera) = camera.iter().next()
-        {
-            let sway = rt.waggle.get(&rt.player_thing()).copied().unwrap_or([0.0; 3]);
-            let placement = view_offset(camera);
-            transform.translation = placement.0 + camera.right().as_vec3() * sway[0] as f32;
+        // Same weapon: the sway moves, and a `jkPlayPOVKey` clip advances if the cog started one.
+        let (sway, key, clock) = {
+            let rt = sim.world.borrow();
+            let player = rt.player_thing();
+            (rt.waggle.get(&player).copied().unwrap_or([0.0; 3]), rt.pov_key.get(&player).cloned(), rt.time)
+        };
+        if let Some(entity) = view.entity {
+            // A new clip restarts from its first frame; the same clip keeps its cursor.
+            if key != view.key {
+                view.key = key;
+                view.phase = 0.0;
+                view.frame = -1;
+            }
+            if let Some(name) = view.key.clone()
+                && let Some(keyfile) = gobs
+                    .0
+                    .read(&name)
+                    .map(|raw| key::parse(&String::from_utf8_lossy(&raw)))
+            {
+                let last = keyfile.frames.max(1) as f32 - 1.0;
+                let frame = (view.phase % (last + 1.0)).floor() as i32;
+                if frame != view.frame {
+                    view.frame = frame;
+                    if let Some(model) = gobs.0.read(&name.replace(".key", ".3do")).or_else(|| {
+                        // The model is the weapon's, not the clip's: reuse the one already drawn.
+                        view.name.as_ref().and_then(|n| gobs.0.read(n))
+                    }) {
+                        let model = tdo::parse(&String::from_utf8_lossy(&model));
+                        let material = model
+                            .materials
+                            .iter()
+                            .position(|mat| gobs.0.read(mat).is_some())
+                            .unwrap_or(0) as i32;
+                        let posed = model_mesh_posed(
+                            &model,
+                            material,
+                            (1.0, 1.0),
+                            Some((&keyfile, frame as f32)),
+                        );
+                        let handle = meshes.add(posed);
+                        if let Ok(mut mesh) = drawn.get_mut(entity) {
+                            let _ = &mut mesh;
+                        }
+                        commands.entity(entity).insert(Mesh3d(handle));
+                    }
+                }
+                view.phase += keyfile.fps * clock.max(0.0).min(0.1);
+            }
+            if let Ok(mut transform) = drawn.get_mut(entity)
+                && let Some(camera) = camera.iter().next()
+            {
+                let placement = view_offset(camera);
+                transform.translation = placement.0 + camera.right().as_vec3() * sway[0] as f32;
+            }
         }
         return;
     }
