@@ -2647,9 +2647,14 @@ impl Runtime {
                 match offset {
                     // The real offset, even when it sits inside the shooter's body: `impacts` skips
                     // the owner, so nothing needs the old "push it out" distance.
+                    //
+                    // `sithWeapon_FireProjectile` does `rdMatrix_TransformVector34Acc(offset,
+                    // &senderOrient)` — the offset is in the shooter's own frame, whose model +Y is
+                    // forward and +X is **right**. With yaw 0 facing +X and up +Z, that right is
+                    // (0, -1), which is `(ahead[1], -ahead[0])` for a general heading.
                     Some([x, y, z]) => [
-                        pos[0] + ahead[0] * y - ahead[1] * x,
-                        pos[1] + ahead[1] * y + ahead[0] * x,
+                        pos[0] + ahead[0] * y + ahead[1] * x,
+                        pos[1] + ahead[1] * y - ahead[0] * x,
                         pos[2] + z,
                     ],
                     _ => [

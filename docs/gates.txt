@@ -112,7 +112,9 @@ flag                                                   exit  what it prints
                                                              fireoffset= (greedo: 0.55 ahead, the
                                                              real number), not a guessed unit
                                                              ahead of the eye. The lateral sign is
-                                                             unverified here
+                                                             all three axes pinned to 0.02:
+                                                             the lateral sign came from the
+                                                             engine, not from a guess
 --use-item                                             0  --- use-item check passed ---
                                                              UseBin(40) sends `activated` to
                                                              the bacta script's own cog and the

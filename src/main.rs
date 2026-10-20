@@ -3399,13 +3399,20 @@ fn main() {
             "muzzle: `{shooter_name}` names fireoffset=({:.6}/{:.6}/{:.6}); its shot starts at {at:?}, the offset puts it at {want:?}",
             offset[0], offset[1], offset[2]
         );
-        // The default fallback is one unit ahead; a template with an offset must not be using it.
+        // The fallback, for contrast: a template with no offset keeps the old unit ahead.
+        // The tolerance pins the *signs*: `sithWeapon_FireProjectile` transforms the offset by the
+        // shooter's own orientation, so at yaw 0 the lateral component goes to `-x`. A sign error is
+        // 0.32 units wrong, not 0.02.
+        for (k, axis) in ["forward", "lateral", "up"].iter().enumerate() {
+            assert!(
+                (at[k] - want[k]).abs() < 0.02,
+                "the shot's {axis} is {}, not the offset's {}",
+                at[k],
+                want[k]
+            );
+        }
         assert!(
-            (at[0] - want[0]).abs() < 0.5 && (at[1] - want[1]).abs() < 0.5,
-            "the shot started at {at:?}, not at the shooter's own offset {want:?}"
-        );
-        assert!(
-            (at[0] - 1.0).abs() > 0.01 || (at[1]).abs() > 0.01,
+            (at[0] - 1.0).abs() > 0.01 || at[1].abs() > 0.01,
             "the shot used the one-unit-ahead fallback"
         );
         println!("--- muzzle check passed ---");
