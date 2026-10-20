@@ -954,6 +954,7 @@ impl Runtime {
                 | "getmastercog"
                 | "setmastercog"
                 | "getgoalframe"
+                | "clearthingflags"
                 | "setfirewait"
                 | "setgoalflags"
                 | "cleargoalflags"
@@ -2748,9 +2749,19 @@ impl Runtime {
                 Value::Nil
             }
             "getthingflags" => Value::Num(self.thing(idx(0)).map(|t| t.flags as f64).unwrap_or(0.0)),
+            // `SetThingFlags` **ORs** (`thing->flags |= flags`) and `ClearThingFlags` masks
+            // (`&= ~flags`) — `sithCogFunctionThing.c:1334`. Neither assigns: assigning would drop
+            // bits the level set, and `IN_CAMFOV` is one of them, which would make `sighted` fire
+            // again for a thing the player has already seen.
             "setthingflags" => {
                 if let Some(t) = self.thing_mut(idx(0)) {
-                    t.flags = num(1) as u32;
+                    t.flags |= idx(1) as u32;
+                }
+                Value::Nil
+            }
+            "clearthingflags" => {
+                if let Some(t) = self.thing_mut(idx(0)) {
+                    t.flags &= !(idx(1) as u32);
                 }
                 Value::Nil
             }
@@ -3376,6 +3387,22 @@ mod tests {
             rt.damage_typed(0, 30.0, DAMAGE_FALL),
             70.0,
             "the fall exception did not get through"
+        );
+        // `SetThingFlags` ORs and `ClearThingFlags` masks; assigning would wipe bits the level set —
+        // `IN_CAMFOV` among them, which is what stops `sighted` firing twice for one thing.
+        rt.things[0].flags = TF_INCAMFOV;
+        rt.call("SetThingFlags", &[Value::Num(0.0), Value::Num(0.0)]);
+        rt.call("SetThingFlags", &[Value::Num(0.0), Value::Num(f64::from(TF_CAPTURED))]);
+        assert_eq!(
+            rt.call("GetThingFlags", &[Value::Num(0.0)]).num() as u32,
+            TF_INCAMFOV | TF_CAPTURED,
+            "SetThingFlags replaced the word instead of adding to it"
+        );
+        rt.call("ClearThingFlags", &[Value::Num(0.0), Value::Num(f64::from(TF_CAPTURED))]);
+        assert_eq!(
+            rt.call("GetThingFlags", &[Value::Num(0.0)]).num() as u32,
+            TF_INCAMFOV,
+            "ClearThingFlags did not clear just that bit"
         );
         // `SetMasterCog`/`GetMasterCog` are the engine's one global master index; unset is -1, and
         // the shipped scripts only clear it by resolving an index to no cog.

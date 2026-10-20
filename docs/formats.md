@@ -771,6 +771,12 @@ door: 00_door.cog (cog 0, thing 4): 1 label(s) ran, frame Num(0.0), moving Num(1
 door: after 3 s the piece sits at frame Num(1.0) and reports goal Num(0.0)
 ```
 
+**Thing flags are a word that gets ORed and masked, never assigned.** `SetThingFlags` is
+`thing->flags |= flags` and `ClearThingFlags` is `thing->flags &= ~flags`
+(`sithCogFunctionThing.c:1334`). The port assigned the word outright, which drops every bit the level or
+the renderer had already set — `SITH_TF_INCAMFOV` (0x100000) among them, so a script touching one flag
+would make `sighted` fire again for a thing the player had already seen.
+
 **The use key sends `activate`, and the target is a linked surface.** `activate` is the third mostcommon label level 1 declares (x14). A script's `surface` symbol is the link
 (`sithCog_LinkCogToSurface`), so the player's use action messages the cogs linked to the surface they
 are looking at: 44 surface links on level 1.
