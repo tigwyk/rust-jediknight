@@ -2909,12 +2909,25 @@ rotate colours on it. Under the old alias every scripted timer would have destro
 armed. `Runtime::thing_timer` holds the deadline and `step` queues `timer` to the thing's own
 instances.
 
-Still invisible: the sprite itself. `bryx.spr` is parsed (`spr.rs`: one row per camera-facing
-rectangle with `width`/`height`/offset, keyed to a `.mat`) and the materials are loadable through
-the same path as model textures, but drawing needs transparency — `to_image` writes alpha 255 for
-every pixel, so a spark's black background would come out as a black quad. The `.mat` `type` word
-(`tex::tex_type`, offset 8) carries the engine's transparency bit; that, and the billboard itself,
-are the next step.
+**The sprite is a list of camera-facing rectangles, and it is drawn now.** A template's `sprite=`
+(`+laserhit` is `bryx.spr`, `+smflash`, `+sparks`, the force-effect templates) resolves through
+`misc\spr\` to a plain-text file: one row per rectangle with a `.mat`, a `width`/`height` in world
+units and a model-space offset. `rdSprite_Draw` builds its four vertices in **camera space** —
+`rdMatrix_TransformPoint34(&vertex_out, &orient->scale, &camera->orient)`, then
+`offset ± widthHalf` on x and `offset ± heightHalf` on z around it — which is a billboard, so the port
+spawns one `Rectangle` per row at `thing.pos + offset` and `billboard_sprites` copies the camera's
+rotation onto it every frame.
+
+Transparency is the part that had to be got right, and it is a per-material key: an effect bitmap is
+painted on black and **palette entry 0 is what the engine never draws**. Keying entry 0 for *world*
+textures would punch holes in any level texture that uses the palette's black, so the two conversions
+are separate — `to_image` writes alpha 255 everywhere, `keyed_rgba` writes 0 for index 0 — and only
+sprite materials take the keyed path.
+
+Level 1 resolves **35 sprite files for 35 templates**, and an impact logs
+`drawing sprite thing 363 (+laserhit, 1 face(s))`. What is not yet proven is the pixels: the level-1
+spawn view has no effect in front of the camera (the AI's impacts land behind geometry and expire in
+0.5 s), so the confirmation is a deliberate in-view spawn, which is the next check to write.
 
 ### Damage decays in flight
 
