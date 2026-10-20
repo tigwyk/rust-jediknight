@@ -3158,6 +3158,9 @@ fn main() {
         let solids = collide::build(&world.level);
         let steps = (seconds / dt).max(1.0) as usize;
         let mut messages = 0usize;
+        // How often the walker actually crossed into another sector: a run that never leaves one
+        // delivers nothing no matter how many handlers the level has.
+        let mut sector_changes = 0usize;
         // Link the scripts the way `setup` does, or no sector can deliver an `entered` and the whole
         // run is a walk through an empty room: a cog `sector` symbol with a value is what
         // `sithCog_LinkCog` turns into a link, and `Runtime::handle` does not build them.
@@ -3178,6 +3181,16 @@ fn main() {
                         links.push((index, symbol.linkid.unwrap_or(0) as i32, sector));
                     }
                 }
+            }
+            // A link whose sector is outside the level cannot ever fire: that is what a misaligned
+            // value list looks like, and it is worth saying out loud per level.
+            let bad = links.iter().filter(|(_, _, sector)| *sector as usize >= world.level.sectors.len()).count();
+            if bad > 0 || std::env::var_os("BK_SOAK_TRACE").is_some() {
+                println!(
+                    "soak: {} sector link(s), {bad} pointing outside the level's {} sector(s)",
+                    links.len(),
+                    world.level.sectors.len()
+                );
             }
             sim_world.borrow_mut().sector_links = links;
         }
@@ -3208,9 +3221,12 @@ fn main() {
             found.unwrap_or((Vec::new(), from))
         };
         let mut leg = 0usize;
-        if std::env::var_os("BK_SOAK_TRACE").is_some() {
-            println!("soak: routing sector -> {watched} in {} waypoint(s)", route.len());
-        }
+        // Always say where the walk is headed: "0 message(s)" with no target named is not a
+        // diagnosis, and level 9 crossed six sectors without waking one of its 54 handlers.
+        println!(
+            "soak: routing to watched sector {watched} in {} waypoint(s)",
+            route.len()
+        );
         for _ in 0..steps {
             // Walk the player forward and let the sector links fire: a soak where nothing is ever
             // triggered is a simulation of an empty room. `pending_messages` (a `damaged`, a `killed`)
@@ -3261,6 +3277,9 @@ fn main() {
                 let here = rt.things.get(player).map(|t| t.pos);
                 let after = here.and_then(|pos| solids.sector_at(pos, 0.05)).map(|s| s as usize);
                 if let Some(sector) = after {
+                    if before != Some(sector) {
+                        sector_changes += 1;
+                    }
                     if before != Some(sector) && std::env::var_os("BK_SOAK_TRACE").is_some() {
                         println!(
                             "soak: sector {} -> {sector} at {:?}, {} link message(s)",
@@ -3368,6 +3387,25 @@ fn main() {
                 }
             }
         }
+        // How many of this level's scripts *can* answer a sector `entered`: a level with links but no
+        // such handler legitimately delivers nothing, and saying so keeps "0 message(s)" from looking
+        // like a defect.
+        let entered_handlers = world
+            .level
+            .cogs
+            .iter()
+            .filter(|inst| {
+                world
+                    .cogs
+                    .get(&inst.script)
+                    .is_some_and(|script| {
+                        script.label("entered").is_some()
+                            || script.label("sectorentered").is_some()
+                            || script.label("sector").is_some()
+                    })
+            })
+            .count();
+        println!("soak: {entered_handlers} script(s) can answer a sector `entered`, {sector_changes} sector crossing(s)");
         let grew = rt.things.len().saturating_sub(world.level.things.len());
         println!(
             "soak: {:.0} s of level time ({} steps) with {} script(s) and {} sector link(s): {messages} message(s) delivered, {} thing(s) spawned, {bad_position} non-finite position(s), {outside} body(ies) outside every sector, clock {:.1}",
