@@ -218,8 +218,11 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
   `rdMaterial_LoadEntry` (`0x44a260`) reads a 76-byte header, a 24-byte `rdTexinfoHeader` per cel
   (+16 when `texture_type & 8`), then **one texture per cel** with its own header. The port's flat
   140-byte header is the *first* cel's texture header, so a sprite's `+0x74`/`+0x78` land inside the
-  second cel's texinfo and read its words as "8 x 78" — the pixels are noise, and the 2 x 2 block in
-  the screenshots is noise too. Next: `tex::parse_mat` walking the cel table (`docs/formats.md` §5).
+  second cel's texinfo — and the file sizes prove it: `bryx.mat` is **8780** bytes while the flat read
+  accounts for **764** (`140 + 624`), leaving **8064 bytes** of real pixels, 1008 per cel. Those
+  pixels are currently noise, so the 2 x 2 block in the screenshots is noise too. Next: `tex::parse_mat`
+  walking the cel table (`docs/formats.md` §5 has the layout, the measured words and the 1008-per-cel
+  figure a parser has to reproduce).
 
 * **Effects are sprites, and sprites are loaded and drawn.** A template's `sprite=` (`+laserhit` is
   `bryx.spr`) is now parsed for every template a level names and its materials are loaded through the

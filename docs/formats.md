@@ -465,10 +465,27 @@ sprite `bryx.mat`: rev 50 type 0x2 cels 8 textures 8; texinfo@76 type 0x8
 ```
 
 `cels == textures` — one texture per cel — and `texture_type & 8` is set, so each cel's entry is
-`24 + 16 = 40` bytes and the first texture is at `76 + 8 * 40 = 396`, not 140. The frames are
-therefore **separate textures**, not one vertical strip, and `tex::parse_mat` needs to walk the cel
-table to read them. Until it does, a sprite's pixels are whatever those bytes happen to be — the
-"2 × 2 block of frames" in the sprite screenshots is noise, not an animation.
+`24 + 16 = 40` bytes. The file sizes then say the flat read cannot be the bitmap at all:
+
+```text
+8780 bytes: rev 50 type 0x2 cels 8 textures 8; texinfo@76 type 0x8; flat read says 8x78 starting
+            140 (140 + 624 = 764)
+54156 bytes: cels 13 textures 13; flat read says 8x82 (140 + 656 = 796)
+33356 bytes: cels  8 textures  8; flat read says 8x81 (140 + 648 = 788)
+```
+
+`bryx.mat` is **8780** bytes while the flat read accounts for **764** of them: the port has been
+decoding the first 624 bytes of a file ten times that size, as dimensions taken from the second cel's
+texinfo header. What is left of the file is real pixel data — `8780 - 716 = 8064` bytes once the
+76-byte header and two 40-byte-per-cel tables are subtracted, i.e. **1008 bytes per cel** — which is
+the number a parser has to reproduce (1008 = 16 x 63 = 24 x 42 = 32 x 31.5, so the cel is not
+power-of-two and has to come from the texture header, not from arithmetic).
+
+The frames are **separate textures**, not one vertical strip, so `tex::parse_mat` needs to walk the
+cel table: header, one texinfo per cel, one texture entry per cel, then each texture's own header
+(width at `+0x10`, height at `+0x14` in the single-cel case) and pixels. Until it does, a sprite's
+pixels are whatever those bytes happen to be — the "2 x 2 block of frames" in the sprite screenshots is
+noise, not an animation.
 
 Verified on the shipped single-cel materials — `140 + width * height == file length` for
 files with no trailing data:

@@ -8378,13 +8378,18 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
                                 .unwrap_or(0)
                         };
                         println!(
-                            "    header: rev {} type {:#x} cels {} textures {}; texinfo@76 type {:#x} f8 {:#x}",
+                            "    {} bytes: header: rev {} type {:#x} cels {} textures {}; texinfo@76 type {:#x}; flat read says {}x{} starting 140 ({} + {} = {})",
+                            raw.len(),
                             word(4),
                             word(8),
                             word(12),
                             word(16),
                             word(76),
-                            word(84)
+                            bitmap.width,
+                            bitmap.height,
+                            140,
+                            bitmap.indices.len(),
+                            140 + bitmap.indices.len()
                         );
                     }
                 }
