@@ -749,7 +749,10 @@ pub struct Runtime {
     pub template_respawn: BTreeMap<String, f32>,
     /// Text a script printed (`jkPrintUNIString`), in order: the `.uni` key it names.
     pub prints: Vec<String>,
-    /// `jkStringClear`/`jkStringConcat*`/`jkStringOutput`: the engine keeps one wide buffer
+    /// The line `jkStringOutput`/`jkPrintUNIString` last put up, and the level time it stops showing.
+    /// The engine's message area holds a line for a few seconds; this build keeps the text and the
+    /// deadline, and the HUD draws it while it lasts.
+    pub hud_message: Option<(String, f32)>,
     /// (`jkCog_jkstring`, 128 characters) that the concat verbs append to. A script builds a line in
     /// pieces and `jkStringOutput` puts the finished line up.
     pub string_buffer: String,
@@ -1032,6 +1035,7 @@ impl Runtime {
             template_types,
             template_health,
             prints: Vec::new(),
+            hud_message: None,
             string_buffer: String::new(),
             loaded_sounds: Vec::new(),
             messages: Vec::new(),
@@ -3485,6 +3489,18 @@ impl Runtime {
         (alpha > 0.0).then_some((filter, tint, add, alpha))
     }
 
+    /// How long a script's line stays in the message area. The engine keeps its own timer per
+    /// `jkStringOutput` type; this build shows every line for the same few seconds.
+    pub const HUD_MESSAGE_TIME: f32 = 4.0;
+
+    /// The line the HUD should be showing right now, if any.
+    pub fn hud_line(&self) -> Option<&str> {
+        match &self.hud_message {
+            Some((line, until)) if self.time < *until => Some(line),
+            _ => None,
+        }
+    }
+
     /// Append to the `jkString*` buffer, respecting the engine's 128-character cap.
     fn string_buffer_push(&mut self, text: &str) {
         if self.string_buffer.chars().count() + text.chars().count() < 128 {
@@ -4906,18 +4922,25 @@ impl Runtime {
             "jkstringoutput" => {
                 let line = std::mem::take(&mut self.string_buffer);
                 if !line.is_empty() {
-                    self.prints.push(line);
+                    self.prints.push(line.clone());
+                    self.hud_message = Some((line, self.time + Self::HUD_MESSAGE_TIME));
                 }
                 Value::Nil
             }
             // `SyncScores`: multiplayer score replication. Single-player has no scores to sync, and
             // the engine's own arm does nothing when `sithNet_isMulti` is clear.
             "syncscores" => Value::Nil,
+            // `jkPrintUNIString(player, key)`: the engine puts the string in the message area, the
+            // same place `jkStringOutput` sends a composed line. The key is resolved by the app.
             "jkprintunistring" => {
-                if let Some(Value::Str(s)) = args.first() {
-                    self.prints.push(s.clone());
-                } else if !args.is_empty() {
-                    self.prints.push(format!("{:.0}", num(0)));
+                let line = match args.first() {
+                    Some(Value::Str(s)) => s.clone(),
+                    _ if !args.is_empty() => format!("COG_{:05}", num(0) as i64),
+                    _ => String::new(),
+                };
+                if !line.is_empty() {
+                    self.prints.push(line.clone());
+                    self.hud_message = Some((line, self.time + Self::HUD_MESSAGE_TIME));
                 }
                 Value::Nil
             }
@@ -5425,6 +5448,7 @@ mod tests {
             template_count: BTreeMap::new(),
             template_bins: BTreeMap::new(),
             prints: Vec::new(),
+            hud_message: None,
             string_buffer: String::new(),
             loaded_sounds: Vec::new(),
             messages: Vec::new(),
@@ -5842,6 +5866,19 @@ mod tests {
         // Script text is collected, not dropped.
         rt.call("jkPrintUNIString", &[Value::Str("GUI_NOPE".into())]);
         assert_eq!(rt.prints, vec!["GUI_NOPE".to_string()]);
+    }
+
+    #[test]
+    fn a_script_line_reaches_the_hud_and_then_expires() {
+        let mut rt = door_runtime();
+        assert!(rt.hud_line().is_none(), "a fresh level shows nothing");
+        rt.call("jkStringClear", &[]);
+        rt.call("jkStringConcatUniString", &[Value::Num(262.0)]);
+        rt.call("jkStringOutput", &[Value::Num(-1.0), Value::Num(-1.0)]);
+        assert_eq!(rt.hud_line(), Some("COG_00262"), "the line did not reach the HUD");
+        // It is gone once its window closes, which is what makes it a message and not a label.
+        rt.time += Runtime::HUD_MESSAGE_TIME + 0.1;
+        assert!(rt.hud_line().is_none(), "the line outlived its window");
     }
 
     #[test]

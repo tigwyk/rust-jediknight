@@ -149,6 +149,27 @@ const NUMBERS: &[(&str, Panel, i32, i32)] = &[
     ("ui\\sft\\amonums.sft", Panel::Right, 13, 19),
 ];
 
+/// Draw a script's message line across the top of the canvas, centred.
+///
+/// `jkStringOutput` puts a line in the message area for a few seconds; the engine draws it with the
+/// medium HUD font over a shadow so it reads against any backdrop. Both are drawn here — the shadow
+/// first, one pixel down and right.
+pub fn draw_message(canvas: &mut Canvas, font: &sft::Font, palette: &[[u8; 3]; 256], text: &str) {
+    if text.is_empty() || font.height == 0 {
+        return;
+    }
+    let width: i32 = text.chars().map(|ch| font.glyph(ch).map(|(_, w)| w as i32).unwrap_or(0)).sum();
+    let x = (canvas.width as i32 - width * MESSAGE_SCALE) / 2;
+    let y = 12;
+    let mut shadow = [[0u8; 3]; 256];
+    shadow[0] = [0, 0, 0];
+    canvas.draw_text_palette(font, x + 1, y + 1, text, &shadow, MESSAGE_SCALE);
+    canvas.draw_text_palette(font, x, y, text, palette, MESSAGE_SCALE);
+}
+
+/// The message line's draw scale, so it reads at 640x480 without covering the view.
+const MESSAGE_SCALE: i32 = 2;
+
 /// Draw the status bar onto a canvas `width` wide: the two panels at the screen's corners
 /// with the meters and numbers inside them.
 pub fn draw(canvas: &mut Canvas, gobs: &gob::GobSet, palette: &[[u8; 3]; 256], hud: &Hud) {

@@ -835,6 +835,18 @@ fn main() {
         ];
         let mut canvas = ui::Canvas::new(640, 480);
         hud::draw(&mut canvas, &gobs, &palette, &hud);
+        // The message area: `jkStringOutput`/`jkPrintUNIString` compose a line and this draws it where
+        // the engine does. `BK_HUD_MESSAGE` is a capture aid, so the line can be seen and hashed
+        // without a window — the same role `BK_HUD_TINT` plays for a screen effect.
+        if let Ok(line) = std::env::var("BK_HUD_MESSAGE") {
+            let strings = gobs
+                .read("ui\\jkstrings.uni")
+                .map(|d| uni::parse(&String::from_utf8_lossy(&d)))
+                .unwrap_or_default();
+            if let Some(font) = hud_font(&gobs) {
+                hud::draw_message(&mut canvas, &font, &palette, &resolve_keys(&strings, &line));
+            }
+        }
         // A capture aid for the screen effect: `BK_HUD_TINT` puts a force-seeing style filter over
         // the status bar so the pass can be seen and hashed without a window (`--hud`).
         if std::env::var_os("BK_HUD_TINT").is_some() {
@@ -8153,6 +8165,38 @@ fn load_menus(game: &std::path::Path) -> Option<menus::Menus> {
 }
 
 /// The engine's fonts, loaded in the order an element's `text_type` indexes them.
+/// A font that can draw letters, for the HUD message line.
+///
+/// The menus' own font table is not loaded in every path that needs one (`--hud` runs before it), so
+/// this takes the first `.sft` in the install that has an `A`. Bounded by the number of fonts shipped.
+fn hud_font(gobs: &gob::GobSet) -> Option<sft::Font> {
+    gobs.names()
+        .into_iter()
+        .filter(|n| n.to_ascii_lowercase().ends_with(".sft"))
+        .filter_map(|n| gobs.read(&n).and_then(|d| sft::parse(&d)))
+        .find(|font| font.glyph('A').is_some())
+}
+
+/// Resolve the `COG_#####` keys a `jkStringConcatUniString` leaves in a line, through the install's
+/// `ui\jkstrings.uni`. A key the table does not have is left alone, so a missing string is visible
+/// rather than silently blank.
+fn resolve_keys(strings: &uni::Uni, line: &str) -> String {
+    let mut out = line.to_string();
+    // The buffer is at most 128 characters, so there are only a few keys to look at.
+    let mut at = 0usize;
+    while let Some(rel) = out[at..].find("COG_") {
+        let start = at + rel;
+        let end = (start + 9).min(out.len());
+        let Some(text) = strings.get(&out[start..end]).map(str::to_string) else {
+            at = end;
+            continue;
+        };
+        out.replace_range(start..end, &text);
+        at = start + text.len();
+    }
+    out
+}
+
 fn load_fonts(gobs: &gob::GobSet, menus: &menus::Menus) -> Vec<sft::Font> {
     (0..menus.fonts.len())
         .filter_map(|i| menus.font(i as i32))
@@ -8470,6 +8514,16 @@ fn refresh_overlay(
             ui::draw_screen(&mut overlay.canvas, &screen, &backdrop, &assets.strings, &look, lit);
         }
         None => hud::draw(&mut overlay.canvas, &gobs.0, &assets.palette, &hud),
+    }
+    // The message area: `jkStringOutput`/`jkPrintUNIString` compose a line, resolve their `.uni`
+    // keys through the install's table, and it shows for a few seconds over the status bar.
+    if overlay.menu.is_none()
+        && let Some(sim) = sim.as_ref()
+        && let Some(line) = sim.world.borrow().hud_line().map(str::to_string)
+        && let Some(font) = assets.fonts.iter().find(|font| font.glyph('A').is_some())
+    {
+        let text = resolve_keys(&assets.strings, &line);
+        hud::draw_message(&mut overlay.canvas, font, &assets.palette, &text);
     }
     // `NewColorEffect`: force seeing's blue filter, IR goggles, a blinding flash. Applied over the
     // finished canvas because a 32-bit buffer has no palette to filter.

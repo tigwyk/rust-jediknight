@@ -102,6 +102,7 @@ Three ceilings came with the last of them, and they are marked in the code:
 | verb | what is real | what is a stand-in |
 | --- | --- | --- |
 | `SetThingRotVel` | the angular velocity is integrated every step and the angles wrap | nothing |
+| `jkStringOutput` / `jkPrintUNIString` | the line is composed (`jkString*`), resolved through `ui\jkstrings.uni` and **drawn**: `hud::draw_message` puts it across the top of the canvas for 4 s, in the live HUD and in `--hud` (`BK_HUD_MESSAGE` is the capture aid) | the engine draws it in its own message slot with per-type timing and a separate chat log; this build has one slot and one duration |
 | `NewColorEffect` / `Modify` / `Free` | the handle, the three channels, the fade, and the create/modify/free round trip; **and the draw**: the effect is blended over the HUD canvas each frame (`ui::Canvas::apply_screen_effect`, unit-tested against `stdPalEffects_GatherEffects`' filter = quarter-channel and zero-tint rules) | the *world* is not tinted — the blend is applied to the 2D canvas, so a force-seeing view dims the HUD and the backdrops, not the 3D scene |
 | `SetThingModel` | the override is stored and a *created* thing is drawn with it | a thing the level **placed** keeps the mesh built at load |
 
