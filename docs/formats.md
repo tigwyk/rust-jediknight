@@ -758,8 +758,20 @@ version of the gate took `pending_messages` inside the `for` head, so the `Arc<M
 locked and the first verb the label called deadlocked instead of panicking the way a `RefCell` would.
 
 
-**The use key sends `activate`, and the target is a linked surface.** `activate` is the third most
-common label level 1 declares (x14). A script's `surface` symbol is the link
+**`GetGoalFrame` is the destination, and it clears on arrival.** `MoveToFrame` stores `goalframe` and
+starts the piece moving; `sithTrackThing_Arrivedidk` sets it back to **0** the moment `curframe`
+reaches it, and only sends `arrived` then. So a script asking `GetGoalFrame` sees a destination while
+the piece travels and a zero once it is parked — which is what the reversing lift idiom reads:
+`MoveToFrame(elevator, 1 - GetGoalFrame(elevator), speed)`. The port answers from the thing's own
+`target`, which it already clears on arrival, and `--door` now watches the whole lifecycle after a
+door opens:
+
+```text
+door: 00_door.cog (cog 0, thing 4): 1 label(s) ran, frame Num(0.0), moving Num(1.0), goal Num(1.0) (target Some(1.0)), flags (1, 0), 4 doorway(s) that were shut now passable
+door: after 3 s the piece sits at frame Num(1.0) and reports goal Num(0.0)
+```
+
+**The use key sends `activate`, and the target is a linked surface.** `activate` is the third mostcommon label level 1 declares (x14). A script's `surface` symbol is the link
 (`sithCog_LinkCogToSurface`), so the player's use action messages the cogs linked to the surface they
 are looking at: 44 surface links on level 1.
 

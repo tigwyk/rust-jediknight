@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **34 gates, 85 tests, 0 failures.** Stubbed script surface:
-**57 verbs, 392 call sites across the 34 shipped levels** (706 before this run of state setters).
+**56 verbs, 368 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -72,28 +72,28 @@ both multiplayer-only screens.
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — plus sector light animation. 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 57 below | the 57 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 56 below | the 56 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 57 stubbed cog verbs
+## 3. The 56 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (392 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 57.
+over the 34 levels from `--cog-check` (368 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 56.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
-(`getselfcog`, `getmastercog`, `getgoalframe`): a script that branches on one takes the wrong branch without
-any error.
+(`getselfcog`, `getmastercog`, `getgoalframe` — all three are implemented now): a script that branches on one
+takes the wrong branch without any error.
 
 | group | calls | verbs, most-called first |
 | --- | --- | --- |
 | AI (3) | 13 | `aisetfiretarget` 8, `aiflee` 3, `aisetclass` 2 |
 | Thing properties and flags (12) | 82 | `setmountwait` 25, `returnex` 12, `setthinglight` 10, `clearthingflags` 9, `thinglightanim` 9, `jkclearflags` 4, `syncsurface` 4, `syncthingpos` 3, `setthingrotvel` 2, `newcoloreffect` 2, `createthingatpos` 1, `teleportthing` 1 |
-| Cog introspection and goal state (2) | 25 | `getgoalframe` 24, `loadtemplate` 1 |
+| Cog introspection and goal state (1) | 1 | `loadtemplate` 1 |
 | Weapons and projectiles (3) | 31 | `jksetsaberinfo` 15, `autoselectweapon` 14, `fireprojectile` 2 |
 | Face and thing modes (5) | 45 | `setfacegeomode` 18, `getfacegeomode` 16, `getthinggeomode` 4, `setthingcurgeomode` 4, `setfacelightmode` 3 |
 | Sectors, adjoins, sky (3) | 15 | `slideceilingsky` 10, `setsectorthrust` 4, `slidehorizonsky` 1 |
@@ -139,8 +139,9 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 1. **Fix the wrong-by-default getters.** ~~`getselfcog`, `getmastercog`~~ — **done**: the VM answers
    `getselfcog` with its own index in the level's cog list, and `setmastercog`/`getmastercog` are the
    world's one global master (`-1` unset), which is what `01_endlevel.cog` registers at startup
-   (`SetMasterCOG(GetSelfCOG())`). Still open: `getgoalframe` (24), which needs things that are path
-   movers, and `loadtemplate` (1). (Also done earlier: `getleveltime`, `gethealth`, `isthingvisible`,
+   (`SetMasterCOG(GetSelfCOG())`). `getgoalframe` answers the destination a piece is moving to and 0 once
+   it has arrived — the engine zeroes `goalframe` on arrival, and that is what a reversing lift reads.
+   Still open: `loadtemplate` (1). (Also done earlier: `getleveltime`, `gethealth`, `isthingvisible`,
    `get/setthingmass`, `setthinguserdata`, `setthingtimer`.)
    **Level-end chain: closed.** A level's `goal*.cog` reports a finished objective with
    `SendMessage(GetMasterCOG(), user0)`, and `SendMessage` now takes the engine's two arguments — a

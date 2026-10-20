@@ -5494,7 +5494,40 @@ fn main() {
             let _ = state;
             let frame = { let mut rt = handle.borrow_mut(); rt.call("GetCurFrame", &[cog::Value::Num(*thing as f64)]) };
             let moving = { let mut rt = handle.borrow_mut(); rt.call("IsThingMoving", &[cog::Value::Num(*thing as f64)]) };
-            println!("door: {name} (cog {instance}, thing {thing}): {ran} label(s) ran, frame {frame:?}, moving {moving:?}, flags {changed:?}, {flipped} doorway(s) that were shut now passable");
+            // `GetGoalFrame` reports where the piece is headed while it moves, and 0 once it is there
+            // (`sithTrackThing_Arrivedidk` zeroes `goalframe`). That is the value a reversing lift script
+            // reads: `MoveToFrame(elevator, 1 - GetGoalFrame(elevator), speed)`.
+            let (goal, dest) = {
+                let mut rt = handle.borrow_mut();
+                let goal = rt.call("GetGoalFrame", &[cog::Value::Num(*thing as f64)]);
+                let dest = rt.things.get(*thing).and_then(|t| t.target).map(|(f, _)| f);
+                (goal, dest)
+            };
+            println!("door: {name} (cog {instance}, thing {thing}): {ran} label(s) ran, frame {frame:?}, moving {moving:?}, goal {goal:?} (target {dest:?}), flags {changed:?}, {flipped} doorway(s) that were shut now passable");
+            if moving == cog::Value::Num(1.0) {
+                assert_eq!(
+                    goal,
+                    cog::Value::Num(dest.unwrap_or(-1.0) as f64),
+                    "GetGoalFrame did not report the destination the piece is moving to"
+                );
+                for _ in 0..180 {
+                    let moved = handle.borrow_mut().step(1.0 / 60.0);
+                    if moved.is_empty() {
+                        break;
+                    }
+                }
+                let (at_goal, at_frame) = {
+                    let mut rt = handle.borrow_mut();
+                    (
+                        rt.call("GetGoalFrame", &[cog::Value::Num(*thing as f64)]),
+                        rt.call("GetCurFrame", &[cog::Value::Num(*thing as f64)]),
+                    )
+                };
+                println!(
+                    "door: after 3 s the piece sits at frame {at_frame:?} and reports goal {at_goal:?}"
+                );
+                assert_eq!(at_goal, cog::Value::Num(0.0), "the goal frame did not reset on arrival");
+            }
             if changed.0 + changed.1 > 0 && flipped > 0 {
                 // A body crossing one is not measured here: the four doorways this door opens join its own
                 // door-*frame* sectors (74/75/76, 0.05 to 0.3 wide), and a 0.065-radius body cannot stand

@@ -953,6 +953,7 @@ impl Runtime {
                 | "aisetlookframe"
                 | "getmastercog"
                 | "setmastercog"
+                | "getgoalframe"
                 | "setfirewait"
                 | "setgoalflags"
                 | "cleargoalflags"
@@ -2478,6 +2479,13 @@ impl Runtime {
                 }
                 Value::Nil
             }
+            "getgoalframe" => Value::Num(
+                // `GetGoalFrame` (`sithCogFunctionThing.c:540`) answers `thing->goalframe`, which
+                // `MoveToFrame` sets and `sithTrackThing_Arrivedidk` **resets to 0 the moment the piece
+                // arrives** — so a script sees the destination only while the thing is still moving.
+                // That is the value `MoveToFrame(elevator, 1 - GetGoalFrame(elevator), speed)` reverses.
+                self.thing(idx(0)).and_then(|t| t.target).map_or(0.0, |(frame, _)| frame as f64),
+            ),
             "getthingsignature" => Value::Num(
                 self.signature.get(ti(0)).copied().unwrap_or(0) as f64,
             ),
