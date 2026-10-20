@@ -188,7 +188,10 @@ flag                                                   exit  what it prints
                                                              a named thing and fire with the player
                                                              behind it, `AIFlee` grows the gap 3.00 ->
                                                              3.30 in a second with no shots, and
-                                                             `AISetClass` moves sightdist 5.0 -> 7.0
+                                                             `AISetClass` moves sightdist 5.0 -> 7.0;
+                                                             the route search crosses sectors 0
+                                                             -> 2, walled off but 1 doorway
+                                                             apart, and starts at [5, 8, 6]
 --endlevel                                               0  the level's own trigger: `01_goal0.cog`
                                                              waits on `sighted` from thing 204 (8t88),
                                                              the draw sends it, the goal messages master

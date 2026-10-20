@@ -1362,6 +1362,61 @@ impl Solids {
             .collect()
     }
 
+    /// Breadth-first route from one sector to another, as the **portal centres** to walk through.
+    ///
+    /// `sithAI.c` moves a puppet along the level's own path graph; this world's graph is the adjoin
+    /// table, so the shortest chain of openings is the route. Only openings the gates allow are taken
+    /// (`Gates::passable`: a shut door, a force field or an AI-only opening is not a route). An empty
+    /// vector means "already there"; `None` means unreachable, and the caller keeps its straight-line
+    /// behaviour rather than freezing.
+    pub fn route(&self, from: usize, to: usize, gates: Gates<'_>) -> Option<Vec<[f32; 3]>> {
+        let n = self.portals.len();
+        if from >= n || to >= n {
+            return None;
+        }
+        if from == to {
+            return Some(Vec::new());
+        }
+        let mut prev: Vec<Option<(usize, [f32; 3])>> = vec![None; n];
+        let mut seen = vec![false; n];
+        seen[from] = true;
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(from);
+        while let Some(sector) = queue.pop_front() {
+            for portal in self.portals.get(sector).into_iter().flatten() {
+                let next = portal.adjoin;
+                if next >= n || seen[next] || !gates.passable(sector, next, portal.link) {
+                    continue;
+                }
+                seen[next] = true;
+                // The middle of the opening: a body walks at the doorway, not at a corner of it.
+                let mut centre = [0.0f32; 3];
+                for v in &portal.verts {
+                    for k in 0..3 {
+                        centre[k] += v[k];
+                    }
+                }
+                let count = portal.verts.len().max(1) as f32;
+                for k in 0..3 {
+                    centre[k] /= count;
+                }
+                prev[next] = Some((sector, centre));
+                if next == to {
+                    let mut out = Vec::new();
+                    let mut at = to;
+                    while let Some((back, centre)) = prev[at] {
+                        out.push(centre);
+                        at = back;
+                    }
+                    out.reverse();
+                    return Some(out);
+                }
+                queue.push_back(next);
+            }
+        }
+        None
+    }
+
     /// The sectors reachable from `start` through openings the camera can see.
     ///
     /// This is the engine's visibility walk in its simplest safe form: breadth-first over

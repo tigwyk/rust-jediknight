@@ -2980,6 +2980,45 @@ fn main() {
                     println!("ai: no portal to steer at on this level");
                 }
             }
+            // `Collision::route`: the adjoin-graph path an actor has to follow when a wall sits between
+            // it and its target. `best_portal` above is one hop — it picks the doorway that shortcuts
+            // the straight line, and once the actor is through it, the next tick picks the same one
+            // again. The search is what a real chase needs; this proves it finds a chain across rooms
+            // whose straight line is walled off.
+            let mut routed = None;
+            let spheres_all = rt.solids.as_ref().map(|s| s.spheres.clone()).unwrap_or_default();
+            for (a, sphere) in spheres_all.iter().enumerate() {
+                for b in 0..spheres_all.len() {
+                    let Some(solids) = rt.solids.as_ref() else { break };
+                    // A walled-off pair is the point: an open line needs no route.
+                    if a == b || !solids.segment_blocked(sphere.0, spheres_all[b].0) {
+                        continue;
+                    }
+                    if let Some(route) = solids.route(a, b, rt.gates())
+                        && !route.is_empty()
+                    {
+                        routed = Some((a, b, route));
+                        break;
+                    }
+                }
+                if routed.is_some() {
+                    break;
+                }
+            }
+            if let Some((a, b, route)) = routed {
+                println!(
+                    "ai: sectors {a} -> {b} are walled off but {} doorway(s) apart, and the route's first waypoint is {:?}",
+                    route.len(),
+                    route.first().map(|p| [p[0].round(), p[1].round(), p[2].round()])
+                );
+                assert!(!route.is_empty());
+                // The chain has to start at the first doorway out of `a`, so it must be a real room.
+                assert!(rt.solids.as_ref().is_some_and(|s| s.spheres.get(a).is_some()));
+                // A sector with no way through answers None rather than an empty route.
+                assert!(rt.solids.as_ref().and_then(|s| s.route(a, a, rt.gates())).is_some());
+            } else {
+                println!("ai: this level has no walled-off pair of rooms to route between");
+            }
         }
         let distance = ((at[0] + GAP - after[0]).powi(2) + (at[1] - after[1]).powi(2)).sqrt();
         let turned = (rt.things[actor].yaw - before_angle).abs();
