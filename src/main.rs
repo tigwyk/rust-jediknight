@@ -3603,6 +3603,71 @@ fn main() {
             blade.saber_sparks, "+saberspark",
             "the spark templates landed in the wrong slots"
         );
+        // `AutoSelectWeapon(player, kind)`: arm the best carried weapon. The engine asks every weapon
+        // cog for a score; with no item cogs this build ranks by the weapon's own `damage=`, which is
+        // the order the shipped cogs' constants produce. The check compares against that rule on two
+        // bins this level actually has templates for, not against a hardcoded bin number.
+        {
+            let nothing = rt.call(
+                "AutoSelectWeapon",
+                &[cog::Value::Num(player as f64), cog::Value::Num(0.0)],
+            );
+            assert_eq!(nothing, cog::Value::Num(-1.0), "nothing carried should answer -1");
+            let armed_bins: Vec<(i32, f32)> = (1..=10)
+                .filter_map(|bin| {
+                    let template = rt.weapon_for_bin(bin)?;
+                    let damage = rt
+                        .template_damage
+                        .get(&template.to_ascii_lowercase())
+                        .copied()?;
+                    Some((bin, damage))
+                })
+                .collect();
+            let mut sorted = armed_bins.clone();
+            sorted.sort_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((weak_bin, weak)) = sorted.first().copied()
+                && let Some((strong_bin, strong)) = sorted.last().copied()
+                && weak_bin != strong_bin
+                && strong > weak
+            {
+                for bin in [weak_bin, strong_bin] {
+                    rt.call(
+                        "SetInv",
+                        &[
+                            cog::Value::Num(player as f64),
+                            cog::Value::Num(bin as f64),
+                            cog::Value::Num(1.0),
+                        ],
+                    );
+                }
+                let chosen = rt.call(
+                    "AutoSelectWeapon",
+                    &[cog::Value::Num(player as f64), cog::Value::Num(0.0)],
+                );
+                println!(
+                    "pickup: `AutoSelectWeapon` picks bin {chosen:?} of {weak_bin} ({weak:.1} damage) and {strong_bin} ({strong:.1}), and arms bin {}",
+                    rt.cur_bin
+                );
+                assert_eq!(
+                    chosen,
+                    cog::Value::Num(strong_bin as f64),
+                    "the weaker weapon was auto-selected"
+                );
+                assert_eq!(rt.cur_bin, strong_bin, "the chosen bin was not armed");
+                for bin in [weak_bin, strong_bin] {
+                    rt.call(
+                        "SetInv",
+                        &[
+                            cog::Value::Num(player as f64),
+                            cog::Value::Num(bin as f64),
+                            cog::Value::Num(0.0),
+                        ],
+                    );
+                }
+            } else {
+                println!("pickup: this level has no second weapon to rank `AutoSelectWeapon` against");
+            }
+        }
         // Respawn: a powerup with `respawn=` comes back after its countdown.
         let respawn_item = rt
             .things

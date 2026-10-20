@@ -232,7 +232,9 @@ flag                                                   exit  what it prints
                                                              dark one; `jkSetSaberInfo` stores the
                                                              blade a script describes -- side
                                                              `saberyellow0.mat`, 0.100 long, hilt
-                                                             0.003, tip 0.001, three sparks
+                                                             0.003, tip 0.001, three sparks, and
+                                                             `AutoSelectWeapon` picks bin 3 of
+                                                             bins 6 (20.0 damage) and 3 (30.0)
 --weapon +elaser                                         0  --- weapon check passed ---
 --bins                                                   0  --- bins check passed ---
 --mana --level 01narshadda.jkl                           0  0 -> 20.0 in one second, clamps at 400

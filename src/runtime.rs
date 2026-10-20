@@ -1806,6 +1806,7 @@ impl Runtime {
                 | "loadtemplate"
                 | "setfacelightmode"
                 | "pathmoveresume"
+                | "autoselectweapon"
                 | "jkgetchoice"
                 | "jksetsaberinfo"
                 | "getthinggeomode"
@@ -2413,6 +2414,48 @@ impl Runtime {
             })
             .map(|(name, _)| name.clone())
             .next()
+    }
+
+    /// `AutoSelectWeapon(player, kind)`: pick the weapon bin the player should be holding and arm it.
+    ///
+    /// `sithWeapon_AutoSelect` asks **each weapon cog** for a score (`SITH_MESSAGE_AUTOSELECT`) and
+    /// takes the highest; this build instantiates no item cogs, so the score is the weapon's own
+    /// `damage=` — the one engine-side number that ranks the shipped weapons the way the cogs'
+    /// hand-tuned constants do. `kind` (0..2 in the engine) is accepted and ignored: the cogs use it
+    /// to answer differently per slot, and there is nothing to ask.
+    ///
+    /// ponytail: a damage ranking, not `pow_*.cog`'s `autoselect:` scores. Clearing an enemy with a
+    /// rifle equipped and then a concussion rifle is the shipped difference; a per-cog score is what
+    /// makes the choice contextual, and that arrives with inventory cogs.
+    pub fn auto_select_weapon(&mut self, kind: i32) -> i32 {
+        if !(0..=2).contains(&kind) {
+            return -1;
+        }
+        let mut best: Option<(i32, f32)> = None;
+        for bin in 1..=26 {
+            if self.inv.get(&bin).copied().unwrap_or(0.0) <= 0.0 {
+                continue;
+            }
+            let Some(template) = self.weapon_for_bin(bin) else { continue };
+            let score = self.template_damage.get(&template.to_ascii_lowercase()).copied().unwrap_or(0.0);
+            if score <= 0.0 {
+                continue;
+            }
+            // Ties keep the armed bin, so picking up the same class of weapon does not shuffle the
+            // player's hands for no reason.
+            if best.is_none_or(|(bin_now, score_now)| {
+                score > score_now || (score == score_now && bin == self.cur_bin && bin_now != bin)
+            }) {
+                best = Some((bin, score));
+            }
+        }
+        match best {
+            Some((bin, _)) => {
+                self.select_bin(bin);
+                bin
+            }
+            None => -1,
+        }
     }
 
     /// `SetCurInvWeapon` / `SelectWeapon`: the bin the player has armed, and — when this
@@ -4288,6 +4331,9 @@ impl Runtime {
                 }
                 Value::Nil
             }
+            // `AutoSelectWeapon(player, kind)`: `sithCogFunction_AutoSelectWeapon` answers the bin
+            // `sithWeapon_AutoSelect` picked, or -1.
+            "autoselectweapon" => Value::Num(self.auto_select_weapon(idx(1) as i32) as f64),
             "jkgetflags" => Value::Num(self.thing(idx(0)).map(|t| t.jk_flags as f64).unwrap_or(0.0)),
             "jksetflags" => {
                 if let Some(thing) = self.thing_mut(idx(0)) {
