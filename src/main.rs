@@ -4606,6 +4606,28 @@ fn main() {
             name > 1,
             "`{template}` has no drawable death animation; the body would keep its stand pose"
         );
+        // `SetMountWait` gates the trigger: `sithWeapon_secMountWait` has to pass before
+        // `sithWeapon_ProcessWeaponControls` reaches the fire path. Every shipped `endlevel.cog`
+        // startup passes 0, which cancels the wait — so this is the only place the gate is exercised.
+        rt.time = 100.0;
+        rt.next_fire = 0.0;
+        rt.call(
+            "SetMountWait",
+            &[cog::Value::Num(shooter_index as f64), cog::Value::Num(1.0)],
+        );
+        assert!(
+            rt.player_fire(shooter_index, &weapon).is_none(),
+            "the weapon fired while it was still mounting"
+        );
+        rt.time = 102.0;
+        assert!(
+            rt.player_fire(shooter_index, &weapon).is_some(),
+            "the mount wait never expired"
+        );
+        println!(
+            "  mount wait: refused at t=100 for a 1 s wait, fired at t=102 (deadline {:.0})",
+            rt.mount_wait_until
+        );
         println!("--- fire check passed ---");
         return;
     }

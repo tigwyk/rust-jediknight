@@ -771,6 +771,18 @@ door: 00_door.cog (cog 0, thing 4): 1 label(s) ran, frame Num(0.0), moving Num(1
 door: after 3 s the piece sits at frame Num(1.0) and reports goal Num(0.0)
 ```
 
+**The weapon has to finish mounting before it fires.** `SetMountWait(thing, seconds)` is
+`sithWeapon_SetMountWait`: it stores `seconds + gameTime` in one **global** (`sithWeapon_secMountWait`,
+not per thing), and `sithWeapon_ProcessWeaponControls` returns before the fire path while that clock is
+still in the future. Every shipped caller passes 0 — each level's `endlevel.cog` startup does
+`SetMountWait(player, 0)` — so in practice the verb *cancels* a wait rather than imposing one. The port
+keeps the same global and refuses `player_fire` until it passes; `--fire` is the only place that
+exercises a non-zero wait:
+
+```text
+  mount wait: refused at t=100 for a 1 s wait, fired at t=102 (deadline 101)
+```
+
 **`PlayKey` swaps a puppet's animation for one of the script's own keyframe symbols.**
 `PlayKey(thing, key, flags, frame)` is `sithPuppet_PlayKey`: the thing's puppet stops playing its
 `.pup` state track (`stand`, `death`) and plays the `.key` the script names instead, from the frame it

@@ -99,6 +99,8 @@ flag                                                   exit  what it prints
                                                              (0x40); 4.0 u/s inside one kills, 2.0 u/s and an
                                                              unflagged sector do not -- `sithPlayer.c:251`--hit                                                    0  --- hit check passed ---
 --fire +bryarbolt                                        0  --- fire check passed ---
+                                                             (also: `SetMountWait` refuses the
+                                                             trigger until its deadline passes)
 --pickup                                                 0  --- pickup check passed ---
 --weapon +elaser                                         0  --- weapon check passed ---
 --bins                                                   0  --- bins check passed ---

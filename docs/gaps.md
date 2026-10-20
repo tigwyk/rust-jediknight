@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **34 gates, 85 tests, 0 failures.** Stubbed script surface:
-**40 verbs, 284 call sites across the 34 shipped levels** (706 before this run of state setters).
+**39 verbs, 259 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -72,17 +72,17 @@ both multiplayer-only screens.
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — plus sector light animation. 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 40 below | the 40 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 39 below | the 39 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 40 stubbed cog verbs
+## 3. The 39 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (284 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 40.
+over the 34 levels from `--cog-check` (259 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 39.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -92,7 +92,7 @@ takes the wrong branch without any error.
 | group | calls | verbs, most-called first |
 | --- | --- | --- |
 | AI (3) | 13 | `aisetfiretarget` 8, `aiflee` 3, `aisetclass` 2 |
-| Thing properties and flags (11) | 73 | `setmountwait` 25, `returnex` 12, `setthinglight` 10, `thinglightanim` 9, `jkclearflags` 4, `syncsurface` 4, `syncthingpos` 3, `setthingrotvel` 2, `newcoloreffect` 2, `createthingatpos` 1, `teleportthing` 1 |
+| Thing properties and flags (10) | 48 | `returnex` 12, `setthinglight` 10, `thinglightanim` 9, `jkclearflags` 4, `syncsurface` 4, `syncthingpos` 3, `setthingrotvel` 2, `newcoloreffect` 2, `createthingatpos` 1, `teleportthing` 1 |
 | Cog introspection and goal state (1) | 1 | `loadtemplate` 1 |
 | Weapons and projectiles (3) | 31 | `jksetsaberinfo` 15, `autoselectweapon` 14, `fireprojectile` 2 |
 | Face and thing modes (5) | 45 | `setfacegeomode` 18, `getfacegeomode` 16, `getthinggeomode` 4, `setthingcurgeomode` 4, `setfacelightmode` 3 |
@@ -183,7 +183,8 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    `SITH_CT_AI` comes from the actor block, and level 1's 8t88 has no `aiclass=` yet its goal script
    walks it to frame 1 (314 calls gone; 392 stubbed, down from 706). What is left of the group needs
    states the port does not have: `aisetfiretarget` (8) wants actors that shoot at something other
-   than the player, `aiflee` (3) the flee state, `setmountwait` (25) the weapon raise.
+   than the player, `aiflee` (3) the flee state. (`setmountwait` (25) is done: the engine's fire path refuses
+   until `sithWeapon_secMountWait` passes, and every shipped caller passes 0.)
 6. **Puppet locomotion states.** Visible, and the state data is already loaded; the pose code is real.
 7. **Attachments and parenting.** Needed by carried weapons, passengers, and any script that moves a child.
 8. **Camera focus and shake.** It is what makes in-engine cutscenes and several force powers read as intended.

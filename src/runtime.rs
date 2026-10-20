@@ -313,6 +313,9 @@ pub struct Runtime {
     pub user_data: std::collections::BTreeMap<usize, f32>,
     pub force: std::collections::BTreeMap<usize, [f32; 3]>,
     pub actor_weapon: std::collections::BTreeMap<usize, i32>,
+    /// `sithWeapon_secMountWait`: when the equipped weapon finishes mounting, as an absolute clock time
+    /// (the engine stores `wait + gameTime` in a global, not per thing).
+    pub mount_wait_until: f32,
     /// `PlayKey`: which of the script's own `keyframe` symbols a thing plays instead of its puppet's
     /// own state track — (keyfile, flags, start frame). Level 1's TIE bomber swaps in `01VTieB.key`
     /// the moment the player sees it.
@@ -748,6 +751,7 @@ impl Runtime {
             master_cog: None,
             multi_mode_flags: 0,
             play_key: BTreeMap::new(),
+            mount_wait_until: 0.0,
             ai: BTreeMap::new(),
             template_weapon: level
                 .templates
@@ -979,6 +983,7 @@ impl Runtime {
                 | "playkey"
                 | "stopanim"
                 | "jumptoframe"
+                | "setmountwait"
                 | "setfirewait"
                 | "setgoalflags"
                 | "cleargoalflags"
@@ -1420,7 +1425,11 @@ impl Runtime {
     /// A shot from the player, refused while `SetFireWait`'s cooldown is running. The engine arms
     /// `nextFire` on the shot rather than measuring from the click, so the wait starts when it fires.
     pub fn player_fire(&mut self, index: usize, weapon: &str) -> Option<usize> {
-        if self.time < self.next_fire {
+        // `sithWeapon_secMountWait`: the weapon has to finish mounting before it fires
+        // (`sithWeapon_ProcessWeaponControls` returns before the fire path while the mount is pending).
+        // Every shipped caller passes 0 (`SetMountWait(player, 0)` in each level's `endlevel.cog`
+        // startup), which cancels the wait rather than imposing one.
+        if self.time < self.mount_wait_until || self.time < self.next_fire {
             return None;
         }
         let shot = self.fire(index as i64, weapon)?;
@@ -2504,6 +2513,13 @@ impl Runtime {
                 }
                 Value::Nil
             }
+            "setmountwait" => {
+                // `sithWeapon_SetMountWait` stores `secWait + gameTime` in one global, and the fire path
+                // refuses until that clock passes. `SetMountWait(player, 0)` — what every shipped
+                // `endlevel.cog` startup calls — therefore cancels the wait instead of imposing one.
+                self.mount_wait_until = self.time + num(1) as f32;
+                Value::Nil
+            }
             // `PlayKey(thing, key, flags, frame)` — `sithPuppet_PlayKey` swaps a puppet's animation for
             // one of the script's own `keyframe` symbols. Level 1's TIE bomber plays `01VTieB.key` from
             // frame 0x14 the moment the player sees it; `StopAnim` drops back to the puppet's own state
@@ -3169,6 +3185,7 @@ mod tests {
             master_cog: None,
             multi_mode_flags: 0,
             play_key: BTreeMap::new(),
+            mount_wait_until: 0.0,
             ai: BTreeMap::new(),
             template_weapon: BTreeMap::new(),
             ai_shot_interval: 1.0,
