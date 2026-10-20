@@ -17219,6 +17219,60 @@ fn template_counts(level: &jkl::Level) -> Vec<(String, usize)> {
 }
 
 #[cfg(test)]
+mod registration_tests {
+    use super::*;
+
+    /// Every function that takes a Bevy system's parameters is named somewhere else.
+    ///
+    /// `saber_blade` was written, compiled and *reported as working* for a dozen rounds before
+    /// anyone noticed it was in no `add_systems` list — the blade simply never drew. Nothing else
+    /// catches that: the function is dead code, so the compiler says nothing, and a system that does
+    /// not run produces no error at run time either. This reads the source and fails if a system's
+    /// name appears only at its own definition.
+    ///
+    /// The check is textual and therefore blunt: a system mentioned only in a *comment* would pass.
+    /// That is the trade for catching the real case, and the failure message names the function.
+    #[test]
+    fn every_system_is_registered() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+            .expect("the source this test lives in");
+        // Comments do not run. A doc comment that names the function (`spawned by [`saber_blade`]`)
+        // is what made the first version of this check pass while the blade never drew, so the
+        // mention count is taken over code only.
+        let code: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // A system's signature is multi-line and its parameters are the tell.
+        let mut unregistered = Vec::new();
+        let mut rest = source.as_str();
+        while let Some(at) = rest.find("\nfn ") {
+            let tail = &rest[at + 1..];
+            let name_end = tail.find('(').unwrap_or(0);
+            let name = &tail[3..name_end];
+            let sig_end = tail.find(") {").unwrap_or(tail.len().min(2000));
+            let signature = &tail[..sig_end];
+            let looks_like_system = ["Res<", "ResMut<", "Commands", "Query<", "EventReader", "Local<"]
+                .iter()
+                .any(|param| signature.contains(param));
+            if looks_like_system && !name.is_empty() {
+                // The definition is one mention; a registration is another.
+                let mentions = code.matches(name).count();
+                if mentions < 2 {
+                    unregistered.push(name.to_string());
+                }
+            }
+            rest = tail;
+        }
+        assert!(
+            unregistered.is_empty(),
+            "these systems are in no add_systems list, so they never run: {unregistered:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod rules_tests {
     use super::*;
 
