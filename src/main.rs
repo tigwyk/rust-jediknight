@@ -5515,7 +5515,6 @@ fn main() {
                     deliver_crossed,
                     use_key,
                     apply_fall_damage,
-                    respawn_after_death,
                     walk_player,
                     cull_sectors,
                     sky_follows_camera,
@@ -10214,35 +10213,15 @@ fn apply_fall_damage(sim: Option<Res<Sim>>, player: Option<ResMut<Player>>) {   
         return;
     };
     let left = rt.damage(index as i64, damage);
+    // `damage` is the generic path (messages, `destroyed`); the player's *death* flag is the one
+    // `sithPlayer_KillPlayer` sets, and without it a lethal landing left the body dead on its feet with
+    // nothing to bring it back. The fall death in `walk_player` takes this same road.
+    if left <= 0.0 {
+        rt.player_dead = true;
+    }
     println!("fall: {damage:.0} damage, {left:.0} health left");
 }
 
-/// `sithPlayer_KillPlayer`: once the runtime says the player is dead, put the body back at the level's
-/// start. The live position lives on `Player`; the spawn is the runtime's own `walkplayer` record, which
-/// the walker never moves — so the level file stays the source of where the player starts.
-fn respawn_after_death(sim: Option<Res<Sim>>, player: Option<ResMut<Player>>) {
-    let (Some(sim), Some(mut player)) = (sim, player) else { return };
-    let mut rt = sim.world.borrow_mut();
-    if !rt.player_dead {
-        return;
-    }
-    let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")) else {
-        return;
-    };
-    let spawn = rt.things[index].pos;
-    let sector = rt.things[index].sector;
-    let (shields, health) = rt.respawn_player(spawn);
-    player.pos = Vec3::from(spawn);
-    player.vy = 0.0;
-    player.vel = [0.0; 2];
-    player.grounded = false;
-    player.fall_killed = false;
-    player.fall_fade = 1.0;
-    if sector >= 0 {
-        player.sector = sector as usize;
-    }
-    println!("death: back at the level's start, {health:.0} health, {shields:.0} shields");
-}
 fn health_follows_damage(
     sim: Option<Res<Sim>>,
     player: Option<ResMut<Player>>,
@@ -10293,16 +10272,25 @@ fn respawn_on_death(sim: Option<Res<Sim>>, mut player: Option<ResMut<Player>>, w
         .things
         .iter()
         .find(|t| t.template.eq_ignore_ascii_case("walkplayer"))
-        .map(|t| [t.pos[0], t.pos[1], t.pos[2] + PLAYER_RADIUS]);
+        .map(|t| ([t.pos[0], t.pos[1], t.pos[2] + PLAYER_RADIUS], t.sector));
     let mut rt = sim.world.borrow_mut();
     if !rt.player_dead {
         return;
     }
-    let Some(spawn) = spawn else { return };
+    let Some((spawn, sector)) = spawn else { return };
     let (shields, health) = rt.respawn_player(spawn);
     drop(rt);
     player.pos = Vec3::from(spawn);
     player.vy = 0.0;
+    // The sector is part of the body's state, not just its position: leaving the sector the player died in
+    // makes the containment rule refuse every move at the spawn (it is a different room), and the body
+    // stands there unable to walk. The walker's velocity goes too — a respawn is not a fall.
+    player.vel = [0.0; 2];
+    if sector >= 0 {
+        player.sector = sector as usize;
+    }
+    player.fall_killed = false;
+    player.fall_fade = 1.0;
     player.grounded = true;
     player.health = health;
     player.shields = shields;
@@ -11621,6 +11609,20 @@ fn setup(
         None => println!(
             "walker: no clear spawn near {start:?} (sector {sector}) - the body may fall or overlap"
         ),
+    }
+
+    // Experiment hook: `BK_SPAWN_SECTOR=<n>` puts the body in that sector's floor instead of the level's
+    // start, and `BK_SPAWN_LIFT=<units>` raises it, so a fall can be watched where a level's own geometry
+    // has one. Same family as `BK_RADIUS`/`BK_EYE`; remove once the falls are settled.
+    if let Ok(want) = std::env::var("BK_SPAWN_SECTOR")
+        && let Ok(want) = want.parse::<usize>()
+        && let Some(centre) = solids.spheres.get(want).map(|s| s.0)
+        && let Some(floor) = solids.floor_below(want, centre)
+    {
+        start = [centre[0], centre[1], floor + PLAYER_RADIUS];
+        sector = want;
+        start[2] += env_f32("BK_SPAWN_LIFT", 0.0);
+        println!("walker: BK_SPAWN_SECTOR put the body at {start:?} in sector {sector}");
     }
 
     // Seed the body onto the floor it stands over. The level's `walkplayer` z is the floor
