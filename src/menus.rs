@@ -266,12 +266,36 @@ pub struct Screen {
 
 impl Screen {
     /// The elements a cursor moves over: the retail screens step through their full-width
-    /// rows (the ones drawn with the `large0` font) and treat the buttons as click targets.
+    /// rows — buttons drawn with the `large0` font — and treat the rest as click targets.
+    ///
+    /// Two things this has to get right, both of which were wrong:
+    ///
+    /// * **A label is not a row.** Several screens draw their *title* with `large0` (Choose Player,
+    ///   Cutscenes, New Player, Edit Character), and counting any `large0` element made the cursor
+    ///   walk the title alone — so Up/Down/Enter could not reach those screens' Ok or Cancel.
+    /// * **A screen made only of ordinary buttons has rows too.** New Game / Load / Cancel on
+    ///   `bkSingle.bm` are drawn with `small0`, which left the single-player screen mouse-only.
+    ///
+    /// Everything Enter can *activate* — a text button, a picture button (the force panel's powers),
+    /// a check box — is a row. Text labels, the `type 7` custom panels, list boxes and edit fields are
+    /// not: Enter does not run them, and a cursor that stops on a dead element is what made Choose
+    /// Player look like it had no Cancel.
     pub fn rows(&self) -> Vec<usize> {
+        let navigable = |i: &Item| matches!(i.kind, 0 | 1 | 3);
+        let rows: Vec<usize> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| navigable(i) && i.text_type == 5)
+            .map(|(n, _)| n)
+            .collect();
+        if !rows.is_empty() {
+            return rows;
+        }
         self.items
             .iter()
             .enumerate()
-            .filter(|(_, i)| i.text_type == 5)
+            .filter(|(_, i)| navigable(i))
             .map(|(n, _)| n)
             .collect()
     }
@@ -863,9 +887,10 @@ mod tests {
     /// ids are the engine's bins, plus a label with no id.
     #[test]
     fn force_rows_hide_until_they_are_found() {
+        // The force panel's powers are `type 1` picture buttons (`FORCE_POWERS`), not text.
         let item = |id: i32| Item {
             key: String::new(),
-            kind: 2,
+            kind: 1,
             text_type: 5,
             id,
             bitmap: 0,
@@ -876,8 +901,9 @@ mod tests {
             click: None,
         };
         let mut items: Vec<Item> = (21..=28).map(item).collect();
-        // A label: not a row at all (`text_type` 5 is what makes a row).
+        // A label: `type 2` is text, so it is not a row whatever font it is drawn with.
         let mut label = item(-1);
+        label.kind = 2;
         label.text_type = 1;
         items.push(label);
         let screen = Screen {

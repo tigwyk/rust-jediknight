@@ -237,9 +237,13 @@ pub fn to_canvas(size: [f32; 2], cursor: [f32; 2]) -> Option<[i32; 2]> {
 
 /// The clickable element under a canvas point: the last one wins, as the engine draws its
 /// elements in order and the topmost is the one under the cursor.
+///
+/// `id < 0` is **not** a reason to skip an element: a screen's cancel/done row carries `hoverId -1`
+/// (see `nav::closes`), so that test made every Cancel button dead to the mouse — the way out of a
+/// sub-screen only worked with the keyboard. Only a text label is unpickable.
 pub fn pick(screen: &Screen, at: [i32; 2]) -> Option<usize> {
     screen.items.iter().enumerate().rev().find_map(|(index, item)| {
-        if item.kind == 2 || item.id < 0 || !item.visible {
+        if item.kind == 2 || !item.visible {
             return None;
         }
         let [x, y, w, h] = item.rect;
@@ -747,9 +751,10 @@ mod tests {
         let mut labels = screen.clone();
         labels.items[1].kind = 2;
         assert_eq!(pick(&labels, [320, 90]), None);
-        // Nor is a label with no id.
-        let mut unclickable = screen.clone();
-        unclickable.items[0].id = -1;
-        assert_eq!(pick(&unclickable, [320, 30]), None);
+        // A *button* with id -1 is picked: that is exactly what a screen's cancel/done row carries
+        // (`hoverId -1`, see `nav::closes`), and skipping it made Cancel dead to the mouse.
+        let mut cancel = screen.clone();
+        cancel.items[0].id = -1;
+        assert_eq!(pick(&cancel, [320, 30]), Some(0));
     }
 }

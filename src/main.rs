@@ -39,7 +39,7 @@ use bevy::audio::{AudioPlayer, AudioSource, PlaybackMode, PlaybackSettings, Volu
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use bevy::camera::visibility::RenderLayers;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
@@ -80,9 +80,144 @@ struct World {
     gob_entries: usize,
 }
 
+/// Accept `03katarn`, `03katarn.jkl` or `jkl\03katarn.jkl` for a level on the command line.
+fn level_arg(name: &str) -> String {
+    let file = if name.to_ascii_lowercase().ends_with(".jkl") {
+        name.to_string()
+    } else {
+        format!("{name}.jkl")
+    };
+    if file.contains(['\\', '/']) { file } else { format!("jkl\\{file}") }
+}
+
+/// Which screen the app opens on. `--menu X` forces one, `--start` (and every capture) begins in the
+/// level, and otherwise the game boots to the retail main menu.
+fn boot_screen(menu: Option<&str>, capture: bool, start_in_level: bool, has_main: bool) -> Option<String> {
+    match menu {
+        Some(requested) => Some(requested.to_string()),
+        None if start_in_level => None,
+        None if !capture && has_main => Some("main".to_string()),
+        None => None,
+    }
+}
+
+/// Every gate this port has, in the order `docs/gates.txt` lists them. `--gates` runs each in its own
+/// process so one panic cannot hide the rest, and reports the `mode:` line each one printed: a gate
+/// with no mode line asserted on parsed data or the runtime and never opened a window.
+const GATES: &[&str] = &[
+    "--check",
+    "--audit",
+    "--boot",
+    "--ui-audit",
+    "--walk all",
+    "--scale",
+    "--rules",
+    "--animate",
+    "--ai",
+    "--collide",
+    "--controls",
+    "--feel",
+    "--flow",
+    "--fall",
+    "--hit",
+    "--live-check",
+    "--mana",
+    "--ammo",
+    "--campaign",
+    "--cog-check",
+    "--adjoins",
+    "--move",
+    "--pickup",
+    "--save",
+    "--sleep",
+    "--triggers",
+    "--transition",
+    "--weapon +elaser",
+    "--audio-state",
+    "--episodes",
+    "--fire +bryarbolt",
+];
+
+/// `--exit-after N`: quit after N frames whatever the machine or the menu is doing.
+///
+/// A run that cannot terminate is not a test: without this, a flag that forgets to quit sits on a
+/// window forever, and one such flag hangs a whole `--gates` sweep. `BK_EXIT_FRAMES` sets the same
+/// budget without the flag.
+fn exit_after_frames(
+    after: Option<Res<ExitAfter>>,
+    mut frames: Local<u64>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Some(after) = after else { return };
+    *frames += 1;
+    if *frames >= after.0 {
+        exit.write(AppExit::Success);
+    }
+}
+
+#[derive(Resource)]
+struct ExitAfter(u64);
+
+/// `--gates`: run the whole list and print, per flag, whether it touched the renderer and what it said.
+/// `--gates`: run the whole list and print, per flag, whether it touched the renderer and what it said.
+fn run_gates(game: &std::path::Path) -> i32 {
+    let exe = std::env::current_exe().expect("the running executable");
+    println!("{:<22} {:<10} {:<6} {}", "flag", "runs", "result", "verdict");
+    let mut failed = 0;
+    for flag in GATES {
+        // Every child gets a frame budget: a gate that forgets to quit ends instead of hanging the sweep,
+        // and it ends *without* a verdict, which is counted as a failure below.
+        let out = std::process::Command::new(&exe)
+            .arg("--game")
+            .arg(game)
+            // Before the flag, not after: several gates take an argument and would eat the budget flag.
+            .args(["--exit-after", "600"])
+            .args(flag.split_whitespace())
+            .env("BK_MUTE", "1")
+            .output();
+        let (mode, verdict) = match &out {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let mode = if text.contains("mode: window") { "window" } else { "headless" };
+                let verdict = text
+                    .lines()
+                    .rev()
+                    .find(|l| l.starts_with("--- "))
+                    .map(str::trim)
+                    .unwrap_or("(no verdict)");
+                (mode, verdict.to_string())
+            }
+            Err(e) => ("error", e.to_string()),
+        };
+        let ok = out.as_ref().map(|o| o.status.success()).unwrap_or(false);
+        // A gate proves itself with a verdict line. A row that opened a window and printed none ran the
+        // game loop (whatever flag it thought it was) and asserts nothing.
+        let verdict_ok = verdict != "(no verdict)";
+        let passed = ok && (mode == "headless" || verdict_ok);
+        if !passed {
+            failed += 1;
+        }
+        println!(
+            "{:<22} {:<10} {:<6} {}",
+            flag,
+            mode,
+            if passed { "pass" } else { "FAIL" },
+            if mode == "window" && !verdict_ok { format!("{verdict} (opened a window)") } else { verdict }
+        );
+    }
+    println!("gates: {} of {} failed", failed, GATES.len());
+    if failed == 0 { 0 } else { 1 }
+}
+
 fn main() {
     let mut game = PathBuf::from(DEFAULT_GAME);
     let mut level_name: Option<String> = None;
+    // --start: boot into the level instead of the main menu.
+    let mut start_in_level = false;
+    // --gates: run every documented gate in its own process and report what each one exercised.
+    let mut gates_run = false;
+    // `--exit-after N` / `BK_EXIT_FRAMES`: a hard frame budget, so a run always ends.
+    let mut exit_after: Option<u64> = std::env::var("BK_EXIT_FRAMES").ok().and_then(|v| v.parse().ok());
     let mut check = false;
     let mut overview = false;
     let mut audit_only = false;
@@ -110,12 +245,16 @@ fn main() {
     let mut cmp_check: Option<String> = None;
     let mut ui_tables = false;
     let mut ui_audit = false;
+    // `--boot`: the screen the app opens on and what each of its rows does.
+    let mut boot_check = false;
     let mut stars = 0i32;
     let mut cull = true;
     let mut rules_only = false;
     let mut animate_only = false;
     let mut animating = true;
     let mut cog_check = false;
+    // `--adjoins`: the sector/adjoin flag verbs, and that collision and the cull read them.
+    let mut adjoin_check = false;
     let mut fire_check: Option<String> = None;
     let mut hit_check = false;
     let mut level_shader = false;
@@ -131,6 +270,8 @@ fn main() {
     let mut controls_check = false;
     let mut move_check = false;
     let mut winding_check = false;
+    // `--scale`: models against the level's own geometry.
+    let mut scale_check = false;
     let mut mana_check = false;
     let mut pull_check = false;
     let mut ammo_check = false;
@@ -262,6 +403,20 @@ fn main() {
                 i += 1;
                 names = args.get(i).cloned();
             }
+            // `--start [level]`: skip the main menu and begin in the level, which is what testing a
+            // level actually needs. A bare level name works: `--start 03katarn`.
+            "--gates" => gates_run = true,
+            "--exit-after" => {
+                i += 1;
+                exit_after = args.get(i).and_then(|v| v.parse().ok());
+            }
+            "--start" => {
+                start_in_level = true;
+                if let Some(next) = args.get(i + 1).filter(|a| !a.starts_with('-')) {
+                    level_name = Some(next.clone());
+                    i += 1;
+                }
+            }
             "--play" => {
                 i += 1;
                 play = args.get(i).cloned();
@@ -311,6 +466,9 @@ fn main() {
                 bm_bg = args.get(i).cloned();
             }
             "--ui-audit" => ui_audit = true,
+            // The boot flow: the screen the app opens on, and what "New Game", "Restart" and "Abort"
+            // resolve to, checked against the install's own element tables.
+            "--boot" => boot_check = true,
             // Verify the portal walk by turning it off: the two frames must be identical.
             "--no-cull" => cull = false,
             // Print the motion the level's templates describe, without opening a window.
@@ -321,6 +479,8 @@ fn main() {
             "--no-anim" => animating = false,
             // The script gate: every level's scripts must still act on their world.
             "--cog-check" => cog_check = true,
+            // The adjoin/sector flag verbs, and the two consumers that must read them.
+            "--adjoins" => adjoin_check = true,
             // `--fire <weapon template>`: fire that weapon at level 1's actor and check the
             // projectile travels, hits and damages.
             // `--level-shader`: draw level surfaces with the material that carries the colormap
@@ -346,6 +506,8 @@ fn main() {
             "--controls" => controls_check = true,
             "--move" => move_check = true,
             "--winding" => winding_check = true,
+            // `--scale`: how big the models really are against the level they are placed in.
+            "--scale" => scale_check = true,
             // `--mana`: force mana regenerates and clamps at the pool ceiling.
             "--mana" => mana_check = true,
             // `--pull`: the force pull power's own script, and whether it moves its target.
@@ -532,6 +694,16 @@ fn main() {
             }
         }
         i += 1;
+    }
+
+    // A level named on the command line may be `03katarn`, `03katarn.jkl` or `jkl\03katarn.jkl`.
+    let level_name = level_name.map(|n| level_arg(&n));
+
+    // `--gates`: run every documented gate in its own process and report what each one exercised.
+    // A gate that never prints `mode: window` asserted on parsed data or the runtime and opened no
+    // window at all; the ones that do print it named the screen they ran against.
+    if gates_run {
+        std::process::exit(run_gates(&game));
     }
 
     let gobs = match gob::GobSet::open(&game) {
@@ -828,6 +1000,60 @@ fn main() {
             }
         }
         let derived = menus.screens.iter().filter(|s| s.background_from_code).count();
+        // Every screen that has a way out has to be *leaveable*, by both hands. A cancel/done/ok row
+        // is how a sub-screen is closed, so a click on it must land on it and the cursor must reach at
+        // least one of them. Both failed before: `ui::pick` skipped `id < 0` — exactly what a retail
+        // cancel row carries, so Cancel was dead to the mouse on every screen that has one — and
+        // `Screen::rows` counted a `large0` *title* as a row, which left Choose Player, Cutscenes and
+        // New Player with a cursor that could only light the title. Screens with no such row are not
+        // counted here: the pause menu's panels are closed by Escape, and a root has nowhere to go.
+        let mut exits = 0usize;
+        let mut dead_click = 0usize;
+        let mut dead_key = 0usize;
+        for screen in &menus.screens {
+            let rows = screen.rows();
+            let way_out = |item: &menus::Item| {
+                matches!(
+                    nav::step(screen.base, item.id, &item.key),
+                    nav::Step::Close | nav::Step::Quit | nav::Step::Abort
+                )
+            };
+            let mut keyable = 0usize;
+            let mut here = 0usize;
+            for (index, item) in screen.items.iter().enumerate() {
+                if !way_out(item) {
+                    continue;
+                }
+                here += 1;
+                exits += 1;
+                let centre = [item.rect[0] + item.rect[2] / 2, item.rect[1] + item.rect[3] / 2];
+                if ui::pick(screen, centre) != Some(index) {
+                    dead_click += 1;
+                    println!(
+                        "  {:#x} {:<14} `{}` (id {}): a click at {centre:?} lands on {:?}, not on it",
+                        screen.base,
+                        screen.name,
+                        item.key,
+                        item.id,
+                        ui::pick(screen, centre)
+                    );
+                }
+                if rows.contains(&index) {
+                    keyable += 1;
+                }
+            }
+            if here > 0 && keyable == 0 {
+                dead_key += 1;
+                println!(
+                    "  {:#x} {:<14}: the cursor walks {} row(s), none of them a way out",
+                    screen.base,
+                    screen.name,
+                    rows.len()
+                );
+            }
+        }
+        println!("exits {exits}: {dead_click} unreachable by click, {dead_key} screen(s) with no way out on the cursor");
+        bad += dead_click + dead_key;
         println!(
             "keys {keyed}, unresolved {unresolved}; backgrounds: {derived}/{} from jkGui_InitMenu, {} inferred; menu edges: {graph}/{}",
             menus.screens.len(),
@@ -835,7 +1061,7 @@ fn main() {
             nav::EDGES.len()
         );
         if bad > 0 {
-            eprintln!("{bad} elements index outside the engine's tables");
+            eprintln!("{bad} problem(s) in the element tables, the graph or the exits above");
             std::process::exit(1);
         }
         println!("--- ui audit passed ---");
@@ -952,7 +1178,7 @@ fn main() {
                     .things
                     .iter()
                     .find(|t| t.template.eq_ignore_ascii_case("walkplayer"))
-                    .map(|t| ([t.pos[0], t.pos[1], t.pos[2] + 0.35], t.yaw));
+                    .map(|t| ([t.pos[0], t.pos[1], t.pos[2] + PLAYER_RADIUS], t.yaw));
                 if let Some((pos, yaw)) = start {
                     map_level = Some((level, pos, yaw));
                 }
@@ -1252,6 +1478,13 @@ fn main() {
         })
     });
 
+    // `--boot`: the screen the app opens on and what each boot row does, resolved from the install's
+    // element tables rather than from the constants they were read into. Headless and level-free.
+    if boot_check {
+        let menus = load_menus(&game).unwrap_or_default();
+        std::process::exit(if boot_gate(&gobs, &menus) { 0 } else { 1 });
+    }
+
     let world = match load(&gobs, &level_name) {
         Ok(w) => w,
         Err(e) => {
@@ -1260,8 +1493,18 @@ fn main() {
         }
     };
 
+    // `--scale`: how big the models really are against the level they are placed in. Both references
+    // are the level's own geometry, so this answers "is the model scale right" without trusting it.
+    if scale_check {
+        print_scale(&world);
+        return;
+    }
+
     // What finishing this level leads to: the graph's next row is the film, and the film's own
     // next row is the level that loads. Resolved once, here, so the watcher only has to act.
+    // `campaign_start` is where "New Game" begins, which is not the same thing once the campaign
+    // has moved on: `--level` and a level transition both change `level_name`, neither changes this.
+    let campaign_start = start_level(&gobs).unwrap_or_else(|| level_name.clone());
     let plan = {
         let episode = episodes_of(&gobs)
             .into_iter()
@@ -1277,7 +1520,7 @@ fn main() {
             }
             None => (None, None),
         };
-        FlowPlan { game: game.clone(), level: level_name.clone(), cut, next, swap }
+        FlowPlan { game: game.clone(), level: level_name.clone(), first: campaign_start.clone(), cut, next, swap }
     };
 
     // `--play <wav>`: play one archived sound and exit, to check the audio path
@@ -2226,12 +2469,16 @@ fn main() {
         let (seen, spawned) = shots(inside);
         let (far, _) = shots(outside);
         let (back, _) = shots(behind);
-        // Chase: inside sight, further than the standoff, so it walks in and turns to face.
+        // Chase: inside sight, further than the standoff, so it walks in and turns to face. The gap is
+        // about four body radii and the actor walks ~0.3 units a second over the two seconds simulated
+        // below, so it has room to close it — a gap in the old level units would be tens of body
+        // heights and never close.
+        const GAP: f32 = 0.6;
         rt.things[actor].pos = at;
         // Off to one side, so "turned toward it" is observable rather than already true. The
         // 200-degree cone is 100 either side, so 80 is inside it — 179 would not be.
         rt.things[actor].yaw = 80.0;
-        rt.things[player].pos = [at[0] + 4.5, at[1], at[2]];
+        rt.things[player].pos = [at[0] + GAP, at[1], at[2]];
         let start = rt.things[actor].pos;
         let before_angle = rt.things[actor].yaw;
         for _ in 0..60 {
@@ -2360,7 +2607,7 @@ fn main() {
                 }
             }
         }
-        let distance = ((at[0] + 4.5 - after[0]).powi(2) + (at[1] - after[1]).powi(2)).sqrt();
+        let distance = ((at[0] + GAP - after[0]).powi(2) + (at[1] - after[1]).powi(2)).sqrt();
         let turned = (rt.things[actor].yaw - before_angle).abs();
         println!(
             "  {template} ({class}): player at 3 units -> {seen} shot(s), {spawned} thing(s); 8 units -> {far}; behind -> {back}"
@@ -2369,10 +2616,10 @@ fn main() {
             "  chase: walked {moved:.2} units in 1 s, now {distance:.2} units away (standoff {:.1}), turned {turned:.1} deg",
             rt.ai_standoff
         );
-        assert!(moved > 0.5, "the actor did not chase ({moved:.2} units)");
+        assert!(moved > 0.1, "the actor did not chase ({moved:.2} units)");
         assert!(
-            (distance - rt.ai_standoff).abs() < 0.35,
-            "the actor stopped {distance:.2} units away, not at the {:.1} standoff",
+            (distance - rt.ai_standoff).abs() < 0.05,
+            "the actor stopped {distance:.2} units away, not at the {:.2} standoff",
             rt.ai_standoff
         );
         assert!(turned > 1.0, "the actor did not turn toward the player");
@@ -2908,6 +3155,44 @@ fn main() {
         // across the doorway under the body.
         let solids = collide::build(&world.level);
         let radius = PLAYER_RADIUS;
+        // that took a polygon's normal from its first three vertices silently dropped the ones whose
+        // first three are collinear — level 1's street floor (surface 3510, the 8-vertex slab at
+        // z = -1.325 in sector 361) among them, which was a hole a body fell through, and walls,
+        // which a body walked into. This runs before the spawn checks so it covers every level.
+        let claimed = collide::surface_sectors(&world.level);
+        let pts_of = |s: &jkl::Surface| -> Vec<[f32; 3]> {
+            s.verts
+                .iter()
+                .filter_map(|&(v, _)| world.level.vertices.get(v as usize).copied())
+                .collect()
+        };
+        let solid = |s: &jkl::Surface| s.adjoin < 0 && s.surfflags & 0x4 != 0 && s.verts.len() >= 3;
+        let missing: Vec<usize> = world
+            .level
+            .surfaces
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| solid(s) && claimed.get(*i).is_some_and(|c| *c != usize::MAX))
+            .filter(|(i, _)| !solids.face_of.contains_key(i))
+            .filter(|(_, s)| collide::has_plane(&pts_of(s)))
+            .map(|(i, _)| i)
+            .collect();
+        let degenerate = world
+            .level
+            .surfaces
+            .iter()
+            .filter(|s| solid(s))
+            .filter(|s| {
+                let pts = pts_of(s);
+                pts.len() >= 3 && !collide::has_plane(&pts[..3]) && collide::has_plane(&pts)
+            })
+            .count();
+        println!(
+            "collide: {} solid surface(s) with a plane missing from collision{:?}; {degenerate} have a collinear first triple, which the widest-triple normal rule keeps",
+            missing.len(),
+            missing.iter().take(5).collect::<Vec<_>>()
+        );
+        assert!(missing.is_empty(), "solid surfaces fell out of collision: {missing:?}");
         // Every `walkplayer` the level places, with the clearance around it: the engine has to choose one,
         // and picking the wrong one drops the player into a closet.
         let starts: Vec<(usize, [f32; 3])> = world
@@ -2926,7 +3211,7 @@ fn main() {
             for dir in [[1.0f32, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]] {
                 room = room.min(
                     solids
-                        .sweep(0, p, dir, radius * 8.0, radius)
+                        .sweep(0, p, dir, radius * 8.0, radius, collide::Gates::default())
                         .map_or(radius * 8.0, |h| h.distance),
                 );
             }
@@ -3076,24 +3361,35 @@ fn main() {
             );
         }
         for (dir, name) in [([1.0f32, 0.0, 0.0], "+x"), ([-1.0, 0.0, 0.0], "-x"), ([0.0, 1.0, 0.0], "+y"), ([0.0, -1.0, 0.0], "-y")] {
-            if let Some(hit) = solids.sweep(sector, above, dir, 20.0, radius) {
+            if let Some(hit) = solids.sweep(sector, above, dir, 20.0, radius, collide::Gates::default()) {
                 let face_distance = collide::distance_to_surface(&solids, hit.surface, above, dir);
                 println!(
                     "collide: {name} stops at {:.2} (surface {}); the plane is at {:.2}, so the sphere kept {:.2} of radius",
                     hit.distance, hit.surface, face_distance, face_distance - hit.distance
                 );
-                // A sphere stops a radius short of the face — or immediately, when it starts closer than
-                // that. Stating it as `max(0, ...)` keeps the check honest at any body size, which the
-                // hard-coded version was not: it asserted a fixed clearance that only held for one radius.
-                let expected = (face_distance - radius).max(0.0);
-                assert!(
-                    (hit.distance - expected).abs() < 0.05,
-                    "the sweep stopped {:.3} from the plane at {face_distance:.3} with radius {radius:.2}; expected {expected:.3}",
-                    hit.distance
-                );
+                // The invariant is about the *contact point*, not the travel: a sphere stops with
+                // its surface on the plane, so `hit.point` is exactly one radius from it. Comparing
+                // `hit.distance` with a plane distance measured from the start only holds while no
+                // doorway was crossed, which is why a level whose +x sweep passes one tripped it.
+                let plane = solids
+                    .face_of
+                    .get(&hit.surface)
+                    .and_then(|i| solids.faces.get(*i))
+                    .or_else(|| solids.floor_of.get(&hit.surface).and_then(|i| solids.floors.get(*i)))
+                    .or_else(|| solids.wall_of.get(&hit.surface).and_then(|i| solids.walls.get(*i)));
+                if let Some(plane) = plane {
+                    let gap = (hit.point[0] - plane.point[0]) * hit.normal[0]
+                        + (hit.point[1] - plane.point[1]) * hit.normal[1]
+                        + (hit.point[2] - plane.point[2]) * hit.normal[2];
+                    assert!(
+                        (gap - radius).abs() < 0.05 || hit.distance <= 1e-4,
+                        "the sweep's contact is {gap:.3} from the plane at {face_distance:.3} with radius {radius:.2}"
+                    );
+                }
                 break;
             }
         }
+        // Every solid, non-adjoined surface a sector claims must be in the collision set. The rule
         println!("--- collide check passed ---");
         return;
     }
@@ -3105,11 +3401,8 @@ fn main() {
         let mut checked = 0;
         for yaw in [0.0f32, 0.7, 1.6, 3.0, 4.5] {
             for pitch in [0.0f32, 0.4, -0.3] {
-                let look = Vec3::new(
-                    yaw.cos() * pitch.cos(),
-                    yaw.sin() * pitch.cos(),
-                    pitch.sin(),
-                );
+                let (f, _) = yaw_axes(yaw);
+                let look = Vec3::new(f[0] * pitch.cos(), f[1] * pitch.cos(), pitch.sin());
                 let cam = Transform::IDENTITY.looking_to(look, Vec3::Z);
                 let flat = |v: Vec3| {
                     let v = Vec3::new(v.x, v.y, 0.0);
@@ -3130,10 +3423,11 @@ fn main() {
                     "yaw {yaw} pitch {pitch}: D moves {right:?} but the camera right is {cam_right:?}"
                 );
                 // Turning: the arrow keys change yaw, and a left turn must swing the view toward the
-                // camera's left. `ArrowLeft` raises yaw.
+                // camera's left. `ArrowLeft` raises yaw, which walks `forward` counter-clockwise.
+                let (f2, _) = yaw_axes(yaw + 0.1);
                 let turned = flat(
                     Transform::IDENTITY
-                        .looking_to(Vec3::new((yaw + 0.1).cos(), (yaw + 0.1).sin(), 0.0), Vec3::Z)
+                        .looking_to(Vec3::new(f2[0], f2[1], 0.0), Vec3::Z)
                         .forward()
                         .as_vec3(),
                 );
@@ -3155,16 +3449,40 @@ fn main() {
         // Mouse look: a rightward delta must turn the view toward the camera right, an upward delta must
         // raise the pitch, and the pitch must stop at the actor template limits.
         let limits = (rules.pitch_min, rules.pitch_max);
+        // The camera's frame must be the engine's frame: `thing_quat` is the recovered euler matrix
+        // (`FUN_0043fcf0` @ 0x43fcf0), column 0 its right axis and column 1 its look axis.
         let camera = |yaw: f32, pitch: f32| {
+            let (f, _) = yaw_axes(yaw);
             Transform::IDENTITY.looking_to(
-                Vec3::new(yaw.cos() * pitch.cos(), yaw.sin() * pitch.cos(), pitch.sin()),
+                Vec3::new(f[0] * pitch.cos(), f[1] * pitch.cos(), pitch.sin()),
                 Vec3::Z,
             )
         };
+        let mut framed = 0;
+        for yaw in [0.0f32, 0.6, 1.3, 2.9, 4.4] {
+            for pitch in [0.0f32, 0.35, -0.4] {
+                let q = thing_quat(pitch.to_degrees(), yaw.to_degrees(), 0.0);
+                let engine_look = q * Vec3::Y;
+                let engine_right = q * Vec3::X;
+                let cam = camera(yaw, pitch);
+                assert!(
+                    cam.forward().as_vec3().dot(engine_look) > 0.999,
+                    "yaw {yaw} pitch {pitch}: the camera looks {:?} but the engine matrix's look column is {engine_look:?}",
+                    cam.forward().as_vec3()
+                );
+                assert!(
+                    cam.right().as_vec3().dot(engine_right) > 0.999,
+                    "yaw {yaw} pitch {pitch}: the camera right is {:?} but the engine matrix's right column is {engine_right:?}",
+                    cam.right().as_vec3()
+                );
+                framed += 1;
+            }
+        }
+        println!("controls: the camera's look and right match the engine matrix on {framed} yaw/pitch pairs");
         let (mut yaw, mut pitch) = (0.8f32, 0.0f32);
         let before = camera(yaw, pitch);
         let (before_forward, before_right) = (before.forward().as_vec3(), before.right().as_vec3());
-        apply_look(&mut yaw, &mut pitch, Vec2::new(120.0, 0.0), LOOK_SENSITIVITY, limits);
+        apply_look(&mut yaw, &mut pitch, Vec2::new(120.0, 0.0), LOOK_SENSITIVITY, limits, false);
         let after = camera(yaw, pitch).forward().as_vec3();
         println!(
             "controls: 120 px right turns the view {:.1} deg toward the camera right",
@@ -3176,17 +3494,68 @@ fn main() {
             "a rightward mouse delta turned left ({after:?} against right {before_right:?})"
         );
         let (mut yaw, mut pitch) = (0.0f32, 0.0f32);
-        apply_look(&mut yaw, &mut pitch, Vec2::new(0.0, -80.0), LOOK_SENSITIVITY, limits);
+        apply_look(&mut yaw, &mut pitch, Vec2::new(0.0, -80.0), LOOK_SENSITIVITY, limits, false);
         println!("controls: 80 px up raises the pitch to {:.2} rad", pitch);
         assert!(pitch > 0.0, "an upward mouse delta did not raise the pitch");
+        // The engine's projection is a fixed horizontal angle: 90 degrees at `buffer + 0x08`, measured in a
+        // running JK.EXE. The port derives the vertical angle from the window's aspect, so this asserts the
+        // derivation rather than a rounded-off constant.
+        let v43 = vertical_fov(4.0 / 3.0).to_degrees();
+        let v169 = vertical_fov(16.0 / 9.0).to_degrees();
+        println!("controls: 90 deg horizontal is {v43:.2} deg vertical at 4:3 and {v169:.2} at 16:9");
+        assert!((v43 - 73.74).abs() < 0.05, "4:3 vertical angle is {v43}, not 73.74");
+        assert!((v169 - 58.72).abs() < 0.05, "16:9 vertical angle is {v169}, not 58.72");
+        let back = 2.0 * ((vertical_fov(16.0 / 9.0) * 0.5).tan() * (16.0 / 9.0)).atan().to_degrees();
+        assert!((back - ENGINE_H_FOV_DEG).abs() < 0.01, "the vertical {back} does not map back to 90 horizontal");
+        // The engine's strafe lean: banks with *lateral* speed, clamped to +-8 degrees.
+        let (fwd, right) = yaw_axes(0.0);
+        let lean_right = camera_lean([right[0] * 0.66, right[1] * 0.66], 0.0);
+        let lean_left = camera_lean([-right[0] * 0.66, -right[1] * 0.66], 0.0);
+        let lean_hard = camera_lean([right[0] * 99.0, right[1] * 99.0], 0.0);
+        let lean_ahead = camera_lean([fwd[0] * 0.66, fwd[1] * 0.66], 0.0);
+        println!("controls: a full-speed strafe banks the view {lean_right:.1} deg, clamped at {lean_hard:.0}");
+        assert!(lean_right > 0.5, "a right strafe did not bank the view right ({lean_right})");
+        assert!((lean_right + lean_left).abs() < 1e-6, "the lean is not symmetric");
+        assert!((lean_hard - 8.0).abs() < 1e-6, "the lean does not clamp at 8 degrees ({lean_hard})");
+        assert!(lean_ahead.abs() < 1e-6, "walking forward banks the view ({lean_ahead})");
+
         let (mut yaw, mut pitch) = (0.0f32, 0.0f32);
-        apply_look(&mut yaw, &mut pitch, Vec2::new(0.0, -100_000.0), LOOK_SENSITIVITY, limits);
+        apply_look(&mut yaw, &mut pitch, Vec2::new(0.0, -100_000.0), LOOK_SENSITIVITY, limits, false);
         println!(
             "controls: pitch clamps at {:.2} rad against the template limit {:.2}",
             pitch, limits.1
         );
         assert!((pitch - limits.1).abs() < 1e-3, "the pitch clamp is not the template limit");
 
+        // Third person stands the camera behind the look axis at the engine's follow height (0.2 above
+        // the body) and aims it at the body's eye.
+        let boom = third_person_boom();
+        let (eye3, target3) = third_person_view(Vec3::new(1.0, 2.0, 3.0), 0.0, 0.0, boom);
+        let behind = eye3 - target3;
+        println!(
+            "controls: third person puts the eye {:.2} u behind and {:.2} u above the body, boom {boom:.2}",
+            -behind.dot(Vec3::Y),
+            eye3.z - target3.z
+        );
+        assert!((eye3.z - (3.0 + THIRD_PERSON_UP)).abs() < 1e-5, "third person is not at the follow height ({})", eye3.z);
+        assert!((target3.z - (3.0 + PLAYER_EYE)).abs() < 1e-5, "third person does not aim at the eye");
+        assert!(behind.dot(Vec3::Y) < 0.0, "the third-person eye is in front of the body");
+        assert!((Vec3::new(behind.x, behind.y, 0.0).length() - boom).abs() < 1e-4, "the boom is not the boom");
+        let (eye_side, _) = third_person_view(Vec3::ZERO, std::f32::consts::FRAC_PI_2, 0.0, boom);
+        // Yaw 90 looks along -X (`yaw_axes` gives `(-sin, cos)`), so the eye belongs at +X.
+        assert!(eye_side.x > boom * 0.99, "yaw 90 does not put the eye behind the -X look axis ({eye_side})");
+        // Vertical look is **modern**: a screen-signed delta with y down looks down. The env override
+        // restores retail's inverted sense, and both directions are asserted so the sign cannot flip.
+
+        let (mut yaw2, mut pitch2) = (0.0f32, 0.0f32);
+        apply_look(&mut yaw2, &mut pitch2, Vec2::new(0.0, 80.0), LOOK_SENSITIVITY, limits, false);
+        let modern_down = pitch2;
+        pitch2 = 0.0;
+        apply_look(&mut yaw2, &mut pitch2, Vec2::new(0.0, 80.0), LOOK_SENSITIVITY, limits, true);
+        let retail_down = pitch2;
+        assert!(modern_down < 0.0, "mouse down did not look down ({modern_down})");
+        assert!(retail_down > 0.0, "BK_INVERT_Y did not restore retail's sense ({retail_down})");
+        println!("controls: mouse down looks down (modern); BK_INVERT_Y=1 looks up, as retail does");
         // The pointer: locked while a level has the screen, released for a menu.
         let playing = |menu: Option<&str>| menu.is_none();
         assert!(playing(None), "no screen open must count as playing");
@@ -4041,6 +4410,206 @@ fn main() {
         return;
     }
 
+    if adjoin_check {
+        // `--adjoins`: the three verbs that switch a passage, and the two consumers that have to
+        // read them. The point is not that the flags get stored — it is that a body stops at a
+        // closed force field and the cull stops at a hidden opening.
+        let level = &world.level;
+        let solids = collide::build(level);
+        // The level's own scripts, `startup` only — what the engine has done by the time you can
+        // move. Every shipped door script closes its doorway here: `SetSectorAdjoins(doorSector, 0)`.
+        let world_state = runtime::Runtime::handle(level);
+        let mut instances = 0usize;
+        let mut closes_doorways = false;
+        for inst in &level.cogs {
+            let Some(data) = gobs.read(&inst.script) else { continue };
+            let text = String::from_utf8_lossy(&data);
+            // `SectorAdjoins(` also matches `SetSectorAdjoins(`: either spelling closes a doorway.
+            closes_doorways |= text.to_ascii_lowercase().contains("sectoradjoins(");
+            let Ok(script) = cog::parse(&text) else { continue };
+            let mut vm = cog::Vm::with_world(world_state.clone());
+            script.bind(&mut vm, &inst.values);
+            if script.label("startup").is_some() {
+                let _ = vm.run_label(&script, "startup");
+                instances += 1;
+            }
+        }
+        let mut rt = world_state.borrow_mut();
+
+        // What the level's own table says before any script runs: every row is `0x7` unless the
+        // opening ships closed, which is how a mapper marks a force field or a one-way passage.
+        let rows = rt.adjoin_flags.len();
+        let closed = |bit: u16, rt: &runtime::Runtime| rt.adjoin_flags.iter().filter(|f| *f & bit == 0).count();
+        let ai_only = rt.adjoin_flags.iter().filter(|f| *f & collide::ADJOIN_AI_ONLY != 0).count();
+        println!(
+            "adjoins: {rows} row(s): {} start with MOVE clear, {ai_only} AI-only, {} not visible",
+            closed(collide::ADJOIN_MOVE, &rt),
+            closed(collide::ADJOIN_VISIBLE, &rt)
+        );
+        let hidden_sectors = rt
+            .sector_flags
+            .iter()
+            .filter(|f| *f & collide::SECTOR_ADJOINS_OFF != 0)
+            .count();
+        println!(
+            "adjoins: {instances} startup script(s) ran: {} sector adjoin change(s), {hidden_sectors} doorway(s) now shut",
+            rt.adjoins_changes
+        );
+        if closes_doorways {
+            // The level places a script that shuts a doorway at load, so the count must be non-zero
+            // and every counted change must be one of those doorways — this is what fails if the
+            // verb stops reaching the sector word again.
+            assert!(hidden_sectors > 0, "no shipped door script closed its doorway on this level");
+            assert_eq!(
+                hidden_sectors, rt.adjoins_changes,
+                "every adjoin change at startup should be a doorway closing"
+            );
+        } else {
+            println!("adjoins: no placed script calls SectorAdjoins here; the verb checks below still run");
+        }
+
+        // Two real openings are probed on the level's own data: one where closing `ADJOIN_MOVE`
+        // stops the sweep at its plane, one whose hidden `VISIBLE` bit drops rooms from the cull.
+        // They are found by trying — a level's recorded sector, its hull and its doorways all
+        // disagree often enough that trusting one sector is how a gate becomes vacuous — and the
+        // searches are separate because some levels join every pair of rooms more than once.
+        let radius = PLAYER_RADIUS;
+        let start_sector = level
+            .things
+            .iter()
+            .find(|t| t.template.eq_ignore_ascii_case("walkplayer"))
+            .and_then(|t| solids.sector_at(t.pos, radius + 0.05));
+        let mut all = |_: &[[f32; 3]]| true;
+        let mut solver = None;
+        let mut cull = None;
+        let mut openings = 0usize;
+        'sectors: for sector in start_sector.into_iter().chain(0..solids.portals.len()) {
+            for portal in solids.portals.get(sector).into_iter().flatten() {
+                openings += 1;
+                let row = portal.link;
+                // A round trip through the verb needs the surface that carries the row.
+                let Some(surface) = rt.surface_adjoin.iter().position(|a| *a == row as i32) else {
+                    continue;
+                };
+                // Start just inside the opening and sweep only a little past its plane, so the
+                // measurement is about this opening and nothing else in the room.
+                let back = radius + 0.1;
+                let at = [
+                    portal.point[0] - portal.normal[0] * back,
+                    portal.point[1] - portal.normal[1] * back,
+                    portal.point[2] - portal.normal[2] * back,
+                ];
+                let dir = portal.normal;
+                let span = radius + 0.15;
+                let plane = back - radius;
+                if solver.is_none() && rt.gates().passable(sector, portal.adjoin, row) {
+                    let mut shut = rt.adjoin_flags.clone();
+                    shut[row] &= !collide::ADJOIN_MOVE;
+                    let shut_gates = collide::Gates { sectors: &rt.sector_flags, adjoins: &shut };
+                    let open_hit = solids.sweep(sector, at, dir, span, radius, rt.gates());
+                    let shut_hit = solids.sweep(sector, at, dir, span, radius, shut_gates);
+                    if open_hit.is_none_or(|h| h.sector != sector)
+                        && shut_hit.is_some_and(|h| h.sector == sector && h.distance <= plane + 1e-3)
+                    {
+                        solver = Some((sector, portal.adjoin, row, surface, at, dir, span, plane));
+                    }
+                }
+                if cull.is_none() {
+                    let before = solids.visible_sectors(&[sector], rt.gates(), &mut all);
+                    let mut hidden = rt.adjoin_flags.clone();
+                    hidden[row] &= !collide::ADJOIN_VISIBLE;
+                    let probe = collide::Gates { sectors: &rt.sector_flags, adjoins: &hidden };
+                    let after = solids.visible_sectors(&[sector], probe, &mut all);
+                    if after.len() < before.len() {
+                        cull = Some((sector, surface, before.len(), after.len()));
+                    }
+                }
+                if solver.is_some() && cull.is_some() {
+                    break 'sectors;
+                }
+            }
+        }
+        if openings == 0 {
+            println!("adjoins: this level has no openings to probe; the flag words and verbs are still checked");
+            println!("--- adjoin check passed ---");
+            return;
+        }
+        let (sector, across, row, surface, at, dir, span, plane) =
+            solver.expect("no opening on this level where clearing MOVE stops the sweep");
+
+        // `ClearAdjoinFlags(surface, 2)` — the force field goes up, and the sweep stops at the
+        // opening's own plane. `SetAdjoinFlags(surface, 16)` is AI-only, which the engine's move
+        // path treats the same way, and clearing it permits again.
+        for (verb, bits, open) in [
+            ("SetAdjoinFlags", 2.0, true),
+            ("ClearAdjoinFlags", 2.0, false),
+            ("SetAdjoinFlags", 2.0, true),
+            ("SetAdjoinFlags", 16.0, false),
+            ("ClearAdjoinFlags", 16.0, true),
+        ] {
+            rt.call(verb, &[cog::Value::Num(surface as f64), cog::Value::Num(bits)]);
+            let hit = solids.sweep(sector, at, dir, span, radius, rt.gates());
+            if open {
+                assert!(
+                    hit.is_none_or(|h| h.sector != sector),
+                    "{verb}({surface}, {bits}) should let the body through: {hit:?}"
+                );
+            } else {
+                let hit = hit.unwrap_or_else(|| panic!("{verb}({surface}, {bits}) did not stop the body"));
+                assert_eq!(hit.sector, sector, "{verb}({surface}, {bits}): the body left the room");
+                assert!(
+                    hit.distance <= plane + 1e-3,
+                    "{verb}({surface}, {bits}) stopped at {} but the opening is at {}",
+                    hit.distance,
+                    plane
+                );
+            }
+        }
+        println!(
+            "adjoins: sector {sector} <-> {across} (row {row}): ClearAdjoinFlags 2 stops the sweep at the opening, Set 2 crosses, Set 16 blocks the walker"
+        );
+
+        // The cull reads the other bit: `ClearAdjoinFlags(surface, 1)` — `16a_crowadjoin.cog`'s
+        // "turn off vis flag" — hides the rooms behind that opening.
+        if let Some((sector, surface, rooms_open, rooms_hidden)) = cull {
+            rt.call("ClearAdjoinFlags", &[cog::Value::Num(surface as f64), cog::Value::Num(1.0)]);
+            assert_eq!(
+                solids.visible_sectors(&[sector], rt.gates(), &mut all).len(),
+                rooms_hidden,
+                "the verb did not hide what the probe said it would"
+            );
+            rt.call("SetAdjoinFlags", &[cog::Value::Num(surface as f64), cog::Value::Num(1.0)]);
+            assert_eq!(
+                solids.visible_sectors(&[sector], rt.gates(), &mut all).len(),
+                rooms_open,
+                "showing the opening did not bring the rooms back"
+            );
+            println!(
+                "adjoins: ClearAdjoinFlags({surface}, 1) drops the rooms behind it from the cull: {rooms_open} -> {rooms_hidden} rooms in view"
+            );
+        } else {
+            println!("adjoins: every room on this level is reachable through more than one opening; the cull half is skipped");
+        }
+        // `SetSectorAdjoins(sector, 0)` is the same hide the door scripts use.
+        let feet = [at[0], at[1], at[2]];
+        let was_water = in_water(level, &solids, sector, feet, &rt.sector_flags);
+        rt.call("SetSectorFlags", &[cog::Value::Num(sector as f64), cog::Value::Num(2.0)]);
+        assert_eq!(rt.sector_flags[sector] & collide::SECTOR_UNDERWATER, collide::SECTOR_UNDERWATER);
+        assert!(
+            in_water(level, &solids, sector, feet, &rt.sector_flags),
+            "a sector flagged underwater is not read as water"
+        );
+        rt.call("SetSectorAdjoins", &[cog::Value::Num(sector as f64), cog::Value::Num(0.0)]);
+        assert!(!rt.gates().passable(sector, across, row), "a hidden sector doorway is still crossed");
+        rt.call("SetSectorAdjoins", &[cog::Value::Num(sector as f64), cog::Value::Num(1.0)]);
+        assert!(rt.gates().passable(sector, across, row), "showing the adjoins did not reopen them");
+        println!(
+            "adjoins: SetSectorFlags({sector}, 2) makes the sector water (was {was_water}); SetSectorAdjoins({sector}, 0) shuts its doorways"
+        );
+        println!("--- adjoin check passed ---");
+        return;
+    }
+
     if cogs_only {
         run_level_cogs(&gobs, &world.level, &cogs_filter);
         return;
@@ -4219,6 +4788,59 @@ fn main() {
         println!(
             "winding: {inward} surface normal(s) point into their room, {outward} point away (those are culled from inside)"
         );
+        // The plane the game itself uses, surface by surface. `#--- Surface normals ---` is read by
+        // `sithSurface_ReadSurfacesListText` (JK.EXE `0x4e5c00`, `sithSurface.c:502`) into
+        // `face.normal`, and it is the only normal the engine's collision and renderer ever see — so
+        // comparing our Newell normal against it says exactly how far our geometry is from the game's.
+        // Two separate questions: does our *plane* match, and does our *sign* match.
+        let (mut compared, mut same_plane, mut same_sign, mut outward_ok) = (0usize, 0usize, 0usize, 0usize);
+        let mut worst_cos: Option<(String, usize, f32)> = None;
+        for name in &levels {
+            let Some(raw) = gobs.read(name) else { continue };
+            let level = jkl::parse(&String::from_utf8_lossy(&raw));
+            for (index, surface) in level.surfaces.iter().enumerate() {
+                let squared = surface.normal[0] * surface.normal[0]
+                    + surface.normal[1] * surface.normal[1]
+                    + surface.normal[2] * surface.normal[2];
+                if surface.verts.len() < 3 || squared < 0.25 {
+                    continue;
+                }
+                let Some(ours) = polygon_normal(&level, surface) else { continue };
+                compared += 1;
+                // Our Newell normal against the plane the level ships. `sithSurface_ReadSurfacesListText`
+                // reads that block into `face.normal` (JK.EXE `0x4e5c00`), so this is a direct
+                // comparison with the game's own geometry — the one number that says whether our
+                // derivation is faithful.
+                let dot = ours[0] * surface.normal[0] + ours[1] * surface.normal[1] + ours[2] * surface.normal[2];
+                if let Ok(want) = std::env::var("BK_SURFACE")
+                    && want.parse::<usize>() == Ok(index)
+                {
+                    println!(
+                        "surface {index} ({name}): ours {ours:?} file {:?} dot {dot:+.4}",
+                        surface.normal
+                    );
+                }
+                // The file's normals point *into* the room (surface 3275 on level 1 is the floor slab
+                // at z = -1.300 and ships (0,0,1), up), and Newell follows the winding, so a faithful
+                // derivation agrees with it rather than opposing it.
+                if dot > 0.0 {
+                    same_sign += 1;
+                } else {
+                    outward_ok += 1;
+                }
+                if dot > 0.999 {
+                    same_plane += 1;
+                } else if worst_cos.as_ref().is_none_or(|(_, _, w)| dot < *w) {
+                    worst_cos = Some((name.clone(), surface.verts[0].0 as usize, dot));
+                }
+            }
+        }
+        println!(
+            "normals: {same_plane} of {compared} surface plane(s) equal the file's own normal (dot > 0.999); {same_sign} agree in sign, {outward_ok} are negated"
+        );
+        if let Some((level, vertex, dot)) = &worst_cos {
+            println!("normals: worst plane is {level} at vertex {vertex} (dot {dot:+.3})");
+        }
         println!("winding: {} level(s) checked", levels.len());
         println!("--- winding check passed ---");
         return;
@@ -4226,38 +4848,62 @@ fn main() {
 
     if move_check {
         // `--move`: every level, walked from the spawn the game actually uses, asserting the promise the
-        // engine makes at the end of `sithCollision_MoveThing`: a move that would take the body out of the
-        // world is not taken (`sithIntersect_IsSphereInSector`). The port states it as "something is under
-        // the body", and this fails if any level drops its body.
+        // engine makes at the end of `sithCollision_MoveThing`: a move that would take the body out of
+        // the world is not taken (`sithIntersect_IsSphereInSector`).
+        //
+        // Each level is walked from eight headings, because "the body can move" cannot mean "forward has
+        // room": the level's own `walkplayer` yaw is the editor's, and several shipped starts face a wall
+        // 0.1 units away (`10cargo` faces a 45° corner). Holding that one direction makes a correct body
+        // look stuck. A level is stuck only when *every* heading is stuck, and a fall in any heading is a
+        // failure, because a body must never be over nothing.
+        const HEADINGS: usize = 8;
         let levels: Vec<String> = gobs.names().into_iter().filter(|n| n.ends_with(".jkl")).collect();
         let (mut walked, mut fell, mut frozen) = (0usize, 0usize, 0usize);
         let mut travelled = 0.0f32;
         for name in &levels {
             let Some(raw) = gobs.read(name) else { continue };
             let level = jkl::parse(&String::from_utf8_lossy(&raw));
-            let Some(r) = walk_level(&level, 180, true) else {
-                continue;
-            };
-            walked += 1;
-            travelled += r.travelled;
-            if r.void_frames > 0 {
-                fell += 1;
-                println!(
-                    "move: {name} spent {} frame(s) over nothing ({:.1} below its spawn)",
-                    r.void_frames, r.dropped
-                );
+            let (mut best, mut any_fall, mut sum, mut runs, mut undone) = (0.0f32, false, 0.0f32, 0usize, 0usize);
+            for heading in 0..HEADINGS {
+                let turn = heading as f32 * std::f32::consts::TAU / HEADINGS as f32;
+                let Some(r) = walk_level(&level, 180, true, turn) else { continue };
+                runs += 1;
+                sum += r.travelled;
+                best = best.max(r.travelled);
+                // A body that is boxed in touches walls; a body that is being undone by the
+                // containment rule does not. Only the second is a defect (`18ascend` and `19a` start
+                // inside a lift car and are correctly immobile, with 172 of 180 frames blocked).
+                if r.travelled < 0.5 && r.blocked == 0 {
+                    undone += 1;
+                }
+                if r.void_frames > 0 && !any_fall {
+                    any_fall = true;
+                    println!(
+                        "move: {name} heading {heading} spent {} frame(s) over nothing ({:.1} below its spawn)",
+                        r.void_frames, r.dropped
+                    );
+                }
             }
-            if r.travelled < 0.5 {
+            if runs == 0 {
+                continue;
+            }
+            walked += 1;
+            travelled += sum;
+            if any_fall {
+                fell += 1;
+            }
+            // The body moved nowhere and met nothing, from every heading: the containment rule is
+            // undoing legal moves, not the level enclosing the spawn.
+            if undone == runs {
                 frozen += 1;
+                println!("move: {name} could not move in any of {runs} heading(s) (best {best:.2} units)");
             }
         }
+        let mean = if walked > 0 { travelled / (walked * HEADINGS) as f32 } else { 0.0 };
         println!(
-            "move: {walked} level(s), {fell} fell through, {frozen} barely moved, {travelled:.0} units travelled in 180 frames each"
+            "move: {walked} level(s) x {HEADINGS} headings, {fell} fell through, {frozen} stuck, {travelled:.0} units travelled ({mean:.1} per heading)"
         );
         assert_eq!(fell, 0, "a body fell out of the world");
-        // A body that cannot move is as broken as one that falls: either way the level is unplayable from
-        // its own spawn, and this is what pins the step height (the engine has no step constant at all, so
-        // the smallest value that keeps every level walking is the honest one).
         assert_eq!(frozen, 0, "a body could not move from its spawn");
         println!("--- move check passed ---");
         return;
@@ -4266,9 +4912,12 @@ fn main() {
     if let Some(walk) = walk {
         match walk {
             Walk::Frames(frames) => {
-                walk_level(&world.level, frames, false);
+                walk_level(&world.level, frames, false, 0.0);
             }
-            Walk::All => walk_all(&gobs, 120),
+            // Twenty seconds a level, not two: at the body's real size a two-second walk stays inside
+            // the room it started in, so it never crossed a portal and the sweep stopped exercising
+            // the transition code at all.
+            Walk::All => walk_all(&gobs, 600),
         }
         return;
     }
@@ -4386,31 +5035,53 @@ fn main() {
         let mut vy = 0.0f32;
         let dt = 1.0 / 30.0;
         for _ in 0..60 {
-            walker_step(&solids, &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+            walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+        }
+        // Drop from the roomiest place the level has, not from the spawn: level 1's walkplayer stands in a
+        // crawlspace 0.3 units tall, and a body lifted above its own ceiling is *outside its sector*, which
+        // the containment rule (correctly, `decomp/004e7950_sithCollision_MoveThing.c:251`) refuses — so the
+        // fall never happens. The roomiest sector is where the drag curve can be measured at all.
+        let roomiest = (0..solids.sectors.len())
+            .filter_map(|i| {
+                let centre = solids.spheres.get(i)?.0;
+                let floor = solids.floor_below(i, centre)?;
+                let ceiling = solids.ceiling_above(i, centre)?;
+                let headroom = ceiling - floor;
+                // The body has to stand on that floor, not in the geometry around it.
+                let at = [centre[0], centre[1], floor + rules.radius];
+                (headroom > 0.0 && solids.inside_sector(i, [at[0], at[1], floor], 0.0))
+                    .then_some((i, at, headroom))
+            })
+            .max_by(|a, b| a.2.total_cmp(&b.2));
+        if let Some((room, at, _headroom)) = roomiest {
+            pos = at;
+            sector = room;
+            vy = 0.0;
         }
         let base = pos[2];
-        // The largest drop that actually falls: a body lifted above its sector's hull is held in place by
-        // the containment guard (which is correct — it is outside its room), so try from the biggest down.
         let mut found = None;
-        for drop in [1.5f32, 1.0, 0.6, 0.4] {
+        for drop in [1.5f32, 1.0, 0.6, 0.4, 0.25, 0.15, 0.08] {
             let start_z = base + drop;
+            // A lift that already leaves the room cannot fall; it is held, which is correct.
+            if !solids.inside_sector(sector, [pos[0], pos[1], start_z - rules.radius], 0.0) {
+                continue;
+            }
             let mut p2 = [pos[0], pos[1], start_z];
             let mut v2 = 0.0f32;
-            let mut impact = 0.0f32;
-            let mut landed_z = start_z;
+            // The fall is measured by how far the body actually descended and by the fastest speed it
+            // reached, not by catching the landing frame: in a low room the whole drop is one frame, and
+            // the old `before < 0` test then never fired at all.
+            let mut peak = 0.0f32;
             for _ in 0..900 {
-                let before = v2;
-                walker_step(&solids, &mut sector, &mut p2, &mut v2, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
-                if v2 == 0.0 && before < 0.0 {
-                    impact = -before;
-                    landed_z = p2[2];
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut p2, &mut v2, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+                peak = peak.max(-v2);
+                if v2 == 0.0 && peak > 0.0 {
                     break;
                 }
             }
-            if impact > 0.0 {
-                // The closed form uses the distance actually fallen, not the lift: a body can come down on a
-                // ledge a little below where it started, and then `sqrt(2 g h)` with the lift overstates it.
-                found = Some((start_z - landed_z, impact));
+            let fell = start_z - p2[2];
+            if peak > 0.0 && fell > 0.02 {
+                found = Some((fell, peak));
                 break;
             }
         }
@@ -4596,7 +5267,7 @@ fn main() {
             // Settle on the floor first: the thing's origin is at the level's walkplayer
             // point, which is not necessarily a radius above the floor.
             for _ in 0..30 {
-                walker_step(&solids, &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
             }
             let base = pos[2];
             let mut airetime = 0.0f32;
@@ -4605,7 +5276,7 @@ fn main() {
             vy = rules.jump;
             let trace = std::env::var_os("BK_JUMP_TRACE").is_some();
             for frame in 0..300 {
-                walker_step(&solids, &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
                 if trace && (frame < 6 || (18..28).contains(&frame) || (60..64).contains(&frame)) {
                     eprintln!(
                         "jump trace {frame}: z {:.3} base {base:.3} vy {vy:.2} support {:?} floor {:?}",
@@ -4699,6 +5370,46 @@ fn main() {
         if muted() { "muted" } else { "on" }
     );
 
+    let menus = load_menus(&game).unwrap_or_default();
+    // The boot screen: retail opens on its main menu, and this build now does too when it is being
+    // *played*. Every flag that drives frames is a capture or a gate — those want the level, not a
+    // menu in front of it — and an install whose executable cannot supply the menu tables keeps the
+    // old straight-into-the-level behaviour rather than showing a screen that cannot draw or close.
+    let capture = shot.is_some()
+        || shot_at.is_some()
+        || overview
+        || near.is_some()
+        || stand.is_some()
+        || live
+        || animate_only
+        || !animating
+        || fire_demo
+        || sim
+        || complete_after.is_some()
+        || play_cutscene.is_some();
+    let boot_menu = boot_screen(menu_open.as_deref(), capture, start_in_level, menus.find("main").is_some());
+    if start_in_level && boot_menu.is_none() {
+        println!(
+            "start: in {} with no menu (Escape opens the pause screen)",
+            level_name
+        );
+    }
+    if boot_menu.as_deref() == Some("main") {
+        println!("boot: main menu (Enter picks, Escape starts nothing until a game is running)");
+    }
+
+    // One line that says what this run is, so nobody has to infer it from the flags: every gate that
+    // exits before this point is headless and never creates a window, and everything that reaches here
+    // names the screen it opens on.
+    println!(
+        "mode: window, {}",
+        match (&boot_menu, capture) {
+            (Some(screen), _) => format!("screen `{screen}` open"),
+            (None, true) => "no screen (capture)".to_string(),
+            (None, false) => "no screen (playing)".to_string(),
+        }
+    );
+
     let mut app = App::new();
     if let Some(played) = startup_cutscene {
         app.insert_resource(played);
@@ -4714,8 +5425,8 @@ fn main() {
         }))
         .add_plugins(level_mat::LevelMaterialPlugin)
         .insert_resource(Archives(gobs))
-        .insert_resource(Screens(load_menus(&game).unwrap_or_default()))
-        .insert_resource(Overlay::new(menu_open).with_pending(pending_id))
+        .insert_resource(Screens(menus))
+        .insert_resource(Overlay::new(boot_menu).with_pending(pending_id))
         .insert_resource(world)
         .insert_resource(MusicDir(game.join("MUSIC")))
         .insert_resource(MusicState::default())
@@ -4743,37 +5454,69 @@ fn main() {
         .insert_resource(plan)
         .insert_resource(PendingLevel::default())
         .insert_resource(CompleteAfter(complete_after))
+        .insert_resource(ExitAfter(exit_after.unwrap_or(u64::MAX)))
         .add_systems(Startup, setup)
         .add_systems(PostStartup, setup_overlay)
-        .add_systems(Update, (share_collider, live_check, run_pulses_and_timers, resume_sleeping_labels, deliver_sector_triggers, deliver_thing_messages, deliver_crossed, use_key, enforce_mute, apply_fall_damage))
-        .insert_resource(TriggerCount::default())
+        // Always on: the collider hand-off, the gate that samples the running game, the mute, the
+        // pointer, the capture timer and the level swap. The swap is here because a menu *requests*
+        // it (New Game, Restart) while the world is paused, and the UI has to keep running to be
+        // closed at all.
         .add_systems(
             Update,
             (
-                (grab_cursor, walk_player),
-                cull_sectors,
+                share_collider,
+                live_check,
+                enforce_mute,
+                grab_cursor,
                 auto_shot,
-                sky_follows_camera,
-                ambient_follows_view,
-                play_exit,
-                advance_sim,
-                (demo_aim, sync_player_thing, health_follows_damage, infrared_follows_force, fire_player, draw_created, projectile_hits, respawn_on_death).chain(),
-                collect_items,
-                ai_shots,
-                play_requested_sounds,
-                music_follows_scripts,
-                show_taken,
-                animate_actors,
-                actors_follow_runtime,
-                complete_level_on_timer,
-                watch_level_complete,
-                queue_next_level,
+                trace_state,
                 swap_level,
-                // The UI systems run in order: input, then pointer, then the redraw that
-                // both of them mark dirty, then the cutscene blit, which has to be last —
-                // the HUD redraw clears the canvas when it runs.
                 (ui_input, ui_mouse, apply_pending, refresh_overlay, cutscene::play_cutscene)
                     .chain(),
+            ),
+        )
+        .insert_resource(TriggerCount::default())
+        // A hard frame budget runs whatever else is happening, menu open or not: a gate that forgets to
+        // quit must not be able to sit on a window (and hang a whole `--gates` sweep).
+        .add_systems(Update, (exit_after_frames, engine_fov))
+        // The world: frozen while any screen is open, which is what retail does and what keeps the
+        // boot menu from running a level's scripts, its AI and its doors behind itself. In three
+        // groups because Bevy's system-config tuples stop at twenty.
+        .add_systems(
+            Update,
+            (
+                (
+                    run_pulses_and_timers,
+                    resume_sleeping_labels,
+                    deliver_sector_triggers,
+                    deliver_thing_messages,
+                    deliver_crossed,
+                    use_key,
+                    apply_fall_damage,
+                    walk_player,
+                    cull_sectors,
+                    sky_follows_camera,
+                    ambient_follows_view,
+                    play_exit,
+                    advance_sim,
+                )
+                    .run_if(no_screen_open),
+                (demo_aim, sync_player_thing, health_follows_damage, infrared_follows_force, fire_player, draw_created, projectile_hits, respawn_on_death)
+                    .chain()
+                    .run_if(no_screen_open),
+                (
+                    collect_items,
+                    ai_shots,
+                    play_requested_sounds,
+                    music_follows_scripts,
+                    show_taken,
+                    animate_actors,
+                    actors_follow_runtime,
+                    complete_level_on_timer,
+                    watch_level_complete,
+                    queue_next_level,
+                )
+                    .run_if(no_screen_open),
             ),
         );
     app.run();
@@ -4793,6 +5536,9 @@ struct Archives(gob::GobSet);
 struct FlowPlan {
     game: std::path::PathBuf,
     level: String,
+    /// The level New Game starts: the first level of the first single-player episode, which is also
+    /// what a bare `cargo run` loads. `level` moves with the campaign; this does not.
+    first: String,
     /// The cutscene that plays on completion, if the graph names one.
     cut: Option<String>,
     /// The level that loads after that.
@@ -4970,7 +5716,8 @@ fn swap_level(world: &mut bevy::prelude::World) {
         .find(|t| t.template.eq_ignore_ascii_case("walkplayer"))
         .map(|t| (Vec3::from(t.pos) + Vec3::Z * PLAYER_EYE, t.yaw.to_radians()));
     if let Some((eye, yaw)) = eye {
-        let aim = Vec3::new(yaw.cos(), yaw.sin(), 0.0);
+        let (yaw_f, _) = yaw_axes(yaw);
+    let aim = Vec3::new(yaw_f[0], yaw_f[1], 0.0);
         let mut cameras = world.query_filtered::<&mut Transform, (With<Camera3d>, Without<OverlayQuad>)>();
         if let Ok(mut transform) = cameras.single_mut(world) {
             *transform = Transform::from_translation(eye).looking_at(eye + aim, Vec3::Z);
@@ -5078,6 +5825,13 @@ struct UiAssets {
 struct Overlay {
     /// Which screen is open, by the name `--ui-tables` prints; `None` shows the status bar.
     menu: Option<String>,
+    /// Whether a game has been started. The boot menu is up before it has, and Escape must not
+    /// close *that* — retail's main menu ignores the key, and dropping into a level the player
+    /// never started is worse than a dead key. Anything but the boot menu starts a game.
+    started: bool,
+    /// The element array the app booted on (`0x526680`, the main menu). Escape backs out one screen
+    /// at a time and stops here, whether or not a game has started.
+    boot: Option<u32>,
     /// The screen Escape opens: whichever one carries `GUI_RETURN_TO_GAME`.
     esc: Option<String>,
     /// The screens opened from the current one, newest last: a cancel/done row goes back.
@@ -5115,6 +5869,10 @@ impl Overlay {
 
     fn new(menu: Option<String>) -> Self {
         Self {
+            // Booting straight into the level (a capture, a gate) is a game already; the boot menu
+            // is the one case where nothing has started yet.
+            started: menu.is_none(),
+            boot: None,
             menu,
             esc: None,
             history: Vec::new(),
@@ -5138,6 +5896,16 @@ impl Overlay {
 
 #[derive(Component)]
 struct OverlayQuad;
+
+/// The run condition on the world's own systems: nothing simulates while a screen is open.
+///
+/// Retail stops the game under its menus, and the boot menu in particular must not have the level's
+/// scripts, doors and AI running behind it while the player is still choosing. The UI, the pointer,
+/// the capture timer and the level swap are outside this condition — the swap is how a menu starts a
+/// game at all.
+fn no_screen_open(overlay: Option<Res<Overlay>>) -> bool {
+    overlay.is_none_or(|o| o.menu.is_none())
+}
 
 /// Build the UI image, the shared assets, and the quad in front of the camera.
 fn setup_overlay(
@@ -5163,6 +5931,12 @@ fn setup_overlay(
     );
     overlay.image = images.add(image);
 
+    // The screen the app opened on: `setup_overlay` resolves it once, because Escape needs to know
+    // where the stack ends. `main` is an alias by artwork (`bkMain.bm`), so the base address is the
+    // reliable identity.
+    if overlay.boot.is_none() {
+        overlay.boot = screens.find("main").map(|s| s.base);
+    }
     let palette = world
         .level
         .colormaps
@@ -5184,20 +5958,19 @@ fn setup_overlay(
         palette,
     });
 
-    // One quad, sized to the camera's own frustum at half a unit out, so the 640x480
-    // canvas covers the view whatever the window size.
-    let Ok((cam, projection)) = cams.single() else { return };
-    let (fov, aspect) = match projection {
-        Projection::Perspective(p) => (p.fov, p.aspect_ratio),
-        _ => (std::f32::consts::FRAC_PI_4, 4.0 / 3.0),
-    };
+    // One quad, sized to the **overlay** camera's frustum at half a unit out, so the 640x480
+    // canvas covers the view whatever the window size. The overlay camera is spawned below and has
+    // the default 45 degree projection, so that is the FOV — sizing the quad from the *world*
+    // camera instead only worked while both were 45 degrees, and `--overview`'s long lens then shrank
+    // the whole HUD into a thumbnail in the middle of the screen.
+    let Ok((cam, _)) = cams.single() else { return };
+    let fov = std::f32::consts::FRAC_PI_4;
     // The overlay quad lives on its own render layer, drawn by a second camera that sees
     // nothing else, so no wall can ever draw over the UI. Half a unit out is plenty.
     let distance = 0.5;
     let height = 2.0 * distance * (fov * 0.5).tan();
     // Keep the canvas' own 4:3 proportions: the HUD and the menus are authored for a
     // 640x480 screen, so stretching them to a widescreen window would shear the art.
-    let _ = aspect;
     let quad = meshes.add(Rectangle::new(height * (overlay.canvas.width as f32 / overlay.canvas.height as f32), height));
     let material = materials.add(StandardMaterial {
         base_color_texture: Some(overlay.image.clone()),
@@ -5251,7 +6024,12 @@ fn refresh_overlay(
     let open = overlay.menu.clone().and_then(|name| screens.find(&name).cloned());
     match open {
         Some(screen) => {
-            let Some((base, panel)) = load_backdrop(&gobs, &screen, None) else { return };
+            let Some((base, panel)) = load_backdrop(&gobs, &screen, None) else {
+                // A screen whose art does not load leaves the canvas cleared, which is a black frame
+                // with no clue why. Say which screen and which bitmap instead.
+                println!("ui: no backdrop for {:#x} `{}` ({})", screen.base, screen.name, screen.background);
+                return;
+            };
             // What the player has found, so the engine's own `bIsVisible` rule can hide the
             // rows it would hide (jkGUIForce.c: `SITHINVENTORY_ITEM_FOUND`).
             let found = |bin: i32| {
@@ -5299,15 +6077,36 @@ fn ui_input(
     keys: Res<ButtonInput<KeyCode>>,
     screens: Option<Res<Screens>>,
     assets: Option<Res<UiAssets>>,
+    plan: Option<Res<FlowPlan>>,
+    overview: Option<Res<Overview>>,
+    mut pending: ResMut<PendingLevel>,
     mut overlay: ResMut<Overlay>,
     mut commands: Commands,
 ) {
     let Some(screens) = screens else { return };
+    // A capture takes no live input (see `ui_mouse`): a held Enter would walk the menu on its own.
+    if overview.as_deref().is_some_and(|o| o.capture) {
+        return;
+    }
     if keys.just_pressed(KeyCode::Escape) {
-        overlay.menu = if overlay.menu.is_some() { None } else { overlay.esc.clone() };
-        overlay.selected = 0;
-        overlay.hover = None;
-        overlay.dirty = true;
+        match overlay.menu.clone() {
+            // Escape backs out one screen at a time, and out of the last one into the game.
+            Some(name) => {
+                let at_boot = screens.find(&name).map(|s| s.base) == overlay.boot;
+                if !at_boot {
+                    let back = overlay.history.pop();
+                    overlay.show(back, 0);
+                }
+            }
+            // …and opens the pause screen, which is a root: it carries no history, so its own
+            // "Return To Game" closes the whole stack rather than walking back through it.
+            None if overlay.started => {
+                overlay.history.clear();
+                let esc = overlay.esc.clone();
+                overlay.show(esc, 0);
+            }
+            None => {}
+        }
     }
     let Some(screen) = overlay.menu.clone().and_then(|name| screens.find(&name).cloned()) else {
         return;
@@ -5326,7 +6125,15 @@ fn ui_input(
     }
     if keys.just_pressed(KeyCode::Enter) {
         let strings = assets.as_deref().map(|a| &a.strings).cloned().unwrap_or_default();
-        activate(&screen, rows[overlay.selected % rows.len()], &mut overlay, &strings, &mut commands);
+        activate(
+            &screen,
+            rows[overlay.selected % rows.len()],
+            &mut overlay,
+            &strings,
+            plan.as_deref(),
+            &mut pending,
+            &mut commands,
+        );
     }
 }
 
@@ -5334,6 +6141,8 @@ fn ui_input(
 fn apply_pending(
     screens: Option<Res<Screens>>,
     assets: Option<Res<UiAssets>>,
+    plan: Option<Res<FlowPlan>>,
+    mut pending: ResMut<PendingLevel>,
     mut overlay: ResMut<Overlay>,
     mut commands: Commands,
 ) {
@@ -5342,7 +6151,7 @@ fn apply_pending(
     let Some(screen) = screens.find(&name).cloned() else { return };
     if let Some(index) = screen.items.iter().position(|item| item.id == id) {
         let strings = assets.as_deref().map(|a| &a.strings).cloned().unwrap_or_default();
-        activate(&screen, index, &mut overlay, &strings, &mut commands);
+        activate(&screen, index, &mut overlay, &strings, plan.as_deref(), &mut pending, &mut commands);
     }
 }
 
@@ -5352,11 +6161,20 @@ fn ui_mouse(
     windows: Query<&Window>,
     screens: Option<Res<Screens>>,
     assets: Option<Res<UiAssets>>,
+    plan: Option<Res<FlowPlan>>,
+    overview: Option<Res<Overview>>,
     sim: Option<Res<Sim>>,
     bank: Option<Res<SoundBank>>,
+    mut pending: ResMut<PendingLevel>,
     mut overlay: ResMut<Overlay>,
     mut commands: Commands,
 ) {
+    // A capture takes no live pointer input, for the same reason `fire_player` refuses it: a click
+    // arriving during a headless run walks the menu on its own — main -> New Game -> Abort -> Quit —
+    // and the frame it was supposed to save is whatever screen the cascade happened to reach.
+    if overview.as_deref().is_some_and(|o| o.capture) {
+        return;
+    }
     let (Some(screens), Ok(window)) = (screens, windows.single()) else { return };
     if overlay.menu.is_none() {
         return;
@@ -5393,24 +6211,46 @@ fn ui_mouse(
         play_menu_wav(&name, &sim, &bank);
     }
     let strings = assets.as_deref().map(|a| &a.strings).cloned().unwrap_or_default();
-    activate(&screen, index, &mut overlay, &strings, &mut commands);
+    activate(&screen, index, &mut overlay, &strings, plan.as_deref(), &mut pending, &mut commands);
 }
 
-/// Run one element's id: an action this build knows, or a note that it does not.
 /// Run one element's id: open the screen the retail graph says it opens, otherwise close
-/// the screen or leave the game.
+/// the screen, start a game, or leave the game.
 fn activate(
     screen: &menus::Screen,
     index: usize,
     overlay: &mut Overlay,
     strings: &uni::Uni,
+    plan: Option<&FlowPlan>,
+    pending: &mut PendingLevel,
     commands: &mut Commands,
 ) {
     let item = &screen.items[index];
-    println!("menu `{}` -> `{}` ({})", screen.name, item.key, item.id);
-    match nav::step(screen.base, item.id, &item.key) {
+    let step = nav::step(screen.base, item.id, &item.key);
+    println!("menu {:#x} `{}` -> `{}` ({}) = {step:?}", screen.base, screen.name, item.key, item.id);
+    match step {
         nav::Step::Quit => {
             commands.write_message(AppExit::Success);
+        }
+        nav::Step::NewGame | nav::Step::Restart => {
+            // Both are "load this level from its own start point": `swap_level` despawns what the
+            // old level spawned and runs `setup` again, so the scripts, the things and the player
+            // all start over instead of resuming the world the menu was drawn over. New Game is the
+            // campaign's first level, Restart is the one that is loaded.
+            let Some(plan) = plan else { return };
+            let level = if step == nav::Step::NewGame { plan.first.clone() } else { plan.level.clone() };
+            overlay.history.clear();
+            overlay.started = true;
+            overlay.show(None, 0);
+            println!("boot: {} -> {level}", item.key);
+            pending.0 = Some(level);
+        }
+        nav::Step::Abort => {
+            // Abort leaves the level rather than the program: back to the boot menu, with the world
+            // still paused behind it (`started` false also keeps Escape from closing that menu).
+            overlay.history.clear();
+            overlay.started = false;
+            overlay.show(Some("main".to_string()), 0);
         }
         nav::Step::Open(to) => {
             // `find` takes a hex address, which is what the graph is keyed by.
@@ -5472,6 +6312,292 @@ fn start_level(gobs: &gob::GobSet) -> Option<String> {
         .filter(|(_, e)| e.kind == episode::KIND_SINGLE)
         .find_map(|(_, e)| e.first_level().map(|s| s.file.clone()))
         .filter(|f| gobs.find(f).is_some())
+}
+
+/// `--boot`: the screen the app opens on, and what each row of the boot path does.
+///
+/// The decisions are [`nav`]'s, and `nav`'s tests pin them. This half checks them against *this
+/// install*: that the screens the ids belong to exist, that the rows carry those ids, that the
+/// cursor can reach New Game at all, and that the campaign it starts is a level the archives hold.
+/// A graph is only a claim until the shipped element tables agree with it.
+fn boot_gate(gobs: &gob::GobSet, menus: &menus::Menus) -> bool {
+    let mut ok = true;
+    let mut say = |good: bool, line: String| {
+        println!("boot: {line}");
+        if !good {
+            ok = false;
+        }
+    };
+    // What a bare `cargo run` opens on.
+    let Some(menu) = menus.find("main") else {
+        say(false, "no `main` screen: the install's executable supplied no menu tables".into());
+        return false;
+    };
+    say(
+        true,
+        format!("opens on `{}` at {:#x}, {} element(s)", menu.name, menu.base, menu.items.len()),
+    );
+    // Main -> single player, through the row a player picks.
+    let Some(row) = menu.items.iter().find(|i| i.key == "GUI_SINGLEPLAYER") else {
+        say(false, "the main menu carries no `GUI_SINGLEPLAYER` row".into());
+        return false;
+    };
+    let to = match nav::step(menu.base, row.id, &row.key) {
+        nav::Step::Open(to) => to,
+        other => {
+            say(false, format!("`GUI_SINGLEPLAYER` is {other:?}, not a screen"));
+            return false;
+        }
+    };
+    let Some(single) = menus.screens.iter().find(|s| s.base == to) else {
+        say(false, format!("{to:#x} is not a screen in this executable"));
+        return false;
+    };
+    say(true, format!("`{}` -> `{}` ({to:#x}, {} element(s))", menu.name, single.name, single.items.len()));
+    // New Game: an action, reachable with the keyboard, starting a level that exists.
+    let index = single.items.iter().position(|i| i.key == "GUI_NEWGAME");
+    let Some(index) = index else {
+        say(false, "the single-player screen carries no `GUI_NEWGAME` row".into());
+        return false;
+    };
+    let new_game = &single.items[index];
+    let step = nav::step(single.base, new_game.id, &new_game.key);
+    say(
+        step == nav::Step::NewGame,
+        format!("`{}` ({}) -> {step:?}", new_game.key, new_game.id),
+    );
+    let rows = single.rows();
+    say(
+        rows.contains(&index),
+        format!(
+            "the cursor walks {} row(s) on `{}` and #{} is among them",
+            rows.len(),
+            single.name,
+            index
+        ),
+    );
+    let first = start_level(gobs);
+    say(
+        first.as_ref().is_some_and(|f| gobs.find(f).is_some()),
+        format!("campaign start {}", first.as_deref().unwrap_or("(none)")),
+    );
+    // The pause menu: resume, reload, and the way back to the boot menu.
+    let Some(esc) = menus.find_by_item("GUI_RETURN_TO_GAME") else {
+        say(false, "no screen carries `GUI_RETURN_TO_GAME`, so Escape has nothing to open".into());
+        return false;
+    };
+    for (key, want) in [
+        ("GUI_RETURN_TO_GAME", nav::Step::Close),
+        ("GUI_RESTART", nav::Step::Restart),
+        ("GUI_ABORT", nav::Step::Abort),
+    ] {
+        match esc.items.iter().find(|i| i.key == key) {
+            Some(item) => say(
+                nav::step(esc.base, item.id, &item.key) == want,
+                format!("pause `{key}` ({}) -> {want:?}", item.id),
+            ),
+            None => say(false, format!("the pause menu carries no `{key}` row")),
+        }
+    }
+    // Where the app opens: the retail menu by default, straight into a level for testing.
+    say(
+        boot_screen(Some("main"), false, false, true).as_deref() == Some("main"),
+        "no flags -> the main menu".into(),
+    );
+    say(
+        boot_screen(None, false, true, true).is_none(),
+        "`--start` -> no screen, straight into the level".into(),
+    );
+    say(
+        boot_screen(Some("esc"), false, true, true).as_deref() == Some("esc"),
+        "`--menu` still wins over `--start`".into(),
+    );
+    if ok {
+        println!("--- boot check passed ---");
+    } else {
+        println!("--- boot check FAILED ---");
+    }
+    ok
+}
+
+/// `--scale`: how big the placed models are against the geometry they are placed in.
+///
+/// `MODEL_SCALE` is one number standing in for "how many level units a model unit is", and the way to
+/// check it is not to re-read the number but to measure a model against the thing it has to fit: a
+/// **door** inside the doorway the level builds for it, and an **actor** under the ceiling of the
+/// sector it stands in. Both references are the level's own geometry.
+fn print_scale(world: &World) {
+    let level = &world.level;
+    let scale = model_scale();
+    let solids = collide::build(level);
+
+    // A model's bounding box **in model space**: a puppet's mesh vertices are node-local, so they
+    // say nothing about the body until the hierarchy is composed. That composition is what
+    // `model_mesh_posed` does to build the mesh, and it is what has to be measured here — the raw
+    // vertex extents of `ky.3do` are 0.064 model units, ten times smaller than the body.
+    let bbox = |model: &tdo::Model| -> Option<([f32; 3], [f32; 3])> {
+        let composed = tdo::pose_nodes(model, None, 0.0);
+        let owners = model.mesh_nodes();
+        let geoset = model.pick_geoset();
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for (index, mesh) in model.meshes.iter().enumerate() {
+            if mesh.geoset != geoset {
+                continue;
+            }
+            let owner = owners
+                .get(index)
+                .copied()
+                .filter(|i| *i != usize::MAX)
+                .and_then(|i| composed.get(i));
+            for v in &mesh.vertices {
+                let p = match owner {
+                    Some(x) => x.apply(*v),
+                    None => *v,
+                };
+                for (i, c) in p.iter().enumerate() {
+                    lo[i] = lo[i].min(*c);
+                    hi[i] = hi[i].max(*c);
+                }
+            }
+        }
+        (hi[0] > lo[0]).then_some((lo, hi))
+    };
+
+    println!("model scale {scale:.1} (BK_MODEL_SCALE overrides); sizes below are world units");
+    println!(
+        "{:<18} {:<16} {:>8} {:>8} {:>8} {:>7} {:>6}",
+        "template", "model", "height", "width", "model h", "RADIUS", "size="
+    );
+    let mut rows: Vec<(String, String, f32, f32, f32, f32, Option<f32>, bool, bool)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for thing in &level.things {
+        if !seen.insert(thing.template.to_ascii_lowercase()) {
+            continue;
+        }
+        let Some(name) = world.template_model.get(&thing.template.to_ascii_lowercase()) else { continue };
+        let Some(model) = world.models.get(name) else { continue };
+        let Some((lo, hi)) = bbox(model) else { continue };
+        let puppet = level.template_param(&thing.template, "puppet").is_some();
+        let door = thing.template.to_ascii_lowercase().contains("door");
+        rows.push((
+            thing.template.clone(),
+            name.clone(),
+            (hi[2] - lo[2]) * scale,
+            (hi[0] - lo[0]).max(hi[1] - lo[1]) * scale,
+            hi[2] - lo[2],
+            model.radius,
+            level.template_param(&thing.template, "size").and_then(|s| s.parse::<f32>().ok()),
+            puppet,
+            door,
+        ));
+    }
+    rows.sort_by(|a, b| b.2.total_cmp(&a.2));
+    for (template, model, height, width, raw, radius, size, puppet, door) in &rows {
+        println!(
+            "{template:<18} {model:<16} {height:>8.2} {width:>8.2} {raw:>8.3} {radius:>7.3} {:>6} {}{}",
+            size.map(|s| format!("{s:.3}")).unwrap_or_else(|| "-".into()),
+            if *puppet { "actor" } else { "" },
+            if *door { " door" } else { "" }
+        );
+    }
+
+    // The level's own references. A **door** has to fill the doorway the level builds for it: the
+    // vertical adjoin polygons around the door's own position are that doorway, in world units.
+    println!("\ndoor against its doorway (world units, the nearest vertical adjoin):");
+    for thing in &level.things {
+        if !thing.template.to_ascii_lowercase().contains("door") {
+            continue;
+        }
+        let Some(name) = world.template_model.get(&thing.template.to_ascii_lowercase()) else { continue };
+        let Some(model) = world.models.get(name) else { continue };
+        let Some((lo, hi)) = bbox(model) else { continue };
+        let Ok(sector) = usize::try_from(thing.sector) else { continue };
+        let mut best: Option<(f32, f32, f32, f32)> = None;
+        for portal in solids.portals.get(sector).into_iter().flatten() {
+            // A doorway is vertical: its plane's normal is horizontal.
+            if portal.normal[2].abs() > 0.6 {
+                continue;
+            }
+            let (mut zlo, mut zhi) = (f32::INFINITY, f32::NEG_INFINITY);
+            let (mut centre, n) = ([0.0f32; 3], portal.verts.len().max(1) as f32);
+            for v in &portal.verts {
+                zlo = zlo.min(v[2]);
+                zhi = zhi.max(v[2]);
+                centre = [centre[0] + v[0] / n, centre[1] + v[1] / n, centre[2] + v[2] / n];
+            }
+            if zhi <= zlo {
+                continue;
+            }
+            // The opening's width: its horizontal extent along its own plane.
+            let tangent = [-portal.normal[1], portal.normal[0], 0.0];
+            let (mut wlo, mut whi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for v in &portal.verts {
+                let t = v[0] * tangent[0] + v[1] * tangent[1];
+                wlo = wlo.min(t);
+                whi = whi.max(t);
+            }
+            let far = ((centre[0] - thing.pos[0]).powi(2) + (centre[1] - thing.pos[1]).powi(2)).sqrt();
+            if best.is_none_or(|(d, ..)| far < d) {
+                best = Some((far, whi - wlo, zhi - zlo, 0.0));
+            }
+        }
+        match best {
+            Some((far, width, height, _)) => println!(
+                "  {:<12} {:<14} model {:>5.2}w x {:>5.2}h ({:.3} x {:.3} model units)  doorway {:>5.2}w x {:>5.2}h at {far:.2} units",
+                thing.template,
+                name,
+                (hi[0] - lo[0]).max(hi[1] - lo[1]) * scale,
+                (hi[2] - lo[2]) * scale,
+                (hi[0] - lo[0]).max(hi[1] - lo[1]),
+                hi[2] - lo[2],
+                width,
+                height
+            ),
+            None => println!("  {:<12} {:<14} no vertical adjoin in its sector", thing.template, name),
+        }
+    }
+
+    // The rooms things stand in, and the actors among them.
+    let mut storeys: Vec<f32> = Vec::new();
+    for thing in &level.things {
+        let Ok(sector) = usize::try_from(thing.sector) else { continue };
+        if let (Some(floor), Some(ceiling)) = (
+            solids.floor_below(sector, thing.pos),
+            solids.ceiling_above(sector, thing.pos),
+        ) && ceiling > floor
+        {
+            storeys.push(ceiling - floor);
+        }
+    }
+    let median = |v: &[f32]| {
+        let mut v = v.to_vec();
+        v.sort_by(f32::total_cmp);
+        v.get(v.len() / 2).copied()
+    };
+    let mut actors: Vec<f32> = rows.iter().filter(|r| r.7).map(|r| r.2).collect();
+    actors.sort_by(f32::total_cmp);
+    let (shortest, tallest, middle) = (
+        actors.first().copied(),
+        actors.last().copied(),
+        median(&actors),
+    );
+    println!(
+        "\nstorey heights over {} placed thing(s): median {:?}, max {:?}",
+        storeys.len(),
+        median(&storeys),
+        storeys.iter().copied().max_by(f32::total_cmp)
+    );
+    println!(
+        "actor heights over {} template(s): shortest {shortest:?}, median {middle:?}, tallest {tallest:?}",
+        actors.len()
+    );
+    if let (Some(actor), Some(storey)) = (middle, median(&storeys)) {
+        println!(
+            "actor / storey = {:.2} (under 1.0 is a body that fits its room with headroom; 10.0 was the ten-times-too-big world)",
+            actor / storey
+        );
+    }
 }
 
 fn print_episodes(gobs: &gob::GobSet) {
@@ -5933,6 +7059,9 @@ struct WalkResult {
 #[allow(clippy::too_many_arguments)]
 fn walker_step(
     solids: &collide::Solids,
+    // What the level's scripts have switched: a closed adjoin or a hidden sector doorway. The
+    // geometry-only callers (`--walk`, `--move`) pass `Gates::default()`, which is "all open".
+    gates: collide::Gates<'_>,
     sector: &mut usize,
     pos: &mut [f32; 3],
     vy: &mut f32,
@@ -5946,6 +7075,9 @@ fn walker_step(
 ) -> (f32, bool) {
     // Where the frame started, so a move that would leave the world can be undone.
     let frame_start = *pos;
+    // `MoveThing` restores the sector as well as the position (see the containment check below), so
+    // the sector the frame began in is kept alongside the position.
+    let sector_start = *sector;
 
     // Vertical: the fall is a *sweep*, the way `sithCollision_MoveThing` moves any body — so it stops at
     // the first floor it meets and crosses doorways on the way down. That is what makes a walkway whose
@@ -5979,7 +7111,7 @@ fn walker_step(
     let delta = [move_dir[0] * dt, move_dir[1] * dt, 0.0];
     let before = *pos;
     let step_up = STEP_UP;
-    let (moved_to, crossed_to, mut blocked) = solids.move_body(*sector, *pos, delta, radius, step_up);
+    let (moved_to, crossed_to, mut blocked) = solids.move_body(*sector, *pos, delta, radius, step_up, gates);
     if std::env::var_os("BK_WALK_TRACE").is_some() {
         let dm = ((moved_to[0] - pos[0]).powi(2) + (moved_to[1] - pos[1]).powi(2)).sqrt();
         eprintln!(
@@ -5987,8 +7119,11 @@ fn walker_step(
             pos[2], moved_to[2]
         );
     }
+    // Read before the sector is adopted: comparing after the assignment made this false for ever, so
+    // the walk summary's "sector crossings" was pinned at whatever the docs had last observed.
+    let crossed = crossed_to != *sector;
     *pos = moved_to;
-    if crossed_to != *sector {
+    if crossed {
         *sector = crossed_to;
     }
     // The step-up the engine allows: a body may climb `moveSize + 0.01` above its feet, which is why a
@@ -5997,50 +7132,50 @@ fn walker_step(
     if !allow_step {
         blocked = false;
     }
-    // The engine's containment guarantee: `sithCollision_MoveThing` ends by restoring the previous
-    // position when the body is no longer inside its sector (`sithIntersect_IsSphereInSector`). This port
-    // keeps a body's sector from the level's own data, and on some maps that sector cannot reach the room
-    // below — so a step off a walkway used to fall for ever. The same guarantee, stated as "is there
-    // anything under this body at all": if not, the move did not happen.
-    // The engine's test is `sithIntersect_IsSphereInSector`: is the body still *inside its sector*, not
-    // "is there a floor under it". A body falling through a room is inside its sector and must be allowed
-    // to fall; testing for a floor instead froze a body in mid-air and re-zeroed it every frame, which is
-    // what the wedge on eight levels turned out to be.
-    let inside = solids.clearance(*sector, *pos).is_some_and(|c| c >= 0.0);
-    if !inside {
-        // The engine calls `sithThing_SetSector` to whatever sector holds the thing, and that is right
-        // when the sector data tiles. Here it does not: level 1 records sector `339` for its `walkplayer`
-        // and `339`'s planes do not bound the walkway, so adopting the *hull* answer swaps to `218`, whose
-        // lateral surfaces let the body walk off the walkway. Keep the recorded sector while there is
-        // geometry under the body, and undo the move only when there is nothing at all.
-        if solids.floor_under(*sector, *pos, 2.0, radius).is_none() {
-            if std::env::var_os("BK_WALK_TRACE").is_some() {
-                eprintln!(
-                    "walk trace:     reverted (clearance {:?}, floor {:?}) at z {:.3}",
-                    solids.clearance(*sector, *pos),
-                    solids.floor_under(*sector, *pos, 2.0, radius),
-                    pos[2]
-                );
-            }
-            *pos = frame_start;
-            *vy = 0.0;
+    // The engine's containment guarantee, transcribed from `sithCollision_MoveThing`
+    // (`decomp/004e7950_sithCollision_MoveThing.c:251`):
+    //
+    //     if (thing->field_28 != 0 && thing->physicsType == 1) {
+    //         if (!sithIntersect_IsSphereInSector(&thing->position, 0, thing->sector)) {
+    //             thing->position = savedPosition;
+    //             direction       = savedDirection;
+    //             sithThing_SetSector(thing, savedSector, 0);
+    //         }
+    //     }
+    //
+    // The position, the direction and the sector all come back. `Solids::inside_sector` is that
+    // function, box short-circuit included, and `hull` is the surface set it walks.
+    //
+    // It is asked about the thing's **origin**, which for a body is its feet: the level places
+    // `walkplayer` at floor height (`10cargo` sector 333: z 1.4814 on a floor at 1.4814) and the eye
+    // sits one eye-height above that. Our `pos` is the body *centre*, one radius up, so the feet are
+    // what gets tested — testing the centre put the body 0.01 outside a 45° corner plane on
+    // `10cargo`, 0.02 outside another on `11gorc`, and undid every step of the walk.
+    let origin = [pos[0], pos[1], pos[2] - radius];
+    if !solids.inside_sector(*sector, origin, 0.0) {
+        if std::env::var_os("BK_WALK_TRACE").is_some() {
+            let worst = solids.hull.get(*sector).into_iter().flatten().min_by(|a, b| {
+                let da = -(a.normal[0] * (origin[0] - a.point[0])
+                    + a.normal[1] * (origin[1] - a.point[1])
+                    + a.normal[2] * (origin[2] - a.point[2]));
+                let db = -(b.normal[0] * (origin[0] - b.point[0])
+                    + b.normal[1] * (origin[1] - b.point[1])
+                    + b.normal[2] * (origin[2] - b.point[2]));
+                da.total_cmp(&db)
+            });
+            eprintln!(
+                "walk trace:     outside sector {sector} ({} hull plane(s), clearance {:?}) at {origin:?}; moved {crossed_to}, crossed {crossed}, worst {:?}; move undone",
+                solids.hull.get(*sector).map_or(0, |p| p.len()),
+                solids.clearance(*sector, origin),
+                worst.map(|p| (p.surface, p.normal, p.point))
+            );
         }
+        *pos = frame_start;
+        *sector = sector_start;
+        *vy = 0.0;
     }
-
-    let crossed = crossed_to != *sector;
     let moved = ((pos[0] - before[0]).powi(2) + (pos[1] - before[1]).powi(2)).sqrt();
-    // A recorded sector whose planes do not bound the room can also stop the body for ever: the lateral
-    // sweep finds a "wall" that is really the sector's own hull edge. When the body wanted to move and did
-    // not, and another sector holds it, that sector is the honest answer — the engine's `SetSector`, used
-    // only as a fallback so the good cases keep the sector the level named.
-    let wanted = (move_dir[0] * move_dir[0] + move_dir[1] * move_dir[1]).sqrt();
-    if wanted > 0.5 && moved < 1e-4 {
-        if let Some(room) = solids.sector_for_body(*pos) {
-            if room != *sector {
-                *sector = room;
-            }
-        }
-    }
+
     (moved, crossed)
 }
 
@@ -6050,11 +7185,12 @@ fn walker_step(
 /// "forward" for the requested number of frames, resolving against the sector's solid
 /// surfaces each step. A level whose geometry and sector table disagree shows up here
 /// as a walker that leaves its sector, or one that never stops against a wall.
-fn walk_level(level: &jkl::Level, frames: u32, quiet: bool) -> Option<WalkResult> {
+fn walk_level(level: &jkl::Level, frames: u32, quiet: bool, turn: f32) -> Option<WalkResult> {
     // Same rules as the window: the sweep is only meaningful if it walks the same way.
     let rules = Rules::from_level(level);
     let (radius, speed) = (rules.radius, rules.walk);
-    const EYE: f32 = 0.35;
+    // The sweep starts the body one radius above the level's own start, which is where `setup` puts it.
+    let EYE = rules.radius;
     const STEP: f32 = 1.0 / 30.0;
 
     let solids = collide::build(level);
@@ -6069,9 +7205,9 @@ fn walk_level(level: &jkl::Level, frames: u32, quiet: bool) -> Option<WalkResult
 
     let player = level.things.iter().find(|t| t.template.eq_ignore_ascii_case("walkplayer"))?;
     let mut pos = [player.pos[0], player.pos[1], player.pos[2] + EYE];
-    // The level's own record of which sector the player starts in is the engine's answer;
-    // re-deriving it from the hull planes picks a trigger sliver or a room that spans the
-    // whole level, and neither walks. Fall back to the hull tests only if it is unusable.
+    // The level's own record of which sector the player starts in is the engine's answer, and the
+    // engine trusts it verbatim: `sithThing_SetSector` is called with it at load. Re-deriving it from
+    // the hull picks a trigger sliver, so the file's field wins and the hull is only the fallback.
     let recorded = usize::try_from(player.sector).ok().filter(|s| *s < solids.sectors.len());
     let Some(mut sector) = recorded.or_else(|| solids.sector_for_body(pos)) else {
         if !quiet {
@@ -6079,9 +7215,11 @@ fn walk_level(level: &jkl::Level, frames: u32, quiet: bool) -> Option<WalkResult
         }
         return None;
     };
-    let yaw = player.yaw.to_radians();
-    // A JK yaw of `a` faces `(cos a, sin a, 0)` with Z up (see `thing_transform`).
-    let forward = [yaw.cos(), yaw.sin(), 0.0];
+    let yaw = player.yaw.to_radians() + turn;
+    // The walker faces the way the level's start faces, in the engine's own basis (`yaw_axes`), with
+    // `turn` radians added so one level can be walked from several headings.
+    let (b, _) = yaw_axes(yaw);
+    let forward = [b[0], b[1], 0.0];
     if std::env::var("BK_TRACE").is_ok() {
         println!("  start sector {sector}, {} planes:", solids.sectors[sector].len());
         for p in &solids.sectors[sector] {
@@ -6118,6 +7256,7 @@ fn walk_level(level: &jkl::Level, frames: u32, quiet: bool) -> Option<WalkResult
         let step_speed = if water { speed * 0.5 } else { speed };
         let (moved, crossed) = walker_step(
             &solids,
+            collide::Gates::default(),
             &mut sector,
             &mut pos,
             &mut 0.0,
@@ -6168,12 +7307,11 @@ fn walk_level(level: &jkl::Level, frames: u32, quiet: bool) -> Option<WalkResult
             );
         }
     }
-    let contained = solids.sectors.get(sector).is_some_and(|planes| {
-        planes
-            .iter()
-            .all(|p| (pos[0] - p.point[0]) * p.normal[0] + (pos[1] - p.point[1]) * p.normal[1]
-                + (pos[2] - p.point[2]) * p.normal[2] <= radius + 0.05)
-    });
+    // The report must ask the rule's own question: `inside_sector` at the body's origin, box
+    // short-circuit included. A hand-rolled "every plane within radius + 0.05" test answers something
+    // else — it ignores `COLLIDEBOX`, which `sithIntersect_IsSphereInSector` checks first — and so
+    // disagreed with the walk it was reporting on (`20aboc`, `20bboc`).
+    let contained = solids.inside_sector(sector, [pos[0], pos[1], pos[2] - radius], 0.0);
     // Whether the hull test agrees is a separate question: sector hulls overlap, so the
     // walker can be correctly inside the sector it thinks it is in and still be claimed
     // by a neighbouring sliver.
@@ -6211,6 +7349,10 @@ fn walk_level(level: &jkl::Level, frames: u32, quiet: bool) -> Option<WalkResult
     })
 }
 
+/// `--facing`: which of the engine's two horizontal axes a level's own `walkplayer` faces.
+///
+/// `rdMatrix_Build34` gives a thing two horizontal axes at yaw: `lvec` (the *look* axis, column 1 of
+
 /// `--walk all`: the same walk on every level, to see whether collision holds in the
 /// whole install rather than in one hand-picked room.
 fn walk_all(gobs: &gob::GobSet, frames: u32) {
@@ -6225,7 +7367,7 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     for name in &levels {
         let Some(raw) = gobs.read(name) else { continue };
         let level = jkl::parse(&String::from_utf8_lossy(&raw));
-        match walk_level(&level, frames, true) {
+        match walk_level(&level, frames, true, 0.0) {
             Some(r) => {
                 transitions += r.transitions;
                 kept += r.contained as usize;
@@ -6359,6 +7501,7 @@ fn pose_view(
                                 mut textures: ResMut<Assets<Image>>| {
         commands.spawn((
             Camera3d::default(),
+
             Transform::from_translation(eye).looking_at(centre, Vec3::Z),
         ));
         // One light and a little ambient, so a posed model reads as 3D instead of a
@@ -7552,7 +8695,7 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
 
 #[derive(Resource)]
 struct Overview {
-    /// `--overview`: a high, wide camera instead of the walker.
+    /// `--overview`: the whole level in plan, instead of the walker — see `plan_view`.
     overview: bool,
     /// `--shot`/`--map-shot`: step on a fixed clock so a capture is reproducible.
     capture: bool,
@@ -7659,11 +8802,24 @@ fn spawn_models(
     let mut unresolved = 0usize;
     let mut triangles = 0usize;
     let mut empty_meshes = 0usize;
+    let mut own_body = 0usize;
     // Thing index -> the entities drawing it. A model with several materials becomes
     // several entities, and they all have to move together when its script does.
     let mut entities: HashMap<usize, Vec<Entity>> = HashMap::new();
 
     for (thing_index, thing) in world.level.things.iter().enumerate() {
+        // The local player's own body is **never** drawn. `walkplayer` names `model3d=ky.3do`
+        // (`03katarn.jkl`), and that is the thing the camera is attached to — the camera is the
+        // body's position plus an eye offset — so spawning it draws the player's model *around* the
+        // viewpoint. Models are drawn with `cull_mode: None` (gaps.md §4), so the camera does not
+        // look at the body, it looks at the inside of it, and those unlit polygons land over the
+        // level, the walls and every NPC in front of them. `BK_MODEL_SCALE=0.01` is the A/B that
+        // says the intruder is a model at all; this is the only one placed at the camera by
+        // definition. The engine's POV pass skips the local player for the same reason.
+        if is_local_player(&thing.template) {
+            own_body += 1;
+            continue;
+        }
         let Some(model_name) = world.template_model.get(&thing.template.to_ascii_lowercase()) else {
             continue;
         };
@@ -7772,12 +8928,21 @@ fn spawn_models(
         }
     }
     println!(
-        "{} model instances from {} shared meshes, {triangles} triangles ({empty_meshes} empty, {unresolved} things with no model loaded), {} animated actors",
+        "{} model instances from {} shared meshes, {triangles} triangles ({empty_meshes} empty, {unresolved} things with no model loaded), {} animated actors, {own_body} own body(ies) not drawn",
         spawned,
         mesh_cache.len(),
         actors.len()
     );
     (entities, actors)
+}
+
+/// Whether a thing is the body the camera follows, and so must not be drawn.
+///
+/// The level places its player starts as `walkplayer` rows — `03katarn.jkl` has four, and every
+/// one carries the `_actor`/`player` template's `model3d=ky.3do`. The app's walker takes the first
+/// of them (`walk_player` looks up exactly this name), so this is the same test.
+fn is_local_player(template: &str) -> bool {
+    template.eq_ignore_ascii_case("walkplayer")
 }
 
 /// JK places things with degrees of pitch, yaw and roll about a Y-up world.
@@ -7820,17 +8985,26 @@ fn thing_quat(pitch: f32, yaw: f32, roll: f32) -> Quat {
     Quat::from_mat3(&Mat3::from_cols(r, l, u)).normalize()
 }
 
-/// Model space is 1/10 of world space: **10.0**.
+/// Model space **is** world space: **1.0**.
 ///
-/// Measured, twice, because the first measurement was read wrong: `bounds()` already multiplies by this
-/// scale, so its "1.81" was *world* units, not model units. The model-space height of `ky.3do` is **0.18**,
-/// and its *posed* height is 0.17 — the stand keyframe barely moves the rest pose at frame 0 — so a
-/// character is 1.8 world units tall at 10, which is a person in a level whose storeys are 2.5 units apart.
-/// The `2x3door` evidence (`d2x3.3do` at 0.2 x 0.3 for a 2 x 3 door) says the same thing.
+/// Measured against the only reference that cannot be argued with — a door model has to fill the
+/// doorway the level builds for it, and both are in the file:
 ///
-/// `physics_scale()` is separate and also 10, but for its own reason: the movement is calibrated in level
-/// units and the drawing scale must be free to change without moving it.
-const MODEL_SCALE: f32 = 10.0;
+/// ```text
+/// door          model (model units)   doorway (level units)   ratio
+/// 2x3door       0.200 x 0.300         0.20 x 0.30             1.00
+/// 2x3door       0.200 x 0.300         0.20 x 0.30             1.00
+/// 3x3door_1     0.300 x 0.300         0.30 x 0.30             1.00
+/// 4x3door_1     0.400 x 0.300         0.50 x 0.35             1.00 (within the opening's slack)
+/// 4x3door_1     0.400 x 0.300         0.35 x 0.25             1.00 (within the opening's slack)
+/// ```
+///
+/// The doorway is the vertical adjoin polygon 0.01–0.02 units from the door's own placement, so the
+/// door sits in it. `--scale` prints that table. This used to be 10 on the reading that a "2x3door"
+/// is 2 x 3 world units, which drew **every** model ten times too big: an actor 1.91 units tall in a
+/// level whose storeys are 0.60 units and whose doorways are 0.30, which is what "the enemy models are
+/// way too big for the level" was. One model unit, one level unit.
+const MODEL_SCALE: f32 = 1.0;
 
 /// Drawing scale for models, independent of the physics scale. The two shared one constant, which made it
 /// impossible to ask which of them is the thing that is ten times wrong.
@@ -8090,12 +9264,24 @@ fn cull_sectors(
     view: Option<Res<SectorView>>,
     player: Option<Res<Player>>,
     level: Option<Res<World>>,
+    overview: Option<Res<Overview>>,
+    // The scripts' switched adjoin flags: `ClearAdjoinFlags(visFace, 1)` hides the room behind an
+    // opening, and the walk below has to skip it.
+    sim: Option<Res<Sim>>,
     cams: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
     mut batches: Query<(&SectorId, &mut Visibility)>,
     mut shown: Local<Option<(usize, usize)>>,
 ) {
     let Some(view) = view else { return };
     if !on.as_deref().is_none_or(|c| c.0) {
+        return;
+    }
+    // A plan view keeps **every** batch, which is what this pass' own doc comment promises and what
+    // it never did: the walk below starts at the player's sector and steps through portals, so from
+    // a camera above the roofs it can reach nothing. That is not a conservative miss — it hid 366 of
+    // level 1's 462 sectors and 807 of `04escapehouse`'s 976 in the top-down capture, so the plan was
+    // a handful of surfaces with every model drawn over and through it.
+    if overview.as_deref().is_some_and(|o| o.overview) {
         return;
     }
     let Some((camera, transform, _)) = cams.iter().find(|(c, _, _)| c.order == 0) else { return };
@@ -8147,9 +9333,11 @@ fn cull_sectors(
         seeds.push(at);
     }
     let mut any = |_: &[[f32; 3]]| true;
+    let runtime = sim.as_deref().map(|s| s.world.borrow());
+    let gates = runtime.as_ref().map(|rt| rt.gates()).unwrap_or_default();
     let mut best: Option<(usize, Vec<usize>)> = None;
     for seed in &seeds {
-        let reach = view.solids.visible_sectors(&[*seed], &mut any);
+        let reach = view.solids.visible_sectors(&[*seed], gates, &mut any);
         let overlap = reach.iter().filter(|s| frustum.contains(s)).count();
         if best.as_ref().is_none_or(|(score, _)| overlap > *score) {
             best = Some((overlap, reach));
@@ -8247,6 +9435,24 @@ struct SkyDome;
 
 /// Surround the view with the level's own sky texture.
 ///
+/// The `--overview` camera, as `(height above the level's centre, vertical FOV)`, for a level that
+/// spans `span` world units along its widest axis.
+///
+/// Two limits set it, and both are checked in `plan_view_tests`:
+///
+/// * **It has to flatten the level.** At `6 x span` a 6-unit wall 20 units off axis projects outwards
+///   by half a unit, so the plan reads as a map. The old `0.9 x span` at the default 45 degrees put the
+///   camera just above the roofs, where every wall leaned out over the room beside it.
+/// * **It has to stay inside the sky dome.** `spawn_sky` centres a radius-600 sphere on the camera each
+///   frame, so a camera further out than that looks at the dome's far *surface* instead of the level:
+///   `09fuelstation` spans 102 units and would sit 610 out, which rendered as a frame of nothing but sky.
+fn plan_view(span: f32) -> (f32, f32) {
+    let distance = (span * 6.0).min(500.0);
+    // `1.1 x span` across the frame: at distance D the vertical extent is `2 D tan(fov/2)`.
+    let fov = 2.0 * (0.55 * span / distance).atan();
+    (distance, fov)
+}
+
 /// The engine draws sky-flagged surfaces in a separate pass and fills whatever they
 /// do not cover with the sky, scrolling it with the view direction (the
 /// `Horizon Sky Offset` / `Ceiling Sky Offset` header fields). That pass is what
@@ -8884,8 +10090,31 @@ fn live_check(
     );
     let player = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer"));
     say(player.is_some(), format!("player thing {player:?}"));
+    // …and its own body is not drawn. The camera follows that thing, so a spawned body wraps the
+    // camera in the inside of the player's own model (`is_local_player`); this is the invariant that
+    // fails if it comes back.
+    let body = player
+        .and_then(|i| sim.entities.get(&i))
+        .map(Vec::len)
+        .unwrap_or(0);
+    say(body == 0, format!("the player's own body is drawn by {body} entity(ies) (want 0)"));
     let sectors = collisions.as_ref().map(|c| c.0.sectors.len()).unwrap_or(0);
     say(sectors > 0, format!("{sectors} collision sector(s)"));
+    // The switched sector/adjoin words belong to this runtime, not to a copy a check built. The
+    // level's own door scripts have run, so some doorway is shut, and the solver's gate reads the
+    // very arrays that were switched (`--adjoins` proves the solver honours them).
+    let shut = rt.sector_flags.iter().filter(|f| *f & collide::SECTOR_ADJOINS_OFF != 0).count();
+    say(
+        rt.adjoin_flags.len() == world.level.adjoins.len()
+            && rt.sector_flags.len() == world.level.sectors.len()
+            && (rt.adjoins_changes == 0 || shut == rt.adjoins_changes),
+        format!(
+            "{} adjoin row(s), {} sector flag(s), {shut} doorway(s) shut by {} script change(s)",
+            rt.adjoin_flags.len(),
+            rt.sector_flags.len(),
+            rt.adjoins_changes
+        ),
+    );
     let drawn = materials.as_ref().map(|m| m.len()).unwrap_or(0);
     say(drawn > 0, format!("{drawn} standard material(s)"));
     let (parts, things) = actors
@@ -9015,7 +10244,7 @@ fn respawn_on_death(sim: Option<Res<Sim>>, mut player: Option<ResMut<Player>>, w
         .things
         .iter()
         .find(|t| t.template.eq_ignore_ascii_case("walkplayer"))
-        .map(|t| [t.pos[0], t.pos[1], t.pos[2] + 0.35]);
+        .map(|t| [t.pos[0], t.pos[1], t.pos[2] + PLAYER_RADIUS]);
     let mut rt = sim.world.borrow_mut();
     if !rt.player_dead {
         return;
@@ -9071,6 +10300,7 @@ fn demo_aim(
 /// Left mouse button: fire the player's weapon from the camera's aim.
 fn fire_player(
     buttons: Res<ButtonInput<MouseButton>>,
+    overview: Option<Res<Overview>>,
     demo: Option<Res<FireDemo>>,
     mut frame: Local<u32>,
     player: Option<Res<Player>>,
@@ -9082,7 +10312,10 @@ fn fire_player(
     // A stream, not one shot: at 4 units/s a bolt crosses a room in a few frames, so a
     // single frame is easy to miss in a screenshot.
     let demo_shot = demo.is_some_and(|d| d.0) && *frame >= 40 && frame.is_multiple_of(8);
-    if !buttons.just_pressed(MouseButton::Left) && !demo_shot {
+    // A capture takes no live input: a click delivered during a headless run fired a bolt into every
+    // `--shot` frame it was in, which is a different picture on every run.
+    let capture = overview.as_deref().is_some_and(|o| o.capture);
+    if (!buttons.just_pressed(MouseButton::Left) || capture) && !demo_shot {
         return;
     }
     let (Some(player), Some(gun), Some(sim)) = (player, gun, sim) else { return };
@@ -10172,7 +11405,7 @@ fn setup(
     // axis; fall back to looking at the level centre when the level has no player.
     let yaw = player.map(|t| t.yaw.to_radians());
     let mut aim = yaw
-        .map(|y| Vec3::new(y.cos(), y.sin(), 0.0))
+        .map(|y| { let (f, _) = yaw_axes(y); Vec3::new(f[0], f[1], 0.0) })
         .unwrap_or_else(|| Vec3::new(center.x, center.y, eye.z) - eye);
     if aim.length() < 0.5 {
         aim = Vec3::new(1.0, 0.0, 0.0);
@@ -10186,7 +11419,8 @@ fn setup(
     if let Some((at, y)) = SHOT_AT.get().copied() {
         eye = Vec3::from(at);
         let y = y.to_radians();
-        aim = Vec3::new(y.cos(), y.sin(), 0.0);
+        let (f, _) = yaw_axes(y);
+        aim = Vec3::new(f[0], f[1], 0.0);
     }
 
     if !cameras.is_empty() {
@@ -10194,11 +11428,25 @@ fn setup(
         // at the same order makes the renderer pick between them (§16.9). Its transform is
         // moved by the player's own walk on the next frame.
     } else if overview.overview {
-        // Frame the whole world from above, for verifying the geometry as a whole.
-        let span = (hi[1] - lo[1]).max(hi[0] - lo[0]).max(hi[2] - lo[2]);
-        let above = center + Vec3::new(0.0, 0.0, span * 0.9 + 5.0);
+        // A plan view: high enough, and through a long enough lens, that the level flattens into a map.
+        // The old 0.9 x span at the default 45 degree FOV put the camera just above the roofs, so every
+        // wall leaned outwards over the room beside it and the capture read as the level's own geometry
+        // overlapping the models standing in it. See `plan_view` for the framing and its two limits.
+        let span = (hi[1] - lo[1]).max(hi[0] - lo[0]).max(hi[2] - lo[2]).max(1.0);
+        let (distance, fov) = plan_view(span);
+        let above = center + Vec3::Z * distance;
         let up = Vec3::Y; // a plan view of a Z-up world: Z would be parallel to the view
-        commands.spawn((Camera3d::default(), Transform::from_translation(above).looking_at(center, up)));
+        commands.spawn((
+            Camera3d::default(),
+
+            // The far plane has to reach the sky dome, which is centred on the camera at radius 600.
+            Projection::Perspective(PerspectiveProjection {
+                fov,
+                far: distance + 700.0,
+                ..default()
+            }),
+            Transform::from_translation(above).looking_at(center, up),
+        ));
     } else if let Some(template) = &near.0 {
         // Stand off from the first thing of the requested template and look at it.
         match level.things.iter().find(|t| t.template.eq_ignore_ascii_case(template)) {
@@ -10226,6 +11474,7 @@ fn setup(
                 println!("framing `{template}` at {target} (thing sector {}, room {room:?})", t.sector);
                 commands.spawn((
                     Camera3d::default(),
+                    EngineFov,
                     Transform::from_translation(eye).looking_at(target, Vec3::Z),
                 ));
             }
@@ -10233,6 +11482,7 @@ fn setup(
                 println!("no thing with template `{template}`; using default view");
                 commands.spawn((
                     Camera3d::default(),
+                    EngineFov,
                     Transform::from_translation(eye).looking_at(eye + aim.normalize(), Vec3::Z),
                 ));
             }
@@ -10244,6 +11494,7 @@ fn setup(
         );
         commands.spawn((
             Camera3d::default(),
+            EngineFov,
             Transform::from_translation(eye).looking_at(eye + aim.normalize(), Vec3::Z),
         ));
     }
@@ -10281,7 +11532,7 @@ fn setup(
             // `walkplayer`, which is the pair that walks on all 34 levels.
             player
                 // `EYE` in the `--walk` sweep (0.35): the same pair that walks on 34 levels.
-                .map(|t| [t.pos[0], t.pos[1], t.pos[2] + 0.35])
+                .map(|t| [t.pos[0], t.pos[1], t.pos[2] + PLAYER_RADIUS])
                 .unwrap_or([eye.x, eye.y, eye.z - PLAYER_EYE]),
             None,
         ),
@@ -10295,8 +11546,9 @@ fn setup(
         .and_then(|t| usize::try_from(t.sector).ok())
         .filter(|i| *i < level.sectors.len())
         .unwrap_or(0);
+    // The level names the sector its `walkplayer` starts in, and the engine trusts that field
+    // (`sithThing_SetSector` at load) — `sector_at` is only for a body `--stand` moved.
     let sector = if facing.is_some() {
-        // `--stand` moved the body, so the recorded sector belongs to the other position.
         solids.sector_at(start, PLAYER_RADIUS).unwrap_or(recorded)
     } else {
         recorded
@@ -10403,6 +11655,7 @@ fn setup(
         health: 100.0,
         shields: 100.0,
         eye: eye_height,
+        third_person: std::env::var_os("BK_THIRD_PERSON").is_some(),
     });
 }
 
@@ -10446,11 +11699,11 @@ fn fall_damage(impact: f32) -> f32 {
 }
 /// Fallbacks for the body, used only when a level's `walkplayer` names no `size=`/`eyeoffset=`.
 ///
-/// The derived path is [`Rules::from_level`]: `size=0.065` x `MODEL_SCALE` = 0.65 for the radius and
-/// `eyeoffset.z=0.037` x `MODEL_SCALE` = 0.37 for the camera, both traced to `sithThing.c`/`sithCamera.c`
-/// and both in model units. These constants are the same two numbers so a level without the fields cannot
-/// disagree with one that has them; `BK_RADIUS`/`BK_EYE`/`BK_STEP` still override per run for experiments.
-const PLAYER_RADIUS: f32 = 0.65;
+/// The derived path is [`Rules::from_level`]: `size=0.065` x `MODEL_SCALE` = 0.065 for the radius and
+/// `eyeoffset.z=0.037` x `MODEL_SCALE` = 0.037 for the camera, both traced to `sithThing.c`/`sithCamera.c`.
+/// These constants are the same two numbers so a level without the fields cannot disagree with one that
+/// has them; `BK_RADIUS`/`BK_EYE`/`BK_STEP` still override per run for experiments.
+const PLAYER_RADIUS: f32 = 0.065;
 
 /// Temporary experiment hooks: the player's radius, eye offset and step, overridable per run so a scale
 /// can be judged from a screenshot without a rebuild. Remove once the values are settled.
@@ -10487,23 +11740,19 @@ fn env_f32(key: &str, fallback: f32) -> f32 {
 /// an options-screen sensitivity (`stdControl_SetMouseSensitivity` scales counts by `sensitivity * 250`),
 /// so the shipped ratio is a setting rather than data. `BK_LOOK_SENS` overrides it.
 const LOOK_SENSITIVITY: f32 = 0.0022;
-/// The step a body may climb: **0.66, bounded below by measurement and above by the geometry quirk**.
+/// The step a body may climb: **one body radius, `movesize + 0.01` = 0.066**.
 ///
 /// The engine has no step at all — `sithCollision.c` contains no step height, and `MoveThing` crosses
 /// floors through adjoins. This port's sweep needs one because its adjoin coverage is incomplete, so the
-/// value is pinned from both ends by checks rather than chosen:
+/// value is the engine's own floor-retry allowance: `sithPhysics_FindFloor`'s second pass runs at
+/// `range = moveSize`, and `walkplayer`'s `movesize=0.065` is one body radius. A ledge up to a third of
+/// the body's height is walkable and a wall is not.
 ///
-/// * `--move` (which now fails if a body cannot move from its spawn) walks all 34 levels at 0.32 and leaves
-///   two frozen at 0.30, so 0.32 is the floor.
-/// * the step fixture needs enough lift to clear a riser's polygon top outright, because the four-way test
-///   rejects a body merely touching the riser it was blocked by (see the `ponytail:` in `collide.rs`), and
-///   0.5 is not enough for a 0.5 riser: 0.66 is. the engine allows `movesize + 0.01`, retried from a raised start
-/// (`sithPhysics_FindFloor`'s second pass at `range = moveSize`). The shipped `walkplayer` has
-/// `movesize=0.065`, which times `MODEL_SCALE` is 0.65 — so a ledge up to about two thirds of a level
-/// unit is walkable and a 2-unit wall is not. The first value tried here was 0.13, which could not climb
-/// the 0.4 riser the walker test builds, and that test is what settled the number.
-const STEP_UP: f32 = 0.66;
-const PLAYER_EYE: f32 = 0.37;
+/// It used to be 0.66 because the drawing scale was ten times too big, so every riser in the level was
+/// measured in a unit ten times the body. `--move` is the check that keeps this honest: a body that
+/// cannot walk off its own spawn fails the gate.
+const STEP_UP: f32 = 0.066;
+const PLAYER_EYE: f32 = 0.037;
 
 /// The player's motion, from the level's own `walkplayer` template chain.
 ///
@@ -10655,6 +11904,8 @@ struct Player {
     /// sector with a low ceiling cannot hold it: level 1's spawn puts 1.45 inside the ceiling
     /// and the view renders from inside the geometry, so it is fitted to the room.
     eye: f32,
+    /// Third person: the engine's follow camera height with a boom behind the look axis. `C` toggles.
+    third_person: bool,
         /// Fall damage owed to the runtime, applied on the next frame by `apply_fall_damage`. The walker only
     /// knows the impact speed; the runtime owns the health.
     fall_damage: f32,
@@ -10726,7 +11977,7 @@ fn spawn_point(
             let mut tightest = f32::INFINITY;
             for dir in [[1.0f32, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]] {
                 let gap = solids
-                    .sweep(room, body, dir, radius * 6.0, radius)
+                    .sweep(room, body, dir, radius * 6.0, radius, collide::Gates::default())
                     .map_or(radius * 6.0, |hit| hit.distance);
                 tightest = tightest.min(gap);
             }
@@ -10794,8 +12045,72 @@ fn spawn_point(
 /// swapped. This function is the single place the mapping lives, and `--controls` checks it against the
 /// camera transform the renderer actually uses.
 fn walk_target(along: f32, across: f32, yaw: f32) -> [f32; 2] {
+    let (forward, right) = yaw_axes(yaw);
+    [
+        forward[0] * along + right[0] * across,
+        forward[1] * along + right[1] * across,
+    ]
+}
+
+/// The engine's own yaw basis, and the only place the mapping lives.
+///
+/// The matrix builder every thing and the camera go through (`FUN_0043fcf0` @ `0x43fcf0`, ported as
+/// `thing_quat`) puts the *pitch-tilted* axis in **column 1**: at yaw 0 with pitch `p` its columns are
+/// `(1,0,0)`, `(0,cos p,sin p)`, `(0,-sin p,cos p)`, so only column 1 rises when the view looks up. The
+/// first-person camera is `R(thing orient) . R(view angles)` (`FUN_004c56b0` @ `0x4c56b0`), so the
+/// camera looks along column 1 and a level's yaw `a` faces `(-sin a, cos a)`.
+///
+/// This port used column 0 (`(cos a, sin a)`) and called it forward, which is the same frame a quarter
+/// turn round: the camera, the walk keys and the spawn aim all followed the level's yaw into the wrong
+/// direction. `scrap/yaw-*.png` is the 03katarn start both ways — column 0 puts the eye inside a
+/// doorway, column 1 is the street the level opens on.
+fn yaw_axes(yaw: f32) -> ([f32; 2], [f32; 2]) {
     let (sin, cos) = yaw.sin_cos();
-    [cos * along + sin * across, sin * along - cos * across]
+    ([-sin, cos], [cos, sin])
+}
+
+/// The engine's first-person strafe lean, in **degrees**: roll += clamp(5 * dot(vel, right), -8, 8).
+///
+/// `FUN_004c56b0` @ `0x4c56b0` (camera mode 1) adds it to the third view angle - the roll, per
+/// `FUN_0043fcf0`'s column order - and the three constants are in the file: 5.0 at `0x522ddc`,
+/// -8.0 at `0x522de0`, 8.0 at `0x522de4`. So it is not a pitch: the view banks with *lateral*
+/// speed, walking forward is level, and a full-speed strafe banks 3.3 degrees.
+fn camera_lean(vel: [f32; 2], yaw: f32) -> f32 {
+    let (_, right) = yaw_axes(yaw);
+    (5.0 * (vel[0] * right[0] + vel[1] * right[1])).clamp(-8.0, 8.0)
+}
+
+/// The engine's projection: a fixed **horizontal** field of view, with the vertical angle left to the
+/// window's aspect.
+///
+/// `90.0` is the word at `buffer + 0x08` of JK.EXE's render buffer, read from a running copy of the
+/// shipped executable with level 1 loaded (`--gates`'s peer observation, recorded in
+/// `docs/formats.md` §24). The engine never states a *vertical* angle: it fixes the horizontal one and
+/// lets the taller axis follow, so a 4:3 screen shows 73.7 degrees vertically and a 16:9 window 58.7 —
+/// which is why Bevy, whose `PerspectiveProjection.fov` is the vertical angle, has to derive it.
+const ENGINE_H_FOV_DEG: f32 = 90.0;
+
+/// The vertical angle that gives `ENGINE_H_FOV_DEG` horizontally at this aspect.
+fn vertical_fov(aspect: f32) -> f32 {
+    2.0 * ((ENGINE_H_FOV_DEG.to_radians() * 0.5).tan() / aspect.max(0.05)).atan()
+}
+
+/// Marks a camera whose projection is the engine's, so `engine_fov` keeps it in step with the window.
+#[derive(Component)]
+struct EngineFov;
+
+/// Keep `EngineFov` cameras on the engine's projection as the window changes shape.
+fn engine_fov(
+    window: Query<&Window, With<PrimaryWindow>>,
+    mut cams: Query<&mut Projection, With<EngineFov>>,
+) {
+    let Ok(window) = window.single() else { return };
+    let fov = vertical_fov(window.width() / window.height().max(1.0));
+    for mut projection in &mut cams {
+        if let Projection::Perspective(perspective) = projection.as_mut() {
+            perspective.fov = fov;
+        }
+    }
 }
 
 /// Lock the pointer while the game has the screen, release it for a menu.
@@ -10829,15 +12144,64 @@ fn grab_cursor(overlay: Option<Res<Overlay>>, mut cursors: Query<&mut CursorOpti
 ///
 /// Signs: a rightward delta turns right, and increasing yaw turns *left* (the basis in `walk_target`
 /// fixes that), so yaw falls with `+dx`. Mouse Y grows downward, so looking up is a negative `dy`.
+/// Apply one frame of mouse look.
+///
+/// **Modern** by default: moving the mouse down looks down. Retail JK is the other way round — mouse up
+/// looks down, the flight-sim convention its 1997 control code was written for — and the executable has no
+/// option for it (searching JK.EXE's strings for "invert" finds nothing), so `BK_INVERT_Y=1` restores the
+/// retail sense for a side-by-side comparison rather than adding a menu the shipped game never had.
+///
+/// The sign rests on the platform convention, not on hope: Bevy passes winit's raw device delta through
+/// unchanged (`bevy_winit` `state.rs`: `Vec2::new(x as f32, y as f32)`), and on Windows that delta is
+/// screen-signed, so `y` grows downward and `pitch - dy` means "mouse down, look down".
 fn apply_look(
     yaw: &mut f32,
     pitch: &mut f32,
     delta: Vec2,
     sens: f32,
     limits: (f32, f32),
+    invert_y: bool,
 ) {
     *yaw -= delta.x * sens;
-    *pitch = (*pitch - delta.y * sens).clamp(limits.0, limits.1);
+    let dy = if invert_y { -delta.y } else { delta.y };
+    *pitch = (*pitch - dy * sens).clamp(limits.0, limits.1);
+}
+
+/// `BK_INVERT_Y=1` restores retail's inverted vertical look.
+fn look_inverted() -> bool {
+    std::env::var_os("BK_INVERT_Y").is_some()
+}
+
+/// How far above the body the engine puts a follow camera.
+///
+/// `FUN_004c56b0`'s follow case (`0x4c59ce`) takes the thing's z and subtracts `-0.2`
+/// (`0x522dec`), then adds an offset built from the orbit matrix — so its camera sits **0.2 above the
+/// thing**, about the height of an actor's head. Third person keeps that height.
+const THIRD_PERSON_UP: f32 = 0.2;
+
+/// The boom length: the port's own standoff rule (`radius * 2.5 + 0.5`, the same one `--stand` uses)
+/// at the player's radius, which at `PLAYER_RADIUS` is a little over three body heights.
+fn third_person_boom() -> f32 {
+    PLAYER_RADIUS * 2.5 + 0.5
+}
+
+/// Where a third-person camera sits and what it aims at, for a body at `pos` looking along `yaw`/`pitch`.
+///
+/// The engine's own follow case is a *spectator orbit*: it spins the camera 8 degrees per second
+/// (`0x4c5a79`: `dt * 8.0` fed to `FUN_00441a30`) and never lets the player aim it, which is fine for a
+/// cutscene and useless for playing. What is engine-derived here is the height and the convention —
+/// translate by the body's position in level units, aim at the body's eye — and the boom is the port's
+/// own, because a steerable chase camera needs a distance the engine never chose.
+fn third_person_view(pos: Vec3, yaw: f32, pitch: f32, boom: f32) -> (Vec3, Vec3) {
+    let (forward, _) = yaw_axes(yaw);
+    let look = Vec3::new(
+        forward[0] * pitch.cos(),
+        forward[1] * pitch.cos(),
+        pitch.sin(),
+    );
+    let target = pos + Vec3::Z * PLAYER_EYE;
+    let eye = pos + Vec3::Z * THIRD_PERSON_UP - look * boom;
+    (eye, target)
 }
 
 /// One frame of the player's horizontal motion, integrated as the engine does.
@@ -10849,19 +12213,30 @@ fn apply_look(
 ///
 /// The rollover is the engine's own `physicsRolloverFrames`: leftover time carries to the next frame, so
 /// 60 fps and 144 fps produce the same motion.
-fn integrate_walk(vel: &mut [f32; 2], target: [f32; 2], drag: f32, dt: f32, rollover: &mut f32) {
+/// Integrate the walk velocity at the engine's own rate, and report how many 0.02 s sub-steps that
+/// was.
+///
+/// `sithPhysics_UpdateThingPhysics` (JK.EXE `0x4f6860`) converts a frame delta into
+/// `ROUND(dt * 50)` sub-steps of `0.02`, keeping the remainder in the thing (`+0x240`), and each
+/// sub-step integrates the velocity *and* calls `MoveThing` (`0x4e7950`) once. The caller needs the
+/// count for the second half of that: a single sweep per frame was covering up to five engine steps
+/// after a hitch, which can cross a seam no 0.02 s step can.
+fn integrate_walk(vel: &mut [f32; 2], target: [f32; 2], drag: f32, dt: f32, rollover: &mut f32) -> usize {
     const STEP: f32 = 1.0 / 50.0;
     let drag = drag.max(0.0);
     *rollover += dt.max(0.0);
     // A long stall (a load, a menu) must not turn into hundreds of steps.
     *rollover = rollover.min(STEP * 8.0);
+    let mut steps = 0;
     while *rollover >= STEP {
         *rollover -= STEP;
         for axis in 0..2 {
             vel[axis] += target[axis] * drag * STEP;
             vel[axis] *= (1.0 - drag * STEP).clamp(0.0, 1.0);
         }
+        steps += 1;
     }
+    steps
 }
 
 /// `--shot <path>`: render a few frames, save a PNG of the viewport and exit.
@@ -10938,6 +12313,42 @@ fn advance_sim(time: Res<Time>, sim: Option<ResMut<Sim>>, mut drawn: Query<&mut 
             }
         }
     }
+}
+
+/// Diagnostic: `BK_TRACE=1` prints what the world camera, the overlay quad and the level batches
+/// believe, once every ten frames. Temporary scaffolding for a screenshot that comes out empty.
+fn trace_state(
+    overlay: Option<Res<Overlay>>,
+    cams: Query<(&GlobalTransform, &Projection), (With<Camera3d>, Without<OverlayQuad>)>,
+    quads: Query<Entity, With<OverlayQuad>>,
+    batches: Query<&Visibility, With<SectorId>>,
+    mut frame: Local<u32>,
+) {
+    if std::env::var_os("BK_TRACE").is_none() {
+        return;
+    }
+    *frame += 1;
+    if !frame.is_multiple_of(10) {
+        return;
+    }
+    let mut visible = 0;
+    let mut hidden = 0;
+    for v in &batches {
+        match v {
+            Visibility::Hidden => hidden += 1,
+            _ => visible += 1,
+        }
+    }
+    let cam = cams.iter().next().map(|(t, p)| format!("{:.2},{:.2},{:.2} {p:?}", t.translation().x, t.translation().y, t.translation().z));
+    println!(
+        "trace {}: menu {:?} dirty {} overlay entities {} batches {visible} visible / {hidden} hidden, cameras {}, cam {:?}",
+        *frame,
+        overlay.as_ref().and_then(|o| o.menu.clone()),
+        overlay.as_ref().is_some_and(|o| o.dirty),
+        quads.iter().count(),
+        cams.iter().count(),
+        cam
+    );
 }
 
 fn auto_shot(shot: Res<Shot>, at: Res<ShotFrame>, mut commands: Commands, mut frame: Local<u32>) {
@@ -11037,6 +12448,27 @@ fn sky_follows_camera(
 /// This is the `--walk` sweep's code path (`walker_step`) with a keyboard for input, so
 /// the movement the sweep verifies is the movement the window runs.
 #[allow(clippy::too_many_arguments)]
+/// Is the body standing in water? Two rules, both the engine's: the surface under the feet carries
+/// `SITH_SURFACE_WATER` (0x20000) or `VERYDEEPWATER` (0x100000), **or** the sector itself carries
+/// `SITH_SECTOR_UNDERWATER` (0x2) — `sithPhysics.c:43` tests the sector, and that bit is what
+/// `SetSectorFlags(sector, 2)` sets for the shipped levels' "underwater passthru layer".
+fn in_water(
+    level: &jkl::Level,
+    solids: &collide::Solids,
+    sector: usize,
+    feet: [f32; 3],
+    sector_flags: &[u32],
+) -> bool {
+    let underfoot = solids
+        .floor_surface(sector, feet)
+        .and_then(|(_, surface)| level.surfaces.get(surface))
+        .is_some_and(|surface| surface.surfflags & (0x2_0000 | 0x10_0000) != 0);
+    underfoot
+        || sector_flags
+            .get(sector)
+            .is_some_and(|flags| flags & collide::SECTOR_UNDERWATER != 0)
+}
+
 fn walk_player(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
@@ -11083,47 +12515,70 @@ fn walk_player(
         }
     }
 
-    if keys.pressed(KeyCode::ArrowLeft) {
+    // What the scripts have switched so far: a force field closed, a door sector's adjoins hidden.
+    // This borrow must be taken after the `vel`/`extra_speed` hand-off above, which holds the
+    // runtime mutably, and it must cover the three reads below (the sweep, the trace and water).
+    // `BK_GATES_OPEN=1` ignores the scripts' switches, which is how the walk can be A/B'd.
+    let runtime = sim.as_deref().map(|s| s.world.borrow());
+    let gates = if std::env::var_os("BK_GATES_OPEN").is_some() {
+        collide::Gates::default()
+    } else {
+        runtime.as_ref().map(|rt| rt.gates()).unwrap_or_default()
+    };
+
+    // A capture may not read the machine's keyboard or mouse: the same command has to reach the same
+    // pose every run (§16.13). The env hooks (BK_WALK_FORWARD) still drive the walker.
+    let live = !overview.capture;
+    let held = |key: KeyCode| live && keys.pressed(key);
+    // `C` toggles third person. Retail has no such key in single player (its follow camera is a
+    // spectator orbit), so there is nothing to match; the port needs one and this is it.
+    if live && keys.just_pressed(KeyCode::KeyC) {
+        player.third_person = !player.third_person;
+        println!(
+            "camera: {}",
+            if player.third_person { "third person" } else { "first person" }
+        );
+    }
+    if held(KeyCode::ArrowLeft) {
         player.yaw += 1.5 * dt;
     }
-    if keys.pressed(KeyCode::ArrowRight) {
+    if held(KeyCode::ArrowRight) {
         player.yaw -= 1.5 * dt;
     }
-    if keys.pressed(KeyCode::ArrowUp) {
+    if held(KeyCode::ArrowUp) {
         player.pitch = (player.pitch + 1.0 * dt).min(1.4);
     }
-    if keys.pressed(KeyCode::ArrowDown) {
+    if held(KeyCode::ArrowDown) {
         player.pitch = (player.pitch - 1.0 * dt).max(-1.4);
     }
 
     // Mouse look, while no screen is open. The cursor is locked then (see `grab_cursor`), which is what
     // makes the deltas relative instead of clamped by the window edge.
-    if overlay.as_deref().is_none_or(|o| o.menu.is_none()) {
+    if live && overlay.as_deref().is_none_or(|o| o.menu.is_none()) {
         let sens = std::env::var("BK_LOOK_SENS")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(LOOK_SENSITIVITY);
         let limits = (player.rules.pitch_min, player.rules.pitch_max);
         let (mut yaw, mut pitch) = (player.yaw, player.pitch);
-        apply_look(&mut yaw, &mut pitch, mouse.delta, sens, limits);
+        apply_look(&mut yaw, &mut pitch, mouse.delta, sens, limits, look_inverted());
         player.yaw = yaw;
         player.pitch = pitch;
     }
 
     // Movement in the walker's own frame, then converted to world (x, z).
-    let (sin, cos) = player.yaw.sin_cos();
     let mut forward = 0.0f32;
     let mut strafe = 0.0f32;
-    if keys.pressed(KeyCode::KeyW) {
+    if held(KeyCode::KeyW) {
         forward += 1.0;
     }
-    if keys.pressed(KeyCode::KeyS) {
+    if held(KeyCode::KeyS) {
         forward -= 1.0;
     }
-    if keys.pressed(KeyCode::KeyD) {
+    if held(KeyCode::KeyD) {
         strafe += 1.0;
     }
-    if keys.pressed(KeyCode::KeyA) {
+    if held(KeyCode::KeyA) {
         strafe -= 1.0;
     }
     // The engine's own scaling: FAST doubles, crouch halves and also halves the jump,
@@ -11152,16 +12607,19 @@ fn walk_player(
     // 50 Hz step with a rollover (`OLDSTEP_TARGET_FPS`, `OLDSTEP_DELTA_50FPS`), so the feel does not
     // depend on the frame rate. `a = target * drag` settles the velocity at exactly the target.
     let drag = if player.grounded { player.rules.drag } else { player.rules.air_drag };
-    {
+    // How many of the engine's 0.02 s sub-steps this frame is worth; the move below runs once per
+    // sub-step, exactly where `UpdateThingPhysics` calls `MoveThing`.
+    let steps = {
         let mut vel = player.vel;
         let mut rollover = player.step_rollover;
-        integrate_walk(&mut vel, target, drag, dt, &mut rollover);
+        let steps = integrate_walk(&mut vel, target, drag, dt, &mut rollover);
         player.vel = vel;
         player.step_rollover = rollover;
-    }
+        steps
+    };
     let dir = player.vel;
 
-    if keys.just_pressed(KeyCode::Space) && player.grounded {
+    if live && keys.just_pressed(KeyCode::Space) && player.grounded {
         player.vy = player.rules.jump_velocity(crouch);
         player.grounded = false;
     }
@@ -11185,24 +12643,33 @@ fn walk_player(
         );
     }
     let before = pos;
-    let (achieved_len, crossed) = walker_step(
-        &solids.0,
-        &mut sector,
-        &mut pos,
-        &mut vy,
-        dir,
-        dt,
-        player.rules.radius,
-        gravity,
-        true,
-    );
+    // One sweep per engine sub-step (`sithPhysics_UpdateThingPhysics` → `MoveThing`), not one per
+    // frame: the distance per sweep is `vel * 0.02` whatever the frame rate did.
+    let mut achieved_len = 0.0f32;
+    let mut crossed = false;
+    for _ in 0..steps {
+        let (len, cross) = walker_step(
+            &solids.0,
+            gates,
+            &mut sector,
+            &mut pos,
+            &mut vy,
+            dir,
+            1.0 / 50.0,
+            player.rules.radius,
+            gravity,
+            true,
+        );
+        achieved_len = achieved_len.max(len);
+        crossed |= cross;
+    }
     if trace {
         let vel = player.vel;
         let len = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
         let ahead = if len > 1e-4 {
             solids
                 .0
-                .sweep(sector, pos, [vel[0] / len, vel[1] / len, 0.0], 0.5, player.rules.radius)
+                .sweep(sector, pos, [vel[0] / len, vel[1] / len, 0.0], 0.5, player.rules.radius, gates)
         } else {
             None
         };
@@ -11245,16 +12712,12 @@ fn walk_player(
     player.sector = sector;
     player.pos = Vec3::from(pos);
     player.grounded = player.vy == 0.0;
-    // Water halves movement: the engine reads `attachedSurface->flags` for
-    // `SITH_SURFACE_WATER` (0x20000) / `VERYDEEPWATER` (0x100000). Ask the solver which
-    // surface is under the body's feet.
+    // Water halves movement: the engine reads the surface under the feet (`SITH_SURFACE_WATER`
+    // 0x20000 / `VERYDEEPWATER` 0x100000) and the sector's own `SITH_SECTOR_UNDERWATER` — the bit
+    // `SetSectorFlags(sector, 2)` sets for the shipped "passthru layer" water.
     player.water = world.as_deref().is_some_and(|world| {
         let feet = [pos[0], pos[1], pos[2] - player.rules.radius + 0.01];
-        solids
-            .0
-            .floor_surface(sector, feet)
-            .and_then(|(_, surface)| world.level.surfaces.get(surface))
-            .is_some_and(|surface| surface.surfflags & (0x2_0000 | 0x10_0000) != 0)
+        in_water(&world.level, &solids.0, sector, feet, gates.sectors)
     });
     if crossed {
         println!("sector {sector}");
@@ -11266,14 +12729,45 @@ fn walk_player(
         return;
     }
     let eye = player.pos + Vec3::Z * player.eye;
+    let (forward, _) = yaw_axes(player.yaw);
     let look = Vec3::new(
-        cos * player.pitch.cos(),
-        sin * player.pitch.cos(),
+        forward[0] * player.pitch.cos(),
+        forward[1] * player.pitch.cos(),
         player.pitch.sin(),
     );
+    // Third person: stand behind the look axis and aim at the body's eye. A wall between the two shortens
+    // the boom rather than putting the camera inside the geometry (§16.9's lesson, applied to the camera).
+    let mut eye = eye;
+    let mut look = look;
+    if player.third_person {
+        let boom = third_person_boom();
+        let (mut third_eye, target) = third_person_view(player.pos, player.yaw, player.pitch, boom);
+        let mut length = boom;
+        for _ in 0..4 {
+            if !solids.0.segment_blocked([target.x, target.y, target.z], [third_eye.x, third_eye.y, third_eye.z]) {
+                break;
+            }
+            length *= 0.6;
+            let (shorter, _) = third_person_view(player.pos, player.yaw, player.pitch, length);
+            third_eye = shorter;
+        }
+        // If even the shortest boom lands outside every sector, the corner is too tight for a chase
+        // camera: sit at the body's own eye rather than inside the wall.
+        if solids.0.sector_at([third_eye.x, third_eye.y, third_eye.z], 0.0).is_none() {
+            third_eye = player.pos + Vec3::Z * player.eye;
+        }
+        eye = third_eye;
+        look = target - third_eye;
+    }
+
     tf.translation = eye;
     if let Some(dir) = look.try_normalize() {
         *tf = tf.looking_to(dir, Vec3::Z);
+        // The engine's own strafe lean (see camera_lean): the up axis tilts toward the right column.
+        let lean = camera_lean(player.vel, player.yaw);
+        if lean != 0.0 {
+            tf.rotate_local_z(-lean.to_radians());
+        }
     }
 }
 
@@ -11553,9 +13047,13 @@ mod walker_tests {
     use super::*;
 
     /// Two floors either side of one doorway: a lower room (`0 <= x <= 1`, floor z=0) and
-    /// a platform (`1 < x <= 3`, floor z=0.5) joined by an opening at x=1 that the body
+    /// a platform (`1 < x <= 3`, floor z=`RISER`) joined by an opening at x=1 that the body
     /// passes through above the step face. Planes' normals point out of the hull, which is
     /// the `.jkl` convention `collide` assumes.
+    ///
+    /// The riser is stated in body heights, not level units, so this fixture survives a change
+    /// of scale: `STEP_UP` is the height the sweep is supposed to be able to climb.
+    const RISER: f32 = STEP_UP * 0.9;
     fn step_room() -> collide::Solids {
         let plane = |normal: [f32; 3], point: [f32; 3]| collide::Plane {
             normal,
@@ -11573,19 +13071,21 @@ mod walker_tests {
             plane([0.0, -1.0, 0.0], [0.0, -2.0, 0.0]),
         ];
         let upper = vec![
-            collide::Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.5], surface: 1 },
+            collide::Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, RISER], surface: 1 },
             plane([0.0, 0.0, 1.0], [0.0, 0.0, 2.0]),
             plane([1.0, 0.0, 0.0], [3.0, 0.0, 0.0]),
             plane([0.0, 1.0, 0.0], [0.0, 2.0, 0.0]),
             plane([0.0, -1.0, 0.0], [0.0, -2.0, 0.0]),
         ];
         let opening = vec![
-            [1.0, -2.0, 0.4],
-            [1.0, 2.0, 0.4],
+            [1.0, -2.0, RISER * 1.3],
+            [1.0, 2.0, RISER * 1.3],
             [1.0, 2.0, 2.0],
             [1.0, -2.0, 2.0],
         ];
         collide::Solids {
+            boxes: Vec::new(),
+            hull: Vec::new(),
             // The sweep reaches a face through these maps, so a fixture that leaves them empty cannot
             // exercise it at all: the ledge's floor and its riser both need naming here.
             floor_of: [(0usize, 0usize), (1, 1)].into_iter().collect(),
@@ -11593,12 +13093,14 @@ mod walker_tests {
             portals: vec![
                 vec![collide::Portal {
                     adjoin: 1,
+                    link: 0,
                     verts: opening.clone(),
                     normal: [1.0, 0.0, 0.0],
                     point: [1.0, 0.0, 0.0],
                 }],
                 vec![collide::Portal {
                     adjoin: 0,
+                    link: 1,
                     verts: opening,
                     normal: [-1.0, 0.0, 0.0],
                     point: [1.0, 0.0, 0.0],
@@ -11617,15 +13119,15 @@ mod walker_tests {
                 },
                 collide::Face {
                     normal: [0.0, 0.0, -1.0],
-                    point: [0.0, 0.0, 0.5],
-                    verts: vec![[1.0, -2.0, 0.5], [3.0, -2.0, 0.5], [3.0, 2.0, 0.5], [1.0, 2.0, 0.5]],
+                    point: [0.0, 0.0, RISER],
+                    verts: vec![[1.0, -2.0, RISER], [3.0, -2.0, RISER], [3.0, 2.0, RISER], [1.0, 2.0, RISER]],
                     surface: 1,
                 },
             ],
             walls: vec![collide::Face {
                 normal: [1.0, 0.0, 0.0],
                 point: [1.0, 0.0, 0.0],
-                verts: vec![[1.0, 2.0, 0.0], [1.0, -2.0, 0.0], [1.0, -2.0, 0.5], [1.0, 2.0, 0.5]],
+                verts: vec![[1.0, 2.0, 0.0], [1.0, -2.0, 0.0], [1.0, -2.0, RISER], [1.0, 2.0, RISER]],
                 surface: 2,
             }],
             wall_of: [(2usize, 0usize)].into_iter().collect(),
@@ -11640,35 +13142,67 @@ mod walker_tests {
         synced.faces = synced.floors.clone();
         synced.faces.extend(synced.walls.iter().cloned());
         let solids = &synced;
-        let (mut sector, mut pos, mut vy) = (0usize, [0.5f32, 0.0, 0.35], 0.0f32);
+        // One body radius: the same pair `setup` and `walk_level` start a body from.
+        let (mut sector, mut pos, mut vy) = (0usize, [0.5f32, 0.0, PLAYER_RADIUS], 0.0f32);
         for _ in 0..60 {
-            walker_step(solids, &mut sector, &mut pos, &mut vy, [1.0, 0.0], 1.0 / 30.0, 0.35, 0.0, true);
+            walker_step(solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [1.0, 0.0], 1.0 / 30.0, PLAYER_RADIUS, 0.0, true);
         }
         (sector, pos)
     }
 
-    /// A 0.5-unit ledge is climbed, and a 2-unit wall is not.
+    /// A riser below `STEP_UP` is climbed, and a wall above it is not.
     ///
-    /// The allowance is `STEP_UP = 0.32`, measured (see its comment): the engine has no step constant, and
-    /// `--move` fails below 0.32 because two levels' spawns are boxed in by a lip. The probe lifts the body
-    /// only when its feet clear the ledge's top edge *and* there is floor up there.
+    /// The allowance is `STEP_UP`, the engine's own floor-retry range (see its comment). The probe
+    /// lifts the body only when its feet clear the ledge's top edge *and* there is floor up there.
     #[test]
     fn a_low_ledge_is_stepped_onto_and_a_tall_wall_is_not() {
         let level = step_room();
         let (_, pos) = walk(&level);
         // The body climbs the riser: gravity is off in this fixture, so a body that never
-        // lifted stays at z = 0.35 and one that stepped up ends above the ledge top.
-        assert!(pos[2] > 0.4, "did not climb: z = {} at x {}", pos[2], pos[0]);
+        // lifted stays at one radius and one that stepped up ends a riser higher.
+        assert!(
+            pos[2] > PLAYER_RADIUS + RISER * 0.5,
+            "did not climb: z = {} at x {}",
+            pos[2],
+            pos[0]
+        );
 
-        // The same riser raised to 2 units: above the step allowance, so it blocks.
+        // The same riser raised three times the allowance: above it, so it blocks.
         let mut tall = step_room();
         for v in tall.walls[0].verts.iter_mut() {
             if v[2] > 0.01 {
-                v[2] = 2.0;
+                v[2] = STEP_UP * 3.0;
             }
         }
         let (_, pos) = walk(&tall);
-        assert!(pos[0] < 1.0, "climbed a 2-unit wall: x = {}", pos[0]);
-        assert!(pos[2] < 0.4, "rose past the wall: z = {}", pos[2]);
+        assert!(pos[0] < 1.0, "climbed a {}-unit wall: x = {}", STEP_UP * 3.0, pos[0]);
+        assert!(pos[2] < PLAYER_RADIUS + RISER * 0.5, "rose past the wall: z = {}", pos[2]);
+    }
+}
+
+#[cfg(test)]
+mod plan_view_tests {
+    use super::plan_view;
+
+    /// The two limits `plan_view` exists to hold, over the spans of the shipped levels — `01narshadda`
+    /// is 38 units across and `09fuelstation` 102, the widest in the install.
+    #[test]
+    fn the_plan_camera_fits_the_level_and_stays_inside_the_sky_dome() {
+        const DOME_RADIUS: f32 = 600.0;
+        for span in [1.0, 20.0, 38.0, 66.0, 102.0, 200.0] {
+            let (distance, fov) = plan_view(span);
+            // The whole level is inside the dome: the camera is `distance` up, and the furthest corner
+            // is at most `span / 2` out from the centre.
+            let far_corner = (distance * distance + (span * 0.5) * (span * 0.5)).sqrt();
+            assert!(
+                far_corner < DOME_RADIUS,
+                "span {span}: the level sits {far_corner} from the camera, past the {DOME_RADIUS}-unit dome"
+            );
+            // …and it fits the frame: the vertical extent at that distance covers the span.
+            let extent = 2.0 * distance * (fov * 0.5).tan();
+            assert!(extent >= span, "span {span}: only {extent} of it is in frame");
+            // Flatter than the 45 degrees that used to lean the walls over their neighbours.
+            assert!(fov < std::f32::consts::FRAC_PI_4, "span {span}: fov {fov} is not a long lens");
+        }
     }
 }

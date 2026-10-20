@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use crate::cog::Value;
+use crate::collide::{Gates, SECTOR_ADJOINS_OFF};
 use crate::jkl::Level;
 
 /// Shared, single-threaded world state. Scripts hold a handle and borrow it briefly
@@ -77,7 +78,7 @@ pub struct ThingState {
     pub decay: f32,
     /// `SetActorExtraSpeed`: an *additive* thrust term the force-speed script sets (and
     /// clears to 0 when the power ends). The engine adds it to `maxThrust`, so it converts
-    /// to a settled speed the same way `maxthrust` does: `extra * MODEL_SCALE / drag`.
+    /// to a settled speed the same way `maxthrust` does: `extra / drag`.
     pub extra_speed: f32,
     /// `GetPhysicsFlags`/`SetPhysicsFlags` (`physflags=`), and the `jkSetFlags` bits the
     /// force scripts set (`0x20` while a power is mid-flash).
@@ -190,14 +191,11 @@ pub struct SurfaceState {
 
 #[derive(Clone)]
 pub struct SectorState {
-    /// `SetSectorAdjoins(sector, 0|1)`: whether the sector's portals are open.
-    pub adjoins: i32,
     /// `SetSectorThrust(sector, vector)`: the force the sector applies.
     pub thrust: [f32; 3],
     pub light: f32,
     pub tint: [f32; 3],
     pub colormap: i32,
-    pub flags: u32,
 }
 
 /// Template name to its model INSERT OFFSET, filled once when the level models are parsed.
@@ -290,6 +288,9 @@ pub struct Runtime {
     pub actor_flags: std::collections::BTreeMap<usize, u32>,
     pub item_flags: std::collections::BTreeMap<usize, u32>,
     pub life_left: std::collections::BTreeMap<usize, f32>,
+    /// `Get/SetThingMass` and `Get/SetThingUserData`: plain per-thing values a script stores.
+    pub mass: std::collections::BTreeMap<usize, f32>,
+    pub user_data: std::collections::BTreeMap<usize, f32>,
     pub force: std::collections::BTreeMap<usize, [f32; 3]>,
     pub actor_weapon: std::collections::BTreeMap<usize, i32>,
     /// `PlayMode`: which animation a script asked a thing to play.
@@ -347,6 +348,16 @@ pub struct Runtime {
     pub messages: Vec<(String, Option<usize>, Option<usize>)>,
     pub messages_sent: usize,
     pub sectors: Vec<SectorState>,
+    /// Each sector's `SITH_SECTOR_*` word, as the level ships it and as `SetSectorFlags` and
+    /// `SetSectorAdjoins` change it. `0x2` underwater, `0x80` adjoins hidden — the two the
+    /// shipped scripts switch, and the two collision reads (`collide::Gates`).
+    pub sector_flags: Vec<u32>,
+    /// Each `World adjoins` row's `SITH_SURFACE_ADJOIN_*` word: `SetAdjoinFlags`/
+    /// `ClearAdjoinFlags` switch these, which is how a force field opens and closes.
+    pub adjoin_flags: Vec<u16>,
+    /// Surface → the adjoin row it carries (`-1` for a wall), so a script's `surface` symbol
+    /// reaches its `pAdjoin` without the runtime holding the whole level.
+    pub surface_adjoin: Vec<i32>,
     /// Per-surface state, indexed the way `.jkl` surfaces are: cels, animation, slides.
     pub surfaces: Vec<SurfaceState>,
     /// Sounds a script asked for, in order: the wav, its volume, and where it came from.
@@ -374,8 +385,8 @@ pub struct Runtime {
     /// How close an actor walks to the player before it stops: this build's standoff, since
     /// the engine's is in the instinct args.
     pub ai_standoff: f32,
-    /// An actor template's walking speed, `maxthrust * MODEL_SCALE / surfdrag` — the same
-    /// conversion `Rules` uses for the player.
+    /// An actor template's walking speed, `maxthrust / surfdrag` — the same conversion `Rules`
+    /// uses for the player.
     pub template_speed: BTreeMap<String, f32>,
     /// Redbook music: `(start track, end track, loop-back track)` as `PlaySong` set it.
     pub music: Option<(i32, i32, i32)>,
@@ -576,6 +587,8 @@ impl Runtime {
             actor_flags: Default::default(),
             item_flags: Default::default(),
             life_left: Default::default(),
+            mass: Default::default(),
+            user_data: Default::default(),
             force: Default::default(),
             actor_weapon: Default::default(),
             play_mode: Default::default(),
@@ -646,8 +659,11 @@ impl Runtime {
             sectors: level
                 .sectors
                 .iter()
-                .map(|s| SectorState { adjoins: 1, thrust: [0.0; 3], light: 0.0, tint: [0.0; 3], colormap: 0, flags: s.flags })
+                .map(|_| SectorState { thrust: [0.0; 3], light: 0.0, tint: [0.0; 3], colormap: 0 })
                 .collect(),
+            sector_flags: level.sectors.iter().map(|s| s.flags).collect(),
+            adjoin_flags: level.adjoins.iter().map(|a| a.flags).collect(),
+            surface_adjoin: level.surfaces.iter().map(|s| s.adjoin).collect(),
             surfaces: level
                 .surfaces
                 .iter()
@@ -689,7 +705,7 @@ impl Runtime {
                 })
                 .collect(),
             ai_shot_interval: 1.0,
-            ai_standoff: 2.5,
+            ai_standoff: 0.25,
             level_complete: false,
             music: None,
             music_volume: 1.0,
@@ -702,7 +718,7 @@ impl Runtime {
                         .template_f32(&t.name, "surfdrag")
                         .filter(|d| *d > 0.0)
                         .unwrap_or(3.0);
-                    (t.name.to_ascii_lowercase(), thrust * 10.0 / drag)
+                    (t.name.to_ascii_lowercase(), thrust / drag)
                 })
                 .collect(),
             last_hold: 0.0,
@@ -822,6 +838,10 @@ impl Runtime {
                 && (flying || path_moved)
                 && !t.destroyed
             {
+                // ponytail: position/segment tests against the sector's own planes and faces, not
+                // `collide::sweep`, so a thing crosses a shut adjoin (a closed force field) that
+                // stops the player. The engine's `SearchForSurfaceCollisions` treats it as solid for
+                // every body; putting projectiles and actors on the swept path is the upgrade.
                 let sector = t.sector.max(0) as usize;
                 let (resolved, hit) = solids.resolve_stepped(sector, t.pos, 0.4);
                 // A push-out is one signal; a fast mover can also step clean through a plane between
@@ -856,6 +876,12 @@ impl Runtime {
         moved
     }
 
+    /// The switched flags, for the solver: what `SetAdjoinFlags`/`ClearAdjoinFlags` and
+    /// `SetSectorAdjoins`/`SetSectorFlags` have done to the world so far.
+    pub fn gates(&self) -> Gates<'_> {
+        Gates { sectors: &self.sector_flags, adjoins: &self.adjoin_flags }
+    }
+
     /// Whether this module implements a verb, so the interpreter routes it here
     /// rather than to its own builtins. Kept beside `call` so both lists are read
     /// together.
@@ -871,6 +897,14 @@ impl Runtime {
                 | "getthingflags"
                 | "setthingflags"
                 | "getthinghealth"
+                | "gethealth"
+                | "getleveltime"
+                | "isthingvisible"
+                | "getthingmass"
+                | "setthingmass"
+                | "getthinguserdata"
+                | "setthinguserdata"
+                | "setthingtimer"
                 | "setthinghealth"
                 | "getthingtemplate"
                 | "getcurframe"
@@ -880,6 +914,9 @@ impl Runtime {
                 | "stopthing"
                 | "setsectoradjoins"
                 | "getsectoradjoins"
+                | "setadjoinflags"
+                | "clearadjoinflags"
+                | "setsectorflags"
                 | "setsectorlight"
                 | "setsectortint"
                 | "setcolormap"
@@ -2133,6 +2170,22 @@ impl Runtime {
                 self.play_mode.insert(ti(0), idx(1) as i32);
                 Value::Nil
             }
+            // `GetHealth`/`GetLevelTime`: the level clock is `time`, seconds the world has stepped.
+            "gethealth" => self.call("getthinghealth", args),
+            "getleveltime" => Value::Num(self.time as f64),
+            "isthingvisible" => Value::Num(self.thing(idx(0)).map_or(0.0, |t| (!t.destroyed) as u8 as f64)),
+            "getthingmass" => Value::Num(self.mass.get(&ti(0)).copied().unwrap_or(0.0) as f64),
+            "setthingmass" => {
+                self.mass.insert(ti(0), num(1) as f32);
+                Value::Nil
+            }
+            "getthinguserdata" => Value::Num(self.user_data.get(&ti(0)).copied().unwrap_or(0.0) as f64),
+            "setthinguserdata" => {
+                self.user_data.insert(ti(0), num(1) as f32);
+                Value::Nil
+            }
+            // `SetThingTimer` writes the same expiry `SetLifeLeft` does.
+            "setthingtimer" => self.call("setlifeleft", args),
             "getlifeleft" => Value::Num(self.life_left.get(&ti(0)).copied().unwrap_or(0.0) as f64),
             "setlifeleft" => {
                 self.life_left.insert(ti(0), num(1) as f32);
@@ -2377,12 +2430,20 @@ impl Runtime {
                 }
                 Value::Nil
             }
+            // `SetSectorAdjoins(sector, 0|1)` is `sithSector_HideSectorAdjoins`/`ShowSectorAdjoins`:
+            // it switches `SITH_SECTOR_ADJOINSOFF` (0x80), and that is how every shipped door
+            // script closes its own doorway (`00_door.cog`: `SetSectorAdjoins(doorSector, 0)` on
+            // startup, `1` when it opens). `SectorAdjoins` is the same verb under its other spelling.
             "setsectoradjoins" => {
-                let want = idx(1) as i32;
+                let shut = idx(1) == 0;
                 let mut changed = false;
-                if let Some(s) = self.sector_mut(idx(0)) {
-                    changed = s.adjoins != want;
-                    s.adjoins = want;
+                if let Some(flags) = self.sector_flags.get_mut(idx(0) as usize) {
+                    changed = (*flags & SECTOR_ADJOINS_OFF != 0) != shut;
+                    *flags = if shut {
+                        *flags | SECTOR_ADJOINS_OFF
+                    } else {
+                        *flags & !SECTOR_ADJOINS_OFF
+                    };
                 }
                 if changed {
                     self.adjoins_changes += 1;
@@ -2390,8 +2451,32 @@ impl Runtime {
                 Value::Nil
             }
             "getsectoradjoins" => Value::Num(
-                self.sectors.get(idx(0) as usize).map(|s| s.adjoins as f64).unwrap_or(0.0),
+                self.sector_flags
+                    .get(idx(0) as usize)
+                    .map(|f| (f & SECTOR_ADJOINS_OFF == 0) as u8 as f64)
+                    .unwrap_or(0.0),
             ),
+            // `SetAdjoinFlags(surface, bits)` / `ClearAdjoinFlags(surface, bits)`:
+            // `pSurface->pAdjoin->flags |= / &= ~bits`, on the row that surface carries — the row
+            // the sweep reads when a body crosses that way (`collide::Gates`).
+            "setadjoinflags" | "clearadjoinflags" => {
+                let set = verb.eq_ignore_ascii_case("setadjoinflags");
+                let bits = idx(1) as u16;
+                let row = self.surface_adjoin.get(idx(0) as usize).copied().unwrap_or(-1);
+                if let Some(flags) = usize::try_from(row).ok().and_then(|r| self.adjoin_flags.get_mut(r)) {
+                    *flags = if set { *flags | bits } else { *flags & !bits };
+                }
+                Value::Nil
+            }
+            // `SetSectorFlags(sector, bits)`: `sector->flags |= bits` and nothing else. The one
+            // bit a shipped script sets is `SITH_SECTOR_UNDERWATER` (0x2), which is what makes a
+            // "passthru layer" a water volume.
+            "setsectorflags" => {
+                if let Some(flags) = self.sector_flags.get_mut(idx(0) as usize) {
+                    *flags |= idx(1) as u32;
+                }
+                Value::Nil
+            }
             "setsectorlight" => {
                 if let Some(s) = self.sector_mut(idx(0)) {
                     s.light = num(1) as f32;
@@ -2412,7 +2497,7 @@ impl Runtime {
                 Value::Nil
             }
             "getsectorflags" => {
-                Value::Num(self.sectors.get(idx(0) as usize).map(|s| s.flags as f64).unwrap_or(0.0))
+                Value::Num(self.sector_flags.get(idx(0) as usize).copied().unwrap_or(0) as f64)
             }
             "playsoundthing" | "playsoundpos" | "playsoundlocal" | "playsound" => {
                 let name = args.first().map(render).unwrap_or_default();
@@ -2605,8 +2690,11 @@ mod tests {
             prints: Vec::new(),
             messages: Vec::new(),
             messages_sent: 0,
+            sectors: vec![SectorState { thrust: [0.0; 3], light: 0.0, tint: [0.0; 3], colormap: 0 }],
+            sector_flags: vec![0],
+            adjoin_flags: vec![0x7],
+            surface_adjoin: vec![0],
             surfaces: Vec::new(),
-            sectors: vec![SectorState { adjoins: 1, thrust: [0.0; 3], light: 0.0, tint: [0.0; 3], colormap: 0, flags: 0 }],
             sounds: Vec::new(),
             timers: 0.0,
             inv: BTreeMap::new(),
@@ -2618,7 +2706,7 @@ mod tests {
             ai: BTreeMap::new(),
             template_weapon: BTreeMap::new(),
             ai_shot_interval: 1.0,
-            ai_standoff: 2.5,
+            ai_standoff: 0.25,
             level_complete: false,
             music: None,
             music_volume: 1.0,
@@ -2649,6 +2737,8 @@ mod tests {
             actor_flags: Default::default(),
             item_flags: Default::default(),
             life_left: Default::default(),
+            mass: Default::default(),
+            user_data: Default::default(),
             force: Default::default(),
             actor_weapon: Default::default(),
             play_mode: Default::default(),
@@ -2684,7 +2774,9 @@ mod tests {
             "firstthinginview", "nextthinginview", "haslos", "thingviewdot", "applyforce",
             "setactorflags", "clearactorflags", "getactorflags", "getthingsignature", "bittest",
             "skilltarget", "getactorweapon", "setactorweapon", "amputatejoint", "playmode",
-            "getlifeleft", "setlifeleft", "getitemflags", "getparam",
+            "getlifeleft", "setlifeleft", "getitemflags", "getparam", "gethealth", "getleveltime",
+            "isthingvisible", "getthingmass", "setthingmass", "getthinguserdata", "setthinguserdata",
+            "setthingtimer",
         ] {
             assert!(Runtime::handles(verb), "`{verb}` is answered but not routed");
         }
@@ -2728,6 +2820,36 @@ mod tests {
         rt.call("SetInv", &[Value::Num(0.0), Value::Num(3.0), Value::Num(2.0)]);
         rt.call("ChangeInv", &[Value::Num(0.0), Value::Num(3.0), Value::Num(1.0)]);
         assert_eq!(rt.call("GetInv", &[Value::Num(0.0), Value::Num(3.0)]), Value::Num(3.0));
+    }
+
+    #[test]
+    fn adjoin_and_sector_flags_reach_the_gates_the_solver_reads() {
+        let mut rt = door_runtime();
+        // `surface_adjoin` names row 0, whose shipped word is the ordinary `0x7`.
+        assert_eq!(rt.adjoin_flags[0], 0x7);
+        // `ClearAdjoinFlags(surface, 2)`: the force field goes up, and the sweep's gate sees it.
+        rt.call("ClearAdjoinFlags", &[Value::Num(0.0), Value::Num(2.0)]);
+        assert_eq!(rt.adjoin_flags[0] & crate::collide::ADJOIN_MOVE, 0);
+        assert!(!rt.gates().passable(0, 1, 0), "a cleared MOVE bit must close the opening");
+        // ... and `SetAdjoinFlags(surface, 2)` opens it again.
+        rt.call("SetAdjoinFlags", &[Value::Num(0.0), Value::Num(2.0)]);
+        assert!(rt.gates().passable(0, 1, 0));
+        // Bit 0x10 blocks the walker too: `00_nogo*`-style "block rear-door access".
+        rt.call("SetAdjoinFlags", &[Value::Num(0.0), Value::Num(16.0)]);
+        assert!(!rt.gates().passable(0, 1, 0));
+        // `ClearAdjoinFlags(visFace, 1)` hides the opening's room from the cull walk.
+        rt.call("ClearAdjoinFlags", &[Value::Num(0.0), Value::Num(1.0)]);
+        assert!(!rt.gates().visible(0));
+
+        // `SetSectorFlags(sector, 2)`: the sector becomes a water volume, which is the bit the
+        // walker reads; `GetSectorFlags` reports the word back.
+        rt.call("SetSectorFlags", &[Value::Num(0.0), Value::Num(2.0)]);
+        assert_eq!(rt.sector_flags[0] & crate::collide::SECTOR_UNDERWATER, 2);
+        assert_eq!(rt.call("GetSectorFlags", &[Value::Num(0.0)]), Value::Num(2.0));
+        // `SetSectorAdjoins(sector, 0)` is the same switch as `0x80` in that word.
+        rt.call("SetSectorAdjoins", &[Value::Num(0.0), Value::Num(0.0)]);
+        assert_eq!(rt.sector_flags[0] & crate::collide::SECTOR_ADJOINS_OFF, 0x80);
+        assert!(!rt.gates().passable(0, 1, 0), "a hidden sector doorway is not crossed");
     }
 
     #[test]
@@ -2814,6 +2936,24 @@ mod tests {
         // Script text is collected, not dropped.
         rt.call("jkPrintUNIString", &[Value::Str("GUI_NOPE".into())]);
         assert_eq!(rt.prints, vec!["GUI_NOPE".to_string()]);
+    }
+
+    #[test]
+    fn thing_getters_and_setters_round_trip() {
+        let mut rt = door_runtime();
+        let t = Value::Num(0.0);
+        assert_eq!(rt.call("GetHealth", &[t.clone()]), rt.call("GetThingHealth", &[t.clone()]));
+        rt.time = 12.5;
+        assert_eq!(rt.call("GetLevelTime", &[]), Value::Num(12.5));
+        rt.call("SetThingMass", &[t.clone(), Value::Num(3.0)]);
+        assert_eq!(rt.call("GetThingMass", &[t.clone()]), Value::Num(3.0));
+        rt.call("SetThingUserData", &[t.clone(), Value::Num(7.0)]);
+        assert_eq!(rt.call("GetThingUserData", &[t.clone()]), Value::Num(7.0));
+        rt.call("SetThingTimer", &[t.clone(), Value::Num(4.0)]);
+        assert_eq!(rt.call("GetLifeLeft", &[t.clone()]), Value::Num(4.0));
+        assert_eq!(rt.call("IsThingVisible", &[t.clone()]), Value::Num(1.0));
+        rt.call("DestroyThing", &[t.clone()]);
+        assert_eq!(rt.call("IsThingVisible", &[t]), Value::Num(0.0));
     }
 
     #[test]

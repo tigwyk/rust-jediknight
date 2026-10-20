@@ -170,6 +170,61 @@ to lie inside geometry — the one reliable camera placement in a level whose
 walkable space you do not model yet. Sector radii range from `0.3` (trigger
 slivers) to `17.2` (the largest room) in level 1. **observed**
 
+### 3.2 The two flag words scripts switch — **observed in the data, corroborated by the code**
+
+The `flags` field of an adjoin row (dropped until now) is the opening's
+`SithSurfaceAdjoin::flags`, and a sector's `FLAGS` is `SITH_SECTOR_*`. Both are
+ordinary run-time state: `SetAdjoinFlags(surface, bits)` / `ClearAdjoinFlags(surface,
+bits)` OR/clear bits on the row the named *surface* carries, and `SetSectorFlags(sector,
+bits)` ORs into the sector's word. The shipped scripts name the bits themselves:
+
+| bit | name (`sithSurface.h`, `types_enums.h`) | shipped use |
+|---|---|---|
+| adjoin `0x1` | `SITHSURF_ADJOIN_VISIBLE` | `16a_crowadjoin.cog`: "turns on an adjoin in the docking port after the player crosses it" — `ClearAdjoinFlags(visFace, 0x001) // turn off vis flag` at startup, `SetAdjoinFlags(visFace, 0x001)` when crossed |
+| adjoin `0x2` | `SITHSURF_ADJOIN_ALLOW_MOVEMENT` | `00_breakingglass.cog`: `SetAdjoinFlags(glass, 2) // Set ADJOIN_MOVE (allow passage)`; the force-field scripts clear it (`// Clear ADJOIN_MOVE (disallow passage)`) |
+| adjoin `0x10` | `SITHSURF_ADJOIN_ALLOW_AI_ONLY` | `SetAdjoinFlags(nogo, 16) // block rear-door access`, and `ClearAdjoinFlags(nogo, 16) // permit rear-door access` |
+| sector `0x2` | `SITH_SECTOR_UNDERWATER` | `SetSectorFlags(passthru, 2) // Assign "underwater" to passthru layer` |
+| sector `0x80` | `SITH_SECTOR_ADJOINSOFF` | every door script: `SetSectorAdjoins(doorsector, 0)` on startup, `1` when it opens — `sithCogFunctionSector_SetSectorAdjoins` is `sithSector_Hide/ShowSectorAdjoins`, which is this bit |
+
+Shipped rows are `0x7` (visible + movement + sound) unless the opening starts closed.
+Of the install's 36,360 adjoin rows, **35,706** are `0x7`; 393 have movement already
+clear (`0x5`), 145 are AI-only (`0x17`), and the rest are small variations (`0xf` 80,
+`0x6` 18, `0x1f` 6, `0x4` 5, `0x3` 3, `0x1d` 2, `0x14` 1, `0xd` 1). Level 1 alone has 5
+movement-closed rows and one AI-only (`--adjoins` prints both counts). Sector words are
+`0x1000` (`HASCOLLIDEBOX`, which the loader sets) plus `0x4` (`COGLINKED`), `0x10`
+(`HIDEONMAP`), `0x40` (`FALLDEATH`) and `0x2` (water) on nine levels — 14tower 33
+sectors, 06abarons 24, then 06bbarons, 17asarris, 17bsarris, m10, m_boss17, 09fuelstation
+and 04escapehouse.
+
+The consumers the port has to honour, and where the engine puts them:
+
+- **movement**: `sithCollision_SearchForSurfaceCollisions` treats an adjoin as a plain
+  solid surface when `ALLOW_MOVEMENT` is clear (`(colflags & RAYCAST_100) == 0 &&
+  (v15->flags & ALLOW_MOVEMENT) == 0 → LABEL_46`), and `sithCollision_MoveThing`
+  always sets `RAYCAST_200`, which also makes `ALLOW_AI_ONLY` solid. So
+  `collide::sweep` tests a closed opening as a face and never crosses it.
+- **culling**: the port's own portal walk (`collide::visible_sectors`) drops an opening
+  whose `VISIBLE` bit was cleared. `SECTOR_ADJOINSOFF` is deliberately *not* read there:
+  a closed door hides nothing in retail (the leaf fills the doorway), and the
+  `--no-cull` A/B stays pixel-identical, which is what keeps stage 1's gate meaningful.
+- **water**: `sithPhysics.c:43` halves movement when `pThing->sector->flags &
+  SITH_SECTOR_UNDERWATER`, in addition to the water *surface* flags; `in_water` in
+  `main.rs` reads both.
+
+Not yet gated: the port's other movers. A projectile or an actor moves by
+`Runtime::step`, which resolves against the sector's planes and faces
+(`resolve_stepped`/`segment_blocked`) instead of the swept path, so a closed opening stops
+the player and not them (marked `ponytail:` at the site).
+
+One asymmetry is deliberate and marked in the code: the engine lets a body step
+*into* a sector whose adjoins are hidden, because the door leaf is a thing and things
+collide. This port has no thing-on-thing collision yet, so a shut sector is
+impassable from both sides — otherwise a body can walk into a closed door's sector and
+never get out. **observed** (data) / **corroborated** (code, [OpenJKDF2](https://github.com/shinyquagsire23/OpenJKDF2)'s
+`sithCollision.c`/`sithCogFunctionSector.c` decompilation; the `setadjoinflags` handler
+itself is unimplemented there, so the surface→row mapping is inferred from the shipped
+scripts and the `SithSurfaceAdjoin` struct).
+
 ### The `World <thing> <n>` counts are not row counts
 
 `World materials 560` is followed by 528 rows. `World things 552` is followed by
@@ -245,11 +300,13 @@ rendering the retail geometry rather than by reading the header:
    ±0.1500 with 0.150000 — the offset is the half-extent of a centre-origin model.
    Adding it to every vertex (as this build did at first) floats each prop off the floor
    by its own height, which is how a crate came to swallow the camera at level 1's start.
-3. **Model space is 1/10 world space.** `d2x3.3do` measures 0.2 × 0.3 for a door
-   named 2 × 3; `c3x10.3do` measures 0.3 × 1.0 for a `3x10catwalk`. The template's
-   `size=` field does *not* carry the factor (`crate6_2` is `size=0.087201` against
-   a model spanning ±0.06), so it comes from the dimensions the template names
-   encode. `MODEL_SCALE = 10.0`.
+3. **Model space is level space: one model unit is one level unit.** The measurement that holds
+   is the level's own geometry: a door model has to fill the doorway built for it, and the
+   vertical adjoin 0.01 units from each door's placement is the doorway. `d2x3.3do` measures
+   0.200 × 0.300 and its doorway 0.20 × 0.30, `d3x3_1.3do` 0.300 × 0.300 against 0.30 × 0.30,
+   `d4x3_1.3do` 0.400 × 0.300 against 0.35–0.50 × 0.25–0.35. `--scale` prints the table.
+   The *name* is not a world size: reading `d2x3.3do`'s "2 × 3" as level units is what put
+   `MODEL_SCALE` at 10 for several rounds. `MODEL_SCALE = 1.0`.
 
 All 477 shipped models parse into drawable geometry, and level 1 places 3119 model
 instances from 342 shared meshes (7457 triangles). **observed**
@@ -1581,9 +1638,10 @@ without a window.
 
 Per sector, from its `SURFACES first count` range:
 
-- a surface with `adjoin == -1` becomes a **plane** (winding is not trustworthy, so the
-  normal comes from the face's first two edges and is oriented by majority vote of the
-  sector's own vertices — the face's own vertices lie on the plane and do not vote);
+- a surface with `adjoin == -1` becomes a **plane**. The normal comes from the polygon's
+  widest-spanning triple of vertices (winding is not trustworthy, and the first three
+  vertices are often collinear — see below), oriented by majority vote of the sector's own
+  vertices — the face's own vertices lie on the plane and do not vote;
 - a surface with an adjoin whose mirror resolves becomes a **portal** to the sector the
   mirror's surface belongs to;
 - the floor is the highest **downward-facing plane along -Z** the walker is above (the
@@ -1596,13 +1654,14 @@ its own `walkplayer` thing, holds "forward" for 120 frames, and reports what hap
 
 ```
 level                          travelled  blocked    sectors contained  hull
-jkl\01narshadda.jkl                 13.9        0   339->339       yes  differs
-jkl\03katarn.jkl                    16.0        0   405->369       yes  differs
-jkl\04escapehouse.jkl               16.3        0   781->786       yes  differs
-jkl\20aboc.jkl                       6.9      100      16->4       yes  differs
+jkl\01narshadda.jkl                 13.3        2   339->218       yes  differs
+jkl\02narshadda.jkl                 13.3        1    22->621       yes  differs
+jkl\03katarn.jkl                    13.3        1   405->502       yes  differs
+jkl\04escapehouse.jkl               13.3        1   800->257       yes  differs
+jkl\20aboc.jkl                       3.3      452     16->16       yes  differs
 ...
 summary: 34/34 levels with a start kept the walker inside its sector,
-         13 had the hull test agree, 931 sector crossings, 1 without a start
+         3 had the hull test agree, 6 sector crossings, 1 without a start
 ```
 
 `contained` is the invariant the solver enforces (the walker stays inside the sector it
@@ -1618,11 +1677,128 @@ one the game would pick in a place where two sectors overlap. Both the level sta
 every headless sweep use the placement's own `sector` field or the sector the walker
 walked into, never a guess from geometry alone.
 
+### A fifth of the collision geometry was missing — **observed, and it was the floor**
+
+A polygon's normal was `normalize(cross(p1 - p0, p2 - p0))`, and that is `None` when those
+three vertices are collinear. `.jkl` faces routinely *start* that way: on level 1, **233 of
+the 4595 surfaces** have a collinear first triple, and every one of them was dropped from
+`Solids` — no plane, no face, no floor. The floor slab `surface 3510` (8 vertices at
+`z = -1.325` in sector 361, the street the level starts on) was one of them, and so were
+walls `3511`/`3516`. The result was a body that walked through a wall and fell through the
+hole behind it.
+
+`polygon_normal` now reads the widest-spanning triple of the polygon instead, and
+`--collide` asserts the invariant that matters: no solid, sector-claimed surface with a
+real plane is missing from the collision set (it also prints the 233). The engine needs
+none of this — `sithCollision_SearchForSurfaceCollisions` (JK.EXE `0x4e86d0`) uses the
+plane and normal the `.jkl` already stores per surface (`+0x48..+0x50`), so a collinear
+vertex order cannot lose a face there. The data was fine; the derivation was not.
+
+The containment rule is the engine's (`sithCollision_MoveThing`, JK.EXE `0x4e7950`): when
+`sithIntersect_IsSphereInSector(pos, 0, sector)` (`0x507f30`) says the body left its
+sector, the move is undone. The port keeps that, with one difference stated in the code:
+it does not undo the move while there is still something under the body, because its hulls
+are derived rather than authored and on 5 of 34 levels the body starts outside its own
+recorded sector's planes (the strict form pins it: `--move` 136 → 93 units, 5 frozen).
+
+That leaves one real divergence, and it is why a body can still walk off level 1's
+unrailed walkway edge into a hole with no floor under it at any depth: the engine changes a
+body's sector in exactly two places (an adjoin crossing, and the restore above), while this
+port also hands a blocked body to the roomiest hull that contains it. That cell's floor can
+stop short of its walls. JK's own answer to falling out of the world is a death, not a
+longer fall: `sithPlayer_Update` checks `vel.z < -3.0` against `SITH_SECTOR_FALLDEATH`
+(`0x40`, which 32 of level 1's sectors carry). The port has no death yet.
+
 The same code runs in the window: `walker_step` is shared by `--walk` and by the app's
 player (`WASD`, `Shift` to run, `Space` to jump, arrow keys to look, the level's own
-`WORLD GRAVITY` pulling down along -Z, with the eye 1.45 units above the thing's own
+`WORLD GRAVITY` pulling down along -Z, with the eye 0.037 units above the body's own
 position). That is why the sweep is worth running — it measures the movement the window
 actually uses.
+
+### How the engine places and moves the player — read out of JK.EXE
+
+Everything in this list is from the shipped binary, not from its decompilation:
+
+| what | where | what it does |
+|---|---|---|
+| `sithWorld_Load` | `0x4cfb30` | parses the `.jkl` into sectors, surfaces, things |
+| player start | `0x4cbfc0` | takes the level's `walkplayer` slots, **skips the ones another player holds**, and *validates* a candidate with a zero-distance collision search from the start point (`SearchForCollisions`, radius = the thing's `size`), moving to the next candidate if it is blocked |
+| `sithThing_SetSector` | `0x4cd1e0` / `0x4cd2c0` | assignment plus sector enter/exit script messages — **no z snap, no floor search, no hull test** |
+| `sithPhysics_UpdateThingPhysics` | `0x4f6860` | converts a frame delta into `ROUND(dt * 50)` **0.02 s sub-steps**, carrying the remainder in the thing (`+0x240`); each sub-step applies acceleration and drag, clamps the speed, then calls the mover |
+| the mover | `0x4e7670` | moves the thing and every attached thing recursively, calling `MoveThing` per sub-step |
+| wedged player | `0x4e7950` → `0x4f61a0` | when the slide loop runs past 3 iterations on a *player*, the engine zeroes its physics state — velocity, forces, attached-surface data — instead of leaving it pinned |
+| `sithPhysics_FindFloor` | `0x4f5550` | a **radius-0 ray** along the thing's up axis, `1.1 ×` the thing's last floor gap (`2 ×` for some move types), flags `0x2802`; a `BOTTOM` contact sets the thing's floor state |
+| fall death | `sithPlayer_Update` | `vel.z < -3.0` **and** the current sector has `SITH_SECTOR_FALLDEATH` (`0x40`) → the player dies after a fade, which is the engine's answer to falling out of the world |
+
+Two things followed from that: the window now moves the body **once per 0.02 s sub-step**
+(the velocity integration already used the engine's rollover, but the sweep was taking a
+whole frame, so a 0.1 s hitch crossed five engine steps at once), and the port's `FindFloor`
+is a sphere rather than a ray, which is the forgiving direction.
+
+Level 1's hole at the walkway corner is *not* one of the sectors with `FALLDEATH` — it is
+`sector 221`, whose `FLAGS` are `0x0` — so the engine's fall-death rule would not fire
+there either. The port now reaches it the way retail does: never. The walk that used to end
+at `z = -167` stops standing on level 1's floor, because the rule below is the engine's own
+and the port no longer invents a sector for a body.
+
+### The three functions that *are* the player's movement — transcribed, not derived
+
+With a full decompilation of the binary in `decomp/` (see `tools/ghidra/`), the port's
+movement is a transcription rather than a reconstruction:
+
+| function | source | what it says |
+|---|---|---|
+| `sithSurface_ReadSurfacesListText` | `decomp/004e5c00_sithSurface_ReadSurfacesListText.c` | after the surface rows comes a **second block**, one `"%d: %f %f %f"` line per surface, read straight into `face.normal`. The file's normals point **into** the room (level 1's floor slab 3275 ships `(0,0,1)`) and are the only normal the engine ever uses. |
+| `sithIntersect_IsSphereInSector` | `decomp/00507f30_sithIntersect_IsSphereInSector.c` | a sector with `HASCOLLIDEBOX` (`0x1000`) answers **inside** as soon as the sphere is within its `COLLIDEBOX`, without testing a surface; otherwise every surface with `HAS_COLLISION` (`0x4`) **or** an adjoin whose link has `ALLOW_MOVEMENT` (`0x2`) is tested, and `distance < radius` means outside. |
+| `sithCollision_MoveThing` | `decomp/004e7950_sithCollision_MoveThing.c` | after the slide loop, `if (thing->field_28 && physicsType == 1 && !IsSphereInSector(&thing->position, 0, thing->sector))` restores the **position, the direction and the sector** saved at the start of the move, then destroys the thing if it has the destroy-on-escape flag. |
+
+Three things followed, and each replaced a guess:
+
+- **The test is on the thing's origin, not the body's centre.** `walkplayer` is placed at
+  floor height (`10cargo` sector 333: `z = 1.4814` on a floor at `1.4814`) and the eye sits
+  above that. The port's `pos` is a centre one radius up, so the check is made on
+  `pos.z - radius`. Testing the centre put the body 0.01 outside a 45° corner plane on
+  `10cargo` and 0.02 outside another on `11gorc` — with the restore firing every frame.
+- **The hull is the engine's surface set, and `COLLIDEBOX` is parsed.** `BOUNDBOX` and
+  `COLLIDEBOX` are separate fields in the `.jkl`; the engine's short-circuit box is the
+  latter, which only exists when the flag is set.
+- **`sector_for_body` is gone.** The engine changes a body's sector in two places only — an
+  adjoin contact and the restore above — and the port now does the same. That third rule was
+  what let a body walk past the wall its sector owned and off the walkway.
+
+One deviation remains, and it is measured rather than suspected. `IsSphereInSector` counts a
+doorway surface into the hull; the port does too, but it takes each hull plane's normal
+**outward from the sector that claims it** rather than trusting the file's sign. The reason is
+data, not preference: one surface can be claimed by two sectors and is only ever authored for
+one of them (`10cargo` sector 333's first claimed surface, 3128, is a 45° face whose authored
+normal points out of 333). With the authored sign, 177 moves a level are undone and only 7 of
+34 levels' tracked sector matches the geometry; with the per-cell sign it is **382 units of
+travel and 14 of 34**. Travel is 474 units with doorways left out of the hull entirely, so the
+doorway planes still cost movement — the open item, with its exact signature, is below.
+
+Verified after the transcription: `--move` walks 34 levels from eight headings each with
+**0 falls and 0 stuck bodies**, `--walk all` reports **34/34 levels contained**, the window
+walk of level 1 runs 700 frames without falling, and **all 31 gates pass**. The fall-damage
+gate had to be anchored on the roomiest sector rather than the spawn, because level 1's
+walkplayer stands in a 0.3-unit crawlspace and a body lifted above its own ceiling is
+(correctly) outside its sector.
+
+**The open item, with its numbers.** A body crossing a doorway has to end up *past* the far room's
+copy of the doorway plane — the origin is what `IsSphereInSector` tests, and a radius short is
+"outside" — and it has to end up *inside* the far room, which a door sector thinner than the body's
+radius cannot provide. Both are visible on level 1 in the first two seconds of the walk:
+
+- the alcove door (sector 339 → 349, plane at `y = -5.15`) refused the body for 522 of 700 frames
+  while the crossing only advanced past the sphere's contact point. The sweep now reports **the
+  position it ended at**, not just the sector, and the crossing clears the plane: the body walks out
+  of the alcove into sector 349 and stands on the floor at `-1.30`. Travel went from 302 to
+  **382 units** over 34 levels × 8 headings.
+- it then meets `sector 337`, a door slab **0.05 units wide**. Contact is at a radius (0.065) from its
+  east face, which is already past its west face at 0.05, so no origin position is legal and the
+  containment rule refuses it (494 frames remain). The fix is one expression: advance
+  `dt + min(radius + 1e-3, far-room depth / 2)`, so the origin lands in the middle of a thin slab
+  instead of through it. The far room's depth is the distance from the near doorway plane to its
+  nearest plane along the direction of travel.
 
 ---
 
@@ -1826,11 +2002,11 @@ Measured from the recovered source and the shipped data, not guessed:
 
 | quantity | engine | where | port today |
 | --- | --- | --- | --- |
-| lateral sphere radius | **0.065** (`walkplayer` template `size=0.065`, `movesize=0.065`) | `sithThing.c` `THINGPARAM_SIZE` → `moveSize`; swept in `sithCollision_MoveThing` | `PLAYER_RADIUS = 0.35` |
+| lateral sphere radius | **0.065** (`walkplayer` template `size=0.065`, `movesize=0.065`) | `sithThing.c` `THINGPARAM_SIZE` → `moveSize`; swept in `sithCollision_MoveThing` | `PLAYER_RADIUS = 0.065` |
 | body height | `physicsParams.height`, else `renderData.model3->insertOffset.z`; `ky.3do` = **0.120114** | `sithPhysics_GetThingHeight` | none: the body is a sphere |
-| floor probe | a **ray** (`radius 0.0`) straight down, `RAYCAST_10` so only `SITH_SURFACE_FLOOR` surfaces count, range `height * 1.1` (`* 2` when floor- or wall-stuck, `moveSize + 0.005` otherwise) | `sithPhysics_FindFloor` | a sphere sweep of radius 0.35 against every face |
-| ledge/step | no step allowance at all; `FindFloor` re-runs within that range | `sithPhysics_FindFloor` | `STEP_UP = 0.66` |
-| camera | `position + actorParams.eyeOffset`, `eyeOffset = (0, 0, 0.037)` from the template, plus a velocity-derived pitch of `clamp(5 * dot(rvec, vel), -8, 8)` | `sithCamera.c:255-292` | `0.35` above the body centre |
+| floor probe | a **ray** (`radius 0.0`) straight down, `RAYCAST_10` so only `SITH_SURFACE_FLOOR` surfaces count, range `height * 1.1` (`* 2` when floor- or wall-stuck, `moveSize + 0.005` otherwise) | `sithPhysics_FindFloor` | a sphere sweep of radius `PLAYER_RADIUS` against every face |
+| ledge/step | no step allowance at all; `FindFloor` re-runs within that range | `sithPhysics_FindFloor` | `STEP_UP = 0.066` (`moveSize + 0.01`) |
+| camera | a *separate* per-thing camera position at `thing + 0x168` (the view matrix is `rotate(view) . translate(-campos)`, `FUN_004051e0`), plus a **velocity-scaled view bob** — no velocity pitch | `0x4051e0`, see §24 | the eye offset is written into `thing + 0x168` by a function not yet identified |
 | what is solid | `(flags & SITH_SURFACE_HAS_COLLISION) == 0 && !pAdjoin` → skip | `sithCollision.c:365` | now matches (`surfflags & 0x4`) |
 
 The body is therefore **5.4x too wide** in the port, the floor probe is a sphere where the engine casts a
@@ -1998,10 +2174,11 @@ screen — nor could an actor's chase, which is why that looked broken too.
 Fixing the query (`(With<Camera3d>, Without<OverlayQuad>)`, the filter the other camera systems
 already use) exposed three more bugs, in this order:
 
-1. **`PLAYER_EYE = 1.45` was never a measured height.** It was chosen so the first screenshots were
-   framed above the floor, and it puts the camera *inside the ceiling* of level 1's spawn room: the
-   screen showed the inside of a solid, and the culler dropped to zero sectors. The sweep's
-   `EYE = 0.35`, which walks on all 34 levels, is the height the rest of the code already used.
+1. **`PLAYER_EYE` was not a measured height until it came from the template.** It had been chosen so the
+   first screenshots were framed above the floor, and the value it held put the camera *inside the
+   ceiling* of level 1's spawn room: the screen showed the inside of a solid, and the culler dropped to
+   zero sectors. It is `eyeoffset.z` now (0.037, one model unit being one level unit), and the sweep
+   starts the body one radius above the level's own start, the same pair the window uses.
 2. **The level's recorded sector for the walkplayer has no planes.** Level 1 records sector `339`
    for it, and `floor_below(339, …)` is `None` — a portal-only sliver, so the body has no floor and
    no walls, and gravity ran away (`z` 0.32 → −20 in a second). The spawn now prefers
@@ -2314,13 +2491,13 @@ the base height the measurement waits for. The assertion is on the apex.
   a sector plane **only while** the body's feet are below that face's top edge and the body is
   beside it in plan. The plane still bounds the room; above the ledge's edge there is nothing to
   hit, which is precisely what the engine's polygon trace gets for free.
-- `walker_step` then probes the engine's allowance — `moveSize + 0.01`, i.e. `0.065 × 10 = 0.65`
-  world units above the feet — lifting in 0.15-unit steps until the raised body is clear *and*
-  `support` finds a floor up there. A body lifts 0.55 and lands on a 0.5 ledge; a 2-unit wall has
-  no clear lift and blocks.
+- `move_body` then retries the blocked move from one step up — the engine's allowance,
+  `moveSize + 0.01`, i.e. `0.065 + 0.01 = 0.066` level units — and keeps the raised result only if
+  the body is clear there *and* `support` finds a floor up there, so a riser is climbed and a wall
+  three times the allowance blocks.
 
 `resolve` stays as it was (planes only, no exemptions) because the `--walk` sweeps measure exactly
-that baseline: 34/34 levels and 1077 crossings, unchanged. The window and the step fixture use
+that baseline: 34/34 levels and its own crossing count, unchanged. The window and the step fixture use
 `resolve_stepped`. Sweeping with the exemption enabled drops the sweeps to 27/34, which is the
 signal that the two behaviours deserve separate names rather than one flagged code path.
 
@@ -2339,12 +2516,11 @@ therefore means bounded-surface tracing, which is a collision rewrite rather tha
 `--walk all` shows the same thing as a symptom: the walkers that stall early on a level are
 stalled against a ledge or a spawn wall, not lost.
 
-Two unit caveats, stated rather than hidden. Template *lengths* are model-space, so they are
-scaled by this renderer's `MODEL_SCALE` (10) into level space — that is what makes gravity 40
-and the jump apex 2.8 units, and it is the only calibration in the table. The template's
-`movesize` (0.065 × 10 = 0.65) is **not** used as the body radius: at 0.65 the walker cannot
-fit through the slivers the `walkplayer` spawns inside, so the radius stays this build's
-calibrated 0.35. Water is not applied yet: it needs the surface the player is standing on,
+Two unit caveats, stated rather than hidden. Template *lengths* are in level units, and
+`MODEL_SCALE` is 1:1 (`d2x3.3do`'s 0.300 model units is the 0.30-unit doorway the level builds
+for it), so gravity is 4.0 and the jump apex 0.28 units — no calibration in the table. The
+template's `movesize` (0.065) is the body's collision radius, one third of a `ky.3do` half a
+level unit tall. Water is not applied yet: it needs the surface the player is standing on,
 which the walker does not track.
 
 The walker now also **starts in the sector the level records** for its `walkplayer` rather
@@ -2843,11 +3019,11 @@ force_heal.cog    cost=200.0  rank = GetInv(player, 25);  HealThing(player, 20 *
 
 `SetActorExtraSpeed` is **additive thrust**, not a multiplier: the engine computes
 `(maxThrust + extraSpeed)` and lets drag settle it (`sithControl.c`). `Rules` already derives
-its walk speed the same way — `maxthrust * MODEL_SCALE / surfdrag` — so the extra converts
-exactly: `walk + extra * MODEL_SCALE / drag`. Level 1 at rank 2:
+its walk speed the same way — `maxthrust / surfdrag` — so the extra converts exactly:
+`walk + extra / drag`. Level 1 at rank 2:
 
 ```text
-  extra speed 1.50 thrust -> walk 6.67 -> 11.67 u/s
+  extra speed 1.50 thrust -> walk 0.67 -> 1.17 u/s
   mana 400 -> 380 (cost 20)
 ```
 
@@ -2918,17 +3094,17 @@ and waits `ai_shot_interval` = 1 s between shots. That cadence is this build's s
 scheduler's weights — marked in the code as such.
 
 An actor in sight also **walks toward the player**: straight-line, at its own
-`maxthrust * MODEL_SCALE / surfdrag` (3.0 u/s for `reeyeesgun`), turning to face as it goes,
-and stopping at a 2.5-unit standoff. `--ai` measures it:
+`maxthrust / surfdrag` (0.3 u/s for `reeyeesgun`), turning to face as it goes,
+and stopping at a 0.25-unit standoff. `--ai` measures it:
 
 ```text
-  chase: walked 2.00 units in 1 s, now 2.50 units away (standoff 2.5), turned 80.0 deg
+  chase: walked 0.35 units in 1 s, now 0.25 units away (standoff 0.2), turned 80.0 deg
 ```
 
 Two bugs the chase exposed, both worth keeping:
 
 - The firing cadence gated the **whole tick**, so an actor that had just fired stood still for
-  a second and only advanced on the tick its timer expired — 0.1 units a second instead of 3.0.
+  a second and only advanced on the tick its timer expired — 0.01 units a second instead of 0.3.
   The cadence now gates the shot only; the legs keep moving.
 - A 200° cone is 100° either side, so an actor facing 179° away does **not** see the player. The
   check starts it at 80° so the turn is observable and legal.
@@ -4193,14 +4369,16 @@ The body is data, not calibration. The engine chain is:
 | eye | `sithCamera.c` `position + actorParams.eyeOffset`; template `eyeoffset=(0,0,0.037)` | 0.037 |
 | position | the sphere centre: `sithPhysics_FindFloor` never moves it, the sphere rests one radius above the floor | floor + radius |
 
-Those are **model units**, and `MODEL_SCALE` takes them into level units exactly as it takes the models, so
-the port uses `PLAYER_RADIUS = 0.065 * 10 = 0.65`, `PLAYER_EYE = 0.037 * 10 = 0.37` and `STEP_UP = 0.75`.
-The camera ends up **1.02 level units above the floor**.
+Those are in **level units** — `size` and `RADIUS` agree on the same number (`walkplayer` 0.065 against
+`ky.3do`'s 0.066), which is what a body's collision radius is — and `MODEL_SCALE` is 1, so nothing is scaled
+on the way in. The port uses `PLAYER_RADIUS = 0.065 * 1 = 0.065`, `PLAYER_EYE = 0.037` and
+`STEP_UP = 0.066`. The camera ends up **0.102 level units above the floor**, in a level whose doorways are
+0.30 tall.
 
-Before this, the port hand-calibrated `0.35` / `0.35` / `0.66`. That is a body five times too wide with a
-camera at knee height, and `--shot` shows what it does: wall at point-blank range, no ceiling, no depth.
-With the engine body the same spawn shows the panelled wall, the ceiling structure, the struts and a
-doorway — the corridor the level actually is.
+That is a body a third of a `ky.3do`-tall being (0.19 units), with the camera at 53% of its height: the
+engine's own numbers, read in the units they are written in. An earlier round multiplied them by 10 to pair
+with a 1.81-unit character — a character that only existed because the models were being drawn ten times too
+big (see below).
 
 `BK_RADIUS`, `BK_EYE`, `BK_MODEL_SCALE` and `BK_PHYS_SCALE` override the values per run, and
 `model_scale()` and `physics_scale()` are separate functions: with one shared constant, a ten-times error
@@ -4209,27 +4387,28 @@ could not be attributed to the models or to the speeds.
 The checks were rebuilt to survive a change of radius, which is what caught the stale assumptions:
 `--collide` asserted a fixed "the sphere kept 0.32 of radius" and now asserts `max(0, distance - radius)`;
 `--live-check` asserts the body stands with its floor directly under it; `--move` walks all 34 levels at the
-new size and reports `0 fell through, 0 barely moved, 188 units`.
-### The drawing scale was the "stuffed inside the walls" bug
+new size and reports `0 fell through, 0 barely moved, 131 units`.
+### The drawing scale: 10 was wrong, and the door settled it
 
 `MODEL_SCALE` was 10, reasoning from the `2x3door` template whose `d2x3.3do` measures 0.2 x 0.3 for a door
-named 2 x 3. Measuring the characters instead settles it: `bounds()` puts `ky.3do` at **0.71 x 0.54 x 1.81**
-units, which is exactly a person in a level whose storeys are 2.5 apart. At 10 the player model stood 18
-units tall, and every character was drawn eighteen units tall inside rooms, which is why they read as stuffed
-into each other and into the walls.
+*named* 2 x 3 — reading the name as level units. At 10 a 0.19-unit actor was drawn 1.91 units tall in levels
+whose storeys are 0.6 units and whose doorways are 0.3, which is the "enemy models are scaled way too big for
+the level" report.
 
-**That conclusion was wrong and was corrected the same session.** `bounds()` already multiplies by
-`MODEL_SCALE`, so its 1.81 was *world* units, not model units: `ky.3do` is 0.18 model units and 0.17 posed,
-and 10 is the right scale. The fault behind "characters stuffed inside each other and the walls" was the
-**camera standing inside an NPC** — the spawn only required `radius * 2` = 0.7 units from other things,
-exactly an NPC body width. With `BK_THING_CLEARANCE = 2.0` the same viewpoint is open room. A number printed
-by a function that scales internally is not a model-space measurement; check the units of the measurement
-before believing it.
+**The measurement that settles it is the doorway.** A door must fill the opening the level builds for it, and
+both are in the file, so no constant is involved: the nearest vertical adjoin to each door's own placement,
+measured in level units, is 0.20 x 0.30 for `d2x3.3do`, 0.30 x 0.30 for `d3x3_1.3do` and 0.35–0.50 x
+0.25–0.35 for `d4x3_1.3do` — the model's own numbers. One model unit, one level unit. `--scale` prints the
+table.
 
-`physics_scale()` stays 10 on purpose. The movement was calibrated in level units (walk 6.67 units a second,
-`--feel`) and must not change when the drawing scale does; the two were one constant, which is what let an
-error in either go unnoticed. Deriving the true speed scale from `sithPhysics_UpdateThingPhysics` and
-`ApplyDrag` is still open.
+Two earlier arguments for 10 were both self-referential. `bounds()` multiplies by `MODEL_SCALE`, so its
+"1.81" for `ky.3do` was 18 model units read as a model-space measurement (the number was already
+ten times what it claimed). And the `RADIUS` table below divided an extent *that had already been scaled by
+10* by `RADIUS`, then found the ratio was about 10 — see the correction there. A number produced by a
+function that scales internally is not a measurement, and a ratio against a value you already multiplied is
+not a confirmation.
+### The body follows the same scale
+
 ## 22. What the engine does when it loads a level and a model
 
 Read against `sithThing_ReadStaticThingsListText`, `sithThing_SetPositionAndOrient`, `rdMatrix_Build34`,
@@ -4271,22 +4450,29 @@ up as geometry on its side.
 `INSERT OFFSET`, no scale. So the port's decision not to add the insert offset to vertices or the transform
 is correct, and the model's own `RADIUS` is the thing that carries its size.
 
-### `RADIUS` settles the model scale, independently
+### `RADIUS` is a body size, not a model-space scale — and the first reading was circular
 
-`sithThing.c` sets `moveSize = renderData.model3->radius` when a template names no `size`, in **world**
-units. Reading `RADIUS` out of every `.3do` and comparing it with the geometry measured by `bounds()`:
+`sithThing.c` sets `moveSize = renderData.model3->radius` when a template names no `size`, in **level**
+units. That is what `RADIUS` is: the thing's collision radius, two thirds of the way down a level unit
+(`d2x3.3do` 0.181 against a 0.300-tall door, `ky.3do` 0.066 against the template's own `size=0.065`).
 
-| model | world h | world w | `RADIUS` | w / RADIUS |
+An earlier round compared it with a `bounds()` extent — but `bounds()` multiplies by `MODEL_SCALE`, so the
+table below divided an extent *already scaled by 10* by `RADIUS` and found the ratio was 10. It read as a
+second, independent confirmation of the constant it had divided by:
+
+| model | extent, as printed at `MODEL_SCALE` 10 | `RADIUS` | ratio | extent in level units, at 1:1 |
 | --- | --- | --- | --- | --- |
-| `d2x3.3do` (2x3 door) | 3.00 | 2.00 | 0.18 | 11.1 |
-| `crt4-4.3do` | 3.00 | 3.00 | 0.26 | 11.5 |
-| `j2x3.3do` | 3.75 | 3.84 | 0.27 | 14.2 |
-| `e6x6_1.3do` | 21.00 | 5.95 | 1.18 | 5.0 |
-| `shut.3do` (shuttle) | 23.07 | 24.09 | 2.03 | 11.9 |
-| `01frt.3do` (freighter) | 50.92 | 110.73 | 7.95 | 13.9 |
+| `d2x3.3do` (2x3 door) | 3.00 × 2.00 | 0.18 | 11.1 | 0.300 × 0.200 |
+| `crt4-4.3do` | 3.00 × 3.00 | 0.26 | 11.5 | 0.300 × 0.300 |
+| `j2x3.3do` | 3.75 × 3.84 | 0.27 | 14.2 | 0.375 × 0.384 |
+| `e6x6_1.3do` | 21.00 × 5.95 | 1.18 | 5.0 | 2.100 × 0.595 |
+| `shut.3do` (shuttle) | 23.07 × 24.09 | 2.03 | 11.9 | 2.307 × 2.409 |
+| `01frt.3do` (freighter) | 50.92 × 110.73 | 7.95 | 13.9 | 5.092 × 11.073 |
 
-The ratio is consistently about 10-14 (half-diagonal against a bounding radius), so model space is world/10
-and `MODEL_SCALE = 10` is right — a second, independent confirmation after the door-name argument.
+The ratio is the constant. At 1:1 the extent is 1.1 × `RADIUS` for a door (a square-ish prop, where the
+radius is half the diagonal) and 5-14 × for long thin models, which is what a bounding radius against a
+half-diagonal looks like. The lesson is in the shape of the mistake: a test whose two sides both contain the
+value under test cannot confirm it.
 
 **So the freighter is 110 units long because a freighter is 110 units long.** The huge flat orange surfaces
 that looked like broken geometry are its hull: the level parks it at `(14.9, 2.5)` near the edge, and its
@@ -4338,13 +4524,13 @@ Its jump check compares the measured apex with `v²/2g` (0.26 vs 0.28, within th
 
 ### The body is `size x MODEL_SCALE`, the eye is `eyeoffset.z x MODEL_SCALE`
 
-`sithThing.c` sets `moveSize` from the template's `size=` — 0.065 on `walkplayer` — and model space is world
-space divided by `MODEL_SCALE` (10, measured from `.3do` geometry: see §21). So the body is
-`0.065 x 10 = 0.65`, and the camera is `position + eyeOffset` (`sithCamera.c`) with
-`eyeoffset=(0,0,0.037)` → `0.037 x 10 = 0.37` above the body centre, which is itself one radius above the
-floor. Camera height: **1.02 level units**.
+`sithThing.c` sets `moveSize` from the template's `size=` — 0.065 on `walkplayer` — and model space is level
+space (`MODEL_SCALE` = 1, measured from the level's own doorways: see §21). So the body is
+`0.065 x 1 = 0.065`, and the camera is `position + eyeOffset` (`sithCamera.c`) with
+`eyeoffset=(0,0,0.037)` → `0.037` above the body centre, which is itself one radius above the floor. Camera
+height: **0.102 level units**, in a level whose doorways are 0.30 tall and whose storeys are about 0.6.
 
-`--walk all` agrees with its own hull test on **30 of 34 levels at radius 0.65**, against 28 at the old 0.35.
+`--walk all` keeps the body inside its own sector from the start on **34 of 34 levels** at this radius.
 
 ### A real bug the derivation exposed
 
@@ -4352,15 +4538,15 @@ floor. Camera height: **1.02 level units**.
 hard 1.0 u/s whatever the level asked for. The window passed `1.0` and got away with it because it integrates
 velocity itself, while the headless sweep passed a unit direction and the real speed — and silently walked at
 1 u/s. The parameter is gone; `move_dir` is a velocity now, and `--move` proves the path follows the
-derivation: **129 units travelled at scale 1, 1100 at the old scale 10.**
+derivation: **131 units travelled at scale 1.**
 
-### The step has no engine value, so it is bounded by checks
+### The step is the engine's own floor-retry allowance
 
 `sithCollision.c` contains no step height at all; `MoveThing` crosses floors through adjoins. The port needs
-one because its adjoin coverage is incomplete, so `STEP_UP` is pinned from both ends by gates: `--move` walks
-all 34 levels at 0.32 and freezes two at 0.30; the step fixture needs 0.66 because the four-way test rejects a
-body merely touching the riser it was blocked by (`ponytail:` in `collide.rs` names the fix — test against the
-polygon's top edge rather than a swept sphere at the raised height).
+one because its adjoin coverage is incomplete, and the number it uses is the engine's: `FindFloor`'s second
+pass runs at `range = moveSize`, so `STEP_UP = movesize + 0.01 = 0.066`, one body radius. It was 0.66 while the
+drawing scale was ten times too big — every riser in the level measured in a unit ten times the body — and the
+step fixture now states its riser as `STEP_UP * 0.9` so it keeps testing the rule rather than a number.
 ### The fall gate, and the bug it caught
 
 `--fall` drops the body from a known height and checks two things: the impact against `sqrt(2 g h)` using
@@ -4379,3 +4565,313 @@ let d = (impact - 2.5).powi(2) * 45.0;    // and FallHurt's own 1.0 floor
 
 The gate is proven able to fail: removing that first line and rebuilding makes `--fall` exit 101, and putting
 it back restores `--- fall check passed ---`.
+## 24. The player controller in the shipped EXE: the map so far
+
+This section exists because "the camera angles feel wrong" is not a question the port's own constants can
+answer. Everything below is read out of `G:\\Games\\Star Wars Jedi Knight - Dark Forces 2\\JK.EXE`
+(sha256 `12e8c8c3…fe44`, image base `0x400000`) with Ghidra 12.1.4. Addresses are virtual, names are
+Ghidra's.
+
+### The chain that reaches the game every frame
+
+```text
+entry                 0x513a00   CRT start; calls the app's WinMain
+WinMain wrapper       0x41ebd0   -> 0x50e750(hInstance, ..., "Jedi Knight")
+wKernel loop          0x50e750   window class "wKernel", message pump
+frame tick            0x4037e0   called from that loop when no message is pending
+per-frame pipeline    0x401ee0   the subsystem chain; see below
+```
+
+`0x4037e0` is a **game-mode state machine**: `DAT_00552b88` is the mode, and three callbacks live in
+overlapping 12-byte-stride tables at `0x525478` (enter), `0x52547c` (per-frame update) and `0x525480`
+(leave). The modes seen in the switch are 1, 4, 5, 8 and 10. The per-frame update for a mode is the
+`0x52547c` slot, so that table is the list of *game* frames and the camera update is one of those
+callbacks reachable from it.
+
+`0x401ee0` then runs the subsystems in order: `FUN_0041f7d0`, `FUN_004093a0`, `FUN_00407a20`,
+`FUN_00423ff0`, `FUN_004289f0`, `FUN_0043abb0`/`FUN_0043abd0`, `FUN_004233c0`/`FUN_004c4d30`/
+`FUN_00423450`, `FUN_004051e0`, `FUN_0043abf0`, then the 2D passes and the frame's last draw. Of those,
+`FUN_004093a0`/`FUN_004094a0` are the multiplayer scoreboard, `FUN_00407a20` draws HUD bitmaps
+(`FUN_004234e0` = blit a `.bm` at a rect), and `FUN_00402eb0` is weapon selection. None is the camera.
+
+### The world render pass, and what is *not* the camera
+
+`FUN_004c63b0` is the "draw the level" pass: it sets the renderer state, **zeroes the counters**
+`DAT_0083197c`, `DAT_00831980`, `DAT_00831984`, `DAT_0082f4b4`, `DAT_0082f4b8`, `DAT_0082fee8`,
+`DAT_00831978`, iterates a list of things calling `FUN_004c7720(thing, 0, ...)` per thing, then calls
+`FUN_004c6c40` for the sector polygons and `FUN_004c7be0`/`FUN_004c8220` for the sprite and effect passes.
+The tick prints those three `0x8319xx` globals afterwards, which is what they are: **raster statistics, not
+a camera position**. An earlier pass through this binary guessed otherwise and chased them; the counters are
+zeroed at the top of the pass and only read by the debug print, so nothing writes a camera there.
+
+### Data structures worth knowing
+
+| address | what |
+| --- | --- |
+| `0x85b780` | the per-player array; indexed by `DAT_0083199c` (the local player), **stride `0x228`**, entries are pointers |
+| `player + 0x130` | a dword of flags, tested as `& 0x800000` in the tick, `FUN_00407a20` and `FUN_00402eb0` (a "this player is not being drawn/simulated" state) |
+| `0x5492d0` | the `.jkl` **template key-name table**: a pointer array whose entries include `"eyeoffset"` at `0x5495c4`, `"minheadpitch"` at `0x5495d0`, `"maxheadpitch"` at `0x5495e0` |
+
+That table is worth stating plainly: `eyeoffset`, `minheadpitch` and `maxheadpitch` are **engine template
+keys**, so the port treating them as data (§23) is right — they are read from the level, not invented.
+
+### What is still unknown, and the next two probes
+
+The camera placement itself (`sithCamera_Update` by OpenJKDF2's name) is **not yet identified**. `0x83197c`
+is not it (see above), and its struct has no direct global reference, which means it is reached through a
+pointer. The two probes that should reach it:
+
+1. read `FUN_004c7720` (the per-thing draw) and `FUN_004c6c40` (the sector pass) for the *view matrix* they
+   transform by, then take `procedure_callers` up from whatever sets that matrix;
+2. follow the `0x52547c` per-frame callbacks for the in-game modes and keep the one that reads
+   `[player + 0x??]` as three floats and writes a 9-float matrix.
+
+### The camera, resolved
+
+The chain is `FUN_004c56b0` @ `0x4c56b0`: for a render buffer's mode 1 (first person) it copies the thing's
+orientation (`thing + 0x88`, twelve dwords, `FUN_0043fcf0`'s output), rotates it by the *view* angles at
+`thing + 0x15c/0x160/0x164` (`FUN_004419d0` = build-from-angles then multiply), puts the translation at the
+thing's position (`thing + 0xb8`) and **adds the eye offset at `thing + 0x168`**. So the camera is
+`pos + eyeOffset` in level units, exactly as §23 has it, and `--eye` was read off the right key.
+
+**The basis question is settled by `FUN_0043fcf0` itself.** It is the euler builder (pitch, yaw, roll) whose
+columns this port already copied as `thing_quat`, and with yaw 0 and roll 0 its columns are
+
+```text
+column 0: (1, 0, 0)          unchanged by pitch
+column 1: (0, cos p, sin p)  the one that rises when the view looks up
+column 2: (0, -sin p, cos p)
+```
+
+Only column 1 pitches, so the camera (built from the thing's own orientation) **looks along column 1**, and a
+level's yaw `a` faces `(-sin a, cos a)`. The port drove the camera, the walk keys and the spawn aim along
+column 0, `(cos a, sin a)` — the same frame rotated a quarter turn — which is why a spawn looked at a wall.
+`scrap/yaw-*.png` is 03katarn's start both ways: column 0 puts the eye inside a doorway, column 1 is the
+street the level opens on.
+
+Everything now goes through one `yaw_axes()` in `src/main.rs`, and `--controls` asserts the camera's look and
+right columns against `thing_quat`'s on 15 yaw/pitch pairs. The doc image at the top of the README is that
+same start after the fix.
+
+**The engine's first-person view has a velocity term, and it is a roll, not a pitch.** `FUN_004c56b0` adds
+
+```c
+if (thing[0x10] == 1) {                    // camera mode 1, first person
+  local_78 = (vel.x * m[0] + vel.z * m[2] + vel.y * m[1]) * 5.0;   // 5 * dot(vel, column 0)
+  clamp(local_78, -8, 8);                                        // degrees
+}
+```
+
+to the *third* euler angle — the roll — so strafing banks the view. It is not the `clamp(5 * dot(rvec, vel),
+-8, 8)` pitch this document used to attribute to `sithCamera.c`; the magnitude is the same because the formula
+is the same, the axis is not. It is ported as `camera_lean()`: a full-speed strafe banks 3.3 degrees, the clamp is 8, and walking forward is level — all three asserted by `--controls`.
+
+**`FUN_004c56b0` is now read in full, and it is the whole camera**: a `switch` on the render buffer's mode
+(jump table `0x4c5f34`, byte table `0x4c5f4c`) whose cases are
+
+| mode | what the case builds |
+| --- | --- |
+| 1 | first person: the thing's orient (`+0x88`), the view angles at `+0x15c/0x160/0x164`, the velocity roll, the translation at `+0xb8`, **plus the eye offset at `+0x168`**, plus `0x8ee5ac` for the local player, then orthonormalised (`FUN_004408e0`) |
+| (next case) | the same, but snapped into the sector by `FUN_004c6050(0, thing[0x5c], pos, angles, 0.02f, 0x2200)`, then offset by `0x549090` |
+| (third) | a follow camera: `FUN_00441e30` off `0x5490b0`, position `thing+0xb8` with **z + 0.05** (the code does `FSUB [0x522dec]` and that constant is −0.05; `0x522de8` is +0.05) |
+| (fourth) | a basis built from the static vectors at `0x5490a0/a4/a8` |
+| (last) | the static matrix at `0x8ee5e0` (12 dwords), copied verbatim |
+
+**The FOV is not in it.** There is no canvas read, no `tan`, no field that could be a field of view anywhere in
+the function — so the projection is a *display-layer* parameter, set outside the player controller. The value
+still is not recovered, but this settles where it is not, and that matters: a port cannot inherit an FOV from the
+camera code because the engine's camera code has none.
+
+Why no constant can be searched for: the engine carries a **degree tangent table** (`0x539xxx`-
+`0x544xxx`, one entry per integer degree, used by its sinusoid and tangent helpers), so a FOV would *index*
+that table instead of appearing as a literal. Scanning the whole image for floats whose `atan` lands on a
+whole degree returns 514 hits and every one is a table entry or a false positive in code bytes; the only
+candidate among the renderer constants (`0x522b14` = 1.80) means 61 degrees, not a plausible half-FOV. So
+the value has to be **read at run time**, not searched for.
+
+**The velocity-roll constants are verified, not inferred.** The case-1 code multiplies by `[0x522ddc]` and
+clamps against `[0x522de0]`/`[0x522de4]`, and those words are
+
+```text
+0x522ddc  5.0     0x522de0  -8.0     0x522de4  8.0     0x522de8  0.05
+```
+
+which is exactly the `clamp(5 * dot(vel, right), -8, 8)` the port implements as `camera_lean`, in degrees
+(the same bounds also appear inline as `0x41000000` / `0xc1000000`). So (b) and (c) are closed with addresses:
+eye offset added to the thing's position at `thing + 0x168`, velocity as a roll of ±8 degrees driven by lateral
+speed, and no velocity pitch anywhere in the camera.
+
+### The FOV, recovered at run time
+
+The static search was right that no literal exists, and the runtime read settled it. JK.EXE was started,
+driven through its intro with injected keystrokes, and sampled with Frida once level 1 was loaded: the local
+player thing (`DAT_008319a4`) was non-null, its angles were `(0, 0, 0)` at the level's spawn, `+0x10` was `1`
+(first person) and `+0xc` was `10`, so this is the player camera and not a cutscene.
+
+```text
+buffer  0x8ec380 + 0x08  = 90.0            <- the projection's field of view, in degrees, horizontal
+camera matrix at +0x34:  c0 = ( 0.500, -0.866, 0)   c1 = (0.866, 0.500, 0)   c2 = (0, 0, 1)
+translation             = (-10.44343, -5.45509, -1.09289)
+player thing            = (-10.44343, -5.45509, -1.12989) + eye (0, 0, 0.037)
+```
+
+Two things fall out of those six numbers, and both are the answers this document was built to reach:
+
+* **The forward axis is column 1.** The level places the player at yaw −60 degrees (`--save` prints that
+  facing from the file, and the camera matrix agrees: `cos 60 = 0.5`, `sin 60 = 0.866`). Column 1 is
+  `(0.866, 0.500) = (-sin a, cos a)` = forward, and column 0 is `(0.500, -0.866) = (cos a, sin a)` = right.
+  This is the port's `yaw_axes`, confirmed by the shipping engine's own matrix rather than by a matrix
+  builder's columns.
+* **The eye offset is added to the thing's position, in level units**, exactly as read: the camera sits at
+  the thing's `+0xb8` plus its `+0x168`, and `0.037` is the template's `eyeoffset`.
+* **The projection is a fixed *horizontal* 90 degrees.** Nothing in the camera code states a vertical angle;
+  the engine fixes the horizontal one and lets the taller axis follow. At 4:3 that is **73.74** degrees
+  vertical and at 16:9 **58.72**. The port used to render at a flat 45 degrees vertical, which is why its
+  captures looked zoomed in beside retail.
+
+The field sits at the head of the render-buffer struct (`DAT_0082f104`, `0x8ec380 + k * 0x4e0`), and the
+values next to it (1.0, 1.0, and `229.5` further into the view object at `+0x3c`) are not angles — 229.5 is
+consistent with a distance, which is what the neighbouring far/fade fields would be.
+
+`--controls` now asserts the derivation: 90 degrees horizontal becomes 73.74 vertical at 4:3 and 58.72 at
+16:9, and the vertical maps back to 90 horizontally, so a rounded-off constant cannot creep in.
+
+### What the runtime session cost, and what it left behind
+
+The executable had to be driven by hand-injection because it has no command line for a level: `-level <name>`
+makes it **exit immediately**, and the port's `--start` has no retail equivalent. Its data path comes from
+`Software\LucasArts Entertainment Company\JediKnight\v1.0`, a key that does not exist on this machine, yet the
+level loaded anyway, so that key is not what gates a single-player start. The intro is five films long;
+Escape skips one each time and lands on the Single Player screen, from which "New Game" plays the level's own
+opening film before the world appears.
+### The follow camera, and why third person is the port's own
+
+`FUN_004c56b0`'s third case (`0x4c59ce`) is the engine's follow camera, and reading it changes what "port the
+follow camera" means:
+
+```text
+0x4c59ce  FUN_00441e30(&dst, &0x5490b0, &DAT_0082f0b8)   build the view from a persistent matrix
+0x4c59e8  offset = (0, 0, 0.05)                         0x3d4ccccd
+0x4c5a17  pos.z - (-0.2)                                <- 0x522dec is -0.2, so +0.2 above the thing
+0x4c5a57  FUN_00440390(matrix, offset, position, 0)     rotate the offset into place
+0x4c5a74  FUN_004c6050(...)                             clip the eye into the sector
+0x4c5a79  FUN_00441a30(&DAT_0082f0b8, (0, 0, dt * 8))   spin the orbit 8 degrees per second
+```
+
+So it is a **spectator orbit**: a camera parked 0.2 above the thing (an actor's head height), offset a hair
+forward, and spun 8 degrees per second around it, with no input of any kind. That is a cutscene and
+multiplayer-observer camera; retail single-player is first person only, and there is no steerable third-person
+camera in the shipping game to copy. `DAT_0082f0b8`, the persistent matrix it spins, is all zeros in the file —
+it is scratch state built at run time (the map-screen camera at `0x4c5150` fills it from a thing's orient).
+
+The port therefore has its own chase camera, built on the two conventions the engine does establish:
+
+* **height** — `0.2` above the body's origin, taken from `0x522dec` (`THIRD_PERSON_UP`);
+* **aim** — the camera looks at the body's eye (`thing + 0x168`), the same point first person puts the eye at.
+
+The boom is the port's own `PLAYER_RADIUS * 2.5 + 0.5` (0.66 units, the same standoff rule `--stand` uses),
+it is shortened step by step when `segment_blocked` says a wall is between the body and the camera, and the
+strafe roll still applies. `C` toggles it (`BK_THIRD_PERSON=1` starts that way) and `--controls` asserts the
+geometry: 0.66 behind the look axis, 0.16 above the aimed point, and behind the correct axis at yaw 90.
+
+**What is still missing for a useful third person: the body is not drawn.** `spawn_models` deliberately skips
+the local player's own model (it would be drawn *around* the first-person viewpoint, and these models have
+`cull_mode: None`), so third person currently shows the level from behind the player rather than the player.
+Drawing it needs the body spawned, rotated with `player.yaw`, and hidden while in first person; that is in
+`docs/gaps.md`.
+
+### The vertical look axis
+
+Retail JK's mouse look is **inverted vertically**: mouse up looks down, the flight-sim convention its 1997
+control code was written for. That is not a setting — the executable's strings contain no "invert" at all
+(a byte search of JK.EXE for `invert`, `Invert` and `INVERT` all return nothing) — so there is nothing in the
+shipped game to switch it off. The port therefore defaults to the modern sense (mouse **down** looks down) and
+keeps the retail one behind `BK_INVERT_Y=1` for side-by-side comparison.
+
+The port's sign does not rest on taste: Bevy passes winit's raw device delta through unchanged
+(`bevy_winit` `state.rs`: `Vec2::new(x as f32, y as f32)`), and on Windows that delta is screen-signed, so a
+larger `y` means the mouse moved down and `pitch - dy` is "mouse down, look down". `--controls` asserts both
+directions — modern by default, inverted under the override — so a sign flip cannot pass unnoticed.
+
+### Why a geometric oracle lied
+
+Before the matrix settled it, the axis was measured a different way: `--facing` cast from each level's own
+`walkplayer` along both horizontal axes and compared the clear run, on the theory that an author places a
+start looking *into* the level.
+
+```text
+longer run: lvec (the look axis) 8, rvec (its right) 11, tied 15 of 34 level(s)
+```
+
+That said `rvec`, and it was wrong. Fifteen of the 34 levels are tied at the 8-unit cap because a straight
+segment test stops at the sector boundary and not at the level, and walking the body both ways ended in a
+collision-bookkeeping artifact rather than in information about intent. Two ambiguous oracles agreeing with
+each other is not evidence; `FUN_0043fcf0`'s columns are, and `--facing` was deleted rather than kept as a
+gate that answers the wrong way.
+
+### Probe 1's first result: the world transform is `0x73a3d0`
+
+The per-thing draw is `FUN_004c7720(thing, 0, 0)` (called from the draw pass `0x4c63b0`). It byte-builds a
+sprite/sorted-triangle list in `DAT_0082f668` (0x30 bytes an entry, capped at `0x20`, counter
+`DAT_00831978`) and **never touches the camera**: every vertex it emits goes through
+`FUN_00443c80(DAT_0073a3d0, dest, source)`, which transforms a point by the matrix that `0x73a3d0` points at.
+
+So the chain is: *something sets `0x73a3d0` to the camera's view matrix → the draw layer transforms every
+vertex through it*. `0x73a3d0` is zero in the file and referenced from ~300 sites across
+`0x43xxxx`–`0x4cxxxx` (the `rd*` layer), which is what a "current transform" global looks like; the draw
+pass also calls `FUN_00443cf0(DAT_0073a3d0)` once at its start.
+
+**The writer of `0x73a3d0` is the camera**, and it is the next probe: `procedure_references` on the ~300
+sites filtered to the `0x40xxxx`–`0x43xxxx` sith layer, or `procedure_callers` of `FUN_00443cf0`. The first
+candidate checked, `FUN_0043b1c0` (0x43b1c0, 4343 bytes, the earliest site), is a bulk polygon-list renderer,
+not the camera.
+
+### Probe 1 result: the camera is `FUN_004051e0`
+
+The one instruction that matters is a single store: `MOV [0x73a3d0], EAX` at `0x4434be`, in
+`FUN_004434b0(param)` — a one-line setter (`DAT_0073a3d0 = param`) that only six places call:
+`jkGuiMap_Show` (0x415c50), the model-editor panel (0x419ae0), and `0x4c5150`, `0x4c5420`, `0x4c54d0`,
+`0x4c5590`, `0x4c5fd0` (the display buffers). None is the camera, so the camera does not set the world
+transform directly; it builds a **view matrix** that the display layer then adopts.
+
+That builder is `FUN_004051e0` — one of the tick's per-frame subsystems (`0x401ee0` calls it right before
+`FUN_0043abf0`). Recovered shape, with every field it touches:
+
+```c
+thing = (&DAT_0085b780)[player_index * 0x8a];          // the player's thing (pointer, stride 0x228)
+phase += clamp(fabs(thing[0x264]), <= 0.02) * DAT_00552bac;     // a per-frame phase step
+sin_cos(phase, &s, &c);                                  // FUN_00431fbd
+speed = |thing[0x1d4 .. 0x1dc]| / thing[0x21c];          // velocity / a speed normaliser
+if (c > 0) c = -c;
+bob = Vec3(c * DAT_00552ba0 * speed,
+           s * DAT_00552ba4 * speed,
+           s * DAT_00552ba8 * speed);
+rotate_matrix(&DAT_0085fa80, bob);                       // FUN_0043fcf0, a 3-angle rotation
+view = rotate(camera_rotation);                          // copied from DAT_0082f104 + 0x34 (12 dwords)
+translate(view, -thing[0x168 .. 0x170]);                 // FUN_00441a90: the camera position, negated
+store(&DAT_0085b5cc + player_index * 0x228, view);       // FUN_0043e4e0: the per-player view matrix
+```
+
+Three things follow straight from that, and one of them corrects this document.
+
+**The camera's position is a field on the thing — `thing + 0x168` (x, y, z floats) — not `position +
+eyeOffset` computed at draw time.** Whatever adds `eyeoffset` writes that field, which makes the *writer of
+`0x168`* the next probe, not the renderer.
+
+**The engine has no velocity-derived pitch.** This document used to attribute
+`clamp(5 * dot(rvec, vel), -8, 8)` to `sithCamera.c` (§23's camera row). The view-matrix builder applies the
+velocity as a **view bob**: a phase integrator driven by `thing[0x264]`, a `sin`/`cos` of that phase, and three
+amplitude globals (`DAT_00552ba0`, `DAT_00552ba4`, `DAT_00552ba8`) scaled by `speed` — a rotation of the view,
+not a change to the pitch. The port implements neither, so this is a *gap* (no bob), and the pitch term the
+document described does not exist.
+
+**`thing[0x1d4 .. 0x1dc]` is the velocity and `thing[0x21c]` the normaliser**; `DAT_00552bac` is the phase
+rate and `DAT_00552bb4` the phase. All of the `0x552ba0`–`0x552bbc` block is **zero in the file**, so the
+amplitudes are set at run time (an option), which is why they read as zero when the binary is inspected
+statically.
+
+Still open after this: the rotation matrix's own builder (who fills `DAT_0082f104 + 0x34` — that is where the
+yaw/pitch and therefore the lvec/rvec question lives), the `0x168` writer (the eye offset), the pitch clamp,
+and the FOV. `FUN_004051e0`'s neighbours in the tick (`FUN_0041f7d0`, `FUN_004289f0`, `FUN_0043abf0`,
+`FUN_00435140`) are the next reads; the display struct `DAT_0082f104` and the per-player block at `0x85b5cc`
+(stride `0x228`) are the structures to carry forward.

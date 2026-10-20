@@ -193,7 +193,7 @@ from the install, palette included.*
 | `.wav` playback + `.snd` sound classes (all 644 + 102) | working |
 | sector ambience loops (`SOUND` per sector, swapped as you move) | working |
 | COG script parser (all 540 scripts) + interpreter core | parsing complete; 315 verbs, and every verb a shipped script calls is answered by the runtime except AI, weapon, music and the message bus (§16.4) |
-| COG runtime — placed instances bound to a mutable world | working: doors open, lifts move, adjoins close; level 1 delivers 92 messages and actuates 13 adjoins. `--cog-check` fails if a verb outside the deferred groups goes back to being stubbed |
+| COG runtime — placed instances bound to a mutable world | working: doors open, lifts move, adjoins close, and the close is real — a hidden sector doorway or a cleared `ADJOIN_MOVE` bit stops the collision sweep, a cleared `VISIBLE` bit stops the cull, and a sector flagged underwater halves movement (`--adjoins`). Level 1 delivers 92 messages and actuates 13 adjoins. `--cog-check` fails if a verb outside the deferred groups goes back to being stubbed |
 | the same runtime driving the renderer (per-frame thing transforms) | working |
 | UI: menus from the game's own art, fonts and element tables | working in-app: 41 element arrays / 512 elements read from the EXE, `--ui <name>`, `--menu`, Up/Down/Enter |
 | UI: the engine's font and bitmap tables | working: 12 fonts + 35 bitmaps read out of the EXE, so text uses the font each element names and hover is the next one |
@@ -220,7 +220,7 @@ espawn= seconds (checked in --pickup). Not yet: pickup sounds, real inventory ma
 ate= per second floored at mindamage=): level 1''s bolt is 30 damage dropping to 10 over 1.33 s (§16.5). Not yet: explosions, ammo, force power effects, a body that falls |
 | actors animate | working: each placed actor plays its puppet's `stand` keyframe at the keyfile's own 15 fps on its own mesh, rebuilt only when the frame number changes; `--animate` checks the rendered vertices across every material — **1684 of 1697** actors move over the loop (§16.3). `walk`/`run`/strafe need velocity, i.e. stage 6's AI |
 | cutscenes (`.smk`) | **the data loads and its headers check out**: 25 files, 483 MB, 29,493 frames, all 640×300 at 15.2 fps (`--smk`); the decoder is `SMACKW32.DLL` (71 KB, named exports recovered), not JK.EXE. The VFS now finds them through the `Resource/VIDEO` mount | decoding not started — stage 8 |
-| level collision + adjoin (portal) traversal | working: a walker stays inside the level's own sectors |
+| level collision + adjoin (portal) traversal | working: a walker stays inside the level's own sectors, and a passage a script shut (a force field, a closed door's sector) is a wall |
 | player motion | working: walk/run/back/strafe/crouch, jump and water derived from the level's own `walkplayer` template chain, gravity scaled from the level, and water halving movement from the floor's surface flags (§16.2); level 1 walks at 0.667 u/s (`maxthrust/surfdrag`), jumps to a 0.28-unit apex in 0.75 s. `--rules` prints the table, the level's flagged-surface counts, and checks the integrated jump against the closed form. Step-up is not implemented and cannot be with infinite-plane collision (§16.2) |
 | sector visibility | working: one batch per (sector, material) + a per-frame clip-plane test, 21 of 462 sectors drawn in level 1 at the spawn, pixel-identical to --no-cull (0 of 230400 sampled pixels differ at yaw 0/90/270). Portal occlusion is implemented and unit-tested but off until the player's sector is tracked (§16.1) |
 
@@ -536,6 +536,7 @@ cargo run --release -- --texture 01f01.mat tex.png      # write a decoded materi
 cargo run --release -- --no-cull                        # draw every sector, to A/B the visibility pass
     cargo run --release -- --rules                          # the player's motion, from the level's templates
     cargo run --release -- --cog-check                      # every level's scripts still act on their world
+    cargo run --release -- --adjoins                        # the flag verbs, and that collision and the cull read them
     cargo run --release -- --fire +bryarbolt                # fire a weapon template at an actor and check the damage
     cargo run --release -- --fire-demo                      # fire a stream of bolts, for a screenshot
     cargo run --release -- --pickup                         # take level 1's powerup, check the inventory and respawn
@@ -742,3 +743,37 @@ episode manifest, the sprite sheet, keyframes, puppets, AI classes, UI bitmaps, 
 tables, the door script — plus the `.cmp` length check, the runtime's verb table, the
 collision solver on a synthetic Z-up room, and the model transform (a parent stored after
 its child with nonzero pivots, and a parent rotation swinging its child).
+## Camera recovery (this session)
+
+The camera is no longer a design choice: every number below came out of `JK.EXE`
+(sha256 `12e8c8c3…efe44`) or out of a copy of it running.
+
+- **Forward is column 1.** `FUN_0043fcf0` @ `0x43fcf0` is the euler builder the port had
+  already copied as `thing_quat`; only its **column 1** tilts with pitch, so a camera built
+  from a thing's orientation looks along column 1 and a level yaw `a` faces
+  `(-sin a, cos a)`. The port drove the camera, the walk keys and the spawn aim along
+  column 0 — the same frame a quarter turn round. `yaw_axes()` is now the only place that
+  mapping lives, and `--controls` asserts the camera's look and right against
+  `thing_quat`'s columns on 15 yaw/pitch pairs.
+- **The eye offset** is added to the thing's own position at `thing + 0x168`
+  (`FUN_004c56b0` @ `0x4c56b0`, `0x4c584c`), in level units — confirmed at run time, where
+  the level-1 camera sat at the player's `+0xb8` plus its `(0, 0, 0.037)` eye.
+- **The velocity term is a strafe roll, not a pitch**: `roll += clamp(5 * dot(vel, right),
+  -8, 8)` degrees, first person only. The constants are in the file — 5.0 @ `0x522ddc`,
+  -8.0 @ `0x522de0`, 8.0 @ `0x522de4` — and the port implements them as `camera_lean`.
+- **The FOV is 90 degrees horizontal**, the word at `buffer + 0x08`, read with Frida from a
+  copy of `JK.EXE` that had level 1 loaded. The engine never states a vertical angle, so the
+  port derives it (`73.74` at 4:3, `58.72` at 16:9) instead of rendering a flat 45.
+- **The follow camera is a spectator orbit**: `0x4c59ce` parks a camera 0.2 above the thing
+  (`0x522dec` = `-0.2`), offsets `(0, 0, 0.05)`, clips it into the sector and spins it
+  **8 degrees per second** (`0x4c5a79`). Retail single player is first person only, so the
+  port has its own chase camera on the engine's 0.2 height, toggled with `C`; the player's
+  own body is not drawn yet.
+- **Vertical mouse look is normalised.** Retail looks *down* when you move the mouse up and
+  has no option to change it (its strings contain no "invert"). The port defaults to the
+  modern sense with `BK_INVERT_Y=1` for comparison, and `--controls` asserts both.
+
+Two tooling notes from the same work: `--gates` runs every check in its own process and
+prints the mode each one ran in (`headless` or `window`), `--exit-after N` keeps a run from
+sitting on a menu, and `--start [level]` boots straight into a level with no screen to click
+through.

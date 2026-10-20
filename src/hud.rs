@@ -155,7 +155,7 @@ pub fn draw(canvas: &mut Canvas, gobs: &gob::GobSet, palette: &[[u8; 3]; 256], h
     // The scroll strip runs down the right edge underneath the status panel, so it is
     // drawn first.
     draw_carried(canvas, gobs, palette, hud);
-    let mut right_x = 0;
+    let (mut left_y, mut right_x, mut right_y) = (0, 0, 0);
     // Panels first: the meters are positioned relative to them.
     for piece in PIECES.iter().filter(|p| matches!(p.kind, Kind::Panel)) {
         let Some(file) = load(gobs, piece.name) else { continue };
@@ -164,14 +164,25 @@ pub fn draw(canvas: &mut Canvas, gobs: &gob::GobSet, palette: &[[u8; 3]; 256], h
             Panel::Left => 0,
             Panel::Right => canvas.width as i32 - cell.width as i32 * HUD_SCALE,
         };
-        if piece.panel == Panel::Right {
-            right_x = x;
+        // Both corners are anchored to the **bottom** of the screen, as the engine does:
+        // `jkHud_leftBlitY = Video_format.height - HUD_SCALED(panel height)` and the same for the
+        // right panel (`jkHud.c:147`, `jkHud.c:151`). They were drawn at `y = 0`, which put the whole
+        // status bar along the top.
+        let y = canvas.height as i32 - cell.height as i32 * HUD_SCALE;
+        match piece.panel {
+            Panel::Left => left_y = y,
+            Panel::Right => {
+                right_x = x;
+                right_y = y;
+            }
         }
-        canvas.blit_indexed([x, 0], cell.width, cell.height, &cell.pixels, palette, HUD_SCALE);
+        canvas.blit_indexed([x, y], cell.width, cell.height, &cell.pixels, palette, HUD_SCALE);
     }
-    let origin = |panel: Panel| match panel {
-        Panel::Left => 0,
-        Panel::Right => right_x,
+    let origin = |panel: Panel| -> (i32, i32) {
+        match panel {
+            Panel::Left => (0, left_y),
+            Panel::Right => (right_x, right_y),
+        }
     };
 
     for piece in PIECES.iter().filter(|p| !matches!(p.kind, Kind::Panel)) {
@@ -204,8 +215,9 @@ pub fn draw(canvas: &mut Canvas, gobs: &gob::GobSet, palette: &[[u8; 3]; 256], h
         let surge = piece.name == "ui\\bm\\stFrc.bm" && hud.force_surge;
         let cell = if surge { file.cells.first() } else { file.cells.get(mip) };
         let Some(cell) = cell else { continue };
+        let (ox, oy) = origin(piece.panel);
         canvas.blit_indexed(
-            [origin(piece.panel) + file.x_pos * HUD_SCALE, file.y_pos * HUD_SCALE],
+            [ox + file.x_pos * HUD_SCALE, oy + file.y_pos * HUD_SCALE],
             cell.width,
             cell.height,
             &cell.pixels,
@@ -229,10 +241,11 @@ pub fn draw(canvas: &mut Canvas, gobs: &gob::GobSet, palette: &[[u8; 3]; 256], h
         };
         // The numbers are colormap-indexed, like every other level asset: the digit
         // font's own bytes pick the colour.
+        let (ox, oy) = origin(*panel);
         canvas.draw_text_palette(
             font,
-            origin(*panel) + x * HUD_SCALE,
-            *y * HUD_SCALE,
+            ox + x * HUD_SCALE,
+            oy + y * HUD_SCALE,
             &text,
             palette,
             HUD_SCALE,

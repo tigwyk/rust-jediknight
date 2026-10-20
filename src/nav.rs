@@ -78,6 +78,12 @@ pub enum Step {
     Close,
     /// Leave the game.
     Quit,
+    /// Start a game: the campaign's first level, from that level's own start point.
+    NewGame,
+    /// Reload the level that is loaded, from its own start point.
+    Restart,
+    /// Leave the level and go back to the main menu.
+    Abort,
     /// Nothing this build knows how to do.
     Nothing,
 }
@@ -88,6 +94,15 @@ pub const ACTS: &[(u32, i32, Step)] = &[
     // GUI_QUITCONFIRM_Q)` over the Ok/Cancel dialog, whose Ok then leaves the game.
     (0x526680, 12, Step::Dialog { screen: 0x530068, keys: &["GUI_QUITCONFIRM", "GUI_QUITCONFIRM_Q"] }),
     (0x530068, 1, Step::Quit),
+    // `jkGuiSingleplayer_Show` (0x41a4a0) case 100: New Game. The episode picker next to it
+    // (`GUI_CHOOSEEPISODE` on 0x536168) is opened by no row in the recovered graph, so New Game
+    // starts the campaign at the first level of the first single-player episode.
+    (0x535e58, 100, Step::NewGame),
+    // `jkGuiEsc_Show` (0x411c30) case 14 and case 17: reload the level, and abort it. Abort is a
+    // return to the main menu, not the `Close` every other `GUI_ABORT` is — the pause menu has a
+    // separate "Return To Game" row (id 1) for that.
+    (0x529560, 14, Step::Restart),
+    (0x529560, 17, Step::Abort),
 ];
 
 /// The screen an element opens, if the graph knows it.
@@ -169,5 +184,14 @@ mod tests {
         // A tab, then the tab screen's Ok row goes back.
         assert_eq!(step(0x52b588, 103, "GUI_SOUND"), Step::Open(0x527820));
         assert_eq!(step(0x527820, 1, "GUI_OK"), Step::Close);
+        // The boot chain: main -> single player -> New Game, and the pause menu's own actions.
+        assert_eq!(step(0x535e58, 100, "GUI_NEWGAME"), Step::NewGame);
+        assert_eq!(step(0x535e58, 101, "GUI_LOAD"), Step::Nothing);
+        assert_eq!(step(0x535e58, -1, "GUI_CANCEL"), Step::Close);
+        assert_eq!(step(0x529560, 1, "GUI_RETURN_TO_GAME"), Step::Close);
+        assert_eq!(step(0x529560, 14, "GUI_RESTART"), Step::Restart);
+        assert_eq!(step(0x529560, 17, "GUI_ABORT"), Step::Abort);
+        // Another screen's abort is still just a close.
+        assert_eq!(step(0x5365a0, 17, "GUI_ABORT"), Step::Close);
     }
 }

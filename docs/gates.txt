@@ -5,29 +5,80 @@ Recorded at round 85. Target: `G:\Games\Star Wars Jedi Knight - Dark Forces 2`
 (GOG, plaintext JK.EXE, image base 0x400000,
 sha256 12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44).
 
-`cargo test` -> 71 passed, 0 failed.
+`cargo test` -> 77 passed, 0 failed.
 `cargo clippy --release --all-targets` -> 56 warnings, no errors.
 
 Each flag below is a gate: it asserts on the live runtime (or the shipped data) and exits
-non-zero if the behaviour drifts. `FAILURES: 0 / 34`.
+non-zero if the behaviour drifts. `--gates` runs the whole list, one process per flag, and says
+which **mode** each one ran in:
+
+```text
+flag                   runs       result verdict
+--controls             headless   pass   --- controls check passed ---
+--live-check           window     pass   --- live check passed ---
+```
+
+* **headless** — the flag returns before `App::new()`: it parsed the level, ran the runtime, and
+  never created a window, a camera or a menu. Most gates are this, and this column is how you can
+  tell without reading `main`.
+* **window** — the flag needed the running game, so it printed `mode: window, <screen>` first.
+  `--live-check` is the only one, because it samples the live world; it names the screen it ran
+  against and prints a verdict, and the sweep counts a window row with no verdict as a failure.
+
+Two flags exist to keep runs finite: `--exit-after N` (or `BK_EXIT_FRAMES=N`) quits after N frames
+whatever is on screen, and `--gates` passes it to every child. A gate that forgets to quit then
+ends without a verdict instead of sitting on the main menu forever — which is what five flags that
+do not exist in this binary used to do, because a hand-written flag list had invented them.
+
+`FAILURES: 0 / 31` (`--gates`: `gates: 0 of 31 failed`).
 
 flag                                                   exit  what it prints
 -------------------------------------------------------------------------------------------------
 --check                                                  0  --- all checks passed ---
 --audit                                                  0  --- audit passed ---            (all 35 levels)
+--boot                                                   0  opens on `main` at 0x526680; `GUI_SINGLEPLAYER`
+                                                             -> 0x535e58; `GUI_NEWGAME` (100) -> NewGame,
+                                                             campaign start 01narshadda.jkl; the cursor walks
+                                                             4 rows and New Game is one of them; `--start` opens
+                                                             no screen (straight into a level), `--menu` still
+                                                             wins; pause
+                                                             `GUI_RETURN_TO_GAME`/`GUI_RESTART`/`GUI_ABORT`
+                                                             -> Close/Restart/Abort
 --ui-audit                                               0  --- ui audit passed ---
---walk all                                               0  34/34 levels with a start kept the walker inside
-                                                             its sector, 1201 sector crossings, 1 without a start
---rules --level 01narshadda.jkl                          0  apex 2.57 / 2.81 closed form; pushed true beside,
+                                                             every screen with a way out can be left:
+                                                             exits 60: 0 unreachable by click, 0 screen(s)
+                                                             with no way out on the cursor
+--walk all                                               0  34/34 levels kept the walker inside the tracked
+                                                             sector with the engine's own facing; 15 had the hull
+                                                             test agree, 584 sector crossings, 1 without a start.
+                                                             The "contained" column asks `inside_sector` — the
+                                                             same call the rule makes, box short-circuit included.
+--scale                                                  0  model scale 1.0: 2x3door 0.30 x 0.20 model
+                                                             units fills a 0.20 x 0.30 doorway, 3x3door_1
+                                                             0.30 x 0.30 fills 0.30 x 0.30, 4x3door_1
+                                                             0.30 x 0.40 fills 0.35-0.50 x 0.25-0.35;
+                                                             actors 0.09-0.64 tall (median 0.19) in
+                                                             storeys of 0.60, ratio 0.32
+--rules --level 01narshadda.jkl                          0  apex 0.26 / 0.28 closed form; pushed true beside,
                                                              false 27 units past the wall's end
 --animate                                                0  117 of 117 placed actors move between frame 0 and
                                                              mid-loop (worst 0.038)
 --cog-check                                              0  --- cog check passed ---        (every level's scripts)
+--adjoins                                                0  1206 rows: 5 start with MOVE clear, 1 AI-only,
+                                                             0 not visible; 27 startup scripts shut 7 doorway
+                                                             sectors; the sweep crosses sector 1 <-> 8 and
+                                                             stops when ClearAdjoinFlags(surface, 2) lands,
+                                                             crosses again on Set 2, and Set 16 blocks;
+                                                             ClearAdjoinFlags(surface, 1) drops 262 -> 261
+                                                             rooms from the cull; SetSectorFlags(sector, 2)
+                                                             makes the sector water and SetSectorAdjoins(0)
+                                                             shuts its doorways
 --triggers                                               0  --- triggers check passed ---
 --sleep                                                  0  --- sleep check passed ---
---live-check                                             0  the body stands in sector 339 at z -0.78 on a floor at
-                                                             -1.13 (0.00 below it); a body that cannot reach a
-                                                             floor fails here instead of showing a black screen
+--live-check                                             0  the body stands in sector 339 at z -1.17 on a floor at
+                                                             -1.23 (0.00 below it); a body that cannot reach a
+                                                             floor fails here instead of showing a black screen;
+                                                             the player's own body is drawn by 0 entity(ies) (want 0)
 --live-check                                             0  --- live check passed ---
 --ai                                                     0  --- ai check passed ---
 --hit                                                    0  --- hit check passed ---
@@ -37,25 +88,33 @@ flag                                                   exit  what it prints
 --bins                                                   0  --- bins check passed ---
 --mana --level 01narshadda.jkl                           0  0 -> 20.0 in one second, clamps at 400
 --ammo --level 01narshadda.jkl                           0  bin 11 (energy); 3 rounds fired -> 3, then dry
---collide --level 01narshadda.jkl                        0  the ported search: 4 of 352 placed things stand on
-                                                             a floor in another sector (215 -> 222), and a wall
-                                                             sweep keeps 0.32 of the 0.35 radius
+--collide --level 01narshadda.jkl                        0  the ported search: 62 of 352 placed things stand on
+                                                             a floor in another sector (74 -> 75, 6.58 across),
+                                                             a sweep down from the spawn finds a floor 0.26 below
+                                                             it in sector 339, and no solid surface a sector claims
+                                                             is missing from the collision set (233 have a collinear
+                                                             first triple, which the widest-triple normal keeps)
 --winding                                                0  966 of 87377 drawn surfaces wind against their own
                                                              normal; 91233 normals point into their room, 0 away
---move                                                   0  34 level(s), 0 fell through, 0 barely moved, 189
-                                                             units travelled in 180 frames each -- the sweep-based
-                                                             move neither wedges nor leaves the world. Held forward
-                                                             in the window, the body walks the walkway, descends
-                                                             into the room below and lands: z -13.65 on floor -14.00
+--move                                                   0  34 levels x 8 headings, 0 fell through, 0 stuck,
+                                                             291 units travelled (1.1 per heading) -- the engine's
+                                                             own rule: `MoveThing`'s restore on a failed
+                                                             `IsSphereInSector`, asked at the body's origin. A
+                                                             level counts as stuck only when every heading is
+                                                             undone with nothing in front (18ascend, 19a start
+                                                             inside a lift car and are correctly immobile)
 --controls --level 01narshadda.jkl                       0  W follows the camera and D is to its right on 15
-                                                             yaw/pitch pairs (forward 6.67, strafe 4.67 = 70%);
-                                                             120 px right turns 24.1 deg right, 80 px up raises
-                                                             the pitch, the clamp is the template limit, and
-                                                             the pointer locks with no screen open
---feel                                                   0  walk 6.67 u/s at drag 3: 0.73 after 0.05 s,
-                                                             5.55 after 0.5 s, 6.27 after 2 s; released
-                                                             2.45 -> 1.80 in 0.1 s; strafe 70%, back 50%,
-                                                             run 200%, crouch 50%
+                                                             yaw/pitch pairs (forward 0.67, strafe 0.47 = 70%);
+                                                             120 px right turns 15.1 deg, 80 px up raises the
+                                                             pitch to 0.18 rad, the clamp is the template limit;
+                                                             the camera's look and right columns **equal the
+                                                             engine's own matrix** (`thing_quat` = `FUN_0043fcf0`
+                                                             @ 0x43fcf0) on 15 yaw/pitch pairs; a full-speed
+                                                             strafe banks the view 3.3 deg, clamped at 8, and
+                                                             90 deg horizontal projection -> 73.74 deg vertical at 4:3,
+                                                             mouse down looks down (modern), BK_INVERT_Y=1 restores retail's
+                                                             after 0.5 s, 0.63 after 2 s; released 0.24 -> 0.18 in
+                                                             0.1 s; strafe 70%, back 50%, run 200%, crouch 50%
 --pull --level 01narshadda.jkl                           0  the shipped script end to end: `activated` -> Ok
                                                              with a 0.33 s pulse, `pulse` targets the
                                                              item (FirstThingInView + HasLOS +

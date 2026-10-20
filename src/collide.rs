@@ -33,6 +33,17 @@ pub struct Plane {
 pub struct Solids {
     /// Per sector, the planes of its solid surfaces.
     pub sectors: Vec<Vec<Plane>>,
+    /// Per sector, only the planes that **bound** the cell: every vertex the sector claims is behind
+    /// them. `sectors` carries every claimed surface's plane, because a wall patch inside the room
+    /// still has to stop a body; only this list may answer "is the body inside", which is what
+    /// `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`) asks.
+    pub hull: Vec<Vec<Plane>>,
+    /// Per sector, its `HASCOLLIDEBOX` bounds (`SITH_SECTOR_HASCOLLIDEBOX`, sector flag `0x1000`),
+    /// from the same vertices. `IsSphereInSector` answers "inside" immediately when the sphere is
+    /// within this box, without looking at a single surface — which is why the engine's containment
+    /// check almost never fires, and why a port that skips the box and tests every plane sees bodies
+    /// "outside" their sector all the time.
+    pub boxes: Vec<Option<([f32; 3], [f32; 3])>>,
     /// Per sector, the openings in its hull: a portal surface names the sector on the
     /// other side in its `adjoin` field, which is what makes a doorway a doorway.
     pub portals: Vec<Vec<Portal>>,
@@ -75,9 +86,67 @@ pub struct Face {
 #[derive(Clone)]
 pub struct Portal {
     pub adjoin: usize,
+    /// The `World adjoins` row that governs crossing *this* way, which is where the flag word
+    /// lives. A mirrored link uses the mirror's row, as the engine's per-side
+    /// `SithSurfaceAdjoin` does.
+    pub link: usize,
     pub verts: Vec<[f32; 3]>,
     pub normal: [f32; 3],
     pub point: [f32; 3],
+}
+
+// The bits the scripts switch, as the engine names them (`sithSurface.h`, `types_enums.h`).
+/// `SithSurfaceAdjoin::flags` 0x1: draw (and cull) through this opening.
+pub const ADJOIN_VISIBLE: u16 = 0x1;
+/// 0x2: the body may pass. `ClearAdjoinFlags(x, 2)` is a force field going up.
+pub const ADJOIN_MOVE: u16 = 0x2;
+/// 0x10: AI-only. The engine's move path (`RAYCAST_200`, which `MoveThing` always sets) treats
+/// an opening with this bit as solid, which is what the shipped "block rear-door access" does.
+pub const ADJOIN_AI_ONLY: u16 = 0x10;
+/// `SithSectorFlag` 0x80: `SetSectorAdjoins(sector, 0)` hides every opening *of* that sector —
+/// how every shipped door script closes its own doorway.
+pub const SECTOR_ADJOINS_OFF: u32 = 0x80;
+/// `SithSectorFlag` 0x2: the sector is a water volume. `sithPhysics.c:43` halves movement inside
+/// one, which is what `SetSectorFlags(sector, 2)` sets up.
+pub const SECTOR_UNDERWATER: u32 = 0x2;
+
+/// What the level's scripts have switched: each sector's flag word and each adjoin row's.
+///
+/// Borrowed rather than copied, so the runtime stays the one place the state lives and the
+/// solver reads whatever the scripts set last frame. Empty slices mean "nothing switched",
+/// which is what a caller with no runtime (`--walk`, a spawn probe over bare geometry) wants.
+#[derive(Clone, Copy, Default)]
+pub struct Gates<'a> {
+    pub sectors: &'a [u32],
+    pub adjoins: &'a [u16],
+}
+
+impl Gates<'_> {
+    /// Can a body move from `from` into `to` through the opening `link`?
+    ///
+    /// `sithCollision_SearchForSurfaceCollisions` tests the adjoin's own bits, and a sector with
+    /// `SITH_SECTOR_ADJOINSOFF` has hidden all of its openings. The engine lets a body step *into*
+    /// such a sector — the door leaf is a thing, and things collide; this port has no thing-on-thing
+    /// collision, so a shut sector is treated as impassable from both sides. Otherwise a closed
+    /// door's sector can be entered and leaves a body with no way out.
+    ///
+    /// ponytail: that missing collision is the ceiling. With it, only `from` would need the test and
+    /// the door leaf would stop the body inside instead.
+    pub fn passable(&self, from: usize, to: usize, link: usize) -> bool {
+        let shut = |s: usize| self.sectors.get(s).is_some_and(|f| f & SECTOR_ADJOINS_OFF != 0);
+        let flags = self.adjoins.get(link).copied().unwrap_or(ADJOIN_MOVE);
+        !shut(from) && !shut(to) && flags & ADJOIN_MOVE != 0 && flags & ADJOIN_AI_ONLY == 0
+    }
+    /// Does the cull walk through the opening `link`?
+    pub fn visible(&self, link: usize) -> bool {
+        self.adjoins.get(link).copied().unwrap_or(ADJOIN_VISIBLE) & ADJOIN_VISIBLE != 0
+    }
+}
+
+/// Does this polygon span a plane at all? Used by `--collide` to prove that no solid surface with
+/// a real polygon fell out of the collision set.
+pub fn has_plane(pts: &[[f32; 3]]) -> bool {
+    polygon_normal(pts).is_some()
 }
 
 /// Whether `pos` is over the polygon, counting a point within `radius` of an edge as over it.
@@ -196,6 +265,33 @@ fn normalize(v: [f32; 3]) -> Option<[f32; 3]> {
     (len > 1e-6).then(|| [v[0] / len, v[1] / len, v[2] / len])
 }
 
+/// A polygon's plane normal, from the widest-spanning triple of its vertices.
+///
+/// The first three vertices are not enough: shipped `.jkl` faces routinely *start* with
+/// collinear points, and `normalize(cross(p1-p0, p2-p0))` is then `None` — which used to drop
+/// the whole surface from collision. Level 1's `01narshadda` surface 3510 is exactly that: the
+/// 8-vertex floor slab at `z = -1.325` in sector 361, whose first three vertices are on one
+/// line. Losing it left a hole in the street that the body fell through, and the same rule was
+/// dropping walls, so bodies could walk into them.
+fn polygon_normal(pts: &[[f32; 3]]) -> Option<[f32; 3]> {
+    let a = *pts.first()?;
+    let mut best: Option<[f32; 3]> = None;
+    let mut best_len = 1e-6f32;
+    // ponytail: every triple, so O(n^2) per polygon, at level load only (largest face here is
+    // 17 vertices). A convex hull or a fan would be O(n), and nothing needs it.
+    for i in 1..pts.len() {
+        for j in (i + 1)..pts.len() {
+            let c = cross(sub(pts[i], a), sub(pts[j], a));
+            let len = dot(c, c).sqrt();
+            if len > best_len {
+                best_len = len;
+                best = normalize(c);
+            }
+        }
+    }
+    best
+}
+
 /// Which sector owns each surface: `sector.surfaces` is a `(first, count)` range into the
 /// surface table, so this is a flat expansion of it. `usize::MAX` for a surface no sector
 /// claims.
@@ -262,6 +358,8 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     let mut walls: Vec<Face> = Vec::new();
     let mut faces: Vec<Face> = Vec::new();
     let mut sectors = Vec::with_capacity(level.sectors.len());
+    let mut hulls = Vec::with_capacity(level.sectors.len());
+    let mut boxes = Vec::with_capacity(level.sectors.len());
     let mut portal_sets = Vec::with_capacity(level.sectors.len());
     let mut spheres = Vec::with_capacity(level.sectors.len());
     for sector in &level.sectors {
@@ -294,6 +392,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         };
 
         let mut planes = Vec::new();
+        let mut hull_planes = Vec::new();
         let mut portals = Vec::new();
         for (surface_of, surface) in &owned {
             if surface.verts.len() < 3 {
@@ -307,32 +406,67 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
             if pts.len() < 3 {
                 continue;
             }
-            // Winding is not trustworthy, so take the normal from the first two edges.
-            let Some(mut normal) = normalize(cross(sub(pts[1], pts[0]), sub(pts[2], pts[0]))) else {
-                continue;
-            };
-            // Orient it by majority vote of the sector's vertices: this face's own
-            // vertices lie on the plane and do not vote, and for a convex hull almost
-            // everything else is behind.
-            let (mut behind, mut front) = (0usize, 0usize);
-            for v in &hull {
-                let d = dot(sub(*v, pts[0]), normal);
-                if d < -1e-4 {
-                    behind += 1;
-                } else if d > 1e-4 {
-                    front += 1;
+            // The plane the level **ships**: `sithSurface_ReadSurfacesListText` (JK.EXE `0x4e5c00`)
+            // reads a second block after the surface rows — one `idx: nx ny nz` line each — into
+            // `face.normal`, and every engine consumer uses that field. The file's normals point
+            // *into* the room (surface 3275 on level 1 is the floor slab at `z = -1.300` and ships
+            // `(0, 0, 1)`, up), while this port's solver was built on the opposite, *outward*
+            // convention, so the authored one is only used here to settle the **sign** — the plane
+            // itself still comes from the polygon, which is what the collision code expects, and the
+            // vertices are what a degenerate or missing block leaves as the fallback.
+            let normal = {
+                let Some(mut normal) = polygon_normal(&pts) else {
+                    continue;
+                };
+                if dot(surface.normal, surface.normal) > 0.25 {
+                    // Outward is the negation of the file's inward normal.
+                    if dot(normal, [-surface.normal[0], -surface.normal[1], -surface.normal[2]]) < 0.0 {
+                        normal = [-normal[0], -normal[1], -normal[2]];
+                    }
+                } else {
+                    // No shipped normal: majority vote of the sector's vertices, where this face's
+                    // own vertices lie on the plane and do not vote and almost everything else is
+                    // behind.
+                    let (mut behind, mut front) = (0usize, 0usize);
+                    for v in &hull {
+                        let d = dot(sub(*v, pts[0]), normal);
+                        if d < -1e-4 {
+                            behind += 1;
+                        } else if d > 1e-4 {
+                            front += 1;
+                        }
+                    }
+                    if front > behind {
+                        normal = [-normal[0], -normal[1], -normal[2]];
+                    }
                 }
-            }
-            if front > behind {
-                normal = [-normal[0], -normal[1], -normal[2]];
-            }
+                normal
+            };
+            // The hull's own orientation: a plane bounds a cell when the cell's inside is behind it,
+            // so the normal is taken outward *from this sector's centre*. The authored normal is
+            // right for the surface, but one surface can be claimed by two sectors and only ever be
+            // authored for one of them — the sector that claims it must still see it as its own wall.
+            // `planes` keeps the authored sign (the sweep orients each face per query anyway).
+            let own = if dot(sub(centre, pts[0]), normal) > 0.0 {
+                [-normal[0], -normal[1], -normal[2]]
+            } else {
+                normal
+            };
             // An adjoined surface is an opening: the walker goes through it into the
             // sector its *mirror* adjoin belongs to, so it is remembered as a portal
             // rather than a wall.
             match across(surface.adjoin) {
                 Some(adjoin) => {
                     let point = pts[0];
-                    portals.push(Portal { adjoin, verts: pts, normal, point });
+                    let link = usize::try_from(surface.adjoin).unwrap_or(usize::MAX);
+                    // `sithIntersect_IsSphereInSector` (`decomp/00507f30:29`) counts a surface into
+                    // the hull when it has `HAS_COLLISION` **or** is an adjoin whose link allows
+                    // movement (`pAdjoin->flags & 2`) — a body in a doorway is inside both sectors.
+                    if level.adjoins.get(link).is_some_and(|a| a.flags & 0x2 != 0) {
+                        hull_planes.push(Plane { normal: own, point, surface: *surface_of });
+                    }
+                    // The row that governs this side's crossing: the one this surface names.
+                    portals.push(Portal { adjoin, link, verts: pts, normal, point });
                 }
                 // The engine's own test, `sithCollision_SearchForSurfaceCollisions`:
                 //     if ( (v12->flags & SITH_SURFACE_HAS_COLLISION) == 0 && !v15 ) continue;
@@ -352,6 +486,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
                     // The sweep needs this one whatever its orientation: an upward-facing slab is
                     // still what a body stands on, and a downward sweep reaches it from above.
                     faces.push(Face { normal, point: pts[0], verts: pts.clone(), surface: *surface_of });
+                    hull_planes.push(Plane { normal: own, point: pts[0], surface: *surface_of });
                     planes.push(Plane { normal, point: pts[0], surface: *surface_of })
                 }
             }
@@ -361,7 +496,17 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
             let d = sub(*p, centre);
             radius = radius.max(dot(d, d).sqrt());
         }
+        // The box `IsSphereInSector` short-circuits on: the level's own `BOUNDBOX` (the engine's
+        // `collidebox_onecorner/othercorner`), used only when the sector claims `HASCOLLIDEBOX`
+        // (0x1000), which is what the engine tests first.
+        let box_of = if sector.flags & 0x1000 != 0 {
+            sector.boundbox
+        } else {
+            None
+        };
         sectors.push(planes);
+        hulls.push(hull_planes);
+        boxes.push(box_of);
         portal_sets.push(portals);
         spheres.push((centre, radius.max(0.1)));
     }
@@ -382,6 +527,12 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
             }
             portal_sets[to].push(Portal {
                 adjoin: from,
+                // The far side's own row, which is the mirror of this one.
+                link: level
+                    .adjoins
+                    .get(portal.link)
+                    .and_then(|a| usize::try_from(a.mirror).ok())
+                    .unwrap_or(portal.link),
                 verts: portal.verts.clone(),
                 normal: [-portal.normal[0], -portal.normal[1], -portal.normal[2]],
                 point: portal.point,
@@ -405,7 +556,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         floors.iter().enumerate().map(|(i, face)| (face.surface, i)).collect();
     let face_of: std::collections::HashMap<usize, usize> =
         faces.iter().enumerate().map(|(i, face)| (face.surface, i)).collect();
-    Solids { sectors, portals: portal_sets, spheres, floors, walls, wall_of, floor_of, faces, face_of }
+    Solids { sectors, hull: hulls, boxes, portals: portal_sets, spheres, floors, walls, wall_of, floor_of, faces, face_of }
 }
 
 /// One swept-sphere contact: where a body of `radius` first touches, in the direction it moved.
@@ -532,7 +683,34 @@ impl Solids {
         dir: [f32; 3],
         dist: f32,
         radius: f32,
+        gates: Gates<'_>,
     ) -> Option<Sweep> {
+        self.sweep_rooms(sector, start, dir, dist, radius, gates).0
+    }
+
+    /// [`Self::sweep`], and the sector the walk ended in.
+    ///
+    /// The second value is not decoration: a sweep that walks *through* a doorway and hits nothing
+    /// returns no contact, and the caller still has to know it is now in the next room. Asking again
+    /// afterwards (by polygon or by distance to the plane) cannot answer it — each room's doorway carries
+    /// its own outward normal, so both rooms claim the same doorway space and a body sitting in one was
+    /// swapped back and forth every frame (17,651 crossings over 34 levels, 97 units walked).
+    /// [`Self::sweep`], and the sector and position the walk ended at.
+    ///
+    /// The extra values are not decoration: a sweep that walks *through* a doorway and hits nothing
+    /// returns no contact, and the caller still has to know it is now in the next room — and where. The
+    /// position matters as much as the room: the crossing advance is what carries the origin past the far
+    /// room's doorway plane, and discarding it left the body a radius short, refused by the containment
+    /// rule on every frame (523 refusals in 700).
+    pub fn sweep_rooms(
+        &self,
+        sector: usize,
+        start: [f32; 3],
+        dir: [f32; 3],
+        dist: f32,
+        radius: f32,
+        gates: Gates<'_>,
+    ) -> (Option<Sweep>, usize, [f32; 3]) {
         let mut sector = sector;
         let mut from = start;
         let mut left = dist;
@@ -543,13 +721,14 @@ impl Solids {
         let mut closest: Option<Sweep> = None;
         for _ in 0..24 {
             if visited.contains(&sector) {
-                return closest;
+                return (closest, sector, [from[0] + dir[0] * left, from[1] + dir[1] * left, from[2]]);
             }
             visited.push(sector);
             let mut wall: Option<Sweep> = None;
             let mut door: Option<(f32, usize)> = None;
 
-            for plane in self.sectors.get(sector)? {
+            let Some(planes_here) = self.sectors.get(sector) else { return (closest, sector, [from[0] + dir[0] * left, from[1] + dir[1] * left, from[2]]) };
+            for plane in planes_here {
                 let face = self
                     .face_of
                     .get(&plane.surface)
@@ -618,33 +797,56 @@ impl Solids {
                 if !sphere_face(at, radius, &face) {
                     continue;
                 }
-                if door.is_none_or(|(dt, _)| t < dt) {
-                    door = Some((t, portal.adjoin));
+                // A body *already* at the opening's plane crossed it on the frame it arrived. Counting
+                // that as a crossing again makes a body pinned in a doorway swap rooms every frame
+                // (13,151 crossings over 34 levels). Only a crossing that advances through the plane
+                // counts, which is also the engine's reading: the contact pushes the body on.
+                if t <= 0.0 {
+                    continue;
+                }
+                // A closed opening is not an opening: `SearchForSurfaceCollisions` falls through to
+                // its plain-surface test when the adjoin's MOVE bit is clear (or the sector's adjoins
+                // are hidden), so a force field stops a body exactly like a wall does.
+                if gates.passable(sector, portal.adjoin, portal.link) {
+                    if door.is_none_or(|(dt, _)| t < dt) {
+                        door = Some((t, portal.adjoin));
+                    }
+                } else if wall.is_none_or(|w| t < w.distance) {
+                    wall = Some(Sweep { distance: t, surface: usize::MAX, normal, sector, point: at });
                 }
             }
 
             match (wall, door) {
-                (Some(hit), Some((dt, _))) if hit.distance <= dt => return Some(hit),
-                (Some(hit), None) => return Some(hit),
+                (Some(hit), Some((dt, _))) if hit.distance <= dt => return (Some(hit), sector, from),
+                (Some(hit), None) => return (Some(hit), sector, from),
                 (Some(hit), Some((dt, adjoin))) => {
                     closest.get_or_insert(hit);
-                    // A doorway reached *at* the body is still a crossing; step past its plane so the
-                    // next sector starts on the far side instead of testing the same plane again.
-                    let advance = (dt + 1e-4).min(left);
+                    // Step to the far side of the opening's plane, not just past the sphere's contact
+                    // point. `IsSphereInSector` is an infinite-plane test at the body's *origin*, and the
+                    // far room's own copy of the doorway sits on that plane: an origin left a radius short
+                    // of it is outside the far room, so `MoveThing`'s restore undoes the crossing and the
+                    // body re-crosses for ever (level 1: 524 refused frames in 700, 0.35 units walked).
+                    //
+                    // The advance is *not* capped by the remaining distance. A crossing is a sector
+                    // transition, and the origin has to clear the far room's plane even when the step has
+                    // almost run out — measured: with the cap the body came to rest 0.009 past the contact
+                    // point, still 0.056 short of the plane, and was refused on every frame. Clearing one
+                    // radius is below the collision radius, so it cannot put the body through anything.
+                    let advance = dt + radius + 1e-3;
                     from = [from[0] + dir[0] * advance, from[1] + dir[1] * advance, from[2] + dir[2] * advance];
-                    left -= advance;
+                    left = (left - dt).max(0.0);
                     sector = adjoin;
                 }
                 (None, Some((dt, adjoin))) => {
-                    let advance = (dt + 1e-4).min(left);
+                    let advance = dt + radius + 1e-3;
                     from = [from[0] + dir[0] * advance, from[1] + dir[1] * advance, from[2] + dir[2] * advance];
-                    left -= advance;
+                    left = (left - dt).max(0.0);
                     sector = adjoin;
                 }
-                (None, None) => return closest,
+                (None, None) => return (closest, sector, [from[0] + dir[0] * left, from[1] + dir[1] * left, from[2]]),
             }
         }
-        closest
+        (closest, sector, [from[0] + dir[0] * left, from[1] + dir[1] * left, from[2]])
     }
     /// `sithCollision_MoveThing` for a walking body: sweep horizontally, slide along what was hit, and
     /// lift over a low step.
@@ -663,6 +865,7 @@ impl Solids {
         delta: [f32; 3],
         radius: f32,
         step: f32,
+        gates: Gates<'_>,
     ) -> ([f32; 3], usize, bool) {
         let len = (delta[0] * delta[0] + delta[1] * delta[1]).sqrt();
         if len < 1e-6 {
@@ -675,13 +878,13 @@ impl Solids {
         let mut dir = [delta[0] / len, delta[1] / len, 0.0];
 
         for bounce in 0..3 {
-            match self.sweep(here, at, dir, left, radius) {
+            match self.sweep_rooms(here, at, dir, left, radius, gates) {
 
-                Some(hit) => {
+                (Some(hit), far, _) => {
                     blocked = true;
                     let travelled = (hit.point[0] - at[0]) * dir[0] + (hit.point[1] - at[1]) * dir[1];
                     at = hit.point;
-                    here = hit.sector;
+                    here = far;
                     left -= travelled.max(0.0);
                     if left < 1e-4 {
                         break;
@@ -702,7 +905,7 @@ impl Solids {
     let clear = [[1.0f32, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]]
         .iter()
         .all(|d| {
-            self.sweep(here, raised, *d, radius * 2.0, radius)
+            self.sweep(here, raised, *d, radius * 2.0, radius, gates)
                 .is_none_or(|h| h.distance > radius * 0.5)
         });
                         // A step must land *somewhere*: lifting the body at a spot where nothing is below it
@@ -711,8 +914,16 @@ impl Solids {
                         let lands = self
                             .floor_under(here, raised, 8.0, radius)
                             .is_some_and(|(_, travelled, _)| travelled <= 8.0);
-                    
-    if clear && lands && self.sweep(here, raised, dir, left, radius).is_none() {
+                        // And the lifted body must still be inside its sector. A slanted surface's
+                        // outward normal has a vertical component, so raising the body carries it
+                        // *through* the plane: on `10cargo` sector 333's 45° corner the lift moved the
+                        // centre 0.047 outward, which made the raised sweep read the wall as "behind
+                        // me", pass, and walk the body out of the room — the engine never does this,
+                        // because its step lives in the floor pass and `MoveThing` re-tests the hull
+                        // afterwards (`decomp/004e7950_sithCollision_MoveThing.c:251`).
+                        let inside = self.inside_sector(here, [raised[0], raised[1], raised[2] - radius], 0.0);
+
+    if clear && lands && inside && self.sweep(here, raised, dir, left, radius, gates).is_none() {
                             at = raised;
                             continue;
                         }
@@ -725,8 +936,15 @@ impl Solids {
                     }
                     dir = [slide[0] / mag, slide[1] / mag, 0.0];
                 }
-                None => {
-                    at = [at[0] + dir[0] * left, at[1] + dir[1] * left, at[2]];
+                (None, far, end) => {
+                    at = end;
+                    // Nothing was hit, but the sweep may have crossed a doorway and `far` is the room the
+                    // body is standing in. This was rejected earlier and is right now: with the crossing
+                    // advance uncapped, a body only reaches here after its origin has cleared the far
+                    // room's doorway plane, so it is genuinely in that room. (With the capped advance the
+                    // body stopped a radius short of the plane and adopting the room flipped it back and
+                    // forth — 584 crossings became 13,151.)
+                    here = far;
                     break;
                 }
             }
@@ -878,7 +1096,9 @@ pub fn crosses(level: &crate::jkl::Level, surface: usize, from: [f32; 3], to: [f
     if verts.len() < 3 {
         return false;
     }
-    let Some(normal) = normalize(cross(sub(verts[1], verts[0]), sub(verts[2], verts[0]))) else {
+    // The same widest-triple rule as the collision build: a trigger face whose first three
+    // vertices are collinear still has a plane, and `crossed` has to find it.
+    let Some(normal) = polygon_normal(&verts) else {
         return false;
     };
     let (d0, d1) = (dot(sub(from, verts[0]), normal), dot(sub(to, verts[0]), normal));
@@ -990,11 +1210,42 @@ impl Solids {
             .max_by(|a, b| a.0.total_cmp(&b.0))
     }
 
-    /// How far inside a sector a point is: the smallest distance to any of its planes.
-    /// A room gives a large number, a thin trigger sliver almost zero.
+    /// How far inside a sector a point is: the smallest distance to any plane that bounds the cell.
+    ///
+    /// `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`) tests the sector's *hull*, and the hull is
+    /// the bounding planes only — a wall patch in the middle of a room is not part of it. `hull`
+    /// carries exactly those (every vertex the sector claims is behind them), so this is the engine's
+    /// question rather than "every surface this sector happens to claim".
+    ///
+    /// `None` means the sector claims no bounding plane at all (a trigger sliver), which callers
+    /// should read as "inside": there is nothing to be outside of.
     pub fn clearance(&self, sector: usize, pos: [f32; 3]) -> Option<f32> {
-        let planes = self.sectors.get(sector)?;
+        // A sector with no bounding plane at all (a trigger sliver, or a synthetic cell in a test)
+        // falls back to its whole plane list: there is no hull to be outside of, and the fallback
+        // keeps such a cell behaving as it did before `hull` existed.
+        let planes = match self.hull.get(sector) {
+            Some(planes) if !planes.is_empty() => planes,
+            _ => self.sectors.get(sector)?,
+        };
         planes.iter().map(|p| -dot(sub(pos, p.point), p.normal)).reduce(f32::min)
+    }
+
+    /// `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`, `sithIntersect.c:58`): is a body of
+    /// `radius` at `pos` still inside `sector`?
+    ///
+    /// Two parts, in the engine's order. First the sector's collide box (`HASCOLLIDEBOX`, flag
+    /// `0x1000`): if the sphere fits inside it the answer is **yes**, without testing a single
+    /// surface. Only a sphere outside that box is tested against the sector's bounding planes, where
+    /// a distance below the radius means outside. `sithCollision_MoveThing` calls this with radius 0
+    /// to decide whether to undo a move.
+    pub fn inside_sector(&self, sector: usize, pos: [f32; 3], radius: f32) -> bool {
+        if let Some(Some((lo, hi))) = self.boxes.get(sector) {
+            let fits = (0..3).all(|k| pos[k] - radius >= lo[k] && pos[k] + radius <= hi[k]);
+            if fits {
+                return true;
+            }
+        }
+        self.clearance(sector, pos).is_none_or(|c| c >= radius)
     }
 
     /// The sector a *body* of `radius` should start in.
@@ -1035,7 +1286,16 @@ impl Solids {
     /// `depth` bounds the walk: retail's recursion stops on portal count and area, this
     /// stops at a fixed number of rooms, which is enough for a 462-sector level and keeps
     /// a pathological chain of portals from walking the whole level every frame.
-    pub fn visible_sectors(&self, seeds: &[usize], sees: &mut dyn FnMut(&[[f32; 3]]) -> bool) -> Vec<usize> {
+    /// `gates` is what the scripts switched: an opening whose adjoin row has lost `VISIBLE`
+    /// (`ClearAdjoinFlags(visFace, 1)`, how `16a_crowadjoin.cog` hides the docking port) is not
+    /// walked through. Closing an opening for movement does *not* hide it — a force field still
+    /// shows the room behind it — so this reads the adjoin's own bit, not `SECTOR_ADJOINS_OFF`.
+    pub fn visible_sectors(
+        &self,
+        seeds: &[usize],
+        gates: Gates<'_>,
+        sees: &mut dyn FnMut(&[[f32; 3]]) -> bool,
+    ) -> Vec<usize> {
         const DEPTH: usize = 24;
         let mut seen = vec![false; self.portals.len()];
         let mut out = Vec::new();
@@ -1052,7 +1312,7 @@ impl Solids {
                 continue;
             }
             for portal in self.portals.get(sector).into_iter().flatten() {
-                if seen[portal.adjoin] || !sees(&portal.verts) {
+                if seen[portal.adjoin] || !gates.visible(portal.link) || !sees(&portal.verts) {
                     continue;
                 }
                 seen[portal.adjoin] = true;
@@ -1068,8 +1328,11 @@ impl Solids {
     /// matters because sector hulls overlap (level 1 has 462 sectors, many of them thin
     /// trigger slivers), so "which hull am I inside" is not a reliable way to move — the
     /// level's own `adjoin` links are.
-    pub fn advance(&self, sector: usize, pos: [f32; 3], radius: f32) -> (usize, [f32; 3]) {
+    pub fn advance(&self, sector: usize, pos: [f32; 3], radius: f32, gates: Gates<'_>) -> (usize, [f32; 3]) {
         for portal in self.portals.get(sector).into_iter().flatten() {
+            if !gates.passable(sector, portal.adjoin, portal.link) {
+                continue;
+            }
             // The walker is at the opening when it is within its own radius of the
             // portal's plane. The sign is not trusted: `adjoin` gives the direction the
             // level intends, and a door is passed in both directions anyway.
@@ -1223,6 +1486,8 @@ mod tests {
     /// Normals point out of the room, which is the convention `.jkl` data gives.
     fn room() -> Solids {
         Solids {
+            boxes: Vec::new(),
+            hull: Vec::new(),
             floor_of: std::collections::HashMap::new(),
             sectors: vec![vec![
                 Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.0], surface: usize::MAX },
@@ -1268,6 +1533,8 @@ mod tests {
             vec![[-1.0, 0.0, z], [1.0, 0.0, z], [1.0, 0.0, z + 1.0], [-1.0, 0.0, z + 1.0]]
         };
         Solids {
+            boxes: Vec::new(),
+            hull: Vec::new(),
             sectors: vec![Vec::new(), Vec::new(), Vec::new()],
             spheres: vec![([0.0, 0.0, 0.0], 4.0), ([0.0, 8.0, 0.0], 4.0), ([0.0, 16.0, 0.0], 4.0)],
             floors: Vec::new(),
@@ -1277,12 +1544,12 @@ mod tests {
             face_of: std::collections::HashMap::new(),
             floor_of: std::collections::HashMap::new(),
             portals: vec![
-                vec![Portal { adjoin: 1, verts: quad(0.0), normal: [0.0, 1.0, 0.0], point: [0.0, 0.0, 0.0] }],
+                vec![Portal { adjoin: 1, link: 0, verts: quad(0.0), normal: [0.0, 1.0, 0.0], point: [0.0, 0.0, 0.0] }],
                 vec![
-                    Portal { adjoin: 0, verts: quad(0.0), normal: [0.0, -1.0, 0.0], point: [0.0, 0.0, 0.0] },
-                    Portal { adjoin: 2, verts: quad(8.0), normal: [0.0, 1.0, 0.0], point: [0.0, 8.0, 0.0] },
+                    Portal { adjoin: 0, link: 1, verts: quad(0.0), normal: [0.0, -1.0, 0.0], point: [0.0, 0.0, 0.0] },
+                    Portal { adjoin: 2, link: 2, verts: quad(8.0), normal: [0.0, 1.0, 0.0], point: [0.0, 8.0, 0.0] },
                 ],
-                vec![Portal { adjoin: 1, verts: quad(8.0), normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0] }],
+                vec![Portal { adjoin: 1, link: 3, verts: quad(8.0), normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0] }],
             ],
         }
     }
@@ -1317,6 +1584,8 @@ mod tests {
         faces.extend(walls.iter().cloned());
         let face_of = faces.iter().enumerate().map(|(i, f)| (f.surface, i)).collect();
         Solids {
+            boxes: Vec::new(),
+            hull: Vec::new(),
             sectors,
             portals: vec![Vec::new()],
             spheres: vec![([0.0, 0.0, 0.0], 4.0)],
@@ -1335,7 +1604,7 @@ mod tests {
         // origin travels 2 - 0.25 before it touches, and that is the whole point of the radius.
         let solids = boxed();
         let hit = solids
-            .sweep(0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 10.0, 0.25)
+            .sweep(0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 10.0, 0.25, Gates::default())
             .expect("the +x wall");
         assert!((hit.distance - 1.75).abs() < 1e-3, "distance {}", hit.distance);
         assert!((hit.normal[0] + 1.0).abs() < 1e-3, "normal {:?} should face the body", hit.normal);
@@ -1345,7 +1614,7 @@ mod tests {
     fn the_sweep_misses_a_wall_the_sphere_never_reaches() {
         // Aiming down the middle of the room must not report either side wall.
         let solids = boxed();
-        let hit = solids.sweep(0, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], 1.0, 0.25);
+        let hit = solids.sweep(0, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], 1.0, 0.25, Gates::default());
         assert!(hit.is_none(), "reported {hit:?} along an open axis");
     }
 
@@ -1371,12 +1640,14 @@ mod tests {
         solids.faces.extend(solids.walls.iter().cloned());
         solids.portals[0].push(Portal {
             adjoin: 1,
+            link: 0,
             verts: vec![[-2.0, -2.0, -1.0], [2.0, -2.0, -1.0], [2.0, 2.0, -1.0], [-2.0, 2.0, -1.0]],
             normal: [0.0, 0.0, -1.0],
             point: [0.0, 0.0, -1.0],
         });
         solids.portals.push(vec![Portal {
             adjoin: 0,
+            link: 1,
             verts: vec![[-2.0, -2.0, -1.0], [2.0, -2.0, -1.0], [2.0, 2.0, -1.0], [-2.0, 2.0, -1.0]],
             normal: [0.0, 0.0, 1.0],
             point: [0.0, 0.0, -1.0],
@@ -1403,18 +1674,64 @@ mod tests {
         let level = corridor();
         // Every portal on screen: the whole corridor, starting from the first room.
         let mut all = |_: &[[f32; 3]]| true;
-        assert_eq!(level.visible_sectors(&[0], &mut all), vec![0, 1, 2]);
+        assert_eq!(level.visible_sectors(&[0], Gates::default(), &mut all), vec![0, 1, 2]);
         // Nothing on screen: just the room the camera is in.
         let mut none = |_: &[[f32; 3]]| false;
-        assert_eq!(level.visible_sectors(&[0], &mut none), vec![0]);
+        assert_eq!(level.visible_sectors(&[0], Gates::default(), &mut none), vec![0]);
         // Only the first opening: the room behind it, but not the one past that.
         let mut first = |verts: &[[f32; 3]]| verts[0][2] < 4.0;
-        assert_eq!(level.visible_sectors(&[0], &mut first), vec![0, 1]);
+        assert_eq!(level.visible_sectors(&[0], Gates::default(), &mut first), vec![0, 1]);
         // The walk is a graph search, so a cycle back to the start adds nothing.
         let mut again = |_: &[[f32; 3]]| true;
-        assert_eq!(level.visible_sectors(&[1], &mut again).len(), 3);
+        assert_eq!(level.visible_sectors(&[1], Gates::default(), &mut again).len(), 3);
         // Two seeds in the same room: the union, without duplicates.
-        assert_eq!(level.visible_sectors(&[0, 1], &mut again), vec![0, 1, 2]);
+        assert_eq!(level.visible_sectors(&[0, 1], Gates::default(), &mut again), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn a_closed_adjoin_is_a_wall_and_a_hidden_one_is_not_walked() {
+        let level = corridor();
+        // Walk +y from the middle of room 0 into the first opening.
+        let dir = [0.0, 1.0, 0.0];
+        let from = [0.0, -1.0, 0.5];
+        let open = level.sweep(0, from, dir, 3.0, 0.25, Gates::default());
+        assert!(
+            open.is_none_or(|h| h.sector == 1),
+            "an open doorway is crossed, not hit: {open:?}"
+        );
+
+        // `ClearAdjoinFlags(link, 2)`: the force field is a wall at the opening.
+        let mut adjoins = vec![ADJOIN_VISIBLE | ADJOIN_MOVE; 4];
+        adjoins[0] &= !ADJOIN_MOVE;
+        let gates = Gates { sectors: &[0; 3], adjoins: &adjoins };
+        let hit = level
+            .sweep(0, from, dir, 3.0, 0.25, gates)
+            .expect("a closed adjoin stops the sweep");
+        assert_eq!(hit.sector, 0, "the body never left its room");
+        assert!(hit.distance < 1.0, "stopped at the opening: {}", hit.distance);
+
+        // `SetAdjoinFlags(link, 16)`: AI-only, which the engine's move path treats as solid.
+        let mut ai_only = vec![ADJOIN_VISIBLE | ADJOIN_MOVE; 4];
+        ai_only[0] |= ADJOIN_AI_ONLY;
+        let gates = Gates { sectors: &[0; 3], adjoins: &ai_only };
+        assert!(level.sweep(0, from, dir, 3.0, 0.25, gates).is_some_and(|h| h.sector == 0));
+
+        // `SetSectorAdjoins(0, 0)`: the sector's own adjoins are hidden, so nothing is crossed.
+        let gates = Gates { sectors: &[SECTOR_ADJOINS_OFF, 0, 0], adjoins: &[0x7; 4] };
+        assert!(level.sweep(0, from, dir, 3.0, 0.25, gates).is_some_and(|h| h.sector == 0));
+        // ... and the doorway is shut from the far side too: this port has no thing collision for
+        // the door leaf that would stop a body once it is inside the shut sector.
+        let back = level.sweep(1, [0.0, 1.0, 0.5], [0.0, -1.0, 0.0], 3.0, 0.25, gates);
+        assert!(back.is_some_and(|h| h.sector == 1), "{back:?}");
+
+        // `ClearAdjoinFlags(link, 1)` hides the room behind it from the cull walk.
+        let mut hidden = vec![0x7; 4];
+        hidden[0] &= !ADJOIN_VISIBLE;
+        let gates = Gates { sectors: &[0; 3], adjoins: &hidden };
+        let mut all = |_: &[[f32; 3]]| true;
+        assert_eq!(level.visible_sectors(&[0], gates, &mut all), vec![0]);
+        // The far side keeps its own row, so the hidden opening is only one-way.
+        assert_eq!(level.visible_sectors(&[1], gates, &mut all), vec![1, 0, 2]);
     }
 
     #[test]

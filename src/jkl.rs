@@ -112,6 +112,11 @@ pub struct Sector {
     pub colormap: u32,
     /// `(first, count)` into `Level::surfaces`, from the sector's own `SURFACES` row.
     pub surfaces: (usize, usize),
+    /// `BOUNDBOX minx miny minz maxx maxy maxz` — the box the level ships, and the one
+    /// `sithIntersect_IsSphereInSector` tests first: a sphere inside it is *inside* the sector with
+    /// no surface test at all (`sithIntersect.c:58`). `collide::Solids::inside_sector` needs it to be
+    /// the engine's test rather than an approximation from the sector's vertices.
+    pub boundbox: Option<([f32; 3], [f32; 3])>,
     /// The sector's ambient loop: `SOUND <wav> <volume>`, played on loop while the
     /// player is in this sector. Most sectors have none.
     pub sound: Option<(String, f32)>,
@@ -120,6 +125,10 @@ pub struct Sector {
 /// One row of the `World adjoins` table: a portal link.
 #[derive(Clone, Default)]
 pub struct Adjoin {
+    /// `SithSurfaceAdjoin::flags`: `0x1` visible, `0x2` allow movement, `0x4` allow sound,
+    /// `0x8`/`0x10` player-only/AI-only. Shipped rows are `0x7` (everything on) unless the
+    /// opening starts closed, and `SetAdjoinFlags`/`ClearAdjoinFlags` switch bits at run time.
+    pub flags: u16,
     /// Index of the adjoin on the other side of the same opening, or `-1`.
     pub mirror: i32,
     /// Mirror distance, used by the engine's reflection pass. Parsed so the field order
@@ -139,6 +148,13 @@ pub struct Surface {
     pub verts: Vec<(u32, i32)>,
     /// Per-vertex shading scalar baked by the level editor's lightmapper.
     pub intensities: Vec<f32>,
+    /// The plane normal the level **ships**, from the `#--- Surface normals ---` block that follows
+    /// the surface rows: `sithSurface_ReadSurfacesListText` reads one `"%d: %f %f %f"` line per
+    /// surface into `face.normal` (JK.EXE `0x4e5c00`), and every consumer — `IsSphereInSector`, the
+    /// collision search, the renderer — uses that field. Deriving it from the vertices was this
+    /// port's invention, and its failure mode was silent: collinear first vertices, wrong winding,
+    /// and doorways oriented for one side of a shared wall.
+    pub normal: [f32; 3],
 }
 
 pub struct Thing {
@@ -290,9 +306,14 @@ pub fn parse(text: &str) -> Level {
             i += 1;
             for row in read_rows(&lines, &mut i, n) {
                 let f = fields(row);
+                let flags = u16::from_str_radix(
+                    f.get(1).unwrap_or(&"0").trim_start_matches("0x"),
+                    16,
+                )
+                .unwrap_or(0);
                 let mirror: i32 = f.get(2).and_then(|v| v.parse().ok()).unwrap_or(-1);
                 let dist: f32 = f.get(3).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-                level.adjoins.push(Adjoin { mirror, dist });
+                level.adjoins.push(Adjoin { flags, mirror, dist });
             }
             continue;
         }
@@ -304,6 +325,23 @@ pub fn parse(text: &str) -> Level {
                 if let Some(s) = parse_surface(row) {
                     level.surfaces.push(s);
                 }
+            }
+            // The engine reads a *second* block here (`sithSurface.c:502`): one `idx: nx ny nz` line
+            // per surface, and stores it as `surfaceInfo.face.normal`. It is the only normal the
+            // engine ever uses, so the port takes it too rather than deriving one.
+            let mut read_normals = 0;
+            while read_normals < n && i < lines.len() {
+                let row = lines[i].trim();
+                if row.is_empty() || row.starts_with('#') {
+                    i += 1;
+                    continue;
+                }
+                let Some((idx, normal)) = parse_surface_normal(row) else { break };
+                if let Some(surface) = level.surfaces.get_mut(idx) {
+                    surface.normal = normal;
+                }
+                read_normals += 1;
+                i += 1;
             }
             continue;
         }
@@ -425,6 +463,14 @@ pub fn parse(text: &str) -> Level {
             if let Some(s) = level.sectors.last_mut() {
                 s.colormap = nth_f32(line, 1).unwrap_or(0.0) as u32;
             }
+        } else if lower.starts_with("boundbox") {
+            if let Some(s) = level.sectors.last_mut() {
+                let f = fields(line);
+                let v: Vec<f32> = (1..7).filter_map(|k| f.get(k).and_then(|x| x.parse().ok())).collect();
+                if v.len() == 6 {
+                    s.boundbox = Some(([v[0], v[1], v[2]], [v[3], v[4], v[5]]));
+                }
+            }
         } else if lower.starts_with("surfaces") {
             // `SURFACES <first> <count>`: the sector's slice of the world surface list.
             if let Some(s) = level.sectors.last_mut() {
@@ -513,7 +559,17 @@ fn parse_surface(line: &str) -> Option<Surface> {
         .filter_map(|k| f.get(start + nverts + k).and_then(|s| s.parse().ok()))
         .collect();
 
-    Some(Surface { material, surfflags, geo, adjoin, verts, intensities })
+    Some(Surface { material, surfflags, geo, adjoin, verts, intensities, normal: [0.0; 3] })
+}
+
+/// `idx: nx ny nz` from the surface-normal block.
+fn parse_surface_normal(line: &str) -> Option<(usize, [f32; 3])> {
+    let f = fields(line);
+    if f.len() != 4 {
+        return None;
+    }
+    let idx: usize = f[0].strip_suffix(':')?.parse().ok()?;
+    Some((idx, [f[1].parse().ok()?, f[2].parse().ok()?, f[3].parse().ok()?]))
 }
 
 /// `num: template name X Y Z Pitch Yaw Roll Sector [extra...]`
