@@ -1403,6 +1403,48 @@ fn main() {
                 ink,
                 "no player marker at the panel's centre"
             );
+            // The **live** path: `refresh_overlay` builds the panel's inputs with `live_map_for`
+            // from the player's own pose, which the shot above does not (it uses the level's
+            // `walkplayer` start). Move the player and the drawing has to change, or the panel is
+            // showing a fixed picture of the level instead of the player's surroundings.
+            if let Some((start_pos, start_yaw)) =
+                map_level.as_ref().map(|(_, pos, yaw)| (*pos, *yaw))
+            {
+                let moved_pos = Vec3::new(start_pos[0] + 3.0, start_pos[1], start_pos[2]);
+                let mut canvas = ui::Canvas::new(640, 480);
+                let map = map_level
+                    .as_ref()
+                    .and_then(|(level, _, _)| live_map_for(screen, level, moved_pos, start_yaw.to_radians()));
+                let look2 = ui::Look {
+                    fonts: &fonts,
+                    art: &art,
+                    checkbox,
+                    palette: &palette,
+                    stars,
+                    text: &none,
+                    map,
+                    load_percent,
+                    ..ui::Look::default()
+                };
+                let backdrop = ui::Backdrop { base: &base, panel: panel.as_ref() };
+                ui::draw_screen(&mut canvas, screen, &backdrop, &strings, &look2, None);
+                let palette2 = ui::palette_of(&base, &palette);
+                let ink2 = palette2[usize::from(look2.map_ink)];
+                let mut moved_drawn = 0usize;
+                for y in 40..360 {
+                    for x in 40..560 {
+                        let at = ((y as u32 * canvas.width + x as u32) * 4) as usize;
+                        if [canvas.rgba[at], canvas.rgba[at + 1], canvas.rgba[at + 2]] == ink2 {
+                            moved_drawn += 1;
+                        }
+                    }
+                }
+                println!(
+                    "map panel: the start pose draws {drawn} pixel(s), three units away {moved_drawn}"
+                );
+                assert!(moved_drawn > 500, "the live map drew only {moved_drawn} pixels");
+                assert_ne!(moved_drawn, drawn, "the map ignored the player's pose");
+            }
             println!("--- map panel check passed ---");
         }
         let image = Image::new(
@@ -9512,9 +9554,27 @@ fn scene_wash(
     }
 }
 
+/// The map panel's inputs for a screen: the level, the player's position in the panel's own
+/// coordinates, and the facing in degrees. `None` when the screen has no map, which is most of them.
+///
+/// Shared with `--map-shot`'s check: the gate has to exercise this, not a copy of it.
+fn live_map_for<'a>(
+    screen: &menus::Screen,
+    level: &'a jkl::Level,
+    pos: Vec3,
+    yaw: f32,
+) -> Option<(&'a jkl::Level, [f32; 3], f32)> {
+    if !screen.items.iter().any(|i| i.panel() == Some(menus::Panel::Map)) {
+        return None;
+    }
+    Some((level, [pos.x, pos.y, pos.z + PLAYER_RADIUS], yaw.to_degrees()))
+}
+
 /// Redraw the canvas when something changed and upload it.
 fn refresh_overlay(
     gobs: Res<Archives>,
+    world: Option<Res<World>>,
+    player: Option<Res<Player>>,
     screens: Option<Res<Screens>>,
     assets: Option<Res<UiAssets>>,
     sim: Option<Res<Sim>>,
@@ -9553,6 +9613,12 @@ fn refresh_overlay(
             let rows = overlay.rows(&screen, &found);
             let cursor = rows.get(overlay.selected % rows.len().max(1)).copied();
             let lit = overlay.hover.or(cursor);
+            // The field-log map panel needs the **live** level and pose: without them the panel
+            // draws its frame and nothing inside, which is what a player opening the map saw.
+            let live_map = match (world.as_deref(), player.as_deref()) {
+                (Some(world), Some(player)) => live_map_for(&screen, &world.level, player.pos, player.yaw),
+                _ => None,
+            };
             let art = |index: i32| -> Option<bm::Bm> {
                 let name = screen.art.get(usize::try_from(index).ok()?)?;
                 bm::parse(&gobs.read(&format!("ui\\bm\\{name}"))?)
@@ -9658,6 +9724,14 @@ fn ui_input(
                 overlay.inventory = false;
                 overlay.dirty = true;
             }
+        }
+    }
+    // `M`: the field log and its map panel, which `refresh_overlay` now fills from the live level.
+    if overlay.menu.is_none() && overlay.started && keys.just_pressed(KeyCode::KeyM) {
+        overlay.inventory = false;
+        overlay.history.clear();
+        if screens.find("fieldlog").is_some() {
+            overlay.show(Some("fieldlog".to_string()), 0);
         }
     }
     if keys.just_pressed(KeyCode::Escape) && !overlay.inventory {
