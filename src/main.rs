@@ -120,6 +120,7 @@ const GATES: &[&str] = &[
     "--flow",
     "--fall",
     "--falldeath",
+    "--door",
     "--hit",
     "--live-check",
     "--mana",
@@ -5147,17 +5148,23 @@ fn main() {
         handle.borrow_mut().wire_links(&world.level.cogs, &world.cogs);
         // Every instance runs `startup` at load, as the engine does — and a door's whole state lives
         // there: `cog_00_door.cog`'s `startup` reads `GetThingSector(door0)` into the *local*
-        // `doorSector` and shuts that sector, which is what `activate` later reopens. A first version of
-        // this probe skipped it and measured a door that did nothing, because its sector symbol was
-        // still empty.
+        // `doorSector` and shuts that sector, which is what `activate` later reopens.
+        //
+        // The VM has to be **kept**, one per instance, exactly as `Sim::instances` does: locals live in
+        // the VM, so a fresh one per label loses `doorSector` and `numDoors` — which is why an earlier
+        // version of this probe read a door with an empty sector and no flag ever changed.
+        let mut vms: Vec<Option<cog::Vm>> = Vec::with_capacity(world.level.cogs.len());
         for inst in &world.level.cogs {
-            let Some(script) = world.cogs.get(&inst.script) else { continue };
-            if script.label("startup").is_none() {
+            let Some(script) = world.cogs.get(&inst.script) else {
+                vms.push(None);
                 continue;
-            }
+            };
             let mut vm = cog::Vm::with_world(handle.clone());
             script.bind(&mut vm, &inst.values);
-            let _ = vm.run_label(script, "startup");
+            if script.label("startup").is_some() {
+                let _ = vm.run_label(script, "startup");
+            }
+            vms.push(Some(vm));
         }
         let candidates: Vec<(usize, usize)> = {
             let rt = handle.borrow();
@@ -5197,8 +5204,7 @@ fn main() {
             for (inst, label) in &pending {
                 let Some(data) = world.level.cogs.get(*inst) else { continue };
                 let Some(script) = world.cogs.get(&data.script) else { continue };
-                let mut vm = cog::Vm::with_world(handle.clone());
-                script.bind(&mut vm, &data.values);
+                let Some(vm) = vms.get_mut(*inst).and_then(|v| v.as_mut()) else { continue };
                 vm.source = *thing as i64;
                 if script.label(label).is_some() && vm.run_label(script, label).is_ok() {
                     ran += 1;
@@ -5211,6 +5217,11 @@ fn main() {
                 (sectors, adjoins)
             };
             let name = world.level.cogs.get(*instance).map(|c| c.script.clone()).unwrap_or_default();
+            let state = {
+                let rt = handle.borrow();
+                rt.things.get(*thing).map(|t| (t.target, t.frame, t.frames.len()))
+            };
+            let _ = state;
             let frame = { let mut rt = handle.borrow_mut(); rt.call("GetCurFrame", &[cog::Value::Num(*thing as f64)]) };
             let moving = { let mut rt = handle.borrow_mut(); rt.call("IsThingMoving", &[cog::Value::Num(*thing as f64)]) };
             println!("door: {name} (cog {instance}, thing {thing}): {ran} label(s) ran, frame {frame:?}, moving {moving:?}, flags {changed:?}");
