@@ -895,6 +895,8 @@ impl Runtime {
                 | "getthingsector"
                 | "setthingsector"
                 | "getthingflags"
+                | "aisetmode"
+                | "aiclearmode"
                 | "setthingflags"
                 | "getthinghealth"
                 | "gethealth"
@@ -2188,11 +2190,13 @@ impl Runtime {
                 }
                 Value::Nil
             }
-            "setactorflags" => {
+            // `sithCogFunctionAI_AISetMode` is `actor->flags |= mode` and `AIClearMode` is
+            // `actor->flags &= ~mode` (`sithCogFunctionAI.c:237`), which is exactly the actor-flag arm below.
+            "setactorflags" | "aisetmode" => {
                 *self.actor_flags.entry(ti(0)).or_insert(0) |= idx(1) as u32;
                 Value::Nil
             }
-            "clearactorflags" => {
+            "clearactorflags" | "aiclearmode" => {
                 *self.actor_flags.entry(ti(0)).or_insert(0) &= !(idx(1) as u32);
                 Value::Nil
             }
@@ -3032,7 +3036,8 @@ mod tests {
         assert!(Runtime::handles("movetoframe"));
         assert!(Runtime::handles("CreateThing"));
         assert!(Runtime::handles("SetWallCel"));
-        assert!(!Runtime::handles("AISetMode"));
+        // `AISetMode` reaches the actor-flag arm now (`sithCogFunctionAI.c:237`), so it is not a stub.
+        assert!(Runtime::handles("AISetMode"));
         let mut rt = door_runtime();
         assert_eq!(
             rt.call("SetSectorAdjoins", &[Value::Num(0.0), Value::Num(1.0)]),
