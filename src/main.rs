@@ -3325,8 +3325,21 @@ fn main() {
             }
             // A body outside every sector has fallen out of the world; the walker's own gate reports
             // that for the player, and this catches it for anything the simulation moved.
+            //
+            // A thing with no `size=`/`radius=` has no body at all: the levels park markers there
+            // (`ghost`, `light0.7` sit outside the geometry on 21ajerec), and a marker cannot fall.
+            let template = rt.templates.get(index).cloned().unwrap_or_default();
+            if !rt.template_body.contains_key(&template.to_ascii_lowercase()) {
+                continue;
+            }
             if solids.sector_at(thing.pos, 0.05).is_none() {
                 outside += 1;
+                if std::env::var_os("BK_SOAK_TRACE").is_some() {
+                    println!(
+                        "  outside: thing {index} `{template}` at {:?} sector {}",
+                        thing.pos, thing.sector
+                    );
+                }
             }
         }
         let grew = rt.things.len().saturating_sub(world.level.things.len());
