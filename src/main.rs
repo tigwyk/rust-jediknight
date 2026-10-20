@@ -11648,27 +11648,24 @@ fn walker_step(
     // what gets tested — testing the centre put the body 0.01 outside a 45° corner plane on
     // `10cargo`, 0.02 outside another on `11gorc`, and undid every step of the walk.
     let origin = [pos[0], pos[1], pos[2] - radius];
+    // A body that has stepped into another room is not an invalid move: the engine's test is
+    // `IsSphereInSector(thing->sector)` and `MoveThing` re-resolves the sector as it crosses an
+    // adjoin. Undoing the step whenever the *old* sector's hull rejects the feet froze bodies on
+    // levels whose room planes are incomplete (19a: sector 722 reports no floor plane at all, so
+    // every step was reverted). Adopt the room the body is now in; only a point in **no** sector is
+    // an invalid move.
     if !solids.inside_sector(*sector, origin, 0.0) {
-        if std::env::var_os("BK_WALK_TRACE").is_some() {
-            let worst = solids.hull.get(*sector).into_iter().flatten().min_by(|a, b| {
-                let da = -(a.normal[0] * (origin[0] - a.point[0])
-                    + a.normal[1] * (origin[1] - a.point[1])
-                    + a.normal[2] * (origin[2] - a.point[2]));
-                let db = -(b.normal[0] * (origin[0] - b.point[0])
-                    + b.normal[1] * (origin[1] - b.point[1])
-                    + b.normal[2] * (origin[2] - b.point[2]));
-                da.total_cmp(&db)
-            });
-            eprintln!(
-                "walk trace:     outside sector {sector} ({} hull plane(s), clearance {:?}) at {origin:?}; moved {crossed_to}, crossed {crossed}, worst {:?}; move undone",
-                solids.hull.get(*sector).map_or(0, |p| p.len()),
-                solids.clearance(*sector, origin),
-                worst.map(|p| (p.surface, p.normal, p.point))
-            );
+        match solids.sector_at(origin, 0.05) {
+            // The body stepped into another room: adopt it, which is what `MoveThing` does as it
+            // crosses an adjoin.
+            Some(found) => *sector = found,
+            // **No room claims the body.** Then the model cannot judge the move, and vetoing on the
+            // old sector's hull is what froze 19a: it spawns at z −2.86, 0.725 below the only
+            // downward-facing plane of sector 722, in a pocket no sector contains. The engine's
+            // guarantee presumes `thing->sector` holds the body; when nothing does, the sweep below
+            // is the only evidence left, and it said the step was fine (`blocked false`).
+            None => {}
         }
-        *pos = frame_start;
-        *sector = sector_start;
-        *vy = 0.0;
     }
     let moved = ((pos[0] - before[0]).powi(2) + (pos[1] - before[1]).powi(2)).sqrt();
 
