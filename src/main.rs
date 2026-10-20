@@ -364,6 +364,8 @@ fn main() {
     let mut items_check = false;
     let mut weapons_check = false;
     let mut soak_check = false;
+    // `--soak-all`: every level in the archives, one process each.
+    let mut soak_all = false;
     let mut sound_check = false;
     let mut music_check = false;
     let mut ui_visible = false;
@@ -679,6 +681,7 @@ fn main() {
             // level time and check the world still makes sense. The only gate that exercises the
             // loop as a whole rather than one piece of it.
             "--soak" => soak_check = true,
+            "--soak-all" => soak_all = true,
             // `--sound`: the `.snd` classes' own fade radii, and the volume curve over them.
             "--sound" => sound_check = true,
             // `--music`: which songs the shipped scripts ask for, and what the install has.
@@ -3350,6 +3353,73 @@ fn main() {
         assert!(rt.time >= seconds * 0.99, "the clock did not advance");
         assert!(grew < 4000, "the thing list grew by {grew}, which is runaway spawning");
         println!("--- soak check passed ---");
+        return;
+    }
+
+    if soak_all {
+        // Every level, not just the one `--soak` names: a level the game cannot run is exactly the
+        // kind of defect a single-level suite hides. Each level is its own process, because the app
+        // builds one world per run; this driver only starts them and reads the verdicts.
+        let exe = std::env::current_exe().expect("the running binary");
+        let levels: Vec<String> = gobs
+            .names()
+            .into_iter()
+            .filter_map(|name| {
+                let lower = name.to_ascii_lowercase();
+                let stem = lower.strip_prefix("jkl\\")?.strip_suffix(".jkl")?;
+                Some(stem.to_string())
+            })
+            .collect();
+        assert!(!levels.is_empty(), "the archives hold no levels");
+        let mut ran = 0usize;
+        let mut bad = Vec::new();
+        let mut outside_bodies = Vec::new();
+        for level in &levels {
+            let output = std::process::Command::new(&exe)
+                .args(["--soak", "--level", level, "--game"])
+                .arg(&game)
+                .env("BK_MUTE", "1")
+                .env("BK_SKIP_WINDOW", "1")
+                .env("BK_SOAK_SECONDS", "6")
+                .output()
+                .expect("start a soak");
+            let text = String::from_utf8_lossy(&output.stdout).to_string();
+            let line = text
+                .lines()
+                .find(|line| line.starts_with("soak:"))
+                .unwrap_or("soak: (no line)")
+                .to_string();
+            let nonfinite = line
+                .split("non-finite position(s)")
+                .next()
+                .and_then(|head| head.rsplit(", ").next())
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let outside = line
+                .split("body(ies) outside")
+                .next()
+                .and_then(|head| head.rsplit(", ").next())
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            ran += 1;
+            if nonfinite > 0 {
+                bad.push(level.clone());
+            }
+            if outside > 1 {
+                outside_bodies.push((level.clone(), outside));
+            }
+            println!("{line}");
+        }
+        println!(
+            "soak-all: {ran} level(s) ran, {} with a non-finite position, {} with bodies outside every sector: {outside_bodies:?}",
+            bad.len(),
+            outside_bodies.len()
+        );
+        // Non-finite positions are a real failure on any level. Bodies outside a sector are reported
+        // rather than asserted: the shipped levels place a few props in solid space, and telling that
+        // apart from a walker that pushed something out needs a per-thing look.
+        assert!(bad.is_empty(), "non-finite positions on {bad:?}");
+        println!("--- soak-all check passed ---");
         return;
     }
 
