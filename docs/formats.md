@@ -2925,33 +2925,31 @@ are separate — `to_image` writes alpha 255 everywhere, `keyed_rgba` writes 0 f
 sprite materials take the keyed path.
 
 Level 1 resolves **35 sprite files for 35 templates**, and an impact logs
-`drawing sprite thing 363 (+laserhit, 1 face(s))`. What the in-view check found is bigger than the
-sprite layer: **`draw_created` renders nothing at all.**
+`drawing sprite thing 363 (+laserhit, 1 face(s))`. **Sprites render.** Getting there took two probe
+errors worth recording, because both looked like renderer bugs:
 
-`--sprite <template>` keeps one thing 1.5 units in front of the camera (created through
-`CreateThing`, then a position write) and the captured frame is byte-identical to the same frame
-without it. Three probes pin it down:
+* **The probe put the thing 90 degrees off-camera.** A JK yaw `a` faces `(-sin a, cos a)` — the
+  engine's own basis, §24 — and `--sprite` first used `(cos a, sin a)`. The `BK_SPRITE_TRACE` line that
+  found it prints the quad in camera space:
+  `billboard #2: world Vec3(-9.69, -6.78, -1.185), camera-space Vec3(1.526, -0.037, 0.015)` — z near
+  zero and x of 1.5, i.e. exactly to the side. With the basis fixed the same line reads
+  `camera-space Vec3(0.026, -0.037, -1.485)`: dead centre, 1.485 units ahead.
+* **The capture was inside a level prop.** Level 1's spawn puts the eye inside a cantina table with a
+  patron 0.15 units away (§`gaps.md` §5.9), so anything 1.5 units ahead is *behind* that model and
+  correctly occluded. A byte-identical frame therefore proved nothing. Walking the body into the open
+  first (`BK_WALK_FORWARD=1`, 120 frames) and comparing with and without the effect gives different
+  frames — `17EAC891…` with, `7881579F…` without — and the spark is visible at the crosshair.
 
-* `+laserhit` (a sprite): nothing — and `BK_SPRITE_DEBUG=1`, which draws that quad **untextured,
-  opaque red**, changes nothing either. So the material and the blend path are innocent.
-* `+bryarbolt` (a **model**, the same template the player fires): `drawing created thing 362
-  (+bryarbolt)` and still nothing. So it is not sprite-specific.
-* `BK_SPRITE_AHEAD=-1.5`, i.e. the same thing 1.5 units *behind* the camera, in case the offset's
-  sense was wrong: still identical. So it is not a facing mistake in the probe.
+What is left of the sprite layer is the **cel geometry**. A sprite `.mat` is a strip of animation
+frames: `bryx.mat` is 8 x 78 for an 8-wide spark, `detx.mat` 8 x 82, `destruct8.mat` 8 x 239.
+`rdSprite_Draw` maps one cel with `texVertOffset`; drawing the whole strip onto the quad shows every
+frame at once. `sprite_quad` now takes a cel index and a cel count, but the count is only *guessed* as
+height-over-width, and the visible result says that guess is wrong — the "single cel" still shows a
+2 x 2 block of frames, so the real cel grid is in the `.mat` header (the engine's `rdMaterial` cel
+table, not the bitmap's aspect) and needs reading from there.
 
-That leaves the entity itself: a `Mesh3d` + `MeshMaterial3d` + `Transform` spawned from a system
-during `Update` is not reaching the rasteriser, while the level's own entities — spawned at startup
-from the same tuple — draw fine. This is the single highest-value rendering bug left, because
-**projectiles have never been on screen**: every bolt, blast and spark is in the runtime and none of
-them is visible.
-
-Still true alongside it: a sprite `.mat` is a **cel strip**, not one image (`bryx.mat` is 8 x **78**
-for an 8-wide spark, about nine frames; `detx.mat` 8 x 82, `destruct8.mat` 8 x 239), and
-`rdSprite_Draw` maps one cel with `texVertOffset` where the port maps the whole strip onto a 0.1-unit
-quad. That will need fixing once anything draws at all.
-
-`BK_SPRITE_TRACE=1` prints the per-material numbers (`8x78 (9 cel(s) of 8), 517 of 624 pixels keyed
-clear, 0.10x0.10 world units`).
+`BK_SPRITE_TRACE=1` prints the per-material numbers and the billboard's camera-space position;
+`BK_SPRITE_DEBUG=1` draws the quad untextured red; `BK_SPRITE_AHEAD` moves it.
 
 ### Damage decays in flight
 

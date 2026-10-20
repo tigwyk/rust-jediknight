@@ -11331,15 +11331,17 @@ fn sprite_demo(
     }
     let mut rt = sim.world.borrow_mut();
     if live.is_some_and(|index| rt.things.get(index).is_some_and(|t| !t.destroyed)) {
-        // Keep it in front of the camera as the camera moves.
+        // Keep it in front of the camera as the camera moves. A JK yaw `a` faces `(-sin a, cos a)`
+        // — the engine's own basis, which `docs/formats.md` §24 recovered and `yaw_axes` holds —
+        // so `(cos, sin)` puts the thing 90 degrees to the side instead.
         let ahead = env_f32("BK_SPRITE_AHEAD", 1.5);
         let (sin, cos) = player.yaw.sin_cos();
         if let Some(index) = *live
             && let Some(thing) = rt.things.get_mut(index)
         {
             thing.pos = [
-                player.pos.x + cos * ahead,
-                player.pos.y + sin * ahead,
+                player.pos.x - sin * ahead,
+                player.pos.y + cos * ahead,
                 player.pos.z,
             ];
             thing.sector = player.sector as i32;
@@ -11356,8 +11358,8 @@ fn sprite_demo(
     let (sin, cos) = player.yaw.sin_cos();
     let ahead = env_f32("BK_SPRITE_AHEAD", 1.5);
     let at = [
-        player.pos.x + cos * ahead,
-        player.pos.y + sin * ahead,
+        player.pos.x - sin * ahead,
+        player.pos.y + cos * ahead,
         player.pos.z,
     ];
     if let Some(thing) = rt.things.get_mut(index) {
@@ -11520,13 +11522,21 @@ fn draw_created(
             if let Some(faces) = world.template_sprite.get(&template_key) {
                 let mut spawned = Vec::new();
                 for face in faces {
+                    // One cel of the strip: `cels` is the image's height over its width, which is
+                    // how all 35 shipped sprites are authored (`bryx.mat` 8 x 78 = 9 frames).
+                    let cels = world
+                        .model_images
+                        .get(&face.material)
+                        .map(|image| {
+                            let size = image.texture_descriptor.size;
+                            (size.height as f32 / size.width.max(1) as f32).max(1.0)
+                        })
+                        .unwrap_or(1.0);
                     let key = (template_key.clone(), face.material.clone());
                     let mesh = created
                         .sprite_meshes
                         .entry(key)
-                        .or_insert_with(|| {
-                            meshes.add(Rectangle::new(face.width.max(0.01), face.height.max(0.01)).mesh().build())
-                        })
+                        .or_insert_with(|| meshes.add(sprite_quad(face.width, face.height, cels, 0)))
                         .clone();
                     let mut material = StandardMaterial {
                         unlit: true,
@@ -12038,6 +12048,33 @@ fn play_requested_sounds(
     }
 }
 
+/// One sprite rectangle, with the UVs of a single animation cel.
+///
+/// A sprite `.mat` is a **vertical strip of cels**, not one image: `bryx.mat` is 8 x 78 for an
+/// 8-wide spark, so it holds 9 frames stacked. `rdSprite_Draw` maps one cel with `texVertOffset`;
+/// drawing the whole strip onto the quad shows every frame at once, squeezed. `cel` picks the frame
+/// and the cel count is the image's height over its width, which is how all 35 shipped sprites are
+/// authored.
+fn sprite_quad(width: f32, height: f32, cels: f32, cel: u32) -> Mesh {
+    let (w, h) = (width.max(0.01) * 0.5, height.max(0.01) * 0.5);
+    let step = 1.0 / cels.max(1.0);
+    let top = step * cel as f32;
+    let (bottom, top) = (top + step, top);
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        vec![[-w, -h, 0.0], [w, -h, 0.0], [w, h, 0.0], [-w, h, 0.0]],
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 0.0, 1.0]; 4]);
+    // Bevy's UV origin is the top-left corner, so cel 0 is the top band of the strip.
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_UV_0,
+        vec![[0.0, bottom], [1.0, bottom], [1.0, top], [0.0, top]],
+    );
+    mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3]));
+    mesh
+}
+
 /// A sprite rectangle: the quad a `.spr` row draws, which has to face the camera every frame.
 #[derive(Component)]
 struct Sprite3d;
@@ -12054,8 +12091,18 @@ fn billboard_sprites(
 ) {
     let Some(view) = camera.iter().next() else { return };
     let rotation = view.rotation();
+    let mut n = 0;
     for mut transform in &mut sprites {
         transform.rotation = rotation;
+        if std::env::var_os("BK_SPRITE_TRACE").is_some() {
+            // Camera space: negative z is in front of the eye in Bevy's convention.
+            let local = view.affine().inverse().transform_point3(transform.translation);
+            println!(
+                "  billboard #{n}: world {:?}, camera-space {:?} (scale {:?})",
+                transform.translation, local, transform.scale
+            );
+            n += 1;
+        }
     }
 }
 

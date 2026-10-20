@@ -34,7 +34,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | --- | --- | --- | --- |
 | Networking and multiplayer | `sithDSS.c`, `sithDSSThing.c`, `sithDSSCog.c`, `sithMulti.c`, `sithComm.c`, `stdComm.c`, `jkGUIMultiplayer.c`, `jkGUINetHost.c`, `jkGUIMultiTally.c` | the whole thing: message streaming, thing replication, cog RPCs, host/join, tally screens. Zero socket code exists. | no `socket`/`UdpSocket`/`TcpStream` in `src/`. The single-player **answers** are now explicit (`ismulti`/`isserver` 0, no team, no score, `*multimodeflags` stored) and `sendtrigger` really broadcasts `trigger`, but only `sendmessageex` is left stubbed — it needs message *return values* |
 | Console and cvars | `sithConsole.c`, `sithCvar.c`, `sithCommand.c`, `jkQuakeConsole.c` | the `~` console, the cvar store, and the command dispatcher (`bind`, `set`, `map`, `quit`) | no matches for `cvar`, `sithCommand`, `sithConsole` |
-| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. The sprite layer is loaded (`spr.rs` parses every template's `sprite=`, `.mat` through the model-texture path, palette entry 0 keyed transparent, one quad per `.spr` row, billboarded to the camera) but it shares the bigger fault below: **`draw_created` renders nothing**. A sprite quad drawn untextured red changes no pixels, and neither does a *model* put through the same path (`+bryarbolt`, `drawing created thing 362`), with the offset sign either way. So **projectiles have never been on screen** — every bolt and blast is in the runtime and invisible. That is the next thing to fix in the renderer, ahead of the cel strip (`bryx.mat` is 8x78, ~9 frames) that the sprites will then need. Probes: `--sprite <template>`, `BK_SPRITE_DEBUG=1`, `BK_SPRITE_AHEAD`, `BK_SPRITE_TRACE=1`; write-up in `docs/formats.md` §16.5. | no particle type; `explosion` matches are class numbers and the damage path |
+| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. **Sprites draw**: every template's `sprite=` is parsed (`spr.rs`), its `.mat` loads through the model-texture path with palette entry 0 keyed transparent, `draw_created` spawns one billboarded quad per row and `billboard_sprites` faces it at the camera — confirmed on screen at level 1's open area (`--sprite +laserhit` + `BK_WALK_FORWARD=1`, different frame hash from the same frame without it). What is left is the **cel grid**: a sprite `.mat` is a strip of animation frames (`bryx.mat` 8x78), `sprite_quad` takes a cel index and count, but the count is guessed as height-over-width and the picture contradicts it, so the engine's `rdMaterial` cel table has to come out of the `.mat` header. | no particle type (`sithParticle`'s own things); `explosion` matches are class numbers and the damage path |
 | In-engine cutscene cameras | `jkCutscene.c`, `sithCamera.c` focus modes | `SetCameraFocus`, `SetCurrentCamera`, `SetPovShake`, scripted camera paths. Cutscenes play as `.smk` film over the world; an in-engine camera cutscene would not cut. | no matches for `SetCameraFocus`/`camerafocus`/`shake`; all three verbs are stubs |
 | Saber | `jkSaber.c` | blade geometry, swing arcs, saber lock, trace damage. `jksetsaberinfo` is a stub. | `saber` matches are template-name and palette text only |
 | Arch lighting | `sithArchLighting.c` | vertex-baked arch light. Level data carries an `archlightIdx` per thing; nothing reads it. | no matches for `archlight` |
@@ -206,17 +206,18 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 
 ## 6. Recently closed, so it is not mistaken for missing
 
-* **The in-view effect check, and what it found instead.** `--sprite <template>` keeps one effect thing
-  1.5 units in front of the camera so a frame can show it. It showed nothing, and three probes say why
-  it matters: an *untextured opaque red* sprite quad changes no pixels (`BK_SPRITE_DEBUG=1`), a
-  **model** put through the same spawn path changes no pixels either (`+bryarbolt`, logged
-  `drawing created thing 362`), and moving it behind the camera changes nothing
-  (`BK_SPRITE_AHEAD=-1.5`). So `draw_created` — the system that draws everything the scripts create —
-  renders nothing, which means **no projectile has ever been visible** in this port. The sprite layer
-  itself is in place behind it: 35 `.spr` files parsed, materials loaded with palette entry 0 keyed
-  transparent, one billboarded quad per row. Next: why an entity spawned from `Update` with
-  `Mesh3d + MeshMaterial3d + Transform` never rasterises while the startup-spawned level entities with
-  the same tuple do.
+* **Sprites render, and the two "renderer bugs" that hid it were both in the probe.** `--sprite
+  <template>` keeps one effect thing in front of the camera so a frame can show it. Two rounds of
+  byte-identical frames turned out to be false alarms: the probe placed the thing with
+  `(cos yaw, sin yaw)` while a JK yaw faces `(-sin yaw, cos yaw)` (§24), putting it exactly 90 degrees
+  to the side — `BK_SPRITE_TRACE`'s camera-space print showed `Vec3(1.526, -0.037, 0.015)` against
+  `Vec3(0.026, -0.037, -1.485)` once fixed — and the capture sat inside level 1's spawn prop (§5.9), so
+  anything 1.5 units ahead was legitimately occluded. Walking into the open first and comparing frames
+  with and without the effect shows it: `17EAC891…` with, `7881579F…` without. **`draw_created` was
+  never broken, and projectiles have been drawing all along.** What remains is the *cel grid*: a
+  sprite `.mat` is a strip of frames (`bryx.mat` 8 x 78), and `sprite_quad`'s cel count is a guess at
+  height-over-width that the picture contradicts (one "cel" still shows a 2 x 2 block), so the engine's
+  `rdMaterial` cel table needs reading out of the `.mat` header.
 
 * **Effects are sprites, and sprites are loaded and drawn.** A template's `sprite=` (`+laserhit` is
   `bryx.spr`) is now parsed for every template a level names and its materials are loaded through the
