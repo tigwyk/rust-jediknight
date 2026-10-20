@@ -33,11 +33,15 @@ impl World {
     /// (normal — Bevy runs systems in parallel, and waiting is correct). Only the first should
     /// panic, so the thread-local flag distinguishes them: a same-thread second borrow panics by
     /// name, cross-thread contention waits.
+    #[track_caller]
     fn take(&self) -> Borrow<'_> {
-        if HELD.with(|held| held.replace(true)) {
+        let here = std::panic::Location::caller();
+        // Which line took the guard that is still alive. Without this the panic names the *second*
+        // borrow (somewhere deep in a system) and leaves the first one to be guessed.
+        if let Some(first) = HELD_AT.with(|at| at.replace(Some(here))) {
             panic!(
-                "the runtime is already borrowed on this thread: drop the guard you hold before \
-                 borrowing again (a gate that holds one while taking another deadlocks)"
+                "the runtime is already borrowed on this thread:\n  first borrowed at {first}\n  \
+                 borrowed again at {here}\ndrop the guard you hold before borrowing again"
             );
         }
         match self.0.lock() {
@@ -46,19 +50,22 @@ impl World {
         }
     }
 
+    #[track_caller]
     pub fn borrow(&self) -> Borrow<'_> {
         self.take()
     }
 
+    #[track_caller]
     pub fn borrow_mut(&self) -> Borrow<'_> {
         self.take()
     }
 }
 
 thread_local! {
-    /// Whether this thread already holds the runtime. `Cell<bool>` in a thread-local is enough: the
-    /// only writer is `Borrow`'s `Drop`, on the same thread.
-    static HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Where this thread took the guard it still holds. The only writer is `take` (to record) and
+    /// `Borrow`'s `Drop` (to clear), both on the same thread.
+    static HELD_AT: std::cell::Cell<Option<&'static std::panic::Location<'static>>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// A borrow of the runtime that clears this thread's "held" flag when it drops.
@@ -82,7 +89,7 @@ impl std::ops::DerefMut for Borrow<'_> {
 
 impl Drop for Borrow<'_> {
     fn drop(&mut self) {
-        HELD.with(|held| held.set(false));
+        HELD_AT.with(|at| at.set(None));
     }
 }
 

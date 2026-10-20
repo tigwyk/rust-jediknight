@@ -145,6 +145,7 @@ const GATES: &[&str] = &[
     "--ammo",
     "--campaign",
     "--tally",
+    "--live-play --start 01narshadda",
     "--muzzle",
     "--use-item",
     "--engine-audit",
@@ -18694,18 +18695,22 @@ fn walk_player(
     }
 
     // What the scripts have switched so far: a force field closed, a door sector's adjoins hidden.
-    // This borrow must be taken after the `vel`/`extra_speed` hand-off above, which holds the
-    // runtime mutably, and it must cover the three reads below (the sweep, the trace and water).
+    // The two flag arrays are **copied out** and `gates` borrows those locals, so the runtime's guard
+    // dies right here. Holding it for the rest of the function made every later `borrow()` a
+    // same-thread double borrow — the fail-fast `World::take` panicked at the first such site, and
+    // there are several. Two small arrays per frame is a cheaper fix than auditing each read.
     // `BK_GATES_OPEN=1` ignores the scripts' switches, which is how the walk can be A/B'd.
-    // The guard is dropped at the end of this block, deliberately: `rt.gates()` is all the walk needs
-    // from the runtime, and holding it for the rest of the function re-entered the runtime deeper down
-    // — a same-thread double borrow that the fail-fast `World::take` panics on. It was invisible while
-    // the walker never ran (the camera query matched three entities); fixing that exposed this.
-    let runtime = sim.as_deref().map(|s| s.world.borrow());
+    let (sector_flags, adjoin_flags) = sim
+        .as_deref()
+        .map(|s| {
+            let rt = s.world.borrow();
+            (rt.sector_flags.clone(), rt.adjoin_flags.clone())
+        })
+        .unwrap_or_default();
     let gates = if std::env::var_os("BK_GATES_OPEN").is_some() {
         collide::Gates::default()
     } else {
-        runtime.as_ref().map(|rt| rt.gates()).unwrap_or_default()
+        collide::Gates { sectors: &sector_flags, adjoins: &adjoin_flags }
     };
 
     // A capture may not read the machine's keyboard or mouse: the same command has to reach the same
@@ -18805,16 +18810,13 @@ fn walk_player(
     // 2's crate puzzle is the shipped case. The surface is read from where the body stood when this
     // frame began, so the carry joins the walk instead of being overwritten by it.
     let mut carry = [0.0; 2];
-    if let Some(sim) = sim.as_deref() {
+    if let Some(held) = sim.as_deref() {
+        let held = held.world.borrow();
         let feet = [player.pos.x, player.pos.y, player.pos.z - player.rules.radius + 0.01];
         if let Some((_, surface)) = solids.0.floor_surface(player.sector, feet) {
-            carry = sim
-                .world
-                .borrow()
-                .surfaces
-                .get(surface)
-                .map(|s| s.slide)
-                .unwrap_or([0.0; 2]);
+            // Read through the guard this function already holds: a second `borrow()` here is the
+            // same-thread double borrow the fail-fast `World::take` panics on.
+            carry = held.surfaces.get(surface).map(|s| s.slide).unwrap_or([0.0; 2]);
             if carry != [0.0; 2] && std::env::var_os("BK_SCROLL_TRACE").is_some() {
                 println!(
                     "scroll: surface {surface} carries the body at {carry:?} level units/second"
@@ -19014,13 +19016,17 @@ fn walk_player(
     // camera thing for a scripted shot. The view then *is* that thing, aimed by its own angles.
     // Read once, with the guard dropped again: the one at the top of the function was removed because
     // holding it re-entered the runtime and tripped the fail-fast `World::take`.
-    let focus_camera = runtime
-        .as_ref()
-        .and_then(|rt| {
+    let camera_read = sim.as_deref().map(|s| {
+        let rt = s.world.borrow();
+        (
             rt.camera_focus_thing()
-                .and_then(|focus| rt.things.get(focus).map(|t| (t.pos, t.yaw, t.pitch)))
-        });
-    let shake = runtime.as_ref().map(|rt| rt.camera_shake()).unwrap_or(([0.0; 3], [0.0; 3]));
+                .and_then(|focus| rt.things.get(focus).map(|t| (t.pos, t.yaw, t.pitch))),
+            rt.camera_shake(),
+        )
+    }).unwrap_or((None, ([0.0; 3], [0.0; 3])));
+    let focus_camera = camera_read.0;
+    let shake = camera_read.1;
+
     if let Some((pos, yaw, pitch)) = focus_camera {
         let (forward, _) = yaw_axes(yaw);
         let pitch = pitch.to_radians();
