@@ -308,8 +308,10 @@ pub struct Runtime {
     /// `sithCog_LinkCogToThing` in tabular form.
     pub thing_links: Vec<(usize, i32, usize)>,
     /// Messages a script has earned but that have not been delivered yet: the runtime holds no VM,
-    /// so it queues `(cog instance, label)` and a system drains it.
-    pub pending_messages: Vec<(usize, &'static str)>,
+    /// so it queues `(cog instance, label, params)` and a system drains it. The params are what
+    /// `GetParam(0)`/`GetParam(1)` answer inside the handler — `damaged` carries the amount and the
+    /// damage type, which is how `force_absorb.cog` decides how much of it to take.
+    pub pending_messages: Vec<(usize, &'static str, [f64; 2])>,
     /// Force mana regeneration per second, and the pool's ceiling. The rate is calibrated: the
     /// engine's own tick is in `jkPlayer.c`, absent here. `force_heal.cog` spends `20 * rank` of bin
     /// 14, so a full pool is 200.
@@ -372,6 +374,9 @@ pub struct Runtime {
     /// material currently draws — `rdMaterial.curCelNum`, which a surface with no cel of its own uses.
     pub material_anims: Vec<(i32, f32, f32, f32)>,
     pub material_cel: BTreeMap<i32, f32>,
+    /// Per thing, the amount the last `damage_typed` applied, so a `damaged` handler that answers
+    /// with a smaller number can be honoured after the fact (`amend_damage`).
+    pub damage_applied: BTreeMap<usize, f32>,
     /// The last 15 Hz bucket a scrolling surface asked the renderer to re-lay its texture in.
     pub scroll_bucket: i32,
     /// `SlideHorizonSky(x, y)` / `SlideCeilingSky(x, y)`: the rate the sky backdrop moves at, in
@@ -882,6 +887,7 @@ impl Runtime {
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            damage_applied: BTreeMap::new(),
             scroll_bucket: 0,
             sky_scroll: [[0.0; 2]; 2],
             mount_wait_until: 0.0,
@@ -1141,7 +1147,7 @@ impl Runtime {
         for index in due {
             self.thing_timer.remove(&index);
             for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "timer"));
+                self.pending_messages.push((instance, "timer", [0.0; 2]));
             }
         }
         // Force mana regenerates. `force_heal.cog` spends `20 * rank` of bin 14 and the shipped
@@ -1180,7 +1186,7 @@ impl Runtime {
                 thing.arrived = false;
             }
             for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "arrived"));
+                self.pending_messages.push((instance, "arrived", [0.0; 2]));
             }
         }
         // Powerups with `respawn=` come back. The countdown runs in the same step as
@@ -1254,7 +1260,7 @@ impl Runtime {
         }
         for index in blocked {
             for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "blocked"));
+                self.pending_messages.push((instance, "blocked", [0.0; 2]));
             }
         }
         self.things_moved += moved.len();
@@ -1985,7 +1991,7 @@ impl Runtime {
         let (surface, _) = best?;
         for (instance, _, linked) in &self.surface_links {
             if *linked == surface {
-                self.pending_messages.push((*instance, "activate"));
+                self.pending_messages.push((*instance, "activate", [0.0; 2]));
             }
         }
         Some(surface)
@@ -2054,7 +2060,7 @@ impl Runtime {
         for (instance, _, linked) in &self.thing_links {
             if *linked == target {
                 // `activate`, not `used`: no shipped cog declares a `used` label (0 of 540), while 82 of them -- every door, switch and item -- answer `activate`. It is also what the surface half of this action already sends.
-                self.pending_messages.push((*instance, "activate"));
+                self.pending_messages.push((*instance, "activate", [0.0; 2]));
             }
         }
         Some(target)
@@ -2124,7 +2130,7 @@ impl Runtime {
         let mut sent = 0;
         for (instance, _link, target) in &self.thing_links {
             if *target == thing {
-                self.pending_messages.push((*instance, "sighted"));
+                self.pending_messages.push((*instance, "sighted", [0.0; 2]));
                 sent += 1;
             }
         }
@@ -2147,7 +2153,7 @@ impl Runtime {
         let mut sent = 0;
         for (instance, _link, target) in &self.sector_links {
             if *target == sector {
-                self.pending_messages.push((*instance, "sighted"));
+                self.pending_messages.push((*instance, "sighted", [0.0; 2]));
                 sent += 1;
             }
         }
@@ -2375,13 +2381,45 @@ impl Runtime {
         };
         // `SITH_MESSAGE_DAMAGED` (10) and `SITH_MESSAGE_KILLED` (12) go to the cogs linked to the
         // thing that was hit; the level's scripts wait on both (level 1: `damaged` x4, `killed` x5).
+        // The params are the engine's: the amount and the damage-type word, which is what a handler's
+        // `GetParam(0)`/`GetParam(1)` read (`force_absorb.cog`, `force_protection.cog`).
+        let params = [amount as f64, kind as f64];
         for instance in self.thing_instances(index) {
-            self.pending_messages.push((instance, "damaged"));
+            self.pending_messages.push((instance, "damaged", params));
             if died {
-                self.pending_messages.push((instance, "killed"));
+                self.pending_messages.push((instance, "killed", params));
             }
         }
+        // What a handler's answer has to amend: the engine applies the amount the `damaged` handler
+        // returns, not the one it was handed.
+        self.damage_applied.insert(index, amount);
         left
+    }
+
+    /// Apply a `damaged` handler's answer (`ReturnEx`): the engine's `sithCog_ThingSendMessage`
+    /// replaces the amount with the handler's value, so the difference between what was applied and
+    /// what the script allows is given back.
+    ///
+    /// Returns `(applied, allowed)` for a log line, or `None` when the answer changed nothing.
+    pub fn amend_damage(&mut self, index: usize, allowed: f32) -> Option<(f32, f32)> {
+        let applied = self.damage_applied.remove(&index)?;
+        if (allowed - applied).abs() < 1e-4 {
+            return None;
+        }
+        // Only give health back: a handler asking for *more* than was applied is not a rule the
+        // engine's path can express (the damage already happened), and the scripts never do it.
+        let refund = (applied - allowed).max(0.0);
+        if refund > 0.0
+            && let Some(t) = self.things.get_mut(index)
+        {
+            t.health = (t.health + refund).max(0.0);
+            // A handler that softens a blow can keep a thing alive; the engine decides death after
+            // the handler, so a thing whose health is back above zero is not dead.
+            if t.health > 0.0 {
+                t.destroyed = false;
+            }
+        }
+        Some((applied, allowed))
     }
 
     /// An actor's own frame list: `frame=(x/y/z:…)` entries the level places on the thing, indexed from
@@ -3782,6 +3820,7 @@ mod tests {
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            damage_applied: BTreeMap::new(),
             scroll_bucket: 0,
             sky_scroll: [[0.0; 2]; 2],
             mount_wait_until: 0.0,

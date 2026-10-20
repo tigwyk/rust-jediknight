@@ -913,6 +913,10 @@ pub struct Vm {
     vars: HashMap<String, Value>,
     /// Values the *engine* can read back from the world (thing positions, sectors).
     pub trace: Trace,
+    /// `ReturnEx(value)`: the value a message handler answers with. `sithCogExec_ReturnEx` stores it
+    /// and the caller reads it back after the label runs — that is how a `damaged` handler says how
+    /// much damage it will actually take (`force_absorb.cog` returns the reduced amount).
+    pub ret: Option<Value>,
     depth: u32,
     /// Statements left before the run is abandoned. COG scripts are event-driven and
     /// many end in `while (1)` waiting for a timer or message, so a budget is the
@@ -968,6 +972,7 @@ impl Vm {
         Self {
             vars,
             trace: Trace::default(),
+            ret: None,
             depth: 0,
             budget: 2_000_000,
             world: None,
@@ -1035,6 +1040,9 @@ impl Vm {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(LABEL_BUDGET);
+            // A `ReturnEx` belongs to the run that set it: the sender reads it right after this
+            // label, so the next one starts clean.
+            self.ret = None;
         }
         if self.depth > 24 {
             return Err(format!("call depth limit in `{label}`"));
@@ -1078,6 +1086,13 @@ impl Vm {
             }
         }
         self.depth -= 1;
+        // `ReturnEx` is the handler's answer even though the script ends with a bare `Return`: the
+        // engine's caller reads the cog's stored value, so a label that stored one returns it.
+        if matches!(result, Ok(Value::Nil)) && !self.sleeping() {
+            if let Some(value) = self.ret.take() {
+                result = Ok(value);
+            }
+        }
         // `BK_COG_TRACE`: name any label that cost a noticeable slice of a frame, which is how a
         // script that loops until its budget runs out shows up without a profiler.
         if std::env::var_os("BK_COG_TRACE").is_some() {
@@ -1306,6 +1321,14 @@ impl Vm {
             "setpulse" => {
                 let value = args.first().map(|v| v.num()).unwrap_or(0.0) as f32;
                 self.pulse = (value > 0.0).then(|| (value, self.now + value));
+                return Value::Nil;
+            }
+
+            // `ReturnEx(value)`: the value the handler answers with. The engine stores it on the cog
+            // (`sithCogExec_ReturnEx`) and the sender reads it once the label has run; the scripts
+            // still write a bare `Return` after it, so it does **not** end the label.
+            "returnex" => {
+                self.ret = Some(args.first().cloned().unwrap_or(Value::Nil));
                 return Value::Nil;
             }
 

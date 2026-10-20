@@ -145,6 +145,7 @@ const GATES: &[&str] = &[
     "--cel",
     "--camera",
     "--scroll",
+    "--damage-return",
     "--move",
     "--pickup",
     "--save",
@@ -286,6 +287,7 @@ fn main() {
     let mut cel_check = false;
     let mut camera_check = false;
     let mut scroll_check = false;
+    let mut damage_return_check = false;
     let mut fire_check: Option<String> = None;
     let mut hit_check = false;
     let mut level_shader = false;
@@ -525,6 +527,8 @@ fn main() {
             "--camera" => camera_check = true,
             // `--scroll`: a scrolling surface (`SlideWall`) and the sprite/sky scroll verbs.
             "--scroll" => scroll_check = true,
+            // `--damage-return`: a `damaged` handler's `ReturnEx` replaces the amount the engine applies.
+            "--damage-return" => damage_return_check = true,
             // `--fire <weapon template>`: fire that weapon at level 1's actor and check the
             // projectile travels, hits and damages.
             // `--level-shader`: draw level surfaces with the material that carries the colormap
@@ -1990,15 +1994,22 @@ fn main() {
             // The queued list is moved out **before** the loop: `World` is an `Arc<Mutex<..>>`, so a
             // guard held by the `for` head would deadlock on the first verb the label calls.
             let pending = std::mem::take(&mut sim_world.borrow_mut().pending_messages);
-            for (instance, label) in pending {
+            for (instance, label, params) in pending {
                 let Some((script_name, vm)) = vms.get_mut(instance) else { continue };
                 let Some(script) = world.cogs.get(script_name) else { continue };
                 if script.label(label).is_none() {
                     continue;
                 }
+                // `GetParam(0)`/`GetParam(1)` inside the handler, then the `damaged` answer, exactly
+                // as `deliver_thing_messages` does it in the running game.
+                sim_world.borrow_mut().last_params = params.to_vec();
                 let outcome = vm.run_label(script, label);
                 if outcome.is_ok() {
                     delivered += 1;
+                }
+                if label == "damaged" && let Some(cog::Value::Num(allowed)) = vm.ret.take() {
+                    let thing = vm.source.max(0) as usize;
+                    sim_world.borrow_mut().amend_damage(thing, allowed as f32);
                 }
             }
             // The bus, exactly as `deliver_cog_messages` runs it.
@@ -4247,7 +4258,7 @@ fn main() {
                 let queued = rt
                     .pending_messages
                     .iter()
-                    .filter(|(_, label)| *label == "arrived")
+                    .filter(|(_, label, _)| *label == "arrived")
                     .count();
                 println!(
                     "  thing {thing} with {frames} frame(s): {} `arrived` message(s) queued",
@@ -4281,7 +4292,7 @@ fn main() {
                 activated += rt
                     .pending_messages
                     .iter()
-                    .filter(|(_, label)| *label == "activate")
+                    .filter(|(_, label, _)| *label == "activate")
                     .count();
             }
         }
@@ -4363,7 +4374,7 @@ fn main() {
             stopped = rt
                 .pending_messages
                 .iter()
-                .filter(|(_, label)| *label == "blocked")
+                .filter(|(_, label, _)| *label == "blocked")
                 .count();
             println!(
                 "  thing {thing} flew from {from:?} into a wall: {stopped} `blocked` message(s), now at {:?}",
@@ -4748,6 +4759,96 @@ fn main() {
         );
         assert_eq!(errors, 0, "cog check found {errors} problems");
         println!("--- cog check passed ---");
+        return;
+    }
+
+    if damage_return_check {
+        // `sithCog.c`'s message dispatch: a handler's `ReturnEx` value **replaces** the message's
+        // argument for `damaged` (other messages accumulate). 115 shipped scripts have a `damaged`
+        // label and 54 of them return the amount — `force_absorb.cog` turns part of a hit into mana
+        // and returns the rest, so this is what makes defensive force powers mean anything.
+        //
+        // Nothing here holds a runtime guard while the VM runs: a script verb locks the same world.
+        let state = runtime::Runtime::handle(&world.level);
+        let thing = world
+            .level
+            .things
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.template.to_ascii_lowercase().contains("walkplayer"))
+            .map(|(i, _)| i)
+            .next()
+            .expect("a level has a walkplayer");
+        // The shipped shape, as an inline script: read the amount from the message params, convert
+        // half of it, answer with the rest.
+        let script = cog::parse(
+            "symbols\nmessage damaged\nflex damage local\nend\ncode\ndamaged:\n\
+             damage = GetParam(0);\nReturnEx(damage / 2);\nReturn;\nend\n",
+        )
+        .expect("the inline handler parses");
+        assert!(script.label("damaged").is_some(), "the handler has no damaged label");
+        let (applied, health_after_damage) = {
+            let mut rt = state.borrow_mut();
+            let before = rt.things[thing].health;
+            rt.damage_typed(thing as i64, 100.0, 0x2);
+            (before - rt.things[thing].health, rt.things[thing].health)
+        };
+        assert!((applied - 100.0).abs() < 1e-3, "the damage was not applied: {applied}");
+        // `GetParam(0)` inside the handler is the amount the engine passed.
+        state.borrow_mut().last_params = vec![100.0, 2.0];
+        let mut vm = cog::Vm::with_world(state.clone());
+        vm.source = thing as i64;
+        let answer = vm.run_label(&script, "damaged").expect("the handler runs");
+        assert_eq!(
+            answer,
+            cog::Value::Num(50.0),
+            "the handler's ReturnEx did not become the label's value"
+        );
+        let amended = state.borrow_mut().amend_damage(thing, 50.0);
+        assert_eq!(amended, Some((100.0, 50.0)), "the answer was not applied");
+        let after = state.borrow().things[thing].health;
+        assert!(
+            (after - health_after_damage - 50.0).abs() < 1e-3,
+            "half of the applied 100 was not given back: {health_after_damage} -> {after}"
+        );
+        println!(
+            "damage-return: thing {thing} was hit for {applied:.0}; `GetParam(0)` answered 100 inside the handler, `ReturnEx(damage / 2)` made the label answer 50, and the runtime gave 50 health back ({health_after_damage:.0} -> {after:.0})"
+        );
+        // A handler that answers the amount unchanged amends nothing, and one that answers nothing
+        // (no `ReturnEx`) leaves the damage standing.
+        assert_eq!(state.borrow_mut().amend_damage(thing, 50.0), None, "a settled hit was amended twice");
+        {
+            let mut rt = state.borrow_mut();
+            rt.damage_typed(thing as i64, 10.0, 0x2);
+        }
+        state.borrow_mut().last_params = vec![10.0, 2.0];
+        let plain = cog::parse(
+            "symbols\nmessage damaged\nend\ncode\ndamaged:\nReturn;\nend\n",
+        )
+        .expect("the plain handler parses");
+        let mut vm = cog::Vm::with_world(state.clone());
+        vm.source = thing as i64;
+        let answer = vm.run_label(&plain, "damaged").expect("the plain handler runs");
+        assert_eq!(answer, cog::Value::Nil, "a bare `Return` must answer nothing");
+        println!("damage-return: a handler with no `ReturnEx` answers nothing and the damage stands");
+
+        // Shipped evidence: which placed scripts have a `damaged` handler that returns an amount.
+        let mut returning = Vec::new();
+        for inst in &world.level.cogs {
+            let Some(data) = gobs.read(&inst.script) else { continue };
+            let text = String::from_utf8_lossy(&data).to_ascii_lowercase();
+            if text.contains("damaged:") && text.contains("returnex") {
+                returning.push(inst.script.clone());
+            }
+        }
+        returning.sort();
+        returning.dedup();
+        println!(
+            "damage-return: {} placed script(s) in this level answer `damaged` with `ReturnEx`{}",
+            returning.len(),
+            returning.first().map(|n| format!(" (first: {n})")).unwrap_or_default()
+        );
+        println!("--- damage-return check passed ---");
         return;
     }
 
@@ -6154,16 +6255,17 @@ fn main() {
             // Another linked thing can be nearer than the one this candidate names; what matters is that
             // the use action finds *a* linked thing, and that its script changes the world.
             // Drain exactly as `deliver_thing_messages` does, so this is the real path and not a shortcut.
-            let pending: Vec<(usize, &'static str)> = {
+            let pending: Vec<(usize, &'static str, [f64; 2])> = {
                 let mut rt = handle.borrow_mut();
                 std::mem::take(&mut rt.pending_messages)
             };
             let mut ran = 0;
-            for (inst, label) in &pending {
+            for (inst, label, params) in &pending {
                 let Some(data) = world.level.cogs.get(*inst) else { continue };
                 let Some(script) = world.cogs.get(&data.script) else { continue };
                 let Some(vm) = vms.get_mut(*inst).and_then(|v| v.as_mut()) else { continue };
                 vm.source = *thing as i64;
+                handle.borrow_mut().last_params = params.to_vec();
                 if script.label(label).is_some() && vm.run_label(script, label).is_ok() {
                     ran += 1;
                 }
@@ -11411,7 +11513,7 @@ fn deliver_crossed(
         let mut rt = sim.world.borrow_mut();
         for (instance, _, linked) in &rt.surface_links.clone() {
             if *linked == surface {
-                rt.pending_messages.push((*instance, "crossed"));
+                rt.pending_messages.push((*instance, "crossed", [0.0; 2]));
                 queued += 1;
             }
         }
@@ -11426,21 +11528,55 @@ fn deliver_crossed(
 
 /// Deliver what the runtime queued: `damaged` and `killed` on the cogs linked to a thing.
 ///
-/// The runtime holds no VM, so `Runtime::damage` records `(cog instance, label)` and this runs it.
-/// Level 1 waits on `damaged` x4 and `killed` x5, so this is what lets a level react to combat.
+/// The runtime holds no VM, so `Runtime::damage` records `(cog instance, label, params)` and this runs
+/// it. Level 1 waits on `damaged` x4 and `killed` x5, so this is what lets a level react to combat.
+///
+/// A `damaged` handler can answer with `ReturnEx`, and the engine then applies *that* amount instead
+/// of the one it passed in (`sithCog.c`'s message dispatch: `damaged`'s return **replaces** the
+/// value). That is how `force_absorb.cog` turns part of a hit into mana, so the answer is fed back to
+/// the runtime once the handlers have run.
 fn deliver_thing_messages(
     world: Option<Res<World>>,
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<TriggerCount>>,
 ) {
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
-    let pending = std::mem::take(&mut sim.world.borrow_mut().pending_messages);
+    // The handle, not the field: `instances` is borrowed mutably for the whole loop, and a VM's verbs
+    // borrow this same runtime, so every borrow below has to be its own short-lived one.
+    let handle = sim.world.clone();
+    let pending = std::mem::take(&mut handle.borrow_mut().pending_messages);
     let mut fired = 0usize;
-    for (instance, label) in pending {
+    // Which thing each `damaged` instance was for, and the amount the handler allows, so the answer
+    // is applied after the last handler on that thing has had its say.
+    let mut answers: Vec<(usize, Option<f32>)> = Vec::new();
+    for (instance, label, params) in pending {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
         let Some(script) = world.cogs.get(script_name) else { continue };
-        if script.label(label).is_some() && vm.run_label(script, label).is_ok() {
-            fired += 1;
+        if script.label(label).is_none() {
+            continue;
+        }
+        // `GetParam(0)`/`GetParam(1)` inside the handler: the engine's own two words.
+        handle.borrow_mut().last_params = params.to_vec();
+        if vm.run_label(script, label).is_err() {
+            continue;
+        }
+        fired += 1;
+        if label == "damaged" {
+            let thing = vm.source.max(0) as usize;
+            let allowed = match vm.ret.take() {
+                Some(cog::Value::Num(n)) => Some(n as f32),
+                _ => None,
+            };
+            answers.push((thing, allowed));
+        }
+    }
+    for (thing, allowed) in answers {
+        let Some(allowed) = allowed else { continue };
+        let amend = handle.borrow_mut().amend_damage(thing, allowed);
+        if let Some((applied, allowed)) = amend {
+            println!(
+                "damage: a `damaged` handler on thing {thing} answered {allowed:.1} of the {applied:.1} applied"
+            );
         }
     }
     if let Some(count) = count.as_mut() {

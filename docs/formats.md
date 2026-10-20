@@ -2456,9 +2456,49 @@ endlevel: 1 message(s) delivered, goal bin 100 = 3, level_complete true
 ```
 
 Still unported from the same function: the hurt sound per type (`SITH_SC_HURTENERGY`, `HURTFIRE`,
-`HURTMAGIC`, `HURTSPECIAL`), the 0.1 damage multiplier for a limb hit, and letting a cog's `damaged`
-handler return a replacement amount (`sithCog_ThingSendMessageEx` with the type as an argument — the
-port's messages carry no arguments yet).
+`HURTMAGIC`, `HURTSPECIAL`) and the 0.1 damage multiplier for a limb hit.
+
+### A message carries params, and `damaged` can answer
+
+`sithCog_ThingSendMessage(thing, message, param0, param1)` passes two words with the message, and the
+handler reads them with `GetParam(0)`/`GetParam(1)`. For `damaged` they are **the amount and the
+damage-type word** — which is how the shipped defensive powers work:
+
+```cog
+# force_absorb.cog
+damaged:
+   damage = GetParam(0);
+   if(IsInvActivated(player, 28)) {
+      type = GetParam(1);
+      if(BitTest(flags, type)) {
+         rank = GetInv(player, 28);
+         absorption = rank / 4;
+         ChangeInv(player, 14, damage * absorption);   // part of it becomes mana
+         damage = damage * (1-absorption);
+      }
+   }
+   ReturnEx(damage);
+   Return;
+```
+
+The port now carries the params on `pending_messages` (`(instance, label, [param0, param1])`), sets them
+on the runtime before running the label so `GetParam` answers, and `ReturnEx(value)` stores the cog's
+answer — `Vm::ret`, which `run_label` hands back as the label's value (the scripts still write a bare
+`Return` after it, so it must not end the label).
+
+`sithCog.c`'s dispatch makes `damaged`'s return **replace** the amount, so the runtime keeps what it
+applied per thing and `amend_damage(thing, allowed)` gives the difference back when the answer is
+smaller — which is exactly `force_absorb`'s "take half". A handler that softens a blow below zero health
+also un-destroys the thing, because the engine decides death *after* the handler.
+
+115 shipped scripts have a `damaged` label and 54 of them answer with `ReturnEx`: the actor cogs, all
+seven dark Jedi, `force_absorb.cog`, `force_protection.cog`, `item_shields.cog` and `kyle.cog`. `--damage-return`
+runs the shipped shape through the real VM: `GetParam(0)` answers the 100 that was applied,
+`ReturnEx(damage / 2)` makes the label answer 50, and the runtime gives 50 health back. The gate also
+reports which placed scripts in a level do this — level 17b's `darkjedi_yun2.cog` is one.
+
+`ponytail:` a settled hit is *amended*, not replayed, so a handler can only reduce damage; a script
+asking for more than was applied is ignored (no shipped one does).
 
 **Force seeing: the script was running and the mode verbs were falling through.** `--force seeing`
 spent its mana (400 → 370, the script's own `ChangeInv(player, 14, -30)`) and called
