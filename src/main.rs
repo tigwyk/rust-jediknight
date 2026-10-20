@@ -3548,6 +3548,22 @@ fn main() {
             rt.inv,
             before
         );
+        // `jkGetChoice()` is bin 18 (`SITHBIN_CHOICE`): the ending scripts branch on it, and
+        // `jkPlayer_CalcAlignment` maps 1 to +100 and 2 to -100. It is inventory, not a flag, so the
+        // same `SetInv`/`GetInv` the rest of the scripts use moves it.
+        rt.call("SetInv", &[cog::Value::Num(player as f64), cog::Value::Num(18.0), cog::Value::Num(0.0)]);
+        let neutral = rt.call("jkGetChoice", &[]);
+        rt.call("SetInv", &[cog::Value::Num(player as f64), cog::Value::Num(18.0), cog::Value::Num(1.0)]);
+        let light = rt.call("jkGetChoice", &[]);
+        rt.call("SetInv", &[cog::Value::Num(player as f64), cog::Value::Num(18.0), cog::Value::Num(2.0)]);
+        let dark = rt.call("jkGetChoice", &[]);
+        rt.call("SetInv", &[cog::Value::Num(player as f64), cog::Value::Num(18.0), cog::Value::Num(0.0)]);
+        println!(
+            "pickup: `jkGetChoice` reads bin 18 -- {neutral:?} by default, {light:?} on the light path, {dark:?} on the dark one"
+        );
+        assert_eq!(neutral, cog::Value::Num(0.0), "the default choice is not neutral");
+        assert_eq!(light, cog::Value::Num(1.0), "the light choice did not read back");
+        assert_eq!(dark, cog::Value::Num(2.0), "the dark choice did not read back");
         // Respawn: a powerup with `respawn=` comes back after its countdown.
         let respawn_item = rt
             .things

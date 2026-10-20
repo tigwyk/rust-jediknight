@@ -227,6 +227,9 @@ flag                                                   exit  what it prints
                                                              (also: `SetMountWait` refuses the
                                                              trigger until its deadline passes)
 --pickup                                                 0  --- pickup check passed ---
+                                                             `jkGetChoice` reads inventory bin 18 -- 0 by
+                                                             default, 1 on the light path, 2 on the
+                                                             dark one
 --weapon +elaser                                         0  --- weapon check passed ---
 --bins                                                   0  --- bins check passed ---
 --mana --level 01narshadda.jkl                           0  0 -> 20.0 in one second, clamps at 400

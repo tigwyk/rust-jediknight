@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **39 gates, 91 tests, 0 failures.** Stubbed script surface:
-**12 verbs, 46 call sites across the 34 shipped levels** (706 before this run of state setters).
+**11 verbs, 39 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -42,6 +42,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | Event queue | `sithEvent.c` | the engine's timed event list. Pulses and timers live in `cog.rs` and cover the scripts; a non-cog timed event (thing expiry, AI tick) has nowhere to live. | no matches for `SithEvent` |
 | Overlay map and 3D map screen | `sithOverlayMap.c`, `sithMap.c`, `jkGUIMap.c`, `ui.rs` | the automap overlay and the 3D map view. The screen is a static backdrop. | `ponytail:` in `ui.rs` — no zoom/orbit transforms |
 | Scope | `jkHudScope.c` | the sniper/binos overlay | 2 incidental HUD-flag matches, no rendering |
+| Ending choice | `jkPlayer.c` (`jkPlayer_SetChoice`/`GetChoice`) | `jkGetChoice()` reads the real value: it is inventory bin 18 (`SITHBIN_CHOICE`), which the endgame scripts branch on and `jkPlayer_CalcAlignment` maps to +100/-100 (`--pickup`) | the **menu** that writes bin 18. There is no ending screen, so the value is always neutral (0) in this build |
 | Thing parenting | `sithThing.c` (`pParent`, `attachedThings`) | **`AttachThingToThing` works**: the child keeps the offset it had at the call, in the parent's own frame (`field_4C`), so a moving parent carries it and a turning one swings it around — a crate on a lift (`00_elev_doors5.cog`), a catwalk on a ship (`09_donefueling.cog`), the sphere `force_absorb.cog` hangs on the player, the orbiting camera of `00_cameratricks.cog`. `DetachThing` and `GetThingParent` round-trip, `SetThingAttachFlags` is stored (`--attach`) | the engine's child *list* (a thing may carry several children, and chains resolve in list order) — this build resolves one level in index order, `ponytail:`-marked. A gun in a hand needs the puppet's joint, which is the puppet work, not this |
 
 Multiplayer is a project of its own and is deliberately out of scope: the UI holes the docs used to list are
@@ -73,17 +74,17 @@ both multiplayer-only screens.
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading; sector light animation, surface light animation, and **`ThingLight`/`SetThingLight`/`ThingLightAnim`**: a thing's own light, ramped the way `sithSurface_SetThingLight` ramps it (`from`, `rate = delta / time`, `to`), summed per sector so a lamp brightens its room and a broken one stops (`--cel`) | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — and the *dynamic* pass that gives a thing's light a radius: this build adds the whole thing-light sum to its sector's baked light, so a lamp lights the room flatly rather than in a pool (`ponytail:` per-surface falloff). 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 12 below | the 12 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 11 below | the 11 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 12 stubbed cog verbs
+## 3. The 11 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (46 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 12.
+over the 34 levels from `--cog-check` (39 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 11.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -94,7 +95,6 @@ takes the wrong branch without any error.
 | --- | --- | --- |
 | Weapons and projectiles (2) | 29 | `jksetsaberinfo` 15, `autoselectweapon` 14 |
 | Models (1) | 6 | `setthingmodel` 6 (CTF scripts only) |
-| Misc (1) | 7 | `jkgetchoice` 7 |
 
 ---
 

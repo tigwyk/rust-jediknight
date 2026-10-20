@@ -1774,6 +1774,7 @@ impl Runtime {
                 | "loadtemplate"
                 | "setfacelightmode"
                 | "pathmoveresume"
+                | "jkgetchoice"
                 | "getthinggeomode"
                 | "setthingcurgeomode"
                 | "changesoundvol"
@@ -4192,6 +4193,11 @@ impl Runtime {
                 Value::Nil
             }
 
+            // `jkGetChoice()`: `jkCog_GetChoice` answers `jkPlayer_GetChoice()`, which is the
+            // player's inventory count in **bin 18** (`SITHBIN_CHOICE`) — not a separate flag. The
+            // ending scripts branch on it (`19b_endlevel.cog` gives the light path its yellow saber),
+            // and `jkPlayer_CalcAlignment` maps 1 to +100 and 2 to -100.
+            "jkgetchoice" => Value::Num(self.inv.get(&18).copied().unwrap_or(0.0) as f64),
             "jkgetflags" => Value::Num(self.thing(idx(0)).map(|t| t.jk_flags as f64).unwrap_or(0.0)),
             "jksetflags" => {
                 if let Some(thing) = self.thing_mut(idx(0)) {
