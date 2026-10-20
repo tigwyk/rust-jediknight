@@ -148,6 +148,10 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    which colours every combat test.
 5. **AI verbs, state setters only.** 240 calls across 11 verbs. Store the mode, speed and look/move targets so
    scripts stop silently failing; the scheduler, awareness and pathfinding are a separate project after this.
+   **Started:** `aisetmode`/`aiclearmode` are the actor-flag arms now (74 calls gone; 632 stubbed, down from
+   706). The rest cannot be aliased — each of `aisetmovespeed` (43), `aisetmoveframe` (34), `aisetlookframe`
+   (31), `setfirewait` (25), `setgoalflags` (25), `setmountwait` (25) needs a value stored *and* a reader:
+   `setfirewait`'s reader is the window's fire path, `aisetmovespeed`'s is the actor steering.
 6. **Puppet locomotion states.** Visible, and the state data is already loaded; the pose code is real.
 7. **Attachments and parenting.** Needed by carried weapons, passengers, and any script that moves a child.
 8. **Camera focus and shake.** It is what makes in-engine cutscenes and several force powers read as intended.
