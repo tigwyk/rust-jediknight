@@ -178,4 +178,19 @@ OpenDoors
         assert!(!ai.sees(at, 0.0, [-3.0, 0.1, 0.0]));
     }
 
+    /// `sithAI_CheckSightThing` measures `sightdist` over the **full** vector: it subtracts the two
+    /// positions with `rdVector_Sub3`, not their horizontal projection. So a target straight up is
+    /// out of sight sooner than one on the floor at the same flat distance — which is why a guard
+    /// cannot see a player on a high ledge at 5 units of climb.
+    #[test]
+    fn sight_distance_is_measured_in_three_dimensions() {
+        let ai = parse(RYB);
+        let at = [0.0, 0.0, 0.0];
+        // 3 flat, 4 up: exactly sightdist=5, and still ahead (fov 200).
+        assert!(ai.sees(at, 0.0, [3.0, 0.0, 4.0]), "5.0 units exactly is still in sight");
+        // The same flat distance with one more unit of climb is out.
+        assert!(!ai.sees(at, 0.0, [3.0, 0.0, 4.5]), "5.4 units is beyond a 5.0 sightdist");
+        assert!(ai.sees(at, 0.0, [3.0, 0.0, 0.0]), "3 units on the floor stays in sight");
+    }
+
 }

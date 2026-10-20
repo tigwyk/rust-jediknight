@@ -3771,6 +3771,11 @@ fn main() {
         // that aim (round 109), so this is what makes a raised player hittable.
         let ledge = [at[0] + GAP, at[1], at[2] + 2.5];
         rt.things[player].pos = ledge;
+        // First with no scripted target, so the answer says whether the sight rule *alone* lets an
+        // actor engage someone above it. `sightdist` is 3D (`sithAI_CheckSightThing` subtracts the
+        // whole vector), so 3 flat and 2.5 up is 3.9 of the 5.0 it has.
+        rt.things[actor].ai_wait = 0.0;
+        let seen_unscripted = rt.ai_tick(player, 1.0);
         // A scripted fire target skips the sight test (`can_see` is true for one), so this checks the
         // *aim* rather than re-testing perception: whether the actor is looking the target's way.
         rt.call(
@@ -3785,7 +3790,7 @@ fn main() {
             .filter(|t| t.vel[2] > 0.5)
             .count();
         println!(
-            "  ledge: a target 2.5 units up -> {fired_at_ledge} shot(s), the actor aims {aim_pitch:.1} deg up, {rising} bolt(s) climbing"
+            "  ledge: a target 2.5 units up -> {seen_unscripted} shot(s) on sight alone, {fired_at_ledge} with a scripted target; the actor aims {aim_pitch:.1} deg up, {rising} bolt(s) climbing"
         );
         if fired_at_ledge > 0 {
             assert!(aim_pitch > 10.0, "the actor aimed {aim_pitch:.1} deg, not up at the ledge");
