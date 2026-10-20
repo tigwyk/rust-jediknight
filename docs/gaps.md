@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **39 gates, 91 tests, 0 failures.** Stubbed script surface:
-**33 verbs, 150 call sites across the 34 shipped levels** (706 before this run of state setters).
+**30 verbs, 137 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -73,17 +73,17 @@ both multiplayer-only screens.
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — plus sector light animation. 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 33 below | the 33 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 30 below | the 30 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 33 stubbed cog verbs
+## 3. The 30 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (150 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 33.
+over the 34 levels from `--cog-check` (137 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 30.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -92,7 +92,6 @@ takes the wrong branch without any error.
 
 | group | calls | verbs, most-called first |
 | --- | --- | --- |
-| AI (3) | 13 | `aisetfiretarget` 8, `aiflee` 3, `aisetclass` 2 |
 | Thing properties and flags (8) | 32 | `setthinglight` 10, `thinglightanim` 9, `syncsurface` 4, `syncthingpos` 3, `setthingrotvel` 2, `newcoloreffect` 2, `createthingatpos` 1, `teleportthing` 1 |
 | Cog introspection and goal state (1) | 1 | `loadtemplate` 1 |
 | Weapons and projectiles (3) | 31 | `jksetsaberinfo` 15, `autoselectweapon` 14, `fireprojectile` 2 |
@@ -184,10 +183,16 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    alone (`frame=(-4.476/15.877/3.840)`), and only the `pos:angles` spelling was accepted, so every
    actor's frame list was silently empty. `ai_tick` also had to stop keying on the instinct class:
    `SITH_CT_AI` comes from the actor block, and level 1's 8t88 has no `aiclass=` yet its goal script
-   walks it to frame 1 (314 calls gone; 392 stubbed, down from 706). What is left of the group needs
-   states the port does not have: `aisetfiretarget` (8) wants actors that shoot at something other
-   than the player, `aiflee` (3) the flee state. (`setmountwait` (25) is done: the engine's fire path refuses
-   until `sithWeapon_secMountWait` passes, and every shipped caller passes 0.)
+   walks it to frame 1 (314 calls gone; 392 stubbed, down from 706). **The group is now closed**:
+   `aisetfiretarget` (8) stores what an actor shoots at, and the fire-target is what made the
+   out-of-sight early return bite — it had to be computed *before* that return, or an actor told to
+   shoot a thing it can see stands still because it cannot see the player; `aiflee` (3) is the flee
+   state (walk away from the named thing, do not shoot); `aisetclass` (2) swaps an actor's `.ai`
+   wholesale from the name the cog binds, which is level 11's endlevel changing Pic's and Gorc's class
+   between fight phases. `--ai` asserts all three: the actor turns to the named target and fires with
+   the player behind it, a fleeing actor's gap grows 3.00 -> 3.30 over a second with no shots, and
+   `AISetClass(actor, "pednarsh.ai")` moves its sightdist 5.0 -> 7.0. (`setmountwait` (25) is done: the
+   engine's fire path refuses until `sithWeapon_secMountWait` passes, and every shipped caller passes 0.)
 6. ~~**Puppet locomotion states.**~~ — **done** (section 6): the state is chosen from the velocity
    `ai_tick` walked the actor at, by `sithPuppet_UpdateThingMove`'s own rule, and the clip advances on
    distance moved instead of the clock. What is left of the state machine is the armed-mode axis and

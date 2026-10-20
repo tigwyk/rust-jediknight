@@ -128,7 +128,15 @@ flag                                                   exit  what it prints
                                                              floor fails here instead of showing a black screen;
                                                              the player's own body is drawn by 0 entity(ies) (want 0)
 --live-check                                             0  --- live check passed ---
---ai                                                     0  --- ai check passed ---
+--ai                                                     0  the instinct classes' own parameters, an
+                                                             actor that fires at a player inside
+                                                             sightdist, walks a scripted destination
+                                                             to 0.24 short of it, turns to a look
+                                                             target; `AISetFireTarget` makes it turn to
+                                                             a named thing and fire with the player
+                                                             behind it, `AIFlee` grows the gap 3.00 ->
+                                                             3.30 in a second with no shots, and
+                                                             `AISetClass` moves sightdist 5.0 -> 7.0
 --endlevel                                               0  the level's own trigger: `01_goal0.cog`
                                                              waits on `sighted` from thing 204 (8t88),
                                                              the draw sends it, the goal messages master

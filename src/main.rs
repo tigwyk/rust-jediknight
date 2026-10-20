@@ -2932,6 +2932,112 @@ fn main() {
         assert_eq!(spawned, 1, "the shot did not create a projectile");
         assert_eq!(far, 0, "an actor fired at a player outside sightdist");
         assert_eq!(back, 0, "an actor fired at a player behind it");
+
+        // `AISetFireTarget`: the actor shoots at the thing a script names instead of the player.
+        // `00_AITurnCoat.cog` and `06_drama.cog` are the shipped users. Put the player behind the
+        // actor (out of sight) and a victim in front, and the actor must still fire.
+        rt.things[player].pos = [at[0] - 3.0, at[1], at[2]];
+        rt.things[player].pos[0] = at[0] - 3.0;
+        rt.things[actor].yaw = 0.0;
+        let victim = rt
+            .things
+            .iter()
+            .enumerate()
+            .find(|(i, t)| *i != actor && *i != player && !t.destroyed)
+            .map(|(i, _)| i)
+            .expect("a level has another thing to shoot");
+        rt.things[actor].pos = at;
+        // Put the victim where the actor can actually see it: the level's geometry decides, so try
+        // the four cardinal directions and take the first clear one.
+        let mut spot = None;
+        for (dx, dy) in [(3.0f32, 0.0f32), (-3.0, 0.0), (0.0, 3.0), (0.0, -3.0)] {
+            let candidate = [at[0] + dx, at[1] + dy, at[2]];
+            if rt.solids.as_ref().is_none_or(|s| !s.segment_blocked(at, candidate)) {
+                spot = Some(candidate);
+                break;
+            }
+        }
+        let spot = spot.expect("an actor with a clear line in some direction");
+        rt.things[victim].pos = spot;
+        rt.things[actor].pos = at;
+        rt.things[actor].ai_wait = 0.0;
+        rt.call(
+            "AISetFireTarget",
+            &[cog::Value::Num(actor as f64), cog::Value::Num(victim as f64)],
+        );
+        let before_player_shot = rt.ai_tick(player, 1.0 / 30.0);
+        rt.things[actor].ai_wait = 0.0;
+        let aimed = rt.things[actor].yaw;
+        let to_target = (spot[1] - at[1]).atan2(spot[0] - at[0]).to_degrees();
+        println!(
+            "  scripted: AISetFireTarget(actor, thing {victim}) -> the actor turns to {aimed:.0} deg (the target is at {to_target:.0}) and fires {before_player_shot} shot(s) with the player behind it"
+        );
+        assert_eq!(
+            before_player_shot, 1,
+            "the actor did not fire at the thing a script named"
+        );
+        assert!(
+            (aimed - to_target).abs() < 5.0,
+            "the actor did not aim at the fire target ({aimed:.1} vs {to_target:.1} deg)"
+        );
+        // A negative index clears it, and the player behind is out of sight again.
+        rt.call("AISetFireTarget", &[cog::Value::Num(actor as f64), cog::Value::Num(-1.0)]);
+        rt.things[actor].yaw = 0.0;
+        rt.things[player].pos = [at[0] - 3.0, at[1], at[2]];
+        rt.things[actor].ai_wait = 0.0;
+        assert_eq!(
+            rt.ai_tick(player, 1.0 / 30.0),
+            0,
+            "clearing the fire target did not restore the instincts"
+        );
+
+        // `AIFlee`: the actor walks *away* from the thing a script names and stops shooting.
+        rt.things[actor].pos = at;
+        rt.things[victim].pos = [at[0] + 3.0, at[1], at[2]];
+        let gap = {
+            let (a, v) = (rt.things[actor].pos, rt.things[victim].pos);
+            ((a[0] - v[0]).powi(2) + (a[1] - v[1]).powi(2)).sqrt()
+        };
+        rt.call("AIFlee", &[cog::Value::Num(actor as f64), cog::Value::Num(victim as f64)]);
+        // A second of fleeing, so the gap moves by a walking step rather than a rounding error.
+        let mut fired_while_fleeing = 0;
+        for _ in 0..30 {
+            fired_while_fleeing += rt.ai_tick(player, 1.0 / 30.0);
+        }
+        rt.call("AIFlee", &[cog::Value::Num(actor as f64), cog::Value::Num(-1.0)]);
+        let fled = {
+            let (a, v) = (rt.things[actor].pos, rt.things[victim].pos);
+            ((a[0] - v[0]).powi(2) + (a[1] - v[1]).powi(2)).sqrt()
+        };
+        println!("  scripted: AIFlee(actor, thing {victim}) -> the gap {gap:.2} -> {fled:.2}, {fired_while_fleeing} shot(s)");
+        assert!(fled > gap, "the actor did not run away from the thing it was told to flee");
+        assert_eq!(fired_while_fleeing, 0, "a fleeing actor fired anyway");
+
+        // `AISetClass`: the argument is the `.ai` file name the cog bound, and the actor's instincts
+        // are replaced — this is how level 11's endlevel changes Pic's and Gorc's class mid-fight.
+        rt.ai_classes = world.ai_classes.clone().into_iter().collect();
+        let current = rt.ai.get(&actor).map(|a| a.sightdist).unwrap_or(0.0);
+        let other = world
+            .ai_classes
+            .iter()
+            .map(|(name, raw)| (name.clone(), ai::parse(raw)))
+            .find(|(_, class)| (class.sightdist - current).abs() > 0.01);
+        if let Some((name, class)) = other {
+            rt.call(
+                "AISetClass",
+                &[cog::Value::Num(actor as f64), cog::Value::Str(name.clone())],
+            );
+            let now = rt.ai.get(&actor).map(|a| a.sightdist).unwrap_or(0.0);
+            println!(
+                "  scripted: AISetClass(actor, `{name}`) -> sightdist {current:.1} -> {now:.1}"
+            );
+            assert!(
+                (now - class.sightdist).abs() < 0.01,
+                "AISetClass did not install the named class"
+            );
+        } else {
+            println!("  scripted: this level has no second instinct class; the class swap is untested");
+        }
         println!("--- ai check passed ---");
         return;
     }
@@ -13255,6 +13361,9 @@ fn setup(
     {
         let mut rt = sim.world.borrow_mut();
         let mut attached = 0;
+        // The class table as well: `AISetClass` names a class the way the cog does (`picup.ai`), and
+        // the runtime cannot read the archives.
+        rt.ai_classes = world.ai_classes.clone().into_iter().collect();
         for (index, thing) in level.things.iter().enumerate() {
             if let Some(class) = level.template_param(&thing.template, "aiclass")
                 && let Some(raw) = world.ai_classes.get(&class.to_ascii_lowercase())

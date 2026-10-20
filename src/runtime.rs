@@ -513,6 +513,16 @@ pub struct Runtime {
     pub ai_move: BTreeMap<usize, [f32; 3]>,
     pub ai_chase: BTreeMap<usize, usize>,
     pub ai_look: BTreeMap<usize, [f32; 3]>,
+    /// `AISetFireTarget(actor, thing)`: what an actor shoots at, when a script names one instead of
+    /// leaving it to its instincts (`00_AITurnCoat.cog` turns an actor on a victim, `06_drama.cog`
+    /// stages a shooting). Absent means "the player", which is what `ai_tick` does by default.
+    pub ai_fire_target: BTreeMap<usize, usize>,
+    /// `AIFlee(actor, from)`: the actor runs *away* from that thing and stops shooting.
+    pub ai_flee: BTreeMap<usize, usize>,
+    /// The level's `.ai` classes by name (`"picup.ai"` -> its text), so `AISetClass` can swap an
+    /// actor's instincts mid-fight: level 11's `endlevel` gives Pic and Gorc a new class when the
+    /// fight changes phase. Filled by the loader; the runtime cannot read the archives.
+    pub ai_classes: BTreeMap<String, String>,
     /// Per-template `weapon=` — the template an actor fires.
     pub template_weapon: BTreeMap<String, String>,
     /// How close an actor walks to the player before it stops: this build's standoff, since
@@ -906,6 +916,9 @@ impl Runtime {
             ai_move: BTreeMap::new(),
             ai_chase: BTreeMap::new(),
             ai_look: BTreeMap::new(),
+            ai_fire_target: BTreeMap::new(),
+            ai_flee: BTreeMap::new(),
+            ai_classes: BTreeMap::new(),
             level_complete: false,
             music: None,
             music_volume: 1.0,
@@ -1398,6 +1411,9 @@ impl Runtime {
                 | "bittest"
                 | "skilltarget"
                 | "getactorweapon"
+                | "aisetfiretarget"
+                | "aiflee"
+                | "aisetclass"
                 | "setactorweapon"
                 | "amputatejoint"
                 | "playmode"
@@ -1531,7 +1547,15 @@ impl Runtime {
             // No instinct class means no sight and no instincts: a class-less actor still walks a
             // destination a script gave it, but it never spots the player on its own.
             let sighted = ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target));
-            if scripted.is_none() && !sighted {
+            // `AISetFireTarget`: what this actor shoots at, when a script names it. That replaces the
+            // player as the thing it has in sight — `00_AITurnCoat.cog` turns an actor on a victim —
+            // so it is computed here, before the out-of-sight early return below.
+            let aim = self
+                .ai_fire_target
+                .get(&index)
+                .and_then(|t| self.things.get(*t).map(|t| t.pos))
+                .filter(|at| self.solids.as_ref().is_none_or(|s| !s.segment_blocked(from, *at)));
+            if scripted.is_none() && !sighted && aim.is_none() {
                 // Out of sight: the actor stands where it is, turning to a scripted look target.
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.ai_target = None;
@@ -1541,6 +1565,47 @@ impl Runtime {
                 }
                 continue;
             }
+            // `AIFlee(actor, from)`: the actor runs away from that thing and does not shoot, which
+            // is a whole mode in the engine (`sithAI_Flee`); here the goal is the opposite
+            // direction, ten units out.
+            let fleeing = self
+                .ai_flee
+                .get(&index)
+                .and_then(|t| self.things.get(*t).map(|t| t.pos));
+            if let Some(threat) = fleeing {
+                let away = [from[0] - threat[0], from[1] - threat[1]];
+                let len = (away[0] * away[0] + away[1] * away[1]).sqrt().max(0.001);
+                let goal = [
+                    from[0] + away[0] / len * 10.0,
+                    from[1] + away[1] / len * 10.0,
+                    from[2],
+                ];
+                let speed = self.template_speed.get(&ai_template).copied().unwrap_or(0.0)
+                    * self.actor_speed.get(&index).copied().unwrap_or(1.0);
+                if speed > 0.0 {
+                    let step = (speed * dt).min(len);
+                    let next = [
+                        from[0] + away[0] / len * step,
+                        from[1] + away[1] / len * step,
+                        from[2],
+                    ];
+                    if let Some(thing) = self.things.get_mut(index) {
+                        thing.pos = next;
+                        thing.ai_target = Some(goal);
+                        thing.yaw = away[1].atan2(away[0]).to_degrees();
+                    }
+                    walked += 1;
+                    self.walked.push(index);
+                    let dt = dt.max(1e-4);
+                    self.walk_vel
+                        .insert(index, [(next[0] - from[0]) / dt, (next[1] - from[1]) / dt]);
+                }
+                continue;
+            }
+            // `AISetFireTarget`: what this actor shoots at, when a script names it. Sight is still
+            // needed, but of *that* thing — `00_AITurnCoat.cog` turns an actor on a victim it can see.
+            // `AISetFireTarget`: what this actor shoots at, when a script names it. Sight is still
+            // needed, but of *that* thing — `00_AITurnCoat.cog` turns an actor on a victim it can see.
             // Where the legs go: the scripted destination, else the player. In the open this is a
             // straight line — the `.ai` has no pathfinder here, marked as such in §16.12.
             let goal = scripted.unwrap_or(target);
@@ -1611,8 +1676,10 @@ impl Runtime {
             }
             // The instinct that fires. An actor whose class has no `PrimaryFire` never
             // shoots, however close the player is, and a scripted walk does not shoot at what it
-            // cannot see.
-            if !sighted || !ready || ai.as_ref().and_then(|ai| ai.instinct("PrimaryFire")).is_none() {
+            // cannot see. A scripted fire target replaces the player as what it shoots at.
+            let shooting_at = aim.unwrap_or(target);
+            let can_see = if aim.is_some() { true } else { sighted };
+            if !can_see || !ready || ai.as_ref().and_then(|ai| ai.instinct("PrimaryFire")).is_none() {
                 continue;
             }
             let Some(weapon) = self
@@ -1622,8 +1689,8 @@ impl Runtime {
             else {
                 continue;
             };
-            let dx = target[0] - from[0];
-            let dy = target[1] - from[1];
+            let dx = shooting_at[0] - from[0];
+            let dy = shooting_at[1] - from[1];
             shots.push((index, weapon));
             if let Some(thing) = self.things.get_mut(index) {
                 thing.yaw = dy.atan2(dx).to_degrees();
@@ -2706,6 +2773,49 @@ impl Runtime {
             // caller can resolve the next one through the episode graph.
             "jkendlevel" | "endlevel" => {
                 self.level_complete = idx(0) != 0 || num(0) != 0.0;
+                Value::Nil
+            }
+            // ---- the scripted AI: who an actor shoots, where it runs, which instincts it has ----
+            //
+            // `AISetFireTarget(actor, thing)`: `sithAI_SetFireTarget` stores the thing on the actor;
+            // a negative clears it back to the instincts. `00_AITurnCoat.cog` and `06_drama.cog` are
+            // the shipped users — both aim one actor at another.
+            "aisetfiretarget" => {
+                if let Ok(actor) = usize::try_from(idx(0)) {
+                    match usize::try_from(idx(1)) {
+                        Ok(target) if self.things.get(target).is_some() => {
+                            self.ai_fire_target.insert(actor, target);
+                        }
+                        _ => {
+                            self.ai_fire_target.remove(&actor);
+                        }
+                    }
+                }
+                Value::Nil
+            }
+            // `AIFlee(actor, from)`: the actor keeps its distance from that thing and stops firing —
+            // `sithAI_Flee` sets the fleeing mode, which `ai_tick` reads as "walk away, do not shoot".
+            "aiflee" => {
+                if let (Ok(actor), Ok(from)) = (usize::try_from(idx(0)), usize::try_from(idx(1))) {
+                    self.ai_flee.insert(actor, from);
+                }
+                Value::Nil
+            }
+            // `AISetClass(actor, class)`: the argument is the `.ai` file name the cog bound
+            // (`ai picup_ai=picup.ai`), so the actor's instincts are replaced wholesale.
+            "aisetclass" => {
+                let name = match args.get(1) {
+                    Some(Value::Str(s)) => s.trim().to_ascii_lowercase(),
+                    _ => String::new(),
+                };
+                let raw = self
+                    .ai_classes
+                    .get(&name)
+                    .or_else(|| name.strip_suffix(".ai").and_then(|n| self.ai_classes.get(n)))
+                    .cloned();
+                if let (Ok(actor), Some(raw)) = (usize::try_from(idx(0)), raw) {
+                    self.ai.insert(actor, crate::ai::parse(&raw));
+                }
                 Value::Nil
             }
             // `ThingLight(thing, value)`: how much light the thing emits. Stored on the
@@ -3831,6 +3941,9 @@ mod tests {
             ai_move: BTreeMap::new(),
             ai_chase: BTreeMap::new(),
             ai_look: BTreeMap::new(),
+            ai_fire_target: BTreeMap::new(),
+            ai_flee: BTreeMap::new(),
+            ai_classes: BTreeMap::new(),
             level_complete: false,
             music: None,
             music_volume: 1.0,
