@@ -155,6 +155,14 @@ pub const DAMAGE_FALL: u32 = 0x40;
 /// `SITH_AF_INVULNERABLE`: `actor->flags` bit 3. `sithActor_DamageActor` checks it before anything
 /// else, so `SetActorFlags(player, 0x8)` is how a script makes someone untouchable.
 pub const AF_INVULNERABLE: u32 = 0x8;
+/// `SITH_SECTOR_COGLINKED`: a cog is placed on this sector, so it can hear `sighted`/`entered`.
+pub const SECTOR_COGLINKED: u32 = 0x4;
+/// `SITH_SECTOR_SEEN`: latched the first time the renderer draws the sector.
+pub const SECTOR_SEEN: u32 = 0x4000;
+/// `SITH_TF_CAPTURED`: the thing has a cog placed on it (`sithRender_RenderThing` is what checks it).
+pub const TF_CAPTURED: u32 = 0x400;
+/// `SITH_TF_INCAMFOV`: latched the first time the renderer draws the thing.
+pub const TF_INCAMFOV: u32 = 0x100000;
 /// A template's `type=` word as the engine's `SithThingType` number.
 ///
 /// From `types_enums.h`: camera 1, actor 2, weapon 3, debris 4, item 5, explosion 6,
@@ -1703,6 +1711,54 @@ impl Runtime {
             }
         }
         out
+    }
+
+    /// The first time the renderer draws a **thing** (`sithRender_RenderThing`, `sithRender.c:2995`):
+    /// `SITH_TF_INCAMFOV` (0x100000) is latched, and a `SITH_TF_CAPTURED` (0x400) thing — one that has
+    /// a cog placed on it — sends `sighted` (id 9) to those cogs. Level 1's goal is exactly this:
+    /// `01_goal0.cog 204` puts the script on 8t88, so *seeing him* completes "Find 8t88 before he
+    /// escapes Nar Shaddaa". The same pass wakes a sleeping actor in the engine, which this port has no
+    /// sleep state for.
+    pub fn thing_sighted(&mut self, thing: usize) -> usize {
+        let Some(t) = self.things.get_mut(thing) else { return 0 };
+        if t.flags & TF_INCAMFOV != 0 {
+            return 0;
+        }
+        t.flags |= TF_INCAMFOV;
+        if t.flags & TF_CAPTURED == 0 {
+            return 0;
+        }
+        let mut sent = 0;
+        for (instance, _link, target) in &self.thing_links {
+            if *target == thing {
+                self.pending_messages.push((*instance, "sighted"));
+                sent += 1;
+            }
+        }
+        sent
+    }
+
+    /// The first time the renderer draws a sector: `sithRender` latches `SITH_SECTOR_SEEN` (0x4000)
+    /// and, when the sector is `SITH_SECTOR_COGLINKED` (0x4), sends `sighted` (id 9) to the cogs placed
+    /// on it. That is how level 1's goal fires — `01_goal0.cog` sits on the sector that holds 8t88, so
+    /// *seeing* the area completes "Find 8t88 before he escapes Nar Shaddaa".
+    pub fn sector_sighted(&mut self, sector: usize) -> usize {
+        let Some(flags) = self.sector_flags.get_mut(sector) else { return 0 };
+        if *flags & SECTOR_SEEN != 0 {
+            return 0;
+        }
+        *flags |= SECTOR_SEEN;
+        if *flags & SECTOR_COGLINKED == 0 {
+            return 0;
+        }
+        let mut sent = 0;
+        for (instance, _link, target) in &self.sector_links {
+            if *target == sector {
+                self.pending_messages.push((*instance, "sighted"));
+                sent += 1;
+            }
+        }
+        sent
     }
 
     /// The next track in the current range, wrapping to the range's start: what `stdMci_Play(from,

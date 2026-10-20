@@ -728,6 +728,36 @@ triggers: surface 839 is crossed by a segment through its centre
 
 and that a degenerate segment is not a crossing.
 
+**`sighted`: the first time the renderer draws a thing or a room.** `sithRender_RenderThing`
+(`sithRender.c:2995`) latches `SITH_TF_INCAMFOV` (0x100000) on a thing the first time it draws it, and
+a `SITH_TF_CAPTURED` (0x400) thing — one with a cog placed on it — sends `sighted` (id 9) to that cog;
+the sector paths do the same with `SITH_SECTOR_SEEN` (0x4000) for a `SITH_SECTOR_COGLINKED` (0x4)
+room. This is how levels complete. Level 1's goal is `01_goal0.cog 204`, placed on 8t88: the script's
+`sighted` handler calls `SendMessage(GetMasterCOG(), user0)`, and `01_endlevel.cog`'s `user0` handler
+sets the goal flag, plays `Accomplish1.wav`, freezes Kyle as invulnerable, sleeps three seconds and
+calls `jkEndLevel(1)` — so *seeing 8t88* is what ends the level.
+
+The port latches the same bits. `cull_sectors` already decides which rooms are drawn, so it marks
+those seen and tests each thing's body against the same frustum planes, which is coarser than the
+engine's per-thing clip (no per-triangle test, so something in the same room behind a pillar can fire
+a frame early). `--endlevel` drives the whole chain from that trigger rather than synthesising the
+message:
+
+```text
+endlevel: `01_goal0.cog` waits on `sighted` from thing 204 (flags 0x20000400)
+endlevel: the thing is drawn for the first time -> 1 `sighted` message(s)
+endlevel: 2 message(s) so far; player thing 0 (GetLocalPlayerThing Num(0.0)), actor flags 0xa00008
+endlevel: player invulnerable while the handler sleeps: true
+endlevel: 2 message(s) delivered, goal bin 100 = 3, level_complete true
+```
+
+Two things that chain taught the port. `user0` is a keyword, not a per-script symbol — `sithCog_Startup`
+registers every message name with its id, so the VM seeds them as globals and a script can send `user0`
+without declaring `message user0`. And a `World` guard must not be held across a label call: the first
+version of the gate took `pending_messages` inside the `for` head, so the `Arc<Mutex<Runtime>>` stayed
+locked and the first verb the label called deadlocked instead of panicking the way a `RefCell` would.
+
+
 **The use key sends `activate`, and the target is a linked surface.** `activate` is the third most
 common label level 1 declares (x14). A script's `surface` symbol is the link
 (`sithCog_LinkCogToSurface`), so the player's use action messages the cogs linked to the surface they

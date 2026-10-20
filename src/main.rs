@@ -1875,11 +1875,14 @@ fn main() {
     }
 
     if endlevel_check {
-        // Finishing a level **through the shipped scripts**, not by calling `jkEndLevel` directly:
-        // `01_endlevel.cog` registers itself as the master cog in `startup`, a goal script reports a
-        // finished objective with `SendMessage(GetMasterCOG(), user0)`, and the master's `user0`
-        // handler sets the goal flag, plays its sound, sleep 3 s and calls `jkEndLevel(1)`.
+        // Finishing a level **through the shipped scripts**, not by calling `jkEndLevel` directly: the
+        // player *sees* 8t88, `sithRender_RenderThing` sends `sighted` to the cog placed on him
+        // (`01_goal0.cog 204`), that script reports the objective to the master cog, and
+        // `01_endlevel.cog`'s `user0` handler sets the goal flag, plays its sound, sleeps 3 s and calls
+        // `jkEndLevel(1)`.
         let sim_world = runtime::Runtime::handle(&world.level);
+        // The link tables are what let `sighted` reach `01_goal0.cog`; the load path wires them too.
+        sim_world.borrow_mut().wire_links(&world.level.cogs, &world.cogs);
         let mut vms: Vec<(String, cog::Vm)> = Vec::new();
         for inst in &world.level.cogs {
             let Some(script) = world.cogs.get(&inst.script) else { continue };
@@ -1896,12 +1899,41 @@ fn main() {
             "endlevel: {} instance(s), master cog {master:?} (set by `SetMasterCOG(GetSelfCOG())`)",
             vms.len()
         );
-        // The goal script's own message: `user0` is id 27 in the retail keyword table.
-        assert_eq!(cog::message_id("user0"), Some(27));
-        sim_world.borrow_mut().call(
-            "SendMessage",
-            &[cog::Value::Num(master.unwrap_or(-1) as f64), cog::Value::Num(27.0)],
+        // The trigger is the level's own: the **goal** cog waits on `sighted`, and on level 1 that is
+        // `01_goal0.cog` on 8t88 (thing 204). `sithRender_RenderThing` sends `sighted` the first time the
+        // thing is drawn, so "see 8t88" is what starts the end of the level. Other scripts declare
+        // `sighted` too (`01_TieBomber.cog` reacts to sighting the player), which is why the goal is
+        // selected by name.
+        let goal_link = sim_world
+            .borrow()
+            .thing_links
+            .iter()
+            .find(|(instance, _, _)| {
+                world.level.cogs.get(*instance).is_some_and(|c| {
+                    c.script.to_ascii_lowercase().contains("goal")
+                        && world.cogs.get(&c.script).is_some_and(|s| s.label("sighted").is_some())
+                })
+            })
+            .map(|(instance, _, thing)| (*instance, *thing))
+            .expect("no goal cog waits on `sighted`");
+        let (goal_instance, goal_thing) = goal_link;
+        let goal_script = world.level.cogs[goal_instance].script.clone();
+        let flags = sim_world
+            .borrow()
+            .things
+            .get(goal_thing)
+            .map(|t| t.flags)
+            .unwrap_or(0);
+        println!(
+            "endlevel: `{goal_script}` waits on `sighted` from thing {goal_thing} (flags {flags:#x})"
         );
+        assert!(
+            flags & runtime::TF_CAPTURED != 0,
+            "thing {goal_thing} is not CAPTURED, so `sighted` would reach nobody"
+        );
+        let sent = sim_world.borrow_mut().thing_sighted(goal_thing);
+        println!("endlevel: the thing is drawn for the first time -> {sent} `sighted` message(s)");
+        assert!(sent > 0, "the goal thing sent no `sighted` message");
         let mut delivered = 0usize;
         let mut completed = false;
         let player_index = sim_world
@@ -1911,6 +1943,23 @@ fn main() {
             .position(|t| t.eq_ignore_ascii_case("walkplayer"));
         let mut checked_invuln = false;
         for _ in 0..40 {
+            // The thing/sector bus, as `deliver_thing_messages` runs it: this is where the `sighted`
+            // the gate triggered arrives at `01_goal0.cog`.
+            //
+            // The queued list is moved out **before** the loop: `World` is an `Arc<Mutex<..>>`, so a
+            // guard held by the `for` head would deadlock on the first verb the label calls.
+            let pending = std::mem::take(&mut sim_world.borrow_mut().pending_messages);
+            for (instance, label) in pending {
+                let Some((script_name, vm)) = vms.get_mut(instance) else { continue };
+                let Some(script) = world.cogs.get(script_name) else { continue };
+                if script.label(label).is_none() {
+                    continue;
+                }
+                let outcome = vm.run_label(script, label);
+                if outcome.is_ok() {
+                    delivered += 1;
+                }
+            }
             // The bus, exactly as `deliver_cog_messages` runs it.
             loop {
                 let queued = std::mem::take(&mut sim_world.borrow_mut().messages);
@@ -1948,8 +1997,12 @@ fn main() {
             if !checked_invuln
                 && let Some(player) = player_index
             {
+                let local = sim_world.borrow_mut().call("GetLocalPlayerThing", &[]);
                 let flags = sim_world.borrow().actor_flags.get(&player).copied().unwrap_or(0);
                 let invulnerable = flags & runtime::AF_INVULNERABLE != 0;
+                println!(
+                    "endlevel: {delivered} message(s) so far; player thing {player} (GetLocalPlayerThing {local:?}), actor flags {flags:#x}"
+                );
                 println!("endlevel: player invulnerable while the handler sleeps: {invulnerable}");
                 assert!(
                     invulnerable,
@@ -9668,18 +9721,22 @@ fn cull_sectors(
     {
         seeds.push(at);
     }
-    let mut any = |_: &[[f32; 3]]| true;
-    let runtime = sim.as_deref().map(|s| s.world.borrow());
-    let gates = runtime.as_ref().map(|rt| rt.gates()).unwrap_or_default();
-    let mut best: Option<(usize, Vec<usize>)> = None;
-    for seed in &seeds {
-        let reach = view.solids.visible_sectors(&[*seed], gates, &mut any);
-        let overlap = reach.iter().filter(|s| frustum.contains(s)).count();
-        if best.as_ref().is_none_or(|(score, _)| overlap > *score) {
-            best = Some((overlap, reach));
+    // The portal walk borrows the runtime's sector gates; the scope ends before the sighting pass
+    // below, which needs to write to it.
+    let (overlap, reachable) = {
+        let mut any = |_: &[[f32; 3]]| true;
+        let runtime = sim.as_deref().map(|s| s.world.borrow());
+        let gates = runtime.as_ref().map(|rt| rt.gates()).unwrap_or_default();
+        let mut best: Option<(usize, Vec<usize>)> = None;
+        for seed in &seeds {
+            let reach = view.solids.visible_sectors(&[*seed], gates, &mut any);
+            let overlap = reach.iter().filter(|s| frustum.contains(s)).count();
+            if best.as_ref().is_none_or(|(score, _)| overlap > *score) {
+                best = Some((overlap, reach));
+            }
         }
-    }
-    let (overlap, reachable) = best.unwrap_or((0, Vec::new()));
+        best.unwrap_or((0, Vec::new()))
+    };
     let use_portals = overlap > 0 && reachable.len() > 1;
     if std::env::var_os("BK_CULL_TRACE").is_some() && shown.is_none() {
         println!(
@@ -9693,6 +9750,33 @@ fn cull_sectors(
         let in_frustum = frustum.contains(&sector);
         let through_portal = !use_portals || reachable.contains(&sector);
         wanted[sector] = in_frustum && through_portal;
+    }
+
+    // `sithRender` latches `SITH_SECTOR_SEEN` the first time it draws a room, and a COGLINKED room
+    // then gets `sighted`. It does the same per **thing** (`sithRender_RenderThing`): a thing that has a
+    // cog on it sends `sighted` the first time it is drawn. That second one is level 1's goal —
+    // `01_goal0.cog 204` puts the script on 8t88, so seeing him is what ends the level (§16.12).
+    if let Some(sim) = sim.as_deref() {
+        let mut rt = sim.world.borrow_mut();
+        for (sector, &visible) in wanted.iter().enumerate() {
+            if visible {
+                rt.sector_sighted(sector);
+            }
+        }
+        // A thing counts as drawn when its own sector is visible and its body is inside the frustum.
+        // That is coarser than the engine's per-thing clip (no per-triangle test), so it can fire a
+        // frame early for something in the same room behind a pillar.
+        let seen: Vec<usize> = rt
+            .things
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| wanted.get(t.sector.max(0) as usize).copied().unwrap_or(true))
+            .filter(|(_, t)| sphere_in_frustum(&planes, Vec3::from(t.pos), 1.0))
+            .map(|(index, _)| index)
+            .collect();
+        for index in seen {
+            rt.thing_sighted(index);
+        }
     }
 
     for (id, mut visibility) in &mut batches {

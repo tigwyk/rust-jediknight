@@ -89,50 +89,58 @@ impl SymKind {
 /// position. `pickedup` is a shipped script's own name and appears in no retail table, so it — and
 /// anything else unlisted — stays on the positional fallback in [`Cog::label_for_message_id`].
 pub fn message_id(name: &str) -> Option<i32> {
-    Some(match name.to_ascii_lowercase().as_str() {
-        "activate" | "activated" => 1,
-        "removed" => 2,
-        "startup" => 3,
-        "timer" => 4,
-        "blocked" => 5,
-        "entered" => 6,
-        "exited" => 7,
-        "crossed" => 8,
-        "sighted" => 9,
-        "damaged" => 10,
-        "arrived" => 11,
-        "killed" => 12,
-        "pulse" => 13,
-        "touched" => 14,
-        "created" => 15,
-        "loading" => 16,
-        "selected" => 17,
-        "deselected" => 18,
-        "autoselect" => 19,
-        "changed" => 20,
-        "deactivated" => 21,
-        "shutdown" => 22,
-        "respawn" => 23,
-        "aievent" => 24,
-        "skill" => 25,
-        "taken" => 26,
-        "user0" => 27,
-        "user1" => 28,
-        "user2" => 29,
-        "user3" => 30,
-        "user4" => 31,
-        "user5" => 32,
-        "user6" => 33,
-        "user7" => 34,
-        "newplayer" => 35,
-        "fire" => 36,
-        "join" => 37,
-        "leave" => 38,
-        "splash" => 39,
-        "trigger" => 40,
-        _ => return None,
-    })
+    MESSAGE_IDS
+        .iter()
+        .find(|(known, _)| known.eq_ignore_ascii_case(name))
+        .map(|(_, id)| *id)
 }
+
+/// The same table as data, because `sithCog_Startup` registers **every** one of these as a keyword: a
+/// script can write `SendMessage(cog, user0)` without declaring `message user0` at all, so the VM needs
+/// them in its globals rather than bound per script.
+pub const MESSAGE_IDS: &[(&str, i32)] = &[
+    ("activate", 1),
+    ("activated", 1),
+    ("removed", 2),
+    ("startup", 3),
+    ("timer", 4),
+    ("blocked", 5),
+    ("entered", 6),
+    ("exited", 7),
+    ("crossed", 8),
+    ("sighted", 9),
+    ("damaged", 10),
+    ("arrived", 11),
+    ("killed", 12),
+    ("pulse", 13),
+    ("touched", 14),
+    ("created", 15),
+    ("loading", 16),
+    ("selected", 17),
+    ("deselected", 18),
+    ("autoselect", 19),
+    ("changed", 20),
+    ("deactivated", 21),
+    ("shutdown", 22),
+    ("respawn", 23),
+    ("aievent", 24),
+    ("skill", 25),
+    ("taken", 26),
+    ("user0", 27),
+    ("user1", 28),
+    ("user2", 29),
+    ("user3", 30),
+    ("user4", 31),
+    ("user5", 32),
+    ("user6", 33),
+    ("user7", 34),
+    ("newplayer", 35),
+    ("fire", 36),
+    ("join", 37),
+    ("leave", 38),
+    ("splash", 39),
+    ("trigger", 40),
+];
 
 #[derive(Debug, Clone)]
 pub struct Symbol {
@@ -284,14 +292,6 @@ impl Cog {
         // A `message` symbol in an expression is the engine's message **id**, not a variable:
         // `sithCogParse` gives `message user0` the value `SITH_MESSAGE_USER0` (27), and that number is
         // what `SendMessage(GetMasterCOG(), user0)` pushes on the stack.
-        for sym in &self.symbols {
-            if sym.kind != SymKind::Message {
-                continue;
-            }
-            if let Some(id) = message_id(&sym.name) {
-                vm.set_var(&sym.name, Value::Num(id as f64));
-            }
-        }
         // Locals still need their declared initialisers, which are not all numbers:
         // `sound locked0=i00ky73t.wav local` is a filename, and a vector literal is
         // single-quoted (`'0.0 1.0 0.0'`). Parsing them as numbers silently turned
@@ -958,8 +958,15 @@ const SLEEPING: &str = "::sleeping";
 
 impl Vm {
     pub fn new() -> Self {
+        // `sithCog_Startup` registers every message name as a **keyword** with its id, so a script can
+        // say `SendMessage(cog, user0)` without declaring anything: `user0` is 27 before any `.cog` text
+        // is read. These are globals, not per-script symbols.
+        let vars = MESSAGE_IDS
+            .iter()
+            .map(|(name, id)| ((*name).to_string(), Value::Num(*id as f64)))
+            .collect();
         Self {
-            vars: HashMap::new(),
+            vars,
             trace: Trace::default(),
             depth: 0,
             budget: 2_000_000,

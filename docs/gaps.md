@@ -188,6 +188,16 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 
 ## 6. Recently closed, so it is not mistaken for missing
 
+* **Level 1 ends when you see 8t88, from the level's own scripts.** `sithRender_RenderThing` sends
+  `sighted` the first time it draws a `CAPTURED` thing, so the port latches that in `cull_sectors`
+  (and the sector form, `SITH_SECTOR_SEEN`). `01_goal0.cog 204` — the goal script placed on 8t88 —
+  answers with `SendMessage(GetMasterCOG(), user0)`, and `01_endlevel.cog`'s `user0` handler sets the
+  goal flag, plays `Accomplish1.wav`, freezes Kyle as invulnerable, sleeps 3 s and calls
+  `jkEndLevel(1)`. `--endlevel` drives exactly that chain and asserts the goal bin, the invulnerability
+  window and `level_complete`. Along the way it proved that message names are engine keywords
+  (`sithCog_Startup` registers `user0` = 27), so the VM seeds them as globals rather than binding them
+  per script.
+
 * **A level can be finished through its own scripts.** `01_endlevel.cog` registers itself as the master
   cog in `startup` (`SetMasterCOG(GetSelfCOG())`), a goal script reports the objective with
   `SendMessage(GetMasterCOG(), user0)`, and the master's `user0` handler sets the goal flag, plays

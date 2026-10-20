@@ -81,11 +81,13 @@ flag                                                   exit  what it prints
                                                              the player's own body is drawn by 0 entity(ies) (want 0)
 --live-check                                             0  --- live check passed ---
 --ai                                                     0  --- ai check passed ---
---endlevel                                               0  master cog 26 (registered by
-                                                             `SetMasterCOG(GetSelfCOG())`), the goal's
-                                                             `user0` (id 27) delivered to it, goal bin
-                                                             100 = 3 and `level_complete` true --
-                                                             `jkEndLevel(1)` after the handler's sleep
+--endlevel                                               0  the level's own trigger: `01_goal0.cog`
+                                                             waits on `sighted` from thing 204 (8t88),
+                                                             the draw sends it, the goal messages master
+                                                             cog 26 (`user0` = 27), Kyle goes invulnerable
+                                                             (flags 0xa00008) for the handler's 3 s sleep
+                                                             and `jkEndLevel(1)` completes the level --
+                                                             goal bin 100 = 3
 --door                                                   0  the player's use action, the level's own script, the solver:
                                                              `00_door.cog` on
                                                              thing 4 answers `activate` by clearing its sector's
