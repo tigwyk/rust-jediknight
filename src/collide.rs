@@ -1641,6 +1641,41 @@ mod tests {
         }
     }
 
+    /// The engine's door rule, on a body rather than on flags: a doorway a script has **shut** is a wall
+    /// to the walker, and one it has **opened** is a doorway.
+    ///
+    /// `Gates` is the whole of the state — `SECTOR_ADJOINS_OFF` on either room (what
+    /// `SetSectorAdjoins(sector, 0)` sets, and what every shipped door script calls on startup) and the
+    /// link's `ADJOIN_MOVE` — and `move_body` is the body's own mover, so this is the same decision the
+    /// player's step makes. The fixture is the three-room corridor: rooms at `y = 0, 8, 16`, one opening
+    /// between each pair.
+    #[test]
+    fn a_shut_doorway_stops_the_body_and_an_open_one_lets_it_through() {
+        let solids = corridor();
+        let radius = 0.065;
+        // In the first room, facing the opening at y = 0, with a step long enough to carry the body through.
+        let start = [0.0, -0.5, 0.5];
+        let step = [0.0, 1.2, 0.0];
+        let links = [ADJOIN_MOVE | ADJOIN_VISIBLE; 4];
+
+        let shut = Gates { sectors: &[SECTOR_ADJOINS_OFF, 0, 0], adjoins: &links };
+        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, shut);
+        assert_eq!(sector, 0, "a shut doorway must leave the body in its own room");
+        assert!(blocked, "the body should report the contact that stopped it");
+
+        let open = Gates { sectors: &[0, 0, 0], adjoins: &links };
+        let (pos, sector, _) = solids.move_body(0, start, step, radius, 0.066, open);
+        assert_eq!(sector, 1, "an open doorway must let the body into the next room, ended at {pos:?}");
+        assert!(pos[1] > start[1], "the body should be past the opening, not at it: {pos:?}");
+
+        // And the other side of the same rule: an opening a script shut with `ClearAdjoinFlags(x, 2)`.
+        let no_move = [ADJOIN_VISIBLE; 4];
+        let barred = Gates { sectors: &[0, 0, 0], adjoins: &no_move };
+        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, barred);
+        assert_eq!(sector, 0, "an opening without `ADJOIN_MOVE` must stop the body");
+        assert!(blocked, "a force field should report the contact");
+    }
+
     /// Four walls and a floor, each with a polygon and the surface id its plane carries: the shape
     /// every sweep test needs, and what a sector looks like to `sweep`.
     fn boxed() -> Solids {

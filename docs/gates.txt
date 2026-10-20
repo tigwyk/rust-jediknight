@@ -5,7 +5,7 @@ Recorded at round 85. Target: `G:\Games\Star Wars Jedi Knight - Dark Forces 2`
 (GOG, plaintext JK.EXE, image base 0x400000,
 sha256 12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44).
 
-`cargo test` -> 81 passed, 0 failed.
+`cargo test` -> 82 passed, 0 failed.
 `cargo clippy --release --all-targets` -> 56 warnings, no errors.
 
 Each flag below is a gate: it asserts on the live runtime (or the shipped data) and exits
