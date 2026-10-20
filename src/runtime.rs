@@ -26,31 +26,63 @@ impl World {
         Self(std::sync::Arc::new(std::sync::Mutex::new(runtime)))
     }
 
-    /// Take the runtime, or **fail loudly** if this thread already holds it.
+    /// Take the runtime, or **fail loudly** if *this thread* already holds it.
     ///
-    /// `Mutex::lock` waits forever on a second borrow by the same thread, which turns a wiring
-    /// mistake into a hang with no message — a gate that hangs looks like a slow gate, and this
-    /// codebase has now produced that mistake four times. A panic names it instead, and the message
-    /// says what to do about it.
-    fn take(&self) -> std::sync::MutexGuard<'_, Runtime> {
-        match self.0.try_lock() {
-            Ok(guard) => guard,
-            Err(std::sync::TryLockError::WouldBlock) => {
-                panic!(
-                    "the runtime is already borrowed on this thread: drop the guard you hold before \
-                     borrowing again (a gate that holds one while taking another deadlocks)"
-                )
-            }
-            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+    /// Two different mistakes look the same to `Mutex::lock`: one thread borrowing twice (a wiring
+    /// bug, which used to hang a gate with no message) and two systems wanting the world at once
+    /// (normal — Bevy runs systems in parallel, and waiting is correct). Only the first should
+    /// panic, so the thread-local flag distinguishes them: a same-thread second borrow panics by
+    /// name, cross-thread contention waits.
+    fn take(&self) -> Borrow<'_> {
+        if HELD.with(|held| held.replace(true)) {
+            panic!(
+                "the runtime is already borrowed on this thread: drop the guard you hold before \
+                 borrowing again (a gate that holds one while taking another deadlocks)"
+            );
+        }
+        match self.0.lock() {
+            Ok(guard) => Borrow { guard, _not_send: std::marker::PhantomData },
+            Err(e) => Borrow { guard: e.into_inner(), _not_send: std::marker::PhantomData },
         }
     }
 
-    pub fn borrow(&self) -> std::sync::MutexGuard<'_, Runtime> {
+    pub fn borrow(&self) -> Borrow<'_> {
         self.take()
     }
 
-    pub fn borrow_mut(&self) -> std::sync::MutexGuard<'_, Runtime> {
+    pub fn borrow_mut(&self) -> Borrow<'_> {
         self.take()
+    }
+}
+
+thread_local! {
+    /// Whether this thread already holds the runtime. `Cell<bool>` in a thread-local is enough: the
+    /// only writer is `Borrow`'s `Drop`, on the same thread.
+    static HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A borrow of the runtime that clears this thread's "held" flag when it drops.
+pub struct Borrow<'a> {
+    guard: std::sync::MutexGuard<'a, Runtime>,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+impl std::ops::Deref for Borrow<'_> {
+    type Target = Runtime;
+    fn deref(&self) -> &Runtime {
+        self.guard.deref()
+    }
+}
+
+impl std::ops::DerefMut for Borrow<'_> {
+    fn deref_mut(&mut self) -> &mut Runtime {
+        self.guard.deref_mut()
+    }
+}
+
+impl Drop for Borrow<'_> {
+    fn drop(&mut self) {
+        HELD.with(|held| held.set(false));
     }
 }
 

@@ -15280,7 +15280,9 @@ fn live_check(
     let rt = sim.world.borrow();
     let mut failed = 0;
     let mut say = |ok: bool, line: String| {
-        println!("live: {line}");
+        // A failed invariant has to be findable in the output: the summary said "1 invariant(s)
+        // failed" and left the reader to guess which.
+        println!("live: {} {line}", if ok { "" } else { "FAIL" });
         if !ok {
             failed += 1;
         }
@@ -15333,9 +15335,15 @@ fn live_check(
         .map(|a| (a.0.iter().map(|x| x.parts.len()).sum::<usize>(), a.0.len()))
         .unwrap_or((0, 0));
     say(parts > 0 || things == 0, format!("{things} actor(s) with {parts} part(s)"));
+    // `sim.instances` holds the level's placed scripts **and** the item scripts the loader starts for
+    // bins the player holds, so it is bounded below by the placed count, not equal to it: the old
+    // equality reported "44 of 42 bound" as a failure and hid whether anything was really missing.
     let bound = sim.instances.len();
     let placed = world.level.cogs.len();
-    say(bound == placed, format!("{bound} of {placed} placed script instance(s) bound"));
+    say(
+        bound >= placed,
+        format!("{bound} script instance(s) bound for {placed} placed one(s)"),
+    );
     // The script queue: a pulse or timer has to have been delivered by now (the level's own scripts
     // arm one-second pulses, so a hundred frames is enough), or the pulse fade can never run (§16.10).
     let armed = sim
