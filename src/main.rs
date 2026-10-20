@@ -5146,6 +5146,9 @@ fn main() {
         // the very flags `collide::Gates` reads to decide a doorway is a wall.
         let handle = runtime::Runtime::handle(&world.level);
         handle.borrow_mut().wire_links(&world.level.cogs, &world.cogs);
+        // The collision world, for the chain's last link: a doorway the solver refused must become one it
+        // allows, or opening the door changes nothing a body can walk through.
+        let solids = collide::build(&world.level);
         // Every instance runs `startup` at load, as the engine does — and a door's whole state lives
         // there: `cog_00_door.cog`'s `startup` reads `GetThingSector(door0)` into the *local*
         // `doorSector` and shuts that sector, which is what `activate` later reopens.
@@ -5216,6 +5219,25 @@ fn main() {
                 let adjoins = rt.adjoin_flags.iter().zip(before.1.iter()).filter(|(a, b)| a != b).count();
                 (sectors, adjoins)
             };
+            // The last link of the chain, without needing a body: a doorway the solver *refused* before
+            // the use must be one it *allows* after it. `Gates::passable` is what `sweep` asks to decide
+            // whether a body may cross, so a flip here is the door becoming walkable.
+            let flipped = {
+                let rt = handle.borrow();
+                let was = collide::Gates { sectors: &before.0, adjoins: &before.1 };
+                let now = collide::Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags };
+                let mut flipped = 0;
+                for (sector, portals) in solids.portals.iter().enumerate() {
+                    for portal in portals {
+                        if was.passable(sector, portal.adjoin, portal.link)
+                            != now.passable(sector, portal.adjoin, portal.link)
+                        {
+                            flipped += 1;
+                        }
+                    }
+                }
+                flipped
+            };
             let name = world.level.cogs.get(*instance).map(|c| c.script.clone()).unwrap_or_default();
             let state = {
                 let rt = handle.borrow();
@@ -5224,20 +5246,20 @@ fn main() {
             let _ = state;
             let frame = { let mut rt = handle.borrow_mut(); rt.call("GetCurFrame", &[cog::Value::Num(*thing as f64)]) };
             let moving = { let mut rt = handle.borrow_mut(); rt.call("IsThingMoving", &[cog::Value::Num(*thing as f64)]) };
-            println!("door: {name} (cog {instance}, thing {thing}): {ran} label(s) ran, frame {frame:?}, moving {moving:?}, flags {changed:?}");
-            if changed.0 + changed.1 > 0 {
-                outcome = Some((*instance, *thing, ran, changed));
+            println!("door: {name} (cog {instance}, thing {thing}): {ran} label(s) ran, frame {frame:?}, moving {moving:?}, flags {changed:?}, {flipped} doorway(s) that were shut now passable");
+            if changed.0 + changed.1 > 0 && flipped > 0 {
+                outcome = Some((*instance, *thing, ran, changed, flipped));
                 break;
             }
         }
-        let Some((instance, thing, ran, (sectors, adjoins))) = outcome else {
+        let Some((instance, thing, ran, (sectors, adjoins), flipped)) = outcome else {
             panic!(
-                "{} linked thing(s) listen on `activate`, none of them changed a door flag: the chain from use to the sweep is broken",
+                "{} linked thing(s) listen on `activate`, none of them opened a doorway for the solver: the chain from use to the sweep is broken",
                 candidates.len()
             );
         };
         println!(
-            "door: cog {instance} on thing {thing}; {ran} message(s) run; {sectors} sector flag(s) and {adjoins} adjoin flag(s) changed by the level's own script"
+            "door: cog {instance} on thing {thing}; {ran} message(s) run; {sectors} sector flag(s) and {adjoins} adjoin flag(s) changed; {flipped} doorway(s) the solver refused are now passable"
         );
         println!("--- door check passed ---");
         return;

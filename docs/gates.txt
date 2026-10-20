@@ -81,8 +81,8 @@ flag                                                   exit  what it prints
                                                              the player's own body is drawn by 0 entity(ies) (want 0)
 --live-check                                             0  --- live check passed ---
 --ai                                                     0  --- ai check passed ---
---door                                                   0  the player's use action, the level's own script and the
-                                                             flag the sweep reads, in one process: `00_door.cog` on
+--door                                                   0  the player's use action, the level's own script, the solver:
+                                                             `00_door.cog` on
                                                              thing 4 answers `activate` by clearing its sector's
                                                              ADJOINS bit and moving the piece to frame 1--falldeath                                              0  32 sector(s) of level 1 carry SITH_SECTOR_FALLDEATH
                                                              (0x40); 4.0 u/s inside one kills, 2.0 u/s and an
