@@ -3187,6 +3187,30 @@ resolves a name to an index, answers `-1` for a name the level does not have, st
 the change reaches the vertex data. On `09fuelstation` the level's own two `00_matanim.cog` calls walk
 **2 material cels** in the first second.
 
+### A sector can push: `SetSectorThrust`
+
+`SetSectorThrust(sector, vector, mult)` (`sithCogFunctionSector_SetSectorThrust`) stores
+`mult * vector` on the sector and sets `SITH_SECTOR_USETHRUST`; a zero vector clears both. `sithPhysics.c`
+then adds it to a body's velocity **exactly like gravity**:
+
+```c
+if (pThing->physicsParams.mass != 0.0 && (pThing->sector->flags & SITH_SECTOR_USETHRUST) && !(...NOTHRUST))
+    rdVector_ScaleAdd3Acc(&a1a, &pThing->sector->thrust, secDeltaTime);
+```
+
+It is an **acceleration**, not a velocity: `'0.0 0.0 1.0'` at 5 against the engine's gravity of 4 is a
+net one-unit-per-second lift. The shipped users are updrafts — level 21's core tube
+(`SetSectorThrust(tube0, upVec, thrustSpeed)`), level 10's power core pushing a body out of its chamber,
+and multiplayer `m5_antigrav.cog`'s four anti-gravity columns.
+
+The port folds it into both halves of the body: `Runtime::step` adds `thrust * dt` to a thing's velocity
+before it moves (a crate in the column rises), and `walk_player` adds it to the walk velocity's two
+horizontal terms and to `vy` — the same place gravity enters. `--things` checks the arithmetic: a
+resting thing gains 5 u/s over a second and rises 2.58 units.
+
+`ponytail:` the port's bodies have no `mass`, so a heavy thing rises exactly as fast as a light one; the
+engine scales the *gravity* by mass but not the thrust.
+
 ### Scrolling: `SlideWall` moves the texture *and* what stands on it
 
 `SlideWall(surface, vector, scale)` (`sithCogFunctionSurface_SlideWall`) is a pair of numbers with two

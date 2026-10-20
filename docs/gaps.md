@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **39 gates, 91 tests, 0 failures.** Stubbed script surface:
-**16 verbs, 57 call sites across the 34 shipped levels** (706 before this run of state setters).
+**15 verbs, 53 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -66,24 +66,24 @@ both multiplayer-only screens.
 | Damage | health, shields, two-way, death and respawn, `DAMAGE_DECAY`, the engine's damage **kind** — a `SithDamageType` bitmask — with `SITH_AF_INVULNERABLE` honoured and its fall exemption (`--endlevel` watches the flag go set and clear around the level-end sleep), and **message parameters plus `ReturnEx`**: a `damaged` handler reads the amount from `GetParam(0)` and answers with `ReturnEx`, which the runtime applies instead of the amount it passed in (`--damage-return`; 115 shipped scripts have a `damaged` label, 54 answer with `ReturnEx`, and level 17b's `darkjedi_yun2.cog` is one) | the kinds are carried but unused elsewhere: the engine picks a hurt sound per type (`SITH_SC_HURTENERGY`/`HURTFIRE`/`HURTMAGIC`/`HURTSPECIAL`) and scales limb hits by 0.1 when the sender has an actor parent. Neither is ported. A handler can only *reduce* a hit (a settled hit is amended, not replayed), so a script asking for more damage than was applied is ignored |
 | Force powers | the bins and the verbs the shipped `force_*.cog` scripts call; jump, speed, healing, seeing, pull and grip run | no structural gap, but the *effects* are unverified beyond jump and speed: nothing drives `force_pull.cog`'s grip in a test, and `setpovshake`/`setthingrotvel` are stubs those scripts would want. `force jump`'s velocity once reached `SetThingVel` as zero — fixed, but the path has no assertion of its own |
 | Sound | 2D playback of `.wav`/`.snd`, one music track, `--audio-state`, per-sink mute, `create`-class sounds, and the **channel verbs**: `PlaySound*` answers a channel, `ChangeSoundVol` ramps it (clamped to 1.5, only for a positive fade, as `sithCogFunctionSound_ChangeVolume` does), `ChangeSoundPitch` sets the rate, and `SectorSound` replaces a sector's ambient with the script's own (`--sound`) | 3D positional and velocity mixing (`sithSoundMixer.c`) and sound classes with mode ranges. The channel is applied when a request *starts* — a one-shot mixer cannot re-tune a sink that is already playing, so `ChangeSoundVol` on a long ambient does not sweep it (`ponytail:`) |
-| Surfaces and sectors | the flags, `SURFFLAG_SKY`/`SURFFLAG_CEILING_SKY`, adjoin state, `sithPhysics_FindFloor`, thrust values, and the script-side switches — `setsectorflags`/`setadjoinflags`/`clearadjoinflags`/`setsectoradjoins` now reach collision and the cull (§6). **Texture cels, material cels, scripted light and scroll reach the renderer**: `SetWallCel`/`SurfaceAnim`, `MaterialAnim`, `SetSectorLight`/`SurfaceLightAnim` and `SlideWall` are baked into the mesh (`Runtime::surface_epoch` -> `rebuild_surfaces` -> the vertex colour and UVs -> `level.wesl`). A scrolling surface also **carries the body standing on it** (§6), which is what a conveyor is; level 1's neon sign and its five 5 fps surfaces step, `09fuelstation`'s two `00_matanim.cog` calls walk `09sign.mat`, and level 2's seven force fields ramp their light | `setsectorthrust` (needs thrust simulation) |
+| Surfaces and sectors | the flags, `SURFFLAG_SKY`/`SURFFLAG_CEILING_SKY`, adjoin state, `sithPhysics_FindFloor`, thrust values, and the script-side switches — `setsectorflags`/`setadjoinflags`/`clearadjoinflags`/`setsectoradjoins` now reach collision and the cull (§6). **Texture cels, material cels, scripted light and scroll reach the renderer**: `SetWallCel`/`SurfaceAnim`, `MaterialAnim`, `SetSectorLight`/`SurfaceLightAnim` and `SlideWall` are baked into the mesh (`Runtime::surface_epoch` -> `rebuild_surfaces` -> the vertex colour and UVs -> `level.wesl`). A scrolling surface also **carries the body standing on it** (§6), which is what a conveyor is; level 1's neon sign and its five 5 fps surfaces step, `09fuelstation`'s two `00_matanim.cog` calls walk `09sign.mat`, and level 2's seven force fields ramp their light | a sector's `thrust` vector now pushes bodies (`SetSectorThrust`, `--things`) |
 | Sky | unlit sky faces plus a dome, and the camera's clear colour; `SlideHorizonSky`/`SlideCeilingSky` scroll the sky **faces** | the sky's own parallax and rotation (`sithRenderSky.c`), and the dome is a port stand-in that does not scroll |
 
 | Models and materials | `.3do` parse, geosets, materials, `RADIUS`, `insertOffset`, mipmaps, the light ramp, `--winding` | `setthingmodel` (swap a model at runtime), per-surface material animation, the geometric-mode verbs (`*geomode`), and no back-face culling for models (§4 — model interiors render when the camera clips in) |
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading; sector light animation, surface light animation, and **`ThingLight`/`SetThingLight`/`ThingLightAnim`**: a thing's own light, ramped the way `sithSurface_SetThingLight` ramps it (`from`, `rate = delta / time`, `to`), summed per sector so a lamp brightens its room and a broken one stops (`--cel`) | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — and the *dynamic* pass that gives a thing's light a radius: this build adds the whole thing-light sum to its sector's baked light, so a lamp lights the room flatly rather than in a pool (`ponytail:` per-surface falloff). 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 16 below | the 16 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 15 below | the 15 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 16 stubbed cog verbs
+## 3. The 15 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (57 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 16.
+over the 34 levels from `--cog-check` (53 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 15.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -94,7 +94,6 @@ takes the wrong branch without any error.
 | --- | --- | --- |
 | Cog introspection and goal state (1) | 1 | `loadtemplate` 1 |
 | Weapons and projectiles (2) | 29 | `jksetsaberinfo` 15, `autoselectweapon` 14 |
-| Sectors, adjoins, sky (2) | 4 | `setsectorthrust` 4 |
 | Models (1) | 6 | `setthingmodel` 6 (CTF scripts only) |
 | Multiplayer (1) | 3 | `sendmessageex` 3 |
 | Misc (1) | 7 | `jkgetchoice` 7 |
@@ -157,8 +156,11 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 2. **Timer queue for `sleep`/`settimer`/`setpulse`** (section 4). It is the one ceiling that changes what
    scripts do, and it sits under every verb that waits.
 3. ~~**Sector and adjoin flags**~~ — **done** (section 6): `setadjoinflags`/`clearadjoinflags`/
-   `setsectorflags` now reach collision and the cull, and `setsectoradjoins` closes a sector's doorways
-   for real. Only `setsectorthrust` (4 calls) is left, and it needs thrust simulation, not a flag store.
+   `setsectorflags` now reach collision and the cull, `setsectoradjoins` closes a sector's doorways
+   for real, and **`setsectorthrust`** makes the sector accelerate what stands in it — `sithPhysics.c`
+   adds `sector->thrust * dt` to a body exactly like gravity, so level 21's core tube is a real
+   updraft and level 10's power core pushes the player out (`--things`; `walk_player` folds it into
+   the body's horizontal velocity and its vertical speed).
 4. ~~**Damage types.**~~ — **done as far as the engine's rules go:** `Runtime::damage_typed` carries the
    `SithDamageType` word (impact 0x1, energy 0x2, fall 0x40, …), bolts arrive as energy and landings as
    falls, `SITH_AF_INVULNERABLE` (`actor->flags & 0x8`) is honoured with the engine's fall exemption

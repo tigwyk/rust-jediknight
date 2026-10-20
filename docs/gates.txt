@@ -145,7 +145,10 @@ flag                                                   exit  what it prints
                                                              carries it on to 4.00, and
                                                              `SetThingCurGeoMode(0)` reads `GetThingGeoMode`
                                                              0 until it is set back to 1, which is
-                                                             how a dark Jedi body leaves the screen
+                                                             how a dark Jedi body leaves the screen;
+                                                             `SetSectorThrust(+Z, 5)` lifts a resting
+                                                             thing from z 0.00 to 2.58 in a second at
+                                                             5.00 u/s, and a zero vector clears it
 --attach                                                  0  `AttachThingToThing(child, parent)` keeps
                                                              the offset: parent at [2,0,0] puts the
                                                              child at [3,0,0.5], a 90 deg parent turn

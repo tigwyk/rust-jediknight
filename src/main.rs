@@ -5124,6 +5124,45 @@ fn main() {
         );
         assert_eq!(hidden, cog::Value::Num(0.0), "the hidden mode did not read back");
         assert_eq!(shown, cog::Value::Num(1.0), "the shown mode did not read back");
+
+        // `SetSectorThrust`: the sector accelerates what stands in it, exactly like gravity. Level 21's
+        // core tube is `'0.0 0.0 1.0'` at 4-5 (an updraft) and level 10's power core pushes the player
+        // out. The thing used here is at rest, so the whole change is the sector's doing.
+        {
+            let sector = rt.things[a].sector;
+            rt.things[a].vel = [0.0; 3];
+            rt.things[a].paused = true; // no path, so only the thrust moves it
+            rt.things[a].target = None;
+            let before = rt.things[a].pos[2];
+            rt.call(
+                "SetSectorThrust",
+                &[
+                    cog::Value::Num(sector as f64),
+                    cog::Value::Vec([0.0, 0.0, 1.0]),
+                    cog::Value::Num(5.0),
+                ],
+            );
+            for _ in 0..30 {
+                rt.step(1.0 / 30.0);
+            }
+            let rising = rt.things[a].vel[2];
+            let after = rt.things[a].pos[2];
+            rt.call(
+                "SetSectorThrust",
+                &[
+                    cog::Value::Num(sector as f64),
+                    cog::Value::Vec([0.0, 0.0, 0.0]),
+                    cog::Value::Num(0.0),
+                ],
+            );
+            let cleared = rt.sectors[usize::try_from(sector).unwrap()].thrust;
+            println!(
+                "things: SetSectorThrust(sector {sector}, +Z, 5) over a second lifts a resting thing from z {before:.2} to {after:.2} at {rising:.2} u/s, and a zero vector clears the drive ({cleared:?})"
+            );
+            assert!(rising > 4.0, "the sector thrust did not accelerate the body: {rising}");
+            assert!(after > before + 1.0, "the body did not rise in the updraft: {after}");
+            assert_eq!(cleared, [0.0; 3], "a zero vector did not clear the thrust");
+        }
         println!("--- things check passed ---");
         return;
     }
@@ -11307,6 +11346,7 @@ fn rebuild_surfaces(
     mut meshes: ResMut<Assets<Mesh>>,
     mut seen: Local<(u32, u32)>,
 ) {
+    let _span = Span::new("rebuild_surfaces");
     let (Some(sim), Some(world), Some(batches)) = (sim, world, batches) else { return };
     let (epoch, hidden, look) = {
         let rt = sim.world.borrow();
@@ -11416,6 +11456,7 @@ fn cull_sectors(
     mut batches: Query<(&SectorId, &mut Visibility)>,
     mut shown: Local<Option<(usize, usize)>>,
 ) {
+    let _span = Span::new("cull_sectors");
     let Some(view) = view else { return };
     if !on.as_deref().is_none_or(|c| c.0) {
         return;
@@ -11693,6 +11734,7 @@ fn actors_follow_runtime(
     actors: Option<ResMut<Actors>>,
     mut transforms: Query<&mut Transform>,
 ) {
+    let _span = Span::new("actors_follow_runtime");
     let (Some(sim), Some(mut actors)) = (sim, actors) else { return };
     let runtime = sim.world.borrow();
     // The walkplayer is an actor too, but its drawn body is not what the runtime's position
@@ -11747,6 +11789,7 @@ fn animate_actors(
     actors: Option<ResMut<Actors>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
+    let _span = Span::new("animate_actors");
     if on.is_some_and(|on| !on.0) {
         return;
     }
@@ -12643,6 +12686,24 @@ fn health_follows_damage(
 /// `sithPlayer` reloads or respawns at the last checkpoint; this build has no checkpoint list yet,
 /// so the level's own start is the respawn point. The dead state shows as a message and the
 /// player's movement is not blocked — the reset is immediate.
+/// One span of a frame, printed when `BK_FRAME_TRACE` is set. `Drop` means an early return still
+/// reports, which is the whole reason this exists instead of two `Instant::now()` calls per system.
+struct Span(&'static str, std::time::Instant);
+
+impl Span {
+    fn new(label: &'static str) -> Self {
+        Span(label, std::time::Instant::now())
+    }
+}
+
+impl Drop for Span {
+    fn drop(&mut self) {
+        if std::env::var_os("BK_FRAME_TRACE").is_some() {
+            println!("frame: {} took {:.2} ms", self.0, self.1.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+}
+
 /// `SetThingCurGeoMode(thing, 0)` takes a thing off screen: every entity the level spawned for that
 /// thing goes hidden, and any other mode brings it back. `renderData.curGeoMode` is the engine's
 /// per-thing draw mode, and the dark Jedi scripts use 0 to drop a body.
@@ -12870,6 +12931,7 @@ fn draw_created(
     // (`+force_dest_p1`) are updated here instead.
     mut quads: Query<(&mut Mesh3d, &mut Transform), With<Sprite3d>>,
 ) {
+    let _span = Span::new("draw_created");
     let (Some(sim), Some(world), Some(created)) = (sim, world, created.as_mut()) else { return };
     let mut rt = sim.world.borrow();
     let first_created = world.level.things.len();
@@ -15437,7 +15499,27 @@ fn walk_player(
             }
         }
     }
-    let dir = [player.vel[0] + carry[0], player.vel[1] + carry[1]];
+    // `SetSectorThrust` is the other half of a conveyor: `sithPhysics.c` adds `sector->thrust * dt`
+    // to a body's velocity exactly like gravity, so an updraft column lifts what stands in it —
+    // level 21's core tube is `'0.0 0.0 1.0'` at 4 to 5, level 10's power core pushes the body out.
+    let thrust = sim
+        .as_deref()
+        .map(|sim| {
+            sim.world
+                .borrow()
+                .sectors
+                .get(player.sector)
+                .map(|s| s.thrust)
+                .unwrap_or([0.0; 3])
+        })
+        .unwrap_or([0.0; 3]);
+    let dir = [
+        player.vel[0] + carry[0] + thrust[0] * dt,
+        player.vel[1] + carry[1] + thrust[1] * dt,
+    ];
+    if thrust != [0.0; 3] && std::env::var_os("BK_SCROLL_TRACE").is_some() {
+        println!("thrust: sector {} accelerates the body at {thrust:?} units/s^2", player.sector);
+    }
 
     if live && keys.just_pressed(KeyCode::Space) && player.grounded {
         player.vy = player.rules.jump_velocity(crouch);
@@ -15446,7 +15528,7 @@ fn walk_player(
 
     let mut pos = [player.pos.x, player.pos.y, player.pos.z];
     let mut sector = player.sector;
-    let mut vy = player.vy;
+    let mut vy = player.vy + thrust[2] * dt;
     let gravity = player.gravity;
     let trace = std::env::var_os("BK_WALK_TRACE").is_some();
     if trace {

@@ -1431,7 +1431,18 @@ impl Runtime {
             }
         }
         let mut blocked: Vec<usize> = Vec::new();
+        // `sithPhysics.c`: a body in a `SITH_SECTOR_USETHRUST` sector gets `thrust * dt` added to its
+        // velocity each step, exactly like gravity. Level 21's core tube lifts what stands in it.
+        let thrust: Vec<[f32; 3]> = self.sectors.iter().map(|s| s.thrust).collect();
         for (i, t) in self.things.iter_mut().enumerate() {
+            if let Some(drive) = usize::try_from(t.sector).ok().and_then(|s| thrust.get(s)).copied()
+                && drive != [0.0; 3]
+                && !t.destroyed
+            {
+                for k in 0..3 {
+                    t.vel[k] += drive[k] * dt;
+                }
+            }
             // A projectile flies straight; a door or lift follows its frame path. A thing
             // is one or the other, so both are checked and a projectile never has frames.
             let previous = t.pos;
@@ -1740,6 +1751,7 @@ impl Runtime {
                 | "syncthingscale"
                 | "syncthinglook"
                 | "pathmovepause"
+                | "setsectorthrust"
                 | "pathmoveresume"
                 | "getthinggeomode"
                 | "setthingcurgeomode"
@@ -3296,6 +3308,24 @@ impl Runtime {
             // build has nobody to push to, so they are answered and do nothing — the engine's own arm is
             // empty without `COG_SHOULD_SYNC`.
             "syncthingpos" | "syncsurface" | "syncthingscale" | "syncthinglook" => Value::Nil,
+            // `SetSectorThrust(sector, vector, mult)`: `sithCogFunctionSector_SetSectorThrust` stores
+            // `mult * vector` on the sector (a zero vector clears it and the `USETHRUST` flag), and
+            // `sithPhysics.c` adds `thrust * dt` to a body's velocity *exactly like gravity*. Level
+            // 21's core tube is an updraft (`'0.0 0.0 1.0'` at 4-5) and level 10's power core pushes
+            // the player out of its chamber.
+            "setsectorthrust" | "sectorthrust" => {
+                let sector = idx(0);
+                let vector = args.get(1).map(vec3).unwrap_or([0.0; 3]);
+                let mult = num(2) as f32;
+                if let Some(s) = self.sector_mut(sector) {
+                    s.thrust = if vector == [0.0; 3] {
+                        [0.0; 3]
+                    } else {
+                        [vector[0] * mult, vector[1] * mult, vector[2] * mult]
+                    };
+                }
+                Value::Nil
+            }
             // `PathMovePause(thing)` / `PathMoveResume(thing)`: `sithTrackThing_PathMovePause` sets
             // `trackParams.flags |= 0x80` (only when the thing is actually moving, answering its index
             // or -1) and `...Resume` clears it. Level 9's pipe doors stop in the doorway this way:
