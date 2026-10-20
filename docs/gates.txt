@@ -222,6 +222,10 @@ flag                                                   exit  what it prints
                                                              (0x40); 4.0 u/s inside one kills, 2.0 u/s and an
                                                              unflagged sector do not -- `sithPlayer.c:251`
 --hit                                                    0  --- hit check passed ---
+                                                             (`--hit` also asserts the flinch:
+                                                             `just_hit(thing 131) = true`, which is
+                                                             what `animate_actors` reads to play an
+                                                             actor's `hit` track -- 127 of 128 ship one)
                                                              (also: an impact effect is a thing with a
                                                              `timer=`: `+laserhit` at 0.5 s is still there
                                                              after 0.33 s and gone after 1.33 s, which is

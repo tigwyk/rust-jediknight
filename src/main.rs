@@ -5374,6 +5374,9 @@ fn main() {
             "hit: bolt {index} landed on thing {target} for {carried:.0}, {left:.0} health left"
         );
         assert!(left < health_before, "the actor took no damage");
+        // The flinch the renderer plays: `just_hit` on the actor that took the bolt.
+        println!("  flinch: just_hit(thing {target}) = {}", rt.just_hit(target));
+        assert!(rt.just_hit(target), "a hit actor was not marked as hit");
 
         // What the projectile leaves behind: `explode=` says the engine spawns that template where
         // the bolt lands, and the blast hurts what is inside it. A weapon without `explode=`
@@ -5617,6 +5620,9 @@ fn main() {
                 (damage - carried) / decay_rate
             );
         }
+        // The flinch the renderer will play: `just_hit` for the actor that took the bolt.
+        println!("  flinch: just_hit(actor {target_idx}) = {}", rt.just_hit(target_idx));
+        assert!(rt.just_hit(target_idx), "a hit actor was not marked as hit");
         assert!(hit, "the projectile never reached the actor");
         assert!(
             (health_before - after - carried).abs() < 0.01,
@@ -7450,6 +7456,7 @@ fn main() {
         // anything on a real level rather than only in the tables.
         let mut armed = 0usize;
         let mut draws = 0usize;
+        let mut flinches = 0usize;
         for thing in &world.level.things {
             let Some(puppet) = world
                 .level
@@ -7469,10 +7476,14 @@ fn main() {
             {
                 draws += 1;
             }
+            if puppet.states.iter().any(|s| s.name.eq_ignore_ascii_case("hit")) {
+                flinches += 1;
+            }
         }
         println!(
             "  locomotion: {walkable} actor(s) ship a `walk` key and {running} a `run` key, so a moving body plays its own stride"
         );
+        println!("  hit: {flinches} actor(s) ship a `hit` track");
         println!(
             "  armed: {armed} actor(s) ship a mode-1 (weapon drawn) set, which `SetArmedMode` selects; {draws} ship mount/dismount tracks"
         );
@@ -13005,7 +13016,7 @@ fn animate_actors(
         // An actor that just fired plays its puppet's `fire` track: the engine's
         // `sithPuppet_UpdateThingMove` picks the action track over the stride, and an actor that
         // keeps walking while shooting is the sliding soldier the trace made obvious.
-        let (firing, armed) = sim
+        let (firing, hit, armed) = sim
             .as_deref()
             .map(|sim| {
                 let rt = sim.world.borrow();
@@ -13016,9 +13027,9 @@ fn animate_actors(
                     Some(mode) => *mode as usize,
                     None => usize::from(rt.thing_has_weapon(actor.thing)),
                 };
-                (rt.just_fired(actor.thing), armed)
+                (rt.just_fired(actor.thing), rt.just_hit(actor.thing), armed)
             })
-            .unwrap_or((false, 0));
+            .unwrap_or((false, false, 0));
         // The state name, which is what decides the keyfile below. A scripted clip has no state
         // of its own, so it gets the empty name and always wins.
         let state = if scripted.is_some() {
@@ -13026,7 +13037,7 @@ fn animate_actors(
         } else if actor.dying {
             "death"
         } else {
-            actor_state(vel, pose.unwrap_or(0.0), firing, armed, |name| {
+            actor_state(vel, pose.unwrap_or(0.0), firing, hit, armed, |name| {
                 actor.states.contains_key(&(name.to_string(), armed))
                     || actor.states.contains_key(&(name.to_string(), 0))
             })
@@ -13153,9 +13164,15 @@ fn actor_state(
     vel: Vec3,
     yaw_deg: f32,
     firing: bool,
+    hit: bool,
     armed: usize,
     has: impl Fn(&str) -> bool,
 ) -> &'static str {
+    // The engine's order: a hit reaction interrupts everything but death, and `fire` outranks the
+    // stride (`sithPuppet_UpdateThingMove`).
+    if hit && has("hit") {
+        return "hit";
+    }
     if firing && has("fire") {
         return "fire";
     }
@@ -17512,20 +17529,25 @@ mod actor_state_tests {
         let stormtrooper = |name: &str| ["stand", "walk", "run", "fire"].contains(&name);
         let droid = |name: &str| ["stand", "walk"].contains(&name);
         let unarmed = 0;
-        assert_eq!(actor_state(still, 0.0, false, unarmed, stormtrooper), "stand");
-        assert_eq!(actor_state(still, 0.0, true, unarmed, stormtrooper), "fire");
+        assert_eq!(actor_state(still, 0.0, false, false, unarmed, stormtrooper), "stand");
+        assert_eq!(actor_state(still, 0.0, true, false, unarmed, stormtrooper), "fire");
         // A puppet with no `fire` row keeps its own state: it shoots without animating the shot.
-        assert_eq!(actor_state(still, 0.0, true, unarmed, droid), "stand");
+        assert_eq!(actor_state(still, 0.0, true, false, unarmed, droid), "stand");
         // Movement still loses to the action track, which is the engine's ordering.
         let running = Vec3::new(1.0, 0.0, 0.0);
-        assert_eq!(actor_state(running, 0.0, false, unarmed, stormtrooper), "run");
-        assert_eq!(actor_state(running, 0.0, true, unarmed, stormtrooper), "fire");
+        assert_eq!(actor_state(running, 0.0, false, false, unarmed, stormtrooper), "run");
+        assert_eq!(actor_state(running, 0.0, true, false, unarmed, stormtrooper), "fire");
         // The armed set is what `SetArmedMode(thing, 1)` selects: mode 1 rows are the same
         // animation with the weapon drawn, and a state without one falls back to mode 0.
         let armed = 1;
         let drawn = |name: &str| ["stand", "walk", "run"].contains(&name);
-        assert_eq!(actor_state(still, 0.0, false, armed, drawn), "stand");
-        assert_eq!(actor_state(still, 0.0, true, armed, |_| false), "stand");
+        assert_eq!(actor_state(still, 0.0, false, false, armed, drawn), "stand");
+        assert_eq!(actor_state(still, 0.0, true, false, armed, |_| false), "stand");
+        // A hit interrupts a shot and a stride; a puppet with no `hit` row is unaffected.
+        assert_eq!(actor_state(still, 0.0, false, true, unarmed, stormtrooper), "stand");
+        let flinching = |name: &str| ["stand", "walk", "run", "fire", "hit"].contains(&name);
+        assert_eq!(actor_state(still, 0.0, false, true, unarmed, flinching), "hit");
+        assert_eq!(actor_state(running, 0.0, true, true, unarmed, flinching), "hit");
     }
 }
 

@@ -780,6 +780,8 @@ pub struct Runtime {
     /// The level time each actor last fired, so the renderer can play its `fire` track. The engine
     /// picks the action track from `sithPuppet_UpdateThingMove`, which this build has no analogue of.
     pub last_shot: BTreeMap<usize, f32>,
+    /// The level time each thing last took damage, for the puppet's `hit` track.
+    pub last_hit: BTreeMap<usize, f32>,
     /// `SetArmedMode`/`SetMajorMode`: the puppet's armed state and its major mode.
     pub armed_mode: BTreeMap<usize, u32>,
     pub major_mode: BTreeMap<usize, u32>,
@@ -1087,6 +1089,7 @@ impl Runtime {
             waggle: BTreeMap::new(),
             key_lengths: BTreeMap::new(),
             last_shot: BTreeMap::new(),
+            last_hit: BTreeMap::new(),
             armed_mode: BTreeMap::new(),
             major_mode: BTreeMap::new(),
             cur_weapon_thing: None,
@@ -3402,6 +3405,9 @@ impl Runtime {
             return self.things.get(index).map(|t| t.health).unwrap_or(0.0);
         }
         let mut died = false;
+        // A hit flinches: `sithPuppet_SetMode` plays the puppet's `hit` track off a damage message,
+        // and 127 of level 1's 128 actors ship one.
+        self.last_hit.insert(index, self.time);
         let left = if let Some(t) = self.things.get_mut(index) {
             t.health -= amount;
             if t.health <= 0.0 {
@@ -3595,6 +3601,12 @@ impl Runtime {
         self.templates
             .get(thing)
             .is_some_and(|name| self.template_weapon.contains_key(&name.to_ascii_lowercase()))
+    }
+
+    /// Whether `thing` took damage within the last fifth of a second — how long the puppet's `hit`
+    /// track has to be started, which `sithPuppet_SetMode` does off a damage message.
+    pub fn just_hit(&self, thing: usize) -> bool {
+        self.last_hit.get(&thing).is_some_and(|at| self.time - at < 0.2)
     }
 
     /// Whether `thing` fired within the last quarter second — long enough for the puppet's `fire`
@@ -5711,6 +5723,7 @@ mod tests {
             waggle: BTreeMap::new(),
             key_lengths: BTreeMap::new(),
             last_shot: BTreeMap::new(),
+            last_hit: BTreeMap::new(),
             armed_mode: BTreeMap::new(),
             major_mode: BTreeMap::new(),
             cur_weapon_thing: None,
