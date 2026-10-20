@@ -115,6 +115,13 @@ pub struct ThingState {
     pub attach_flags: u32,
     /// `RotatePivot`'s in-flight spin, if any.
     pub spin: Option<PivotSpin>,
+    /// `ThingLight`/`SetThingLight`/`ThingLightAnim`: how much light this thing emits. Retail uses it
+    /// in the dynamic-light pass, which this build does not have, so it is summed into the light of
+    /// the sector the thing stands in — a lamp brightens its room and a broken one stops.
+    /// `light_end`/`light_rate` are the ramp (`sithSurface_SetThingLight`'s `field_40`/`field_44`).
+    pub light: f32,
+    pub light_end: f32,
+    pub light_rate: f32,
 }
 
 impl ThingState {
@@ -712,6 +719,9 @@ impl Runtime {
                     attach_offset: [0.0; 3],
                     attach_flags: 0,
                     spin: None,
+                    light: 0.0,
+                    light_end: 0.0,
+                    light_rate: 0.0,
                 })
                 .collect(),
             templates: level.things.iter().map(|t| t.template.clone()).collect(),
@@ -1091,6 +1101,57 @@ impl Runtime {
         }
     }
 
+    /// `SetThingLight`/`ThingLight`/`ThingLightAnim`: set or ramp a thing's own light, which
+    /// `sithSurface_SetThingLight` does with the same `(from, rate, to)` record as a sector fade.
+    fn set_thing_light(&mut self, index: usize, value: f32, time: f32) {
+        if let Some(thing) = self.things.get_mut(index) {
+            if time > 0.0 {
+                thing.light_end = value;
+                thing.light_rate = (value - thing.light) / time;
+            } else {
+                thing.light = value;
+                thing.light_end = value;
+                thing.light_rate = 0.0;
+            }
+        }
+    }
+
+    /// The light a thing emits, summed per sector: what the renderer adds to a sector's own light.
+    /// Retail lights a radius around the thing; this build has one baked sector light, so the sum is
+    /// the granularity available (`ponytail:` a per-surface distance falloff is the upgrade).
+    pub fn thing_light_by_sector(&self) -> Vec<f32> {
+        let mut out = vec![0.0f32; self.sectors.len()];
+        for thing in &self.things {
+            if thing.light <= 0.0 || thing.destroyed {
+                continue;
+            }
+            if let Some(slot) = usize::try_from(thing.sector).ok().and_then(|i| out.get_mut(i)) {
+                *slot += thing.light;
+            }
+        }
+        out
+    }
+
+    /// Advance a thing's light ramp: `sithSurface_Update`'s `0x400000` arm, the same one a sector fade
+    /// and `SurfaceLightAnim` use.
+    fn advance_thing_lights(&mut self, dt: f32) {
+        for thing in self.things.iter_mut() {
+            if thing.light_rate == 0.0 {
+                continue;
+            }
+            thing.light += thing.light_rate * dt;
+            let arrived = if thing.light_rate > 0.0 {
+                thing.light >= thing.light_end
+            } else {
+                thing.light <= thing.light_end
+            };
+            if arrived {
+                thing.light = thing.light_end;
+                thing.light_rate = 0.0;
+            }
+        }
+    }
+
     /// `SetPOVShake`'s offsets decay toward zero at their own rate, the way `sithCamera_Update`
     /// subtracts `delta * dt` from every component and clamps at 0 — so a shot's recoil is a kick
     /// that recovers rather than an offset that sticks.
@@ -1166,6 +1227,7 @@ impl Runtime {
         self.bump_scroll_epoch();
         self.advance_lights(dt);
         self.decay_shake(dt);
+        self.advance_thing_lights(dt);
         // `timer=`/`SetLifeLeft` expiry: `sithThing_Update` counts `msecLifeLeft` down and calls
         // `sithThing_DestroyDyingThing` when it reaches zero. Without this an impact spark lives
         // forever, and a corpse never goes away.
@@ -1561,6 +1623,8 @@ impl Runtime {
                 | "waitforstop"
                 | "stopsound"
                 | "thinglight"
+                | "setthinglight"
+                | "thinglightanim"
                 | "setsurfaceflags"
                 | "capturething"
                 | "takeitem"
@@ -1877,6 +1941,9 @@ impl Runtime {
             attach_offset: [0.0; 3],
             attach_flags: 0,
             spin: None,
+            light: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
             extra_speed: 0.0,
             ai_target: None,
             ai_wait: 0.0,
@@ -2416,6 +2483,9 @@ impl Runtime {
             attach_offset: [0.0; 3],
             attach_flags: 0,
             spin: None,
+            light: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
             extra_speed: 0.0,
             ai_target: None,
             ai_wait: 0.0,
@@ -3040,16 +3110,46 @@ impl Runtime {
                 }
                 Value::Nil
             }
-            // `ThingLight(thing, value)`: how much light the thing emits. Stored on the
-            // sector the thing is in, which is the granularity this world has.
+            // `ThingLight(thing, value, time)`: `sithCogFunctionThing_ThingLight` sets the thing's own
+            // light outright when `time` is 0 and otherwise ramps it there over `time` seconds
+            // (`sithSurface_SetThingLight(pThing, light, time, 0)`). A negative value is ignored, which
+            // is the engine's guard.
             "thinglight" => {
                 let value = num(1) as f32;
-                if let Some(sector) = self.thing(idx(0)).map(|t| t.sector)
-                    && let Some(s) = self.sector_mut(sector as i64)
+                let time = num(2) as f32;
+                if value >= 0.0
+                    && let Some(index) = usize::try_from(idx(0)).ok()
                 {
-                    s.light = value;
+                    self.set_thing_light(index, value, time);
                 }
                 Value::Nil
+            }
+            // `SetThingLight(thing, value)`: the plain setter, no ramp.
+            "setthinglight" => {
+                let value = num(1) as f32;
+                if value >= 0.0
+                    && let Some(index) = usize::try_from(idx(0)).ok()
+                {
+                    self.set_thing_light(index, value, 0.0);
+                }
+                Value::Nil
+            }
+            // `ThingLightAnim(thing, start, end, period)`: from `start` to `end` over `period * 0.5`
+            // seconds, answering the record or -1 — `10_powercore.cog` pulses four lights with it and
+            // `00_lightanim.cog` is the generic form.
+            "thinglightanim" => {
+                let (start, end, period) = (num(1) as f32, num(2) as f32, num(3) as f32);
+                if end < start || period <= 0.0 {
+                    return Value::Num(-1.0);
+                }
+                let Some(index) = usize::try_from(idx(0)).ok() else { return Value::Num(-1.0) };
+                if let Some(thing) = self.things.get_mut(index) {
+                    thing.light = start;
+                    thing.light_end = end;
+                    thing.light_rate = (end - start) / (period * 0.5);
+                    return Value::Num(index as f64);
+                }
+                Value::Num(-1.0)
             }
             // Surface flags decide footstep and landing sounds (`SITH_SURFACE_*`); the
             // renderer does not animate them, so this is recorded as answered only.
@@ -3738,6 +3838,9 @@ impl Runtime {
                     attach_offset: [0.0; 3],
                     attach_flags: 0,
                     spin: None,
+                    light: 0.0,
+                    light_end: 0.0,
+                    light_rate: 0.0,
                     extra_speed: 0.0,
                     ai_target: None,
                     ai_wait: 0.0,
@@ -4108,6 +4211,9 @@ mod tests {
                 attach_offset: [0.0; 3],
                 attach_flags: 0,
                 spin: None,
+                light: 0.0,
+                light_end: 0.0,
+                light_rate: 0.0,
                 extra_speed: 0.0,
                 ai_target: None,
                 ai_wait: 0.0,

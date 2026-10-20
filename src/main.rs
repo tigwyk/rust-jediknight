@@ -5584,6 +5584,73 @@ fn main() {
                 "cel: MaterialAnim on `{name}` answered material {material}, stepped its cel {start} -> {stepped} at 4 fps, and that changed the vertex data ({lit:016x} -> {animated:016x}); an unknown name answers -1"
             );
         }
+        // `ThingLight`/`SetThingLight`/`ThingLightAnim`: a lamp brightens the sector it stands in, and
+        // the draw reads it. Retail lights a radius around the thing; this build's baked sector light
+        // is the granularity it has, so the thing's light is summed per sector.
+        {
+            let mut rt = world_state.borrow_mut();
+            let lamp = (0..rt.things.len())
+                .find(|i| !rt.things[*i].destroyed && rt.things[*i].sector >= 0)
+                .expect("a thing in a sector");
+            let sector = rt.things[lamp].sector as usize;
+            // `light` is pure arithmetic over the per-surface and per-sector columns, so any index
+            // shows what a face in that sector is drawn with.
+            let surface = 0usize;
+            let before = SurfaceLook::of(&rt).light(surface, rt.things[lamp].sector);
+            rt.call(
+                "ThingLight",
+                &[cog::Value::Num(lamp as f64), cog::Value::Num(2.0), cog::Value::Num(0.0)],
+            );
+            assert_eq!(rt.things[lamp].light, 2.0, "ThingLight did not set the thing's light");
+            assert!(
+                rt.thing_light_by_sector()[sector] >= 2.0,
+                "the thing's light did not reach its sector"
+            );
+            let after = SurfaceLook::of(&rt).light(surface, rt.things[lamp].sector);
+            println!(
+                "cel: ThingLight(thing {lamp}, 2) lifts its sector's drawn light {before:.2} -> {after:.2}"
+            );
+            assert!(after > before + 1.5, "the thing's light did not reach the vertex data");
+            // `ThingLightAnim`: from 0 to 1 over period * 0.5 seconds, one step per second.
+            let answer = rt.call(
+                "ThingLightAnim",
+                &[
+                    cog::Value::Num(lamp as f64),
+                    cog::Value::Num(0.0),
+                    cog::Value::Num(1.0),
+                    cog::Value::Num(4.0),
+                ],
+            );
+            assert_eq!(answer, cog::Value::Num(lamp as f64), "ThingLightAnim did not answer the record");
+            assert_eq!(rt.things[lamp].light, 0.0, "ThingLightAnim did not start from `start`");
+            rt.step(1.0);
+            let half = rt.things[lamp].light;
+            rt.step(1.0);
+            let full = rt.things[lamp].light;
+            println!(
+                "cel: ThingLightAnim(0 -> 1, period 4) ramps over period/2 = 2 s: {half:.2} after one second and {full:.2} after two, then stops ({})",
+                rt.things[lamp].light_rate == 0.0
+            );
+            assert!((half - 0.5).abs() < 0.05, "the ramp did not reach half in half the time: {half}");
+            assert!((full - 1.0).abs() < 0.01, "the ramp did not reach the end: {full}");
+            assert_eq!(rt.things[lamp].light_rate, 0.0, "the ramp did not stop at its target");
+            // Which placed scripts in this level light things.
+            let mut lamps = Vec::new();
+            for inst in &world.level.cogs {
+                let Some(data) = gobs.read(&inst.script) else { continue };
+                let text = String::from_utf8_lossy(&data).to_ascii_lowercase();
+                if text.contains("thinglight") || text.contains("thinglightanim") {
+                    lamps.push(inst.script.clone());
+                }
+            }
+            lamps.sort();
+            lamps.dedup();
+            println!(
+                "cel: {} placed script(s) in this level light a thing{}",
+                lamps.len(),
+                lamps.first().map(|n| format!(" (first: {n})")).unwrap_or_default()
+            );
+        }
         println!("--- cel check passed ---");
         return;
     }
@@ -9521,6 +9588,9 @@ struct SurfaceLook {
     sectors: Vec<f32>,
     /// `MaterialAnim`'s per-material cel (`rdMaterial.curCelNum`).
     materials: HashMap<i32, f32>,
+    /// `ThingLight`'s light summed per sector: retail lights a radius around the thing, and this
+    /// build's baked sector light is the granularity it has, so the sum is added to the sector's own.
+    thing_light: Vec<f32>,
     /// `SlideWall`'s accumulated texel offset per surface — the engine adds `scrollVector * dt` to
     /// `texVertOffset` and wraps it at 1024, which from the clock is just `rate * time`.
     scrolls: Vec<[f32; 2]>,
@@ -9558,6 +9628,7 @@ impl SurfaceLook {
                     (rt.sky_scroll[1][1] * rt.time).rem_euclid(1024.0),
                 ],
             ],
+            thing_light: rt.thing_light_by_sector(),
         }
     }
 
@@ -9592,10 +9663,13 @@ impl SurfaceLook {
 
     /// The factor the level's baked vertex light is multiplied by: the engine adds a surface's and a
     /// sector's `extraLight` on top of the baked term, so 0 means "as the level was built".
-    fn light(&self, surface: usize, sector: usize) -> f32 {
+    fn light(&self, surface: usize, sector: i32) -> f32 {
         let surface = self.lights.get(surface).copied().unwrap_or(0.0);
-        let sector = self.sectors.get(sector).copied().unwrap_or(0.0);
-        (1.0 + surface + sector).clamp(0.0, 4.0)
+        let index = usize::try_from(sector).unwrap_or(usize::MAX);
+        let sector_own = self.sectors.get(index).copied().unwrap_or(0.0);
+        // `ThingLight`: the lamps standing in this sector, summed (see `thing_light_by_sector`).
+        let things = self.thing_light.get(index).copied().unwrap_or(0.0);
+        (1.0 + surface + sector_own + things).clamp(0.0, 4.0)
     }
 }
 
@@ -10944,14 +11018,14 @@ fn build_world(
         // leaves it on screen as long as another is visible.
         let owners = claims.get(index).map(Vec::as_slice).unwrap_or(&[]);
         if owners.is_empty() {
-            let light = look.light(index, usize::MAX);
+            let light = look.light(index, -1);
             batches
                 .entry((usize::MAX, surface.material))
                 .or_default()
                 .push_polygon(level, surface, tex_size, cel, light, scroll);
         }
         for &sector in owners {
-            let light = look.light(index, sector);
+            let light = look.light(index, sector as i32);
             batches
                 .entry((sector, surface.material))
                 .or_default()

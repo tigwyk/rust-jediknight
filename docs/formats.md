@@ -3246,6 +3246,39 @@ the arithmetic (a `0 -> 1` ramp at 2 fps lands on 0.5 after half a second and th
 path, and running a level's own startup scripts shows the shipped calls arriving: level 2 moves **7
 surface lights** (its force fields) in the first second.
 
+### A thing's own light: `ThingLight`, `SetThingLight`, `ThingLightAnim`
+
+The third source of scripted light is a **thing**: a lamp, a console, a burning barrel. The engine keeps
+`thing->light` and `SITH_TF_EMITLIGHT`, and gives it a radius in the dynamic-light pass.
+
+* **`ThingLight(thing, value, time)`** — `sithCogFunctionThing_ThingLight`: a negative value is ignored;
+  `time == 0` sets `thing->light` outright, and otherwise it calls
+  `sithSurface_SetThingLight(pThing, value, time, 0)`, a ramp.
+* **`SetThingLight(thing, value)`** — the plain setter behind the same state.
+* **`ThingLightAnim(thing, start, end, period)`** — refuses `end < start` or `period <= 0`, sets the
+  light to `start`, and ramps to `end` over **`period * 0.5`** seconds (`idk_ = idk * 0.5` in the
+  decompile), answering the record or `-1`. `10_powercore.cog` pulses four lights with it and
+  `00_lightanim.cog` is the generic form.
+
+`sithSurface_SetThingLight` builds the same record a sector fade uses — `field_44 = (to - from) / time`,
+`field_3C = from`, `field_40 = to` — so the port's `ThingState.light`/`light_end`/`light_rate` advance by
+the same code path as `SetSectorLight`, and the ramp frees itself at its target.
+
+A thing's light is summed **per sector** (`Runtime::thing_light_by_sector`) and added to that sector's
+light in the draw, so a lamp brightens the room it stands in and `00_breakinglamp.cog` dims it again when
+the lamp is shot out.
+
+```text
+cel: ThingLight(thing 0, 2) lifts its sector's drawn light 1.00 -> 3.00
+cel: ThingLightAnim(0 -> 1, period 4) ramps over period/2 = 2 s: 0.50 after one second and 1.00
+     after two, then stops (true)
+cel: 1 placed script(s) in this level light a thing (first: 01_TieBomber.cog)
+```
+
+`ponytail:` retail gives the light a *radius*; this build adds the whole sum to its sector's baked light,
+so a lamp lights its room flatly instead of in a pool. The upgrade is a per-surface falloff from the
+thing's position — the sector column is the granularity the vertex bake has today.
+
 ### Damage decays in flight
 
 The engine's `sithWeapon_Update` decays a projectile's damage as it flies, when the weapon's

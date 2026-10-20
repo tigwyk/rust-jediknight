@@ -98,7 +98,13 @@ flag                                                   exit  what it prints
                                                              light, lands on 1 and stops (level 2 ramps 7 of
                                                              its own); `MaterialAnim` resolves a material
                                                              name, answers -1 for an unknown one, and steps
-                                                             its cel (level 9's own two calls walk 2)
+                                                             its cel (level 9's own two calls walk 2);
+                                                             `ThingLight(thing, 2)` lifts its sector's
+                                                             drawn light 1.00 -> 3.00 and
+                                                             `ThingLightAnim(0 -> 1, period 4)` ramps
+                                                             over period/2 = 2 s (0.50 then 1.00) and
+                                                             stops; level 1 places
+                                                             `01_TieBomber.cog`, which lights one
 --camera                                                 0  17b_Camera.cog startup points camera slot 0 at
                                                              thing 38 (`droidcam`, `ghostCam`) at
                                                              [2.03, -2.83, 2.56], so the view is not the
