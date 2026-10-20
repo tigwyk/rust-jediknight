@@ -147,6 +147,7 @@ const GATES: &[&str] = &[
     "--scroll",
     "--damage-return",
     "--attach",
+    "--things",
     "--move",
     "--pickup",
     "--save",
@@ -290,6 +291,7 @@ fn main() {
     let mut scroll_check = false;
     let mut damage_return_check = false;
     let mut attach_check = false;
+    let mut things_check = false;
     let mut fire_check: Option<String> = None;
     let mut hit_check = false;
     let mut level_shader = false;
@@ -533,6 +535,8 @@ fn main() {
             "--damage-return" => damage_return_check = true,
             // `--attach`: a thing rides another (`AttachThingToThing`), and stops when detached.
             "--attach" => attach_check = true,
+            // --things: TeleportThing, CreateThingAtPos, FireProjectile and the Sync* no-ops.
+            "--things" => things_check = true,
             // `--fire <weapon template>`: fire that weapon at level 1's actor and check the
             // projectile travels, hits and damages.
             // `--level-shader`: draw level surfaces with the material that carries the colormap
@@ -4869,6 +4873,105 @@ fn main() {
         );
         assert_eq!(errors, 0, "cog check found {errors} problems");
         println!("--- cog check passed ---");
+        return;
+    }
+
+    if things_check {
+        // The last of the "thing properties" tail: `TeleportThing`, `CreateThingAtPos`,
+        // `FireProjectile`, `SetRespawnMask`, and the multiplayer `Sync*` family, which a
+        // single-player build answers and does nothing.
+        let state = runtime::Runtime::handle(&world.level);
+        let mut rt = state.borrow_mut();
+        let Some(template) = rt
+            .templates
+            .iter()
+            .find(|t| rt.template_types.contains_key(*t))
+            .cloned()
+        else {
+            println!("things: this level has no templates");
+            return;
+        };
+        let Some(a) = (0..rt.things.len()).find(|i| !rt.things[*i].destroyed) else {
+            println!("things: this level has no things");
+            return;
+        };
+        let b = (0..rt.things.len()).find(|i| *i != a).unwrap_or(a);
+        // `TeleportThing(thing, to)` copies the whole pose, angles included — not a position set.
+        rt.things[b].pos = [7.0, 8.0, 9.0];
+        rt.things[b].pitch = 10.0;
+        rt.things[b].yaw = 20.0;
+        rt.things[b].roll = 30.0;
+        rt.things[a].pos = [1.0, 2.0, 3.0];
+        rt.things[a].pitch = 0.0;
+        rt.things[a].yaw = 0.0;
+        rt.things[a].roll = 0.0;
+        rt.call(
+            "TeleportThing",
+            &[cog::Value::Num(a as f64), cog::Value::Num(b as f64)],
+        );
+        let pose = (rt.things[a].pos, rt.things[a].pitch, rt.things[a].yaw, rt.things[a].roll);
+        println!(
+            "things: TeleportThing(thing {a}, thing {b}) copies the whole pose — {pose:?} — not just the position"
+        );
+        assert_eq!(pose, ([7.0, 8.0, 9.0], 10.0, 20.0, 30.0), "the teleport did not copy the pose");
+        // `CreateThingAtPos`: an absolute pose, no marker involved.
+        let before = rt.things.len();
+        let sector = rt.things[a].sector;
+        let spawned = rt.call(
+            "CreateThingAtPos",
+            &[
+                cog::Value::Str(template.clone()),
+                cog::Value::Num(sector as f64),
+                cog::Value::Vec([4.0, 5.0, 6.0]),
+                cog::Value::Vec([0.0, 90.0, 0.0]),
+            ],
+        );
+        let index = match spawned {
+            cog::Value::Num(n) if n >= 0.0 => n as usize,
+            other => panic!("CreateThingAtPos answered {other:?}"),
+        };
+        println!(
+            "things: CreateThingAtPos(`{template}`) made thing {index} at {:?} facing {:.0} deg ({before} things -> {})",
+            rt.things[index].pos,
+            rt.things[index].yaw,
+            rt.things.len()
+        );
+        assert_eq!(rt.things.len(), before + 1, "CreateThingAtPos did not add a thing");
+        assert_eq!(rt.things[index].pos, [4.0, 5.0, 6.0], "the spawn landed elsewhere");
+        assert_eq!(rt.things[index].yaw, 90.0, "the spawn lost its angles");
+        // `FireProjectile`: the thing's own `weapon=`, answered with the bolt.
+        let armed = (0..rt.things.len()).find(|i| {
+            rt.templates
+                .get(*i)
+                .is_some_and(|name| rt.template_weapon.contains_key(name))
+        });
+        if let Some(armed) = armed {
+            let before = rt.things.len();
+            let bolt = rt.call("FireProjectile", &[cog::Value::Num(armed as f64)]);
+            println!(
+                "things: FireProjectile(thing {armed}, `{}`) answered {bolt:?} and added {} thing(s)",
+                rt.templates[armed],
+                rt.things.len() - before
+            );
+            assert!(
+                matches!(bolt, cog::Value::Num(n) if n >= 0.0),
+                "FireProjectile did not fire"
+            );
+        } else {
+            println!("things: this level has no armed thing; FireProjectile is untested");
+        }
+        // `SetRespawnMask` is the *player's* mask, not a thing's.
+        rt.call("SetRespawnMask", &[cog::Value::Num(a as f64), cog::Value::Num(31.0)]);
+        assert_eq!(rt.player_respawn_mask, 0x1f, "SetRespawnMask did not store the mask");
+        // The multiplayer pushes answer and change nothing.
+        let still = rt.things[a].pos;
+        let answers = rt.call("SyncThingPos", &[cog::Value::Num(a as f64)]);
+        let surface = rt.call("SyncSurface", &[cog::Value::Num(0.0)]);
+        println!(
+            "things: SyncThingPos answers {answers:?} and SyncSurface {surface:?}, and the thing stays at {still:?} (a single-player build has nobody to push to)"
+        );
+        assert_eq!(rt.things[a].pos, still, "SyncThingPos moved something");
+        println!("--- things check passed ---");
         return;
     }
 

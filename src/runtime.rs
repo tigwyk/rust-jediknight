@@ -412,6 +412,8 @@ pub struct Runtime {
     /// material currently draws — `rdMaterial.curCelNum`, which a surface with no cel of its own uses.
     pub material_anims: Vec<(i32, f32, f32, f32)>,
     pub material_cel: BTreeMap<i32, f32>,
+    /// `SetRespawnMask`: the player's respawn mask, i.e. which items a dying player keeps.
+    pub player_respawn_mask: u32,
     /// Per thing, the amount the last `damage_typed` applied, so a `damaged` handler that answers
     /// with a smaller number can be honoured after the fact (`amend_damage`).
     pub damage_applied: BTreeMap<usize, f32>,
@@ -942,6 +944,7 @@ impl Runtime {
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            player_respawn_mask: 0,
             damage_applied: BTreeMap::new(),
             scroll_bucket: 0,
             sky_scroll: [[0.0; 2]; 2],
@@ -1099,6 +1102,58 @@ impl Runtime {
             self.scroll_bucket = bucket;
             self.surface_epoch += 1;
         }
+    }
+
+    /// Create a thing from a template at a pose: the one constructor `CreateThing` (marker-relative)
+    /// and `CreateThingAtPos` (absolute) share, so the two cannot drift apart.
+    fn spawn_at(&mut self, template: String, pos: [f32; 3], sector: i32, angles: [f32; 3]) -> usize {
+        let insert = template_insert(&template);
+        let health = self.template_health.get(&template).copied().unwrap_or(1.0);
+        let kind = self.template_types.get(&template).copied().unwrap_or(0);
+        self.things.push(ThingState {
+            pos,
+            insert,
+            pitch: angles[0],
+            yaw: angles[1],
+            roll: angles[2],
+            sector,
+            flags: 0,
+            health,
+            frame: 0.0,
+            target: None,
+            frames: Vec::new(),
+            destroyed: false,
+            vel: self.template_vel.get(&template).copied().unwrap_or([0.0; 3]),
+            damage: self.template_damage.get(&template).copied().unwrap_or(0.0),
+            phys_flags: 0,
+            jk_flags: 0,
+            attach: None,
+            attach_offset: [0.0; 3],
+            attach_flags: 0,
+            spin: None,
+            light: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
+            extra_speed: 0.0,
+            ai_target: None,
+            ai_wait: 0.0,
+            arrived: false,
+            min_damage: self
+                .template_min_damage
+                .get(&template)
+                .copied()
+                .unwrap_or(0.0),
+            decay: if self.template_decay.contains(&template) {
+                self.template_rate.get(&template).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            },
+        });
+        self.templates.push(template);
+        self.types.push(kind);
+        let index = self.things.len() - 1;
+        self.arm_life(index);
+        index
     }
 
     /// `SetThingLight`/`ThingLight`/`ThingLightAnim`: set or ramp a thing's own light, which
@@ -1622,6 +1677,14 @@ impl Runtime {
                 | "killtimerex"
                 | "waitforstop"
                 | "stopsound"
+                | "createthingatpos"
+                | "teleportthing"
+                | "setrespawnmask"
+                | "fireprojectile"
+                | "syncthingpos"
+                | "syncsurface"
+                | "syncthingscale"
+                | "syncthinglook"
                 | "thinglight"
                 | "setthinglight"
                 | "thinglightanim"
@@ -3110,6 +3173,68 @@ impl Runtime {
                 }
                 Value::Nil
             }
+            // `CreateThingAtPos(template, sector, pos, angles)`: the absolute-position form of
+            // `CreateThing`, which is how `force_absorb.cog` hangs its sphere on the player and how
+            // every effect script spawns a burst where something happened.
+            "createthingatpos" => {
+                let template = match args.first() {
+                    Some(Value::Str(s)) => s.to_ascii_lowercase(),
+                    _ => return Value::Num(-1.0),
+                };
+                let sector = idx(1) as i32;
+                let pos = args.get(2).map(vec3).unwrap_or([0.0; 3]);
+                let angles = args.get(3).map(vec3).unwrap_or([0.0; 3]);
+                Value::Num(self.spawn_at(template, pos, sector, angles) as f64)
+            }
+            // `TeleportThing(thing, to)`: `sithCogFunctionThing_TeleportThing` detaches the thing, then
+            // copies the target's **whole pose** — orientation as well as position — re-homes it in the
+            // target's sector and re-grounds it. It is not a position set: the angles come along.
+            "teleportthing" => {
+                let (Ok(thing), Ok(to)) = (usize::try_from(idx(0)), usize::try_from(idx(1))) else {
+                    return Value::Nil;
+                };
+                let Some(from) =
+                    self.things.get(to).map(|t| (t.pos, t.pitch, t.yaw, t.roll, t.sector))
+                else {
+                    return Value::Nil;
+                };
+                if let Some(t) = self.things.get_mut(thing) {
+                    t.attach = None;
+                    t.attach_flags = 0;
+                    t.pos = from.0;
+                    t.pitch = from.1;
+                    t.yaw = from.2;
+                    t.roll = from.3;
+                    t.sector = from.4;
+                    t.target = None;
+                    t.vel = [0.0; 3];
+                }
+                Value::Nil
+            }
+            // `SetRespawnMask(player, mask)`: `sithCogFunctionPlayer_SetRespawnMask` writes the *player's*
+            // respawn mask — which items a dying player keeps — not a thing's. Stored so the round trip
+            // is real; single-player death does not consult it.
+            "setrespawnmask" => {
+                self.player_respawn_mask = idx(1) as u32;
+                Value::Nil
+            }
+            // `FireProjectile(thing)`: fire the thing's own `weapon=` template, which is what a scripted
+            // turret or an NPC does (`sithCogFunctionThing_FireProjectile`).
+            "fireprojectile" => {
+                let Some(index) = usize::try_from(idx(0)).ok() else { return Value::Num(-1.0) };
+                let Some(weapon) = self
+                    .templates
+                    .get(index)
+                    .and_then(|name| self.template_weapon.get(name).cloned())
+                else {
+                    return Value::Num(-1.0);
+                };
+                Value::Num(self.fire(index as i64, &weapon).map(|i| i as f64).unwrap_or(-1.0))
+            }
+            // `SyncThingPos`/`SyncSurface` and their siblings: multiplayer state pushes. A single-player
+            // build has nobody to push to, so they are answered and do nothing — the engine's own arm is
+            // empty without `COG_SHOULD_SYNC`.
+            "syncthingpos" | "syncsurface" | "syncthingscale" | "syncthinglook" => Value::Nil,
             // `ThingLight(thing, value, time)`: `sithCogFunctionThing_ThingLight` sets the thing's own
             // light outright when `time` is 0 and otherwise ramps it there over `time` seconds
             // (`sithSurface_SetThingLight(pThing, light, time, 0)`). A negative value is ignored, which
@@ -3815,52 +3940,7 @@ impl Runtime {
                 let moved = rotate_by_angles(delta, src_pitch, src_yaw, src_roll);
                 let pos = [src_pos[0] + moved[0], src_pos[1] + moved[1], src_pos[2] + moved[2]];
                 let sector = src_sector;
-                let health = self.template_health.get(&template).copied().unwrap_or(1.0);
-                let kind = self.template_types.get(&template).copied().unwrap_or(0);
-                self.things.push(ThingState {
-                    pos,
-                    insert,
-                    yaw: src_yaw,
-                    pitch: src_pitch,
-                    roll: src_roll,
-                    sector,
-                    flags: 0,
-                    health,
-                    frame: 0.0,
-                    target: None,
-                    frames: Vec::new(),
-                    destroyed: false,
-                    vel: self.template_vel.get(&template).copied().unwrap_or([0.0; 3]),
-                    damage: self.template_damage.get(&template).copied().unwrap_or(0.0),
-                    phys_flags: 0,
-                    jk_flags: 0,
-                    attach: None,
-                    attach_offset: [0.0; 3],
-                    attach_flags: 0,
-                    spin: None,
-                    light: 0.0,
-                    light_end: 0.0,
-                    light_rate: 0.0,
-                    extra_speed: 0.0,
-                    ai_target: None,
-                    ai_wait: 0.0,
-            arrived: false,
-                    min_damage: self
-                        .template_min_damage
-                        .get(&template)
-                        .copied()
-                        .unwrap_or(0.0),
-                    decay: if self.template_decay.contains(&template) {
-                        self.template_rate.get(&template).copied().unwrap_or(0.0)
-                    } else {
-                        0.0
-                    },
-                });
-                self.templates.push(template);
-                self.types.push(kind);
-                let index = self.things.len() - 1;
-                self.arm_life(index);
-                Value::Num(index as f64)
+                Value::Num(self.spawn_at(template, pos, sector, [src_pitch, src_yaw, src_roll]) as f64)
             }
             // `DamageThing(thing, damage)`: the health bookkeeping only. Death, the
             // killer's credit and the `killed` messages belong to combat (stage 5).
@@ -4266,6 +4346,7 @@ mod tests {
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            player_respawn_mask: 0,
             damage_applied: BTreeMap::new(),
             scroll_bucket: 0,
             sky_scroll: [[0.0; 2]; 2],
