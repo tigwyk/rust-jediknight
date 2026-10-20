@@ -11771,6 +11771,18 @@ fn setup(
     {
         forced_yaw = Some(degrees);
     }
+    // `BK_SPAWN_OFFSET="dx,dy"`: nudge the spawn horizontally. A door piece usually sits *in* its wall,
+    // so half a unit along its own yaw lands outside the room and every move is undone; this puts the
+    // body on the room's side of it.
+    if let Ok(offset) = std::env::var("BK_SPAWN_OFFSET")
+        && let Some((dx, dy)) = offset.split_once(',')
+        && let (Ok(dx), Ok(dy)) = (dx.trim().parse::<f32>(), dy.trim().parse::<f32>())
+    {
+        start[0] += dx;
+        start[1] += dy;
+        sector = solids.sector_at(start, PLAYER_RADIUS).unwrap_or(sector);
+        println!("walker: BK_SPAWN_OFFSET moved the body to {start:?}, sector {sector}");
+    }
 
     // Seed the body onto the floor it stands over. The level's `walkplayer` z is the floor
     // surface itself (level 1: `-0.78` against a walkway top at `-0.75`), so a body placed exactly
