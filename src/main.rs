@@ -2817,6 +2817,34 @@ fn main() {
             assert_eq!(fresh.inv.get(&2).copied(), Some(3.0), "the inventory did not restore");
             assert_eq!(fresh.time, 128.5, "the clock did not restore");
             let _ = std::fs::remove_file(&path);
+
+            // `AutosaveGame()`: what the story levels call at their own beats. The verb only raises a
+            // flag — the app writes — so the check is the flag, the file, and that the file carries
+            // the world the script asked to keep.
+            live.call("AutosaveGame", &[]);
+            assert!(live.autosave, "`AutosaveGame` did not raise the checkpoint flag");
+            let path = std::env::temp_dir().join("bevi-knight-autosave.jks");
+            let bytes = write_snapshot(&path, &level_name, &live).expect("write the autosave");
+            live.autosave = false;
+            let saved = jks::Save::read(&std::fs::read(&path).expect("re-read"))
+                .expect("the autosave did not parse");
+            let payload = saved
+                .sections
+                .iter()
+                .find(|s| s.kind() == runtime::SAVE_SECTION)
+                .expect("the autosave has no state section");
+            let state = runtime::Snapshot::from_bytes(&payload.data).expect("the autosave payload");
+            println!(
+                "jks: `AutosaveGame` raised the flag and {bytes} bytes at `{}` restore {}/{} things at {:.2} s",
+                path.display(),
+                state.things.len(),
+                live.things.len(),
+                state.time
+            );
+            assert_eq!(state.things.len(), live.things.len(), "the autosave is missing things");
+            assert_eq!(state.time, live.time, "the autosave did not keep the clock");
+            assert_eq!(state.things[player].health, 37.0, "the autosave lost the player's health");
+            let _ = std::fs::remove_file(&path);
         }
         println!("--- save check passed ---");
         return;
@@ -7738,6 +7766,10 @@ fn main() {
     }
 
     // The material plugin comes after `DefaultPlugins`: `load_internal_asset!` needs `Assets<Shader>`.
+    // Where `AutosaveGame` writes: `BK_SAVE_DIR`, else `saves` beside the game data.
+    let save_directory = std::env::var_os("BK_SAVE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| game.join("saves"));
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: format!("bevi-knight — {level_name}"),
@@ -7749,6 +7781,11 @@ fn main() {
         .insert_resource(Archives(gobs))
         .insert_resource(Screens(menus))
         .insert_resource(SaberBlade::default())
+        .insert_resource(SaveDir(
+            std::env::var_os("BK_SAVE_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| game.join("saves")),
+        ))
         .insert_resource(Overlay::new(boot_menu).with_pending(pending_id))
         .insert_resource(world)
         .insert_resource(MusicDir(game.join("MUSIC")))
@@ -7840,7 +7877,8 @@ fn main() {
                     actors_follow_runtime,
                     things_follow_geomode,
                     adopt_carried,
-                    saber_blade,
+                    adopt_carried,
+                    autosave,
                     billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
@@ -13451,6 +13489,49 @@ fn fire_player(
         println!("fired {weapon} (thing {shot})");
     }
 }
+
+/// Write a savegame: the `.jks` container with this build's state payload inside it.
+///
+/// Both the `--save` check and the live `AutosaveGame` path go through here, so what the scripts ask for
+/// and what a check proves are the same file.
+fn write_snapshot(
+    path: &std::path::Path,
+    level_name: &str,
+    rt: &runtime::Runtime,
+) -> std::io::Result<usize> {
+    let mut save = jks::Save::new(level_name);
+    save.sections.push(jks::Section::new(runtime::SAVE_SECTION, rt.snapshot().to_bytes()));
+    let bytes = save.write();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, &bytes)?;
+    Ok(bytes.len())
+}
+
+/// `AutosaveGame()`: the first system to see the flag writes the checkpoint and clears it.
+fn autosave(
+    sim: Option<Res<Sim>>,
+    dir: Option<Res<SaveDir>>,
+    plan: Option<Res<FlowPlan>>,
+) {
+    let (Some(sim), Some(dir)) = (sim, dir) else { return };
+    let path = dir.0.join("autosave.jks");
+    let mut rt = sim.world.borrow_mut();
+    if !rt.autosave {
+        return;
+    }
+    rt.autosave = false;
+    let level = plan.as_ref().map(|p| p.level.clone()).unwrap_or_default();
+    match write_snapshot(&path, &level, &rt) {
+        Ok(bytes) => println!("autosave: `AutosaveGame` wrote {bytes} bytes to `{}`", path.display()),
+        Err(e) => println!("autosave: could not write `{}`: {e}", path.display()),
+    }
+}
+
+/// Where this build writes its saves: `BK_SAVE_DIR`, else `saves` beside the game's data.
+#[derive(Resource)]
+struct SaveDir(std::path::PathBuf);
 
 /// The player's lightsaber blade, drawn from the eye when `jkSetSaberInfo` armed one.
 ///

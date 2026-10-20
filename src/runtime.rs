@@ -845,6 +845,10 @@ pub struct Runtime {
     /// The engine registers the verb as `jkendlevel` (`jkCog.c`), and a level's final script
     /// is what calls it.
     pub level_complete: bool,
+    /// `AutosaveGame()`: a script asked for a checkpoint. The app writes it and clears this — the
+    /// runtime does no file I/O. The shipped story levels call it at their own beats (7, 11, 15, 17a,
+    /// 17b and 20), so the save happens where retail's does.
+    pub autosave: bool,
     /// `SetMusicVol(v)`, 0..1 — the scripts fade this from a `pulse`.
     pub music_volume: f32,
     /// How long an actor waits between shots. The engine's instinct scheduler decides with
@@ -1262,6 +1266,7 @@ impl Runtime {
             ai_flee: BTreeMap::new(),
             ai_classes: BTreeMap::new(),
             level_complete: false,
+            autosave: false,
             music: None,
             music_volume: 1.0,
             template_speed: level
@@ -2025,6 +2030,7 @@ impl Runtime {
                 | "loadtemplate"
                 | "setfacelightmode"
                 | "pathmoveresume"
+                | "autosavegame"
                 | "setthingmodel"
                 | "newcoloreffect"
                 | "modifycoloreffect"
@@ -5137,6 +5143,12 @@ impl Runtime {
             // scripts are the only callers, swapping a player's body for their team's model. The
             // renderer resolves a *created* thing through this override; a thing the level placed keeps
             // the mesh built at load, because replacing it means despawning and rebuilding its entities.
+            // `AutosaveGame()`: the level's own story beats ask for a checkpoint (7, 11, 15, 17a,
+            // 17b and 20 call it from `rahnlines`/`endlevel`). The flag is what the app writes.
+            "autosavegame" => {
+                self.autosave = true;
+                Value::Nil
+            }
             "setthingmodel" => {
                 if let Ok(thing) = usize::try_from(idx(0))
                     && let Some(Value::Str(model)) = args.get(1)
@@ -5366,6 +5378,7 @@ mod tests {
             ai_flee: BTreeMap::new(),
             ai_classes: BTreeMap::new(),
             level_complete: false,
+            autosave: false,
             music: None,
             music_volume: 1.0,
             template_speed: BTreeMap::new(),
