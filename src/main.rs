@@ -7123,11 +7123,11 @@ fn run_level(
                     continue;
                 }
                 let script = &scripts[script_name];
-                // `#N` is a numeric message: the engine numbers messages per script, so N
-                // is resolved against *this* script's `message:` list.
+                // `#N` is a numeric message: the engine hands the id to the receiver and its
+                // `message:` list decides the label, so both sides agree on `SITH_MESSAGE_*` values.
                 let name = match name.strip_prefix('#').and_then(|n| n.parse::<usize>().ok()) {
-                    Some(ordinal) => match script.messages().nth(ordinal) {
-                        Some(message) => message.name.clone(),
+                    Some(id) => match script.label_for_message_id(id) {
+                        Some(label) => label,
                         None => continue,
                     },
                     None => name.clone(),
@@ -10095,10 +10095,10 @@ fn deliver_cog_messages(
                 }
                 let Some(script) = world.cogs.get(script_name) else { continue };
                 // `#N` is a message number: the engine hands the id to the receiver, whose own
-                // `message:` list numbers them.
+                // `message:` list decides the label, so both sides agree on `SITH_MESSAGE_*` values.
                 let label = match name.strip_prefix('#').and_then(|n| n.parse::<usize>().ok()) {
-                    Some(ordinal) => match script.messages().nth(ordinal) {
-                        Some(message) => message.name.clone(),
+                    Some(id) => match script.label_for_message_id(id) {
+                        Some(label) => label,
                         None => continue,
                     },
                     None => name.clone(),

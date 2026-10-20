@@ -144,14 +144,17 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    `get/setthingmass`, `setthinguserdata`, `setthingtimer`.)
    **Level-end chain: closed.** A level's `goal*.cog` reports a finished objective with
    `SendMessage(GetMasterCOG(), user0)`, and `SendMessage` now takes the engine's two arguments — a
-   **cog index** and a message number (`sithCogFunction_SendMessage`) — carrying the calling cog as
-   the sender so `GetSenderID()` answers in the receiver. The queue is drained in play as well as in
-   `--run`; before this, `Runtime::messages` (script→script, addressed by cog) was only pumped by
-   `--run`, while the live loop drained `pending_messages` (thing/sector, addressed by instance).
-   Level 1 now delivers the goal message to exactly one cog instead of broadcasting it to 41, and
-   `[01_endlevel.cog user0]` runs — goal flag, `Accomplish1.wav`, `Sleep(3.0)`, `jkEndLevel(1)`.
-   Remaining: message *numbers* are still resolved against the receiving script's `message:` list
-   rather than mapped to `SITH_MESSAGE_*` ids, so mismatched declaration orders can disagree.
+   **cog index** and a message **id** (`sithCogFunction_SendMessage`) — carrying the calling cog as
+   the sender so `GetSenderID()` answers in the receiver. The ids come from the retail binary's own
+   keyword table in `sithCog_Startup` (`activate` 1, `activated` 1 as an alias, `startup` 3,
+   `timer` 4, … `user0`…`user7` 27…34, `trigger` 40), so a `message` symbol evaluates to its id and a
+   receiver matches its `message:` list by id rather than by declaration order. The queue is drained
+   in play as well as in `--run`; before this, `Runtime::messages` (script→script, addressed by cog)
+   was only pumped by `--run`, while the live loop drained `pending_messages` (thing/sector, addressed
+   by instance). Level 1 delivers the goal message to exactly one cog instead of broadcasting it to
+   41, and `[01_endlevel.cog user0]` runs — goal flag, `Accomplish1.wav`, `Sleep(3.0)`, `jkEndLevel(1)`.
+   Across the 34 levels the id routing is visible on three: level 2 sends 5 → 7 script messages, and
+   11 and 17 change how many doorway pieces and sounds their scripts drive.
 2. **Timer queue for `sleep`/`settimer`/`setpulse`** (section 4). It is the one ceiling that changes what
    scripts do, and it sits under every verb that waits.
 3. ~~**Sector and adjoin flags**~~ — **done** (section 6): `setadjoinflags`/`clearadjoinflags`/

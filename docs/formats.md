@@ -2616,15 +2616,21 @@ a goal script) does arrive today, and `--run 01narshadda` shows the handler runn
   [01_endlevel.cog user0] sound Accomplish1.wav at 1.00
 ```
 
-That message is now addressed rather than broadcast. `sithCogFunction_SendMessage` pops a **cog
-index** and a message **type id** (`SITH_MESSAGE_USER0` = 27, `activate` = 1, `startup` = 3,
-`timer` = 4, `pulse` = 13, `user0`…`user7` = 27…34), resolves the cog and delivers to that one
-instance. The port queues `(label, sending cog, target cog)`: the target is the cog index argument
-(the port still carries the message as `#N` and resolves `N` against the receiving script's
-`message:` list, which is the engine's own per-script numbering), and the sender is the calling VM's
-index, so `GetSenderID()` answers something real in the receiver. A negative or unset target — an
-unset master cog — still broadcasts, which is what the start-of-level scripts have before their
-`endlevel` instance has run.
+That message is now addressed rather than broadcast, and its number is the engine's.
+`sithCogFunction_SendMessage` pops a **cog index** and a message **id**, resolves the cog and delivers
+to that one instance. The ids are not a guess: `sithCog_Startup` (`JK.EXE:004de070`) registers each
+name as a keyword with `sithCog_AddIntSymbol`, and that table is `activate` 1 — and `activated` **1
+too**, an alias shipped scripts use in 82 places — `removed` 2, `startup` 3, `timer` 4, `blocked` 5,
+`entered` 6, `exited` 7, `crossed` 8, `sighted` 9, `damaged` 10, `arrived` 11, `killed` 12, `pulse` 13,
+`touched` 14, `created` 15, `loading` 16, `selected` 17, `deselected` 18, `autoselect` 19, `changed` 20,
+`deactivated` 21, `shutdown` 22, `respawn` 23, `aievent` 24, `skill` 25, `taken` 26, `user0`…`user7`
+27…34, `newplayer` 35, `fire` 36, `join` 37, `leave` 38, `splash` 39, `trigger` 40. A `message` symbol in
+an expression is that id, so `SendMessage(GetMasterCOG(), user0)` puts 27 on the stack, and the receiver
+matches its `message:` list **by id** rather than by declaration order; a name no retail table carries
+(`pickedup`) still falls back to the positional reading. The port queues `(label, sending cog, target
+cog)`, and the sender is the calling VM's index, so `GetSenderID()` answers something real in the
+receiver. A negative or unset target — an unset master cog — still broadcasts, which is what the
+start-of-level scripts have before their `endlevel` instance has run.
 
 Delivery had to be added to the live loop as well as to `--run`: `Sim` has two buses, and only the
 first was drained every frame. `pending_messages` carries thing- and sector-linked labels addressed
@@ -2639,10 +2645,6 @@ Two conventions, stated because they are *not* the engine's full behaviour:
   level parse does not keep, so every instance is treated as level-wide. `GetSenderRef` answers 0
   too, so a script comparing `GetSenderRef() == GetSourceRef()` still matches for engine-triggered
   events; `GetSenderID` does answer the calling cog now.
-- A message's *number* is still resolved against the receiving script's `message:` list rather than
-  mapped to `SITH_MESSAGE_*` ids, so a sender and a receiver that declare their messages in different
-  orders can still disagree. The enum values are recorded above; wiring `user0`…`user7` in as parser
-  constants is what removes the remaining ambiguity.
 
 ## 16.5 Firing a weapon — **observed**, first slice
 

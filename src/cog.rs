@@ -79,6 +79,61 @@ impl SymKind {
     }
 }
 
+/// The engine's cog message names and their ids, from the retail binary's own table.
+///
+/// `sithCog_Startup` (`JK.EXE:004de070`) registers every one of these as a keyword with
+/// `sithCog_AddIntSymbol`: `activate` 1, `activated` **1 as well** (an alias), `startup` 3, `timer` 4,
+/// `blocked` 5, `entered` 6 … `taken` 26, `user0` 27 … `user7` 34, `newplayer` 35, `fire` 36,
+/// `join` 37, `leave` 38, `splash` 39, `trigger` 40. So `SendMessage(GetMasterCOG(), user0)` is
+/// `SendMessage(cog, 27)` on the stack, and a receiver matches its `message:` list by id rather than by
+/// position. `pickedup` is a shipped script's own name and appears in no retail table, so it — and
+/// anything else unlisted — stays on the positional fallback in [`Cog::label_for_message_id`].
+pub fn message_id(name: &str) -> Option<i32> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "activate" | "activated" => 1,
+        "removed" => 2,
+        "startup" => 3,
+        "timer" => 4,
+        "blocked" => 5,
+        "entered" => 6,
+        "exited" => 7,
+        "crossed" => 8,
+        "sighted" => 9,
+        "damaged" => 10,
+        "arrived" => 11,
+        "killed" => 12,
+        "pulse" => 13,
+        "touched" => 14,
+        "created" => 15,
+        "loading" => 16,
+        "selected" => 17,
+        "deselected" => 18,
+        "autoselect" => 19,
+        "changed" => 20,
+        "deactivated" => 21,
+        "shutdown" => 22,
+        "respawn" => 23,
+        "aievent" => 24,
+        "skill" => 25,
+        "taken" => 26,
+        "user0" => 27,
+        "user1" => 28,
+        "user2" => 29,
+        "user3" => 30,
+        "user4" => 31,
+        "user5" => 32,
+        "user6" => 33,
+        "user7" => 34,
+        "newplayer" => 35,
+        "fire" => 36,
+        "join" => 37,
+        "leave" => 38,
+        "splash" => 39,
+        "trigger" => 40,
+        _ => return None,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct Symbol {
     pub kind: SymKind,
@@ -188,6 +243,16 @@ impl Cog {
         self.symbols.iter().filter(|s| s.kind == SymKind::Message)
     }
 
+    /// The label a numeric message id names, for the pumps: the receiver's `message:` list is matched
+    /// by engine id, and a name the enum does not cover still falls back to the old positional reading
+    /// (`message: list index == id`), which is how this port delivered messages before the ids existed.
+    pub fn label_for_message_id(&self, id: usize) -> Option<String> {
+        self.messages()
+            .find(|m| message_id(&m.name) == Some(id as i32))
+            .or_else(|| self.messages().nth(id))
+            .map(|m| m.name.clone())
+    }
+
     /// Bind a placed instance's values to this script.
     ///
     /// The level stores one row per instance: the script name followed by a value for
@@ -215,6 +280,17 @@ impl Cog {
                 _ => Value::Str(raw.clone()),
             };
             vm.set_var(&sym.name, value);
+        }
+        // A `message` symbol in an expression is the engine's message **id**, not a variable:
+        // `sithCogParse` gives `message user0` the value `SITH_MESSAGE_USER0` (27), and that number is
+        // what `SendMessage(GetMasterCOG(), user0)` pushes on the stack.
+        for sym in &self.symbols {
+            if sym.kind != SymKind::Message {
+                continue;
+            }
+            if let Some(id) = message_id(&sym.name) {
+                vm.set_var(&sym.name, Value::Num(id as f64));
+            }
         }
         // Locals still need their declared initialisers, which are not all numbers:
         // `sound locked0=i00ky73t.wav local` is a filename, and a vector literal is
@@ -1419,6 +1495,30 @@ end
         assert_eq!(vm.trace.prints, vec!["7".to_string()]);
         // A VM nobody indexed answers -1, which is the engine's "no cog" index.
         assert_eq!(Vm::new().call_verb("GetSelfCog", Vec::new()), Value::Num(-1.0));
+    }
+
+    /// The retail keyword table (`sithCog_Startup`) gives each message name a `SITH_MESSAGE_*` id, the
+    /// parser stores that id in the symbol, and the pumps match the receiver by id — so
+    /// `SendMessage(cog, user0)` reaches `message user0` wherever the receiver declares it.
+    #[test]
+    fn a_message_name_is_its_engine_id() {
+        assert_eq!(message_id("user0"), Some(27));
+        assert_eq!(message_id("USER7"), Some(34));
+        // Retail registers `activated` against id 1 as well, alongside `activate`.
+        assert_eq!(message_id("activated"), Some(1));
+        assert_eq!(message_id("pickedup"), None);
+        let cog = parse(
+            "symbols\nmessage timer\nmessage user0\nend\ncode\ntimer:\n\treturn;\nuser0:\n\treturn;\nend\n",
+        )
+        .expect("parses");
+        let mut vm = Vm::new();
+        cog.bind(&mut vm, &[]);
+        assert_eq!(vm.var("user0"), Value::Num(27.0));
+        // By id: `user0` is declared second, so a positional reading would answer `timer`.
+        assert_eq!(cog.label_for_message_id(27).as_deref(), Some("user0"));
+        assert_eq!(cog.label_for_message_id(4).as_deref(), Some("timer"));
+        // A name with no engine id still falls back to the positional reading.
+        assert_eq!(cog.label_for_message_id(0).as_deref(), Some("timer"));
     }
 
     #[test]
