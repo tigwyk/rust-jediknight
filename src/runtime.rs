@@ -107,6 +107,10 @@ pub struct ThingState {
     /// clears to 0 when the power ends). The engine adds it to `maxThrust`, so it converts
     /// to a settled speed the same way `maxthrust` does: `extra / drag`.
     pub extra_speed: f32,
+    /// `PathMovePause`: the thing keeps its destination but stops advancing —
+    /// `sithTrackThing_PathMovePause` sets `trackParams.flags |= 0x80` and `...Resume` clears it.
+    /// Level 9's pipe doors stop in the doorway this way (`09_stoppipedoors.cog`).
+    pub paused: bool,
     /// `GetPhysicsFlags`/`SetPhysicsFlags` (`physflags=`), and the `jkSetFlags` bits the
     /// force scripts set (`0x20` while a power is mid-flash).
     pub phys_flags: u32,
@@ -133,6 +137,11 @@ impl ThingState {
     /// One animation step: advance `frame` toward the target and re-derive the pose.
     /// Returns whether the thing moved.
     pub fn step(&mut self, dt: f32) -> bool {
+        // `PathMovePause` keeps the destination: the thing stands still where the pause caught it
+        // and `PathMoveResume` carries on toward the same frame.
+        if self.paused {
+            return false;
+        }
         let Some((target, speed)) = self.target else { return false };
         let delta = target - self.frame;
         let step = speed.max(0.001) * dt;
@@ -417,6 +426,9 @@ pub struct Runtime {
     /// material currently draws — `rdMaterial.curCelNum`, which a surface with no cel of its own uses.
     pub material_anims: Vec<(i32, f32, f32, f32)>,
     pub material_cel: BTreeMap<i32, f32>,
+    /// `GetThingGeoMode`/`SetThingCurGeoMode`: a thing's draw mode, where 0 is not drawn. The
+    /// renderer watches `geomode_epoch` and hides the entities of a thing whose mode is 0.
+    pub thing_geomode: BTreeMap<usize, i32>,
     /// `SetRespawnMask`: the player's respawn mask, i.e. which items a dying player keeps.
     pub player_respawn_mask: u32,
     /// Per sound channel, the volume `ChangeSoundVol` sets, and its in-flight fade
@@ -735,6 +747,7 @@ impl Runtime {
                     attach_offset: [0.0; 3],
                     attach_flags: 0,
                     spin: None,
+            paused: false,
                     light: 0.0,
                     light_end: 0.0,
                     light_rate: 0.0,
@@ -958,6 +971,7 @@ impl Runtime {
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            thing_geomode: BTreeMap::new(),
             sound_volume: Vec::new(),
             sound_pitch: Vec::new(),
             sound_fade: BTreeMap::new(),
@@ -1149,6 +1163,7 @@ impl Runtime {
             attach_offset: [0.0; 3],
             attach_flags: 0,
             spin: None,
+            paused: false,
             light: 0.0,
             light_end: 0.0,
             light_rate: 0.0,
@@ -1724,6 +1739,10 @@ impl Runtime {
                 | "syncsurface"
                 | "syncthingscale"
                 | "syncthinglook"
+                | "pathmovepause"
+                | "pathmoveresume"
+                | "getthinggeomode"
+                | "setthingcurgeomode"
                 | "changesoundvol"
                 | "changesoundpitch"
                 | "sectorsound"
@@ -2044,6 +2063,7 @@ impl Runtime {
             attach_offset: [0.0; 3],
             attach_flags: 0,
             spin: None,
+            paused: false,
             light: 0.0,
             light_end: 0.0,
             light_rate: 0.0,
@@ -2586,6 +2606,7 @@ impl Runtime {
             attach_offset: [0.0; 3],
             attach_flags: 0,
             spin: None,
+            paused: false,
             light: 0.0,
             light_end: 0.0,
             light_rate: 0.0,
@@ -3275,6 +3296,47 @@ impl Runtime {
             // build has nobody to push to, so they are answered and do nothing — the engine's own arm is
             // empty without `COG_SHOULD_SYNC`.
             "syncthingpos" | "syncsurface" | "syncthingscale" | "syncthinglook" => Value::Nil,
+            // `PathMovePause(thing)` / `PathMoveResume(thing)`: `sithTrackThing_PathMovePause` sets
+            // `trackParams.flags |= 0x80` (only when the thing is actually moving, answering its index
+            // or -1) and `...Resume` clears it. Level 9's pipe doors stop in the doorway this way:
+            // `09_stoppipedoors.cog` pauses when the player enters the sector and resumes on exit.
+            "pathmovepause" => {
+                let Some(index) = usize::try_from(idx(0)).ok() else { return Value::Num(-1.0) };
+                match self.things.get_mut(index) {
+                    Some(t) if t.target.is_some() => {
+                        t.paused = true;
+                        Value::Num(index as f64)
+                    }
+                    _ => Value::Num(-1.0),
+                }
+            }
+            "pathmoveresume" => {
+                let Some(index) = usize::try_from(idx(0)).ok() else { return Value::Num(0.0) };
+                match self.things.get_mut(index) {
+                    Some(t) if t.paused => {
+                        t.paused = false;
+                        Value::Num(1.0)
+                    }
+                    _ => Value::Num(0.0),
+                }
+            }
+            // `GetThingGeoMode` reads the thing's draw mode and `SetThingCurGeoMode` writes it
+            // (`renderData.desiredGeoMode`/`curGeoMode`). 0 is `RD_GEOMODE_NONE`: the thing is not
+            // drawn, which is how the dark Jedi scripts take a body off screen.
+            "getthinggeomode" => Value::Num(
+                usize::try_from(idx(0))
+                    .ok()
+                    .map(|i| self.thing_geomode.get(&i).copied().unwrap_or(1) as f64)
+                    .unwrap_or(0.0),
+            ),
+            "setthingcurgeomode" => {
+                if let Ok(thing) = usize::try_from(idx(0)) {
+                    let mode = idx(1) as i32;
+                    self.thing_geomode.insert(thing, mode);
+                    self.geomode_epoch = self.geomode_epoch.wrapping_add(1);
+                }
+                Value::Nil
+            }
             // `ThingLight(thing, value, time)`: `sithCogFunctionThing_ThingLight` sets the thing's own
             // light outright when `time` is 0 and otherwise ramps it there over `time` seconds
             // (`sithSurface_SetThingLight(pThing, light, time, 0)`). A negative value is ignored, which
@@ -4383,6 +4445,7 @@ mod tests {
                 attach_offset: [0.0; 3],
                 attach_flags: 0,
                 spin: None,
+            paused: false,
                 light: 0.0,
                 light_end: 0.0,
                 light_rate: 0.0,
@@ -4431,13 +4494,13 @@ mod tests {
             shake_angle: [0.0; 3],
             shake_pos_rate: 0.0,
             shake_angle_rate: 0.0,
-            geomode_epoch: 0,
             surface_epoch: 0,
             surface_cels: Vec::new(),
             material_cels: BTreeMap::new(),
             material_names: BTreeMap::new(),
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
+            thing_geomode: BTreeMap::new(),
             sound_volume: Vec::new(),
             sound_pitch: Vec::new(),
             sound_fade: BTreeMap::new(),

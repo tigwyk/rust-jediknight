@@ -139,8 +139,13 @@ flag                                                   exit  what it prints
                                                              bolt); `SetRespawnMask` stores the
                                                              player's mask; and `SyncThingPos`/
                                                              `SyncSurface` answer Nil and move
-                                                             nothing (single-player has nobody to
-                                                             push to)
+                                                             nothing; `PathMovePause` holds a
+                                                             moving thing at x 2.00 for a second
+                                                             with `IsMoving` still 1, `PathMoveResume`
+                                                             carries it on to 4.00, and
+                                                             `SetThingCurGeoMode(0)` reads `GetThingGeoMode`
+                                                             0 until it is set back to 1, which is
+                                                             how a dark Jedi body leaves the screen
 --attach                                                  0  `AttachThingToThing(child, parent)` keeps
                                                              the offset: parent at [2,0,0] puts the
                                                              child at [3,0,0.5], a 90 deg parent turn

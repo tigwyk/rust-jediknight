@@ -5078,6 +5078,52 @@ fn main() {
             "things: SyncThingPos answers {answers:?} and SyncSurface {surface:?}, and the thing stays at {still:?} (a single-player build has nobody to push to)"
         );
         assert_eq!(rt.things[a].pos, still, "SyncThingPos moved something");
+
+        // `PathMovePause`/`PathMoveResume`: the thing keeps its destination and stops advancing —
+        // level 9's pipe doors stop in the doorway this way (`09_stoppipedoors.cog`).
+        rt.things[a].frames = vec![[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [4.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
+        rt.things[a].frame = 0.0;
+        rt.things[a].target = Some((1.0, 2.0));
+        rt.step(0.25);
+        let moved = rt.things[a].pos[0];
+        let paused = rt.call("PathMovePause", &[cog::Value::Num(a as f64)]);
+        rt.step(1.0);
+        let held = rt.things[a].pos[0];
+        let still_moving = rt.call("IsMoving", &[cog::Value::Num(a as f64)]);
+        let resumed = rt.call("PathMoveResume", &[cog::Value::Num(a as f64)]);
+        rt.step(0.25);
+        let carried_on = rt.things[a].pos[0];
+        println!(
+            "things: PathMovePause answered {paused:?} at x {moved:.2}, a second later it is still {held:.2} (`IsMoving` {still_moving:?}), and PathMoveResume answered {resumed:?} so it carries on to {carried_on:.2}"
+        );
+        assert_eq!(paused, cog::Value::Num(a as f64), "PathMovePause did not answer the thing");
+        assert_eq!(held, moved, "a paused path move kept advancing");
+        assert_eq!(still_moving, cog::Value::Num(1.0), "a paused thing stopped reporting as moving");
+        assert_eq!(resumed, cog::Value::Num(1.0), "PathMoveResume did not resume");
+        assert!(carried_on > held, "a resumed path move did not continue toward its frame");
+        // Pausing a thing that is not moving answers -1, which is the engine's guard.
+        assert_eq!(
+            rt.call("PathMovePause", &[cog::Value::Num(b as f64)]),
+            cog::Value::Num(-1.0)
+        );
+
+        // `SetThingCurGeoMode`/`GetThingGeoMode`: 0 is not drawn, and the round trip is real.
+        let before = rt.call("GetThingGeoMode", &[cog::Value::Num(a as f64)]);
+        rt.call(
+            "SetThingCurGeoMode",
+            &[cog::Value::Num(a as f64), cog::Value::Num(0.0)],
+        );
+        let hidden = rt.call("GetThingGeoMode", &[cog::Value::Num(a as f64)]);
+        rt.call(
+            "SetThingCurGeoMode",
+            &[cog::Value::Num(a as f64), cog::Value::Num(1.0)],
+        );
+        let shown = rt.call("GetThingGeoMode", &[cog::Value::Num(a as f64)]);
+        println!(
+            "things: SetThingCurGeoMode(thing {a}, 0) makes GetThingGeoMode answer {hidden:?} ({before:?} by default), and 1 brings it back ({shown:?}); the renderer hides the thing's entities for 0"
+        );
+        assert_eq!(hidden, cog::Value::Num(0.0), "the hidden mode did not read back");
+        assert_eq!(shown, cog::Value::Num(1.0), "the shown mode did not read back");
         println!("--- things check passed ---");
         return;
     }
@@ -7285,6 +7331,7 @@ fn main() {
                     show_taken,
                     animate_actors,
                     actors_follow_runtime,
+                    things_follow_geomode,
                     billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
@@ -12596,6 +12643,31 @@ fn health_follows_damage(
 /// `sithPlayer` reloads or respawns at the last checkpoint; this build has no checkpoint list yet,
 /// so the level's own start is the respawn point. The dead state shows as a message and the
 /// player's movement is not blocked — the reset is immediate.
+/// `SetThingCurGeoMode(thing, 0)` takes a thing off screen: every entity the level spawned for that
+/// thing goes hidden, and any other mode brings it back. `renderData.curGeoMode` is the engine's
+/// per-thing draw mode, and the dark Jedi scripts use 0 to drop a body.
+///
+/// ponytail: a sweep of `Sim::entities` every frame, writing only where the value differs; an
+/// epoch-guarded version is the upgrade if that map ever grows into the thousands.
+fn things_follow_geomode(sim: Option<Res<Sim>>, mut visibility: Query<&mut Visibility>) {
+    let Some(sim) = sim else { return };
+    let modes = sim.world.borrow().thing_geomode.clone();
+    for (thing, entities) in &sim.entities {
+        let want = if modes.get(thing).copied().unwrap_or(1) == 0 {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
+        for entity in entities {
+            if let Ok(mut current) = visibility.get_mut(*entity)
+                && *current != want
+            {
+                *current = want;
+            }
+        }
+    }
+}
+
 fn respawn_on_death(sim: Option<Res<Sim>>, mut player: Option<ResMut<Player>>, world: Option<Res<World>>) {
     let (Some(sim), Some(player), Some(world)) = (sim, player.as_mut(), world) else { return };
     let spawn = world
