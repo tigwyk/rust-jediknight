@@ -107,6 +107,14 @@ flag                                                   exit  what it prints
                                                              reacts: level 1's links watch
                                                              sectors off the walk, so 0
                                                              messages -- the router is next
+--engine-audit                                         0  --- engine-audit check passed ---
+                                                             ranks the decompilation's 2,379
+                                                             functions by size and reports the
+                                                             biggest that src never cites (83
+                                                             cited). A pointer to where to look,
+                                                             NOT a coverage figure: an uncited
+                                                             function can be fully implemented
+                                                             (update_attachments is)
 --cog-check                                              0  --- cog check passed ---        (every level's scripts, and every label each one declares:
                                                              the deep pass is what found `AutosaveGame`, the
                                                              `jkString*` buffer, `StopKey`, `LoadSound` and

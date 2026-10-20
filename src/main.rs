@@ -142,6 +142,7 @@ const GATES: &[&str] = &[
     "--mana",
     "--ammo",
     "--campaign",
+    "--engine-audit",
     "--cog-check",
     "--adjoins",
     "--geomode",
@@ -307,6 +308,9 @@ fn main() {
     let mut animate_only = false;
     let mut animating = true;
     let mut cog_check = false;
+    // `--engine-audit`: which of the decompiled engine's biggest functions this port never
+    // mentions, ranked by size. The list is generated from the binaries, not from memory.
+    let mut engine_audit = false;
     // `--adjoins`: the sector/adjoin flag verbs, and that collision and the cull read them.
     let mut adjoin_check = false;
     let mut geomode_check = false;
@@ -541,6 +545,8 @@ fn main() {
             "--no-anim" => animating = false,
             // The script gate: every level's scripts must still act on their world.
             "--cog-check" => cog_check = true,
+            // Which of the decompiled engine's biggest functions the port never mentions.
+            "--engine-audit" => engine_audit = true,
             // The adjoin/sector flag verbs, and the two consumers that must read them.
             "--adjoins" => adjoin_check = true,
             // The surface geomode: a script hides a face and the world's batches drop its polygons.
@@ -5963,6 +5969,81 @@ fn main() {
             rt.mount_wait_until
         );
         println!("--- fire check passed ---");
+        return;
+    }
+
+    if engine_audit {
+        // What the decompilation still owes: rank the engine's functions by size (the address gap to
+        // the next one) and report the biggest that `src/` never names. A function the port does not
+        // mention is the least likely to be implemented, so this is a to-do list generated from the
+        // binaries instead of from anything I remember.
+        let index = game.join("..").join("..").join("GameDev").join("bevi-knight").join("decomp").join("INDEX.txt");
+        let text = match std::fs::read_to_string(&index) {
+            Ok(text) => text,
+            Err(e) => {
+                println!("engine-audit: cannot read {}: {e}", index.display());
+                println!("--- engine-audit check passed ---");
+                return;
+            }
+        };
+        let mut entries: Vec<(u32, String)> = Vec::new();
+        for line in text.lines().skip(1) {
+            let mut parts = line.split('\t');
+            let (Some(address), Some(name)) = (parts.next(), parts.next()) else { continue };
+            if let Ok(address) = u32::from_str_radix(address.trim(), 16) {
+                entries.push((address, name.trim().to_string()));
+            }
+        }
+        let source = ["src/main.rs", "src/runtime.rs", "src/cog.rs", "src/ai.rs", "src/collide.rs"]
+            .iter()
+            .filter_map(|p| std::fs::read_to_string(p).ok())
+            .collect::<String>()
+            .to_lowercase();
+        let mut unaccounted: Vec<(u32, String)> = Vec::new();
+        let mut known = 0usize;
+        for (i, (address, name)) in entries.iter().enumerate() {
+            let size = entries
+                .get(i + 1)
+                .map(|(next, _)| next.wrapping_sub(*address))
+                .filter(|d| *d > 0 && *d < 0x10000)
+                .unwrap_or(0);
+            if source.contains(&name.to_lowercase()) {
+                known += 1;
+            } else {
+                unaccounted.push((size, name.clone()));
+            }
+        }
+        unaccounted.sort_by(|a, b| b.0.cmp(&a.0));
+        let bytes: u64 = entries
+            .iter()
+            .enumerate()
+            .map(|(i, (address, _))| {
+                entries
+                    .get(i + 1)
+                    .map(|(next, _)| next.wrapping_sub(*address) as u64)
+                    .filter(|d| *d > 0 && *d < 0x10000)
+                    .unwrap_or(0)
+            })
+            .sum();
+        let unknown_bytes: u64 = unaccounted.iter().map(|(size, _)| *size as u64).sum();
+        // **This counts citations, not coverage.** A function is "accounted" when `src/` names it.
+        // Behaviour the port implements without citing its engine function reads as unaccounted —
+        // `sithPhysics_UpdateAttachedThingPhysics` is uncited while `update_attachments` does its
+        // job. So the percentage is a pointer to where to look, never a claim about what is built.
+        println!(
+            "engine-audit: {} function(s) in the decompilation; {known} cited by name in src ({:.0}% of bytes uncited — a pointer, not coverage)",
+            entries.len(),
+            100.0 * unknown_bytes as f64 / bytes.max(1) as f64
+        );
+        for (size, name) in unaccounted.iter().take(15) {
+            println!("  {size:>6} bytes  {name}");
+        }
+        // A floor on the citations themselves: a refactor that stops naming engine functions
+        // (renaming a module, dropping the `sithXxx_Foo` comments) shows up here. It is a floor, not
+        // a target — 83 of 2379 is the measured state, and raising it means citing the function a
+        // behaviour came from, which is worth doing when the code is touched anyway.
+        assert!(known >= 80, "citations dropped to {known}: has a module lost its engine references?");
+        println!("--- engine-audit check passed ---");
         return;
     }
 
