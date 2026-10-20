@@ -15336,13 +15336,13 @@ fn live_play_drive(
     }
     // Short phases: the sweep gives every gate 600 frames, and a big level can spend a few hundred of
     // them loading before the body exists. 45 walk + 15 fire still measures ~2 units of walking.
-    const WALK_FRAMES: u32 = 45;
+    const WALK_FRAMES: u32 = 30;
     // 30, not 15: `fire_player` acts on `just_pressed`, so a held trigger fires at most once and the
     // first click can still land inside a scripted `SetFireWait` cooldown. Fifteen frames was too
     // short for the shot to land at all (01narshadda reported 0 with the shorter phase).
-    const FIRE_FRAMES: u32 = 30;
+    const FIRE_FRAMES: u32 = 20;
     // Long enough for a jump to rise and land: `jkPlayer`'s jump is a short hop.
-    const JUMP_FRAMES: u32 = 40;
+    const JUMP_FRAMES: u32 = 30;
     let state = playing.get_or_insert_with(|| LivePlayState {
         start: player.as_deref().map(|p| p.pos),
         ..Default::default()
@@ -15368,7 +15368,7 @@ fn live_play_drive(
         // Four directions in turn, because a body can spawn facing a wall: on 02narshadda, 04escapehouse
         // and 09fuelstation `W` produced zero movement while `player.vel` was non-zero, which is a
         // blocked step, not a broken input path. Sweeping the compass asks "can the body move at all".
-        let phase = state.frame / 12;
+        let phase = state.frame / 8;
         for key in [KeyCode::KeyW, KeyCode::KeyD, KeyCode::KeyS, KeyCode::KeyA] {
             keys.release(key);
         }
@@ -15409,23 +15409,29 @@ fn live_play_drive(
         }
         return;
     }
-    // Jump: one real press of Space, then watch the body leave the ground and come back. `Space` is
-    // read with `just_pressed && grounded`, so a held key would jump once and never again.
-    if (WALK_FRAMES + FIRE_FRAMES + 1..=WALK_FRAMES + FIRE_FRAMES + JUMP_FRAMES).contains(&state.frame)
-    {
-        if state.frame == WALK_FRAMES + FIRE_FRAMES + 1 {
+    // Jump: real presses of Space, then watch the body leave the ground. `Space` is read with
+    // `just_pressed && grounded`, so the phase **waits for the floor** before its clock starts — the
+    // walk can end mid-step, and a press while the body is a hair off the ground is refused, which is
+    // how this check flaked (level 1 passed, then reported a 0.00 peak on the next run).
+    if state.frame > WALK_FRAMES + FIRE_FRAMES && !state.jump_done {
+        if !player.as_deref().is_some_and(|p| p.grounded) {
+            return;
+        }
+        state.jump_frames += 1;
+        if state.jump_frames == 1 {
             state.jump_base = player.as_deref().map(|p| p.pos.z);
         }
-        // Pressed on alternate frames, not once: the walker jumps on `just_pressed && grounded`, and on
-        // a heavy map the body can be a hair off the floor on any given frame (dt 0.1 there), so a
-        // single press lands on the one frame it is refused. This is a player mashing jump.
-        if state.frame % 2 == 0 {
+        if state.jump_frames % 2 == 0 {
             keys.press(KeyCode::Space);
         } else {
             keys.release(KeyCode::Space);
         }
         if let (Some(base), Some(player)) = (state.jump_base, player.as_deref()) {
             state.jump_peak = state.jump_peak.max(player.pos.z - base);
+        }
+        if state.jump_frames >= JUMP_FRAMES {
+            state.jump_done = true;
+            keys.release(KeyCode::Space);
         }
         return;
     }
@@ -15506,6 +15512,8 @@ struct LivePlayState {
     things_before: usize,
     things_peak: usize,
     jump_base: Option<f32>,
+    jump_frames: u32,
+    jump_done: bool,
     jump_peak: f32,
 }
 
