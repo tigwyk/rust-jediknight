@@ -431,3 +431,7 @@ opens a window and runs until it closes, so a sweep would hang on them; `--shot`
 are the deterministic capture paths (fixed 1/60 dt in capture mode).
  --audio-state  prints the mute decision and master gain, then exits before any audio device exists (verify silence without playing it)
  --fall  drop the body from the spawn and check the impact against sqrt(2gh) and the damage against (v-2.5)^2*45
+
+Tools that answer questions rather than assert (not in the sweep):
+  --uni-key <KEY>   which string file carries a key, and what it says
+  --soak-all        every level in the archives, one process each
