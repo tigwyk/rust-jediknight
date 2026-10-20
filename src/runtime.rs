@@ -2990,6 +2990,34 @@ impl Runtime {
         }
     }
 
+    /// `jkPlayer_NextWeapon` / `jkPlayer_PrevWeapon`: step through the weapon bins the player is
+    /// carrying. The engine keeps a "weapons I own" mask and walks it; a count in `inv` is the same
+    /// set here, and `weapon_for_bin` says which of those are weapons at all.
+    ///
+    /// `step` is +1 or -1. Returns the bin armed after the move, or -1 when no weapon is carried.
+    pub fn cycle_weapon(&mut self, step: i32) -> i32 {
+        if step == 0 {
+            return -1;
+        }
+        let mut own: Vec<i32> = (1..=26)
+            .filter(|bin| self.inv.get(bin).copied().unwrap_or(0.0) > 0.0)
+            .filter(|bin| self.weapon_for_bin(*bin).is_some())
+            .collect();
+        if own.is_empty() {
+            return -1;
+        }
+        own.sort_unstable();
+        let next = match own.iter().position(|bin| *bin == self.cur_bin) {
+            Some(at) => {
+                let index = (at as i32 + step.signum()).rem_euclid(own.len() as i32);
+                own[index as usize]
+            }
+            None => own[0],
+        };
+        self.select_bin(next);
+        next
+    }
+
     /// `SetCurInvWeapon` / `SelectWeapon`: the bin the player has armed, and — when this
     /// build can tell which template that bin means — the projectile it fires.
     pub fn select_bin(&mut self, bin: i32) -> bool {
@@ -6412,6 +6440,30 @@ mod tests {
         rt.call("jkStringClear", &[]);
         rt.call("jkStringConcatAsciiString", &[Value::Str("x".repeat(200))]);
         assert!(rt.string_buffer.is_empty(), "the 128-character cap did not hold");
+    }
+
+    /// `jkPlayer_NextWeapon`: `[` and `]` step through the weapons carried. Nothing called
+    /// `select_bin` from input before this, so a picked-up blaster never reached the player's hands.
+    #[test]
+    fn weapon_cycling_walks_the_weapons_carried() {
+        let mut rt = door_runtime();
+        // Bins 2 and 3 are the ones `weapon_for_bin` knows (`bryar`, `stlaser`); 5 is carried by
+        // nobody, so it must never come up.
+        rt.inv.insert(2, 1.0);
+        rt.inv.insert(3, 1.0);
+        rt.inv.insert(5, 1.0);
+        for name in ["bryarblaster", "stlaser"] {
+            rt.template_types.insert(name.to_string(), 3);
+            rt.template_damage.insert(name.to_string(), 20.0);
+        }
+        rt.select_bin(2);
+        assert_eq!(rt.cycle_weapon(1), 3, "next went the wrong way");
+        assert_eq!(rt.cur_bin, 3);
+        assert_eq!(rt.cycle_weapon(1), 2, "cycling did not wrap");
+        assert_eq!(rt.cycle_weapon(-1), 3, "previous did not wrap the other way");
+        for _ in 0..4 {
+            assert_ne!(rt.cycle_weapon(1), 5, "a bin with no weapon template was armed");
+        }
     }
 
     /// A second borrow by the thread that already holds the world is a wiring mistake, and it used

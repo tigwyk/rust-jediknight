@@ -9223,16 +9223,16 @@ fn quick_save(
 ) {
     let (Some(sim), Some(dir)) = (sim, dir) else { return };
     // Save slots: `quicksave.jks` was the only place a game could go, so a second save overwrote the
-    // first and retail's slot list had nothing to show. `[`/`]` move the slot, and the current one
-    // is named in the message so the player can see where a save went.
+    // first and retail's slot list had nothing to show. `,`/`.` move the slot (`[`/`]` are the
+    // weapon keys, as retail binds them), and the current one is named in the message.
     let Some(mut slot_res) = slot_res else { return };
     let mut slot = slot_res.0;
-    if keys.just_pressed(KeyCode::BracketLeft) {
+    if keys.just_pressed(KeyCode::Comma) {
         slot = (slot + SLOTS - 1) % SLOTS;
         slot_res.0 = slot;
         println!("quicksave: slot {slot}");
     }
-    if keys.just_pressed(KeyCode::BracketRight) {
+    if keys.just_pressed(KeyCode::Period) {
         slot = (slot + 1) % SLOTS;
         slot_res.0 = slot;
         println!("quicksave: slot {slot}");
@@ -9911,6 +9911,17 @@ fn ui_input(
                 overlay.dirty = true;
             }
         }
+    }
+    // `[` and `]`: previous and next weapon, as retail binds them. Without this there was no way to
+    // arm anything the player picked up — `select_bin` existed and nothing called it.
+    if overlay.menu.is_none()
+        && overlay.started
+        && let Some(sim) = sim.as_deref()
+        && (keys.just_pressed(KeyCode::BracketLeft) || keys.just_pressed(KeyCode::BracketRight))
+    {
+        let step = if keys.just_pressed(KeyCode::BracketLeft) { -1 } else { 1 };
+        let armed = sim.world.borrow_mut().cycle_weapon(step);
+        overlay.dirty = armed >= 0;
     }
     // `M`: the field log and its map panel, which `refresh_overlay` now fills from the live level.
     if overlay.menu.is_none() && overlay.started && keys.just_pressed(KeyCode::KeyM) {
