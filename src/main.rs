@@ -15331,6 +15331,15 @@ fn live_play_drive(
         start: player.as_deref().map(|p| p.pos),
         ..Default::default()
     });
+    // The clock starts when the body exists: a big level spends its first frames loading, and a
+    // counted phase that runs through them presses W at a body that is not there yet. That is why
+    // 02narshadda, 04escapehouse and 09fuelstation measured zero movement while 01narshadda did not.
+    if player.is_none() {
+        return;
+    }
+    if state.start.is_none() {
+        state.start = player.as_deref().map(|p| p.pos);
+    }
     state.frame += 1;
     // Tracked every frame, not only at the end: if the body moves and then snaps back, the summary
     // at the end says "moved 0.00" and hides the cause.
@@ -15339,12 +15348,27 @@ fn live_play_drive(
     }
     if state.frame <= WALK_FRAMES {
         // Held, not tapped: the walker reads `just_pressed`/`pressed`, and a released key moves nothing.
-        keys.press(KeyCode::KeyW);
+        //
+        // Four directions in turn, because a body can spawn facing a wall: on 02narshadda, 04escapehouse
+        // and 09fuelstation `W` produced zero movement while `player.vel` was non-zero, which is a
+        // blocked step, not a broken input path. Sweeping the compass asks "can the body move at all".
+        let phase = state.frame / 23;
+        for key in [KeyCode::KeyW, KeyCode::KeyD, KeyCode::KeyS, KeyCode::KeyA] {
+            keys.release(key);
+        }
+        keys.press(match phase % 4 {
+            0 => KeyCode::KeyW,
+            1 => KeyCode::KeyD,
+            2 => KeyCode::KeyS,
+            _ => KeyCode::KeyA,
+        });
         return;
     }
     if state.frame == WALK_FRAMES + 1 {
         state.walked = player.as_deref().map(|p| p.pos);
-        keys.release(KeyCode::KeyW);
+        for key in [KeyCode::KeyW, KeyCode::KeyD, KeyCode::KeyS, KeyCode::KeyA] {
+            keys.release(key);
+        }
         if let Some(sim) = sim.as_deref() {
             state.things_before = sim.world.borrow().things.len();
         }
@@ -18857,6 +18881,12 @@ fn walk_player(
     let gravity = player.gravity;
     let trace = std::env::var_os("BK_WALK_TRACE").is_some();
     if trace {
+        eprintln!(
+            "walk trace: live {live} W {} escape {} forward {forward} strafe {strafe} vel {:?}",
+            keys.pressed(KeyCode::KeyW),
+            keys.pressed(KeyCode::Escape),
+            player.vel
+        );
         let around = solids.0.sectors_around(pos);
         let mut floors: Vec<(usize, Option<f32>)> = around
             .iter()
