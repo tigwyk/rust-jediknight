@@ -62,7 +62,10 @@ flag                                                   exit  what it prints
 --rules --level 01narshadda.jkl                          0  apex 0.26 / 0.28 closed form; pushed true beside,
                                                              false 27 units past the wall's end
 --animate                                                0  117 of 117 placed actors move between frame 0 and
-                                                             mid-loop (worst 0.038)
+                                                             mid-loop (worst 0.038); the locomotion chooser
+                                                             picks walk/run/walkback/strafe from the velocity
+                                                             `ai_tick` walked at, and 128 of level 1's actors
+                                                             ship a `walk` row to play it with
 --cog-check                                              0  --- cog check passed ---        (every level's scripts)
 --adjoins                                                0  1206 rows: 5 start with MOVE clear, 1 AI-only,
                                                              0 not visible; 27 startup scripts shut 7 doorway

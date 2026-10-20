@@ -351,6 +351,12 @@ pub struct Runtime {
     /// and out of walls: `ai_tick` has no collider (the runtime is level-agnostic), and this is the
     /// hand-off to the system that does.
     pub walked: Vec<usize>,
+    /// The velocity each of those actors walked at, in world units per second: `(x, y)`. This is
+    /// the port's `physicsParams.vel` for an actor — `sithPuppet_UpdateThingMove` transforms it
+    /// into the thing's own frame to choose `stand`/`walk`/`run`/`walkback`/`strafe*`, and nothing
+    /// else knows how fast a body is walking: the AI writes positions, and a collision push can
+    /// move an actor further in one frame than a stride would.
+    pub walk_vel: std::collections::BTreeMap<usize, [f32; 2]>,
     /// Actors that steered through a portal on the last `ai_tick`, so a check can see the pathing.
     pub via_portal: Vec<usize>,
     /// Force seeing's infrared mode, and the map-mode flags the same script clears.
@@ -641,6 +647,7 @@ impl Runtime {
             ir_mode: false,
             map_mode_flags: 0,
             walked: Vec::new(),
+            walk_vel: BTreeMap::new(),
             via_portal: Vec::new(),
             sector_links: Vec::new(),
             surface_links: Vec::new(),
@@ -1166,6 +1173,7 @@ impl Runtime {
         let mut fired = 0;
         let mut walked = 0;
         self.walked.clear();
+        self.walk_vel.clear();
         self.via_portal.clear();
         let mut shots: Vec<(usize, String)> = Vec::new();
         // Every actor with an instinct class, **plus** any actor a script gave a destination to.
@@ -1265,6 +1273,13 @@ impl Runtime {
                 }
                 walked += 1;
                 self.walked.push(index);
+                // The velocity this body is walking at, which is what the renderer needs to pick
+                // its puppet state — a position delta cannot tell a stride from a collision push.
+                let dt = dt.max(1e-4);
+                self.walk_vel.insert(
+                    index,
+                    [(next[0] - from[0]) / dt, (next[1] - from[1]) / dt],
+                );
             } else if let Some(thing) = self.things.get_mut(index) {
                 thing.ai_target = None;
                 if let Some(yaw) = look_yaw {
@@ -3275,6 +3290,7 @@ mod tests {
             ir_mode: false,
             map_mode_flags: 0,
             walked: Vec::new(),
+            walk_vel: BTreeMap::new(),
             via_portal: Vec::new(),
             sector_links: Vec::new(),
             surface_links: Vec::new(),

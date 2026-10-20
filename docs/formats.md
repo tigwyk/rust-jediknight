@@ -2638,7 +2638,7 @@ hull" fail here — the first picks a trigger sliver that pins the body, the sec
 that spans the level and lets the body walk out of the world. `collide::sector_for_body` exists
 as the fallback and prefers the sector with the most clearance.
 
-## 16.3 Actors animate — **observed** (stand only)
+## 16.3 Actors animate — **observed**
 
 A placed thing animates when its template names a **puppet** (`puppet=ky.pup` on
 `walkplayer`, `rystr.pup` on `reeyeesgun`). A `.pup` is a table of *states*:
@@ -2673,11 +2673,44 @@ the `stand` state is a genuinely static pose or its joints are not bound to that
 visible geoset. `--no-anim` freezes the actors so a frame pair can be A/B'd, the same way
 `--no-cull` A/Bs the visibility pass.
 
-Not done yet: every actor plays `stand`. `walk`/`run`/strafe selection needs velocity to
-mean something — the placed actors are not simulated yet (roadmap stage 6's AI) — and the
-puppet's `joints` block (which maps a keyfile node to a *model* node id rather than by
-name) is parsed but not applied; models whose node names differ from the keyfile's would
-pose wrongly. Attachments (`fireoffset`, weapon models) also wait for combat.
+**The state is chosen from the actor's own velocity.** `sithPuppet_UpdateThingMove`
+(`0x4e4380`) transforms the thing's velocity into its own frame, takes whichever axis
+dominates, and indexes the puppet's animation table with it — the table being the `.pup`'s
+rows in order, so `stand` is 1, `walk` 2, `run` 3, `walkback` 4, `strafeleft`/`straferight`
+5/6. Dominant forward axis: `walk` while the speed is under 0.5 u/s (`local_10`, raised to
+1.0 for a player thing), `run` at or above it, `walkback` when the forward component is
+negative. Dominant lateral axis: `strafeleft`/`straferight` by sign. Under 0.02 u/s it stands
+and plays its **turn** animation when the AI's turning flag is set (not modelled here). The
+same function returns the speed to `sithPuppet_UpdatePuppet`, which calls
+`rdPuppet_AdvanceTrack(speed × dt × const)` — a locomotion clip advances with **distance
+moved**, not with the clock, which is why a walk cycle does not slide.
+
+The port has no physics velocity: `ai_tick` moves an actor by writing its position, so
+`Runtime::walk_vel` records the velocity each actor walked at (`(next - from) / dt`), and
+`locomotion_state` applies the same axis-and-threshold rule to it. A renderer-side
+displacement was tried first and is wrong — the sim ticks and the render frames do not line
+up (a 0.33 u/s walk measured 3.6 u/s), and `ai_shots` re-seats an actor that ends up inside
+a wall, a push the `--ai` gate reports at 6.7 units, which reads as a sprint sideways. A
+script's `PlayKey` still overrides the choice, and a dead actor plays `death` once and holds
+the last frame. A state change restarts the clip, which is `sithPuppet_PlayMode` clearing
+`animStartedMs`.
+
+```text
+actor: thing 80 plays `rystroll.key` (walk, 0.33 u/s at yaw -106)
+actor: thing 207 plays `ryrun.key` (run, 0.60 u/s at yaw 102)
+```
+
+`--animate` also checks the chooser against the level's own puppets: every state name it can
+return for an actor is looked up in that actor's `.pup`, and the gate fails if fewer than half
+the level's actors ship a `walk` row (level 1: 128 of them, and 128 a `run`).
+
+Not done yet: the armed/unarmed mode axis (`mode=1` rows, which the engine switches with
+`SetArmedMode` when a weapon is drawn) — the port draws mode 0 — and the puppet's `joints`
+block (which maps a keyfile node to a *model* node id rather than by name) is parsed but not
+applied; models whose node names differ from the keyfile's would pose wrongly.
+`_DAT_00522fbc`, the units-to-frames constant `AdvanceTrack` is scaled by, is not recovered,
+so the clip rate is normalised at the 0.5 u/s threshold instead. Attachments (`fireoffset`,
+weapon models) also wait for combat.
 
 ## 16.4 The COG verb layer — **observed**, partial
 

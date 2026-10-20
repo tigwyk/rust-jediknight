@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **35 gates, 85 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **35 gates, 86 tests, 0 failures.** Stubbed script surface:
 **36 verbs, 221 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
@@ -56,7 +56,7 @@ both multiplayer-only screens.
 | Thing attachment | the impact half of `sithThing_AttachThingToSurface`: `(v-2.5)^2*45` above a 2.5 threshold, applied to the runtime's player (`--fall`) | the *record*: `attach_flags`, `attachedSurface`, the surface-info snapshot, scroll-velocity transfer on a scrolling surface, and the `entered`/`exited` cog messages on a `COG_LINKED` surface |
 | Physics | velocity integration with `ApplyDrag`, gravity, jump, fall, step, spawn clearance — for the player | `physicsRolloverFrames`/`OLDSTEP_DELTA_50FPS` accumulation (the port uses the frame's `dt`), angular velocity, `SITH_PF_USEANGULARTHRUST`, rotation of things (`sithCollision_RotateThing`), scripted movement of things, and every non-player thing: placed props are static |
 | Walk sweep | the walker runs the window's own `walker_step` on all 34 levels (`--walk all`), 20 s each: **34/34 stayed inside the tracked sector** over 639 doorway crossings, and on 14 levels the level's own hull test agreed | the tracked sector can still lag where sector hulls overlap, so `inside_sector` is the arbiter rather than the file's own hull |
-| Puppets and animation | `stand` and `death`, `.key` interpolation with parent chains and pivots, `frame=` paths for doors and lifts, and `PlayKey`/`StopAnim`/`JumpToFrame` — a script can replace the puppet's state track with one of its own `keyframe` symbols (level 1's TIE bomber plays `01VTieB.key` from frame 0x14 when the player sees it) | the rest of the state machine — `walk`, `run`, `walkback`, `strafe`, `crouch`, `jump`, `attack`, `holster`, `draw`, `victim` — and `sithAnimClass` layering, so an actor never changes pose in reaction to anything. A scripted clip has no own epoch and its `flags` are not interpreted |
+| Puppets and animation | `stand`, `death`, and the locomotion set — `walk`, `run`, `walkback`, `strafeleft`, `straferight` chosen from the velocity the AI walked at, by the rule in `sithPuppet_UpdateThingMove` (dominant axis, 0.5 u/s walk/run threshold), with the clip advancing on distance moved rather than the clock. Plus `.key` interpolation with parent chains and pivots, `frame=` paths for doors and lifts, and `PlayKey`/`StopAnim`/`JumpToFrame` — a script can replace the puppet's state track with one of its own `keyframe` symbols (level 1's TIE bomber plays `01VTieB.key` from frame 0x14 when the player sees it) | the armed/unarmed **mode** axis (`mode=1` rows, `SetArmedMode` when a weapon is drawn — the port draws mode 0), and the rest of the state machine: `crouch`, `jump`, `fall`/`land`, `fire`, `hit`, `toss`/`place`/`drop`, `turnleft`/`turnright`, `victim`, plus `sithAnimClass` layering. A scripted clip has no own epoch and its `flags` are not interpreted |
 | AI | the `.ai` parser (instincts, flags, moves), actor spawning, `sightdist`/`fov` deciding whether an armed actor fires its own `weapon=`, scripted destinations — `AISetMovePos`/`AISetMoveThing`/`AISetLookPos`/`AISetMoveSpeed` make a placed actor patrol or follow — and the **frame list** verbs (`AISetMoveFrame`/`AISetLookFrame` index the thing's own `numframes=`/`frame=` entries, which class-less actors like level 1's 8t88 use). `--ai` fires a level-1 actor at 3 units, not at 8, not from behind, then walks one onto a scripted point and turns it; `--endlevel` shows 8t88 walking to his frame | the runtime: instinct **scheduler** (weights, priority, interruption), **awareness** (no hearing, no alert propagation), **pathfinding** (steering is greedy — it picks the doorway that looks closest on both legs), `accuracy=` spread, aim-joint tracking |
 | Actors | placement, health, shields, death, `--ai` | aim joints (`sithActor_UpdateAimJoints`), head pitch as a separate channel, force-power state, mount waits |
 | Camera | position `thing + 0xb8 + thing[0x168]` (eye offset, level units), orientation from the view angles at `thing + 0x15c/0x160/0x164`, the engine's yaw basis (column 1 = forward, confirmed at run time), the first-person velocity roll (`clamp(5 * dot(vel, right), -8, 8)`, constants at `0x522ddc`/`0x522de0`/`0x522de4`), the projection (**90 deg horizontal** from `buffer + 0x08`, vertical derived: 73.74 at 4:3, 58.72 at 16:9), and a third-person chase camera at the engine's follow height (0.2 above the body, `0x522dec`), toggled with `C` | the **player's own body is not drawn**, so third person shows the level from behind the player rather than the player: `spawn_models` skips the local model on purpose (`cull_mode: None` would wrap it around the first-person eye). Drawing it needs spawn + yaw rotation + hiding in first person. Also the engine's own follow case (`0x4c59ce`) is a spectator orbit spun at 8 deg/s and is not reproduced; view bob (`0x4051e0`) and screen shake (`DAT_008ee5b8/bc/c0`) are unported |
@@ -185,7 +185,10 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    states the port does not have: `aisetfiretarget` (8) wants actors that shoot at something other
    than the player, `aiflee` (3) the flee state. (`setmountwait` (25) is done: the engine's fire path refuses
    until `sithWeapon_secMountWait` passes, and every shipped caller passes 0.)
-6. **Puppet locomotion states.** Visible, and the state data is already loaded; the pose code is real.
+6. ~~**Puppet locomotion states.**~~ — **done** (section 6): the state is chosen from the velocity
+   `ai_tick` walked the actor at, by `sithPuppet_UpdateThingMove`'s own rule, and the clip advances on
+   distance moved instead of the clock. What is left of the state machine is the armed-mode axis and
+   the reactions (`crouch`, `jump`, `fire`, `hit`, turns).
 7. **Attachments and parenting.** Needed by carried weapons, passengers, and any script that moves a child.
 8. **Camera focus and shake.** It is what makes in-engine cutscenes and several force powers read as intended.
 9. **Level 1's first frame is a wall of polygons, and it is the level's own start.** The walker spawns at
@@ -202,6 +205,19 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 ---
 
 ## 6. Recently closed, so it is not mistaken for missing
+
+* **A moving actor plays its own walk, not an idle glide.** `sithPuppet_UpdateThingMove` (`0x4e4380`)
+  transforms the thing's velocity into its own frame and picks the puppet state by the dominant axis:
+  forward under 0.5 u/s is `walk`, at or above it `run`, negative is `walkback`, and a lateral
+  component that dominates is `strafeleft`/`straferight`. The port had no velocity to feed it —
+  `ai_tick` moves an actor by writing its position — so `Runtime::walk_vel` now records the velocity
+  each actor walked at and `locomotion_state` applies the same rule to it. The clip also advances on
+  distance moved (`sithPuppet_UpdatePuppet`'s `AdvanceTrack(speed × dt)`), so the legs keep pace with
+  the body. Two wrong shapes were tried first and are recorded so they are not retried: a renderer-side
+  displacement measured 3.6 u/s for a 0.33 u/s walk (the sim ticks and render frames do not line up),
+  and the collision push that re-seats an actor inside a wall turned into a sprint sideways.
+  `--animate` checks the chooser against each actor's own `.pup` and fails if fewer than half the
+  level's actors ship a `walk` row (level 1: 128 ship `walk`, 128 `run`).
 
 * **A face can be hidden, and an untouched face reports that it is drawn.** `SetFaceGeoMode(surface, 0)`
   is `GEOMETRY_NONE`: `00_breakingglass.cog` shatters glass with it and the force-field switches open

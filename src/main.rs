@@ -5363,13 +5363,64 @@ fn main() {
                 );
             }
         }
+        // The locomotion chooser, against the level's own puppets: every state it can return must
+        // name a keyfile the actor's puppet actually ships, or `animate_actors` falls back to
+        // `stand` and the actor glides. The steps are velocities in the actor's own frame.
+        let mut walkable = 0usize;
+        let mut running = 0usize;
+        for thing in &world.level.things {
+            let Some(puppet) = world
+                .level
+                .template_param(&thing.template, "puppet")
+                .map(|n| n.to_ascii_lowercase())
+                .and_then(|p| world.puppets.get(&p))
+            else {
+                continue;
+            };
+            let states: std::collections::BTreeMap<String, &str> = puppet
+                .states
+                .iter()
+                .filter(|s| s.mode == 0)
+                .filter(|s| world.keys.get(&s.key.to_ascii_lowercase()).is_some_and(key::Key::is_drawable))
+                .map(|s| (s.name.to_ascii_lowercase(), s.key.as_str()))
+                .collect();
+            let yaw = thing.yaw;
+            let (sin, cos) = yaw.to_radians().sin_cos();
+            let forward = Vec3::new(cos, sin, 0.0);
+            let right = Vec3::new(-sin, cos, 0.0);
+            for (want, vel) in [
+                ("stand", Vec3::ZERO),
+                ("walk", forward * 0.3),
+                ("run", forward * 0.8),
+                ("walkback", forward * -0.3),
+                ("straferight", right * 0.3),
+                ("strafeleft", right * -0.3),
+            ] {
+                assert_eq!(locomotion_state(vel, yaw), want, "{}: {want} from {vel}", thing.template);
+                if !states.contains_key(want) {
+                    continue;
+                }
+                if want == "walk" {
+                    walkable += 1;
+                } else if want == "run" {
+                    running += 1;
+                }
+            }
+        }
         println!(
             "{level_name}: {moved} of {checked} placed actors move between frame 0 and mid-loop (worst {:.3})",
             worst
         );
+        println!(
+            "  locomotion: {walkable} actor(s) ship a `walk` key and {running} a `run` key, so a moving body plays its own stride"
+        );
         assert!(
             checked == 0 || moved * 2 > checked,
             "only {moved} of {checked} actors animate"
+        );
+        assert!(
+            checked == 0 || walkable * 2 > checked,
+            "only {walkable} of {checked} actors ship a locomotion key"
         );
         return;
     }
@@ -9310,11 +9361,22 @@ struct Actor {
     /// The `death` state's keyfile, if the puppet has one: played once when the actor dies
     /// and held on its last frame, the way the engine leaves a body on the floor.
     death: Option<String>,
+    /// Every drawable state of the puppet, `name` → `.key`: `stand`, `walk`, `run`, `walkback`,
+    /// `strafeleft`, `straferight`, … The `.pup` row order is the engine's animation index, so
+    /// the names are the engine's own (`sithPuppet.c`'s `animNames`). Armed modes (`mode=1`) are
+    /// skipped: the port draws the unarmed puppet.
+    states: std::collections::BTreeMap<String, String>,
+    /// The state name currently playing, so a change restarts the clip (`sithPuppet_PlayMode`
+    /// resets `animStartedMs`).
+    state: String,
+    /// Animation clock in authored frames. A locomotion clip advances by the distance the body
+    /// moved, a standing or dying one by the wall clock.
+    phase: f32,
     /// One mesh per material the model uses.
     parts: Vec<(Handle<Mesh>, i32, (f32, f32))>,
     /// The frame number last written, so a still frame is not rebuilt.
     drawn: i32,
-    /// Which keyfile `drawn` belongs to, so a `PlayKey` swap forces a rebuild on the same frame.
+    /// Which keyfile `drawn` belongs to, so a state change forces a rebuild on the same frame.
     drawn_key: String,
     /// Whether the death animation has been started.
     dying: bool,
@@ -9413,6 +9475,20 @@ fn spawn_models(
             .and_then(|puppet| puppet.states.iter().find(|s| s.name.eq_ignore_ascii_case("death")))
             .map(|state| state.key.to_ascii_lowercase())
             .filter(|key| world.keys.get(key).is_some_and(key::Key::is_drawable));
+        // Every animation the puppet can play, so a state name can become a keyfile when the
+        // actor starts moving. Mode 0 is the unarmed set — a `stand` lookup above already takes
+        // the first row, and mode 1 is the same animations with the weapon drawn.
+        let states: std::collections::BTreeMap<String, String> = puppet
+            .map(|puppet| {
+                puppet
+                    .states
+                    .iter()
+                    .filter(|s| s.mode == 0)
+                    .filter(|s| world.keys.get(&s.key.to_ascii_lowercase()).is_some_and(key::Key::is_drawable))
+                    .map(|s| (s.name.to_ascii_lowercase(), s.key.to_ascii_lowercase()))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut actor_parts: Vec<(Handle<Mesh>, i32, (f32, f32))> = Vec::new();
         let materials_used: std::collections::BTreeSet<i32> = model
             .meshes
@@ -9484,6 +9560,9 @@ fn spawn_models(
                 model: model_name.clone(),
                 key,
                 death,
+                states,
+                state: "stand".to_string(),
+                phase: 0.0,
                 parts: std::mem::take(&mut actor_parts),
                 drawn: i32::MIN,
                 drawn_key: String::new(),
@@ -10193,14 +10272,14 @@ fn actors_follow_runtime(
     }
 }
 
-/// Play every placed actor's `stand` animation: each `.key`'s own `FPS` field is the
+/// Play every placed actor's current puppet state: each `.key`'s own `FPS` field is the
 /// clock, and a frame is written into the actor's meshes only when the frame *number*
 /// changes, so a 15 fps animation costs one rebuild per 1/15 s rather than per render.
 ///
-/// The state is always `stand` for now. The engine picks by velocity
-/// (`sithPuppet_UpdateThingMove`: no velocity is `stand`, moving is `walk`/`run`,
-/// strafing is the directional variants), and nothing drives the placed actors yet —
-/// that is roadmap stage 6's AI.
+/// The state comes from motion, the way `sithPuppet_UpdateThingMove` (`0x4e4380`) picks it:
+/// standing still is `stand`, moving forward is `walk` under 0.5 u/s and `run` above it,
+/// backwards is `walkback`, sideways is `strafeleft`/`straferight`. A script's `PlayKey` wins
+/// over all of it, and a dead actor plays `death` once and holds it.
 /// ponytail: a changed frame rebuilds the whole mesh asset instead of writing into its
 /// vertex buffer or skinning on the GPU. Ceiling: one rebuild per actor per animation
 /// tick (15/s per actor), which holds for the ~120 actors a level places; the upgrade
@@ -10218,7 +10297,7 @@ fn animate_actors(
         return;
     }
     let (Some(world), Some(mut actors)) = (world, actors) else { return };
-    let now = time.elapsed_secs();
+    let dt = time.delta_secs();
     // A dead actor plays `death` once and holds its last frame. The runtime is the source of
     // truth for health, so the renderer reads it each frame rather than being told.
     let dead: std::collections::HashSet<usize> = sim
@@ -10231,31 +10310,60 @@ fn animate_actors(
     for actor in &mut actors.0 {
         // A script can replace the puppet's own state track with one of its `keyframe` symbols
         // (`PlayKey`): level 1's TIE bomber swaps in `01VTieB.key` from frame 0x14 when the player
-        // first sees it. Without a script entry the puppet's `stand`/`death` choice stands.
-        let scripted = sim
+        // first sees it. The velocity is the one `ai_tick` walked at — the port's stand-in for
+        // `physicsParams.vel`, which `sithPuppet_UpdateThingMove` transforms into the thing's own
+        // frame to choose a state.
+        let (scripted, pose, walk) = sim
             .as_deref()
-            .and_then(|sim| sim.world.borrow().play_key.get(&actor.thing).cloned());
-        let key_name = if let Some((key, _, _)) = &scripted {
-            if actor.drawn_key != *key {
-                actor.drawn = -1;
-                actor.drawn_key = key.clone();
-            }
-            key.as_str()
+            .map(|sim| {
+                let rt = sim.world.borrow();
+                (
+                    rt.play_key.get(&actor.thing).cloned(),
+                    rt.things.get(actor.thing).map(|t| t.yaw),
+                    rt.walk_vel.get(&actor.thing).copied(),
+                )
+            })
+            .unwrap_or((None, None, None));
+        let vel = walk.map_or(Vec3::ZERO, |[x, y]| Vec3::new(x, y, 0.0));
+        if dead.contains(&actor.thing) {
+            actor.dying = true;
+        }
+        // The state name, which is what decides the keyfile below. A scripted clip has no state
+        // of its own, so it gets the empty name and always wins.
+        let state = if scripted.is_some() {
+            ""
+        } else if actor.dying {
+            "death"
         } else {
-            if !actor.drawn_key.is_empty() {
-                actor.drawn = -1;
-                actor.drawn_key.clear();
-            }
-            if dead.contains(&actor.thing) {
-                actor.dying = true;
-                animating_key(actor, true)
-            } else if actor.dying {
-                animating_key(actor, true)
-            } else {
-                animating_key(actor, false)
-            }
+            locomotion_state(vel, pose.unwrap_or(0.0))
         };
-        let (Some(model), Some(key)) = (world.models.get(&actor.model), world.keys.get(key_name))
+        if actor.state.as_str() != state {
+            let next = match &scripted {
+                Some((key, _, _)) => key.clone(),
+                None => actor
+                    .states
+                    .get(state)
+                    .cloned()
+                    .or_else(|| Some(animating_key(actor, actor.dying).to_string()))
+                    .unwrap_or_default(),
+            };
+            // A state change restarts the clip: `sithPuppet_PlayMode` resets `animStartedMs`.
+            actor.state.clear();
+            actor.state.push_str(state);
+            actor.drawn_key = next;
+            actor.drawn = -1;
+            actor.phase = 0.0;
+            if !state.is_empty() && state != "stand" {
+                println!(
+                    "actor: thing {} plays `{}` ({state}, {:.2} u/s at yaw {:.0})",
+                    actor.thing,
+                    actor.drawn_key,
+                    horizontal_speed(vel),
+                    pose.unwrap_or(0.0)
+                );
+            }
+        }
+        let (Some(model), Some(key)) = (world.models.get(&actor.model), world.keys.get(&actor.drawn_key))
         else {
             continue;
         };
@@ -10267,10 +10375,23 @@ fn animate_actors(
         // recorded and not interpreted.
         let last = key.frames.max(1) as f32 - 1.0;
         let start = scripted.as_ref().map_or(0.0, |(_, _, frame)| *frame as f32);
-        let frame = if actor.dying {
-            ((now * key.fps + start).min(last)).floor() as i32
+        // A locomotion clip advances with the distance the body covered, not the clock
+        // (`sithPuppet_UpdatePuppet` advances the track by `speed * dt * const`), so the legs keep
+        // pace with the body instead of sliding on a fixed rate. ponytail: that units-to-frames
+        // constant is not recovered, so the clip is normalised at the walk/run threshold above —
+        // 0.5 u/s plays it at its authored rate — and capped at the floor and twice that.
+        let moving = !state.is_empty() && state != "stand" && state != "death";
+        let rate = if moving {
+            key.fps * (horizontal_speed(vel) / 0.5).clamp(0.5, 2.0)
         } else {
-            ((now * key.fps + start) % (last + 1.0)).floor() as i32
+            key.fps
+        };
+        actor.phase += dt * rate;
+        let clock = actor.phase + start;
+        let frame = if actor.dying {
+            clock.min(last).floor() as i32
+        } else {
+            (clock % (last + 1.0)).floor() as i32
         };
         if frame == actor.drawn {
             continue;
@@ -10281,6 +10402,49 @@ fn animate_actors(
                 *slot = model_mesh_posed(model, *material, *tex_size, Some((key, frame as f32)));
             }
         }
+    }
+}
+
+/// The part of a velocity that drives a stride: a body riding a lift is not walking.
+fn horizontal_speed(vel: Vec3) -> f32 {
+    (vel.x * vel.x + vel.y * vel.y).sqrt()
+}
+
+/// Which puppet state a moving actor plays, from `sithPuppet_UpdateThingMove` (`0x4e4380`).
+///
+/// The engine transforms the thing's velocity into its own frame and picks by the dominant
+/// axis: forward is `walk` below the walk/run threshold and `run` above it, a negative forward
+/// component is `walkback`, and a lateral component that dominates the forward one is
+/// `strafeleft`/`straferight`. Under 0.02 u/s the actor is standing still — it would play its
+/// turn animation there if the AI's turning flag were modelled, which it is not.
+///
+/// The threshold is `local_10` in that function: 0.5 u/s, and 1.0 for a player thing.
+/// ponytail: the port feeds this its own averaged displacement rather than a physics velocity,
+/// because `ai_tick` moves actors by writing their position and no velocity exists to read.
+/// Same selector, different source; a teleport reads as one huge step and snaps the clip.
+fn locomotion_state(vel: Vec3, yaw_deg: f32) -> &'static str {
+    // Only horizontal motion picks a stride. Retail compares the component it measured on the
+    // dominant axis; here the measured quantity is a velocity, so the horizontal magnitude is
+    // what must clear the dead zone.
+    let speed = horizontal_speed(vel);
+    if speed <= 0.02 {
+        return "stand";
+    }
+    let (sin, cos) = yaw_deg.to_radians().sin_cos();
+    let forward = vel.x * cos + vel.y * sin;
+    let lateral = -vel.x * sin + vel.y * cos;
+    if forward.abs() >= lateral.abs() {
+        if forward <= 0.0 {
+            "walkback"
+        } else if speed < 0.5 {
+            "walk"
+        } else {
+            "run"
+        }
+    } else if lateral >= 0.0 {
+        "straferight"
+    } else {
+        "strafeleft"
     }
 }
 
@@ -13902,6 +14066,9 @@ mod rules_tests {
             model: "3do/rystr.3do".into(),
             key: "kystand0.key".into(),
             death: Some("kyftdeth.key".into()),
+            states: std::collections::BTreeMap::from([("stand".to_string(), "kystand0.key".to_string())]),
+            state: "stand".into(),
+            phase: 0.0,
             parts: Vec::new(),
             drawn: i32::MIN,
             drawn_key: String::new(),
@@ -13913,6 +14080,27 @@ mod rules_tests {
         // A puppet with no death state keeps its stand loop rather than blanking.
         let immortal = Actor { death: None, ..actor };
         assert_eq!(animating_key(&immortal, true), "kystand0.key");
+    }
+
+    /// `sithPuppet_UpdateThingMove` (`0x4e4380`) picks the animation from the velocity in the
+    /// thing's own frame: the dominant axis says forward (walk/run/walkback) or sideways
+    /// (strafe), and 0.5 u/s is where walk becomes run. A yaw of 0 faces `+x`, so these
+    /// velocities are already in world terms.
+    #[test]
+    fn locomotion_is_chosen_from_the_velocity_axis_and_speed() {
+        assert_eq!(locomotion_state(Vec3::ZERO, 0.0), "stand");
+        // Below the 0.02 u/s dead zone: a body being nudged in place is still standing.
+        assert_eq!(locomotion_state(Vec3::new(0.01, 0.0, 0.0), 0.0), "stand");
+        assert_eq!(locomotion_state(Vec3::new(0.3, 0.0, 0.0), 0.0), "walk");
+        assert_eq!(locomotion_state(Vec3::new(0.5, 0.0, 0.0), 0.0), "run");
+        assert_eq!(locomotion_state(Vec3::new(0.3, 0.3, 0.0), 45.0), "walk");
+        assert_eq!(locomotion_state(Vec3::new(-0.3, 0.0, 0.0), 0.0), "walkback");
+        assert_eq!(locomotion_state(Vec3::new(0.0, 0.3, 0.0), 0.0), "straferight");
+        assert_eq!(locomotion_state(Vec3::new(0.0, -0.3, 0.0), 0.0), "strafeleft");
+        // Turning the body turns its answer: the same world velocity is forward at yaw 90.
+        assert_eq!(locomotion_state(Vec3::new(0.0, 0.3, 0.0), 90.0), "walk");
+        // Vertical motion never picks a walk: a lift or a fall is not a stride.
+        assert_eq!(locomotion_state(Vec3::new(0.0, 0.0, 2.0), 0.0), "stand");
     }
 
     #[test]
