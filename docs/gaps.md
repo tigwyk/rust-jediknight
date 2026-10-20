@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **42 gates, 92 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **45 gates, 99 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
