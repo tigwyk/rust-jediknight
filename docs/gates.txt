@@ -229,7 +229,10 @@ flag                                                   exit  what it prints
 --pickup                                                 0  --- pickup check passed ---
                                                              `jkGetChoice` reads inventory bin 18 -- 0 by
                                                              default, 1 on the light path, 2 on the
-                                                             dark one
+                                                             dark one; `jkSetSaberInfo` stores the
+                                                             blade a script describes -- side
+                                                             `saberyellow0.mat`, 0.100 long, hilt
+                                                             0.003, tip 0.001, three sparks
 --weapon +elaser                                         0  --- weapon check passed ---
 --bins                                                   0  --- bins check passed ---
 --mana --level 01narshadda.jkl                           0  0 -> 20.0 in one second, clamps at 400

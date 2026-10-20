@@ -3564,6 +3564,45 @@ fn main() {
         assert_eq!(neutral, cog::Value::Num(0.0), "the default choice is not neutral");
         assert_eq!(light, cog::Value::Num(1.0), "the light choice did not read back");
         assert_eq!(dark, cog::Value::Num(2.0), "the dark choice did not read back");
+        // `jkSetSaberInfo(thing, side, tip, base_rad, tip_rad, len, wall, blood, saber)`: the verb's
+        // whole job is to store those on the player (`jkSaber_InitializeSaberInfo` builds the blade
+        // polyline from them), so the round trip is the check — and it pins the argument order, which
+        // is easy to reverse because the engine pops the arguments backwards.
+        rt.call(
+            "jkSetSaberInfo",
+            &[
+                cog::Value::Num(player as f64),
+                cog::Value::Str("saberyellow0.mat".into()),
+                cog::Value::Str("saberyellow1.mat".into()),
+                cog::Value::Num(0.003),
+                cog::Value::Num(0.001),
+                cog::Value::Num(0.100),
+                cog::Value::Str("+wallspark".into()),
+                cog::Value::Str("+bloodspark".into()),
+                cog::Value::Str("+saberspark".into()),
+            ],
+        );
+        let blade = rt.saber.get(&player).cloned().unwrap_or_default();
+        println!(
+            "pickup: `jkSetSaberInfo` stores the blade -- side `{}`, tip `{}`, {:.3} long, hilt {:.3} / tip {:.3}, sparks {}/{}/{}",
+            blade.side,
+            blade.tip,
+            blade.length,
+            blade.base_rad,
+            blade.tip_rad,
+            blade.wall_sparks,
+            blade.blood_sparks,
+            blade.saber_sparks
+        );
+        assert_eq!(blade.side, "saberyellow0.mat", "the side material landed in the wrong slot");
+        assert_eq!(blade.tip, "saberyellow1.mat", "the tip material landed in the wrong slot");
+        assert!((blade.base_rad - 0.003).abs() < 1e-6, "the hilt radius is not the script's");
+        assert!((blade.tip_rad - 0.001).abs() < 1e-6, "the tip radius is not the script's");
+        assert!((blade.length - 0.100).abs() < 1e-6, "the length is not the script's");
+        assert_eq!(
+            blade.saber_sparks, "+saberspark",
+            "the spark templates landed in the wrong slots"
+        );
         // Respawn: a powerup with `respawn=` comes back after its countdown.
         let respawn_item = rt
             .things

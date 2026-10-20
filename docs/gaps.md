@@ -4,7 +4,7 @@ A map of the engine's own source units (`sith*`, `jk*`) against this port, so th
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
 The port's checks at the time of writing: **39 gates, 91 tests, 0 failures.** Stubbed script surface:
-**11 verbs, 39 call sites across the 34 shipped levels** (706 before this run of state setters).
+**10 verbs, 24 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
 
@@ -36,7 +36,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | Console and cvars | `sithConsole.c`, `sithCvar.c`, `sithCommand.c`, `jkQuakeConsole.c` | the `~` console, the cvar store, and the command dispatcher (`bind`, `set`, `map`, `quit`) | no matches for `cvar`, `sithCommand`, `sithConsole` |
 | Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. **Sprites draw, with their real artwork and animation**: every template's `sprite=` is parsed (`spr.rs`), its `.mat` loads through the cel-table reader in `tex.rs` with palette entry 0 keyed transparent, `draw_created` spawns one billboarded quad per row and `billboard_sprites` faces it at the camera. The frames walk with the thing's life (`Runtime::sprite_cel`: `typeflags & 0x1` arms it, frame *k* holds for the *k*-th `life / cels` slice), which is what `sithExplosion_CreateThing` does through `sithSurface_sub_4F00A0`. | no particle type (`sithParticle`'s own things — smoke, embers and dust are separate things the engine spawns); `explosion` matches are class numbers and the damage path |
 | In-engine cutscene cameras | `jkCutscene.c`, `sithCamera.c` focus modes | **The focus models work**: seven camera slots, `SetCameraFocus(slot, thing)` + `SetCurrentCamera(slot)` move the view onto that thing (aimed by its own own yaw/pitch), `GetCameraMode`/`GetPrimaryFocus`/`GetSecondaryFocus` read back, and `SetPOVShake` adds the recoil offset that decays at its own rate. Level 17b's `17b_Camera.cog` cutscene runs end to end: the view cuts to `ghostCam`, and after the script's `Sleep(6.0)` it hands the view back to the player. | `CycleCamera`, `SetCameraZoom`, path-driven camera dollies beyond `PlayKey` (a camera on a `.key` track follows its thing but has no path timing of its own), and the secondary-focus framing |
-| Saber | `jkSaber.c` | blade geometry, swing arcs, saber lock, trace damage. `jksetsaberinfo` is a stub. | `saber` matches are template-name and palette text only |
+| Saber | `jkSaber.c` | `jkSetSaberInfo` stores the blade the scripts describe — the two materials, the hilt and tip radii, the length and the three spark templates — with the argument order pinned by a gate (`--pickup`). Every shipped saber script (`07_rahnlines`, `19b_endlevel`, the dark Jedi `boc`/`jerec`/`yun`, `ctf_main`) now succeeds instead of stubbing | the **blade itself**: `jkSaber_InitializeSaberInfo` builds an `rdPolyline` and `jkSaber.c` swings it through `JKFLAG_SABERON`/`SABERDAMAGE`/`SABEREXTEND`, and the swings are run by `cog_weap_saber.cog` — so this needs the weapon-cog work (no inventory cogs exist) plus the puppet arm to hang a blade on |
 | Arch lighting | `sithArchLighting.c` | vertex-baked arch light. Level data carries an `archlightIdx` per thing; nothing reads it. | no matches for `archlight` |
 | Track things | `sithTrackThing.c` | things that ride a `.key` track (free paths, camera dollies). The port interpolates `frame=` lists, which covers doors and lifts but not a path with its own timing. **`PathMovePause`/`PathMoveResume` work**: the thing keeps its destination, stops advancing (`paused`, the engine's `flags \| 0x80`) and reports `IsMoving` 1 throughout, which is exactly what level 9's pipe doors need to stop in the doorway (`09_stoppipedoors.cog`, `--things`) | a path with per-frame timings of its own (`trackParams` interpolation); the port walks frames linearly at `MoveToFrame`'s speed |
 | Event queue | `sithEvent.c` | the engine's timed event list. Pulses and timers live in `cog.rs` and cover the scripts; a non-cog timed event (thing expiry, AI tick) has nowhere to live. | no matches for `SithEvent` |
@@ -74,17 +74,17 @@ both multiplayer-only screens.
 | Rendering | opaque pass, portal-aware sector culling, the light ramp, HUD | no transparency sorting, sprites counted but never drawn, and a changed animation frame rebuilds the whole mesh asset instead of writing into it (§4) |
 | Colormap and lighting | the palette, and each `.cmp` ramp sampled at **32 steps** (`LIGHT_STEPS`) to build the surface light ramp; a single far colour for distance shading; sector light animation, surface light animation, and **`ThingLight`/`SetThingLight`/`ThingLightAnim`**: a thing's own light, ramped the way `sithSurface_SetThingLight` ramps it (`from`, `rate = delta / time`, `to`), summed per sector so a lamp brightens its room and a broken one stops (`--cel`) | the engine's per-distance table **selection** — a surface picks the 256-entry table matching its distance from the light — and the *dynamic* pass that gives a thing's light a radius: this build adds the whole thing-light sum to its sector's baked light, so a lamp lights the room flatly rather than in a pool (`ponytail:` per-surface falloff). 256 tables are located per ramp (`(len - CMP_HEADER - CMP_PALETTE) / 256` in `tex.rs`) and the ramp uses 32 of them |
 | Savegames | the container and thing records: version 6, the 1580-byte header, the `0x28` record header, template/type/position/angles round-trip | the rest of `sithGamesave.c`: cog state, AI state, item respawn masks, the event queue, multiplayer sections, and the header internals |
-| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 11 below | the 11 stubbed verbs in section 3 |
+| Cog | the VM, 34 levels of scripts, pulses and timers, every verb the scripts call except the 10 below | the 10 stubbed verbs in section 3 |
 | HUD and UI | the HUD, most screens, menus built from `jkGUIRend` tables | the screens still placeholders (`--ui-tables`), the scope, the map screen, and the tally screens (blocked on multiplayer) |
 | Cutscenes | `.smk` decoding of all 25 shipped films (483 MB, 29,493 frames) with their own palette records, seeded from the level | in-engine camera cutscenes (section 1) |
 
 ---
 
-## 3. The 11 stubbed cog verbs
+## 3. The 10 stubbed cog verbs
 
 The concrete remaining port surface: the shipped scripts call these and get nothing. Counts are call sites
-over the 34 levels from `--cog-check` (39 still stubbed, out of 706 the scripts make). Each verb is in exactly
-one group, and the groups sum to 11.
+over the 34 levels from `--cog-check` (24 still stubbed, out of 706 the scripts make). Each verb is in exactly
+one group, and the groups sum to 10.
 
 An unhandled verb returns `0` (the catch-all arm of `Runtime::handle`). That is the right answer for `ismulti`
 and `isserver` in a single-player game, and the wrong one for a getter that should return something
@@ -93,8 +93,9 @@ takes the wrong branch without any error.
 
 | group | calls | verbs, most-called first |
 | --- | --- | --- |
-| Weapons and projectiles (2) | 29 | `jksetsaberinfo` 15, `autoselectweapon` 14 |
+| Weapons and projectiles (2) | 14 | `autoselectweapon` 14 |
 | Models (1) | 6 | `setthingmodel` 6 (CTF scripts only) |
+| Effects (2) | 4 | `newcoloreffect` 2, `setthingrotvel` 2 |
 
 ---
 

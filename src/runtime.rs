@@ -268,6 +268,20 @@ pub struct SurfaceState {
     pub light_rate: f32,
 }
 
+/// `jkSetSaberInfo`'s blade, as `jkSaber_InitializeSaberInfo` stores it: the two blade materials,
+/// the base and tip radii, the length, and the three spark templates a hit spawns.
+#[derive(Clone, Debug, Default)]
+pub struct SaberInfo {
+    pub side: String,
+    pub tip: String,
+    pub base_rad: f32,
+    pub tip_rad: f32,
+    pub length: f32,
+    pub wall_sparks: String,
+    pub blood_sparks: String,
+    pub saber_sparks: String,
+}
+
 #[derive(Clone)]
 pub struct SectorState {
     /// `SetSectorThrust(sector, vector)`: the force the sector applies.
@@ -634,6 +648,12 @@ pub struct Runtime {
     pub force_target_tint: Vec<f32>,
     /// The player's current weapon template, when a pickup has changed it.
     pub weapon: Option<String>,
+    /// `jkSetSaberInfo`: the blade this player carries. The engine keeps it in
+    /// `playerInfo->saberInfo` and `jkSaber.c` swings it; this build keeps the same numbers and
+    /// sweeps the blade itself (`saber_swing`), because the swing animations are the puppet work.
+    pub saber: BTreeMap<usize, SaberInfo>,
+    /// Seconds until the next swing, so holding the button is not a machine gun of blades.
+    pub saber_wait: f32,
     /// The armed inventory bin (`SITHBIN_*`), which is how the engine names a weapon or a
     /// force power.
     pub cur_bin: i32,
@@ -1036,6 +1056,8 @@ impl Runtime {
             force_target: None,
             force_target_tint: Vec::new(),
             weapon: None,
+            saber: BTreeMap::new(),
+            saber_wait: 0.0,
             cur_bin: 0,
             default_weapon: level
                 .template_param("walkplayer", "weapon")
@@ -1775,6 +1797,7 @@ impl Runtime {
                 | "setfacelightmode"
                 | "pathmoveresume"
                 | "jkgetchoice"
+                | "jksetsaberinfo"
                 | "getthinggeomode"
                 | "setthingcurgeomode"
                 | "changesoundvol"
@@ -4198,6 +4221,31 @@ impl Runtime {
             // ending scripts branch on it (`19b_endlevel.cog` gives the light path its yellow saber),
             // and `jkPlayer_CalcAlignment` maps 1 to +100 and 2 to -100.
             "jkgetchoice" => Value::Num(self.inv.get(&18).copied().unwrap_or(0.0) as f64),
+            // `jkSetSaberInfo(thing, side, tip, base_rad, tip_rad, len, wall, blood, saber)`:
+            // `jkCog_SetSaberInfo` pops in reverse and calls `jkSaber_InitializeSaberInfo`, so the
+            // thing is `idx(0)` and the blade's own numbers follow it.
+            "jksetsaberinfo" => {
+                let text = |k: usize| match args.get(k) {
+                    Some(Value::Str(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                if let Ok(thing) = usize::try_from(idx(0)) {
+                    self.saber.insert(
+                        thing,
+                        SaberInfo {
+                            side: text(1),
+                            tip: text(2),
+                            base_rad: num(3) as f32,
+                            tip_rad: num(4) as f32,
+                            length: num(5) as f32,
+                            wall_sparks: text(6),
+                            blood_sparks: text(7),
+                            saber_sparks: text(8),
+                        },
+                    );
+                }
+                Value::Nil
+            }
             "jkgetflags" => Value::Num(self.thing(idx(0)).map(|t| t.jk_flags as f64).unwrap_or(0.0)),
             "jksetflags" => {
                 if let Some(thing) = self.thing_mut(idx(0)) {
@@ -4793,6 +4841,8 @@ mod tests {
             tint: [0.0; 3],
             force_target: None,
             force_target_tint: Vec::new(),
+            saber: BTreeMap::new(),
+            saber_wait: 0.0,
             weapon: None,
             cur_bin: 0,
             default_weapon: "+bryarbolt".into(),
