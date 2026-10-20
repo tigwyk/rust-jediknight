@@ -75,6 +75,9 @@ flag                                                   exit  what it prints
                                                              state names; turnleft/turnright x226 are
                                                              now played, and drawgun/holster x24
                                                              correct round 85's "no draw tracks")
+                                                             (and those rows are now played:
+                                                             `draw_row` returns drawgun on
+                                                             0->1 and holster on 1->0)
 --cog-check                                              0  --- cog check passed ---        (every level's scripts, and every label each one declares:
                                                              the deep pass is what found `AutosaveGame`, the
                                                              `jkString*` buffer, `StopKey`, `LoadSound` and

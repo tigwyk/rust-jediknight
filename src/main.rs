@@ -12056,6 +12056,11 @@ struct Actor {
     /// The yaw drawn last frame, so a body turning in place can play its `turnleft`/`turnright`
     /// track — `sithPuppet_UpdateThingMove` picks those from the body's angular velocity.
     drawn_yaw: Option<f32>,
+    /// The armed mode drawn last frame, so a change plays the puppet's own draw or holster row
+    /// (`drawgun`/`holster` — 24 actors ship each, and `SetArmedMode` is what flips them).
+    drawn_mode: usize,
+    /// A draw or holster row still playing, with the level time it ends.
+    drawing: Option<(String, f32)>,
 }
 
 /// Every placed actor with a puppet (`walkplayer`, stormtroopers, droids), animated by
@@ -12252,6 +12257,8 @@ fn spawn_models(
                 dying: false,
                 drawn_at: Vec3::from(thing.pos),
                 drawn_yaw: None,
+                drawn_mode: 0,
+                drawing: None,
             });
         }
     }
@@ -13042,7 +13049,7 @@ fn animate_actors(
         // An actor that just fired plays its puppet's `fire` track: the engine's
         // `sithPuppet_UpdateThingMove` picks the action track over the stride, and an actor that
         // keeps walking while shooting is the sliding soldier the trace made obvious.
-        let (firing, hit, armed) = sim
+        let (firing, hit, armed, rt_now) = sim
             .as_deref()
             .map(|sim| {
                 let rt = sim.world.borrow();
@@ -13053,9 +13060,9 @@ fn animate_actors(
                     Some(mode) => *mode as usize,
                     None => usize::from(rt.thing_has_weapon(actor.thing)),
                 };
-                (rt.just_fired(actor.thing), rt.just_hit(actor.thing), armed)
+                (rt.just_fired(actor.thing), rt.just_hit(actor.thing), armed, rt.time)
             })
-            .unwrap_or((false, false, 0));
+            .unwrap_or((false, false, 0, 0.0));
         // How fast the body is turning, in degrees per second: a body that turns in place plays its
         // `turnleft`/`turnright` track, which 226 of level 1's puppets ship and no code played.
         let yaw_now = pose.unwrap_or(0.0);
@@ -13072,12 +13079,39 @@ fn animate_actors(
             })
             .unwrap_or(0.0);
         actor.drawn_yaw = Some(yaw_now);
+        // A change of armed mode plays the puppet's own draw or holster row first — this is the
+        // body half of what a weapon cog's `selected:`/`deselected:` does (`SetArmedMode`).
+        if actor.drawn_mode != armed {
+            if let Some(row) = draw_row(actor.drawn_mode, armed)
+                && let Some(key) = actor
+                    .states
+                    .get(&(row.to_string(), armed))
+                    .or_else(|| actor.states.get(&(row.to_string(), 0)))
+                && let Some(clip) = world.keys.get(key)
+            {
+                let playtime = clip.frames.max(1) as f32 / clip.fps.max(1.0);
+                actor.drawing = Some((row.to_string(), rt_now + playtime));
+            }
+            actor.drawn_mode = armed;
+        }
         // The state name, which is what decides the keyfile below. A scripted clip has no state
         // of its own, so it gets the empty name and always wins.
+        // A draw or holster row still playing outranks the stride: it is the transition between two
+        // armed modes, and `draw_row` is the only place that names it.
+        let transition = actor
+            .drawing
+            .as_ref()
+            .filter(|(_, until)| rt_now < *until)
+            .map(|(row, _)| row.clone());
         let state = if scripted.is_some() {
             ""
         } else if actor.dying {
             "death"
+        } else if let Some(row) = transition.as_deref().filter(|row| {
+            actor.states.contains_key(&(row.to_string(), armed))
+                || actor.states.contains_key(&(row.to_string(), 0))
+        }) {
+            row
         } else {
             actor_state(vel, pose.unwrap_or(0.0), firing, hit, turn, armed, |name| {
                 actor.states.contains_key(&(name.to_string(), armed))
@@ -13150,6 +13184,20 @@ fn animate_actors(
                 *slot = model_mesh_posed(model, *material, *tex_size, Some((key, frame as f32)));
             }
         }
+    }
+}
+
+/// Which state row a change of armed mode plays, if the puppet has one.
+///
+/// The rows are `drawgun`/`holster` (24 actors ship each). **Not** `mount`/`dismount`: those are
+/// the names of the *weapon cog's* keyframe symbols (`mountAnim=bryvmnt.key`), which animate the
+/// first-person viewmodel, not the body. Mixing the two up is what made an earlier round report
+/// that no puppet shipped a draw animation.
+fn draw_row(from: usize, to: usize) -> Option<&'static str> {
+    match (from, to) {
+        (0, 1) => Some("drawgun"),
+        (1, 0) => Some("holster"),
+        _ => None,
     }
 }
 
@@ -17518,6 +17566,22 @@ fn template_counts(level: &jkl::Level) -> Vec<(String, usize)> {
 }
 
 #[cfg(test)]
+mod draw_row_tests {
+    use super::draw_row;
+
+    /// The body's own draw and holster rows, and nothing for a mode that did not change.
+    #[test]
+    fn a_mode_change_names_the_puppets_own_row() {
+        assert_eq!(draw_row(0, 1), Some("drawgun"));
+        assert_eq!(draw_row(1, 0), Some("holster"));
+        assert_eq!(draw_row(0, 0), None);
+        assert_eq!(draw_row(1, 1), None);
+        // Modes beyond armed/unarmed are not the port's (crouch and the rest are a separate row).
+        assert_eq!(draw_row(1, 2), None);
+    }
+}
+
+#[cfg(test)]
 mod arg_value_tests {
     use super::arg_value;
 
@@ -17731,6 +17795,8 @@ mod rules_tests {
             dying: false,
             drawn_at: Vec3::ZERO,
             drawn_yaw: None,
+            drawn_mode: 0,
+            drawing: None,
         };
         assert_eq!(animating_key(&actor, false), "kystand0.key");
         assert_eq!(animating_key(&actor, true), "kyftdeth.key");
