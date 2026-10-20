@@ -2923,8 +2923,29 @@ impl Runtime {
     /// instead. A `ponytail:` heuristic — good enough to arm the bryar and the stormtrooper
     /// rifle on level 1, replaced by the real table when it is recovered.
     pub fn weapon_for_bin(&self, bin: i32) -> Option<String> {
-        // Exact-ish names, not bare substrings: a "st" hint happily matched `+concblast2`
-        // and a "saber" hint matched the `+force_saber` particle effect.
+        // The faithful rule first: a weapon is a template the engine types as `SITH_THING_WEAPON`
+        // (3) that names this bin in its own `inv=`. That is the engine's own mapping — `weaponData`
+        // is not in the level text, but every shipped weapon template carries `inv=` and the port
+        // already reads it into `template_inv`, so this needs no name guessing and covers every
+        // weapon the level defines rather than the handful a hint list happened to name.
+        let by_inv = self
+            .template_inv
+            .iter()
+            .filter(|(_, owner)| **owner == bin)
+            .map(|(name, _)| name)
+            .filter(|name| {
+                self.template_types.get(*name).copied() == Some(3)
+                    && self.template_damage.get(*name).copied().unwrap_or(0.0) > 0.0
+                    && !["exp", "cloud", "saber", "force_"].iter().any(|bad| name.contains(bad))
+            })
+            .min()
+            .cloned();
+        if by_inv.is_some() {
+            return by_inv;
+        }
+        // Fallback for a level whose weapon templates carry no `inv=`: name hints. Exact-ish, not
+        // bare substrings — a "st" hint happily matched `+concblast2`, and a "saber" hint matched the
+        // `+force_saber` particle effect.
         let hints: &[&str] = match bin {
             2 => &["bryar"],
             3 => &["stlaser", "stormtrooper"],
@@ -6440,6 +6461,24 @@ mod tests {
         rt.call("jkStringClear", &[]);
         rt.call("jkStringConcatAsciiString", &[Value::Str("x".repeat(200))]);
         assert!(rt.string_buffer.is_empty(), "the 128-character cap did not hold");
+    }
+
+    /// A weapon template found by its own `inv=` rather than by a name hint: the engine types it
+    /// `SITH_THING_WEAPON` and the template says which bin it belongs to, so a weapon the hint list
+    /// never named is still reachable.
+    #[test]
+    fn a_weapon_is_found_by_its_own_inv() {
+        let mut rt = door_runtime();
+        // A bin the hint table does not cover at all, and a name it would never guess.
+        rt.template_inv.insert("raildetonator".to_string(), 7);
+        rt.template_types.insert("raildetonator".to_string(), 3);
+        rt.template_damage.insert("raildetonator".to_string(), 40.0);
+        assert_eq!(rt.weapon_for_bin(7).as_deref(), Some("raildetonator"));
+        // A named bin still resolves through `inv=` first, so the hint list is only a fallback.
+        rt.template_inv.insert("someblaster".to_string(), 2);
+        rt.template_types.insert("someblaster".to_string(), 3);
+        rt.template_damage.insert("someblaster".to_string(), 5.0);
+        assert_eq!(rt.weapon_for_bin(2).as_deref(), Some("someblaster"));
     }
 
     /// `jkPlayer_NextWeapon`: `[` and `]` step through the weapons carried. Nothing called

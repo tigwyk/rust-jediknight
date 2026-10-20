@@ -3080,6 +3080,23 @@ fn main() {
                 vertices = model.meshes.iter().map(|m| m.vertices.len()).sum();
                 materials = model.materials.len();
             }
+            // Which bins this level's templates actually resolve to a weapon: the engine finds
+            // them by `inv=` plus its weapon type, so printing the map shows the coverage the
+            // weapon keys have on this level.
+            let mut armed: Vec<(i32, String)> = (1..=26)
+                .filter_map(|bin| rt.weapon_for_bin(bin).map(|name| (bin, name)))
+                .collect();
+            armed.sort();
+            println!(
+                "weapons: {} bin(s) resolve to a weapon template: {:?}",
+                armed.len(),
+                armed
+            );
+            assert!(
+                armed.len() >= 2,
+                "only {} weapon bin(s) resolve, so `[`/`]` has nothing to switch between",
+                armed.len()
+            );
             println!(
                 "weapons: the cog named first-person model {pov:?} -- {vertices} vertices, {materials} material(s)"
             );
