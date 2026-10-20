@@ -26,12 +26,31 @@ impl World {
         Self(std::sync::Arc::new(std::sync::Mutex::new(runtime)))
     }
 
+    /// Take the runtime, or **fail loudly** if this thread already holds it.
+    ///
+    /// `Mutex::lock` waits forever on a second borrow by the same thread, which turns a wiring
+    /// mistake into a hang with no message — a gate that hangs looks like a slow gate, and this
+    /// codebase has now produced that mistake four times. A panic names it instead, and the message
+    /// says what to do about it.
+    fn take(&self) -> std::sync::MutexGuard<'_, Runtime> {
+        match self.0.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                panic!(
+                    "the runtime is already borrowed on this thread: drop the guard you hold before \
+                     borrowing again (a gate that holds one while taking another deadlocks)"
+                )
+            }
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        }
+    }
+
     pub fn borrow(&self) -> std::sync::MutexGuard<'_, Runtime> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.take()
     }
 
     pub fn borrow_mut(&self) -> std::sync::MutexGuard<'_, Runtime> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.take()
     }
 }
 
@@ -6393,6 +6412,16 @@ mod tests {
         rt.call("jkStringClear", &[]);
         rt.call("jkStringConcatAsciiString", &[Value::Str("x".repeat(200))]);
         assert!(rt.string_buffer.is_empty(), "the 128-character cap did not hold");
+    }
+
+    /// A second borrow by the thread that already holds the world is a wiring mistake, and it used
+    /// to be silent: `Mutex::lock` waits, so a gate that made the mistake looked like a slow gate.
+    #[test]
+    #[should_panic(expected = "already borrowed")]
+    fn borrowing_a_held_world_fails_loudly() {
+        let world = World::new(door_runtime());
+        let _held = world.borrow();
+        let _second = world.borrow_mut();
     }
 
     #[test]
