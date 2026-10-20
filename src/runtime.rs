@@ -3768,6 +3768,12 @@ impl Runtime {
         (focus != self.player_thing()).then_some(focus)
     }
 
+    /// Whether the player's saber should be drawn: armed by `jkSetSaberInfo` **and** not switched
+    /// off by `jkDisableSaber`, which the saber scripts call when the blade goes away.
+    pub fn saber_shown(&self, player: usize) -> bool {
+        self.saber_enabled && self.saber.contains_key(&player)
+    }
+
     /// What the camera's own shake adds to the view and to the aim, in level units and degrees.
     pub fn camera_shake(&self) -> ([f32; 3], [f32; 3]) {
         (self.shake_pos, self.shake_angle)

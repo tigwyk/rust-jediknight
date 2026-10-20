@@ -5524,6 +5524,16 @@ fn main() {
             rt.time += 1.0;
             rt.things[player].pos = [actor_pos[0] - 4.0, actor_pos[1], actor_pos[2]];
             assert!(rt.saber_swing(player).is_empty(), "the blade reached four units");
+            // `jkDisableSaber` takes the blade away; `jkEnableSaber` puts it back. Nothing read the
+            // flag before, so the drawn blade ignored both.
+            assert!(rt.saber_shown(player), "the saber should be drawn after `jkSetSaberInfo`");
+            rt.call("jkDisableSaber", &[]);
+            let off = rt.saber_shown(player);
+            rt.call("jkEnableSaber", &[]);
+            let back = rt.saber_shown(player);
+            println!("saber: drawn {}, after jkDisableSaber {}, after jkEnableSaber {}", true, off, back);
+            assert!(!off, "`jkDisableSaber` left the blade drawn");
+            assert!(back, "`jkEnableSaber` did not bring the blade back");
         }
         println!("--- hit check passed ---");
         return;
@@ -14528,7 +14538,12 @@ fn saber_blade(
     let armed = {
         let rt = sim.world.borrow();
         let player = rt.player_thing();
-        let blade_info = rt.saber.get(&player).cloned();
+        // `jkDisableSaber`/`jkEnableSaber` are what the saber scripts flip when the blade goes away,
+        // and nothing read the flag, so a disabled saber still drew.
+        let blade_info = rt
+            .saber_shown(player)
+            .then(|| rt.saber.get(&player).cloned())
+            .flatten();
         let weapon = rt.current_weapon();
         blade_info.filter(|_| crate::runtime::Runtime::is_saber(&weapon))
     };
