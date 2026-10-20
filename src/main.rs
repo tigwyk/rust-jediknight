@@ -18875,6 +18875,23 @@ fn walk_player(
         player.grounded = false;
     }
 
+    // `sithThing_AttachThingToSurface`: a placed body starts *on* its floor. A body whose feet begin
+    // below its own sector's floor plane can never take a step — every horizontal sweep reports a
+    // collision in all four directions — and three levels place the player that way (02narshadda has
+    // feet at 2.905 with its floor at 3.0). One clamp here fixes the walk for all of them.
+    if let Some((floor, _)) = solids.0.floor_surface(
+        player.sector,
+        [player.pos.x, player.pos.y, player.pos.z + player.rules.radius],
+    ) && player.pos.z - player.rules.radius < floor - 0.01
+    {
+        // `+ 0.01`: the containment test is asked at the feet with zero tolerance, so a body resting
+        // exactly on the plane rounds outside it and every step is undone — the same epsilon the
+        // scroll probe uses below.
+        player.pos.z = floor + player.rules.radius + 0.01;
+        player.vy = 0.0;
+        player.grounded = true;
+    }
+
     let mut pos = [player.pos.x, player.pos.y, player.pos.z];
     let mut sector = player.sector;
     let mut vy = player.vy + thrust[2] * dt;
@@ -18882,11 +18899,13 @@ fn walk_player(
     let trace = std::env::var_os("BK_WALK_TRACE").is_some();
     if trace {
         eprintln!(
-            "walk trace: live {live} W {} escape {} forward {forward} strafe {strafe} vel {:?}",
+            "walk trace: live {live} W {} escape {} forward {forward} strafe {strafe} vel {:?} target {target:?} extra {} crouch {crouch}",
             keys.pressed(KeyCode::KeyW),
             keys.pressed(KeyCode::Escape),
-            player.vel
+            player.vel,
+            player.extra_speed
         );
+        eprintln!("walk trace: dt {dt:.4} drag {:.3} grounded {} steps?", drag, player.grounded);
         let around = solids.0.sectors_around(pos);
         let mut floors: Vec<(usize, Option<f32>)> = around
             .iter()
@@ -18939,6 +18958,9 @@ fn walk_player(
     // wall instead of stopping dead; the walker reports when it pushed the body out.
     // `walker_step` reports how far the resolver let the body actually travel; when a wall ate part of
     // the frame, the fraction that survived is the velocity along the wall — that is the slide.
+    if trace {
+        eprintln!("walk trace: achieved {achieved_len:.5} vel-before-slide {:?}", player.vel);
+    }
     if achieved_len > 0.0 {
         let moved = [(pos[0] - before[0]) / dt.max(1e-4), (pos[1] - before[1]) / dt.max(1e-4)];
         let want = [player.vel[0], player.vel[1]];
