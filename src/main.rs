@@ -290,6 +290,7 @@ fn main() {
     let mut load_check = false;
     let mut die_check = false;
     let mut fire_demo = false;
+    let mut sprite_template: Option<String> = None;
     let mut pickup_check = false;
     let mut weapon_check: Option<String> = None;
     let mut bins_check = false;
@@ -553,6 +554,12 @@ fn main() {
             // `--fire-demo`: pull the trigger once after a few frames, so a screenshot can
             // show a bolt in flight without a human at the mouse.
             "--fire-demo" => fire_demo = true,
+            // `--sprite <template>`: keep an effect template alive in front of the camera, so a
+            // screenshot shows what the sprite layer draws. See `sprite_demo`.
+            "--sprite" => {
+                i += 1;
+                sprite_template = args.get(i).cloned();
+            }
             // `--pickup`: walk the player onto level 1's own powerup and check it is taken.
             "--pickup" => pickup_check = true,
             // `--weapon <template>`: taking a weapon changes what the player fires.
@@ -6067,6 +6074,7 @@ fn main() {
         .insert_resource(Cull(cull))
         .insert_resource(Animate(animating))
         .insert_resource(FireDemo(fire_demo))
+        .insert_resource(SpriteDemo(sprite_template))
         .insert_resource(Look(look))
         .insert_resource(Ambience::default())
         .insert_resource(PlaySound(play_sound))
@@ -6124,7 +6132,7 @@ fn main() {
                     advance_sim,
                 )
                     .run_if(no_screen_open),
-                (demo_aim, sync_player_thing, health_follows_damage, infrared_follows_force, fire_player, draw_created, projectile_hits, respawn_on_death)
+                (demo_aim, sync_player_thing, health_follows_damage, infrared_follows_force, fire_player, sprite_demo, draw_created, projectile_hits, respawn_on_death)
                     .chain()
                     .run_if(no_screen_open),
                 (
@@ -8332,7 +8340,27 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
             // the black is its transparency. Keying a *world* texture that way would punch holes in
             // it, so only sprite materials get the keyed conversion.
             if let Some(bitmap) = gobs.read(&face.material).as_deref().and_then(tex::parse_mat) {
-                model_images.insert(face.material.clone(), to_image_keyed(&bitmap, &palette));
+                let keyed = keyed_rgba(&bitmap, &palette);
+                // A sprite `.mat` is a vertical **strip of animation cels**, not one image:
+                // `bryx.mat` is 8x78 for an 8-wide spark, so it holds ~9 frames stacked. The quad
+                // in `draw_created` maps the whole strip onto one small rectangle today, which is
+                // why a spark is not visibly on screen yet — the cel sub-rect is the missing piece.
+                if std::env::var_os("BK_SPRITE_TRACE").is_some() {
+                    let clear = keyed.chunks(4).filter(|p| p[3] == 0).count();
+                    println!(
+                        "  sprite `{}`: {}x{} ({} cel(s) of {}), {} of {} pixels keyed clear, {:.2}x{:.2} world units",
+                        face.material,
+                        bitmap.width,
+                        bitmap.height,
+                        bitmap.height / bitmap.width.max(1),
+                        bitmap.width,
+                        clear,
+                        bitmap.indices.len(),
+                        face.width,
+                        face.height
+                    );
+                }
+                model_images.insert(face.material.clone(), image_from_rgba(bitmap.width, bitmap.height, keyed));
             }
         }
         template_sprite.insert(template.name.to_ascii_lowercase(), faces);
@@ -9504,6 +9532,11 @@ struct Gun(String);
 /// `--fire-demo`: fire once after a few frames, so a screenshot shows a bolt in flight.
 #[derive(Resource)]
 struct FireDemo(bool);
+
+/// `--sprite <template>`: the effect template to keep alive in front of the camera. See
+/// `sprite_demo`.
+#[derive(Resource)]
+struct SpriteDemo(Option<String>);
 
 /// `--no-anim`: freeze the actors, which is how the animation is A/B'd against a still
 /// frame the same way `--no-cull` A/Bs the visibility pass.
@@ -11273,6 +11306,65 @@ fn respawn_on_death(sim: Option<Res<Sim>>, mut player: Option<ResMut<Player>>, w
     player.health = health;
     player.shields = shields;
     println!("player: died; respawned at the level's start with {health:.0} health and {shields:.0} shields");
+}
+
+/// `--sprite <template>`: keep one of an effect template alive in front of the camera, so a
+/// screenshot can show what a sprite actually draws as.
+///
+/// This is the only way to look at the sprite layer: an impact effect lives for its `timer=`
+/// (`+laserhit` ships 0.5 s) and the game's own impacts land behind whatever the camera is facing.
+/// The thing is created the way a script would — `CreateThing` at the player, then moved — and
+/// re-created after it expires, so whichever frame gets captured has one.
+fn sprite_demo(
+    demo: Option<Res<SpriteDemo>>,
+    mut live: Local<Option<usize>>,
+    mut frame: Local<u32>,
+    player: Option<Res<Player>>,
+    sim: Option<Res<Sim>>,
+) {
+    let (Some(demo), Some(player), Some(sim)) = (demo, player, sim) else { return };
+    let Some(template) = demo.0.as_deref() else { return };
+    *frame += 1;
+    // The world is still being built for the first frames: a thing created then is not drawn.
+    if *frame < 30 {
+        return;
+    }
+    let mut rt = sim.world.borrow_mut();
+    if live.is_some_and(|index| rt.things.get(index).is_some_and(|t| !t.destroyed)) {
+        // Keep it in front of the camera as the camera moves.
+        let ahead = 1.5;
+        let (sin, cos) = player.yaw.sin_cos();
+        if let Some(index) = *live
+            && let Some(thing) = rt.things.get_mut(index)
+        {
+            thing.pos = [
+                player.pos.x + cos * ahead,
+                player.pos.y + sin * ahead,
+                player.pos.z,
+            ];
+            thing.sector = player.sector as i32;
+        }
+        return;
+    }
+    let player_thing = rt.player_thing();
+    let created = rt.call(
+        "CreateThing",
+        &[cog::Value::Str(template.to_string()), cog::Value::Num(player_thing as f64)],
+    );
+    let cog::Value::Num(index) = created else { return };
+    let index = index as usize;
+    let (sin, cos) = player.yaw.sin_cos();
+    let at = [
+        player.pos.x + cos * 1.5,
+        player.pos.y + sin * 1.5,
+        player.pos.z,
+    ];
+    if let Some(thing) = rt.things.get_mut(index) {
+        thing.pos = at;
+        thing.sector = player.sector as i32;
+    }
+    println!("sprite demo: `{template}` at {at:?}, thing {index}");
+    *live = Some(index);
 }
 
 /// `--fire-demo`: point the player at the nearest actor once, so the stream of bolts has

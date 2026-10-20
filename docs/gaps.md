@@ -34,7 +34,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | --- | --- | --- | --- |
 | Networking and multiplayer | `sithDSS.c`, `sithDSSThing.c`, `sithDSSCog.c`, `sithMulti.c`, `sithComm.c`, `stdComm.c`, `jkGUIMultiplayer.c`, `jkGUINetHost.c`, `jkGUIMultiTally.c` | the whole thing: message streaming, thing replication, cog RPCs, host/join, tally screens. Zero socket code exists. | no `socket`/`UdpSocket`/`TcpStream` in `src/`. The single-player **answers** are now explicit (`ismulti`/`isserver` 0, no team, no score, `*multimodeflags` stored) and `sendtrigger` really broadcasts `trigger`, but only `sendmessageex` is left stubbed — it needs message *return values* |
 | Console and cvars | `sithConsole.c`, `sithCvar.c`, `sithCommand.c`, `jkQuakeConsole.c` | the `~` console, the cvar store, and the command dispatcher (`bind`, `set`, `map`, `quit`) | no matches for `cvar`, `sithCommand`, `sithConsole` |
-| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. The **sprite** layer now exists: every template's `sprite=` is parsed (`spr.rs`) into camera-facing rectangles, its `.mat` is loaded through the model-texture path with palette entry 0 keyed transparent, and `draw_created` spawns those quads with `billboard_sprites` turning them to the camera. What is *not* proven is the pixels: the level-1 spawn view has no effect in front of the camera (the AI's impacts land behind geometry), so the on-screen confirmation is still open — the evidence so far is the load line (35 sprite files for 35 templates) and the per-impact `drawing sprite thing N (+laserhit, 1 face(s))` line. Next: spawn an effect in front of the camera on purpose and diff the frame. | no particle type; `explosion` matches are class numbers and the damage path |
+| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. The **sprite** layer is loaded and spawned but **not yet on screen**: every template's `sprite=` is parsed (`spr.rs`) into camera-facing rectangles, its `.mat` is loaded through the model-texture path, palette entry 0 is keyed transparent, `draw_created` spawns the quads and `billboard_sprites` turns them to the camera. `--sprite <template>` puts one 1.5 units in front of the camera, and the captured frame is **byte-identical** to the same frame without it — no pixels. Two known bugs, both written up in `docs/formats.md` §16.5: a sprite `.mat` is a vertical **cel strip** (`bryx.mat` is 8x78, ~9 frames) and the port maps the whole strip onto one quad, and nothing rasterises at all, which points at the blend path (`AlphaMode::Blend` vs the engine's additive effect materials). | no particle type; `explosion` matches are class numbers and the damage path |
 | In-engine cutscene cameras | `jkCutscene.c`, `sithCamera.c` focus modes | `SetCameraFocus`, `SetCurrentCamera`, `SetPovShake`, scripted camera paths. Cutscenes play as `.smk` film over the world; an in-engine camera cutscene would not cut. | no matches for `SetCameraFocus`/`camerafocus`/`shake`; all three verbs are stubs |
 | Saber | `jkSaber.c` | blade geometry, swing arcs, saber lock, trace damage. `jksetsaberinfo` is a stub. | `saber` matches are template-name and palette text only |
 | Arch lighting | `sithArchLighting.c` | vertex-baked arch light. Level data carries an `archlightIdx` per thing; nothing reads it. | no matches for `archlight` |
@@ -214,9 +214,12 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
   `draw_created` spawns one quad per `.spr` row at the thing's position plus the row's model-space
   offset, and `billboard_sprites` turns them to the camera each frame, which is what
   `rdSprite_Draw`'s camera-space vertices do. Level 1 resolves **35 sprite files for 35 templates**,
-  and an impact logs `drawing sprite thing 363 (+laserhit, 1 face(s))`. Unproven: the pixels. The
-  spawn view has no effect in front of the camera — the AI's impacts land behind geometry — so the
-  next step is to spawn one in view on purpose and diff the frame.
+  and an impact logs `drawing sprite thing 363 (+laserhit, 1 face(s))`. **Not on screen yet:** the
+  in-view check `--sprite +laserhit` (one effect thing 1.5 units in front of the camera) captures a
+  frame byte-identical to the same frame without it. A sprite `.mat` is a *cel strip* — `bryx.mat`
+  is 8x78, about nine frames — and the port maps the whole strip onto one quad; but that does not
+  explain zero pixels, so the blend path is the second suspect. Both are written up in
+  `docs/formats.md` §16.5, and `BK_SPRITE_TRACE=1` prints the numbers that found them.
 
 * **A created thing dies when its `timer=` runs out, and `SetThingTimer` is a different timer.**
   `timer=` is the engine's `msecLifeLeft` (`sithThing.c:1777`), counted down every frame with

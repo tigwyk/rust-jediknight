@@ -2925,9 +2925,24 @@ are separate — `to_image` writes alpha 255 everywhere, `keyed_rgba` writes 0 f
 sprite materials take the keyed path.
 
 Level 1 resolves **35 sprite files for 35 templates**, and an impact logs
-`drawing sprite thing 363 (+laserhit, 1 face(s))`. What is not yet proven is the pixels: the level-1
-spawn view has no effect in front of the camera (the AI's impacts land behind geometry and expire in
-0.5 s), so the confirmation is a deliberate in-view spawn, which is the next check to write.
+`drawing sprite thing 363 (+laserhit, 1 face(s))`. What the in-view check found is that the quad
+contributes **no pixels at all** — `--sprite <template>` (a demo flag that keeps one effect thing
+1.5 units in front of the camera through `CreateThing` + a position write) captures a frame
+byte-identical to the same frame without it. Two candidate causes, both recorded here because each is
+a separate bug:
+
+1. **A sprite `.mat` is a strip of animation cels, not one image.** `bryx.mat` is 8 x **78** for an
+   8-wide spark — roughly nine frames stacked — and `detx.mat` 8 x 82, `destruct8.mat` 8 x 239.
+   `rdSprite_Draw` maps one cel with `texVertOffset`; the port maps the whole strip onto a 0.1-unit
+   quad, which squashes the spark to a tenth of a tiny rectangle.
+2. **Nothing rasterises yet**, which the squashed-cel explanation does not account for: a mostly-clear
+   0.1 x 0.1 quad would still change some pixels. So the blend path is the other suspect —
+   `AlphaMode::Blend` with an unlit material over a keyed bitmap, versus the engine's effect
+   materials, which read as additive (`black adds nothing`) rather than alpha-blended.
+
+`BK_SPRITE_TRACE=1` prints the per-material numbers that found this (`8x78 (9 cel(s) of 8), 517 of
+624 pixels keyed clear, 0.10x0.10 world units`), and the next step is the cel sub-rect plus a
+`blend`/`add` A/B on one quad.
 
 ### Damage decays in flight
 

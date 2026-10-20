@@ -2186,7 +2186,9 @@ impl Runtime {
         usize::try_from(i).ok().and_then(|i| self.sectors.get_mut(i))
     }
 
-    fn player_thing(&self) -> usize {
+    /// The thing the camera rides: the level's first `walkplayer`, which is the engine's own rule
+    /// (`sithPlayer_Initialize` takes the first thing of type PLAYER).
+    pub fn player_thing(&self) -> usize {
         self.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")).unwrap_or(0)
     }
 
