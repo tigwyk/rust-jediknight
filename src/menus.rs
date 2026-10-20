@@ -675,13 +675,17 @@ fn element_at(exe: &[u8], sections: &[Section], image_base: u32, base: u32) -> O
     // are all -1 (the force icons) takes its position and size from `bitmaps[+0x10]`
     // (`jkGuiRend_PicButtonEventHandler`). The END record has a zero rect, and so does any
     // padding between arrays, so neither passes.
+    // Widened to `i64` before adding: these four are arbitrary bytes read out of the executable, so a
+    // candidate record can hold values near `i32::MAX` and `rect[0] + rect[2]` overflowed — a panic in
+    // debug builds, silently wrapping in release, and the three menu tests that walk the raw table
+    // failed on it rather than on a menu.
     let placeholder = rect.iter().all(|v| *v < 0);
     let fits = rect[2] > 0
         && rect[3] > 0
         && rect[0] >= 0
         && rect[1] >= 0
-        && rect[0] + rect[2] <= SCREEN[0]
-        && rect[1] + rect[3] <= SCREEN[1];
+        && i64::from(rect[0]) + i64::from(rect[2]) <= i64::from(SCREEN[0])
+        && i64::from(rect[1]) + i64::from(rect[3]) <= i64::from(SCREEN[1]);
     if !(0..=8).contains(&kind) || !(0..=15).contains(&text_type) || !(fits || placeholder) {
         return None;
     }
