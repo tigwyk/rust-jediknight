@@ -2925,24 +2925,33 @@ are separate — `to_image` writes alpha 255 everywhere, `keyed_rgba` writes 0 f
 sprite materials take the keyed path.
 
 Level 1 resolves **35 sprite files for 35 templates**, and an impact logs
-`drawing sprite thing 363 (+laserhit, 1 face(s))`. What the in-view check found is that the quad
-contributes **no pixels at all** — `--sprite <template>` (a demo flag that keeps one effect thing
-1.5 units in front of the camera through `CreateThing` + a position write) captures a frame
-byte-identical to the same frame without it. Two candidate causes, both recorded here because each is
-a separate bug:
+`drawing sprite thing 363 (+laserhit, 1 face(s))`. What the in-view check found is bigger than the
+sprite layer: **`draw_created` renders nothing at all.**
 
-1. **A sprite `.mat` is a strip of animation cels, not one image.** `bryx.mat` is 8 x **78** for an
-   8-wide spark — roughly nine frames stacked — and `detx.mat` 8 x 82, `destruct8.mat` 8 x 239.
-   `rdSprite_Draw` maps one cel with `texVertOffset`; the port maps the whole strip onto a 0.1-unit
-   quad, which squashes the spark to a tenth of a tiny rectangle.
-2. **Nothing rasterises yet**, which the squashed-cel explanation does not account for: a mostly-clear
-   0.1 x 0.1 quad would still change some pixels. So the blend path is the other suspect —
-   `AlphaMode::Blend` with an unlit material over a keyed bitmap, versus the engine's effect
-   materials, which read as additive (`black adds nothing`) rather than alpha-blended.
+`--sprite <template>` keeps one thing 1.5 units in front of the camera (created through
+`CreateThing`, then a position write) and the captured frame is byte-identical to the same frame
+without it. Three probes pin it down:
 
-`BK_SPRITE_TRACE=1` prints the per-material numbers that found this (`8x78 (9 cel(s) of 8), 517 of
-624 pixels keyed clear, 0.10x0.10 world units`), and the next step is the cel sub-rect plus a
-`blend`/`add` A/B on one quad.
+* `+laserhit` (a sprite): nothing — and `BK_SPRITE_DEBUG=1`, which draws that quad **untextured,
+  opaque red**, changes nothing either. So the material and the blend path are innocent.
+* `+bryarbolt` (a **model**, the same template the player fires): `drawing created thing 362
+  (+bryarbolt)` and still nothing. So it is not sprite-specific.
+* `BK_SPRITE_AHEAD=-1.5`, i.e. the same thing 1.5 units *behind* the camera, in case the offset's
+  sense was wrong: still identical. So it is not a facing mistake in the probe.
+
+That leaves the entity itself: a `Mesh3d` + `MeshMaterial3d` + `Transform` spawned from a system
+during `Update` is not reaching the rasteriser, while the level's own entities — spawned at startup
+from the same tuple — draw fine. This is the single highest-value rendering bug left, because
+**projectiles have never been on screen**: every bolt, blast and spark is in the runtime and none of
+them is visible.
+
+Still true alongside it: a sprite `.mat` is a **cel strip**, not one image (`bryx.mat` is 8 x **78**
+for an 8-wide spark, about nine frames; `detx.mat` 8 x 82, `destruct8.mat` 8 x 239), and
+`rdSprite_Draw` maps one cel with `texVertOffset` where the port maps the whole strip onto a 0.1-unit
+quad. That will need fixing once anything draws at all.
+
+`BK_SPRITE_TRACE=1` prints the per-material numbers (`8x78 (9 cel(s) of 8), 517 of 624 pixels keyed
+clear, 0.10x0.10 world units`).
 
 ### Damage decays in flight
 

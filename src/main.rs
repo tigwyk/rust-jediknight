@@ -11332,7 +11332,7 @@ fn sprite_demo(
     let mut rt = sim.world.borrow_mut();
     if live.is_some_and(|index| rt.things.get(index).is_some_and(|t| !t.destroyed)) {
         // Keep it in front of the camera as the camera moves.
-        let ahead = 1.5;
+        let ahead = env_f32("BK_SPRITE_AHEAD", 1.5);
         let (sin, cos) = player.yaw.sin_cos();
         if let Some(index) = *live
             && let Some(thing) = rt.things.get_mut(index)
@@ -11354,9 +11354,10 @@ fn sprite_demo(
     let cog::Value::Num(index) = created else { return };
     let index = index as usize;
     let (sin, cos) = player.yaw.sin_cos();
+    let ahead = env_f32("BK_SPRITE_AHEAD", 1.5);
     let at = [
-        player.pos.x + cos * 1.5,
-        player.pos.y + sin * 1.5,
+        player.pos.x + cos * ahead,
+        player.pos.y + sin * ahead,
         player.pos.z,
     ];
     if let Some(thing) = rt.things.get_mut(index) {
@@ -11536,6 +11537,14 @@ fn draw_created(
                     };
                     material.base_color_texture =
                         world.model_images.get(&face.material).map(|image| images.add(image.clone()));
+                    // `BK_SPRITE_DEBUG=1` draws the quad untextured red and opaque. It is the A/B
+                    // that separates "the material rasterises nothing" from "the quad never
+                    // reaches the rasteriser", which are different bugs with the same black frame.
+                    if std::env::var_os("BK_SPRITE_DEBUG").is_some() {
+                        material.base_color = Color::srgb(1.0, 0.0, 0.0);
+                        material.base_color_texture = None;
+                        material.alpha_mode = AlphaMode::Opaque;
+                    }
                     let entity = commands
                         .spawn((
                             Mesh3d(mesh),
