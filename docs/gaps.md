@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **33 gates, 83 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **34 gates, 84 tests, 0 failures.** Stubbed script surface:
 **59 verbs, 457 call sites across the 34 shipped levels** (706 before this run of state setters).
 
 Two rules for reading this file:
@@ -154,7 +154,10 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    by instance). Level 1 delivers the goal message to exactly one cog instead of broadcasting it to
    41, and `[01_endlevel.cog user0]` runs — goal flag, `Accomplish1.wav`, `Sleep(3.0)`, `jkEndLevel(1)`.
    Across the 34 levels the id routing is visible on three: level 2 sends 5 → 7 script messages, and
-   11 and 17 change how many doorway pieces and sounds their scripts drive.
+   11 and 17 change how many doorway pieces and sounds their scripts drive. `--endlevel` is the gate
+   that pins the whole thing end to end on level 1: master cog 26 registered by startup, `user0`
+   (id 27) delivered to it, goal bin 100 = 3, and `level_complete` true after the handler's 3 s sleep
+   — i.e. **a level can be finished by its own scripts**.
 2. **Timer queue for `sleep`/`settimer`/`setpulse`** (section 4). It is the one ceiling that changes what
    scripts do, and it sits under every verb that waits.
 3. ~~**Sector and adjoin flags**~~ — **done** (section 6): `setadjoinflags`/`clearadjoinflags`/
@@ -181,6 +184,15 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 ---
 
 ## 6. Recently closed, so it is not mistaken for missing
+
+* **A level can be finished through its own scripts.** `01_endlevel.cog` registers itself as the master
+  cog in `startup` (`SetMasterCOG(GetSelfCOG())`), a goal script reports the objective with
+  `SendMessage(GetMasterCOG(), user0)`, and the master's `user0` handler sets the goal flag, plays
+  `Accomplish1.wav`, sleeps 3 s and calls `jkEndLevel(1)`. Three things had to be true for that: the
+  VM's own index and the world's master cog (`GetSelfCog`/`SetMasterCog`), a message bus addressed by
+  cog with the **retail** message ids (`user0` = 27, from `sithCog_Startup`'s keyword table), and that
+  bus being drained in the live loop rather than only by `--run`. `--endlevel` pins it: master cog 26,
+  one message delivered, goal bin 100 = 3, `level_complete` true.
 
 * **A doorway whose far side cannot hold the body is now a wall, and crossings land where the body
   can stand.** Two separate refusals kept level 1's start impassable: the crossing only advanced past

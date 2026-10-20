@@ -121,6 +121,7 @@ const GATES: &[&str] = &[
     "--fall",
     "--falldeath",
     "--door",
+    "--endlevel",
     "--hit",
     "--live-check",
     "--mana",
@@ -296,6 +297,7 @@ fn main() {
     let mut force_screen_check = false;
     let mut campaign = false;
     let mut transition = false;
+    let mut endlevel_check = false;
     let mut flow_level: Option<String> = None;
     let mut smk_check = false;
     let mut smk_decode: Option<String> = None;
@@ -362,6 +364,7 @@ fn main() {
             "--fall" => fall_check = true,
         "--falldeath" => falldeath_check = true,
         "--door" => door_check = true,
+        "--endlevel" => endlevel_check = true,
             "--mute" => muted_flag = true,
             "--sound-on" => sound_on = true,
             "--audio-state" => audio_state = true,
@@ -1868,6 +1871,96 @@ fn main() {
             chain.get(1).cloned().unwrap_or_else(|| "the end".into())
         );
         println!("--- transition check passed ---");
+        return;
+    }
+
+    if endlevel_check {
+        // Finishing a level **through the shipped scripts**, not by calling `jkEndLevel` directly:
+        // `01_endlevel.cog` registers itself as the master cog in `startup`, a goal script reports a
+        // finished objective with `SendMessage(GetMasterCOG(), user0)`, and the master's `user0`
+        // handler sets the goal flag, plays its sound, sleep 3 s and calls `jkEndLevel(1)`.
+        let sim_world = runtime::Runtime::handle(&world.level);
+        let mut vms: Vec<(String, cog::Vm)> = Vec::new();
+        for inst in &world.level.cogs {
+            let Some(script) = world.cogs.get(&inst.script) else { continue };
+            let mut vm = cog::Vm::with_world(sim_world.clone());
+            vm.cog_index = vms.len() as i32;
+            script.bind(&mut vm, &inst.values);
+            if script.label("startup").is_some() {
+                let _ = vm.run_label(script, "startup");
+            }
+            vms.push((inst.script.clone(), vm));
+        }
+        let master = sim_world.borrow().master_cog;
+        println!(
+            "endlevel: {} instance(s), master cog {master:?} (set by `SetMasterCOG(GetSelfCOG())`)",
+            vms.len()
+        );
+        // The goal script's own message: `user0` is id 27 in the retail keyword table.
+        assert_eq!(cog::message_id("user0"), Some(27));
+        sim_world.borrow_mut().call(
+            "SendMessage",
+            &[cog::Value::Num(master.unwrap_or(-1) as f64), cog::Value::Num(27.0)],
+        );
+        let mut delivered = 0usize;
+        let mut completed = false;
+        for _ in 0..40 {
+            // The bus, exactly as `deliver_cog_messages` runs it.
+            loop {
+                let queued = std::mem::take(&mut sim_world.borrow_mut().messages);
+                if queued.is_empty() {
+                    break;
+                }
+                for (name, sender, target) in queued {
+                    for (script_name, vm) in &mut vms {
+                        if let Some(target) = target
+                            && vm.cog_index != target
+                        {
+                            continue;
+                        }
+                        let Some(script) = world.cogs.get(script_name) else { continue };
+                        let label = match name.strip_prefix('#').and_then(|n| n.parse::<usize>().ok())
+                        {
+                            Some(id) => match script.label_for_message_id(id) {
+                                Some(label) => label,
+                                None => continue,
+                            },
+                            None => name.clone(),
+                        };
+                        if script.label(&label).is_none() {
+                            continue;
+                        }
+                        vm.sender = sender.map_or(0, |s| s as i64);
+                        let _ = vm.run_label(script, &label);
+                        delivered += 1;
+                    }
+                }
+            }
+            if sim_world.borrow().level_complete {
+                completed = true;
+                break;
+            }
+            // Cog time, so the handler's `Sleep(3.0)` expires and the label resumes — the same
+            // condition `resume_sleeping_labels` uses.
+            for (script_name, vm) in &mut vms {
+                vm.now += 1.0;
+                if vm.sleeping() {
+                    continue;
+                }
+                let Some(label) = vm.sleeping_label().map(str::to_string) else { continue };
+                let Some(script) = world.cogs.get(script_name) else { continue };
+                if script.label(&label).is_none() {
+                    continue;
+                }
+                let _ = vm.run_label(script, &label);
+            }
+        }
+        println!(
+            "endlevel: {delivered} message(s) delivered, goal bin 100 = {}, level_complete {completed}",
+            sim_world.borrow().inv.get(&100).copied().unwrap_or(0.0)
+        );
+        assert!(completed, "the goal -> master cog chain did not end the level");
+        println!("--- endlevel check passed ---");
         return;
     }
 

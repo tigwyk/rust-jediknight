@@ -30,7 +30,7 @@ whatever is on screen, and `--gates` passes it to every child. A gate that forge
 ends without a verdict instead of sitting on the main menu forever — which is what five flags that
 do not exist in this binary used to do, because a hand-written flag list had invented them.
 
-`FAILURES: 0 / 33` (`--gates`: `gates: 0 of 33 failed`).
+`FAILURES: 0 / 34` (`--gates`: `gates: 0 of 34 failed`).
 
 flag                                                   exit  what it prints
 -------------------------------------------------------------------------------------------------
@@ -81,6 +81,11 @@ flag                                                   exit  what it prints
                                                              the player's own body is drawn by 0 entity(ies) (want 0)
 --live-check                                             0  --- live check passed ---
 --ai                                                     0  --- ai check passed ---
+--endlevel                                               0  master cog 26 (registered by
+                                                             `SetMasterCOG(GetSelfCOG())`), the goal's
+                                                             `user0` (id 27) delivered to it, goal bin
+                                                             100 = 3 and `level_complete` true --
+                                                             `jkEndLevel(1)` after the handler's sleep
 --door                                                   0  the player's use action, the level's own script, the solver:
                                                              `00_door.cog` on
                                                              thing 4 answers `activate` by clearing its sector's

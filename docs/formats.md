@@ -2616,6 +2616,15 @@ a goal script) does arrive today, and `--run 01narshadda` shows the handler runn
   [01_endlevel.cog user0] sound Accomplish1.wav at 1.00
 ```
 
+`--endlevel` is the gate that pins the chain end to end on level 1: it binds every placed instance, runs
+`startup` (which registers `01_endlevel.cog` as master cog 26), sends `user0` — id 27 — to that cog, then
+pumps the bus and advances cog time so the handler's `Sleep(3.0)` expires:
+
+```text
+endlevel: 42 instance(s), master cog Some(26) (set by `SetMasterCOG(GetSelfCOG())`)
+endlevel: 1 message(s) delivered, goal bin 100 = 3, level_complete true
+```
+
 That message is now addressed rather than broadcast, and its number is the engine's.
 `sithCogFunction_SendMessage` pops a **cog index** and a message **id**, resolves the cog and delivers
 to that one instance. The ids are not a guess: `sithCog_Startup` (`JK.EXE:004de070`) registers each
