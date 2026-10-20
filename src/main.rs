@@ -5692,6 +5692,7 @@ fn main() {
                     resume_sleeping_labels,
                     deliver_sector_triggers,
                     deliver_thing_messages,
+                    deliver_cog_messages,
                     deliver_crossed,
                     use_key,
                     apply_fall_damage,
@@ -7104,16 +7105,23 @@ fn run_level(
     let mut script_messages = 0usize;
     let mut delivered_messages = 0usize;
     for _round in 0..8 {
-        let queued: Vec<(String, Option<usize>, Option<usize>)> = {
+        let queued: Vec<(String, Option<usize>, Option<i32>)> = {
             let mut w = world.borrow_mut();
             std::mem::take(&mut w.messages)
         };
         if queued.is_empty() {
             break;
         }
-        for (name, _target, sender) in queued {
+        for (name, sender, cog) in queued {
             script_messages += 1;
             for (script_name, vm) in &mut vms {
+                // `SendMessage` addresses a cog (`sithCogFunction_SendMessage` pops a cog index and
+                // resolves it), so a targeted message goes to that one instance.
+                if let Some(target) = cog
+                    && vm.cog_index != target
+                {
+                    continue;
+                }
                 let script = &scripts[script_name];
                 // `#N` is a numeric message: the engine numbers messages per script, so N
                 // is resolved against *this* script's `message:` list.
@@ -10052,6 +10060,64 @@ fn deliver_thing_messages(
     }
     if fired > 0 && std::env::var_os("BK_TRIGGER_TRACE").is_some() {
         println!("trigger: {fired} thing message(s) delivered");
+    }
+}
+
+/// Deliver the script-to-script messages `SendMessage` queued: a cog index and a message id.
+///
+/// This is the bus the shipped **level-end chain** rides. A level's `goal*.cog` reports a finished
+/// objective with `SendMessage(GetMasterCOG(), user0)`, and the master cog's `user0` answers by
+/// setting the goal flag, playing `Accomplish1.wav`, sleeping three seconds and calling
+/// `jkEndLevel(1)` (`01_endlevel.cog`). Nothing used to drain this queue in play — only `--run` did —
+/// so in the window that message never left the runtime. `pending_messages` is the other bus: it
+/// carries thing- and sector-linked labels addressed by *instance index*, while this one carries what
+/// one script said to another, addressed by cog index (`sithCogFunction_SendMessage`).
+fn deliver_cog_messages(
+    world: Option<Res<World>>,
+    mut sim: Option<ResMut<Sim>>,
+    mut count: Option<ResMut<TriggerCount>>,
+) {
+    let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
+    let mut fired = 0usize;
+    // A script may answer with another message, so drain until quiet. Bounded, because two scripts
+    // that greet each other forever must not wedge a frame.
+    for _round in 0..8 {
+        let queued = std::mem::take(&mut sim.world.borrow_mut().messages);
+        if queued.is_empty() {
+            break;
+        }
+        for (name, sender, cog) in queued {
+            for (script_name, vm) in &mut sim.instances {
+                if let Some(target) = cog
+                    && vm.cog_index != target
+                {
+                    continue;
+                }
+                let Some(script) = world.cogs.get(script_name) else { continue };
+                // `#N` is a message number: the engine hands the id to the receiver, whose own
+                // `message:` list numbers them.
+                let label = match name.strip_prefix('#').and_then(|n| n.parse::<usize>().ok()) {
+                    Some(ordinal) => match script.messages().nth(ordinal) {
+                        Some(message) => message.name.clone(),
+                        None => continue,
+                    },
+                    None => name.clone(),
+                };
+                if script.label(&label).is_none() {
+                    continue;
+                }
+                vm.sender = sender.map_or(0, |s| s as i64);
+                if vm.run_label(script, &label).is_ok() {
+                    fired += 1;
+                }
+            }
+        }
+    }
+    if let Some(count) = count.as_mut() {
+        count.0 += fired;
+    }
+    if fired > 0 && std::env::var_os("BK_TRIGGER_TRACE").is_some() {
+        println!("trigger: {fired} script message(s) delivered");
     }
 }
 

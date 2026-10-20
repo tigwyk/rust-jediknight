@@ -2616,23 +2616,33 @@ a goal script) does arrive today, and `--run 01narshadda` shows the handler runn
   [01_endlevel.cog user0] sound Accomplish1.wav at 1.00
 ```
 
-It arrives by *coincidence*, and that is the next thing to fix. `sithCogFunction_SendMessage` pops a
-**cog index** and a message **type id** (`SITH_MESSAGE_USER0` = 27, `activate` = 1, `startup` = 3,
-`timer` = 4, `pulse` = 13, `user0`…`user7` = 27…34); this port reads argument 0 as a thing and
-argument 1 as a label, and when the name is numeric it carries `#N` and resolves `N` against the
-*receiving* script's `message:` list. Two scripts that declare the same messages in the same order
-therefore line up, which is why `user0` reaches `user0` here — a script with a different declaration
-order would get the wrong label. The fix is contained: a cog-addressed queue (one producer, one
-consumer) plus the type ids, with the sender's own index carried for `GetSenderID`.
+That message is now addressed rather than broadcast. `sithCogFunction_SendMessage` pops a **cog
+index** and a message **type id** (`SITH_MESSAGE_USER0` = 27, `activate` = 1, `startup` = 3,
+`timer` = 4, `pulse` = 13, `user0`…`user7` = 27…34), resolves the cog and delivers to that one
+instance. The port queues `(label, sending cog, target cog)`: the target is the cog index argument
+(the port still carries the message as `#N` and resolves `N` against the receiving script's
+`message:` list, which is the engine's own per-script numbering), and the sender is the calling VM's
+index, so `GetSenderID()` answers something real in the receiver. A negative or unset target — an
+unset master cog — still broadcasts, which is what the start-of-level scripts have before their
+`endlevel` instance has run.
+
+Delivery had to be added to the live loop as well as to `--run`: `Sim` has two buses, and only the
+first was drained every frame. `pending_messages` carries thing- and sector-linked labels addressed
+by *instance index*; `Runtime::messages` carries what one script said to another, addressed by cog
+index. On level 1 the difference is visible — `--run 01narshadda` went from "1 sent by scripts
+(41 delivered)" to "(1 delivered)": the goal message used to be broadcast to every instance that
+happened to declare a label at the same ordinal.
 
 Two conventions, stated because they are *not* the engine's full behaviour:
 
 - `GetSourceRef` answers 0. Retail stores the source in the thing's `cog=` field, which this
-  level parse does not keep, so every instance is treated as level-wide. Message senders
-  default to 0 as well, so a script comparing `GetSenderRef() == GetSourceRef()` still
-  matches for engine-triggered events.
-- `SendMessage` is not implemented. Scripts that message *another* thing (a door asking its
-  cog to open) still need a message bus in the runtime; that is the next piece of this stage.
+  level parse does not keep, so every instance is treated as level-wide. `GetSenderRef` answers 0
+  too, so a script comparing `GetSenderRef() == GetSourceRef()` still matches for engine-triggered
+  events; `GetSenderID` does answer the calling cog now.
+- A message's *number* is still resolved against the receiving script's `message:` list rather than
+  mapped to `SITH_MESSAGE_*` ids, so a sender and a receiver that declare their messages in different
+  orders can still disagree. The enum values are recorded above; wiring `user0`…`user7` in as parser
+  constants is what removes the remaining ambiguity.
 
 ## 16.5 Firing a weapon — **observed**, first slice
 

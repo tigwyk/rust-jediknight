@@ -142,16 +142,16 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    (`SetMasterCOG(GetSelfCOG())`). Still open: `getgoalframe` (24), which needs things that are path
    movers, and `loadtemplate` (1). (Also done earlier: `getleveltime`, `gethealth`, `isthingvisible`,
    `get/setthingmass`, `setthinguserdata`, `setthingtimer`.)
-   **Next in this area — the level-end chain.** `SetMasterCOG`/`GetSelfCOG` are only half of it, and
-   the other half *works by accident*: a level's `goal*.cog` scripts report a completed objective with
-   `SendMessage(GetMasterCOG(), user0)`, and this port broadcasts that message as `#N` where `N` is
-   resolved against the *receiving* script's `message:` list. Two scripts that declare the same
-   messages in the same order line up, which is why `--run 01narshadda` reaches `01_endlevel.cog`'s
-   `user0` (goal completed, `Sleep(3.0)`, `jkEndLevel(1)`) — but a script with a different declaration
-   order would get the wrong label. The engine pops a **cog index** and a message **type id**
-   (`SITH_MESSAGE_USER0` = 27, `activate` = 1, `startup` = 3; `user0`…`user7` = 27…34), so the fix is a
-   cog-addressed queue (one producer, one consumer) plus those ids. That is the shortest path to
-   "a level can be finished on purpose rather than by luck".
+   **Level-end chain: closed.** A level's `goal*.cog` reports a finished objective with
+   `SendMessage(GetMasterCOG(), user0)`, and `SendMessage` now takes the engine's two arguments — a
+   **cog index** and a message number (`sithCogFunction_SendMessage`) — carrying the calling cog as
+   the sender so `GetSenderID()` answers in the receiver. The queue is drained in play as well as in
+   `--run`; before this, `Runtime::messages` (script→script, addressed by cog) was only pumped by
+   `--run`, while the live loop drained `pending_messages` (thing/sector, addressed by instance).
+   Level 1 now delivers the goal message to exactly one cog instead of broadcasting it to 41, and
+   `[01_endlevel.cog user0]` runs — goal flag, `Accomplish1.wav`, `Sleep(3.0)`, `jkEndLevel(1)`.
+   Remaining: message *numbers* are still resolved against the receiving script's `message:` list
+   rather than mapped to `SITH_MESSAGE_*` ids, so mismatched declaration orders can disagree.
 2. **Timer queue for `sleep`/`settimer`/`setpulse`** (section 4). It is the one ceiling that changes what
    scripts do, and it sits under every verb that waits.
 3. ~~**Sector and adjoin flags**~~ — **done** (section 6): `setadjoinflags`/`clearadjoinflags`/

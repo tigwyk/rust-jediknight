@@ -347,10 +347,17 @@ pub struct Runtime {
     pub template_respawn: BTreeMap<String, f32>,
     /// Text a script printed (`jkPrintUNIString`), in order: the `.uni` key it names.
     pub prints: Vec<String>,
-    /// Script-to-script messages queued by `SendMessage`: `(name, target thing, sender)`.
-    /// A target of `None` is a broadcast, which is what the level-wide instances in this
-    /// build can actually receive.
-    pub messages: Vec<(String, Option<usize>, Option<usize>)>,
+    /// Script-to-script messages queued by `SendMessage`: `(label, sending cog, target cog)`.
+    /// The engine's arm is `SendMessage(cogIdx, messageType)` — `sithCogFunction_SendMessage` —
+    /// so the target is a **cog index**, not a thing, and the label is either a name or `#N`
+    /// (a message number resolved against the receiving script's `message:` list). A target of
+    /// `None` is what an unset master cog produces; the port then broadcasts rather than dropping
+    /// the message, because that is the only delivery the shipped scripts have today.
+    pub messages: Vec<(String, Option<usize>, Option<i32>)>,
+    /// The cog asking the world a question right now: what `SendMessage` records as the sender, and
+    /// what `GetSenderID` answers in the receiver (`pCog->idx` in the engine's call). The VM sets it
+    /// before each world verb, because only the VM knows which script is running.
+    pub caller_cog: i32,
     pub messages_sent: usize,
     pub sectors: Vec<SectorState>,
     /// Each sector's `SITH_SECTOR_*` word, as the level ships it and as `SetSectorFlags` and
@@ -551,6 +558,7 @@ impl Runtime {
             template_health,
             prints: Vec::new(),
             messages: Vec::new(),
+            caller_cog: -1,
             messages_sent: 0,
             template_vel: level
                 .templates
@@ -2077,13 +2085,14 @@ impl Runtime {
             // Surface flags decide footstep and landing sounds (`SITH_SURFACE_*`); the
             // renderer does not animate them, so this is recorded as answered only.
             "setsurfaceflags" => Value::Nil,
-            // `CaptureThing`: put a thing in the player's inventory instead of the world.
-            // `SendMessage(target, message)`: `target` is a thing index (or 0 for a
-            // broadcast), `message` a name or a message number. The engine addresses a
-            // cog; this queues the message and lets the pump deliver it to the script
-            // instances that declare that label.
+            // `SendMessage(cog, message)`: `sithCogFunction_SendMessage` pops a **cog index** and a
+            // message id, resolves the cog and delivers to that one instance. A script's `cog`
+            // symbol is such an index, which is how `ctf_callback` and `GetMasterCOG()` arrive here.
+            // The id is carried as `#N` and resolved against the receiving script's `message:` list,
+            // as before; a negative cog (an unset master) broadcasts, which is the only delivery the
+            // shipped start-of-level scripts have until every level's endlevel startup has run.
             "sendmessage" => {
-                let target = usize::try_from(idx(0)).ok().filter(|i| self.things.get(*i).is_some());
+                let cog = (idx(0) >= 0).then(|| idx(0) as i32);
                 let name = match args.get(1) {
                     Some(Value::Str(s)) => s.clone(),
                     Some(value) => {
@@ -2094,7 +2103,8 @@ impl Runtime {
                     }
                     None => "message 0".to_string(),
                 };
-                self.messages.push((name, target, Some(0)));
+                let sender = (self.caller_cog >= 0).then_some(self.caller_cog as usize);
+                self.messages.push((name, sender, cog));
                 self.messages_sent += 1;
                 Value::Nil
             }
@@ -2918,6 +2928,7 @@ mod tests {
             template_bins: BTreeMap::new(),
             prints: Vec::new(),
             messages: Vec::new(),
+            caller_cog: -1,
             messages_sent: 0,
             sectors: vec![SectorState { thrust: [0.0; 3], light: 0.0, tint: [0.0; 3], colormap: 0 }],
             sector_flags: vec![0],
@@ -3232,6 +3243,15 @@ mod tests {
         assert_eq!(rt.call("GetMasterCog", &[]), Value::Num(4.0));
         rt.call("SetMasterCog", &[Value::Num(-1.0)]);
         assert_eq!(rt.call("GetMasterCog", &[]), Value::Num(-1.0));
+        // `SendMessage(cog, msg)` addresses a **cog** and carries its own message number, and the
+        // sender it records is the calling cog — which `sithCogFunction_SendMessage` passes on and the
+        // receiver reads back with `GetSenderID`.
+        rt.caller_cog = 5;
+        rt.call("SendMessage", &[Value::Num(3.0), Value::Num(27.0)]);
+        assert_eq!(
+            rt.messages,
+            vec![("#27".to_string(), Some(5), Some(3))]
+        );
     }
 
     /// `sithThing_CreateThing` places a spawned thing at `marker.position + markerOrient * (insertDiff)`.

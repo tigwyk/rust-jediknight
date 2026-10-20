@@ -1248,7 +1248,11 @@ impl Vm {
         }
         if let Some(world) = &self.world {
             if crate::runtime::Runtime::handles(name) {
-                return world.borrow_mut().call(name, &args);
+                let mut world = world.borrow_mut();
+                // Engine verbs can see which cog is calling them (`pCog`): `SendMessage` records that
+                // index as the sender, and the receiver reads it back through `GetSenderID`.
+                world.caller_cog = self.cog_index;
+                return world.call(name, &args);
             }
         }
         match name.to_ascii_lowercase().as_str() {
