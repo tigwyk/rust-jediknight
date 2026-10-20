@@ -6498,6 +6498,8 @@ mod tests {
         rt.select_bin(2);
         assert_eq!(rt.cycle_weapon(1), 3, "next went the wrong way");
         assert_eq!(rt.cur_bin, 3);
+        // The point of switching: what fires next is the new gun's shot.
+        assert_eq!(rt.current_weapon(), "stlaser", "the armed weapon did not change");
         assert_eq!(rt.cycle_weapon(1), 2, "cycling did not wrap");
         assert_eq!(rt.cycle_weapon(-1), 3, "previous did not wrap the other way");
         for _ in 0..4 {
