@@ -6539,6 +6539,21 @@ mod tests {
             queued.contains(&"selected"),
             "the mount animation was never asked for: {queued:?}"
         );
+        // And the trigger works once the cog has armed it: this is what the weapon cog's own
+        // `activated:` does with `ActivateWeapon`, so the trigger path is exercised end to end
+        // without needing the app's message pump.
+        rt.messages.clear();
+        rt.weapon_cog = None;
+        assert!(!rt.try_fire_weapon(rt.player_thing()), "an unarmed trigger fired");
+        rt.call(
+            "ActivateWeapon",
+            &[
+                Value::Num(rt.player_thing() as f64),
+                Value::Num(0.5),
+                Value::Num(0.0),
+            ],
+        );
+        assert!(rt.try_fire_weapon(rt.player_thing()), "the armed trigger refused to fire");
         // The point of switching: what fires next is the new gun's shot.
         assert_eq!(rt.current_weapon(), "stlaser", "the armed weapon did not change");
         assert_eq!(rt.cycle_weapon(1), 2, "cycling did not wrap");
