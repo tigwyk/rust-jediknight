@@ -286,6 +286,9 @@ pub struct Runtime {
     /// Every one of these is named by a shipped script — `cog\force_pull.cog` and
     /// `cog\force_grip.cog` — which is why they exist at all (§16.5).
     pub actor_flags: std::collections::BTreeMap<usize, u32>,
+    /// `AISetMoveSpeed`: a multiplier on the actor's walking speed, clamped 0..2 by the engine
+    /// (`sithCogFunctionAI.c:16`). Absent means 1.
+    pub actor_speed: std::collections::BTreeMap<usize, f32>,
     pub item_flags: std::collections::BTreeMap<usize, u32>,
     pub life_left: std::collections::BTreeMap<usize, f32>,
     /// `Get/SetThingMass` and `Get/SetThingUserData`: plain per-thing values a script stores.
@@ -585,6 +588,7 @@ impl Runtime {
             mana_regen: MANA_REGEN,
             mana_max: MANA_MAX,
             actor_flags: Default::default(),
+            actor_speed: Default::default(),
             item_flags: Default::default(),
             life_left: Default::default(),
             mass: Default::default(),
@@ -897,6 +901,7 @@ impl Runtime {
                 | "getthingflags"
                 | "aisetmode"
                 | "aiclearmode"
+                | "aisetmovespeed"
                 | "setthingflags"
                 | "getthinghealth"
                 | "gethealth"
@@ -1086,7 +1091,10 @@ impl Runtime {
             let dx = target[0] - from[0];
             let dy = target[1] - from[1];
             let reach = (dx * dx + dy * dy).sqrt();
-            let speed = self.template_speed.get(&ai_template).copied().unwrap_or(0.0);
+            // `sithAI.c:814` steps the actor by `maxThrust * dt * moveSpeed`, so a scripted
+            // `AISetMoveSpeed` scales the template's walking speed rather than replacing it.
+            let speed = self.template_speed.get(&ai_template).copied().unwrap_or(0.0)
+                * self.actor_speed.get(&index).copied().unwrap_or(1.0);
             let standoff = self.ai_standoff;
 
             if reach > standoff && speed > 0.0 {
@@ -2201,6 +2209,12 @@ impl Runtime {
                 Value::Nil
             }
             "getactorflags" => Value::Num(self.actor_flags.get(&ti(0)).copied().unwrap_or(0) as f64),
+            // `sithCogFunctionAI_AISetMoveSpeed` clamps to 0..2 and stores it on the actor; the AI
+            // step multiplies by it. The clamp is the engine's, so it is applied on the way in.
+            "aisetmovespeed" => {
+                self.actor_speed.insert(ti(0), (num(1) as f32).clamp(0.0, 2.0));
+                Value::Nil
+            }
             "getthingsignature" => Value::Num(
                 self.signature.get(ti(0)).copied().unwrap_or(0) as f64,
             ),
@@ -2807,6 +2821,7 @@ mod tests {
             mana_regen: MANA_REGEN,
             mana_max: MANA_MAX,
             actor_flags: Default::default(),
+            actor_speed: Default::default(),
             item_flags: Default::default(),
             life_left: Default::default(),
             mass: Default::default(),
@@ -3043,6 +3058,9 @@ mod tests {
             rt.call("SetSectorAdjoins", &[Value::Num(0.0), Value::Num(1.0)]),
             Value::Nil
         );
+        // `AISetMoveSpeed` stores a speed multiplier for the AI step, clamped to the engine's 0..2.
+        rt.call("AISetMoveSpeed", &[Value::Num(0.0), Value::Num(5.0)]);
+        assert_eq!(rt.actor_speed.get(&0).copied(), Some(2.0));
     }
 
     /// `sithThing_CreateThing` places a spawned thing at `marker.position + markerOrient * (insertDiff)`.
