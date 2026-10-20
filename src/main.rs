@@ -3070,6 +3070,53 @@ fn main() {
         let solids = collide::build(&world.level);
         let steps = (seconds / dt).max(1.0) as usize;
         let mut messages = 0usize;
+        // Link the scripts the way `setup` does, or no sector can deliver an `entered` and the whole
+        // run is a walk through an empty room: a cog `sector` symbol with a value is what
+        // `sithCog_LinkCog` turns into a link, and `Runtime::handle` does not build them.
+        {
+            let mut links: Vec<(usize, i32, usize)> = Vec::new();
+            for (index, inst) in world.level.cogs.iter().enumerate() {
+                let Some(script) = world.cogs.get(&inst.script) else { continue };
+                let mut next = inst.values.iter();
+                for symbol in &script.symbols {
+                    if symbol.local || symbol.kind == cog::SymKind::Message {
+                        continue;
+                    }
+                    let Some(raw) = next.next() else { break };
+                    if symbol.kind != cog::SymKind::Sector {
+                        continue;
+                    }
+                    if let Ok(sector) = raw.trim().parse::<usize>() {
+                        links.push((index, symbol.linkid.unwrap_or(0) as i32, sector));
+                    }
+                }
+            }
+            sim_world.borrow_mut().sector_links = links;
+        }
+        // Steer for the nearest sector a script is watching. A straight walk from the start point
+        // reaches none of level 1's triggers, so the soak proved nothing but stability. This is the
+        // AI's idea of routing without a router: head for the room's centre, and when a step is
+        // blocked try a fan of headings before giving up on that frame.
+        let target = {
+            let rt = sim_world.borrow();
+            let start = rt.things.get(player).map(|t| t.pos).unwrap_or([0.0; 3]);
+            rt.sector_links
+                .iter()
+                .filter_map(|(_, _, sector)| world.level.sectors.get(*sector).map(|s| s.center))
+                .min_by(|a, b| {
+                    let d = |c: &[f32; 3]| (c[0] - start[0]).powi(2) + (c[1] - start[1]).powi(2);
+                    d(a).total_cmp(&d(b))
+                })
+        };
+        if std::env::var_os("BK_SOAK_TRACE").is_some() {
+            let rt = sim_world.borrow();
+            println!(
+                "soak: {} sector link(s), target {target:?}, player at {:?} in sector {}",
+                rt.sector_links.len(),
+                rt.things[player].pos,
+                rt.things[player].sector
+            );
+        }
         for _ in 0..steps {
             // Walk the player forward and let the sector links fire: a soak where nothing is ever
             // triggered is a simulation of an empty room. `pending_messages` (a `damaged`, a `killed`)
@@ -3078,13 +3125,43 @@ fn main() {
                 let mut rt = sim_world.borrow_mut();
                 let before = rt.things.get(player).and_then(|t| usize::try_from(t.sector).ok());
                 if let Some(thing) = rt.things.get_mut(player) {
-                    let (sin, cos) = thing.yaw.to_radians().sin_cos();
-                    thing.pos[0] += cos * 0.02;
-                    thing.pos[1] += sin * 0.02;
+                    // Toward the watched sector's centre, with collision: a blocked heading tries the
+                    // same step fanned left and right before the frame gives up, which rounds a
+                    // corner in a doorway-width corridor.
+                    if let Some(goal) = target {
+                        let dx = goal[0] - thing.pos[0];
+                        let dy = goal[1] - thing.pos[1];
+                        let base = dy.atan2(dx);
+                        for turn in [0.0f32, 0.5, -0.5, 1.0, -1.0] {
+                            let heading = base + turn;
+                            let candidate = [
+                                thing.pos[0] + heading.cos() * 0.03,
+                                thing.pos[1] + heading.sin() * 0.03,
+                                thing.pos[2],
+                            ];
+                            if solids.sector_at(candidate, 0.05).is_some() {
+                                thing.pos = candidate;
+                                thing.yaw = (heading.to_degrees() + 360.0) % 360.0;
+                                break;
+                            }
+                        }
+                    } else {
+                        let (sin, cos) = thing.yaw.to_radians().sin_cos();
+                        thing.pos[0] += cos * 0.02;
+                        thing.pos[1] += sin * 0.02;
+                    }
                 }
                 let here = rt.things.get(player).map(|t| t.pos);
                 let after = here.and_then(|pos| solids.sector_at(pos, 0.05)).map(|s| s as usize);
                 if let Some(sector) = after {
+                    if before != Some(sector) && std::env::var_os("BK_SOAK_TRACE").is_some() {
+                        println!(
+                            "soak: sector {} -> {sector} at {:?}, {} link message(s)",
+                            before.map_or(-1, |s| s as i32),
+                            rt.things[player].pos,
+                            rt.sector_messages(before, after).len()
+                        );
+                    }
                     rt.things[player].sector = sector as i32;
                 }
                 let mut queued: Vec<(String, Option<usize>, Option<i32>, [f64; 2])> = rt
@@ -3157,10 +3234,11 @@ fn main() {
         }
         let grew = rt.things.len().saturating_sub(world.level.things.len());
         println!(
-            "soak: {:.0} s of level time ({} steps) with {} script(s): {messages} message(s) delivered, {} thing(s) spawned, {bad_position} non-finite position(s), {outside} body(ies) outside every sector, clock {:.1}",
+            "soak: {:.0} s of level time ({} steps) with {} script(s) and {} sector link(s): {messages} message(s) delivered, {} thing(s) spawned, {bad_position} non-finite position(s), {outside} body(ies) outside every sector, clock {:.1}",
             seconds,
             steps,
             vms.len(),
+            rt.sector_links.len(),
             grew,
             rt.time
         );
