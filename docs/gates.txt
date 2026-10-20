@@ -191,7 +191,10 @@ flag                                                   exit  what it prints
                                                              `AISetClass` moves sightdist 5.0 -> 7.0;
                                                              the route search crosses sectors 0
                                                              -> 2, walled off but 1 doorway
-                                                             apart, and starts at [5, 8, 6]
+                                                             apart, and a follower told to walk
+                                                             to a thing across that wall takes
+                                                             the same route through doorway
+                                                             [5, 8, 6]
 --endlevel                                               0  the level's own trigger: `01_goal0.cog`
                                                              waits on `sighted` from thing 204 (8t88),
                                                              the draw sends it, the goal messages master

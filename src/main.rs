@@ -3012,10 +3012,57 @@ fn main() {
                     route.first().map(|p| [p[0].round(), p[1].round(), p[2].round()])
                 );
                 assert!(!route.is_empty());
-                // The chain has to start at the first doorway out of `a`, so it must be a real room.
-                assert!(rt.solids.as_ref().is_some_and(|s| s.spheres.get(a).is_some()));
                 // A sector with no way through answers None rather than an empty route.
                 assert!(rt.solids.as_ref().and_then(|s| s.route(a, a, rt.gates())).is_some());
+                // And the *tick* takes it: a follower told to walk to a thing it cannot see is the
+                // shipped case this exists for (`AISetMoveThing` for a sidekick who fell behind).
+                let (a_pos, b_pos) = {
+                    let solids = rt.solids.as_deref().expect("solids");
+                    (solids.spheres[a].0, solids.spheres[b].0)
+                };
+                let saved = (
+                    rt.things[actor].pos,
+                    rt.things[actor].sector,
+                    rt.things[player].pos,
+                    rt.things[player].sector,
+                );
+                rt.things[actor].pos = a_pos;
+                rt.things[actor].sector = a as i32;
+                rt.things[actor].vel = [0.0; 3];
+                rt.things[player].pos = b_pos;
+                rt.things[player].sector = b as i32;
+                rt.ai_route.remove(&actor);
+                rt.call(
+                    "AISetMoveThing",
+                    &[cog::Value::Num(actor as f64), cog::Value::Num(player as f64)],
+                );
+                rt.ai_tick(player, 1.0 / 30.0);
+                let taken = rt.ai_route.get(&actor).cloned().unwrap_or_default();
+                let first = taken.first().copied();
+                println!(
+                    "ai: the same follower, told to walk to a thing across the wall, takes a route of {} waypoint(s) (first {:?})",
+                    taken.len(),
+                    first.map(|p| [p[0].round(), p[1].round(), p[2].round()])
+                );
+                assert!(!taken.is_empty(), "the blocked follower kept no route");
+                // The tick may pick a different (equally short) doorway than the gate's search did,
+                // because a point can sit in two hulls; what must hold is that it turned toward the
+                // doorway it kept.
+                if let Some(centre) = first {
+                    let want_yaw = (centre[1] - a_pos[1]).atan2(centre[0] - a_pos[0]).to_degrees();
+                    let yaw = rt.things[actor].yaw;
+                    assert!(
+                        (yaw - want_yaw).abs() < 5.0,
+                        "the follower did not turn toward its first doorway ({yaw:.0} vs {want_yaw:.0})"
+                    );
+                }
+                rt.ai_chase.remove(&actor);
+                rt.ai_move.remove(&actor);
+                rt.ai_route.remove(&actor);
+                rt.things[actor].pos = saved.0;
+                rt.things[actor].sector = saved.1;
+                rt.things[player].pos = saved.2;
+                rt.things[player].sector = saved.3;
             } else {
                 println!("ai: this level has no walled-off pair of rooms to route between");
             }

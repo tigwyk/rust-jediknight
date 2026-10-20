@@ -582,6 +582,10 @@ pub struct Runtime {
     pub ai_move: BTreeMap<usize, [f32; 3]>,
     pub ai_chase: BTreeMap<usize, usize>,
     pub ai_look: BTreeMap<usize, [f32; 3]>,
+    /// Per actor, the doorway centres it is walking through when its straight line is walled off,
+    /// from `Collision::route`. A waypoint is popped on arrival, and a scripted destination starts
+    /// again with an empty route.
+    pub ai_route: BTreeMap<usize, Vec<[f32; 3]>>,
     /// `AISetFireTarget(actor, thing)`: what an actor shoots at, when a script names one instead of
     /// leaving it to its instincts (`00_AITurnCoat.cog` turns an actor on a victim, `06_drama.cog`
     /// stages a shooting). Absent means "the player", which is what `ai_tick` does by default.
@@ -1000,6 +1004,7 @@ impl Runtime {
             ai_move: BTreeMap::new(),
             ai_chase: BTreeMap::new(),
             ai_look: BTreeMap::new(),
+            ai_route: BTreeMap::new(),
             ai_fire_target: BTreeMap::new(),
             ai_flee: BTreeMap::new(),
             ai_classes: BTreeMap::new(),
@@ -1857,7 +1862,11 @@ impl Runtime {
             let look_yaw = look.map(|l| (l[1] - from[1]).atan2(l[0] - from[0]).to_degrees());
             // No instinct class means no sight and no instincts: a class-less actor still walks a
             // destination a script gave it, but it never spots the player on its own.
-            let sighted = ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target));
+            // Sight needs a **clear line**. `Ai::sees` is distance and cone only, so without
+            // this an actor sees — and shoots — straight through walls. The engine casts its own
+            // sight ray (`sithAI.c`); one segment test is the same rule here.
+            let sighted = ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target))
+                && self.solids.as_ref().is_none_or(|s| !s.segment_blocked(from, target));
             // `AISetFireTarget`: what this actor shoots at, when a script names it. That replaces the
             // player as the thing it has in sight — `00_AITurnCoat.cog` turns an actor on a victim —
             // so it is computed here, before the out-of-sight early return below.
@@ -1915,11 +1924,12 @@ impl Runtime {
             }
             // `AISetFireTarget`: what this actor shoots at, when a script names it. Sight is still
             // needed, but of *that* thing — `00_AITurnCoat.cog` turns an actor on a victim it can see.
-            // `AISetFireTarget`: what this actor shoots at, when a script names it. Sight is still
-            // needed, but of *that* thing — `00_AITurnCoat.cog` turns an actor on a victim it can see.
-            // Where the legs go: the scripted destination, else the player. In the open this is a
-            // straight line — the `.ai` has no pathfinder here, marked as such in §16.12.
-            let goal = scripted.unwrap_or(target);
+            let want = scripted.unwrap_or(target);
+            // A route in hand wins over the destination: each waypoint is a doorway centre the search
+            // found, and reaching one pops it. When the route is empty the destination is the goal
+            // again, which is what makes the last leg (doorway -> target) a straight walk.
+            let route_goal = self.ai_route.get(&index).and_then(|r| r.first().copied());
+            let goal = route_goal.unwrap_or(want);
             let dx = goal[0] - from[0];
             let dy = goal[1] - from[1];
             let reach = (dx * dx + dy * dy).sqrt();
@@ -1927,8 +1937,30 @@ impl Runtime {
             // `AISetMoveSpeed` scales the template's walking speed rather than replacing it.
             let speed = self.template_speed.get(&ai_template).copied().unwrap_or(0.0)
                 * self.actor_speed.get(&index).copied().unwrap_or(1.0);
-            // A scripted destination is walked all the way onto; the chase stops at its standoff.
-            let standoff = if scripted.is_some() { 0.0 } else { self.ai_standoff };
+            // A scripted destination is walked all the way onto; the chase stops at its standoff, and
+            // so does each doorway on a route.
+            let standoff = if scripted.is_some() || route_goal.is_some() {
+                0.0
+            } else {
+                self.ai_standoff
+            };
+
+            // The line to the *destination* is what decides whether a route is needed: testing the
+            // next step instead was a bug, because a step is a centimetre and an actor in the middle
+            // of a room never saw the wall it was about to press into.
+            let blocked = route_goal.is_none()
+                && self.solids.as_ref().is_some_and(|s| s.segment_blocked(from, want));
+            if blocked
+                && let Some(route) = self.sector_route(index, from, want)
+                && !route.is_empty()
+            {
+                self.ai_route.insert(index, route);
+            }
+            let route_goal = self.ai_route.get(&index).and_then(|r| r.first().copied());
+            let goal = route_goal.unwrap_or(want);
+            let dx = goal[0] - from[0];
+            let dy = goal[1] - from[1];
+            let reach = (dx * dx + dy * dy).sqrt();
 
             if reach > standoff && speed > 0.0 {
                 let step = (speed * dt).min(reach - standoff);
@@ -1937,23 +1969,8 @@ impl Runtime {
                     from[1] + dy / reach * step,
                     from[2],
                 ];
-                // A straight line is only walkable in the open. When it is walled off, head for the
-                // portal that best shortcuts the way instead — the actor goes through the doorway
-                // rather than pressing into the wall (§16.12).
-                let mut next = next;
-                let mut heading = (dx, dy);
                 let mut via_portal = false;
-                if let Some(solids) = &self.solids
-                    && solids.segment_blocked(from, next)
-                    && let Some(centre) = self.best_portal(from, goal)
-                {
-                    let (px, py) = (centre[0] - from[0], centre[1] - from[1]);
-                    let plen = (px * px + py * py).sqrt().max(0.001);
-                    let step = (speed * dt).min(plen);
-                    next = [from[0] + px / plen * step, from[1] + py / plen * step, from[2]];
-                    heading = (px, py);
-                    via_portal = true;
-                }
+                let heading = (dx, dy);
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.pos = next;
                     thing.ai_target = Some(goal);
@@ -2458,6 +2475,37 @@ impl Runtime {
     /// does not look past it. An actor in a room with two doors may pick the wrong one; the engine's
     /// `sithAI` runs a real path over sector adjoins. This is the "walks through the door instead of
     /// into the wall" step, which is what the level geometry actually needs.
+    /// The doorway centres from `from`'s room to the room `want` stands in, for an actor whose straight
+    /// line is walled off. The sector of a point comes from the collision build's own hull tests,
+    /// which is the same answer a body standing there gets.
+    fn sector_route(&self, index: usize, from: [f32; 3], want: [f32; 3]) -> Option<Vec<[f32; 3]>> {
+        let solids = self.solids.as_deref()?;
+        // A point can sit in more than one hull (doorway space belongs to both rooms), so every
+        // candidate is tried rather than trusting the first.
+        let mut starts: Vec<usize> = Vec::new();
+        if let Some(claimed) = self
+            .things
+            .get(index)
+            .map(|t| t.sector)
+            .and_then(|s| usize::try_from(s).ok())
+            .filter(|s| *s < solids.spheres.len())
+        {
+            starts.push(claimed);
+        }
+        starts.extend(solids.sectors_around(from));
+        let goals = solids.sectors_around(want);
+        for start in starts {
+            for goal in &goals {
+                if let Some(route) = solids.route(start, *goal, self.gates())
+                    && !route.is_empty()
+                {
+                    return Some(route);
+                }
+            }
+        }
+        None
+    }
+
     pub fn best_portal(&self, from: [f32; 3], target: [f32; 3]) -> Option<[f32; 3]> {
         let mut best: Option<([f32; 3], f32)> = None;
         for (_, _, centre) in &self.portals {
@@ -4612,6 +4660,7 @@ mod tests {
             ai_move: BTreeMap::new(),
             ai_chase: BTreeMap::new(),
             ai_look: BTreeMap::new(),
+            ai_route: BTreeMap::new(),
             ai_fire_target: BTreeMap::new(),
             ai_flee: BTreeMap::new(),
             ai_classes: BTreeMap::new(),
