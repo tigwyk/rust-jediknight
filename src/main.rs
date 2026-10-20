@@ -15380,7 +15380,10 @@ fn live_play_drive(
     buttons.release(MouseButton::Left);
     let (start, walked) = (state.start, state.walked);
     let moved = match (start, walked) {
-        (Some(a), Some(b)) => ((b - a).length(), a, b),
+        // Horizontal only: the settle pass lifts a body onto its floor, and a check that counted that
+        // as walking would pass a body that cannot take a single step (02narshadda reported 0.10 of
+        // pure vertical drift).
+        (Some(a), Some(b)) => (((b - a).truncate().length()), a, b),
         _ => (0.0, Vec3::ZERO, Vec3::ZERO),
     };
     let fired = sim
@@ -18879,6 +18882,13 @@ fn walk_player(
     // below its own sector's floor plane can never take a step — every horizontal sweep reports a
     // collision in all four directions — and three levels place the player that way (02narshadda has
     // feet at 2.905 with its floor at 3.0). One clamp here fixes the walk for all of them.
+    // Sector first, then floor: the floor has to come from the room the body is standing in, not from
+    // whatever sector the level named.
+    if let Some(sector) =
+        solids.0.sector_for_body([player.pos.x, player.pos.y, player.pos.z - player.rules.radius])
+    {
+        player.sector = sector;
+    }
     if let Some((floor, _)) = solids.0.floor_surface(
         player.sector,
         [player.pos.x, player.pos.y, player.pos.z + player.rules.radius],
@@ -18890,6 +18900,15 @@ fn walk_player(
         player.pos.z = floor + player.rules.radius + 0.01;
         player.vy = 0.0;
         player.grounded = true;
+    }
+    // The sector the thing was placed in can be one whose hull the body is *outside*: 04escapehouse
+    // and 09fuelstation both place the player behind a wall plane of their own sector, so the
+    // containment test undid every step and the body never moved. `sector_for_body` picks the room
+    // with the most clearance around the feet, which is the room the body is actually standing in.
+    if let Some(sector) =
+        solids.0.sector_for_body([player.pos.x, player.pos.y, player.pos.z - player.rules.radius])
+    {
+        player.sector = sector;
     }
 
     let mut pos = [player.pos.x, player.pos.y, player.pos.z];
