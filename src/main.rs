@@ -15331,7 +15331,10 @@ fn live_play_drive(
     // Short phases: the sweep gives every gate 600 frames, and a big level can spend a few hundred of
     // them loading before the body exists. 45 walk + 15 fire still measures ~2 units of walking.
     const WALK_FRAMES: u32 = 45;
-    const FIRE_FRAMES: u32 = 15;
+    // 30, not 15: `fire_player` acts on `just_pressed`, so a held trigger fires at most once and the
+    // first click can still land inside a scripted `SetFireWait` cooldown. Fifteen frames was too
+    // short for the shot to land at all (01narshadda reported 0 with the shorter phase).
+    const FIRE_FRAMES: u32 = 30;
     let state = playing.get_or_insert_with(|| LivePlayState {
         start: player.as_deref().map(|p| p.pos),
         ..Default::default()
@@ -15378,13 +15381,7 @@ fn live_play_drive(
             // Live things, not the vector length: a slot freed earlier in the same frame is reused, so
             // the length can stay the same while a bolt is very much in flight (09fuelstation fired
             // `+econcbullet` and the count did not move).
-            state.things_before = sim
-                .world
-                .borrow()
-                .things
-                .iter()
-                .filter(|t| !t.destroyed)
-                .count();
+            state.things_before = sim.world.borrow().shots_fired;
         }
     }
     if (WALK_FRAMES + 1..=WALK_FRAMES + FIRE_FRAMES).contains(&state.frame) {
@@ -15406,7 +15403,12 @@ fn live_play_drive(
         (Some(a), Some(b)) => (((b - a).truncate().length()), a, b),
         _ => (0.0, Vec3::ZERO, Vec3::ZERO),
     };
-    let fired = state.things_peak.saturating_sub(state.things_before);
+    // A counter inside the runtime, not a sample of live things: a bolt can be born and destroyed
+    // between two frames at 10 fps, which made the sampled version flaky in both directions.
+    let fired = sim
+        .as_deref()
+        .map(|sim| sim.world.borrow().shots_fired.saturating_sub(state.things_before))
+        .unwrap_or(0);
     println!(
         "live-play: W for {WALK_FRAMES} frames moved the body {:.2} units ({:?} -> {:?})",
         moved.0, moved.1, moved.2

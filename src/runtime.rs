@@ -626,6 +626,9 @@ pub struct Runtime {
     pub template_move: BTreeMap<String, String>,
     /// World gravity, from the level's own `World Gravity` line: what pulls a physics thing down.
     pub gravity: f32,
+    /// Every shot the runtime spawned, so a check can ask "did the trigger work" without sampling
+    /// live things: a bolt can be born and destroyed between two frames at 10 fps.
+    pub shots_fired: usize,
     /// A template's `health=`/`maxhealth=`, so a created thing starts with real health.
     pub template_health: BTreeMap<String, f32>,
     /// A template's `vel=` — a projectile's launch speed — and its `damage=`.
@@ -1176,6 +1179,7 @@ impl Runtime {
                 })
                 .collect(),
             gravity: level.gravity,
+            shots_fired: 0,
             prints: Vec::new(),
             hud_message: None,
             string_buffer: String::new(),
@@ -6069,6 +6073,7 @@ mod tests {
             template_health: BTreeMap::from([("walkplayer".to_string(), 100.0)]),
             template_move: BTreeMap::new(),
             gravity: 4.0,
+            shots_fired: 0,
             template_vel: BTreeMap::new(),
             template_damage: BTreeMap::new(),
             template_inv: BTreeMap::new(),
