@@ -501,8 +501,14 @@ fn main() {
             }
             "--hud" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    hud_out = Some(v.clone());
+                // A following flag is not a filename: `--hud --level 01` used to write a PNG named
+                // `--level`, the same trap `--save` had.
+                match args.get(i) {
+                    Some(v) if !v.starts_with("--") => hud_out = Some(v.clone()),
+                    _ => {
+                        i -= 1;
+                        hud_out = Some("hud.png".to_string());
+                    }
                 }
             }
             "--sft" => {
@@ -8183,6 +8189,7 @@ fn main() {
                     load_item_cogs,
                     saber_blade,
                     draw_viewmodel,
+                    scene_wash,
                     billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
@@ -8820,6 +8827,15 @@ fn setup_overlay(
     // Keep the canvas' own 4:3 proportions: the HUD and the menus are authored for a
     // 640x480 screen, so stretching them to a widescreen window would shear the art.
     let quad = meshes.add(Rectangle::new(height * (overlay.canvas.width as f32 / overlay.canvas.height as f32), height));
+    // The screen-effect wash's own quad and material, transparent until an effect asks for it.
+    let tint_quad = meshes.add(Rectangle::new(height * (overlay.canvas.width as f32 / overlay.canvas.height as f32), height));
+    let tint_material = materials.add(StandardMaterial {
+        base_color: bevy::color::Color::NONE,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        ..default()
+    });
     let material = materials.add(StandardMaterial {
         base_color_texture: Some(overlay.image.clone()),
         unlit: true,
@@ -8836,7 +8852,28 @@ fn setup_overlay(
             RenderLayers::layer(1),
         ));
         // A camera that sees only layer 1: the world camera keeps layer 0, so the UI is
-        // never depth-tested against the scene and never clipped by it.
+        // never depth-tested against the scene and never clipped by it. Order 2, so the screen
+        // effects below draw under the HUD rather than over it.
+        parent.spawn((
+            Camera3d::default(),
+            Camera {
+                order: 2,
+                clear_color: ClearColorConfig::None,
+                ..default()
+            },
+            RenderLayers::layer(1),
+            OverlayQuad,
+        ));
+        // The screen-effect wash: its own layer and a camera between the world and the UI, so
+        // `NewColorEffect` tints the scene — force seeing's blue, infrared's red, a damage flash —
+        // and the HUD stays drawn on top of it in its own colours.
+        parent.spawn((
+            Mesh3d(tint_quad),
+            MeshMaterial3d(tint_material),
+            Transform::from_xyz(0.0, 0.0, -distance),
+            ScreenTintQuad,
+            RenderLayers::layer(2),
+        ));
         parent.spawn((
             Camera3d::default(),
             Camera {
@@ -8844,10 +8881,68 @@ fn setup_overlay(
                 clear_color: ClearColorConfig::None,
                 ..default()
             },
-            RenderLayers::layer(1),
-            OverlayQuad,
+            RenderLayers::layer(2),
+            ScreenTintCamera,
         ));
     });
+}
+
+/// The entity carrying the screen-effect wash, and its material handle.
+#[derive(Component)]
+struct ScreenTintQuad;
+
+/// The camera that draws the screen-effect wash on its own layer.
+#[derive(Component)]
+struct ScreenTintCamera;
+
+/// What the scene wash should be: a colour and an alpha, from the same effect the canvas applies.
+///
+/// The canvas filters a 32-bit buffer per channel; a blended quad cannot dim a channel, so a filter
+/// that turns one **off** is drawn as that channel's absence — a blue-only filter is a blue wash with
+/// no red or green in it — which is the same impression at a glance and is what the 2D path produces
+/// too. `add` biases the colour up, as it does in the buffer.
+fn scene_tint(
+    filter: [bool; 3],
+    tint: [f32; 3],
+    add: [f32; 3],
+    alpha: f32,
+) -> (bevy::color::LinearRgba, f32) {
+    let tinted = tint != [0.0; 3];
+    let mut rgb = [0.0f32; 3];
+    for k in 0..3 {
+        // An off channel contributes no light; a tinted one scales the white wash.
+        let lit = if filter[k] { 1.0 } else { 0.0 };
+        let scaled = if tinted { lit * tint[k] } else { lit };
+        rgb[k] = (scaled + add[k] / 255.0).clamp(0.0, 1.0);
+    }
+    (
+        bevy::color::LinearRgba::new(rgb[0], rgb[1], rgb[2], 1.0),
+        alpha.clamp(0.0, 1.0),
+    )
+}
+
+/// Drive the scene wash from `NewColorEffect`: force seeing's blue, infrared's red, a flash.
+///
+/// The same effect the canvas applies, on a quad drawn between the world and the HUD — the canvas
+/// path can only tint what it draws, which is the overlay itself.
+fn scene_wash(
+    sim: Option<Res<Sim>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    quads: Query<&MeshMaterial3d<StandardMaterial>, With<ScreenTintQuad>>,
+) {
+    let Some(sim) = sim else { return };
+    let effect = sim.world.borrow().screen_effect();
+    let (colour, alpha) = match effect {
+        Some((filter, tint, add, alpha)) => scene_tint(filter, tint, add, alpha),
+        None => (bevy::color::LinearRgba::NONE, 0.0),
+    };
+    for handle in &quads {
+        let Some(mut material) = materials.get_mut(&handle.0) else { continue };
+        material.base_color = colour.into();
+        material.alpha_mode = AlphaMode::Blend;
+        // `base_color` carries the alpha for a blended unlit quad.
+        material.base_color.set_alpha(alpha);
+    }
 }
 
 /// Redraw the canvas when something changed and upload it.
@@ -17350,6 +17445,27 @@ fn template_counts(level: &jkl::Level) -> Vec<(String, usize)> {
     let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     ranked
+}
+
+#[cfg(test)]
+mod scene_tint_tests {
+    use super::scene_tint;
+
+    /// The wash a force-sight or infrared effect asks for, against the canvas rules: an off channel
+    /// adds no light, a tint scales what is left, `add` biases, alpha passes through.
+    #[test]
+    fn a_filter_removes_its_channel_and_a_tint_colours_the_rest() {
+        // Force seeing: red and green off, blue kept — a blue wash.
+        let (colour, alpha) = scene_tint([false, false, true], [0.0; 3], [0.0; 3], 0.5);
+        assert_eq!((colour.red, colour.green, colour.blue), (0.0, 0.0, 1.0));
+        assert_eq!(alpha, 0.5);
+        // No effect at all is a white wash at whatever alpha the caller asked for.
+        let (colour, _) = scene_tint([true; 3], [0.0; 3], [0.0; 3], 1.0);
+        assert_eq!((colour.red, colour.green, colour.blue), (1.0, 1.0, 1.0));
+        // A tint scales the kept channels, and `add` biases up without overflowing.
+        let (colour, _) = scene_tint([true, true, true], [1.0, 0.5, 0.0], [0.0, 0.0, 255.0], 1.0);
+        assert_eq!((colour.red, colour.green, colour.blue), (1.0, 0.5, 1.0));
+    }
 }
 
 #[cfg(test)]
