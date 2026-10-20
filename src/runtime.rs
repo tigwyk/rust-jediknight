@@ -4501,6 +4501,7 @@ mod tests {
             material_anims: Vec::new(),
             material_cel: BTreeMap::new(),
             thing_geomode: BTreeMap::new(),
+            geomode_epoch: 0,
             sound_volume: Vec::new(),
             sound_pitch: Vec::new(),
             sound_fade: BTreeMap::new(),
