@@ -949,6 +949,8 @@ impl Runtime {
                 | "aisetmovepos"
                 | "aisetmovething"
                 | "aisetlookpos"
+                | "aisetmoveframe"
+                | "aisetlookframe"
                 | "getmastercog"
                 | "setmastercog"
                 | "setfirewait"
@@ -1114,12 +1116,19 @@ impl Runtime {
         self.walked.clear();
         self.via_portal.clear();
         let mut shots: Vec<(usize, String)> = Vec::new();
-        let actors: Vec<(usize, crate::ai::Ai)> =
-            self.ai.iter().map(|(i, ai)| (*i, ai.clone())).collect();
-        for (index, ai) in &actors {
-            let ai = ai;
-            let ai_template = self.templates.get(*index).cloned().unwrap_or_default();
-            let index = *index;
+        // Every actor with an instinct class, **plus** any actor a script gave a destination to.
+        // `AISetMovePos`/`AISetMoveFrame` are gated on `controlType == SITH_CT_AI` in the engine, which
+        // an actor has whether or not its template names an `aiclass=` — level 1's 8t88 has no class but
+        // its goal script walks him to frame 1.
+        let mut actors: Vec<usize> = self.ai.keys().copied().collect();
+        for index in self.ai_move.keys().chain(self.ai_chase.keys()) {
+            if !actors.contains(index) {
+                actors.push(*index);
+            }
+        }
+        for index in actors {
+            let ai = self.ai.get(&index).cloned();
+            let ai_template = self.templates.get(index).cloned().unwrap_or_default();
             let Some(thing) = self.things.get_mut(index) else { continue };
             if thing.destroyed || self.types.get(index).copied() != Some(2) {
                 continue;
@@ -1144,7 +1153,9 @@ impl Runtime {
             // `AISetLookPos` is a standing turn: it decides facing whenever the legs are not carrying
             // the actor somewhere, which is how `00_AIPatrol.cog` reverses at the end of each leg.
             let look_yaw = look.map(|l| (l[1] - from[1]).atan2(l[0] - from[0]).to_degrees());
-            let sighted = ai.sees(from, yaw, target);
+            // No instinct class means no sight and no instincts: a class-less actor still walks a
+            // destination a script gave it, but it never spots the player on its own.
+            let sighted = ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target));
             if scripted.is_none() && !sighted {
                 // Out of sight: the actor stands where it is, turning to a scripted look target.
                 if let Some(thing) = self.things.get_mut(index) {
@@ -1219,7 +1230,7 @@ impl Runtime {
             // The instinct that fires. An actor whose class has no `PrimaryFire` never
             // shoots, however close the player is, and a scripted walk does not shoot at what it
             // cannot see.
-            if !sighted || !ready || ai.instinct("PrimaryFire").is_none() {
+            if !sighted || !ready || ai.as_ref().and_then(|ai| ai.instinct("PrimaryFire")).is_none() {
                 continue;
             }
             let Some(weapon) = self
@@ -1956,6 +1967,13 @@ impl Runtime {
         left
     }
 
+    /// An actor's own frame list: `frame=(x/y/z:…)` entries the level places on the thing, indexed from
+    /// 0. `AISetMoveFrame`/`AISetLookFrame` walk to one of these, and `MoveToFrame` uses the same list.
+    pub fn frame_of(&self, thing: usize, frame: i64) -> Option<[f32; 3]> {
+        let frames = self.things.get(thing)?.frames.get(usize::try_from(frame).ok()?)?;
+        Some([frames[0], frames[1], frames[2]])
+    }
+
     /// `actor->flags & SITH_AF_INVULNERABLE` with the engine's fall exception.
     fn invulnerable(&self, index: usize, kind: u32) -> bool {
         kind != DAMAGE_FALL
@@ -2434,6 +2452,21 @@ impl Runtime {
                     &mut self.ai_look
                 };
                 table.insert(ti(0), pos);
+                Value::Nil
+            }
+            // `AISetMoveFrame`/`AISetLookFrame` (`sithCogFunctionAI.c:73`) index the actor's own frame
+            // list — the `numframes=`/`frame=(x/y/z:…)` parameters the level places on the thing, which
+            // is the same list `MoveToFrame` walks. Level 1's 8t88 has two frames and its goal script
+            // sends him to frame 1. The engine refuses a frame past `loadedFrames`, and this does too.
+            "aisetmoveframe" | "aisetlookframe" => {
+                let (thing, frame) = (ti(0), idx(1));
+                if let Some(at) = self.frame_of(thing, frame) {
+                    if verb.eq_ignore_ascii_case("aisetmoveframe") {
+                        self.ai_move.insert(thing, at);
+                    } else {
+                        self.ai_look.insert(thing, at);
+                    }
+                }
                 Value::Nil
             }
             // `AISetMoveThing(actor, thing)`: a *live* destination. The engine re-reads the thing's

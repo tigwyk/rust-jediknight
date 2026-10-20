@@ -3219,6 +3219,25 @@ target persists until a script replaces it. `--ai` proves both:
   scripted: AISetLookPos -> now facing 90 deg (+90 is +Y)
 ```
 
+`AISetMoveFrame`/`AISetLookFrame` are the same two verbs with a **frame number** instead of a point:
+`sithCogFunctionAI.c:73` reads `actor->aFrames[frame]` and refuses a frame past `loadedFrames`. Those
+frames are the thing's own `numframes=`/`frame=` parameters, i.e. the same list `MoveToFrame` walks —
+and they ship in two spellings. A path frame carries its angles (`frame=(x/y/z:p/y/r)`, what a door or
+lift is drawn at) and an **actor's** frame is a position alone (`frame=(-4.476/15.877/3.840)`); the
+parser only accepted the first, so every actor's frame list came out empty. Level 1's 8t88 is the case
+that matters: `01_goal0.cog` answers his `sighted` with `AISetMoveFrame(eightyEight, 1)`.
+
+That also showed the tick was keyed on the wrong thing. It iterated actors that had an `.ai` instinct
+class, but the engine's gate is `controlType == SITH_CT_AI`, which every actor has whether or not its
+template names an `aiclass=` — 8t88 has none. The tick now walks any actor with a scripted destination,
+and a class-less actor simply never *spots* the player on its own. `--endlevel` asserts the destination
+and the walk:
+
+```text
+endlevel: 8t88's frame 1 is Some([-3.85, 16.325, 3.84]), destination Some([-3.85, 16.325, 3.84])
+endlevel: 8t88 walked 0.27 units along that frame in 1 s
+```
+
 Two bugs the chase exposed, both worth keeping:
 
 - The firing cadence gated the **whole tick**, so an actor that had just fired stood still for

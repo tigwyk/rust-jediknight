@@ -182,10 +182,26 @@ impl Thing {
     /// `frame=(x/y/z:p/y/r)` → six numbers.
     fn parse_frame(s: &str) -> Option<[f32; 6]> {
         let inner = s.strip_prefix("frame=(")?.trim_end_matches(')');
-        let (pos, rot) = inner.split_once(':')?;
+        // Two spellings ship: a path frame carries its angles (`x/y/z:p/y/r`, what a door or lift is
+        // drawn at), and an **actor's** `numframes` list carries the position alone — level 1's 8t88 is
+        // `frame=(-4.476/15.877/3.840)`. Dropping the second form left every actor with an empty frame
+        // list, which is what `AISetMoveFrame` indexes.
+        let (pos, rot) = match inner.split_once(':') {
+            Some((pos, rot)) => (pos, Some(rot)),
+            None => (inner, None),
+        };
         let p: Vec<f32> = pos.split('/').filter_map(|v| v.trim().parse().ok()).collect();
-        let r: Vec<f32> = rot.split('/').filter_map(|v| v.trim().parse().ok()).collect();
-        if p.len() != 3 || r.len() != 3 {
+        if p.len() != 3 {
+            return None;
+        }
+        let r: Vec<f32> = rot
+            .map(|rot| rot.split('/').filter_map(|v| v.trim().parse().ok()).collect())
+            .unwrap_or_default();
+        if r.is_empty() {
+            // No angles: the actor's frame is a position, and its facing stays what it was.
+            return Some([p[0], p[1], p[2], 0.0, 0.0, 0.0]);
+        }
+        if r.len() != 3 {
             return None;
         }
         Some([p[0], p[1], p[2], r[0], r[1], r[2]])
@@ -609,4 +625,21 @@ fn parse_thing(line: &str) -> Option<Thing> {
         frames,
         vel,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two `frame=` spellings ship: a path frame carries its angles (`x/y/z:yaw/…`, what a door or lift
+    /// is drawn at), an actor's `numframes` list is a position alone (level 1's 8t88). The second used to
+    /// be dropped, which left every actor's frame list empty — and `AISetMoveFrame` indexes that list.
+    #[test]
+    fn both_frame_spellings_parse() {
+        let path = Thing::parse_frame("frame=(1.2/9.65/6.35:0.0/90.0/0.02)").expect("path frame");
+        assert_eq!(path, [1.2, 9.65, 6.35, 0.0, 90.0, 0.02]);
+        let actor = Thing::parse_frame("frame=(-4.476/15.877/3.840)").expect("actor frame");
+        assert_eq!(actor, [-4.476, 15.877, 3.84, 0.0, 0.0, 0.0]);
+        assert_eq!(Thing::parse_frame("frame=(1/2)"), None);
+    }
 }

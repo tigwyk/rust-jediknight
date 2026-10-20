@@ -87,7 +87,9 @@ flag                                                   exit  what it prints
                                                              cog 26 (`user0` = 27), Kyle goes invulnerable
                                                              (flags 0xa00008) for the handler's 3 s sleep
                                                              and `jkEndLevel(1)` completes the level --
-                                                             goal bin 100 = 3
+                                                             goal bin 100 = 3; `AISetMoveFrame` then
+                                                             walks 8t88 to the level's own frame 1
+                                                             (0.27 units in 1 s, class-less actor)
 --door                                                   0  the player's use action, the level's own script, the solver:
                                                              `00_door.cog` on
                                                              thing 4 answers `activate` by clearing its sector's

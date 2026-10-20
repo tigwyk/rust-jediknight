@@ -2004,6 +2004,31 @@ fn main() {
                     "endlevel: {delivered} message(s) so far; player thing {player} (GetLocalPlayerThing {local:?}), actor flags {flags:#x}"
                 );
                 println!("endlevel: player invulnerable while the handler sleeps: {invulnerable}");
+                // `01_goal0.cog` also walks 8t88 to his second frame — the level's own
+                // `numframes=2 frame=(…)` list, which is the one `AISetMoveFrame` indexes.
+                let wanted = sim_world.borrow().frame_of(goal_thing, 1);
+                let placed = sim_world.borrow().ai_move.get(&goal_thing).copied();
+                println!("endlevel: 8t88's frame 1 is {wanted:?}, destination {placed:?}");
+                assert_eq!(
+                    placed, wanted,
+                    "AISetMoveFrame did not land on the level's own frame 1"
+                );
+                // ...and it has to move him: he has no `aiclass=`, so the tick only walks actors that
+                // have a scripted destination (`SITH_CT_AI` comes from the actor, not the class).
+                let before = sim_world.borrow().things.get(goal_thing).map(|t| t.pos);
+                for _ in 0..30 {
+                    sim_world.borrow_mut().ai_tick(player, 1.0 / 30.0);
+                }
+                if let (Some(from), Some(to)) =
+                    (before, sim_world.borrow().things.get(goal_thing).map(|t| t.pos))
+                {
+                    let walked = ((to[0] - from[0]).powi(2) + (to[1] - from[1]).powi(2)).sqrt();
+                    println!("endlevel: 8t88 walked {walked:.2} units along that frame in 1 s");
+                    assert!(
+                        walked > 0.1,
+                        "the class-less actor did not walk its scripted frame ({walked:.2})"
+                    );
+                }
                 assert!(
                     invulnerable,
                     "the level-end handler did not make the player invulnerable (flags {flags:#x})"
