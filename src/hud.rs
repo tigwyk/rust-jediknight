@@ -198,9 +198,25 @@ const MESSAGE_SCALE: i32 = 2;
 /// Draw the status bar onto a canvas `width` wide: the two panels at the screen's corners
 /// with the meters and numbers inside them.
 pub fn draw(canvas: &mut Canvas, gobs: &gob::GobSet, palette: &[[u8; 3]; 256], hud: &Hud) {
+    draw_selected(canvas, gobs, palette, hud, None, false);
+}
+
+/// The status bar, with the carried strip's selection lit: `selected` indexes `hud.carried`,
+/// and `open` is the inventory's own mode (a frame round the strip, as the inventory screen does).
+///
+/// Separate from `draw` so the selection can be checked without a screen: the canvas is pixels,
+/// and a gate can count them.
+pub fn draw_selected(
+    canvas: &mut Canvas,
+    gobs: &gob::GobSet,
+    palette: &[[u8; 3]; 256],
+    hud: &Hud,
+    selected: Option<usize>,
+    open: bool,
+) {
     // The scroll strip runs down the right edge underneath the status panel, so it is
     // drawn first.
-    draw_carried(canvas, gobs, palette, hud);
+    draw_carried(canvas, gobs, palette, hud, selected, open);
     let (mut left_y, mut right_x, mut right_y) = (0, 0, 0);
     // Panels first: the meters are positioned relative to them.
     for piece in PIECES.iter().filter(|p| matches!(p.kind, Kind::Panel)) {
@@ -365,15 +381,52 @@ fn draw_item(canvas: &mut Canvas, gobs: &gob::GobSet, palette: &[[u8; 3]; 256], 
 }
 
 /// The scroll strip down the right edge: one icon per carried item, 28px apart.
-fn draw_carried(canvas: &mut Canvas, gobs: &gob::GobSet, palette: &[[u8; 3]; 256], hud: &Hud) {
+///
+/// `selected` lights one entry — the inventory's own cursor — with a box the palette's near-white
+/// drawn round it, and `open` marks the strip while the inventory is open. The engine frames the
+/// selected item the same way; the box is the port's because the inventory screen's own art is
+/// drawn by `jkHudInv` code this tree does not carry.
+fn draw_carried(
+    canvas: &mut Canvas,
+    gobs: &gob::GobSet,
+    palette: &[[u8; 3]; 256],
+    hud: &Hud,
+    selected: Option<usize>,
+    open: bool,
+) {
     let defs = gobs
         .read("misc\\items.dat")
         .map(|d| items(&String::from_utf8_lossy(&d)))
         .unwrap_or_default();
     let x = canvas.width as i32 - 32 * HUD_SCALE;
+    // The brightest palette entry is the box's colour: the palette carries no fixed white, and a
+    // hard index would draw black on some `.cmp` ramps.
+    let lit = (0..256u16)
+        .max_by_key(|&i| {
+            let [r, g, b] = palette[i as usize];
+            r as u32 + g as u32 + b as u32
+        })
+        .unwrap_or(0) as u8;
     for (n, (item, count)) in hud.carried.iter().enumerate() {
         let y = 8 + n as i32 * 28 * HUD_SCALE;
-        if let Some(cell) = load(gobs, &icon_for(&defs, item)).and_then(|f| f.cells.first().cloned()) {
+        let cell = load(gobs, &icon_for(&defs, item)).and_then(|f| f.cells.first().cloned());
+        if open && selected == Some(n) {
+            // The box sits one scaled pixel outside the icon, so a highlight never covers the art.
+            let (w, h) = cell
+                .as_ref()
+                .map(|c| (c.width as i32 * HUD_SCALE, c.height as i32 * HUD_SCALE))
+                .unwrap_or((24 * HUD_SCALE, 24 * HUD_SCALE));
+            let (l, t) = (x - HUD_SCALE, y - HUD_SCALE);
+            for i in l..=l + w {
+                canvas.put(i, t, palette, lit);
+                canvas.put(i, t + h, palette, lit);
+            }
+            for j in t..=t + h {
+                canvas.put(l, j, palette, lit);
+                canvas.put(l + w, j, palette, lit);
+            }
+        }
+        if let Some(cell) = cell {
             canvas.blit_indexed([x, y], cell.width, cell.height, &cell.pixels, palette, HUD_SCALE);
         }
         if *count > 1 && let Some(font) = load_font(gobs, "ui\\sft\\helthnum.sft") {

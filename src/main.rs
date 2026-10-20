@@ -3359,6 +3359,30 @@ fn main() {
         // Still two left, so `SetInvAvailable(player, 40, 0)` must NOT have run: the script only
         // clears availability when the count reaches zero.
         assert!(available, "a bin with 2 left was marked unavailable");
+        // The strip's selection: the inventory box is drawn into the canvas, so the highlight is
+        // countable pixels rather than something only a window could judge.
+        {
+            let mut canvas = ui::Canvas::new(ui::CANVAS[0] as u32, ui::CANVAS[1] as u32);
+            let mut shown = hud::Hud::default();
+            shown.carried = vec![("bactatank".to_string(), 2)];
+            shown.item = Some("bactatank".to_string());
+            shown.item_count = 2;
+            // A white palette: the canvas stores palette *indices*, so a zeroed palette would read as
+            // black whatever was drawn.
+            let palette = [[255u8, 255, 255]; 256];
+            hud::draw_selected(&mut canvas, &gobs, &palette, &shown, None, false);
+            let lit_pixels = |canvas: &ui::Canvas| {
+                canvas.rgba.chunks(4).filter(|p| p[3] != 0).count()
+            };
+            let plain = lit_pixels(&canvas);
+            let mut canvas = ui::Canvas::new(ui::CANVAS[0] as u32, ui::CANVAS[1] as u32);
+            hud::draw_selected(&mut canvas, &gobs, &palette, &shown, Some(0), true);
+            let lit = lit_pixels(&canvas);
+            println!(
+                "use-item: the inventory strip draws {plain} pixel(s) unselected and {lit} with a selection"
+            );
+            assert_ne!(lit, plain, "selecting an item drew nothing");
+        }
         println!("--- use-item check passed ---");
         return;
     }
@@ -9204,6 +9228,14 @@ struct Overlay {
     lines: Vec<(usize, String)>,
     /// Index into the menu's selectable rows.
     selected: usize,
+    /// Whether the inventory strip is open for selection. `I` toggles it; while it is open the
+    /// arrows move `inv_selected` and Enter uses that item (`UseBin`, the engine's own path).
+    inventory: bool,
+    /// Index into `hud.carried` and `carried_bins`.
+    inv_selected: usize,
+    /// The bin id behind each entry of `hud.carried`, in the same order: `hud::carried` names items
+    /// the way the table does, and using one needs the bin number.
+    carried_bins: Vec<i32>,
     /// The element the mouse is over, if any: the engine lights it with its hover font.
     hover: Option<usize>,
     hud: hud::Hud,
@@ -9241,6 +9273,9 @@ impl Overlay {
             pending: None,
             lines: Vec::new(),
             selected: 0,
+            inventory: false,
+            inv_selected: 0,
+            carried_bins: Vec::new(),
             hover: None,
             hud: hud::Hud::default(),
             canvas: ui::Canvas::new(ui::CANVAS[0] as u32, ui::CANVAS[1] as u32),
@@ -9495,6 +9530,8 @@ fn refresh_overlay(
     }
     overlay.dirty = false;
     let hud = overlay.hud.clone();
+    // Read before the canvas is borrowed mutably below.
+    let (inv_selected, inventory_open) = (overlay.inv_selected, overlay.inventory);
     overlay.canvas.rgba.fill(0);
     let open = overlay.menu.clone().and_then(|name| screens.find(&name).cloned());
     match open {
@@ -9538,7 +9575,14 @@ fn refresh_overlay(
             let backdrop = ui::Backdrop { base: &base, panel: panel.as_ref() };
             ui::draw_screen(&mut overlay.canvas, &screen, &backdrop, &assets.strings, &look, lit);
         }
-        None => hud::draw(&mut overlay.canvas, &gobs.0, &assets.palette, &hud),
+        None => hud::draw_selected(
+            &mut overlay.canvas,
+            &gobs.0,
+            &assets.palette,
+            &hud,
+            Some(inv_selected),
+            inventory_open,
+        ),
     }
     // The message area: `jkStringOutput`/`jkPrintUNIString` compose a line, resolve their `.uni`
     // keys through the install's table, and it shows for a few seconds over the status bar.
@@ -9567,6 +9611,7 @@ fn refresh_overlay(
 /// Escape opens and closes the menu, the arrows move the cursor and Enter picks.
 fn ui_input(
     keys: Res<ButtonInput<KeyCode>>,
+    sim: Option<Res<Sim>>,
     screens: Option<Res<Screens>>,
     assets: Option<Res<UiAssets>>,
     plan: Option<Res<FlowPlan>>,
@@ -9580,7 +9625,42 @@ fn ui_input(
     if overview.as_deref().is_some_and(|o| o.capture) {
         return;
     }
-    if keys.just_pressed(KeyCode::Escape) {
+    // The inventory strip: `I` opens it, the arrows move and Enter uses the selected item. Retail
+    // reaches the same call through `jkHudInv`'s screen, whose art this tree does not carry; the
+    // strip is the HUD's own, so this reads it rather than drawing a second one.
+    if overlay.menu.is_none() && overlay.started {
+        if keys.just_pressed(KeyCode::KeyI) {
+            overlay.inventory = !overlay.inventory;
+            overlay.dirty = true;
+        }
+        if overlay.inventory {
+            let count = overlay.hud.carried.len();
+            if count > 0 {
+                if keys.just_pressed(KeyCode::ArrowDown) {
+                    overlay.inv_selected = (overlay.inv_selected + 1) % count;
+                    overlay.dirty = true;
+                }
+                if keys.just_pressed(KeyCode::ArrowUp) {
+                    overlay.inv_selected = (overlay.inv_selected + count - 1) % count;
+                    overlay.dirty = true;
+                }
+                if keys.just_pressed(KeyCode::Enter)
+                    && let Some(bin) = overlay.carried_bins.get(overlay.inv_selected).copied()
+                {
+                    if let Some(sim) = sim.as_deref() {
+                        sim.world.borrow_mut().use_bin(bin);
+                    }
+                    overlay.dirty = true;
+                }
+            }
+            // Escape closes the strip before it would open the pause screen.
+            if keys.just_pressed(KeyCode::Escape) {
+                overlay.inventory = false;
+                overlay.dirty = true;
+            }
+        }
+    }
+    if keys.just_pressed(KeyCode::Escape) && !overlay.inventory {
         match overlay.menu.clone() {
             // Escape backs out one screen at a time, and out of the last one into the game.
             Some(name) => {
@@ -14528,9 +14608,17 @@ fn health_follows_damage(
     // HUD was never fed this, so the panel stayed blank however much was picked up.
     if let Some(overlay) = overlay.as_mut() {
         let carried = hud::carried(&rt.inv, &world.item_defs);
+        // The bin behind each carried entry, in the same order: using one needs its number.
+        overlay.carried_bins = world
+            .item_defs
+            .iter()
+            .filter(|def| rt.inv.get(&def.id).copied().unwrap_or(0.0).round() as i32 > 0)
+            .map(|def| def.id)
+            .collect();
+        if overlay.inv_selected >= carried.len() {
+            overlay.inv_selected = carried.len().saturating_sub(1);
+        }
         if overlay.hud.carried != carried {
-            // The "item in hand" cell takes the first thing carried: there is no inventory screen to
-            // select one from yet, and a panel that names nothing is what the player sees now.
             overlay.hud.item = carried.first().map(|(name, _)| name.clone());
             overlay.hud.item_count = carried.first().map(|(_, count)| *count).unwrap_or(0);
             overlay.hud.carried = carried;
