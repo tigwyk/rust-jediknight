@@ -5248,8 +5248,12 @@ fn main() {
             let moving = { let mut rt = handle.borrow_mut(); rt.call("IsThingMoving", &[cog::Value::Num(*thing as f64)]) };
             println!("door: {name} (cog {instance}, thing {thing}): {ran} label(s) ran, frame {frame:?}, moving {moving:?}, flags {changed:?}, {flipped} doorway(s) that were shut now passable");
             if changed.0 + changed.1 > 0 && flipped > 0 {
-                outcome = Some((*instance, *thing, ran, changed, flipped));
-                break;
+                // A body crossing one is not measured here: the four doorways this door opens join its own
+                // door-*frame* sectors (74/75/76, 0.05 to 0.3 wide), and a 0.065-radius body cannot stand
+                // inside those at either side of the plane -- `inside_sector` is false both ways, so a walk
+                // test there measures the frame, not the door. The solver verdict above is the body-free
+                // half of the same question, and a level with a corridor door is where the walk belongs.
+                outcome = Some((*instance, *thing, ran, changed, flipped));                break;
             }
         }
         let Some((instance, thing, ran, (sectors, adjoins), flipped)) = outcome else {
