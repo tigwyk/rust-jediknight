@@ -2738,7 +2738,7 @@ Now implemented, with the engine's semantics where they differ from the obvious:
 | group | verbs | notes |
 |---|---|---|
 | things | `GetThingType`, `FirstThingInSector`, `NextThingInSector`, `CreateThing`, `DamageThing`, `DestroyThing`, `CaptureThing`, `ThingLight` | type numbers from `types_enums.h`: actor 2, weapon 3, item 5, player 10, sprite 13; `CreateThing(template, source)` spawns at the source thing with the template's `health=` |
-| surfaces | `SurfaceCenter`, `SetWallCel`, `GetWallCel`, `SlideWall`, `SurfaceAnim`, `GetSurfaceAnim`, `StopSurfaceAnim`, `SetSurfaceFlags` | `SurfaceAnim(surface, fps)` treats a non-positive rate as the engine's default **15 fps** (`sithCogFunction_SurfaceAnim`) |
+| surfaces | `SurfaceCenter`, `SetWallCel`, `GetWallCel`, `SlideWall`, `SurfaceAnim`, `GetSurfaceAnim`, `StopSurfaceAnim`, `SetSurfaceFlags` | `SurfaceAnim(surface, fps)` treats a non-positive rate as the engine's default **15 fps** (`sithCogFunction_SurfaceAnim`); the cel it sets is drawn (§16.5), the slide offset it sets is not |
 | sectors | `SectorAdjoins` (the setter `SetSectorAdjoins` under its other spelling), `SectorLight`, `GetSectorLight`, `SectorThrust` | thrust is stored, not simulated: nothing is in flight until combat |
 | messages | `GetSenderID`, `GetSenderRef`, `GetSenderType`, `GetSourceRef`, `jkGetLocalPlayer` | see the caveat below |
 | misc | `jkPrintUNIString`, `SetTimerEx`, `KillTimerEx`, `WaitForStop`, `StopSound` | printing collects the `.uni` key in `Runtime::prints` |
@@ -3005,6 +3005,47 @@ second. `BK_SPRITE_TRACE=1` on a live impact prints the walk:
 
 `+laserhit`, `+grenade_exp` (0x17), `+force_dest1..4` (0x53), `twinkle` (0x11) and `+watersplash`
 (0x1) all carry the bit; `bubble` (a physics bubble, `typeflags` absent, one cel) does not need it.
+
+### A surface's cel: world textures animate too
+
+The same cel table applies to **world** materials. 77 of the shipped materials hold more than one
+bitmap and a handful of those are level textures — `00tfuel` and `00twater2` (8 cels), `01abb2`
+(6), `04tpractice` (6), `09tdiag` (6), the `00t*`/`03t*`/`08t*` panels, `09sign`, `03lock`. The level
+row carries **no cel of its own**: every surface starts at cel 0 and the scripts move it.
+
+`sithSurface_Update` is the arm:
+
+```c
+if ((flags & SITH_SURFACE_200000) && surf->field_30 <= now) {
+    step = surf->field_34;                                  // 1000 / fps
+    surf->wallCel += (now - surf->field_30) / step + 1;
+    surf->field_30 = step + now - (now - surf->field_30) % step;
+    if (surf->wallCel >= material->num_texinfo) wrap;       // flags & 1/2/4 pick the wrap base
+}
+```
+
+`SurfaceAnim(surface, fps)` creates that record (`sithSurface_sub_4F00A0`) and `SetWallCel(surface,
+n)` sets the frame outright. Level 1 places both: **`00_surfanim.cog`** drives five surfaces at 5 fps
+and **`01_neonsign.cog`** drives surface 765 at 2 fps.
+
+How the port draws it: the mesh's vertex-colour **alpha** carries the cel (the shader's light term is
+the rgb), the level material's uniform carries `cels` from the `.mat` header, and `level.wesl` maps
+
+```wgsl
+uv.y = (fract(uv.y * params.cels) + cel) / params.cels;
+```
+
+— `fract(v * cels)` because the mesh's UVs are texel space over the **whole strip**, so multiplying
+by `cels` is what puts the wrap back at one cel; the naive `fract(v)` tiled the whole strip into each
+face, i.e. every cel squashed into one. `--cel` checks both properties (band membership and the one-
+cel period) plus the data path: `SetWallCel` changes the vertex data and bumps `Runtime::cel_epoch`,
+which `rebuild_surfaces` watches; after 1 s of clock the level's own neon-sign script has stepped
+surface 765 from 0 to 2. A re-batch of all 4595 of level 1's surfaces measures **1.4 ms**, so an
+animation stepping a few times a second rides the rebuild path at under 2% of a frame.
+
+`ponytail:` two ceilings here. The rebuild is whole-world rather than per-sector (the same ceiling
+`SetFaceGeoMode` already had), and `SlideWall`/water **scroll** offsets are still not applied — the
+mesh bakes no scroll term, so a conveyor's texture moves in retail and not here.
 
 ### Damage decays in flight
 

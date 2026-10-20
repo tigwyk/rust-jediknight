@@ -33,8 +33,13 @@ pub struct LevelParams {
     pub fade_end: f32,
     /// `EnableIRMode`: force seeing's infrared pass.
     pub infra: f32,
+    /// How many cels this material's bitmap holds, from its `.mat` header. A surface's cel arrives in
+    /// the vertex colour's alpha (see `Batch::push_polygon`), and `level.wesl` maps it into the packed
+    /// column; 1 means "no animation" and the term is skipped.
+    pub cels: f32,
     pub _pad0: f32,
     pub _pad1: f32,
+    pub _pad2: f32,
 }
 
 impl Default for LevelParams {
@@ -47,8 +52,10 @@ impl Default for LevelParams {
             fade_start: 30.0,
             fade_end: 320.0,
             infra: 0.0,
+            cels: 1.0,
             _pad0: 0.0,
             _pad1: 0.0,
+            _pad2: 0.0,
         }
     }
 }

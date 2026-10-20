@@ -5,7 +5,7 @@ Recorded at round 85. Target: `G:\Games\Star Wars Jedi Knight - Dark Forces 2`
 (GOG, plaintext JK.EXE, image base 0x400000,
 sha256 12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44).
 
-`cargo test` -> 82 passed, 0 failed.
+`cargo test` -> 90 passed, 0 failed.
 `cargo clippy --release --all-targets` -> 56 warnings, no errors.
 
 Each flag below is a gate: it asserts on the live runtime (or the shipped data) and exits
@@ -30,7 +30,7 @@ whatever is on screen, and `--gates` passes it to every child. A gate that forge
 ends without a verdict instead of sitting on the main menu forever — which is what five flags that
 do not exist in this binary used to do, because a hand-written flag list had invented them.
 
-`FAILURES: 0 / 35` (`--gates`: `gates: 0 of 35 failed`).
+`FAILURES: 0 / 36` (`--gates`: `gates: 0 of 36 failed`).
 
 flag                                                   exit  what it prints
 -------------------------------------------------------------------------------------------------
@@ -82,6 +82,12 @@ flag                                                   exit  what it prints
                                                              GetFaceGeoMode reads 0 back and the change
                                                              bumps the epoch that `rebuild_surfaces`
                                                              re-batches on
+--cel                                                    0  29 of 3393 drawn surface(s) in level 1 use a
+                                                             multi-cel material; SetWallCel 1 changes the
+                                                             vertex data the shader reads and bumps the
+                                                             cel epoch a rebuild watches; after 1 s of
+                                                             clock the level's own `01_neonsign.cog` has
+                                                             stepped surface 765 from cel 0 to 2 (2 fps)
 --triggers                                               0  --- triggers check passed ---
 --sleep                                                  0  --- sleep check passed ---
 --live-check                                             0  the body stands in sector 339 at z -1.17 on a floor at

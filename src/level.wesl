@@ -15,8 +15,10 @@ struct LevelParams {
     fade_start: f32,
     fade_end: f32,
     infra: f32,
+    cels: f32,
     pad0: f32,
     pad1: f32,
+    pad2: f32,
 };
 
 @group(3) @binding(0) var base_color_texture: texture_2d<f32>;
@@ -25,8 +27,20 @@ struct LevelParams {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    let tex = textureSample(base_color_texture, base_color_sampler, in.uv);
-    var base = tex * in.color;
+    var uv = in.uv;
+    // A world texture with more than one frame is packed into one column, cel 0 at the top, exactly
+    // like a sprite's `.mat` — so the surface's cel (carried in the vertex colour's alpha) picks the
+    // band and the sampling wraps inside it. Single-cel materials, which is almost all of them, skip
+    // this and sample as they always have.
+    if (params.cels > 1.5) {
+        let cel = clamp(floor(in.color.a + 0.5), 0.0, params.cels - 1.0);
+        // The mesh's UVs are texel space divided by the whole strip, so `v * cels` is back in cel
+        // units: wrap inside one cel, then move to the chosen band.
+        uv.y = (fract(uv.y * params.cels) + cel) / params.cels;
+    }
+    let tex = textureSample(base_color_texture, base_color_sampler, uv);
+    // Alpha is the cel channel here, not coverage, so the light term multiplies the colour only.
+    var base = vec4<f32>(tex.rgb * in.color.rgb, 1.0);
     // The light ramp's distance term: near geometry is untouched, far geometry walks toward the
     // colormap's darkest table, which is what the retail renderer does with its brightness tables.
     let d = distance(in.world_position.xyz, view.world_position.xyz);

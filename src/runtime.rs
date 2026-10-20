@@ -204,6 +204,8 @@ pub struct SurfaceState {
     pub cel: f32,
     pub anim: f32,
     pub slide: [f32; 2],
+    /// When the next cel is due, on the runtime's clock — the engine's `rdSurface.field_30`.
+    pub next: f32,
 }
 
 #[derive(Clone)]
@@ -329,6 +331,14 @@ pub struct Runtime {
     /// Bumped on every geomode change, so the renderer knows to rebuild the world's batches instead
     /// of scanning the map each frame.
     pub geomode_epoch: u32,
+    /// Bumped when a surface's **cel** changes (`SetWallCel`, or an animation stepping), which the
+    /// renderer bakes into the mesh the same way. Separate from `geomode_epoch` so a per-frame
+    /// animation does not look like a stream of geometry changes.
+    pub cel_epoch: u32,
+    /// Per surface, how many cels its material holds (`num_texinfo`), where an animation wraps. The
+    /// runtime cannot read a `.mat`, so the loader hands this over; absent means 1, i.e. nothing to
+    /// animate.
+    pub surface_cels: Vec<u32>,
     /// `sithWeapon_secMountWait`: when the equipped weapon finishes mounting, as an absolute clock time
     /// (the engine stores `wait + gameTime` in a global, not per thing).
     pub mount_wait_until: f32,
@@ -802,7 +812,7 @@ impl Runtime {
                     } else {
                         [0.0; 3]
                     };
-                    SurfaceState { center, cel: 0.0, anim: 0.0, slide: [0.0; 2] }
+                    SurfaceState { center, cel: 0.0, anim: 0.0, slide: [0.0; 2], next: 0.0 }
                 })
                 .collect(),
             sounds: Vec::new(),
@@ -820,6 +830,8 @@ impl Runtime {
             play_key: BTreeMap::new(),
             face_geomode: BTreeMap::new(),
             geomode_epoch: 0,
+            cel_epoch: 0,
+            surface_cels: Vec::new(),
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
             template_weapon: level
@@ -883,12 +895,54 @@ impl Runtime {
         World::new(Self::new(level))
     }
 
+    /// `sithSurface_Update`'s cel animation: a surface with a rate walks its material's cels.
+    ///
+    /// The engine's arm is `if (flags & SITH_SURFACE_200000) && field_30 <= now` then
+    /// `wallCel += (now - field_30) / field_34 + 1` with `field_34 = 1000 / fps` and the next due
+    /// time snapped to the step grid, wrapping at `material->num_texinfo` (and honouring the
+    /// ping-pong/bounce flags, which no shipped surface's `flags` word carries). A rate of 0 is a
+    /// still surface.
+    ///
+    /// The renderer bakes a cel into the mesh, so a step bumps `cel_epoch` — measured at 1.4 ms to
+    /// re-batch all of level 1's 4595 surfaces, i.e. under 2% of a frame at 15 fps. `ponytail:` the
+    /// whole world is re-batched rather than the sectors holding the animated surface, which is the
+    /// same ceiling `SetFaceGeoMode` already lives with.
+    fn advance_surface_cels(&mut self) {
+        let now = self.time;
+        let mut changed = false;
+        for (index, surface) in self.surfaces.iter_mut().enumerate() {
+            // Nothing to animate when the material has one cel, or when the loader never handed the
+            // counts over (the script-only checks run without a `.mat`).
+            let cels = self.surface_cels.get(index).copied().unwrap_or(1);
+            if cels < 2 || surface.anim <= 0.0 {
+                continue;
+            }
+            let step = 1.0 / surface.anim.max(0.001);
+            if surface.next <= 0.0 {
+                surface.next = now + step;
+                continue;
+            }
+            if now < surface.next {
+                continue;
+            }
+            let elapsed = now - surface.next;
+            surface.cel += (elapsed / step).floor() + 1.0;
+            surface.next = step + now - elapsed % step;
+            surface.cel %= cels as f32;
+            changed = true;
+        }
+        if changed {
+            self.cel_epoch += 1;
+        }
+    }
+
     /// Advance every moving thing. Returns the indices that moved, so a renderer can
     /// rewrite just those transforms instead of the whole level's.
     pub fn step(&mut self, dt: f32) -> Vec<usize> {
         let mut moved = Vec::new();
         self.time += dt;
         self.decay_damage(dt);
+        self.advance_surface_cels();
         // `timer=`/`SetLifeLeft` expiry: `sithThing_Update` counts `msecLifeLeft` down and calls
         // `sithThing_DestroyDyingThing` when it reaches zero. Without this an impact spark lives
         // forever, and a corpse never goes away.
@@ -2271,6 +2325,9 @@ impl Runtime {
             "setwallcel" => {
                 if let Some(s) = self.surface_mut(idx(0)) {
                     s.cel = num(1) as f32;
+                    // The renderer folds a surface's cel into the mesh it already built, so a change
+                    // has to ask for a rebuild the way a geomode change does.
+                    self.cel_epoch += 1;
                 }
                 Value::Nil
             }
@@ -2287,8 +2344,12 @@ impl Runtime {
             // default 15 fps (`sithCogFunction_SurfaceAnim`).
             "surfaceanim" => {
                 let rate = if num(1) > 0.0 { num(1) as f32 } else { 15.0 };
+                let now = self.time;
                 if let Some(s) = self.surface_mut(idx(0)) {
                     s.anim = rate;
+                    // The first cel is due one step from now, which is also how the engine starts
+                    // (`field_30 = now + field_34`).
+                    s.next = now + 1.0 / rate;
                 }
                 Value::Num(idx(0) as f64)
             }
@@ -3390,6 +3451,8 @@ mod tests {
             play_key: BTreeMap::new(),
             face_geomode: BTreeMap::new(),
             geomode_epoch: 0,
+            cel_epoch: 0,
+            surface_cels: Vec::new(),
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
             template_weapon: BTreeMap::new(),
@@ -3622,10 +3685,37 @@ mod tests {
     }
 
     #[test]
+    fn an_animated_surface_walks_its_cels_and_wraps() {
+        let mut rt = door_runtime();
+        rt.surfaces.push(SurfaceState {
+            center: [0.0; 3],
+            cel: 0.0,
+            anim: 0.0,
+            slide: [0.0; 2],
+            next: 0.0,
+        });
+        let index = rt.surfaces.len() - 1;
+        // The material's cel count comes from the `.mat`; 3 cels here.
+        rt.surface_cels = vec![1; index];
+        rt.surface_cels.push(3);
+        let epoch = rt.cel_epoch;
+        // `SurfaceAnim(surface, 15)`: a cel every 1/15 s. Half a second is 7 steps of 1/15,
+        // so cel 7, and 7 % 3 = 1.
+        rt.call("SurfaceAnim", &[Value::Num(index as f64), Value::Num(15.0)]);
+        rt.step(0.5);
+        assert_eq!(rt.surfaces[index].cel, 1.0);
+        assert!(rt.cel_epoch > epoch, "a cel step did not ask for a rebuild");
+        // A material with one cel never advances, whatever the rate says.
+        rt.surface_cels[index] = 1;
+        rt.step(1.0);
+        assert_eq!(rt.surfaces[index].cel, 1.0);
+    }
+
+    #[test]
     fn the_new_world_verbs_act_on_the_world() {
         let mut rt = door_runtime();
         // A surface's cel round-trips, and its centre is whatever the level said.
-        rt.surfaces.push(SurfaceState { center: [1.0, 2.0, 3.0], cel: 0.0, anim: 0.0, slide: [0.0; 2] });
+        rt.surfaces.push(SurfaceState { center: [1.0, 2.0, 3.0], cel: 0.0, anim: 0.0, slide: [0.0; 2], next: 0.0 });
         rt.call("SetWallCel", &[Value::Num(0.0), Value::Num(4.0)]);
         assert_eq!(rt.call("GetWallCel", &[Value::Num(0.0)]), Value::Num(4.0));
         assert_eq!(rt.call("SurfaceCenter", &[Value::Num(0.0)]), Value::Vec([1.0, 2.0, 3.0]));

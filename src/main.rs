@@ -54,6 +54,11 @@ struct World {
     level: jkl::Level,
     /// Level material index -> decoded bitmap.
     images: HashMap<i32, Image>,
+    /// Level material index -> how many cels its bitmap holds (`num_texinfo`). Only a handful of world
+    /// textures are animated — water, fuel, lock and sign panels — but a surface can point its cel at
+    /// any of them with `SetWallCel`/`SurfaceAnim`, so the level shader needs the count to map a cel
+    /// onto the packed strip.
+    material_cels: HashMap<i32, u32>,
     /// Material indices whose `tex_type & 2` marks them as portal materials: `sithSurface.c` refuses to
     /// give those a geometry mode, so the engine never draws them. Drawing one seals a doorway.
     /// Lowercase template name -> lowercase `.3do` name.
@@ -137,6 +142,7 @@ const GATES: &[&str] = &[
     "--cog-check",
     "--adjoins",
     "--geomode",
+    "--cel",
     "--move",
     "--pickup",
     "--save",
@@ -268,6 +274,7 @@ fn main() {
     // `--adjoins`: the sector/adjoin flag verbs, and that collision and the cull read them.
     let mut adjoin_check = false;
     let mut geomode_check = false;
+    let mut cel_check = false;
     let mut fire_check: Option<String> = None;
     let mut hit_check = false;
     let mut level_shader = false;
@@ -501,6 +508,8 @@ fn main() {
             "--adjoins" => adjoin_check = true,
             // The surface geomode: a script hides a face and the world's batches drop its polygons.
             "--geomode" => geomode_check = true,
+            // `--cel`: a surface's cel reaches the mesh the level shader draws.
+            "--cel" => cel_check = true,
             // `--fire <weapon template>`: fire that weapon at level 1's actor and check the
             // projectile travels, hits and damages.
             // `--level-shader`: draw level surfaces with the material that carries the colormap
@@ -4727,6 +4736,156 @@ fn main() {
         return;
     }
 
+    if cel_check {
+        // A surface's cel (`SetWallCel`, `SurfaceAnim`) picks one frame out of a multi-cel world
+        // texture — water, a fuel pipe, a lock or sign panel. The renderer's half is the vertex
+        // colour's alpha, which `level.wesl` folds into `v`; the claim to test is that the number
+        // reaches the batch the mesh is built from, and that a different cel is a different mesh.
+        let level = &world.level;
+        let cels = &world.material_cels;
+        let multi: Vec<(usize, i32)> = level
+            .surfaces
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.material >= 0 && s.verts.len() >= 3)
+            .filter(|(_, s)| cels.get(&s.material).copied().unwrap_or(1) > 1)
+            .map(|(i, s)| (i, s.material))
+            .collect();
+        println!(
+            "cel: {} of {} drawn surface(s) use a multi-cel material; {} level material(s) animate",
+            multi.len(),
+            level.surfaces.iter().filter(|s| s.material >= 0).count(),
+            level.materials.iter().enumerate().filter(|(i, _)| cels.get(&(*i as i32)).copied().unwrap_or(1) > 1).count()
+        );
+        let Some(&(index, material)) = multi.first() else {
+            println!("cel: this level has no animated surface; nothing to check");
+            return;
+        };
+        let count = cels[&material];
+        // The hash of every vertex alpha in the batches that draw the surface: 0 for cel 0, the cel
+        // index for anything else. `Vec<f32>` bits, so the comparison is exact.
+        let hash = |cels: &[f32]| -> u64 {
+            let (batches, _) = build_world(level, &world.images, &Default::default(), cels);
+            let mut h = 0xcbf2_9ce4_8422_2325u64;
+            for batch in batches.values() {
+                for color in &batch.colors {
+                    h = (h ^ color[3].to_bits() as u64).wrapping_mul(0x100_0000_01b3);
+                }
+            }
+            h
+        };
+        let mut state = vec![0.0f32; level.surfaces.len()];
+        let first = hash(&state);
+        // Through the verb, not by writing the vector: the script's `SetWallCel` is what has to
+        // reach the renderer, and it also has to bump the epoch the rebuild watches.
+        let world_state = runtime::Runtime::handle(level);
+        let (epoch_before, epoch_after) = {
+            let mut rt = world_state.borrow_mut();
+            let before = rt.cel_epoch;
+            rt.call("SetWallCel", &[cog::Value::Num(index as f64), cog::Value::Num(1.0)]);
+            state[index] = rt.surfaces[index].cel;
+            (before, rt.cel_epoch)
+        };
+        let second = hash(&state);
+        // What a cel change costs the renderer: it re-batches the level. `SurfaceAnim` would pay this
+        // `fps` times a second, which is the number that decides whether the animation can ride the
+        // rebuild path at all.
+        let started = std::time::Instant::now();
+        let _ = build_world(level, &world.images, &Default::default(), &state);
+        let rebuild_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let centre = {
+            let (mut cx, mut cy, mut cz, mut n) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            for &(vi, _) in &level.surfaces[index].verts {
+                if let Some(p) = level.vertices.get(vi as usize) {
+                    cx += p[0];
+                    cy += p[1];
+                    cz += p[2];
+                    n += 1.0;
+                }
+            }
+            n = n.max(1.0);
+            [cx / n, cy / n, cz / n]
+        };
+        println!(
+            "cel: surface {index} centre {centre:?} normal {:?} (frame a shot with --stand and --look)",
+            level.surfaces[index].normal
+        );
+        println!(
+            "cel: surface {index} draws `{}` with {count} cel(s); SetWallCel 1 changed the batch data ({first:016x} -> {second:016x}) and bumped the rebuild epoch {epoch_before} -> {epoch_after}; a re-batch takes {rebuild_ms:.1} ms",
+            level.materials.get(material.max(0) as usize).cloned().unwrap_or_default()
+        );
+        assert_ne!(first, second, "a cel change did not reach the vertex data");
+        assert_ne!(epoch_before, epoch_after, "a cel change did not ask for a rebuild");
+        // The shader's remap, checked as arithmetic on real numbers: `level.wesl` turns a mesh `v`
+        // into `(fract(v * cels) + cel) / cels` because the mesh's UVs are texel space over the whole
+        // strip. Two properties matter and both fail for the naive `fract(v)`: every sample lands in
+        // the band it asked for, and the tiling period is one *cel*, not the whole strip.
+        let cels = count as f32;
+        let period = 1.0 / cels;
+        for cel in [0.0, 1.0, cels - 1.0] {
+            for v in [0.0f32, 0.3, 1.0, 2.5] {
+                let band = (cel_v(v, cel, cels) * cels).floor();
+                assert_eq!(band, cel, "cel {cel} sampled band {band} at v={v}");
+                assert!(
+                    (cel_v(v + period, cel, cels) - cel_v(v, cel, cels)).abs() < 1e-5,
+                    "the cel remap does not repeat once per cel (v={v}, cels={cels})"
+                );
+            }
+        }
+        println!(
+            "cel: the remap keeps every sample in its band and repeats once per cel ({cels} cel(s))"
+        );
+
+        // End to end: a **shipped** script's `SurfaceAnim` moves a cel. Level 1 places
+        // `00_surfanim.cog` (five surfaces at 5 fps) and `01_neonsign.cog` (surface 765 at 2 fps),
+        // so a level that names the verb must have a surface stepping after a second of clock.
+        let animates = level.cogs.iter().any(|inst| {
+            gobs.read(&inst.script)
+                .map(|data| {
+                    String::from_utf8_lossy(&data).to_ascii_lowercase().contains("surfaceanim(")
+                })
+                .unwrap_or(false)
+        });
+        if animates {
+            let state = runtime::Runtime::handle(level);
+            state.borrow_mut().surface_cels = level
+                .surfaces
+                .iter()
+                .map(|s| world.material_cels.get(&s.material).copied().unwrap_or(1))
+                .collect();
+            let mut started = 0usize;
+            for inst in &level.cogs {
+                let Some(data) = gobs.read(&inst.script) else { continue };
+                let Ok(script) = cog::parse(&String::from_utf8_lossy(&data)) else { continue };
+                let mut vm = cog::Vm::with_world(state.clone());
+                script.bind(&mut vm, &inst.values);
+                if script.label("startup").is_some() {
+                    let _ = vm.run_label(&script, "startup");
+                    started += 1;
+                }
+            }
+            let before: Vec<f32> = state.borrow().surfaces.iter().map(|s| s.cel).collect();
+            state.borrow_mut().step(1.0);
+            let after: Vec<f32> = state.borrow().surfaces.iter().map(|s| s.cel).collect();
+            let moved = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+            let example = before
+                .iter()
+                .zip(&after)
+                .position(|(a, b)| a != b)
+                .map(|i| format!("surface {i}: {} -> {}", before[i], after[i]))
+                .unwrap_or_else(|| "none".to_string());
+            println!("cel: {started} startup script(s) ran; after 1 s, {moved} surface(s) stepped ({example})");
+            assert!(moved > 0, "a shipped SurfaceAnim script never moved a cel");
+        } else {
+            println!("cel: no placed script calls SurfaceAnim here; the animation path is untested on this level");
+        }
+        // Back to cel 0 is the level's own state, and has to be the original mesh again.
+        state[index] = 0.0;
+        assert_eq!(hash(&state), first, "cel 0 is not the mesh the level started with");
+        println!("--- cel check passed ---");
+        return;
+    }
+
     if geomode_check {
         // `SetFaceGeoMode(surface, 0)` is `GEOMETRY_NONE`: `00_breakingglass.cog` shatters glass with
         // it and `00_slashablefaces.cog` sets 4 back when a panel is intact. The claim to test is not
@@ -4744,7 +4903,7 @@ fn main() {
             .map(|(i, s)| (i, s.verts.len(), claims[i][0]))
             .expect("no drawn surface with a single claiming sector");
         let triangles = |hidden: &std::collections::BTreeSet<usize>| -> usize {
-            build_world(level, &Default::default(), hidden)
+            build_world(level, &Default::default(), hidden, &[])
                 .0
                 .values()
                 .map(|batch| batch.indices.len() / 3)
@@ -8264,6 +8423,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
     }
 
     let mut images = HashMap::new();
+    let mut material_cels: HashMap<i32, u32> = HashMap::new();
 
     for (idx, name) in level.materials.iter().enumerate() {
         if name.is_empty() {
@@ -8278,6 +8438,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         }
         let Some(mat) = tex::parse_mat(&data) else { continue };
         images.insert(idx as i32, to_image(&mat, &palette));
+        material_cels.insert(idx as i32, mat.cels);
     }
 
     println!(
@@ -8520,6 +8681,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
     Ok(World {
         level,
         images,
+        material_cels,
         template_model,
         models,
         model_images,
@@ -8664,6 +8826,7 @@ impl Batch {
         level: &jkl::Level,
         surface: &jkl::Surface,
         tex_size: (f32, f32),
+        cel: f32,
     ) {
         let base = self.positions.len() as u32;
         let n = surface.verts.len();
@@ -8701,7 +8864,10 @@ impl Batch {
                 // own darkening curve (§6).
                 tex::Palette::light_scale(intensity).clamp(0.02, 2.0)
             };
-            self.colors.push([l, l, l, 1.0]);
+            // The alpha channel is free in this shader and carries the surface's cel: a world texture
+            // with more than one frame is packed into one column (like a sprite), and `level.wesl`
+            // folds `cel` into `v`. A single-cel material ignores it.
+            self.colors.push([l, l, l, cel]);
         }
 
         for k in 1..n.saturating_sub(1) {
@@ -8925,7 +9091,7 @@ fn audit(gobs: &gob::GobSet) -> Result<(), String> {
         // Build the actual draw geometry, headless: a level whose surfaces pass the
         // index checks can still produce no triangles (degenerate or collinear
         // polygons), and that would render as an empty world with no error.
-        let (batches, _) = build_world(&level, &Default::default(), &Default::default());
+        let (batches, _) = build_world(&level, &Default::default(), &Default::default(), &[]);
         let world_tris: usize = batches.values().map(|b| b.indices.len() / 3).sum();
         let empty_batches = batches.values().filter(|b| b.indices.is_empty()).count();
         if textured > 0 && world_tris == 0 {
@@ -9713,6 +9879,13 @@ fn spawn_models(
     (entities, actors)
 }
 
+/// The level shader's cel remap (`level.wesl`), in Rust so the gate can check the arithmetic on
+/// numbers instead of trusting a comment: the mesh's `v` is texel space over the whole strip, so
+/// `v * cels` is cel units, and the wrap happens there before the band is added.
+fn cel_v(v: f32, cel: f32, cels: f32) -> f32 {
+    ((v * cels).fract() + cel) / cels
+}
+
 /// Whether a thing is the body the camera follows, and so must not be drawn.
 ///
 /// The level places its player starts as `walkplayer` rows — `03katarn.jkl` has four, and every
@@ -9941,6 +10114,7 @@ fn build_world(
     level: &jkl::Level,
     images: &HashMap<i32, Image>,
     hidden: &std::collections::BTreeSet<usize>,
+    cels: &[f32],
 ) -> (HashMap<(usize, i32), Batch>, usize) {
     let claims = collide::surface_claims(level);
     let mut batches: HashMap<(usize, i32), Batch> = HashMap::new();
@@ -9951,6 +10125,9 @@ fn build_world(
             skipped += 1;
             continue;
         }
+        // A surface's frame comes from the script (`SetWallCel`, `SurfaceAnim`), and every surface
+        // starts at cel 0 — the `.jkl` row carries no cel of its own.
+        let cel = cels.get(index).copied().unwrap_or(0.0).max(0.0);
         let tex_size = images
             .get(&surface.material)
             .map(|img| {
@@ -9965,13 +10142,16 @@ fn build_world(
         // leaves it on screen as long as another is visible.
         let owners = claims.get(index).map(Vec::as_slice).unwrap_or(&[]);
         if owners.is_empty() {
-            batches.entry((usize::MAX, surface.material)).or_default().push_polygon(level, surface, tex_size);
+            batches
+                .entry((usize::MAX, surface.material))
+                .or_default()
+                .push_polygon(level, surface, tex_size, cel);
         }
         for &sector in owners {
             batches
                 .entry((sector, surface.material))
                 .or_default()
-                .push_polygon(level, surface, tex_size);
+                .push_polygon(level, surface, tex_size, cel);
         }
     }
     (batches, skipped)
@@ -9990,25 +10170,32 @@ fn rebuild_surfaces(
     world: Option<Res<World>>,
     batches: Option<Res<SurfaceBatches>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut seen: Local<u32>,
+    mut seen: Local<(u32, u32)>,
 ) {
     let (Some(sim), Some(world), Some(batches)) = (sim, world, batches) else { return };
-    let (epoch, hidden) = {
+    let (epoch, hidden, cels) = {
         let rt = sim.world.borrow();
         (
-            rt.geomode_epoch,
+            // Both the geomode and the cel changes are baked into the mesh; the pair is what the
+            // rebuild watches, and only a geomode change is worth a line of log (a cel animation
+            // steps several times a second).
+            (rt.geomode_epoch, rt.cel_epoch),
             rt.face_geomode
                 .iter()
                 .filter(|(_, mode)| **mode == 0)
                 .map(|(surface, _)| *surface)
                 .collect::<std::collections::BTreeSet<usize>>(),
+            // The surface cels are what a script's `SetWallCel`/`SurfaceAnim` wrote; the mesh folds
+            // each one into its vertices' alpha for the shader to apply.
+            rt.surfaces.iter().map(|s| s.cel).collect::<Vec<f32>>(),
         )
     };
     if epoch == *seen {
         return;
     }
+    let geomode_moved = epoch.0 != seen.0;
     *seen = epoch;
-    let (built, _) = build_world(&world.level, &world.images, &hidden);
+    let (built, _) = build_world(&world.level, &world.images, &hidden, &cels);
     let mut patched = 0usize;
     for (key, handle) in &batches.0 {
         let Some(batch) = built.get(key).cloned() else { continue };
@@ -10017,10 +10204,12 @@ fn rebuild_surfaces(
             patched += 1;
         }
     }
-    println!(
-        "surfaces: geomode changed, {patched} batch(es) rebuilt with {} surface(s) hidden",
-        hidden.len()
-    );
+    if geomode_moved {
+        println!(
+            "surfaces: geomode changed, {patched} batch(es) rebuilt with {} surface(s) hidden",
+            hidden.len()
+        );
+    }
 }
 
 /// Triangles a model contributes, counting each face as `nverts - 2`.
@@ -12264,7 +12453,7 @@ fn setup(
     // Surfaces a script has hidden before the world was built (`GEOMETRY_NONE`). Scripts start before
     // the meshes are built, so a level that hides glass in `startup` is already accounted for here;
     // anything later goes through `rebuild_surfaces`.
-    let (batches, skipped) = build_world(level, &world.images, &Default::default());
+    let (batches, skipped) = build_world(level, &world.images, &Default::default(), &[]);
     let no_mat = level.surfaces.iter().filter(|s| s.material < 0).count();
     let few_verts = level.surfaces.iter().filter(|s| s.verts.len() < 3).count();
     println!(
@@ -12336,7 +12525,10 @@ fn setup(
                     let texture = world.images.get(&mat_idx).map(|i| images.add(i.clone()));
                     level_materials.add(level_mat::LevelMaterial {
                         base_color_texture: texture,
-                        params: level_params,
+                        params: level_mat::LevelParams {
+                            cels: world.material_cels.get(&mat_idx).copied().unwrap_or(1) as f32,
+                            ..level_params
+                        },
                     })
                 })
                 .clone();
@@ -12413,6 +12605,13 @@ fn setup(
         elapsed: 0.0,
         reported: 0.0,
     };
+    // How many cels each surface's material has, so `SurfaceAnim` knows where to wrap. The runtime
+    // has no file access, so the loader hands the counts over once.
+    sim.world.borrow_mut().surface_cels = level
+        .surfaces
+        .iter()
+        .map(|s| world.material_cels.get(&s.material).copied().unwrap_or(1))
+        .collect();
     for inst in &level.cogs {
         let Some(script) = world.cogs.get(&inst.script) else { continue };
         let mut vm = cog::Vm::with_world(sim.world.clone());
