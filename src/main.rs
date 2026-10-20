@@ -1904,6 +1904,12 @@ fn main() {
         );
         let mut delivered = 0usize;
         let mut completed = false;
+        let player_index = sim_world
+            .borrow()
+            .templates
+            .iter()
+            .position(|t| t.eq_ignore_ascii_case("walkplayer"));
+        let mut checked_invuln = false;
         for _ in 0..40 {
             // The bus, exactly as `deliver_cog_messages` runs it.
             loop {
@@ -1936,6 +1942,21 @@ fn main() {
                     }
                 }
             }
+            // The handler freezes Kyle as invulnerable (`SetActorFlags(player, 0x8)`) *before* it
+            // sleeps, so the flag has to be set with the label suspended, and cleared again before
+            // `jkEndLevel` — that is the pair `sithActor_DamageActor` reads.
+            if !checked_invuln
+                && let Some(player) = player_index
+            {
+                let flags = sim_world.borrow().actor_flags.get(&player).copied().unwrap_or(0);
+                let invulnerable = flags & runtime::AF_INVULNERABLE != 0;
+                println!("endlevel: player invulnerable while the handler sleeps: {invulnerable}");
+                assert!(
+                    invulnerable,
+                    "the level-end handler did not make the player invulnerable (flags {flags:#x})"
+                );
+                checked_invuln = true;
+            }
             if sim_world.borrow().level_complete {
                 completed = true;
                 break;
@@ -1960,6 +1981,15 @@ fn main() {
             sim_world.borrow().inv.get(&100).copied().unwrap_or(0.0)
         );
         assert!(completed, "the goal -> master cog chain did not end the level");
+        // ...and vulnerable again, or the freeze would outlive the level.
+        if let Some(player) = player_index {
+            let flags = sim_world.borrow().actor_flags.get(&player).copied().unwrap_or(0);
+            assert_eq!(
+                flags & runtime::AF_INVULNERABLE,
+                0,
+                "the handler left the player invulnerable ({flags:#x})"
+            );
+        }
         println!("--- endlevel check passed ---");
         return;
     }
@@ -3052,12 +3082,12 @@ fn main() {
         let spawn = rt.things[player].pos;
         let (health, shields) = (rt.things[player].health, rt.player_shields);
         println!("die: player starts with {health:.0} health and {shields:.0} shields");
-        let (shields, health) = rt.damage_player(30.0);
+        let (shields, health) = rt.damage_player(30.0, runtime::DAMAGE_IMPACT);
         println!("die: 30 damage -> {shields:.0} shield(s), {health:.0} health");
         assert!((shields - (100.0 - 30.0)).abs() < 0.01, "the shields did not absorb it");
         assert!((health - 100.0).abs() < 0.01, "health moved before the shields were gone");
         // Through the shields and into health: 70 shield + 130 health is lethal.
-        let (shields, health) = rt.damage_player(200.0);
+        let (shields, health) = rt.damage_player(200.0, runtime::DAMAGE_IMPACT);
         println!("die: 200 more -> {shields:.0} shield(s), {health:.0} health");
         assert_eq!(shields, 0.0, "shields should be spent");
         assert_eq!(health, 0.0, "the player should be dead");
@@ -10569,7 +10599,10 @@ fn apply_fall_damage(sim: Option<Res<Sim>>, player: Option<ResMut<Player>>) {   
     else {
         return;
     };
-    let left = rt.damage(index as i64, damage);
+    // A landing is a **fall**, not an impact: `sithActor_DamageActor` exempts `SITH_DAMAGE_FALL`
+    // (0x40) from `SITH_AF_INVULNERABLE`, which is why the level-end freeze does not save a body
+    // that drops off a ledge.
+    let left = rt.damage_typed(index as i64, damage, runtime::DAMAGE_FALL);
     // `damage` is the generic path (messages, `destroyed`); the player's *death* flag is the one
     // `sithPlayer_KillPlayer` sets, and without it a lethal landing left the body dead on its feet with
     // nothing to bring it back. The fall death in `walk_player` takes this same road.
@@ -10899,7 +10932,7 @@ fn projectile_hits(
         }
         for victim in rt.explode_hits(*explosion) {
             if Some(victim) == player_index_blasts {
-                let (shields, health) = rt.damage_player(damage);
+                let (shields, health) = rt.damage_player(damage, runtime::DAMAGE_IMPACT);
                 println!("blast {template}: the player took {damage:.0}, {shields:.0} shield(s), {health:.0} health");
             } else {
                 let left = rt.damage(victim as i64, damage);
@@ -10914,13 +10947,13 @@ fn projectile_hits(
     for (shot, target, damage) in impacts {
         // The player has a shield bar in front of their health; everything else is health only.
         let left = if Some(target) == player_index {
-            let (shields, health) = rt.damage_player(damage);
+            let (shields, health) = rt.damage_player(damage, runtime::DAMAGE_ENERGY);
             println!(
                 "hit: the player took {damage:.0}, {shields:.0} shield(s) and {health:.0} health left"
             );
             health
         } else {
-            rt.damage(target as i64, damage)
+            rt.damage_typed(target as i64, damage, runtime::DAMAGE_ENERGY)
         };
         rt.things[shot].destroyed = true;
         if let Some(entities) = created.drawn.remove(&shot) {

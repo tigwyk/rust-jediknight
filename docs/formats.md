@@ -2306,6 +2306,32 @@ grows and fades; the engine's explosion animates over its own frames and expires
 here is the *identity* — one template, spawned at the impact, hurting what it covers — which is the
 part the level scripts and the damage model depend on.
 
+**Damage has a kind, and invulnerability has one exception.** `sithActor_DamageActor`
+(`JK.EXE:004ecc90`) takes a `SithDamageType` word — impact 0x1, energy 0x2, fire 0x4, force 0x8,
+saber 0x10, drown 0x20, fall 0x40 — and checks `actor->flags & SITH_AF_INVULNERABLE` (0x8) *before*
+anything else:
+
+```c
+if ((pActor->actorParams.flags & SITH_AF_INVULNERABLE) != 0 && damageType != 0x40) return 0.0;
+```
+
+So a scripted invulnerability swallows everything except a fall. `Runtime::damage_typed` carries the
+kind: bolts arrive as energy, landings as falls, and the player's own path (`damage_player`, which has
+the shield bar in front of health) honours the same guard, since the engine's actor branch covers the
+player too. `01_endlevel.cog` is where it shows: its `user0` handler sets `SetActorFlags(player, 0x8)`
+and freezes Kyle, sleeps three seconds, then clears it — `--endlevel` watches the flag go set while the
+label is suspended and cleared before `jkEndLevel`:
+
+```text
+endlevel: player invulnerable while the handler sleeps: true
+endlevel: 1 message(s) delivered, goal bin 100 = 3, level_complete true
+```
+
+Still unported from the same function: the hurt sound per type (`SITH_SC_HURTENERGY`, `HURTFIRE`,
+`HURTMAGIC`, `HURTSPECIAL`), the 0.1 damage multiplier for a limb hit, and letting a cog's `damaged`
+handler return a replacement amount (`sithCog_ThingSendMessageEx` with the type as an argument — the
+port's messages carry no arguments yet).
+
 **Force seeing: the script was running and the mode verbs were falling through.** `--force seeing`
 spent its mana (400 → 370, the script's own `ChangeInv(player, 14, -30)`) and called
 `EnableIRMode`, `DisableIRMode`, `ClearMapModeFlags` and `ChangeSoundVol` — and none of the mode

@@ -148,6 +148,13 @@ pub const PULL_RANGE: f32 = 30.0;
 pub const PULL_REACH: f32 = 2.0;
 /// `SITHBIN_GOAL00` (`types_enums.h`): the first of the goal counters `SetGoalFlags` writes.
 pub const GOAL_BIN: i32 = 100;
+/// `SithDamageType`: what kind of hurt, as a bitmask. Only the bits this port distinguishes.
+pub const DAMAGE_IMPACT: u32 = 0x01;
+pub const DAMAGE_ENERGY: u32 = 0x02;
+pub const DAMAGE_FALL: u32 = 0x40;
+/// `SITH_AF_INVULNERABLE`: `actor->flags` bit 3. `sithActor_DamageActor` checks it before anything
+/// else, so `SetActorFlags(player, 0x8)` is how a script makes someone untouchable.
+pub const AF_INVULNERABLE: u32 = 0x8;
 /// A template's `type=` word as the engine's `SithThingType` number.
 ///
 /// From `types_enums.h`: camera 1, actor 2, weapon 3, debris 4, item 5, explosion 6,
@@ -1781,8 +1788,16 @@ impl Runtime {
     /// second number never moved: `--hit` showed the player taking 9 straight off health while the
     /// shields read 100. This is the engine's order — `sithPlayer_Update` spends shields before
     /// health and only dies when health reaches 0.
-    pub fn damage_player(&mut self, amount: f32) -> (f32, f32) {
+    pub fn damage_player(&mut self, amount: f32, kind: u32) -> (f32, f32) {
         let player = self.player_thing();
+        // The player goes through the same guard as any actor (`sithActor_DamageActor` takes the
+        // player branch too), so a scripted invulnerability covers bolts as well as everything else.
+        if self.invulnerable(player, kind) {
+            return (
+                self.player_shields,
+                self.things.get(player).map(|t| t.health).unwrap_or(0.0),
+            );
+        }
         let mut left = amount;
         if self.player_shields > 0.0 {
             let absorbed = left.min(self.player_shields);
@@ -1847,7 +1862,21 @@ impl Runtime {
 
     /// `DamageThing` as a call, for code that holds no `Value`.
     pub fn damage(&mut self, target: i64, amount: f32) -> f32 {
+        self.damage_typed(target, amount, DAMAGE_IMPACT)
+    }
+
+    /// Damage of a known **kind**: the engine's word is a bitmask (`SithDamageType`, `types_enums.h`)
+    /// — impact 0x1, energy 0x2, fire 0x4, force 0x8, saber 0x10, drown 0x20, fall 0x40.
+    ///
+    /// `sithActor_DamageActor` (`JK.EXE:004ecc90`) checks `actor->flags & SITH_AF_INVULNERABLE` before
+    /// anything else and returns without damage **unless** the type is a fall, so scripted
+    /// invulnerability does not save anyone from a long drop. `01_endlevel.cog` sets that flag while it
+    /// freezes Kyle for the level-end fade.
+    pub fn damage_typed(&mut self, target: i64, amount: f32, kind: u32) -> f32 {
         let Ok(index) = usize::try_from(target) else { return 0.0 };
+        if self.invulnerable(index, kind) {
+            return self.things.get(index).map(|t| t.health).unwrap_or(0.0);
+        }
         let mut died = false;
         let left = if let Some(t) = self.things.get_mut(index) {
             t.health -= amount;
@@ -1869,6 +1898,12 @@ impl Runtime {
             }
         }
         left
+    }
+
+    /// `actor->flags & SITH_AF_INVULNERABLE` with the engine's fall exception.
+    fn invulnerable(&self, index: usize, kind: u32) -> bool {
+        kind != DAMAGE_FALL
+            && self.actor_flags.get(&index).copied().unwrap_or(0) & AF_INVULNERABLE != 0
     }
 
     /// The damage this template deals (`damage=`), for a projectile that hits.
@@ -3236,6 +3271,15 @@ mod tests {
         assert_eq!(rt.call("GetInv", &[Value::Num(0.0), Value::Num(100.0)]), Value::Num(3.0));
         rt.call("ClearGoalFlags", &[Value::Num(0.0), Value::Num(0.0), Value::Num(1.0)]);
         assert_eq!(rt.call("GetInv", &[Value::Num(0.0), Value::Num(100.0)]), Value::Num(2.0));
+        // `SITH_AF_INVULNERABLE` (0x8, `sithActor_DamageActor`) swallows a hit but not a fall:
+        // 0x40 is the one type the engine exempts from the flag.
+        rt.call("SetActorFlags", &[Value::Num(0.0), Value::Num(8.0)]);
+        assert_eq!(rt.damage(0, 30.0), 100.0, "an invulnerable thing took a hit");
+        assert_eq!(
+            rt.damage_typed(0, 30.0, DAMAGE_FALL),
+            70.0,
+            "the fall exception did not get through"
+        );
         // `SetMasterCog`/`GetMasterCog` are the engine's one global master index; unset is -1, and
         // the shipped scripts only clear it by resolving an index to no cog.
         assert_eq!(rt.call("GetMasterCog", &[]), Value::Num(-1.0));
