@@ -2930,6 +2930,51 @@ fn main() {
         }
         assert!(ran > 20, "the item scripts did not run ({ran} labels)");
         println!("weapons: {} distinct verb(s) with no answer", ranked.len());
+
+        // The end-to-end the routing question needs: draw the bryar (`activated:` arms it through
+        // `ActivateWeapon`), then pull the trigger (its own `fire:` spends bin 11 and calls
+        // `FireProjectile` with its own `projectile=` template). Nothing here is the port's firing
+        // path — this is the script doing the work.
+        {
+            let name = "weap_bryar.cog";
+            // Not every item script is in a level's own table, so fall back to the archive the way
+            // the measurement above does.
+            let script = world.cogs.get(name).or_else(|| {
+                gobs.read(name)
+                    .and_then(|d| cog::parse(&String::from_utf8_lossy(&d)).ok())
+                    .map(|parsed| Box::leak(Box::new(parsed)) as &cog::Cog)
+            });
+            let Some(script) = script else {
+                println!("weapons: `{name}` did not load for the end-to-end");
+                return;
+            };
+            let mut vm = cog::Vm::with_world(sim_world.clone());
+            script.bind(&mut vm, &[]);
+            let player = sim_world.borrow().player_thing();
+            // The script checks its own ammo first, so give the player rounds the way a pickup would;
+            // otherwise `fire:` correctly refuses and no shot can happen.
+            sim_world.borrow_mut().set_bin(11, 50.0);
+            vm.sender_ref = player as i64;
+            vm.sender = player as i64;
+            for label in ["activated", "fire"] {
+                let outcome = script
+                    .label(label)
+                    .map(|_| vm.run_label(script, label))
+                    .transpose();
+                if let Err(e) = outcome {
+                    println!("weapons: `{label}` did not run: {e:?}");
+                }
+            }
+            let rt = sim_world.borrow();
+            let spawned = rt.things.len().saturating_sub(world.level.things.len());
+            println!(
+                "weapons: the bryar's own `activated:` armed it ({:?}), and its `fire:` spawned {spawned} thing(s) with {:.0} round(s) left in bin 11",
+                rt.weapon_cog.map(|c| c.0),
+                rt.inv.get(&11).copied().unwrap_or(0.0)
+            );
+            assert!(rt.weapon_cog.is_some(), "`activated:` did not arm the weapon cog");
+            assert!(spawned > 0, "the bryar's `fire:` spawned nothing");
+        }
         println!("--- weapons check passed ---");
         return;
     }
@@ -13858,6 +13903,13 @@ fn fire_player(
     if rt.time < rt.next_fire {
         return;
     }
+    // A weapon cog the script armed (`ActivateWeapon` from its own `activated:`) owns the shot: send
+    // it `fire` and let its policy spend the ammo and call `FireProjectile`, which is the engine's
+    // split — the cog is the policy, the verb is the mechanism. Firing here as well would double it.
+    if let Some((cog, _, _)) = rt.weapon_cog {
+        rt.messages.push(("fire".to_string(), Some(index), Some(cog), [0.0; 2]));
+        return;
+    }
     // The saber is not a projectile: a swing traces the blade and spends no ammo. `jkSetSaberInfo`
     // is what gives the player one, and the ending scripts hand it out on the light path.
     if runtime::Runtime::is_saber(&weapon) && rt.saber.contains_key(&index) {
@@ -13923,10 +13975,21 @@ fn load_item_cogs(mut sim: Option<ResMut<Sim>>, world: Option<Res<World>>) {
         } else {
             false
         };
+        // `activated:` is what a weapon cog arms itself from (`ActivateWeapon(player, …)`), and the
+        // engine sends it when the weapon is drawn — which is now, since the player just got it.
+        let mut armed = false;
+        if script.label("activated").is_some() {
+            if let Ok(player) = i64::try_from(sim.world.borrow().player_thing()) {
+                vm.sender = player;
+                vm.sender_ref = player;
+            }
+            armed = vm.run_label(script, "activated").is_ok();
+        }
         println!(
-            "items: started `{name}` for the player (cog {}, startup {})",
+            "items: started `{name}` for the player (cog {}, startup {}, activated {})",
             vm.cog_index,
-            if started { "ran" } else { "has none" }
+            if started { "ran" } else { "has none" },
+            if armed { "ran" } else { "none" }
         );
         sim.world.borrow_mut().spawned_cogs.insert(key);
         sim.instances.push((name.clone(), vm));

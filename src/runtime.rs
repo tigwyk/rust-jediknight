@@ -4102,16 +4102,27 @@ impl Runtime {
             }
             // `FireProjectile(thing)`: fire the thing's own `weapon=` template, which is what a scripted
             // turret or an NPC does (`sithCogFunctionThing_FireProjectile`).
+            // `FireProjectile(shooter, template, sound, mode, fireOffset, aimError, scale, scaleFlags,
+            // autoaimFov, autoaimMaxDist)`: the **template** is the projectile a script names
+            // (`projectile=+bryarbolt` in a weapon cog's own symbols), and `aimError` is the spread
+            // vector. A script that fires is naming what to fire, not asking for the shooter's default.
             "fireprojectile" => {
                 let Some(index) = usize::try_from(idx(0)).ok() else { return Value::Num(-1.0) };
-                let Some(weapon) = self
-                    .templates
-                    .get(index)
-                    .and_then(|name| self.template_weapon.get(name).cloned())
-                else {
-                    return Value::Num(-1.0);
+                let named = match args.get(1) {
+                    Some(Value::Str(name)) if self.template_damage.contains_key(&name.to_ascii_lowercase()) => {
+                        Some(name.clone())
+                    }
+                    _ => None,
                 };
-                Value::Num(self.fire(index as i64, &weapon).map(|i| i as f64).unwrap_or(-1.0))
+                let weapon = named.or_else(|| {
+                    self.templates
+                        .get(index)
+                        .and_then(|name| self.template_weapon.get(name).cloned())
+                });
+                let Some(weapon) = weapon else { return Value::Num(-1.0) };
+                let error = args.get(5).map(vec3).map(|v| v[2]).unwrap_or(0.0);
+                let shot = self.fire_with_spread(index as i64, &weapon, error as f32);
+                Value::Num(shot.map(|i| i as f64).unwrap_or(-1.0))
             }
             // `SyncThingPos`/`SyncSurface` and their siblings: multiplayer state pushes. A single-player
             // build has nobody to push to, so they are answered and do nothing — the engine's own arm is
