@@ -93,6 +93,19 @@ impl ItemDef {
     }
 }
 
+/// The items a player carries, from the inventory bins in `misc\items.dat`'s own order.
+///
+/// The list down the right of the status bar is this: every bin with a count, named the way the
+/// table names it. Nothing filled it before, so the panel was blank however much the player held.
+pub fn carried(inv: &std::collections::BTreeMap<i32, f32>, defs: &[ItemDef]) -> Vec<(String, i32)> {
+    defs.iter()
+        .filter_map(|def| {
+            let count = inv.get(&def.id).copied().unwrap_or(0.0).round() as i32;
+            (count > 0).then(|| (def.name.clone(), count))
+        })
+        .collect()
+}
+
 /// Parse `misc\items.dat`: `name id min max flags [args]` per line, `#` comments.
 pub fn items(text: &str) -> Vec<ItemDef> {
     let mut out = Vec::new();
@@ -386,6 +399,38 @@ fn load_font(gobs: &gob::GobSet, name: &str) -> Option<sft::Font> {
 
 fn load(gobs: &gob::GobSet, name: &str) -> Option<bm::Bm> {
     bm::parse(&gobs.read(name)?)
+}
+
+#[cfg(test)]
+mod carried_tests {
+    use super::*;
+
+    /// The status bar's strip: only bins with a count, in the table's own order.
+    #[test]
+    fn the_carried_list_is_the_bins_that_are_held() {
+        let defs = items(
+            "bryar_pistol 11 min 0 max 1 flags 0x5\n\
+             bactatank 40 min 0 max 5 flags 0x102 cog=item_bacta.cog\n\
+             keyred 29 min 0 max 1 flags 0x0\n",
+        );
+        let mut inv = std::collections::BTreeMap::new();
+        inv.insert(40, 2.0);
+        inv.insert(29, 1.0);
+        inv.insert(11, 0.0);
+        // The table's order, not the bins' numeric order: 40 comes before 29 there.
+        assert_eq!(
+            carried(&inv, &defs),
+            vec![("bactatank".to_string(), 2), ("keyred".to_string(), 1)]
+        );
+        // An empty inventory carries nothing, and a fractional count rounds.
+        assert!(carried(&std::collections::BTreeMap::new(), &defs).is_empty());
+        inv.insert(11, 0.6);
+        let bryar = carried(&inv, &defs)
+            .into_iter()
+            .find(|(name, _)| name == "bryar_pistol")
+            .expect("a held bryar is missing from the strip");
+        assert_eq!(bryar.1, 1, "0.6 did not round to 1");
+    }
 }
 
 #[cfg(test)]

@@ -62,6 +62,8 @@ struct World {
     /// `misc\items.dat`'s `cog=` column: inventory bin -> the script that bin runs. Read once at
     /// load and handed to the runtime, which has no file access.
     item_cogs: std::collections::BTreeMap<i32, String>,
+    /// The whole `misc\items.dat` table, so the status bar can name the bins the player holds.
+    item_defs: Vec<hud::ItemDef>,
     /// Material indices whose `tex_type & 2` marks them as portal materials: `sithSurface.c` refuses to
     /// give those a geometry mode, so the engine never draws them. Drawing one seals a doorway.
     /// Lowercase template name -> lowercase `.3do` name.
@@ -3421,6 +3423,11 @@ fn main() {
                 &[cog::Value::Num(player as f64), cog::Value::Num(2.0), cog::Value::Num(2.0)],
             );
             assert_eq!(rt.pending_cogs.len(), 1, "a held bin asked for its script twice");
+            // The status bar draws what the player holds: `hud::carried` is that list, and the
+            // panel stayed blank before because nothing fed it.
+            let shown = hud::carried(&rt.inv, &defs);
+            println!("items: the status bar lists {shown:?}");
+            assert!(!shown.is_empty(), "the status bar has nothing to draw though bins are held");
         }
         // `sithInventory_ActivateBin` + `sithInventory_SendFire`: a bin activated with a delay sends
         // its own cog a `fire` when the delay is up, and keeps doing it while the bin stays active —
@@ -11437,6 +11444,10 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
             .into_iter()
             .filter_map(|def| def.cog.map(|cog| (def.id, cog)))
             .collect(),
+        item_defs: gobs
+            .read("misc\\items.dat")
+            .map(|d| hud::items(&String::from_utf8_lossy(&d)))
+            .unwrap_or_default(),
         material_cels,
         template_model,
         models,
@@ -14479,11 +14490,12 @@ fn apply_fall_damage(sim: Option<Res<Sim>>, player: Option<ResMut<Player>>) {   
 
 fn health_follows_damage(
     sim: Option<Res<Sim>>,
+    world: Option<Res<World>>,
     player: Option<ResMut<Player>>,
     ammo_bin: Option<Res<AmmoBin>>,
     mut overlay: Option<ResMut<Overlay>>,
 ) {
-    let (Some(sim), Some(mut player)) = (sim, player) else { return };
+    let (Some(sim), Some(mut player), Some(world)) = (sim, player, world) else { return };
     let rt = sim.world.borrow();
     let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")) else {
         return;
@@ -14511,6 +14523,19 @@ fn health_follows_damage(
     {
         overlay.hud.ammo = ammo;
         overlay.dirty = true;
+    }
+    // The status bar's inventory strip: every bin the player holds, named by `misc\items.dat`. The
+    // HUD was never fed this, so the panel stayed blank however much was picked up.
+    if let Some(overlay) = overlay.as_mut() {
+        let carried = hud::carried(&rt.inv, &world.item_defs);
+        if overlay.hud.carried != carried {
+            // The "item in hand" cell takes the first thing carried: there is no inventory screen to
+            // select one from yet, and a panel that names nothing is what the player sees now.
+            overlay.hud.item = carried.first().map(|(name, _)| name.clone());
+            overlay.hud.item_count = carried.first().map(|(_, count)| *count).unwrap_or(0);
+            overlay.hud.carried = carried;
+            overlay.dirty = true;
+        }
     }
 }
 
