@@ -180,6 +180,12 @@ pub fn play_cutscene(
 ) {
     let Some(mut cutscene) = cutscene else { return };
     cutscene.advance(time.delta_secs());
+    if std::env::var_os("BK_FILM_TRACE").is_some() && cutscene.at % 120 == 0 {
+        println!(
+            "film: frame {} of {}, finished {}",
+            cutscene.at, cutscene.total, cutscene.finished
+        );
+    }
     let (width, height) = (overlay.canvas.width, overlay.canvas.height);
     let frame = cutscene.current().to_vec();
     blit(&mut overlay.canvas.rgba, width, height, &frame);

@@ -15376,7 +15376,7 @@ fn goal_probe(
     mut player: Option<ResMut<Player>>,
     plan: Option<Res<FlowPlan>>,
     sim: Option<Res<Sim>>,
-    mut state: Local<(u32, bool, usize)>,
+    mut state: Local<(u32, bool, usize, bool)>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if !probe.enabled {
@@ -15440,12 +15440,33 @@ fn goal_probe(
     // end of the level and the successor's name.
     if state.0 > 120 {
         if sim.world.borrow().level_complete {
-            let next = plan.as_deref().and_then(|p| p.next.clone());
-            println!(
-                "goal: level complete after {} frames, next {:?}",
-                state.0,
-                next.as_deref().unwrap_or("(end of campaign)")
-            );
+            if !state.3 {
+                state.3 = true;
+                let next = plan.as_deref().and_then(|p| p.next.clone());
+                println!(
+                    "goal: level complete after {} frames, next {:?}",
+                    state.0,
+                    next.as_deref().unwrap_or("(end of campaign)")
+                );
+            }
+            // `BK_GOAL_SWAP=1` keeps the probe alive through the film so the whole handover can be
+            // watched once by hand. It is not the default: 992 frames of film is a minute of wall
+            // clock, and a gate that slow is a gate people stop running.
+            if std::env::var_os("BK_GOAL_SWAP").is_some() && state.2 != 0 {
+                if world.level.sectors.len() != state.2 {
+                    println!(
+                        "goal: the next level loaded after {} frames ({} sectors)",
+                        state.0,
+                        world.level.sectors.len()
+                    );
+                    println!("--- goal check passed ---");
+                    exit.write(AppExit::Success);
+                } else if state.0 > 2400 {
+                    println!("goal: FAIL the film never handed over");
+                    exit.write(AppExit::Success);
+                }
+                return;
+            }
             println!("--- goal check passed ---");
             exit.write(AppExit::Success);
         } else if state.0 > 900 {
