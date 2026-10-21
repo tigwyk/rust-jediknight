@@ -18820,8 +18820,14 @@ fn walk_player(
     // A capture runs on a fixed step, so the same command reaches the same pose every time: with the
     // wall-clock delta, the player was still falling at one frame count and settled at another, and
     // two identical runs differed in half their pixels (§16.13).
+    // A pinned step on request (`BK_FIXED_DT`): the live checks drive real input and this frame time
+    // ranges from 0.008 s to the 0.1 clamp depending on the level's weight, so 30 frames is anywhere
+    // from a quarter second to three. A fixed step makes a check depend on the code, not the machine —
+    // and it is what exposed the jump that never lands (`BK_FIXED_DT=0.0333`, level 1).
     let dt = if overview.capture {
         1.0 / 60.0
+    } else if std::env::var_os("BK_FIXED_DT").is_some() {
+        env_f32("BK_FIXED_DT", 1.0 / 30.0).clamp(1.0 / 240.0, 0.1)
     } else {
         time.delta_secs().min(0.1)
     };
