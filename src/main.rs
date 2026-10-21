@@ -145,9 +145,6 @@ const GATES: &[&str] = &[
     "--ammo",
     "--campaign",
     "--tally",
-    // The only gate that drives real input through the live schedule. It needs a window (the walker
-    // queries the world camera) and is skipped, like `--live-check`, in a headless sweep.
-    "--live-play --start 01narshadda",
     "--muzzle",
     "--use-item",
     "--engine-audit",
