@@ -118,7 +118,11 @@ pub fn items(text: &str) -> Vec<ItemDef> {
         let (Some(name), Some(id), Some(max)) = (rest.first(), rest.get(1), rest.get(3)) else {
             continue;
         };
-        let (Ok(id), Ok(max)) = (id.parse(), max.parse()) else { continue };
+        // `max` is an integer in most rows but a decimal in the force ones (`f_jump … 4.0 0x108
+        // cog=force_jump.cog`), and an integer-only parse silently dropped every force power: 41 rows
+        // name a cog, only 24 reached the map, and bin 21 was among the missing.
+        let (Ok(id), Ok(max)) = (id.parse::<i32>(), max.parse::<f32>()) else { continue };
+        let max = max.round() as i32;
         // `jkHudInv_ItemDatLoad`: name id min max flags, then `key=value` words, where
         // `cog=<path>` names that bin's script.
         let flags = rest.get(4).copied().unwrap_or("").to_string();
@@ -501,6 +505,20 @@ mod items_tests {
         assert_eq!(defs[0].flags, "0x024");
         assert_eq!(defs[0].max, 1);
         assert_eq!(defs[1].cog, None, "an item with no cog grew one");
+    }
+
+    /// The force rows spell `max` as a decimal — `f_jump 21 0 4.0 0x108 cog=force_jump.cog` — and an
+    /// integer-only parse dropped all eight powers without saying so: 41 rows in the shipped file name
+    /// a cog, only 24 reached the map, and `set_bin(21)` then queued nothing.
+    #[test]
+    fn the_force_rows_survive_a_decimal_maximum() {
+        let text = "f_jump 21 0 4.0 0x108 cog=force_jump.cog\nf_speed 22 0 4.5 0x108\n";
+        let defs = items(text);
+        assert_eq!(defs.len(), 2, "a decimal `max` dropped the row");
+        assert_eq!(defs[0].id, 21);
+        assert_eq!(defs[0].max, 4);
+        assert_eq!(defs[0].cog.as_deref(), Some("force_jump.cog"));
+        assert_eq!(defs[1].max, 5, "4.5 should round to 5");
     }
 }
 

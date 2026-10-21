@@ -702,7 +702,7 @@ is why it was recoverable.
 ## Verification
 
 Every check in one page: [docs/gates.txt](docs/gates.txt) records each flag, its exit code and the
-number it printed against this install — **30 gates, 0 failures**, plus 76 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
+number it printed against this install — **55 gates, 0 failures**, plus 111 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
 
 `--check` on level 1 (`jkl\01narshadda.jkl`) reports, and asserts:
 
@@ -766,7 +766,10 @@ the summary, is what each check prints:
   shoot the weapon out of an actor's hand.
 - **Only some force powers are exercised.** Jump, speed, healing, seeing, pull and grip have gates; the
   other powers in the menu's own table (throw, lightning, destruction, protection, absorb, blinding,
-  deadly sight…) have their scripts and now their verbs, but nothing checks that they do anything.
+  deadly sight…) have their scripts and now their verbs, but nothing checks that they do anything. The
+  *acquisition* path is now the engine's own — a bin that goes from empty to held runs the `cog=` that
+  `misc\items.dat` names for it — and it had been dead for all eight force bins because their `max`
+  column is a decimal (`4.0`) and the parse was integer.
 - **Puppet animation is partly wired.** Every actor's `stand` state animates, and death plays once and
   holds; walk, run, attack and crouch states are parsed but not driven by motion.
 - **AI steering is greedy, not a search.** Actors walk at what they see and step through doorways when
