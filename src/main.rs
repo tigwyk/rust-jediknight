@@ -15326,6 +15326,8 @@ fn live_play_drive(
     player: Option<Res<Player>>,
     sim: Option<Res<Sim>>,
     ammo: Option<Res<AmmoBin>>,
+    count: Option<Res<TriggerCount>>,
+    world: Option<Res<World>>,
     cam: Query<Entity, (With<Camera3d>, Without<OverlayQuad>)>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -15400,6 +15402,35 @@ fn live_play_drive(
     state.frame += 1;
     // Tracked every frame, not only at the end: if the body moves and then snaps back, the summary
     // at the end says "moved 0.00" and hides the cause.
+    if let Some(player) = player.as_deref() {
+        if state.sector_last != Some(player.sector) {
+            if state.sector_last.is_some() {
+                state.crossings += 1;
+            }
+            state.sector_last = Some(player.sector);
+            // How many scripts are linked into the room the body just entered. A crossing into a room
+            // nothing is linked to is silent by design; a crossing into a room with links is not.
+            // Only links whose script has an `entered:` label can answer — `sector_enter` skips the rest
+            // — so a level whose links are all `exited:`-only is silent by design, not broken.
+            if let (Some(sim), Some(world)) = (sim.as_deref(), world.as_deref()) {
+                let rt = sim.world.borrow();
+                state.linked_visited += rt
+                    .sector_links
+                    .iter()
+                    .filter(|(_, _, sector)| *sector == player.sector)
+                    .filter(|(instance, _, _)| {
+                        sim.instances
+                            .get(*instance)
+                            .and_then(|(name, _)| world.cogs.get(name))
+                            .is_some_and(|script| script.label("entered").is_some())
+                    })
+                    .count();
+            }
+        }
+        if state.triggers_before == 0 {
+            state.triggers_before = count.as_deref().map(|c| c.0).unwrap_or(0);
+        }
+    }
     if let (Some(start), Some(player)) = (state.start, player.as_deref()) {
         // Horizontal, like the final measurement: a jump adds vertical movement, and counting it made
         // a body that only jumped fail as "moves and snaps back".
@@ -15481,6 +15512,26 @@ fn live_play_drive(
     // Peak horizontal displacement, not the final one: the walk phase sweeps W/D/S/A so the body goes
     // out and comes back, and comparing start with end measured the return trip — a body that walked
     // 0.27 units failed as "did not move at all".
+    let fired_triggers = count
+        .as_deref()
+        .map(|c| c.0.saturating_sub(state.triggers_before))
+        .unwrap_or(0);
+    println!(
+        "live-play: crossed {} sector(s); the level's scripts answered {} of them",
+        state.crossings, fired_triggers
+    );
+    // A level that links cogs to sectors must hear about a crossing, or walking through a room does
+    // nothing — `sithThing_EnterSector` is the whole of every door, lift and cutscene trigger in the
+    // game. A link whose script has no `entered:` label never runs, so the count is the honest one.
+    // Only links **into the body's own sector** can fire on entry: a level with 171 links whose sectors
+    // the player never touches (09fuelstation) answers nothing at spawn, and that is not a defect.
+    let linked = state.linked_visited;
+    // The spawn is a crossing too (`sithThing_EnterSector` runs with no previous sector), which is why
+    // the count is checked whenever the level links anything at all.
+    if linked > 0 && fired_triggers == 0 {
+        println!("live-play: FAIL {linked} sector link(s), but no script answered");
+        failed += 1;
+    }
     if state.max_moved < 0.05 {
         println!("live-play: FAIL the body did not move at all (peak {:.2})", state.max_moved);
         failed += 1;
@@ -15507,7 +15558,9 @@ fn live_play_drive(
     }
     // A jump has to leave the ground; landing is reported but not required, because a body that starts
     // over a drop stays airborne and that is the map's business.
-    if state.jump_frames > 0 && state.jump_peak < 0.2 {
+    // Only when the jump was actually attempted: a body that never touches a floor (static, whose
+    // spawn falls through the world) has already been reported, and cannot be asked to jump.
+    if state.jump_started && state.jump_peak < 0.2 {
         println!("live-play: FAIL Space did not lift the body (peak {:.2})", state.jump_peak);
         failed += 1;
     }
@@ -15530,6 +15583,13 @@ struct LivePlayState {
     jump_base: Option<f32>,
     jump_frames: u32,
     jump_started: bool,
+    /// Sector crossings the body made, and the trigger messages they produced.
+    sector_last: Option<usize>,
+    crossings: usize,
+    triggers_before: usize,
+    /// Links into every sector the body has entered **that could answer**, so a silent entry can be
+    /// told from an unlinked one.
+    linked_visited: usize,
     jump_wait: u32,
     jump_done: bool,
     jump_peak: f32,
