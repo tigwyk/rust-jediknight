@@ -15341,7 +15341,10 @@ fn live_play_drive(
     // them loading before the body exists. 45 walk + 15 fire still measures ~2 units of walking.
     // 60, not 30: at a pinned 1/30 s step the old phase was one second of simulated time spread over
     // four directions, and the body barely left the mark before the direction changed.
-    const WALK_FRAMES: u32 = 60;
+    // 120: the body accelerates (maxthrust 2 / drag 3, so it reaches 0.63 of its top speed in a
+    // third of a second) and 15 frames per direction left it at 0.02 units/s — it never left the mark
+    // on a ramp. 30 frames a direction is half a second of walking.
+    const WALK_FRAMES: u32 = 120;
     // 30, not 15: `fire_player` acts on `just_pressed`, so a held trigger fires at most once and the
     // first click can still land inside a scripted `SetFireWait` cooldown. Fifteen frames was too
     // short for the shot to land at all (01narshadda reported 0 with the shorter phase).
@@ -15413,7 +15416,7 @@ fn live_play_drive(
         // Four directions in turn, because a body can spawn facing a wall: on 02narshadda, 04escapehouse
         // and 09fuelstation `W` produced zero movement while `player.vel` was non-zero, which is a
         // blocked step, not a broken input path. Sweeping the compass asks "can the body move at all".
-        let phase = state.frame / 15;
+        let phase = state.frame / 30;
         for key in [KeyCode::KeyW, KeyCode::KeyD, KeyCode::KeyS, KeyCode::KeyA] {
             keys.release(key);
         }
