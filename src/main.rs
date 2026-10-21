@@ -15361,6 +15361,39 @@ fn live_play_drive(
     if state.start.is_none() {
         state.start = player.as_deref().map(|p| p.pos);
     }
+    // Jump **first**, before the body walks anywhere: it stands on its spawn floor now, and the walk
+    // phase can step off a ledge (16aescapeship ends up falling for the rest of the run, so the jump
+    // was never attempted there). One press, then the flight, then the landing: mashing made the body
+    // re-jump the instant it touched down, so every reading caught it mid-air.
+    if !state.jump_done {
+        let grounded = player.as_deref().is_some_and(|p| p.grounded);
+        state.jump_frames += 1;
+        if !state.jump_started {
+            // Wait for the floor, bounded: a body that never touches one cannot jump, and waiting
+            // forever would leave the check with no verdict at all.
+            if grounded {
+                state.jump_started = true;
+                state.jump_base = player.as_deref().map(|p| p.pos.z);
+                keys.press(KeyCode::Space);
+            } else if state.jump_frames > 90 {
+                state.jump_done = true;
+                println!(
+                    "live-play: the body never settled on a floor in 90 frames, so the jump was not attempted"
+                );
+            }
+            return;
+        }
+        keys.release(KeyCode::Space);
+        if let (Some(base), Some(player)) = (state.jump_base, player.as_deref()) {
+            state.jump_peak = state.jump_peak.max(player.pos.z - base);
+        }
+        // Landed: it left the ground and is back on it. The cap keeps a body that falls out of the
+        // level from stalling the run.
+        if (state.jump_peak > 0.05 && grounded) || state.jump_frames > 180 {
+            state.jump_done = true;
+        }
+        return;
+    }
     state.frame += 1;
     // Tracked every frame, not only at the end: if the body moves and then snaps back, the summary
     // at the end says "moved 0.00" and hides the cause.
@@ -15418,39 +15451,6 @@ fn live_play_drive(
         if let Some(sim) = sim.as_deref() {
             let live = sim.world.borrow().things.iter().filter(|t| !t.destroyed).count();
             state.things_peak = state.things_peak.max(live);
-        }
-        return;
-    }
-    // Jump: **one** real press of Space, then the flight, then the landing. Not a mash: pressing every
-    // other frame made the body jump again the instant it touched down, so the measurement always
-    // caught it mid-air and reported a height it never came back from (level 1: "now 0.49" while the
-    // trace showed it landing at −0.919 between jumps).
-    if state.frame > WALK_FRAMES + FIRE_FRAMES && !state.jump_done {
-        let grounded = player.as_deref().is_some_and(|p| p.grounded);
-        state.jump_frames += 1;
-        if !state.jump_started {
-            // Wait for the floor, bounded: a body that never touches one cannot jump, and waiting
-            // forever would leave the check with no verdict at all.
-            if grounded {
-                state.jump_started = true;
-                state.jump_base = player.as_deref().map(|p| p.pos.z);
-                keys.press(KeyCode::Space);
-            } else if state.jump_frames > 90 {
-                state.jump_done = true;
-                println!(
-                    "live-play: the body never settled on a floor in 90 frames, so the jump was not attempted"
-                );
-            }
-            return;
-        }
-        keys.release(KeyCode::Space);
-        if let (Some(base), Some(player)) = (state.jump_base, player.as_deref()) {
-            state.jump_peak = state.jump_peak.max(player.pos.z - base);
-        }
-        // Landed: it left the ground and is back on it. The cap keeps a body that falls out of the
-        // level from stalling the run.
-        if (state.jump_peak > 0.05 && grounded) || state.jump_frames > 180 {
-            state.jump_done = true;
         }
         return;
     }
