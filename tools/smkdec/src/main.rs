@@ -145,7 +145,11 @@ fn main() {
             hash ^= *byte as u64;
             hash = hash.wrapping_mul(0x100_0000_01b3);
         }
-        std::fs::write(format!("{prefix}{decoded:03}.raw"), &buffer).expect("write frame");
+        let path = format!("{prefix}{decoded:03}.raw");
+        std::fs::write(&path, &buffer).expect("write frame");
+        if std::env::var_os("SMKDEC_TRACE").is_some() && decoded < 3 {
+            eprintln!("wrote {path} ({} bytes)", buffer.len());
+        }
         if buffer.iter().any(|b| *b != 0) && first_ink.is_none() {
             first_ink = Some(decoded);
         }
