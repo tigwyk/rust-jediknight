@@ -154,6 +154,8 @@ const GATES: &[&str] = &[
     "--use-live --start 01narshadda",
     // An actor in a real level shoots at the living body.
     "--ai-live --start 01narshadda",
+    // Force jump as a player action: the cog loads from the archives and the body leaves the floor.
+    "--force-live --start 01narshadda",
     "--muzzle",
     "--use-item",
     "--engine-audit",
@@ -385,6 +387,7 @@ fn main() {
     let mut save_live = false;
     let mut use_live = false;
     let mut ai_live = false;
+    let mut force_live = false;
     // `--uni <key>`: which string file carries a key, and what it says.
     let mut uni_key: Option<String> = None;
     // `--live-all`: every level through the real schedule, one process each.
@@ -718,6 +721,7 @@ fn main() {
             // `--use-live`: the use key against a linked door, through real input.
             "--use-live" => use_live = true,
             "--ai-live" => ai_live = true,
+            "--force-live" => force_live = true,
             "--uni-key" => {
                 i += 1;
                 uni_key = args.get(i).cloned();
@@ -6950,7 +6954,17 @@ fn main() {
             println!("things: this level has no templates");
             return;
         };
-        let Some(a) = (0..rt.things.len()).find(|i| !rt.things[*i].destroyed) else {
+        // A **non-player** thing, when there is one: the player's body is integrated by `walk_player`,
+        // so the runtime's own thrust and path-move loop leaves it alone (`Runtime`'s mover loop), and
+        // an assertion about that loop has to watch something else.
+        let player_at = rt
+            .templates
+            .iter()
+            .position(|t| t.eq_ignore_ascii_case("walkplayer"));
+        let Some(a) = (0..rt.things.len())
+            .find(|i| !rt.things[*i].destroyed && Some(*i) != player_at)
+            .or_else(|| (0..rt.things.len()).find(|i| !rt.things[*i].destroyed))
+        else {
             println!("things: this level has no things");
             return;
         };
@@ -9357,6 +9371,7 @@ fn main() {
         .insert_resource(SaveProbe { enabled: save_live })
         .insert_resource(UseProbe { enabled: use_live })
         .insert_resource(AiProbe { enabled: ai_live })
+        .insert_resource(ForceProbe { enabled: force_live })
         .insert_resource(PulseCount::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
@@ -9451,7 +9466,8 @@ fn main() {
         .add_systems(Update, goal_probe.after(live_play_drive).run_if(no_screen_open))
         .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open))
         .add_systems(Update, use_probe.before(use_key).run_if(no_screen_open))
-        .add_systems(Update, ai_probe.run_if(no_screen_open));
+        .add_systems(Update, ai_probe.run_if(no_screen_open))
+        .add_systems(Update, force_probe.run_if(no_screen_open));
     app.run();
 }
 
@@ -15719,6 +15735,101 @@ fn goal_probe(
             exit.write(AppExit::Success);
         } else if state.0 > 900 {
             println!("goal: FAIL the level never ended (GOAL00 set, `jkEndLevel` never called)");
+            exit.write(AppExit::Success);
+        }
+    }
+}
+
+/// `--force-live`: acquire force jump, hold it through the live cog, and watch the body leave the floor.
+///
+/// `--force jump` runs the power in a throwaway VM, so its pulses never tick and no second loop can
+/// spend its impulse. This one goes through the real path: `items.dat`'s cog is started by the loader,
+/// `activated`/`deactivated` arrive as messages, and `walk_player` turns the script's `SetThingVel` into
+/// the body's vertical speed.
+#[derive(Resource, Default)]
+struct ForceProbe {
+    enabled: bool,
+}
+
+fn force_probe(
+    probe: Res<ForceProbe>,
+    sim: Option<Res<Sim>>,
+    player: Option<Res<Player>>,
+    mut state: Local<(u32, u8, f32, f32, f32)>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !probe.enabled {
+        return;
+    }
+    let Some(sim) = sim.as_deref() else { return };
+    let Some(player) = player.as_deref() else { return };
+    state.0 += 1;
+    let body = sim.world.borrow().player_thing();
+    let jump_cog = sim
+        .instances
+        .iter()
+        .position(|(name, _)| name.to_ascii_lowercase().contains("force_jump"));
+    match state.1 {
+        0 => {
+            {
+                let mut rt = sim.world.borrow_mut();
+                rt.inv.insert(21, 1.0);
+                rt.inv.insert(14, 100.0);
+                rt.pending_cogs.push("force_jump.cog".to_string());
+            }
+            state.4 = sim.world.borrow().inv.get(&14).copied().unwrap_or(0.0);
+            state.1 = 1;
+            state.0 = 0;
+        }
+        1 => {
+            let Some(cog) = jump_cog else {
+                if state.0 > 90 {
+                    println!("force-live: FAIL `force_jump.cog` never started");
+                    exit.write(AppExit::Success);
+                }
+                return;
+            };
+            state.3 = player.pos.z;
+            sim.world.borrow_mut().messages.push((
+                "activated".to_string(),
+                Some(body),
+                Some(sim.instances[cog].1.cog_index),
+                [0.0; 2],
+            ));
+            state.1 = 2;
+            state.0 = 0;
+        }
+        2 => {
+            if state.0 < 25 {
+                return;
+            }
+            let cog = jump_cog.unwrap_or(0);
+            sim.world.borrow_mut().messages.push((
+                "deactivated".to_string(),
+                Some(body),
+                Some(sim.instances[cog].1.cog_index),
+                [0.0; 2],
+            ));
+            state.1 = 3;
+            state.0 = 0;
+            state.2 = player.pos.z;
+        }
+        _ => {
+            state.2 = state.2.max(player.pos.z);
+            if state.0 < 40 {
+                return;
+            }
+            let mana = sim.world.borrow().inv.get(&14).copied().unwrap_or(0.0);
+            let rose = state.2 - state.3;
+            println!(
+                "force-live: the body rose {rose:+.2} (took off at {:.2}, peak {:.2}), mana {mana:.0} of {:.0}",
+                state.3, state.2, state.4
+            );
+            if rose > 0.2 && mana < state.4 - 1.0 {
+                println!("--- force-live check passed ---");
+            } else {
+                println!("force-live: FAIL the power did not lift the body");
+            }
             exit.write(AppExit::Success);
         }
     }

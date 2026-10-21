@@ -1915,7 +1915,21 @@ impl Runtime {
         // round, and 231 of level 1's bodies left the world. `sithPhysics` resolves the vertical axis
         // against the sector's surfaces first; that is the prerequisite, not gravity itself. m5's four
         // weapon pickups rise because a thrust sector accelerates them and nothing pulls back.
+        // The player is **not** a generic mover: `walk_player` integrates the body and consumes a
+        // scripted velocity (`force_jump.cog`'s `SetThingVel`) into `player.vy`. Letting both loops run
+        // meant the generic one moved the *thing*, hit the level, zeroed the velocity and rewound the
+        // position, so the jump's impulse was spent before the walker ever saw it.
+        let player_at = self
+            .templates
+            .iter()
+            .position(|t| t.eq_ignore_ascii_case("walkplayer"));
         for (i, t) in self.things.iter_mut().enumerate() {
+            if Some(i) == player_at {
+                // Path moves still run — a script can walk the player along frames — but the body's
+                // velocity is the walker's to integrate, and `t.vel` is left for it to consume.
+                let _ = t.step(dt);
+                continue;
+            }
             if let Some(drive) = usize::try_from(t.sector).ok().and_then(|s| thrust.get(s)).copied()
                 && drive != [0.0; 3]
                 && !t.destroyed
