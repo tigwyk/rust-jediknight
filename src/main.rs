@@ -388,6 +388,7 @@ fn main() {
     let mut use_live = false;
     let mut ai_live = false;
     let mut force_live = false;
+    let mut force_all = false;
     // `--uni <key>`: which string file carries a key, and what it says.
     let mut uni_key: Option<String> = None;
     // `--live-all`: every level through the real schedule, one process each.
@@ -722,6 +723,7 @@ fn main() {
             "--use-live" => use_live = true,
             "--ai-live" => ai_live = true,
             "--force-live" => force_live = true,
+            "--force-all" => force_all = true,
             "--uni-key" => {
                 i += 1;
                 uni_key = args.get(i).cloned();
@@ -9372,6 +9374,7 @@ fn main() {
         .insert_resource(UseProbe { enabled: use_live })
         .insert_resource(AiProbe { enabled: ai_live })
         .insert_resource(ForceProbe { enabled: force_live })
+        .insert_resource(ForceAllProbe { enabled: force_all })
         .insert_resource(PulseCount::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
@@ -9467,7 +9470,8 @@ fn main() {
         .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open))
         .add_systems(Update, use_probe.before(use_key).run_if(no_screen_open))
         .add_systems(Update, ai_probe.run_if(no_screen_open))
-        .add_systems(Update, force_probe.run_if(no_screen_open));
+        .add_systems(Update, force_probe.run_if(no_screen_open))
+        .add_systems(Update, force_all_probe.run_if(no_screen_open));
     app.run();
 }
 
@@ -15738,6 +15742,59 @@ fn goal_probe(
             exit.write(AppExit::Success);
         }
     }
+}
+
+/// `--force-all`: every force power `items.dat` names starts, through the same loader a pickup uses.
+///
+/// The powers are never placed in a JKL, so their scripts only run if the loader falls back to the
+/// archives. This acquires the whole row of bins in one frame and reads back which cogs came up —
+/// a list, not a judgement, because each power's *effect* needs its own check (`--force-live`).
+#[derive(Resource, Default)]
+struct ForceAllProbe {
+    enabled: bool,
+}
+
+fn force_all_probe(
+    probe: Res<ForceAllProbe>,
+    sim: Option<Res<Sim>>,
+    mut state: Local<(u32, bool)>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !probe.enabled {
+        return;
+    }
+    let Some(sim) = sim.as_deref() else { return };
+    state.0 += 1;
+    if !state.1 {
+        let mut rt = sim.world.borrow_mut();
+        // `set_bin`, not `inv.insert`: the bin going from empty to held is what queues the bin's own
+        // script from `items.dat`, and skipping that was why nothing started.
+        for bin in 21..=28 {
+            rt.set_bin(bin, 1.0);
+        }
+        rt.set_bin(14, 100.0);
+        state.1 = true;
+        state.0 = 0;
+        return;
+    }
+    if state.0 < 30 {
+        return;
+    }
+    let mut started: Vec<String> = sim
+        .instances
+        .iter()
+        .map(|(name, _)| name.to_ascii_lowercase())
+        .filter(|name| name.starts_with("force_"))
+        .collect();
+    started.sort();
+    started.dedup();
+    println!("force-all: {} of 8 power script(s) started: {started:?}", started.len());
+    if started.len() >= 8 {
+        println!("--- force-all check passed ---");
+    } else {
+        println!("force-all: FAIL the loader skipped a power");
+    }
+    exit.write(AppExit::Success);
 }
 
 /// `--force-live`: acquire force jump, hold it through the live cog, and watch the body leave the floor.
