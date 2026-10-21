@@ -19015,6 +19015,10 @@ fn walk_player(
         player.sector,
         [player.pos.x, player.pos.y, player.pos.z + player.rules.radius],
     ) && player.pos.z - player.rules.radius < floor - 0.01
+        // Never while the body is rising: `sithThing_AttachThingToSurface` is a placement step, and
+        // running it every frame teleported a jumping body back to the floor each frame — 17bsarris
+        // oscillates z −0.083 → −0.106 → −0.083 and never leaves the ground.
+        && player.vy <= 0.0
     {
         // `+ 0.01`: the containment test is asked at the feet with zero tolerance, so a body resting
         // exactly on the plane rounds outside it and every step is undone — the same epsilon the
