@@ -148,6 +148,8 @@ const GATES: &[&str] = &[
     // The mission objective completing in play: the body stands in the goal's sector and
     // the renderer sights 8t88, which is what 01_goal0.cog waits for.
     "--goal --start 01narshadda",
+    // F5 then F9 through the real input path: the snapshot has to come back.
+    "--save-live --start 01narshadda",
     "--muzzle",
     "--use-item",
     "--engine-audit",
@@ -376,6 +378,7 @@ fn main() {
     let mut soak_all = false;
     let mut tally_check = false;
     let mut goal_check = false;
+    let mut save_live = false;
     // `--uni <key>`: which string file carries a key, and what it says.
     let mut uni_key: Option<String> = None;
     // `--live-all`: every level through the real schedule, one process each.
@@ -704,6 +707,8 @@ fn main() {
             // `--goal`: stand the body in front of the level's goal thing and let the renderer see it, so
             // the mission objective completes in play instead of being driven by hand.
             "--goal" => goal_check = true,
+            // `--save-live`: F5 then F9 through the real input path, with the clock as the witness.
+            "--save-live" => save_live = true,
             "--uni-key" => {
                 i += 1;
                 uni_key = args.get(i).cloned();
@@ -9340,6 +9345,7 @@ fn main() {
         .insert_resource(LiveCheckState { enabled: live, ..Default::default() })
         .insert_resource(LivePlay { enabled: live_play })
         .insert_resource(GoalProbe { enabled: goal_check })
+        .insert_resource(SaveProbe { enabled: save_live })
         .insert_resource(PulseCount::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
@@ -9431,7 +9437,8 @@ fn main() {
             ),
         )
         // Its own line: the tuple above is already at Bevy's system-count limit.
-        .add_systems(Update, goal_probe.after(live_play_drive).run_if(no_screen_open));
+        .add_systems(Update, goal_probe.after(live_play_drive).run_if(no_screen_open))
+        .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open));
     app.run();
 }
 
@@ -15362,6 +15369,81 @@ struct LivePlay {
 #[derive(Resource, Default)]
 struct GoalProbe {
     enabled: bool,
+}
+
+/// `--save-live`: press F5, disturb the world, press F9, and read the clock back.
+///
+/// The quicksave gate writes and restores a snapshot at the runtime level; this drives the **keys**,
+/// which is the part a player touches. The simulated clock is the witness because the snapshot carries
+/// it and nothing else in the level touches it.
+#[derive(Resource, Default)]
+struct SaveProbe {
+    enabled: bool,
+}
+
+fn save_probe(
+    probe: Res<SaveProbe>,
+    sim: Option<Res<Sim>>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut state: Local<(u32, u8, f32)>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !probe.enabled {
+        return;
+    }
+    let Some(sim) = sim.as_deref() else { return };
+    state.0 += 1;
+    match state.1 {
+        0 => {
+            // Give the level a moment to run its own scripts, then save.
+            if state.0 < 30 {
+                return;
+            }
+            let time = sim.world.borrow().time;
+            state.2 = time;
+            keys.press(KeyCode::F5);
+            state.1 = 1;
+            state.0 = 0;
+            println!("save-live: F5 at clock {time:.2}");
+        }
+        1 => {
+            keys.release(KeyCode::F5);
+            if state.0 < 5 {
+                return;
+            }
+            // Disturb what the snapshot holds, the way a few seconds of play would.
+            let mut rt = sim.world.borrow_mut();
+            rt.time += 100.0;
+            rt.inv.insert(2, 99.0);
+            let after = rt.time;
+            drop(rt);
+            keys.press(KeyCode::F9);
+            state.1 = 2;
+            state.0 = 0;
+            println!("save-live: F9 after pushing the clock to {after:.2} and bin 2 to 99");
+        }
+        _ => {
+            keys.release(KeyCode::F9);
+            if state.0 < 10 {
+                return;
+            }
+            let (time, bin) = {
+                let rt = sim.world.borrow();
+                (rt.time, rt.inv.get(&2).copied().unwrap_or(0.0))
+            };
+            let restored = (time - state.2).abs() < 0.5;
+            println!(
+                "save-live: clock {time:.2} (saved {:.2}), bin 2 = {bin:.0}",
+                state.2
+            );
+            if restored && bin < 99.0 {
+                println!("--- save-live check passed ---");
+            } else {
+                println!("save-live: FAIL the load did not restore the snapshot");
+            }
+            exit.write(AppExit::Success);
+        }
+    }
 }
 
 /// Stand in front of the goal and **look** at it.
