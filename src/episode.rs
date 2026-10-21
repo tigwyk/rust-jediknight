@@ -68,9 +68,16 @@ impl Episode {
     /// The row that names `file`, however the case is spelled (`01narshadda.jkl` is listed as
     /// `01narshadda.jkl` but the level files on disk are `04EscapeHouse.jkl`).
     pub fn row_for(&self, file: &str) -> Option<&Sequence> {
+        // The graph names levels by bare file (`01narshadda.jkl`) and the game knows them by archive
+        // path (`jkl\01narshadda.jkl`), so a strict compare never matched: finishing level 1 said
+        // "end of campaign" instead of loading the film before level 2.
+        let name = |path: &str| {
+            path.rsplit(['\\', '/']).next().unwrap_or(path).to_ascii_lowercase()
+        };
+        let wanted = name(file);
         self.sequences
             .iter()
-            .find(|s| s.file.eq_ignore_ascii_case(file))
+            .find(|s| name(&s.file) == wanted)
     }
 
     /// The next row after `id`, following `goto_a` — the chain a level's own `jkEndLevel`

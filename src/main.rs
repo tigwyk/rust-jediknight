@@ -15374,8 +15374,9 @@ fn goal_probe(
     probe: Res<GoalProbe>,
     world: Option<Res<World>>,
     mut player: Option<ResMut<Player>>,
+    plan: Option<Res<FlowPlan>>,
     sim: Option<Res<Sim>>,
-    mut state: Local<(u32, bool)>,
+    mut state: Local<(u32, bool, usize)>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if !probe.enabled {
@@ -15416,23 +15417,42 @@ fn goal_probe(
         println!("goal: placed the body 8 units from thing {goal} in sector {sector}");
         return;
     }
-    if state.0 < 120 {
-        return;
+    if state.0 == 120 {
+        let flags = sim
+            .world
+            .borrow()
+            .inv
+            .get(&runtime::GOAL_BIN)
+            .copied()
+            .unwrap_or(0.0) as u32;
+        state.2 = world.level.sectors.len();
+        println!("goal: GOAL00 flags {flags:#b} after {} frames", state.0);
+        if flags & 0b10 == 0 {
+            println!("goal: FAIL the objective did not complete (flags {flags:#b})");
+            exit.write(AppExit::Success);
+            return;
+        }
+        println!("goal: the objective completed; waiting for the level to end");
     }
-    let flags = sim
-        .world
-        .borrow()
-        .inv
-        .get(&runtime::GOAL_BIN)
-        .copied()
-        .unwrap_or(0.0) as u32;
-    println!("goal: GOAL00 flags {flags:#b} after {} frames", state.0);
-    if flags & 0b10 != 0 {
-        println!("--- goal check passed ---");
-    } else {
-        println!("goal: FAIL the objective did not complete (flags {flags:#b})");
+    // The level's own final script calls `jkEndLevel`, which is what turns a completed objective into
+    // the end of the level. The film after it holds the load, and waiting that out would cost a minute
+    // of wall clock per run — `--transition` and `--campaign` cover the swap; this claims the goal, the
+    // end of the level and the successor's name.
+    if state.0 > 120 {
+        if sim.world.borrow().level_complete {
+            let next = plan.as_deref().and_then(|p| p.next.clone());
+            println!(
+                "goal: level complete after {} frames, next {:?}",
+                state.0,
+                next.as_deref().unwrap_or("(end of campaign)")
+            );
+            println!("--- goal check passed ---");
+            exit.write(AppExit::Success);
+        } else if state.0 > 900 {
+            println!("goal: FAIL the level never ended (GOAL00 set, `jkEndLevel` never called)");
+            exit.write(AppExit::Success);
+        }
     }
-    exit.write(AppExit::Success);
 }
 
 fn live_play_drive(
