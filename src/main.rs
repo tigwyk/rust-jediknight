@@ -11568,9 +11568,10 @@ fn walker_step(
     radius: f32,
     gravity: f32,
     allow_step: bool,
-) -> (f32, bool) {
+) -> (f32, bool, bool) {
     // Where the frame started, so a move that would leave the world can be undone.
     let frame_start = *pos;
+    let mut landed = false;
     // `MoveThing` restores the sector as well as the position (see the containment check below), so
     // the sector the frame began in is kept alongside the position.
     let sector_start = *sector;
@@ -11597,6 +11598,11 @@ fn walker_step(
                 }
                 pos[2] = z;
                 *vy = 0.0;
+                // The engine keeps an "on ground" flag from exactly this event: the vertical sweep was
+                // stopped by a surface. Deriving it from `vy == 0.0` instead leaves a body on a
+                // thrusting or bouncing floor permanently airborne, and such a body can never jump
+                // (09fuelstation: vy oscillates ±0.9 and `grounded` is never true).
+                landed = true;
             }
             None => pos[2] += drop,
         }
@@ -11669,7 +11675,7 @@ fn walker_step(
     }
     let moved = ((pos[0] - before[0]).powi(2) + (pos[1] - before[1]).powi(2)).sqrt();
 
-    (moved, crossed)
+    (moved, crossed, landed)
 }
 
 /// `--walk <frames>`: the collision solver exercised on a real level, with no window.
@@ -11747,7 +11753,7 @@ fn walk_level(level: &jkl::Level, frames: u32, quiet: bool, turn: f32) -> Option
             wet_frames += 1;
         }
         let step_speed = if water { speed * 0.5 } else { speed };
-        let (moved, crossed) = walker_step(
+        let (moved, crossed, _landed) = walker_step(
             &solids,
             collide::Gates::default(),
             &mut sector,
@@ -15418,6 +15424,13 @@ fn live_play_drive(
             // A body that never touches a floor cannot jump, and waiting forever would leave the check
             // with no verdict at all (four maps reported exactly that). Bounded wait, reported.
             state.jump_wait += 1;
+            if std::env::var_os("BK_LIVE_PLAY_TRACE").is_some() && state.jump_wait % 10 == 0 {
+                println!(
+                    "live-play: waiting for the floor: grounded {:?} vy {:?}",
+                    player.as_deref().map(|p| p.grounded),
+                    player.as_deref().map(|p| p.vy)
+                );
+            }
             if state.jump_wait > 90 {
                 state.jump_done = true;
                 println!(
@@ -19049,9 +19062,12 @@ fn walk_player(
     // One sweep per engine sub-step (`sithPhysics_UpdateThingPhysics` → `MoveThing`), not one per
     // frame: the distance per sweep is `vel * 0.02` whatever the frame rate did.
     let mut achieved_len = 0.0f32;
+    let mut landed = false;
     let mut crossed = false;
     for _ in 0..steps {
-        let (len, cross) = walker_step(
+        // Not shadowed as `landed`: the accumulation below needs the outer flag, and shadowing it
+        // silently left every frame "airborne" on a level that lands every sub-step.
+        let (len, cross, step_landed) = walker_step(
             &solids.0,
             gates,
             &mut sector,
@@ -19065,6 +19081,7 @@ fn walk_player(
         );
         achieved_len = achieved_len.max(len);
         crossed |= cross;
+        landed |= step_landed;
     }
     if trace {
         let vel = player.vel;
@@ -19117,7 +19134,10 @@ fn walk_player(
     player.vy = vy;
     player.sector = sector;
     player.pos = Vec3::from(pos);
-    player.grounded = player.vy == 0.0;
+    // `derived from the landing event`, not from `vy == 0.0`: a body on a thrusting floor never has
+    // zero vertical speed, and such a body could never jump. A landing this frame, or a resting body
+    // (vy already zero), is on the ground.
+    player.grounded = landed || player.vy == 0.0;
     // The engine's fall death (`sithPlayer.c:251`, `decomp/004c89d0_sithPlayer_Update.c:80`): falling
     // faster than 3 u/s inside a sector flagged `SITH_SECTOR_FALLDEATH` marks the player
     // `SITH_AF_FALLKILLED` and the palette runs down at 0.7 a second; at zero, `sithPlayer_KillPlayer`.
