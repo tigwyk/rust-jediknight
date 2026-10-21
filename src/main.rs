@@ -15461,7 +15461,7 @@ fn goal_probe(
                     );
                     println!("--- goal check passed ---");
                     exit.write(AppExit::Success);
-                } else if state.0 > 2400 {
+                // The film plays in real time (992 frames at 15.2 fps = 65 s), so a frame budget is\n                // the wrong clock for it: a fast machine reached 2400 frames in 20 s.\n                } else if state.0 > 20000 {
                     println!("goal: FAIL the film never handed over");
                     exit.write(AppExit::Success);
                 }

@@ -67,7 +67,12 @@ impl Cutscene {
             .stdout(std::process::Stdio::null())
             .spawn();
         match spawned {
-            Ok(_) => println!("cutscene: {} ({total} frames) decoding", file.display()),
+            Ok(child) => println!(
+                "cutscene: {} ({total} frames) decoding, pid {}, prefix {}",
+                file.display(),
+                child.id(),
+                prefix.display()
+            ),
             Err(e) => {
                 println!("cutscene: could not start the decoder: {e}");
                 return None;
@@ -125,6 +130,15 @@ impl Cutscene {
             }
             if !self.frame_path(self.at + 1).exists() {
                 // Not decoded yet: keep the frame we have and do not bank the time.
+                if std::env::var_os("BK_FILM_TRACE").is_some() && self.at < 2 {
+                    let path = self.frame_path(self.at + 1);
+                    println!(
+                        "film: waiting for {:?} at {}, elapsed {:.3}",
+                        path.file_name().map(|n| n.to_string_lossy().to_string()),
+                        self.at + 1,
+                        self.elapsed
+                    );
+                }
                 self.elapsed = self.frame_seconds;
                 return;
             }
@@ -151,6 +165,9 @@ impl Cutscene {
 
 impl Drop for Cutscene {
     fn drop(&mut self) {
+        if std::env::var_os("BK_FILM_TRACE").is_some() {
+            println!("film: dropping the film at frame {} of {}", self.at, self.total);
+        }
         self.clean_up();
     }
 }
@@ -179,6 +196,9 @@ pub fn play_cutscene(
     mut images: ResMut<Assets<Image>>,
 ) {
     let Some(mut cutscene) = cutscene else { return };
+    if std::env::var_os("BK_FILM_TRACE").is_some() && cutscene.at == 0 {
+        println!("film: dt {:.4}", time.delta_secs());
+    }
     cutscene.advance(time.delta_secs());
     if std::env::var_os("BK_FILM_TRACE").is_some() && cutscene.at % 120 == 0 {
         println!(
