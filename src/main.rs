@@ -16577,14 +16577,36 @@ fn write_snapshot(
 /// the item, and that script then owns the weapon's own messages. `Runtime::set_bin` names the
 /// scripts and this system builds the VMs — the runtime has no file access, and the VMs belong to
 /// `Sim`.
-fn load_item_cogs(mut sim: Option<ResMut<Sim>>, world: Option<Res<World>>) {
-    let (Some(sim), Some(world)) = (sim.as_mut(), world) else { return };
+fn load_item_cogs(
+    mut sim: Option<ResMut<Sim>>,
+    mut world: Option<ResMut<World>>,
+    gobs: Option<Res<Archives>>,
+) {
+    let (Some(sim), Some(world)) = (sim.as_mut(), world.as_mut()) else { return };
     let pending: Vec<String> = std::mem::take(&mut sim.world.borrow_mut().pending_cogs);
     if pending.is_empty() {
         return;
     }
     for name in pending {
         let key = name.to_ascii_lowercase();
+        // A bin whose script the level does not **place** — `force_jump.cog` and the rest of the force
+        // powers are started by acquiring the bin, never by being in the JKL — has to come from the
+        // archive. Without this every force power silently did nothing: `items.dat` names the cog, the
+        // level does not carry it, and the loader skipped it.
+        if !world.cogs.contains_key(&key)
+            && let Some(gobs) = gobs.as_deref()
+        {
+            match gobs.read(&format!("cog\\{name}")) {
+                Some(raw) => match cog::parse(&String::from_utf8_lossy(&raw)) {
+                    Ok(parsed) => {
+                        println!("items: `{name}` loaded from the archives (not placed by the level)");
+                        world.cogs.insert(key.clone(), parsed);
+                    }
+                    Err(_) => println!("items: `{name}` does not parse"),
+                },
+                None => println!("items: `{name}` is in `items.dat` and not in the archives"),
+            }
+        }
         let Some(script) = world.cogs.get(&key) else {
             println!("items: `{name}` is named by `items.dat` but was not loaded from the level");
             continue;
