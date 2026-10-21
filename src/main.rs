@@ -15158,8 +15158,14 @@ fn deliver_sector_triggers(
         if script.label(label).is_none() {
             continue;
         }
-        let _ = vm.run_label(script, label);
-        fired += 1;
+        // A label that runs and **errors** has not been delivered, and counting it as delivered hides
+        // the reason a level cannot progress. 21ajerec's `21_JerecAI.cog` entry failed here silently.
+        match vm.run_label(script, label) {
+            Ok(_) => fired += 1,
+            Err(error) => println!(
+                "trigger: `{script_name}`'s `{label}` failed entering sector {sector}: {error}"
+            ),
+        }
     }
     if let Some(count) = count.as_mut() {
         count.0 += fired;
@@ -15414,7 +15420,7 @@ fn live_play_drive(
             // — so a level whose links are all `exited:`-only is silent by design, not broken.
             if let (Some(sim), Some(world)) = (sim.as_deref(), world.as_deref()) {
                 let rt = sim.world.borrow();
-                state.linked_visited += rt
+                let capable: Vec<usize> = rt
                     .sector_links
                     .iter()
                     .filter(|(_, _, sector)| *sector == player.sector)
@@ -15424,7 +15430,19 @@ fn live_play_drive(
                             .and_then(|(name, _)| world.cogs.get(name))
                             .is_some_and(|script| script.label("entered").is_some())
                     })
-                    .count();
+                    .map(|(instance, _, _)| *instance)
+                    .collect();
+                state.linked_visited += capable.len();
+                if std::env::var_os("BK_LIVE_PLAY_TRACE").is_some() {
+                    for instance in &capable {
+                        println!(
+                            "live-play: sector {} link -> instance {instance} ({:?}) of {}",
+                            player.sector,
+                            sim.instances.get(*instance).map(|(n, _)| n.clone()),
+                            sim.instances.len()
+                        );
+                    }
+                }
             }
         }
         if state.triggers_before == 0 {
@@ -15512,10 +15530,10 @@ fn live_play_drive(
     // Peak horizontal displacement, not the final one: the walk phase sweeps W/D/S/A so the body goes
     // out and comes back, and comparing start with end measured the return trip — a body that walked
     // 0.27 units failed as "did not move at all".
-    let fired_triggers = count
-        .as_deref()
-        .map(|c| c.0.saturating_sub(state.triggers_before))
-        .unwrap_or(0);
+    // The whole run, not a delta: the spawn crossing is delivered on the first frame the body exists,
+    // which can be before this driver has ever seen it — a delta missed exactly that message and made
+    // 21ajerec look like a dead link when its script had already run.
+    let fired_triggers = count.as_deref().map(|c| c.0).unwrap_or(0);
     println!(
         "live-play: crossed {} sector(s); the level's scripts answered {} of them",
         state.crossings, fired_triggers
