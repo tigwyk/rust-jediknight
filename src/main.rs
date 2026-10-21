@@ -145,6 +145,9 @@ const GATES: &[&str] = &[
     "--ammo",
     "--campaign",
     "--tally",
+    // The mission objective completing in play: the body stands in the goal's sector and
+    // the renderer sights 8t88, which is what 01_goal0.cog waits for.
+    "--goal --start 01narshadda",
     "--muzzle",
     "--use-item",
     "--engine-audit",
@@ -372,6 +375,7 @@ fn main() {
     // `--soak-all`: every level in the archives, one process each.
     let mut soak_all = false;
     let mut tally_check = false;
+    let mut goal_check = false;
     // `--uni <key>`: which string file carries a key, and what it says.
     let mut uni_key: Option<String> = None;
     // `--live-all`: every level through the real schedule, one process each.
@@ -697,6 +701,9 @@ fn main() {
             "--tally" => tally_check = true,
             "--live-all" => live_all = true,
             "--live-play" => live_play = true,
+            // `--goal`: stand the body in front of the level's goal thing and let the renderer see it, so
+            // the mission objective completes in play instead of being driven by hand.
+            "--goal" => goal_check = true,
             "--uni-key" => {
                 i += 1;
                 uni_key = args.get(i).cloned();
@@ -9332,6 +9339,7 @@ fn main() {
         .insert_resource(IrFromStart(ir_from_start))
         .insert_resource(LiveCheckState { enabled: live, ..Default::default() })
         .insert_resource(LivePlay { enabled: live_play })
+        .insert_resource(GoalProbe { enabled: goal_check })
         .insert_resource(PulseCount::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
@@ -9421,7 +9429,9 @@ fn main() {
                 )
                     .run_if(no_screen_open),
             ),
-        );
+        )
+        // Its own line: the tuple above is already at Bevy's system-count limit.
+        .add_systems(Update, goal_probe.after(live_play_drive).run_if(no_screen_open));
     app.run();
 }
 
@@ -15346,6 +15356,83 @@ fn infrared_follows_force(
 #[derive(Resource, Default)]
 struct LivePlay {
     enabled: bool,
+}
+
+/// `--goal`: put the body in front of the level's goal thing and let the renderer sight it.
+#[derive(Resource, Default)]
+struct GoalProbe {
+    enabled: bool,
+}
+
+/// Stand in front of the goal and **look** at it.
+///
+/// `01_goal0.cog` sits on 8t88 and its `sighted:` label starts "Find 8t88 before he escapes Nar
+/// Shaddaa"; the renderer sends `sighted` the first time the thing is drawn. So the mission's first
+/// objective can complete without a hand on the keyboard: place the body in the goal's own sector
+/// facing it, run some frames, and read the goal bins the objectives panel draws from.
+fn goal_probe(
+    probe: Res<GoalProbe>,
+    world: Option<Res<World>>,
+    mut player: Option<ResMut<Player>>,
+    sim: Option<Res<Sim>>,
+    mut state: Local<(u32, bool)>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !probe.enabled {
+        return;
+    }
+    let (Some(world), Some(sim)) = (world, sim.as_deref()) else { return };
+    let Some(player) = player.as_deref_mut() else { return };
+    state.0 += 1;
+    // The instance that waits on `sighted` and is named like a goal — the same lookup `--endlevel`
+    // makes; its linked thing is the one the renderer has to draw.
+    let goal = sim
+        .world
+        .borrow()
+        .thing_links
+        .iter()
+        .find(|(instance, _, _)| {
+            world.level.cogs.get(*instance).is_some_and(|c| {
+                c.script.to_ascii_lowercase().contains("goal")
+                    && world.cogs.get(&c.script).is_some_and(|s| s.label("sighted").is_some())
+            })
+        })
+        .map(|(_, _, thing)| *thing);
+    let Some(goal) = goal else {
+        println!("goal: this level has no script waiting on `sighted`");
+        exit.write(AppExit::Success);
+        return;
+    };
+    let Some((pos, sector)) = sim.world.borrow().things.get(goal).map(|t| (t.pos, t.sector)) else {
+        return;
+    };
+    if !state.1 {
+        // Eight units in front of it, facing it, in its own room, so the cull pass has no excuse.
+        player.pos = Vec3::new(pos[0], pos[1] - 8.0, pos[2]);
+        player.sector = sector.max(0) as usize;
+        player.yaw = std::f32::consts::FRAC_PI_2;
+        player.vy = 0.0;
+        state.1 = true;
+        println!("goal: placed the body 8 units from thing {goal} in sector {sector}");
+        return;
+    }
+    if state.0 < 120 {
+        return;
+    }
+    let flags = sim
+        .world
+        .borrow()
+        .inv
+        .get(&runtime::GOAL_BIN)
+        .copied()
+        .unwrap_or(0.0) as u32;
+    println!("goal: GOAL00 flags {flags:#b} after {} frames", state.0);
+    if flags & 0b10 != 0 {
+        println!("--- goal check passed ---");
+    } else {
+        println!("goal: FAIL the objective did not complete (flags {flags:#b})");
+    }
+    exit.write(AppExit::Success);
 }
 
 fn live_play_drive(
