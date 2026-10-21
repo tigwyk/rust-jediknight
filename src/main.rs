@@ -15339,7 +15339,9 @@ fn live_play_drive(
     }
     // Short phases: the sweep gives every gate 600 frames, and a big level can spend a few hundred of
     // them loading before the body exists. 45 walk + 15 fire still measures ~2 units of walking.
-    const WALK_FRAMES: u32 = 30;
+    // 60, not 30: at a pinned 1/30 s step the old phase was one second of simulated time spread over
+    // four directions, and the body barely left the mark before the direction changed.
+    const WALK_FRAMES: u32 = 60;
     // 30, not 15: `fire_player` acts on `just_pressed`, so a held trigger fires at most once and the
     // first click can still land inside a scripted `SetFireWait` cooldown. Fifteen frames was too
     // short for the shot to land at all (01narshadda reported 0 with the shorter phase).
@@ -15363,15 +15365,22 @@ fn live_play_drive(
     // Tracked every frame, not only at the end: if the body moves and then snaps back, the summary
     // at the end says "moved 0.00" and hides the cause.
     if let (Some(start), Some(player)) = (state.start, player.as_deref()) {
-        state.max_moved = state.max_moved.max((player.pos - start).length());
+        // Horizontal, like the final measurement: a jump adds vertical movement, and counting it made
+        // a body that only jumped fail as "moves and snaps back".
+        state.max_moved = state.max_moved.max((player.pos - start).truncate().length());
     }
     if state.frame <= WALK_FRAMES {
+        // The walk's own first frame is the baseline: taking it when the body first appeared counted a
+        // script's teleport at level start as movement.
+        if state.frame == 1 {
+            state.start = player.as_deref().map(|p| p.pos);
+        }
         // Held, not tapped: the walker reads `just_pressed`/`pressed`, and a released key moves nothing.
         //
         // Four directions in turn, because a body can spawn facing a wall: on 02narshadda, 04escapehouse
         // and 09fuelstation `W` produced zero movement while `player.vel` was non-zero, which is a
         // blocked step, not a broken input path. Sweeping the compass asks "can the body move at all".
-        let phase = state.frame / 8;
+        let phase = state.frame / 15;
         for key in [KeyCode::KeyW, KeyCode::KeyD, KeyCode::KeyS, KeyCode::KeyA] {
             keys.release(key);
         }
@@ -15412,23 +15421,21 @@ fn live_play_drive(
         }
         return;
     }
-    // Jump: real presses of Space, then watch the body leave the ground. `Space` is read with
-    // `just_pressed && grounded`, so the phase **waits for the floor** before its clock starts — the
-    // walk can end mid-step, and a press while the body is a hair off the ground is refused, which is
-    // how this check flaked (level 1 passed, then reported a 0.00 peak on the next run).
+    // Jump: **one** real press of Space, then the flight, then the landing. Not a mash: pressing every
+    // other frame made the body jump again the instant it touched down, so the measurement always
+    // caught it mid-air and reported a height it never came back from (level 1: "now 0.49" while the
+    // trace showed it landing at −0.919 between jumps).
     if state.frame > WALK_FRAMES + FIRE_FRAMES && !state.jump_done {
-        if !player.as_deref().is_some_and(|p| p.grounded) {
-            // A body that never touches a floor cannot jump, and waiting forever would leave the check
-            // with no verdict at all (four maps reported exactly that). Bounded wait, reported.
-            state.jump_wait += 1;
-            if std::env::var_os("BK_LIVE_PLAY_TRACE").is_some() && state.jump_wait % 10 == 0 {
-                println!(
-                    "live-play: waiting for the floor: grounded {:?} vy {:?}",
-                    player.as_deref().map(|p| p.grounded),
-                    player.as_deref().map(|p| p.vy)
-                );
-            }
-            if state.jump_wait > 90 {
+        let grounded = player.as_deref().is_some_and(|p| p.grounded);
+        state.jump_frames += 1;
+        if !state.jump_started {
+            // Wait for the floor, bounded: a body that never touches one cannot jump, and waiting
+            // forever would leave the check with no verdict at all.
+            if grounded {
+                state.jump_started = true;
+                state.jump_base = player.as_deref().map(|p| p.pos.z);
+                keys.press(KeyCode::Space);
+            } else if state.jump_frames > 90 {
                 state.jump_done = true;
                 println!(
                     "live-play: the body never settled on a floor in 90 frames, so the jump was not attempted"
@@ -15436,21 +15443,14 @@ fn live_play_drive(
             }
             return;
         }
-        state.jump_frames += 1;
-        if state.jump_frames == 1 {
-            state.jump_base = player.as_deref().map(|p| p.pos.z);
-        }
-        if state.jump_frames % 2 == 0 {
-            keys.press(KeyCode::Space);
-        } else {
-            keys.release(KeyCode::Space);
-        }
+        keys.release(KeyCode::Space);
         if let (Some(base), Some(player)) = (state.jump_base, player.as_deref()) {
             state.jump_peak = state.jump_peak.max(player.pos.z - base);
         }
-        if state.jump_frames >= JUMP_FRAMES {
+        // Landed: it left the ground and is back on it. The cap keeps a body that falls out of the
+        // level from stalling the run.
+        if (state.jump_peak > 0.05 && grounded) || state.jump_frames > 180 {
             state.jump_done = true;
-            keys.release(KeyCode::Space);
         }
         return;
     }
@@ -15458,34 +15458,28 @@ fn live_play_drive(
     let (start, walked) = (state.start, state.walked);
     let moved = match (start, walked) {
         // Horizontal only: the settle pass lifts a body onto its floor, and a check that counted that
-        // as walking would pass a body that cannot take a single step (02narshadda reported 0.10 of
-        // pure vertical drift).
+        // as walking would pass a body that cannot take a single step.
         (Some(a), Some(b)) => (((b - a).truncate().length()), a, b),
         _ => (0.0, Vec3::ZERO, Vec3::ZERO),
     };
-    // A counter inside the runtime, not a sample of live things: a bolt can be born and destroyed
-    // between two frames at 10 fps, which made the sampled version flaky in both directions.
+    let landed = player.as_deref().and_then(|p| state.jump_base.map(|base| p.pos.z - base));
+    // The runtime's own counter: a bolt can be born and destroyed between two frames at 10 fps, so a
+    // sample of live things said "0 shots" on a working trigger.
     let fired = sim
         .as_deref()
         .map(|sim| sim.world.borrow().shots_fired.saturating_sub(state.things_before))
         .unwrap_or(0);
-    println!(
-        "live-play: W for {WALK_FRAMES} frames moved the body {:.2} units ({:?} -> {:?})",
-        moved.0, moved.1, moved.2
-    );
     println!("live-play: {FIRE_FRAMES} frames of left click added {fired} thing(s) to the world");
-    println!("live-play: largest single-frame displacement seen {:.2}", state.max_moved);
-    let landed = player.as_deref().and_then(|p| state.jump_base.map(|base| p.pos.z - base));
     println!(
         "live-play: Space lifted the body {:.2} units (highest {:.2}, now {:?})",
         state.jump_peak, state.jump_peak, landed.map(|z| (z * 1000.0).round() / 1000.0)
     );
     let mut failed = 0;
-    if moved.0 < 0.05 && state.max_moved >= 0.05 {
-        println!("live-play: FAIL the body moves and snaps back (max {:.2})", state.max_moved);
-        failed += 1;
-    } else if moved.0 < 0.05 {
-        println!("live-play: FAIL the body did not move at all");
+    // Peak horizontal displacement, not the final one: the walk phase sweeps W/D/S/A so the body goes
+    // out and comes back, and comparing start with end measured the return trip — a body that walked
+    // 0.27 units failed as "did not move at all".
+    if state.max_moved < 0.05 {
+        println!("live-play: FAIL the body did not move at all (peak {:.2})", state.max_moved);
         failed += 1;
     }
     // "Nothing to fire" is not a broken trigger: a bot map can start the player with an empty clip and
@@ -15532,6 +15526,7 @@ struct LivePlayState {
     things_peak: usize,
     jump_base: Option<f32>,
     jump_frames: u32,
+    jump_started: bool,
     jump_wait: u32,
     jump_done: bool,
     jump_peak: f32,
@@ -19141,6 +19136,9 @@ fn walk_player(
     // zero vertical speed, and such a body could never jump. A landing this frame, or a resting body
     // (vy already zero), is on the ground.
     player.grounded = landed || player.vy == 0.0;
+    if std::env::var_os("BK_JUMP_TRACE").is_some() {
+        eprintln!("jump trace: z {:.3} vy {vy:.2} landed {landed} sector {sector}", player.pos.z);
+    }
     // The engine's fall death (`sithPlayer.c:251`, `decomp/004c89d0_sithPlayer_Update.c:80`): falling
     // faster than 3 u/s inside a sector flagged `SITH_SECTOR_FALLDEATH` marks the player
     // `SITH_AF_FALLKILLED` and the palette runs down at 0.7 a second; at zero, `sithPlayer_KillPlayer`.
