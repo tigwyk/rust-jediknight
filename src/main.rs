@@ -15079,6 +15079,30 @@ fn deliver_cog_messages(
     // verb borrows this same runtime.
     let handle = sim.world.clone();
     let mut fired = 0usize;
+    // The renderer's own messages: `sithRender` latches "seen" and sends `sighted` to the cogs on a
+    // room or a thing (`thing_sighted`/`sector_sighted` push into `pending_messages`). Nothing on the
+    // live path ever drained that queue, so **seeing 8t88 queued the goal's message and dropped it** —
+    // the level's first objective could never start. Delivered here, ahead of the ordinary bus.
+    // Taken into a local first: a `handle.borrow_mut()` in the `for` header lives for the whole loop,
+    // and the `last_params` write inside it would borrow again on the same thread.
+    let pending = std::mem::take(&mut handle.borrow_mut().pending_messages);
+    for (instance, label, params) in pending {
+        let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
+        let Some(script) = world.cogs.get(script_name) else { continue };
+        if script.label(label).is_none() {
+            continue;
+        }
+        handle.borrow_mut().last_params = params.to_vec();
+        match vm.run_label(script, label) {
+            Ok(_) => {
+                fired += 1;
+                if std::env::var_os("BK_TRIGGER_TRACE").is_some() {
+                    println!("sighted: `{script_name}` ran `{label}`");
+                }
+            }
+            Err(error) => println!("sighted: `{script_name}`'s `{label}` failed: {error}"),
+        }
+    }
     // A script may answer with another message, so drain until quiet. Bounded, because two scripts
     // that greet each other forever must not wedge a frame.
     for _round in 0..8 {
@@ -15538,6 +15562,21 @@ fn live_play_drive(
         "live-play: crossed {} sector(s); the level's scripts answered {} of them",
         state.crossings, fired_triggers
     );
+    // The mission itself: `SetGoalFlags` writes bins 100+ (`SITHBIN_GOAL00`) and the panel draws from
+    // those bits, so a goal that flips while the body stands there is the level progressing.
+    let goals = sim
+        .as_deref()
+        .map(|sim| {
+            let rt = sim.world.borrow();
+            (0..8)
+                .filter_map(|n| {
+                    let flags = rt.inv.get(&(runtime::GOAL_BIN + n)).copied().unwrap_or(0.0);
+                    (flags != 0.0).then_some((n, flags as u32))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    println!("live-play: goal bins set {goals:?}");
     // A level that links cogs to sectors must hear about a crossing, or walking through a room does
     // nothing — `sithThing_EnterSector` is the whole of every door, lift and cutscene trigger in the
     // game. A link whose script has no `entered:` label never runs, so the count is the honest one.
