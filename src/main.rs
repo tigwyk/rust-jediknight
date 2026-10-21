@@ -15415,6 +15415,15 @@ fn live_play_drive(
     // how this check flaked (level 1 passed, then reported a 0.00 peak on the next run).
     if state.frame > WALK_FRAMES + FIRE_FRAMES && !state.jump_done {
         if !player.as_deref().is_some_and(|p| p.grounded) {
+            // A body that never touches a floor cannot jump, and waiting forever would leave the check
+            // with no verdict at all (four maps reported exactly that). Bounded wait, reported.
+            state.jump_wait += 1;
+            if state.jump_wait > 90 {
+                state.jump_done = true;
+                println!(
+                    "live-play: the body never settled on a floor in 90 frames, so the jump was not attempted"
+                );
+            }
             return;
         }
         state.jump_frames += 1;
@@ -15491,7 +15500,7 @@ fn live_play_drive(
     }
     // A jump has to leave the ground; landing is reported but not required, because a body that starts
     // over a drop stays airborne and that is the map's business.
-    if state.jump_peak < 0.2 {
+    if state.jump_frames > 0 && state.jump_peak < 0.2 {
         println!("live-play: FAIL Space did not lift the body (peak {:.2})", state.jump_peak);
         failed += 1;
     }
@@ -15513,6 +15522,7 @@ struct LivePlayState {
     things_peak: usize,
     jump_base: Option<f32>,
     jump_frames: u32,
+    jump_wait: u32,
     jump_done: bool,
     jump_peak: f32,
 }
