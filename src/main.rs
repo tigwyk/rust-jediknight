@@ -152,6 +152,8 @@ const GATES: &[&str] = &[
     "--save-live --start 01narshadda",
     // The use key against a linked door, through real input.
     "--use-live --start 01narshadda",
+    // An actor in a real level shoots at the living body.
+    "--ai-live --start 01narshadda",
     "--muzzle",
     "--use-item",
     "--engine-audit",
@@ -382,6 +384,7 @@ fn main() {
     let mut goal_check = false;
     let mut save_live = false;
     let mut use_live = false;
+    let mut ai_live = false;
     // `--uni <key>`: which string file carries a key, and what it says.
     let mut uni_key: Option<String> = None;
     // `--live-all`: every level through the real schedule, one process each.
@@ -714,6 +717,7 @@ fn main() {
             "--save-live" => save_live = true,
             // `--use-live`: the use key against a linked door, through real input.
             "--use-live" => use_live = true,
+            "--ai-live" => ai_live = true,
             "--uni-key" => {
                 i += 1;
                 uni_key = args.get(i).cloned();
@@ -9352,6 +9356,7 @@ fn main() {
         .insert_resource(GoalProbe { enabled: goal_check })
         .insert_resource(SaveProbe { enabled: save_live })
         .insert_resource(UseProbe { enabled: use_live })
+        .insert_resource(AiProbe { enabled: ai_live })
         .insert_resource(PulseCount::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
@@ -9445,7 +9450,8 @@ fn main() {
         // Its own line: the tuple above is already at Bevy's system-count limit.
         .add_systems(Update, goal_probe.after(live_play_drive).run_if(no_screen_open))
         .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open))
-        .add_systems(Update, use_probe.before(use_key).run_if(no_screen_open));
+        .add_systems(Update, use_probe.before(use_key).run_if(no_screen_open))
+        .add_systems(Update, ai_probe.run_if(no_screen_open));
     app.run();
 }
 
@@ -15376,6 +15382,84 @@ struct LivePlay {
 #[derive(Resource, Default)]
 struct GoalProbe {
     enabled: bool,
+}
+
+/// `--ai-live`: stand in front of an armed actor and wait to be shot.
+///
+/// `--ai` proves the perception and aim rules at the runtime level; this proves an actor in a real
+/// level acts on the living player — its own template, its own instinct class, its own script.
+#[derive(Resource, Default)]
+struct AiProbe {
+    enabled: bool,
+}
+
+fn ai_probe(
+    probe: Res<AiProbe>,
+    world: Option<Res<World>>,
+    sim: Option<Res<Sim>>,
+    mut player: Option<ResMut<Player>>,
+    mut state: Local<(u32, u8, usize)>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !probe.enabled {
+        return;
+    }
+    let (Some(world), Some(sim)) = (world, sim.as_deref()) else { return };
+    let Some(player) = player.as_deref_mut() else { return };
+    state.0 += 1;
+    match state.1 {
+        0 => {
+            // An actor is a placed thing whose template names an instinct class. One borrow, one pass:
+            // the template list is the runtime's, the `aiclass` lookup is the level's.
+            let armed: Option<usize> = {
+                let rt = sim.world.borrow();
+                rt.templates
+                    .iter()
+                    .position(|name| world.level.template_param(name, "aiclass").is_some())
+            };
+            let Some(actor) = armed else {
+                println!("ai-live: this level places no actor");
+                exit.write(AppExit::Success);
+                return;
+            };
+            let Some(pos) = sim.world.borrow().things.get(actor).map(|t| (t.pos, t.sector)) else {
+                return;
+            };
+            // Three units in front, inside the usual `sightdist`, facing it so it can see a face.
+            player.pos = Vec3::new(pos.0[0], pos.0[1] - 3.0, pos.0[2]);
+            player.sector = pos.1.max(0) as usize;
+            player.yaw = std::f32::consts::FRAC_PI_2;
+            player.vy = 0.0;
+            state.2 = sim.world.borrow().shots_fired;
+            state.1 = 1;
+            state.0 = 0;
+            println!("ai-live: the body stands 3 units from actor {actor}");
+        }
+        1 => {
+            if state.0 < 90 {
+                return;
+            }
+            let (shots, health) = {
+                let rt = sim.world.borrow();
+                let body = rt
+                    .templates
+                    .iter()
+                    .position(|name| name.eq_ignore_ascii_case("walkplayer"))
+                    .and_then(|at| rt.things.get(at))
+                    .map(|t| t.health)
+                    .unwrap_or(0.0);
+                (rt.shots_fired.saturating_sub(state.2), body)
+            };
+            println!("ai-live: {shots} shot(s) at the body, its health {health:.0}");
+            if shots > 0 {
+                println!("--- ai-live check passed ---");
+            } else {
+                println!("ai-live: FAIL no actor fired at the body in 90 frames");
+            }
+            exit.write(AppExit::Success);
+        }
+        _ => {}
+    }
 }
 
 /// `--use-live`: stand in front of a linked thing and press **E**, the way a player opens a door.
