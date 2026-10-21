@@ -150,6 +150,8 @@ const GATES: &[&str] = &[
     "--goal --start 01narshadda",
     // F5 then F9 through the real input path: the snapshot has to come back.
     "--save-live --start 01narshadda",
+    // The use key against a linked door, through real input.
+    "--use-live --start 01narshadda",
     "--muzzle",
     "--use-item",
     "--engine-audit",
@@ -379,6 +381,7 @@ fn main() {
     let mut tally_check = false;
     let mut goal_check = false;
     let mut save_live = false;
+    let mut use_live = false;
     // `--uni <key>`: which string file carries a key, and what it says.
     let mut uni_key: Option<String> = None;
     // `--live-all`: every level through the real schedule, one process each.
@@ -709,6 +712,8 @@ fn main() {
             "--goal" => goal_check = true,
             // `--save-live`: F5 then F9 through the real input path, with the clock as the witness.
             "--save-live" => save_live = true,
+            // `--use-live`: the use key against a linked door, through real input.
+            "--use-live" => use_live = true,
             "--uni-key" => {
                 i += 1;
                 uni_key = args.get(i).cloned();
@@ -9346,6 +9351,7 @@ fn main() {
         .insert_resource(LivePlay { enabled: live_play })
         .insert_resource(GoalProbe { enabled: goal_check })
         .insert_resource(SaveProbe { enabled: save_live })
+        .insert_resource(UseProbe { enabled: use_live })
         .insert_resource(PulseCount::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
@@ -9438,7 +9444,8 @@ fn main() {
         )
         // Its own line: the tuple above is already at Bevy's system-count limit.
         .add_systems(Update, goal_probe.after(live_play_drive).run_if(no_screen_open))
-        .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open));
+        .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open))
+        .add_systems(Update, use_probe.before(use_key).run_if(no_screen_open));
     app.run();
 }
 
@@ -15369,6 +15376,81 @@ struct LivePlay {
 #[derive(Resource, Default)]
 struct GoalProbe {
     enabled: bool,
+}
+
+/// `--use-live`: stand in front of a linked thing and press **E**, the way a player opens a door.
+///
+/// The door gate drives the same chain from code; this one presses the key. The witness is
+/// `TriggerCount`: `use_thing` queues `activate` into `pending_messages`, `deliver_cog_messages`
+/// drains it, and a script that answered is a door that opened.
+#[derive(Resource, Default)]
+struct UseProbe {
+    enabled: bool,
+}
+
+fn use_probe(
+    probe: Res<UseProbe>,
+    sim: Option<Res<Sim>>,
+    mut player: Option<ResMut<Player>>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    count: Option<Res<TriggerCount>>,
+    mut state: Local<(u32, u8, usize)>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !probe.enabled {
+        return;
+    }
+    let Some(sim) = sim.as_deref() else { return };
+    let Some(player) = player.as_deref_mut() else { return };
+    state.0 += 1;
+    match state.1 {
+        0 => {
+            // The first thing a script linked: every door, switch and lever in the level is one.
+            let target = sim
+                .world
+                .borrow()
+                .thing_links
+                .first()
+                .map(|(_, _, thing)| *thing);
+            let Some(target) = target else {
+                println!("use-live: this level links no thing to a script");
+                exit.write(AppExit::Success);
+                return;
+            };
+            let Some(pos) = sim.world.borrow().things.get(target).map(|t| (t.pos, t.sector)) else {
+                return;
+            };
+            // Two units away on -Y, facing +Y: inside the 3-unit reach and the 0.3 facing cone.
+            player.pos = Vec3::new(pos.0[0], pos.0[1] - 2.0, pos.0[2]);
+            player.sector = pos.1.max(0) as usize;
+            player.yaw = std::f32::consts::FRAC_PI_2;
+            player.vy = 0.0;
+            state.2 = count.as_deref().map(|c| c.0).unwrap_or(0);
+            keys.press(KeyCode::KeyE);
+            state.1 = 1;
+            state.0 = 0;
+            println!("use-live: E in front of thing {target} (sector {})", pos.1);
+        }
+        1 => {
+            keys.release(KeyCode::KeyE);
+            if state.0 < 20 {
+                return;
+            }
+            let now = count.as_deref().map(|c| c.0).unwrap_or(0);
+            println!(
+                "use-live: {} script message(s) answered the key (was {})",
+                now.saturating_sub(state.2),
+                state.2
+            );
+            if now > state.2 {
+                println!("--- use-live check passed ---");
+            } else {
+                println!("use-live: FAIL the key reached no script");
+            }
+            exit.write(AppExit::Success);
+        }
+        _ => {}
+    }
 }
 
 /// `--save-live`: press F5, disturb the world, press F9, and read the clock back.
