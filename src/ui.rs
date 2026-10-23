@@ -38,6 +38,10 @@ pub struct Look<'a> {
     /// The force-star art (`foStars.bm`) and how many stars to draw, for the one custom
     /// panel this build can fill without game state.
     pub stars: Option<(&'a bm::Bm, i32)>,
+    /// On the force screen, a power's level from the player's inventory. `jkGuiForce_ForceStarsDraw`
+    /// reads `GetInvItemAmount(bin)`, then blits the star cell for that level beside the icon: cells
+    /// `3..6` for the light-side powers, `7..10` for the dark ones, `0` for a plain star.
+    pub force_level: Option<(&'a bm::Bm, &'a dyn Fn(i32) -> i32)>,
     /// Literal text for a run-time dialog's element: `jkGuiDialog_Message` fills the lines
     /// of an already-built Ok/Cancel menu, whose text elements carry no key.
     pub text: &'a dyn Fn(usize) -> Option<String>,
@@ -71,6 +75,7 @@ impl<'a> Default for Look<'a> {
             checkbox: None,
             palette: no_palette(),
             stars: None,
+            force_level: None,
             text: &Empty::text,
             load_percent: 0.0,
         }
@@ -167,6 +172,31 @@ pub fn draw_screen(
             if let Some(artwork) = (look.art)(item.bitmap) {
                 let [ax, ay] = [if x < 0 { artwork.x_pos } else { x }, if y < 0 { artwork.y_pos } else { y }];
                 blit_art(canvas, &palette, [ax, ay], &artwork, [w, h], usize::from(lit));
+                // `jkGuiForce_ForceStarsDraw`: the level beside the icon, from the inventory. The
+                // cell is `level - 1` biased by three for the light powers (`0x19..0x1c`) and by
+                // seven for the dark ones (`0x1e..0x21`); a power with no level draws nothing. Icons
+                // left of the panel's middle get their stars to their left, the rest to the right
+                // (`x < 0x140`).
+                if let Some((star, level_of)) = look.force_level
+                    && screen.base == 0x52f168
+                {
+                    let level = level_of(item.id);
+                    if level > 0 {
+                        let cell = level - 1
+                            + if (0x19..=0x1c).contains(&item.id) {
+                                3
+                            } else if (0x1e..=0x21).contains(&item.id) {
+                                7
+                            } else {
+                                0
+                            };
+                        if let Some(star_cell) = star.cells.get(cell as usize) {
+                            let width = star_cell.width as i32;
+                            let sx = if ax < 0x140 { ax - width - 0x13 } else { ax + w + 0x13 };
+                            blit_art(canvas, &palette, [sx, ay + 3], star, [0, 0], cell as usize);
+                        }
+                    }
+                }
             }
             continue;
         }

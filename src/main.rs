@@ -10683,6 +10683,14 @@ fn refresh_overlay(
                     .and_then(|rows| rows.get(index).cloned())
                     .or_else(|| lines.iter().find(|(at, _)| *at == index).map(|(_, t)| t.clone()))
             };
+            // `jkGuiForce_ForceStarsDraw` asks the inventory for each power's level; the force screen
+            // draws that many star cells beside its icons.
+            let level_of = |bin: i32| -> i32 {
+                sim.as_ref()
+                    .map(|sim| sim.world.borrow().inv.get(&bin).copied().unwrap_or(0.0) as i32)
+                    .unwrap_or(0)
+            };
+            let force_star = star_art.as_ref().filter(|_| screen.base == 0x52f168);
             let look = ui::Look {
                 fonts: &assets.fonts,
                 art: &art,
@@ -10690,6 +10698,7 @@ fn refresh_overlay(
                 palette: &assets.palette,
                 stars,
                 text: &text,
+                force_level: force_star.map(|art| (art, &level_of as &dyn Fn(i32) -> i32)),
                 map: live_map,
                 ..ui::Look::default()
             };
