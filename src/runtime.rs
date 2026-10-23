@@ -312,6 +312,25 @@ fn vec_param(raw: Option<&str>) -> Option<[f32; 3]> {
     Some([x, y, z])
 }
 
+/// The radius a placed thing's **collision volume** has, from the engine's own template rule.
+///
+/// `misc\things.dat`'s class rows carry `collide=`: `_structure` is `collide=3` and `_decor` is
+/// `collide=0`, and `_walkstruct` inherits the first through its `_structure` base. Every placed
+/// template carries its own `size=` (the radius), so a thing is solid exactly when its chain's
+/// `collide` is non-zero. That is why `column01` (`_structure`, `size=0.204987`) stops a body in
+/// retail while `tuskensoused` (`_ghostdecor`) does not — and why the port, which has no
+/// model collision at all, walks through both.
+///
+/// Returns `None` for a thing the engine lets a body pass through.
+pub fn solid_radius(level: &crate::jkl::Level, template: &str) -> Option<f32> {
+    let collide = level.template_param(template, "collide")?.trim().parse::<i32>().ok()?;
+    if collide == 0 {
+        return None;
+    }
+    // The radius is the template's own `size=`; `movesize=` is the same for everything placed.
+    let size = level.template_param(template, "size")?.trim().parse::<f32>().ok()?;
+    (size > 0.0).then_some(size)
+}
 fn thing_type(word: Option<&str>) -> i32 {
     match word.map(str::to_ascii_lowercase).as_deref() {
         Some("camera") => 1,

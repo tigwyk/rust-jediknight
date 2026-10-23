@@ -51,6 +51,15 @@ pub struct Solids {
     /// there. Derived from the sector's own vertices, so it is tighter than the file's
     /// bounding radius.
     pub spheres: Vec<([f32; 3], f32)>,
+    /// The bodies a placed *model* makes solid: `_structure` and `_walkstruct` things, whose
+    /// `collide=` the template chain carries. Retail stops Kyle at the cantina's columns and tables;
+    /// without these he walks through both, which is what a player notices first.
+    ///
+    /// ponytail: a vertical cylinder of the template's own `size=` radius and eight radii of height,
+    /// not the model's box — a *structure* whose model is much taller or offset from its origin is
+    /// approximated. The `.3do` bounds are the upgrade path, and the radius is the engine's own
+    /// number (`sithThing` collision), so the width is right even where the height is a guess.
+    pub things: Vec<([f32; 3], f32)>,
     /// Every downward-facing solid surface with its polygon: the floors a body can stand on.
     pub floors: Vec<Face>,
     /// Every vertical solid surface with its polygon: the walls. A wall only pushes while the
@@ -560,7 +569,29 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         floors.iter().enumerate().map(|(i, face)| (face.surface, i)).collect();
     let face_of: std::collections::HashMap<usize, usize> =
         faces.iter().enumerate().map(|(i, face)| (face.surface, i)).collect();
-    Solids { sectors, hull: hulls, boxes, portals: portal_sets, spheres, floors, walls, wall_of, floor_of, faces, face_of }
+    // The models that make a body stop: `collide=` on the template chain, radius from `size=`.
+    let things = level
+        .things
+        .iter()
+        .filter_map(|thing| {
+            let radius = crate::runtime::solid_radius(level, &thing.template)?;
+            Some((thing.pos, radius))
+        })
+        .collect();
+    Solids {
+        sectors,
+        hull: hulls,
+        boxes,
+        portals: portal_sets,
+        spheres,
+        floors,
+        walls,
+        wall_of,
+        floor_of,
+        faces,
+        face_of,
+        things,
+    }
 }
 
 /// One swept-sphere contact: where a body of `radius` first touches, in the direction it moved.
@@ -1039,7 +1070,40 @@ impl Solids {
         // No hull projection here: `advance` snaps the body onto a sector plane, which can *lower* it
         // through the floor it is standing on. The sweep already walked any doorway, so `here` is the
         // sector the body ended in.
-        (at, here, blocked)
+        //
+        // The placed models come last because they are not sector planes: a `_structure` column or a
+        // `_walkstruct` table is a body-sized cylinder the sweep knows nothing about, and pushing out
+        // of it after the walls keeps the two solvers from fighting over the same step.
+        let at = self.push_out_of_things(at, radius);
+        (at, here, blocked || at != pos)
+    }
+
+    /// Push a body out of any solid model it has ended up inside.
+    ///
+    /// `sithPhysics` treats a collidable thing as a cylinder; the radius is the template`s own
+    /// `size=` (the engine`s number, `sithThing` collision), and the height is the eight radii the
+    /// `Solids::things` comment names as the known approximation.
+    fn push_out_of_things(&self, mut at: [f32; 3], radius: f32) -> [f32; 3] {
+        for &(centre, thing_radius) in &self.things {
+            if (at[2] - centre[2]).abs() > thing_radius * 8.0 + radius {
+                continue;
+            }
+            let (dx, dy) = (at[0] - centre[0], at[1] - centre[1]);
+            let apart = (dx * dx + dy * dy).sqrt();
+            let least = thing_radius + radius;
+            if apart >= least {
+                continue;
+            }
+            if apart > 1e-5 {
+                let scale = least / apart;
+                at[0] = centre[0] + dx * scale;
+                at[1] = centre[1] + dy * scale;
+            } else {
+                // Dead centre: pick a direction rather than divide by zero.
+                at[0] = centre[0] + least;
+            }
+        }
+        at
     }
 
     /// The sector a body at `pos` can actually stand in, and the floor it would land on.
@@ -1628,6 +1692,7 @@ mod tests {
     /// Normals point out of the room, which is the convention `.jkl` data gives.
     fn room() -> Solids {
         Solids {
+        things: Vec::new(),
             boxes: Vec::new(),
             hull: Vec::new(),
             floor_of: std::collections::HashMap::new(),
@@ -1675,6 +1740,7 @@ mod tests {
             vec![[-1.0, 0.0, z], [1.0, 0.0, z], [1.0, 0.0, z + 1.0], [-1.0, 0.0, z + 1.0]]
         };
         Solids {
+        things: Vec::new(),
             boxes: Vec::new(),
             hull: Vec::new(),
             sectors: vec![Vec::new(), Vec::new(), Vec::new()],
@@ -1761,6 +1827,7 @@ mod tests {
         faces.extend(walls.iter().cloned());
         let face_of = faces.iter().enumerate().map(|(i, f)| (f.surface, i)).collect();
         Solids {
+        things: Vec::new(),
             boxes: Vec::new(),
             hull: Vec::new(),
             sectors,

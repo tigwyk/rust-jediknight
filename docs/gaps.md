@@ -777,3 +777,16 @@ A level ends when one of its scripts calls `jkEndLevel`; the engine registers th
     --- ends check passed ---
 
 The seven without one are multiplayer maps (`m10`, `m2`, `m4`, `m5`, `m_boss15`, `m_boss17`) and the tool's own `static` scene, which are labelled as such rather than counted; the assertion runs over campaign levels, and it is an assertion, not a report. That is the first whole-install evidence that the chain has an exit from every level it can reach. 122 tests, **58 gates**, 0 failed.
+
+**Round 185 (from a play report):** *"clipping and lack of collision"* — the report was right, and the cause was that **the port had no model collision at all**. Every sector plane stopped a body; not one placed model did, so a player walked through the cantina's tables, its columns and every crate in the game.
+
+The engine's rule is in the shipped data, in the template chain: `misc\things.dat` gives `_structure` a `collide=3` and `_decor` a `collide=0`, `_walkstruct` inherits the first through its `_structure` base, and each placed template carries its own `size=` radius. `column01 _structure … size=0.204987` is solid; `tuskensoused _ghostdecor` is not. `runtime::solid_radius` reads exactly that, `collide::build` turns every placed thing it answers for into a cylinder, and `Solids::push_out_of_things` resolves the body against them after the walls (`move_body`, so the sweep's own callers get it too).
+
+Measured on level 1, walking straight at a `column01` from three units:
+
+    before:  walked 120 frames: travelled 1.1 units,  71 blocked
+    after:   walked 120 frames: travelled 0.4 units, 110 blocked
+
+The same walk on every level now stops in the furniture instead of passing through it — `--walk all` reads `25/34 contained, 32 sector crossings` where it read `30/34, 56`, and the four extra "NO" rows are bodies blocked against a table or crate within a metre of the start rather than bodies walking into the next room. That is the expected consequence of furniture being solid, and `sweep: 0 level(s) left the body in the void, worst drop 0.00` still holds.
+
+Two limits, both written down rather than hidden: the collision volume is a **vertical cylinder** of the template's `size=` and eight radii of height, not the model's box (`ponytail:` in `Solids::things` names the `.3do` bounds as the upgrade), and the **camera still clips** when it starts 0.16 units from a tabletop — the near plane cuts the geometry, which is the other half of the report and is not fixed yet. `BK_NEAR_THINGS=1` prints what stands within three units of the spawn and whether the engine calls it solid, which is how the spawn's two columns and one table were identified. 122 tests, 58 gates, 0 failed.

@@ -19054,6 +19054,26 @@ fn setup(
             "spawn: sector center {eye} radius {area:.1} (walkplayer sector {})",
             player.map(|t| t.sector).unwrap_or(-1)
         );
+        // `BK_NEAR_THINGS=1`: what is standing at the spawn, and whether it is the kind of thing
+        // the engine lets a body walk through. Decor is `type=ghost` (no collision, by design), and
+        // a camera that starts inside a *solid* model is the difference worth seeing.
+        if std::env::var_os("BK_NEAR_THINGS").is_some() {
+            let mut near: Vec<(f32, String, i32, [f32; 3])> = level
+                .things
+                .iter()
+                .map(|t| {
+                    let d = ((t.pos[0] - eye.x).powi(2) + (t.pos[1] - eye.y).powi(2) + (t.pos[2] - eye.z).powi(2)).sqrt();
+                    let kind = level.template_param(&t.template, "type").unwrap_or("(none)").to_string();
+                    (d, t.template.clone(), 0, t.pos)
+                })
+                .filter(|(d, _, _, _)| *d < 40.0)
+                .collect();
+            near.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for (d, template, _, at) in near.iter().take(10) {
+                let kind = level.template_param(template, "type").unwrap_or("(none)");
+                println!("near: {d:5.1} `{template}` type={kind} at {at:?}");
+            }
+        }
         commands.spawn((
             Camera3d::default(),
             WorldCamera,
@@ -19062,6 +19082,29 @@ fn setup(
         ));
     }
 
+    // `BK_NEAR_THINGS=1` reports what stands at the spawn and whether the engine makes it solid.
+    // The rule is the template chain's `collide=` plus the template's own `size=` radius
+    // (`misc\things.dat`: `_structure` 3, `_decor` 0), which is what decides whether a body stops
+    // at a column or walks through it.
+    if std::env::var_os("BK_NEAR_THINGS").is_some() {
+        let eye = player.map(|t| t.pos).unwrap_or([0.0; 3]);
+        let mut near: Vec<(f32, String, Option<f32>)> = level
+            .things
+            .iter()
+            .map(|t| {
+                let d = ((t.pos[0] - eye[0]).powi(2) + (t.pos[1] - eye[1]).powi(2) + (t.pos[2] - eye[2]).powi(2)).sqrt();
+                (d, t.template.clone(), runtime::solid_radius(&level, &t.template))
+            })
+            .filter(|(d, _, _)| *d < 3.0)
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (d, template, solid) in near.iter().take(10) {
+            match solid {
+                Some(r) => println!("near: {d:5.2} `{template}` solid, radius {r:.3}"),
+                None => println!("near: {d:5.2} `{template}` passable"),
+            }
+        }
+    }
     // The walker: same code path as `--walk`, with the level's `walkplayer` as its start.
     let solids = collide::build(level);
     // The body's centre, not the eye: `walk_player` adds `PLAYER_EYE` when it places the
@@ -21138,6 +21181,7 @@ mod walker_tests {
             [1.0, -2.0, 2.0],
         ];
         collide::Solids {
+            things: Vec::new(),
             boxes: Vec::new(),
             hull: Vec::new(),
             // The sweep reaches a face through these maps, so a fixture that leaves them empty cannot
