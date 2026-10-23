@@ -98,6 +98,11 @@ pub fn draw_screen(
     look: &Look,
     selected: Option<usize>,
 ) {
+    // A plate's own palette need not carry the font's ink: `bkForce.bm` maps the glyph pixels
+    // (`229..232`, the values the `ui\sft` art uses) to black, which is why the Force Powers labels
+    // draw invisibly on their own dark plate while the tally's plate paints them orange. Falling back
+    // does not help — the level colormap paints those indices black too — so the real fix is the
+    // engine's glyph remap (`stdFont_Draw3`'s remap table), which this port does not carry yet.
     let palette = palette_of(backdrop.base, look.palette);
     if let Some(cell) = backdrop.base.cells.first() {
         canvas.blit_indexed([0, 0], cell.width, cell.height, &cell.pixels, &palette, 1);

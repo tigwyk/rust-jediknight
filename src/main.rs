@@ -2472,6 +2472,30 @@ fn main() {
                 Some(p) => println!("force screen: bkForce palette 1..4 = {:?}", &p[1..5]),
                 None => println!("force screen: bkForce carries no palette of its own"),
             }
+            // Text is drawn with the *glyph's own* pixel value as a palette index
+            // (`ui::Canvas::draw_text_palette`), so what the text looks like is decided by which
+            // entries a font's glyph pixels hit. Print the ones the Ok button's letters use.
+            let fonts = load_menus(&game)
+                .map(|tables| load_fonts(&gobs, &tables))
+                .unwrap_or_default();
+            // `jkGuiForce_Show` calls `jkGui_SetModeMenu(*(jkGui_stdBitmaps + 0x60))`, but 0x60 is not
+            // a plain pointer index (it lands on `flRotDow.bm`), so the menu palette's real source is
+            // still unknown. Print the chain that is certain instead.
+            if let Some(font) = fonts.get(2)
+                && let Some((at, _)) = font.glyph('O')
+            {
+                let values: Vec<u8> = (0..font.height)
+                    .flat_map(|row| (0..8).map(move |col| (row, col)))
+                    .filter_map(|(row, col)| font.strip.get((row * font.strip_width + at + col) as usize).copied())
+                    .filter(|v| *v != 0)
+                    .collect();
+                let first = values.first().copied().unwrap_or(0);
+                println!(
+                    "force screen: font 2 `O` pixels {} distinct, first {first}, palette gives {:?}",
+                    values.iter().collect::<std::collections::BTreeSet<_>>().len(),
+                    art.palette_rgb.map(|p| p[first as usize]),
+                );
+            }
         }
         println!("--- force screen check passed ---");
         return;
