@@ -805,3 +805,25 @@ The cause is the shape of `episode.jk`'s graph: `gotoA` links run forwards, so t
 Two deliberate exclusions, because a gate that sits through a 2:47 film is a gate nobody runs: `--start` never fills `pre`, and the system clears it for a capture, a probe or a sweep child. Both were checked — a `--shot` capture logs no `cutscene:` line and still saves at frame 30, and the sweep is 58 of 58.
 
 The overlap the test pinned down is worth keeping in view: level 2's predecessor is `06a.smk`, which is *level 1's ending film*, already played by `flow_after`. That is why the app asks `flow_before` only at the campaign start — asking on every load would play each film twice. 123 tests, 58 gates, 0 failed.
+
+**Round 187 (from a review of the real camera):** the decompilation answers the clipping question, and the answer is the **near plane**, not collision.
+
+`sithCamera_Startup` (0x4c4de0) creates six cameras — modes 1 (first person), 4, 8, 0x20, 0x40, 0x80 — each with **FOV 90°** (`0x42b40000`) and aspect 1.0 (`0x3f800000`). Each one's `rdCamera` is built by
+
+    rdCamera_NewEntry(camera + 0x7c, fov, 0, 0x3c800000, 0x42800000, aspect)
+
+and those two constants are **near = 0.015625 (1/64)** and far = 64.0. The player's own radius is `size=0.065`, so the engine's near plane is *a quarter of the body's radius*: a body that can touch a wall always keeps the eye further from it than the near plane, and no wall is ever sliced.
+
+The port used Bevy's default `PerspectiveProjection` near of **0.1** — six times the engine's, and *larger than the player's radius* — so every wall the body could reach was inside the near plane. That is the "clipping": the frame was showing geometry cut open by a plane 0.1 in front of the eye. `engine_projection()` now sets near `0.015625`, far 1000 (the sky dome's radius 600 has to fit), and every `EngineFov` world camera takes it; `engine_fov` keeps changing only the angle, as before.
+
+The rest of the camera, for the record. `sithCamera_Update` (0x4c56b0) switches on the mode:
+
+- **case 1, first person** — copy the thing's matrix (`thing + 0x88`), add the punch/flash offset (thing field 2 → `thing + 0xe4`), otherwise the thing's own `eyeoffset` (`+0x15c..0x164`) plus a head-pitch forward shift (`+0x1d4..` dotted with the camera axes, times `_DAT_00522ddc`, clamped to ±8) and the POV shake (`DAT_008ee5b8..`, set by `sithCamera_SetPOVShake`), then translate by the thing's position (`+0xb8`).
+- **case 4, third person** — the same eye offset plus `thing + 0x168`, then `sithCamera_SearchSectorInRadius` from the thing toward the camera.
+- **cases 0x20 / 0x40 / 0x80** — override cameras for cinematics (fixed matrix, sway, or the "sector in radius" placement).
+
+`sithCamera_SearchSectorInRadius` (0x4c6050) is the engine's **camera collision**: it normalises focus→camera, calls `sithCollision_SearchForCollisions` with radius `0x3ca3d70a` (0.02) and flags `|0x800`, then **rewrites the camera position to the first hit** (`cam = hit_t * dir + focus`). So the third-person camera is pulled in to the wall; the first-person camera is not, and does not need to be, because of the near plane above.
+
+`sithCollision_FindSectorInRadius` supplies the sector index for the final camera point (the `param_1[6]` field), and `sithCamera_RenderScene` sets it current, inverts it into the view (`rdCamera_Update`), and draws.
+
+What that leaves for the port: first person matches retail's maths already (eye offset `0.037` from `_actor`'s `eyeoffset`, 90° horizontal FOV). The third-person/chase cases and their pull-in are not ported — `--stand` and the overview place their cameras directly — which is where `sithCamera_SearchSectorInRadius` would go if a third-person view is wanted. 123 tests, 58 gates, 0 failed.

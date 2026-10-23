@@ -19101,6 +19101,7 @@ fn setup(
                     Camera3d::default(),
                     WorldCamera,
                     EngineFov,
+                    engine_projection(),
                     Transform::from_translation(eye).looking_at(target, Vec3::Z),
                 ));
             }
@@ -19110,6 +19111,7 @@ fn setup(
                     Camera3d::default(),
                     WorldCamera,
                     EngineFov,
+                    engine_projection(),
                     Transform::from_translation(eye).looking_at(eye + aim.normalize(), Vec3::Z),
                 ));
             }
@@ -19143,6 +19145,7 @@ fn setup(
             Camera3d::default(),
             WorldCamera,
             EngineFov,
+            engine_projection(),
             Transform::from_translation(eye).looking_at(eye + aim.normalize(), Vec3::Z),
         ));
     }
@@ -19860,6 +19863,21 @@ fn vertical_fov(aspect: f32) -> f32 {
     2.0 * ((ENGINE_H_FOV_DEG.to_radians() * 0.5).tan() / aspect.max(0.05)).atan()
 }
 
+/// The world camera's projection, with the engine's own near plane.
+///
+/// `sithCamera_NewEntry` builds each camera's `rdCamera` with `rdCamera_NewEntry(fov, 0,
+/// 0x3c800000, 0x42800000, aspect)` — near **0.015625** (1/64) and far 64.0 — and `rdCamera_SetFOV`
+/// keeps the 90° the six entries are created with (`0x42b40000`). Bevy's `PerspectiveProjection`
+/// default near is 0.1, six times that, and *larger than the player's own 0.065 radius*: any wall the
+/// body can touch sits inside the near plane, and the frame shows the wall sliced open. The engine
+/// cannot show that, because its near plane is a quarter of the body's radius.
+fn engine_projection() -> Projection {
+    Projection::Perspective(PerspectiveProjection {
+        near: 0.015625,
+        far: 1000.0,
+        ..default()
+    })
+}
 /// Marks a camera whose projection is the engine's, so `engine_fov` keeps it in step with the window.
 #[derive(Component)]
 struct EngineFov;
