@@ -10,6 +10,7 @@ mod bm;
 mod cog;
 mod collide;
 mod episode;
+mod force;
 mod gob;
 mod hud;
 mod jks;
@@ -389,6 +390,7 @@ fn main() {
     let mut ai_live = false;
     let mut force_live = false;
     let mut force_all = false;
+    let mut force_economy = false;
     // `--uni <key>`: which string file carries a key, and what it says.
     let mut uni_key: Option<String> = None;
     // `--live-all`: every level through the real schedule, one process each.
@@ -724,6 +726,7 @@ fn main() {
             "--ai-live" => ai_live = true,
             "--force-live" => force_live = true,
             "--force-all" => force_all = true,
+        "--force-economy" => force_economy = true,
             "--uni-key" => {
                 i += 1;
                 uni_key = args.get(i).cloned();
@@ -9375,6 +9378,7 @@ fn main() {
         .insert_resource(AiProbe { enabled: ai_live })
         .insert_resource(ForceProbe { enabled: force_live })
         .insert_resource(ForceAllProbe { enabled: force_all })
+        .insert_resource(ForceEconomyProbe { enabled: force_economy })
         .insert_resource(PulseCount::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
@@ -9471,7 +9475,8 @@ fn main() {
         .add_systems(Update, use_probe.before(use_key).run_if(no_screen_open))
         .add_systems(Update, ai_probe.run_if(no_screen_open))
         .add_systems(Update, force_probe.run_if(no_screen_open))
-        .add_systems(Update, force_all_probe.run_if(no_screen_open));
+        .add_systems(Update, force_all_probe.run_if(no_screen_open))
+        .add_systems(Update, force_economy_probe);
     app.run();
 }
 
@@ -15793,6 +15798,84 @@ fn force_all_probe(
         println!("--- force-all check passed ---");
     } else {
         println!("force-all: FAIL the loader skipped a power");
+    }
+    exit.write(AppExit::Success);
+}
+
+/// `--force-economy`: the engine's force-power arithmetic, without a screen to drive it.
+///
+/// The powers are ordinary inventory bins, so the whole economy is `src/force.rs`: the rank ladder
+/// `jkPlayer_SetAccessiblePowers` walks, `jkPlayer_CalcAlignment`'s weighted sum, the rank-8 mastery
+/// choice and the side the player is locked out of past rank 6. The Force Powers screen that *spends*
+/// the points is next; this prints the model it will run on, and fails if any of the four disagree
+/// with the constants read out of `JK.EXE` (`0x52206c` = `6.25`, `0x522074` = `-20`, `0x522078` = `4`).
+#[derive(Resource, Default)]
+struct ForceEconomyProbe {
+    enabled: bool,
+}
+
+fn force_economy_probe(probe: Res<ForceEconomyProbe>, mut exit: MessageWriter<AppExit>) {
+    if !probe.enabled {
+        return;
+    }
+    use std::collections::BTreeMap;
+    let map = |pairs: &[(i32, f32)]| -> BTreeMap<i32, f32> { pairs.iter().copied().collect() };
+    let empty: BTreeMap<i32, f32> = BTreeMap::new();
+    let mut ok = true;
+
+    let ladder: Vec<usize> = (0..=8).map(|rank| force::accessible_powers(rank).len()).collect();
+    println!("force-economy: the rank ladder holds {ladder:?} powers for ranks 0..8");
+    ok &= ladder == [0, 4, 4, 4, 6, 8, 10, 12, 12];
+
+    let light_one = map(&[(force::LIGHT[0], 4.0)]);
+    let dark_one = map(&[(force::DARK[0], 4.0)]);
+    let floor = map(&[
+        (force::DARK[0], 4.0),
+        (force::DARK[1], 4.0),
+        (force::DARK[2], 4.0),
+        (force::DARK[3], 4.0),
+    ]);
+    println!(
+        "force-economy: alignment one light level {:.1}, one dark {:.1}, sixteen dark {:.1}",
+        force::alignment(&light_one, false),
+        force::alignment(&dark_one, false),
+        force::alignment(&floor, false),
+    );
+    ok &= force::alignment(&light_one, false) == 25.0;
+    ok &= force::alignment(&dark_one, false) == -25.0;
+    ok &= force::alignment(&floor, false) == -100.0;
+
+    let declared = map(&[(force::SIDE, 1.0), (force::DARK[0], 4.0)]);
+    println!(
+        "force-economy: a declared side reads {:.1}, an empty tally {:.1}",
+        force::alignment(&declared, false),
+        force::alignment(&empty, true),
+    );
+    ok &= force::alignment(&declared, false) == 100.0;
+    ok &= force::alignment(&empty, true) == 20.0;
+
+    let mut jedi = map(&[
+        (force::RANK, 8.0),
+        (force::LIGHT[0], 4.0),
+        (force::LIGHT[1], 4.0),
+        (force::LIGHT[2], 4.0),
+        (force::LIGHT[3], 4.0),
+    ]);
+    let mastery = force::protection_deadlysight(&mut jedi);
+    println!(
+        "force-economy: rank 8 with the light side maxed grants {mastery} (protection {:?})",
+        jedi.get(&force::PROTECTION).copied(),
+    );
+    ok &= mastery == 1 && jedi.get(&force::PROTECTION).copied() == Some(4.0);
+
+    let sides = force::allowed_sides(&dark_one, 7);
+    println!("force-economy: past rank 6 a dark Jedi sees (light {:?}, dark {:?})", sides.0, sides.1);
+    ok &= sides == (false, true);
+
+    if ok {
+        println!("--- force-economy check passed ---");
+    } else {
+        println!("force-economy: FAIL the model disagrees with JK.EXE");
     }
     exit.write(AppExit::Success);
 }
