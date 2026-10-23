@@ -53,3 +53,24 @@ through the install's own `SMACKW32.DLL`.
 [docs/gaps.md](gaps.md) is the unit-by-unit account with the evidence for every row;
 [docs/roadmap.md](roadmap.md) is the dependency-ordered remainder;
 [docs/progress-log.md](progress-log.md) is how each piece was recovered.
+
+## Verified on this install
+
+Everything below was run against the retail data while this note was written, not remembered
+from an earlier build.
+
+```
+--gates            0 of 58 failed        (one child process per check, every row a verdict)
+cargo test --bins  122 passed
+--audit            540 cogs parsed, 0 failed, 1854 labels, 7683 symbols
+--walk all         0 level(s) left the body in the void, worst drop 0.00
+--campaign         32 level step(s) walked, 30 distinct level file(s)
+--ends             28 of 35 levels name a script that calls jkEndLevel; the rest are m*/static
+--goal             objective completed, level complete after 203 frames, next 02narshadda.jkl
+--save-slots       two slot files, distinct true, both read back
+--force-live       rose +0.60 at level 1, +0.71 at level 4 with the same press
+```
+
+The two screens a player spends the most time in are photographed from the running build:
+[force-powers.png](force-powers.png) (a power's level drawn beside its icon) and
+[tally.png](tally.png) (three stars earned at the end of level 1).
