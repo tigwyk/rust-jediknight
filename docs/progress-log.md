@@ -702,7 +702,7 @@ is why it was recoverable.
 ## Verification
 
 Every check in one page: [docs/gates.txt](docs/gates.txt) records each flag, its exit code and the
-number it printed against this install — **55 gates, 0 failures**, plus 116 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
+number it printed against this install — **55 gates, 0 failures**, plus 120 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
 
 `--check` on level 1 (`jkl\01narshadda.jkl`) reports, and asserts:
 

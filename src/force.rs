@@ -180,6 +180,82 @@ pub fn allowed_sides(inv: &BTreeMap<i32, f32>, rank: i32) -> (bool, bool) {
     }
 }
 
+/// `jkPlayer_FixStars`: reconcile the unspent pool against the rank's own budget, and return the
+/// pool it left behind.
+///
+/// A Jedi's total is **three points per rank** (`rank * 3`). What counts as spent is the unspent
+/// pool plus every power level from `0x15` up to `0x22` — the loop steps `0x14..0x23` and skips the
+/// rank itself, protection and deadly sight, which are not bought. A Jedi under budget is topped up
+/// to it; one over budget is refunded a point at a time in the engine's own order: the pool first,
+/// then the highest tier of each side down to the basics, dark before light inside every pair.
+///
+/// `FixStars` spins forever if it is over budget with every bin already empty; that cannot happen
+/// (the spend it counted is the same set it drains), but this stops rather than hangs if it ever does.
+pub fn fix_stars(inv: &mut BTreeMap<i32, f32>) -> i32 {
+    /// The order `FixStars` drains in when a Jedi is over budget.
+    const REFUND: [i32; 13] = [
+        POINTS,
+        DARK[3],
+        LIGHT[3],
+        DARK[2],
+        LIGHT[2],
+        DARK[1],
+        LIGHT[1],
+        DARK[0],
+        LIGHT[0],
+        BASICS[3],
+        BASICS[2],
+        BASICS[1],
+        BASICS[0],
+    ];
+    let rank = level(inv, RANK);
+    let budget = rank * 3;
+    let spent: i32 = level(inv, POINTS)
+        + BASICS
+            .iter()
+            .chain(LIGHT.iter())
+            .chain(DARK.iter())
+            .map(|bin| level(inv, *bin))
+            .sum::<i32>();
+    if spent < budget {
+        let pool = (budget - spent) as f32;
+        inv.insert(POINTS, pool);
+        return pool as i32;
+    }
+    let mut over = spent - budget;
+    while over > 0 {
+        // `FixStars` walks the same list for every point, so the pool drains before any power.
+        let Some(bin) = REFUND.iter().find(|bin| level(inv, **bin) > 0) else {
+            break;
+        };
+        inv.insert(*bin, (level(inv, *bin) - 1) as f32);
+        over -= 1;
+    }
+    level(inv, POINTS)
+}
+
+/// `jkMain_EndLevel`: the powers a finished level grants, from the episode row that names them.
+///
+/// An episode row carries a light bin and a dark bin (`.epi` columns 5 and 6, `lightpow`/`darkpow`
+/// in `src/episode.rs`). `jkMain_EndLevel` grants each one whose bin sits strictly between `0x13` and
+/// `0x23`, through `sithInventory_SetCarries` — which sets the *same* available bit
+/// `SetAccessiblePowers` sets — and skips a light grant for a player who declared the dark side and
+/// the dark grant for one who declared the light. `choice` is `jkPlayer_GetChoice()`: 1 light, 2 dark.
+///
+/// This is how single-player Jedi actually receive powers: level 3's row names bin `22` (`f_speed`)
+/// and the row's own comment says `[Speed]`, so a light-side player has force speed from level 3 on.
+pub fn episode_grants(lightpow: i32, darkpow: i32, choice: i32) -> Vec<i32> {
+    let in_range = |bin: i32| bin > 0x13 && bin < 0x23;
+    let mut bins = Vec::new();
+    if in_range(lightpow) && choice != 2 {
+        bins.push(lightpow);
+    }
+    if in_range(darkpow) && choice != 1 {
+        bins.push(darkpow);
+    }
+    bins
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +362,63 @@ mod tests {
         let dark = inv(&[(DARK[0], 4.0)]);
         assert_eq!(allowed_sides(&dark, 7), (false, true));
         assert_eq!(allowed_sides(&BTreeMap::new(), 7), (true, true), "neutral keeps both");
+    }
+
+    /// `FixStars`'s budget is three points a rank, and a Jedi under it is topped up to it.
+    #[test]
+    fn the_point_pool_is_three_per_rank() {
+        let mut fresh = inv(&[(RANK, 3.0)]);
+        assert_eq!(fix_stars(&mut fresh), 9);
+        assert_eq!(fresh.get(&POINTS).copied(), Some(9.0));
+
+        let mut spent = inv(&[(RANK, 3.0), (BASICS[0], 2.0), (LIGHT[1], 1.0)]);
+        assert_eq!(fix_stars(&mut spent), 6, "two in jump and one in a power leaves six");
+        assert_eq!(spent.get(&POINTS).copied(), Some(6.0));
+
+        let mut none = inv(&[(RANK, 0.0)]);
+        assert_eq!(fix_stars(&mut none), 0, "a rank-0 Jedi has nothing to spend");
+    }
+
+    /// Over budget the pool drains first, then the powers in the engine's own order.
+    #[test]
+    fn an_over_budget_jedi_is_refunded_pool_first() {
+        let mut over = inv(&[(RANK, 1.0), (POINTS, 1.0), (DARK[3], 3.0)]);
+        assert_eq!(fix_stars(&mut over), 0, "one point over budget comes out of the pool");
+        assert_eq!(over.get(&DARK[3]).copied(), Some(3.0), "the power is untouched");
+
+        let mut powers = inv(&[(RANK, 1.0), (DARK[3], 2.0), (LIGHT[0], 2.0)]);
+        assert_eq!(fix_stars(&mut powers), 0);
+        assert_eq!(
+            powers.get(&DARK[3]).copied(),
+            Some(1.0),
+            "the pool is empty, so the top tier drains first, dark before light"
+        );
+        assert_eq!(powers.get(&LIGHT[0]).copied(), Some(2.0));
+    }
+
+    /// The mastery bins are granted, not bought, so they never count against the budget.
+    #[test]
+    fn the_mastery_bins_are_outside_the_budget() {
+        let mut master = inv(&[(RANK, 1.0), (PROTECTION, 4.0), (DEADLYSIGHT, 4.0)]);
+        assert_eq!(fix_stars(&mut master), 3);
+        assert_eq!(master.get(&PROTECTION).copied(), Some(4.0), "and they are left alone");
+    }
+
+    /// A level grants the power its episode row names, and only to the side that may use it.
+    #[test]
+    fn an_episode_row_grants_the_power_it_names() {
+        // Level 3's row: `22 0`, and its comment says `[Speed]`.
+        assert_eq!(episode_grants(22, 0, 0), vec![22], "an undecided player gets the light power");
+        assert_eq!(episode_grants(22, 0, 1), vec![22]);
+        assert_eq!(episode_grants(22, 0, 2), Vec::<i32>::new(), "a dark Jedi is not given it");
+        assert_eq!(episode_grants(0, 30, 1), Vec::<i32>::new());
+        assert_eq!(episode_grants(0, 30, 2), vec![30]);
+        assert_eq!(
+            episode_grants(19, 34, 0),
+            vec![34],
+            "the range excludes 0x13 itself but still includes deadly sight"
+        );
+        assert_eq!(episode_grants(20, 0, 0), vec![20], "the rank bin itself is in range");
+        assert_eq!(episode_grants(0, 0, 0), Vec::<i32>::new(), "a row with no powers grants none");
     }
 }

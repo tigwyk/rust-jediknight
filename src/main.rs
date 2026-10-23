@@ -15868,6 +15868,28 @@ fn force_economy_probe(probe: Res<ForceEconomyProbe>, mut exit: MessageWriter<Ap
     );
     ok &= mastery == 1 && jedi.get(&force::PROTECTION).copied() == Some(4.0);
 
+    let mut fresh = map(&[(force::RANK, 3.0)]);
+    let credited = force::fix_stars(&mut fresh);
+    let mut overspent = map(&[
+        (force::RANK, 1.0),
+        (force::POINTS, 1.0),
+        (force::DARK[3], 3.0),
+    ]);
+    let refunded = force::fix_stars(&mut overspent);
+    println!(
+        "force-economy: `jkPlayer_FixStars` credits {credited} point(s) at rank 3 and refunds an \
+         over-budget Jedi down to {refunded}"
+    );
+    ok &= credited == 9 && refunded == 0;
+
+    let granted = force::episode_grants(22, 0, 0);
+    let denied = force::episode_grants(22, 0, 2);
+    println!(
+        "force-economy: level 3's row grants {granted:?} to a light-side Jedi and {denied:?} to a \
+         dark one"
+    );
+    ok &= granted == vec![22] && denied.is_empty();
+
     let sides = force::allowed_sides(&dark_one, 7);
     println!("force-economy: past rank 6 a dark Jedi sees (light {:?}, dark {:?})", sides.0, sides.1);
     ok &= sides == (false, true);
