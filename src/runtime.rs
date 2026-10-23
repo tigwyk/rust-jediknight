@@ -4063,8 +4063,24 @@ impl Runtime {
         }
     }
 
-    /// What the player keeps across a level change.
+    /// `jkMain_EndLevel`'s own grant: give the player the power their level's episode row names.
     ///
+    /// The row carries a light bin and a dark bin, and the engine sets the `available` bit on each
+    /// one the player's declared side may use (`sithInventory_SetCarries`) as the level is finished.
+    /// The port's equivalent of that bit is holding the bin: `set_bin` starts the bin's own `cog=`,
+    /// which is what makes the power usable, so a granted power is raised to star one and an
+    /// already-held one is left where it is.
+    pub fn grant_episode_powers(&mut self, lightpow: i32, darkpow: i32) -> Vec<i32> {
+        let choice = self.inv.get(&crate::force::SIDE).copied().unwrap_or(0.0) as i32;
+        let bins = crate::force::episode_grants(lightpow, darkpow, choice);
+        for bin in &bins {
+            let level = self.inv.get(bin).copied().unwrap_or(0.0).max(1.0);
+            self.set_bin(*bin, level);
+        }
+        bins
+    }
+
+    /// What the player keeps across a level change.
     /// The engine's `jkPlayer_*` state survives the level load — inventory, the armed bin, the
     /// selected weapon, the saber, the `jkFlags` the force scripts set. This build rebuilds the whole
     /// runtime from the incoming `.jkl`, so those pieces have to be handed over explicitly instead of

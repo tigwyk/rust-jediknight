@@ -157,6 +157,8 @@ const GATES: &[&str] = &[
     "--ai-live --start 01narshadda",
     // Force jump as a player action: the cog loads from the archives and the body leaves the floor.
     "--force-live --start 01narshadda",
+    // The episode row's own grant: level 3 names force speed, and its script starts.
+    "--force-grant --start 03katarn",
     "--muzzle",
     "--use-item",
     "--engine-audit",
@@ -391,6 +393,7 @@ fn main() {
     let mut force_live = false;
     let mut force_all = false;
     let mut force_economy = false;
+    let mut force_grant = false;
     // `--uni <key>`: which string file carries a key, and what it says.
     let mut uni_key: Option<String> = None;
     // `--live-all`: every level through the real schedule, one process each.
@@ -727,6 +730,7 @@ fn main() {
             "--force-live" => force_live = true,
             "--force-all" => force_all = true,
         "--force-economy" => force_economy = true,
+        "--force-grant" => force_grant = true,
             "--uni-key" => {
                 i += 1;
                 uni_key = args.get(i).cloned();
@@ -9379,6 +9383,7 @@ fn main() {
         .insert_resource(ForceProbe { enabled: force_live })
         .insert_resource(ForceAllProbe { enabled: force_all })
         .insert_resource(ForceEconomyProbe { enabled: force_economy })
+        .insert_resource(ForceGrantProbe { enabled: force_grant })
         .insert_resource(PulseCount::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
@@ -9476,7 +9481,9 @@ fn main() {
         .add_systems(Update, ai_probe.run_if(no_screen_open))
         .add_systems(Update, force_probe.run_if(no_screen_open))
         .add_systems(Update, force_all_probe.run_if(no_screen_open))
-        .add_systems(Update, force_economy_probe);
+        .add_systems(Update, force_economy_probe)
+        .add_systems(Update, grant_level_powers)
+        .add_systems(Update, force_grant_probe);
     app.run();
 }
 
@@ -9873,6 +9880,46 @@ fn quick_save(
             println!("quicksave: loading level `{level}` before restoring `{}`", path.display());
         }
     }
+}
+
+/// Give the level its own force-power grant, once per level.
+///
+/// `jkMain_EndLevel` reads the episode row of the level being finished and grants the light and dark
+/// bins it names, through `sithInventory_SetCarries`' available bit. This build rebuilds the runtime
+/// per level, so the grant is applied when a level starts instead — which is the same thing a player
+/// sees, since the power is held for the whole of the level that follows. Level 3's row names bin 22,
+/// so a light-side player has force speed from there on.
+///
+/// The row is found by asking every loaded episode which one owns the level; `episode.jk` is not a
+/// fixed name across the shipped archives.
+fn grant_level_powers(
+    sim: Option<Res<Sim>>,
+    plan: Option<Res<FlowPlan>>,
+    gobs: Option<Res<Archives>>,
+    mut done: Local<String>,
+) {
+    let (Some(sim), Some(plan), Some(gobs)) = (sim, plan, gobs) else { return };
+    if !plan.swap || *done == plan.level {
+        return;
+    }
+    let Some((_, episode)) = episodes_of(&gobs.0)
+        .into_iter()
+        .find(|(_, episode)| episode.row_for(&plan.level).is_some())
+    else {
+        *done = plan.level.clone();
+        return;
+    };
+    *done = plan.level.clone();
+    let Some(row) = episode.row_for(&plan.level) else { return };
+    let (lightpow, darkpow) = (row.lightpow, row.darkpow);
+    if lightpow == 0 && darkpow == 0 {
+        return;
+    }
+    let granted = sim.world.borrow_mut().grant_episode_powers(lightpow, darkpow);
+    println!(
+        "level: `{}` grants force power(s) {granted:?} (light {lightpow}, dark {darkpow})",
+        plan.level
+    );
 }
 
 /// Put a loaded savegame onto the level that just finished loading.
@@ -15798,6 +15845,50 @@ fn force_all_probe(
         println!("--- force-all check passed ---");
     } else {
         println!("force-all: FAIL the loader skipped a power");
+    }
+    exit.write(AppExit::Success);
+}
+
+/// `--force-grant`: the level's own episode row hands the player a power, and its script starts.
+///
+/// `jkMain_EndLevel` grants `lightpow`/`darkpow` from the episode row through the available bit;
+/// this build applies it as the level starts, which means the bin is held and the bin's own `cog=`
+/// is running. Level 3's row names bin 22 (`f_speed`), so on `03katarn` the player should hold it and
+/// `force_speed.cog` should be one of the loaded instances.
+#[derive(Resource, Default)]
+struct ForceGrantProbe {
+    enabled: bool,
+}
+
+fn force_grant_probe(
+    probe: Res<ForceGrantProbe>,
+    sim: Option<Res<Sim>>,
+    mut state: Local<u32>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !probe.enabled {
+        return;
+    }
+    let Some(sim) = sim.as_deref() else { return };
+    *state += 1;
+    if *state < 90 {
+        return;
+    }
+    let (level, instance) = {
+        let rt = sim.world.borrow();
+        let level = rt.inv.get(&22).copied().unwrap_or(0.0);
+        drop(rt);
+        let instance = sim
+            .instances
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("force_speed.cog"));
+        (level, instance)
+    };
+    println!("force-grant: episode row gave bin 22 = {level}, `force_speed.cog` running: {instance}");
+    if level >= 1.0 && instance {
+        println!("--- force-grant check passed ---");
+    } else {
+        println!("force-grant: FAIL the level's power was not granted or its script did not start");
     }
     exit.write(AppExit::Success);
 }
