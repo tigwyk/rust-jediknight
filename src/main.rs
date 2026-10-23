@@ -9624,6 +9624,10 @@ fn watch_level_complete(
     // the draw path already — the screen was simply never shown.
     if !*tallied {
         *tallied = true;
+        // The level's own state lands here, before the tally draws it: `jkMain_EndLevel` raises the
+        // rank and credits the stars the tally then repeats.
+        let (rank, earned) = sim.world.borrow_mut().finish_level();
+        println!("level: `{}` finished — rank {rank}, {earned} star(s) earned", plan.level);
         let playing_for_real = capture.is_some_and(|capture| !capture.0)
             // `BK_TALLY=1` forces it in a capture run, which is the only way this screen can be
             // photographed without a player at the keyboard.
@@ -9722,27 +9726,8 @@ fn swap_level(world: &mut bevy::prelude::World) {
         .get_resource::<Sim>()
         .map(|sim| sim.world.borrow().carry());
     if let Some(mut carried) = carried {
-        // A finished level raises the Jedi's rank, and `jkPlayer_FixStars` turns that rank into the
-        // points the force screen spends — its budget is exactly three a rank.
-        //
-        // ponytail: this is the one inferred rule in the force economy. The dump has no single-player
-        // caller of `jkPlayer_SetRank`/`jkPlayer_FixStars` (both are reached only from multiplayer's
-        // new-character screen) and nothing writes the point bins, so *where* retail credits them is
-        // unrecovered; one rank per level, capped at the thirteenth, is the port's stand-in. It lives
-        // here alone, so a better answer replaces one line.
-        let rank = carried.inv.get(&crate::force::RANK).copied().unwrap_or(0.0);
-        let rank = (rank + 1.0).min(13.0);
-        carried.inv.insert(crate::force::RANK, rank);
-        let points = crate::force::fix_stars(&mut carried.inv);
-        // The level being left is still the plan's own: it moves to `name` further down.
-        let leaving = world
-            .get_resource::<FlowPlan>()
-            .map(|plan| plan.level.clone())
-            .unwrap_or_default();
-        println!(
-            "level: the Jedi reaches rank {rank} on leaving `{leaving}`, {points} force point(s) to \
-             spend"
-        );
+        // The rank and the level's stars were credited when the level ended (`finish_level`), so the
+        // inventory being handed over already carries them.
         world.insert_resource(Carried(carried));
     }
     // Everything the old level spawned, and nothing else: the cameras, lights and overlay are
@@ -9991,7 +9976,9 @@ fn seed_force_screen_powers(sim: Option<Res<Sim>>, mut done: Local<bool>) {
     let mut rt = sim.world.borrow_mut();
     rt.set_bin(21, 2.0);
     rt.set_bin(22, 1.0);
-    rt.set_bin(crate::force::POINTS, 3.0);
+    // The stars a level earns, which the screen folds into the pool when it opens — the same path a
+    // real level takes (`finish_level` credits `0x10`, `jkGuiForce_Show` folds it).
+    rt.set_bin(0x10, 3.0);
     rt.set_bin(crate::force::RANK, 4.0);
 }
 
@@ -10004,10 +9991,18 @@ fn refresh_force_screen(
     sim: Option<Res<Sim>>,
     overlay: Option<Res<Overlay>>,
     mut screens: Option<ResMut<Screens>>,
+    mut folded: Local<bool>,
 ) {
     let (Some(sim), Some(overlay), Some(mut screens)) = (sim, overlay, screens) else { return };
     if overlay.menu.as_deref() != Some("0x52f168") {
+        *folded = false;
         return;
+    }
+    // `jkGuiForce_Show` folds the level's award into the pool the first time the screen is opened.
+    if !*folded {
+        *folded = true;
+        let pool = sim.world.borrow_mut().fold_stars();
+        println!("force: the screen folded the level's stars in, {pool} in the pool");
     }
     let inv = sim.world.borrow().inv.clone();
     let Some(screen) = screens.0.screens.iter_mut().find(|s| s.base == 0x52f168) else { return };
@@ -10659,10 +10654,17 @@ fn refresh_overlay(
             // screen showed no stars at all however far the player had trained.
             let star_art = gobs.read("ui\\bm\\foStars.bm").and_then(|d| bm::parse(&d));
             let rank = sim.as_deref().map(|sim| sim.world.borrow().jedi_rank()).unwrap_or(0);
+            // `jkGuiSingleTally_ForceStarsRender` repeats the star cell `GetInvItemAmount(0x10)`
+            // times: bin 0x10 is the stars *this level earned*, not the rank and not the pool
+            // (`jkGuiForce_Show` folds 0x10 into 0x11 when the player opens that screen).
+            let earned = sim
+                .as_deref()
+                .map(|sim| sim.world.borrow().inv.get(&0x10).copied().unwrap_or(0.0) as i32)
+                .unwrap_or(0);
             let stars = star_art
                 .as_ref()
                 .filter(|_| screen.items.iter().any(|i| matches!(i.panel(), Some(menus::Panel::ForceStars))))
-                .map(|art| (art, rank));
+                .map(|art| (art, earned));
             // The tally's rows carry no key: `tally_lines` fills them, and the gate checks it.
             let tally_lines = sim
                 .as_deref()

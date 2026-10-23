@@ -4093,6 +4093,41 @@ impl Runtime {
         true
     }
 
+    /// End of level: raise the rank and credit the level's stars, in the order the engine does it.
+    ///
+    /// `jkMain_EndLevel` is where a finished level's state lands, before the tally draws it, so the
+    /// rank goes up and bin `0x10` — the "stars earned" the tally repeats — takes this level's award.
+    /// Returns `(rank, stars earned)`.
+    ///
+    /// ponytail: one rank and three stars per level is the port's stand-in. The dump reaches
+    /// `jkPlayer_SetRank`/`jkPlayer_FixStars` only from multiplayer's new-character screen and nothing
+    /// writes the point bins, so where retail credits them is unrecovered; three a rank matches
+    /// `FixStars`' budget (`rank * 3`) exactly, which is why the reconcile afterwards is a no-op.
+    pub fn finish_level(&mut self) -> (f32, f32) {
+        let rank = (self.inv.get(&crate::force::RANK).copied().unwrap_or(0.0) + 1.0).min(13.0);
+        self.set_bin(crate::force::RANK, rank);
+        let earned = self.inv.get(&0x10).copied().unwrap_or(0.0) + 3.0;
+        self.set_bin(0x10, earned);
+        (rank, earned)
+    }
+
+    /// `jkGuiForce_Show`'s opening move: fold the level's award (bin `0x10`) into the pool (`0x11`).
+    ///
+    /// The tally draws `0x10` — the stars this level earned — and the first time the player opens the
+    /// force screen the engine adds them to the pool it spends from and clears `0x10`. The reconcile
+    /// afterwards is `jkPlayer_FixStars`, whose budget (three a rank) the award keeps in step, so it
+    /// has nothing to do unless a script or a save left the pool out of step.
+    pub fn fold_stars(&mut self) -> f32 {
+        let fresh = self.inv.get(&0x10).copied().unwrap_or(0.0);
+        if fresh > 0.0 {
+            let pool = self.inv.get(&crate::force::POINTS).copied().unwrap_or(0.0) + fresh.round();
+            self.set_bin(0x10, 0.0);
+            self.set_bin(crate::force::POINTS, pool);
+            crate::force::fix_stars(&mut self.inv);
+        }
+        self.inv.get(&crate::force::POINTS).copied().unwrap_or(0.0)
+    }
+
     /// What the player keeps across a level change.
     /// The engine's `jkPlayer_*` state survives the level load — inventory, the armed bin, the
     /// selected weapon, the saber, the `jkFlags` the force scripts set. This build rebuilds the whole
