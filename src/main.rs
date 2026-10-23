@@ -241,25 +241,28 @@ fn run_gates(game: &std::path::Path) -> i32 {
             .args(flag.split_whitespace())
             .env("BK_MUTE", "1")
             .output();
-        let (mode, verdict) = match &out {
+        let (mode, verdict, complained) = match &out {
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout);
                 let mode = if text.contains("mode: window") { "window" } else { "headless" };
+                // A child that says FAIL anywhere has failed, verdict line or not: a gate that
+                // prints both is worse than one that prints neither.
+                let complained = text.lines().any(|l| l.contains("FAIL"));
                 let verdict = text
                     .lines()
                     .rev()
                     .find(|l| l.starts_with("--- "))
                     .map(str::trim)
                     .unwrap_or("(no verdict)");
-                (mode, verdict.to_string())
+                (mode, verdict.to_string(), complained)
             }
-            Err(e) => ("error", e.to_string()),
+            Err(e) => ("error", e.to_string(), false),
         };
         let ok = out.as_ref().map(|o| o.status.success()).unwrap_or(false);
         // A gate proves itself with a verdict line — **headless too**. A headless gate that exits 0
         // without one has run something that asserts nothing (an early return, a flag that fell
         // through), and the sweep used to call that a pass.
-        let verdict_ok = verdict != "(no verdict)";
+        let verdict_ok = verdict != "(no verdict)" && !complained;
         let passed = ok && verdict_ok;
         if !passed {
             failed += 1;
@@ -269,7 +272,13 @@ fn run_gates(game: &std::path::Path) -> i32 {
             flag,
             mode,
             if passed { "pass" } else { "FAIL" },
-            if mode == "window" && !verdict_ok { format!("{verdict} (opened a window)") } else { verdict }
+            if complained {
+                format!("{verdict} (printed FAIL)")
+            } else if mode == "window" && !verdict_ok {
+                format!("{verdict} (opened a window)")
+            } else {
+                verdict
+            }
         );
     }
     println!("gates: {} of {} failed", failed, GATES.len());
@@ -8442,6 +8451,9 @@ fn main() {
         println!(
             "winding: {inward} surface normal(s) point into their room, {outward} point away (those are culled from inside)"
         );
+        // The gate's first claim, asserted: a normal that points away from its room is a face seen
+        // through from inside, and a nonzero count means the winding derivation broke.
+        assert_eq!(outward, 0, "{outward} surface normal(s) point away from their room");
         // The plane the game itself uses, surface by surface. `#--- Surface normals ---` is read by
         // `sithSurface_ReadSurfacesListText` (JK.EXE `0x4e5c00`, `sithSurface.c:502`) into
         // `face.normal`, and it is the only normal the engine's collision and renderer ever see — so
@@ -8496,6 +8508,12 @@ fn main() {
             println!("normals: worst plane is {level} at vertex {vertex} (dot {dot:+.3})");
         }
         println!("winding: {} level(s) checked", levels.len());
+        // The second claim, asserted: every surface's plane must equal the one the level ships.
+        // The run that added this compared 126639 of 126639, so anything less is a regression.
+        assert_eq!(
+            same_plane, compared,
+            "{same_plane} of {compared} surface plane(s) disagree with the file's own normal"
+        );
         println!("--- winding check passed ---");
         return;
     }
