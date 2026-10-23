@@ -790,3 +790,18 @@ Measured on level 1, walking straight at a `column01` from three units:
 The same walk on every level now stops in the furniture instead of passing through it — `--walk all` reads `25/34 contained, 32 sector crossings` where it read `30/34, 56`, and the four extra "NO" rows are bodies blocked against a table or crate within a metre of the start rather than bodies walking into the next room. That is the expected consequence of furniture being solid, and `sweep: 0 level(s) left the body in the void, worst drop 0.00` still holds.
 
 Two limits, both written down rather than hidden: the collision volume is a **vertical cylinder** of the template's `size=` and eight radii of height, not the model's box (`ponytail:` in `Solids::things` names the `.3do` bounds as the upgrade), and the **camera still clips** when it starts 0.16 units from a tabletop — the near plane cuts the geometry, which is the other half of the report and is not fixed yet. `BK_NEAR_THINGS=1` prints what stands within three units of the spawn and whether the engine calls it solid, which is how the spawn's two columns and one table were identified. 122 tests, 58 gates, 0 failed.
+
+**Round 186 (from a play report):** *"it plays the cutscenes of Kyle talking to the lady in the ship, then the booth, THEN it puts you in the game"* — the port started the campaign at `first_level` and skipped the opening film entirely.
+
+The cause is the shape of `episode.jk`'s graph: `gotoA` links run forwards, so the film that *leads into* level 1 is the one row no walk from the level reaches.
+
+    10:      1     1        CUT      03-04a.smk        0   0   11   -1
+    11:      1     1        LEVEL    01narshadda.jkl   0   0   12   -1    # Level 1: Narshadda
+
+`Episode::flow_before` walks that backwards from the level (the row whose `gotoA` is the level, then the row whose `gotoA` is that film, up to a previous level row), and `FlowPlan::pre` carries the result. On a real campaign start `play_intro_films` plays them in order and only then lets play continue, which is what retail does:
+
+    cutscene: the campaign opens with 03-04a.smk, 2500 frames, 0 left after it
+
+Two deliberate exclusions, because a gate that sits through a 2:47 film is a gate nobody runs: `--start` never fills `pre`, and the system clears it for a capture, a probe or a sweep child. Both were checked — a `--shot` capture logs no `cutscene:` line and still saves at frame 30, and the sweep is 58 of 58.
+
+The overlap the test pinned down is worth keeping in view: level 2's predecessor is `06a.smk`, which is *level 1's ending film*, already played by `flow_after`. That is why the app asks `flow_before` only at the campaign start — asking on every load would play each film twice. 123 tests, 58 gates, 0 failed.

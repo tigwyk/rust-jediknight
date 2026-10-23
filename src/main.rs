@@ -1764,7 +1764,29 @@ fn main() {
             }
             None => (None, None),
         };
-        FlowPlan { game: game.clone(), level: level_name.clone(), first: campaign_start.clone(), cut, next, swap }
+        // The campaign opens with a film that no forward walk reaches: row 10 of the single-player
+        // episode is `03-04a.smk` with `gotoA 11`, and 11 is level 1. Retail plays it, then drops the
+        // player into the cantina; a start at `first_level` skipped it, which is what a player
+        // reported as missing (`--start` and every capture still skip it, deliberately).
+        let pre: Vec<String> = match &episode {
+            Some(episode) if !start_in_level && level_name == campaign_start => {
+                episode
+                    .flow_before(&level_name)
+                    .iter()
+                    .map(|s| s.file.clone())
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        FlowPlan {
+            game: game.clone(),
+            level: level_name.clone(),
+            first: campaign_start.clone(),
+            cut,
+            next,
+            pre,
+            swap,
+        }
     };
 
     // `--play <wav>`: play one archived sound and exit, to check the audio path
@@ -9541,6 +9563,7 @@ fn main() {
         .add_systems(Update, goal_probe.after(live_play_drive).run_if(no_screen_open))
         .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open))
         .add_systems(Update, save_slots_probe)
+        .add_systems(Update, play_intro_films)
         .add_systems(Update, use_probe.before(use_key).run_if(no_screen_open))
         .add_systems(Update, ai_probe.run_if(no_screen_open))
         .add_systems(Update, force_probe.run_if(no_screen_open))
@@ -9573,6 +9596,9 @@ struct FlowPlan {
     first: String,
     /// The cutscene that plays on completion, if the graph names one.
     cut: Option<String>,
+    /// The cutscenes that play **before** this level. Only the campaign start fills this: the
+    /// opening film is the one row no forward walk reaches (`03-04a.smk` -> level 1).
+    pre: Vec<String>,
     /// The level that loads after that.
     next: Option<String>,
     /// Whether to actually swap the loaded world (see [`swap_level`] for the boundary).
@@ -9697,6 +9723,45 @@ fn watch_level_complete(
     }
 }
 
+/// The campaign's opening film, played before the first level.
+///
+/// The graph's `gotoA` links run forwards, so the film that *leads into* level 1 is the one row no
+/// walk from the level reaches: `03-04a.smk` sits at line 10 with `gotoA 11`, and 11 is
+/// `01narshadda.jkl`. Retail plays it — the ship, then the booth — before the player is dropped into
+/// the cantina; a start at `first_level` skipped all of it. `--start` and every capture leave
+/// `pre` empty, so a gate never sits through a film.
+fn play_intro_films(
+    mut plan: Option<ResMut<FlowPlan>>,
+    playing: Option<Res<cutscene::Cutscene>>,
+    capture: Option<Res<CaptureMode>>,
+    overview: Option<Res<Overview>>,
+    mut commands: Commands,
+) {
+    let Some(plan) = plan.as_mut() else { return };
+    if plan.pre.is_empty() || playing.is_some() {
+        return;
+    }
+    // A capture, a probe or a gate is not a play session: it wants the level, not a two-minute
+    // film in front of it. Clearing the list says so once rather than on every frame.
+    if capture.is_some_and(|c| c.0) || overview.is_some_and(|o| o.capture) {
+        plan.pre.clear();
+        return;
+    }
+    let name = plan.pre.remove(0);
+    let dll = plan.game.join("SMACKW32.DLL");
+    let file = plan.game.join("Resource").join("VIDEO").join(&name);
+    match cutscene::Cutscene::load(&dll, &file, 0) {
+        Some(played) => {
+            println!(
+                "cutscene: the campaign opens with {name}, {} frames, {} left after it",
+                played.total,
+                plan.pre.len()
+            );
+            commands.insert_resource(played);
+        }
+        None => println!("cutscene: could not decode {}", file.display()),
+    }
+}
 /// When the film has played out, ask for the next level. The swap itself happens in
 /// [`swap_level`] so the reload does not run in the middle of another system's borrows.
 fn queue_next_level(

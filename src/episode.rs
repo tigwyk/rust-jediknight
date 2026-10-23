@@ -89,6 +89,35 @@ impl Episode {
             .flatten()
     }
 
+    /// The cutscenes that play **before** `level_file`: the chain that leads into it.
+    ///
+    /// The graph's `gotoA` links run forwards, so a level's intro films are the rows nobody in the
+    /// level's own chain visits — row 10 of the single-player episode is `03-04a.smk` with
+    /// `gotoA 11`, and 11 is level 1. Retail plays that film, then drops the player into the cantina;
+    /// a port that starts at `first_level` skips it entirely, which is exactly what a player
+    /// reported (the ship and the booth scenes were missing).
+    pub fn flow_before(&self, level_file: &str) -> Vec<&Sequence> {
+        let Some(level) = self.row_for(level_file) else { return Vec::new() };
+        let mut found: Vec<&Sequence> = Vec::new();
+        let mut at = level.id;
+        // Walk backwards: the film whose `gotoA` is `at`, then the film whose `gotoA` is that
+        // film, and so on — a run of CUT rows ends at the previous LEVEL row.
+        loop {
+            let Some(previous) = self
+                .sequences
+                .iter()
+                .find(|s| s.goto_a == at && s.kind == Kind::Cut)
+            else {
+                break;
+            };
+            found.insert(0, previous);
+            at = previous.id;
+            if found.len() > 8 {
+                break;
+            }
+        }
+        found
+    }
     /// What finishing `level_file` leads to: the cutscene the graph names (if the very next row
     /// is one) and the level that follows it.
     pub fn flow_after(&self, level_file: &str) -> (Option<&Sequence>, Option<&Sequence>) {
@@ -180,6 +209,30 @@ mod tests {
 
     /// A level's successor is a cutscene, and the cutscene's successor is the next level — the
     /// chain `jkEndLevel` walks.
+    /// The single-player episode starts with a film that no forward walk from level 1 reaches.
+    #[test]
+    fn the_intro_film_is_found_before_the_first_level() {
+        let e = parse(
+            "\"The Force Within\"\nTYPE  1\nSEQ   3\n\n\
+             10:\t1\t1\tCUT\t03-04a.smk\t0\t0\t11\t-1\n\
+             11:\t1\t1\tLEVEL\t01narshadda.jkl\t0\t0\t12\t-1\n\
+             12:\t1\t1\tCUT\t06a.smk\t0\t0\t20\t-1\n\
+             20:\t1\t2\tLEVEL\t02narshadda.jkl\t0\t0\t-1\t-1\n\
+             end\n",
+        );
+        let before: Vec<&str> = e.flow_before("01narshadda.jkl").iter().map(|s| s.file.as_str()).collect();
+        assert_eq!(before, ["03-04a.smk"], "level 1 should be preceded by its intro film");
+        // The film after a level is a different question, and still answered the same way.
+        let (cut, next) = e.flow_after("01narshadda.jkl");
+        assert_eq!(cut.map(|s| s.file.as_str()), Some("06a.smk"));
+        assert_eq!(next.map(|s| s.file.as_str()), Some("02narshadda.jkl"));
+        // Level 2 is preceded by `06a.smk` — the film level 1 ends with, which `flow_after` already
+        // plays. That overlap is why the app only asks `flow_before` at the campaign start: asking on
+        // every load would play each film twice.
+        let second: Vec<&str> = e.flow_before("02narshadda.jkl").iter().map(|s| s.file.as_str()).collect();
+        assert_eq!(second, ["06a.smk"]);
+    }
+
     #[test]
     fn the_next_row_follows_goto_a() {
         let e = parse(
