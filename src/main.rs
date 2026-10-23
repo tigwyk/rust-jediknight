@@ -12246,6 +12246,9 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
         "level", "travelled", "blocked", "sectors", "contained", "hull"
     );
     let (mut kept, mut agreed, mut no_start, mut transitions) = (0usize, 0usize, 0usize, 0usize);
+    // The two things that must hold on *every* level, containment or not: the body is never left in
+    // the void, and it never falls further than a step.
+    let (mut voids, mut worst_drop) = (0usize, 0.0f32);
     for name in &levels {
         let Some(raw) = gobs.read(name) else { continue };
         let level = jkl::parse(&String::from_utf8_lossy(&raw));
@@ -12254,6 +12257,8 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                 transitions += r.transitions;
                 kept += r.contained as usize;
                 agreed += r.in_hull as usize;
+                voids += usize::from(r.void_frames > 0);
+                worst_drop = worst_drop.max(r.dropped.max(0.0));
                 println!(
                     "{:<30} {:>9.1} {:>8} {:>10} {:>9}  {}",
                     name,
@@ -12274,6 +12279,11 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
         "summary: {kept}/{} levels with a start kept the walker inside its sector, {agreed} had the hull test agree, {transitions} sector crossings, {no_start} without a start",
         levels.len() - no_start
     );
+    // The assertions: containment varies for reasons the table shows, but a body must never be left
+    // in the void and must never fall further than a step. Without these the sweep asserted nothing.
+    println!("sweep: {voids} level(s) left the body in the void, worst drop {worst_drop:.2}");
+    assert_eq!(voids, 0, "{voids} level(s) left the body in the void");
+    assert!(worst_drop < 1.0, "the worst drop was {worst_drop:.2}, which is a fall");
     println!("--- walk check passed ---");
 }
 

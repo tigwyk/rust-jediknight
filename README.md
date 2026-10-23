@@ -443,15 +443,24 @@ what makes portals work, and treating it as a sector index pins you in place
 ```
 level                          travelled  blocked    sectors contained  hull
 jkl\03katarn.jkl                    16.0        0   405->369       yes  differs
-jkl\04escapehouse.jkl               16.3        0   781->786       yes  differs
-jkl\09fuelstation.jkl               11.0        0   874->880       yes  differs
+jkl\04escapehouse.jkl                1.2      548   800->937        NO  agrees
+jkl\06bbarons.jkl                    0.9      563    318->85        NO  agrees
+jkl\11gorc.jkl                       0.8      563     19->14        NO  agrees
+jkl\m10.jkl                         13.4        0       4->8        NO  differs
 ...
-summary: 34/34 levels with a start kept the walker inside its sector,
-         13 had the hull test agree, 931 sector crossings, 1 without a start
+summary: 30/34 levels with a start kept the walker inside its sector,
+         18 had the hull test agree, 56 sector crossings, 1 without a start
 ```
 
-`contained` holds on every level with a start; `hull` is a stricter second opinion that
-disagrees where sectors overlap (level 1 has 462 sectors for 352 things, many of them
+`contained` holds on 30 of the 34 levels with a start. The four that leave their starting
+sector are named above, and the numbers say why: three are *blocked* for most of the sweep
+(548–563 of 600 frames) and travel about a metre, so the sector they end in is a
+neighbouring sliver the walker was pushed into, not a doorway it walked through; `m10` is the
+power-core level, where the sector's own thrust moves the body. What the gate *asserts* is
+narrower and holds everywhere: **no level leaves the body in the void, and none drops it
+further than a step** — its last two lines are `sweep: 0 level(s) left the body in the void,
+worst drop 0.00`, and those are assertions, not a report. `hull` is a stricter second opinion
+that disagrees where sectors overlap (level 1 has 462 sectors for 352 things, many of them
 trigger slivers). The window runs the same `walker_step` the sweep measures, so walking
 into a wall stops at the wall and walking through a doorway changes sector.
 
