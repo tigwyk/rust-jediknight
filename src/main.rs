@@ -2441,6 +2441,18 @@ fn main() {
         );
         assert_eq!(names.len(), 2, "the rule showed {} powers, not 2", names.len());
         assert!(names.iter().any(|n| n == "JUMP") && names.iter().any(|n| n == "SPEED"));
+        // The pause menu's own edge has to land on it: `jkGuiEsc_Show` calls `jkGuiForce_Show`, and
+        // the port opens screens by the address the graph names, so the built screen must carry that
+        // base or the row is a dead end.
+        assert_eq!(
+            nav::step(0x529560, 12, ""),
+            nav::Step::Open(0x52f168),
+            "the pause menu's force row no longer points at the screen"
+        );
+        assert_eq!(
+            screen.base, 0x52f168,
+            "the built screen does not carry the address the graph opens"
+        );
         println!("--- force screen check passed ---");
         return;
     }
@@ -9291,7 +9303,11 @@ fn main() {
         if muted() { "muted" } else { "on" }
     );
 
-    let menus = load_menus(&game).unwrap_or_default();
+    let mut menus = load_menus(&game).unwrap_or_default();
+    // The force-power screen is built rather than read: `jkGuiForce_Init` fills its element array at
+    // run time, so the executable's tables do not carry it. Its base is the address the pause menu's
+    // own edge points at (`0x52f168`), which is how `nav` opens it.
+    menus.screens.push(menus::force_screen());
     // The boot screen: retail opens on its main menu, and this build now does too when it is being
     // *played*. Every flag that drives frames is a capture or a gate — those want the level, not a
     // menu in front of it — and an install whose executable cannot supply the menu tables keeps the
@@ -9646,7 +9662,28 @@ fn swap_level(world: &mut bevy::prelude::World) {
     let carried = world
         .get_resource::<Sim>()
         .map(|sim| sim.world.borrow().carry());
-    if let Some(carried) = carried {
+    if let Some(mut carried) = carried {
+        // A finished level raises the Jedi's rank, and `jkPlayer_FixStars` turns that rank into the
+        // points the force screen spends — its budget is exactly three a rank.
+        //
+        // ponytail: this is the one inferred rule in the force economy. The dump has no single-player
+        // caller of `jkPlayer_SetRank`/`jkPlayer_FixStars` (both are reached only from multiplayer's
+        // new-character screen) and nothing writes the point bins, so *where* retail credits them is
+        // unrecovered; one rank per level, capped at the thirteenth, is the port's stand-in. It lives
+        // here alone, so a better answer replaces one line.
+        let rank = carried.inv.get(&crate::force::RANK).copied().unwrap_or(0.0);
+        let rank = (rank + 1.0).min(13.0);
+        carried.inv.insert(crate::force::RANK, rank);
+        let points = crate::force::fix_stars(&mut carried.inv);
+        // The level being left is still the plan's own: it moves to `name` further down.
+        let leaving = world
+            .get_resource::<FlowPlan>()
+            .map(|plan| plan.level.clone())
+            .unwrap_or_default();
+        println!(
+            "level: the Jedi reaches rank {rank} on leaving `{leaving}`, {points} force point(s) to \
+             spend"
+        );
         world.insert_resource(Carried(carried));
     }
     // Everything the old level spawned, and nothing else: the cameras, lights and overlay are

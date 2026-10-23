@@ -173,7 +173,7 @@ pub fn force_screen() -> Screen {
         });
     }
     Screen {
-        base: 0,
+        base: 0x52f168,
         name: "force".to_string(),
                 // `jkGUIForce.c`: `jkGui_InitMenu(jkGuiForce_pMenu, jkGui_stdBitmaps[JKGUI_BM_BK_FORCE])`,
         // and `jkGui_aBitmaps[9] = "bkForce.bm"`.
