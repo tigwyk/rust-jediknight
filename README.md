@@ -182,6 +182,10 @@ from the install, palette included.*
 
 ## Status
 
+Release notes for 0.1 — what a player can actually do, how to run it, and what is
+deliberately missing — are in [docs/release-0.1.md](docs/release-0.1.md). The tables below
+are the unit-by-unit account behind them.
+
 | area | state |
 |---|---|
 | `.gob` archive VFS (5 archives, 4795 entries / 4791 unique names) | working |
