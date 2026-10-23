@@ -1311,23 +1311,21 @@ fn main() {
             eprintln!("fatal: no JediKnight.EXE / JK.EXE for the menu tables");
             std::process::exit(1);
         };
-        // `--force-screen` names a screen the executable cannot supply — the retail force panel
-        // is built on the heap at run time — so it is composed from `jkGUIForce.c`'s table and
-        // gated by which powers the player has found (`--force-found 29,33`).
-        let built = (menu_name == "force").then(menus::force_screen);
-        let Some(screen) = built.as_ref().or_else(|| menus.find(&menu_name)) else {
+        // The force panel is one of the executable's own screens (`jkGuiForce_pElements` is a static
+        // array; only the icon rects are computed at run time), so it is found like any other. What
+        // `--force-found` adds is the "hide what you have not found" rule, applied to a copy.
+        let Some(screen) = menus.find(&menu_name) else {
             eprintln!("fatal: no screen `{menu_name}`; `--ui-tables` lists them");
             std::process::exit(1);
         };
-        let mut gated;
-        let screen = if let Some(built) = built.as_ref() {
-            gated = built.clone();
-            let found = |bin: i32| force_found.contains(&bin);
-            for item in &mut gated.items {
-                if item.kind == 1 {
-                    item.visible = found(item.id);
-                }
-            }
+        let gated;
+        let screen = if !force_found.is_empty() {
+            gated = {
+                let mut copy = screen.clone();
+                let found = |bin: i32| force_found.contains(&bin);
+                menus::apply_force_rows(&mut copy, |bin| f32::from(found(bin) as u8));
+                copy
+            };
             &gated
         } else {
             screen
@@ -2408,12 +2406,19 @@ fn main() {
     }
 
     if force_screen_check {
-        // The panel the retail build builds at run time: `jkGuiForce_buttons[25]` in
-        // `jkGUIForce.c` names 17 power buttons, and `jkGuiForce_Init` clears `bIsVisible` on
-        // the ones the player does not carry, so the screen shows what you have found.
-        let mut screen = menus::force_screen();
+        // The force panel is the executable's own screen (`jkGuiForce_pElements`, base `0x52f168`):
+        // fourteen `type 1` picture buttons whose ids are `items.dat` bins (`21` jump … `34` deadly
+        // sight) plus three note rows. `jkGuiForce_Init` computes their rects and clears
+        // `bIsVisible` on the powers the player does not carry, which is the rule this checks.
+        let mut screen = load_menus(&game)
+            .and_then(|tables| tables.find("0x52f168").cloned())
+            .expect("the executable no longer carries the force screen");
         let powers: Vec<usize> = (0..screen.items.len()).filter(|n| screen.items[*n].kind == 1).collect();
-        assert_eq!(powers.len(), menus::FORCE_POWERS.len(), "the table lost a power");
+        assert_eq!(powers.len(), 14, "the table lost a power");
+        let bins: Vec<i32> = powers.iter().map(|n| screen.items[*n].id).collect();
+        for bin in [21, 22, 24, 28, 29, 34] {
+            assert!(bins.contains(&bin), "the table lost bin {bin}");
+        }
         // Nothing found: every power row hides.
         for n in &powers {
             screen.items[*n].visible = false;
@@ -2421,13 +2426,13 @@ fn main() {
         // The power buttons are picture buttons, not text rows, so the gate is `bIsVisible`
         // itself — which is what `draw_screen` skips on and what the retail `jkGuiForce_Init`
         // clears. Nothing found: no power shows. Jump and speed found: exactly those two.
-        let mut shown_for = |found: &dyn Fn(i32) -> bool| -> Vec<String> {
+        let mut shown_for = |found: &dyn Fn(i32) -> bool| -> Vec<i32> {
             let mut shown = Vec::new();
             for n in &powers {
                 let item = &mut screen.items[*n];
                 item.visible = found(item.id);
                 if item.visible {
-                    shown.push(item.key.clone());
+                    shown.push(item.id);
                 }
             }
             shown
@@ -2439,16 +2444,14 @@ fn main() {
         let carried = |bin: i32| bin == 21 || bin == 22;
         let names = shown_for(&carried);
         println!(
-            "force screen: {} power row(s) in the table, {} shown for a player with jump and speed: {}",
+            "force screen: {} power row(s) in the table, {} shown for a player with jump and speed: {names:?}",
             powers.len(),
             names.len(),
-            names.join(", ")
         );
         assert_eq!(names.len(), 2, "the rule showed {} powers, not 2", names.len());
-        assert!(names.iter().any(|n| n == "JUMP") && names.iter().any(|n| n == "SPEED"));
+        assert!(names.contains(&21) && names.contains(&22));
         // The pause menu's own edge has to land on it: `jkGuiEsc_Show` calls `jkGuiForce_Show`, and
-        // the port opens screens by the address the graph names, so the built screen must carry that
-        // base or the row is a dead end.
+        // the port opens screens by the address the graph names.
         assert_eq!(
             nav::step(0x529560, 12, ""),
             nav::Step::Open(0x52f168),
@@ -2456,47 +2459,8 @@ fn main() {
         );
         assert_eq!(
             screen.base, 0x52f168,
-            "the built screen does not carry the address the graph opens"
+            "the screen found by name is not the address the graph opens"
         );
-        // Its Ok closes it, which is also the only way it closes while its text buttons draw nothing.
-        assert_eq!(
-            nav::step(0x52f168, 1, "GUI_OK"),
-            nav::Step::Close,
-            "the force screen's Ok no longer closes the screen"
-        );
-        // Why the text buttons draw nothing: text is drawn in palette index 1 of the *screen's* own
-        // palette (`ui::draw_screen`), so print that entry. bkTally's index 1 is the orange its rows
-        // are drawn in; if bkForce's is dark, that is the whole explanation.
-        if let Some(art) = gobs.read("ui\\bm\\bkforce.bm").and_then(|d| bm::parse(&d)) {
-            match art.palette_rgb {
-                Some(p) => println!("force screen: bkForce palette 1..4 = {:?}", &p[1..5]),
-                None => println!("force screen: bkForce carries no palette of its own"),
-            }
-            // Text is drawn with the *glyph's own* pixel value as a palette index
-            // (`ui::Canvas::draw_text_palette`), so what the text looks like is decided by which
-            // entries a font's glyph pixels hit. Print the ones the Ok button's letters use.
-            let fonts = load_menus(&game)
-                .map(|tables| load_fonts(&gobs, &tables))
-                .unwrap_or_default();
-            // `jkGuiForce_Show` calls `jkGui_SetModeMenu(*(jkGui_stdBitmaps + 0x60))`, but 0x60 is not
-            // a plain pointer index (it lands on `flRotDow.bm`), so the menu palette's real source is
-            // still unknown. Print the chain that is certain instead.
-            if let Some(font) = fonts.get(2)
-                && let Some((at, _)) = font.glyph('O')
-            {
-                let values: Vec<u8> = (0..font.height)
-                    .flat_map(|row| (0..8).map(move |col| (row, col)))
-                    .filter_map(|(row, col)| font.strip.get((row * font.strip_width + at + col) as usize).copied())
-                    .filter(|v| *v != 0)
-                    .collect();
-                let first = values.first().copied().unwrap_or(0);
-                println!(
-                    "force screen: font 2 `O` pixels {} distinct, first {first}, palette gives {:?}",
-                    values.iter().collect::<std::collections::BTreeSet<_>>().len(),
-                    art.palette_rgb.map(|p| p[first as usize]),
-                );
-            }
-        }
         println!("--- force screen check passed ---");
         return;
     }
@@ -9347,11 +9311,7 @@ fn main() {
         if muted() { "muted" } else { "on" }
     );
 
-    let mut menus = load_menus(&game).unwrap_or_default();
-    // The force-power screen is built rather than read: `jkGuiForce_Init` fills its element array at
-    // run time, so the executable's tables do not carry it. Its base is the address the pause menu's
-    // own edge points at (`0x52f168`), which is how `nav` opens it.
-    menus.screens.push(menus::force_screen());
+    let menus = load_menus(&game).unwrap_or_default();
     // The boot screen: retail opens on its main menu, and this build now does too when it is being
     // *played*. Every flag that drives frames is a capture or a gate — those want the level, not a
     // menu in front of it — and an install whose executable cannot supply the menu tables keeps the

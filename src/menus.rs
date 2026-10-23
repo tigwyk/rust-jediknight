@@ -77,120 +77,6 @@ impl Item {
     }
 }
 
-/// The force-power screen's buttons, from `jkGUIForce.c`'s own `jkGuiForce_buttons[25]` table.
-///
-/// The executable cannot supply these: the retail screen fills `jkGuiForce_pElements` on the
-/// heap at run time, so no shipped element array carries a power row (§16.11). What the source
-/// does give is the table itself — every field below is copied from it:
-///
-/// ```text
-/// /*3*/ { ELEMENT_PICBUTTON, SITHBIN_F_ABSORB, 0, NULL,
-///           0, {-1, -1, -1, -1}, 1, 0, "GUI_HINT_ABSORB", 0, jkGuiForce_ButtonClick, 0, {0}, 0},
-/// ```
-///
-/// `(bin, bitmap, hint)`: the bin whose inventory value turns the row on, the `fo*.bm` icon it
-/// draws, and the string the panel shows for it. The rect is `{-1, -1, -1, -1}` in the file
-/// because `jkGuiForce_Init` lays the icons out; the grid below is that layout, 6 across.
-pub const FORCE_POWERS: [(&str, i32, i32, &str); 17] = [
-    ("ABSORB", 28, 0, "GUI_HINT_ABSORB"),
-    ("BLINDING", 27, 1, "GUI_HINT_BLINDING"),
-    ("DESTRUCTION", 33, 3, "GUI_HINT_DESTRUCTION"),
-    ("GRIP", 31, 4, "GUI_HINT_GRIP"),
-    ("HEALING", 25, 5, "GUI_HINT_HEALING"),
-    ("JUMP", 21, 6, "GUI_HINT_JUMP"),
-    ("PERSUASION", 26, 7, "GUI_HINT_PERSUASION"),
-    ("PULL", 24, 9, "GUI_HINT_PULL"),
-    ("SEEING", 23, 10, "GUI_HINT_SEEING"),
-    ("SPEED", 22, 11, "GUI_HINT_SPEED"),
-    ("THROW", 30, 12, "GUI_HINT_THROW"),
-    ("LIGHTNING", 32, 13, "GUI_HINT_LIGHTNING"),
-    ("PROTECTION", 29, 8, "GUI_HINT_PROTECTION"),
-    ("DEADLYSIGHT", 34, 2, "GUI_HINT_DEADLYSIGHT"),
-    // The three powers the retail single-player build does not offer keep their rows: the table has
-    // 17 buttons and the screen hides the ones the player has not found. They have no `items.dat`
-    // row, so bin 0 — nothing can ever be found there, and a click on one spends nothing.
-    ("PROJECT", 0, 0, "GUI_HINT_PROJECT"),
-    ("PUSH", 0, 7, "GUI_HINT_PUSH"),
-    ("RAGE", 0, 3, "GUI_HINT_RAGE"),
-];
-
-/// Build the force-power screen the way `jkGuiForce_Init` does: one picture button per power,
-/// laid out six across, with the note and the OK/RESET/QUIT row underneath.
-pub fn force_screen() -> Screen {
-    let mut items = Vec::new();
-    // /*0*/ and /*1*/: the note lines, at the table's own rects.
-    for rect in [[160, 320, 320, 30], [10, 15, 620, 30], [10, 46, 620, 30]] {
-        items.push(Item {
-            key: String::new(),
-            kind: 2,
-            text_type: 5,
-            id: 0,
-            bitmap: 0,
-            rect,
-            hint: None,
-            visible: true,
-            draw: None,
-            click: None,
-        });
-    }
-    const CELL: i32 = 64;
-    const LEFT: i32 = 40;
-    const TOP: i32 = 110;
-    for (index, (name, bin, bitmap, hint)) in FORCE_POWERS.iter().enumerate() {
-        let column = index as i32 % 6;
-        let row = index as i32 / 6;
-        items.push(Item {
-            key: name.to_string(),
-            kind: 1,
-            text_type: 0,
-            id: *bin,
-            bitmap: *bitmap,
-            rect: [LEFT + column * CELL, TOP + row * CELL, -1, -1],
-            hint: Some(hint.to_string()),
-            // The engine's rule: `jkGuiForce_Init` clears `bIsVisible` for a power whose bin
-            // the player does not carry, so the panel shows what you have found (§16.11).
-            visible: false,
-            draw: None,
-            click: None,
-        });
-    }
-    // /*17*/, /*18*/, /*19*/: OK, RESET and QUIT at the table's rects.
-    for (key, id, rect) in [
-        ("GUI_OK", 1, [550, 420, 80, 40]),
-        ("GUI_RESET", 0, [270, 350, 100, 30]),
-        ("GUI_QUIT", -1, [0, 420, 100, 40]),
-    ] {
-        items.push(Item {
-            key: key.to_string(),
-            kind: 0,
-            // `jkGuiForce_pElements`: the three text buttons are `font 2`, like every other screen's
-            // (the tally's Ok reads the same field). They still draw nothing — see gaps.md: font 3
-            // drew nothing either, so the font index is not the cause.
-            text_type: 2,
-            id,
-            bitmap: 0,
-            rect,
-            hint: None,
-            visible: true,
-            draw: None,
-            click: None,
-        });
-    }
-    Screen {
-        base: 0x52f168,
-        name: "force".to_string(),
-                // `jkGUIForce.c`: `jkGui_InitMenu(jkGuiForce_pMenu, jkGui_stdBitmaps[JKGUI_BM_BK_FORCE])`,
-        // and `jkGui_aBitmaps[9] = "bkForce.bm"`.
-        background: String::from("ui\\bm\\bkforce.bm"),
-        background_from_code: true,
-        panel: None,
-        art: FORCE_POWERS.iter().map(|(_, _, b, _)| format!("fo{b}.bm")).collect(),
-        items,
-        sound_click: None,
-        sound_hover: None,
-    }
-}
-
 /// Show the power rows the player actually holds, and return how many that is.
 ///
 /// `jkGuiForce_Init` clears `bIsVisible` for a power whose bin the player does not carry, so the
@@ -1094,22 +980,46 @@ mod tests {
         assert!(load(&bytes).is_none());
     }
 
-    /// The built force screen hides a power the player does not hold, and its rows carry the bins
-    /// `items.dat` does (`JUMP` 21, `SPEED` 22) rather than the engine's element ids.
+    /// The force screen hides a power the player does not hold. The rows are the executable's own
+    /// (`jkGuiForce_pElements` is a static array; `jkGuiForce_Init` only computes their rects), and
+    /// their ids are the `items.dat` bins — `JUMP` 21, `SPEED` 22 — not element ids.
     #[test]
-    fn the_force_screen_shows_what_the_player_holds() {
-        let mut screen = force_screen();
+    fn the_force_rows_follow_the_players_inventory() {
+        let mut screen = Screen {
+            base: 0x52f168,
+            name: "force".to_string(),
+            background: String::new(),
+            background_from_code: false,
+            panel: None,
+            art: Vec::new(),
+            sound_click: None,
+            sound_hover: None,
+            items: [21, 22, 23]
+                .into_iter()
+                .map(|bin| Item {
+                    key: format!("BIN{bin}"),
+                    kind: PICBUTTON,
+                    text_type: 0,
+                    id: bin,
+                    bitmap: 0,
+                    rect: [-1, -1, -1, -1],
+                    hint: None,
+                    visible: true,
+                    draw: None,
+                    click: None,
+                })
+                .collect(),
+        };
         assert_eq!(apply_force_rows(&mut screen, |_| 0.0), 0, "nothing found, nothing shown");
         let held = [21, 22];
-        assert_eq!(apply_force_rows(&mut screen, |bin| f32::from(held.contains(&bin) as u8)), 2);
-        let shown: Vec<&str> = screen
+        let shown = apply_force_rows(&mut screen, |bin| f32::from(held.contains(&bin) as u8));
+        assert_eq!(shown, 2, "the rule showed {shown} rows, not 2");
+        let visible: Vec<&str> = screen
             .items
             .iter()
-            .filter(|item| item.kind == 1 && item.visible)
+            .filter(|item| item.visible)
             .map(|item| item.key.as_str())
             .collect();
-        assert_eq!(shown, ["JUMP", "SPEED"]);
-        let bins: Vec<i32> = FORCE_POWERS.iter().map(|(_, bin, _, _)| *bin).collect();
-        assert!(bins.contains(&21) && bins.contains(&22), "the table lost a bin");
+        assert_eq!(visible, ["BIN21", "BIN22"]);
     }
 }
