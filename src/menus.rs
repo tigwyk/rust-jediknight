@@ -164,7 +164,8 @@ pub fn force_screen() -> Screen {
             key: key.to_string(),
             kind: 0,
             // `jkGuiForce_pElements`: the three text buttons are `font 2`, like every other screen's
-            // (the tally's Ok reads the same field). Font 3 drew nothing at all.
+            // (the tally's Ok reads the same field). They still draw nothing — see gaps.md: font 3
+            // drew nothing either, so the font index is not the cause.
             text_type: 2,
             id,
             bitmap: 0,

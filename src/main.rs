@@ -2458,6 +2458,21 @@ fn main() {
             screen.base, 0x52f168,
             "the built screen does not carry the address the graph opens"
         );
+        // Its Ok closes it, which is also the only way it closes while its text buttons draw nothing.
+        assert_eq!(
+            nav::step(0x52f168, 1, "GUI_OK"),
+            nav::Step::Close,
+            "the force screen's Ok no longer closes the screen"
+        );
+        // Why the text buttons draw nothing: text is drawn in palette index 1 of the *screen's* own
+        // palette (`ui::draw_screen`), so print that entry. bkTally's index 1 is the orange its rows
+        // are drawn in; if bkForce's is dark, that is the whole explanation.
+        if let Some(art) = gobs.read("ui\\bm\\bkforce.bm").and_then(|d| bm::parse(&d)) {
+            match art.palette_rgb {
+                Some(p) => println!("force screen: bkForce palette 1..4 = {:?}", &p[1..5]),
+                None => println!("force screen: bkForce carries no palette of its own"),
+            }
+        }
         println!("--- force screen check passed ---");
         return;
     }
