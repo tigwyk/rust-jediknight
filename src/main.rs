@@ -9369,6 +9369,9 @@ fn main() {
         .add_plugins(level_mat::LevelMaterialPlugin)
         .insert_resource(Archives(gobs))
         .insert_resource(Screens(menus))
+        .insert_resource(CaptureMode(
+            shot.is_some() || live || sim || complete_after.is_some() || !animating || goal_check,
+        ))
         .insert_resource(SaberBlade::default())
         .insert_resource(Viewmodel::default())
         .insert_resource(PendingRestore::default())
@@ -9569,6 +9572,16 @@ fn complete_level_on_timer(
     println!("complete: called jkEndLevel after {seconds:.2}s");
 }
 
+/// Whether this run is a capture or a probe rather than somebody playing.
+///
+/// A probe drives frames itself and cannot click a screen, so the post-level tally is skipped for
+/// one — otherwise a gate that finishes a level would wait on a screen nobody can close.
+#[derive(Resource)]
+struct CaptureMode(bool);
+
+/// The tally screen's base, `jkGuiSingleTally_Show`.
+const TALLY_SCREEN: u32 = 0x531530;
+
 /// When the level's scripts call `jkEndLevel`, play the graph's cutscene and name the level that
 /// follows it. The level swap itself is not implemented — the world is built at startup — so this
 /// stops at the film, which is the part a player actually sees.
@@ -9577,19 +9590,68 @@ fn watch_level_complete(
     sim: Option<Res<Sim>>,
     plan: Option<Res<FlowPlan>>,
     playing: Option<Res<cutscene::Cutscene>>,
+    mut overlay: Option<ResMut<Overlay>>,
+    mut screens: Option<ResMut<Screens>>,
+    capture: Option<Res<CaptureMode>>,
     mut announced: Local<bool>,
+    mut tallied: Local<bool>,
 ) {
     let (Some(sim), Some(plan)) = (sim, plan) else { return };
-    if *announced || !sim.world.borrow().level_complete {
+    if !sim.world.borrow().level_complete {
         return;
     }
-    *announced = true;
-    println!(
-        "level {} complete -> cutscene {}, then {}",
-        plan.level,
-        plan.cut.as_deref().unwrap_or("(none)"),
-        plan.next.as_deref().unwrap_or("(end of campaign)")
-    );
+    if !*announced {
+        *announced = true;
+        println!(
+            "level {} complete -> cutscene {}, then {}",
+            plan.level,
+            plan.cut.as_deref().unwrap_or("(none)"),
+            plan.next.as_deref().unwrap_or("(end of campaign)")
+        );
+    }
+    // The tally comes first, as retail does: `jkGuiSingleTally_Show` (base `0x531530`) shows the
+    // rank, the secrets and the stars before the film runs. Its four blank text rows are where
+    // `_DAT_005315a0` and the secrets line go; the stars panel (`0x418000`) reads the bins itself.
+    if !*tallied {
+        *tallied = true;
+        let playing_for_real = capture.is_some_and(|capture| !capture.0);
+        if playing_for_real
+            && let (Some(overlay), Some(screens)) = (overlay.as_mut(), screens.as_mut())
+        {
+            let (rank, pool, found, total) = {
+                let rt = sim.world.borrow();
+                let get = |bin: i32| rt.inv.get(&bin).copied().unwrap_or(0.0);
+                (
+                    get(crate::force::RANK),
+                    get(crate::force::POINTS),
+                    get(0x46),
+                    get(0x47),
+                )
+            };
+            let lines = [
+                format!("RANK {rank:.0}"),
+                format!("SECRETS FOUND {found:.0} OF {total:.0}"),
+                format!("STARS EARNED {pool:.0}"),
+                String::new(),
+            ];
+            if let Some(screen) = screens.0.screens.iter_mut().find(|s| s.base == TALLY_SCREEN) {
+                let blanks = screen
+                    .items
+                    .iter_mut()
+                    .filter(|item| item.kind == 2 && item.key.is_empty());
+                for (item, line) in blanks.zip(lines) {
+                    item.key = line;
+                }
+            }
+            overlay.history.clear();
+            overlay.show(Some(format!("{TALLY_SCREEN:#x}")), 0);
+            println!("tally: rank {rank:.0}, secrets {found:.0} of {total:.0}, {pool:.0} star(s)");
+        }
+    }
+    // The player closes the tally (Ok or Escape) before the film takes the screen.
+    if overlay.as_ref().is_some_and(|overlay| overlay.menu.is_some()) {
+        return;
+    }
     if playing.is_some() {
         return;
     }

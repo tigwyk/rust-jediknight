@@ -671,3 +671,9 @@ The campaign chain is also verified past level 1 — `03katarn` completes into i
     level: the Jedi reaches rank 1 on leaving `jkl\03katarn.jkl`, 2 force point(s) to spend
 
 Two points, not three, is `FixStars` agreeing with itself: the granted speed power is one star spent, and the budget is three a rank.
+
+**Round 174:** the post-level tally is in, which is the beat between finishing a level and its film. `jkGuiSingleTally_Show` is base `0x531530` (7 items: four blank text rows, the `type 7` stars panel `0x418000`, Quit and Ok) and the executable's tables already carried it; what was missing was anyone showing it. `watch_level_complete` now fills its four blank rows from the run — `RANK 0`, `SECRETS FOUND 0 OF 8`, `STARS EARNED 0` — and holds the film back until the player closes it (`0x531530` id `1` is the new `Step::Close` edge; Escape backs out too).
+
+That made one thing necessary: a probe cannot click a screen, so `CaptureMode` remembers whether this run is a capture or a probe and the tally is skipped for one. Checked both ways — `--complete-after 1` still goes straight to the film, and `--goal --start 01narshadda` still walks GOAL00 -> `jkEndLevel` -> `06a.smk` -> `02narshadda.jkl` and passes. 122 tests, 56 gates, 0 failed.
+
+Not verified here: how the populated tally *looks*, since this environment has no window and a capture run deliberately skips it. The layout is the executable's own; the four strings are the port's.

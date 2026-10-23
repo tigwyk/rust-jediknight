@@ -111,6 +111,8 @@ pub const ACTS: &[(u32, i32, Step)] = &[
     // screen (a list of save slots) is not built, so these act on the one slot the keys use.
     (0x529560, 13, Step::LoadGame),
     (0x529560, 15, Step::SaveGame),
+    // The post-level tally's Ok: closes the screen and lets the level's film take over.
+    (0x531530, 1, Step::Close),
 ];
 
 /// The screen an element opens, if the graph knows it.
