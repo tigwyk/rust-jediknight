@@ -4348,15 +4348,7 @@ impl Runtime {
                 Value::Num(-1.0)
             }
             "getsectorlight" => Value::Num(self.sectors.get(idx(0) as usize).map(|s| s.light).unwrap_or(0.0) as f64),
-            // `SectorThrust(sector, vector)`: the force the sector applies to things in
-            // it. Stored, not simulated — nothing is in flight yet (combat, stage 5).
-            "sectorthrust" => {
-                let v = args.get(1).map(vec3).unwrap_or([0.0; 3]);
-                if let Some(s) = self.sector_mut(idx(0)) {
-                    s.thrust = v;
-                }
-                Value::Nil
-            }
+
             "destroything" => {
                 if let Some(t) = self.thing_mut(idx(0)) {
                     t.destroyed = true;

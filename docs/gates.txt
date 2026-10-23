@@ -38,7 +38,7 @@ because `--live-check` needs a display that is actually presenting: with no focu
 sits in presentation after its setup output and never reaches the hundredth frame its verdict is
 gated on, so the sweep would hang instead of finishing. Everything else is headless and unaffected.
 
-`FAILURES: 0 / 42` (`--gates`: `gates: 0 of 42 failed`, or `0 of 41` with `BK_SKIP_WINDOW=1`).
+`FAILURES: 0 / 57` (`--gates`: `gates: 0 of 57 failed`, or `0 of 56` with `BK_SKIP_WINDOW=1`).
 
 flag                                                   exit  what it prints
 -------------------------------------------------------------------------------------------------
@@ -438,3 +438,71 @@ are the deterministic capture paths (fixed 1/60 dt in capture mode).
 Tools that answer questions rather than assert (not in the sweep):
   --uni-key <KEY>   which string file carries a key, and what it says
   --soak-all        every level in the archives, one process each
+
+Latest full sweep — 2026-10-23, against this install
+================================================
+Every row below was produced by --gates (one child process per flag, --exit-after 1200,
+BK_MUTE=1), and every row printed a verdict line:
+
+--check                headless   pass   --- all checks passed ---
+--audit                headless   pass   --- audit passed ---
+--boot                 headless   pass   --- boot check passed ---
+--ui-audit             headless   pass   --- ui audit passed ---
+--walk all             headless   pass   --- walk check passed ---
+--scale                headless   pass   --- scale check passed ---
+--rules                headless   pass   --- rules check passed ---
+--animate              headless   pass   --- animate check passed ---
+--ai                   headless   pass   --- ai check passed ---
+--collide              headless   pass   --- collide check passed ---
+--controls             headless   pass   --- controls check passed ---
+--feel                 headless   pass   --- feel check passed ---
+--flow                 headless   pass   --- flow check passed ---
+--fall                 headless   pass   --- fall check passed ---
+--falldeath            headless   pass   --- fall death check passed ---
+--door                 headless   pass   --- door check passed ---
+--endlevel             headless   pass   --- endlevel check passed ---
+--hit                  headless   pass   --- hit check passed ---
+--live-check           window     pass   --- live check passed ---
+--mana                 headless   pass   --- mana check passed ---
+--ammo                 headless   pass   --- ammo check passed ---
+--campaign             headless   pass   --- campaign check passed ---
+--tally                headless   pass   --- tally check passed ---
+--goal --start 01narshadda window     pass   --- goal check passed ---
+--save-live --start 01narshadda window     pass   --- save-live check passed ---
+--save-slots --start 01narshadda window     pass   --- save-slots check passed ---
+--use-live --start 01narshadda window     pass   --- use-live check passed ---
+--ai-live --start 01narshadda window     pass   --- ai-live check passed ---
+--force-live --start 01narshadda window     pass   --- force-live check passed ---
+--force-grant --start 03katarn window     pass   --- force-grant check passed ---
+--muzzle               headless   pass   --- muzzle check passed ---
+--use-item             headless   pass   --- use-item check passed ---
+--engine-audit         headless   pass   --- engine-audit check passed ---
+--cog-check            headless   pass   --- cog check passed ---
+--adjoins              headless   pass   --- adjoin check passed ---
+--geomode              headless   pass   --- geomode check passed ---
+--cel                  headless   pass   --- cel check passed ---
+--camera               headless   pass   --- camera check passed ---
+--scroll               headless   pass   --- scroll check passed ---
+--damage-return        headless   pass   --- damage-return check passed ---
+--attach               headless   pass   --- attach check passed ---
+--things               headless   pass   --- things check passed ---
+--move                 headless   pass   --- move check passed ---
+--pickup               headless   pass   --- pickup check passed ---
+--save                 headless   pass   --- save check passed ---
+--items                headless   pass   --- items check passed ---
+--weapons              headless   pass   --- weapons check passed ---
+--soak                 headless   pass   --- soak check passed ---
+--quicksave            headless   pass   --- quicksave check passed ---
+--sleep                headless   pass   --- sleep check passed ---
+--triggers             headless   pass   --- triggers check passed ---
+--transition           headless   pass   --- transition check passed ---
+--weapon +elaser       headless   pass   --- weapon check passed ---
+--audio-state          headless   pass   --- audio-state check passed ---
+--sound                headless   pass   --- sound check passed ---
+--episodes             headless   pass   --- episodes check passed ---
+--fire +bryarbolt      headless   pass   --- fire check passed ---
+gates: 0 of 57 failed
+
+That is **57 gates**, 0 failures, with 122 unit tests alongside. Rows that need a window
+(--live-check, --live-play, --goal, --tally, …) are the ones BK_SKIP_WINDOW=1 drops on a
+machine without a display; the count then reads   of 56 failed.
