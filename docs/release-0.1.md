@@ -39,8 +39,10 @@ through the install's own `SMACKW32.DLL`.
 
 - **Multiplayer.** No networking, no protocol, no dedicated server. The roadmap scopes
   single-player on purpose.
-- **One save slot.** The engine's file format is used, but the slot picker screen is not
-  built; Save and Load act on one file.
+- **The save-slot picker.** Saving and loading work in the engine's own `.jks` container, and eight
+  slots exist — `,` and `.` step between them, `F5` writes and `F9` reads the current one — but
+  retail's slot-list screen (a name field and a Delete row) is not built, so a slot is chosen with a
+  key rather than from a list.
 - **A real instinct scheduler.** AI honours `PrimaryFire` — delay, facing cone, ranges,
   aim error, bursts — but the other instincts in a class, and their weights, are parsed
   and ignored.

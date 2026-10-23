@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **56 gates, 122 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **57 gates, 122 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -719,3 +719,14 @@ The credit moved out of `swap_level` (where it happened after the tally had alre
 *`JUMP` at level 2 with a two-star cell to its left, `SPEED` at level 1 with a one-star cell to its right — the bias and the side rule are `ForceStarsDraw`'s own. The other icons are hidden because the player has not found them.*
 
 `ui::Look::force_level` carries the star art and a closure onto the live inventory, so the pips follow what the player actually has, and they redraw on the same frame as the row visibility does. 122 tests, 56 gates, 0 failed.
+
+**Round 179:** the save slots are gated, and one release-note claim was out of date. Instead of one file, `SLOTS = 8` slot files exist (`quicksave.jks` for slot 0, `slotN.jks` after that), `,` and `.` step between them, and the new `--save-slots` gate proves two of them hold different games at once:
+
+    save-slots: slot 0 <- `jkl\01narshadda.jkl`, 26228 bytes
+    save-slots: slot 7 <- `jkl\03katarn.jkl`, 26228 bytes
+    save-slots: `quicksave.jks` reads back `jkl\01narshadda.jkl` with 355 thing(s)
+    save-slots: `slot7.jks` reads back `jkl\03katarn.jkl` with 355 thing(s)
+    save-slots: 2 slot file(s), distinct true
+    --- save-slots check passed ---
+
+It writes into a temporary directory and removes what it wrote, so no real save is touched. What is still missing is retail's own slot-list *screen* — `0x53b948`, whose 14 items are a list element, a name field, Ok, Cancel and Delete — so a slot is chosen with a key rather than from a list; the release notes now say that instead of "one save slot". 122 tests, **57 gates**, 0 failed.

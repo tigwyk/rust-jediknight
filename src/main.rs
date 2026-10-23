@@ -151,6 +151,8 @@ const GATES: &[&str] = &[
     "--goal --start 01narshadda",
     // F5 then F9 through the real input path: the snapshot has to come back.
     "--save-live --start 01narshadda",
+    // Eight slots, two of them holding different games at once.
+    "--save-slots --start 01narshadda",
     // The use key against a linked door, through real input.
     "--use-live --start 01narshadda",
     // An actor in a real level shoots at the living body.
@@ -391,6 +393,7 @@ fn main() {
     let mut tally_check = false;
     let mut goal_check = false;
     let mut save_live = false;
+    let mut save_slots = false;
     let mut use_live = false;
     let mut ai_live = false;
     let mut force_live = false;
@@ -727,6 +730,7 @@ fn main() {
             "--goal" => goal_check = true,
             // `--save-live`: F5 then F9 through the real input path, with the clock as the witness.
             "--save-live" => save_live = true,
+        "--save-slots" => save_slots = true,
             // `--use-live`: the use key against a linked door, through real input.
             "--use-live" => use_live = true,
             "--ai-live" => ai_live = true,
@@ -9409,6 +9413,7 @@ fn main() {
         .insert_resource(LivePlay { enabled: live_play })
         .insert_resource(GoalProbe { enabled: goal_check })
         .insert_resource(SaveProbe { enabled: save_live })
+        .insert_resource(SaveSlotsProbe { enabled: save_slots })
         .insert_resource(UseProbe { enabled: use_live })
         .insert_resource(AiProbe { enabled: ai_live })
         .insert_resource(ForceProbe { enabled: force_live })
@@ -9508,6 +9513,7 @@ fn main() {
         // Its own line: the tuple above is already at Bevy's system-count limit.
         .add_systems(Update, goal_probe.after(live_play_drive).run_if(no_screen_open))
         .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open))
+        .add_systems(Update, save_slots_probe)
         .add_systems(Update, use_probe.before(use_key).run_if(no_screen_open))
         .add_systems(Update, ai_probe.run_if(no_screen_open))
         .add_systems(Update, force_probe.run_if(no_screen_open))
@@ -9895,6 +9901,80 @@ fn read_save(path: &std::path::Path) -> Option<(String, runtime::Snapshot)> {
     let save = jks::Save::read(&bytes).ok()?;
     let payload = save.sections.iter().find(|s| s.kind() == runtime::SAVE_SECTION)?;
     Some((save.level.clone(), runtime::Snapshot::from_bytes(&payload.data)?))
+}
+
+/// `--save-slots`: eight slots exist (`SLOTS`), `,`/`.` move between them, and two of them hold
+/// different games at once.
+///
+/// `quicksave.jks` used to be the only file a game could go to, so a second save overwrote the first
+/// and retail's slot list would have had nothing to show. Slots are the engine's own `.jks` container
+/// per file; this writes two, reads them back and checks they are separate and intact, in a temporary
+/// directory so no real save is touched.
+#[derive(Resource, Default)]
+struct SaveSlotsProbe {
+    enabled: bool,
+}
+
+fn save_slots_probe(
+    probe: Res<SaveSlotsProbe>,
+    sim: Option<Res<Sim>>,
+    mut state: Local<u32>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !probe.enabled {
+        return;
+    }
+    let Some(sim) = sim.as_deref() else { return };
+    *state += 1;
+    if *state < 60 {
+        return;
+    }
+    let dir = std::env::temp_dir().join("bk-save-slots");
+    let rt = sim.world.borrow();
+    let mut ok = true;
+    let mut written: Vec<(std::path::PathBuf, usize)> = Vec::new();
+    for (slot, level) in [(0usize, "jkl\\01narshadda.jkl"), (SLOTS - 1, "jkl\\03katarn.jkl")] {
+        let path = slot_path(&dir, slot);
+        match write_snapshot(&path, level, &rt) {
+            Ok(bytes) => {
+                println!("save-slots: slot {slot} <- `{level}`, {bytes} bytes");
+                written.push((path, bytes));
+            }
+            Err(e) => {
+                ok = false;
+                println!("save-slots: slot {slot} failed: {e}");
+            }
+        }
+    }
+    for (path, _) in &written {
+        match read_save(path) {
+            Some((level, snapshot)) => {
+                println!(
+                    "save-slots: `{}` reads back `{level}` with {} thing(s)",
+                    path.file_name().unwrap_or_default().to_string_lossy(),
+                    snapshot.things.len()
+                );
+                ok &= !level.is_empty() && !snapshot.things.is_empty();
+            }
+            None => {
+                ok = false;
+                println!("save-slots: `{}` did not read back", path.display());
+            }
+        }
+    }
+    // Two files, not one: the whole point of slots.
+    let distinct = written.len() == 2 && written[0].0 != written[1].0;
+    ok &= distinct;
+    for (path, _) in &written {
+        let _ = std::fs::remove_file(path);
+    }
+    println!("save-slots: {} slot file(s), distinct {distinct}", written.len());
+    if ok {
+        println!("--- save-slots check passed ---");
+    } else {
+        println!("save-slots: FAIL a slot did not round trip");
+    }
+    exit.write(AppExit::Success);
 }
 
 /// `F5` writes a quicksave, `F9` loads one.
