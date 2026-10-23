@@ -9499,7 +9499,8 @@ fn main() {
         .add_systems(Update, force_all_probe.run_if(no_screen_open))
         .add_systems(Update, force_economy_probe)
         .add_systems(Update, grant_level_powers)
-        .add_systems(Update, force_grant_probe);
+        .add_systems(Update, force_grant_probe)
+        .add_systems(Update, spend_force_point);
     app.run();
 }
 
@@ -9916,6 +9917,47 @@ fn quick_save(
             pending_level.0 = Some(level.clone());
             println!("quicksave: loading level `{level}` before restoring `{}`", path.display());
         }
+    }
+}
+
+/// A power the player clicked on the force screen, by the screen's own name for it (`SPEED`).
+#[derive(Resource)]
+struct SpendPower(String);
+
+/// Resolve a clicked power's name to its `items.dat` row and spend a point on it.
+///
+/// The force screen's rows are named the way `items.dat` names them, minus the `f_`: the row is
+/// `f_speed` (`bin 22`, `force_speed.cog`, `max 4`), and that row is the authority on which bin the
+/// button means — the button table's own ids are not bin numbers (`JUMP` carries `29` there, while
+/// `items.dat` puts jump on `21`).
+fn spend_force_point(
+    mut commands: Commands,
+    spend: Option<Res<SpendPower>>,
+    sim: Option<Res<Sim>>,
+    world: Option<Res<World>>,
+    mut overlay: Option<ResMut<Overlay>>,
+) {
+    let (Some(spend), Some(sim), Some(world)) = (spend, sim, world) else { return };
+    commands.remove_resource::<SpendPower>();
+    let want = format!("f_{}", spend.0.to_ascii_lowercase());
+    let Some(def) = world.item_defs.iter().find(|d| d.name.eq_ignore_ascii_case(&want)) else {
+        println!("force: the screen's `{}` names no `items.dat` row", spend.0);
+        return;
+    };
+    let spent = sim.world.borrow_mut().spend_force_point(def.id, def.max);
+    let pool = sim
+        .world
+        .borrow()
+        .inv
+        .get(&crate::force::POINTS)
+        .copied()
+        .unwrap_or(0.0);
+    println!(
+        "force: `{}` (bin {}, max {}) -> spent {spent}, {pool} point(s) left",
+        def.name, def.id, def.max
+    );
+    if let Some(overlay) = overlay.as_mut() {
+        overlay.dirty = spent;
     }
 }
 
@@ -10787,6 +10829,13 @@ fn activate(
     commands: &mut Commands,
 ) {
     let item = &screen.items[index];
+    // The force screen's power rows are not navigation: clicking one spends a point on that power
+    // (`jkGuiForce_ButtonClick`, the one function the dump cannot supply — see `force::can_spend`).
+    // The name is resolved to its bin against `items.dat` by a system that holds the runtime.
+    if screen.base == 0x52f168 && item.kind == 1 {
+        commands.insert_resource(SpendPower(item.key.clone()));
+        return;
+    }
     let step = nav::step(screen.base, item.id, &item.key);
     println!("menu {:#x} `{}` -> `{}` ({}) = {step:?}", screen.base, screen.name, item.key, item.id);
     match step {
@@ -15922,10 +15971,26 @@ fn force_grant_probe(
         (level, instance)
     };
     println!("force-grant: episode row gave bin 22 = {level}, `force_speed.cog` running: {instance}");
-    if level >= 1.0 && instance {
+    // The spend path, through the runtime the screen's clicks use: two points on the granted power,
+    // then one on a power the rank-0 ladder does not offer.
+    let (first, second, locked, after, pool) = {
+        let mut rt = sim.world.borrow_mut();
+        rt.set_bin(crate::force::POINTS, 2.0);
+        let first = rt.spend_force_point(22, 4);
+        let second = rt.spend_force_point(22, 4);
+        let locked = rt.spend_force_point(25, 4);
+        let after = rt.inv.get(&22).copied().unwrap_or(0.0);
+        let pool = rt.inv.get(&crate::force::POINTS).copied().unwrap_or(-1.0);
+        (first, second, locked, after, pool)
+    };
+    println!(
+        "force-grant: spending two points on `f_speed` -> {first}/{second}, bin 22 = {after}, \
+         {pool} left; a locked power -> {locked}"
+    );
+    if level >= 1.0 && instance && first && second && !locked && after == 3.0 && pool == 0.0 {
         println!("--- force-grant check passed ---");
     } else {
-        println!("force-grant: FAIL the level's power was not granted or its script did not start");
+        println!("force-grant: FAIL the level's power was not granted, its script did not start, or the spend rule refused a legal point");
     }
     exit.write(AppExit::Success);
 }

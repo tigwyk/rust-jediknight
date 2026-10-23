@@ -4080,6 +4080,19 @@ impl Runtime {
         bins
     }
 
+    /// Spend one force point on `bin`, as the force screen's button does. `max` is the row's own
+    /// limit from `items.dat`. Returns whether the point went in.
+    pub fn spend_force_point(&mut self, bin: i32, max: i32) -> bool {
+        if !crate::force::can_spend(&self.inv, bin, max) {
+            return false;
+        }
+        let pool = (self.inv.get(&crate::force::POINTS).copied().unwrap_or(0.0) - 1.0).max(0.0);
+        self.set_bin(crate::force::POINTS, pool);
+        let level = self.inv.get(&bin).copied().unwrap_or(0.0) + 1.0;
+        self.set_bin(bin, level);
+        true
+    }
+
     /// What the player keeps across a level change.
     /// The engine's `jkPlayer_*` state survives the level load — inventory, the armed bin, the
     /// selected weapon, the saber, the `jkFlags` the force scripts set. This build rebuilds the whole

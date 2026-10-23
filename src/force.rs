@@ -234,8 +234,40 @@ pub fn fix_stars(inv: &mut BTreeMap<i32, f32>) -> i32 {
     level(inv, POINTS)
 }
 
-/// `jkMain_EndLevel`: the powers a finished level grants, from the episode row that names them.
+/// Can the player put one more star into `bin`? `max` is `items.dat`'s own limit for the row, which
+/// is `4` for every force power and `8` for the rank.
 ///
+/// This is the port's stand-in for `jkGuiForce_ButtonClick`, the one function the dump cannot supply:
+/// it survives only as the element table's function pointer (`jkGuiForce_Show` stashes a data address
+/// at `0x8ec320`, which is zero on disk). The rules it enforces are the engine's own, though — one
+/// point from the pool, the rank ladder decides what is on offer, and past rank 6 the side the Jedi is
+/// not on is locked out. A power the level granted stays open even if the ladder has not reached it.
+///
+/// ponytail: the *order* the click applies these in is inferred, not recovered; the amounts, the
+/// ladder and the lockout are all from the executable.
+pub fn can_spend(inv: &BTreeMap<i32, f32>, bin: i32, max: i32) -> bool {
+    if amount(inv, POINTS) < 1.0 || level(inv, bin) >= max {
+        return false;
+    }
+    // The masteries are granted by `SetProtectionDeadlysight`, never bought.
+    if bin == PROTECTION || bin == DEADLYSIGHT {
+        return false;
+    }
+    let rank = level(inv, RANK);
+    if level(inv, bin) == 0 && !accessible_powers(rank).contains(&bin) {
+        return false;
+    }
+    let (light, dark) = allowed_sides(inv, rank);
+    if LIGHT.contains(&bin) {
+        return light;
+    }
+    if DARK.contains(&bin) {
+        return dark;
+    }
+    true
+}
+
+/// `jkMain_EndLevel`: the powers a finished level grants, from the episode row that names them.
 /// An episode row carries a light bin and a dark bin (`.epi` columns 5 and 6, `lightpow`/`darkpow`
 /// in `src/episode.rs`). `jkMain_EndLevel` grants each one whose bin sits strictly between `0x13` and
 /// `0x23`, through `sithInventory_SetCarries` — which sets the *same* available bit
@@ -402,6 +434,35 @@ mod tests {
         let mut master = inv(&[(RANK, 1.0), (PROTECTION, 4.0), (DEADLYSIGHT, 4.0)]);
         assert_eq!(fix_stars(&mut master), 3);
         assert_eq!(master.get(&PROTECTION).copied(), Some(4.0), "and they are left alone");
+    }
+
+    /// Spending one point needs a point, room under the row's own limit, and a power on offer.
+    #[test]
+    fn a_click_spends_one_point_on_a_power_on_offer() {
+        // Rank 1 offers the four basics; the pool has three points.
+        let base = inv(&[(RANK, 1.0), (POINTS, 3.0)]);
+        assert!(can_spend(&base, BASICS[0], 4), "a basic power is on offer at rank 1");
+        assert!(!can_spend(&base, LIGHT[0], 4), "rank 1 has not reached the light powers");
+        let mut spent = base.clone();
+        spent.insert(POINTS, 0.0);
+        assert!(!can_spend(&spent, BASICS[0], 4), "no points in the pool");
+        let mut full = base.clone();
+        full.insert(BASICS[0], 4.0);
+        assert!(!can_spend(&full, BASICS[0], 4), "the row's own maximum is four stars");
+
+        // A power the level granted stays open even at rank 0, where the ladder offers nothing.
+        let granted = inv(&[(RANK, 0.0), (POINTS, 3.0), (BASICS[1], 1.0)]);
+        assert!(can_spend(&granted, BASICS[1], 4), "a granted power can be raised");
+        assert!(!can_spend(&granted, BASICS[0], 4), "an ungranted one still cannot");
+
+        // The masteries are granted, never bought.
+        let master = inv(&[(RANK, 8.0), (POINTS, 3.0), (PROTECTION, 4.0)]);
+        assert!(!can_spend(&master, PROTECTION, 4));
+
+        // Past rank 6 the other side is locked out.
+        let sith = inv(&[(RANK, 7.0), (POINTS, 3.0), (DARK[0], 1.0)]);
+        assert!(can_spend(&sith, DARK[0], 4), "the dark side is open to a dark Jedi");
+        assert!(!can_spend(&sith, LIGHT[0], 4), "and the light side is shut");
     }
 
     /// A level grants the power its episode row names, and only to the side that may use it.
