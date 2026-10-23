@@ -141,6 +141,8 @@ const GATES: &[&str] = &[
     "--door",
     "--endlevel",
     "--hit",
+    // Every campaign level names a script that calls `jkEndLevel`: without one it cannot be finished.
+    "--ends",
     "--live-check",
     "--mana",
     "--ammo",
@@ -363,6 +365,7 @@ fn main() {
     let mut things_check = false;
     let mut fire_check: Option<String> = None;
     let mut hit_check = false;
+    let mut ends_check_flag = false;
     let mut level_shader = false;
     let mut standard_material = false;
     let mut fade_test = false;
@@ -670,6 +673,7 @@ fn main() {
             // `--hit`: the impact scan the game actually uses (`Runtime::impacts`), which no check
             // covered before — `--fire` simulated its own hit test and missed this path entirely.
             "--hit" => hit_check = true,
+        "--ends" => ends_check_flag = true,
             // `--die`: shields absorb first, health reaches 0, and the level's start brings the
             // player back with a full bar.
             "--die" => die_check = true,
@@ -6492,6 +6496,11 @@ fn main() {
         return;
     }
 
+    if ends_check_flag {
+        ends_check(&gobs);
+        return;
+    }
+
     if hit_check {
         // The path the game runs: fire, step, and let `Runtime::impacts` decide what was hit.
         let sim_world = runtime::Runtime::handle(&world.level);
@@ -12253,6 +12262,57 @@ fn walk_level(level: &jkl::Level, frames: u32, quiet: bool, turn: f32) -> Option
 ///
 /// `rdMatrix_Build34` gives a thing two horizontal axes at yaw: `lvec` (the *look* axis, column 1 of
 
+/// `--ends`: which script ends each level, and so whether every level can be finished.
+///
+/// A level is completed by a script calling `jkEndLevel` — the engine registers the verb in
+/// `jkCog.c` and the level's final script is what calls it, so a level whose scripts never call it
+/// cannot be finished however well everything else works. This sweeps the archives, reads every
+/// script a level places, and reports the ones that end it.
+fn ends_check(gobs: &gob::GobSet) {
+    let levels: Vec<String> =
+        gobs.names().into_iter().filter(|n| n.ends_with(".jkl")).collect();
+    let (mut with_end, mut without): (usize, Vec<String>) = (0, Vec::new());
+    for name in &levels {
+        let Some(raw) = gobs.read(name) else { continue };
+        let level = jkl::parse(&String::from_utf8_lossy(&raw));
+        let mut endings: Vec<String> = Vec::new();
+        for instance in &level.cogs {
+            let path = format!("cog\\{}", instance.script.to_ascii_lowercase());
+            let Some(bytes) = gobs.read(&path) else { continue };
+            let source = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+            if source.contains("jkendlevel") && !endings.contains(&instance.script) {
+                endings.push(instance.script.clone());
+            }
+        }
+        // The `m*` maps are multiplayer and `static` is the tool's own scene: neither is a campaign
+        // level, and neither ends through `jkEndLevel`.
+        let base = name.rsplit('\\').next().unwrap_or(name);
+        let campaign = !(base.starts_with('m') || base.starts_with("static"));
+        if !endings.is_empty() {
+            with_end += 1;
+            println!("{name:<30} {} script(s): {}", endings.len(), endings.join(", "));
+        } else if campaign {
+            without.push(name.clone());
+            println!("{name:<30} -");
+        } else {
+            println!("{name:<30} not a campaign level");
+        }
+    }
+    println!(
+        "ends: {with_end} of {} level(s) name a script that calls `jkEndLevel` (the `m*` maps and `static` are not campaign levels)",
+        levels.len()
+    );
+    if !without.is_empty() {
+        println!("ends: no end script in {without:?}");
+    }
+    // A level with no end at all is unwinnable: assert that every level the campaign reaches has one.
+    assert!(
+        without.is_empty(),
+        "{} level(s) cannot be finished: {without:?}",
+        without.len()
+    );
+    println!("--- ends check passed ---");
+}
 /// `--walk all`: the same walk on every level, to see whether collision holds in the
 /// whole install rather than in one hand-picked room.
 fn walk_all(gobs: &gob::GobSet, frames: u32) {

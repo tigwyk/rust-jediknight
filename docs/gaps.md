@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **57 gates, 122 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **58 gates, 122 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -768,3 +768,12 @@ The audit took every `--- <name> check passed ---` line and looked back for a ch
 Both are the gate's own numbers from the run that added them, so any drift now fails instead of scrolling past.
 
 The harness got the matching guard: a child that prints **`FAIL` anywhere** now counts as failed even if it also printed a verdict line, because a gate that says both is worse than one that says neither. The row reads `(printed FAIL)` so the reason is on the page. 122 tests, 57 gates, 0 failed.
+
+**Round 184:** a new gate answers the question the release actually stands on — can every campaign level be finished?
+
+A level ends when one of its scripts calls `jkEndLevel`; the engine registers that verb in `jkCog.c` and the level's final script is what calls it, so a level whose scripts never call it cannot be completed no matter how well everything else works. `--ends` sweeps the archives, reads every script each level places, and reports which ones end it:
+
+    ends: 28 of 35 level(s) name a script that calls `jkEndLevel` (the `m*` maps and `static` are not campaign levels)
+    --- ends check passed ---
+
+The seven without one are multiplayer maps (`m10`, `m2`, `m4`, `m5`, `m_boss15`, `m_boss17`) and the tool's own `static` scene, which are labelled as such rather than counted; the assertion runs over campaign levels, and it is an assertion, not a report. That is the first whole-install evidence that the chain has an exit from every level it can reach. 122 tests, **58 gates**, 0 failed.
