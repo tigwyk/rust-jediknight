@@ -92,25 +92,26 @@ impl Item {
 /// draws, and the string the panel shows for it. The rect is `{-1, -1, -1, -1}` in the file
 /// because `jkGuiForce_Init` lays the icons out; the grid below is that layout, 6 across.
 pub const FORCE_POWERS: [(&str, i32, i32, &str); 17] = [
-    ("ABSORB", 23, 0, "GUI_HINT_ABSORB"),
-    ("BLINDING", 24, 1, "GUI_HINT_BLINDING"),
-    ("DESTRUCTION", 26, 3, "GUI_HINT_DESTRUCTION"),
-    ("GRIP", 27, 4, "GUI_HINT_GRIP"),
-    ("HEALING", 28, 5, "GUI_HINT_HEALING"),
-    ("JUMP", 29, 6, "GUI_HINT_JUMP"),
-    ("PERSUASION", 30, 7, "GUI_HINT_PERSUASION"),
-    ("PULL", 31, 9, "GUI_HINT_PULL"),
-    ("SEEING", 32, 10, "GUI_HINT_SEEING"),
-    ("SPEED", 33, 11, "GUI_HINT_SPEED"),
-    ("THROW", 34, 12, "GUI_HINT_THROW"),
-    ("LIGHTNING", 25, 13, "GUI_HINT_LIGHTNING"),
-    ("PROTECTION", 22, 8, "GUI_HINT_PROTECTION"),
-    ("DEADLYSIGHT", 21, 2, "GUI_HINT_DEADLYSIGHT"),
-    // The three powers the retail single-player build does not offer keep their rows: the
-    // table has 17 buttons and the screen hides the ones the player has not found.
-    ("PROJECT", 20, 0, "GUI_HINT_PROJECT"),
-    ("PUSH", 21, 7, "GUI_HINT_PUSH"),
-    ("RAGE", 22, 3, "GUI_HINT_RAGE"),
+    ("ABSORB", 28, 0, "GUI_HINT_ABSORB"),
+    ("BLINDING", 27, 1, "GUI_HINT_BLINDING"),
+    ("DESTRUCTION", 33, 3, "GUI_HINT_DESTRUCTION"),
+    ("GRIP", 31, 4, "GUI_HINT_GRIP"),
+    ("HEALING", 25, 5, "GUI_HINT_HEALING"),
+    ("JUMP", 21, 6, "GUI_HINT_JUMP"),
+    ("PERSUASION", 26, 7, "GUI_HINT_PERSUASION"),
+    ("PULL", 24, 9, "GUI_HINT_PULL"),
+    ("SEEING", 23, 10, "GUI_HINT_SEEING"),
+    ("SPEED", 22, 11, "GUI_HINT_SPEED"),
+    ("THROW", 30, 12, "GUI_HINT_THROW"),
+    ("LIGHTNING", 32, 13, "GUI_HINT_LIGHTNING"),
+    ("PROTECTION", 29, 8, "GUI_HINT_PROTECTION"),
+    ("DEADLYSIGHT", 34, 2, "GUI_HINT_DEADLYSIGHT"),
+    // The three powers the retail single-player build does not offer keep their rows: the table has
+    // 17 buttons and the screen hides the ones the player has not found. They have no `items.dat`
+    // row, so bin 0 — nothing can ever be found there, and a click on one spends nothing.
+    ("PROJECT", 0, 0, "GUI_HINT_PROJECT"),
+    ("PUSH", 0, 7, "GUI_HINT_PUSH"),
+    ("RAGE", 0, 3, "GUI_HINT_RAGE"),
 ];
 
 /// Build the force-power screen the way `jkGuiForce_Init` does: one picture button per power,
@@ -185,6 +186,20 @@ pub fn force_screen() -> Screen {
         sound_click: None,
         sound_hover: None,
     }
+}
+
+/// Show the power rows the player actually holds, and return how many that is.
+///
+/// `jkGuiForce_Init` clears `bIsVisible` for a power whose bin the player does not carry, so the
+/// panel offers what has been found — and the row carries that bin in its `id`, which is what makes
+/// this the engine's rule rather than a guess.
+pub fn apply_force_rows(screen: &mut Screen, level: impl Fn(i32) -> f32) -> usize {
+    let mut shown = 0;
+    for item in screen.items.iter_mut().filter(|item| item.kind == 1) {
+        item.visible = level(item.id) > 0.0;
+        shown += usize::from(item.visible);
+    }
+    shown
 }
 
 /// What a `type 7` element's own screen code paints into its rect.
@@ -1074,5 +1089,24 @@ mod tests {
         let at = 0x200 + 100 + 0x1c;
         bytes[at..at + 4].copy_from_slice(&900i32.to_le_bytes());
         assert!(load(&bytes).is_none());
+    }
+
+    /// The built force screen hides a power the player does not hold, and its rows carry the bins
+    /// `items.dat` does (`JUMP` 21, `SPEED` 22) rather than the engine's element ids.
+    #[test]
+    fn the_force_screen_shows_what_the_player_holds() {
+        let mut screen = force_screen();
+        assert_eq!(apply_force_rows(&mut screen, |_| 0.0), 0, "nothing found, nothing shown");
+        let held = [21, 22];
+        assert_eq!(apply_force_rows(&mut screen, |bin| f32::from(held.contains(&bin) as u8)), 2);
+        let shown: Vec<&str> = screen
+            .items
+            .iter()
+            .filter(|item| item.kind == 1 && item.visible)
+            .map(|item| item.key.as_str())
+            .collect();
+        assert_eq!(shown, ["JUMP", "SPEED"]);
+        let bins: Vec<i32> = FORCE_POWERS.iter().map(|(_, bin, _, _)| *bin).collect();
+        assert!(bins.contains(&21) && bins.contains(&22), "the table lost a bin");
     }
 }

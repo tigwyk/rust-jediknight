@@ -2431,7 +2431,9 @@ fn main() {
         };
         let nothing = shown_for(&|_| false);
         assert!(nothing.is_empty(), "{nothing:?} showed with nothing found");
-        let carried = |bin: i32| bin == 29 || bin == 33;
+        // The rows carry the inventory bin, so the selector is the player's own inventory: 21 jump,
+        // 22 speed (`items.dat`).
+        let carried = |bin: i32| bin == 21 || bin == 22;
         let names = shown_for(&carried);
         println!(
             "force screen: {} power row(s) in the table, {} shown for a player with jump and speed: {}",
@@ -9500,7 +9502,8 @@ fn main() {
         .add_systems(Update, force_economy_probe)
         .add_systems(Update, grant_level_powers)
         .add_systems(Update, force_grant_probe)
-        .add_systems(Update, spend_force_point);
+        .add_systems(Update, spend_force_point)
+        .add_systems(Update, refresh_force_screen);
     app.run();
 }
 
@@ -9920,16 +9923,42 @@ fn quick_save(
     }
 }
 
-/// A power the player clicked on the force screen, by the screen's own name for it (`SPEED`).
-#[derive(Resource)]
-struct SpendPower(String);
-
-/// Resolve a clicked power's name to its `items.dat` row and spend a point on it.
+/// Show what the player holds while the force screen is up, and how many points are left.
 ///
-/// The force screen's rows are named the way `items.dat` names them, minus the `f_`: the row is
-/// `f_speed` (`bin 22`, `force_speed.cog`, `max 4`), and that row is the authority on which bin the
-/// button means — the button table's own ids are not bin numbers (`JUMP` carries `29` there, while
-/// `items.dat` puts jump on `21`).
+/// `jkGuiForce_Init` clears `bIsVisible` for a power the player does not carry, and `ForceStarsDraw`
+/// paints the point pool; both are read from the live inventory each frame the screen is open, so a
+/// point spent and a power found show up immediately.
+fn refresh_force_screen(
+    sim: Option<Res<Sim>>,
+    overlay: Option<Res<Overlay>>,
+    mut screens: Option<ResMut<Screens>>,
+) {
+    let (Some(sim), Some(overlay), Some(mut screens)) = (sim, overlay, screens) else { return };
+    if overlay.menu.as_deref() != Some("0x52f168") {
+        return;
+    }
+    let inv = sim.world.borrow().inv.clone();
+    let Some(screen) = screens.0.screens.iter_mut().find(|s| s.base == 0x52f168) else { return };
+    menus::apply_force_rows(screen, |bin| inv.get(&bin).copied().unwrap_or(0.0));
+    // The pool line: a key with no string in the table is drawn as itself, so the note row can carry
+    // the numbers straight from the inventory.
+    let pool = inv.get(&crate::force::POINTS).copied().unwrap_or(0.0);
+    let rank = inv.get(&crate::force::RANK).copied().unwrap_or(0.0);
+    if let Some(note) = screen.items.get_mut(2) {
+        note.key = format!("STARS {pool:.0}   RANK {rank:.0}");
+    }
+}
+
+/// A power the player clicked on the force screen, by its inventory bin.
+#[derive(Resource)]
+struct SpendPower(i32);
+
+/// Spend one point on the clicked power, with that row's own `items.dat` maximum as the ceiling.
+///
+/// The screen's rows carry the inventory bin in their `id`, taken from `items.dat` (`SPEED` is bin
+/// `22`, the row `f_speed` runs `force_speed.cog`, `max 4`). The button ids the engine's own element
+/// table uses are element ids, not bins — `JUMP` carries `29` there while `items.dat` puts jump on
+/// `21` — so the port builds the table from the item file instead.
 fn spend_force_point(
     mut commands: Commands,
     spend: Option<Res<SpendPower>>,
@@ -9939,12 +9968,14 @@ fn spend_force_point(
 ) {
     let (Some(spend), Some(sim), Some(world)) = (spend, sim, world) else { return };
     commands.remove_resource::<SpendPower>();
-    let want = format!("f_{}", spend.0.to_ascii_lowercase());
-    let Some(def) = world.item_defs.iter().find(|d| d.name.eq_ignore_ascii_case(&want)) else {
-        println!("force: the screen's `{}` names no `items.dat` row", spend.0);
-        return;
-    };
-    let spent = sim.world.borrow_mut().spend_force_point(def.id, def.max);
+    let bin = spend.0;
+    let max = world
+        .item_defs
+        .iter()
+        .find(|d| d.id == bin)
+        .map(|d| d.max)
+        .unwrap_or(4);
+    let spent = sim.world.borrow_mut().spend_force_point(bin, max);
     let pool = sim
         .world
         .borrow()
@@ -9952,10 +9983,14 @@ fn spend_force_point(
         .get(&crate::force::POINTS)
         .copied()
         .unwrap_or(0.0);
-    println!(
-        "force: `{}` (bin {}, max {}) -> spent {spent}, {pool} point(s) left",
-        def.name, def.id, def.max
-    );
+    let level = sim
+        .world
+        .borrow()
+        .inv
+        .get(&bin)
+        .copied()
+        .unwrap_or(0.0);
+    println!("force: bin {bin} (max {max}) -> spent {spent}, now {level}, {pool} point(s) left");
     if let Some(overlay) = overlay.as_mut() {
         overlay.dirty = spent;
     }
@@ -10833,7 +10868,7 @@ fn activate(
     // (`jkGuiForce_ButtonClick`, the one function the dump cannot supply — see `force::can_spend`).
     // The name is resolved to its bin against `items.dat` by a system that holds the runtime.
     if screen.base == 0x52f168 && item.kind == 1 {
-        commands.insert_resource(SpendPower(item.key.clone()));
+        commands.insert_resource(SpendPower(item.id));
         return;
     }
     let step = nav::step(screen.base, item.id, &item.key);
