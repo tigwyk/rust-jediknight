@@ -9329,7 +9329,15 @@ fn main() {
         || sim
         || complete_after.is_some()
         || play_cutscene.is_some();
-    let boot_menu = boot_screen(menu_open.as_deref(), capture, start_in_level, menus.find("main").is_some());
+    // `BK_FORCE_SCREEN=1` opens the force-power screen at boot, with two powers seeded, so the panel
+    // can be photographed without a player clicking the pause menu. A capture aid, like `BK_TALLY`.
+    let force_screen_shot = std::env::var_os("BK_FORCE_SCREEN").is_some();
+    let boot_menu: Option<String> = if force_screen_shot {
+        Some("0x52f168".to_string())
+    } else {
+        boot_screen(menu_open.as_deref(), capture, start_in_level, menus.find("main").is_some())
+            .map(|name| name.to_string())
+    };
     if start_in_level && boot_menu.is_none() {
         println!(
             "start: in {} with no menu (Escape opens the pause screen)",
@@ -9509,7 +9517,8 @@ fn main() {
         .add_systems(Update, grant_level_powers)
         .add_systems(Update, force_grant_probe)
         .add_systems(Update, spend_force_point)
-        .add_systems(Update, refresh_force_screen);
+        .add_systems(Update, refresh_force_screen)
+        .add_systems(Update, seed_force_screen_powers);
     app.run();
 }
 
@@ -9968,6 +9977,23 @@ fn quick_save(
             println!("quicksave: loading level `{level}` before restoring `{}`", path.display());
         }
     }
+}
+
+/// `BK_FORCE_SCREEN`'s seed: two powers and a few points, so the panel has something to draw.
+///
+/// A photograph of the screen with an empty inventory would show seventeen hidden rows, which is
+/// correct and uninformative. This runs only when the capture aid asks for it.
+fn seed_force_screen_powers(sim: Option<Res<Sim>>, mut done: Local<bool>) {
+    if *done || std::env::var_os("BK_FORCE_SCREEN").is_none() {
+        return;
+    }
+    let Some(sim) = sim else { return };
+    *done = true;
+    let mut rt = sim.world.borrow_mut();
+    rt.set_bin(21, 2.0);
+    rt.set_bin(22, 1.0);
+    rt.set_bin(crate::force::POINTS, 3.0);
+    rt.set_bin(crate::force::RANK, 4.0);
 }
 
 /// Show what the player holds while the force screen is up, and how many points are left.

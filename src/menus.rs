@@ -163,7 +163,9 @@ pub fn force_screen() -> Screen {
         items.push(Item {
             key: key.to_string(),
             kind: 0,
-            text_type: 3,
+            // `jkGuiForce_pElements`: the three text buttons are `font 2`, like every other screen's
+            // (the tally's Ok reads the same field). Font 3 drew nothing at all.
+            text_type: 2,
             id,
             bitmap: 0,
             rect,

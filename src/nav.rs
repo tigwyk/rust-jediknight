@@ -113,6 +113,9 @@ pub const ACTS: &[(u32, i32, Step)] = &[
     (0x529560, 15, Step::SaveGame),
     // The post-level tally's Ok: closes the screen and lets the level's film take over.
     (0x531530, 1, Step::Close),
+    // The force screen's Ok. Its three text buttons draw nothing yet (see gaps.md), so this edge is
+    // also what keeps the screen closable from the keyboard.
+    (0x52f168, 1, Step::Close),
 ];
 
 /// The screen an element opens, if the graph knows it.
