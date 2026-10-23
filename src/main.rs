@@ -232,7 +232,10 @@ fn run_gates(game: &std::path::Path) -> i32 {
             .arg("--game")
             .arg(game)
             // Before the flag, not after: several gates take an argument and would eat the budget flag.
-            .args(["--exit-after", "600"])
+            // 1200 frames, not 600: the goal gate plays level 1 until its objective fires and the level
+            // ends, which lands at about 440 frames with no headroom — it failed once under a sweep's
+            // own contention, and a gate that fails intermittently is worse than a slower sweep.
+            .args(["--exit-after", "1200"])
             .args(flag.split_whitespace())
             .env("BK_MUTE", "1")
             .output();
@@ -9591,7 +9594,6 @@ fn watch_level_complete(
     plan: Option<Res<FlowPlan>>,
     playing: Option<Res<cutscene::Cutscene>>,
     mut overlay: Option<ResMut<Overlay>>,
-    mut screens: Option<ResMut<Screens>>,
     capture: Option<Res<CaptureMode>>,
     mut announced: Local<bool>,
     mut tallied: Local<bool>,
@@ -9610,42 +9612,25 @@ fn watch_level_complete(
         );
     }
     // The tally comes first, as retail does: `jkGuiSingleTally_Show` (base `0x531530`) shows the
-    // rank, the secrets and the stars before the film runs. Its four blank text rows are where
-    // `_DAT_005315a0` and the secrets line go; the stars panel (`0x418000`) reads the bins itself.
+    // rank, the secrets and the stars before the film runs. Its rows are filled by `tally_lines` in
+    // the draw path already — the screen was simply never shown.
     if !*tallied {
         *tallied = true;
-        let playing_for_real = capture.is_some_and(|capture| !capture.0);
+        let playing_for_real = capture.is_some_and(|capture| !capture.0)
+            // `BK_TALLY=1` forces it in a capture run, which is the only way this screen can be
+            // photographed without a player at the keyboard.
+            || std::env::var_os("BK_TALLY").is_some();
         if playing_for_real
-            && let (Some(overlay), Some(screens)) = (overlay.as_mut(), screens.as_mut())
+            && let Some(overlay) = overlay.as_mut()
         {
-            let (rank, pool, found, total) = {
+            let (rank, found, total) = {
                 let rt = sim.world.borrow();
                 let get = |bin: i32| rt.inv.get(&bin).copied().unwrap_or(0.0);
-                (
-                    get(crate::force::RANK),
-                    get(crate::force::POINTS),
-                    get(0x46),
-                    get(0x47),
-                )
+                (get(crate::force::RANK), get(0x46), get(0x47))
             };
-            let lines = [
-                format!("RANK {rank:.0}"),
-                format!("SECRETS FOUND {found:.0} OF {total:.0}"),
-                format!("STARS EARNED {pool:.0}"),
-                String::new(),
-            ];
-            if let Some(screen) = screens.0.screens.iter_mut().find(|s| s.base == TALLY_SCREEN) {
-                let blanks = screen
-                    .items
-                    .iter_mut()
-                    .filter(|item| item.kind == 2 && item.key.is_empty());
-                for (item, line) in blanks.zip(lines) {
-                    item.key = line;
-                }
-            }
             overlay.history.clear();
             overlay.show(Some(format!("{TALLY_SCREEN:#x}")), 0);
-            println!("tally: rank {rank:.0}, secrets {found:.0} of {total:.0}, {pool:.0} star(s)");
+            println!("tally: rank {rank:.0}, secrets {found:.0} of {total:.0}");
         }
     }
     // The player closes the tally (Ok or Escape) before the film takes the screen.
