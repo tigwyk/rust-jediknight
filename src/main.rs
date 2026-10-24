@@ -9585,7 +9585,8 @@ fn main() {
         .add_systems(Update, force_grant_probe)
         .add_systems(Update, spend_force_point)
         .add_systems(Update, refresh_force_screen)
-        .add_systems(Update, seed_force_screen_powers);
+        .add_systems(Update, seed_force_screen_powers)
+        .add_systems(Update, arm_for_capture);
     app.run();
 }
 
@@ -10151,6 +10152,32 @@ fn quick_save(
 ///
 /// A photograph of the screen with an empty inventory would show seventeen hidden rows, which is
 /// correct and uninformative. This runs only when the capture aid asks for it.
+/// `BK_ARM=<bin>`: start with that weapon bin armed.
+///
+/// A capture of the first-person weapon needs one, and level 1 starts the player on fists
+/// (`weap_fists.cog`), so this is how `draw_viewmodel` is seen without playing up to a pickup.
+fn arm_for_capture(sim: Option<Res<Sim>>, mut done: Local<bool>) {
+    if *done {
+        return;
+    }
+    let Some(bin) = std::env::var("BK_ARM").ok().and_then(|v| v.parse::<i32>().ok()) else {
+        *done = true;
+        return;
+    };
+    let Some(sim) = sim else { return };
+    *done = true;
+    let mut rt = sim.world.borrow_mut();
+    rt.inv.insert(bin, 1.0);
+    rt.select_bin(bin);
+    // `BK_POV=<model>`: name the first-person model the way the weapon cog would
+    // (`jkSetPOVModel`), so the draw path can be photographed without the cog chain.
+    if let Ok(model) = std::env::var("BK_POV") {
+        let player = rt.player_thing();
+        rt.pov_model.insert(player, model.clone());
+        println!("viewmodel: POV model forced to `{model}`");
+    }
+    println!("viewmodel: armed bin {bin} (`{}`)", rt.current_weapon());
+}
 fn seed_force_screen_powers(sim: Option<Res<Sim>>, mut done: Local<bool>) {
     if *done || std::env::var_os("BK_FORCE_SCREEN").is_none() {
         return;
@@ -10534,6 +10561,9 @@ impl Overlay {
         screen.visible_rows(found)
     }
 }
+/// The camera that draws the first-person weapon and nothing else.
+#[derive(Component)]
+struct ViewmodelCamera;
 
 #[derive(Component)]
 struct OverlayQuad;
@@ -10671,19 +10701,39 @@ fn setup_overlay(
             RenderLayers::layer(1),
         ));
         // A camera that sees only layer 1: the world camera keeps layer 0, so the UI is
-        // never depth-tested against the scene and never clipped by it. Order 2, so the screen
+        // never depth-tested against the scene and never clipped by it. Order 3, so the screen
         // effects below draw under the HUD rather than over it.
         parent.spawn((
             Camera3d::default(),
             Camera {
-                order: 2,
+                order: 3,
                 clear_color: ClearColorConfig::None,
                 ..default()
             },
             RenderLayers::layer(1),
             OverlayQuad,
         ));
-        // The screen-effect wash: its own layer and a camera between the world and the UI, so
+        // The first-person weapon, in camera space on its own layer.
+        //
+        // `jkPlayer_DrawPov` (0x4051e0) draws the weapon from the **camera's own matrix**, not from a
+        // world pose: it copies the camera, pre-translates by the negated POV offset, pre-multiplies
+        // the sway rotation, and draws with `rdSetZBufferMethod(0)` / `rdSetOcclusionMethod(0)`. The
+        // weapon therefore never depth-tests against the world and can never be cut by a wall. This
+        // camera is that pass: it sees only layer 3, draws after the world (order 1) and clears
+        // nothing, so the weapon lands on top of the scene with its own depth buffer. The mesh is
+        // parented to it, so its transform is camera-relative.
+        parent.spawn((
+            Camera3d::default(),
+            Camera {
+                order: 1,
+                clear_color: ClearColorConfig::None,
+                ..default()
+            },
+            RenderLayers::layer(3),
+            EngineFov,
+            engine_projection(),
+            ViewmodelCamera,
+        ));        // The screen-effect wash: its own layer and a camera between the world and the UI, so
         // `NewColorEffect` tints the scene — force seeing's blue, infrared's red, a damage flash —
         // and the HUD stays drawn on top of it in its own colours.
         parent.spawn((
@@ -10696,7 +10746,7 @@ fn setup_overlay(
         parent.spawn((
             Camera3d::default(),
             Camera {
-                order: 1,
+                order: 2,
                 clear_color: ClearColorConfig::None,
                 ..default()
             },
@@ -17667,9 +17717,20 @@ fn draw_viewmodel(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut drawn: Query<&mut Transform, With<ViewmodelMesh>>,
-    camera: Query<&GlobalTransform, (With<Camera3d>, Without<OverlayQuad>)>,
+    // The weapon rides the viewmodel camera, so its transform is the local one the camera sees.
+    cam: Query<(Entity, &GlobalTransform), With<ViewmodelCamera>>,
 ) {
     let (Some(gobs), Some(sim), Some(view)) = (archives, sim, view.as_mut()) else { return };
+    // `BK_VIEW=x,y,z`: where the weapon sits in the view, for framing a capture. The default is the
+    // placement the world-space version used, expressed in the camera's own frame.
+    let local_at = std::env::var("BK_VIEW")
+        .ok()
+        .and_then(|v| {
+            let n: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            (n.len() == 3).then_some(Vec3::new(n[0], n[1], n[2]))
+        })
+        .unwrap_or(Vec3::new(0.16, -0.14, -0.42));
+
     let want = {
         let rt = sim.world.borrow();
         let player = rt.player_thing();
@@ -17729,11 +17790,10 @@ fn draw_viewmodel(
                 }
                 view.phase += keyfile.fps * clock.max(0.0).min(0.1);
             }
-            if let Ok(mut transform) = drawn.get_mut(entity)
-                && let Some(camera) = camera.iter().next()
-            {
-                let placement = view_offset(camera);
-                transform.translation = placement.0 + camera.right().as_vec3() * sway[0] as f32;
+            if let Ok(mut transform) = drawn.get_mut(entity) {
+                // Camera-local: right is +X, up is +Y, forward is -Z. The sway is the waggle the
+                // weapon cog sets, applied along the camera axis as before.
+                transform.translation = Vec3::new(local_at.x + sway[0] as f32, local_at.y, local_at.z);
             }
         }
         return;
@@ -17757,20 +17817,41 @@ fn draw_viewmodel(
     let material = materials.add(StandardMaterial {
         base_color: bevy::color::Color::WHITE,
         perceptual_roughness: 0.7,
+        // `jkPlayer_DrawPov` lights this pass with `rdCamera_SetAmbientLight` from the sector's own
+        // light. The port has no per-camera ambient, so the weapon is unlit — visible and readable,
+        // but not yet lit like the room it is in.
+        // ponytail: sector ambient on the viewmodel camera is the upgrade.
+        unlit: true,
         cull_mode: None,
         ..default()
     });
-    let Some(camera) = camera.iter().next() else { return };
-    let (translation, rotation) = view_offset(camera);
+    let Some((camera, camera_rot)) = cam.iter().next() else { return };
+    // The weapon lives in **camera space**: parented to the viewmodel camera, so its transform is
+    // relative to the view and no world geometry can ever reach it (`jkPlayer_DrawPov` builds it from
+    // the camera matrix the same way). The orientation is the one the world-space placement used,
+    // expressed in the camera's own frame, so the model sits exactly as before — only now it cannot
+    // be clipped.
+    let (_, rotation) = view_offset(camera_rot);
+    let local = Transform {
+        // Right +X, up +Y, forward -Z, so this is the world placement expressed in the view frame.
+        translation: local_at,
+        rotation: camera_rot.rotation().inverse() * rotation,
+        ..default()
+    };
     let entity = commands
-        .spawn((Mesh3d(mesh), MeshMaterial3d(material), Transform {
-            translation,
-            rotation,
-            ..default()
-        }, ViewmodelMesh))
+        .spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            local,
+            ViewmodelMesh,
+            RenderLayers::layer(3),
+            ChildOf(camera),
+            bevy::camera::visibility::NoFrustumCulling,
+        ))
         .id();
     view.entity = Some(entity);
     println!("viewmodel: drew `{name}` ({} meshes, material `{}`)", model.meshes.len(), model.materials.first().cloned().unwrap_or_default());
+
 }
 
 /// Where a first-person weapon sits relative to the view: low and right, angled in.
