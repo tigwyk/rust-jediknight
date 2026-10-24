@@ -59,7 +59,10 @@ pub struct Solids {
     /// not the model's box — a *structure* whose model is much taller or offset from its origin is
     /// approximated. The `.3do` bounds are the upgrade path, and the radius is the engine's own
     /// number (`sithThing` collision), so the width is right even where the height is a guess.
-    pub things: Vec<([f32; 3], f32)>,
+    /// Each solid thing: its centre, its collision radius (`size=` from the template chain) and the
+    /// vertical span of its own model. The cylinder used to be eight radii tall in both directions,
+    /// which is a guess: a table is short and a column is tall, and the `.3do` knows which.
+    pub things: Vec<([f32; 3], f32, f32, f32)>,
     /// Every downward-facing solid surface with its polygon: the floors a body can stand on.
     pub floors: Vec<Face>,
     /// Every vertical solid surface with its polygon: the walls. A wall only pushes while the
@@ -569,15 +572,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         floors.iter().enumerate().map(|(i, face)| (face.surface, i)).collect();
     let face_of: std::collections::HashMap<usize, usize> =
         faces.iter().enumerate().map(|(i, face)| (face.surface, i)).collect();
-    // The models that make a body stop: `collide=` on the template chain, radius from `size=`.
-    let things = level
-        .things
-        .iter()
-        .filter_map(|thing| {
-            let radius = crate::runtime::solid_radius(level, &thing.template)?;
-            Some((thing.pos, radius))
-        })
-        .collect();
+    // The solid things are filled by the caller, which has the models: see `solid_things` in `main`.
     Solids {
         sectors,
         hull: hulls,
@@ -590,7 +585,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         floor_of,
         faces,
         face_of,
-        things,
+        things: Vec::new(),
     }
 }
 
@@ -1084,8 +1079,10 @@ impl Solids {
     /// `size=` (the engine`s number, `sithThing` collision), and the height is the eight radii the
     /// `Solids::things` comment names as the known approximation.
     fn push_out_of_things(&self, mut at: [f32; 3], radius: f32) -> [f32; 3] {
-        for &(centre, thing_radius) in &self.things {
-            if (at[2] - centre[2]).abs() > thing_radius * 8.0 + radius {
+        for &(centre, thing_radius, z_min, z_max) in &self.things {
+            // The body's own radius against the thing's model span: a table blocks a walking body, a
+            // lamp above head height does not.
+            if at[2] + radius < z_min || at[2] - radius > z_max {
                 continue;
             }
             let (dx, dy) = (at[0] - centre[0], at[1] - centre[1]);
@@ -1134,7 +1131,15 @@ impl Solids {
         match self.sweep_rooms(sector, focus, dir, len, radius, Gates::default()).0 {
             // `Sweep::point` is where the sphere's centre contacts the plane, which is exactly where
             // the engine puts the camera — it does not back off by the radius again.
-            Some(hit) => (hit.point, Some(hit.surface)),
+            Some(hit) => {
+                if std::env::var_os("BK_CAMERA_TRACE").is_some() {
+                    println!(
+                        "camera pull: sector {sector}, contact at {:.4} of {len:.2}, normal {:?}, surface {}",
+                        hit.distance, hit.normal, hit.surface
+                    );
+                }
+                (hit.point, Some(hit.surface))
+            }
             None => (want, None),
         }
     }

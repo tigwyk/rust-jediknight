@@ -919,3 +919,12 @@ So the practical recipe is `BK_HEADLESS=1 bevi-knight --gates` for a background 
 Two honest observations from the capture. Kyle is **small for 1.5 units away** — the same "model drawn smaller than its measured size" that the view weapon showed, and worth chasing against the `--scale` numbers (`model scale 1.0`, a door 0.3 units) rather than against a screenshot. And the body has **no animation**: it is the rest pose, where every placed actor is animated by `animate_actors`; joining the player to that list is the next step for this item.
 
 125 tests, 59 gates (8 skipped headless), 0 failed.
+
+**Round 197 (goal round 7):** item 2's body is recentred on its own geometry, and item 3's cylinder is gone — the walk numbers came back with it.
+
+- **The player's body is recentred** on its combined model box before it is drawn (`ky.3do` spans x[-0.03,0.04] y[-0.01,0.04] z[-0.12,0.06], centred on `[0.0019, 0.016, -0.027]`), the same effect that put the view weapon at the edge of the view: a model's node transforms place its parts away from its origin, so an entity's transform did not mean what it said. Kyle now stands where the body is ([docs/third-person.png](third-person.png)).
+- **Solid things carry the span of their own model.** `collide::build` cannot know it — the models are parsed after the level — so `solids.things` starts empty and [`solid_things`] fills it where both are in hand: the engine's `size=` radius from `runtime::solid_radius`, and the vertical span from `bounds(model, pose_nodes(...))`. The cylinder was **eight radii tall in both directions**, which is a guess: the spans measured in level 1 run **0.02 to 2.10 units**.
+- **`--walk all` is back to its pre-model-collision numbers: 30/34 levels contained, 56 sector crossings, 18 with the hull test agreeing, 0 level left in the void, worst drop 0.00.** The regression to 25/34 came from the guessed cylinder, not from making furniture solid.
+- `--collide` now asserts the spans: every solid thing has a positive span, the set contains a low thing and a tall one (ratio > 1.5), and it prints them (`334 solid thing(s), model spans 0.02..2.10`).
+
+125 tests, 59 gates (8 skipped headless), 0 failed.

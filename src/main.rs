@@ -5607,7 +5607,8 @@ fn main() {
         // `sithCollision_SearchForSurfaceCollisions`. What it has to prove here is the one thing the old
         // floor queries could not do on a real level: find a floor that belongs to *another sector*,
         // across the doorway under the body.
-        let solids = collide::build(&world.level);
+        let mut solids = collide::build(&world.level);
+        solids.things = solid_things(&world, &solids);
         let radius = PLAYER_RADIUS;
         // that took a polygon's normal from its first three vertices silently dropped the ones whose
         // first three are collinear — level 1's street floor (surface 3510, the 8-vertex slab at
@@ -5844,6 +5845,25 @@ fn main() {
             }
         }
         // Every solid, non-adjoined surface a sector claims must be in the collision set. The rule
+        // The solid things carry the span of their own model, not a guessed cylinder: every entry must
+        // have a positive span, and the set must contain both a low thing (a table) and a tall one (a
+        // column), or the spans were never filled in.
+        {
+            let things = &solids.things;
+            assert!(!things.is_empty(), "no solid things at all in this level");
+            for (_, radius, lo, hi) in things {
+                assert!(*radius > 0.0, "a solid thing with radius {radius}");
+                assert!(hi > lo, "a solid thing whose model spans {lo}..{hi}");
+            }
+            let heights: Vec<f32> = things.iter().map(|(_, _, lo, hi)| hi - lo).collect();
+            let low = heights.iter().cloned().fold(f32::MAX, f32::min);
+            let tall = heights.iter().cloned().fold(0.0f32, f32::max);
+            assert!(tall > low * 1.5, "every solid thing is the same height ({low}..{tall})");
+            println!(
+                "collide: {} solid thing(s), model spans {low:.2}..{tall:.2} (radius from `size=`)",
+                things.len()
+            );
+        }
         println!("--- collide check passed ---");
         return;
     }
@@ -18049,6 +18069,7 @@ fn draw_player_body(
         )
     };
     if body.entities.is_empty() {
+    if body.entities.is_empty() {
         let Some(model_name) = world.template_model.get(&template.to_ascii_lowercase()) else {
             return;
         };
@@ -18056,9 +18077,51 @@ fn draw_player_body(
         // One mesh per material, exactly as `spawn_level` draws every other thing: a model's faces
         // name different materials, and a single-material mesh is a few dozen vertices of a body
         // (59 of `ky.3do`'s, which is why the first version of this drew nothing recognisable).
-        for (index, mat) in model.materials.iter().enumerate() {
-            let mesh = meshes.add(model_mesh(model, index as i32, (1.0, 1.0)));
-            let texture = world.model_images.get(mat).map(|image| images.add(image.clone()));
+        let parts: Vec<(i32, Mesh)> = model
+            .materials
+            .iter()
+            .enumerate()
+            .map(|(index, _)| (index as i32, model_mesh(model, index as i32, (1.0, 1.0))))
+            .collect();
+        // The parts are placed by the model's own node transforms, which sit them away from its
+        // origin — the same effect that made the view weapon appear at the edge of the view. Recentre
+        // the whole body on its combined box before drawing it, so the entity's transform means what
+        // it says.
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for (_, mesh) in &parts {
+            if let Some(bevy::mesh::VertexAttributeValues::Float32x3(v)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            {
+                for p in v {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                }
+            }
+        }
+        let centre = [
+            (lo[0] + hi[0]) * 0.5,
+            (lo[1] + hi[1]) * 0.5,
+            (lo[2] + hi[2]) * 0.5,
+        ];
+        for (index, mesh) in parts {
+            let mut mesh = mesh;
+            if let Some(bevy::mesh::VertexAttributeValues::Float32x3(v)) =
+                mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+            {
+                for p in v {
+                    for k in 0..3 {
+                        p[k] -= centre[k];
+                    }
+                }
+            }
+            let handle = meshes.add(mesh);
+            let texture = model
+                .materials
+                .get(index as usize)
+                .and_then(|mat| world.model_images.get(mat))
+                .map(|image| images.add(image.clone()));
             let material = materials.add(StandardMaterial {
                 base_color_texture: texture,
                 unlit: true,
@@ -18067,7 +18130,7 @@ fn draw_player_body(
             });
             let entity = commands
                 .spawn((
-                    Mesh3d(mesh),
+                    Mesh3d(handle),
                     MeshMaterial3d(material),
                     Transform::default(),
                     PlayerBodyMesh,
@@ -18077,9 +18140,11 @@ fn draw_player_body(
             body.entities.push(entity);
         }
         println!(
-            "body: drawing `{model_name}` for third person ({} material part(s))",
-            body.entities.len()
+            "body: drawing `{model_name}` for third person ({} part(s)), geometry x[{:.2},{:.2}] y[{:.2},{:.2}] z[{:.2},{:.2}], centred on {:?}",
+            body.entities.len(),
+            lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], centre
         );
+    }
     }
     let hidden = cam
         .iter()
@@ -18098,6 +18163,33 @@ fn draw_player_body(
             Visibility::Visible
         });
     }
+}
+/// Every solid thing in the level, with the vertical span of its own model.
+///
+/// The radius is the engine's `size=` (see [`runtime::solid_radius`]); the span is the model's own
+/// bounding box, which is what `sithThing` collides against. A template whose model is not loaded keeps a
+/// body-sized span rather than disappearing from the list.
+fn solid_things(world: &World, solids: &collide::Solids) -> Vec<([f32; 3], f32, f32, f32)> {
+    let _ = solids;
+    let mut out = Vec::new();
+    for thing in &world.level.things {
+        let Some(radius) = crate::runtime::solid_radius(&world.level, &thing.template) else {
+            continue;
+        };
+        let span = world
+            .template_model
+            .get(&thing.template.to_ascii_lowercase())
+            .and_then(|name| world.models.get(name))
+            .map(|model| {
+                let pose = tdo::pose_nodes(model, None, 0.0);
+                let (lo, hi) = bounds(model, &pose);
+                (thing.pos[2] + lo[2], thing.pos[2] + hi[2])
+            })
+            .filter(|(lo, hi)| hi > lo)
+            .unwrap_or((thing.pos[2] - radius, thing.pos[2] + radius));
+        out.push((thing.pos, radius, span.0, span.1));
+    }
+    out
 }
 /// The player's sector light — what retail hands the POV pass as ambient
 /// (`rdCamera_SetAmbientLight` takes `sector->ambient + sector->extraLight`, clamped to 0..1).
@@ -19787,6 +19879,12 @@ fn setup(
         solids.sectors.iter().map(|s| s.len()).sum::<usize>(),
         level.gravity
     );
+    // Solid things, with the span their own model occupies. `collide::build` cannot know it — the models
+    // are parsed after the level — so the spans are filled here, where both are in hand. The cylinder
+    // used to be eight radii tall in either direction, which is a guess: a table is short, a column is
+    // tall, and `--walk all` measured the guess.
+    let mut solids = solids;
+    solids.things = solid_things(&world, &solids);
     commands.insert_resource(Collision(solids));
     // The ammo bin the player's weapon spends, resolved once from the weapon's own powerup cog.
     let ammo_bin = ammo_bin_for(&world);
