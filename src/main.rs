@@ -9452,6 +9452,7 @@ fn main() {
         ))
         .insert_resource(SaberBlade::default())
         .insert_resource(Viewmodel::default())
+        .insert_resource(PlayerBody::default())
         .insert_resource(PendingRestore::default())
         .insert_resource(SaveLoad::default())
         .insert_resource(SaveSlot::default())
@@ -9566,6 +9567,7 @@ fn main() {
                     load_item_cogs,
                     saber_blade,
                     draw_viewmodel,
+                    draw_player_body,
                     scene_wash,
                     billboard_sprites,
                     complete_level_on_timer,
@@ -17953,6 +17955,107 @@ fn view_frame(fov: f32, aspect: f32, drawn_size: f32) -> (Vec3, f32) {
     let base = Vec3::new(half_width * 0.34, -half_height * 0.55, -distance);
     (base, (half_height * 0.62) / size)
 }
+/// The player's own body: a mesh the third-person camera can see. First person never shows it — the
+/// camera is the body's position plus an eye offset, so the model would be drawn *around* the view —
+/// and `spawn_level` skips it for exactly that reason. `Chase::on` is the only thing that turns this
+/// on, and it is the same condition the boom uses.
+#[derive(Resource, Default)]
+struct PlayerBody {
+    entity: Option<Entity>,
+}
+
+/// Marks the entity [`draw_player_body`] puts the player's model on.
+#[derive(Component)]
+struct PlayerBodyMesh;
+
+/// Draw the player's model when the third-person boom is on, and follow the body with it.
+///
+/// The engine draws the local player only when the camera is not the POV (`sithCamera_Update` case 1
+/// copies the thing's matrix; the body itself is drawn by `sithThing_Draw` for everything the camera
+/// does not own). The port has no per-thing draw list to filter, so the body is its own entity.
+fn draw_player_body(
+    mut commands: Commands,
+    chase: Res<Chase>,
+    sim: Option<Res<Sim>>,
+    world: Option<Res<World>>,
+    mut body: ResMut<PlayerBody>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut drawn: Query<&mut Transform, With<PlayerBodyMesh>>,
+    cam: Query<&GlobalTransform, With<WorldCamera>>,
+) {
+    let (Some(sim), Some(world)) = (sim, world) else { return };
+    if !chase.on {
+        if let Some(entity) = body.entity.take() {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+    let (template, pos, yaw) = {
+        let rt = sim.world.borrow();
+        let player = rt.player_thing();
+        let Some(thing) = rt.things.get(player) else { return };
+        (
+            rt.templates.get(player).cloned().unwrap_or_default(),
+            thing.pos,
+            thing.yaw,
+        )
+    };
+    if body.entity.is_none() {
+        let Some(model_name) = world.template_model.get(&template.to_ascii_lowercase()) else {
+            return;
+        };
+        let Some(model) = world.models.get(model_name) else { return };
+        let at = model
+            .materials
+            .iter()
+            .position(|mat| world.model_images.contains_key(mat))
+            .unwrap_or(0);
+        let mesh = meshes.add(model_mesh(model, at as i32, (1.0, 1.0)));
+        let texture = model
+            .materials
+            .get(at)
+            .and_then(|mat| world.model_images.get(mat))
+            .map(|image| images.add(image.clone()));
+        let material = materials.add(StandardMaterial {
+            base_color_texture: texture,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        });
+        let entity = commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::default(),
+                PlayerBodyMesh,
+            ))
+            .id();
+        body.entity = Some(entity);
+        println!("body: drawing the player's own model `{model_name}` for third person");
+    }
+    if let Some(entity) = body.entity {
+        if let Ok(mut transform) = drawn.get_mut(entity) {
+            *transform = Transform::from_translation(Vec3::from(pos))
+                .with_rotation(Quat::from_rotation_z(-yaw.to_radians()));
+        }
+        // A camera inside the body sees the inside of its own polygons (`cull_mode: None`), and the
+        // boom's pull-in parks it exactly there in a tight room — a booth, a corridor, against a wall.
+        // Retail never has the problem because it does not draw the local body at all; the port's rule
+        // is the boom's own length: closer than the body's size, and the body is not drawn.
+        if let Some(camera) = cam.iter().next() {
+            let distance = (camera.translation() - Vec3::from(pos)).length();
+            let close = distance < 0.6;
+            if std::env::var_os("BK_VM_TRACE").is_some() {
+                println!("body: camera {distance:.2} from the body, {close}");
+            }
+            commands
+                .entity(entity)
+                .insert(if close { Visibility::Hidden } else { Visibility::Visible });
+        }
+    }
+}
 /// The player's sector light — what retail hands the POV pass as ambient
 /// (`rdCamera_SetAmbientLight` takes `sector->ambient + sector->extraLight`, clamped to 0..1).
 fn sector_light(sim: &Sim, level: &jkl::Level) -> f32 {
@@ -21042,7 +21145,14 @@ fn walk_player(
     if chase.on {
         let focus = eye;
         let want = focus - look.normalize_or(Vec3::NEG_X) * chase.length;
-        let (pulled, hit) = solids.0.camera_pull(player.sector, focus.to_array(), want.to_array(), PLAYER_EYE);
+        // `0x3ca3d70a` (0.02) is the radius `sithCamera_SearchSectorInRadius` passes. `PLAYER_EYE`
+        // (0.037) is *larger* than the eye's height above the floor, so the sphere starts touching the
+        // floor plane and every boom collapsed to nothing — the third-person view was first person.
+        // The sector the *eye* is in, not the one the runtime last wrote: a stale index makes the walk
+        // start outside its own hull, where every plane reports a contact at distance 0 and the boom
+        // collapses onto the player.
+        let sector = solids.0.sector_at(focus.to_array(), 0.5).unwrap_or(player.sector);
+        let (pulled, hit) = solids.0.camera_pull(sector, focus.to_array(), want.to_array(), 0.02);
         let pulled = Vec3::from(pulled);
         eye = pulled;
         if std::env::var_os("BK_CAMERA_TRACE").is_some() {

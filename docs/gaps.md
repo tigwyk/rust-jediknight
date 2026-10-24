@@ -889,3 +889,15 @@ What a capture shows now: a pistol about 230 by 180 pixels at the lower right of
 - **Size.** The missing `Transform::scale` from the previous round is confirmed working: the pistol now spans roughly a quarter of the frame's height at the lower right instead of being a speck.
 
 What a capture shows: a textured, room-lit weapon at the lower right of `04escapehouse`. What it does **not** yet show is retail's exact framing: `bryv.3do` is the pistol *with hands* (`HND-WRT.MAT` is one of its materials), the drawn mass reads as the hand and forearm, and the precise offset and turn are the POV thing's `+0x168`, which no decompiled writer sets. Item 1 is therefore done as far as the data goes: placement, scale, texture and lighting are all derived from the shipped numbers and pinned by `view_frame_tests`. 125 tests, 59 gates, 0 failed.
+
+**Round 194 (goal round 5, item 2 started):** the third-person camera now has a body to look at, and the boom turned out to have a bug of its own.
+
+- **The player's own body is drawn** (`draw_player_body`): `ky.3do`, textured through the level's `model_images`, at the thing's position and yaw, and *only* when `Chase::on`. `spawn_level` deliberately skips the local player — the camera sits inside it, so its unlit polygons would land over the whole frame — and that skip stays for first person.
+- **The body hides itself when the camera is inside it.** The boom's own pull-in parks the camera at the body in tight rooms, where `cull_mode: None` shows the inside of the model: the first capture of this round was a tan band across the sky. The camera-to-body distance is the rule, and it is the boom's own number rather than a guess.
+- **Two boom fixes.** `camera_pull` was passed `PLAYER_EYE` (0.037) as its cast radius, which is *larger than the eye's height above the floor*, so the sphere could start touching the floor plane; `sithCamera_SearchSectorInRadius` passes `0x3ca3d70a` (0.02) and the port does now too. The sector handed to the walk is now the one the *eye* is in (`sector_at`), not the runtime's last written index, because a stale index starts the walk outside its own hull where every plane reports a contact at distance zero.
+
+That second fix did not fix the collapse: `04escapehouse` still traces
+
+    camera: third person wanted (-6.04, -1.86, 0.70), pulled to (-3.09, -1.86, 0.70) (surface 8215)
+
+— a 2.95-unit boom pulled to 0.04. The camera is provably at the eye (the body log reads `camera 0.06 from the body`), so **the body is not visible and item 2 is not done**; the remaining suspect is the sweep's contact test at a start point that `sector_at` reports inside but whose hull planes still count as touching. Next round: bisect that with a synthetic open-sector cast, then re-check the body. 125 tests, 59 gates, 0 failed.
