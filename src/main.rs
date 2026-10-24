@@ -5659,6 +5659,8 @@ fn main() {
             .map(|(i, t)| (i, t.pos))
             .collect();
         println!("collide: {} walkplayer thing(s) placed", starts.len());
+        // The tightest eye clearance over every spawn in the level: the near-plane invariant.
+        let mut tightest = f32::INFINITY;
         for (i, pos) in &starts {
             let p = [pos[0], pos[1], pos[2]];
             let floor = solids.floor_under(0, [p[0], p[1], p[2] + 0.5], 2.0, radius);
@@ -5670,6 +5672,31 @@ fn main() {
                         .map_or(radius * 8.0, |h| h.distance),
                 );
             }
+            // The eye`s own clearance, with a zero-radius probe: the near plane is the number that
+            // decides whether a nearby wall is sliced open, and it is the *eye*, not the body sphere,
+            // that must keep `NEAR_PLANE` away from everything. The booth in level 1 — 0.16 from a
+            // table, 0.4 from two columns — is exactly the case this exists for.
+            let eye = [p[0], p[1], p[2] + PLAYER_EYE];
+            let mut eye_clearance = f32::INFINITY;
+            for dir in [
+                [1.0f32, 0.0, 0.0],
+                [-1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, -1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, -1.0],
+            ] {
+                eye_clearance = eye_clearance.min(
+                    solids
+                        .sweep(0, eye, dir, 2.0, 0.0, collide::Gates::default())
+                        .map_or(2.0, |h| h.distance),
+                );
+            }
+            assert!(
+                eye_clearance > NEAR_PLANE,
+                "the eye at {eye:?} is {eye_clearance:.4} from a surface, inside the {NEAR_PLANE} near plane"
+            );
+            tightest = tightest.min(eye_clearance);
             let neighbours = world
                 .level
                 .things
@@ -5845,6 +5872,10 @@ fn main() {
             }
         }
         // Every solid, non-adjoined surface a sector claims must be in the collision set. The rule
+        println!(
+            "collide: tightest eye clearance {:.3} (near plane {NEAR_PLANE})",
+            tightest
+        );
         // The solid things carry the span of their own model, not a guessed cylinder: every entry must
         // have a positive span, and the set must contain both a low thing (a table) and a tall one (a
         // column), or the spans were never filled in.
@@ -17999,6 +18030,18 @@ fn recentre_mesh(meshes: &mut Assets<Mesh>, handle: &Handle<Mesh>) -> (f32, Vec3
 /// one thing here that is a choice rather than a decoded constant — retail composes the placement from
 /// the POV thing's own offset (`thing + 0x168`), and no decompiled writer sets it.
 ///
+/// What the decompilation does say, and what this derives instead of guessing:
+///
+/// - `thing + 0x168` is the **eye offset** — the local vector `sithCamera_Update` pre-translates the
+///   thing`s matrix by (`rdMatrix_PreTranslate34(puVar10, iVar7 + 0x168)`) and `jkPlayer_DrawPov`
+///   negates (`local_3c = -*(float *)(iVar3 + 0x168)`). Nothing in the dump *writes* it, so its value
+///   is the same calibration the eye height uses (`PLAYER_EYE`, clamped by the nearest ceiling), not a
+///   fresh number.
+/// - `thing + 0x21c` is **not a scale**: `jkPlayer_DrawPov` divides the sway by it
+///   (`_DAT_00552bc0 = local_44 / *(float *)(iVar3 + 0x21c)`), and `sithPuppet_UpdatePuppet` uses it as
+///   the reference speed in `(0x21c + node offset) - 0xbc`. The bob the port calls `waggle` is its
+///   counterpart.
+///
 /// ponytail: the box includes everything the model draws (hands as well as the weapon), so a model with
 /// far-flung parts reads smaller than its pistol. The `.3do` node scale is where the real answer lives.
 fn view_frame(fov: f32, aspect: f32, drawn_size: f32) -> (Vec3, f32) {
@@ -20430,9 +20473,13 @@ fn vertical_fov(aspect: f32) -> f32 {
 /// default near is 0.1, six times that, and *larger than the player's own 0.065 radius*: any wall the
 /// body can touch sits inside the near plane, and the frame shows the wall sliced open. The engine
 /// cannot show that, because its near plane is a quarter of the body's radius.
+///
+/// `NEAR_PLANE` is the same constant the renderer uses, so a gate compares against the real number.
+const NEAR_PLANE: f32 = 0.015625;
+
 fn engine_projection() -> Projection {
     Projection::Perspective(PerspectiveProjection {
-        near: 0.015625,
+        near: NEAR_PLANE,
         far: 1000.0,
         ..default()
     })

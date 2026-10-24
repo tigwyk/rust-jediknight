@@ -928,3 +928,12 @@ Two honest observations from the capture. Kyle is **small for 1.5 units away** �
 - `--collide` now asserts the spans: every solid thing has a positive span, the set contains a low thing and a tall one (ratio > 1.5), and it prints them (`334 solid thing(s), model spans 0.02..2.10`).
 
 125 tests, 59 gates (8 skipped headless), 0 failed.
+
+**Round 198 (goal round 8, item 4 closed, and the +0x168/+0x21c question answered):** the near plane cannot slice a tight spawn, and it is now a gate rather than an observation.
+
+- **`--collide` measures the eye`s clearance with a zero-radius probe** in six directions at every `walkplayer` spawn and asserts it against the renderer`s own `NEAR_PLANE` (1/64, `rdCamera_NewEntry`'s `0x3c800000`). Level 1`s booth — the case the defect named — reports `tightest eye clearance 0.157 (near plane 0.015625)`: the eye keeps **ten times the near plane** from the table and the columns, so nothing can be clipped. The gate fails if any spawn in any level comes inside it.
+- **The camera/body interplay** is the other half: the boom`s pull-in parks the third-person camera at the body in a tight room, where `body_visible` hides the body rather than showing the inside of its polygons.
+- **`thing + 0x168` is the eye offset, and the dump does say so.** `sithCamera_Update` pre-translates the thing`s matrix by it (`rdMatrix_PreTranslate34(puVar10, iVar7 + 0x168)`) and `jkPlayer_DrawPov` negates it (`local_3c = -*(float *)(iVar3 + 0x168)`) to build the POV frame. Nothing *writes* it, so its value stays the port`s eye calibration (`PLAYER_EYE`, clamped by the nearest ceiling) — the same quantity, derived instead of guessed.
+- **`thing + 0x21c` is not a scale.** `jkPlayer_DrawPov` divides the sway by it, and `sithPuppet_UpdatePuppet` uses it as the reference speed in `(0x21c + node offset) - 0xbc`. The port`s `waggle` is its counterpart, so there was never a scale to decode.
+
+That closes the four items: the view weapon (placement, scale, texture, sector light), the third-person body, model-span collision with the `--walk all` numbers restored, and the near-plane invariant at tight spawns. 125 tests, 59 gates (8 skipped headless), `--walk all` 30/34 contained / 0 void.
