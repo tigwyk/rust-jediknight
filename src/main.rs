@@ -53,6 +53,10 @@ const DEFAULT_GAME: &str = r"G:\Games\Star Wars Jedi Knight - Dark Forces 2";
 #[derive(Resource)]
 struct World {
     level: jkl::Level,
+    /// The install's palette, which every `.mat` bitmap is decoded through. Kept so a model the
+    /// level never placed — a weapon's first-person mesh, which a cog names at run time — can be
+    /// textured on demand.
+    palette: [[u8; 3]; 256],
     /// Level material index -> decoded bitmap.
     images: HashMap<i32, Image>,
     /// Level material index -> how many cels its bitmap holds (`num_texinfo`). Only a handful of world
@@ -13053,6 +13057,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
     );
 
     Ok(World {
+        palette: <[[u8; 3]; 256]>::try_from(palette.0).unwrap_or([[0u8; 3]; 256]),
         level,
         images,
         item_cogs: gobs
@@ -17699,6 +17704,7 @@ fn draw_viewmodel(
     sim: Option<Res<Sim>>,
     world: Option<Res<World>>,
     mut view: Option<ResMut<Viewmodel>>,
+    mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut drawn: Query<&mut Transform, With<ViewmodelMesh>>,
@@ -17809,7 +17815,17 @@ fn draw_viewmodel(
     // drawn unlit from its own baked vertex light, so the weapon is unlit as well — an unlit material
     // whose colour *is* the sector light gives the same result without a per-camera light.
     let light = world.as_ref().map(|w| sector_light(&sim, &w.level)).unwrap_or(1.0);
+    // The weapon's own bitmap. A view model is named by a cog at run time, so it is not in the level's
+    // `model_images`; it is decoded here through the same `.mat` path the world uses, with the level's
+    // palette. `sithThing`'s renderer draws the POV thing with its material, not with a flat colour.
+    let texture = world.as_ref().and_then(|world| {
+        model.materials.iter().find_map(|mat| {
+            let bitmap = gobs.0.read(mat).as_deref().and_then(tex::parse_mat)?;
+            Some(images.add(to_image(&bitmap, &tex::Palette(world.palette.to_vec()))))
+        })
+    });
     let material = materials.add(StandardMaterial {
+        base_color_texture: texture,
         base_color: bevy::color::Color::srgb(light, light, light),
         perceptual_roughness: 0.7,
         // `jkPlayer_DrawPov` lights this pass with `rdCamera_SetAmbientLight` from the sector's own
