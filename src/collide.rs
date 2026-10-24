@@ -1106,6 +1106,38 @@ impl Solids {
         at
     }
 
+    /// `sithCamera_SearchSectorInRadius` (0x4c6050): pull a camera in to the first thing between it and
+    /// the focus.
+    ///
+    /// The engine normalises `focus -> want`, calls `sithCollision_SearchForCollisions` with radius
+    /// `0x3ca3d70a` (0.02) and flags `|0x800`, then **rewrites the camera position to the first hit**
+    /// (`cam = hit_t * dir + focus`). That is what keeps a chase camera out of the wall behind the
+    /// player; it is only used by the third-person modes, because in first person the near plane
+    /// (1/64) already sits inside the body's own radius.
+    ///
+    /// This does the same cast through the sector walk, so a camera behind a doorway is not pulled in
+    /// by the wall beside the door. `None` in the second slot means nothing was in the way and the
+    /// requested point stands.
+    pub fn camera_pull(
+        &self,
+        sector: usize,
+        focus: [f32; 3],
+        want: [f32; 3],
+        radius: f32,
+    ) -> ([f32; 3], Option<usize>) {
+        let delta = [want[0] - focus[0], want[1] - focus[1], want[2] - focus[2]];
+        let len = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        if len < 1e-5 {
+            return (want, None);
+        }
+        let dir = [delta[0] / len, delta[1] / len, delta[2] / len];
+        match self.sweep_rooms(sector, focus, dir, len, radius, Gates::default()).0 {
+            // `Sweep::point` is where the sphere's centre contacts the plane, which is exactly where
+            // the engine puts the camera — it does not back off by the radius again.
+            Some(hit) => (hit.point, Some(hit.surface)),
+            None => (want, None),
+        }
+    }
     /// The sector a body at `pos` can actually stand in, and the floor it would land on.
     ///
     /// This is the criterion the spawn needs: the level's recorded sector for a thing can be a trigger

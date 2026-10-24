@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **58 gates, 122 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **59 gates, 123 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -827,3 +827,17 @@ The rest of the camera, for the record. `sithCamera_Update` (0x4c56b0) switches 
 `sithCollision_FindSectorInRadius` supplies the sector index for the final camera point (the `param_1[6]` field), and `sithCamera_RenderScene` sets it current, inverts it into the view (`rdCamera_Update`), and draws.
 
 What that leaves for the port: first person matches retail's maths already (eye offset `0.037` from `_actor`'s `eyeoffset`, 90° horizontal FOV). The third-person/chase cases and their pull-in are not ported — `--stand` and the overview place their cameras directly — which is where `sithCamera_SearchSectorInRadius` would go if a third-person view is wanted. 123 tests, 58 gates, 0 failed.
+
+**Round 188:** the third-person pull-in is ported — `sithCamera_SearchSectorInRadius` had no counterpart in the port, and there was no third-person view to need one.
+
+`collide::camera_pull` is the routine's own shape: normalise `focus -> want`, cast with the sector walk (`sweep_rooms`, so a camera behind a doorway is not pulled in by the wall beside the door), and **return the contact point** — the engine puts the camera at `hit_t * dir + focus`, not a radius short of it.
+
+The view is a boom behind the eye along the look direction, `Chase::length` long (3.0, or `BK_CHASE_DIST`), toggled with **`V`** and started on with `BK_CHASE=1` for captures. Every frame the boom is wanted, then pulled:
+
+    camera: third person wanted Vec3(-13.04, -6.96, -1.15), pulled to Vec3(-10.48, -5.48, -1.15) (surface 3304)
+
+That is level 1's booth: 3.0 requested, 0.04 available, because the player starts in a closed box — which is the correct answer and the reason retail opens in first person.
+
+`--camera-pull` is the gate, and it checks both branches. Sixteen directions at a 3.0 boom from level 1's largest sector: every pulled camera must be *nearer* than the boom and must clear the wall by the cast radius; and a boom of 1e-4, short enough that nothing can be reached, must come back **exactly** where it was asked to be — the branch an enclosed room never exercises on its own.
+
+Two honest limits. The player's own model is not drawn in third person (first person never needed it), so the boom currently shows an empty view of the room; retail draws the body. And the boom is a straight segment, where `sithCamera_Update`'s case 4 composes the camera matrix from the thing's own chase offset (`thing + 0x168`) — the port uses a plain look-direction boom, with the pull-in — which is the part that was asked for. 123 tests, **59 gates**, 0 failed.

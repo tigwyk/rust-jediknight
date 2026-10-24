@@ -143,6 +143,8 @@ const GATES: &[&str] = &[
     "--hit",
     // Every campaign level names a script that calls `jkEndLevel`: without one it cannot be finished.
     "--ends",
+    // The third-person boom is shortened by whatever is in the way, and left alone when nothing is.
+    "--camera-pull",
     "--live-check",
     "--mana",
     "--ammo",
@@ -366,6 +368,8 @@ fn main() {
     let mut fire_check: Option<String> = None;
     let mut hit_check = false;
     let mut ends_check_flag = false;
+    let mut level_shader = false;
+    let mut camera_pull_flag = false;
     let mut level_shader = false;
     let mut standard_material = false;
     let mut fade_test = false;
@@ -672,6 +676,8 @@ fn main() {
             }
             // `--hit`: the impact scan the game actually uses (`Runtime::impacts`), which no check
             // covered before — `--fire` simulated its own hit test and missed this path entirely.
+            "--hit" => hit_check = true,
+        "--camera-pull" => camera_pull_flag = true,
             "--hit" => hit_check = true,
         "--ends" => ends_check_flag = true,
             // `--die`: shields absorb first, health reaches 0, and the level's start brings the
@@ -6518,6 +6524,11 @@ fn main() {
         return;
     }
 
+    if camera_pull_flag {
+        camera_pull_check(&gobs);
+        return;
+    }
+
     if ends_check_flag {
         ends_check(&gobs);
         return;
@@ -9463,6 +9474,7 @@ fn main() {
         .insert_resource(GoalProbe { enabled: goal_check })
         .insert_resource(SaveProbe { enabled: save_live })
         .insert_resource(SaveSlotsProbe { enabled: save_slots })
+        .insert_resource(Chase::default())
         .insert_resource(UseProbe { enabled: use_live })
         .insert_resource(AiProbe { enabled: ai_live })
         .insert_resource(ForceProbe { enabled: force_live })
@@ -10915,6 +10927,7 @@ fn ui_input(
     keys: Res<ButtonInput<KeyCode>>,
     sim: Option<Res<Sim>>,
     screens: Option<Res<Screens>>,
+    mut chase: ResMut<Chase>,
     assets: Option<Res<UiAssets>>,
     plan: Option<Res<FlowPlan>>,
     overview: Option<Res<Overview>>,
@@ -10973,7 +10986,16 @@ fn ui_input(
         let armed = sim.world.borrow_mut().cycle_weapon(step);
         overlay.dirty = armed >= 0;
     }
-    // `M`: the field log and its map panel, which `refresh_overlay` now fills from the live level.
+    // `V`: third person. The boom is `Chase::length` behind the eye and `collide::camera_pull`
+    // shortens it to whatever is in the way — the engine's own third-person behaviour, which retail
+    // reaches through `sithCamera_CycleCamera`.
+    if overlay.menu.is_none() && keys.just_pressed(KeyCode::KeyV) {
+        chase.on = !chase.on;
+        println!(
+            "camera: {} person",
+            if chase.on { "third" } else { "first" }
+        );
+    }    // `M`: the field log and its map panel, which `refresh_overlay` now fills from the live level.
     if overlay.menu.is_none() && overlay.started && keys.just_pressed(KeyCode::KeyM) {
         overlay.inventory = false;
         overlay.history.clear();
@@ -12327,6 +12349,74 @@ fn walk_level(level: &jkl::Level, frames: u32, quiet: bool, turn: f32) -> Option
 ///
 /// `rdMatrix_Build34` gives a thing two horizontal axes at yaw: `lvec` (the *look* axis, column 1 of
 
+/// `--camera-pull`: the third-person boom, and `sithCamera_SearchSectorInRadius` shortening it.
+///
+/// Casts the boom in sixteen directions from level 1's own start and reports what each one hits. A
+/// camera that is not pulled must be exactly where it asked to be; a pulled one must be *nearer* and
+/// must still clear the wall by the cast radius, because the engine puts the camera at the contact
+/// point rather than at the wall.
+fn camera_pull_check(gobs: &gob::GobSet) {
+    let Some(raw) = gobs.read("jkl\\01narshadda.jkl") else {
+        println!("camera-pull: level 1 is not in the archives");
+        return;
+    };
+    let level = jkl::parse(&String::from_utf8_lossy(&raw));
+    let solids = collide::build(&level);
+    // The room, not the spawn: level 1 opens inside the booth, a closed box of surfaces, so every
+    // direction hits a wall there and the test would measure the booth rather than the sweep. The
+    // centre of the largest sector is the one point a convex room guarantees is inside it.
+    let Some((sector, room)) = level
+        .sectors
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.radius.total_cmp(&b.1.radius))
+    else {
+        println!("camera-pull: level 1 has no sectors");
+        return;
+    };
+    let eye = [room.center[0], room.center[1], room.center[2] + PLAYER_EYE];
+    let boom = 3.0f32;
+    let radius = 0.02f32;
+    let (mut pulled, mut free) = (0usize, 0usize);
+    for step in 0..16 {
+        let angle = std::f32::consts::TAU * step as f32 / 16.0;
+        let dir = [angle.cos(), angle.sin(), 0.0];
+        let want = [eye[0] + dir[0] * boom, eye[1] + dir[1] * boom, eye[2] + dir[2] * boom];
+        let (got, hit) = solids.camera_pull(sector, eye, want, radius);
+        let reach = ((got[0] - eye[0]).powi(2) + (got[1] - eye[1]).powi(2) + (got[2] - eye[2]).powi(2)).sqrt();
+        match hit {
+            Some(surface) => {
+                pulled += 1;
+                println!("camera-pull: {angle:5.2} rad -> {reach:.3} (surface {surface})");
+                assert!(reach < boom, "a pulled camera reached {reach:.3}, past the {boom} boom");
+                assert!(reach >= radius * 0.5, "a pulled camera ended {reach:.3} from the eye");
+            }
+            None => {
+                free += 1;
+                assert!((reach - boom).abs() < 1e-3, "an unpulled camera sat {reach:.3}, not {boom}");
+            }
+        }
+    }
+    println!("camera-pull: {pulled} direction(s) pulled in, {free} left at the full {boom}");
+    // The pull must also be *silent* when there is nothing in the way: a boom short enough that no
+    // surface can be reached has to come back exactly where it was asked to be. That is the branch
+    // a long boom in an enclosed room never exercises.
+    for step in 0..8 {
+        let angle = std::f32::consts::TAU * step as f32 / 8.0;
+        let dir = [angle.cos(), angle.sin(), 0.0];
+        let short = 1e-4f32;
+        let want = [eye[0] + dir[0] * short, eye[1] + dir[1] * short, eye[2]];
+        let (got, hit) = solids.camera_pull(sector, eye, want, radius);
+        assert!(hit.is_none(), "a {short} boom hit something");
+        assert!(
+            (got[0] - want[0]).abs() < 1e-6 && (got[1] - want[1]).abs() < 1e-6,
+            "an unobstructed boom moved to {got:?}"
+        );
+    }
+    assert!(pulled > 0, "nothing was pulled in, so the sweep never fired");
+    println!("camera-pull: a {:.0e} boom is never touched", 1e-4);
+    println!("--- camera-pull check passed ---");
+}
 /// `--ends`: which script ends each level, and so whether every level can be finished.
 ///
 /// A level is completed by a script calling `jkEndLevel` — the engine registers the verb in
@@ -19404,6 +19494,30 @@ fn setup(
 #[derive(Resource)]
 struct Collision(collide::Solids);
 
+/// The third-person boom: off by default (retail boots into first person), `V` toggles it.
+///
+/// The length is the distance the camera wants to sit behind the eye; `collide::camera_pull` — the
+/// port of `sithCamera_SearchSectorInRadius` — shortens it to whatever is in the way. `BK_CHASE_DIST`
+/// overrides the length so a capture can frame a room or a corridor.
+#[derive(Resource)]
+struct Chase {
+    on: bool,
+    length: f32,
+}
+
+impl Default for Chase {
+    fn default() -> Self {
+        Self {
+            // `BK_CHASE=1` starts in third person, which is how a capture or a probe sees the boom
+            // without a key press; `V` toggles it in play.
+            on: std::env::var_os("BK_CHASE").is_some(),
+            length: std::env::var("BK_CHASE_DIST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3.0),
+        }
+    }
+}
 /// Fall damage for an impact speed, exactly as `sithCollision_FallHurt` computes it.
 ///
 /// `(vel - 2.5)^2 * 45`, applied only when that exceeds 1.0 — so a fall under 2.5 units/s hurts nothing,
@@ -20264,6 +20378,7 @@ fn walk_player(
     mouse: Res<bevy::input::mouse::AccumulatedMouseMotion>,
     overlay: Option<Res<Overlay>>,
     // The overlay camera is a `Camera3d` too, so it must be excluded or `single_mut` fails and
+    mut chase: ResMut<Chase>,
     // the walker's view never moves (which is what happened for every round before this one).
     mut cam: Query<&mut Transform, (With<Camera3d>, With<WorldCamera>)>,
 ) {
@@ -20719,7 +20834,22 @@ fn walk_player(
         }
     }
 
-    tf.translation = eye;
+    // Third person: a boom behind the eye along the look direction, then
+    // `sithCamera_SearchSectorInRadius` — the engine's own pull-in — shortens it to the first thing
+    // between the player and the camera. `V` toggles it; first person is the default because that is
+    // what retail boots into.
+    if chase.on {
+        let focus = eye;
+        let want = focus - look.normalize_or(Vec3::NEG_X) * chase.length;
+        let (pulled, hit) = solids.0.camera_pull(player.sector, focus.to_array(), want.to_array(), PLAYER_EYE);
+        let pulled = Vec3::from(pulled);
+        eye = pulled;
+        if std::env::var_os("BK_CAMERA_TRACE").is_some() {
+            println!(
+                "camera: third person wanted {want:?}, pulled to {pulled:?} (surface {hit:?})"
+            );
+        }
+    }    tf.translation = eye;
     if std::env::var_os("BK_CAMERA_TRACE").is_some() {
         println!(
             "camera: eye {eye:?} look {:?} scripted {:?}",
