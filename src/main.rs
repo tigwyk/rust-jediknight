@@ -17695,6 +17695,7 @@ fn draw_viewmodel(
     mut commands: Commands,
     archives: Option<Res<Archives>>,
     sim: Option<Res<Sim>>,
+    world: Option<Res<World>>,
     mut view: Option<ResMut<Viewmodel>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -17794,8 +17795,13 @@ fn draw_viewmodel(
         .position(|mat| gobs.0.read(mat).is_some())
         .unwrap_or(0) as i32;
     let mesh = meshes.add(model_mesh(&model, material, (1.0, 1.0)));
+    // `rdCamera_SetAmbientLight(camera, sector->ambient + sector->extraLight)` is how retail lights the
+    // POV pass, and the runtime tracks that number per sector (`SetSectorLight` moves it). The world is
+    // drawn unlit from its own baked vertex light, so the weapon is unlit as well — an unlit material
+    // whose colour *is* the sector light gives the same result without a per-camera light.
+    let light = world.as_ref().map(|w| sector_light(&sim, &w.level)).unwrap_or(1.0);
     let material = materials.add(StandardMaterial {
-        base_color: bevy::color::Color::WHITE,
+        base_color: bevy::color::Color::srgb(light, light, light),
         perceptual_roughness: 0.7,
         // `jkPlayer_DrawPov` lights this pass with `rdCamera_SetAmbientLight` from the sector's own
         // light. The port has no per-camera ambient, so the weapon is unlit — visible and readable,
@@ -17856,12 +17862,35 @@ fn draw_viewmodel(
         ))
         .id();
     view.entity = Some(entity);
-    println!("viewmodel: drew `{name}` ({} meshes, material `{}`)", model.meshes.len(), model.materials.first().cloned().unwrap_or_default());
+    println!(
+        "viewmodel: drew `{name}` ({} meshes, material `{}`), sector light {light:.2}",
+        model.meshes.len(),
+        model.materials.first().cloned().unwrap_or_default()
+    );
 }
 
+/// The player's sector light — what retail hands the POV pass as ambient
+/// (`rdCamera_SetAmbientLight` takes `sector->ambient + sector->extraLight`, clamped to 0..1).
+fn sector_light(sim: &Sim, level: &jkl::Level) -> f32 {
+    let rt = sim.world.borrow();
+    let player = rt.player_thing();
+    let sector = rt.things.get(player).map(|t| t.sector).unwrap_or(0);
+    let Ok(sector) = usize::try_from(sector) else { return 1.0 };
+    // The room's own baked light plus whatever `SetSectorLight` added on top: the sum the engine
+    // clamps into `rdCamera_SetAmbientLight`.
+    let baked = level
+        .sectors
+        .get(sector)
+        .map(|s| s.ambient_light + s.extra_light)
+        .unwrap_or(1.0);
+    let scripted = rt.sectors.get(sector).map(|s| s.light).unwrap_or(0.0);
+    (baked + scripted).clamp(0.0, 1.0)
+}
 /// Where a first-person weapon sits relative to the view: low and right, angled in.
 fn view_offset(camera: &GlobalTransform) -> (Vec3, Quat) {
     let forward = camera.forward().as_vec3();
+
+/// Where a first-person weapon sits relative to the view: low and right, angled in.
     let right = camera.right().as_vec3();
     let up = camera.up().as_vec3();
     let translation = camera.translation() + forward * 0.42 + right * 0.16 - up * 0.14;

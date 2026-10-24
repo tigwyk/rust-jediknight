@@ -117,6 +117,11 @@ pub struct Sector {
     /// no surface test at all (`sithIntersect.c:58`). `collide::Solids::inside_sector` needs it to be
     /// the engine's test rather than an approximation from the sector's vertices.
     pub boundbox: Option<([f32; 3], [f32; 3])>,
+    /// `AMBIENT LIGHT <v>` and `EXTRA LIGHT <v>`: what the editor baked into this room. Retail sums
+    /// them into the POV pass's ambient (`jkPlayer_DrawPov`), which is why the weapon is as bright as
+    /// the room it is held in.
+    pub ambient_light: f32,
+    pub extra_light: f32,
     /// The sector's ambient loop: `SOUND <wav> <volume>`, played on loop while the
     /// player is in this sector. Most sectors have none.
     pub sound: Option<(String, f32)>,
@@ -471,6 +476,16 @@ pub fn parse(text: &str) -> Level {
                     s.center = [f[0], f[1], f[2]];
                 }
             }
+        } else if lower.starts_with("ambient light") {
+            // `AMBIENT LIGHT <v>`: the sector`s ambient, which is what `rdCamera_SetAmbientLight`
+            // hands the POV pass (added to `EXTRA LIGHT`, per `jkPlayer_DrawPov`).
+            if let Some(s) = level.sectors.last_mut() {
+                s.ambient_light = nth_f32(line, 2).unwrap_or(0.0);
+            }
+        } else if lower.starts_with("extra light") {
+            if let Some(s) = level.sectors.last_mut() {
+                s.extra_light = nth_f32(line, 2).unwrap_or(0.0);
+            }
         } else if lower.starts_with("radius") {
             if let Some(s) = level.sectors.last_mut() {
                 s.radius = nth_f32(line, 1).unwrap_or(0.0);
@@ -634,6 +649,16 @@ mod tests {
     /// Two `frame=` spellings ship: a path frame carries its angles (`x/y/z:yaw/…`, what a door or lift
     /// is drawn at), an actor's `numframes` list is a position alone (level 1's 8t88). The second used to
     /// be dropped, which left every actor's frame list empty — and `AISetMoveFrame` indexes that list.
+    /// `AMBIENT LIGHT` and `EXTRA LIGHT` are what retail sums into the POV pass's ambient
+    /// (`jkPlayer_DrawPov`), so the parser has to read both or the weapon draws black.
+    #[test]
+    fn reads_the_sector_lights() {
+        let text = "\nSECTORS 1\n\n0: 0 0 0\n  AMBIENT LIGHT 0.75\n  EXTRA LIGHT 0.13\n  RADIUS 4\n";
+        let level = parse(text);
+        assert_eq!(level.sectors.len(), 1);
+        assert!((level.sectors[0].ambient_light - 0.75).abs() < 1e-5, "ambient light not read");
+        assert!((level.sectors[0].extra_light - 0.13).abs() < 1e-5, "extra light not read");
+    }
     #[test]
     fn both_frame_spellings_parse() {
         let path = Thing::parse_frame("frame=(1.2/9.65/6.35:0.0/90.0/0.02)").expect("path frame");

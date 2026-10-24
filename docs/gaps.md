@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **59 gates, 123 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **59 gates, 124 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -860,3 +860,13 @@ Two things are honestly not done. The model is **not framed like retail yet**: `
 - **The orientation was the invisible-weapon bug.** The old placement composed `from_rotation_arc(Vec3::Z, forward)`, which in the camera's own frame turns the pistol sideways and, at the placement the model's radius asks for, points it behind the eye. `bryv.3do`'s geometry is x[-0.007,0.005] y[-0.007,0.015] z[-0.035,0.015] with `RADIUS 0.066`, so the placement is 1.6 radii forward, half a radius right and 0.6 down, and the transform needs **no** extra rotation: `model_mesh` already converts the file's frame.
 
 Still open on this item, and why: the weapon reads **small** and sits low-right against the HUD — the framing needs the POV thing's real offset, which is the piece the decompilation does not hand over; and the pass is still `unlit` where retail uses `rdCamera_SetAmbientLight` from the sector. Capture aids: `BK_ARM=<bin>`, `BK_POV=<model>`, `BK_VIEW=x,y,z`. 123 tests, 59 gates, 0 failed.
+
+**Round 191 (goal round 2, item 1 continued):** the weapon is now lit by the room, and the reason it was black was a real data gap.
+
+`jkPlayer_DrawPov` hands `rdCamera_SetAmbientLight` the **sector's `AMBIENT LIGHT` plus `EXTRA LIGHT`**, clamped to 0..1. The port parsed neither: `jkl.rs` read a sector's centre, radius, colormap, boundbox, surfaces and sound, and stopped there. `SectorState.light` (the `SetSectorLight` extra) was the only light the weapon could have used, and it is 0 in level 1's booth — so the first version of this fix drew the pistol black (logged `sector light 0.00`).
+
+Both fields are now parsed, and `sector_light` sums the baked room light with whatever `SetSectorLight` has added, exactly as the engine does. Level 1's spawn reads **0.88** where it read 0.00, and the weapon is visible and lit rather than a dark sliver. A unit test pins the parse (`reads_the_sector_lights`): 124 tests now.
+
+One attempt failed and is worth recording so it is not repeated: I tried to derive the framing from the **posed** bounds (`tdo::pose_nodes` + `bounds`) and a scale from the view's half-height. That produced `scale = 0.62 * half_height / size` for a posed size that is evidently not what the raw vertices suggest, and the weapon vanished entirely — the round-1 placement (radius-based, 1.6 radii forward) is what ships. The framing is therefore still open: the weapon reads small and sits low-right against the HUD, and the honest fix is still the POV thing's own offset, which the decompilation does not give a writer for.
+
+`--gates` 59 of 59, 0 failed; 124 tests.
