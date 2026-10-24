@@ -901,3 +901,11 @@ That second fix did not fix the collapse: `04escapehouse` still traces
     camera: third person wanted (-6.04, -1.86, 0.70), pulled to (-3.09, -1.86, 0.70) (surface 8215)
 
 — a 2.95-unit boom pulled to 0.04. The camera is provably at the eye (the body log reads `camera 0.06 from the body`), so **the body is not visible and item 2 is not done**; the remaining suspect is the sweep's contact test at a start point that `sector_at` reports inside but whose hull planes still count as touching. Next round: bisect that with a synthetic open-sector cast, then re-check the body. 125 tests, 59 gates, 0 failed.
+
+**Round 195 (a question from the player, not a defect):** *"can the tests run without stealing the mouse or showing a window?"* — yes, and a sweep now never takes the pointer either way.
+
+- **`BK_HEADLESS=1`** runs with **no window at all** (`WindowPlugin { primary_window: None }`). The sweep is then silent on the desktop: `gates: 0 of 59 failed, 8 skipped`. The eight that are skipped are the ones that need the real frame loop — `--live-check`, `--goal`, `--save-live`, `--save-slots`, `--use-live`, `--ai-live`, `--force-live`, `--force-grant` — and Bevy exits them with "No windows are open" before they reach a verdict. The sweep detects exactly that message and reports **skipped**, counted separately: never a pass, never a failure of the code it was meant to check.
+- **`BK_NO_GRAB=1`** is for those eight, and for anything run windowed: the window still opens, but `grab_cursor` does nothing, so the pointer stays yours. The sweep sets it on every child itself, so `--gates` cannot take the mouse even when run with a window.
+- `cargo test --bins` never opened a window and still does not: **125 passed**.
+
+So the practical recipe is `BK_HEADLESS=1 bevi-knight --gates` for a background check, and `BK_NO_GRAB=1 bevi-knight --gates` when the eight live gates also need to run. Windowed sweep after the change: `0 of 59 failed, 0 skipped`.

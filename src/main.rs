@@ -224,6 +224,7 @@ fn run_gates(game: &std::path::Path) -> i32 {
     let exe = std::env::current_exe().expect("the running executable");
     println!("{:<22} {:<10} {:<6} {}", "flag", "runs", "result", "verdict");
     let mut failed = 0;
+    let mut skipped = 0;
     for flag in GATES {
         // The sweep's one window gate renders a real window; on a machine with no usable display it
         // sits in presentation and never reaches its verdict. `BK_SKIP_WINDOW=1` skips it so the
@@ -248,6 +249,10 @@ fn run_gates(game: &std::path::Path) -> i32 {
             .args(["--exit-after", "1200"])
             .args(flag.split_whitespace())
             .env("BK_MUTE", "1")
+            // A sweep is not a play session: no child may take the pointer, so a machine stays usable
+            // while the gates run. The live gates still open a window (they need the camera entity) but
+            // they drive the input themselves and have no use for the mouse.
+            .env("BK_NO_GRAB", "1")
             .output();
         let (mode, verdict, complained) = match &out {
             Ok(out) => {
@@ -271,6 +276,24 @@ fn run_gates(game: &std::path::Path) -> i32 {
         // without one has run something that asserts nothing (an early return, a flag that fell
         // through), and the sweep used to call that a pass.
         let verdict_ok = verdict != "(no verdict)" && !complained;
+        // A gate that needs the frame loop cannot run without a window: Bevy exits with
+        // "No windows are open" before the gate reaches anything. Under `BK_HEADLESS=1` that is the
+        // environment, not the code, so it is reported as skipped and counted as such — never as a
+        // pass, and never as a failure of the thing it was meant to check.
+        let window_only = std::env::var_os("BK_HEADLESS").is_some()
+            && verdict == "(no verdict)"
+            && out
+                .as_ref()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout).contains("No windows are open")
+                        || String::from_utf8_lossy(&o.stderr).contains("No windows are open")
+                })
+                .unwrap_or(false);
+        if window_only {
+            skipped += 1;
+            println!("{flag:<22} {:<10} {:<6} skipped (needs a window; BK_HEADLESS)", mode, "-");
+            continue;
+        }
         let passed = ok && verdict_ok;
         if !passed {
             failed += 1;
@@ -289,7 +312,12 @@ fn run_gates(game: &std::path::Path) -> i32 {
             }
         );
     }
-    println!("gates: {} of {} failed", failed, GATES.len());
+    println!(
+        "gates: {} of {} failed, {} skipped",
+        failed,
+        GATES.len(),
+        skipped
+    );
     if failed == 0 { 0 } else { 1 }
 }
 
@@ -9437,8 +9465,12 @@ fn main() {
     let save_directory = std::env::var_os("BK_SAVE_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| game.join("saves"));
+    // `BK_HEADLESS=1`: no window at all. A gate does not need one — none of them photographs the
+    // screen — and a window is what steals the pointer and covers the desktop while a sweep runs. The
+    // `--shot` capture path is a separate invocation and still opens one.
+    let headless = std::env::var_os("BK_HEADLESS").is_some();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
+            primary_window: (!headless).then(|| Window {
                 title: format!("bevi-knight — {level_name}"),
                 ..default()
             }),
@@ -16943,6 +16975,7 @@ fn live_play_drive(
         state.jump_peak, state.jump_peak, landed.map(|z| (z * 1000.0).round() / 1000.0)
     );
     let mut failed = 0;
+    let mut skipped = 0;
     // Peak horizontal displacement, not the final one: the walk phase sweeps W/D/S/A so the body goes
     // out and comes back, and comparing start with end measured the return trip — a body that walked
     // 0.27 units failed as "did not move at all".
@@ -17095,6 +17128,7 @@ fn live_check(
     }
     let rt = sim.world.borrow();
     let mut failed = 0;
+    let mut skipped = 0;
     let mut say = |ok: bool, line: String| {
         // A failed invariant has to be findable in the output: the summary said "1 invariant(s)
         // failed" and left the reader to guess which.
@@ -17955,6 +17989,14 @@ fn view_frame(fov: f32, aspect: f32, drawn_size: f32) -> (Vec3, f32) {
     let base = Vec3::new(half_width * 0.34, -half_height * 0.55, -distance);
     (base, (half_height * 0.62) / size)
 }
+/// Whether the player's body is drawn at a given camera distance.
+///
+/// A camera inside the body sees the inside of its polygons — models are drawn with `cull_mode: None`
+/// — and the boom's pull-in parks it exactly there in a tight room. Retail never meets the problem
+/// because the local body is not drawn at all; the port's rule is the boom's own length.
+fn body_visible(camera_distance: f32) -> bool {
+    camera_distance >= 0.6
+}
 /// The player's own body: a mesh the third-person camera can see. First person never shows it — the
 /// camera is the body's position plus an eye offset, so the model would be drawn *around* the view —
 /// and `spawn_level` skips it for exactly that reason. `Chase::on` is the only thing that turns this
@@ -18030,6 +18072,9 @@ fn draw_player_body(
                 MeshMaterial3d(material),
                 Transform::default(),
                 PlayerBodyMesh,
+                // The mesh is a body whose node transforms put its parts away from the origin, and a
+                // computed `Aabb` from that is what silently culls the view weapon too.
+                bevy::camera::visibility::NoFrustumCulling,
             ))
             .id();
         body.entity = Some(entity);
@@ -18046,7 +18091,7 @@ fn draw_player_body(
         // is the boom's own length: closer than the body's size, and the body is not drawn.
         if let Some(camera) = cam.iter().next() {
             let distance = (camera.translation() - Vec3::from(pos)).length();
-            let close = distance < 0.6;
+            let close = !body_visible(distance);
             if std::env::var_os("BK_VM_TRACE").is_some() {
                 println!("body: camera {distance:.2} from the body, {close}");
             }
@@ -20320,6 +20365,13 @@ fn engine_fov(
 /// interface otherwise (`stdControl` captures on window activation, the GUI frees it). Without a grab the
 /// deltas stop at the window edge and the look jams in one direction.
 fn grab_cursor(overlay: Option<Res<Overlay>>, mut cursors: Query<&mut CursorOptions>) {
+    // A headless run must not take the pointer: there is no window to hold it, and a sweep that
+    // locked the mouse would be unusable while it ran. `BK_NO_GRAB=1` is the same courtesy for the
+    // live gates, which do need a window but have no use for the pointer — they drive the input
+    // themselves.
+    if std::env::var_os("BK_HEADLESS").is_some() || std::env::var_os("BK_NO_GRAB").is_some() {
+        return;
+    }
     let playing = overlay.as_deref().is_none_or(|o| o.menu.is_none());
     let mode = if playing {
         CursorGrabMode::Locked
