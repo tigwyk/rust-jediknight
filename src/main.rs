@@ -18003,7 +18003,9 @@ fn body_visible(camera_distance: f32) -> bool {
 /// on, and it is the same condition the boom uses.
 #[derive(Resource, Default)]
 struct PlayerBody {
-    entity: Option<Entity>,
+    /// One entity per material: a model's faces name different materials, and a single-material
+    /// mesh is a few dozen vertices of a body rather than the body itself.
+    entities: Vec<Entity>,
 }
 
 /// Marks the entity [`draw_player_body`] puts the player's model on.
@@ -18029,76 +18031,72 @@ fn draw_player_body(
 ) {
     let (Some(sim), Some(world)) = (sim, world) else { return };
     if !chase.on {
-        if let Some(entity) = body.entity.take() {
+        for entity in body.entities.drain(..) {
             commands.entity(entity).despawn();
         }
         return;
     }
-    let (template, pos, yaw) = {
+    let (template, pos, orientation) = {
         let rt = sim.world.borrow();
         let player = rt.player_thing();
         let Some(thing) = rt.things.get(player) else { return };
         (
             rt.templates.get(player).cloned().unwrap_or_default(),
             thing.pos,
-            thing.yaw,
+            // The basis every other thing is drawn with: `thing_quat` is `rdMatrix_Build34(pyr)`.
+            // `Quat::from_rotation_z(-yaw)` is only the yaw, in the wrong frame.
+            thing_quat(thing.pitch, thing.yaw, thing.roll),
         )
     };
-    if body.entity.is_none() {
+    if body.entities.is_empty() {
         let Some(model_name) = world.template_model.get(&template.to_ascii_lowercase()) else {
             return;
         };
         let Some(model) = world.models.get(model_name) else { return };
-        let at = model
-            .materials
-            .iter()
-            .position(|mat| world.model_images.contains_key(mat))
-            .unwrap_or(0);
-        let mesh = meshes.add(model_mesh(model, at as i32, (1.0, 1.0)));
-        let texture = model
-            .materials
-            .get(at)
-            .and_then(|mat| world.model_images.get(mat))
-            .map(|image| images.add(image.clone()));
-        let material = materials.add(StandardMaterial {
-            base_color_texture: texture,
-            unlit: true,
-            cull_mode: None,
-            ..default()
-        });
-        let entity = commands
-            .spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(material),
-                Transform::default(),
-                PlayerBodyMesh,
-                // The mesh is a body whose node transforms put its parts away from the origin, and a
-                // computed `Aabb` from that is what silently culls the view weapon too.
-                bevy::camera::visibility::NoFrustumCulling,
-            ))
-            .id();
-        body.entity = Some(entity);
-        println!("body: drawing the player's own model `{model_name}` for third person");
+        // One mesh per material, exactly as `spawn_level` draws every other thing: a model's faces
+        // name different materials, and a single-material mesh is a few dozen vertices of a body
+        // (59 of `ky.3do`'s, which is why the first version of this drew nothing recognisable).
+        for (index, mat) in model.materials.iter().enumerate() {
+            let mesh = meshes.add(model_mesh(model, index as i32, (1.0, 1.0)));
+            let texture = world.model_images.get(mat).map(|image| images.add(image.clone()));
+            let material = materials.add(StandardMaterial {
+                base_color_texture: texture,
+                unlit: true,
+                cull_mode: None,
+                ..default()
+            });
+            let entity = commands
+                .spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(material),
+                    Transform::default(),
+                    PlayerBodyMesh,
+                    bevy::camera::visibility::NoFrustumCulling,
+                ))
+                .id();
+            body.entities.push(entity);
+        }
+        println!(
+            "body: drawing `{model_name}` for third person ({} material part(s))",
+            body.entities.len()
+        );
     }
-    if let Some(entity) = body.entity {
-        if let Ok(mut transform) = drawn.get_mut(entity) {
+    let hidden = cam
+        .iter()
+        .next()
+        .map(|camera| !body_visible((camera.translation() - Vec3::from(pos)).length()))
+        .unwrap_or(false);
+    for (n, entity) in body.entities.iter().enumerate() {
+        let _ = n;
+        if let Ok(mut transform) = drawn.get_mut(*entity) {
             *transform = Transform::from_translation(Vec3::from(pos))
-                .with_rotation(Quat::from_rotation_z(-yaw.to_radians()));
+                .with_rotation(orientation);
         }
-        // A camera inside the body sees the inside of its own polygons (`cull_mode: None`), and the
-        // boom's pull-in parks it exactly there in a tight room — a booth, a corridor, against a wall.
-        // Retail never has the problem because it does not draw the local body at all; the port's rule
-        // is the boom's own length: closer than the body's size, and the body is not drawn.
-        if let Some(camera) = cam.iter().next() {
-            let distance = (camera.translation() - Vec3::from(pos)).length();
-            let close = !body_visible(distance);
-            if std::env::var_os("BK_VM_TRACE").is_some() {
-                println!("body: camera {distance:.2} from the body, {close}");
-            }
-            commands
-                .entity(entity)
-                .insert(if close { Visibility::Hidden } else { Visibility::Visible });
-        }
+        commands.entity(*entity).insert(if hidden {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
+        });
     }
 }
 /// The player's sector light — what retail hands the POV pass as ambient

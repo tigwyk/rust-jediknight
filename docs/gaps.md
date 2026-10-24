@@ -909,3 +909,13 @@ That second fix did not fix the collapse: `04escapehouse` still traces
 - `cargo test --bins` never opened a window and still does not: **125 passed**.
 
 So the practical recipe is `BK_HEADLESS=1 bevi-knight --gates` for a background check, and `BK_NO_GRAB=1 bevi-knight --gates` when the eight live gates also need to run. Windowed sweep after the change: `0 of 59 failed, 0 skipped`.
+
+**Round 196 (goal round 6, item 2):** the third-person camera now shows Kyle, and the reason it showed nothing was the mesh, not the placement.
+
+- **A model is drawn one mesh per material.** `model_mesh` builds the faces of a *single* material index, which for `ky.3do` is **59 vertices** — a sliver that reads as nothing at all. `draw_player_body` now builds one entity per material, exactly as `spawn_level` draws every other thing: 20 parts for Kyle, and he appears in the arena seen from behind (`docs/third-person.png`).
+- **The orientation is `thing_quat(pitch, yaw, roll)`**, the port's transcription of `rdMatrix_Build34`, not `Quat::from_rotation_z(-yaw)` — the yaw alone in the wrong frame, which lays a body down.
+- **The body hides when the camera is inside it** (`body_visible`): the boom's pull-in parks the camera at the body in a tight room, and with `cull_mode: None` that shows the inside of the polygons. The rule is the boom's own length.
+
+Two honest observations from the capture. Kyle is **small for 1.5 units away** — the same "model drawn smaller than its measured size" that the view weapon showed, and worth chasing against the `--scale` numbers (`model scale 1.0`, a door 0.3 units) rather than against a screenshot. And the body has **no animation**: it is the rest pose, where every placed actor is animated by `animate_actors`; joining the player to that list is the next step for this item.
+
+125 tests, 59 gates (8 skipped headless), 0 failed.
