@@ -10586,6 +10586,8 @@ struct Viewmodel {
     /// new frame — a handful of vertices, unlike a body puppet's.
     key: Option<String>,
     phase: f32,
+    /// Where the weapon sits in the view, from the model's own geometry (`draw_viewmodel`).
+    base: Vec3,
     frame: i32,
 }
 
@@ -10713,27 +10715,7 @@ fn setup_overlay(
             RenderLayers::layer(1),
             OverlayQuad,
         ));
-        // The first-person weapon, in camera space on its own layer.
-        //
-        // `jkPlayer_DrawPov` (0x4051e0) draws the weapon from the **camera's own matrix**, not from a
-        // world pose: it copies the camera, pre-translates by the negated POV offset, pre-multiplies
-        // the sway rotation, and draws with `rdSetZBufferMethod(0)` / `rdSetOcclusionMethod(0)`. The
-        // weapon therefore never depth-tests against the world and can never be cut by a wall. This
-        // camera is that pass: it sees only layer 3, draws after the world (order 1) and clears
-        // nothing, so the weapon lands on top of the scene with its own depth buffer. The mesh is
-        // parented to it, so its transform is camera-relative.
-        parent.spawn((
-            Camera3d::default(),
-            Camera {
-                order: 1,
-                clear_color: ClearColorConfig::None,
-                ..default()
-            },
-            RenderLayers::layer(3),
-            EngineFov,
-            engine_projection(),
-            ViewmodelCamera,
-        ));        // The screen-effect wash: its own layer and a camera between the world and the UI, so
+        // The screen-effect wash: its own layer and a camera between the world and the UI, so
         // `NewColorEffect` tints the scene — force seeing's blue, infrared's red, a damage flash —
         // and the HUD stays drawn on top of it in its own colours.
         parent.spawn((
@@ -17718,18 +17700,16 @@ fn draw_viewmodel(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut drawn: Query<&mut Transform, With<ViewmodelMesh>>,
     // The weapon rides the viewmodel camera, so its transform is the local one the camera sees.
-    cam: Query<(Entity, &GlobalTransform), With<ViewmodelCamera>>,
+    cam: Query<(Entity, &GlobalTransform, &Projection), With<WorldCamera>>,
 ) {
     let (Some(gobs), Some(sim), Some(view)) = (archives, sim, view.as_mut()) else { return };
-    // `BK_VIEW=x,y,z`: where the weapon sits in the view, for framing a capture. The default is the
-    // placement the world-space version used, expressed in the camera's own frame.
-    let local_at = std::env::var("BK_VIEW")
-        .ok()
-        .and_then(|v| {
-            let n: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
-            (n.len() == 3).then_some(Vec3::new(n[0], n[1], n[2]))
-        })
-        .unwrap_or(Vec3::new(0.16, -0.14, -0.42));
+    // `BK_VIEW=x,y,z`: an explicit placement for framing a capture. Without it the weapon is
+    // placed from the model's own geometry (see the spawn below), which is what makes a pistol and
+    // a rifle frame themselves without a table of magic numbers.
+    let view_override = std::env::var("BK_VIEW").ok().and_then(|v| {
+        let n: Vec<f32> = v.split(",").filter_map(|p| p.trim().parse().ok()).collect();
+        (n.len() == 3).then_some(Vec3::new(n[0], n[1], n[2]))
+    });
 
     let want = {
         let rt = sim.world.borrow();
@@ -17793,7 +17773,7 @@ fn draw_viewmodel(
             if let Ok(mut transform) = drawn.get_mut(entity) {
                 // Camera-local: right is +X, up is +Y, forward is -Z. The sway is the waggle the
                 // weapon cog sets, applied along the camera axis as before.
-                transform.translation = Vec3::new(local_at.x + sway[0] as f32, local_at.y, local_at.z);
+                transform.translation = view.base + Vec3::X * sway[0] as f32;
             }
         }
         return;
@@ -17825,17 +17805,43 @@ fn draw_viewmodel(
         cull_mode: None,
         ..default()
     });
-    let Some((camera, camera_rot)) = cam.iter().next() else { return };
+    let Some((camera, camera_rot, projection)) = cam.iter().next() else {
+        return;
+    };
     // The weapon lives in **camera space**: parented to the viewmodel camera, so its transform is
     // relative to the view and no world geometry can ever reach it (`jkPlayer_DrawPov` builds it from
     // the camera matrix the same way). The orientation is the one the world-space placement used,
     // expressed in the camera's own frame, so the model sits exactly as before — only now it cannot
     // be clipped.
     let (_, rotation) = view_offset(camera_rot);
+    // Where the weapon sits, from the model itself.
+    //
+    // `bryv.3do`'s own geometry is about 0.02 units across, and its `RADIUS` is 0.066 — a view model is
+    // authored small and drawn close. Placing it at a fixed distance (the old 0.42) therefore put it
+    // off the edge or made it a speck. Scaling the placement by the model's radius frames any weapon:
+    // 1.2 radii forward, half a radius right and 0.6 down, which is a pistol held low and right the way
+    // `jkPlayer_DrawPov` composes the camera matrix with the POV thing's own offset.
+    //
+    // ponytail: retail's exact answer is that offset — `thing + 0x168`, which no decompiled writer sets
+    // (it is not in the dumped template parser), so this derives the placement instead of guessing it.
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for piece in &model.meshes {
+        for v in &piece.vertices {
+            for k in 0..3 {
+                lo[k] = lo[k].min(v[k]);
+                hi[k] = hi[k].max(v[k]);
+            }
+        }
+    }
+    let reach = ((hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2])).max(model.radius * 0.5);
+    view.base = view_override.unwrap_or(Vec3::new(reach * 0.5, -reach * 0.6, -reach * 1.6));
     let local = Transform {
-        // Right +X, up +Y, forward -Z, so this is the world placement expressed in the view frame.
-        translation: local_at,
-        rotation: camera_rot.rotation().inverse() * rotation,
+        translation: view.base,
+        // The model in the camera's own axes: a `.3do`'s barrel is +Y, and `model_mesh` already
+        // converts the file's frame to the renderer's, so the view frame needs no extra turn. The old
+        // world placement composed one from ``from_rotation_arc``, which pointed the weapon sideways
+        // and — at the placement the model's radius asks for — behind the eye altogether.
+        rotation: Quat::IDENTITY,
         ..default()
     };
     let entity = commands
@@ -17844,14 +17850,13 @@ fn draw_viewmodel(
             MeshMaterial3d(material),
             local,
             ViewmodelMesh,
-            RenderLayers::layer(3),
-            ChildOf(camera),
             bevy::camera::visibility::NoFrustumCulling,
+            ChildOf(camera),
+
         ))
         .id();
     view.entity = Some(entity);
     println!("viewmodel: drew `{name}` ({} meshes, material `{}`)", model.meshes.len(), model.materials.first().cloned().unwrap_or_default());
-
 }
 
 /// Where a first-person weapon sits relative to the view: low and right, angled in.
