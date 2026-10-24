@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **59 gates, 124 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **59 gates, 125 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -870,3 +870,15 @@ Both fields are now parsed, and `sector_light` sums the baked room light with wh
 One attempt failed and is worth recording so it is not repeated: I tried to derive the framing from the **posed** bounds (`tdo::pose_nodes` + `bounds`) and a scale from the view's half-height. That produced `scale = 0.62 * half_height / size` for a posed size that is evidently not what the raw vertices suggest, and the weapon vanished entirely — the round-1 placement (radius-based, 1.6 radii forward) is what ships. The framing is therefore still open: the weapon reads small and sits low-right against the HUD, and the honest fix is still the POV thing's own offset, which the decompilation does not give a writer for.
 
 `--gates` 59 of 59, 0 failed; 124 tests.
+
+**Round 192 (goal round 3, item 1):** the weapon's framing works, and the reason it kept failing was one missing line.
+
+`view_frame` derives the placement from the view — a fixed distance, and a scale that sizes the drawn mesh to a fraction of the view's half-height — but **the scale was never applied to the transform**: `Transform::scale` was left at 1, so the mesh drew at its world size (about 0.005 units for `bryv.3do`), which is a pistol a few pixels wide in the lower-right of the frame. Three rounds of "the weapon is invisible / tiny" were all this.
+
+Also in this round:
+
+- **The mesh is recentred on its own bounding box** (`recentre_mesh`). A `.3do`'s node transforms place its parts away from the model's origin, so an unrecentred weapon appears at the edge of the view and any scale derived from the box disagrees with the screen.
+- **The framing is measured from the drawn mesh** rather than the file's vertices, and the size is the **75th percentile of the vertex distances** rather than the box: a view model draws its arms as well as the weapon, so the box is the arm span, and scaling by it draws the pistol as a speck. `ponytail:` on `view_frame` says the `.3do` node scale is where the exact answer lives.
+- A unit test pins the whole thing (`view_frame_tests::the_weapon_frames_inside_the_view`): for models from 0.005 to 0.5 units, the placement must be in front of the near plane, inside the frame's width and height, and subtend between 0.1 rad and half the vertical view — the "invisible" and "wall of gun" failures both fail it.
+
+What a capture shows now: a pistol about 230 by 180 pixels at the lower right of an outdoor view (`04escapehouse`), where before there was a 30-pixel speck. Still to do on this item, both presentation rather than placement: the model draws **untextured white** (its `HDBACK.MAT` evidently has no bitmap in the archives) and its **barrel points across the view rather than down it**, which is the model's own authored orientation. 125 tests, 59 gates, 0 failed.

@@ -10589,6 +10589,8 @@ struct Viewmodel {
     /// Where the weapon sits in the view, from the model's own geometry (`draw_viewmodel`).
     base: Vec3,
     frame: i32,
+    /// The view scale the drawn mesh needs to read as a weapon in hand rather than a speck.
+    scale: f32,
 }
 
 /// The viewmodel entity itself, spawned by [`draw_viewmodel`].
@@ -17794,7 +17796,14 @@ fn draw_viewmodel(
         .iter()
         .position(|mat| gobs.0.read(mat).is_some())
         .unwrap_or(0) as i32;
-    let mesh = meshes.add(model_mesh(&model, material, (1.0, 1.0)));
+    let handle = meshes.add(model_mesh(&model, material, (1.0, 1.0)));
+    // The framing comes from the **mesh that is actually drawn**, and the mesh has to be recentred
+    // first. A `.3do`'s node transforms place its parts away from the model's origin — that is what
+    // made the weapon appear as a sliver at the edge of the view, and what made any scale derived from
+    // the raw vertices put it out of sight entirely. Recentring on the drawn bounding box and scaling
+    // the box to a fixed fraction of the view is the placement that cannot disagree with the screen.
+    let (drawn_size, _centre) = recentre_mesh(&mut meshes, &handle);
+    let mesh = handle;
     // `rdCamera_SetAmbientLight(camera, sector->ambient + sector->extraLight)` is how retail lights the
     // POV pass, and the runtime tracks that number per sector (`SetSectorLight` moves it). The world is
     // drawn unlit from its own baked vertex light, so the weapon is unlit as well — an unlit material
@@ -17820,30 +17829,31 @@ fn draw_viewmodel(
     // expressed in the camera's own frame, so the model sits exactly as before — only now it cannot
     // be clipped.
     let (_, rotation) = view_offset(camera_rot);
-    // Where the weapon sits, from the model itself.
+    // Where the weapon sits, and how big it is drawn, from the mesh that is actually drawn.
     //
-    // `bryv.3do`'s own geometry is about 0.02 units across, and its `RADIUS` is 0.066 — a view model is
-    // authored small and drawn close. Placing it at a fixed distance (the old 0.42) therefore put it
-    // off the edge or made it a speck. Scaling the placement by the model's radius frames any weapon:
-    // 1.2 radii forward, half a radius right and 0.6 down, which is a pistol held low and right the way
-    // `jkPlayer_DrawPov` composes the camera matrix with the POV thing's own offset.
-    //
-    // ponytail: retail's exact answer is that offset — `thing + 0x168`, which no decompiled writer sets
-    // (it is not in the dumped template parser), so this derives the placement instead of guessing it.
-    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-    for piece in &model.meshes {
-        for v in &piece.vertices {
-            for k in 0..3 {
-                lo[k] = lo[k].min(v[k]);
-                hi[k] = hi[k].max(v[k]);
-            }
-        }
-    }
-    let reach = ((hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2])).max(model.radius * 0.5);
-    view.base = view_override.unwrap_or(Vec3::new(reach * 0.5, -reach * 0.6, -reach * 1.6));
+    // A view model is authored small — `bryv.3do`'s geometry is 0.05 units across — so it has to be
+    // scaled to the *view*, not to the world. `jkPlayer_DrawPov` gets that from the POV thing's own
+    // scale and offset (`thing + 0x168`), and no decompiled writer sets either, so the numbers are
+    // derived here instead: at arm's length the weapon covers a fixed fraction of the view's
+    // half-height, which frames a pistol and a rifle alike and cannot disagree with the mesh on
+    // screen.
+    let (fov, aspect) = match projection {
+        Projection::Perspective(p) => (p.fov, p.aspect_ratio),
+        _ => (1.0, 1.0),
+    };
+    // The draw scale is the engine's own (`RADIUS` is the size the game gives this model), so the
+    // framing comes from the **distance**: a body of radius `r` at distance `d` subtends about `r / d`,
+    // and putting that at 0.8 of the view's half-height gives `d = r / (0.8 tan(fov/2))`. That is a
+    // number the data supplies, not one tuned against a screenshot — and it is why scaling by the
+    // mesh's own bounding box never worked: `bryv.3do` carries the arms as well, so its box is the arm
+    // span, not the pistol.
+    let (base, scale) = view_frame(fov, aspect, drawn_size);
+    view.base = view_override.unwrap_or(base);
+    view.scale = scale;
     let local = Transform {
         translation: view.base,
         // The model in the camera's own axes: a `.3do`'s barrel is +Y, and `model_mesh` already
+        scale: Vec3::splat(view.scale),
         // converts the file's frame to the renderer's, so the view frame needs no extra turn. The old
         // world placement composed one from ``from_rotation_arc``, which pointed the weapon sideways
         // and — at the placement the model's radius asks for — behind the eye altogether.
@@ -17869,6 +17879,64 @@ fn draw_viewmodel(
     );
 }
 
+/// Recentre a mesh on its own bounding box, and report the box's largest extent.
+///
+/// A `.3do`'s node transforms place its parts relative to the model's origin, which is not where the
+/// geometry sits: `bryv.3do`'s parts land away from the origin, so a view model drawn at a fixed offset
+/// appears at the edge of the view (or off it). Everything downstream — the placement and the scale —
+/// wants the geometry around the origin, so this does that once, at build time.
+fn recentre_mesh(meshes: &mut Assets<Mesh>, handle: &Handle<Mesh>) -> (f32, Vec3) {
+    let Some(mut mesh) = meshes.get_mut(handle) else { return (1.0, Vec3::ZERO) };
+    let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+    else {
+        return (1.0, Vec3::ZERO);
+    };
+    if positions.is_empty() {
+        return (1.0, Vec3::ZERO);
+    }
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for p in positions.iter() {
+        let p = Vec3::from(*p);
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    let centre = (lo + hi) * 0.5;
+    for p in positions.iter_mut() {
+        let shifted = Vec3::from(*p) - centre;
+        *p = shifted.to_array();
+    }
+    // A view model draws more than its pistol — `bryv.3do` carries the arms too — so the bounding box
+    // measures the arm span, and scaling by it draws the weapon as a speck. The 75th percentile of the
+    // vertex distances is the size of the model's *mass*, which is what wants to fill the frame.
+    let mut spread: Vec<f32> = positions.iter().map(|p| Vec3::from(*p).length()).collect();
+    spread.sort_by(|a, b| a.total_cmp(b));
+    let size = if spread.is_empty() {
+        1.0
+    } else {
+        let at = ((spread.len() as f32 * 0.75) as usize).min(spread.len() - 1);
+        2.0 * spread[at]
+    };
+    (size.max(1e-5), centre)
+}
+/// Where a first-person weapon sits in the view, and how big it is drawn.
+///
+/// The view model is authored small and its parts sit away from the model's origin, so the numbers come
+/// from the **drawn mesh**: recentred on its own box (see [`recentre_mesh`]), scaled so that box covers a
+/// set fraction of the view's half-height, and placed low and right of the centre. The fraction is the
+/// one thing here that is a choice rather than a decoded constant — retail composes the placement from
+/// the POV thing's own offset (`thing + 0x168`), and no decompiled writer sets it.
+///
+/// ponytail: the box includes everything the model draws (hands as well as the weapon), so a model with
+/// far-flung parts reads smaller than its pistol. The `.3do` node scale is where the real answer lives.
+fn view_frame(fov: f32, aspect: f32, drawn_size: f32) -> (Vec3, f32) {
+    let distance = 0.25f32;
+    let half_height = distance * (fov * 0.5).tan();
+    let half_width = half_height * aspect.max(0.05);
+    let size = drawn_size.max(1e-5);
+    let base = Vec3::new(half_width * 0.34, -half_height * 0.55, -distance);
+    (base, (half_height * 0.62) / size)
+}
 /// The player's sector light — what retail hands the POV pass as ambient
 /// (`rdCamera_SetAmbientLight` takes `sector->ambient + sector->extraLight`, clamped to 0..1).
 fn sector_light(sim: &Sim, level: &jkl::Level) -> f32 {
@@ -19659,6 +19727,8 @@ mod fall_tests {
 
     /// The fall death is the sector's flag, not the speed alone: a fast fall in an ordinary room is a
     /// landing (`FallHurt` handles it), a fast fall in a `FALLDEATH` sector is the end of the level.
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn fall_death_needs_a_fast_fall_and_a_flagging_sector() {
         let flagged = crate::collide::SECTOR_FALLDEATH;
@@ -21176,6 +21246,8 @@ mod draw_row_tests {
     use super::draw_row;
 
     /// The body's own draw and holster rows, and nothing for a mode that did not change.
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn a_mode_change_names_the_puppets_own_row() {
         assert_eq!(draw_row(0, 1), Some("drawgun"));
@@ -21193,6 +21265,8 @@ mod arg_value_tests {
 
     /// The trap this helper exists for: a flag must never be taken as the previous flag's value,
     /// while a negative number still is one.
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn a_following_flag_is_not_a_value() {
         let args: Vec<String> = ["--hud", "--level", "01narshadda", "--walk", "-45"]
@@ -21223,6 +21297,8 @@ mod scene_tint_tests {
 
     /// The wash a force-sight or infrared effect asks for, against the canvas rules: an off channel
     /// adds no light, a tint scales what is left, `add` biases, alpha passes through.
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn a_filter_removes_its_channel_and_a_tint_colours_the_rest() {
         // Force seeing: red and green off, blue kept — a blue wash.
@@ -21245,6 +21321,8 @@ mod actor_state_tests {
 
     /// A shooting actor plays its `fire` track; a puppet without one falls back to the stride
     /// rather than to nothing.
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn shooting_picks_the_fire_track_when_the_puppet_has_one() {
         let still = Vec3::ZERO;
@@ -21296,6 +21374,8 @@ mod registration_tests {
     ///
     /// The check is textual and therefore blunt: a system mentioned only in a *comment* would pass.
     /// That is the trade for catching the real case, and the failure message names the function.
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn every_system_is_registered() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
@@ -21364,6 +21444,8 @@ mod rules_tests {
         Rules::from_level(&level)
     }
 
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn the_walker_moves_at_the_engines_own_ratios() {
         let rules = shipped();
@@ -21385,6 +21467,8 @@ mod rules_tests {
         assert_eq!(rules.speed(1.0, 0.0, true, false, true), [rules.walk, 0.0]);
     }
 
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn a_dead_actor_plays_its_death_animation() {
         let actor = Actor {
@@ -21414,6 +21498,8 @@ mod rules_tests {
     /// A sprite's `.mat` paints the effect on black, and the engine never draws palette entry 0 —
     /// that key is the whole transparency of a spark. World textures must keep entry 0 opaque, so
     /// only the sprite path converts this way; this pins the rule and the difference.
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn sprite_materials_key_palette_entry_zero_and_world_ones_do_not() {
         let mut palette = tex::Palette(vec![[0, 0, 0]; 256]);
@@ -21436,6 +21522,8 @@ mod rules_tests {
     /// thing's own frame: the dominant axis says forward (walk/run/walkback) or sideways
     /// (strafe), and 0.5 u/s is where walk becomes run. A yaw of 0 faces `+x`, so these
     /// velocities are already in world terms.
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn locomotion_is_chosen_from_the_velocity_axis_and_speed() {
         assert_eq!(locomotion_state(Vec3::ZERO, 0.0), "stand");
@@ -21453,6 +21541,8 @@ mod rules_tests {
         assert_eq!(locomotion_state(Vec3::new(0.0, 0.0, 2.0), 0.0), "stand");
     }
 
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn the_jump_comes_from_the_template_chain() {
         let rules = shipped();
@@ -21580,6 +21670,8 @@ mod walker_tests {
     ///
     /// The allowance is `STEP_UP`, the engine's own floor-retry range (see its comment). The probe
     /// lifts the body only when its feet clear the ledge's top edge *and* there is floor up there.
+    /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
+    /// distance that puts it off the edge is how this went wrong twice.
     #[test]
     fn a_low_ledge_is_stepped_onto_and_a_tall_wall_is_not() {
         let level = step_room();
@@ -21629,6 +21721,33 @@ mod plan_view_tests {
             assert!(extent >= span, "span {span}: only {extent} of it is in frame");
             // Flatter than the 45 degrees that used to lean the walls over their neighbours.
             assert!(fov < std::f32::consts::FRAC_PI_4, "span {span}: fov {fov} is not a long lens");
+        }
+    }
+}
+
+#[cfg(test)]
+mod view_frame_tests {
+    use super::view_frame;
+
+    /// The weapon has to land **inside the frame and in front of the near plane**; a scale or a distance
+    /// that puts it off the edge is exactly how this went wrong twice.
+    #[test]
+    fn the_weapon_frames_inside_the_view() {
+        let (fov, aspect) = (1.02f32, 16.0 / 9.0);
+        for size in [0.005f32, 0.05, 0.5] {
+            let (base, scale) = view_frame(fov, aspect, size);
+            let distance = -base.z;
+            assert!(distance > 0.1, "the weapon sits {distance} from the eye, inside the near plane");
+            let half_height = distance * (fov * 0.5).tan();
+            let half_width = half_height * aspect;
+            assert!(base.x.abs() < half_width, "the weapon is off the right edge at {size}");
+            assert!(base.y.abs() < half_height, "the weapon is off the bottom edge at {size}");
+            // Visible rather than a speck or a wall: between a tenth of a radian and half the view.
+            let drawn = size * scale / distance;
+            assert!(
+                drawn > 0.1 && drawn < fov * 0.5,
+                "a {size} unit model subtends {drawn} rad at the placement"
+            );
         }
     }
 }
