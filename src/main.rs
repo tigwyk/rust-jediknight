@@ -8913,6 +8913,48 @@ fn main() {
             checked == 0 || walkable * 2 > checked,
             "only {walkable} of {checked} actors ship a locomotion key"
         );
+        // The local player is an actor too: `spawn_models` spawns his body hidden and `animate_actors`
+        // gives him the same stand/walk states an NPC gets, which is what makes the third-person chase
+        // camera show an animated Kyle rather than a rest pose. This asserts the wiring, not the pixels.
+        {
+            // The same rule `spawn_models` uses: the first `walkplayer` in the level is the local player.
+            let Some(player) = world
+                .level
+                .things
+                .iter()
+                .position(|thing| is_local_player(&thing.template))
+            else {
+                panic!("the level places no local player");
+            };
+            let puppet = world
+                .level
+                .things
+                .get(player)
+                .and_then(|thing| world.level.template_param(&thing.template, "puppet"))
+                .map(|name| name.to_ascii_lowercase());
+            let Some(puppet) = puppet.and_then(|name| world.puppets.get(&name)) else {
+                panic!("the local player has no puppet");
+            };
+            let has = |want: &str| {
+                puppet
+                    .states
+                    .iter()
+                    .any(|state| state.name.eq_ignore_ascii_case(want))
+            };
+            assert!(
+                has("stand") && has("walk"),
+                "the local player puppet has no stand/walk states"
+            );
+            println!(
+                "  the local player draws `{}` as an actor: stand and walk both ship keys",
+                puppet
+                    .states
+                    .iter()
+                    .find(|state| state.name.eq_ignore_ascii_case("stand"))
+                    .map(|state| state.key.as_str())
+                    .unwrap_or("?")
+            );
+        }
         println!("--- animate check passed ---");
         return;
     }
@@ -9535,7 +9577,6 @@ fn main() {
         ))
         .insert_resource(SaberBlade::default())
         .insert_resource(Viewmodel::default())
-        .insert_resource(PlayerBody::default())
         .insert_resource(PendingRestore::default())
         .insert_resource(SaveLoad::default())
         .insert_resource(SaveSlot::default())
@@ -14335,17 +14376,15 @@ fn spawn_models(
     let mut entities: HashMap<usize, Vec<Entity>> = HashMap::new();
 
     for (thing_index, thing) in world.level.things.iter().enumerate() {
-        // The local player's own body is **never** drawn. `walkplayer` names `model3d=ky.3do`
-        // (`03katarn.jkl`), and that is the thing the camera is attached to — the camera is the
-        // body's position plus an eye offset — so spawning it draws the player's model *around* the
-        // viewpoint. Models are drawn with `cull_mode: None` (gaps.md §4), so the camera does not
-        // look at the body, it looks at the inside of it, and those unlit polygons land over the
-        // level, the walls and every NPC in front of them. `BK_MODEL_SCALE=0.01` is the A/B that
-        // says the intruder is a model at all; this is the only one placed at the camera by
-        // definition. The engine's POV pass skips the local player for the same reason.
+        // The local player's body is an ordinary actor, but hidden: the camera is the body plus an eye
+        // offset, so in first person the model would be drawn around the viewpoint (models use
+        // `cull_mode: None`, so the camera looks at the inside of them). `draw_player_body` shows it only
+        // in third person, and spawning it as an actor is what gives Kyle the same stand/walk/fire states
+        // `animate_actors` plays for every NPC. Only the **first** `walkplayer` is the local player: a
+        // level may place several (the training arena does) and those are NPCs like any other.
+        let own = is_local_player(&thing.template) && own_body == 0;
         if is_local_player(&thing.template) {
             own_body += 1;
-            continue;
         }
         let Some(model_name) = world.template_model.get(&thing.template.to_ascii_lowercase()) else {
             continue;
@@ -14450,9 +14489,17 @@ fn spawn_models(
                 }
             };
 
-            let entity = commands
-                .spawn((Mesh3d(mesh), MeshMaterial3d(material), transform, LevelEntity))
-                .id();
+            let mut spawned_part = commands.spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                transform,
+                LevelEntity,
+            ));
+            if own {
+                // Marked so the third-person pass can show and hide it; hidden until it does.
+                spawned_part.insert((PlayerBodyMesh, Visibility::Hidden));
+            }
+            let entity = spawned_part.id();
             entities.entry(thing_index).or_default().push(entity);
             spawned += 1;
         }
@@ -14477,7 +14524,7 @@ fn spawn_models(
         }
     }
     println!(
-        "{} model instances from {} shared meshes, {triangles} triangles ({empty_meshes} empty, {unresolved} things with no model loaded), {} animated actors, {own_body} own body(ies) not drawn",
+        "{} model instances from {} shared meshes, {triangles} triangles ({empty_meshes} empty, {unresolved} things with no model loaded), {} animated actors, {own_body} own body(ies) drawn hidden",
         spawned,
         mesh_cache.len(),
         actors.len()
@@ -17420,9 +17467,17 @@ impl Drop for Span {
 ///
 /// ponytail: a sweep of `Sim::entities` every frame, writing only where the value differs; an
 /// epoch-guarded version is the upgrade if that map ever grows into the thousands.
-fn things_follow_geomode(sim: Option<Res<Sim>>, mut visibility: Query<&mut Visibility>) {
+fn things_follow_geomode(
+    sim: Option<Res<Sim>>,
+    mut visibility: Query<&mut Visibility>,
+    body_parts: Query<Entity, With<PlayerBodyMesh>>,
+) {
     let Some(sim) = sim else { return };
     let modes = sim.world.borrow().thing_geomode.clone();
+    // The local player body is not the geomode to control: `draw_player_body` owns it, hiding it in
+    // first person and when the boom parks the camera inside it. This system wrote `Inherited` over that
+    // every frame, which is what put an arm across the first-person view.
+    let body: std::collections::HashSet<Entity> = body_parts.iter().collect();
     for (thing, entities) in &sim.entities {
         let want = if modes.get(thing).copied().unwrap_or(1) == 0 {
             Visibility::Hidden
@@ -17430,6 +17485,9 @@ fn things_follow_geomode(sim: Option<Res<Sim>>, mut visibility: Query<&mut Visib
             Visibility::Inherited
         };
         for entity in entities {
+            if body.contains(entity) {
+                continue;
+            }
             if let Ok(mut current) = visibility.get_mut(*entity)
                 && *current != want
             {
@@ -18060,16 +18118,6 @@ fn view_frame(fov: f32, aspect: f32, drawn_size: f32) -> (Vec3, f32) {
 fn body_visible(camera_distance: f32) -> bool {
     camera_distance >= 0.6
 }
-/// The player's own body: a mesh the third-person camera can see. First person never shows it — the
-/// camera is the body's position plus an eye offset, so the model would be drawn *around* the view —
-/// and `spawn_level` skips it for exactly that reason. `Chase::on` is the only thing that turns this
-/// on, and it is the same condition the boom uses.
-#[derive(Resource, Default)]
-struct PlayerBody {
-    /// One entity per material: a model's faces name different materials, and a single-material
-    /// mesh is a few dozen vertices of a body rather than the body itself.
-    entities: Vec<Entity>,
-}
 
 /// Marks the entity [`draw_player_body`] puts the player's model on.
 #[derive(Component)]
@@ -18081,130 +18129,32 @@ struct PlayerBodyMesh;
 /// copies the thing's matrix; the body itself is drawn by `sithThing_Draw` for everything the camera
 /// does not own). The port has no per-thing draw list to filter, so the body is its own entity.
 fn draw_player_body(
-    mut commands: Commands,
     chase: Res<Chase>,
     sim: Option<Res<Sim>>,
-    world: Option<Res<World>>,
-    mut body: ResMut<PlayerBody>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut drawn: Query<&mut Transform, With<PlayerBodyMesh>>,
     cam: Query<&GlobalTransform, With<WorldCamera>>,
+    mut parts: Query<&mut Visibility, With<PlayerBodyMesh>>,
 ) {
-    let (Some(sim), Some(world)) = (sim, world) else { return };
-    if !chase.on {
-        for entity in body.entities.drain(..) {
-            commands.entity(entity).despawn();
-        }
-        return;
-    }
-    let (template, pos, orientation) = {
+    // The body is spawned by `spawn_models` as an ordinary actor, so `animate_actors` gives it the same
+    // stand/walk/fire states every NPC gets; this system only decides whether it is drawn. First person
+    // never shows it — the camera is inside it — and third person hides it too when the boom's pull-in
+    // has parked the camera closer than the body is big, where `cull_mode: None` shows its inside.
+    let Some(sim) = sim else { return };
+    let player = sim.world.borrow().player_thing();
+    let pos = {
         let rt = sim.world.borrow();
-        let player = rt.player_thing();
         let Some(thing) = rt.things.get(player) else { return };
-        (
-            rt.templates.get(player).cloned().unwrap_or_default(),
-            thing.pos,
-            // The basis every other thing is drawn with: `thing_quat` is `rdMatrix_Build34(pyr)`.
-            // `Quat::from_rotation_z(-yaw)` is only the yaw, in the wrong frame.
-            thing_quat(thing.pitch, thing.yaw, thing.roll),
-        )
+        thing.pos
     };
-    if body.entities.is_empty() {
-    if body.entities.is_empty() {
-        let Some(model_name) = world.template_model.get(&template.to_ascii_lowercase()) else {
-            return;
-        };
-        let Some(model) = world.models.get(model_name) else { return };
-        // One mesh per material, exactly as `spawn_level` draws every other thing: a model's faces
-        // name different materials, and a single-material mesh is a few dozen vertices of a body
-        // (59 of `ky.3do`'s, which is why the first version of this drew nothing recognisable).
-        let parts: Vec<(i32, Mesh)> = model
-            .materials
+    let shown = chase.on
+        && cam
             .iter()
-            .enumerate()
-            .map(|(index, _)| (index as i32, model_mesh(model, index as i32, (1.0, 1.0))))
-            .collect();
-        // The parts are placed by the model's own node transforms, which sit them away from its
-        // origin — the same effect that made the view weapon appear at the edge of the view. Recentre
-        // the whole body on its combined box before drawing it, so the entity's transform means what
-        // it says.
-        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-        for (_, mesh) in &parts {
-            if let Some(bevy::mesh::VertexAttributeValues::Float32x3(v)) =
-                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-            {
-                for p in v {
-                    for k in 0..3 {
-                        lo[k] = lo[k].min(p[k]);
-                        hi[k] = hi[k].max(p[k]);
-                    }
-                }
-            }
+            .next()
+            .is_some_and(|camera| body_visible((camera.translation() - Vec3::from(pos)).length()));
+    let wanted = if shown { Visibility::Visible } else { Visibility::Hidden };
+    for mut visibility in &mut parts {
+        if *visibility != wanted {
+            *visibility = wanted;
         }
-        let centre = [
-            (lo[0] + hi[0]) * 0.5,
-            (lo[1] + hi[1]) * 0.5,
-            (lo[2] + hi[2]) * 0.5,
-        ];
-        for (index, mesh) in parts {
-            let mut mesh = mesh;
-            if let Some(bevy::mesh::VertexAttributeValues::Float32x3(v)) =
-                mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
-            {
-                for p in v {
-                    for k in 0..3 {
-                        p[k] -= centre[k];
-                    }
-                }
-            }
-            let handle = meshes.add(mesh);
-            let texture = model
-                .materials
-                .get(index as usize)
-                .and_then(|mat| world.model_images.get(mat))
-                .map(|image| images.add(image.clone()));
-            let material = materials.add(StandardMaterial {
-                base_color_texture: texture,
-                unlit: true,
-                cull_mode: None,
-                ..default()
-            });
-            let entity = commands
-                .spawn((
-                    Mesh3d(handle),
-                    MeshMaterial3d(material),
-                    Transform::default(),
-                    PlayerBodyMesh,
-                    bevy::camera::visibility::NoFrustumCulling,
-                ))
-                .id();
-            body.entities.push(entity);
-        }
-        println!(
-            "body: drawing `{model_name}` for third person ({} part(s)), geometry x[{:.2},{:.2}] y[{:.2},{:.2}] z[{:.2},{:.2}], centred on {:?}",
-            body.entities.len(),
-            lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], centre
-        );
-    }
-    }
-    let hidden = cam
-        .iter()
-        .next()
-        .map(|camera| !body_visible((camera.translation() - Vec3::from(pos)).length()))
-        .unwrap_or(false);
-    for (n, entity) in body.entities.iter().enumerate() {
-        let _ = n;
-        if let Ok(mut transform) = drawn.get_mut(*entity) {
-            *transform = Transform::from_translation(Vec3::from(pos))
-                .with_rotation(orientation);
-        }
-        commands.entity(*entity).insert(if hidden {
-            Visibility::Hidden
-        } else {
-            Visibility::Visible
-        });
     }
 }
 /// Every solid thing in the level, with the vertical span of its own model.
@@ -18607,13 +18557,24 @@ fn projectile_hits(
 
 /// Show a thing's model while it is in the world, hide it once it is gone (taken,
 /// destroyed, or counting down to respawn).
-fn show_taken(sim: Option<Res<Sim>>, mut shown: Query<&mut Visibility>) {
+fn show_taken(
+    sim: Option<Res<Sim>>,
+    mut shown: Query<&mut Visibility>,
+    body_parts: Query<Entity, With<PlayerBodyMesh>>,
+    
+) {
     let Some(sim) = sim else { return };
     let rt = sim.world.borrow();
+    // The local player body is drawn by `draw_player_body` alone: it is hidden in first person and when
+    // the boom parks the camera inside it, and this sweep used to write `Visible` over both.
+    let body: std::collections::HashSet<Entity> = body_parts.iter().collect();
     for (index, entities) in &sim.entities {
         let alive = rt.things.get(*index).is_none_or(|t| !t.destroyed);
         let want = if alive { Visibility::Visible } else { Visibility::Hidden };
         for entity in entities {
+            if body.contains(entity) {
+                continue;
+            }
             if let Ok(mut visible) = shown.get_mut(*entity)
                 && *visible != want
             {

@@ -937,3 +937,12 @@ Two honest observations from the capture. Kyle is **small for 1.5 units away** �
 - **`thing + 0x21c` is not a scale.** `jkPlayer_DrawPov` divides the sway by it, and `sithPuppet_UpdatePuppet` uses it as the reference speed in `(0x21c + node offset) - 0xbc`. The port`s `waggle` is its counterpart, so there was never a scale to decode.
 
 That closes the four items: the view weapon (placement, scale, texture, sector light), the third-person body, model-span collision with the `--walk all` numbers restored, and the near-plane invariant at tight spawns. 125 tests, 59 gates (8 skipped headless), `--walk all` 30/34 contained / 0 void.
+
+**Round 199 (requested: "add the player"):** the local player is now an **actor**.
+
+- **Kyle is spawned by `spawn_models` like every other thing** — same model, same per-material parts, same `ky.pup` puppet — and handed to `Actors`, so `animate_actors` drives him with the same `stand` / `walk` / `run` / `fire` / `death` states the NPCs get. The gate says which keys: `the local player draws kystand0.key as an actor: stand and walk both ship keys`.
+- **His parts are hidden at spawn** and marked `PlayerBodyMesh`; `draw_player_body` now only decides whether they are drawn (first person: no; third person: yes unless the boom's pull-in has parked the camera inside him). That replaced the ~70-line private mesh builder from the previous rounds — one spawn path for bodies instead of two.
+- **Two systems used to write `Visible` over that decision every frame**: `things_follow_geomode` (which sets `Inherited` for every live thing) and `show_taken` (which sets `Visible` for every live thing). Both now skip the player's marked parts, which is what had put a forearm across the first-person view; the first-person frame is clean again and third person still shows him ([docs/third-person.png](third-person.png)).
+- **Only the first `walkplayer` is the local player.** The training arena places sixteen, and the other fifteen are NPCs that must still be drawn — the flag is `is_local_player(&thing.template) && own_body == 0`.
+
+125 tests, 59 gates (8 skipped headless), 0 failed.
