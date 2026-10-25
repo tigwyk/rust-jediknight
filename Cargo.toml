@@ -7,9 +7,6 @@ edition = "2024"
 # `wav` enables the WAV decoder: Bevy's default `audio` feature only ships Vorbis,
 # and every one of the game's 644 sound files is 22 kHz 16-bit PCM WAV.
 bevy = { version = "0.20", features = ["wav"] }
-# Already in the tree through `bevy_image`; named directly so `--texture` can write
-# a PNG of a decoded material without a hand-rolled encoder.
-image = { version = "0.25", default-features = false, features = ["png"] }
 
 [profile.dev]
 opt-level = 1

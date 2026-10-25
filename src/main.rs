@@ -19,7 +19,7 @@ mod menus;
 mod nav;
 mod key;
 mod level_mat;
-mod png;
+mod ppm;
 mod pup;
 mod rows;
 mod runtime;
@@ -1938,7 +1938,7 @@ fn main() {
         let last = decoded.hashes.len().saturating_sub(1);
         let ppm = std::env::temp_dir().join(format!("bk-smk-frame{last:03}.ppm"));
         if let Ok(bytes) = std::fs::read(&ppm)
-            && let Some((width, height, pixels)) = png::read_ppm(&bytes)
+            && let Some((width, height, pixels)) = ppm::read_ppm(&bytes)
         {
             // Grey by default: the 8-bit indices with no palette are still an image.
             let mut rgb = pixels.clone();
@@ -1970,7 +1970,22 @@ fn main() {
             } else {
                 "bk-cutscene-frame.png"
             });
-            png::write_rgb(&out, width, height, &rgb).expect("write the frame");
+            let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
+            for pixel in rgb.chunks_exact(3) {
+                rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+            }
+            let frame = Image::new(
+                Extent3d { width, height, depth_or_array_layers: 1 },
+                TextureDimension::D2,
+                rgba,
+                TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::RENDER_WORLD,
+            );
+            frame
+                .try_into_dynamic()
+                .expect("convert the frame")
+                .save(&out)
+                .expect("write the frame");
             println!(
                 "  frame {last} written to {} ({} distinct palette entries used)",
                 out.display(),
@@ -2276,17 +2291,7 @@ fn main() {
                             continue;
                         }
                         let Some(script) = world.cogs.get(script_name) else { continue };
-                        let label = match name.strip_prefix('#').and_then(|n| n.parse::<usize>().ok())
-                        {
-                            Some(id) => match script.label_for_message_id(id) {
-                                Some(label) => label,
-                                None => continue,
-                            },
-                            None => name.clone(),
-                        };
-                        if script.label(&label).is_none() {
-                            continue;
-                        }
+                        let Some(label) = script.label_for_name(&name) else { continue };
                         vm.sender = sender.map_or(0, |s| s as i64);
                         let _ = vm.run_label(script, &label);
                         delivered += 1;
@@ -3306,34 +3311,22 @@ fn main() {
         // run is a walk through an empty room: a cog `sector` symbol with a value is what
         // `sithCog_LinkCog` turns into a link, and `Runtime::handle` does not build them.
         {
-            let mut links: Vec<(usize, i32, usize)> = Vec::new();
-            for (index, inst) in world.level.cogs.iter().enumerate() {
-                let Some(script) = world.cogs.get(&inst.script) else { continue };
-                let mut next = inst.values.iter();
-                for symbol in &script.symbols {
-                    if symbol.local || symbol.kind == cog::SymKind::Message {
-                        continue;
-                    }
-                    let Some(raw) = next.next() else { break };
-                    if symbol.kind != cog::SymKind::Sector {
-                        continue;
-                    }
-                    if let Ok(sector) = raw.trim().parse::<usize>() {
-                        links.push((index, symbol.linkid.unwrap_or(0) as i32, sector));
-                    }
-                }
-            }
+            let mut rt = sim_world.borrow_mut();
+            rt.wire_links(&world.level.cogs, &world.cogs);
             // A link whose sector is outside the level cannot ever fire: that is what a misaligned
             // value list looks like, and it is worth saying out loud per level.
-            let bad = links.iter().filter(|(_, _, sector)| *sector as usize >= world.level.sectors.len()).count();
+            let bad = rt
+                .sector_links
+                .iter()
+                .filter(|(_, _, sector)| *sector >= world.level.sectors.len())
+                .count();
             if bad > 0 || std::env::var_os("BK_SOAK_TRACE").is_some() {
                 println!(
                     "soak: {} sector link(s), {bad} pointing outside the level's {} sector(s)",
-                    links.len(),
+                    rt.sector_links.len(),
                     world.level.sectors.len()
                 );
             }
-            sim_world.borrow_mut().sector_links = links;
         }
         // Steer to a sector a script is actually watching, by the adjoin graph's own route — the same
         // search the AI uses. Walking at the *nearest* linked centre reached sectors none of level
@@ -3455,16 +3448,7 @@ fn main() {
                         continue;
                     }
                     let Some(script) = world.cogs.get(script_name) else { continue };
-                    let label = match name.strip_prefix('#').and_then(|n| n.parse::<usize>().ok()) {
-                        Some(id) => match script.label_for_message_id(id) {
-                            Some(label) => label,
-                            None => continue,
-                        },
-                        None => name.clone(),
-                    };
-                    if script.label(&label).is_none() {
-                        continue;
-                    }
+                    let Some(label) = script.label_for_name(&name) else { continue };
                     vm.sender = sender.map_or(0, |s| s as i64);
                     sim_world.borrow_mut().last_params = params.to_vec();
                     if vm.run_label(script, &label).is_ok() {
@@ -6298,41 +6282,7 @@ fn main() {
         // label can never hear anything, which is worth reporting separately from the link count.
         let sim_world = runtime::Runtime::handle(&world.level);
         let mut rt = sim_world.borrow_mut();
-        let mut links: Vec<(usize, i32, usize)> = Vec::new();
-        for (index, inst) in world.level.cogs.iter().enumerate() {
-            let Some(script) = world.cogs.get(&inst.script) else { continue };
-            let mut next = inst.values.iter();
-            for symbol in &script.symbols {
-                if symbol.local || symbol.kind == cog::SymKind::Message {
-                    continue;
-                }
-                let Some(raw) = next.next() else { break };
-                if symbol.kind == cog::SymKind::Sector
-                    && let Ok(sector) = raw.trim().parse::<usize>()
-                {
-                    links.push((index, symbol.linkid.unwrap_or(0) as i32, sector));
-                }
-            }
-        }
-        // The same walk for `surface` and `thing` symbols: those are the `used`/`touched` links a
-        // door or a switch carries, and counting them says how much of the level's interaction is
-        // wired even before it is delivered.
-        let (mut surfaces, mut things) = (0usize, 0usize);
-        for inst in &world.level.cogs {
-            let Some(script) = world.cogs.get(&inst.script) else { continue };
-            let mut next = inst.values.iter();
-            for symbol in &script.symbols {
-                if symbol.local || symbol.kind == cog::SymKind::Message {
-                    continue;
-                }
-                let Some(raw) = next.next() else { break };
-                match symbol.kind {
-                    cog::SymKind::Surface if raw.trim().parse::<usize>().is_ok() => surfaces += 1,
-                    cog::SymKind::Thing if raw.trim().parse::<i64>().is_ok() => things += 1,
-                    _ => {}
-                }
-            }
-        }
+        rt.wire_links(&world.level.cogs, &world.cogs);
         // Which of those links a script can actually hear. The label is `activate`, not `used`: no shipped
         // cog declares `used` (0 of 540), 82 declare `activate`, and that is what the runtime sends when
         // the player uses a linked thing. `touched` is the pickup's label and does exist.
@@ -6346,7 +6296,12 @@ fn main() {
                 touched += 1;
             }
         }
-        println!("triggers: {} sector link(s), {surfaces} surface link(s), {things} thing link(s) on this level", links.len());
+        println!(
+            "triggers: {} sector link(s), {} surface link(s), {} thing link(s) on this level",
+            rt.sector_links.len(),
+            rt.surface_links.len(),
+            rt.thing_links.len()
+        );
         println!("triggers: {used} script(s) with an `activate` label, {touched} with `touched`");
         // Every message label the level's scripts declare, with how many scripts carry it: this is
         // the set of events the level actually waits on, which is what the event layer has to feed.
@@ -6367,45 +6322,9 @@ fn main() {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
-        rt.sector_links = links.clone();
-        // The same walk for thing links, which is what `arrived`/`damaged`/`killed` travel on.
-        let mut thing_links: Vec<(usize, i32, usize)> = Vec::new();
-        for (index, inst) in world.level.cogs.iter().enumerate() {
-            let Some(script) = world.cogs.get(&inst.script) else { continue };
-            let mut next = inst.values.iter();
-            for symbol in &script.symbols {
-                if symbol.local || symbol.kind == cog::SymKind::Message {
-                    continue;
-                }
-                let Some(raw) = next.next() else { break };
-                if symbol.kind == cog::SymKind::Thing
-                    && let Ok(thing) = raw.trim().parse::<i64>()
-                    && thing >= 0
-                {
-                    thing_links.push((index, symbol.linkid.unwrap_or(0) as i32, thing as usize));
-                }
-            }
-        }
-        println!("triggers: {} thing link(s) on this level", thing_links.len());
-        rt.thing_links = thing_links;
-        let mut surface_links: Vec<(usize, i32, usize)> = Vec::new();
-        for (index, inst) in world.level.cogs.iter().enumerate() {
-            let Some(script) = world.cogs.get(&inst.script) else { continue };
-            let mut next = inst.values.iter();
-            for symbol in &script.symbols {
-                if symbol.local || symbol.kind == cog::SymKind::Message {
-                    continue;
-                }
-                let Some(raw) = next.next() else { break };
-                if symbol.kind == cog::SymKind::Surface
-                    && let Ok(surface) = raw.trim().parse::<usize>()
-                {
-                    surface_links.push((index, symbol.linkid.unwrap_or(0) as i32, surface));
-                }
-            }
-        }
-        println!("triggers: {} surface link(s) on this level", surface_links.len());
-        rt.surface_links = surface_links;
+        println!("triggers: {} thing link(s) on this level", rt.thing_links.len());
+        println!("triggers: {} surface link(s) on this level", rt.surface_links.len());
+        let links = rt.sector_links.clone();
         let mut heard = 0usize;
         for (instance, link, sector) in &links {
             let (script_name, present) = {
@@ -7420,7 +7339,8 @@ fn main() {
             "pivot: RotatePivot(0, 2 s) turns the body about the origin: after 1 s {half:?} at {half_yaw:.0} deg, after 2 s {end:?}; the attached thing rides at {riding:?} ({riding_yaw:.0} deg), and a finished spin stops ({done}, {still:?})"
         );
         assert!(
-            (half[0] - 0.7071).abs() < 0.01 && (half[1] - 0.7071).abs() < 0.01,
+            (half[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01
+                && (half[1] - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.01,
             "half of a 90 deg turn about the origin is not at 45 deg on the orbit: {half:?}"
         );
         assert!((half_yaw - 45.0).abs() < 0.5, "the body did not turn with its orbit: {half_yaw}");
@@ -7429,7 +7349,8 @@ fn main() {
             "a full 90 deg turn did not land on +Y: {end:?}"
         );
         assert!(
-            (riding[0] - 1.4142).abs() < 0.02 && (riding[1] - 1.4142).abs() < 0.02,
+            (riding[0] - std::f32::consts::SQRT_2).abs() < 0.02
+                && (riding[1] - std::f32::consts::SQRT_2).abs() < 0.02,
             "the attached thing did not orbit with its parent: {riding:?}"
         );
         assert!(done, "the spin did not finish");
@@ -9642,7 +9563,7 @@ fn main() {
                 auto_shot,
                 trace_state,
                 swap_level,
-                (ui_input, ui_mouse, apply_pending, refresh_overlay, cutscene::play_cutscene, quick_save)
+                (ui_input, ui_mouse, apply_pending, refresh_overlay, cutscene::play_cutscene, cutscene_fills_screen, quick_save)
             ),
         )
         .insert_resource(TriggerCount::default())
@@ -10870,6 +10791,57 @@ fn setup_overlay(
     });
 }
 
+/// The overlay-quad scale that puts a cutscene's picture on the window's edges.
+///
+/// The film is 640x300 on the HUD's 640x480 canvas, so at the HUD's own 4:3 the picture covers the
+/// width and 62.5% of the height; on a 16:9 window it covers 75% of the width too. Scaling the quad
+/// by the factor below moves the picture's edges out to the window's, and the canvas' black padding
+/// (and any pillarbox) falls outside the view. Width and height both have to fit, so the smaller
+/// factor wins; the height cap only bites on a window wider than the 640:300 film itself.
+fn film_fill_scale(width: f32, height: f32) -> f32 {
+    if width <= 0.0 || height <= 0.0 {
+        return 1.0;
+    }
+    let canvas_h = ui::CANVAS[1] as f32;
+    let aspect = width / height;
+    (aspect * canvas_h / cutscene::FRAME_WIDTH as f32)
+        .min(canvas_h / cutscene::FRAME_HEIGHT as f32)
+}
+
+/// Fill the window with a cutscene: the engine cut films on the display, not inside the HUD's box.
+fn cutscene_fills_screen(
+    playing: Option<Res<cutscene::Cutscene>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut cameras: Query<&mut Camera, (With<OverlayQuad>, Without<ScreenTintCamera>)>,
+    mut quads: Query<&mut Transform, (With<OverlayQuad>, Without<Camera3d>)>,
+    mut black: Local<bool>,
+) {
+    let Some(window) = windows.iter().next() else { return };
+    let film = playing.is_some();
+    // The HUD camera clears to nothing so the world shows behind the status bar; a film needs the whole
+    // window black, including the pillarbox of a window wider than the 640:300 picture.
+    if *black != film {
+        *black = film;
+        for mut camera in &mut cameras {
+            camera.clear_color = if film {
+                ClearColorConfig::Custom(Color::BLACK)
+            } else {
+                ClearColorConfig::None
+            };
+        }
+    }
+    let scale = if film {
+        film_fill_scale(window.width(), window.height())
+    } else {
+        1.0
+    };
+    for mut transform in &mut quads {
+        if transform.scale.x != scale {
+            transform.scale = Vec3::splat(scale);
+        }
+    }
+}
+
 /// The entity carrying the screen-effect wash, and its material handle.
 #[derive(Component)]
 struct ScreenTintQuad;
@@ -12063,22 +12035,13 @@ fn run_level(
                 let script = &scripts[script_name];
                 // `#N` is a numeric message: the engine hands the id to the receiver and its
                 // `message:` list decides the label, so both sides agree on `SITH_MESSAGE_*` values.
-                let name = match name.strip_prefix('#').and_then(|n| n.parse::<usize>().ok()) {
-                    Some(id) => match script.label_for_message_id(id) {
-                        Some(label) => label,
-                        None => continue,
-                    },
-                    None => name.clone(),
-                };
-                if script.label(&name).is_none() {
-                    continue;
-                }
+                let Some(label) = script.label_for_name(&name) else { continue };
                 vm.sender = sender.unwrap_or(0) as i64;
                 vm.sender_ref = sender.unwrap_or(0) as i64;
                 // `SendMessageEx`'s two parameters: what this handler's `GetParam` reads.
                 world.borrow_mut().last_params = params.to_vec();
                 let before_sounds = world.borrow().sounds.len();
-                match vm.run_label(script, &name) {
+                match vm.run_label(script, &label) {
                     Ok(_) => delivered_messages += 1,
                     Err(e) if e == cog::WAITING => msg_waiting += 1,
                     Err(e) => errors.push(format!("{script_name} {name}: {e}")),
@@ -15920,16 +15883,7 @@ fn deliver_cog_messages(
                 let Some(script) = world.cogs.get(script_name) else { continue };
                 // `#N` is a message number: the engine hands the id to the receiver, whose own
                 // `message:` list decides the label, so both sides agree on `SITH_MESSAGE_*` values.
-                let label = match name.strip_prefix('#').and_then(|n| n.parse::<usize>().ok()) {
-                    Some(id) => match script.label_for_message_id(id) {
-                        Some(label) => label,
-                        None => continue,
-                    },
-                    None => name.clone(),
-                };
-                if script.label(&label).is_none() {
-                    continue;
-                }
+                let Some(label) = script.label_for_name(&name) else { continue };
                 vm.sender = sender.map_or(0, |s| s as i64);
                 // **Source as well as sender.** `GetSourceRef()` is what a message handler reads to
                 // find the thing that caused it — `cog_weap_bryar.cog`'s `fire:` does
@@ -17188,6 +17142,7 @@ fn live_check(
     actors: Option<Res<Actors>>,
     pulses: Option<Res<PulseCount>>,
     player: Option<Res<Player>>,
+    bodies: Query<&Visibility, With<PlayerBodyMesh>>,
 ) {
     if !state.enabled || *said {
         return;
@@ -17259,14 +17214,23 @@ fn live_check(
         return;
     }
     say(player.is_some(), format!("player thing {player:?}"));
-    // …and its own body is not drawn. The camera follows that thing, so a spawned body wraps the
-    // camera in the inside of the player's own model (`is_local_player`); this is the invariant that
-    // fails if it comes back.
-    let body = player
+    // …and none of its body is visible. The body is spawned as an actor (so it animates like the
+    // NPCs) but `draw_player_body` hides it while the camera owns the eye; a visible part wraps the
+    // camera in the inside of the player's own model, which is the "black screen at spawn" report.
+    // Third person is the one mode that draws it, and this check runs first person.
+    let visible = player
         .and_then(|i| sim.entities.get(&i))
-        .map(Vec::len)
+        .map(|entities| {
+            entities
+                .iter()
+                .filter(|entity| bodies.get(**entity).is_ok_and(|v| *v != Visibility::Hidden))
+                .count()
+        })
         .unwrap_or(0);
-    say(body == 0, format!("the player's own body is drawn by {body} entity(ies) (want 0)"));
+    say(
+        visible == 0,
+        format!("the player's own body is drawn by {visible} visible entity(ies) (want 0)"),
+    );
     let sectors = collisions.as_ref().map(|c| c.0.sectors.len()).unwrap_or(0);
     say(sectors > 0, format!("{sectors} collision sector(s)"));
     // The switched sector/adjoin words belong to this runtime, not to a copy a check built. The
@@ -18110,15 +18074,6 @@ fn view_frame(fov: f32, aspect: f32, drawn_size: f32) -> (Vec3, f32) {
     let base = Vec3::new(half_width * 0.34, -half_height * 0.55, -distance);
     (base, (half_height * 0.62) / size)
 }
-/// Whether the player's body is drawn at a given camera distance.
-///
-/// A camera inside the body sees the inside of its polygons — models are drawn with `cull_mode: None`
-/// — and the boom's pull-in parks it exactly there in a tight room. Retail never meets the problem
-/// because the local body is not drawn at all; the port's rule is the boom's own length.
-fn body_visible(camera_distance: f32) -> bool {
-    camera_distance >= 0.6
-}
-
 /// Marks the entity [`draw_player_body`] puts the player's model on.
 #[derive(Component)]
 struct PlayerBodyMesh;
@@ -18145,11 +18100,13 @@ fn draw_player_body(
         let Some(thing) = rt.things.get(player) else { return };
         thing.pos
     };
+    // Under 0.6 the boom has pulled the camera inside him, where `cull_mode: None` shows his insides;
+    // retail never meets this because it draws no local body at all.
     let shown = chase.on
         && cam
             .iter()
             .next()
-            .is_some_and(|camera| body_visible((camera.translation() - Vec3::from(pos)).length()));
+            .is_some_and(|camera| (camera.translation() - Vec3::from(pos)).length() >= 0.6);
     let wanted = if shown { Visibility::Visible } else { Visibility::Hidden };
     for mut visibility in &mut parts {
         if *visibility != wanted {
@@ -19366,50 +19323,34 @@ fn setup(
     // delivers (§16.10). The level's own soundtrack script uses one to start the music fade.
     {
         // Instance values are positional over the script's non-local, non-message symbols, which is
-        // the same walk `Cog::bind` does; a `sector` symbol's value is the sector index.
-        let mut links: Vec<(usize, i32, usize)> = Vec::new();
-        for (index, inst) in level.cogs.iter().enumerate() {
-            let Some(script) = world.cogs.get(&inst.script) else { continue };
-            let mut next = inst.values.iter();
-            for symbol in &script.symbols {
-                if symbol.local || symbol.kind == cog::SymKind::Message {
-                    continue;
-                }
-                let Some(raw) = next.next() else { break };
-                if symbol.kind != cog::SymKind::Sector {
-                    continue;
-                }
-                if let Ok(sector) = raw.trim().parse::<usize>() {
-                    links.push((index, symbol.linkid.unwrap_or(0) as i32, sector));
-                }
+        // the same walk `Cog::bind` does; one pass fills the sector, thing and surface tables.
+        {
+            let mut rt = sim.world.borrow_mut();
+            rt.wire_links(&level.cogs, &world.cogs);
+            if !rt.sector_links.is_empty() {
+                println!(
+                    "triggers: {} sector link(s) from the level's scripts",
+                    rt.sector_links.len()
+                );
             }
-        }
-        if !links.is_empty() {
-            println!("triggers: {} sector link(s) from the level's scripts", links.len());
-            sim.world.borrow_mut().sector_links = links;
-        }
-        // Thing links: the `damaged`/`killed`/`touched` half. A `thing` symbol's value is the thing
-        // index, so the same walk gives the table `Runtime::damage` queues messages against.
-        let mut thing_links: Vec<(usize, i32, usize)> = Vec::new();
-        for (index, inst) in level.cogs.iter().enumerate() {
-            let Some(script) = world.cogs.get(&inst.script) else { continue };
-            let mut next = inst.values.iter();
-            for symbol in &script.symbols {
-                if symbol.local || symbol.kind == cog::SymKind::Message {
-                    continue;
-                }
-                let Some(raw) = next.next() else { break };
-                if symbol.kind == cog::SymKind::Thing
-                    && let Ok(thing) = raw.trim().parse::<i64>()
-                    && thing >= 0
-                {
-                    thing_links.push((index, symbol.linkid.unwrap_or(0) as i32, thing as usize));
-                }
+            if !rt.thing_links.is_empty() {
+                println!(
+                    "triggers: {} thing link(s) from the level's scripts",
+                    rt.thing_links.len()
+                );
             }
-        }
-        if !thing_links.is_empty() {
-            println!("triggers: {} thing link(s) from the level's scripts", thing_links.len());
-            sim.world.borrow_mut().thing_links = thing_links;
+            if !rt.surface_links.is_empty() {
+                println!(
+                    "triggers: {} surface link(s) from the level's scripts",
+                    rt.surface_links.len()
+                );
+            }
+            println!(
+                "links: {} thing, {} surface, {} sector link(s) wired from the level's scripts",
+                rt.thing_links.len(),
+                rt.surface_links.len(),
+                rt.sector_links.len()
+            );
         }
         // Portals for the actors' steering: a surface two sectors share is a doorway, and its centre
         // is where an actor heads when the straight line to its target is walled off.
@@ -19486,27 +19427,6 @@ fn setup(
                 println!("pathing: {} portal(s) for actor steering", portals.len());
                 sim.world.borrow_mut().portals = portals;
             }
-        }
-        // Surface links: what the player's use action messages.
-        let mut surface_links: Vec<(usize, i32, usize)> = Vec::new();
-        for (index, inst) in level.cogs.iter().enumerate() {
-            let Some(script) = world.cogs.get(&inst.script) else { continue };
-            let mut next = inst.values.iter();
-            for symbol in &script.symbols {
-                if symbol.local || symbol.kind == cog::SymKind::Message {
-                    continue;
-                }
-                let Some(raw) = next.next() else { break };
-                if symbol.kind == cog::SymKind::Surface
-                    && let Ok(surface) = raw.trim().parse::<usize>()
-                {
-                    surface_links.push((index, symbol.linkid.unwrap_or(0) as i32, surface));
-                }
-            }
-        }
-        if !surface_links.is_empty() {
-            println!("triggers: {} surface link(s) from the level's scripts", surface_links.len());
-            sim.world.borrow_mut().surface_links = surface_links;
         }
     }
     commands.insert_resource(sim);
@@ -19898,20 +19818,6 @@ fn setup(
     // on the first frame, when the resource exists.
     // The player's motion comes from the level's own `walkplayer` template, which is why
     // the numbers differ per level: `-walk` sweeps use the same rules.
-    // The link layer: which script hears a thing's `used`, a surface's `activate`, a sector's
-    // `entered`. It is what makes a level's own doors and switches work, and it is built from the
-    // level's `cogs` section plus each script's `symbols`.
-    {
-        let handle = runtime::Runtime::handle(&world.level);
-        let mut rt = handle.borrow_mut();
-        rt.wire_links(&world.level.cogs, &world.cogs);
-        println!(
-            "links: {} thing, {} surface, {} sector link(s) wired from the level's scripts",
-            rt.thing_links.len(),
-            rt.surface_links.len(),
-            rt.sector_links.len()
-        );
-    }
     let rules = Rules::from_level(level);
     println!("rules: {}", rules.describe());
     commands.insert_resource(Player {
@@ -22031,5 +21937,25 @@ mod view_frame_tests {
                 "a {size} unit model subtends {drawn} rad at the placement"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod film_fill_tests {
+    use super::film_fill_scale;
+
+    /// The film has to land on the window's edges: the same picture, bigger, with the HUD's own
+    /// padding outside the view. 16:9 is the default window; 4:3 is the HUD's un-scaled case; an
+    /// ultra-wide window is where the height cap takes over and the film is pillarboxed.
+    #[test]
+    fn a_film_fills_the_window_and_keeps_its_2_13_to_1_shape() {
+        // 16:9: 1.777 * 480/640 = 4/3. The picture spans the width and 83% of the height.
+        assert!((film_fill_scale(1280.0, 720.0) - 4.0 / 3.0).abs() < 1e-6);
+        // The HUD's own 4:3: the picture already spans the canvas, so no scale.
+        assert!((film_fill_scale(640.0, 480.0) - 1.0).abs() < 1e-6);
+        // Wider than the film itself: the height limit wins (480/300 = 1.6), sides pillarboxed.
+        assert!((film_fill_scale(2560.0, 720.0) - 1.6).abs() < 1e-6);
+        // A minimised or headless window is not a scale of zero.
+        assert_eq!(film_fill_scale(0.0, 0.0), 1.0);
     }
 }

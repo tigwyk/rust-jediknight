@@ -2137,7 +2137,7 @@ Measured from the recovered source and the shipped data, not guessed:
 | body height | `physicsParams.height`, else `renderData.model3->insertOffset.z`; `ky.3do` = **0.120114** | `sithPhysics_GetThingHeight` | none: the body is a sphere |
 | floor probe | a **ray** (`radius 0.0`) straight down, `RAYCAST_10` so only `SITH_SURFACE_FLOOR` surfaces count, range `height * 1.1` (`* 2` when floor- or wall-stuck, `moveSize + 0.005` otherwise) | `sithPhysics_FindFloor` | a sphere sweep of radius `PLAYER_RADIUS` against every face |
 | ledge/step | no step allowance at all; `FindFloor` re-runs within that range | `sithPhysics_FindFloor` | `STEP_UP = 0.066` (`moveSize + 0.01`) |
-| camera | a *separate* per-thing camera position at `thing + 0x168` (the view matrix is `rotate(view) . translate(-campos)`, `FUN_004051e0`), plus a **velocity-scaled view bob** — no velocity pitch | `0x4051e0`, see §24 | the eye offset is written into `thing + 0x168` by a function not yet identified |
+| camera | the camera is the thing's position (`+0xb8`) plus the eye offset it carries at `thing + 0x168` (a field, not `position + eyeoffset` computed at draw time); the POV weapon's frame is built from the camera's matrix by `jkPlayer_DrawPov` (`0x4051e0` — negated `+0x168`, sway from `+0x1d4`/`+0x21c`, no depth test, sector ambient), and the camera has no velocity pitch | `0x4c56b0`, `0x4051e0`, see §24 | no decompiled writer sets `0x168`; the port calibrates it as `PLAYER_EYE` |
 | what is solid | `(flags & SITH_SURFACE_HAS_COLLISION) == 0 && !pAdjoin` → skip | `sithCollision.c:365` | now matches (`surfflags & 0x4`) |
 
 The body is therefore **5.4x too wide** in the port, the floor probe is a sphere where the engine casts a
@@ -4068,7 +4068,9 @@ working decoder broken, and why the check decodes forty frames and looks for the
 any non-zero pixel.
 
 **What a decoded frame looks like.** The helper writes each frame as a `P6` PPM of the 8-bit
-indices, and the app turns the last one into a PNG (`--smk-decode` prints the path):
+indices, `src/ppm.rs` reads it back (the P6 reader is now all that module is: the hand-rolled PNG
+writer and the direct `image` dependency are gone, and the last frame is turned into a PNG through
+Bevy's `Image::try_into_dynamic().save()`), and `--smk-decode` prints the path:
 
 ![frame 39 of 01-02A.SMK, decoded from the shipped DLL](cutscene-frame.png)
 
@@ -4153,14 +4155,31 @@ And in the window, after the level completes ([§16.9](#finishing-a-level-plays-
 
 `--cutscene <file> [start-frame]` plays a film in place of the HUD. There is no new quad or
 material: the overlay canvas is already a 640x480 RGBA texture on a quad in front of the camera,
-so `src/cutscene.rs` blits each 640x300 frame into it, letterboxed by 90 rows top and bottom (the
-same framing the engine showed on a 4:3 screen), and advances one frame per 66 ms of wall clock —
-the film's own rate from its header.
+so `src/cutscene.rs::blit` writes each 640x300 frame into it — 90 rows above and below, now
+**opaque black** — and advances one frame per 66 ms of wall clock, the film's own rate from its
+header.
+
+**The film now fills the window instead of sitting inside the HUD's 4:3 box.** Those 90 rows are the
+canvas' own padding, not the engine's framing — the engine cut films on the display, not inside the
+HUD's box — and at the HUD's 4:3 on a wider window the picture used to sit in a box with the live
+level visible around it. `cutscene_fills_screen` now scales the quad the canvas is drawn on while a
+film plays, by `film_fill_scale(width, height) = min(aspect * 480/640, 480/300)` — 16:9 gives 4/3,
+which puts the picture's width exactly on the window's edges and leaves the film's own 2.13:1 shape
+covering 83% of the height; a window wider than the 640:300 film caps the scale at
+`480/300 = 1.6`, which fills the height and pillarboxes the sides; at 4:3 it is 1.0, because the
+canvas already spans the window. The bars the film still shows are its own 2.13:1 shape, not the
+HUD's padding. The HUD camera also switches its clear colour from
+`ClearColorConfig::None` to `ClearColorConfig::Custom(Color::BLACK)` for a film, so the window
+around the picture — including a pillarbox — is black rather than the live level, and `blit` fills
+the canvas' bars with `[0, 0, 0, 255]` instead of the old transparent fill, so the world cannot
+show through those either. The scale is pinned by
+`film_fill_tests::a_film_fills_the_window_and_keeps_its_2_13_to_1_shape`.
 
 ![the opening cutscene playing over level 1](cutscene-playing.png)
 
 That is frame 41 of `01-02A.SMK` in the running window, over level 1's geometry: decode through
-the shipped DLL, blit into the overlay, upload to the texture, 15 fps.
+the shipped DLL, blit into the overlay, upload to the texture, 15 fps. The capture predates the
+fill-screen change, so the film still sits in its box with the level visible around it.
 
 **The whole film, once, without holding it in memory.** The first version decoded a fixed 90
 frames and looped them, which is what "the film loops several times" looked like: `06a.smk` is
@@ -5369,8 +5388,8 @@ is the same, the axis is not. It is ported as `camera_lean()`: a full-speed stra
 | mode | what the case builds |
 | --- | --- |
 | 1 | first person: the thing's orient (`+0x88`), the view angles at `+0x15c/0x160/0x164`, the velocity roll, the translation at `+0xb8`, **plus the eye offset at `+0x168`**, plus `0x8ee5ac` for the local player, then orthonormalised (`FUN_004408e0`) |
-| (next case) | the same, but snapped into the sector by `FUN_004c6050(0, thing[0x5c], pos, angles, 0.02f, 0x2200)`, then offset by `0x549090` |
-| (third) | a follow camera: `FUN_00441e30` off `0x5490b0`, position `thing+0xb8` with **z + 0.05** (the code does `FSUB [0x522dec]` and that constant is −0.05; `0x522de8` is +0.05) |
+| (next case), **mode 4 — third person** | the same, but snapped into the sector by `FUN_004c6050(0, thing[0x5c], pos, angles, 0.02f, 0x2200)`, then offset by `0x549090` |
+| (third) | a spectator orbit: `FUN_00441e30` off `0x5490b0`, position `thing+0xb8` with **z + 0.05** (the code does `FSUB [0x522dec]` and that constant is −0.05; `0x522de8` is +0.05) |
 | (fourth) | a basis built from the static vectors at `0x5490a0/a4/a8` |
 | (last) | the static matrix at `0x8ee5e0` (12 dwords), copied verbatim |
 
@@ -5433,6 +5452,32 @@ consistent with a distance, which is what the neighbouring far/fade fields would
 `--controls` now asserts the derivation: 90 degrees horizontal becomes 73.74 vertical at 4:3 and 58.72 at
 16:9, and the vertical maps back to 90 horizontally, so a rounded-off constant cannot creep in.
 
+### The near plane is 1/64 of a unit, and that is why retail never clipped
+
+`sithCamera_Startup` (`0x4c4de0`) creates six cameras — modes 1 (first person), 4, 8, `0x20`,
+`0x40`, `0x80` — each with **FOV 90°** (`0x42b40000`) and aspect 1.0 (`0x3f800000`), and builds each
+one's `rdCamera` with
+
+    rdCamera_NewEntry(camera + 0x7c, fov, 0, 0x3c800000, 0x42800000, aspect)
+
+so **near = 0.015625 (1/64)** (`0x3c800000`) and **far = 64.0** (`0x42800000`). The player's own
+radius is `size=0.065`, so the engine's near plane is a **quarter of the body's radius**: a body
+that can touch a wall keeps its eye further from the wall than the near plane, and no wall is ever
+sliced open.
+
+The port used Bevy's default `PerspectiveProjection` near of **0.1** — six times the engine's, and
+larger than the body's own radius — so every wall the body could reach sat inside the near plane,
+and the frame showed geometry cut open 0.1 in front of the eye. `engine_projection()` now projects
+near `0.015625` (`NEAR_PLANE`) and far 1000 (the sky dome's radius 600 has to fit), and every
+`EngineFov` world camera takes it; `engine_fov` keeps changing only the vertical angle as the
+window changes shape. `--collide` asserts the invariant rather than describing it: a zero-radius
+probe from the eye in six directions at every `walkplayer` spawn must clear `NEAR_PLANE`, and level
+1's booth — the case the defect named — prints
+
+    collide: tightest eye clearance 0.157 (near plane 0.015625)
+
+so the eye keeps ten times the near plane from the table and the columns around the spawn.
+
 ### What the runtime session cost, and what it left behind
 
 The executable had to be driven by hand-injection because it has no command line for a level: `-level <name>`
@@ -5441,10 +5486,21 @@ makes it **exit immediately**, and the port's `--start` has no retail equivalent
 level loaded anyway, so that key is not what gates a single-player start. The intro is five films long;
 Escape skips one each time and lands on the Single Player screen, from which "New Game" plays the level's own
 opening film before the world appears.
-### The follow camera, and why third person is the port's own
+### The follow camera: mode 4 is third person, and the orbit is not
 
-`FUN_004c56b0`'s third case (`0x4c59ce`) is the engine's follow camera, and reading it changes what "port the
-follow camera" means:
+`FUN_004c56b0` has two ways to get behind the player, and they are not the same camera.
+
+**Mode 4 is the engine's third-person camera.** It applies the same eye offset as first person (the
+thing's `+0x168`) and then calls `sithCamera_SearchSectorInRadius` (`0x4c6050`) from the thing
+toward the camera: normalise `focus -> camera`, run `sithCollision_SearchForCollisions` with radius
+`0x3ca3d70a` (0.02) and flags `| 0x800`, and **rewrite the camera position to the first hit**
+(`cam = hit_t * dir + focus`). That is the engine's camera collision, and it is what keeps a
+third-person camera out of the wall behind the player. `sithCollision_FindSectorInRadius` supplies
+the sector index for the final point, and `sithCamera_RenderScene` sets it current, inverts it into
+the view (`rdCamera_Update`) and draws.
+
+**The switch's third case (`0x4c59ce`) is a spectator orbit**, which this document used to take for
+the whole of "the follow camera":
 
 ```text
 0x4c59ce  FUN_00441e30(&dst, &0x5490b0, &DAT_0082f0b8)   build the view from a persistent matrix
@@ -5455,27 +5511,53 @@ follow camera" means:
 0x4c5a79  FUN_00441a30(&DAT_0082f0b8, (0, 0, dt * 8))   spin the orbit 8 degrees per second
 ```
 
-So it is a **spectator orbit**: a camera parked 0.2 above the thing (an actor's head height), offset a hair
-forward, and spun 8 degrees per second around it, with no input of any kind. That is a cutscene and
-multiplayer-observer camera; retail single-player is first person only, and there is no steerable third-person
-camera in the shipping game to copy. `DAT_0082f0b8`, the persistent matrix it spins, is all zeros in the file —
-it is scratch state built at run time (the map-screen camera at `0x4c5150` fills it from a thing's orient).
+So it is a camera parked 0.2 above the thing (an actor's head height), offset a hair forward, and
+spun 8 degrees per second around it, with no input of any kind. That is a cutscene and
+multiplayer-observer camera; retail single-player is first person only, and the port does **not**
+reproduce it. `DAT_0082f0b8`, the persistent matrix it spins, is all zeros in the file — it is
+scratch state built at run time (the map-screen camera at `0x4c5150` fills it from a thing's
+orient).
 
-The port therefore has its own chase camera, built on the two conventions the engine does establish:
+The port's own chase camera is mode 4's shape, not the orbit's:
 
-* **height** — `0.2` above the body's origin, taken from `0x522dec` (`THIRD_PERSON_UP`);
-* **aim** — the camera looks at the body's eye (`thing + 0x168`), the same point first person puts the eye at.
+* **the boom** — `Chase::length` behind the eye (3.0, or `BK_CHASE_DIST`), toggled with **`V`**,
+  started on with `BK_CHASE=1` for captures; that is the third-person view the round log in
+  `docs/gaps.md` describes, and the only one that draws the body. The earlier `C` toggle
+  (`BK_THIRD_PERSON=1`) still flips `player.third_person`, and the `third_person_view` path it
+  reaches is still in the build too: a 0.66 boom (`PLAYER_RADIUS * 2.5 + 0.5`, the `--stand` rule)
+  shortened step by step by `segment_blocked`, with no body drawn, and `--controls` still asserts
+  its geometry (0.66 behind the look axis, 0.16 above the aimed point, behind the correct axis at
+  yaw 90). Both keys change the view.
+* **the pull-in** — `collide::camera_pull` is `sithCamera_SearchSectorInRadius`'s own shape:
+  normalise `focus -> want`, cast with the sector walk (`sweep_rooms`, so a camera behind a doorway
+  is not pulled in by the wall beside the door), and **return the contact point** — the engine puts
+  the camera at `hit_t * dir + focus`, not a radius short of it. Every frame the boom is wanted,
+  then pulled:
 
-The boom is the port's own `PLAYER_RADIUS * 2.5 + 0.5` (0.66 units, the same standoff rule `--stand` uses),
-it is shortened step by step when `segment_blocked` says a wall is between the body and the camera, and the
-strafe roll still applies. `C` toggles it (`BK_THIRD_PERSON=1` starts that way) and `--controls` asserts the
-geometry: 0.66 behind the look axis, 0.16 above the aimed point, and behind the correct axis at yaw 90.
+      camera: third person wanted Vec3(-13.04, -6.96, -1.15), pulled to Vec3(-10.48, -5.48, -1.15) (surface 3304)
 
-**What is still missing for a useful third person: the body is not drawn.** `spawn_models` deliberately skips
-the local player's own model (it would be drawn *around* the first-person viewpoint, and these models have
-`cull_mode: None`), so third person currently shows the level from behind the player rather than the player.
-Drawing it needs the body spawned, rotated with `player.yaw`, and hidden while in first person; that is in
-`docs/gaps.md`.
+  That is level 1's booth: 3.0 requested, 0.04 available, because the player starts in a closed box
+  — the correct answer, and the reason retail opens in first person.
+* **the gate** — `--camera-pull` checks both branches. Sixteen directions at a 3.0 boom from level
+  1's largest sector: every pulled camera must be *nearer* than the boom and no closer to the eye
+  than half the cast radius. And a boom of `1e-4`, short enough that nothing can be reached, must
+  come back **exactly** where it was asked to be — the branch an enclosed room never exercises on
+  its own.
+* **the body** — the player's own model is drawn in third person now. `spawn_models` spawns him as
+  an ordinary thing (same `ky.3do`, one entity per material, same `ky.pup`), so `animate_actors`
+  drives the same `stand` / `walk` / `run` / `fire` / `death` states the NPCs get, and
+  `draw_player_body` only decides whether the parts are drawn: never in first person, and not in
+  third person either when the boom's pull-in parks the camera inside him (closer than 0.6), where
+  `cull_mode: None` would show the inside of his polygons. The parts are the model's own geometry
+  with the node transforms applied — `INSERT OFFSET` stays the engine's height above the placement
+  point, not a vertex offset — and the strafe roll still applies on top.
+  [docs/third-person.png](third-person.png) is the arena from behind him.
+
+The engine's own POV sway — the phase and the `0x552ba0` amplitudes behind `FUN_004051e0`'s bob —
+is not reproduced: the port's `waggle` is the cog's offset on the weapon, not the engine's
+rotation. The POV shake its case 1 adds is `SetPOVShake`'s offset, which the port does apply
+(`Runtime::camera_shake` → the camera's aim, decaying at the script's own rates). The orbit above is
+the one camera behaviour in this section the port leaves out.
 
 ### The vertical look axis
 
@@ -5523,16 +5605,26 @@ sites filtered to the `0x40xxxx`–`0x43xxxx` sith layer, or `procedure_callers`
 candidate checked, `FUN_0043b1c0` (0x43b1c0, 4343 bytes, the earliest site), is a bulk polygon-list renderer,
 not the camera.
 
-### Probe 1 result: the camera is `FUN_004051e0`
+### Probe 1 result: `FUN_004051e0` is the POV weapon's frame, not the camera
 
 The one instruction that matters is a single store: `MOV [0x73a3d0], EAX` at `0x4434be`, in
 `FUN_004434b0(param)` — a one-line setter (`DAT_0073a3d0 = param`) that only six places call:
 `jkGuiMap_Show` (0x415c50), the model-editor panel (0x419ae0), and `0x4c5150`, `0x4c5420`, `0x4c54d0`,
 `0x4c5590`, `0x4c5fd0` (the display buffers). None is the camera, so the camera does not set the world
-transform directly; it builds a **view matrix** that the display layer then adopts.
+transform directly; it builds a **view matrix** that the display layer then adopts. The candidate this
+probe followed, `FUN_004051e0` — one of the tick's per-frame subsystems (`0x401ee0` calls it right
+before `FUN_0043abf0`) — is **`jkPlayer_DrawPov`**, the first-person weapon's own frame, not that
+matrix.
 
-That builder is `FUN_004051e0` — one of the tick's per-frame subsystems (`0x401ee0` calls it right before
-`FUN_0043abf0`). Recovered shape, with every field it touches:
+`jkPlayer_DrawPov` copies the camera's matrix, pre-translates by the *negated* POV offset
+(`thing + 0x168..0x170`), pre-multiplies the sway rotation (`rdMatrix_BuildRotate34` from the
+puppet's bob constants and the weapon's own velocity, `thing + 0x1d4..` and `thing + 0x21c`), turns
+the depth and occlusion tests **off** (`rdSetZBufferMethod(0)`, `rdSetOcclusionMethod(0)`), takes
+its ambient from the sector (`rdCamera_SetAmbientLight`, `rdColormap_SetCurrent`: `AMBIENT LIGHT` +
+`EXTRA LIGHT`, clamped to 0..1), and draws the POV thing with `rdThing_Draw`; `jkSaber_Draw` adds
+the blade for the same matrix. That is why retail's pistol never disappears into a wall — the pass
+has no depth test at all and lands on top of the scene every frame. Recovered shape, with every
+field it touches:
 
 ```c
 thing = (&DAT_0085b780)[player_index * 0x8a];          // the player's thing (pointer, stride 0x228)
@@ -5545,30 +5637,45 @@ bob = Vec3(c * DAT_00552ba0 * speed,
            s * DAT_00552ba8 * speed);
 rotate_matrix(&DAT_0085fa80, bob);                       // FUN_0043fcf0, a 3-angle rotation
 view = rotate(camera_rotation);                          // copied from DAT_0082f104 + 0x34 (12 dwords)
-translate(view, -thing[0x168 .. 0x170]);                 // FUN_00441a90: the camera position, negated
+translate(view, -thing[0x168 .. 0x170]);                 // FUN_00441a90: the POV/eye offset, negated
 store(&DAT_0085b5cc + player_index * 0x228, view);       // FUN_0043e4e0: the per-player view matrix
 ```
 
-Three things follow straight from that, and one of them corrects this document.
+Four things follow straight from that, and each one corrects or sharpens an earlier claim.
 
-**The camera's position is a field on the thing — `thing + 0x168` (x, y, z floats) — not `position +
-eyeOffset` computed at draw time.** Whatever adds `eyeoffset` writes that field, which makes the *writer of
-`0x168`* the next probe, not the renderer.
+**`thing + 0x168` is the eye/POV offset**, not a camera position the renderer computes: the camera
+(`FUN_004c56b0`, above) pre-translates the thing's matrix by it (`rdMatrix_PreTranslate34(puVar10,
+iVar7 + 0x168)`) and `jkPlayer_DrawPov` negates it here. No decompiled *writer* of the field turned
+up — not in `sithThing_ParseThingArg`, and not as a template key the parser handles — so the port
+supplies the same quantity as a calibration instead: `PLAYER_EYE`, clamped by the nearest ceiling.
+
+**This is a POV weapon sway, not a view bob.** The phase, the `sin`/`cos` and the three `0x552ba0`
+amplitudes rotate the weapon's frame from the puppet's bob constants and the weapon's own velocity;
+`FUN_004c56b0`'s mode 1 has no bob of its own. The port's counterpart is `waggle`, a camera-local
+offset on the drawn weapon, and the engine's exact rotation is not reproduced.
 
 **The engine has no velocity-derived pitch.** This document used to attribute
-`clamp(5 * dot(rvec, vel), -8, 8)` to `sithCamera.c` (§23's camera row). The view-matrix builder applies the
-velocity as a **view bob**: a phase integrator driven by `thing[0x264]`, a `sin`/`cos` of that phase, and three
-amplitude globals (`DAT_00552ba0`, `DAT_00552ba4`, `DAT_00552ba8`) scaled by `speed` — a rotation of the view,
-not a change to the pitch. The port implements neither, so this is a *gap* (no bob), and the pitch term the
-document described does not exist.
+`clamp(5 * dot(rvec, vel), -8, 8)` to `sithCamera.c` (§23's camera row). The velocity term in the
+camera is the **roll** of the first-person case above; the pitch term the document described does not
+exist.
 
-**`thing[0x1d4 .. 0x1dc]` is the velocity and `thing[0x21c]` the normaliser**; `DAT_00552bac` is the phase
-rate and `DAT_00552bb4` the phase. All of the `0x552ba0`–`0x552bbc` block is **zero in the file**, so the
-amplitudes are set at run time (an option), which is why they read as zero when the binary is inspected
-statically.
+**`thing[0x1d4 .. 0x1dc]` is the velocity and `thing[0x21c]` the reference speed** — an earlier note
+calling it a scale was wrong: `jkPlayer_DrawPov` divides the sway by it (`_DAT_00552bc0 = local_44 /
+*(float *)(iVar3 + 0x21c)`), and `sithPuppet_UpdatePuppet` uses it as the reference speed in
+`(0x21c + node offset) - 0xbc`. `DAT_00552bac` is the phase rate and `DAT_00552bb4` the phase; the
+`0x552ba0`–`0x552bbc` block is **zero in the file**, so the amplitudes are set at run time (an
+option), which is why they read as zero when the binary is inspected statically.
 
-Still open after this: the rotation matrix's own builder (who fills `DAT_0082f104 + 0x34` — that is where the
-yaw/pitch and therefore the lvec/rvec question lives), the `0x168` writer (the eye offset), the pitch clamp,
-and the FOV. `FUN_004051e0`'s neighbours in the tick (`FUN_0041f7d0`, `FUN_004289f0`, `FUN_0043abf0`,
-`FUN_00435140`) are the next reads; the display struct `DAT_0082f104` and the per-player block at `0x85b5cc`
-(stride `0x228`) are the structures to carry forward.
+What the port draws instead of the engine's frame: `draw_viewmodel` puts the weapon in the camera's
+frame — parented to the world camera, `NoFrustumCulling` — and derives its placement and scale from
+the drawn mesh through `view_frame` (`view_frame_tests::the_weapon_frames_inside_the_view`), decodes
+its own `.mat` through the world's texture path so it is textured rather than white, and tints it by
+`sector_light` — the sector's `AMBIENT LIGHT` + `EXTRA LIGHT`, exactly the number
+`rdCamera_SetAmbientLight` receives. Retail's exact framing waits on the writer of `0x168`; the port
+derives the placement from the mesh instead.
+
+Still open: the writer of `thing + 0x168` (the quantity is confirmed by both readers, but nothing in
+the dump writes it), the case-3 spectator orbit above, and the view weapon's exact retail framing,
+which waits on that writer. `FUN_004051e0`'s neighbours in the tick (`FUN_0041f7d0`, `FUN_004289f0`,
+`FUN_0043abf0`, `FUN_00435140`) are the next reads; the display struct `DAT_0082f104` and the
+per-player block at `0x85b5cc` (stride `0x228`) are the structures to carry forward.

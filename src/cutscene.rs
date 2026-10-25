@@ -10,9 +10,10 @@
 //! when its file appears. Playback holds the last available frame rather than skipping, and stops
 //! on the final frame instead of looping.
 //!
-//! The film is 640x300 (every one of the 25 is, `--smk`), and the canvas is 640x480, so the frame
-//! sits centred with 90 rows of black above and below — the same letterbox the engine showed on a
-//! 4:3 screen.
+//! The film is 640x300 (every one of the 25 is, `--smk`) and the canvas is 640x480, so the frame
+//! lands centred with 90 rows of black above and below. Those rows are the canvas' own padding:
+//! `cutscene_fills_screen` in `main` scales the quad the canvas is drawn on until the picture reaches
+//! the window's edges, which moves the padding out of the view — the film fills the screen.
 
 use std::path::{Path, PathBuf};
 
@@ -178,7 +179,11 @@ pub fn blit(canvas: &mut [u8], width: u32, height: u32, frame: &[u8]) {
     if canvas.len() < need || frame.len() < (FRAME_WIDTH * FRAME_HEIGHT * 4) as usize {
         return;
     }
-    canvas[..need].fill(0);
+    // Opaque black: the overlay is blended over the live world, so a transparent letterbox would show
+    // the level through the bars instead of the film's own black.
+    for pixel in canvas[..need].chunks_exact_mut(4) {
+        pixel.copy_from_slice(&[0, 0, 0, 255]);
+    }
     let top = height.saturating_sub(FRAME_HEIGHT) / 2;
     let row_bytes = (FRAME_WIDTH * 4) as usize;
     for row in 0..FRAME_HEIGHT.min(height) {
@@ -263,7 +268,11 @@ mod tests {
         blit(&mut canvas, FRAME_WIDTH, canvas_height, &frame);
         let top = (canvas_height - FRAME_HEIGHT) / 2;
         assert_eq!(top, 90);
-        assert_eq!(canvas[0], 0, "above the frame is black, not the old contents");
+        assert_eq!(
+            &canvas[0..4],
+            &[0, 0, 0, 255],
+            "above the frame is opaque black, not the old contents (or the world through it)"
+        );
         let at = (top * FRAME_WIDTH * 4) as usize;
         assert_eq!(&canvas[at..at + 4], &[255, 255, 255, 255]);
         assert_eq!(canvas[at - 4], 0);

@@ -261,6 +261,16 @@ impl Cog {
             .map(|m| m.name.clone())
     }
 
+    /// The label a message name resolves to: `#N` through [`Self::label_for_message_id`], or the name
+    /// itself. `None` when the script has no such label, so a pump can skip the script outright.
+    pub fn label_for_name(&self, name: &str) -> Option<String> {
+        let label = match name.strip_prefix('#').and_then(|n| n.parse::<usize>().ok()) {
+            Some(id) => self.label_for_message_id(id)?,
+            None => name.to_string(),
+        };
+        self.label(&label).is_some().then_some(label)
+    }
+
     /// Bind a placed instance's values to this script.
     ///
     /// The level stores one row per instance: the script name followed by a value for

@@ -191,13 +191,13 @@ are the unit-by-unit account behind them.
 | `.gob` archive VFS (5 archives, 4795 entries / 4791 unique names) | working |
 | `.jkl` level parsing (geometry, materials, objects) | working |
 | `.mat` material → bitmap (1932 of 1983; the rest are texture-less by design) | working |
-| `.cmp` colormap → palette (offset 64; the 64–320 distance tables are located but unused) | base palette only |
-| `.3do` model parsing + placement (all 477 models) | working, drawn from the rest pose |
-| `.spr` sprite parsing (all 20) | parsed; nothing placed uses one |
+| `.cmp` colormap → palette (offset 64; each ramp's 64 or 320 brightness tables follow the palette) | base palette + the 32-step light ramp (`LIGHT_STEPS`); the engine's table selection is not done |
+| `.3do` model parsing + placement (all 477 models) | working: every model places, a placed actor animates its puppet, and props draw at their stored pose |
+| `.spr` sprite parsing (all 20) | working: a template's `sprite=` draws as one billboarded quad per row, one cel of the strip, and the cel walks with the thing's own life (`Runtime::sprite_cel`) |
 | `.wav` playback + `.snd` sound classes (all 644 + 102) | working |
 | sector ambience loops (`SOUND` per sector, swapped as you move) | working |
-| COG script parser (all 540 scripts) + interpreter core | parsing complete; 315 verbs, and every verb a shipped script calls is answered by the runtime except AI, weapon, music and the message bus (§16.4) |
-| COG runtime — placed instances bound to a mutable world | working: doors open, lifts move, adjoins close, and the close is real — a hidden sector doorway or a cleared `ADJOIN_MOVE` bit stops the collision sweep, a cleared `VISIBLE` bit stops the cull, and a sector flagged underwater halves movement (`--adjoins`). **The link layer is live (`--door`)**: the three link tables are built from each level's `cogs` section and its scripts' `symbols` (level 1: 37 thing, 44 surface, 10 sector), the player's use sends `activate`, and `00_door.cog` answers by clearing its sector's ADJOINS bit — the four doorways the solver refused before that are passable after it. A body crossing an opened doorway, and a shut or barred one stopping it, is asserted in `collide`'s tests. Level 1 delivers 92 messages and actuates 13 adjoins. `--cog-check` fails if a verb outside the deferred groups goes back to being stubbed (632 stubbed calls left, down from 706) |
+| COG script parser (all 540 scripts) + interpreter core | parsing complete; 315 verbs, and every verb a shipped script calls gets an answer — 0 stubbed, 0 errors over 706 call sites across the 34 shipped levels (§16.4) |
+| COG runtime — placed instances bound to a mutable world | working: doors open, lifts move, adjoins close, and the close is real — a hidden sector doorway or a cleared `ADJOIN_MOVE` bit stops the collision sweep, a cleared `VISIBLE` bit stops the cull, and a sector flagged underwater halves movement (`--adjoins`). **The link layer is live (`--door`)**: the three link tables are built from each level's `cogs` section and its scripts' `symbols` (level 1: 37 thing, 44 surface, 10 sector), the player's use sends `activate`, and `00_door.cog` answers by clearing its sector's ADJOINS bit — the four doorways the solver refused before that are passable after it. A body crossing an opened doorway, and a shut or barred one stopping it, is asserted in `collide`'s tests. Level 1 delivers 92 messages and actuates 13 adjoins. `--cog-check` is the gate: **0 stubbed verbs, 0 errors** over 706 call sites across the 34 shipped levels |
 | the same runtime driving the renderer (per-frame thing transforms) | working |
 | UI: menus from the game's own art, fonts and element tables | working in-app: 41 element arrays / 512 elements read from the EXE, `--ui <name>`, `--menu`, Up/Down/Enter |
 | UI: the engine's font and bitmap tables | working: 12 fonts + 35 bitmaps read out of the EXE, so text uses the font each element names and hover is the next one |
@@ -211,22 +211,22 @@ are the unit-by-unit account behind them.
 | UI bitmaps (`.bm`) and string tables (`.uni`) decoding | working: all 146 + 5 files |
 | sprite fonts (`.sft`) | working: all 27 files (`--sft`), used by `--ui` |
 | world geometry rendering with per-vertex baked light + mipmaps | working |
-| sky (unlit sky faces + a sky dome for the background) | working, no sky scroll |
+| sky (unlit sky faces + a sky dome for the background) | working: `SlideHorizonSky`/`SlideCeilingSky` scroll the sky faces; the sky's own parallax/rotation is missing and the dome does not scroll |
 | episode manifests (`episode.jk`, all 3 episodes, 37 sequences) | working |
 | retail asset graph — all 35 levels + every referenced asset | **verified** |
-| distance shading (the `.cmp` tables) | not started — see stage 1 above |
-| `.key` animation data, `.pup` puppets, `.ai` classes | parsed (all 784 files); placed actors animate (`stand`) — see the `actors animate` row below; `.ai` classes parsed but not driving anything yet |
-| inventory bins | weapons and force powers share one table (`enum SITHBIN`): `SetCurInvWeapon`/`SelectWeapon` arm a bin, `GetCurInvWeapon` reads it, force mana is bin 14 and force powers are bins 21–26 (§16.7). `--bins` checks the round-trip and that arming the bryar arms `+bryarbolt`. The bin→projectile mapping is a name heuristic, not the engine's `weaponData`. **Force powers run their own scripts**: `--force jump` executes `force_jump.cog` end to end (mana −20 exact, hold measured 0.5 s) but the lift is an open bug — the script's velocity reaches `SetThingVel` as zero |
-| AI | actors carry their shipped `.ai`: sight distance and cone decide whether an armed actor fires its own `weapon=`, and `--ai` checks that an actor fires at 3 units, holds at 8 and stays silent from behind (§16.8). The instinct scheduler's weights, pathfinding, `accuracy=` spread and reactions are not done |
+| distance shading (the `.cmp` tables) | the ramp is in use: each `.cmp` ships 64 or 320 brightness tables, sampled into a 32-step LUT (`LIGHT_STEPS`) for the level shader; the engine's per-distance/per-surface table selection is not done (§6) |
+| `.key` animation data, `.pup` puppets, `.ai` classes | parsed (all 784 files); placed actors animate their puppet — see the `actors animate` row below; `.ai` classes drive sight, fire and chase (the `AI` row) |
+| inventory bins | weapons and force powers share one table (`enum SITHBIN`): `SetCurInvWeapon`/`SelectWeapon` arm a bin, `GetCurInvWeapon` reads it, force mana is bin 14 and force powers are bins 21–26 (§16.7). `--bins` checks the round-trip and that arming the bryar arms `+bryarbolt`. The bin→projectile mapping is a name heuristic, not the engine's `weaponData`. **Force powers run their own scripts**: `--force jump` executes `force_jump.cog` end to end (mana −20 exact, hold measured 0.5 s, lift asserted at **3.00 u/s** upward — `duration + 2.5` — on the player's velocity) |
+| AI | actors carry their shipped `.ai`: sight distance and cone decide whether an armed actor fires its own `weapon=`, and `--ai` checks that an actor fires at 3 units, holds at 8 and stays silent from behind (§16.8). Pathfinding is a breadth-first route over the adjoin graph (`Collide::route`) and `PrimaryFire`'s aim-error fraction is applied; the instinct scheduler's weights and reactions are not done |
 | items | pickups work through the item's **own script**: touching a powerup runs its cog's `touched` then `taken`, so `pow_shields.cog` lands `bin 60 +20` from its own `bin=60`/`ChangeInv` (§16.6); `--pickup` asserts it on level 1's `shieldrecharge`. Also fixed the inventory verbs' argument order (thing first) and `TakeItem` double-counting. Taking a weapon changes what the player fires (runtime weapon: `+bryarbolt` 30 damage -> `+elaser` 12, checked by --weapon), and a taken powerup comes back after its 
 espawn= seconds (checked in --pickup). Not yet: pickup sounds, real inventory maxima |
 | combat: firing | working in the window: **left mouse** fires the level's own weapon template, the bolt is drawn and flown with the template's `vel=`, stops at the sector graph and applies its `damage=`; `--fire +bryarbolt` checks flight and the 30 points of damage headlessly, and `--fire-demo` shows the bolt on screen (§16.5). a projectile damages what it reaches and a killed actor plays the puppet's own `death` keyframe (`kyftdeth.key`, 45 frames at 15 fps) and holds its last frame; --fire asserts the kill. Damage decays in flight the way the engine does it (SITH_WF_DAMAGE_DECAY 0x4000, 
 ate= per second floored at mindamage=): level 1''s bolt is 30 damage dropping to 10 over 1.33 s (§16.5). Not yet: explosions, ammo, force power effects, a body that falls |
-| actors animate | working: each placed actor plays its puppet's `stand` keyframe at the keyfile's own 15 fps on its own mesh, rebuilt only when the frame number changes; `--animate` checks the rendered vertices across every material — **1684 of 1697** actors move over the loop (§16.3). `walk`/`run`/strafe need velocity, i.e. stage 6's AI |
-| cutscenes (`.smk`) | **the data loads and its headers check out**: 25 files, 483 MB, 29,493 frames, all 640×300 at 15.2 fps (`--smk`); the decoder is `SMACKW32.DLL` (71 KB, named exports recovered), not JK.EXE. The VFS now finds them through the `Resource/VIDEO` mount | decoding not started — stage 8 |
+| actors animate | working: each placed actor plays its puppet's `stand` keyframe at the keyfile's own 15 fps on its own mesh, rebuilt only when the frame number changes; `--animate` checks the rendered vertices across every material — **1684 of 1697** actors move over the loop (§16.3), and `actor_state` picks `walk`/`run`/`walkback`/`strafe` from the velocity the actor walked at, plus `fire`/`hit`/`turn` |
+| cutscenes (`.smk`) | **it plays**: 25 files, 483 MB, 29,493 frames, all 640×300 at 15.2 fps (`--smk`); the decoder is `SMACKW32.DLL` (71 KB, named exports recovered), not JK.EXE. The VFS finds them through the `Resource/VIDEO` mount, `--cutscene` plays them once in the window in colour, and the known limit is 29 of 768 palette bytes against libsmacker (§16.9) — stage 8 |
 | level collision + adjoin (portal) traversal | working: a walker stays inside the level's own sectors, and a passage a script shut (a force field, a closed door's sector) is a wall |
-| player motion | working: walk/run/back/strafe/crouch, jump and water derived from the level's own `walkplayer` template chain, gravity scaled from the level, and water halving movement from the floor's surface flags (§16.2); level 1 walks at 0.667 u/s (`maxthrust/surfdrag`), jumps to a 0.28-unit apex in 0.75 s. `--rules` prints the table, the level's flagged-surface counts, and checks the integrated jump against the closed form. Step-up is not implemented and cannot be with infinite-plane collision (§16.2) |
-| sector visibility | working: one batch per (sector, material) + a per-frame clip-plane test, 21 of 462 sectors drawn in level 1 at the spawn, pixel-identical to --no-cull (0 of 230400 sampled pixels differ at yaw 0/90/270). Portal occlusion is implemented and unit-tested but off until the player's sector is tracked (§16.1) |
+| player motion | working: walk/run/back/strafe/crouch, jump and water derived from the level's own `walkplayer` template chain, gravity scaled from the level, and water halving movement from the floor's surface flags (§16.2); level 1 walks at 0.667 u/s (`maxthrust/surfdrag`), jumps to a 0.28-unit apex in 0.75 s. `--rules` prints the table, the level's flagged-surface counts, and checks the integrated jump against the closed form. Step-up is implemented: `move_body` retries a blocked move from one step up (`moveSize + 0.01` = 0.066 units) and keeps the raised result only when `support` finds a floor there, so a riser is climbed and a wall three times the allowance blocks (§16.2) |
+| sector visibility | working: one batch per (sector, material) + a per-frame clip-plane test, with **portal occlusion on** — the portal graph is symmetric and the seed is the candidate whose walk best covers the frustum, and the culled frame is 0.000% different from `--no-cull` over 230,400 sampled pixels (level 1's spawn: 21 of 462 sectors in the frustum, 11 hidden) (§16.1) |
 
 ### Where the roadmap stands
 
@@ -236,12 +236,12 @@ Stage-by-stage, against `docs/roadmap.md`, with the check that holds each one:
 |---|---|---|
 | 1 visibility | `.cmp` colormap material by default at measured parity (0.00% vs `StandardMaterial`), and **portal occlusion on**: symmetric portal graph, seed chosen by agreement with the frustum, culled frame 0.000% different from `--no-cull` over 230,400 pixels | `--cmp`, `--shot` A/B, `--audit` |
 | 2 player | walk/run/back/strafe/crouch from the template, the engine's jump gravity, water from surface flags, step-up, and the **lateral rule** in one function (`collide::face_blocks`: span + outline + penetration). `--rules` asserts a body beside a wall is stopped and one 20 units past its end is not | `--rules`, `--walk all` |
-| 2 player parity | **done except lateral coverage**: walk/run/back/strafe/crouch/jump/water from the template's own numbers, step-up onto a 0.65 ledge, the body standing on faces that belong to other sectors, and the view following the walker at the sweep's eye height (§16.2). Still open: a body beside a face but outside its plan projection is still pushed by an infinite plane | `--rules`, `--walk all` |
+| 2 player parity | **done except lateral coverage**: walk/run/back/strafe/crouch/jump/water from the template's own numbers, step-up onto a low ledge (one `moveSize + 0.01` allowance), the body standing on faces that belong to other sectors, and the view following the walker at the sweep's eye height (§16.2). Still open: a body beside a face but outside its plan projection is still pushed by an infinite plane | `--rules`, `--walk all` |
 | 4 COG verbs | every label level 1 declares is fed, each `run_label` has a fresh bounded budget, and **`sleep`/`waitformessage` suspend and resume** across frames (`Vm::resume` + `resume_sleeping_labels`; `--sleep` pins both halves and is verified to fail when suspension is removed). A nested `sleep` re-runs its enclosing block | `--cog-check`, `--sleep`, `--triggers`, `--live-check` |
 | 5 combat | **complete for single-player**: damage two-way, shields, death/respawn, pickups, explosions, force jump/speed/healing/seeing, mana regeneration, ammo, and **force pull exactly as the shipped script does it** — highlight with `jkSetTarget`, then `ApplyForce` at 30 u/s toward the player with gravity cleared (`--pull`). Grip damages over time while holding the victim | `--hit`, `--fire`, `--pickup`, `--weapon`, `--force`, `--mana`, `--ammo`, `--pull` |
-| 6 AI | instincts reach the live runtime (117 actors), and the chase **steers through portals** — 1206 doorways built from the `adjoin`/`mirror` pairs, chosen when the straight line is walled off (`segment_blocked`). Steering is greedy, not a search; scheduler weights and `accuracy=` are still fixed | `--ai`, `--live-check` |
+| 6 AI | instincts reach the live runtime (117 actors), and the chase **searches the level** — `Collide::route` walks the adjoin graph breadth-first (1206 doorways on level 1, built from the `adjoin`/`mirror` pairs) and the actor follows the doorway centres it answers, popping each on arrival; `PrimaryFire`'s whole argument list — delay, facing cone, ranges, aim error, bursts — is honoured. Only `PrimaryFire` runs: the instinct scheduler's weights, the other instincts and reaction times are still missing | `--ai`, `--live-check` |
 | 7 audio | attenuation over 375 clips, the song range, the pulse/timer queue, the **music fade** verified end to end (`--fade`: 0.00 → 1.00 → 0.00 through the script's own chain), and the **menus' own wavs** parsed from `jkGuiMenu` and played on hover/click (39 of 41 screens, both names present) | `--sound`, `--music`, `--fade`, `--ui-sounds` |
-| 8 `.smk` cutscenes | **it decodes and it plays in the window**: the DLL is 32-bit (`machine 0x014C`), so a 64-bit process cannot load it (error 193) — the decode runs in `tools/smkdec`, a dependency-free i686 helper driven by JK's own `SmackOpen(file, 0xfe000, -1)`. `--smk-decode` proves frames come out and differ (`01-02A.SMK`: 40 decoded, 10 distinct, first non-blank frame 16), and `--cutscene 01-02A.SMK 30` plays them over level 1 at 15 fps letterboxed 640×300 in the 640×480 overlay ([image](docs/cutscene-playing.png)). **Frames are in colour, from the film's own palette**: the header layout is proved (chunk sizes + tables + huffman block fill all 25 films exactly, `Layout::covers` in `--smk`), and palette records decode per frame — `skip`, `colour-shift`, and literal "set one colour" chunks, the last of which was the bug that made the first attempt look like coloured static ([images](docs/cutscene-colour-window.png)). Palettes are verified against libsmacker as a reference decoder (740 of 768 bytes wrong before the fix, 29 after, §16.9). **The whole film plays once, streamed**: 90 decoded frames used to loop, which is what a 992-frame film playing the same six seconds looks like; the helper now decodes the entire film to disk as it plays (about 5× real time, so it stays ahead) and frames are read, coloured and blitted as they appear, stopping on the last one ([image](docs/cutscene-late-frame.png)). Known limit: 29 of 768 palette bytes still differ from libsmacker (§16.9). Data: the VFS falls back to loose files through the `Resource/VIDEO` mount, so `--campaign` resolves every cutscene row and `--smk` verifies all 25 files (483 MB, 29,493 frames, 640×300 at 15.2 fps) | `--smk`, `--smk-decode`, `--cutscene`, `--campaign` |
+| 8 `.smk` cutscenes | **it decodes and it plays in the window**: the DLL is 32-bit (`machine 0x014C`), so a 64-bit process cannot load it (error 193) — the decode runs in `tools/smkdec`, a dependency-free i686 helper driven by JK's own `SmackOpen(file, 0xfe000, -1)`. `--smk-decode` proves frames come out and differ (`01-02A.SMK`: 40 decoded, 10 distinct, first non-blank frame 16), and `--cutscene 01-02A.SMK 30` plays them over level 1 at 15 fps, **scaled out to the window's edges**: the 640×300 picture is scaled by `min(aspect·480/640, 480/300)` — 4:3 → 1, 16:9 → 4/3, and a window wider than the film's 2.13:1 → 1.6 with a pillarbox — while the HUD camera clears opaque black and the canvas' padding is opaque black ([image](docs/cutscene-playing.png)). **Frames are in colour, from the film's own palette**: the header layout is proved (chunk sizes + tables + huffman block fill all 25 films exactly, `Layout::covers` in `--smk`), and palette records decode per frame — `skip`, `colour-shift`, and literal "set one colour" chunks, the last of which was the bug that made the first attempt look like coloured static ([images](docs/cutscene-colour-window.png)). Palettes are verified against libsmacker as a reference decoder (740 of 768 bytes wrong before the fix, 29 after, §16.9). **The whole film plays once, streamed**: 90 decoded frames used to loop, which is what a 992-frame film playing the same six seconds looks like; the helper now decodes the entire film to disk as it plays (about 5× real time, so it stays ahead) and frames are read, coloured and blitted as they appear, stopping on the last one ([image](docs/cutscene-late-frame.png)). Known limit: 29 of 768 palette bytes still differ from libsmacker (§16.9). Data: the VFS falls back to loose files through the `Resource/VIDEO` mount, so `--campaign` resolves every cutscene row and `--smk` verifies all 25 files (483 MB, 29,493 frames, 640×300 at 15.2 fps) | `--smk`, `--smk-decode`, `--cutscene`, `--campaign` |
 | 9 campaign flow | **savegame container + thing records implemented** (`src/jks.rs`): version 6, the 1580-byte header, 32-byte level name, 4-byte field, 24-byte player block, then records with the engine's **0x28-byte header** (length +0x20, type +0x24) and a `ThingRecord` over the payload offsets `FUN_004f4210` stages — template index, type, position, angles. `--save` writes one record per placed thing (level 1: 64) and reads every position and angle back, including the player's own spawn. The campaign **graph** is verified too: `--campaign` walks both `gotoA`/`gotoB` edges and proves all 28 single-player levels are reachable from level 1 through the one `DECIDE` row, while the MP/CTF manifests loop as map rotations (§16.9). The **transition** is wired to the engine's own verb: `jkendlevel` (`jkCog.c`) marks `Runtime::level_complete`, and `--transition` resolves the successor through the graph — `01narshadda.jkl -> 02narshadda.jkl`, 21 levels on the `gotoA` spine (§16.9). Not done: the rest of the payload fields and the header internals. **The transition runs end to end up to the film**: `--complete-after <s>` calls the engine's own `jkEndLevel`, `Episode::flow_after` resolves the graph's next rows, the `CUT` row plays in the window and the next level is named (`level 01narshadda.jkl complete -> cutscene 06a.smk, then 02narshadda.jkl`, [image](docs/cutscene-on-complete.png)); `--flow` asserts every hop, with each film checked as `SMK2` and each level present in the archives. **The swap works, and it is the default**: `swap_level` is an exclusive system that despawns the old level's `LevelEntity`-tagged entities, swaps `World` and re-runs `setup`, so level 2 (391 things, 641 sectors) is built and rendered with its own music after the film (`--no-swap-levels` stops at the film). Three bugs made it work: the camera is only spawned when none exists, the film gates the change via `Cutscene::finished`, and the overlay is marked dirty so the HUD returns ([image](docs/level2-after-transition.png)). Remaining for the stage: the rest of the `.jks` payload and the header internals | `--save`, `--campaign`, `--transition`, `--flow`, `--complete-after`, `--swap-levels` |
 | 10 UI panels | **every single-player custom element draws**: map, objectives, force stars, load bar, title text, plus the menus' own wavs. The two holes the docs used to name — the model window and the power grid — are both on `edit_character`, a **multiplayer** screen, so they are out of scope rather than pending | `--map-shot`, `--ui-visible`, `--load-bar`, `--force-screen`, `--ui-tables` |
 
@@ -265,7 +265,8 @@ is not: this is not yet a replacement you can finish the game in.
   checks that built their own world; this one would have failed on both.
 - The world renders from the player's own eyes at the walker's eye height, with sector/portal
   visibility culling; walls carry their polygons, and the body stands on the walkway and steps onto
-  a 0.65-unit ledge (`--walk all`: 34/34 levels, 1077 sector crossings).
+  a low ledge (`--walk all`: 30/34 levels with a start keep the walker inside its sector,
+  56 sector crossings, 0 left in the void).
 - The `.key`/`.pup` animation plays on placed actors; an actor that sees you fires (projectiles,
   in-flight damage decay) and walks toward you at its own `maxstep`.
 - The `.smk` films decode through the install's own 32-bit `SMACKW32.DLL` in a helper process, play
@@ -281,7 +282,7 @@ is not: this is not yet a replacement you can finish the game in.
   the actor's own `+elaser`; the status bar shows the runtime's health. Force powers, explosions and
   ammo are still partial (§16.5).
 - **Force powers are data, not effects**: force seeing/pull/grip have no visual or physical effect yet.
-- ~~`--rules`' jump calibration failed~~ — **fixed**: the lateral resolver was pushing along a floor plane's infinite normal and pinning the body, so `walker_step` now keeps the height its vertical step produced and lets the resolver own X and Y. `--rules` measures `apex 2.57 / 2.81` (91% of the closed form) and exits clean (§16.2).
+- ~~`--rules`' jump calibration failed~~ — **fixed**: the lateral resolver was pushing along a floor plane's infinite normal and pinning the body, so `walker_step` now keeps the height its vertical step produced and lets the resolver own X and Y. `--rules` measures `apex 0.26 / 0.28` closed form (inside the gate's 15% band) and exits clean (§16.2).
 - **The movement basis is JK's own now, and strafing was backwards until it was.** `walk_target`
   builds motion from `lvec = (cos yaw, sin yaw)` and `rvec = lvec × uvec = (sin yaw, -cos yaw)`; the port
   had `-rvec`, so `A` and `D` were swapped. `--controls` compares the mapping against the camera transform
@@ -442,7 +443,7 @@ what makes portals work, and treating it as a sector index pins you in place
 
 ```
 level                          travelled  blocked    sectors contained  hull
-jkl\03katarn.jkl                    16.0        0   405->369       yes  differs
+jkl\03katarn.jkl                     4.5      402   405->428       yes  differs
 jkl\04escapehouse.jkl                1.2      548   800->937        NO  agrees
 jkl\06bbarons.jkl                    0.9      563    318->85        NO  agrees
 jkl\11gorc.jkl                       0.8      563     19->14        NO  agrees
@@ -640,8 +641,9 @@ is why it was recoverable.
 
 ## Verification
 
-Every check in one page: [docs/gates.txt](docs/gates.txt) records each flag, its exit code and the
-number it printed against this install — **59 gates, 0 failures**, plus 123 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
+Every check in one page: [docs/gates.txt](docs/gates.txt) records each flag and what it printed
+against this install; the sweep now is **59 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
+`0 of 59 failed, 8 skipped`), plus 126 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
 
 `--check` on level 1 (`jkl\01narshadda.jkl`) reports, and asserts:
 
@@ -676,14 +678,14 @@ Validated on all 35 levels — see `docs/formats.md` §10–§11.
 
 ## Where the port stands
 
-Nine of the ten roadmap stages are landed and gated; the tenth is half drawn. The evidence, rather than
+All ten roadmap stages are landed and gated. The evidence, rather than
 the summary, is what each check prints:
 
 | what | check | the number it prints |
 | --- | --- | --- |
 | jump physics agrees with the rules | `--rules` | `apex 0.26 / 0.28 closed form` |
 | a wall stops a body beside it, not past its end | `--rules` | `pushed true … 27 past its end is pushed false` |
-| the walker stays legal on every level | `--walk all` | `34/34 levels`, 959 sector crossings |
+| the walker stays legal on every level | `--walk all` | `30/34 levels` with a start stay inside their sector; 56 sector crossings; `0` left in the void, worst drop 0.00 |
 | portal occlusion | `--audit` + `--shot` A/B | `21 of 462 sectors in view`, **0.000%** different from `--no-cull` |
 | the colormap material matches the CPU path | `--shot` A/B | **0.00%** of pixels differ, two levels |
 | every label a level waits on | `--cog-check`, `--triggers` | `startup/arrived/timer/pulse/entered/exited/damaged/killed/activate/crossed/blocked` |
@@ -706,11 +708,19 @@ the summary, is what each check prints:
 - **Only some force powers are exercised.** Jump, speed, healing, seeing, pull and grip have gates; the
   other powers in the menu's own table (throw, lightning, destruction, protection, absorb, blinding,
   deadly sight…) have their scripts and now their verbs, but nothing checks that they do anything.
-- **Puppet animation is partly wired.** Every actor's `stand` state animates, and death plays once and
-  holds; walk, run, attack and crouch states are parsed but not driven by motion.
-- **AI steering is greedy, not a search.** Actors walk at what they see and step through doorways when
-  the straight line is walled off, so a two-door room can send them the wrong way; instinct scheduler
-  weights, `accuracy=` spread and reaction times are unfixed.
+- **Puppet animation is partly wired.** Every actor's `stand` state animates, death plays once and
+  holds, and `actor_state` drives the body's own locomotion clips — `walk`/`run`/`walkback`/
+  `strafeleft`/`straferight` from the velocity it walked at, advanced by distance moved rather
+  than the clock — plus `fire`, `hit` and `turn` (`--animate`: 1684 of 1697 placed actors move).
+  Still unselected: crouch, the airborne set, `death2`, `choke`, alt-fire, `drawsaber`/`drawfists`,
+  and `sithAnimClass` layering.
+- **Only `PrimaryFire` runs.** The chase is a search now: `Runtime::sector_route` asks
+  `Collide::route` for a breadth-first doorway route over the adjoin graph (refusing a link its
+  own gates close) and keeps it per actor, popping a waypoint on arrival; `PrimaryFire`'s whole
+  argument list — delay, facing cone, ranges, aim error, bursts — is honoured. Still missing: the
+  instinct scheduler (weights, `LookForTarget`/`Listen`/`Follow`/`OpenDoors`), reaction time
+  before the first shot, hearing/alert propagation, and a route that refreshes before the
+  straight line is walled off.
 - **Cutscene palette**: 29 of 768 palette bytes still differ from libsmacker's decode.
 - **No single-player UI panel is missing.** The model window and power grid belong to `edit_character`
   (`bkBuildMulti.bm`), a multiplayer screen — `--ui-tables` says which screen owns each draw callback.
@@ -777,11 +787,40 @@ The camera is no longer a design choice: every number below came out of `JK.EXE`
 - **The FOV is 90 degrees horizontal**, the word at `buffer + 0x08`, read with Frida from a
   copy of `JK.EXE` that had level 1 loaded. The engine never states a vertical angle, so the
   port derives it (`73.74` at 4:3, `58.72` at 16:9) instead of rendering a flat 45.
-- **The follow camera is a spectator orbit**: `0x4c59ce` parks a camera 0.2 above the thing
-  (`0x522dec` = `-0.2`), offsets `(0, 0, 0.05)`, clips it into the sector and spins it
-  **8 degrees per second** (`0x4c5a79`). Retail single player is first person only, so the
-  port has its own chase camera on the engine's 0.2 height, toggled with `C`; the player's
-  own body is not drawn yet.
+- **Third person is the engine's case 4, with its camera collision.** `sithCamera_Update`'s case 4
+  applies the same eye offset and then `sithCamera_SearchSectorInRadius` (`0x4c6050`): normalise
+  focus→camera, cast with radius `0x3ca3d70a` (0.02), and **rewrite the camera position to the
+  first hit**. `collide::camera_pull` is that routine — the sector walk follows the adjoins, and
+  the returned contact point *is* the camera, not a radius short of it. The port's boom is 3.0
+  units (`BK_CHASE_DIST`), toggled with `V` and started on with `BK_CHASE=1`; `--camera-pull`
+  casts sixteen directions from level 1's largest sector and asserts every pulled camera is
+  nearer than the boom, and that a `1e-4` boom is returned exactly where it was asked.
+  (`C`, seeded by `BK_THIRD_PERSON`, still selects an earlier 0.66-unit `third_person_view` boom
+  with no body, which `--controls` asserts; the `V` chase is the one the camera pull-in and the
+  drawn body belong to.)
+- **The body in that view is an actor, not a special case.** `spawn_models` spawns the local
+  `walkplayer` like every other thing — `ky.3do` in per-material parts, `ky.pup` driving it —
+  and `animate_actors` gives it the same `stand`/`walk`/`run`/`fire`/`death` states the NPCs get
+  (`--animate` asserts the local puppet ships `stand` and `walk`). `draw_player_body` only decides
+  whether it is drawn: never in first person, and not when the boom's pull-in has parked the
+  camera inside him ([docs/third-person.png](docs/third-person.png)).
+- **The near plane is 1/64.** `rdCamera_NewEntry(camera + 0x7c, fov, 0, 0x3c800000, 0x42800000,
+  aspect)` — near `0x3c800000` = **0.015625** and far `0x42800000` = **64**. The port had Bevy's
+  `0.1` default, six times the engine's and larger than the player's own 0.065 radius, which is
+  exactly the distance at which a wall the body can touch gets sliced open: `engine_projection`
+  now uses near 0.015625 and far 1000 (the 600-unit sky dome has to fit), and `--collide` probes
+  every spawn's eye clearance with a zero-radius sphere — level 1's booth is **0.157**, ten times
+  the near plane — and fails if any spawn comes inside it.
+- **The POV weapon is drawn in the camera's own frame, from the negated eye offset.**
+  `jkPlayer_DrawPov` (`0x4051e0`) copies the camera's matrix, pre-translates by the *negated*
+  `thing + 0x168` eye/POV offset, applies the sway built from `+0x1d4` and `+0x21c` (where
+  `+0x21c` is a **reference speed**, not a scale), turns the depth and occlusion tests off for the
+  pass, and lights it from the sector's `AMBIENT LIGHT + EXTRA LIGHT`. The port draws a textured
+  view model in the camera frame with that sector sum as its tint — an unlit material with no
+  per-camera ambient — placed and scaled by `view_frame` from the drawn mesh (`view_frame_tests`
+  pins it in front of the near plane, inside the frame, subtending between 0.1 rad and half the
+  view). It has no separate camera: a second Bevy camera on the view model's layer draws nothing
+  in this build, so the mesh rides the world camera with `NoFrustumCulling`.
 - **Vertical mouse look is normalised.** Retail looks *down* when you move the mouse up and
   has no option to change it (its strings contain no "invert"). The port defaults to the
   modern sense with `BK_INVERT_Y=1` for comparison, and `--controls` asserts both.

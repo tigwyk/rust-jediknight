@@ -18,7 +18,7 @@ Useful flags while evaluating (each is also a gate):
 
 | flag | what it shows |
 |---|---|
-| `--gates` | every behaviour check, one process each — **56 gates, 0 failures** |
+| `--gates` | every behaviour check, one process each — **59 gates, 0 failures** |
 | `--start <level>` | start inside a level, skipping the menu |
 | `--campaign` | walk the episode graph and print where it goes |
 | `--items` | the `misc\items.dat` table and which bins name a script |
@@ -60,8 +60,8 @@ Everything below was run against the retail data while this note was written, no
 from an earlier build.
 
 ```
---gates            0 of 58 failed        (one child process per check, every row a verdict)
-cargo test --bins  122 passed
+--gates            0 of 59 failed, 8 skipped   (one child process per check; the 8 are window-only gates skipped headless, never counted as passes)
+cargo test --bins  126 passed
 --audit            540 cogs parsed, 0 failed, 1854 labels, 7683 symbols
 --walk all         0 level(s) left the body in the void, worst drop 0.00
 --campaign         32 level step(s) walked, 30 distinct level file(s)

@@ -385,16 +385,21 @@ impl Canvas {
             for col in 0..w {
                 let Some(&i) = pixels.get((row * w + col) as usize) else { continue };
                 let [r, g, b] = palette[i as usize];
-                for dy in 0..scale {
-                    for dx in 0..scale {
-                        let (px, py) = (x + col as i32 * scale + dx, y + row as i32 * scale + dy);
-                        if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
-                            continue;
-                        }
-                        let at = ((py as u32 * self.width + px as u32) * 4) as usize;
-                        self.rgba[at..at + 4].copy_from_slice(&[r, g, b, 255]);
-                    }
+                self.scaled(x + col as i32 * scale, y + row as i32 * scale, scale, [r, g, b]);
+            }
+        }
+    }
+
+    /// One colour, drawn `scale` x `scale` times, ignoring anything outside the canvas.
+    fn scaled(&mut self, x: i32, y: i32, scale: i32, [r, g, b]: [u8; 3]) {
+        for dy in 0..scale {
+            for dx in 0..scale {
+                let (px, py) = (x + dx, y + dy);
+                if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
+                    continue;
                 }
+                let at = ((py as u32 * self.width + px as u32) * 4) as usize;
+                self.rgba[at..at + 4].copy_from_slice(&[r, g, b, 255]);
             }
         }
     }
@@ -572,16 +577,7 @@ pub fn map(
                             continue;
                         }
                         let [r, g, b] = palette[v as usize];
-                        for dy in 0..s {
-                            for dx in 0..s {
-                                let (px, py) = (pen + col as i32 * s + dx, y + row as i32 * s + dy);
-                                if px < 0 || py < 0 || px >= self.width as i32 || py >= self.height as i32 {
-                                    continue;
-                                }
-                                let at = ((py as u32 * self.width + px as u32) * 4) as usize;
-                                self.rgba[at..at + 4].copy_from_slice(&[r, g, b, 255]);
-                            }
-                        }
+                        self.scaled(pen + col as i32 * s, y + row as i32 * s, s, [r, g, b]);
                     }
                 }
             }
