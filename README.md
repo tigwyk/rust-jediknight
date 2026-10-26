@@ -250,38 +250,47 @@ gates above are what fail if a behaviour drifts.
 
 ### Status: what a player can do today
 
-Read this as the honest line between the two halves of the goal. The **read** half — parsing every
-retail asset format and proving it against the install — is essentially complete. The **play** half
-is not: this is not yet a replacement you can finish the game in.
+The **read** half — parsing every retail asset format and proving it against the install — is
+essentially complete. The **play** half is now a real single-player game on the light-side
+campaign: `New Game` plays the opening film, the levels' own scripts run against the live world,
+finishing a level plays its film (two, at the campaign's mid-game decision) and loads the next,
+and the chain reaches the finale film. It is **not a finished remake and not yet human-played
+end to end**: the dark-side arm has no choice screen, the ending screen is absent, and the gaps
+listed below are visible in play. The release note ([docs/release-0.1.md](docs/release-0.1.md))
+is the player-facing version of this.
 
-**Works, with a check behind it:**
+**Open for 0.1:**
 
-- All 35 shipped levels parse and pass `--check` (36/36 including `static.jkl`), and `--audit` reads
-  every archive and reports 34/35 reachable from the manifests.
-- **`--live-check` watches the running game, not a mock of it**: twenty frames in, it asserts the
-  instincts are attached to the runtime the game simulates, the player thing exists, the collider and
-  the materials are populated, actors have parts, and every placed script bound. Two bugs in one week
-  (the impact scan never being called, instincts attached to a throwaway runtime) were invisible to
-  checks that built their own world; this one would have failed on both.
-- The world renders from the player's own eyes at the walker's eye height, with sector/portal
-  visibility culling; walls carry their polygons, and the body stands on the walkway and steps onto
-  a low ledge (`--walk all`: 30/34 levels with a start keep the walker inside its sector,
-  56 sector crossings, 0 left in the void).
-- The `.key`/`.pup` animation plays on placed actors; an actor that sees you fires (projectiles,
-  in-flight damage decay) and walks toward you at its own `maxstep`.
-- The `.smk` films decode through the install's own 32-bit `SMACKW32.DLL` in a helper process, play
-  once in full colour, and the level transition after them lands on the next level.
-- The force panel and the field-log map panel draw from the executable's own screens and tables.
-- The campaign graph, savegame container (`.jks`), audio mix curve, and the menu screens' data are
-  recovered and checked.
+- **No human playthrough yet.** The chain is gated level by level and end to end (`--tour`), but
+  levels 2–21's objectives have not been played through by a person; that is the next release gate.
+- **The dark-side arm is unreachable.** The campaign's `DECIDE` row after level 15 takes the
+  neutral (light) arm because the choice screen is not built; `16b`/`17b`/`20b`/`21b` load and
+  chain, but no UI selects them. The ending screen is likewise absent (the ending-choice bin stays
+  neutral).
+- **AI is `PrimaryFire` only**: actors see, route through doorways and shoot, but there is no
+  instinct scheduler, hearing, alert propagation or reaction time before the first shot.
+- **Health and shields reset at each level**; inventory, force powers, rank and the ending choice
+  carry over.
+- **Force powers beyond jump/speed/heal/seeing/pull/grip are unverified**, and animation states for
+  crouch, alt-fire, saber swing and layered upper/lower body are not selected.
+- **Level 1's first frame starts inside cantina furniture** (a table 0.16 units from the eye);
+  whether retail opens the same way is unsettled and needs a retail reference frame.
+- **The save-slot picker is keys only** (`,`/`.` choose a slot, `F5`/`F9` save/load); retail's
+  slot-list screen is not drawn.
+- **Cutscene palette**: 29 of 768 palette bytes still differ from libsmacker's decode.
+- **Multiplayer is out of scope**, deliberately.
 
-**Does not work yet — do not expect a playable campaign:**
+**Fixed in earlier rounds, kept as the record:**
 
 - ~~Combat is one-directional~~ — **two-way now, and checked**: `--hit` drives the same scan the game
   uses and lands 25 of a bolt's 30 carried damage on a placed actor, then takes 9 off the player from
-  the actor's own `+elaser`; the status bar shows the runtime's health. Force powers, explosions and
-  ammo are still partial (§16.5).
-- **Force powers are data, not effects**: force seeing/pull/grip have no visual or physical effect yet.
+  the actor's own `+elaser`; the status bar shows the runtime's health. (Ammo and explosions landed
+  later too; the force-power rows above are what is still partial.)
+- **Force powers run the shipped scripts, and six of them are gated.** Jump, speed, healing, seeing,
+  pull and grip execute the install's own `force_*.cog` and are checked (`--force*`, `--pull`, `--mana`);
+  the remaining powers have their scripts and verbs but no check that they change anything.
+- **Grip's disarm is the one script branch still simplified** (`SkillTarget` throws items, not the
+  weapon out of an actor's hand).
 - ~~`--rules`' jump calibration failed~~ — **fixed**: the lateral resolver was pushing along a floor plane's infinite normal and pinning the body, so `walker_step` now keeps the height its vertical step produced and lets the resolver own X and Y. `--rules` measures `apex 0.26 / 0.28` closed form (inside the gate's 15% band) and exits clean (§16.2).
 - **The movement basis is JK's own now, and strafing was backwards until it was.** `walk_target`
   builds motion from `lvec = (cos yaw, sin yaw)` and `rvec = lvec × uvec = (sin yaw, -cos yaw)`; the port
@@ -293,21 +302,24 @@ is not: this is not yet a replacement you can finish the game in.
   released for menus. Arrow keys still turn.
 - **"Characters stuffed inside each other" was the camera standing inside an NPC, not the model scale.**
   The spawn only demanded `radius * 2` = 0.7 units from other things, exactly an NPC's body width; `--shot`
-  showed a head and shoulders filling the frame. The spawn now wants 2.0 units (`BK_THING_CLEARANCE`), and
-  the same viewpoint is open room. `MODEL_SCALE` stays 10: `ky.3do` is 0.18 model units and 0.17 posed, so a
-  character is 1.8 world units — a person in a 2.5-unit storey. A round was spent at 1.0 on a misread
-  measurement (`bounds()` already scales), which made every character ten times too small.
+  showed a head and shoulders filling the frame. The spawn now wants 2.0 units (`BK_THING_CLEARANCE`), so
+  no NPC sits in the lens; level 1's start is still the cantina booth, with its own furniture at arm's
+  length (see the open items above — that one needs a retail reference frame). `MODEL_SCALE` stays 10:
+  `ky.3do` is 0.18 model units and 0.17 posed, so a character is 1.8 world units — a person in a 2.5-unit
+  storey. A round was spent at 1.0 on a misread measurement (`bounds()` already scales), which made every
+  character ten times too small.
 - **The player body is back to the calibrated values, because the model scale was the real fault.** Radius
   `0.35`, eye `1.45`, step `0.66` -- these pair with a 1.81-unit character in a 2.5-unit storey. The detour
   through `size=0.065`/`eyeoffset=0.037` assumed those were world units; they are offsets within a puppet,
   and taking them literally put the camera 0.1 above the floor. Frames and the reasoning are in
   `docs/formats.md` (player body and drawing scale sections).
-- **Audio is muted by default, and quiet when enabled.** `--sound-on` plays at a 5% master gain
-  (`--sound-on` + `BK_VOLUME=1` for a real playtest); `--mute`/`BK_MUTE=1` force silence whatever else is
-  passed. `--audio-state` prints the decision and gain, then exits before an audio device is opened, so the
-  mute can be verified without playing anything. The read-back `audio: N sink(s) live, M audible, loudest X`
-  line reports the sink state sampled from the sinks themselves — it printed nothing for a whole round while
-  the enforcement system was silently unregistered, which is exactly why it now prints even at zero sinks.
+- **Audio is on by default at the engine's own master scale.** A play session is audible; captures
+  and probes are silent, and `--sound-on`/`BK_SOUND=1` forces sound in a capture. `--mute`/`BK_MUTE=1`
+  and `BK_VOLUME` still override. This used to be muted by default at 5% gain — a release build that
+  starts silent reads as broken. `--audio-state` prints the decision and gain, then exits before an
+  audio device is opened, so the decision can be verified without playing anything. The read-back
+  `audio: N sink(s) live, M audible, loudest X` line reports the sink state sampled from the sinks
+  themselves.
 - **Things have three angles, and the port was reading one.** The row is `X Y Z pitch yaw roll sector`;
   only yaw was parsed and the transform rotated about Z, so **138 of 352 things in level 1** (39%) were drawn
   face-up. The orientation is now `rdMatrix_Build34` verbatim, converted to a quaternion. Reading the load
@@ -338,11 +350,16 @@ is not: this is not yet a replacement you can finish the game in.
 - **UI panels**: every single-player custom element draws (map, objectives, force stars, load bar,
   title text). The two that used to be listed as missing — the model window and the power grid — are
   both on `edit_character`, a **multiplayer** screen, so they are out of scope.
-- **Actors do not pathfind**; they walk straight at what they see, steering through portals by
-  agreement with the frustum, and the instinct scheduler's weights are unfixed.
+- **Actors route, they do not pathfind in general.** `Collide::route` searches the adjoin graph
+  breadth-first for a doorway route when the straight line is blocked, sight needs a cleared line,
+  and `PrimaryFire`'s whole argument list is honoured; what is missing is the retail *scheduler*
+  below that (weights, interruption, hearing, alert propagation).
 - **Multiplayer is out of scope**, deliberately.
 
-Each of those is listed against its stage in `docs/roadmap.md` with the next concrete step.
+Unit-by-unit detail with the evidence for every row is in [docs/gaps.md](docs/gaps.md); the
+dependency-ordered remainder is [docs/roadmap.md](docs/roadmap.md); the per-flag transcript is
+[docs/gates.txt](docs/gates.txt); the player-facing 0.1 note is
+[docs/release-0.1.md](docs/release-0.1.md).
 
 ### Retail coverage
 
@@ -574,6 +591,7 @@ cargo run --release -- --no-cull                        # draw every sector, to 
     cargo run --release -- --complete-after 0.1             # finish the level: jkEndLevel, film, then next level
     cargo run --release -- --complete-after 0.1 --no-swap-levels  # stop at the film instead
     cargo run --release -- --flow                           # level -> cutscene -> next level, checked
+cargo run --release -- --tour                           # every campaign level: load, run its scripts, check its transition
     cargo run --release -- --animate                        # check that every placed actor's keyframes move it
     cargo run --release -- --no-anim                        # freeze the actors, to A/B the animation
     cargo run --release -- --level "jkl/04EscapeHouse.jkl"
@@ -642,8 +660,8 @@ is why it was recoverable.
 ## Verification
 
 Every check in one page: [docs/gates.txt](docs/gates.txt) records each flag and what it printed
-against this install; the sweep now is **59 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
-`0 of 59 failed, 8 skipped`), plus 126 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
+against this install; the sweep now is **60 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
+`0 of 60 failed, 8 skipped`), plus 129 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
 
 `--check` on level 1 (`jkl\01narshadda.jkl`) reports, and asserts:
 
@@ -696,6 +714,7 @@ the summary, is what each check prints:
 | damage is two-way, death respawns | `--hit`, `--die` | 25 of 30 carried damage lands; 0 health respawns full |
 | actors close through doorways | `--ai` | `blocked true, steering at portal …` over 1206 portals |
 | the campaign graph and transitions | `--campaign`, `--transition` | passes over all 35 levels |
+| every campaign level runs and hands over | `--tour` | 25 level files (28 rows, both arms), 22 cutscenes, 0 script errors; the decision row's two films are kept in order |
 | cutscenes decode and sequence | `--smk` | passes from the episode order |
 
 **Known gaps, each with where the answer lives** (all in `docs/formats.md`):
@@ -766,7 +785,7 @@ episode manifest, the sprite sheet, keyframes, puppets, AI classes, UI bitmaps, 
 tables, the door script — plus the `.cmp` length check, the runtime's verb table, the
 collision solver on a synthetic Z-up room, and the model transform (a parent stored after
 its child with nonzero pivots, and a parent rotation swinging its child).
-## Camera recovery (this session)
+## Camera recovery
 
 The camera is no longer a design choice: every number below came out of `JK.EXE`
 (sha256 `12e8c8c3…efe44`) or out of a copy of it running.

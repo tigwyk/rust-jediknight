@@ -824,3 +824,13 @@ episode manifest, the sprite sheet, keyframes, puppets, AI classes, UI bitmaps, 
 tables, the door script — plus the `.cmp` length check, the runtime's verb table, the
 collision solver on a synthetic Z-up room, and the model transform (a parent stored after
 its child with nonzero pivots, and a parent rotation swinging its child).
+## Release-readiness pass (round 201)
+
+The first-run defects are fixed and the campaign chain is now a gate. `jkPrintUNIString` was
+reading its first argument (the player's thing index) instead of the second (the `.uni` key), so
+level 1's first pickup printed `COG_00000` instead of "Shield Recharge"; audio is audible by
+default now instead of silent-unless-`--sound-on`; and `Episode::flow_after` no longer hands the
+campaign's `DECIDE` row back as if it were a level — it walks the decision, keeps both of level
+15's films in order and continues on the neutral (light) arm. `--tour` is the new release-content
+gate over every campaign level. The evidence and the numbers are in `docs/gaps.md`'s Round 201
+entry; the current checks are **60 gates, 129 tests, 0 failures**.

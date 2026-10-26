@@ -1492,6 +1492,16 @@ entirely two `goto` edges** on the `DECIDE` row at line 143 — light goes to 15
 dark to 600 — so the graph, not a level list, is the real progression. The two
 paths converge again at 620 (`18Ascend`) and end separately at 212 / 661.
 
+A transition can therefore be **more than one film**: after `15maw` (line 141) the
+chain is `CUT 38a.smk` (142) → `DECIDE` (143) → light arm's `CUT 39a.smk` (150) →
+`16aEscapeShip` (151). The port's `Episode::flow_after` walks all of those rows,
+keeps the films in order, crosses the decision on `gotoA` (neutral/light, because
+the choice screen is not built) and returns the next level; the app plays the
+queue in order and only swaps the level when it is empty. Before that walk existed
+it read one row ahead and handed the `DECIDE` row's own file (`38a.smk`, a film)
+back as the next level, which would have stalled a real playthrough after level 15
+— a defect only the `--tour` gate caught.
+
 The `cd` column is the 1997 release's CD number; it is `0` for multiplayer and CTF.
 `lightpow`/`darkpow` are inventory bin numbers for the Force power awarded.
 
@@ -2847,7 +2857,7 @@ Now implemented, with the engine's semantics where they differ from the obvious:
 | surfaces | `SurfaceCenter`, `SetWallCel`, `GetWallCel`, `SlideWall`, `SurfaceAnim`, `GetSurfaceAnim`, `StopSurfaceAnim`, `SetSurfaceFlags` | `SurfaceAnim(surface, fps)` treats a non-positive rate as the engine's default **15 fps** (`sithCogFunction_SurfaceAnim`); the cel it sets is drawn (§16.5), the slide offset it sets is not |
 | sectors | `SectorAdjoins` (the setter `SetSectorAdjoins` under its other spelling), `SectorLight`, `GetSectorLight`, `SectorThrust` | thrust is stored, not simulated: nothing is in flight until combat |
 | messages | `GetSenderID`, `GetSenderRef`, `GetSenderType`, `GetSourceRef`, `jkGetLocalPlayer` | see the caveat below |
-| misc | `jkPrintUNIString`, `SetTimerEx`, `KillTimerEx`, `WaitForStop`, `StopSound` | printing collects the `.uni` key in `Runtime::prints` |
+| misc | `jkPrintUNIString`, `SetTimerEx`, `KillTimerEx`, `WaitForStop`, `StopSound` | `jkPrintUNIString(thing, key)` puts a `.uni` line on the message slot: the **second** argument is the key, named or numeric (`pow_shields.cog` calls `jkPrintUNIString(player, bin)` with `bin=60`, and `ui\jkstrings.uni`'s `COG_00060` is "Shield Recharge"). Reading the first argument instead printed the player's thing index as `COG_00000`; printing collects the key in `Runtime::prints` |
 
 Level 1 now delivers **92 messages**, actuates **13 sector adjoins** (its doors), moves 19
 things and requests 19 sounds. Across all 34 levels that carry scripts, the stub list went

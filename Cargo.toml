@@ -2,6 +2,10 @@
 name = "bevi-knight"
 version = "0.1.0"
 edition = "2024"
+description = "A from-scratch single-player reconstruction of Star Wars Jedi Knight: Dark Forces II, reading the retail install's archives and executable tables"
+repository = "https://github.com/tigwyk/rust-jediknight"
+readme = "README.md"
+rust-version = "1.85"
 
 [dependencies]
 # `wav` enables the WAV decoder: Bevy's default `audio` feature only ships Vorbis,

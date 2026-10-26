@@ -4,7 +4,8 @@ Every row must print a verdict line (`--- X check passed ---`): the sweep fails 
 that exits 0 without one, headless or windowed. A row that only prints numbers is not
 proving anything, and seven rows were doing exactly that until this rule tightened.
 
-Recorded at round 85. Target: `G:\Games\Star Wars Jedi Knight - Dark Forces 2`
+Started around round 85; the **latest full sweep** and the current counts are at the end of this file.
+Target: `G:\Games\Star Wars Jedi Knight - Dark Forces 2`
 (GOG, plaintext JK.EXE, image base 0x400000,
 sha256 12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44).
 
@@ -38,7 +39,7 @@ because `--live-check` needs a display that is actually presenting: with no focu
 sits in presentation after its setup output and never reaches the hundredth frame its verdict is
 gated on, so the sweep would hang instead of finishing. Everything else is headless and unaffected.
 
-`FAILURES: 0 / 57` (`--gates`: `gates: 0 of 57 failed`, or `0 of 56` with `BK_SKIP_WINDOW=1`).
+`FAILURES: 0 / 60` (`--gates`: `gates: 0 of 60 failed`; `BK_HEADLESS=1` reads `0 of 60 failed, 8 skipped` for the window-only gates; `BK_SKIP_WINDOW=1` skips `--live-check` and says so).
 
 flag                                                   exit  what it prints
 -------------------------------------------------------------------------------------------------
@@ -363,6 +364,11 @@ flag                                                   exit  what it prints
 --smk                                                    0  --- smk check passed ---
 --campaign                                               0  --- campaign check passed ---
 --transition                                             0  --- transition check passed ---
+--tour                                                   0  all 25 campaign level files (28 rows on
+                                                            both arms) load, run their own scripts (0
+                                                            errors), and hand over to a real film and the
+                                                            next level; the DECIDE row's two films stay in
+                                                            order (15maw: 38a -> 39a -> 16aEscapeShip)
 --save                                                   0  wrote 9320 bytes (version 6), round-tripped
                                                              the state too: health 37, +1.25 along x,
                                                              inventory bin 2 = 3 and the clock at
@@ -432,18 +438,19 @@ Two checks are visual and are A/B rather than textual:
 Deliberately excluded from the suite: `--ir`, `--frames` without `--shot`, and `--play`. Each
 opens a window and runs until it closes, so a sweep would hang on them; `--shot`/`--map-shot`
 are the deterministic capture paths (fixed 1/60 dt in capture mode).
- --audio-state  prints the mute decision and master gain, then exits before any audio device exists (verify silence without playing it)
+ --audio-state  prints the audio decision (play session / capture / mute) and master gain, then exits before any audio device exists (verify it without playing anything)
  --fall  drop the body from the spawn and check the impact against sqrt(2gh) and the damage against (v-2.5)^2*45
 
 Tools that answer questions rather than assert (not in the sweep):
   --uni-key <KEY>   which string file carries a key, and what it says
   --soak-all        every level in the archives, one process each
 
-Latest full sweep — 2026-10-23, against this install
+Latest full sweep — 2026-10-26, against this install
 ================================================
 Every row below was produced by --gates (one child process per flag, --exit-after 1200,
 BK_MUTE=1), and every row printed a verdict line:
 
+flag                   runs       result verdict
 --check                headless   pass   --- all checks passed ---
 --audit                headless   pass   --- audit passed ---
 --boot                 headless   pass   --- boot check passed ---
@@ -462,6 +469,8 @@ BK_MUTE=1), and every row printed a verdict line:
 --door                 headless   pass   --- door check passed ---
 --endlevel             headless   pass   --- endlevel check passed ---
 --hit                  headless   pass   --- hit check passed ---
+--ends                 headless   pass   --- ends check passed ---
+--camera-pull          headless   pass   --- camera-pull check passed ---
 --live-check           window     pass   --- live check passed ---
 --mana                 headless   pass   --- mana check passed ---
 --ammo                 headless   pass   --- ammo check passed ---
@@ -496,13 +505,16 @@ BK_MUTE=1), and every row printed a verdict line:
 --sleep                headless   pass   --- sleep check passed ---
 --triggers             headless   pass   --- triggers check passed ---
 --transition           headless   pass   --- transition check passed ---
+--tour                 headless   pass   --- tour check passed ---
 --weapon +elaser       headless   pass   --- weapon check passed ---
 --audio-state          headless   pass   --- audio-state check passed ---
 --sound                headless   pass   --- sound check passed ---
 --episodes             headless   pass   --- episodes check passed ---
 --fire +bryarbolt      headless   pass   --- fire check passed ---
-gates: 0 of 57 failed
+gates: 0 of 60 failed, 0 skipped
 
-That is **57 gates**, 0 failures, with 122 unit tests alongside. Rows that need a window
-(--live-check, --live-play, --goal, --tally, …) are the ones BK_SKIP_WINDOW=1 drops on a
-machine without a display; the count then reads   of 56 failed.
+That is **60 gates**, 0 failures, with **129** unit tests alongside. The eight window-only
+gates are reported as skipped under `BK_HEADLESS=1` (`0 of 60 failed, 8 skipped`), never as
+passes. `--tour` is the release-content gate: all 25 campaign level files load, run their
+scripts and hand over to a real film and the next level; it caught the campaign decision's
+missing second film and the old `flow_after` handing a film back as if it were a level.

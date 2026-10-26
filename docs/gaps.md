@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **59 gates, 126 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **60 gates, 129 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -960,3 +960,41 @@ That closes the four items: the view weapon (placement, scale, texture, sector l
 - Smaller: `body_visible` was a one-line function and is now the comparison in `draw_player_body`; `--live-check` counts *visible* body parts rather than the entities the player owns, because the body has been an actor since round 199 and the old count passed for the wrong reason; the runtime's door test builds `Runtime::new(&Level::default())` instead of a ~190-line struct literal; the self-check's rotation asserts use `std::f32::consts`.
 
 126 tests, 59 gates (8 skipped headless), 0 failed.
+
+**Round 201 (release-readiness pass):** the first-run defects a player would have hit are fixed,
+and the campaign chain is now a gate of its own.
+
+- **`jkPrintUNIString` read the wrong argument.** Level 1's first pickup printed `COG_00000` across
+  the top of the screen: `pow_shields.cog` calls `jkPrintUNIString(player, bin)`, and the runtime
+  read `args.first()` — the player's thing index 0 — instead of the second argument, the `.uni`
+  key. Bin 60 is `COG_00060`, "Shield Recharge"; the key is now read from argument 1 (falling back
+  to the one-argument form the old test used), and `cargo test` pins both. The screenshot that
+  found it is `docs/first-frame-level1.png`.
+- **Audio is audible by default.** A play session now uses `BK_VOLUME` (default 0.75, the engine's
+  own mixer scale) instead of being silent unless `--sound-on`; captures and probes stay silent,
+  `--sound-on` forces a capture audible, and `--mute` always wins. `--audio-state` dropped its
+  tautological print for three assertions on the decision, and a unit test pins the matrix.
+- **The campaign decision's transition was broken, and no gate could see it.** `Episode::flow_after`
+  only looked one row ahead, so finishing `15maw.jkl` named the **`DECIDE` row's file (`38a.smk`) as
+  the next level** — the app would have tried to load a film and stalled there. It now walks the
+  rows: it collects every film in order (level 15: `38a.smk` then `39a.smk`), crosses the `DECIDE`
+  row on its neutral arm (`gotoA`, the light path — there is no choice screen), and stops at the
+  next level. The app's film queue plays both and only sets `films_done` when the queue and the
+  running film are both finished, so the level swap cannot cut a two-film transition short;
+  `film_step` is unit-tested, and a live run (`--start 15maw --complete-after 0.1`) was watched
+  through `38a.smk` → `39a.smk` → `16aEscapeShip.jkl loaded`.
+- **`--tour` is the release-content gate.** It walks every campaign level file (25 files, 28 rows
+  across both arms), loads and parses it, runs its placed scripts against a live world (`run_level`
+  now returns a report, so a label that takes an error arm and a retail-missing sound are
+  distinguishable), then checks every film it names is a real `SMK` in the archives and its
+  successor is a real level. It asserts the light spine's 20 transitions in order, the `DECIDE`
+  row's two films, and exactly two finale levels. Result on this install: 25 level files, 22
+  cutscenes, 0 script errors, 1 sound missing from retail data (level 18's `LTSaberHit012.wav`,
+  which the original engine also did not ship).
+- `--cog-check` now fails on a label error (it previously only counted stubs), and `--gates` counts
+  `BK_SKIP_WINDOW` rows as skipped instead of dropping them from the total.
+
+Current: **60 gates, 129 tests, 0 failures**; `--gates` windowed 0 of 60 failed, `BK_HEADLESS=1`
+0 of 60 failed with 8 skipped. Still open for a *release* (not for the code): one human playthrough
+of levels 2–21, the dark-side choice and ending screens, the AI instinct scheduler, health
+carry-over, and the level-1 spawn view.
