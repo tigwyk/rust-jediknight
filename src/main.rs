@@ -191,6 +191,9 @@ const GATES: &[&str] = &[
     "--sleep",
     "--triggers",
     "--transition",
+    // Every campaign level loads, its own scripts act on a live world without an error, and
+    // finishing it lands on the graph's film and the level that follows — the whole spine.
+    "--tour",
     "--weapon +elaser",
     "--audio-state",
     "--sound",
@@ -234,6 +237,7 @@ fn run_gates(game: &std::path::Path) -> i32 {
         if (flag.starts_with("--live-check") || flag.starts_with("--live-play"))
             && std::env::var_os("BK_SKIP_WINDOW").is_some()
         {
+            skipped += 1;
             println!("{flag:<22} {:<10} {:<6} skipped (BK_SKIP_WINDOW)", "window", "-");
             continue;
         }
@@ -460,6 +464,7 @@ fn main() {
     let mut force_screen_check = false;
     let mut campaign = false;
     let mut transition = false;
+    let mut tour = false;
     let mut endlevel_check = false;
     let mut flow_level: Option<String> = None;
     let mut smk_check = false;
@@ -830,6 +835,8 @@ fn main() {
             "--campaign" => campaign = true,
             // `--transition`: what finishing a level advances to, through the episode graph.
             "--transition" => transition = true,
+            // `--tour`: every campaign level, its scripts, and the hop that follows it.
+            "--tour" => tour = true,
             // `--flow [level]`: level -> its cutscene -> the next level, from the graph.
             "--flow" => {
                 i += 1;
@@ -1792,15 +1799,15 @@ fn main() {
             .into_iter()
             .find(|(_, e)| e.kind == episode::KIND_SINGLE)
             .map(|(_, e)| e);
-        let (cut, next) = match &episode {
+        let (cuts, next) = match &episode {
             Some(episode) => {
-                let (film, level) = episode.flow_after(&level_name);
+                let flow = episode.flow_after(&level_name);
                 (
-                    film.map(|s| s.file.clone()),
-                    level.map(|s| s.file.clone()),
+                    flow.films.iter().map(|s| s.file.clone()).collect::<Vec<_>>(),
+                    flow.next.map(|s| s.file.clone()),
                 )
             }
-            None => (None, None),
+            None => (Vec::new(), None),
         };
         // The campaign opens with a film that no forward walk reaches: row 10 of the single-player
         // episode is `03-04a.smk` with `gotoA 11`, and 11 is level 1. Retail plays it, then drops the
@@ -1820,8 +1827,9 @@ fn main() {
             game: game.clone(),
             level: level_name.clone(),
             first: campaign_start.clone(),
-            cut,
+            cuts,
             next,
+            films_done: false,
             pre,
             swap,
         }
@@ -2181,6 +2189,165 @@ fn main() {
             chain.get(1).cloned().unwrap_or_else(|| "the end".into())
         );
         println!("--- transition check passed ---");
+        return;
+    }
+
+    if tour {
+        // The source release's content gate: every campaign level is loaded, its own scripts act on a
+        // live world, and finishing it through the campaign graph lands on films that exist and a
+        // level that follows. The heavy lifting is existing code (`run_level`, `flow_after`); this
+        // gate is the chain that says they agree for every level, not just level 1.
+        let (_, episode) = episodes_of(&gobs)
+            .into_iter()
+            .find(|(_, e)| e.kind == episode::KIND_SINGLE)
+            .expect("no single-player episode");
+        let first = episode.first_level().expect("no first level");
+        // The light spine is `gotoA`; `--campaign` already proves the DECIDE branch is reachable.
+        let mut spine: Vec<String> = Vec::new();
+        let mut at = first.id;
+        let mut steps = 0;
+        while at >= 0 && steps <= episode.sequences.len() {
+            let Some(row) = episode.sequences.iter().find(|s| s.id == at) else { break };
+            if row.kind == episode::Kind::Level {
+                spine.push(row.file.clone());
+            }
+            at = row.goto_a;
+            steps += 1;
+        }
+        assert_eq!(
+            spine.first().map(|l| l.to_ascii_lowercase()),
+            Some("01narshadda.jkl".to_string()),
+            "the tour does not begin at the campaign's first level"
+        );
+        assert_eq!(
+            spine.last().map(|l| l.to_ascii_lowercase()),
+            Some("21ajerec.jkl".to_string()),
+            "the light spine does not end at the campaign's last light-side level"
+        );
+        // The whole graph, both arms: 28 level rows for 25 distinct level files (the two paths share
+        // the final tower levels). A `DECIDE` row's two arms are the light and dark paths.
+        let mut levels: Vec<String> = Vec::new();
+        for row in episode.levels() {
+            if !levels.iter().any(|l| l.eq_ignore_ascii_case(&row.file)) {
+                levels.push(row.file.clone());
+            }
+        }
+        assert_eq!(levels.len(), 25, "the campaign's level rows did not resolve to 25 files");
+        // The campaign opens with films the forward walk never visits; they are part of a player's
+        // playthrough, so the tour starts there too.
+        let mut films = 0usize;
+        for film in episode.flow_before(&spine[0]) {
+            let bytes = gobs
+                .read(&film.file)
+                .unwrap_or_else(|| panic!("opening film {} did not resolve", film.file));
+            assert_eq!(&bytes[0..3], b"SMK", "{} is not a Smacker film", film.file);
+            println!("tour: opening film {} ({} bytes)", film.file, bytes.len());
+            films += 1;
+        }
+        let mut total_things = 0usize;
+        let mut script_errors = 0usize;
+        let mut missing_sounds = 0usize;
+        let mut terminals = 0usize;
+        for (i, name) in levels.iter().enumerate() {
+            let raw = gobs.read(name).unwrap_or_else(|| {
+                panic!("campaign level {name} is in the manifest but not the archives")
+            });
+            let level = jkl::parse(&String::from_utf8_lossy(&raw));
+            assert!(!level.things.is_empty(), "{name} parsed with no things");
+            assert!(!level.sectors.is_empty(), "{name} parsed with no sectors");
+            total_things += level.things.len();
+            // The level's own scripts, bound and stepped the way `--cog-check` and `--run` bind them:
+            // startup, every declared message, the script-to-script bus, and the deep pass.
+            let report = run_level(&gobs, &level, true);
+            script_errors += report.errors;
+            missing_sounds += report.missing_sounds;
+            // What a finished level leads to: every film in the transition, then the level after it.
+            // Both are checked against real bytes — a dangling manifest row is a release blocker.
+            let flow = episode.flow_after(name);
+            let mut film_names: Vec<&str> = Vec::new();
+            for film in &flow.films {
+                let bytes = gobs
+                    .read(&film.file)
+                    .unwrap_or_else(|| panic!("{name}: film {} did not resolve", film.file));
+                assert_eq!(&bytes[0..3], b"SMK", "{} is not a Smacker film", film.file);
+                films += 1;
+                film_names.push(film.file.as_str());
+            }
+            match flow.next {
+                Some(next) => {
+                    assert_eq!(
+                        next.kind,
+                        episode::Kind::Level,
+                        "{name}: the graph advances to {}, which is not a level",
+                        next.file
+                    );
+                    assert!(
+                        episode.row_for(&next.file).is_some(),
+                        "{name}: the graph advances to {}, which is not a campaign row",
+                        next.file
+                    );
+                    assert!(
+                        gobs.read(&next.file).is_some(),
+                        "{name}: the next level {} is not in the archives",
+                        next.file
+                    );
+                }
+                None => {
+                    terminals += 1;
+                    assert!(
+                        name.to_ascii_lowercase().starts_with("21"),
+                        "{name}: the graph ends the campaign on a level that is not a finale"
+                    );
+                }
+            }
+            println!(
+                "tour: {:>2}/{} {name} ({} things) -> {} -> {}",
+                i + 1,
+                levels.len(),
+                level.things.len(),
+                if film_names.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    film_names.join(" -> ")
+                },
+                flow.next.map(|n| n.file.as_str()).unwrap_or("(end of campaign)")
+            );
+        }
+        // The light spine is a run of levels whose transitions must agree with the manifest's own
+        // order, including the `DECIDE` row between level 15 and the light arm's level 16.
+        for pair in spine.windows(2) {
+            let flow = episode.flow_after(&pair[0]);
+            assert_eq!(
+                flow.next.map(|n| n.file.to_ascii_lowercase()),
+                Some(pair[1].to_ascii_lowercase()),
+                "the light spine continues to {}, but finishing {} leads to {:?}",
+                pair[1],
+                pair[0],
+                flow.next.map(|n| n.file.as_str())
+            );
+        }
+        // The decision row itself: level 15 leads through two films to the light arm's level 16.
+        let decide = episode.flow_after("15maw.jkl");
+        assert_eq!(
+            decide.films.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            ["38a.smk", "39a.smk"],
+            "the decision's two films are not both in the transition"
+        );
+        assert_eq!(
+            decide.next.map(|n| n.file.as_str()),
+            Some("16aEscapeShip.jkl"),
+            "the neutral arm of the decision is not the light one"
+        );
+        assert_eq!(terminals, 2, "the campaign should end on two finale levels (light and dark)");
+        assert_eq!(script_errors, 0, "the tour's level scripts took {script_errors} error(s)");
+        println!(
+            "tour: {} level file(s), {} thing(s), {} cutscene(s), {} light-spine hop(s), 0 script errors, {missing_sounds} sound(s) missing from retail data",
+            levels.len(),
+            total_things,
+            films,
+            spine.len().saturating_sub(1)
+        );
+        println!("--- tour check passed ---");
         return;
     }
 
@@ -6990,7 +7157,15 @@ fn main() {
                 continue;
             }
             checked += 1;
-            for (verb, n) in run_level(&gobs, &level, true) {
+            let report = run_level(&gobs, &level, true);
+            errors += report.errors;
+            if report.missing_sounds > 0 {
+                println!(
+                    "cog check: {name}: {} sound(s) a script asked for are not in the archives (retail gap)",
+                    report.missing_sounds
+                );
+            }
+            for (verb, n) in report.stubs {
                 *stubs.entry(verb).or_default() += n;
             }
         }
@@ -8338,7 +8513,7 @@ fn main() {
                 let Some(raw) = gobs.read(name) else { continue };
                 let level = jkl::parse(&String::from_utf8_lossy(&raw));
                 println!("--- {name} ---");
-                for (verb, n) in run_level(&gobs, &level, true) {
+                for (verb, n) in run_level(&gobs, &level, true).stubs {
                     *stubbed.entry(verb).or_default() += n;
                 }
             }
@@ -8351,7 +8526,7 @@ fn main() {
             println!("{}", all.join(", "));
             return;
         }
-        run_level(&gobs, &world.level, false);
+        let _ = run_level(&gobs, &world.level, false);
         return;
     }
 
@@ -9397,35 +9572,9 @@ fn main() {
         let _ = SHOT_AT.set(vantage);
     }
 
-    // Silent by default. Audio is noise in every test run and one flag away for a playtest, and asking for
-    // it explicitly is the only way to be sure a capture does not blast the room. `--sound-on` (or
-    // `BK_SOUND=1`) turns it back on; `--mute` and `BK_MUTE=1` still force it off.
-    let audible = sound_on || std::env::var("BK_SOUND").is_ok_and(|v| !v.is_empty() && v != "0");
-    let forced_off = muted_flag || std::env::var("BK_MUTE").is_ok_and(|v| !v.is_empty() && v != "0");
-    // `--audio-state`: report the decision and stop, before any audio device exists. This is how the mute
-    // gets verified without a single sample reaching the speakers — checking the intent by *playing* it is
-    // what made noise twice.
-    if audio_state {
-        println!(
-            "audio-state: {} (sound-on flag {sound_on}, mute flag {muted_flag}, capture {}), gain {:.3}",
-            if forced_off || !audible { "muted" } else { "on" },
-            shot.is_some() || shot_at.is_some(),
-            if forced_off || !audible { 0.0 } else { env_f32("BK_VOLUME", 0.05) }
-        );
-        println!("--- audio-state check passed ---");
-        return;
-    }
-    MUTED.store(forced_off || !audible, std::sync::atomic::Ordering::Relaxed);
-    println!(
-        "audio: {} (--sound-on to hear it, --mute to force silence)",
-        if muted() { "muted" } else { "on" }
-    );
-
-    let menus = load_menus(&game).unwrap_or_default();
-    // The boot screen: retail opens on its main menu, and this build now does too when it is being
-    // *played*. Every flag that drives frames is a capture or a gate — those want the level, not a
-    // menu in front of it — and an install whose executable cannot supply the menu tables keeps the
-    // old straight-into-the-level behaviour rather than showing a screen that cannot draw or close.
+    // A capture or a probe is not a play session: it wants frames, not sound. This used to be the
+    // release default too — a build that starts silent reads as broken — so the audio decision keys
+    // on it instead: a play session is audible, a capture is quiet unless `--sound-on` asks.
     let capture = shot.is_some()
         || shot_at.is_some()
         || overview
@@ -9438,6 +9587,38 @@ fn main() {
         || sim
         || complete_after.is_some()
         || play_cutscene.is_some();
+    let force_sound = sound_on || std::env::var("BK_SOUND").is_ok_and(|v| !v.is_empty() && v != "0");
+    let forced_off = muted_flag || std::env::var("BK_MUTE").is_ok_and(|v| !v.is_empty() && v != "0");
+    let (audio_on, gain) = audio_plan(capture, force_sound, forced_off);
+    // `--audio-state`: report the decision and stop, before any audio device exists. This is how the
+    // decision is verified without a single sample reaching the speakers, and it asserts the three
+    // outcomes a release depends on: play is audible, captures are quiet, `--mute` always wins.
+    if audio_state {
+        println!(
+            "audio-state: {} (capture {capture}, sound-on {force_sound}, mute {forced_off}), gain {gain:.3}",
+            if audio_on { "on" } else { "muted" }
+        );
+        let play = audio_plan(false, false, false);
+        let capture_quiet = audio_plan(true, false, false);
+        let mute = audio_plan(false, false, true);
+        assert!(
+            play.0 && !capture_quiet.0 && !mute.0,
+            "audio plan: play {play:?}, capture {capture_quiet:?}, mute {mute:?}"
+        );
+        println!("--- audio-state check passed ---");
+        return;
+    }
+    MUTED.store(!audio_on, std::sync::atomic::Ordering::Relaxed);
+    println!(
+        "audio: {} (gain {gain:.2}; --mute silences it, --sound-on forces it in a capture)",
+        if muted() { "muted" } else { "on" }
+    );
+
+    let menus = load_menus(&game).unwrap_or_default();
+    // The boot screen: retail opens on its main menu, and this build now does too when it is being
+    // *played*. Every flag that drives frames is a capture or a gate — those want the level, not a
+    // menu in front of it — and an install whose executable cannot supply the menu tables keeps the
+    // old straight-into-the-level behaviour rather than showing a screen that cannot draw or close.
     // `BK_FORCE_SCREEN=1` opens the force-power screen at boot, with two powers seeded, so the panel
     // can be photographed without a player clicking the pause menu. A capture aid, like `BK_TALLY`.
     let force_screen_shot = std::env::var_os("BK_FORCE_SCREEN").is_some();
@@ -9658,13 +9839,19 @@ struct FlowPlan {
     /// The level New Game starts: the first level of the first single-player episode, which is also
     /// what a bare `cargo run` loads. `level` moves with the campaign; this does not.
     first: String,
-    /// The cutscene that plays on completion, if the graph names one.
-    cut: Option<String>,
+    /// The cutscenes that play on completion, in order. A level can lead through more than one
+    /// film: the campaign's mid-game `DECIDE` row sits between level 15's film and the chosen
+    /// path's film, so the transition is a queue rather than a single file.
+    cuts: Vec<String>,
     /// The cutscenes that play **before** this level. Only the campaign start fills this: the
     /// opening film is the one row no forward walk reaches (`03-04a.smk` -> level 1).
     pre: Vec<String>,
     /// The level that loads after that.
     next: Option<String>,
+    /// Set once the completion queue above has played out (immediately for a level that leads
+    /// straight to another level). `queue_next_level` waits on it, so a two-film transition cannot
+    /// swap the level halfway through its films.
+    films_done: bool,
     /// Whether to actually swap the loaded world (see [`swap_level`] for the boundary).
     swap: bool,
 }
@@ -9716,20 +9903,44 @@ struct CaptureMode(bool);
 /// The tally screen's base, `jkGuiSingleTally_Show`.
 const TALLY_SCREEN: u32 = 0x531530;
 
-/// When the level's scripts call `jkEndLevel`, play the graph's cutscene and name the level that
-/// follows it. The level swap itself is not implemented — the world is built at startup — so this
-/// stops at the film, which is the part a player actually sees.
+/// The next move for the completion film queue. Pure so the two-film ordering can be tested
+/// without a window: a running film is waited on, a finished one is dropped (its resource goes away
+/// at the end of the frame) and the **next** film starts on the following frame, and `Done` is only
+/// reported when the queue is empty — which is what [`FlowPlan::films_done`] hands to the level swap.
+#[derive(Debug, PartialEq, Eq)]
+enum FilmStep {
+    Wait,
+    DropFinished,
+    Play(String),
+    Done,
+}
+
+fn film_step(cuts: &[String], playing: Option<bool>) -> FilmStep {
+    match playing {
+        Some(false) => FilmStep::Wait,
+        Some(true) => FilmStep::DropFinished,
+        None => match cuts.first() {
+            Some(name) => FilmStep::Play(name.clone()),
+            None => FilmStep::Done,
+        },
+    }
+}
+
+/// When the level's scripts call `jkEndLevel`, play the graph's films in order and name the level
+/// that follows them. A transition can have more than one film — the campaign's `DECIDE` row sits
+/// between level 15's film and the chosen path's — so this owns a queue, and only marks the
+/// transition played once the queue and the running film are both done (see [`FlowPlan::films_done`]).
 fn watch_level_complete(
     mut commands: Commands,
     sim: Option<Res<Sim>>,
-    plan: Option<Res<FlowPlan>>,
+    plan: Option<ResMut<FlowPlan>>,
     playing: Option<Res<cutscene::Cutscene>>,
     mut overlay: Option<ResMut<Overlay>>,
     capture: Option<Res<CaptureMode>>,
     mut announced: Local<bool>,
     mut tallied: Local<bool>,
 ) {
-    let (Some(sim), Some(plan)) = (sim, plan) else { return };
+    let (Some(sim), Some(mut plan)) = (sim, plan) else { return };
     if !sim.world.borrow().level_complete {
         return;
     }
@@ -9738,7 +9949,11 @@ fn watch_level_complete(
         println!(
             "level {} complete -> cutscene {}, then {}",
             plan.level,
-            plan.cut.as_deref().unwrap_or("(none)"),
+            if plan.cuts.is_empty() {
+                "(none)".to_string()
+            } else {
+                plan.cuts.join(" -> ")
+            },
             plan.next.as_deref().unwrap_or("(end of campaign)")
         );
     }
@@ -9772,18 +9987,26 @@ fn watch_level_complete(
     if overlay.as_ref().is_some_and(|overlay| overlay.menu.is_some()) {
         return;
     }
-    if playing.is_some() {
-        return;
-    }
-    let Some(name) = plan.cut.clone() else { return };
-    let dll = plan.game.join("SMACKW32.DLL");
-    let file = plan.game.join("Resource").join("VIDEO").join(&name);
-    match cutscene::Cutscene::load(&dll, &file, 0) {
-        Some(played) => {
-            println!("cutscene: playing {name}, {} frames", played.total);
-            commands.insert_resource(played);
+    // A film that is still running holds the queue. When it ends its resource is dropped **now** and
+    // the next film starts on the following frame, so `queue_next_level` can never observe "nothing
+    // playing" while a film is still queued — which would skip the second half of a two-film
+    // transition.
+    match film_step(&plan.cuts, playing.as_ref().map(|playing| playing.finished)) {
+        FilmStep::Wait => {}
+        FilmStep::Done => plan.films_done = true,
+        FilmStep::DropFinished => commands.remove_resource::<cutscene::Cutscene>(),
+        FilmStep::Play(name) => {
+            plan.cuts.remove(0);
+            let dll = plan.game.join("SMACKW32.DLL");
+            let file = plan.game.join("Resource").join("VIDEO").join(&name);
+            match cutscene::Cutscene::load(&dll, &file, 0) {
+                Some(played) => {
+                    println!("cutscene: playing {name}, {} frames", played.total);
+                    commands.insert_resource(played);
+                }
+                None => println!("cutscene: could not decode {}", file.display()),
+            }
         }
-        None => println!("cutscene: could not decode {}", file.display()),
     }
 }
 
@@ -9830,7 +10053,6 @@ fn play_intro_films(
 /// [`swap_level`] so the reload does not run in the middle of another system's borrows.
 fn queue_next_level(
     plan: Option<Res<FlowPlan>>,
-    playing: Option<Res<cutscene::Cutscene>>,
     sim: Option<Res<Sim>>,
     mut pending: ResMut<PendingLevel>,
     mut asked: Local<bool>,
@@ -9843,12 +10065,11 @@ fn queue_next_level(
     if !sim.world.borrow().level_complete {
         return;
     }
-    // The film is what holds the level change. When the graph names one, it must exist and
-    // have shown every frame; a level with no film has nothing to wait for.
-    match (&playing, &plan.cut) {
-        (Some(playing), _) if playing.finished => {}
-        (None, None) => {}
-        _ => return,
+    // The transition's films hold the level change: `watch_level_complete` sets `films_done` only
+    // when the queue and the running film are both finished, so a level that plays two films (the
+    // campaign's decision) cannot swap halfway through.
+    if !plan.films_done {
+        return;
     }
     let Some(next) = plan.next.clone() else { return };
     *asked = true;
@@ -9906,15 +10127,19 @@ fn swap_level(world: &mut bevy::prelude::World) {
     world.insert_resource(next);
     if let Some(mut plan) = world.get_resource_mut::<FlowPlan>() {
         plan.level = name.clone();
-        let (cut, after) = episode
+        let (cuts, after) = episode
             .map(|d| episode::parse(&String::from_utf8_lossy(&d)))
             .map(|e| {
-                let (film, level) = e.flow_after(&name);
-                (film.map(|s| s.file.clone()), level.map(|s| s.file.clone()))
+                let flow = e.flow_after(&name);
+                (
+                    flow.films.iter().map(|s| s.file.clone()).collect::<Vec<_>>(),
+                    flow.next.map(|s| s.file.clone()),
+                )
             })
-            .unwrap_or((None, None));
-        plan.cut = cut;
+            .unwrap_or((Vec::new(), None));
+        plan.cuts = cuts;
         plan.next = after;
+        plan.films_done = false;
     }
     // The same startup path, now that `World` holds the new level.
     // The film is over: give the screen back to the HUD of the level that just loaded. The
@@ -11856,11 +12081,23 @@ fn take_item_with_script(
     Some((cog_name, bins))
 }
 
+/// What one `run_level` pass found: the verbs nothing answers, plus the counts a gate reports on.
+/// The stubs are a to-do list, and a label that errored is a defect; a sound the archives do not
+/// hold is a **retail data gap** (the original engine ignored it too), so it is reported, not failed.
+struct RunReport {
+    stubs: std::collections::BTreeMap<String, usize>,
+    /// Labels that failed to run, and the deep pass's failures. The engine's own scripts should
+    /// never take an error arm.
+    errors: usize,
+    /// Script-requested sounds that no archive holds: retail data the engine also skipped.
+    missing_sounds: usize,
+}
+
 fn run_level(
     gobs: &gob::GobSet,
     level: &jkl::Level,
     quiet: bool,
-) -> std::collections::BTreeMap<String, usize> {
+) -> RunReport {
 
     let world = runtime::Runtime::handle(level);
     if !quiet {
@@ -11995,7 +12232,14 @@ fn run_level(
             match vm.run_label(script, &label) {
                 Ok(_) => deep_ran += 1,
                 Err(e) if e == cog::WAITING => deep_waiting += 1,
-                Err(_) => deep_errors += 1,
+                Err(e) => {
+                    deep_errors += 1;
+                    // Keep the first few, the way the message-pump errors are kept: a failing label
+                    // is a defect to read, not only a count.
+                    if errors.len() < 8 {
+                        errors.push(format!("{name} {label}: {e}"));
+                    }
+                }
             }
         }
         for (verb, n) in &vm.trace.calls {
@@ -12140,7 +12384,12 @@ fn run_level(
     for e in errors.iter().take(8) {
         println!("  {e}");
     }
-    silent_verbs
+    RunReport {
+        stubs: silent_verbs,
+        // A label that errored, in the message pump or in the deep pass, is a real failure.
+        errors: errors.len() + deep_errors,
+        missing_sounds: missing.len(),
+    }
 }
 
 /// `--walk` selections: a frame count for the selected level, or every level.
@@ -19951,15 +20200,40 @@ fn muted() -> bool {
     MUTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Master gain for everything audible: zero while muted, otherwise a deliberately quiet default
-/// (`BK_VOLUME` overrides). The game mixes loud, and a test run that makes any sound at all should not be
-/// unpleasant, so this is 5% (-26 dB) rather than 100%.
+/// Master gain for everything audible: zero while muted, otherwise `BK_VOLUME`. This used to
+/// default to 5% (-26 dB) because every dev run made noise; a release has to sound like the game,
+/// and captures and probes are silent by [`audio_plan`] now.
 fn sound_gain() -> f32 {
     if muted() {
         0.0
     } else {
-        env_f32("BK_VOLUME", 0.05).clamp(0.0, 1.0)
+        env_f32("BK_VOLUME", AUDIO_GAIN).clamp(0.0, 1.0)
     }
+}
+
+/// The default master gain: the engine's own mixer scale (`snd::FINAL_SCALE` 0.75), so the mix is
+/// the loudness retail produces rather than a dev-quiet fraction of it.
+const AUDIO_GAIN: f32 = 0.75;
+
+/// The audio decision for one run: whether it makes sound, and at what master gain.
+///
+/// `capture` is a run that drives frames rather than a play session (a shot, a gate, a probe);
+/// those stay silent so a test never blasts the room, and `--sound-on`/`BK_SOUND` is the explicit
+/// override. `muted` is `--mute`/`BK_MUTE` and always wins. A play session is audible by default —
+/// a release build that starts silent reads as broken.
+fn audio_plan(capture: bool, sound_on: bool, muted: bool) -> (bool, f32) {
+    if muted {
+        return (false, 0.0);
+    }
+    let audible = !capture || sound_on;
+    (
+        audible,
+        if audible {
+            env_f32("BK_VOLUME", AUDIO_GAIN).clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+    )
 }
 
 fn env_f32(key: &str, fallback: f32) -> f32 {
@@ -21427,6 +21701,45 @@ fn template_counts(level: &jkl::Level) -> Vec<(String, usize)> {
     let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     ranked
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::audio_plan;
+
+    /// The release decision: a play session is audible, a capture is quiet, `--sound-on` overrides
+    /// the capture, and `--mute` always wins. A silent-by-default build is what this replaced.
+    #[test]
+    fn play_is_audible_captures_are_quiet_and_mute_always_wins() {
+        let play = audio_plan(false, false, false);
+        assert!(play.0, "a play session made no sound");
+        assert!(play.1 > 0.0, "a play session had no gain");
+        assert!(!audio_plan(true, false, false).0, "a capture was audible");
+        assert!(audio_plan(true, true, false).0, "--sound-on did not force a capture audible");
+        assert_eq!(audio_plan(false, false, true), (false, 0.0), "--mute did not win");
+        assert_eq!(audio_plan(true, true, true), (false, 0.0), "--mute lost to --sound-on");
+    }
+}
+
+#[cfg(test)]
+mod transition_tests {
+    use super::{FilmStep, film_step};
+
+    /// The two-film transition (the campaign's decision): a queued film is started, a running one
+    /// waited on, a finished one dropped first, and `Done` only once nothing is left — which is the
+    /// condition the level swap waits on, so the second film cannot be skipped.
+    #[test]
+    fn a_two_film_transition_plays_both_films_before_it_is_done() {
+        let queue = vec!["38a.smk".to_string(), "39a.smk".to_string()];
+        assert_eq!(film_step(&queue, None), FilmStep::Play("38a.smk".into()));
+        assert_eq!(film_step(&queue, Some(false)), FilmStep::Wait, "a running film was skipped");
+        assert_eq!(film_step(&queue, Some(true)), FilmStep::DropFinished);
+        // Its resource is gone now; one film is left.
+        let rest = vec!["39a.smk".to_string()];
+        assert_eq!(film_step(&rest, None), FilmStep::Play("39a.smk".into()));
+        assert_eq!(film_step(&rest, Some(true)), FilmStep::DropFinished);
+        assert_eq!(film_step(&[], None), FilmStep::Done);
+    }
 }
 
 #[cfg(test)]

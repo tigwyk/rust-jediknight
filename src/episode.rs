@@ -118,17 +118,43 @@ impl Episode {
         }
         found
     }
-    /// What finishing `level_file` leads to: the cutscene the graph names (if the very next row
-    /// is one) and the level that follows it.
-    pub fn flow_after(&self, level_file: &str) -> (Option<&Sequence>, Option<&Sequence>) {
-        let Some(row) = self.row_for(level_file) else { return (None, None) };
-        let Some(after) = self.next_row(row.id) else { return (None, None) };
-        if after.kind == Kind::Cut {
-            (Some(after), self.next_row(after.id))
-        } else {
-            (None, Some(after))
+    /// What finishing `level_file` leads to: the films the graph plays first, in order, and the
+    /// level that loads after them. A level can lead through more than one film — the mid-campaign
+    /// `DECIDE` row sits between its two — and the decision itself is a row, not a level.
+    pub fn flow_after(&self, level_file: &str) -> FlowAfter<'_> {
+        let mut flow = FlowAfter::default();
+        let Some(row) = self.row_for(level_file) else { return flow };
+        let mut at = row.goto_a;
+        let mut steps = 0;
+        while at >= 0 && steps <= self.sequences.len() {
+            steps += 1;
+            let Some(next) = self.sequences.iter().find(|s| s.id == at) else { break };
+            match next.kind {
+                Kind::Cut => {
+                    flow.films.push(next);
+                    at = next.goto_a;
+                }
+                // The campaign's own fork after the Maw. This build has no choice screen, so the
+                // neutral arm is the light one (`gotoA`); the dark arm is `gotoB`.
+                Kind::Decide => at = next.goto_a,
+                Kind::Level => {
+                    flow.next = Some(next);
+                    break;
+                }
+                Kind::Other => break,
+            }
         }
+        flow
     }
+}
+
+/// The answer to "what does finishing this level lead to": the films in play order, and the level
+/// that loads after them (`None` at the end of the campaign). A straight level-to-level step has
+/// no films.
+#[derive(Debug, Default)]
+pub struct FlowAfter<'a> {
+    pub films: Vec<&'a Sequence>,
+    pub next: Option<&'a Sequence>,
 }
 
 pub fn parse(text: &str) -> Episode {
@@ -223,9 +249,12 @@ mod tests {
         let before: Vec<&str> = e.flow_before("01narshadda.jkl").iter().map(|s| s.file.as_str()).collect();
         assert_eq!(before, ["03-04a.smk"], "level 1 should be preceded by its intro film");
         // The film after a level is a different question, and still answered the same way.
-        let (cut, next) = e.flow_after("01narshadda.jkl");
-        assert_eq!(cut.map(|s| s.file.as_str()), Some("06a.smk"));
-        assert_eq!(next.map(|s| s.file.as_str()), Some("02narshadda.jkl"));
+        let flow = e.flow_after("01narshadda.jkl");
+        assert_eq!(
+            flow.films.iter().map(|s| s.file.as_str()).collect::<Vec<_>>(),
+            ["06a.smk"]
+        );
+        assert_eq!(flow.next.map(|s| s.file.as_str()), Some("02narshadda.jkl"));
         // Level 2 is preceded by `06a.smk` — the film level 1 ends with, which `flow_after` already
         // plays. That overlap is why the app only asks `flow_before` at the campaign start: asking on
         // every load would play each film twice.
@@ -249,12 +278,51 @@ mod tests {
         assert!(e.next_row(next.id).is_none(), "the campaign ends at -1");
 
         // And the same answer through the helper the app uses on completion.
-        let (film, level) = e.flow_after("01narshadda.jkl");
-        assert_eq!(film.map(|s| s.file.as_str()), Some("06a.smk"));
-        assert_eq!(level.map(|s| s.file.as_str()), Some("02narshadda.jkl"));
+        let flow = e.flow_after("01narshadda.jkl");
+        assert_eq!(
+            flow.films.iter().map(|s| s.file.as_str()).collect::<Vec<_>>(),
+            ["06a.smk"]
+        );
+        assert_eq!(flow.next.map(|s| s.file.as_str()), Some("02narshadda.jkl"));
         // A level whose successor is another level has no film in between.
-        let (none, straight) = e.flow_after("02narshadda.jkl");
-        assert!(none.is_none());
-        assert!(straight.is_none(), "the test graph ends there");
+        let straight = e.flow_after("02narshadda.jkl");
+        assert!(straight.films.is_empty());
+        assert!(straight.next.is_none(), "the test graph ends there");
+    }
+
+    /// The campaign's mid-game decision: two films and a `DECIDE` row sit between level 15 and the
+    /// next level, and the decision's two arms are the light and dark paths. The port has no choice
+    /// screen, so `flow_after` takes the neutral arm (`gotoA`, light) — and still keeps both films so
+    /// the app plays the whole transition. This is the shipped manifest's own shape (row 143).
+    #[test]
+    fn a_decision_row_is_crossed_and_its_films_are_kept_in_order() {
+        let e = parse(
+            "\"Ep\"\nTYPE  1\n\
+             141: 1 14 LEVEL  15maw.jkl         0 0 142 -1\n\
+             142: 1 14 CUT    38a.smk            0 0 143 -1\n\
+             143: 1 14 DECIDE 38a.smk            0 0 150 600\n\
+             150: 1 15 CUT    39a.smk            0 0 151 -1\n\
+             151: 1 15 LEVEL  16aEscapeShip.jkl 0 0 160 152\n\
+             160: 1 16 CUT    41-42a.smk         0 0 161 -1\n\
+             161: 1 16 LEVEL  17asarris.jkl      0 0 -1  -1\n\
+             600: 1 15 CUT    54a.smk            0 0 601 -1\n\
+             601: 1 15 LEVEL  16bEscapeShip.jkl 0 0 610 602\n\
+             610: 1 16 CUT    41dsa.smk          0 0 611 -1\n\
+             611: 1 16 LEVEL  17bsarris.jkl      0 0 -1  -1\n",
+        );
+        let flow = e.flow_after("15maw.jkl");
+        assert_eq!(
+            flow.films.iter().map(|s| s.file.as_str()).collect::<Vec<_>>(),
+            ["38a.smk", "39a.smk"],
+            "the film before the decision and the chosen arm's film both play"
+        );
+        assert_eq!(
+            flow.next.map(|s| s.file.as_str()),
+            Some("16aEscapeShip.jkl"),
+            "the neutral arm is the light one"
+        );
+        // The dark arm is still walkable once its own level is the one being finished.
+        let dark = e.flow_after("16bEscapeShip.jkl");
+        assert_eq!(dark.next.map(|s| s.file.as_str()), Some("17bsarris.jkl"));
     }
 }

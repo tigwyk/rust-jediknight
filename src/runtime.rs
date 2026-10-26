@@ -5683,13 +5683,18 @@ impl Runtime {
             // `SyncScores`: multiplayer score replication. Single-player has no scores to sync, and
             // the engine's own arm does nothing when `sithNet_isMulti` is clear.
             "syncscores" => Value::Nil,
-            // `jkPrintUNIString(player, key)`: the engine puts the string in the message area, the
-            // same place `jkStringOutput` sends a composed line. The key is resolved by the app.
+            // `jkPrintUNIString(thing, key)`: the engine puts the string in the message area, the
+            // same place `jkStringOutput` sends a composed line. The first argument is the thing the
+            // line belongs to — every shipped caller passes the player — and the **second** is the
+            // `.uni` key, either a name or its numeric index (`jkPrintUNIString(player, bin)` in
+            // `pow_shields.cog` names bin 60, "Shield Recharge"). Reading the first argument printed
+            // `COG_00000` — the player's own thing index — where the pickup's name belonged.
             "jkprintunistring" => {
-                let line = match args.first() {
+                let key_at = if args.len() >= 2 { 1 } else { 0 };
+                let line = match args.get(key_at) {
                     Some(Value::Str(s)) => s.clone(),
-                    _ if !args.is_empty() => format!("COG_{:05}", num(0) as i64),
-                    _ => String::new(),
+                    Some(_) => format!("COG_{:05}", num(key_at) as i64),
+                    None => String::new(),
                 };
                 if !line.is_empty() {
                     self.prints.push(line.clone());
@@ -6524,6 +6529,15 @@ mod tests {
         // Script text is collected, not dropped.
         rt.call("jkPrintUNIString", &[Value::Str("GUI_NOPE".into())]);
         assert_eq!(rt.prints, vec!["GUI_NOPE".to_string()]);
+        // The shipped two-argument form is `jkPrintUNIString(player, key)`: the **second** argument
+        // names the `.uni` key (`jkPrintUNIString(player, bin)` in `pow_shields.cog` names bin 60,
+        // "Shield Recharge"). Reading the first printed the player's thing index, which is how a
+        // pickup on level 1 put `COG_00000` across the top of the screen.
+        rt.call("jkPrintUNIString", &[Value::Num(0.0), Value::Num(60.0)]);
+        assert_eq!(rt.prints.last().map(String::as_str), Some("COG_00060"));
+        assert_eq!(rt.hud_line(), Some("COG_00060"));
+        rt.call("jkPrintUNIString", &[Value::Num(0.0), Value::Str("GUI_NOPE".into())]);
+        assert_eq!(rt.prints.last().map(String::as_str), Some("GUI_NOPE"));
     }
 
     #[test]
