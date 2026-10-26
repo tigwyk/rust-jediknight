@@ -29,7 +29,7 @@ here has been pushed or published.
   registry auto-discovery), through the GUI (right game pre-filled), and through install →
   `--check` → shortcut creation → uninstall, all to temporary folders.
 - [x] **Known issues.** The release note's "deliberately rough or not there" section, plus the
-  README's "Open for 0.1" list.
+  README's status and known-limits section.
 - [x] **Check record.** `--gates` 0 of 61 failed, 0 skipped (windowed) / 9 skipped
   (`BK_HEADLESS=1`); `cargo test --bins` 132 passed.
 - [x] **CI.** `.github/workflows/ci.yml` runs on windows-latest with the Cargo MSRV:
