@@ -11,6 +11,7 @@ mod cog;
 mod collide;
 mod episode;
 mod force;
+mod gamepath;
 mod gob;
 mod hud;
 mod jks;
@@ -46,8 +47,6 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
 use std::collections::HashMap;
 use std::path::PathBuf;
-
-const DEFAULT_GAME: &str = r"G:\Games\Star Wars Jedi Knight - Dark Forces 2";
 
 /// Everything loaded from disk, handed to Bevy as a resource.
 #[derive(Resource)]
@@ -346,7 +345,11 @@ fn arg_value<'a>(args: &'a [String], i: &mut usize) -> Option<&'a String> {
 }
 
 fn main() {
-    let mut game = PathBuf::from(DEFAULT_GAME);
+    // `--game` wins over everything; otherwise `gamepath` finds the retail install (registry,
+    // saved path, usual GOG folders) instead of a hardcoded developer path.
+    let mut game_arg: Option<PathBuf> = None;
+    let mut find_game = false;
+    let mut set_game: Option<String> = None;
     let mut level_name: Option<String> = None;
     // --start: boot into the level instead of the main menu.
     let mut start_in_level = false;
@@ -921,8 +924,16 @@ fn main() {
             "--game" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
-                    game = PathBuf::from(v);
+                    game_arg = Some(PathBuf::from(v));
                 }
+            }
+            // Print where the install is (and how it was found), then exit: the installer and a
+            // user debugging a bad install both want this without loading the game.
+            "--find-game" => find_game = true,
+            // Check and save a path once, so later launches need no `--game`.
+            "--set-game" => {
+                i += 1;
+                set_game = args.get(i).cloned();
             }
             "--level" => {
                 i += 1;
@@ -939,6 +950,47 @@ fn main() {
 
     // A level named on the command line may be `03katarn`, `03katarn.jkl` or `jkl\03katarn.jkl`.
     let level_name = level_name.map(|n| level_arg(&n));
+
+    // `--find-game` and `--set-game` are setup utilities: they answer and exit before any game
+    // data is touched.
+    if find_game {
+        match gamepath::resolve(game_arg.as_deref()) {
+            Ok(found) => {
+                println!("game: {}", found.path.display());
+                println!("found by: {}", found.source);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(dir) = set_game.as_deref().map(std::path::Path::new) {
+        match gamepath::save(dir) {
+            Ok(file) => {
+                println!("saved {} as the install (in {})", dir.display(), file.display());
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    // A release build ships no developer path: an explicit `--game` is validated, otherwise the
+    // saved path / GOG registry / usual folders are searched and the result is said out loud once.
+    let found = match gamepath::resolve(game_arg.as_deref()) {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    if game_arg.is_none() {
+        println!("game: {} (found by {})", found.path.display(), found.source);
+    }
+    let game = found.path;
 
     // `--gates`: run every documented gate in its own process and report what each one exercised.
     // A gate that never prints `mode: window` asserted on parsed data or the runtime and opened no
