@@ -3,12 +3,15 @@
 # The port is Windows-only, so the runner is windows-latest. It enforces the MSRV pinned in
 # Cargo.toml, runs the unit suite (the gates under --gates need a retail game install, which CI
 # does not have and must not download), builds the 32-bit film helper, and produces the native
-# setup executable as a downloadable artifact.
+# setup executable as a downloadable artifact. When a version tag (v*) is pushed, a second job
+# creates a GitHub release and attaches that setup to it.
+
 name: CI
 
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -84,3 +87,50 @@ jobs:
           path: dist/bevi-knight-*-setup.exe
           if-no-files-found: error
           retention-days: 14
+  # On a version tag the artifact from the windows job becomes the release asset. The tag must
+  # match Cargo.toml, so a release cannot ship a setup whose version disagrees with its name.
+  release:
+    name: Attach the setup to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"$' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($tag -ne "v$version") { throw "tag $tag does not match Cargo.toml version $version" }
+          Write-Host "tag $tag matches Cargo.toml version $version"
+
+      - name: Download the setup built by the windows job
+        uses: actions/download-artifact@v7
+        with:
+          name: bevi-knight-setup
+          path: dist
+
+      - name: Create the release and attach the setup
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $version = $tag.Substring(1)
+          $asset = "dist/bevi-knight-$version-setup.exe"
+          if (-not (Test-Path -LiteralPath $asset)) { throw "missing $asset" }
+          $repo = "https://github.com/${{ github.repository }}"
+          $notes = "Windows installer attached: bevi-knight-$version-setup.exe.`n`n" +
+            "Requires your own retail GOG install of Star Wars Jedi Knight: Dark Forces II. No game data is included; the setup finds the GOG install, installs per user and registers an uninstaller in Apps & Features.`n`n" +
+            "README: $repo/blob/$tag/README.md`n" +
+            "Documentation and known gaps: $repo/tree/$tag/docs"
+          $arguments = @($tag, $asset, '--verify-tag', '--title', "bevi-knight $version", '--notes', $notes)
+          if ($tag -match '-') { $arguments += '--prerelease' }
+          & gh release create @arguments
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+          Write-Host "released $tag with $asset"

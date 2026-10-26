@@ -909,3 +909,11 @@ engineering content (screens gallery, unit-by-unit status, flags, reverse-engine
 verification detail, layout, camera recovery) moved verbatim to docs/engineering.md, with the stale
 hardcoded Steam path replaced by the discovery order. 205-line README; 129 doc links still resolve;
 CI green and setup artifact rebuilt.
+
+## Releases from CI (round 210)
+
+Pushing a v* tag now triggers the CI workflow again; after the Windows job builds the setup, a
+release job checks that the tag matches Cargo.toml's version, downloads the artifact and runs
+gh release create --verify-tag with the setup attached (hyphenated tags become pre-releases).
+The README points at Releases first and keeps the CI artifact and source build as fallbacks. The
+v0.1.0 tag predates this job, so it has no attached asset yet; the next tag is the first live run.

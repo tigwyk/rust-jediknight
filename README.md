@@ -57,18 +57,22 @@ player's own shield, health, force and battery values.*
 
 ## Install
 
-The Windows setup is built by CI on every push. Grab the newest one:
+CI builds the setup on every push, and every **version tag produces a GitHub release with the
+Windows setup attached**. Download the newest one from
+[Releases](https://github.com/tigwyk/rust-jediknight/releases).
 
-1. Open the latest green [CI run](https://github.com/tigwyk/rust-jediknight/actions/workflows/ci.yml)
-   (Actions → **CI** → newest run → **Artifacts**).
-2. Download **`bevi-knight-setup`**, unzip it, and run `bevi-knight-<version>-setup.exe`.
-   (Artifact downloads need a GitHub sign-in. Alternatively, [build it yourself](#build-from-source)
-   with one command.)
-3. The setup finds your GOG install from its registry entry or usual folders. If it cannot, browse
+If no release is published yet — or you want the newest unreleased build — get the
+`bevi-knight-setup` artifact from the latest green
+[CI run](https://github.com/tigwyk/rust-jediknight/actions/workflows/ci.yml) (Actions → **CI** →
+newest run → **Artifacts**; a GitHub sign-in is needed for artifact downloads), or
+[build it yourself](#build-from-source) with one command.
+
+1. Run `bevi-knight-<version>-setup.exe`.
+2. The setup finds your GOG install from its registry entry or usual folders. If it cannot, browse
    to the folder with `JK.EXE`, paste the path, or drag the folder onto the window. It installs
    per-user to `%LOCALAPPDATA%\Programs\bevi-knight`, adds a Start Menu shortcut, and registers in
    **Settings → Apps**.
-4. Uninstall at any time from **Settings → Apps → bevi-knight**, or with
+3. Uninstall at any time from **Settings → Apps → bevi-knight**, or with
    `bevi-knight-uninstall.exe` in the install folder.
 
 The setup is unsigned, so Windows SmartScreen may warn the first time: **More info → Run anyway**.

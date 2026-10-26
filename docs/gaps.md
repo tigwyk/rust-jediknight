@@ -1192,3 +1192,21 @@ record moved behind it.
 
 Still open: the GitHub release has no attached setup asset yet (the README points at the CI
 artifact), plus the human playthrough caveat.
+
+**Round 210 (releases from CI):** tagging now produces the release, with the setup attached.
+
+- `.github/workflows/ci.yml` also triggers on pushed `v*` tags. The existing `windows` job builds
+  the setup as before; a second `release` job (gated on `refs/tags/v`) checks out the tag, verifies
+  the tag is `v` plus `Cargo.toml`'s version, so a release cannot ship a setup whose filename
+  disagrees with its tag, downloads the `bevi-knight-setup` artifact and runs
+  `gh release create --verify-tag` with the asset attached. Tags containing a hyphen are marked as
+  pre-releases. The release job runs on `ubuntu-latest` with only `contents: write` and
+  `actions: read`.
+- Release notes are fixed text (installer attached, retail copy required, no game data, README and
+  docs links). GitHub supplies the source zip/tarball.
+- The README's install section now points at Releases first and keeps the CI artifact and the
+  from-source path as fallbacks.
+- Not exercised by a tag yet: `v0.1.0` was pushed before this job existed, so it has no attached
+  release asset. The command assembly was tested locally (gh rejects the missing asset with a
+  non-zero exit and creates nothing); the first live run is the next tag.
+- Still open: the human playthrough caveat, and deciding whether to backfill a `v0.1.0` release.

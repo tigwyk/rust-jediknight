@@ -36,6 +36,10 @@ here has been pushed or published.
   `cargo build --locked`, the 132 unit tests, the i686 film helper, the native `setup.exe`
   artifact, and [scripts/check-docs-links.ps1](../scripts/check-docs-links.ps1). The 61 gates
   are excluded because they need a retail install.
+- [x] **Release automation.** Pushing a `v*` tag runs the same Windows job and then a release job:
+  it refuses a tag whose name is not `v` plus `Cargo.toml`'s version, downloads the setup artifact
+  and attaches it to the GitHub release (`--verify-tag`; hyphenated tags become pre-releases).
+  The next tag is its first live run - `v0.1.0` predates the job, so that release has no asset yet.
 - [x] **License.** **GPL-3.0-or-later** for code, tools and setup scripts: `LICENSE` (verbatim
   GPLv3), `NOTICE` (game/trademark/screenshot carve-out and the source-for-binaries note), and
   `license = "GPL-3.0-or-later"` in `Cargo.toml`. Contributions are inbound = outbound.
