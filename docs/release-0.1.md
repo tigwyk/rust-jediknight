@@ -156,9 +156,9 @@ cargo test --bins  130 passed
 --walk all         0 level(s) left the body in the void, worst drop 0.00
 --campaign         32 level step(s) walked, 30 distinct level file(s)
 --ends             28 of 35 level(s) name a script that calls jkEndLevel; the rest are m*/static
---goal             objective completed, level complete after 202 frames, next 02narshadda.jkl
+--goal             objective completed, level complete in ~200 frames, next 02narshadda.jkl
 --save-slots       2 slot file(s), distinct true, both read back
---force-live       rose +0.63 at level 1, +0.71 at level 4 with the same press
+--force-live       the same press lifts the body at level 1 and at level 4; gate passes
 --audio-state      on at gain 0.750 for a play session; muted for a capture
 ```
 

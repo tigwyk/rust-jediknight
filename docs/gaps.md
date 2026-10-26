@@ -1026,7 +1026,7 @@ more blockers behind the first-run ones; all are fixed and now gated.
 - **`--goal` regressed when the new system was added** — the renderer sighting probe depended on the
   scheduler's order between the probe, `walk_player` and `cull_sectors`. The probe now pins its pose
   every frame and the three systems are ordered explicitly; `--goal` passes repeatedly and reports
-  `level complete after 202 frames, next 02narshadda.jkl`.
+  `level complete in about 200 frames, next 02narshadda.jkl` (the exact frame is load-dependent).
 - Smaller fixes: `RunReport.errors` no longer double-counts deep-pass errors; the Smacker helper is
   found next to the executable's checkout as well as the cwd (`BK_SMKDEC` overrides); the declared
   MSRV is Bevy's real one, **1.97.1**; the release note's audit line now quotes the whole summary.
