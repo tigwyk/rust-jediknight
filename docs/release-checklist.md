@@ -39,7 +39,8 @@ here has been pushed or published.
 - [x] **Release automation.** Pushing a `v*` tag runs the same Windows job and then a release job:
   it refuses a tag whose name is not `v` plus `Cargo.toml`'s version, downloads the setup artifact
   and attaches it to the GitHub release (`--verify-tag`; hyphenated tags become pre-releases).
-  `v0.1.0` predates the job, so that release has no asset; `v0.1.1` is the first live run.
+  `v0.1.0` predates the job and has no attached asset; `v0.1.1` was the first live run and
+  published https://github.com/tigwyk/rust-jediknight/releases/tag/v0.1.1 with the setup attached.
 - [x] **License.** **GPL-3.0-or-later** for code, tools and setup scripts: `LICENSE` (verbatim
   GPLv3), `NOTICE` (game/trademark/screenshot carve-out and the source-for-binaries note), and
   `license = "GPL-3.0-or-later"` in `Cargo.toml`. Contributions are inbound = outbound.

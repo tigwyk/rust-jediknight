@@ -924,3 +924,10 @@ Picked the smallest real gap for a version bump: health and shields reset at eve
 because `Runtime::carry`/`adopt` did not include them. They now ride `CarryOver` clamped to the
 next level's max health and the 200 shield cap, with a round-trip test. Version 0.1.1; the tag is
 the release automation's first live run (v0.1.0 predated it).
+
+## First release from a tag (round 212)
+
+Pushed the v0.1.1 tag; the workflow built the setup and the release job published
+https://github.com/tigwyk/rust-jediknight/releases/tag/v0.1.1 with bevi-knight-0.1.1-setup.exe
+attached. Downloaded the asset back, matched its sha256 (7d3a...), installed it silently, ran
+--check and uninstalled cleanly. The release path now works without manual steps.

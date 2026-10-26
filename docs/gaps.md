@@ -1225,3 +1225,17 @@ artifact), plus the human playthrough caveat.
   Suite: **133 tests** (was 132).
 - **Version:** `0.1.1`. The tag also exercises the round-210 release automation for the first time
   (`v0.1.0` predated it), so the GitHub release should arrive with the setup attached.
+
+**Round 212 (release v0.1.1, automation live):** tagging `v0.1.1` ran the whole path for the
+first time and published the release.
+
+- The tag run's Windows job passed (133 tests, setup built), then the release job checked the tag
+  against `Cargo.toml`, downloaded the artifact and created
+  https://github.com/tigwyk/rust-jediknight/releases/tag/v0.1.1 with
+  `bevi-knight-0.1.1-setup.exe` attached (29,671,424 bytes,
+  sha256 `7d3a5879…9ac38`). No manual release step was needed.
+- The published asset was downloaded again from GitHub, hashed to match the release digest,
+  installed silently into a scratch folder, passed `--check` on level 1 and uninstalled cleanly.
+- That closes the loop the 0.1 release left open: the README's Releases link now has a real asset,
+  and the next tags keep producing them. The only remaining release caveat is unchanged - the
+  human playthrough of levels 2-21 and the dark-side ending screens.
