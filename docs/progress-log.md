@@ -857,3 +857,13 @@ the folders GOG installs to, with `JK.EXE` plus `Resource\` as the proof it is r
 leaves an uninstaller; `packaging\package.ps1` builds the zip to hand a player. Tested from the
 zip with both an explicit path and registry auto-discovery; `--gates` stays 0 of 61 and the
 suite is 132 tests.
+## A native setup.exe (round 204)
+
+The script installer became a single native Windows setup: a WinForms wizard (`packaging\Setup.cs`)
+compiled with the in-box .NET Framework C# compiler, with the game, film helper and docs embedded
+as a zip resource. It detects the GOG install, accepts a browsed/pasted/dragged game folder,
+installs per-user, saves the game path, makes Start Menu/desktop shortcuts, registers in Apps &
+Features and carries its own uninstaller (`Uninstall.cs`); `/S` switches make it scriptable.
+`packaging\build-setup.ps1` builds it to `dist\bevi-knight-<version>-setup.exe` (~28 MB) without
+Inno Setup, WiX, NSIS or Squirrel. Tested through GUI, silent install (explicit and auto-detected
+paths), installed `--check`, shortcut creation/removal and uninstall.

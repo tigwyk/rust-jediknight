@@ -1072,3 +1072,30 @@ player can install it without knowing what `--game` means.
 
 The licence, version-name and publish decisions are still the owner's (see
 `docs/release-checklist.md`); the install path itself is now found, saved and forgotten about.
+
+**Round 204 (a real Windows setup):** the PowerShell installer is replaced by **one self-contained
+`setup.exe`**, built without installing any installer framework.
+
+- `packaging/Setup.cs` is a WinForms wizard compiled by `packaging/build-setup.ps1` with the .NET
+  Framework C# compiler and UI libraries that ship with Windows (the user's machine already has
+  them; nothing is downloaded or installed to build it). It auto-detects the GOG install from the
+  registry and the usual folders, accepts a browsed, pasted or **dragged** folder, validates
+  `JK.EXE` + `Resource\`, installs to `%LOCALAPPDATA%\Programs\bevi-knight`, writes
+  `game-path.txt`, creates Start Menu/desktop shortcuts, registers an **Apps & Features** entry
+  and writes the payload (game, i686 film helper, docs) from a zip embedded as a resource.
+- `packaging/Uninstall.cs` is the installed `bevi-knight-uninstall.exe`: confirm, remove the
+  shortcuts, the Apps & Features key, the saved path and (after exit) the folder.
+- Silent/automatable: `/S /GAMEPATH="<folder>" /DIR="<dir>" /NOSHORTCUTS`, or `/uninstall`; the
+  silent path auto-detects when `/GAMEPATH` is omitted. `BK_SETUP_LOG` redirects the setup log for
+  scripted runs.
+- `packaging/build-setup.ps1` builds the release (and film helper), generates the icon from
+  `docs/menu-main.png`, compiles the uninstaller, zips the payload, and compiles
+  `dist\bevi-knight-<version>-setup.exe` (~28 MB) with the payload embedded. The old
+  `install.ps1`/`Install.cmd`/`package.ps1` are deleted.
+- Verified by hand: the GUI opens as `bevi-knight 0.1.0 setup` with the GOG install pre-filled;
+  silent installs with an explicit path and with registry auto-discovery succeeded; the installed
+  exe found the game through its saved file and passed `--check`; the Start Menu shortcut was
+  created and removed; the uninstaller deleted the folder, shortcut and uninstall entry. The
+  binary stays at 132 tests and 61 gates (this round adds no Rust code).
+
+Still owner decisions: licence, final version name, whether to push — plus a human playthrough.

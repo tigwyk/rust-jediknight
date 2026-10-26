@@ -29,25 +29,39 @@ executable explicitly if it was moved.
 
 ## Install it (Windows, no admin rights)
 
-The Windows release zip is produced by `packaging\package.ps1` and contains `Install.cmd`:
+`packaging\build-setup.ps1` builds **one native setup executable**:
 
 ```sh
-powershell -ExecutionPolicy Bypass -File packaging\package.ps1   # writes dist\bevi-knight-<version>-windows.zip
+powershell -ExecutionPolicy Bypass -File packaging\build-setup.ps1
+# writes dist\bevi-knight-<version>-setup.exe (~28 MB: wizard + the game, film helper and docs)
 ```
 
-Unzip it and run **`Install.cmd`** (or `powershell -ExecutionPolicy Bypass -File install.ps1`).
-The installer:
+It is compiled with the C# compiler and UI libraries that ship with Windows — no Inno Setup,
+WiX, NSIS or Squirrel — so it is a normal Windows dialog rather than a script. Run it and it:
 
-- searches **GOG's registry entries and the usual GOG install folders** for *Jedi Knight*;
-- asks you to paste the folder that contains `JK.EXE` if it cannot find it, and checks it;
-- copies the port and the film helper to `%LOCALAPPDATA%\Programs\bevi-knight` (per-user, so no
-  admin rights, no registry writes and no changes to the game install);
-- saves the game path in `game-path.txt` beside the program and adds a Start Menu shortcut.
+- searches **GOG's registry entries and the usual GOG install folders** for *Jedi Knight*, and
+  pre-fills the result;
+- lets you **Browse**, paste the folder that contains `JK.EXE`, or **drag the folder onto the
+  window**, and checks it before enabling Install;
+- copies the port, the film helper and the docs to `%LOCALAPPDATA%\Programs\bevi-knight`
+  (per-user, so no admin rights and no changes to the game install);
+- saves the game path in `game-path.txt` beside the program, adds a Start Menu shortcut (and a
+  desktop one if ticked), registers an **Apps & Features** uninstall entry, and can launch the
+  game when it finishes.
 
-`Uninstall.cmd` in the install folder reverses all of it. The game itself finds the install the
-same way when the installer is not used: `--game` first, then `BK_GAME`, then `game-path.txt`
-(beside the program or in `%APPDATA%\bevi-knight\`), then the GOG registry, then the usual GOG
-folders. Two setup flags answer questions without loading the game:
+Uninstall from **Settings → Apps → bevi-knight**, or run `bevi-knight-uninstall.exe` in the
+install folder. Two switches make the setup scriptable:
+
+| switch | effect |
+|---|---|
+| `/S /GAMEPATH="<folder>" /DIR="<folder>" /NOSHORTCUTS` | silent install (omit `/GAMEPATH` to auto-detect) |
+| `/uninstall` | starts the installed uninstaller |
+
+The setup is unsigned, so Windows SmartScreen may warn the first time (More info → Run anyway);
+a code-signing certificate is what removes that. The game itself finds the install the same way
+when the setup is not used: `--game` first, then `BK_GAME`, then `game-path.txt` (beside the
+program or in `%APPDATA%\bevi-knight\`), then the GOG registry, then the usual GOG folders. Two
+setup flags answer questions without loading the game:
 
 | flag | what it does |
 |---|---|
@@ -143,12 +157,14 @@ order and continues on the light-side arm.
 
 ## Changes since `v0.1.0`
 
-- **It finds your install, and there is a Windows installer.** The game resolves `--game`,
+- **It finds your install, and there is a native Windows setup.** The game resolves `--game`,
   `BK_GAME`, a saved `game-path.txt`, GOG's registry entries and the usual GOG folders;
-  `--find-game` shows the result and `--set-game "<path>"` saves one. `packaging\package.ps1`
-  builds a zip whose `Install.cmd` searches for the retail install, asks if it cannot find it,
-  installs per-user to `%LOCALAPPDATA%\Programs\bevi-knight` and writes an uninstaller — no
-  admin rights, and the game install is not modified.
+  `--find-game` shows the result and `--set-game "<path>"` saves one. `packaging\build-setup.ps1`
+  builds one self-contained `bevi-knight-<version>-setup.exe` (a WinForms wizard compiled with
+  the compiler Windows already has) that finds the GOG install, accepts a browsed/pasted/dragged
+  game folder, installs per-user to `%LOCALAPPDATA%\Programs\bevi-knight`, creates shortcuts and
+  an Apps & Features entry, and carries its uninstaller — no admin rights, and the game install
+  is not modified.
 - **The HUD message bug is fixed.** `jkPrintUNIString(player, key)` was reading its first
   argument (the player's thing index) instead of its second (the `.uni` key), so level 1's
   first pickup printed `COG_00000` across the screen instead of "Shield Recharge". The verb
@@ -199,10 +215,11 @@ cargo test --bins  132 passed
 Also checked by hand on this build: normal launch shows the main menu and plays no film;
 the `New Game` action plays `03-04a.smk` (2500 frames) and drops into the cantina; a level
 15 completion was watched through `38a.smk` → `39a.smk` → `16aEscapeShip.jkl loaded`. The
-packaged zip was extracted and its installer run to a temporary folder both with an explicit
-game path and with auto-discovery (it found the GOG install through the registry), the
-installed executable then found the game through its saved `game-path.txt` and passed
-`--check`, and the uninstaller removed the folder and shortcuts.
+native setup was built and run silently to a temporary folder both with an explicit game path
+and with auto-discovery (it found the GOG install through the registry), the installed
+executable then found the game through its saved `game-path.txt` and passed `--check`, its
+Start Menu shortcut was created and removed, the GUI opened with the right game pre-filled,
+and the uninstaller removed the folder, shortcut and Apps & Features entry.
 
 The two screens a player spends the most time in are photographed from the running build:
 [force-powers.png](force-powers.png) (a power's level drawn beside its icon) and

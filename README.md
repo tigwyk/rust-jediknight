@@ -536,11 +536,15 @@ The game finds the retail install itself: `--game`, then `BK_GAME`, then a saved
 entries and the usual GOG folders. `--find-game` says what it found and how, and
 `--set-game "<path>"` saves a choice.
 
-For players there is a Windows installer: `packaging\package.ps1` builds
-`dist\bevi-knight-<version>-windows.zip`; unzip it and run `Install.cmd`. It searches for the
-GOG install (and asks for the folder if it cannot find one), installs per-user to
-`%LOCALAPPDATA%\Programs\bevi-knight`, saves the game path beside the program, adds a Start
-Menu shortcut, and writes an uninstaller. No admin rights; the game install is untouched.
+For players there is a **native Windows setup**: `packaging\build-setup.ps1` produces one
+self-contained `dist\bevi-knight-<version>-setup.exe` (wizard + embedded game, film helper and
+docs, ~28 MB), compiled with the C# compiler and UI libraries that ship with Windows - no
+Inno Setup, WiX, NSIS or Squirrel. It finds the GOG install (registry or usual folders),
+accepts a browsed/pasted/dragged folder, installs per-user to
+`%LOCALAPPDATA%\Programs\bevi-knight`, saves the game path beside the program, creates Start
+Menu/desktop shortcuts and an Apps & Features uninstall entry. No admin rights; the game
+install is untouched. It also takes `/S /GAMEPATH="..." /DIR="..." /NOSHORTCUTS` for silent
+installs.
 
 ```powershell
 cargo run --release                      # render the game's first level
@@ -794,7 +798,7 @@ src/rows.rs     shared text-list helpers
 src/gamepath.rs finding the retail install (saved path, GOG registry, usual GOG folders)
 src/main.rs     asset loading, mesh building, Bevy app, self-check, audit
 docs/formats.md recovered format reference + evidence + unknowns
-packaging/      install.ps1 + Install.cmd (per-user installer) and package.ps1 (release zip)
+packaging/      build-setup.ps1 + Setup.cs/Uninstall.cs (native per-user setup.exe)
 ```
 
 Tests (`cargo test`) pin the formats whose layout is easy to get subtly wrong — the
