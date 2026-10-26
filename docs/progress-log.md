@@ -893,3 +893,10 @@ every relative docs link with the new `scripts\check-docs-links.ps1`, and upload
 artifact. The 61 gates are not in CI because they require a retail install; fmt/clippy are not
 enforced yet (tree is not rustfmt-clean, clippy has warnings but no errors). The workflow only
 runs once it is pushed, so GitHub has not executed it yet.
+
+## CI ran for real (round 208)
+
+Pushed `main` and `v0.1.0` after approval. The first CI run was green in 22m45s and uploaded the
+setup artifact; it flagged the v4 actions as Node 20, so they moved to checkout@v7/cache@v6/
+upload-artifact@v7 in a00e577 and the cached rerun was green in 3m54s. The published tag stays on
+the verified release commit c941ccc; main is the CI-fixed commit after it.

@@ -1159,3 +1159,17 @@ Remaining owner actions: explicit approval to push, and the human playthrough ca
   GitHub has not run it yet - the badge in the README will only go green after the first push.
 
 Remaining owner actions: explicit approval to push, and the human playthrough caveat.
+
+**Round 208 (CI green on the first pushes):** after approval, `main` and the annotated `v0.1.0`
+tag were pushed, and GitHub Actions ran the workflow for real.
+
+- First run (cold cache): green in **22m45s**, artifact `bevi-knight-setup`
+  (29,585,772 bytes), every step passed. GitHub annotated `checkout@v4`, `cache@v4` and
+  `upload-artifact@v4` as Node 20 actions forced onto Node 24.
+- Follow-up `a00e577` bumps them to `checkout@v7`, `cache@v6`, `upload-artifact@v7` (same inputs
+  used here). The cached rerun was green in **3m54s** with the setup artifact again uploaded
+  (29,586,084 bytes).
+- Repo state: `main` = `a00e577`; `v0.1.0` = `c941ccc` (the verified release commit). The release
+  tag was not moved after publishing; its embedded setup docs are the ones built before the push.
+- The 45-minute job timeout is comfortable for a cold Bevy build; cache restores are the
+  difference between ~23 and ~4 minutes.
