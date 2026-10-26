@@ -900,3 +900,12 @@ Pushed `main` and `v0.1.0` after approval. The first CI run was green in 22m45s 
 setup artifact; it flagged the v4 actions as Node 20, so they moved to checkout@v7/cache@v6/
 upload-artifact@v7 in a00e577 and the cached rerun was green in 3m54s. The published tag stays on
 the verified release commit c941ccc; main is the CI-fixed commit after it.
+
+## The README became the front door (round 209)
+
+Rewrote the README for players: badges, status table, requirements, CI setup download and install,
+first launch, controls, troubleshooting, reporting issues, source build and docs map. The long
+engineering content (screens gallery, unit-by-unit status, flags, reverse-engineering notes,
+verification detail, layout, camera recovery) moved verbatim to docs/engineering.md, with the stale
+hardcoded Steam path replaced by the discovery order. 205-line README; 129 doc links still resolve;
+CI green and setup artifact rebuilt.

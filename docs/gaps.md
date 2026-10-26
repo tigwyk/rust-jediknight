@@ -1173,3 +1173,22 @@ tag were pushed, and GitHub Actions ran the workflow for real.
   tag was not moved after publishing; its embedded setup docs are the ones built before the push.
 - The 45-minute job timeout is comfortable for a cold Bevy build; cache restores are the
   difference between ~23 and ~4 minutes.
+
+**Round 209 (player-facing README):** the README is now the front door, and the engineering
+record moved behind it.
+
+- The README opens with badges, what the port is (and is not), a status table, requirements, the
+  CI-built setup and install/uninstall steps, first launch, an accurate controls table,
+  troubleshooting, issue-reporting guidance (including "do not attach retail game files"), build
+  instructions, verification and a documentation map. It is 205 lines instead of 894.
+- Everything else - the screenshot gallery, the unit-by-unit status, the full flag catalogue,
+  reverse-engineering notes, verification detail, "where the port stands", layout and camera
+  recovery - moved verbatim to `docs/engineering.md`, with links rewritten for its location. The
+  stale "default game path is G:\Steam\..." paragraph was replaced by the real discovery order
+  while moving it.
+- The release checklist's reference to the README's old "Open for 0.1" list now points at the
+  status/known-limits section. Docs link check: 129 relative links across 8 files resolve.
+- CI stayed green after the change (cached, 3m35s) and continued to build the setup artifact.
+
+Still open: the GitHub release has no attached setup asset yet (the README points at the CI
+artifact), plus the human playthrough caveat.
