@@ -9,8 +9,8 @@ Target: `G:\Games\Star Wars Jedi Knight - Dark Forces 2`
 (GOG, plaintext JK.EXE, image base 0x400000,
 sha256 12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44).
 
-`cargo test` -> 91 passed, 0 failed.
-`cargo clippy --release --all-targets` -> 56 warnings, no errors.
+`cargo test` -> 130 passed, 0 failed.
+`cargo clippy --release --all-targets` -> no errors; 140 warnings on the binary (150 with tests).
 
 Each flag below is a gate: it asserts on the live runtime (or the shipped data) and exits
 non-zero if the behaviour drifts. `--gates` runs the whole list, one process per flag, and says
@@ -26,7 +26,8 @@ flag                   runs       result verdict
   never created a window, a camera or a menu. Most gates are this, and this column is how you can
   tell without reading `main`.
 * **window** — the flag needed the running game, so it printed `mode: window, <screen>` first.
-  `--live-check` is the only one, because it samples the live world; it names the screen it ran
+  Nine gates are windowed: `--live-check`, `--goal`, `--save-live`, `--save-slots`, `--use-live`,
+  `--ai-live`, `--force-live`, `--force-grant` and `--tour-live`. Each names the screen it ran
   against and prints a verdict, and the sweep counts a window row with no verdict as a failure.
 
 Two flags exist to keep runs finite: `--exit-after N` (or `BK_EXIT_FRAMES=N`) quits after N frames
@@ -34,12 +35,14 @@ whatever is on screen, and `--gates` passes it to every child. A gate that forge
 ends without a verdict instead of sitting on the main menu forever — which is what five flags that
 do not exist in this binary used to do, because a hand-written flag list had invented them.
 
-`BK_SKIP_WINDOW=1` skips the one window gate and prints it as **skipped**, not as a pass. It exists
-because `--live-check` needs a display that is actually presenting: with no focused desktop the app
-sits in presentation after its setup output and never reaches the hundredth frame its verdict is
-gated on, so the sweep would hang instead of finishing. Everything else is headless and unaffected.
+`BK_HEADLESS=1` runs with no window, so the nine windowed gates cannot run: the sweep reports them
+as **skipped**, never as passes (`gates: 0 of 61 failed, 9 skipped`). `BK_SKIP_WINDOW=1` skips only
+`--live-check` and says so. The headless mode exists because `--live-check` needs a display that is
+actually presenting: with no focused desktop the app sits in presentation after its setup output and
+never reaches the hundredth frame its verdict is gated on, so the sweep would hang instead of
+finishing. Everything else is headless and unaffected.
 
-`FAILURES: 0 / 60` (`--gates`: `gates: 0 of 60 failed`; `BK_HEADLESS=1` reads `0 of 60 failed, 8 skipped` for the window-only gates; `BK_SKIP_WINDOW=1` skips `--live-check` and says so).
+`FAILURES: 0 / 61` (`--gates`: `gates: 0 of 61 failed, 0 skipped`; `BK_HEADLESS=1` reads `0 of 61 failed, 9 skipped` for the nine window-only gates; `BK_SKIP_WINDOW=1` skips `--live-check` and says so).
 
 flag                                                   exit  what it prints
 -------------------------------------------------------------------------------------------------
@@ -364,11 +367,18 @@ flag                                                   exit  what it prints
 --smk                                                    0  --- smk check passed ---
 --campaign                                               0  --- campaign check passed ---
 --transition                                             0  --- transition check passed ---
---tour                                                   0  all 25 campaign level files (28 rows on
-                                                            both arms) load, run their own scripts (0
-                                                            errors), and hand over to a real film and the
-                                                            next level; the DECIDE row's two films stay in
-                                                            order (15maw: 38a -> 39a -> 16aEscapeShip)
+--tour                                                   0  28 campaign level rows on both arms (25
+                                                             distinct files) load and run their own
+                                                             scripts (0 errors); every named film is a
+                                                             real SMK and every successor a real level;
+                                                             both finale rows and the DECIDE row's two
+                                                             films stay in order (15maw: 38a -> 39a ->
+                                                             16aEscapeShip); the dark arm walks to
+                                                             21bjerec/57a.smk
+--tour-live                                              0  21 level(s) finished and swapped in the
+                                                             running app, through the end at
+                                                             21ajerec.jkl; each transition's films are
+                                                             named and skipped in a tour run
 --save                                                   0  wrote 9320 bytes (version 6), round-tripped
                                                              the state too: health 37, +1.25 along x,
                                                              inventory bin 2 = 3 and the clock at
@@ -450,6 +460,7 @@ Latest full sweep — 2026-10-26, against this install
 Every row below was produced by --gates (one child process per flag, --exit-after 1200,
 BK_MUTE=1), and every row printed a verdict line:
 
+```text
 flag                   runs       result verdict
 --check                headless   pass   --- all checks passed ---
 --audit                headless   pass   --- audit passed ---
@@ -506,15 +517,17 @@ flag                   runs       result verdict
 --triggers             headless   pass   --- triggers check passed ---
 --transition           headless   pass   --- transition check passed ---
 --tour                 headless   pass   --- tour check passed ---
+--tour-live            window     pass   --- tour-live check passed ---
 --weapon +elaser       headless   pass   --- weapon check passed ---
 --audio-state          headless   pass   --- audio-state check passed ---
 --sound                headless   pass   --- sound check passed ---
 --episodes             headless   pass   --- episodes check passed ---
 --fire +bryarbolt      headless   pass   --- fire check passed ---
-gates: 0 of 60 failed, 0 skipped
+gates: 0 of 61 failed, 0 skipped
+```
 
-That is **60 gates**, 0 failures, with **129** unit tests alongside. The eight window-only
-gates are reported as skipped under `BK_HEADLESS=1` (`0 of 60 failed, 8 skipped`), never as
-passes. `--tour` is the release-content gate: all 25 campaign level files load, run their
-scripts and hand over to a real film and the next level; it caught the campaign decision's
-missing second film and the old `flow_after` handing a film back as if it were a level.
+That is **61 gates**, 0 failures, with **130** unit tests alongside. The nine window-only
+gates are reported as skipped under `BK_HEADLESS=1` (`0 of 61 failed, 9 skipped`), never as
+passes. `--tour` checks the campaign by row on both arms (28 rows, 25 distinct files, 23 film
+hops, 2 finale rows), and `--tour-live` finishes and swaps all 21 light-side levels in the
+running app.

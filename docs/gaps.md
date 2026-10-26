@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **60 gates, 129 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 130 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -994,7 +994,48 @@ and the campaign chain is now a gate of its own.
 - `--cog-check` now fails on a label error (it previously only counted stubs), and `--gates` counts
   `BK_SKIP_WINDOW` rows as skipped instead of dropping them from the total.
 
-Current: **60 gates, 129 tests, 0 failures**; `--gates` windowed 0 of 60 failed, `BK_HEADLESS=1`
-0 of 60 failed with 8 skipped. Still open for a *release* (not for the code): one human playthrough
+At that round: **60 gates, 129 tests, 0 failures** (`--gates` windowed 0 of 60 failed; `BK_HEADLESS=1`
+0 of 60 failed with 8 skipped); the round after this fixed the campaign chain and added the 61st gate. Still open for a *release* (not for the code): one human playthrough
 of levels 2–21, the dark-side choice and ending screens, the AI instinct scheduler, health
 carry-over, and the level-1 spawn view.
+
+**Round 202 (release candidate, reviewed):** a fresh-eyes review of the release diff found three
+more blockers behind the first-run ones; all are fixed and now gated.
+
+- **The campaign stopped after level 2.** `swap_level` read a bare `gobs.read("episode.jk")` to
+  resolve the successor. Every archive holds that name (`JK1`, `JK1MP`, `JK1CTF`), and the read
+  returned the last one — the multiplayer manifest — so `flow_after` found no campaign row and the
+  app printed `(end of campaign)` after level 2. It now takes the single-player episode through
+  `episodes_of`, as `setup` does. `--tour-live` is the gate: the running app finishes and swaps all
+  21 light-side levels and exits at `21ajerec.jkl` (it would previously have stopped at two).
+- **Per-level completion state was process-wide.** `queue_next_level`'s `asked` and
+  `watch_level_complete`'s `announced`/`tallied` locals never reset, so one session could only
+  finish one level, and levels 2+ would skip their rank credit and tally. Both reset when
+  `level_complete` clears on a fresh level.
+- **The opening film played behind the main menu.** `play_intro_films` inserted the film at boot,
+  `refresh_overlay` then suppressed the menu, and nothing removed a finished film: after 164 s the
+  player had an invisible menu over a frozen last frame. It now waits for `overlay.started` (New
+  Game), retires an intro film when it finishes, and is ordered after `swap_level`; normal launch
+  was checked to show the menu with no film, and the New Game action to play `03-04a.smk`.
+- **`--tour` now checks rows, not file names, on both arms.** The arms share level files
+  (`18Ascend`, `19A`, `19B`), and a file-name lookup always took the light row. `Episode::flow_after_row`
+  is used by the tour: 28 level rows, 25 distinct files, every film a real SMK, every successor a
+  real level, both finale rows (light `21ajerec`/`52-53a.smk`, dark `21bjerec`/`57a.smk`), and the
+  decision's two films in order. The app still resolves by name on its light walk, which is correct
+  because the light rows come first in the manifest.
+- **`--goal` regressed when the new system was added** — the renderer sighting probe depended on the
+  scheduler's order between the probe, `walk_player` and `cull_sectors`. The probe now pins its pose
+  every frame and the three systems are ordered explicitly; `--goal` passes repeatedly and reports
+  `level complete after 202 frames, next 02narshadda.jkl`.
+- Smaller fixes: `RunReport.errors` no longer double-counts deep-pass errors; the Smacker helper is
+  found next to the executable's checkout as well as the cwd (`BK_SMKDEC` overrides); the declared
+  MSRV is Bevy's real one, **1.97.1**; the release note's audit line now quotes the whole summary.
+
+Current: **61 gates** (`--gates` windowed `0 of 61 failed, 0 skipped`; `BK_HEADLESS=1`
+`0 of 61 failed, 9 skipped`) and **130 tests**. `--tour`: 28 rows (25 files), 5543 things, 23 films,
+2 terminal rows, 0 script errors, 1 sound missing from retail data. `--audit`: 540 cogs parsed,
+1854 labels, 7683 symbols, 35/35 levels clean, 10 unresolved asset references, 57 undecoded files.
+`--tour-live`: 21 levels finished and swapped through `21ajerec`. The campaign's two-film playback is
+pinned by `film_step` unit tests and was watched once by hand (`38a` -> `39a` -> `16aEscapeShip`);
+`--tour-live` names films instead of playing them, because 22 films is longer than a sweep should
+take. The remaining publish blocker is the license, which needs the repository owner's decision.

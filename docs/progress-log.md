@@ -833,4 +833,15 @@ default now instead of silent-unless-`--sound-on`; and `Episode::flow_after` no 
 campaign's `DECIDE` row back as if it were a level — it walks the decision, keeps both of level
 15's films in order and continues on the neutral (light) arm. `--tour` is the new release-content
 gate over every campaign level. The evidence and the numbers are in `docs/gaps.md`'s Round 201
-entry; the current checks are **60 gates, 129 tests, 0 failures**.
+entry; the checks at that point were **60 gates, 129 tests, 0 failures**.
+## Release candidate, reviewed (round 202)
+
+A fresh-eyes review of the release diff found three blockers behind the first-run fixes: the app
+stopped the campaign after level 2 (its successor lookup read the multiplayer `episode.jk`), the
+per-level completion flags never reset, and the opening film played behind the boot menu and was
+never removed. All are fixed; `--tour-live` now finishes and swaps all 21 light-side levels in the
+running app, `--tour` checks 28 rows on both arms, and normal launch/New Game were checked by hand.
+The review also caught a scheduler-order dependence in `--goal` (now explicitly ordered and pinned),
+an inflated `RunReport` error count, and a stale MSRV. The current checks are **61 gates, 130 tests,
+0 failures** (windowed `0 of 61 failed, 0 skipped`; headless `0 of 61 failed, 9 skipped`). Still
+open for publish: the license choice, and a human playthrough of levels 2–21.

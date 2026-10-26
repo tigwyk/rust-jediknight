@@ -7,7 +7,7 @@ developed against, because its `JK.EXE` is plaintext).
 
 ## Build it
 
-Windows x64, a Rust toolchain with edition-2024 support (1.85 or newer) and the MSVC
+Windows x64, a Rust toolchain **1.97.1 or newer** (what Bevy 0.20 needs) with the MSVC
 target, and a retail install of *Star Wars Jedi Knight: Dark Forces II*.
 
 ```sh
@@ -19,8 +19,13 @@ decodes films in a small i686 helper. Without it the game runs but skips cutscen
 message.
 
 ```sh
+rustup target add i686-pc-windows-msvc
 cargo build --release --target i686-pc-windows-msvc --manifest-path tools/smkdec/Cargo.toml
 ```
+
+The game finds the helper in the repo's `tools/smkdec/target/i686-pc-windows-msvc/release/`
+whether it is started from the repo or from `target/release/`, and `BK_SMKDEC` names the
+executable explicitly if it was moved.
 
 ## Run it
 
@@ -34,12 +39,18 @@ cutscene and loads the next, and the light-side chain reaches the finale film. E
 player touches is the shipped data: the levels, the scripts, the menus, the HUD, the sounds
 and the films. Audio is on by default; `--mute` forces silence.
 
+The whole light-side chain has also been walked **by the app itself**, without a player:
+`--tour-live` finishes each level on a timer, skips its films by name and loads the next,
+and reports `21 level(s) finished and swapped, through the end at 21ajerec.jkl`. What a
+person has not done is *play* levels 2–21 (see below).
+
 Useful flags while evaluating (each is also a gate):
 
 | flag | what it shows |
 |---|---|
-| `--gates` | every behaviour check, one process each — **60 gates, 0 failures** |
-| `--tour` | every campaign level: loads it, runs its scripts, checks its film and its successor |
+| `--gates` | every behaviour check, one process each — **61 gates, 0 failures** |
+| `--tour` | every campaign level row on both arms: loads it, runs its scripts, checks its film(s) and successor |
+| `--tour-live` | the running app walks the campaign: 21 levels finished and swapped, ending at `21ajerec.jkl` |
 | `--start <level>` | start inside a level, skipping the menu |
 | `--campaign` | walk the episode graph and print where it goes |
 | `--items` | the `misc\items.dat` table and which bins name a script |
@@ -61,13 +72,19 @@ order and continues on the light-side arm.
 ## What is deliberately rough or not there
 
 - **No human has played the campaign end to end yet.** The chain is gated level by level and
-  end to end (`--tour`: 25 level files, 28 campaign rows on both arms, 22 films, 0 script
-  errors), but objectives on levels 2–21 have not been played through by a person. That is
-  the next release gate, and the main caveat on "0.1".
+  end to end (`--tour`: 28 campaign rows on both arms for 25 level files, 23 film hops, two
+  finale rows, 0 script errors; `--tour-live`: the app itself finishes and swaps all 21
+  light-side levels), but objectives on levels 2–21 have not been played through by a person.
+  That is the next release gate, and the main caveat on "0.1".
+- **Two-film playback is checked by unit test and was watched once by hand, not by a gate.**
+  The mid-campaign decision plays `38a.smk` then `39a.smk` before the next level; a gate that
+  sat through all 23 film hops would be too slow, so `--tour-live` names each film and skips it. The
+  queue's ordering is pinned by `film_step` tests.
 - **The dark-side arm is unreachable.** The campaign's decision row after level 15 takes the
   neutral (light) arm because the choice screen is not built. The dark levels (`16b`, `17b`,
-  `20b`, `21b`) load and chain, but no UI selects them. The **ending screen** is likewise
-  absent: the ending-choice inventory bin stays neutral.
+  `20b`, `21b`) parse, load and chain — `--tour` walks that arm row by row to `21bjerec` and
+  its `57a.smk` finale — but no UI selects them. The **ending screen** is likewise absent:
+  the ending-choice inventory bin stays neutral.
 - **Multiplayer.** No networking, no protocol, no dedicated server. The roadmap scopes
   single-player on purpose.
 - **A real instinct scheduler.** AI honours `PrimaryFire` — delay, facing cone, ranges, aim
@@ -105,13 +122,25 @@ order and continues on the light-side arm.
 - **Audio is on by default.** A play session is audible at `BK_VOLUME` (default 0.75, the
   engine's own mixer scale); captures and probes stay silent unless `--sound-on` is passed,
   and `--mute`/`BK_MUTE` always wins. `--audio-state` asserts all three decisions.
+- **The campaign now runs past level 2.** `swap_level` resolved the successor against a bare
+  `episode.jk`, which every archive holds (`JK1`, `JK1MP`, `JK1CTF`) and which therefore
+  returned the multiplayer manifest; the app called level 2 "end of campaign" and stopped.
+  It now resolves the single-player episode explicitly. `--tour-live` is the gate over that.
+- **Per-level completion state resets with the level.** `queue_next_level`'s "already asked"
+  flag and `watch_level_complete`'s announced/tallied flags were process-wide, so only the
+  first level of a session would end, show its tally and credit rank/stars. Each now resets
+  when the next level starts.
+- **The opening film no longer starts behind the main menu.** It used to be inserted at boot,
+  hid the menu, and was never removed; it now waits for `New Game` (`overlay.started`) and a
+  finished intro is retired.
 - **The campaign decision's transition plays both films.** `Episode::flow_after` now walks
   through the `DECIDE` row and keeps every film in order (level 15: `38a.smk` then
   `39a.smk`), takes the neutral arm (light), and only swaps the level when the queue is
   empty; a two-film transition can no longer be cut short.
-- **`--tour` is the new release gate:** every campaign level file is loaded, its placed
-  scripts run against a live world, and every film and successor it names is checked against
-  the archives. 60 gates and 129 tests now pass on this install.
+- **`--tour` checks both arms by row**, not by file name: 28 campaign rows for 25 distinct
+  level files, every film and successor against the archives, both finale rows, and the
+  decision's two films in order. `--tour-live` walks the same chain through the running app.
+  61 gates and 130 tests now pass on this install.
 
 ## Verified on this install
 
@@ -119,18 +148,23 @@ Everything below was run against the retail data while this note was written, no
 from an earlier build.
 
 ```
---gates            0 of 60 failed, 0 skipped   (windowed; BK_HEADLESS=1 reads 0 of 60 failed, 8 skipped)
-cargo test --bins  129 passed
---tour             25 level file(s) (28 campaign rows, both arms), 22 cutscenes, 0 script errors, 1 sound missing from retail data
---audit            540 cogs parsed, 0 failed, 1854 labels, 7683 symbols; summary 35/35 levels clean
+--gates            0 of 61 failed, 0 skipped   (windowed; BK_HEADLESS=1 reads 0 of 61 failed, 9 skipped)
+cargo test --bins  130 passed
+--tour             28 level row(s) on both arms (25 distinct files), 5543 things, 23 films, 2 terminal rows, 0 script errors, 1 sound missing from retail data
+--tour-live        21 level(s) finished and swapped, through the end at 21ajerec.jkl
+--audit            540 cogs parsed, 0 failed, 1854 labels, 7683 symbols; summary 35/35 levels clean, 10 unresolved asset references, 0 non-drawable models, 0 manifest LEVEL rows missing, 57 undecoded files
 --walk all         0 level(s) left the body in the void, worst drop 0.00
 --campaign         32 level step(s) walked, 30 distinct level file(s)
 --ends             28 of 35 level(s) name a script that calls jkEndLevel; the rest are m*/static
---goal             objective completed, level complete after 203 frames, next 02narshadda.jkl
+--goal             objective completed, level complete after 202 frames, next 02narshadda.jkl
 --save-slots       2 slot file(s), distinct true, both read back
 --force-live       rose +0.63 at level 1, +0.71 at level 4 with the same press
 --audio-state      on at gain 0.750 for a play session; muted for a capture
 ```
+
+Also checked by hand on this build: normal launch shows the main menu and plays no film;
+the `New Game` action plays `03-04a.smk` (2500 frames) and drops into the cantina; a level
+15 completion was watched through `38a.smk` → `39a.smk` → `16aEscapeShip.jkl loaded`.
 
 The two screens a player spends the most time in are photographed from the running build:
 [force-powers.png](force-powers.png) (a power's level drawn beside its icon) and

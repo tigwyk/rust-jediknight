@@ -1502,6 +1502,20 @@ it read one row ahead and handed the `DECIDE` row's own file (`38a.smk`, a film)
 back as the next level, which would have stalled a real playthrough after level 15
 — a defect only the `--tour` gate caught.
 
+The two arms also **share level files**: rows 620/631/640 (dark) and their light
+counterparts both name `18Ascend`, `19A` and `19B`, and the dark rows' `gotoA`
+leads to `20bboc` where the light row's leads to `20aboc`. A lookup by file name
+therefore always takes the first (light) row, which is what the app wants on its
+reachable walk but wrong for checking the other arm; `Episode::flow_after_row(id)`
+resolves the exact row, and `--tour` uses it to walk both arms to their own finales
+(`21ajerec`/`52-53a.smk` and `21bjerec`/`57a.smk`).
+
+`episode.jk` itself is in **three archives** (`JK1`, `JK1MP`, `JK1CTF`). A bare
+name read returns the last one — the multiplayer manifest — so the campaign's
+successor has to come from the `KIND_SINGLE` episode (`all_named("episode.jk")`
+and pick by kind); reading it by name is what made the running app call level 2
+"end of campaign" before `--tour-live` caught it.
+
 The `cd` column is the 1997 release's CD number; it is `0` for multiplayer and CTF.
 `lightpow`/`darkpow` are inventory bin numbers for the Force power awarded.
 
