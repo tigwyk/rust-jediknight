@@ -121,9 +121,24 @@ impl Episode {
     /// What finishing `level_file` leads to: the films the graph plays first, in order, and the
     /// level that loads after them. A level can lead through more than one film — the mid-campaign
     /// `DECIDE` row sits between its two — and the decision itself is a row, not a level.
+    ///
+    /// This resolves the **first** row whose file name matches. The two arms share level files
+    /// (`18Ascend`, `19A`, `19B`), so a caller that knows which arm it is on should use
+    /// [`flow_after_row`](Self::flow_after_row) with that row's id.
     pub fn flow_after(&self, level_file: &str) -> FlowAfter<'_> {
+        let Some(row) = self.row_for(level_file) else { return FlowAfter::default() };
+        self.flow_after_row(row.id)
+    }
+
+    /// What finishing the level **row `id`** leads to. The dark arm's shared level rows point into
+    /// the dark branch (`19A` row 631 reaches `20bboc`), and resolving them by file name would follow
+    /// the light branch's first matching row instead.
+    pub fn flow_after_row(&self, id: i32) -> FlowAfter<'_> {
         let mut flow = FlowAfter::default();
-        let Some(row) = self.row_for(level_file) else { return flow };
+        let Some(row) = self.sequences.iter().find(|s| s.id == id) else { return flow };
+        if row.kind != Kind::Level {
+            return flow;
+        }
         let mut at = row.goto_a;
         let mut steps = 0;
         while at >= 0 && steps <= self.sequences.len() {
@@ -324,5 +339,35 @@ mod tests {
         // The dark arm is still walkable once its own level is the one being finished.
         let dark = e.flow_after("16bEscapeShip.jkl");
         assert_eq!(dark.next.map(|s| s.file.as_str()), Some("17bsarris.jkl"));
+    }
+
+    #[test]
+    fn shared_level_files_resolve_by_row_not_by_name() {
+        // The arms share level files, so the two `19A`/`19B` rows point at different successors.
+        // The name lookup takes the first (light) row, which is the app's reachable arm; the row
+        // lookup is what `--tour` uses to check the dark arm as well.
+        let e = parse(
+            "\"Ep\"\nTYPE  1\n\
+             181: 1 18 LEVEL  19A.jkl  0 0 190 -1\n\
+             190: 1 19 LEVEL  19B.jkl  0 0 200 -1\n\
+             200: 1 20 LEVEL  20aboc.jkl 0 0 -1 -1\n\
+             631: 1 18 LEVEL  19A.jkl  0 0 640 -1\n\
+             640: 1 19 LEVEL  19B.jkl  0 0 650 -1\n\
+             650: 1 20 LEVEL  20bboc.jkl 0 0 -1 -1\n",
+        );
+        assert_eq!(
+            e.flow_after("19B.jkl").next.map(|s| s.file.as_str()),
+            Some("20aboc.jkl"),
+            "a file-name lookup takes the first (light) row"
+        );
+        assert_eq!(
+            e.flow_after_row(640).next.map(|s| s.file.as_str()),
+            Some("20bboc.jkl"),
+            "the dark row's own gotoA leads into the dark branch"
+        );
+        assert_eq!(
+            e.flow_after_row(190).next.map(|s| s.file.as_str()),
+            Some("20aboc.jkl")
+        );
     }
 }

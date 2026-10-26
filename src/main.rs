@@ -194,6 +194,9 @@ const GATES: &[&str] = &[
     // Every campaign level loads, its own scripts act on a live world without an error, and
     // finishing it lands on the graph's film and the level that follows — the whole spine.
     "--tour",
+    // The same walk through the running app: each level is finished, its films skipped by name, and
+    // the next level is really swapped in, through the end of the campaign.
+    "--tour-live",
     "--weapon +elaser",
     "--audio-state",
     "--sound",
@@ -243,14 +246,16 @@ fn run_gates(game: &std::path::Path) -> i32 {
         }
         // Every child gets a frame budget: a gate that forgets to quit ends instead of hanging the sweep,
         // and it ends *without* a verdict, which is counted as a failure below.
+        // 1200 frames, not 600: the goal gate plays level 1 until its objective fires and the level
+        // ends, which lands at about 440 frames with no headroom — it failed once under a sweep's
+        // own contention, and a gate that fails intermittently is worse than a slower sweep.
+        // `--tour-live` swaps through 21 levels of geometry in one process and needs more.
+        let budget = if *flag == "--tour-live" { "9000" } else { "1200" };
         let out = std::process::Command::new(&exe)
             .arg("--game")
             .arg(game)
             // Before the flag, not after: several gates take an argument and would eat the budget flag.
-            // 1200 frames, not 600: the goal gate plays level 1 until its objective fires and the level
-            // ends, which lands at about 440 frames with no headroom — it failed once under a sweep's
-            // own contention, and a gate that fails intermittently is worse than a slower sweep.
-            .args(["--exit-after", "1200"])
+            .args(["--exit-after", budget])
             .args(flag.split_whitespace())
             .env("BK_MUTE", "1")
             // A sweep is not a play session: no child may take the pointer, so a machine stays usable
@@ -465,6 +470,7 @@ fn main() {
     let mut campaign = false;
     let mut transition = false;
     let mut tour = false;
+    let mut tour_live = false;
     let mut endlevel_check = false;
     let mut flow_level: Option<String> = None;
     let mut smk_check = false;
@@ -837,6 +843,9 @@ fn main() {
             "--transition" => transition = true,
             // `--tour`: every campaign level, its scripts, and the hop that follows it.
             "--tour" => tour = true,
+            // `--tour-live`: the same walk through the running app — each level is finished on a
+            // timer, its films are named and skipped, and the next level loads for real.
+            "--tour-live" => tour_live = true,
             // `--flow [level]`: level -> its cutscene -> the next level, from the graph.
             "--flow" => {
                 i += 1;
@@ -2193,50 +2202,70 @@ fn main() {
     }
 
     if tour {
-        // The source release's content gate: every campaign level is loaded, its own scripts act on a
-        // live world, and finishing it through the campaign graph lands on films that exist and a
-        // level that follows. The heavy lifting is existing code (`run_level`, `flow_after`); this
-        // gate is the chain that says they agree for every level, not just level 1.
+        // The source release's content gate: every campaign level **row** loads, its own scripts act
+        // on a live world, and finishing it through the campaign graph lands on films that exist and a
+        // level that follows. Both arms are checked: the light one is what a player walks by default,
+        // the dark one is what the decision's other edge names. Rows, not file names — the arms share
+        // level files (`18Ascend`, `19A`, `19B`), and a name lookup takes the first (light) row.
         let (_, episode) = episodes_of(&gobs)
             .into_iter()
             .find(|(_, e)| e.kind == episode::KIND_SINGLE)
             .expect("no single-player episode");
+        let rows: Vec<&episode::Sequence> = episode.levels().collect();
+        assert_eq!(
+            rows.len(),
+            28,
+            "the campaign should have 28 level rows, found {}",
+            rows.len()
+        );
+        let mut files: Vec<String> = Vec::new();
+        for row in &rows {
+            if !files.iter().any(|f| f.eq_ignore_ascii_case(&row.file)) {
+                files.push(row.file.clone());
+            }
+        }
+        assert_eq!(files.len(), 25, "the campaign's 28 level rows did not resolve to 25 files");
+        // The light spine, by row: `gotoA` from the first level to the end, crossing the DECIDE row on
+        // its neutral arm.
         let first = episode.first_level().expect("no first level");
-        // The light spine is `gotoA`; `--campaign` already proves the DECIDE branch is reachable.
-        let mut spine: Vec<String> = Vec::new();
+        let mut light: Vec<&episode::Sequence> = Vec::new();
         let mut at = first.id;
         let mut steps = 0;
         while at >= 0 && steps <= episode.sequences.len() {
             let Some(row) = episode.sequences.iter().find(|s| s.id == at) else { break };
             if row.kind == episode::Kind::Level {
-                spine.push(row.file.clone());
+                light.push(row);
             }
             at = row.goto_a;
             steps += 1;
         }
-        assert_eq!(
-            spine.first().map(|l| l.to_ascii_lowercase()),
-            Some("01narshadda.jkl".to_string()),
-            "the tour does not begin at the campaign's first level"
-        );
-        assert_eq!(
-            spine.last().map(|l| l.to_ascii_lowercase()),
-            Some("21ajerec.jkl".to_string()),
-            "the light spine does not end at the campaign's last light-side level"
-        );
-        // The whole graph, both arms: 28 level rows for 25 distinct level files (the two paths share
-        // the final tower levels). A `DECIDE` row's two arms are the light and dark paths.
-        let mut levels: Vec<String> = Vec::new();
-        for row in episode.levels() {
-            if !levels.iter().any(|l| l.eq_ignore_ascii_case(&row.file)) {
-                levels.push(row.file.clone());
+        assert_eq!(light.first().map(|r| r.file.as_str()), Some("01narshadda.jkl"));
+        assert_eq!(light.last().map(|r| r.file.as_str()), Some("21ajerec.jkl"));
+        // The dark arm, by row: from its level 16 to its own finale. `--campaign` proves the DECIDE
+        // row's two edges are reachable; this walks the second one to its end.
+        let dark_start = rows
+            .iter()
+            .find(|r| r.file.eq_ignore_ascii_case("16bEscapeShip.jkl"))
+            .copied()
+            .expect("no dark-side level 16 row");
+        let mut dark: Vec<&episode::Sequence> = vec![dark_start];
+        let mut at = dark_start.goto_a;
+        let mut steps = 0;
+        while at >= 0 && steps <= episode.sequences.len() {
+            let Some(row) = episode.sequences.iter().find(|s| s.id == at) else { break };
+            match row.kind {
+                episode::Kind::Level => dark.push(row),
+                episode::Kind::Other => break,
+                _ => {}
             }
+            at = row.goto_a;
+            steps += 1;
         }
-        assert_eq!(levels.len(), 25, "the campaign's level rows did not resolve to 25 files");
+        assert_eq!(dark.last().map(|r| r.file.as_str()), Some("21bjerec.jkl"));
         // The campaign opens with films the forward walk never visits; they are part of a player's
         // playthrough, so the tour starts there too.
         let mut films = 0usize;
-        for film in episode.flow_before(&spine[0]) {
+        for film in episode.flow_before(&first.file) {
             let bytes = gobs
                 .read(&film.file)
                 .unwrap_or_else(|| panic!("opening film {} did not resolve", film.file));
@@ -2244,31 +2273,17 @@ fn main() {
             println!("tour: opening film {} ({} bytes)", film.file, bytes.len());
             films += 1;
         }
-        let mut total_things = 0usize;
-        let mut script_errors = 0usize;
-        let mut missing_sounds = 0usize;
+        // What finishing each **row** leads to: every film in the transition must be a real Smacker
+        // file in the archives, and the successor must be a real level. A dangling manifest row is a
+        // release blocker, and this is the check that found the DECIDE row's missing second film.
         let mut terminals = 0usize;
-        for (i, name) in levels.iter().enumerate() {
-            let raw = gobs.read(name).unwrap_or_else(|| {
-                panic!("campaign level {name} is in the manifest but not the archives")
-            });
-            let level = jkl::parse(&String::from_utf8_lossy(&raw));
-            assert!(!level.things.is_empty(), "{name} parsed with no things");
-            assert!(!level.sectors.is_empty(), "{name} parsed with no sectors");
-            total_things += level.things.len();
-            // The level's own scripts, bound and stepped the way `--cog-check` and `--run` bind them:
-            // startup, every declared message, the script-to-script bus, and the deep pass.
-            let report = run_level(&gobs, &level, true);
-            script_errors += report.errors;
-            missing_sounds += report.missing_sounds;
-            // What a finished level leads to: every film in the transition, then the level after it.
-            // Both are checked against real bytes — a dangling manifest row is a release blocker.
-            let flow = episode.flow_after(name);
+        for row in &rows {
+            let flow = episode.flow_after_row(row.id);
             let mut film_names: Vec<&str> = Vec::new();
             for film in &flow.films {
                 let bytes = gobs
                     .read(&film.file)
-                    .unwrap_or_else(|| panic!("{name}: film {} did not resolve", film.file));
+                    .unwrap_or_else(|| panic!("{}: film {} did not resolve", row.file, film.file));
                 assert_eq!(&bytes[0..3], b"SMK", "{} is not a Smacker film", film.file);
                 films += 1;
                 film_names.push(film.file.as_str());
@@ -2278,79 +2293,107 @@ fn main() {
                     assert_eq!(
                         next.kind,
                         episode::Kind::Level,
-                        "{name}: the graph advances to {}, which is not a level",
-                        next.file
-                    );
-                    assert!(
-                        episode.row_for(&next.file).is_some(),
-                        "{name}: the graph advances to {}, which is not a campaign row",
+                        "{}: the graph advances to {}, which is not a level",
+                        row.file,
                         next.file
                     );
                     assert!(
                         gobs.read(&next.file).is_some(),
-                        "{name}: the next level {} is not in the archives",
+                        "{}: the next level {} is not in the archives",
+                        row.file,
                         next.file
                     );
                 }
                 None => {
                     terminals += 1;
                     assert!(
-                        name.to_ascii_lowercase().starts_with("21"),
-                        "{name}: the graph ends the campaign on a level that is not a finale"
+                        row.file.to_ascii_lowercase().starts_with("21"),
+                        "{}: the graph ends the campaign on a row that is not a finale",
+                        row.file
                     );
                 }
             }
             println!(
-                "tour: {:>2}/{} {name} ({} things) -> {} -> {}",
-                i + 1,
-                levels.len(),
-                level.things.len(),
+                "tour: row {:>3} {} -> {} -> {}",
+                row.id,
+                row.file,
                 if film_names.is_empty() {
                     "(none)".to_string()
                 } else {
-                    film_names.join(" -> ")
+                    film_names.join(" + ")
                 },
                 flow.next.map(|n| n.file.as_str()).unwrap_or("(end of campaign)")
             );
         }
-        // The light spine is a run of levels whose transitions must agree with the manifest's own
-        // order, including the `DECIDE` row between level 15 and the light arm's level 16.
-        for pair in spine.windows(2) {
-            let flow = episode.flow_after(&pair[0]);
+        assert_eq!(terminals, 2, "the campaign should end on the two finale rows");
+        // Each spine's hops agree with that row's own flow — including the DECIDE row between level 15
+        // and the light arm's level 16.
+        for pair in light.windows(2) {
+            let flow = episode.flow_after_row(pair[0].id);
             assert_eq!(
-                flow.next.map(|n| n.file.to_ascii_lowercase()),
-                Some(pair[1].to_ascii_lowercase()),
-                "the light spine continues to {}, but finishing {} leads to {:?}",
-                pair[1],
-                pair[0],
-                flow.next.map(|n| n.file.as_str())
+                flow.next.map(|n| n.id),
+                Some(pair[1].id),
+                "finishing {} does not lead to the next light row {}",
+                pair[0].file,
+                pair[1].file
             );
         }
-        // The decision row itself: level 15 leads through two films to the light arm's level 16.
-        let decide = episode.flow_after("15maw.jkl");
+        for pair in dark.windows(2) {
+            let flow = episode.flow_after_row(pair[0].id);
+            assert_eq!(
+                flow.next.map(|n| n.id),
+                Some(pair[1].id),
+                "finishing {} does not lead to the next dark row {}",
+                pair[0].file,
+                pair[1].file
+            );
+        }
+        let maw = light
+            .iter()
+            .find(|r| r.file.eq_ignore_ascii_case("15maw.jkl"))
+            .expect("no 15maw row");
+        let decide = episode.flow_after_row(maw.id);
         assert_eq!(
             decide.films.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
             ["38a.smk", "39a.smk"],
-            "the decision's two films are not both in the transition"
+            "the decision's two films are not both in level 15's transition"
         );
         assert_eq!(
             decide.next.map(|n| n.file.as_str()),
             Some("16aEscapeShip.jkl"),
             "the neutral arm of the decision is not the light one"
         );
-        assert_eq!(terminals, 2, "the campaign should end on two finale levels (light and dark)");
+        // The scripts, once per distinct level file, and the geometry each one parses to.
+        let mut total_things = 0usize;
+        let mut script_errors = 0usize;
+        let mut missing_sounds = 0usize;
+        for name in &files {
+            let raw = gobs.read(name).unwrap_or_else(|| {
+                panic!("campaign level {name} is in the manifest but not the archives")
+            });
+            let level = jkl::parse(&String::from_utf8_lossy(&raw));
+            assert!(!level.things.is_empty(), "{name} parsed with no things");
+            assert!(!level.sectors.is_empty(), "{name} parsed with no sectors");
+            total_things += level.things.len();
+            // Bound and stepped the way `--cog-check` and `--run` bind them: startup, every declared
+            // message, the script-to-script bus, and the deep pass.
+            let report = run_level(&gobs, &level, true);
+            script_errors += report.errors;
+            missing_sounds += report.missing_sounds;
+        }
         assert_eq!(script_errors, 0, "the tour's level scripts took {script_errors} error(s)");
         println!(
-            "tour: {} level file(s), {} thing(s), {} cutscene(s), {} light-spine hop(s), 0 script errors, {missing_sounds} sound(s) missing from retail data",
-            levels.len(),
+            "tour: {} level row(s) on both arms ({} distinct files), {} thing(s), {} film(s), {} terminal row(s), 0 script errors, {} sound(s) missing from retail data",
+            rows.len(),
+            files.len(),
             total_things,
             films,
-            spine.len().saturating_sub(1)
+            terminals,
+            missing_sounds
         );
         println!("--- tour check passed ---");
         return;
     }
-
     if endlevel_check {
         // Finishing a level **through the shipped scripts**, not by calling `jkEndLevel` directly: the
         // player *sees* 8t88, `sithRender_RenderThing` sends `sighted` to the cog placed on him
@@ -9575,7 +9618,13 @@ fn main() {
     // A capture or a probe is not a play session: it wants frames, not sound. This used to be the
     // release default too — a build that starts silent reads as broken — so the audio decision keys
     // on it instead: a play session is audible, a capture is quiet unless `--sound-on` asks.
-    let capture = shot.is_some()
+    // `--tour-live` finishes every level on a short timer so the running app walks the campaign
+    // itself; its films are named and skipped, since no gate has time to watch 22 of them.
+    if tour_live && complete_after.is_none() {
+        complete_after = Some(0.2);
+    }
+    let capture = tour_live
+        || shot.is_some()
         || shot_at.is_some()
         || overview
         || near.is_some()
@@ -9677,6 +9726,7 @@ fn main() {
         .insert_resource(CaptureMode(
             shot.is_some() || live || sim || complete_after.is_some() || !animating || goal_check,
         ))
+        .insert_resource(TourLive { active: tour_live })
         .insert_resource(SaberBlade::default())
         .insert_resource(Viewmodel::default())
         .insert_resource(PendingRestore::default())
@@ -9804,10 +9854,19 @@ fn main() {
             ),
         )
         // Its own line: the tuple above is already at Bevy's system-count limit.
-        .add_systems(Update, goal_probe.after(live_play_drive).run_if(no_screen_open))
+        // The goal probe pins the body's pose; the walker has to place the camera from that pose
+        // before the cull pass sights the thing, or the gate depends on the scheduler's order.
+        .add_systems(
+            Update,
+            goal_probe
+                .after(walk_player)
+                .before(cull_sectors)
+                .run_if(no_screen_open),
+        )
         .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open))
         .add_systems(Update, save_slots_probe)
-        .add_systems(Update, play_intro_films)
+        .add_systems(Update, play_intro_films.after(swap_level))
+        .add_systems(Update, tour_live_exit)
         .add_systems(Update, use_probe.before(use_key).run_if(no_screen_open))
         .add_systems(Update, ai_probe.run_if(no_screen_open))
         .add_systems(Update, force_probe.run_if(no_screen_open))
@@ -9872,25 +9931,83 @@ struct CompleteAfter(Option<f32>);
 
 /// Call the engine's own `jkEndLevel` once the timer expires. This is the same verb a level's
 /// final script calls (`jkCog_EndLevel` in `jkCog.c`), so it drives the real path.
+/// `--tour-live`: the running app walks the whole campaign by itself. Each level is finished on a
+/// short timer, its films are named and skipped (a gate has no time to watch 22 of them), and the
+/// next level loads for real; the gate exits when the graph has no successor left.
+#[derive(Resource, Default)]
+struct TourLive {
+    active: bool,
+}
+
+/// Call the engine's own `jkEndLevel` on **each** level of a run. The timer belongs to the level, not
+/// the process: it resets when `FlowPlan.level` changes, so `--tour-live` (and a probe that keeps
+/// running after a swap) finishes every level it reaches instead of only the first.
 fn complete_level_on_timer(
     time: Res<Time>,
     after: Option<Res<CompleteAfter>>,
     sim: Option<Res<Sim>>,
+    plan: Option<Res<FlowPlan>>,
     mut waited: Local<f32>,
-    mut done: Local<bool>,
+    mut seen: Local<Option<String>>,
+    mut done: Local<Option<String>>,
 ) {
-    let (Some(after), Some(sim)) = (after, sim) else { return };
+    let (Some(after), Some(sim), Some(plan)) = (after, sim, plan) else { return };
     let Some(seconds) = after.0 else { return };
-    if *done {
+    if seen.as_deref() != Some(plan.level.as_str()) {
+        *seen = Some(plan.level.clone());
+        *waited = 0.0;
+    }
+    if done.as_deref() == Some(plan.level.as_str()) {
         return;
     }
     *waited += time.delta_secs();
     if *waited < seconds {
         return;
     }
-    *done = true;
+    *done = Some(plan.level.clone());
     sim.world.borrow_mut().call("jkendlevel", &[cog::Value::Num(1.0)]);
-    println!("complete: called jkEndLevel after {seconds:.2}s");
+    println!("complete: called jkEndLevel after {seconds:.2}s on {}", plan.level);
+}
+
+/// `--tour-live`'s finish line: the last level is complete, the graph has no successor, and the
+/// levels were actually swapped. Counts the levels so a stall in the middle fails the gate rather
+/// than passing at the first one.
+fn tour_live_exit(
+    tour: Option<Res<TourLive>>,
+    plan: Option<Res<FlowPlan>>,
+    sim: Option<Res<Sim>>,
+    mut exit: MessageWriter<AppExit>,
+    mut last: Local<Option<String>>,
+    mut count: Local<u32>,
+    mut finished: Local<bool>,
+) {
+    let (Some(tour), Some(plan), Some(sim)) = (tour, plan, sim) else { return };
+    if !tour.active || *finished {
+        return;
+    }
+    if last.as_deref() != Some(plan.level.as_str()) {
+        *last = Some(plan.level.clone());
+        *count += 1;
+    }
+    if plan.next.is_none() && plan.films_done && sim.world.borrow().level_complete {
+        *finished = true;
+        assert_eq!(
+            *count, 21,
+            "tour-live finished {} level(s), not the 21 on the campaign's light spine",
+            *count
+        );
+        assert!(
+            plan.level.eq_ignore_ascii_case("21ajerec.jkl"),
+            "tour-live ended at {}, not the campaign's last light-side level",
+            plan.level
+        );
+        println!(
+            "tour-live: {} level(s) finished and swapped, through the end at {}",
+            *count, plan.level
+        );
+        println!("--- tour-live check passed ---");
+        exit.write(AppExit::Success);
+    }
 }
 
 /// Whether this run is a capture or a probe rather than somebody playing.
@@ -9935,6 +10052,7 @@ fn watch_level_complete(
     sim: Option<Res<Sim>>,
     plan: Option<ResMut<FlowPlan>>,
     playing: Option<Res<cutscene::Cutscene>>,
+    tour: Option<Res<TourLive>>,
     mut overlay: Option<ResMut<Overlay>>,
     capture: Option<Res<CaptureMode>>,
     mut announced: Local<bool>,
@@ -9942,6 +10060,11 @@ fn watch_level_complete(
 ) {
     let (Some(sim), Some(mut plan)) = (sim, plan) else { return };
     if !sim.world.borrow().level_complete {
+        // These locals belong to one completion, not to the process. A fresh level starts with the
+        // flags clear, so reset here or a campaign's second level would skip its rank credit, its
+        // tally screen and its completion print.
+        *announced = false;
+        *tallied = false;
         return;
     }
     if !*announced {
@@ -9987,6 +10110,15 @@ fn watch_level_complete(
     if overlay.as_ref().is_some_and(|overlay| overlay.menu.is_some()) {
         return;
     }
+    // A tour run is checking the chain, not watching films: name the films and mark the transition
+    // done at once, so the next level loads.
+    if tour.as_ref().is_some_and(|tour| tour.active) {
+        for name in std::mem::take(&mut plan.cuts) {
+            println!("tour-live: film {name} skipped");
+        }
+        plan.films_done = true;
+        return;
+    }
     // A film that is still running holds the queue. When it ends its resource is dropped **now** and
     // the next film starts on the following frame, so `queue_next_level` can never observe "nothing
     // playing" while a film is still queued — which would skip the second half of a two-film
@@ -10010,28 +10142,52 @@ fn watch_level_complete(
     }
 }
 
-/// The campaign's opening film, played before the first level.
+/// The campaign's opening film, played **after New Game starts a game**.
 ///
 /// The graph's `gotoA` links run forwards, so the film that *leads into* level 1 is the one row no
 /// walk from the level reaches: `03-04a.smk` sits at line 10 with `gotoA 11`, and 11 is
 /// `01narshadda.jkl`. Retail plays it — the ship, then the booth — before the player is dropped into
-/// the cantina; a start at `first_level` skipped all of it. `--start` and every capture leave
-/// `pre` empty, so a gate never sits through a film.
+/// the cantina; a start at `first_level` skipped all of it. `--start` and every capture leave `pre`
+/// empty, so a gate never sits through a film.
+///
+/// It must not start at boot: the app opens on the main menu, and a film inserted there hid the menu
+/// and then froze on its last frame, because nothing removed a finished intro. `overlay.started` is
+/// the line — the boot menu is up before a game has started, and New Game sets it.
 fn play_intro_films(
     mut plan: Option<ResMut<FlowPlan>>,
     playing: Option<Res<cutscene::Cutscene>>,
     capture: Option<Res<CaptureMode>>,
     overview: Option<Res<Overview>>,
+    overlay: Option<Res<Overlay>>,
     mut commands: Commands,
+    mut intro_playing: Local<bool>,
 ) {
     let Some(plan) = plan.as_mut() else { return };
-    if plan.pre.is_empty() || playing.is_some() {
-        return;
-    }
     // A capture, a probe or a gate is not a play session: it wants the level, not a two-minute
     // film in front of it. Clearing the list says so once rather than on every frame.
     if capture.is_some_and(|c| c.0) || overview.is_some_and(|o| o.capture) {
         plan.pre.clear();
+        return;
+    }
+    // A running film holds the list. Only an intro film is *this* system's to retire: a transition
+    // film belongs to `watch_level_complete`'s queue, and removing it here would fight the queue.
+    if let Some(playing) = playing.as_ref() {
+        if !*intro_playing {
+            return;
+        }
+        if !playing.finished {
+            return;
+        }
+        commands.remove_resource::<cutscene::Cutscene>();
+        *intro_playing = false;
+        return;
+    }
+    if plan.pre.is_empty() {
+        return;
+    }
+    // Not at the boot menu: only a game that has been started plays its opening film. (A `--start`
+    // run has `started` true and an empty list, so this is the New Game path.)
+    if !overlay.as_ref().is_some_and(|overlay| overlay.started) {
         return;
     }
     let name = plan.pre.remove(0);
@@ -10045,6 +10201,7 @@ fn play_intro_films(
                 plan.pre.len()
             );
             commands.insert_resource(played);
+            *intro_playing = true;
         }
         None => println!("cutscene: could not decode {}", file.display()),
     }
@@ -10058,11 +10215,13 @@ fn queue_next_level(
     mut asked: Local<bool>,
 ) {
     let (Some(plan), Some(sim)) = (plan, sim) else { return };
-    if *asked || !plan.swap {
+    // One transition request per level: the flag resets with the level, not with the process. It used
+    // to stay set after the first swap, so a campaign would stop after its second level.
+    if !sim.world.borrow().level_complete {
+        *asked = false;
         return;
     }
-    // The film is what holds the transition: once playback has ended, the next level loads.
-    if !sim.world.borrow().level_complete {
+    if *asked || !plan.swap {
         return;
     }
     // The transition's films hold the level change: `watch_level_complete` sets `films_done` only
@@ -10086,11 +10245,20 @@ fn queue_next_level(
 /// code path as the first load instead of a second implementation that can drift from it.
 fn swap_level(world: &mut bevy::prelude::World) {
     let Some(name) = world.resource_mut::<PendingLevel>().0.take() else { return };
-    // Read the successor and the manifest while the borrow is immutable, then swap.
+    // Read the successor and the manifest while the borrow is immutable, then swap. The manifest is
+    // `episode.jk`, which every archive holds (`JK1`, `JK1MP`, `JK1CTF`): a bare `read` returns the
+    // last one — the multiplayer list — and resolving the campaign's successor against that stopped
+    // the campaign after level 2. Ask for the single-player episode explicitly, as `setup` does.
     let (next, episode) = {
         let gobs = &world.resource::<Archives>().0;
         match load(gobs, &name) {
-            Ok(next) => (next, gobs.read("episode.jk")),
+            Ok(next) => {
+                let episode = episodes_of(gobs)
+                    .into_iter()
+                    .find(|(_, e)| e.kind == episode::KIND_SINGLE)
+                    .map(|(_, e)| e);
+                (next, episode)
+            }
             Err(e) => {
                 println!("level: could not load {name}: {e}");
                 return;
@@ -10128,7 +10296,6 @@ fn swap_level(world: &mut bevy::prelude::World) {
     if let Some(mut plan) = world.get_resource_mut::<FlowPlan>() {
         plan.level = name.clone();
         let (cuts, after) = episode
-            .map(|d| episode::parse(&String::from_utf8_lossy(&d)))
             .map(|e| {
                 let flow = e.flow_after(&name);
                 (
@@ -12215,6 +12382,7 @@ fn run_level(
     let mut deep_ran = 0usize;
     let mut deep_waiting = 0usize;
     let mut deep_errors = 0usize;
+    let mut deep_listed = 0usize;
     for (name, vm) in &mut vms {
         let script = &scripts[name];
         let skip: std::collections::HashSet<String> = script
@@ -12238,6 +12406,7 @@ fn run_level(
                     // is a defect to read, not only a count.
                     if errors.len() < 8 {
                         errors.push(format!("{name} {label}: {e}"));
+                        deep_listed += 1;
                     }
                 }
             }
@@ -12386,8 +12555,10 @@ fn run_level(
     }
     RunReport {
         stubs: silent_verbs,
-        // A label that errored, in the message pump or in the deep pass, is a real failure.
-        errors: errors.len() + deep_errors,
+        // A label that errored, in the message pump or in the deep pass, is a real failure. Counted
+        // once: the deep pass also keeps its first few messages in `errors` for reading, and adding
+        // `deep_errors` on top of the list double-counted those.
+        errors: errors.len() + deep_errors - deep_listed,
         missing_sounds: missing.len(),
     }
 }
@@ -16628,15 +16799,21 @@ fn goal_probe(
     let Some((pos, sector)) = sim.world.borrow().things.get(goal).map(|t| (t.pos, t.sector)) else {
         return;
     };
+    // Eight units in front of it, facing it, in its own room, so the cull pass has no excuse.
+    //
+    // Re-assert it **every frame** rather than once: the walker recomputes the tracked sector from
+    // the body's position, and the renderer's sighting pass keys off that sector, so a one-shot
+    // teleport left this gate at the mercy of the schedule's order between the probe, `walk_player`
+    // and `cull_sectors` — it passed for months and then failed when an unrelated system changed the
+    // order. The registration orders these three explicitly, and the pose stays put until the level
+    // ends. This is a synthetic observation, so pinning the body is the honest thing to do.
+    player.pos = Vec3::new(pos[0], pos[1] - 8.0, pos[2]);
+    player.sector = sector.max(0) as usize;
+    player.yaw = std::f32::consts::FRAC_PI_2;
+    player.vy = 0.0;
     if !state.1 {
-        // Eight units in front of it, facing it, in its own room, so the cull pass has no excuse.
-        player.pos = Vec3::new(pos[0], pos[1] - 8.0, pos[2]);
-        player.sector = sector.max(0) as usize;
-        player.yaw = std::f32::consts::FRAC_PI_2;
-        player.vy = 0.0;
         state.1 = true;
         println!("goal: placed the body 8 units from thing {goal} in sector {sector}");
-        return;
     }
     if state.0 == 120 {
         let flags = sim

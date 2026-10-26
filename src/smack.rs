@@ -15,9 +15,30 @@
 use std::path::{Path, PathBuf};
 
 /// Where the helper lands when built with the command in this module's docs.
+///
+/// `cwd` is the documented case (`cargo run` from the repo, or the built binary started there), but
+/// a binary launched anywhere else looked for the helper in *its own* working directory and silently
+/// played no films. `BK_SMKDEC` names it explicitly; otherwise the executable's directory and up to
+/// three parents are searched, so a build under `target/release/` finds its own repo checkout.
 pub fn shim_path() -> Option<PathBuf> {
-    let candidate = Path::new("tools/smkdec/target/i686-pc-windows-msvc/release/smkdec.exe");
-    candidate.exists().then(|| candidate.to_path_buf())
+    let rel = Path::new("tools/smkdec/target/i686-pc-windows-msvc/release/smkdec.exe");
+    if let Some(explicit) = std::env::var_os("BK_SMKDEC") {
+        let candidate = PathBuf::from(explicit);
+        return candidate.exists().then_some(candidate);
+    }
+    if rel.exists() {
+        return Some(rel.to_path_buf());
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?;
+    for _ in 0..4 {
+        let candidate = dir.join(rel);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?;
+    }
+    None
 }
 
 /// One decoded cutscene run.
