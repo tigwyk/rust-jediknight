@@ -7,40 +7,40 @@ It does not run or patch the original engine, and needs no cover mount or crack:
 the shipped `.gob` archives and the engine executable's own tables directly, and draws the
 real levels, menus and HUD.
 
-![jkl\03katarn.jkl, from the level's own start point](docs/screenshot.png)
+![jkl\03katarn.jkl, from the level's own start point](screenshot.png)
 
 *`jkl\03katarn.jkl`, viewed from the level's `walkplayer` start point: the level's own
 geometry, materials and sky, with placed crate models sitting on the ledge at their real
 size. Levels and models share one Z-up coordinate system, so a model's height is its
 height in the world.*
 
-![All 35 retail levels, rendered from their own start points](docs/levels.png)
+![All 35 retail levels, rendered from their own start points](levels.png)
 
 *Every `.jkl` in the install — 26 single-player (25 campaign levels, listed as 28
 manifest rows across the light and dark paths, plus the asset-only `static.jkl`),
 6 multiplayer and 3 CTF — one `--shot` process each, from each level's own start
 point. The outdoor levels show the game's own cloud sky.*
 
-![An outdoor level with its sky](docs/sky.png)
+![An outdoor level with its sky](sky.png)
 
 *`jkl\04escapehouse.jkl`: brick walls, wooden beams and the level's sky texture,
 drawn as an unshaded dome behind the world.*
 
-![Four .3do models, assembled from their node hierarchies](docs/models.png)
+![Four .3do models, assembled from their node hierarchies](models.png)
 
 *`--pose <model> -`: four models drawn from their own rest pose. A puppet's mesh
 vertices are node-local, so the body only exists after its 18-node hierarchy is
 composed — the top-left figure is `3do/actor/ky.3do`, the walker is `3do/at.3do`, and
 the door and crate below have no hierarchy at all and are drawn as stored.*
 
-![A keyframe pose](docs/pose-kyle.png)
+![A keyframe pose](pose-kyle.png)
 
 *`--pose 3do/actor/ky.3do 3do/key/kystand0.key 8`: the same body posed from frame 8 of
 its stand animation. A `.key` frame is an absolute local pose per joint, matched to the
 model by mesh name (`kystand0.key` lists its joints alphabetically, the model lists them
 in authoring order).*
 
-![The retail main menu, drawn from the game's own bitmap and strings](docs/menu-main.png)
+![The retail main menu, drawn from the game's own bitmap and strings](menu-main.png)
 
 *`--ui singleplayer`: the game's own `ui\bm\bkmain.bm` with its `ui\sft\large0.sft` text, at
 the element rects read out of the engine executable's `.data`. Nothing about this screen is
@@ -48,19 +48,19 @@ authored here — the art, the font, the strings (`ui\jkstrings.uni`) and the la
 come from the retail install, and the text is the colour retail shows because a glyph's
 byte is a palette index into the background's own palette.*
 
-![The in-game Esc menu](docs/menu-esc.png)
+![The in-game Esc menu](menu-esc.png)
 
 *`--ui esc`: the pause screen over `bkesc.bm`, same pipeline — the same `large0.sft` glyph
 strip resolves to a different colour because this palette is different.*
 
-![The in-game status bar, drawn over a live level](docs/ingame-hud.png)
+![The in-game status bar, drawn over a live level](ingame-hud.png)
 
 *The status bar as the app draws it: `statusLeft.bm`/`statusRight.bm` at the screen
 corners with the shield, health, force and battery meters and the three `%03d` numbers,
 all at `hud_scale` 2. Every position comes from the bitmap headers and every frame index
 from the meter's own value.*
 
-![The character-select screen, from the executable's own element table](docs/ui-chooseplayer.png)
+![The character-select screen, from the executable's own element table](ui-chooseplayer.png)
 
 *`--ui chooseplayer`: the artwork, the five buttons and their rects all come from the
 install, and the element array itself is read out of the engine executable at 0x526d98 — the
@@ -69,7 +69,7 @@ not the `bkSingle` this build used to guess: it is the `jkGui_stdBitmaps[0]` arg
 `jkGui_InitMenu` call that initializes the screen, read from the code. The player list itself
 is a list box the engine fills from code, so it is empty here.*
 
-![The map / field-log screen, its controls and its open map area](docs/ui-fieldlog.png)
+![The map / field-log screen, its controls and its open map area](ui-fieldlog.png)
 
 *`--ui 0x52ea68`: the in-game map and journal. This is the screen the extraction used to
 call "force_powers" — 12 picture buttons over a 520x320 custom element — because nothing in
@@ -78,7 +78,7 @@ the data says what it is. The code does: its menu is initialized by `jkGuiMap_St
 and pan arrows, `flSpin`, `flReset`). The black area is the `type 7` element where the map is
 drawn at run time; the green bar above it is drawn by that same code.*
 
-![The single-player screen, reached by activating the main menu's first row](docs/ui-nav-singleplayer.png)
+![The single-player screen, reached by activating the main menu's first row](ui-nav-singleplayer.png)
 
 *`--menu main/10`: the app activated the main menu's `GUI_SINGLEPLAYER` row through the same
 path a click takes, and the screen it opened is the one the retail graph names — the
@@ -87,7 +87,7 @@ from the element table. Navigation follows the recovered `_Show` switches, not a
 `menus`/`nav` map `(screen, hoverId)` to the next screen, and the audit checks every edge's id
 against the data it came from.*
 
-![The objectives page, whose empty state is the engine's own line](docs/ui-objectives.png)
+![The objectives page, whose empty state is the engine's own line](ui-objectives.png)
 
 *`--ui 0x5311e0`: the objectives page. Its `type 7` panel is `jkGuiObjectives_CustomRender`
 (its own `+0x30` callback, 0x417b00), which lists the player's goals and, with none, prints
@@ -95,7 +95,7 @@ against the data it came from.*
 goal inventory, so that is its true state — the words come from `jkstrings.uni`, not from
 here. The green banner is painted in `bkFieldLog.bm` itself.*
 
-![The quit-confirmation dialog, its text from the shipped string table](docs/ui-quit-dialog.png)
+![The quit-confirmation dialog, its text from the shipped string table](ui-quit-dialog.png)
 
 *`--menu main/12`: the main menu's Quit row does not exit — the decompiled `jkGuiMain_Show`
 case 12 calls `jkGuiDialog_Message(GUI_QUITCONFIRM, GUI_QUITCONFIRM_Q)`, so the app opens the
@@ -104,7 +104,7 @@ you want to quit Jedi Knight?"), the dialog's own panel over the menu art, and C
 back / Ok leaving. Nothing here is typed in: the layout is the element array at 0x530068 and
 the text is the shipped table.*
 
-![The character editor: six arrow buttons around two code-drawn panels](docs/ui-edit-character.png)
+![The character editor: six arrow buttons around two code-drawn panels](ui-edit-character.png)
 
 *`--ui 0x534cd0`: the character editor. Six picture buttons index the engine's bitmap table
 (33/34 = `arrowLeft.bm`/`arrowRight.bm`) and land exactly on their rects, which is what
@@ -113,7 +113,7 @@ buttons called `cancel`. The two black panels are `type 7` custom elements — t
 window and the force-power grid are drawn by the screen's code into rects the data only
 reserves.*
 
-![A dialog: the bkdialog panel over the main menu art](docs/ui-dialog.png)
+![A dialog: the bkdialog panel over the main menu art](ui-dialog.png)
 
 *`--ui 0x52fe88`: a dialog is two layers. `bkdialog.bm` is 414x206, not a screen, so the
 engine copies the menu art and then the panel at that bitmap's own `xPos`/`yPos`
@@ -122,13 +122,13 @@ draws the panel only for screens whose elements really do fit inside it — this
 "Ok" box does, while the four-line quit prompt spans the screen and draws no panel. The
 message lines are runtime text the engine fills in, so only the button shows.*
 
-![The loading screen, from its own array](docs/ui-loading.png)
+![The loading screen, from its own array](ui-loading.png)
 
 *`--ui 0x534790`: "Loading…" and the two copyright lines are ordinary elements in the
 executable's `.data`, drawn over `bkloading.bm` — the same array the engine fills with
 progress text.*
 
-![The force-power screen: fourteen icons placed by their own bitmaps](docs/ui-force.png)
+![The force-power screen: fourteen icons placed by their own bitmaps](ui-force.png)
 
 *`--ui force`: the screen this build could not find for two rounds. Its elements carry a
 `rect = -1,-1,-1,-1` placeholder that the engine fills from the artwork, so a "does the rect
@@ -136,7 +136,7 @@ fit the screen" test threw the whole screen away. Each icon is placed from its o
 `xPos`/`yPos` (`foAbsorb.bm` at 201,269, `foJump.bm` at 284,87, …), drawn from its
 normal/hover/pressed cells, over `bkforce.bm`.*
 
-![The single-player tally, its force-star row drawn](docs/ui-tally-stars.png)
+![The single-player tally, its force-star row drawn](ui-tally-stars.png)
 
 *`--ui 0x531530 --stars 4`: the tally screen's `type 7` element is where
 `jkGuiSingleTally_ForceStarsRender` (0x418000) paints the force stars — one `foStars.bm` cell
@@ -145,38 +145,38 @@ build draws what `--stars` is given and nothing otherwise; every other custom pa
 in `--ui-tables` (`[map]`, `[objectives]`, `[loadbar]`, `[model]`, …) but needs state or level
 data the screenshot path does not have.*
 
-![The setup screen: gold title, gold tabs, red labels and a check box](docs/ui-setup.png)
+![The setup screen: gold title, gold tabs, red labels and a check box](ui-setup.png)
 
 *`--ui setup`: every font here is named by the element's own `textType` — `large1` for the
 title, `med0` for the tab buttons, `small0` for the red labels — and the empty check box
 left of "Enable A3D Sound" is `check.bm` from the engine's bitmap table, with the label
 shifted right by the box's width plus four, as the engine does.*
 
-![The main menu in the running game, cursor on Single Player](docs/ingame-menu-main.png)
+![The main menu in the running game, cursor on Single Player](ingame-menu-main.png)
 
 *`--menu singleplayer`: the same screen inside the app, with the cursor on the first row
 drawn in the engine's own hover font (`large1`), which is how retail lights a hovered row.
 Escape opens the pause screen, Up/Down move, Enter picks.*
 
-![The pause menu rendered into the running game](docs/ingame-menu.png)
+![The pause menu rendered into the running game](ingame-menu.png)
 
 *Escape opens `bkesc.bm` in the app itself — 640x480 canvas letterboxed over the live
 level, cursor on `Objectives` — and Up/Down/Enter move and pick.*
 
-![The whole HUD, composed offline](docs/hud.png)
+![The whole HUD, composed offline](hud.png)
 
 *`--hud`: status bar, crosshair, the bracketed item panel at the bottom and the inventory
 strip down the right edge, composed over the campaign's first level's colormap — which is
 where the red/green/amber come from. The icons are `ui\bm\ic<name>.bm`, whose file names are
 derived from `misc\items.dat`'s item names by the engine's own `ic%.5s%d.bm` rule.*
 
-![The force-power screen artwork](docs/ui-force-art.png)
+![The force-power screen artwork](ui-force-art.png)
 
 *`--bm "ui\bm\bkforce.bm"`: the Jedi-power screen's own artwork — the medallion bands,
 the alien landscape, and the empty slots the force icons are drawn into. Decoded straight
 from the install, palette included.*
 
-![Whole-level overview](docs/overview.png)
+![Whole-level overview](overview.png)
 
 *`--overview`: level 1 in plan, from directly above — a plan view of a Z-up world, `6 x span` up
 through a 10-degree lens with every sector drawn. Standing 0.9 x span above the roofs at the default
@@ -240,8 +240,8 @@ Stage-by-stage, against `docs/roadmap.md`, with the check that holds each one:
 | 5 combat | **complete for single-player**: damage two-way, shields, death/respawn, pickups, explosions, force jump/speed/healing/seeing, mana regeneration, ammo, and **force pull exactly as the shipped script does it** — highlight with `jkSetTarget`, then `ApplyForce` at 30 u/s toward the player with gravity cleared (`--pull`). Grip damages over time while holding the victim | `--hit`, `--fire`, `--pickup`, `--weapon`, `--force`, `--mana`, `--ammo`, `--pull` |
 | 6 AI | instincts reach the live runtime (117 actors), and the chase **searches the sector graph**: `Collide::route` is breadth-first over the portals (1206 doorways on level 1, built from the `adjoin`/`mirror` pairs), refusing links its own gates close, and the runtime keeps the doorway route per actor and pops waypoints as they are reached; the direct line is still tried first. Instinct scheduler weights, `accuracy=` spread and reaction times are still unfixed | `--ai`, `--live-check` |
 | 7 audio | attenuation over 375 clips, the song range, the pulse/timer queue, the **music fade** verified end to end (`--fade`: 0.00 → 1.00 → 0.00 through the script's own chain), and the **menus' own wavs** parsed from `jkGuiMenu` and played on hover/click (39 of 41 screens, both names present) | `--sound`, `--music`, `--fade`, `--ui-sounds` |
-| 8 `.smk` cutscenes | **it decodes and it plays in the window**: the DLL is 32-bit (`machine 0x014C`), so a 64-bit process cannot load it (error 193) — the decode runs in `tools/smkdec`, a dependency-free i686 helper driven by JK's own `SmackOpen(file, 0xfe000, -1)`. `--smk-decode` proves frames come out and differ (`01-02A.SMK`: 40 decoded, 10 distinct, first non-blank frame 16), and `--cutscene 01-02A.SMK 30` plays them over level 1 at 15 fps letterboxed 640×300 in the 640×480 overlay ([image](docs/cutscene-playing.png)). **Frames are in colour, from the film's own palette**: the header layout is proved (chunk sizes + tables + huffman block fill all 25 films exactly, `Layout::covers` in `--smk`), and palette records decode per frame — `skip`, `colour-shift`, and literal "set one colour" chunks, the last of which was the bug that made the first attempt look like coloured static ([images](docs/cutscene-colour-window.png)). Palettes are verified against libsmacker as a reference decoder (740 of 768 bytes wrong before the fix, 29 after, §16.9). **The whole film plays once, streamed**: 90 decoded frames used to loop, which is what a 992-frame film playing the same six seconds looks like; the helper now decodes the entire film to disk as it plays (about 5× real time, so it stays ahead) and frames are read, coloured and blitted as they appear, stopping on the last one ([image](docs/cutscene-late-frame.png)). Known limit: 29 of 768 palette bytes still differ from libsmacker (§16.9). Data: the VFS falls back to loose files through the `Resource/VIDEO` mount, so `--campaign` resolves every cutscene row and `--smk` verifies all 25 files (483 MB, 29,493 frames, 640×300 at 15.2 fps) | `--smk`, `--smk-decode`, `--cutscene`, `--campaign` |
-| 9 campaign flow | **savegame container + thing records implemented** (`src/jks.rs`): version 6, the 1580-byte header, 32-byte level name, 4-byte field, 24-byte player block, then records with the engine's **0x28-byte header** (length +0x20, type +0x24) and a `ThingRecord` over the payload offsets `FUN_004f4210` stages — template index, type, position, angles. `--save` writes one record per placed thing (level 1: 64) and reads every position and angle back, including the player's own spawn. The campaign **graph** is verified too: `--campaign` walks both `gotoA`/`gotoB` edges and proves all 28 single-player levels are reachable from level 1 through the one `DECIDE` row, while the MP/CTF manifests loop as map rotations (§16.9). The **transition** is wired to the engine's own verb: `jkendlevel` (`jkCog.c`) marks `Runtime::level_complete`, and `--transition` resolves the successor through the graph — `01narshadda.jkl -> 02narshadda.jkl`, 21 levels on the `gotoA` spine (§16.9). Not done: the rest of the payload fields and the header internals. **The transition runs end to end up to the film**: `--complete-after <s>` calls the engine's own `jkEndLevel`, `Episode::flow_after` resolves the graph's next rows, the `CUT` row plays in the window and the next level is named (`level 01narshadda.jkl complete -> cutscene 06a.smk, then 02narshadda.jkl`, [image](docs/cutscene-on-complete.png)); `--flow` asserts every hop, with each film checked as `SMK2` and each level present in the archives. **The swap works, and it is the default**: `swap_level` is an exclusive system that despawns the old level's `LevelEntity`-tagged entities, swaps `World` and re-runs `setup`, so level 2 (391 things, 641 sectors) is built and rendered with its own music after the film (`--no-swap-levels` stops at the film). Three bugs made it work: the camera is only spawned when none exists, the film gates the change via `Cutscene::finished`, and the overlay is marked dirty so the HUD returns ([image](docs/level2-after-transition.png)). Remaining for the stage: the rest of the `.jks` payload and the header internals | `--save`, `--campaign`, `--transition`, `--flow`, `--complete-after`, `--swap-levels` |
+| 8 `.smk` cutscenes | **it decodes and it plays in the window**: the DLL is 32-bit (`machine 0x014C`), so a 64-bit process cannot load it (error 193) — the decode runs in `tools/smkdec`, a dependency-free i686 helper driven by JK's own `SmackOpen(file, 0xfe000, -1)`. `--smk-decode` proves frames come out and differ (`01-02A.SMK`: 40 decoded, 10 distinct, first non-blank frame 16), and `--cutscene 01-02A.SMK 30` plays them over level 1 at 15 fps letterboxed 640×300 in the 640×480 overlay ([image](cutscene-playing.png)). **Frames are in colour, from the film's own palette**: the header layout is proved (chunk sizes + tables + huffman block fill all 25 films exactly, `Layout::covers` in `--smk`), and palette records decode per frame — `skip`, `colour-shift`, and literal "set one colour" chunks, the last of which was the bug that made the first attempt look like coloured static ([images](cutscene-colour-window.png)). Palettes are verified against libsmacker as a reference decoder (740 of 768 bytes wrong before the fix, 29 after, §16.9). **The whole film plays once, streamed**: 90 decoded frames used to loop, which is what a 992-frame film playing the same six seconds looks like; the helper now decodes the entire film to disk as it plays (about 5× real time, so it stays ahead) and frames are read, coloured and blitted as they appear, stopping on the last one ([image](cutscene-late-frame.png)). Known limit: 29 of 768 palette bytes still differ from libsmacker (§16.9). Data: the VFS falls back to loose files through the `Resource/VIDEO` mount, so `--campaign` resolves every cutscene row and `--smk` verifies all 25 files (483 MB, 29,493 frames, 640×300 at 15.2 fps) | `--smk`, `--smk-decode`, `--cutscene`, `--campaign` |
+| 9 campaign flow | **savegame container + thing records implemented** (`src/jks.rs`): version 6, the 1580-byte header, 32-byte level name, 4-byte field, 24-byte player block, then records with the engine's **0x28-byte header** (length +0x20, type +0x24) and a `ThingRecord` over the payload offsets `FUN_004f4210` stages — template index, type, position, angles. `--save` writes one record per placed thing (level 1: 64) and reads every position and angle back, including the player's own spawn. The campaign **graph** is verified too: `--campaign` walks both `gotoA`/`gotoB` edges and proves all 28 single-player levels are reachable from level 1 through the one `DECIDE` row, while the MP/CTF manifests loop as map rotations (§16.9). The **transition** is wired to the engine's own verb: `jkendlevel` (`jkCog.c`) marks `Runtime::level_complete`, and `--transition` resolves the successor through the graph — `01narshadda.jkl -> 02narshadda.jkl`, 21 levels on the `gotoA` spine (§16.9). Not done: the rest of the payload fields and the header internals. **The transition runs end to end up to the film**: `--complete-after <s>` calls the engine's own `jkEndLevel`, `Episode::flow_after` resolves the graph's next rows, the `CUT` row plays in the window and the next level is named (`level 01narshadda.jkl complete -> cutscene 06a.smk, then 02narshadda.jkl`, [image](cutscene-on-complete.png)); `--flow` asserts every hop, with each film checked as `SMK2` and each level present in the archives. **The swap works, and it is the default**: `swap_level` is an exclusive system that despawns the old level's `LevelEntity`-tagged entities, swaps `World` and re-runs `setup`, so level 2 (391 things, 641 sectors) is built and rendered with its own music after the film (`--no-swap-levels` stops at the film). Three bugs made it work: the camera is only spawned when none exists, the film gates the change via `Cutscene::finished`, and the overlay is marked dirty so the HUD returns ([image](level2-after-transition.png)). Remaining for the stage: the rest of the `.jks` payload and the header internals | `--save`, `--campaign`, `--transition`, `--flow`, `--complete-after`, `--swap-levels` |
 | 10 UI panels | **every single-player custom element draws**: map, objectives, force stars, load bar, title text, plus the menus' own wavs. The two holes the docs used to name — the model window and the power grid — are both on `edit_character`, a **multiplayer** screen, so they are out of scope rather than pending | `--map-shot`, `--ui-visible`, `--load-bar`, `--force-screen`, `--ui-tables` |
 
 Every stage's recovered constants and code addresses are in `docs/formats.md`; the
@@ -324,7 +324,7 @@ is not: this is not yet a replacement you can finish the game in.
   character: the same ten-times error seen from the other side, and what put the camera 0.1 above the floor
   while the props were ten times too big. `--rules` prints the derived motion, `--live-check` puts the body
   on its floor, and `--move` walks all 34 levels with it. `--near reeyeesfist` at the corrected size:
-  [image](docs/model-scale.png).
+  [image](model-scale.png).
 - **Audio is muted by default, and quiet when enabled.** `--sound-on` plays at a 5% master gain
   (`--sound-on` + `BK_VOLUME=1` for a real playtest); `--mute`/`BK_MUTE=1` force silence whatever else is
   passed. `--audio-state` prints the decision and gain, then exits before an audio device is opened, so the
@@ -358,8 +358,8 @@ is not: this is not yet a replacement you can finish the game in.
   puts the look axis in column 1 — so a level's yaw `a` faces `(-sin a, cos a)`, and the port had been driving
   the camera, the walk keys and the spawn aim along column 0, `(cos a, sin a)`. One `yaw_axes()` now holds the
   mapping; `--controls` asserts the camera's look and right against `thing_quat`'s columns on 15 yaw/pitch
-  pairs. The 03katarn start is the proof: [before](docs/camera-before.png) stands the eye inside a doorway,
-  [after](docs/screenshot.png) is the street the level opens on. The engine's velocity term turned out to be a
+  pairs. The 03katarn start is the proof: [before](camera-before.png) stands the eye inside a doorway,
+  [after](screenshot.png) is the street the level opens on. The engine's velocity term turned out to be a
   **strafe roll** (`roll += clamp(5 * dot(vel, right), -8, 8)` degrees, first person only), not the pitch the
   docs had attributed; it is ported now as `camera_lean()`, and the three constants are byte-verified in the file — 5.0 at
   `0x522ddc`, −8.0 at `0x522de0`, 8.0 at `0x522de4` — with `--controls` asserting the 3.3 deg bank at full
@@ -701,8 +701,8 @@ is why it was recoverable.
 
 ## Verification
 
-Every check in one page: [docs/gates.txt](docs/gates.txt) records each flag, its exit code and the
-number it printed against this install — **59 gates, 0 failures**, plus 122 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
+Every check in one page: [docs/gates.txt](gates.txt) records each flag, its exit code and the
+number it printed against this install — **59 gates, 0 failures**, plus 122 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
 
 `--check` on level 1 (`jkl\01narshadda.jkl`) reports, and asserts:
 

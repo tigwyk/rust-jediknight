@@ -2354,9 +2354,8 @@ the highest such face that the body is *over* (within a body radius of an edge s
 within `drop` below the feet, and `walker_step` asks it before falling back to the sector planes.
 Level 1's spawn now reports `support Some(-1.275)` and stands, where before every sector-plane query
 returned `None` and the walker sank through the level. Walking off the walkway still falls — that is
-a gap in the level, not a bug.
-
-![standing on the walkway at level 1's spawn](walker-on-the-walkway.png)
+a gap in the level, not a bug. (The screenshot that showed the standing view is no longer in the
+tree; `walker-view.png` above is the same camera.)
 
 **Why a plane-based floor query is not enough.** The obvious next step is "ask *every* sector for a
 floor under the body". It was tried and it fails on data that is easy to check. Level 1's walkway is
