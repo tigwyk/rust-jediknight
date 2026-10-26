@@ -1,0 +1,86 @@
+# Build, test and package bevi-knight on a Windows runner.
+#
+# The port is Windows-only, so the runner is windows-latest. It enforces the MSRV pinned in
+# Cargo.toml, runs the unit suite (the gates under --gates need a retail game install, which CI
+# does not have and must not download), builds the 32-bit film helper, and produces the native
+# setup executable as a downloadable artifact.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows build, tests and setup
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      # The MSRV is the one number that must be tested, not the runner's default toolchain.
+      - name: Read the MSRV from Cargo.toml
+        id: msrv
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^rust-version = "(.+)"$' | Select-Object -First 1).Matches.Groups[1].Value
+          if (-not $version) { throw 'Cargo.toml has no rust-version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal --target i686-pc-windows-msvc
+          rustup default ${{ steps.msrv.outputs.version }}
+
+      # Bevy is the slow part; cache the registry and build directories keyed by the lock files.
+      - name: Cache cargo and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            tools/smkdec/target
+          key: ${{ runner.os }}-cargo-${{ steps.msrv.outputs.version }}-${{ hashFiles('Cargo.lock', 'tools/smkdec/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ steps.msrv.outputs.version }}-
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Unit tests
+        run: cargo test --bins --release --locked
+
+      # The setup embeds this helper; without it the installed game skips cutscenes.
+      - name: Build the 32-bit film helper
+        run: cargo build --release --locked --target i686-pc-windows-msvc --manifest-path tools/smkdec/Cargo.toml
+
+      # Uses the in-box .NET Framework compiler, so there is nothing to install first.
+      - name: Build the native setup
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build-setup.ps1 -SkipBuild
+
+      - name: Check documentation links
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-docs-links.ps1
+
+      - name: Upload the setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: bevi-knight-setup
+          path: dist/bevi-knight-*-setup.exe
+          if-no-files-found: error
+          retention-days: 14

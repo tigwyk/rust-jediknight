@@ -1136,3 +1136,26 @@ annotated tag, and the name the setup artifact takes.
   the repository state says it was not, and this note records that reasoning.
 
 Remaining owner actions: explicit approval to push, and the human playthrough caveat.
+
+**Round 207 (CI):** `.github/workflows/ci.yml` builds, tests and packages the port on
+`windows-latest`.
+
+- **Toolchain:** the workflow reads `rust-version` from `Cargo.toml` (1.97.1) and installs that
+  exact toolchain with the `i686-pc-windows-msvc` target, so CI tests the MSRV rather than
+  whatever the runner happens to ship. `cargo build --locked` and
+  `cargo test --bins --release --locked` pin the two checked-in lock files.
+- **What it produces:** the 132 unit tests, the 32-bit film helper, and the native
+  `bevi-knight-0.1.0-setup.exe` through `packaging/build-setup.ps1 -SkipBuild`, uploaded as a
+  14-day artifact. Cargo registry and build output are cached by lock-file hash.
+- **Documentation:** `scripts/check-docs-links.ps1` resolves every relative link against the
+  file that contains it (the failure mode that once left 34 broken links in the progress log);
+  CI runs it, and it passes locally with 108 links across 7 files.
+- **What is deliberately not in CI:** the 61 gates under `--gates` need the retail game install,
+  which the repository does not ship and CI must not download. `cargo fmt --check` is not
+  enforced yet because the tree is not rustfmt-clean, and clippy runs with ~140 warnings (no
+  errors), so neither is a gate. Both are noted as future tightening, not hidden.
+- Verified locally: the exact commands run here (build, tests, helper, setup, link check) pass,
+  and the workflow YAML parses as one `windows` job with ten steps. Nothing has been pushed, so
+  GitHub has not run it yet - the badge in the README will only go green after the first push.
+
+Remaining owner actions: explicit approval to push, and the human playthrough caveat.

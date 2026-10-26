@@ -32,6 +32,10 @@ here has been pushed or published.
   README's "Open for 0.1" list.
 - [x] **Check record.** `--gates` 0 of 61 failed, 0 skipped (windowed) / 9 skipped
   (`BK_HEADLESS=1`); `cargo test --bins` 132 passed.
+- [x] **CI.** `.github/workflows/ci.yml` runs on windows-latest with the Cargo MSRV:
+  `cargo build --locked`, the 132 unit tests, the i686 film helper, the native `setup.exe`
+  artifact, and [scripts/check-docs-links.ps1](../scripts/check-docs-links.ps1). The 61 gates
+  are excluded because they need a retail install.
 - [x] **License.** **GPL-3.0-or-later** for code, tools and setup scripts: `LICENSE` (verbatim
   GPLv3), `NOTICE` (game/trademark/screenshot carve-out and the source-for-binaries note), and
   `license = "GPL-3.0-or-later"` in `Cargo.toml`. Contributions are inbound = outbound.

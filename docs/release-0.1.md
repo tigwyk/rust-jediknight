@@ -27,6 +27,10 @@ The game finds the helper in the repo's `tools/smkdec/target/i686-pc-windows-msv
 whether it is started from the repo or from `target/release/`, and `BK_SMKDEC` names the
 executable explicitly if it was moved.
 
+The same steps run in [CI](../.github/workflows/ci.yml) on a Windows runner with this file's MSRV,
+and the job uploads the native setup as a build artifact. The `--gates` checks are not in CI:
+they need a retail install, which is not shipped here.
+
 ## Install it (Windows, no admin rights)
 
 `packaging\build-setup.ps1` builds **one native setup executable**:

@@ -1,5 +1,7 @@
 # bevi-knight
 
+[![CI](https://github.com/tigwyk/rust-jediknight/actions/workflows/ci.yml/badge.svg)](https://github.com/tigwyk/rust-jediknight/actions/workflows/ci.yml)
+
 A from-scratch reconstruction of **Star Wars Jedi Knight: Dark Forces II**'s world
 renderer in **Rust + Bevy 0.20**.
 
@@ -680,6 +682,12 @@ is why it was recoverable.
 Every check in one page: [docs/gates.txt](docs/gates.txt) records each flag and what it printed
 against this install; the sweep now is **61 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
 `0 of 61 failed, 9 skipped`), plus 132 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
+
+[CI](.github/workflows/ci.yml) runs on Windows: it installs the MSRV from `Cargo.toml`, builds
+with `--locked`, runs the 132 unit tests, builds the i686 film helper, produces the native
+`setup.exe` as an artifact, and checks every relative documentation link. The 61 gates are not
+in CI on purpose — they require a retail game install, which the repository does not ship and
+CI does not download.
 
 `--check` on level 1 (`jkl\01narshadda.jkl`) reports, and asserts:
 

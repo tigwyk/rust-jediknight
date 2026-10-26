@@ -883,3 +883,13 @@ The source release is 0.1.0: Cargo version, annotated `v0.1.0` tag on the releas
 ever been pushed (`git ls-remote --tags origin` empty) and `origin/main` was 278 commits behind,
 so this is the first published release rather than a fix bump; the `v0.1.1-rc.1` candidate tag was
 removed. The release note's change list is now "What changed since the earlier 0.1 candidate".
+
+## CI (round 207)
+
+`.github/workflows/ci.yml` is a single windows-latest job: install the MSRV pinned in
+`Cargo.toml` (plus the i686 target), `cargo build --locked`, `cargo test --bins --release`, build
+the film helper, build the native `setup.exe` with `packaging\build-setup.ps1 -SkipBuild`, check
+every relative docs link with the new `scripts\check-docs-links.ps1`, and upload the setup as an
+artifact. The 61 gates are not in CI because they require a retail install; fmt/clippy are not
+enforced yet (tree is not rustfmt-clean, clippy has warnings but no errors). The workflow only
+runs once it is pushed, so GitHub has not executed it yet.
