@@ -191,7 +191,9 @@ order and continues on the light-side arm.
   level files, every film and successor against the archives, both finale rows, and the
   decision's two films in order. `--tour-live` walks the same chain through the running app.
   61 gates and 132 tests now pass on this install.
-
+- **The project is explicitly GPL-3.0-or-later** (`LICENSE` + `NOTICE` + `Cargo.toml`), and the
+  notice spells out that the game, its marks and the documentation screenshots are not licensed
+  here — no game data ships with it.
 ## Verified on this install
 
 Everything below was run against the retail data while this note was written, not remembered
@@ -224,3 +226,17 @@ and the uninstaller removed the folder, shortcut and Apps & Features entry.
 The two screens a player spends the most time in are photographed from the running build:
 [force-powers.png](force-powers.png) (a power's level drawn beside its icon) and
 [tally.png](tally.png) (three stars earned at the end of level 1).
+
+## License
+
+The source, tools and the setup build scripts are **GPL-3.0-or-later**; see `LICENSE` and
+`NOTICE` in the repository root. Rebuild it, study it, change it, redistribute it — including
+selling copies — as long as the source and the same freedoms go with it. Closed-source forks
+and proprietary repackaging are not allowed. Contributions are accepted under the same license.
+
+No game data is licensed or included. *Star Wars Jedi Knight: Dark Forces II* and everything in
+it belongs to Lucasfilm/Disney; this is an unaffiliated reconstruction that reads the retail
+install the player owns. The screenshots under `docs/` show retail artwork, are documentation,
+and are not covered by the GPL. Binary releases (including the setup) should be offered
+alongside the corresponding source: that is this repository, which `Cargo.toml` names. The
+setup also installs `LICENSE` and `NOTICE` beside the game.

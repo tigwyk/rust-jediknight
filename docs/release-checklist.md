@@ -32,15 +32,15 @@ here has been pushed or published.
   README's "Open for 0.1" list.
 - [x] **Check record.** `--gates` 0 of 61 failed, 0 skipped (windowed) / 9 skipped
   (`BK_HEADLESS=1`); `cargo test --bins` 132 passed.
+- [x] **License.** **GPL-3.0-or-later** for code, tools and setup scripts: `LICENSE` (verbatim
+  GPLv3), `NOTICE` (game/trademark/screenshot carve-out and the source-for-binaries note), and
+  `license = "GPL-3.0-or-later"` in `Cargo.toml`. Contributions are inbound = outbound.
 - [x] **Local tag.** `v0.1.1-rc.1`, annotated, pointing at this candidate (not pushed).
 
 ## Waiting on the repository owner
 
-- [ ] **License.** No `LICENSE`/`COPYING` and no `license` field in `Cargo.toml`. Choose one
-  (MIT, Apache-2.0, MIT/Apache-2.0, GPL-3.0, …) and add the file, the Cargo fields and a
-  release-note line before distributing.
-- [ ] **Version name.** `Cargo.toml` still says `0.1.0`; the local `v0.1.0` tag is 16 commits
-  behind (before the campaign-chain fixes). Keep the `v0.1.1-rc.1` candidate tag, move to
+- [ ] **Version name.** `Cargo.toml` still says `0.1.0`; the local `v0.1.0` tag is far
+  behind (before the campaign-chain and setup work). Keep the `v0.1.1-rc.1` candidate tag, move to
   `v0.1.1`, or re-tag a fresh `v0.1.0`?
 - [ ] **Publish.** `git push origin main --follow-tags` (or the chosen branch/tag) — **only on
   explicit approval**.

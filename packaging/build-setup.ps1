@@ -93,6 +93,11 @@ try {
         Write-Warning 'no smkdec.exe; the installed game will skip cutscenes.'
     }
     Copy-Item -LiteralPath (Join-Path $repo 'README.md') -Destination $payload
+    # The GPL text and the game/trademark notice travel with the installed copy.
+    foreach ($legal in @('LICENSE', 'NOTICE')) {
+        $src = Join-Path $repo $legal
+        if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $payload }
+    }
     foreach ($doc in @('release-0.1.md', 'release-checklist.md')) {
         $src = Join-Path $repo "docs\$doc"
         if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $payload 'docs') }

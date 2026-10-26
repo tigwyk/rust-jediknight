@@ -1,0 +1,34 @@
+bevi-knight — a from-scratch reconstruction of Star Wars Jedi Knight: Dark Forces II
+
+Copyright (C) 2026 the bevi-knight contributors
+
+This repository's source code, tools and the setup build scripts are free software:
+you can redistribute them and/or modify them under the terms of the GNU General
+Public License as published by the Free Software Foundation, either version 3 of
+the License, or (at your option) any later version. See the LICENSE file for the
+full text. There is no warranty.
+
+GAME AND ASSETS
+---------------
+No game data is part of this project and none is licensed here. Star Wars, Jedi
+Knight: Dark Forces II, and related names, stories, characters, artwork, sounds
+and films are trademarks and/or copyrights of Lucasfilm Ltd. and/or The Walt
+Disney Company. This project is not affiliated with, sponsored by, or endorsed by
+them. It is a reader/reconstruction that requires the user to own and install the
+retail game; every level, texture, sound and film is loaded from that install.
+
+The screenshots and captured text under docs/ show the retail game's own artwork.
+They are included as documentation of the reconstruction and remain the property
+of their respective owners; the GPL grant above does not apply to them.
+
+THIRD-PARTY CODE
+----------------
+Dependencies keep their own licenses. Bevy and the Rust crates used here are
+MIT/Apache-2.0 licensed and compatible with GPL-3.0. The i686 film helper
+(tools/smkdec) loads the SMACKW32.DLL that ships with the user's own game install;
+no decoder library is distributed.
+
+SOURCE FOR BINARIES
+-------------------
+The corresponding source for any binary release is this repository. If a build is
+distributed, keep that source available at the same place under GPL-3.0 section 6.

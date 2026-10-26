@@ -1099,3 +1099,22 @@ The licence, version-name and publish decisions are still the owner's (see
   binary stays at 132 tests and 61 gates (this round adds no Rust code).
 
 Still owner decisions: licence, final version name, whether to push — plus a human playthrough.
+
+**Round 205 (license):** the tree now carries an explicit license instead of defaulting to
+all-rights-reserved.
+
+- **GPL-3.0-or-later** for the source, tools and setup scripts. `LICENSE` is the verbatim GPLv3
+  text from gnu.org, `Cargo.toml` gained `license = "GPL-3.0-or-later"`, and README/release note
+  state it. Contributions are inbound = outbound (no CLA).
+- **`NOTICE`** carries the parts a code license cannot: no game data is included or licensed,
+  *Star Wars Jedi Knight: Dark Forces II* and its contents belong to Lucasfilm/Disney, the
+  project is unaffiliated, and the screenshots under `docs/` (retail artwork used as
+  documentation) are excluded from the GPL grant. It also records that binary releases should
+  keep the corresponding source available, and that dependencies keep their own MIT/Apache
+  licenses.
+- What the license does and does not do: it stops a **closed-source fork or proprietary
+  repackage** (the source and the same freedoms must travel), but GPL does not forbid selling
+  copies or support. The commercial ceiling here is really the game rights, which this project
+  cannot license at all — the retail copy stays with the player.
+- Remaining owner decisions are now version naming and pushing; the human playthrough is still
+  the honest ceiling on "0.1".

@@ -806,6 +806,21 @@ episode manifest, the sprite sheet, keyframes, puppets, AI classes, UI bitmaps, 
 tables, the door script — plus the `.cmp` length check, the runtime's verb table, the
 collision solver on a synthetic Z-up room, and the model transform (a parent stored after
 its child with nonzero pivots, and a parent rotation swinging its child).
+
+## License and game rights
+
+The source, tools and setup scripts are **GPL-3.0-or-later** — see [LICENSE](LICENSE) and
+[NOTICE](NOTICE). You can rebuild, study, modify and redistribute it, including selling copies,
+as long as the corresponding source and the same freedoms travel with it; a closed-source
+fork or a proprietary repackage is not permitted. Contributions are accepted under the same
+license (inbound = outbound, no CLA).
+
+**No game data is included.** *Star Wars Jedi Knight: Dark Forces II* and everything in it —
+levels, textures, sounds, films, names — belongs to Lucasfilm/Disney, and this project is not
+affiliated with or endorsed by them. It reads the retail game the user already owns. The
+screenshots under `docs/` show retail artwork, are included as documentation, and are not
+covered by the GPL grant.
+
 ## Camera recovery
 
 The camera is no longer a design choice: every number below came out of `JK.EXE`

@@ -867,3 +867,11 @@ Features and carries its own uninstaller (`Uninstall.cs`); `/S` switches make it
 `packaging\build-setup.ps1` builds it to `dist\bevi-knight-<version>-setup.exe` (~28 MB) without
 Inno Setup, WiX, NSIS or Squirrel. Tested through GUI, silent install (explicit and auto-detected
 paths), installed `--check`, shortcut creation/removal and uninstall.
+
+## The license (round 205)
+
+The tree is GPL-3.0-or-later: verbatim `LICENSE`, `license` in `Cargo.toml`, and a `NOTICE` that
+draws the line a code license cannot - no game data is included or licensed, the game and its
+marks belong to Lucasfilm/Disney, the docs screenshots are retail artwork excluded from the GPL,
+and binary releases should keep this repository as their corresponding source. Contributions are
+inbound = outbound.

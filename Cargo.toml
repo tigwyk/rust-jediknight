@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "A from-scratch single-player reconstruction of Star Wars Jedi Knight: Dark Forces II, reading the retail install's archives and executable tables"
 repository = "https://github.com/tigwyk/rust-jediknight"
+license = "GPL-3.0-or-later"
 readme = "README.md"
 rust-version = "1.97.1"
 
