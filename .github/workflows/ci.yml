@@ -28,7 +28,7 @@ jobs:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The MSRV is the one number that must be tested, not the runner's default toolchain.
       - name: Read the MSRV from Cargo.toml
@@ -47,7 +47,7 @@ jobs:
 
       # Bevy is the slow part; cache the registry and build directories keyed by the lock files.
       - name: Cache cargo and build output
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -78,7 +78,7 @@ jobs:
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-docs-links.ps1
 
       - name: Upload the setup
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bevi-knight-setup
           path: dist/bevi-knight-*-setup.exe
