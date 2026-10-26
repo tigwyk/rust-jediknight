@@ -1,6 +1,6 @@
 [package]
 name = "bevi-knight"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A from-scratch single-player reconstruction of Star Wars Jedi Knight: Dark Forces II, reading the retail install's archives and executable tables"
 repository = "https://github.com/tigwyk/rust-jediknight"

@@ -19,7 +19,7 @@ sky, with its crate models at their real size.*
 
 ## Status at a glance
 
-**Version 0.1.0 — Windows x64, single-player only.** The light-side campaign is playable from the
+**Version 0.1.1 — Windows x64, single-player only.** The light-side campaign is playable from the
 opening film to the finale, with the caveat that nobody has yet played levels 2–21 all the way
 through by hand (the app itself completes all 21 levels in sequence as a check).
 
@@ -128,7 +128,7 @@ so they survive uninstalling the port.
 Please use the [issue tracker](https://github.com/tigwyk/rust-jediknight/issues/new). A useful report
 includes:
 
-- the bevi-knight version (shown in **Settings → Apps**; 0.1.0 is the current release),
+- the bevi-knight version (shown in **Settings → Apps**; 0.1.1 is the current release),
 - your Windows version and GPU,
 - where the retail install lives and which edition it is (GOG, CD, other),
 - what you did, what you expected, and what happened,
@@ -174,7 +174,7 @@ cargo run --release -- --gates          # 61 behaviour gates, one process each
 ## Verification
 
 [docs/gates.txt](docs/gates.txt) records what every check printed against the retail install:
-**61 gates, 0 failures** (windowed; `BK_HEADLESS=1` skips 9 that need a window), plus **132 unit
+**61 gates, 0 failures** (windowed; `BK_HEADLESS=1` skips 9 that need a window), plus **133 unit
 tests**. CI builds, tests and packages on Windows with the MSRV pinned in `Cargo.toml` and uploads
 the setup artifact. The 61 gates are not in CI on purpose — they require the game data, which the
 repository does not ship and CI does not download.

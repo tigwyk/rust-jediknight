@@ -265,8 +265,8 @@ is the player-facing version of this.
   neutral).
 - **AI is `PrimaryFire` only**: actors see, route through doorways and shoot, but there is no
   instinct scheduler, hearing, alert propagation or reaction time before the first shot.
-- **Health and shields reset at each level**; inventory, force powers, rank and the ending choice
-  carry over.
+- **Health and shields carry across levels** (fixed in 0.1.1), as do inventory, force powers, rank
+  and the ending choice.
 - **Force powers beyond jump/speed/heal/seeing/pull/grip are unverified**, and animation states for
   crouch, alt-fire, saber swing and layered upper/lower body are not selected.
 - **Level 1's first frame starts inside cantina furniture** (a table 0.16 units from the eye);
@@ -674,10 +674,10 @@ is why it was recoverable.
 
 Every check in one page: [docs/gates.txt](gates.txt) records each flag and what it printed
 against this install; the sweep now is **61 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
-`0 of 61 failed, 9 skipped`), plus 132 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
+`0 of 61 failed, 9 skipped`), plus 133 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
 
 [CI](../.github/workflows/ci.yml) runs on Windows: it installs the MSRV from `Cargo.toml`, builds
-with `--locked`, runs the 132 unit tests, builds the i686 film helper, produces the native
+with `--locked`, runs the 133 unit tests, builds the i686 film helper, produces the native
 `setup.exe` as an artifact, and checks every relative documentation link. The 61 gates are not
 in CI on purpose — they require a retail game install, which the repository does not ship and
 CI does not download.

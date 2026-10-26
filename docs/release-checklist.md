@@ -31,22 +31,22 @@ here has been pushed or published.
 - [x] **Known issues.** The release note's "deliberately rough or not there" section, plus the
   README's status and known-limits section.
 - [x] **Check record.** `--gates` 0 of 61 failed, 0 skipped (windowed) / 9 skipped
-  (`BK_HEADLESS=1`); `cargo test --bins` 132 passed.
+  (`BK_HEADLESS=1`); `cargo test --bins` 133 passed.
 - [x] **CI.** `.github/workflows/ci.yml` runs on windows-latest with the Cargo MSRV:
-  `cargo build --locked`, the 132 unit tests, the i686 film helper, the native `setup.exe`
+  `cargo build --locked`, the 133 unit tests, the i686 film helper, the native `setup.exe`
   artifact, and [scripts/check-docs-links.ps1](../scripts/check-docs-links.ps1). The 61 gates
   are excluded because they need a retail install.
 - [x] **Release automation.** Pushing a `v*` tag runs the same Windows job and then a release job:
   it refuses a tag whose name is not `v` plus `Cargo.toml`'s version, downloads the setup artifact
   and attaches it to the GitHub release (`--verify-tag`; hyphenated tags become pre-releases).
-  The next tag is its first live run - `v0.1.0` predates the job, so that release has no asset yet.
+  `v0.1.0` predates the job, so that release has no asset; `v0.1.1` is the first live run.
 - [x] **License.** **GPL-3.0-or-later** for code, tools and setup scripts: `LICENSE` (verbatim
   GPLv3), `NOTICE` (game/trademark/screenshot carve-out and the source-for-binaries note), and
   `license = "GPL-3.0-or-later"` in `Cargo.toml`. Contributions are inbound = outbound.
-- [x] **Version and tag.** `0.1.0` in `Cargo.toml`, and an annotated `v0.1.0` tag on the release
-  commit. No tag had ever been pushed, so the earlier local `v0.1.0` candidate was re-pointed at
-  this release instead of inventing a `0.1.1` for an unpublished build; the temporary
-  `v0.1.1-rc.1` candidate tag was removed.
+- [x] **Version and tag.** `0.1.1` in `Cargo.toml` on top of the published `0.1.0`: this patch
+  fixes health and shields carrying across levels and gives the release automation its first
+  live run. An annotated `v0.1.1` tag names the release commit. (The original `v0.1.0` was a
+  re-pointed local candidate before it was published; see round 206.)
 
 ## Waiting on the repository owner
 

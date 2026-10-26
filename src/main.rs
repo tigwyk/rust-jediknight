@@ -10834,10 +10834,12 @@ fn adopt_carried(mut commands: Commands, carried: Option<Res<Carried>>, sim: Opt
     let (Some(carried), Some(sim)) = (carried, sim) else { return };
     sim.world.borrow_mut().adopt(&carried.0);
     println!(
-        "level: the player carries over {} inventory bin(s), weapon {:?}, saber {}",
+        "level: the player carries over {} inventory bin(s), weapon {:?}, saber {}, {:.0} health and {:.0} shield(s)",
         carried.0.inv.len(),
         carried.0.weapon,
-        carried.0.saber.is_some()
+        carried.0.saber.is_some(),
+        carried.0.health,
+        carried.0.shields
     );
     commands.remove_resource::<Carried>();
 }

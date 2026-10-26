@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 132 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 133 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -42,7 +42,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | Event queue | `sithEvent.c` | the engine's timed event list. Pulses and timers live in `cog.rs` and cover the scripts; a non-cog timed event (thing expiry, AI tick) has nowhere to live. | no matches for `SithEvent` |
 | Overlay map and 3D map screen | `sithOverlayMap.c`, `sithMap.c`, `jkGUIMap.c`, `ui.rs` | the **field-log map panel draws the live level**: `M` opens the screen, `live_map_for` gives it `World` + `Player`, and `ui::map` projects the level around the player's pose (`--map-shot` checks both the ink and that moving the player changes the drawing). Still missing: zoom and orbit, and the 3D map view | `ponytail:` in `ui.rs` — no zoom/orbit transforms |
 | Scope | `jkHudScope.c` | the sniper/binos overlay | 2 incidental HUD-flag matches, no rendering |
-| Level change | `jkMain.c` (`jkPlayer_Initialize`), `swap_level` | the **player's own state carries over** a level change: inventory (weapons, force powers, mana, the ending choice), the armed bin, the selected weapon, the saber and the `jkFlags` the force scripts set (`Runtime::carry`/`adopt`, `cargo test` covers the round trip) | health and shields do **not** carry — each level starts the player at the template's own values, which is not what the engine does |
+| Level change | `jkMain.c` (`jkPlayer_Initialize`), `swap_level` | the **player's own state carries over** a level change: inventory (weapons, force powers, mana, the ending choice), the armed bin, the selected weapon, the saber and the `jkFlags` the force scripts set (`Runtime::carry`/`adopt`, `cargo test` covers the round trip) | health and shields carry too (fixed in 0.1.1; `runtime::tests::health_and_shields_cross_a_level_change`) |
 | Ending choice | `jkPlayer.c` (`jkPlayer_SetChoice`/`GetChoice`) | `jkGetChoice()` reads the real value: it is inventory bin 18 (`SITHBIN_CHOICE`), which the endgame scripts branch on and `jkPlayer_CalcAlignment` maps to +100/-100 (`--pickup`) | the **menu** that writes bin 18. There is no ending screen, so the value is always neutral (0) in this build |
 | Thing parenting | `sithThing.c` (`pParent`, `attachedThings`) | **`AttachThingToThing` works**: the child keeps the offset it had at the call, in the parent's own frame (`field_4C`), so a moving parent carries it and a turning one swings it around — a crate on a lift (`00_elev_doors5.cog`), a catwalk on a ship (`09_donefueling.cog`), the sphere `force_absorb.cog` hangs on the player, the orbiting camera of `00_cameratricks.cog`. `DetachThing` and `GetThingParent` round-trip, `SetThingAttachFlags` is stored (`--attach`) | the engine's child *list* (a thing may carry several children, and chains resolve in list order) — this build resolves one level in index order, `ponytail:`-marked. A gun in a hand needs the puppet's joint, which is the puppet work, not this |
 
@@ -1210,3 +1210,18 @@ artifact), plus the human playthrough caveat.
   release asset. The command assembly was tested locally (gh rejects the missing asset with a
   non-zero exit and creates nothing); the first live run is the next tag.
 - Still open: the human playthrough caveat, and deciding whether to backfill a `v0.1.0` release.
+
+**Round 211 (health across levels, 0.1.1):** the small bug picked for a version bump.
+
+- **Symptom:** finishing a level reset health and shields to the next level's template values, so a
+  campaign could be carried by finishing levels. The release note listed it as a known gap.
+- **Cause:** `Runtime::carry`/`adopt` handed over inventory, weapon, armed bin, saber, `jk_flags`
+  and the ending choice, but not the player's health or the shield bar; the fresh runtime started
+  from its template.
+- **Fix:** `CarryOver` now carries `health` and `shields`; `adopt` restores them clamped to the new
+  level's own `maxhealth` and the shield bar's 200 cap. The `adopt_carried` log line prints both.
+- **Check:** `runtime::tests::health_and_shields_cross_a_level_change` builds the old runtime at
+  41 health / 73 shields, carries it into a fresh 100/100 runtime and asserts the values survive.
+  Suite: **133 tests** (was 132).
+- **Version:** `0.1.1`. The tag also exercises the round-210 release automation for the first time
+  (`v0.1.0` predated it), so the GitHub release should arrive with the setup attached.

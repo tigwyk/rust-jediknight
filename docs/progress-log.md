@@ -917,3 +917,10 @@ release job checks that the tag matches Cargo.toml's version, downloads the arti
 gh release create --verify-tag with the setup attached (hyphenated tags become pre-releases).
 The README points at Releases first and keeps the CI artifact and source build as fallbacks. The
 v0.1.0 tag predates this job, so it has no attached asset yet; the next tag is the first live run.
+
+## Health across levels, 0.1.1 (round 211)
+
+Picked the smallest real gap for a version bump: health and shields reset at every level change
+because `Runtime::carry`/`adopt` did not include them. They now ride `CarryOver` clamped to the
+next level's max health and the 200 shield cap, with a round-trip test. Version 0.1.1; the tag is
+the release automation's first live run (v0.1.0 predated it).

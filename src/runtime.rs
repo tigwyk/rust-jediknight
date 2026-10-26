@@ -561,6 +561,9 @@ pub struct CarryOver {
     pub cur_bin: i32,
     pub saber: Option<SaberInfo>,
     pub jk_flags: u32,
+    /// Health and the shield bar are `jkPlayer_*` state too, so a level change keeps them.
+    pub health: f32,
+    pub shields: f32,
 }
 
 /// `jkSetSaberInfo`'s blade, as `jkSaber_InitializeSaberInfo` stores it: the two blade materials,
@@ -4149,9 +4152,9 @@ impl Runtime {
 
     /// What the player keeps across a level change.
     /// The engine's `jkPlayer_*` state survives the level load — inventory, the armed bin, the
-    /// selected weapon, the saber, the `jkFlags` the force scripts set. This build rebuilds the whole
-    /// runtime from the incoming `.jkl`, so those pieces have to be handed over explicitly instead of
-    /// coming out of the thing list.
+    /// selected weapon, the saber, the `jkFlags` the force scripts set, and the health and shield
+    /// bars. This build rebuilds the whole runtime from the incoming `.jkl`, so those pieces have
+    /// to be handed over explicitly instead of coming out of the thing list.
     pub fn carry(&self) -> CarryOver {
         let player = self.player_thing();
         CarryOver {
@@ -4160,6 +4163,8 @@ impl Runtime {
             cur_bin: self.cur_bin,
             saber: self.saber.get(&player).cloned(),
             jk_flags: self.things.get(player).map(|t| t.jk_flags).unwrap_or(0),
+            health: self.things.get(player).map(|t| t.health).unwrap_or(0.0),
+            shields: self.player_shields,
         }
     }
 
@@ -4173,9 +4178,21 @@ impl Runtime {
             self.saber.insert(player, blade.clone());
         }
         let player = self.player_thing();
+        let ceiling = self
+            .templates
+            .get(player)
+            .and_then(|name| self.template_max_health.get(name))
+            .copied()
+            .unwrap_or(100.0)
+            .max(1.0);
         if let Some(thing) = self.things.get_mut(player) {
             thing.jk_flags = carry.jk_flags;
+            // The new level's player starts at its template's full health; keep what the old
+            // level was carrying instead, but never above this level's own maximum.
+            thing.health = carry.health.clamp(0.0, ceiling);
         }
+        // `SITHBIN_SHIELDS` caps the bar at 200.
+        self.player_shields = carry.shields.clamp(0.0, 200.0);
     }
 
     /// The thing the view follows, when a script has pointed a camera away from the player.
@@ -6987,5 +7004,26 @@ mod tests {
         assert!((y[0] + 1.0).abs() < 1e-5 && y[1].abs() < 1e-5, "{y:?}");
         // An unknown template has no model, so its offset is zero rather than a missing entry.
         assert_eq!(template_insert("no such template"), [0.0; 3]);
+    }
+
+    /// Health and the shield bar are part of the `jkPlayer_*` state that outlives a level, like
+    /// the inventory. They used to be rebuilt at the new level's full values, so finishing a
+    /// level healed the player to 100/100.
+    #[test]
+    fn health_and_shields_cross_a_level_change() {
+        let mut old = door_runtime();
+        old.things[0].health = 41.0;
+        old.player_shields = 73.0;
+        let carried = old.carry();
+        assert_eq!(carried.health, 41.0);
+        assert_eq!(carried.shields, 73.0);
+
+        // A fresh level starts the player at its own full values (100 health, 100 shields here).
+        let mut next = door_runtime();
+        next.things[0].health = 100.0;
+        next.player_shields = 100.0;
+        next.adopt(&carried);
+        assert_eq!(next.things[0].health, 41.0, "the carried health was not restored");
+        assert_eq!(next.player_shields, 73.0, "the carried shields were not restored");
     }
 }

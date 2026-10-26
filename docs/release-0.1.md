@@ -136,8 +136,8 @@ order and continues on the light-side arm.
 - **A real instinct scheduler.** AI honours `PrimaryFire` — delay, facing cone, ranges, aim
   error, bursts — and routes through doorways, but there is no instinct scheduler, no
   hearing or alert propagation, and no reaction time before the first shot.
-- **Health and shields do not carry between levels.** Inventory, force powers, rank and the
-  ending choice do.
+- **Health and shields carry between levels** since 0.1.1; inventory, force powers, rank and the
+  ending choice always did.
 - **The save-slot picker.** Saving and loading work in the engine's own `.jks` container, and
   eight slots exist — `,` and `.` step between them, `F5` writes and `F9` reads the current
   one — but retail's slot-list screen is not built.
@@ -194,7 +194,7 @@ order and continues on the light-side arm.
 - **`--tour` checks both arms by row**, not by file name: 28 campaign rows for 25 distinct
   level files, every film and successor against the archives, both finale rows, and the
   decision's two films in order. `--tour-live` walks the same chain through the running app.
-  61 gates and 132 tests now pass on this install.
+  61 gates and 133 tests now pass on this install.
 - **The project is explicitly GPL-3.0-or-later** (`LICENSE` + `NOTICE` + `Cargo.toml`), and the
   notice spells out that the game, its marks and the documentation screenshots are not licensed
   here — no game data ships with it.
@@ -205,7 +205,7 @@ from an earlier build.
 
 ```
 --gates            0 of 61 failed, 0 skipped   (windowed; BK_HEADLESS=1 reads 0 of 61 failed, 9 skipped)
-cargo test --bins  132 passed
+cargo test --bins  133 passed
 --tour             28 level row(s) on both arms (25 distinct files), 5543 things, 23 films, 2 terminal rows, 0 script errors, 1 sound missing from retail data
 --tour-live        21 level(s) finished and swapped, through the end at 21ajerec.jkl
 --audit            540 cogs parsed, 0 failed, 1854 labels, 7683 symbols; summary 35/35 levels clean, 10 unresolved asset references, 0 non-drawable models, 0 manifest LEVEL rows missing, 57 undecoded files
@@ -231,6 +231,13 @@ The two screens a player spends the most time in are photographed from the runni
 [force-powers.png](force-powers.png) (a power's level drawn beside its icon) and
 [tally.png](tally.png) (three stars earned at the end of level 1).
 
+## Patch 0.1.1
+
+- **Health and shields now cross level changes.** Finishing a level used to rebuild the player at
+  the new level's template values; they are now part of `Runtime::carry`/`adopt`, clamped to the
+  new level's maximum. Pinned by
+  `runtime::tests::health_and_shields_cross_a_level_change`; the suite is 133 tests.
+
 ## License
 
 The source, tools and the setup build scripts are **GPL-3.0-or-later**; see `LICENSE` and
@@ -244,3 +251,4 @@ install the player owns. The screenshots under `docs/` show retail artwork, are 
 and are not covered by the GPL. Binary releases (including the setup) should be offered
 alongside the corresponding source: that is this repository, which `Cargo.toml` names. The
 setup also installs `LICENSE` and `NOTICE` beside the game.
+
