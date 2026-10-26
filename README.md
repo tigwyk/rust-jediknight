@@ -531,8 +531,21 @@ math.
 
 ## Run
 
+The game finds the retail install itself: `--game`, then `BK_GAME`, then a saved
+`game-path.txt` (beside the program or in `%APPDATA%\bevi-knight\`), then GOG's registry
+entries and the usual GOG folders. `--find-game` says what it found and how, and
+`--set-game "<path>"` saves a choice.
+
+For players there is a Windows installer: `packaging\package.ps1` builds
+`dist\bevi-knight-<version>-windows.zip`; unzip it and run `Install.cmd`. It searches for the
+GOG install (and asks for the folder if it cannot find one), installs per-user to
+`%LOCALAPPDATA%\Programs\bevi-knight`, saves the game path beside the program, adds a Start
+Menu shortcut, and writes an uninstaller. No admin rights; the game install is untouched.
+
 ```powershell
 cargo run --release                      # render the game's first level
+cargo run --release -- --find-game       # where the install is, and how it was found
+cargo run --release -- --set-game "C:\GOG Games\Star Wars Jedi Knight - Dark Forces 2"
 cargo run --release -- --check           # parse-only validation, no window
 cargo run --release -- --audit           # sweep the whole install (drop-in gate)
 cargo run --release -- --live-check      # invariants on the running game's own runtime
@@ -662,7 +675,7 @@ is why it was recoverable.
 
 Every check in one page: [docs/gates.txt](docs/gates.txt) records each flag and what it printed
 against this install; the sweep now is **61 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
-`0 of 61 failed, 9 skipped`), plus 130 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
+`0 of 61 failed, 9 skipped`), plus 132 tests. What is not ported, unit by unit, is [docs/gaps.md](docs/gaps.md).
 
 `--check` on level 1 (`jkl\01narshadda.jkl`) reports, and asserts:
 
@@ -778,8 +791,10 @@ src/ui.rs       the UI canvas: screen compositing, text, integer scaling
 src/menus.rs    the screen element arrays, read out of the executable's .data
 src/hud.rs      the status bar: retail panel/meter placement and frame selection
 src/rows.rs     shared text-list helpers
+src/gamepath.rs finding the retail install (saved path, GOG registry, usual GOG folders)
 src/main.rs     asset loading, mesh building, Bevy app, self-check, audit
 docs/formats.md recovered format reference + evidence + unknowns
+packaging/      install.ps1 + Install.cmd (per-user installer) and package.ps1 (release zip)
 ```
 
 Tests (`cargo test`) pin the formats whose layout is easy to get subtly wrong — the

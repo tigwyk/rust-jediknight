@@ -27,9 +27,37 @@ The game finds the helper in the repo's `tools/smkdec/target/i686-pc-windows-msv
 whether it is started from the repo or from `target/release/`, and `BK_SMKDEC` names the
 executable explicitly if it was moved.
 
+## Install it (Windows, no admin rights)
+
+The Windows release zip is produced by `packaging\package.ps1` and contains `Install.cmd`:
+
+```sh
+powershell -ExecutionPolicy Bypass -File packaging\package.ps1   # writes dist\bevi-knight-<version>-windows.zip
+```
+
+Unzip it and run **`Install.cmd`** (or `powershell -ExecutionPolicy Bypass -File install.ps1`).
+The installer:
+
+- searches **GOG's registry entries and the usual GOG install folders** for *Jedi Knight*;
+- asks you to paste the folder that contains `JK.EXE` if it cannot find it, and checks it;
+- copies the port and the film helper to `%LOCALAPPDATA%\Programs\bevi-knight` (per-user, so no
+  admin rights, no registry writes and no changes to the game install);
+- saves the game path in `game-path.txt` beside the program and adds a Start Menu shortcut.
+
+`Uninstall.cmd` in the install folder reverses all of it. The game itself finds the install the
+same way when the installer is not used: `--game` first, then `BK_GAME`, then `game-path.txt`
+(beside the program or in `%APPDATA%\bevi-knight\`), then the GOG registry, then the usual GOG
+folders. Two setup flags answer questions without loading the game:
+
+| flag | what it does |
+|---|---|
+| `--find-game` | prints the install path it would use, and how it found it |
+| `--set-game <path>` | checks a path and saves it for later launches |
+
 ## Run it
 
 ```sh
+cargo run --release --            # no path needed once one is installed or saved
 cargo run --release -- --game "G:\Games\Star Wars Jedi Knight - Dark Forces 2"
 ```
 
@@ -115,6 +143,12 @@ order and continues on the light-side arm.
 
 ## Changes since `v0.1.0`
 
+- **It finds your install, and there is a Windows installer.** The game resolves `--game`,
+  `BK_GAME`, a saved `game-path.txt`, GOG's registry entries and the usual GOG folders;
+  `--find-game` shows the result and `--set-game "<path>"` saves one. `packaging\package.ps1`
+  builds a zip whose `Install.cmd` searches for the retail install, asks if it cannot find it,
+  installs per-user to `%LOCALAPPDATA%\Programs\bevi-knight` and writes an uninstaller — no
+  admin rights, and the game install is not modified.
 - **The HUD message bug is fixed.** `jkPrintUNIString(player, key)` was reading its first
   argument (the player's thing index) instead of its second (the `.uni` key), so level 1's
   first pickup printed `COG_00000` across the screen instead of "Shield Recharge". The verb
@@ -140,7 +174,7 @@ order and continues on the light-side arm.
 - **`--tour` checks both arms by row**, not by file name: 28 campaign rows for 25 distinct
   level files, every film and successor against the archives, both finale rows, and the
   decision's two films in order. `--tour-live` walks the same chain through the running app.
-  61 gates and 130 tests now pass on this install.
+  61 gates and 132 tests now pass on this install.
 
 ## Verified on this install
 
@@ -149,7 +183,7 @@ from an earlier build.
 
 ```
 --gates            0 of 61 failed, 0 skipped   (windowed; BK_HEADLESS=1 reads 0 of 61 failed, 9 skipped)
-cargo test --bins  130 passed
+cargo test --bins  132 passed
 --tour             28 level row(s) on both arms (25 distinct files), 5543 things, 23 films, 2 terminal rows, 0 script errors, 1 sound missing from retail data
 --tour-live        21 level(s) finished and swapped, through the end at 21ajerec.jkl
 --audit            540 cogs parsed, 0 failed, 1854 labels, 7683 symbols; summary 35/35 levels clean, 10 unresolved asset references, 0 non-drawable models, 0 manifest LEVEL rows missing, 57 undecoded files
@@ -164,7 +198,11 @@ cargo test --bins  130 passed
 
 Also checked by hand on this build: normal launch shows the main menu and plays no film;
 the `New Game` action plays `03-04a.smk` (2500 frames) and drops into the cantina; a level
-15 completion was watched through `38a.smk` → `39a.smk` → `16aEscapeShip.jkl loaded`.
+15 completion was watched through `38a.smk` → `39a.smk` → `16aEscapeShip.jkl loaded`. The
+packaged zip was extracted and its installer run to a temporary folder both with an explicit
+game path and with auto-discovery (it found the GOG install through the registry), the
+installed executable then found the game through its saved `game-path.txt` and passed
+`--check`, and the uninstaller removed the folder and shortcuts.
 
 The two screens a player spends the most time in are photographed from the running build:
 [force-powers.png](force-powers.png) (a power's level drawn beside its icon) and

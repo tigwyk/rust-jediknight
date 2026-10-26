@@ -845,3 +845,15 @@ The review also caught a scheduler-order dependence in `--goal` (now explicitly 
 an inflated `RunReport` error count, and a stale MSRV. The current checks are **61 gates, 130 tests,
 0 failures** (windowed `0 of 61 failed, 0 skipped`; headless `0 of 61 failed, 9 skipped`). Still
 open for publish: the license choice, and a human playthrough of levels 2–21.
+## Finding the install, and an installer (round 203)
+
+The port used to start from a hardcoded developer path. `src/gamepath.rs` now resolves the
+retail install the way a player expects: an explicit `--game`, `BK_GAME`, a saved
+`game-path.txt` beside the program or in `%APPDATA%\bevi-knight\`, GOG's registry entries, then
+the folders GOG installs to, with `JK.EXE` plus `Resource\` as the proof it is really the game.
+`--find-game` and `--set-game` make that inspectable and savable. `packaging\install.ps1`
+(launched by `Install.cmd`) does the search once, installs per-user to
+`%LOCALAPPDATA%\Programs\bevi-knight`, writes that saved path, adds a Start Menu shortcut and
+leaves an uninstaller; `packaging\package.ps1` builds the zip to hand a player. Tested from the
+zip with both an explicit path and registry auto-discovery; `--gates` stays 0 of 61 and the
+suite is 132 tests.

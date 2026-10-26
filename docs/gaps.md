@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 130 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 132 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -1039,3 +1039,36 @@ Current: **61 gates** (`--gates` windowed `0 of 61 failed, 0 skipped`; `BK_HEADL
 pinned by `film_step` unit tests and was watched once by hand (`38a` -> `39a` -> `16aEscapeShip`);
 `--tour-live` names films instead of playing them, because 22 films is longer than a sweep should
 take. The remaining publish blocker is the license, which needs the repository owner's decision.
+
+**Round 203 (finding the install):** the port no longer carries a hardcoded developer path, and a
+player can install it without knowing what `--game` means.
+
+- **`src/gamepath.rs` resolves the retail install.** `--game` is validated and wins; then
+  `BK_GAME`, a saved `game-path.txt` (beside the program, so a portable copy stays self-contained,
+  then `%APPDATA%\bevi-knight\`), GOG's registry entries
+  (`HKLM\SOFTWARE[\WOW6432Node]\GOG.com\Games` / `HKCU\...`, read through `reg.exe`, one query per
+  key), and the folders GOG installs to (`<drive>:\GOG Games`, `<drive>:\Games`,
+  `...\GOG Galaxy\Games`). A candidate must hold `JK.EXE` (or the other engine names) **and** a
+  `Resource\` folder, so a launcher folder with the title in its path is rejected. `--find-game`
+  prints the result and its source, `--set-game <path>` validates and saves it. The hardcoded
+  `DEFAULT_GAME` is gone; a run without a resolvable install fails with instructions instead of
+  loading the wrong folder.
+- **`packaging/install.ps1` + `Install.cmd` is the per-user installer.** It searches the same
+  places from PowerShell (native registry provider this time), asks for the `JK.EXE` folder when it
+  finds nothing, checks it, copies `bevi-knight.exe`, `smkdec.exe` and the docs into
+  `%LOCALAPPDATA%\Programs\bevi-knight`, writes `game-path.txt` beside the program, adds a Start
+  Menu shortcut (desktop with `-DesktopShortcut`), and writes `uninstall.ps1`/`Uninstall.cmd`. No
+  admin rights, no registry writes and no changes to the game install; `-NoShortcuts` and
+  `-InstallDir` exist for scripted checks.
+- **`packaging/package.ps1` builds the thing to hand a player:** release binary + i686 film helper
+  + installer + README/release note, zipped as `dist\bevi-knight-<version>-windows.zip`.
+- Verified: two new unit tests (install-layout validation, registry-line parsing) bring the suite
+  to **132**; `--find-game` resolves via `--game`, the GOG registry, a portable `game-path.txt` and
+  the `%APPDATA%` file; `--check` with no `--game` passes on the registry-discovered install; the
+  installer was run to a temporary folder with an explicit path and with auto-discovery, the
+  installed copy's `--check` passed and it found the game through its saved file, the uninstaller
+  removed folder and shortcuts; the packaged zip was extracted and installed from, end to end.
+  `--gates` still reads 0 of 61 failed after the startup change.
+
+The licence, version-name and publish decisions are still the owner's (see
+`docs/release-checklist.md`); the install path itself is now found, saved and forgotten about.

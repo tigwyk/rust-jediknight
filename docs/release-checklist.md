@@ -1,7 +1,8 @@
 # Source 0.1 release checklist
 
-State of the tree for a **source-only** 0.1 release: buildable from a clean checkout, with a
-player-facing note and the full check record. Nothing here has been pushed or published.
+State of the tree for the **source 0.1 release** (plus a Windows binary zip with a per-user
+installer): buildable from a clean checkout, with a player-facing note and the full check
+record. Nothing here has been pushed or published.
 
 ## Done and verified on this tree
 
@@ -13,14 +14,20 @@ player-facing note and the full check record. Nothing here has been pushed or pu
 - [x] **Docs.** [README](../README.md) carries the honest status and open items;
   [docs/release-0.1.md](release-0.1.md) is the builder/player note;
   [docs/gates.txt](gates.txt) ends with a fresh 61-row sweep; [docs/gaps.md](gaps.md) records
-  rounds 201–202; [docs/formats.md](formats.md) has the evidence for the changed behaviour.
+  rounds 201–203; [docs/formats.md](formats.md) has the evidence for the changed behaviour.
 - [x] **Build instructions.** Windows x64, Rust **1.97.1+** (Bevy 0.20's MSRV), MSVC target,
   `rustup target add i686-pc-windows-msvc` for the film helper, and the game finds that helper
   from its own checkout (`BK_SMKDEC` overrides).
+- [x] **Installer and game discovery.** `packaging/package.ps1` builds a Windows zip;
+  `Install.cmd` finds the retail install (GOG registry, usual folders, or asks), copies the port
+  per-user to `%LOCALAPPDATA%\Programs\bevi-knight`, saves `game-path.txt`, adds a Start Menu
+  shortcut and writes an uninstaller. The game itself also resolves `--game` → `BK_GAME` → saved
+  paths → GOG registry → common folders, with `--find-game`/`--set-game` for manual setup.
+  Tested from the packaged zip, both with an explicit path and with registry auto-discovery.
 - [x] **Known issues.** The release note's "deliberately rough or not there" section, plus the
   README's "Open for 0.1" list.
 - [x] **Check record.** `--gates` 0 of 61 failed, 0 skipped (windowed) / 9 skipped
-  (`BK_HEADLESS=1`); `cargo test --bins` 130 passed.
+  (`BK_HEADLESS=1`); `cargo test --bins` 132 passed.
 - [x] **Local tag.** `v0.1.1-rc.1`, annotated, pointing at this candidate (not pushed).
 
 ## Waiting on the repository owner
@@ -45,4 +52,6 @@ cargo build --release
 BK_HEADLESS=1 ./target/release/bevi-knight.exe --game "<install>" --gates
 ./target/release/bevi-knight.exe --game "<install>" --tour
 ./target/release/bevi-knight.exe --game "<install>" --tour-live
+powershell -ExecutionPolicy Bypass -File packaging\package.ps1   # release zip
+powershell -ExecutionPolicy Bypass -File packaging\install.ps1 -GamePath "<install>" -InstallDir "$env:TEMP\bk-test" -NoShortcuts
 ```

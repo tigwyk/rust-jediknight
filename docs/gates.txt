@@ -9,7 +9,7 @@ Target: `G:\Games\Star Wars Jedi Knight - Dark Forces 2`
 (GOG, plaintext JK.EXE, image base 0x400000,
 sha256 12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44).
 
-`cargo test` -> 130 passed, 0 failed.
+`cargo test` -> 132 passed, 0 failed.
 `cargo clippy --release --all-targets` -> no errors; 140 warnings on the binary (150 with tests).
 
 Each flag below is a gate: it asserts on the live runtime (or the shipped data) and exits
@@ -526,7 +526,7 @@ flag                   runs       result verdict
 gates: 0 of 61 failed, 0 skipped
 ```
 
-That is **61 gates**, 0 failures, with **130** unit tests alongside. The nine window-only
+That is **61 gates**, 0 failures, with **132** unit tests alongside. The nine window-only
 gates are reported as skipped under `BK_HEADLESS=1` (`0 of 61 failed, 9 skipped`), never as
 passes. `--tour` checks the campaign by row on both arms (28 rows, 25 distinct files, 23 film
 hops, 2 finale rows), and `--tour-live` finishes and swaps all 21 light-side levels in the
