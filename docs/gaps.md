@@ -1118,3 +1118,21 @@ all-rights-reserved.
   cannot license at all — the retail copy stays with the player.
 - Remaining owner decisions are now version naming and pushing; the human playthrough is still
   the honest ceiling on "0.1".
+
+**Round 206 (final version):** the release is **0.1.0** — the version in `Cargo.toml`, the
+annotated tag, and the name the setup artifact takes.
+
+- The earlier local `v0.1.0` tag pointed at `4ddb697` (23 Oct), 27 commits before this release,
+  and `git ls-remote --tags origin` returned nothing: no tag had ever been pushed and
+  `origin/main` was 278 commits behind. This is therefore the first published release, not a
+  fix release, so re-pointing `v0.1.0` is more honest than inventing `0.1.1` for a build nobody
+  received. The temporary `v0.1.1-rc.1` candidate tag was deleted.
+- The release note's change list is retitled "What changed since the earlier 0.1 candidate" so
+  it does not claim to follow a published `v0.1.0`.
+- `packaging\build-setup.ps1` derives the artifact name from `Cargo.toml`, so the native setup
+  is `bevi-knight-0.1.0-setup.exe`; it was rebuilt after the docs changed so the embedded
+  release note and checklist are current.
+- If the old local tag had ever been handed out as a binary, the correct move would be `0.1.1`;
+  the repository state says it was not, and this note records that reasoning.
+
+Remaining owner actions: explicit approval to push, and the human playthrough caveat.

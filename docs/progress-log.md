@@ -875,3 +875,11 @@ draws the line a code license cannot - no game data is included or licensed, the
 marks belong to Lucasfilm/Disney, the docs screenshots are retail artwork excluded from the GPL,
 and binary releases should keep this repository as their corresponding source. Contributions are
 inbound = outbound.
+
+## The version: 0.1.0 (round 206)
+
+The source release is 0.1.0: Cargo version, annotated `v0.1.0` tag on the release commit, and
+`bevi-knight-0.1.0-setup.exe`. The earlier local `v0.1.0` tag was re-pointed because no tag had
+ever been pushed (`git ls-remote --tags origin` empty) and `origin/main` was 278 commits behind,
+so this is the first published release rather than a fix bump; the `v0.1.1-rc.1` candidate tag was
+removed. The release note's change list is now "What changed since the earlier 0.1 candidate".

@@ -35,13 +35,13 @@ here has been pushed or published.
 - [x] **License.** **GPL-3.0-or-later** for code, tools and setup scripts: `LICENSE` (verbatim
   GPLv3), `NOTICE` (game/trademark/screenshot carve-out and the source-for-binaries note), and
   `license = "GPL-3.0-or-later"` in `Cargo.toml`. Contributions are inbound = outbound.
-- [x] **Local tag.** `v0.1.1-rc.1`, annotated, pointing at this candidate (not pushed).
+- [x] **Version and tag.** `0.1.0` in `Cargo.toml`, and an annotated `v0.1.0` tag on the release
+  commit. No tag had ever been pushed, so the earlier local `v0.1.0` candidate was re-pointed at
+  this release instead of inventing a `0.1.1` for an unpublished build; the temporary
+  `v0.1.1-rc.1` candidate tag was removed.
 
 ## Waiting on the repository owner
 
-- [ ] **Version name.** `Cargo.toml` still says `0.1.0`; the local `v0.1.0` tag is far
-  behind (before the campaign-chain and setup work). Keep the `v0.1.1-rc.1` candidate tag, move to
-  `v0.1.1`, or re-tag a fresh `v0.1.0`?
 - [ ] **Publish.** `git push origin main --follow-tags` (or the chosen branch/tag) — **only on
   explicit approval**.
 - [ ] **Human playthrough.** Levels 2–21 are gated but nobody has played them start to finish;

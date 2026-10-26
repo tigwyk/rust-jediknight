@@ -155,7 +155,7 @@ order and continues on the light-side arm.
 [docs/roadmap.md](roadmap.md) is the dependency-ordered remainder;
 [docs/progress-log.md](progress-log.md) is how each piece was recovered.
 
-## Changes since `v0.1.0`
+## What changed since the earlier 0.1 candidate
 
 - **It finds your install, and there is a native Windows setup.** The game resolves `--game`,
   `BK_GAME`, a saved `game-path.txt`, GOG's registry entries and the usual GOG folders;
