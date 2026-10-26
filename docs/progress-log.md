@@ -931,3 +931,10 @@ Pushed the v0.1.1 tag; the workflow built the setup and the release job publishe
 https://github.com/tigwyk/rust-jediknight/releases/tag/v0.1.1 with bevi-knight-0.1.1-setup.exe
 attached. Downloaded the asset back, matched its sha256 (7d3a...), installed it silently, ran
 --check and uninstalled cleanly. The release path now works without manual steps.
+
+## Landing page (round 213)
+
+A static landing page in site/ (HTML + one CSS file + optimised screenshots) is deployed to
+GitHub Pages by .github/workflows/pages.yml. It covers the pitch, version 0.1.1 status, screens,
+the three-step install, requirements, source build, docs links and the licence/game-rights
+footer. The README links it and the repository homepage was set to the Pages URL.

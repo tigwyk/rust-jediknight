@@ -41,6 +41,9 @@ here has been pushed or published.
   and attaches it to the GitHub release (`--verify-tag`; hyphenated tags become pre-releases).
   `v0.1.0` predates the job and has no attached asset; `v0.1.1` was the first live run and
   published https://github.com/tigwyk/rust-jediknight/releases/tag/v0.1.1 with the setup attached.
+- [x] **Landing page.** `site/` is a static page deployed to
+  <https://tigwyk.github.io/rust-jediknight/> by `.github/workflows/pages.yml` on changes under
+  `site/`; it mirrors the README's install/status/reporting content for players.
 - [x] **License.** **GPL-3.0-or-later** for code, tools and setup scripts: `LICENSE` (verbatim
   GPLv3), `NOTICE` (game/trademark/screenshot carve-out and the source-for-binaries note), and
   `license = "GPL-3.0-or-later"` in `Cargo.toml`. Contributions are inbound = outbound.

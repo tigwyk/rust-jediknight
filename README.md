@@ -3,6 +3,7 @@
 [![CI](https://github.com/tigwyk/rust-jediknight/actions/workflows/ci.yml/badge.svg)](https://github.com/tigwyk/rust-jediknight/actions/workflows/ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Platform: Windows 10/11 x64](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-0078d4.svg)](#requirements)
+[![Website](https://img.shields.io/badge/website-tigwyk.github.io%2Frust--jediknight-d9b45b)](https://tigwyk.github.io/rust-jediknight/)
 
 A from-scratch replacement engine for **Star Wars Jedi Knight: Dark Forces II**, written in
 **Rust + Bevy 0.20**. Point it at the GOG install you already own and it plays the real game —
@@ -183,6 +184,7 @@ repository does not ship and CI does not download.
 
 | Document | What it covers |
 |---|---|
+| [Landing page](https://tigwyk.github.io/rust-jediknight/) | Screenshots, status and install steps at a glance |
 | [0.1 release note](docs/release-0.1.md) | What 0.1 does, its caveats, and the verified numbers |
 | [docs/gates.txt](docs/gates.txt) | The full gate transcript from the retail install |
 | [docs/engineering.md](docs/engineering.md) | The engineering record: coverage, reverse-engineering, camera recovery |

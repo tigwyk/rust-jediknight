@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>bevi-knight — a replacement engine for Jedi Knight: Dark Forces II</title>
+  <meta name="description" content="A from-scratch replacement engine for Star Wars Jedi Knight: Dark Forces II, written in Rust + Bevy. Windows x64, reads your own retail GOG install, ships no game data. GPL-3.0-or-later.">
+  <meta name="theme-color" content="#070b14">
+  <link rel="icon" href="assets/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="apple-touch-icon" href="assets/favicon.png">
+  <link rel="stylesheet" href="style.css">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="bevi-knight — Jedi Knight, rebuilt in Rust">
+  <meta property="og:description" content="A from-scratch replacement engine for Star Wars Jedi Knight: Dark Forces II. Point it at your own retail install and play the real game — no game data included.">
+  <meta property="og:url" content="https://tigwyk.github.io/rust-jediknight/">
+  <meta property="og:image" content="https://tigwyk.github.io/rust-jediknight/assets/og.jpg">
+  <meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="#top" aria-label="bevi-knight home">
+      <svg class="brand-mark" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 22 12 12 22 2 12Z" fill="none" stroke="#d9b45b" stroke-width="1.5"/><path d="M12 7.5 16.5 12 12 16.5 7.5 12Z" fill="#d9b45b"/></svg>
+      <span>bevi-knight</span>
+    </a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="#status">Status</a>
+      <a href="#screens">Screens</a>
+      <a href="#install">Install</a>
+      <a href="#build">Build</a>
+      <a href="#docs">Docs</a>
+      <a class="nav-gh" href="https://github.com/tigwyk/rust-jediknight">GitHub <span aria-hidden="true">&#8599;</span></a>
+      <a class="button button-small" href="https://github.com/tigwyk/rust-jediknight/releases/latest">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero" id="top">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="dot"></span> v0.1.1 &middot; Windows x64 &middot; single-player</p>
+        <h1>Jedi Knight,<br><span class="gold">rebuilt in Rust.</span></h1>
+        <p class="lede">A from-scratch replacement engine for <em>Star Wars Jedi Knight: Dark Forces II</em>. Point it at the GOG install you already own and it plays the real game &mdash; the shipped levels, menus, HUD, sounds and cutscenes &mdash; in a modern window.</p>
+        <div class="actions">
+          <a class="button" href="https://github.com/tigwyk/rust-jediknight/releases/latest">Download for Windows</a>
+          <a class="button ghost" href="https://github.com/tigwyk/rust-jediknight">View the source</a>
+        </div>
+        <p class="fineprint">GPL-3.0-or-later &middot; no game data included &middot; your retail install is never modified</p>
+      </div>
+      <figure class="hero-shot">
+        <img src="assets/hero.jpg" alt="A level from Star Wars Jedi Knight: Dark Forces II rendered by bevi-knight" width="1280" height="720">
+        <figcaption><code>jkl\03katarn.jkl</code>, rendered from the retail data.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="section" id="about">
+    <div class="wrap">
+      <div class="facts">
+        <div class="fact">
+          <span class="fact-icon" aria-hidden="true">&#9670;</span>
+          <h3>Reads your install</h3>
+          <p>The port parses the retail <code>.gob</code> archives and the tables inside <code>JK.EXE</code>. It never patches or redistributes the game.</p>
+        </div>
+        <div class="fact">
+          <span class="fact-icon" aria-hidden="true">&#9671;</span>
+          <h3>Nothing to buy from us</h3>
+          <p>The engine and every asset it draws come from the copy you already own. No game files are shipped, hosted or downloaded here.</p>
+        </div>
+        <div class="fact">
+          <span class="fact-icon" aria-hidden="true">&#9650;</span>
+          <h3>Built on Bevy 0.20</h3>
+          <p>Rust for the readers, the script VM, collision and game state; Bevy for the window, the renderer and the audio.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="status">
+    <div class="wrap">
+      <p class="kicker">Status</p>
+      <h2>The campaign runs. The edges are honest.</h2>
+      <p class="section-lede">0.1.1 plays the light-side campaign from the opening film to the finale. A human has not yet played levels 2&ndash;21 end to end &mdash; the app itself completes all 21 as a check &mdash; and the dark-side ending is not built.</p>
+
+      <div class="status-grid">
+        <div class="panel panel-ok">
+          <h3>Working today</h3>
+          <ul class="ticks">
+            <li>All 28 campaign rows, both finales, films and level hand-off</li>
+            <li>Menus, HUD, inventory, force-power screen from the game's own art</li>
+            <li>Save slots, audio, cutscenes and music from the retail files</li>
+            <li>Combat: weapons, damage, deaths, pickups, six force powers</li>
+            <li>Doors, lifts, triggers and scripts running against the live world</li>
+            <li>Health and shields now carry between levels</li>
+          </ul>
+        </div>
+        <div class="panel panel-warn">
+          <h3>Still rough or missing</h3>
+          <ul class="crosses">
+            <li>No human playthrough of levels 2&ndash;21 yet</li>
+            <li>Dark-side choice and ending screens</li>
+            <li>Multiplayer</li>
+            <li>AI instinct scheduler &mdash; actors see, chase and fire, but only <code>PrimaryFire</code></li>
+            <li>Several force powers and animation states unverified</li>
+            <li>29 of 768 cutscene palette bytes differ from the reference decoder</li>
+          </ul>
+        </div>
+      </div>
+      <p class="more"><a class="text-link" href="https://github.com/tigwyk/rust-jediknight/blob/main/docs/release-0.1.md">The full 0.1 release note <span aria-hidden="true">&rarr;</span></a> <a class="text-link" href="https://github.com/tigwyk/rust-jediknight/blob/main/docs/gaps.md">unit-by-unit gaps <span aria-hidden="true">&rarr;</span></a></p>
+    </div>
+  </section>
+
+  <section class="section section-alt" id="screens">
+    <div class="wrap">
+      <p class="kicker">Screens</p>
+      <h2>Every pixel comes from the retail data.</h2>
+      <p class="section-lede">The levels, the menu art, the fonts, the strings, the HUD panels and the films are read from the install you point it at.</p>
+      <div class="gallery">
+        <figure>
+          <img src="assets/menu.jpg" alt="The retail main menu drawn by bevi-knight" width="1280" height="720" loading="lazy">
+          <figcaption>The main menu, from the game's own bitmap, font and element table.</figcaption>
+        </figure>
+        <figure>
+          <img src="assets/hud.jpg" alt="The in-game status bar over a live level" width="1280" height="720" loading="lazy">
+          <figcaption>The status bar over a live level: retail panels, meters and numbers.</figcaption>
+        </figure>
+        <figure>
+          <img src="assets/third.jpg" alt="Third-person view of Kyle Katarn in a level" width="1280" height="720" loading="lazy">
+          <figcaption>Third person, with the engine's own chase camera and pull-in.</figcaption>
+        </figure>
+        <figure>
+          <img src="assets/cutscene.jpg" alt="A cutscene frame decoded from the retail films" width="1280" height="720" loading="lazy">
+          <figcaption>Cutscenes decode the shipped Smacker films through the game's own DLL.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="install">
+    <div class="wrap">
+      <p class="kicker">Install</p>
+      <h2>Three steps, no admin rights.</h2>
+      <div class="steps">
+        <div class="step">
+          <span class="step-num">1</span>
+          <h3>Download the setup</h3>
+          <p>Get <code>bevi-knight-0.1.1-setup.exe</code> from the <a href="https://github.com/tigwyk/rust-jediknight/releases/latest">latest release</a>. It is unsigned, so Windows SmartScreen may ask: <em>More info &rarr; Run anyway</em>.</p>
+        </div>
+        <div class="step">
+          <span class="step-num">2</span>
+          <h3>Point it at your game</h3>
+          <p>The wizard finds your GOG install automatically. If it cannot, browse to the folder containing <code>JK.EXE</code>, paste the path, or drag the folder onto the window.</p>
+        </div>
+        <div class="step">
+          <span class="step-num">3</span>
+          <h3>Play</h3>
+          <p>Launch from the Start Menu and choose <em>New Game</em>. The installer is per-user, creates an uninstaller in <em>Settings &rarr; Apps</em>, and never touches the game folder.</p>
+        </div>
+      </div>
+      <div class="panel requirements">
+        <h3>What you need</h3>
+        <ul class="ticks">
+          <li>Windows 10 or 11, x64.</li>
+          <li>A retail GOG install of <em>Star Wars Jedi Knight: Dark Forces II</em>: the folder must contain <code>JK.EXE</code> and a <code>Resource\</code> directory.</li>
+          <li>About 100 MB of disk space; no admin rights, no runtime to install.</li>
+        </ul>
+        <p class="muted">The GOG build is what this is tested against. The Steam executable is DRM-wrapped and is not read by the port.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section-alt" id="build">
+    <div class="wrap">
+      <p class="kicker">Build from source</p>
+      <h2>One toolchain, two binaries.</h2>
+      <div class="build-grid">
+        <div>
+          <p>Windows x64 and a Rust toolchain <strong>1.97.1 or newer</strong> with the MSVC target. Cutscenes need a small 32-bit helper because the game's <code>SMACKW32.DLL</code> is 32-bit.</p>
+          <pre><code>cargo build --release
+
+rustup target add i686-pc-windows-msvc
+cargo build --release --target i686-pc-windows-msvc \
+  --manifest-path tools/smkdec/Cargo.toml
+
+# optional: build the Windows setup locally
+powershell -ExecutionPolicy Bypass -File packaging\build-setup.ps1</code></pre>
+          <p class="muted">The 61 behaviour gates need the retail data; <code>cargo test</code> is the part that runs without it. CI builds, tests and packages on Windows with the pinned MSRV.</p>
+        </div>
+        <div class="panel">
+          <h3>Under the hood</h3>
+          <ul class="ticks">
+            <li>Custom readers for <code>.gob</code>, <code>.jkl</code>, <code>.3do</code>, <code>.key</code>, <code>.pup</code>, <code>.bm</code>, <code>.sft</code>, <code>.cmp</code></li>
+            <li>COG script parser and interpreter &mdash; 540 scripts, 0 stubbed verbs</li>
+            <li>Recovered collision, camera, HUD and menu tables from the engine executable</li>
+            <li>133 unit tests; 61 gates on a retail install</li>
+          </ul>
+          <a class="text-link" href="https://github.com/tigwyk/rust-jediknight/blob/main/docs/engineering.md">Read the engineering notes <span aria-hidden="true">&rarr;</span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="docs">
+    <div class="wrap">
+      <p class="kicker">Documentation</p>
+      <h2>The evidence is public.</h2>
+      <div class="docs-grid">
+        <a class="doc" href="https://github.com/tigwyk/rust-jediknight/blob/main/docs/release-0.1.md">
+          <h3>0.1 release note</h3>
+          <p>What 0.1 does, its caveats and the verified numbers.</p>
+        </a>
+        <a class="doc" href="https://github.com/tigwyk/rust-jediknight/blob/main/docs/engineering.md">
+          <h3>Engineering notes</h3>
+          <p>The unit-by-unit record, reverse engineering and camera recovery.</p>
+        </a>
+        <a class="doc" href="https://github.com/tigwyk/rust-jediknight/blob/main/docs/formats.md">
+          <h3>File formats</h3>
+          <p>Every recovered format with its evidence and unknowns.</p>
+        </a>
+        <a class="doc" href="https://github.com/tigwyk/rust-jediknight/blob/main/docs/gaps.md">
+          <h3>Gaps</h3>
+          <p>Everything not ported yet, unit by unit.</p>
+        </a>
+        <a class="doc" href="https://github.com/tigwyk/rust-jediknight/blob/main/docs/gates.txt">
+          <h3>Gate transcript</h3>
+          <p>The 61 gates as they printed on the retail install.</p>
+        </a>
+        <a class="doc" href="https://github.com/tigwyk/rust-jediknight/blob/main/docs/roadmap.md">
+          <h3>Roadmap</h3>
+          <p>The dependency-ordered remainder.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section cta">
+    <div class="wrap cta-inner">
+      <div>
+        <h2>Your copy. Your engine.</h2>
+        <p class="section-lede">Download the setup, point it at the GOG install on your disk, and tell us what breaks.</p>
+      </div>
+      <div class="actions">
+        <a class="button" href="https://github.com/tigwyk/rust-jediknight/releases/latest">Download 0.1.1</a>
+        <a class="button ghost" href="https://github.com/tigwyk/rust-jediknight/issues/new">Report an issue</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap footer-inner">
+    <p class="footer-brand">bevi-knight</p>
+    <p>Free software under <a href="https://github.com/tigwyk/rust-jediknight/blob/main/LICENSE">GPL-3.0-or-later</a>. No game data is included or licensed.</p>
+    <p><em>Star Wars Jedi Knight: Dark Forces II</em> and everything in it belongs to Lucasfilm/Disney. This project is not affiliated with or endorsed by them. It only reads the retail game the player already owns.</p>
+    <p class="footer-links">
+      <a href="https://github.com/tigwyk/rust-jediknight">Source</a>
+      <a href="https://github.com/tigwyk/rust-jediknight/releases">Releases</a>
+      <a href="https://github.com/tigwyk/rust-jediknight/issues">Issues</a>
+      <a href="https://github.com/tigwyk/rust-jediknight/blob/main/NOTICE">Notice</a>
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1239,3 +1239,18 @@ first time and published the release.
 - That closes the loop the 0.1 release left open: the README's Releases link now has a real asset,
   and the next tags keep producing them. The only remaining release caveat is unchanged - the
   human playthrough of levels 2-21 and the dark-side ending screens.
+
+**Round 213 (landing page):** GitHub Pages now hosts a proper front page for players.
+
+- `site/` is a hand-written static page (HTML + CSS, no framework, no JavaScript) with a hero,
+  status split, screenshot gallery, three-step install, requirements, source build, docs links
+  and the GPL/game-rights footer. Images are downsized JPEGs generated from the existing docs
+  screenshots; the page is responsive and honours reduced motion.
+- `.github/workflows/pages.yml` deploys `site/` with `actions/configure-pages@v6`,
+  `actions/upload-pages-artifact@v5` and `actions/deploy-pages@v5` on pushes that touch the page
+  (and on demand). Pages is enabled for the repository with `build_type=workflow`.
+- The page was rendered locally in headless Edge at 1440 and 1280 widths and inspected; the
+  README gained a Website badge and a landing-page row, and the repository homepage points at
+  the deployed URL.
+- Deliberately not added: analytics, comments, JavaScript, or a build step for the page. It is
+  four files plus images.
