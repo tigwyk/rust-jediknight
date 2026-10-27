@@ -225,6 +225,35 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    retail draws the same frame (nothing here says the start point is wrong); the way to settle it is a
    retail reference frame at level start, then either the port's draw offset follows or the start stays.
 
+   **The spawn difference was the reference camera, and the draw fixes stand (2026-10-26).**
+   `tools/parity/` captures the real GOG build and the port at the same player pose (retail `coords`:
+   `Pos (-10.44, -5.46, -1.13) PYR: (1.04, -59.98, 1.04) Sector 339`). Reading the camera path in the
+   dump settles the two guesses this item raised: first person is the thing position plus the
+   `thing + 0x168` eye offset (`sithCamera_Update`, `0x4c56b0`), which is the template's
+   `eyeoffset=(0,0,0.037)` **in level units** (no `x10`), and that path has **no ceiling clamp** —
+   the sector search there is the third-person pull-in. `sithPlayer_NewPlayer` (`0x4c8ec0`) places
+   the player exactly at the level's recorded thing pose, with no floor re-seeding either. So the
+   port's eye offset already matched, and its ceiling clamp is a workaround, not engine behaviour.
+   The wall of polygons is **one animated decor thing**: level 1's `tuskensoused` patron (thing 215),
+   which `01_TuskenTwitch.cog` drives with `PlayKey(THout.key)`. The port drew it frozen because it
+   only loaded keyfiles named by puppets, and because the thing's `cr.pup` declares no states it was
+   not treated as an actor at all. Both are fixed: script-named keyfiles are loaded, things with a
+   puppet are animatable, and `PlayKey`'s flags are honoured (`0x2/0x4/0x20` = play once and hold,
+   per `rdPuppet_AdvanceTrack` `0x43eaa0`).
+   The apparent contradiction — the first retail reference frame showed the room cleanly with no
+   patron at the eye — is resolved: level 1 opens on a **scripted intro camera** (its 1 s series is
+   not static), so that first reference was not the player camera. With the staged executable patched
+   to register the gated dev verbs, `warp` reproduces a pose and `coords` verifies it (`spawn_yaw30`:
+   position delta 0.005, yaw delta 0.01); the *pose-verified* player-camera retail frame draws the
+   patron in the same place the port does. The port's spawn draw was right.
+   The retail reference itself also stopped being the weak link: the 1997 Direct3D path crashes on
+   this Windows 11 machine (system `D3DIM.DLL`), so the harness now stages **dgVoodoo2** into the
+   scratch copy and runs the game's **16-bit** path, whose F12 writes a 24-bit `JSHOT###.BMP` instead
+   of the palettised PCX. The 16-bit pair at the verified pose scores SSIM **0.62** where the old
+   8-bit/unverified pair scored 0.13; the remaining gap is renderer difference and the port's HUD,
+   not a drawing rule. Reproduce with `pwsh -File tools/parity/retail-capture.ps1`, `port-capture.ps1`,
+   `compare.ps1` (see `tools/parity/README.md`).
+
 ---
 
 ## 6. Recently closed, so it is not mistaken for missing

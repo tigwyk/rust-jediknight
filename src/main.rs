@@ -41,7 +41,7 @@ use bevy::audio::{AudioPlayer, AudioSource, PlaybackMode, PlaybackSettings, Volu
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowResolution};
 use bevy::camera::visibility::RenderLayers;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
@@ -9765,9 +9765,21 @@ fn main() {
     // screen — and a window is what steals the pointer and covers the desktop while a sweep runs. The
     // `--shot` capture path is a separate invocation and still opens one.
     let headless = std::env::var_os("BK_HEADLESS").is_some();
+    // Parity captures render at the retail view size, not this display mode: `port-capture.ps1`
+    // reads the retail sidecar's world crop and passes it as `BK_WINDOW="WxH"`, so both frames have
+    // the same shape. Without it the window is the engine's own 1024x768 display mode.
+    let (window_width, window_height) = std::env::var("BK_WINDOW")
+        .ok()
+        .and_then(|raw| {
+            let (width, height) = raw.split_once('x')?;
+            Some((width.trim().parse::<u32>().ok()?, height.trim().parse::<u32>().ok()?))
+        })
+        .filter(|(width, height)| *width > 0 && *height > 0)
+        .unwrap_or((1024, 768));
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: (!headless).then(|| Window {
                 title: format!("bevi-knight — {level_name}"),
+                resolution: WindowResolution::new(window_width, window_height),
                 ..default()
             }),
             ..default()
@@ -13586,6 +13598,49 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
             cogs.insert(name.clone(), script);
         }
     }
+    // A script can play a keyfile of its own — `PlayKey(tusken, tuskenKey, 1, 0x4)` with
+    // `keyframe tuskenKey=THout.key local` is what level 1's `01_TuskenTwitch.cog` does when the
+    // patron first becomes visible. Only the *puppets'* key files were read above, so that clip was
+    // missing and `animate_actors` skipped the actor entirely (`world.keys.get` failed): the patron
+    // stayed frozen at its spawn pose, 0.16 units from the player's eye, filling the first frame.
+    // Resolve every `keyframe` symbol the level's scripts declare — by name when it names a file,
+    // else by index into the level's own keyframe table (`Section: KEYFRAMES`).
+    let level_keys: Vec<String> = level
+        .assets
+        .iter()
+        .filter(|a| a.kind == jkl::AssetKind::Keyframe)
+        .map(|a| a.name.to_ascii_lowercase())
+        .collect();
+    let script_keys: Vec<String> = cogs
+        .values()
+        .flat_map(|script| script.symbols.iter())
+        .filter(|symbol| symbol.kind == cog::SymKind::Keyframe)
+        .filter_map(|symbol| {
+            let init = symbol.init.as_deref()?.trim();
+            if init.is_empty() {
+                return None;
+            }
+            if init.to_ascii_lowercase().ends_with(".key") {
+                Some(init.to_ascii_lowercase())
+            } else {
+                init.parse::<usize>()
+                    .ok()
+                    .and_then(|index| level_keys.get(index).cloned())
+            }
+        })
+        .collect();
+    let mut script_keyfiles = 0usize;
+    for key_name in script_keys {
+        if keys.contains_key(&key_name) {
+            continue;
+        }
+        let Some(raw) = gobs.read(&key_name) else { continue };
+        keys.insert(key_name, key::parse(&String::from_utf8_lossy(&raw)));
+        script_keyfiles += 1;
+    }
+    if script_keyfiles > 0 {
+        println!("{script_keyfiles} keyfile(s) named by scripts loaded for `PlayKey`");
+    }
     println!("{} placed script instances", level.cogs.len());
     println!("{} things on a keyframe path, {} with flags, {} moving", level.things.iter().filter(|t| t.frames.len() > 1).count(), level.things.iter().filter(|t| t.flags != 0).count(), level.things.iter().filter(|t| t.vel != [0.0; 3]).count());
 
@@ -14813,6 +14868,16 @@ fn spawn_models(
     let mut entities: HashMap<usize, Vec<Entity>> = HashMap::new();
 
     for (thing_index, thing) in world.level.things.iter().enumerate() {
+        // `BK_HIDE_THING=<index>` skips one thing's model. Diagnostics use it to A/B-identify what a
+        // frame is showing when the data says one thing and the picture says another.
+        if std::env::var("BK_HIDE_THING")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            == Some(thing_index)
+        {
+            println!("hide: thing {thing_index} `{}` not spawned", thing.template);
+            continue;
+        }
         // The local player's body is an ordinary actor, but hidden: the camera is the body plus an eye
         // offset, so in first person the model would be drawn around the viewpoint (models use
         // `cull_mode: None`, so the camera looks at the inside of them). `draw_player_body` shows it only
@@ -14835,13 +14900,17 @@ fn spawn_models(
         }
 
         let transform = thing_transform(thing);
-        // An actor is a thing whose template names a puppet with a drawable `stand` state.
-        // Its mesh cannot be shared: the pose is written into the mesh every frame.
+        // An actor is a thing whose template names a puppet. Its mesh cannot be shared: the pose is
+        // written into the mesh every frame. A puppet with **no** `stand` state is still an actor:
+        // a script can drive it directly with `PlayKey` (level 1's `01_TuskenTwitch.cog` plays
+        // `THout.key` on the `tuskensoused` patron, and its `cr.pup` declares no states at all), and
+        // without per-thing meshes that clip would animate every thing sharing the model.
         let puppet = world
             .level
             .template_param(&thing.template, "puppet")
             .map(|n| n.to_ascii_lowercase())
             .and_then(|puppet| world.puppets.get(&puppet));
+        let has_puppet = puppet.is_some();
         let animate = puppet
             .and_then(|puppet| puppet.states.iter().find(|s| s.name.eq_ignore_ascii_case("stand")))
             .map(|state| state.key.to_ascii_lowercase())
@@ -14886,7 +14955,7 @@ fn spawn_models(
                 })
                 .unwrap_or((1.0, 1.0));
             let mesh = match mesh_cache.get(&key) {
-                _ if animate.is_some() => {
+                _ if has_puppet => {
                     let mesh = meshes.add(model_mesh(model, mat_idx, tex_size));
                     actor_parts.push((mesh.clone(), mat_idx, tex_size));
                     mesh
@@ -14940,11 +15009,11 @@ fn spawn_models(
             entities.entry(thing_index).or_default().push(entity);
             spawned += 1;
         }
-        if let Some(key) = animate {
+        if has_puppet {
             actors.push(Actor {
                 thing: thing_index,
                 model: model_name.clone(),
-                key,
+                key: animate.unwrap_or_default(),
                 death,
                 states,
                 state: "stand".to_string(),
@@ -15851,10 +15920,17 @@ fn animate_actors(
         // event markers, not a loop range (`stand kystand0.key 0x00 0 0` on a 31-frame file).
         // A dying actor plays to its last frame and stays there; a living one loops.
         // ponytail: a scripted clip is offset by its start frame but has no own epoch, so the
-        // `PlayKey(..., frame)` start looks like a loop offset rather than a timed track; `flags` is
-        // recorded and not interpreted.
+        // `PlayKey(..., frame)` start looks like a loop offset rather than a timed track.
         let last = key.frames.max(1) as f32 - 1.0;
         let start = scripted.as_ref().map_or(0.0, |(_, _, frame)| *frame as f32);
+        // `sithPuppet_PlayKey` turns the cog's `flags` into a `rdPuppet` status: 0x2/0x4/0x20 all
+        // clamp the track at its last frame and stop it (`rdPuppet_AdvanceTrack`, 0x43eAA0), which
+        // is the one-shot "hold the ending pose" a placed-decor clip like level 1's `THout.key`
+        // relies on. Without it the port looped the clip: the `tuskensoused` patron twitched forever
+        // at the spawn instead of lying still in its final frame like retail.
+        let hold = scripted
+            .as_ref()
+            .is_some_and(|(_, flags, _)| flags & (0x2 | 0x4 | 0x20) != 0);
         // A locomotion clip advances with the distance the body covered, not the clock
         // (`sithPuppet_UpdatePuppet` advances the track by `speed * dt * const`), so the legs keep
         // pace with the body instead of sliding on a fixed rate. ponytail: that units-to-frames
@@ -15868,7 +15944,7 @@ fn animate_actors(
         };
         actor.phase += dt * rate;
         let clock = actor.phase + start;
-        let frame = if actor.dying {
+        let frame = if actor.dying || hold {
             clock.min(last).floor() as i32
         } else {
             (clock % (last + 1.0)).floor() as i32
