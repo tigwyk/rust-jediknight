@@ -5,10 +5,15 @@ something is ported**, or **what to work on next when the build is not yet fun t
 
 ## Why this exists
 
-As of 0.1.1 the port reports 10 of 10 roadmap stages "done", 61 gates and 133 tests green, a signed-off
-release, an installer, CI and a landing page — and level 1 still has fundamental playability problems.
-The first retail reference frame (`tools/parity/`, gaps §5.9) found one at once: the spawn view sits
-inside a cantina table that retail does not draw through the eye.
+As of 0.1.1 the port reports 10 of 10 roadmap stages "done", 61 gates and 134 tests green, a signed-off
+release, an installer, CI and a landing page — and level 1 still had fundamental playability problems.
+The first retail reference frame (`tools/parity/`, gaps §5.9) looked like it found the cause at once:
+the spawn view appeared to sit inside a cantina table that retail does not draw through the eye. The
+harness then showed that was two other bugs, not a draw rule: the thing at the eye was one decor
+prop drawn frozen (a `PlayKey` keyfile the loader skipped, now loaded) and the port's spawn camera sat
+0.055 units below retail's because setup replaced the level's recorded pose with a floor-seated one
+(fixed and now gated; the `spawn` pair went 0.23 → 0.63 SSIM). The lesson stands even though the first
+suspect did not: the port's own gates had been passing.
 
 The cause is structural, not a missing feature:
 
@@ -60,8 +65,10 @@ Everything else (installer, site, extra screens, multiplayer) is downstream of t
 | T3 **Visual parity** | Same pose gives the same picture within a stated tolerance | `tools/parity` shot pairs with a per-shot SSIM/diff threshold |
 | T4 **Play parity** | A recorded input script reaches the same end state in both builds | replay script plus end-state diff |
 
-Today almost everything is T1. The roadmap's "done" rows should be relabelled with the tier they have
-actually reached; most will read T1 and a few T0.
+Today almost everything is T1. As of the parity round, level 1's spawn pose and spawn frame are the
+first T2/T3 rows: the pose comes from retail's own `coords` recording, and the frame is a thresholded
+shot pair under `tools/parity/compare.ps1 -Gate`. Everything else is still T1/T0 on the roadmap rows,
+and each row should name the tier it actually reached; most will read T1.
 
 ## How to port one thing (the repeatable loop)
 
@@ -89,26 +96,70 @@ Put every discrepancy in one bucket before touching code; the bucket names the l
 | Approximation | a ledger entry exists for it | retire the entry |
 | Retail quirk | retail itself looks odd | keep it, document it |
 
+## Deviation ledger
+
+Deliberate differences from retail that are allowed for now. Every entry names what differs, how it
+is measured, and what retires it. The full sweep of the 38 `ponytail:` markers plus the gaps §2
+partials is still to be written; these are the entries this round created or measured.
+
+| where | what differs | measured | retires when |
+|---|---|---|---|
+| `walk_player`, idle-only attachment | a body keeps the level's recorded spawn z while idle, but once it walks the port settles it onto the floor; the engine keeps the surface attachment through movement, so a moving player's eye would be 0.055 lower at level 1's spawn than retail's | spawn `--shot`/`--camera-trace`: eye −1.0929 idle vs −1.148 walking (retail: −1.0929 both) | `sithPhysics_UpdateAttachedThingPhysics` — the attached-surface half of the movement port, Phase 1 step 3 |
+| `spawn_point` | a recorded pose the port's body cannot stand in is nudged sideways and floor-seated; the engine places at the recorded pose and relies on its own attachment | the `walker: spawn ... was inside something` log line; `--walk all` | the movement port models the engine's body width and attachment |
+| `compare.ps1 -Gate` | the port's HUD is inside its frame while the retail world crop has none, so a pair's ceiling is renderer/HUD-limited | verified pose pairs cap at 0.62–0.63 SSIM; thresholds sit at 0.55 | HUD-free capture, or a HUD-masked metric |
+| `shots.tsv` / `--shot-at` | retail `warp` keeps the level's own pitch (1.04° at level 1) while the port aims level, so a pair carries ~1° of pitch difference | sidecar `pyr` records it per shot | pitch in `--shot-at` (Phase 0) |
+
 ## Phases
 
 ### Phase 0 — Reset the definition (do first, small)
 
-- Relabel every `roadmap.md` / `gaps.md` row with its tier. Merge the three overlapping lists
-  (`roadmap`, `gaps`, `engineering` status) into one status table; keep the long prose as appendix.
-- Make `tools/parity/` a first-class gate: commit it, add one command that prints a per-shot score
-  against a threshold file, enable retail `warp`, and add pitch to the port's `--shot-at`. (The harness
-  is untracked at the time of writing.)
-- Build the **deviation ledger**: grep the `ponytail`/`shortcut:` markers and the gaps §2 partials into
-  one list with owner, measurement and retire condition.
+- **Done:** `tools/parity/` is committed, the staged retail build takes `warp` (the dev-command patch
+  is applied to the scratch copy), and `pwsh -File tools/parity/compare.ps1 -Gate` scores every pair
+  against `tools/parity/thresholds.tsv` and exits non-zero. The gate is verified in both directions:
+  the pre-fix spawn frame fails at 0.2284, the fixed one passes at 0.62–0.63.
+- **Open:** pitch in the port's `--shot-at` (retail `warp` keeps the level's own pitch, so route shots
+  need the port to match it); HUD-free capture or a HUD-masked metric, so a pair is not mostly the
+  port's HUD difference; and the status table (next bullet).
+- **Trimmed:** do not relabel every `roadmap.md`/`gaps.md` row. Keep one status table for the ten
+  roadmap stages plus the deviation ledger, and correct the stale rows; the long prose stays appendix.
+  The tier relabel below is the remaining piece.
+- Tier the ten roadmap rows (T0/T1/T2/T3) and merge the overlapping `roadmap.md` / `gaps.md` /
+  `engineering.md` status summaries into that one table.
+- Build the **deviation ledger** (started above): sweep the `ponytail:` markers and the gaps §2
+  partials into it with owner, measurement and retire condition.
 - Freeze: installer, site, new UI screens, version bumps. Releases pause until Phase 1 exits.
+
+### Phase 0.5 — Retail trace v0 (unblocks Phase 1 steps 3–6)
+
+T3 works today because a screenshot is a complete observation. T2/T4 do not: `coords` is a manual
+console poll, `cogstatus`/`aistatus` output formats are not pinned, and no movement replay exists, so
+"the same inputs produce the same position/sector/health" cannot be measured yet. Steps 3–6 all need
+this, so it is its own deliverable rather than a hidden dependency.
+
+Exit criteria:
+
+1. A scripted walk on retail yields a parseable position + sector trace (poll `coords` on a fixed
+   cadence, with `slowmo` if the console cannot keep up), and the format is documented.
+2. The `cogstatus`/`aistatus` handlers are decompiled and their output formats pinned; one level's cog
+   variables are captured through them.
+3. The port replays the same scripted inputs and produces a comparable trace, with the fixed-step
+   policy stated, so step 3's "within a stated epsilon" is measurable.
+4. If console polling cannot carry health/velocity, hook `sithThing_SetPositionAndOrient` and the
+   damage function with Frida and capture a per-tick CSV; the hook script lives under `tools/parity/`.
+
+Do not start Phase 1 step 3 without this.
 
 ### Phase 1 — Level 1 vertical slice (the real work)
 
 Ordered so each step is observable and unblocks the next. Each item ends with a retail fixture and a
 tier, not a checkbox.
 
-1. **First frame.** Spawn pose, eye height, near plane, which things draw at the eye, player-body
-   exclusion in first person. Exit: spawn shot pair within threshold. *(in progress elsewhere)*
+1. **First frame — level 1 done.** The spawn pose is the level's recorded `walkplayer` pose
+   (`sithPlayer_NewPlayer`, no floor re-seed), the eye offset is the template's 0.037 in level units,
+   and an idle body stays attached to its floor instead of settling the 0.055 authored gap. Evidence:
+   the `spawn` pair went 0.2284 → 0.62–0.63 SSIM (MAD 31.3 → 23.2), the equal of the warp-verified pairs,
+   and `compare.ps1 -Gate` fails on the pre-fix frame. Remaining: the same spawn audit for the other
+   levels, and the idle-only ceiling in the deviation ledger.
 2. **The room as retail draws it.** Model back-face behaviour, transparency order, sky, light ramp at
    distance, sprites. Exit: a fixed set of poses along the level-1 route (cantina, corridor, first
    door) within threshold.
@@ -149,23 +200,25 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 
 ## What the retail harness already answers
 
-Reviewed `tools/parity/` (retail-capture, retail-lib, port-capture, compare, shots.tsv). It drives the
-GOG `JK.EXE -devMode` on a scratch copy, so it is the oracle this roadmap needs; it only has one verified
-row so far (`spawn`).
+Reviewed `tools/parity/` (retail-capture, retail-lib, port-capture, compare, thresholds, shots.tsv).
+It drives the GOG `JK.EXE -devMode` on a scratch copy, so it is the oracle this roadmap needs. It has
+three level-1 pairs: two warp-verified poses (0.62/0.63 SSIM) and the plain spawn pair, which is now
+gated at 0.63.
 
 | Question | Answer from the harness |
 |---|---|
-| Can we read retail state without a debugger? | **Partly.** The dev console's `coords` prints position, PYR and **sector**, and the console list box is scraped for engine output (e.g. level-parse lines). That is enough for T2 on position/sector. Health, velocity, bins and cog variables are not exposed yet. |
+| Can we read retail state without a debugger? | **Partly.** The dev console's `coords` prints position, PYR and **sector**, and the console list box is scraped for engine output (e.g. level-parse lines). That is enough for T2 on position/sector. Health, velocity, bins and cog variables are not exposed yet; polling is manual, not a per-tick trace (Phase 0.5). |
 | Can we drive retail without a human? | **Yes.** Menus take synthetic mouse clicks at fixed coordinates; in gameplay synthetic keys work (keys held 300 ms or more, or the engine drops them). Walking scripts look feasible but are unproven. |
-| Can we put retail at a chosen pose? | **Not yet.** `warp` is "not recognized" on the GOG build. The cause and a one-patch fix are found (see below). Until the harness applies it, only the level spawn is a verified pose, which blocks every Phase 1 step past 1. |
-| Is there a retail frame to compare with? | **Yes.** F12 is the engine's own screenshot (world only, no HUD). Frames are cropped to the world box (736x767 today) and scored by SSIM/mean difference, which the README itself calls triage, not equality. |
-| Is the harness safe to run routinely? | **With care.** It takes over the display (640x480 fullscreen, mouse captured), needs hands off, and has restore scripts for an interrupted run. Not CI-able: needs a retail install and a desktop session. |
+| Can we put retail at a chosen pose? | **Yes.** The staged `JK.EXE` is patched so the gated dev verbs register (`Set-JkDevCommandsEnabled`), and `warp x y z p y r` reproduces a pose that `coords` verifies (level-1 position delta 0.005). `warp` keeps the level's own pitch and roll, so pitch is not settable yet. |
+| Is there a retail frame to compare with? | **Yes.** F12 is the engine's own screenshot. The default 16-bit D3D path through dgVoodoo2 writes a 24-bit BMP; `-Software` writes a palettised PCX (palette-index comparison would be possible there). Frames are cropped to the world box (1170x731 today) and scored by SSIM/mean difference — triage, with per-shot floors in `thresholds.tsv`. |
+| Can the comparison fail a build? | **Yes.** `pwsh -File tools/parity/compare.ps1 -Gate` exits non-zero on a missing or below-threshold pair. Verified: the pre-fix spawn frame fails at 0.2284, the fixed one passes at 0.62–0.63; a 0.03-unit eye-height shift drops a pair to ~0.24. |
+| Is the harness safe to run routinely? | **With care.** It takes over the display (fullscreen, mouse captured; currently 1440x900 with `viewSize=6`), needs hands off, and has restore scripts for an interrupted run. Not CI-able: needs a retail install and a desktop session. |
 
 ## Getting the rest from Ghidra and REA
 
 The exported decompilation in `decomp/` already settles part of this. Plan for the remainder:
 
-**Found in `decomp/` (read, not yet run):**
+**Found in `decomp/` (read, and used where noted):**
 
 - `sithCommand_Startup` (0x4edc10) registers `players`, `coords`, `trackshots` and a few others always, and
   the rest **only if `(DAT_008ee66c & 0x100) != 0`**. That is why `-devMode` gives `coords` but not
@@ -195,34 +248,38 @@ The exported decompilation in `decomp/` already settles part of this. Plan for t
    `mov eax,[0x8ee66c]; add esp,0xc; test ah,1; jz <skip registration>`. The six bytes of the `jz` are
    `0f 84 b8 01 00 00`. Replace them with six `90` and every gated command registers. The byte pattern
    `a1 6c e6 8e 00 83 c4 0c f6 c4 01 0f 84 b8 01 00 00` occurs **exactly once** in the file, at file
-   offset `0xed099` (jz at `0xed0a4`). The harness already restages the install into
-   `target/parity/retailcopy/` on every run, so it can apply the patch after staging and assert the pattern
-   is unique first. The real install is never touched.
+   offset `0xed099` (jz at `0xed0a4`). `Set-JkDevCommandsEnabled` (`retail-lib.ps1`) restages the
+   install into `target/parity/retailcopy/`, verifies that unique site and NOPs it; the real install is
+   never touched. **Confirmed:** the staged build now takes `warp`, and `coords` verifies the posed
+   camera to a 0.005-unit position delta.
 4. **Screenshots.** `jkGame_Screenshot` (0x4025e0): on the software path it converts the framebuffer to a
    bitmap, swaps in `stdDisplay_GetPalette()` and calls `stdPcx_Write`. So the F12 PCX is **8-bit indexed
    with the display palette**: palette-index comparison is possible, not just SSIM. The 16-bit/3D path
    writes BMP instead; keep 3D acceleration off.
 
-**Not yet done (needs a retail run, which takes over the display, so not run from here):**
+**Not yet done (needs a retail run, available but hands-off and screen-taking):**
 
-- Apply the patch and confirm `warp`, `cogstatus`, `aistatus`, `slowmo` register and print.
+- Confirm `cogstatus`/`aistatus`/`slowmo` print through the patched build, and record their formats.
 - Decompile the `LAB_` handlers for `coords` (0x4ee960), `cogtrace` (0x4ee170), `coglist` (0x4ee2f0) to
   pin their output formats for parsing.
 - Frida/`observe_native_calls` hooks on `sithThing_SetPositionAndOrient` and the damage function for a
   per-tick CSV (position, velocity, health). `slowmo` plus a fixed key script may make this unnecessary.
 - Palette-index diff: have the port emit an indexed frame, or quantise through the retail palette.
+- Route poses: choose 4–6 level-1 eyes along the route for `shots.tsv` and capture the batch (one run
+  per row, ~30–40 s each). Blocked on pitch in `--shot-at` for rows whose view is not level.
 
 Still open after the review:
 
 - **Per-tick state.** `coords` is a manual poll. The unlocked `cogstatus`/`aistatus` commands may cover
-  script and AI state; health, velocity and bins likely still need a hooked trace (see above).
-- **Pitch and non-spawn poses.** The port's `--shot-at` ignores pitch; retail needs `warp`. Both are
-  Phase 0 prerequisites for the route shots in Phase 1 step 2.
+  script and AI state; health, velocity and bins likely still need a hooked trace. Phase 0.5 owns this.
+- **Pitch and non-spawn poses.** `warp` already reproduces position and yaw and is verified; the port's
+  `--shot-at` still ignores pitch, so the route shots in Phase 1 step 2 need that one small change first.
 - **Input replay determinism.** Retail frame timing is not ours; T4 needs fixed-step or a tolerance, and
   the harness has no replay of movement yet.
-- **Better than SSIM.** Confirmed the PCX is palette-indexed (above); what remains is the port emitting
-  indices.
-- **Renderer tolerance.** Retail's software renderer and Bevy will never match pixel for pixel; pick
-  per-shot thresholds from known-good shots and tighten them over time.
+- **Better than SSIM.** Confirmed the PCX is palette-indexed on the software path (above); what remains
+  is the port emitting indices. The gate's SSIM floors are the triage version.
+- **Renderer tolerance.** Retail's renderer and Bevy will never match pixel for pixel. Per-shot floors
+  now live in `tools/parity/thresholds.tsv` (0.55 against verified pairs at 0.62–0.63); tighten them as
+  renderer parity improves, never below the verified-pair noise.
 - **Fixture hygiene.** Keep traces and numbers in the repo; keep retail screenshots out of any
   GPL-licensed distribution unless the existing NOTICE terms cover them.

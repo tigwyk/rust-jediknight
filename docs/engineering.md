@@ -269,8 +269,11 @@ is the player-facing version of this.
   and the ending choice.
 - **Force powers beyond jump/speed/heal/seeing/pull/grip are unverified**, and animation states for
   crouch, alt-fire, saber swing and layered upper/lower body are not selected.
-- **Level 1's first frame starts inside cantina furniture** (a table 0.16 units from the eye);
-  whether retail opens the same way is unsettled and needs a retail reference frame.
+- **Only level 1's spawn frame is gated against retail.** The first frame there is fixed: the player
+  starts at the level's recorded `walkplayer` pose plus the template's 0.037 eye offset, and an idle
+  body stays attached to its floor instead of settling the 0.055 authored gap. The `spawn` pair went
+  0.23 → 0.63 SSIM and `tools/parity/compare.ps1 -Gate` fails on the pre-fix frame. No other level has
+  been captured or gated yet.
 - **The save-slot picker is keys only** (`,`/`.` choose a slot, `F5`/`F9` save/load); retail's
   slot-list screen is not drawn.
 - **Cutscene palette**: 29 of 768 palette bytes still differ from libsmacker's decode.
@@ -299,16 +302,18 @@ is the player-facing version of this.
 - **"Characters stuffed inside each other" was the camera standing inside an NPC, not the model scale.**
   The spawn only demanded `radius * 2` = 0.7 units from other things, exactly an NPC's body width; `--shot`
   showed a head and shoulders filling the frame. The spawn now wants 2.0 units (`BK_THING_CLEARANCE`), so
-  no NPC sits in the lens; level 1's start is still the cantina booth, with its own furniture at arm's
-  length (see the open items above — that one needs a retail reference frame). `MODEL_SCALE` stays 10:
+  no NPC sits in the lens; level 1's start is the level's own recorded pose, with its own furniture at
+  arm's length — retail opens there too, verified against `coords` and the `spawn` parity pair, so that
+  is the level's design rather than a spawn error. `MODEL_SCALE` stays 10:
   `ky.3do` is 0.18 model units and 0.17 posed, so a character is 1.8 world units — a person in a 2.5-unit
   storey. A round was spent at 1.0 on a misread measurement (`bounds()` already scales), which made every
   character ten times too small.
-- **The player body is back to the calibrated values, because the model scale was the real fault.** Radius
-  `0.35`, eye `1.45`, step `0.66` -- these pair with a 1.81-unit character in a 2.5-unit storey. The detour
-  through `size=0.065`/`eyeoffset=0.037` assumed those were world units; they are offsets within a puppet,
-  and taking them literally put the camera 0.1 above the floor. Frames and the reasoning are in
-  `docs/formats.md` (player body and drawing scale sections).
+- **The player body uses the engine's own size and eye offset, measured from retail.** Radius `0.065`
+  and eye `0.037` (`size=`/`eyeoffset=` in level units — `MODEL_SCALE` is 1.0 for template params, not
+  10), which is what the level-1 player camera is built from: `sithCamera_Update` is `thing + 0x168`
+  and `sithPlayer_NewPlayer` copies the recorded pose. An earlier round calibrated radius `0.35`/eye
+  `1.45` against the render scale; the pose-verified retail capture (gaps §5.9, `tools/parity/`)
+  superseded it — at eye 1.45 the camera renders the inside of the model at the spawn.
 - **Audio is on by default at the engine's own master scale.** A play session is audible; captures
   and probes are silent, and `--sound-on`/`BK_SOUND=1` forces sound in a capture. `--mute`/`BK_MUTE=1`
   and `BK_VOLUME` still override. This used to be muted by default at 5% gain — a release build that
@@ -674,10 +679,10 @@ is why it was recoverable.
 
 Every check in one page: [docs/gates.txt](gates.txt) records each flag and what it printed
 against this install; the sweep now is **61 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
-`0 of 61 failed, 9 skipped`), plus 133 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
+`0 of 61 failed, 9 skipped`), plus 134 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
 
 [CI](../.github/workflows/ci.yml) runs on Windows: it installs the MSRV from `Cargo.toml`, builds
-with `--locked`, runs the 133 unit tests, builds the i686 film helper, produces the native
+with `--locked`, runs the 134 unit tests, builds the i686 film helper, produces the native
 `setup.exe` as an artifact, and checks every relative documentation link. The 61 gates are not
 in CI on purpose — they require a retail game install, which the repository does not ship and
 CI does not download.

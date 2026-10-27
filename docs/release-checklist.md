@@ -31,9 +31,9 @@ here has been pushed or published.
 - [x] **Known issues.** The release note's "deliberately rough or not there" section, plus the
   README's status and known-limits section.
 - [x] **Check record.** `--gates` 0 of 61 failed, 0 skipped (windowed) / 9 skipped
-  (`BK_HEADLESS=1`); `cargo test --bins` 133 passed.
+  (`BK_HEADLESS=1`); `cargo test --bins` 134 passed.
 - [x] **CI.** `.github/workflows/ci.yml` runs on windows-latest with the Cargo MSRV:
-  `cargo build --locked`, the 133 unit tests, the i686 film helper, the native `setup.exe`
+  `cargo build --locked`, the 134 unit tests, the i686 film helper, the native `setup.exe`
   artifact, and [scripts/check-docs-links.ps1](../scripts/check-docs-links.ps1). The 61 gates
   are excluded because they need a retail install.
 - [x] **Release automation.** Pushing a `v*` tag runs the same Windows job and then a release job:

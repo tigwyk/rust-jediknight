@@ -12788,6 +12788,14 @@ fn walker_step(
     (moved, crossed, landed)
 }
 
+/// `sithThing_AttachThingToSurface`'s floor search: is a standing body within `moveSize + 0.005` of a
+/// floor? That is the engine's attach range for a body that is not attached yet, and it is why a spawn
+/// authored slightly above the floor (level 1: 0.055) is kept rather than settled by gravity.
+/// `walkplayer`'s `size` and `movesize` are the same number (0.065), so `radius` carries both halves.
+fn attaches_to_floor(solids: &collide::Solids, pos: [f32; 3], radius: f32) -> bool {
+    solids.support(pos, radius, radius + 0.005).is_some()
+}
+
 /// `--walk <frames>`: the collision solver exercised on a real level, with no window.
 ///
 /// Starts at the level's own `walkplayer` thing — where the game puts you — and holds
@@ -20209,11 +20217,13 @@ fn setup(
             (a, Some((at[1] - a[1]).atan2(at[0] - a[0])))
         }
         None => (
-            // The same start the `--walk` sweep uses: `EYE` above the level's own
-            // `walkplayer`, which is the pair that walks on all 34 levels.
+            // The player's start is the level's recorded pose, which is where the engine puts him:
+            // `sithPlayer_NewPlayer` (`0x4c8ec0`) copies the `walkplayer` thing's position, with no
+            // floor re-seed. The port used to add `PLAYER_RADIUS` here and then seat the body on a
+            // floor probe, which placed the level-1 eye 0.055 units below the retail spawn camera
+            // (most of the first-frame parity gap; see `spawn_point` below).
             player
-                // `EYE` in the `--walk` sweep (0.35): the same pair that walks on 34 levels.
-                .map(|t| [t.pos[0], t.pos[1], t.pos[2] + PLAYER_RADIUS])
+                .map(|t| t.pos)
                 .unwrap_or([eye.x, eye.y, eye.z - PLAYER_EYE]),
             None,
         ),
@@ -20238,20 +20248,29 @@ fn setup(
     // the floor may belong to the room below a doorway, which no plane list of the sliver knows about.
     let mut sector = sector;
     let mut start = start;
-    // Nudge out of an NPC or a wall, and stand on the floor found there.
+    // Nudge out of an NPC or a wall, but only in the plane. The engine puts the body at the level's
+    // recorded pose (`sithPlayer_NewPlayer`, `0x4c8ec0`), so a pose that can stand there keeps its own
+    // z: re-seating it on a floor probe moved the debug camera 0.055 units down at level 1's spawn.
+    // Only a body the level placed inside something takes the floor height of the point it was moved to.
+    let recorded = start;
     match spawn_point(&world.level, &solids, sector, start, PLAYER_RADIUS, "walkplayer") {
         Some((body, room)) => {
-            if (body[0] - start[0]).abs() > 1e-3 || (body[1] - start[1]).abs() > 1e-3 {
+            let nudged =
+                (body[0] - recorded[0]).abs() > 1e-3 || (body[1] - recorded[1]).abs() > 1e-3;
+            if nudged {
                 println!(
-                    "walker: spawn {start:?} was inside something; standing at ({:.2}, {:.2}) instead",
+                    "walker: spawn {recorded:?} was inside something; standing at ({:.2}, {:.2}) instead",
                     body[0], body[1]
                 );
+                start = body;
+            } else {
+                start[0] = body[0];
+                start[1] = body[1];
             }
-            start = body;
             sector = room;
         }
         None => println!(
-            "walker: no clear spawn near {start:?} (sector {sector}) - the body may fall or overlap"
+            "walker: no clear spawn near {recorded:?} (sector {sector}) - the body may fall or overlap"
         ),
     }
 
@@ -20306,15 +20325,9 @@ fn setup(
         println!("walker: BK_SPAWN_OFFSET moved the body to {start:?}, sector {sector}");
     }
 
-    // Seed the body onto the floor it stands over. The level's `walkplayer` z is the floor
-    // surface itself (level 1: `-0.78` against a walkway top at `-0.75`), so a body placed exactly
-    // there is 0.03 *below* the face and gravity then drops it through — the camera ends up in the
-    // slab. Probing from 0.2 above puts the feet on the face instead.
-
     let player_yaw = forced_yaw.unwrap_or_else(|| facing.unwrap_or_else(|| yaw.unwrap_or_else(|| aim.z.atan2(aim.x))));
-    // The camera sits at `position + eyeOffset` (`sithCamera.c`), and the template's
-    // `eyeoffset=(x/y/z)` is the offset in **model** units, so `MODEL_SCALE` takes it into level units:
-    // `walkplayer`'s `0.037 x 10 = 0.37` above the body centre, which is itself one radius above the floor.
+    // The camera sits at `position + eyeOffset` (`sithCamera.c`): the template's `eyeoffset=(x/y/z)` is
+    // in level units (`walkplayer`: 0.037), applied to the body centre the engine placed.
     // A sector with a low ceiling still bounds it below, so a body in a crawlspace does not put the camera
     // through the roof.
     let mut ceilings: Vec<f32> = std::iter::once(sector)
@@ -20388,7 +20401,10 @@ fn setup(
         yaw: player_yaw,
         pitch: 0.0,
         sector,
-        grounded: false,
+        // The engine attaches a placed body to the floor it stands over (`sithPlayer_NewPlayer` calls
+        // the attach step); the idle check in `walk_player` then keeps the authored pose instead of
+        // letting gravity settle the small authored gap. A spawn with no floor in range falls normally.
+        grounded: true,
         gravity: rules.gravity.max(1.0),
         rules,
         water: false,
@@ -21562,8 +21578,20 @@ fn walk_player(
 
     let mut pos = [player.pos.x, player.pos.y, player.pos.z];
     let mut sector = player.sector;
+    // `sithThing_AttachThingToSurface`: a body standing on a surface stays attached to it, so it does
+    // not fall the small gap a level may author between its recorded pose and the floor. Level 1's
+    // `walkplayer` is 0.055 above the cantina floor; retail keeps that pose, and it is the retail
+    // spawn camera, so an idle body must not settle onto the floor.
+    // ponytail: idle only. The engine keeps the attachment through a walk too, which is the
+    // `sithPhysics_UpdateAttachedThingPhysics` half of the movement port (docs/gaps.md §2); until
+    // that lands, a player who starts walking settles 0.055 lower at this spot.
+    let idle = forward == 0.0 && strafe == 0.0;
+    let attached = idle
+        && player.grounded
+        && player.vy <= 0.0
+        && attaches_to_floor(&solids.0, [player.pos.x, player.pos.y, player.pos.z], player.rules.radius);
     let mut vy = player.vy + thrust[2] * dt;
-    let gravity = player.gravity;
+    let gravity = if attached { 0.0 } else { player.gravity };
     let trace = std::env::var_os("BK_WALK_TRACE").is_some();
     if trace {
         eprintln!(
@@ -22480,6 +22508,20 @@ mod walker_tests {
     /// lifts the body only when its feet clear the ledge's top edge *and* there is floor up there.
     /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
     /// distance that puts it off the edge is how this went wrong twice.
+    #[test]
+    fn a_body_attaches_to_a_floor_within_one_move_size() {
+        let solids = step_room();
+        // Level 1 spawns 0.055 above its floor; `moveSize + 0.005` is 0.070, so the engine keeps that
+        // authored pose instead of letting gravity settle it.
+        let at = |gap: f32| [0.5f32, 0.0, PLAYER_RADIUS + gap];
+        assert!(attaches_to_floor(&solids, at(0.0), PLAYER_RADIUS), "contact must attach");
+        assert!(attaches_to_floor(&solids, at(0.055), PLAYER_RADIUS), "0.055 is inside the attach range");
+        assert!(!attaches_to_floor(&solids, at(0.08), PLAYER_RADIUS), "0.08 is past moveSize + 0.005");
+        let mut no_floor = step_room();
+        no_floor.floors.clear();
+        assert!(!attaches_to_floor(&no_floor, at(0.0), PLAYER_RADIUS), "no floor must not attach");
+    }
+
     #[test]
     fn a_low_ledge_is_stepped_onto_and_a_tall_wall_is_not() {
         let level = step_room();

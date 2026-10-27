@@ -2,7 +2,9 @@
 
 Screenshot the **real GOG game** and **this port** from the same, known camera poses, then put
 them side by side. Built to answer "does the port draw what the 1997 engine draws?" — the first
-use is level 1's opening, where the port's spawn view is buried in a prop (`docs/gaps.md` §5.9).
+use was level 1's opening, where the port's spawn view looked buried in a prop. That turned out to
+be a frozen decor animation plus a spawn camera 0.055 units low, both fixed; the pair is now part
+of a thresholded gate (`compare.ps1 -Gate`) rather than a one-off investigation.
 
 Both sides are driven headlessly (no human input) and the pose is recorded, so two runs are
 comparable even if the mouse moves between them.
@@ -14,10 +16,12 @@ comparable even if the mouse moves between them.
 | 1 | `retail-capture.ps1` | Copies the retail install to a scratch folder, launches the **GOG `JK.EXE`** in `-devMode`, drives its menus with the mouse, reads the player pose from the game's own `coords` console command, `warp`s to each pose in `shots.tsv`, presses F12 (the game writes `JSHOT*.PCX/BMP`) and converts the frames to PNG. |
 | 2 | `port-capture.ps1` | Runs `bevi-knight.exe` once per shot with `--start`, `--shot`, and (for numeric poses) `--shot-at`. |
 | 3 | `compare.ps1` | Pairs `retail/<name>.png` with `port/<name>.png`, writes a side-by-side, a contact sheet, and `report.md` with framing facts and a triage score (SSIM / mean absolute difference). |
+| 4 | `compare.ps1 -Gate` | Scores every row of `thresholds.tsv` against its SSIM/MAD floors and exits non-zero if one is missing or failed. This is the regression check. |
 
 The retail side never touches your real installation: it works on a copy under
-`target/parity/retailcopy/`. It also needs the game's 3D acceleration **off** (with it on, this
-game renders a black world and only the HUD — see Troubleshooting).
+`target/parity/retailcopy/`. By default it stages dgVoodoo2 and runs the game's 16-bit 3D path;
+`-Software` forces the 8-bit software path. With no working 3D path the world renders black and
+only the HUD appears — see Troubleshooting.
 
 ## Requirements
 
@@ -25,7 +29,7 @@ game renders a black world and only the HUD — see Troubleshooting).
 - A retail **GOG** install of *Star Wars Jedi Knight: Dark Forces II* (the port's normal requirement).
 - The port built: `cargo build --release` (the harness will build it if missing).
 - **Keep hands off the mouse and keyboard while a retail run is in progress** — it is a fullscreen
-  640x480 game with the mouse captured, and synthetic input is how the harness drives it.
+  game with the mouse captured, and synthetic input is how the harness drives it.
 
 ## Quick start
 
@@ -40,6 +44,9 @@ pwsh -File tools/parity/port-capture.ps1
 
 # 3. pair, score and lay them out
 pwsh -File tools/parity/compare.ps1
+
+# 4. the regression check: pass/fail against the per-shot thresholds
+pwsh -File tools/parity/compare.ps1 -Gate
 ```
 
 Outputs:
@@ -68,6 +75,30 @@ pwsh -File tools/parity/restore-display.ps1 -RegistryDefaults # Windows' saved d
 `port-capture.ps1` also checks for that stuck mode before it captures and heals it, so the port does
 not open on a 640x480 desktop.
 
+## The gate: `compare.ps1 -Gate`
+
+`tools/parity/thresholds.tsv` gives every gated shot a minimum SSIM and a maximum mean absolute
+difference; `compare.ps1 -Gate` scores the captured pairs against it, prints `PASS`/`FAIL` per shot and
+exits non-zero if a thresholded shot is missing or outside its bounds. A pair with no threshold row is
+reported as `UNGRADED` (so a new shot does not break the gate before its floor is chosen).
+
+```text
+name        min_ssim  max_mean_abs_diff
+spawn       0.55      28.0
+spawn_pose  0.55      28.0
+spawn_yaw30 0.55      28.0
+```
+
+The floors are tolerances, not equality: retail (1997 renderer) and the port (Bevy) differ, and the
+port's HUD is inside its frame while the retail world crop has none, so a verified pose pair currently
+sits at 0.62–0.63 SSIM. The floors are set just under that, and the gate is known to fail on a real
+regression: the pre-fix spawn camera (0.055 units low) scores 0.2284; the fixed one scores 0.618–0.630 across runs.
+The numbers are tied to the capture policy above (600 frames, window from the retail sidecar, default
+16-bit retail renderer) — changing framing or frame count invalidates them.
+
+The gate needs a retail install and captured references on the machine, so it is a developer check, not
+a CI job; the port's own 133 tests and 61 gates remain the CI-able surface.
+
 ## The shot list: `tools/parity/shots.tsv`
 
 Tab-separated, one shot per line. A pose of `-` means **the level's own spawn** (retail reads the
@@ -81,10 +112,11 @@ spawn_pose	01narshadda	-10.443433	-5.455094	-1.092886	0	-59.994
 spawn_yaw30	01narshadda	-10.443433	-5.455094	-1.092886	0	-30
 ```
 
-`spawn` (no warp) captures whatever camera the level opens on, which for level 1 is the scripted
-intro camera — it scores ~0.23 SSIM against the port. `spawn_pose` is the same spot as the level's
-own `walkplayer` but captured through `warp`, i.e. the verified player camera: it scores ~0.63, the
-same as `spawn_yaw30`. Use numeric rows when a pair has to be trusted.
+`spawn` (no warp) captures the level's own start; retail reads the pose with `coords` and the sidecar
+marks it `first_frame_is_player_camera` (its frame is pixel-identical to the warp-verified pair), so it
+is a valid pair — it scores ~0.63 now, the same as `spawn_pose` and `spawn_yaw30`, after the spawn
+camera was fixed (0.23 before). Numeric rows are the ones whose pose `coords` proves through `warp`;
+use them when a pair has to be trusted independently of the level's start.
 
 - `z` is the **eye** height — the value the port's `--shot-at` takes. Retail's `warp` moves the player
   body, and the engine rides the camera at `thing + 0x168` (the template's `eyeoffset=(0,0,0.037)`),
@@ -143,7 +175,8 @@ Everything below was verified against the GOG build (the harness works on a scra
 
 - **Triage, not equality.** Retail runs its 16-bit DirectDraw/D3D path, translated by dgVoodoo2 to
   D3D11; the port uses Bevy. The report's SSIM/mean-difference is for ranking pairs; the side-by-side
-  is the evidence.
+  is the evidence. `-Gate` turns the tolerances in `thresholds.tsv` into a pass/fail floor — it is a
+  regression check on this machine, not a claim that the pictures are equal.
 - **Retail framing:** the game's `viewSize` letterboxes the world inside its display mode; today the
   display mode is 1440x900 (16bpp, 3D on, `viewSize = 6`) and the world box is `1170x731+135+84`.
   Retail capture saves the world box (`<shot>.png`) and the raw frame (`<shot>-raw.png`); the box is
@@ -156,21 +189,22 @@ Everything below was verified against the GOG build (the harness works on a scra
 - **Pose rows:** numeric rows work through the patched `warp` and are verified against `coords`
   (`warp_verified` in the sidecar). `warp` sets position and yaw only — pitch/roll keep the level's
   own view angles — so rows use `pitch 0` and the sidecar records the achieved pitch.
-- **Pitch:** the port's `--shot-at` aims horizontally only; retail `PYR` pitch is recorded but
-  cannot be reproduced yet. Spawn/level rows are unaffected.
+- **Pitch:** the port's `--shot-at` aims horizontally only. Retail `warp` keeps the level's own view
+  angles (level 1 is at PYR pitch 1.04), so a numeric pair carries about a degree of pitch difference;
+  the gate's floors tolerate it. Adding pitch to `--shot-at` is the Phase 0 fix that removes it.
 - **Retail script coverage:** the menu coordinates and key timing are tied to the GOG build (and
   to `player\Lee\Lee.plr`); a different build/player may need the constants updated.
-- **Level 1's spawn — what the pair shows:** the 1 s series is *not* static: the first seconds show a
-  moving view (a scripted intro camera), so the settled last frame is the comparison reference and
-  `spawn_yaw30` — captured after `warp` — is the pose-verified player-camera pair. That matters for
-  the score: the unverified `spawn` reference still frames the intro camera (SSIM 0.23), while the
-  same room at the verified pose scores 0.62. The port used to freeze one animated decor thing
-  (`tuskensoused`, thing 215) in front of the eye; the level's `01_TuskenTwitch.cog` plays a keyframe
-  on it via `PlayKey`, and the port's runtime now loads script-named keyfiles and honours the one-shot
-  `PlayKey` flags, so it animates and settles. Once the pose is verified (`warp`), retail draws that
-  patron in the same place the port does — the old clean spawn reference was the intro camera, not a
-  missing draw rule. (The decomp also shows the port's eye offset matches retail and that retail has
-  no first-person ceiling clamp; see `docs/gaps.md` §5.9.)
+- **Level 1's spawn — what the pair showed, and the fix.** Retail's spawn frame is the player camera:
+  the 1 s series is static in its world regions (`first_frame_is_player_camera` in the sidecar) and it
+  is pixel-identical to the warp-verified `spawn_pose` reference. The 0.23 pair was the *port's* spawn
+  camera, 0.055 units low: setup replaced the level's recorded pose with a floor-seated one. The port
+  now starts at the recorded pose and keeps it while idle, so `spawn` scores 0.618–0.630 — the equal of the
+  warp-verified pairs — and `compare.ps1 -Gate` fails the pre-fix frame. The thing at the eye is one
+  decor thing (`tuskensoused`, thing 215) that `01_TuskenTwitch.cog` animates with `PlayKey`; the
+  loader used to skip script-named keyfiles, which is what froze it. Retail draws that patron in the
+  same place the port does, so it is the level's own start, not a missing draw rule. (The decomp also
+  shows the eye offset matches retail and that retail has no first-person ceiling clamp; see
+  `docs/gaps.md` §5.9.)
 
 ## Troubleshooting
 

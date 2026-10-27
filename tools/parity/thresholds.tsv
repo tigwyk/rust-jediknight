@@ -1,0 +1,21 @@
+# Per-shot parity gate thresholds for tools/parity/compare.ps1 -Gate.
+#
+# Format: name <TAB> min_ssim <TAB> max_mean_abs_diff
+#
+# These are tolerances, not equality: retail (1997 D3D via dgVoodoo2, or software) and the port
+# (Bevy) are different renderers, and the port's HUD is inside its frame while the retail world
+# crop has none. A *verified* pose pair currently scores 0.62-0.63 SSIM here, so the floors sit
+# just under that: a real camera or draw regression is caught (moving the level-1 eye by 0.03
+# units drops the pair to ~0.24), while renderer/HUD noise is not.
+#
+# Raising a floor is the right move when a renderer change improves a pair; lowering one needs
+# a reason in the commit message. A pair captured without a row here is reported as UNGRADED.
+#
+# The numbers are tied to the capture policy in tools/parity/port-capture.ps1: 600 frames
+# (`--frames 600`), the window sized from the retail sidecar, and whatever renderer
+# retail-capture.ps1 used (16-bit D3D via dgVoodoo2 by default). Changing either side's
+# framing or frame count invalidates them.
+name	min_ssim	max_mean_abs_diff
+spawn	0.55	28.0
+spawn_pose	0.55	28.0
+spawn_yaw30	0.55	28.0

@@ -18,16 +18,27 @@
   Retail and port are different renderers with different framing: the numbers
   are a triage signal, not a pixel-equality claim.
 
+  -Gate scores the pairs named in tools/parity/thresholds.tsv against each
+  shot's SSIM/MAD floors and exits non-zero if one is missing or outside them.
+
 .EXAMPLE
   pwsh -File tools/parity/compare.ps1
+
+.EXAMPLE
+  pwsh -File tools/parity/compare.ps1 -Gate
 #>
 [CmdletBinding()]
-param()
+param(
+    # Score every pair that names a threshold in tools/parity/thresholds.tsv and exit non-zero if
+    # one is missing or below its floor. Without it the script is the triage report it always was.
+    [switch]$Gate
+)
 
 $ErrorActionPreference = 'Stop'
 
 $Root        = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # tools\parity -> repo root
 $ShotsPath   = Join-Path $Root 'tools\parity\shots.tsv'
+$ThresholdsPath = Join-Path $Root 'tools\parity\thresholds.tsv'
 $RetailDir   = Join-Path $Root 'target\parity\retail'
 $PortDir     = Join-Path $Root 'target\parity\port'
 $CompareDir  = Join-Path $Root 'target\parity\compare'
@@ -59,6 +70,22 @@ function Get-ShotRows {
             Z     = $f[4].Trim()
             Pitch = $f[5].Trim()
             Yaw   = $f[6].Trim()
+        }
+    }
+    return $rows
+}
+
+# Threshold rows: name <TAB> min_ssim <TAB> max_mean_abs_diff.
+function Get-ThresholdRows {
+    $rows = @()
+    foreach ($line in Get-Content -LiteralPath $ThresholdsPath) {
+        if ($line -match '^\s*(#|$)') { continue }
+        $f = $line -split "`t"
+        if ($f.Count -lt 3 -or $f[0].Trim() -eq 'name') { continue }
+        $rows += [pscustomobject]@{
+            Name    = $f[0].Trim()
+            MinSsim = [double]::Parse($f[1].Trim(), [System.Globalization.CultureInfo]::InvariantCulture)
+            MaxMad  = [double]::Parse($f[2].Trim(), [System.Globalization.CultureInfo]::InvariantCulture)
         }
     }
     return $rows
@@ -401,6 +428,61 @@ if ($ordered.Count -gt 0) {
     Remove-Item -LiteralPath $ContactPath -Force -ErrorAction SilentlyContinue
 }
 
+# ---------------------------------------------------------------- gate
+
+# `-Gate`: score the pairs named in tools/parity/thresholds.tsv. A missing capture, a failed metric
+# or a score under its floor fails; a pair with no threshold row is UNGRADED, so adding a shot does
+# not break the gate before its threshold is chosen.
+$gateFailures = 0
+$gateResults = @()
+$ungraded = @()
+if ($Gate) {
+    if (-not (Test-Path -LiteralPath $ThresholdsPath)) { throw "missing threshold file: $ThresholdsPath" }
+    $thresholds = @(Get-ThresholdRows)
+    if ($thresholds.Count -eq 0) { throw "no threshold rows in $ThresholdsPath" }
+    $byName = @{}
+    foreach ($p in $pairs) { $byName[$p.Row.Name] = $p }
+    $failedNames = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($e in $errors) { $null = $failedNames.Add($e.Name) }
+    foreach ($t in $thresholds) {
+        $result = [pscustomobject]@{
+            Name = $t.Name; MinSsim = $t.MinSsim; MaxMad = $t.MaxMad
+            Ssim = $null; Mad = $null; Verdict = 'PASS'; Detail = ''
+        }
+        if ($failedNames.Contains($t.Name)) {
+            $result.Verdict = 'FAIL'; $result.Detail = 'capture or metric failed'
+        } elseif (-not $byName.ContainsKey($t.Name)) {
+            $result.Verdict = 'FAIL'; $result.Detail = 'not captured'
+        } else {
+            $pair = $byName[$t.Name]
+            $result.Ssim = $pair.Ssim.All
+            $result.Mad = $pair.Mad
+            if ($pair.Ssim.All -lt $t.MinSsim) {
+                $result.Verdict = 'FAIL'
+                $result.Detail = 'SSIM {0:F4} < {1:F2}' -f $pair.Ssim.All, $t.MinSsim
+            } elseif ($pair.Mad -gt $t.MaxMad) {
+                $result.Verdict = 'FAIL'
+                $result.Detail = 'MAD {0:F1} > {1:F1}' -f $pair.Mad, $t.MaxMad
+            }
+        }
+        $gateResults += $result
+        if ($result.Verdict -eq 'PASS') {
+            Write-Host ("gate: PASS  {0}  SSIM {1:F4} >= {2:F2}  MAD {3:F1} <= {4:F1}" -f
+                $result.Name, $result.Ssim, $result.MinSsim, $result.Mad, $result.MaxMad)
+        } else {
+            $gateFailures++
+            Write-Host ("gate: FAIL  {0}  {1}" -f $result.Name, $result.Detail)
+        }
+    }
+    $thresholdNames = @($thresholds | ForEach-Object { $_.Name })
+    foreach ($p in $pairs) {
+        if ($thresholdNames -notcontains $p.Row.Name) {
+            $ungraded += $p.Row.Name
+            Write-Host ("gate: UNGRADED  {0}  (no row in thresholds.tsv)" -f $p.Row.Name)
+        }
+    }
+}
+
 # ---------------------------------------------------------------- report
 
 $lines = [System.Collections.Generic.List[string]]::new()
@@ -448,20 +530,20 @@ if ($ordered.Count -eq 0) {
         if ($p.RetailMeta) { $lines.Add('- retail coords metadata: ' + $p.RetailMeta) }
         if ($p.Crop.AlreadyCropped) {
             $lines.Add('- retail: `' + $retailRel + '` ' + "$($p.RetailInfo.Width)x$($p.RetailInfo.Height)" +
-                ' pal8; the PNG is already cropped to the world box (sidecar world_crop ' +
+                '; the PNG is already cropped to the world box (sidecar world_crop ' +
                 $p.Crop.WorldBox + '); used as-is, no further crop')
         } elseif ($p.Crop.NoBars) {
             $lines.Add('- retail: `' + $retailRel + '` ' + "$($p.RetailInfo.Width)x$($p.RetailInfo.Height)" +
-                ' pal8; no black border detected, full frame used')
+                '; no black border detected, full frame used')
         } else {
             $b = $p.Borders
             $lines.Add('- retail: `' + $retailRel + '` ' + "$($p.RetailInfo.Width)x$($p.RetailInfo.Height)" +
-                ' pal8; detected world crop **' + "$($p.Crop.Width)x$($p.Crop.Height)+$($p.Crop.X)+$($p.Crop.Y)" +
+                '; detected world crop **' + "$($p.Crop.Width)x$($p.Crop.Height)+$($p.Crop.X)+$($p.Crop.Y)" +
                 "** (border removed left $($b.Left), right $($b.Right), top $($b.Top), bottom $($b.Bottom) px)")
         }
         $lines.Add('- crop source: ' + $p.Crop.Source)
         $lines.Add('- port: `' + $portRel + '` ' + "$($p.PortInfo.Width)x$($p.PortInfo.Height)" +
-            ' rgb24; the port HUD is drawn into the image (retail software captures have no HUD)')
+            ' rgb24; the port HUD is drawn into the image (the retail world crop excludes its HUD)')
         $lines.Add('- side-by-side (left: retail world, right: port): `' + $sideRel + '`')
         $lines.Add(("- SSIM (All, grayscale ${NormalizedWidth}x${NormalizedHeight}): **{0:F4}** ({1} dB)" -f $p.Ssim.All, $p.Ssim.Db))
         $lines.Add(("- mean absolute difference (grayscale ${NormalizedWidth}x${NormalizedHeight}): **{0:F1} / 255**" -f $p.Mad))
@@ -469,26 +551,48 @@ if ($ordered.Count -eq 0) {
     }
 }
 
+if ($Gate) {
+    $lines.Add('## Gate')
+    $lines.Add('')
+    $lines.Add('Thresholds: `tools/parity/thresholds.tsv`. A shot fails when it is not captured or its')
+    $lines.Add('SSIM is below the row minimum or its mean absolute difference is above the maximum.')
+    $lines.Add('')
+    $lines.Add('| shot | SSIM | min | MAD | max | verdict |')
+    $lines.Add('|---|---:|---:|---:|---:|---|')
+    foreach ($g in $gateResults) {
+        $ssimText = if ($null -ne $g.Ssim) { '{0:F4}' -f $g.Ssim } else { '-' }
+        $madText  = if ($null -ne $g.Mad) { '{0:F1}' -f $g.Mad } else { '-' }
+        $verdict  = if ($g.Verdict -eq 'PASS') { 'PASS' } else { "**FAIL** ($($g.Detail))" }
+        $lines.Add(("| {0} | {1} | {2:F2} | {3} | {4:F1} | {5} |" -f
+            $g.Name, $ssimText, $g.MinSsim, $madText, $g.MaxMad, $verdict))
+    }
+    if ($ungraded.Count -gt 0) {
+        $lines.Add('')
+        $lines.Add("Ungraded pairs (no threshold row): " + ($ungraded -join ', '))
+    }
+    $lines.Add('')
+}
+
 $lines.Add('## Framing and method')
 $lines.Add('')
-$lines.Add('- Retail side: the GOG game captured with its 8-bit software renderer; `JSHOT*.PCX`')
-$lines.Add('  converted to PNG: 1024x768 pal8. `viewSize=5` letterboxes the world view inside that')
-$lines.Add('  buffer (near-black border, about 16 luma). A full-frame `ffmpeg bbox` is fooled by')
-$lines.Add('  the `-devMode` dev-log text boxes in the top corners, so the world box is detected')
-$lines.Add('  on a middle horizontal band that excludes them (`crop=iw:<band>:0:<y>`, bbox')
-$lines.Add('  threshold ' + $BorderThreshold + ', the cropdetect default limit); the detected x-range is then')
-$lines.Add('  applied to the full image height, and y is refined only when it spans essentially')
-$lines.Add('  the full height. If the retail sidecar JSON has a `world_crop` field it is used')
-$lines.Add('  instead: applied inside the PNG when the PNG is the raw frame, or treated as')
-$lines.Add('  already applied when the PNG size matches world_crop (the PNG is then the world')
-$lines.Add('  box). If the box equals the full frame the image is treated as having no bars')
-$lines.Add('  and is not cropped. The crop actually used, and its source, are printed above')
-$lines.Add('  for every pair. Retail software captures contain no HUD.')
-$lines.Add('- Port side: `bevi-knight.exe --game <install> --start <level> --frames 90 --shot <png> --mute`')
-$lines.Add('  via `tools/parity/port-capture.ps1`. Captures are rgb24 at the port window size: the')
-$lines.Add('  first pass was 1280x720 (16:9); after the 2026-10 rebuild the port window is 1024x768')
-$lines.Add('  (4:3). The exact size of each port image is read from the PNG (see above), and the')
-$lines.Add('  port draws its HUD and notification text into the frame.')
+$lines.Add('- Retail side: the GOG game, captured from the staged scratch copy. By default it runs')
+$lines.Add('  the 16-bit Direct3D path through dgVoodoo2, whose F12 writes a 24-bit `JSHOT###.BMP`;')
+$lines.Add('  `retail-capture.ps1 -Software` uses the 8-bit path and writes a palettised `PCX`. The')
+$lines.Add('  game''s `viewSize`/display mode letterbox the world inside the raw frame, and the')
+$lines.Add('  `-devMode` console boxes sit in the top corners. The sidecar JSON''s `world_crop` is')
+$lines.Add('  the authoritative world box when present; otherwise a full-frame `ffmpeg bbox` is')
+$lines.Add('  fooled by the corner boxes, so the box is detected on a middle horizontal band')
+$lines.Add('  (`crop=iw:<band>:0:<y>`, bbox threshold ' + $BorderThreshold + ') and its x-range is applied to the')
+$lines.Add('  full image height. If the PNG is already cropped to the sidecar box it is used as-is;')
+$lines.Add('  if the box equals the full frame the image is treated as having no bars. The crop')
+$lines.Add('  actually used, and its source, are printed above for every pair. Retail captures')
+$lines.Add('  have no HUD in the world crop.')
+$lines.Add('- Port side: `bevi-knight.exe --game <install> --start <level> --frames 600 --shot <png> --mute`')
+$lines.Add('  via `tools/parity/port-capture.ps1` (600 frames = 10 s of fixed-step sim, so scripted')
+$lines.Add('  clips have settled the way the retail reference has). The port window is rendered at the')
+$lines.Add('  retail view size read from the sidecar (`BK_WINDOW`), so both frames have one shape;')
+$lines.Add('  without a sidecar it stays at 1024x768. Captures are rgb24 and the port draws its HUD')
+$lines.Add('  and notification text into the frame.')
 $lines.Add('- Different renderers, palettes and FOVs. Both images are stretched onto one common')
 $lines.Add(('  {0}x{1} grayscale canvas (`scale`, `setsar=1`, `format=gray`) before' -f $NormalizedWidth, $NormalizedHeight))
 $lines.Add('  SSIM and mean absolute difference. This deliberately ignores each side aspect and FOV')
@@ -497,10 +601,12 @@ $lines.Add('  contact sheet are the real evidence. The retail PNG also carries a
 $lines.Add('  sample-aspect tag (ffmpeg reports DAR 16:9); the normalization uses square pixels.')
 $lines.Add('- Pose: shots.tsv `-` means the level spawn (plain `--start`, no `--shot-at`). A')
 $lines.Add('  numeric row is passed to the port as `--shot-at "x,y,z,yaw"`; the port has horizontal')
-$lines.Add('  aim only, so retail PYR pitch cannot be reproduced (known limitation).')
+$lines.Add('  aim only and the retail `warp` keeps the level''s own pitch (1.04 degrees at level 1),')
+$lines.Add('  so a pair tolerates about a degree of pitch. Both are known limitations, recorded here.')
 $lines.Add('- Port captures never run while JK.EXE is running; `port-capture.ps1` waits or aborts.')
 $lines.Add('- Reproduce: `pwsh -File tools/parity/port-capture.ps1` then')
-$lines.Add('  `pwsh -File tools/parity/compare.ps1`.')
+$lines.Add('  `pwsh -File tools/parity/compare.ps1`; the regression check is')
+$lines.Add('  `pwsh -File tools/parity/compare.ps1 -Gate`.')
 $lines.Add('')
 
 if ($missing.Count -gt 0) {
@@ -528,7 +634,9 @@ Set-Content -LiteralPath $ReportPath -Value ($lines -join "`n") -Encoding utf8
 
 Write-Host ''
 Write-Host "compared: $($ordered.Count) pair(s); not captured yet: $($missing.Count); failed: $($errors.Count)"
+if ($Gate) { Write-Host "gate: $($gateResults.Count) threshold(s), $gateFailures failure(s)" }
 Write-Host "report: $ReportPath"
 if ($ordered.Count -gt 0) { Write-Host "contact sheet: $ContactPath" }
+if ($Gate -and $gateFailures -gt 0) { exit 1 }
 if ($errors.Count -gt 0) { exit 1 }
 exit 0

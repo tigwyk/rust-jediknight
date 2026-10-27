@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 133 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 134 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -240,12 +240,15 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    not treated as an actor at all. Both are fixed: script-named keyfiles are loaded, things with a
    puppet are animatable, and `PlayKey`'s flags are honoured (`0x2/0x4/0x20` = play once and hold,
    per `rdPuppet_AdvanceTrack` `0x43eaa0`).
-   The apparent contradiction — the first retail reference frame showed the room cleanly with no
-   patron at the eye — is resolved: level 1 opens on a **scripted intro camera** (its 1 s series is
-   not static), so that first reference was not the player camera. With the staged executable patched
-   to register the gated dev verbs, `warp` reproduces a pose and `coords` verifies it (`spawn_yaw30`:
-   position delta 0.005, yaw delta 0.01); the *pose-verified* player-camera retail frame draws the
-   patron in the same place the port does. The port's spawn draw was right.
+   The apparent contradiction — an early retail reference showed the room with no patron filling the
+   eye — was the **patron's animation state**, not the camera. Retail plays `THout.key` once and holds
+   the clip's last frame, so the patron lies settled in the booth; the port drew the clip's first frame
+   forever (it loaded only puppet-named keyfiles and ignored `PlayKey`'s hold flags), which is the leg
+   across the view. With the staged executable patched to register the gated dev verbs, `warp`
+   reproduces a pose and `coords` verifies it (`spawn_yaw30`: position delta 0.005, yaw delta 0.01);
+   the *pose-verified* retail frame and the level's own un-warped spawn frame are the same camera
+   (SSIM 0.99995, sidecar `first_frame_is_player_camera: true`), and it draws the patron in the same
+   place the port now does. The port's spawn draw was right; its spawn camera was not (next paragraph).
    The retail reference itself also stopped being the weak link: the 1997 Direct3D path crashes on
    this Windows 11 machine (system `D3DIM.DLL`), so the harness now stages **dgVoodoo2** into the
    scratch copy and runs the game's **16-bit** path, whose F12 writes a 24-bit `JSHOT###.BMP` instead
@@ -253,6 +256,20 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    8-bit/unverified pair scored 0.13; the remaining gap is renderer difference and the port's HUD,
    not a drawing rule. Reproduce with `pwsh -File tools/parity/retail-capture.ps1`, `port-capture.ps1`,
    `compare.ps1` (see `tools/parity/README.md`).
+
+   **The plain spawn was 0.055 low, and it is now gated (2026-10-26, same round).** The pose above was
+   captured through `warp`, so it bypasses the level's own start; an un-warped capture of level 1
+   showed the port 0.055 units below the same retail `coords`. The eye offset was not the cause — it is
+   right. The spawn *placement* was: setup added `PLAYER_RADIUS` to the recorded pose and re-seated the
+   body on a floor probe (`spawn_point`), while `sithPlayer_NewPlayer` (`0x4c8ec0`) places the player at
+   the level's recorded pose and the engine's attach step holds it there. The port now starts at the
+   recorded pose and, while idle, stays attached to the floor it stands over instead of settling the
+   gap the level authored (`walk_player`; the walking half is a `ponytail:` entry in the porting
+   roadmap's deviation ledger). Measured: the port's spawn eye was `-1.148` against retail's `-1.093`;
+   a port capture at the recorded pose is pixel-identical to a `--shot-at` capture there (SSIM 0.9999),
+   and the `spawn` pair went **0.2284 → 0.62–0.63** SSIM (MAD 31.3 → 23.2), the equal of the two
+   warp-verified pairs. `pwsh -File tools/parity/compare.ps1 -Gate` now fails on the pre-fix frame
+   (0.2284) and passes the fixed one; the same command is the regression check.
 
 ---
 

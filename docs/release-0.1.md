@@ -147,10 +147,12 @@ order and continues on the light-side arm.
 - **Animation is partial.** Walk/run/fire/hit/turn/death play; crouch, alt-fire, saber swing
   and layered upper/lower body do not, and the view weapon's exact retail framing is derived
   rather than recovered.
-- **Level 1's first frame starts inside cantina furniture** (a table 0.16 units from the eye,
-  a patron 0.15 — [first-frame-level1.png](first-frame-level1.png) is what that looks like).
-  Whether retail opens the same way is unsettled and needs a retail reference frame;
-  near-plane clipping is fixed, the blocked view is not.
+- **Level 1's first frame now matches retail's.** Retail's own reference frame (captured at the pose
+  its `coords` reports) draws the cantina patron and furniture at arm's length just as the port does.
+  The port's spawn camera was 0.055 units low because setup re-seated the level's recorded pose; it now
+  starts at the recorded pose and holds it, and the pair is gated at 0.63 SSIM
+  (`tools/parity/compare.ps1 -Gate`; it was 0.23 before). The venue is still the cantina booth — that
+  is the level's design. Other levels' spawns are not gated yet.
 - **Surface attachment.** Thing-to-thing parenting and landing are the engine's;
   `sithPhysics_UpdateAttachedThingPhysics` is still stood in for by `update_attachments`.
 - **Cutscene palette.** 29 of 768 palette bytes still differ from libsmacker's decode.
@@ -194,7 +196,7 @@ order and continues on the light-side arm.
 - **`--tour` checks both arms by row**, not by file name: 28 campaign rows for 25 distinct
   level files, every film and successor against the archives, both finale rows, and the
   decision's two films in order. `--tour-live` walks the same chain through the running app.
-  61 gates and 133 tests now pass on this install.
+  61 gates and 134 tests now pass on this install.
 - **The project is explicitly GPL-3.0-or-later** (`LICENSE` + `NOTICE` + `Cargo.toml`), and the
   notice spells out that the game, its marks and the documentation screenshots are not licensed
   here — no game data ships with it.
@@ -205,7 +207,7 @@ from an earlier build.
 
 ```
 --gates            0 of 61 failed, 0 skipped   (windowed; BK_HEADLESS=1 reads 0 of 61 failed, 9 skipped)
-cargo test --bins  133 passed
+cargo test --bins  134 passed
 --tour             28 level row(s) on both arms (25 distinct files), 5543 things, 23 films, 2 terminal rows, 0 script errors, 1 sound missing from retail data
 --tour-live        21 level(s) finished and swapped, through the end at 21ajerec.jkl
 --audit            540 cogs parsed, 0 failed, 1854 labels, 7683 symbols; summary 35/35 levels clean, 10 unresolved asset references, 0 non-drawable models, 0 manifest LEVEL rows missing, 57 undecoded files
@@ -236,7 +238,7 @@ The two screens a player spends the most time in are photographed from the runni
 - **Health and shields now cross level changes.** Finishing a level used to rebuild the player at
   the new level's template values; they are now part of `Runtime::carry`/`adopt`, clamped to the
   new level's maximum. Pinned by
-  `runtime::tests::health_and_shields_cross_a_level_change`; the suite is 133 tests.
+  `runtime::tests::health_and_shields_cross_a_level_change`; the suite is 134 tests.
 
 ## License
 
