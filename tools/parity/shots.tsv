@@ -1,0 +1,13 @@
+# Vantage list for retail-vs-port parity captures.
+# Format: name <TAB> level <TAB> x <TAB> y <TAB> z <TAB> pitch <TAB> yaw
+# A "-" pose means: the level own spawn pose. Retail: load and read `coords`, no warp.
+#                                Port: plain `--start <level>`, no `--shot-at`.
+# Positions are the **camera eye** in game/world units; PYR are degrees in the retail `coords`
+# convention. The retail side warps the player body to `z - 0.037` so the eye lands at `z`
+# (`sithCamera_Update` rides `thing + 0x168`); the port's `--shot-at` takes the eye directly.
+# Pitch must be 0: the port's `--shot-at` is horizontal aim only (see port-capture.ps1).
+# The staged JK.EXE is patched so `warp` exists (see Set-JkDevCommandsEnabled in retail-lib.ps1).
+name	level	x	y	z	pitch	yaw
+spawn	01narshadda	-	-	-	-	-
+spawn_pose	01narshadda	-10.443433	-5.455094	-1.092886	0	-59.994
+spawn_yaw30	01narshadda	-10.443433	-5.455094	-1.092886	0	-30
