@@ -12,9 +12,8 @@
   running JK.EXE (the retail-capture side owns it) and waits for it to exit;
   if it is still running after the wait, the batch aborts.
 
-  Rows with an explicit pose in shots.tsv also get `--shot-at "x,y,z,yaw"`.
-  The port's --shot-at is horizontal aim only: PYR pitch cannot be reproduced
-  (known limitation, recorded in the log).
+  Rows with an explicit pose in shots.tsv also get `--shot-at "x,y,z,yaw,pitch"`. The pitch is the
+  port camera pitch in degrees (from the row; retail `warp` cannot set pitch — see shots.tsv).
 
   The port window is rendered at the retail view size: for each row this reads
   target/parity/retail/<name>.json (the world crop inside the retail frame) and
@@ -134,11 +133,19 @@ foreach ($row in $rows) {
             Write-Log "WARN $($row.Name): could not read $retailJson ($($_.Exception.Message)); using the port's default window"
         }
     }
+    # The port camera's pitch for the shot, in degrees. `coords` PYR pitch (1.04 at level 1) is not
+    # the rendered camera pitch: a 0.25-degree port pitch already drops the spawn pair 0.63 -> 0.59,
+    # so the row's own value (0 unless a retail frame says otherwise) is what the port uses.
+    $shotPitch = 0.0
+    if ($row.Pitch -ne '-' -and $row.Pitch -ne '') {
+        $shotPitch = [double]::Parse($row.Pitch, [System.Globalization.CultureInfo]::InvariantCulture)
+    }
     $env:BK_WINDOW = $windowSize   # $null removes it again for the next row
     Write-Log ("window: " + $(if ($windowSize) { "$windowSize (retail view size)" } else { 'default 1024x768 (no retail sidecar yet)' }))
     $argLine = '--game "' + $Game + '" --start ' + $row.Level + ' --frames ' + $Frames + ' --shot "' + $shotRel + '" --mute'
     if ($hasPose) {
-        $argLine += ' --shot-at "' + (@($row.X, $row.Y, $row.Z, $row.Yaw) -join ',') + '"'
+        $pitchText = $shotPitch.ToString('0.######', [System.Globalization.CultureInfo]::InvariantCulture)
+        $argLine += ' --shot-at "' + (@($row.X, $row.Y, $row.Z, $row.Yaw) -join ',') + ',' + $pitchText + '"'
     }
 
     $outPath = Join-Path $OutDir '_run.out'
@@ -170,7 +177,7 @@ foreach ($row in $rows) {
     if ($ok) {
         $size = (Get-Item -LiteralPath $shotAbs).Length
         $poseNote = if ($hasPose) {
-            "  (pose $($row.X),$($row.Y),$($row.Z),yaw $($row.Yaw); pitch $($row.Pitch) unsupported - horizontal aim only)"
+            "  (pose $($row.X),$($row.Y),$($row.Z),yaw $($row.Yaw),pitch $shotPitch)"
         } else { '' }
         Write-Log ("{0}: OK  {1:N1}s  {2} bytes  {3}{4}" -f $row.Name, $sw.Elapsed.TotalSeconds, $size, $shotRel, $poseNote)
         Write-Log ("  cmd: bevi-knight.exe {0}" -f $argLine)

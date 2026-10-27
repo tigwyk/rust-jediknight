@@ -314,6 +314,12 @@ is the player-facing version of this.
   and `sithPlayer_NewPlayer` copies the recorded pose. An earlier round calibrated radius `0.35`/eye
   `1.45` against the render scale; the pose-verified retail capture (gaps §5.9, `tools/parity/`)
   superseded it — at eye 1.45 the camera renders the inside of the model at the spawn.
+- **Multiplayer spawn markers were drawn as actors.** Every `walkplayer` row after the first is a
+  multiplayer start (`01narshadda` has 12, `03katarn` 4); the port spawned all of them as animated Kyle
+  actors and made them solid obstacles. Retail's single-player draws only the local player. The
+  `route_cantina` parity pair exposed it — retail's frame there is clean, the port's had a Kyle model in
+  the camera. `spawn_models` now skips every non-first `walkplayer`, and `solid_things` excludes player
+  starts (the local player is not an obstacle; the markers are not bodies).
 - **Audio is on by default at the engine's own master scale.** A play session is audible; captures
   and probes are silent, and `--sound-on`/`BK_SOUND=1` forces sound in a capture. `--mute`/`BK_MUTE=1`
   and `BK_VOLUME` still override. This used to be muted by default at 5% gain — a release build that

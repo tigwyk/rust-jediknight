@@ -271,6 +271,32 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    warp-verified pairs. `pwsh -File tools/parity/compare.ps1 -Gate` now fails on the pre-fix frame
    (0.2284) and passes the fixed one; the same command is the regression check.
 
+   **The route set: five poses, three gated, two triage; and the player starts it exposed.** The
+   `route_*` rows in `tools/parity/shots.tsv` are the level's own `walkplayer` placements (things
+   167/169/170/171/174). Retail verified all five through `warp` + `coords` (position delta ≤0.02).
+   Three pairs (`route_cantina`, `route_lower`, `route_street`) score **0.72/0.72/0.73** SSIM and are
+   gated at 0.65. The first one also proved a port renderer bug: retail's frame at that pose is clean,
+   while the port put a Kyle model in the camera because it spawned the level's other eleven
+   `walkplayer` things as ordinary animated actors. Those rows are the multiplayer spawn points, not
+   NPCs; single-player retail draws only the local player. `spawn_models` now skips every non-first
+   `walkplayer`, and `solid_things` excludes all player starts (the local player is not an obstacle;
+   the other markers are not bodies at all). The comment that called them NPCs ("the training arena
+   does") was wrong and is corrected.
+
+   Two upper rows (`route_catwalk` 0.46, `route_door` 0.41) are **ungraded on purpose**: retail's
+   reference there carries a scripted red screen tint that ramps in over the 1 s series (its world-region
+   SSIM falls to 0.45–0.56), a position-triggered effect; the port capture only moves the camera, so its
+   player never enters the sector and its scripts never fire (moving the player with `BK_SPAWN_THING`
+   also failed to reproduce it, because the port lands in a different sector than retail's `warp`). That
+   is the missing port-side player warp in the porting roadmap's Phase 0.5, not a renderer tolerance.
+
+   **Pitch does not mean what `coords` says.** Adding pitch to `--shot-at` and sweeping it against the
+   verified spawn reference gave a sharp answer: port pitch 0 matches retail best (0.6296), 0.25° drops
+   to 0.59, 0.5° to 0.39 and ±1.04° to ~0.27 — even though retail's `coords` prints PYR pitch 1.04. The
+   rendered camera pitch at level 1 is therefore ~0, and `coords`' first PYR number is not it. Pairs
+   request pitch 0; a genuinely pitched retail view cannot be set yet (`warp` ignores pitch), which is
+   recorded in the porting roadmap's open list.
+
 ---
 
 ## 6. Recently closed, so it is not mistaken for missing

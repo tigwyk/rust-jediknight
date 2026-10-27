@@ -372,7 +372,7 @@ fn main() {
     let mut audio_state = false;
     let mut fall_check = false;
     let mut falldeath_check = false;
-    let mut door_check = false;    let mut shot_at: Option<([f32; 3], f32)> = None;
+    let mut door_check = false;    let mut shot_at: Option<([f32; 3], f32, f32)> = None;
 
     let mut sim = false;
     let mut dump: Option<String> = None;
@@ -536,12 +536,17 @@ fn main() {
             "--mute" => muted_flag = true,
             "--sound-on" => sound_on = true,
             "--audio-state" => audio_state = true,
-            // `--shot-at "x,y,z"`: put the capture camera exactly there, looking along +x unless
-            // `--shot-yaw` says otherwise. A deterministic vantage is the only way to compare two frames.
+            // `--shot-at "x,y,z"` (with `--shot-yaw`): put the capture camera exactly there, looking
+            // along +x unless `--shot-yaw` says otherwise. A deterministic vantage is the only way to
+            // compare two frames. An optional fifth number is the camera's pitch in degrees (positive
+            // looks up); retail's `warp` cannot set pitch and its rendered pitch is not its `coords`
+            // PYR pitch, so cross-side pairs use 0 unless a retail reference is measured to differ
+            // (see `tools/parity/shots.tsv`).
             "--shot-at" => {
                 shot_at = arg_value(&args, &mut i).cloned().and_then(|s| {
                     let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
-                    (v.len() == 4).then(|| ([v[0], v[1], v[2]], v[3]))
+                    (v.len() == 4 || v.len() == 5)
+                        .then(|| ([v[0], v[1], v[2]], v[3], v.get(4).copied().unwrap_or(0.0)))
                 });
             }
             "--frames" => {
@@ -14886,15 +14891,17 @@ fn spawn_models(
             println!("hide: thing {thing_index} `{}` not spawned", thing.template);
             continue;
         }
-        // The local player's body is an ordinary actor, but hidden: the camera is the body plus an eye
-        // offset, so in first person the model would be drawn around the viewpoint (models use
-        // `cull_mode: None`, so the camera looks at the inside of them). `draw_player_body` shows it only
-        // in third person, and spawning it as an actor is what gives Kyle the same stand/walk/fire states
-        // `animate_actors` plays for every NPC. Only the **first** `walkplayer` is the local player: a
-        // level may place several (the training arena does) and those are NPCs like any other.
+        // A `walkplayer` row is a player start: the first one is the local player; the rest are the
+        // level's multiplayer spawn points (`01narshadda` places 12, `03katarn` 4). Single-player
+        // retail draws only the local player's body, so the others are not actors here either —
+        // drawing them put a Kyle model in the camera at every multiplayer start, which the
+        // `route_cantina` parity pair exposed (retail's frame at that pose is clean).
         let own = is_local_player(&thing.template) && own_body == 0;
         if is_local_player(&thing.template) {
             own_body += 1;
+            if !own {
+                continue;
+            }
         }
         let Some(model_name) = world.template_model.get(&thing.template.to_ascii_lowercase()) else {
             continue;
@@ -15038,7 +15045,7 @@ fn spawn_models(
         }
     }
     println!(
-        "{} model instances from {} shared meshes, {triangles} triangles ({empty_meshes} empty, {unresolved} things with no model loaded), {} animated actors, {own_body} own body(ies) drawn hidden",
+        "{} model instances from {} shared meshes, {triangles} triangles ({empty_meshes} empty, {unresolved} things with no model loaded), {} animated actors, {own_body} player start(s) with only the local body hidden",
         spawned,
         mesh_cache.len(),
         actors.len()
@@ -15053,11 +15060,13 @@ fn cel_v(v: f32, cel: f32, cels: f32) -> f32 {
     ((v * cels).fract() + cel) / cels
 }
 
-/// Whether a thing is the body the camera follows, and so must not be drawn.
+/// Whether a thing is a `walkplayer` row — a player start.
 ///
-/// The level places its player starts as `walkplayer` rows — `03katarn.jkl` has four, and every
-/// one carries the `_actor`/`player` template's `model3d=ky.3do`. The app's walker takes the first
-/// of them (`walk_player` looks up exactly this name), so this is the same test.
+/// The level places its player starts as `walkplayer` rows — `03katarn.jkl` has four, `01narshadda`
+/// twelve — and they are the multiplayer spawn points, not NPCs. The app's walker takes the first of
+/// them (`walk_player` looks up exactly this name), so only the first is the local player; retail's
+/// single-player does not draw or collide the rest (the `route_*` parity pairs exposed the drawn
+/// ones: a Kyle model filled the camera at the level-1 multiplayer starts).
 fn is_local_player(template: &str) -> bool {
     template.eq_ignore_ascii_case("walkplayer")
 }
@@ -18687,6 +18696,12 @@ fn solid_things(world: &World, solids: &collide::Solids) -> Vec<([f32; 3], f32, 
     let _ = solids;
     let mut out = Vec::new();
     for thing in &world.level.things {
+        // Player starts are not obstacles. The first is the local player (a body does not collide
+        // with itself) and the rest are the level's multiplayer spawn markers, which single-player
+        // retail neither draws nor places in the world.
+        if is_local_player(&thing.template) {
+            continue;
+        }
         let Some(radius) = crate::runtime::solid_radius(&world.level, &thing.template) else {
             continue;
         };
@@ -20053,13 +20068,15 @@ fn setup(
         aim = Quat::from_rotation_z(-look.0.to_radians()) * aim.normalize();
     }
 
-    // `--shot-at "x,y,z"` (with `--shot-yaw`): a chosen vantage for a capture, overriding whatever the
-    // spawn or `--stand` decided. Comparing two frames needs the same eye every time.
-    if let Some((at, y)) = SHOT_AT.get().copied() {
+    // `--shot-at "x,y,z,yaw[,pitch]"`: a chosen vantage for a capture, overriding whatever the spawn
+    // or `--stand` decided. Comparing two frames needs the same eye and aim every time: pitch is the
+    // camera pitch in degrees (positive up). Retail's `warp` cannot set its own, so pairs use 0 unless
+    // a retail reference is measured otherwise (see `tools/parity/shots.tsv`).
+    if let Some((at, y, pitch)) = SHOT_AT.get().copied() {
         eye = Vec3::from(at);
-        let y = y.to_radians();
-        let (f, _) = yaw_axes(y);
-        aim = Vec3::new(f[0], f[1], 0.0);
+        let (f, _) = yaw_axes(y.to_radians());
+        let p = pitch.to_radians();
+        aim = Vec3::new(f[0] * p.cos(), f[1] * p.cos(), p.sin());
     }
 
     if !cameras.is_empty() {
@@ -20511,9 +20528,9 @@ const PLAYER_RADIUS: f32 = 0.065;
 
 /// Temporary experiment hooks: the player's radius, eye offset and step, overridable per run so a scale
 /// can be judged from a screenshot without a rebuild. Remove once the values are settled.
-/// `--shot-at` vantage, set once in `main` and read by `setup`. A global because `setup` already takes
-/// as many parameters as Bevy will accept.
-static SHOT_AT: std::sync::OnceLock<([f32; 3], f32)> = std::sync::OnceLock::new();
+/// `--shot-at` vantage, set once in `main` and read by `setup`: eye, yaw and pitch (degrees). A global
+/// because `setup` already takes as many parameters as Bevy will accept.
+static SHOT_AT: std::sync::OnceLock<([f32; 3], f32, f32)> = std::sync::OnceLock::new();
 
 /// Silence everything. Captures are muted outright — a screenshot run has no business making noise — and
 /// `--mute` (or `BK_MUTE=1`) silences any other run.

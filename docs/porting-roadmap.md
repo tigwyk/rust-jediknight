@@ -106,8 +106,9 @@ partials is still to be written; these are the entries this round created or mea
 |---|---|---|---|
 | `walk_player`, idle-only attachment | a body keeps the level's recorded spawn z while idle, but once it walks the port settles it onto the floor; the engine keeps the surface attachment through movement, so a moving player's eye would be 0.055 lower at level 1's spawn than retail's | spawn `--shot`/`--camera-trace`: eye −1.0929 idle vs −1.148 walking (retail: −1.0929 both) | `sithPhysics_UpdateAttachedThingPhysics` — the attached-surface half of the movement port, Phase 1 step 3 |
 | `spawn_point` | a recorded pose the port's body cannot stand in is nudged sideways and floor-seated; the engine places at the recorded pose and relies on its own attachment | the `walker: spawn ... was inside something` log line; `--walk all` | the movement port models the engine's body width and attachment |
-| `compare.ps1 -Gate` | the port's HUD is inside its frame while the retail world crop has none, so a pair's ceiling is renderer/HUD-limited | verified pose pairs cap at 0.62–0.63 SSIM; thresholds sit at 0.55 | HUD-free capture, or a HUD-masked metric |
-| `shots.tsv` / `--shot-at` | retail `warp` keeps the level's own pitch (1.04° at level 1) while the port aims level, so a pair carries ~1° of pitch difference | sidecar `pyr` records it per shot | pitch in `--shot-at` (Phase 0) |
+| `compare.ps1 -Gate` | the port's HUD is inside its frame while the retail world crop has none, so a pair's ceiling is renderer/HUD-limited | verified pairs cap at 0.62–0.63 (spawn) and 0.72–0.73 (route); thresholds sit at 0.55 / 0.65 | HUD-free capture, or a HUD-masked metric |
+| `shots.tsv` / `--shot-at` | retail's rendered camera pitch is ~0 while its `coords` reports PYR pitch 1.04, and `warp` cannot set pitch, so a pair cannot reproduce a pitched retail view; rows request pitch 0 | port pitch 0.25° already drops the spawn pair 0.63 → 0.59; `coords` PYR is in every sidecar | a retail-side way to set or read the rendered view pitch (none known); the port side already takes pitch |
+| camera-only `--shot-at` | a capture moves the camera but leaves the player at the level start, so scripts keyed to the player's sector/position do not fire on the port side; `route_catwalk`/`route_door` are ungraded because of it | those pairs score 0.46/0.41 against gated route pairs at 0.72–0.73; retail's series shows the red tint ramping in | port-side player warp with trigger routing, Phase 0.5 item 5 |
 
 ## Phases
 
@@ -116,10 +117,13 @@ partials is still to be written; these are the entries this round created or mea
 - **Done:** `tools/parity/` is committed, the staged retail build takes `warp` (the dev-command patch
   is applied to the scratch copy), and `pwsh -File tools/parity/compare.ps1 -Gate` scores every pair
   against `tools/parity/thresholds.tsv` and exits non-zero. The gate is verified in both directions:
-  the pre-fix spawn frame fails at 0.2284, the fixed one passes at 0.62–0.63.
-- **Open:** pitch in the port's `--shot-at` (retail `warp` keeps the level's own pitch, so route shots
-  need the port to match it); HUD-free capture or a HUD-masked metric, so a pair is not mostly the
-  port's HUD difference; and the status table (next bullet).
+  the pre-fix spawn frame fails at 0.2284, the fixed one passes at 0.62–0.63. The gate now covers six
+  pairs: the three spawn rows and three level-1 route rows (0.72–0.73).
+- **Partly done:** `--shot-at` now takes a pitch. Measured: level 1's rendered camera pitch is ~0 even
+  though `coords` reports PYR pitch 1.04, and the retail `warp` cannot set pitch — so pairs request 0
+  and a retail-side way to set view pitch is still unknown.
+- **Open:** HUD-free capture or a HUD-masked metric, so a pair is not mostly the port's HUD difference;
+  and the status table (next bullet).
 - **Trimmed:** do not relabel every `roadmap.md`/`gaps.md` row. Keep one status table for the ten
   roadmap stages plus the deviation ledger, and correct the stale rows; the long prose stays appendix.
   The tier relabel below is the remaining piece.
@@ -146,6 +150,9 @@ Exit criteria:
    policy stated, so step 3's "within a stated epsilon" is measurable.
 4. If console polling cannot carry health/velocity, hook `sithThing_SetPositionAndOrient` and the
    damage function with Frida and capture a per-tick CSV; the hook script lives under `tools/parity/`.
+5. Port-side pose warp: a way to put the *player* (not just the capture camera) at a recorded pose and
+   let its scripts run, so a capture sees the state retail's `warp` creates. The route set already
+   needs it: `route_catwalk` and `route_door` differ by a position-triggered screen effect.
 
 Do not start Phase 1 step 3 without this.
 
@@ -160,9 +167,14 @@ tier, not a checkbox.
    the `spawn` pair went 0.2284 → 0.62–0.63 SSIM (MAD 31.3 → 23.2), the equal of the warp-verified pairs,
    and `compare.ps1 -Gate` fails on the pre-fix frame. Remaining: the same spawn audit for the other
    levels, and the idle-only ceiling in the deviation ledger.
-2. **The room as retail draws it.** Model back-face behaviour, transparency order, sky, light ramp at
-   distance, sprites. Exit: a fixed set of poses along the level-1 route (cantina, corridor, first
-   door) within threshold.
+2. **The room as retail draws it — route set in place, draw fixes not started.** A first route set is
+   captured: five level-1 `walkplayer` positions (cantina, three along the way up, the upper door) plus
+   the three spawn rows. Three route pairs are gated at 0.72–0.73 SSIM; `route_catwalk`/`route_door`
+   are triage-only because retail's reference there carries a position-triggered red screen tint the
+   camera-only port capture cannot reproduce. The renderer differences this step exists for — model
+   back-face behaviour, transparency order, sky, distance light ramp, sprites — are still T1 and
+   unfixed. Exit: the fixed pose set within threshold, including the two upper rows once the port can
+   warp the player (Phase 0.5 item 5).
 3. **Movement.** Replace the unscoped sweep with the engine's sector-scoped collision; non-player
    thing physics (props, corpses, dropped items); step, slope and ledge behaviour. Exit: a recorded
    input script yields the same position/sector trace as retail, within a stated epsilon, across the
@@ -202,16 +214,17 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 
 Reviewed `tools/parity/` (retail-capture, retail-lib, port-capture, compare, thresholds, shots.tsv).
 It drives the GOG `JK.EXE -devMode` on a scratch copy, so it is the oracle this roadmap needs. It has
-three level-1 pairs: two warp-verified poses (0.62/0.63 SSIM) and the plain spawn pair, which is now
-gated at 0.63.
+eight level-1 pairs: the spawn row and two warp-verified spawn poses (0.62–0.63), and five route poses
+(things 167/169/170/171/174), of which three are gated at 0.72–0.73 and two are triage-only because a
+position-triggered scripted effect (a red screen tint) is not reproducible by a camera-only port capture.
 
 | Question | Answer from the harness |
 |---|---|
 | Can we read retail state without a debugger? | **Partly.** The dev console's `coords` prints position, PYR and **sector**, and the console list box is scraped for engine output (e.g. level-parse lines). That is enough for T2 on position/sector. Health, velocity, bins and cog variables are not exposed yet; polling is manual, not a per-tick trace (Phase 0.5). |
 | Can we drive retail without a human? | **Yes.** Menus take synthetic mouse clicks at fixed coordinates; in gameplay synthetic keys work (keys held 300 ms or more, or the engine drops them). Walking scripts look feasible but are unproven. |
-| Can we put retail at a chosen pose? | **Yes.** The staged `JK.EXE` is patched so the gated dev verbs register (`Set-JkDevCommandsEnabled`), and `warp x y z p y r` reproduces a pose that `coords` verifies (level-1 position delta 0.005). `warp` keeps the level's own pitch and roll, so pitch is not settable yet. |
+| Can we put retail at a chosen pose? | **Yes.** The staged `JK.EXE` is patched so the gated dev verbs register (`Set-JkDevCommandsEnabled`), and `warp x y z p y r` reproduces a pose that `coords` verifies (position delta ≤0.02 on all eight rows). Pitch/roll are not settable, and the rendered camera pitch is not the `coords` PYR pitch (level 1 prints 1.04 but renders at ~0). |
 | Is there a retail frame to compare with? | **Yes.** F12 is the engine's own screenshot. The default 16-bit D3D path through dgVoodoo2 writes a 24-bit BMP; `-Software` writes a palettised PCX (palette-index comparison would be possible there). Frames are cropped to the world box (1170x731 today) and scored by SSIM/mean difference — triage, with per-shot floors in `thresholds.tsv`. |
-| Can the comparison fail a build? | **Yes.** `pwsh -File tools/parity/compare.ps1 -Gate` exits non-zero on a missing or below-threshold pair. Verified: the pre-fix spawn frame fails at 0.2284, the fixed one passes at 0.62–0.63; a 0.03-unit eye-height shift drops a pair to ~0.24. |
+| Can the comparison fail a build? | **Yes.** `pwsh -File tools/parity/compare.ps1 -Gate` exits non-zero on a missing or below-threshold pair. Verified: the pre-fix spawn frame fails at 0.2284, the fixed one passes at 0.62–0.63; a 0.03-unit eye-height shift drops a pair to ~0.24; the three gated route pairs sit at 0.72–0.73. |
 | Is the harness safe to run routinely? | **With care.** It takes over the display (fullscreen, mouse captured; currently 1440x900 with `viewSize=6`), needs hands off, and has restore scripts for an interrupted run. Not CI-able: needs a retail install and a desktop session. |
 
 ## Getting the rest from Ghidra and REA
@@ -255,7 +268,8 @@ The exported decompilation in `decomp/` already settles part of this. Plan for t
 4. **Screenshots.** `jkGame_Screenshot` (0x4025e0): on the software path it converts the framebuffer to a
    bitmap, swaps in `stdDisplay_GetPalette()` and calls `stdPcx_Write`. So the F12 PCX is **8-bit indexed
    with the display palette**: palette-index comparison is possible, not just SSIM. The 16-bit/3D path
-   writes BMP instead; keep 3D acceleration off.
+   (the harness default through dgVoodoo2) writes a 24-bit BMP instead; `-Software` still produces the
+   indexed PCX for a future palette-index metric.
 
 **Not yet done (needs a retail run, available but hands-off and screen-taking):**
 
@@ -265,21 +279,27 @@ The exported decompilation in `decomp/` already settles part of this. Plan for t
 - Frida/`observe_native_calls` hooks on `sithThing_SetPositionAndOrient` and the damage function for a
   per-tick CSV (position, velocity, health). `slowmo` plus a fixed key script may make this unnecessary.
 - Palette-index diff: have the port emit an indexed frame, or quantise through the retail palette.
-- Route poses: choose 4–6 level-1 eyes along the route for `shots.tsv` and capture the batch (one run
-  per row, ~30–40 s each). Blocked on pitch in `--shot-at` for rows whose view is not level.
+- Route poses beyond the first set: five `walkplayer` eyes are captured (three gated, two triage);
+  more poses need the port-side player warp first (Phase 0.5 item 5), because a camera-only capture
+  does not reproduce position-triggered scripts.
 
 Still open after the review:
 
 - **Per-tick state.** `coords` is a manual poll. The unlocked `cogstatus`/`aistatus` commands may cover
   script and AI state; health, velocity and bins likely still need a hooked trace. Phase 0.5 owns this.
-- **Pitch and non-spawn poses.** `warp` already reproduces position and yaw and is verified; the port's
-  `--shot-at` still ignores pitch, so the route shots in Phase 1 step 2 need that one small change first.
+- **Pitch.** `--shot-at` takes a pitch now, but retail's rendered camera pitch is not its `coords` PYR
+  pitch (level 1 prints 1.04 and renders at ~0) and `warp` cannot set pitch, so pairs request 0.
+  Setting a genuinely pitched retail view is still unsolved.
+- **Player pose and scripted effects.** A camera-only `--shot-at` leaves the player at the level start,
+  so scripts that react to the player's sector or position do not fire on the port side. The two
+  triage route rows show the size of that difference (retail ramps a red screen tint; the port frame is
+  neutral). Port-side warp is Phase 0.5 item 5.
 - **Input replay determinism.** Retail frame timing is not ours; T4 needs fixed-step or a tolerance, and
   the harness has no replay of movement yet.
 - **Better than SSIM.** Confirmed the PCX is palette-indexed on the software path (above); what remains
   is the port emitting indices. The gate's SSIM floors are the triage version.
 - **Renderer tolerance.** Retail's renderer and Bevy will never match pixel for pixel. Per-shot floors
-  now live in `tools/parity/thresholds.tsv` (0.55 against verified pairs at 0.62–0.63); tighten them as
-  renderer parity improves, never below the verified-pair noise.
+  now live in `tools/parity/thresholds.tsv` (0.55 for spawn against 0.62–0.63, 0.65 for route against
+  0.72–0.73); tighten them as renderer parity improves, never below the verified-pair noise.
 - **Fixture hygiene.** Keep traces and numbers in the repo; keep retail screenshots out of any
   GPL-licensed distribution unless the existing NOTICE terms cover them.

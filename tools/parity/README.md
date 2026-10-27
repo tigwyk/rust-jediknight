@@ -83,21 +83,31 @@ exits non-zero if a thresholded shot is missing or outside its bounds. A pair wi
 reported as `UNGRADED` (so a new shot does not break the gate before its floor is chosen).
 
 ```text
-name        min_ssim  max_mean_abs_diff
-spawn       0.55      28.0
-spawn_pose  0.55      28.0
-spawn_yaw30 0.55      28.0
+name           min_ssim  max_mean_abs_diff
+spawn          0.55      28.0
+spawn_pose     0.55      28.0
+spawn_yaw30    0.55      28.0
+route_cantina  0.65      30.0
+route_lower    0.65      30.0
+route_street   0.65      30.0
 ```
 
 The floors are tolerances, not equality: retail (1997 renderer) and the port (Bevy) differ, and the
-port's HUD is inside its frame while the retail world crop has none, so a verified pose pair currently
-sits at 0.62–0.63 SSIM. The floors are set just under that, and the gate is known to fail on a real
-regression: the pre-fix spawn camera (0.055 units low) scores 0.2284; the fixed one scores 0.618–0.630 across runs.
+port's HUD is inside its frame while the retail world crop has none. The spawn pairs sit at 0.62–0.63
+and the gated route pairs at 0.72–0.73; the floors sit under those, and the gate is known to fail on a
+real regression: the pre-fix spawn camera (0.055 units low) scores 0.2284, the fixed one 0.62–0.63.
+
+`route_catwalk` and `route_door` are captured but deliberately **ungraded**: retail's reference at
+those poses shows a scripted red screen tint that ramps in over its 1 s series (a position-triggered
+effect), while a port `--shot-at` capture moves only the camera and leaves the player at the level
+start, so the port's scripts never fire. They report `UNGRADED` at 0.46/0.41 — that gap is the missing
+player warp, not a renderer tolerance; see `docs/gaps.md` §5.9.
+
 The numbers are tied to the capture policy above (600 frames, window from the retail sidecar, default
 16-bit retail renderer) — changing framing or frame count invalidates them.
 
 The gate needs a retail install and captured references on the machine, so it is a developer check, not
-a CI job; the port's own 133 tests and 61 gates remain the CI-able surface.
+a CI job; the port's own 134 tests and 61 gates remain the CI-able surface.
 
 ## The shot list: `tools/parity/shots.tsv`
 
@@ -110,7 +120,18 @@ name	level	x	y	z	pitch	yaw
 spawn	01narshadda	-	-	-	-	-
 spawn_pose	01narshadda	-10.443433	-5.455094	-1.092886	0	-59.994
 spawn_yaw30	01narshadda	-10.443433	-5.455094	-1.092886	0	-30
+route_cantina	01narshadda	-2.200043	-2.900013	-1.142886	0	-74.999908
+route_lower	01narshadda	4.074969	-6.875029	0.257114	0	15.000092
+route_street	01narshadda	5.474939	-1.899975	0.657119	0	-134.988342
+route_catwalk	01narshadda	7.749950	-1.175000	2.857114	0	0
+route_door	01narshadda	1.400084	9.700065	6.357114	0	105.000092
 ```
+
+The `route_*` rows are the level's own `walkplayer` placements — the multiplayer start points (things
+167, 169, 170, 171 and 174 of `01narshadda`) — so each is an authored, standable camera covering the
+cantina, the way up and the upper door. Retail does not draw those marker things in single player; the
+port used to (a Kyle model filled the camera at each), and now skips them the same way. The two upper
+rows are the ungraded ones described above.
 
 `spawn` (no warp) captures the level's own start; retail reads the pose with `coords` and the sidecar
 marks it `first_frame_is_player_camera` (its frame is pixel-identical to the warp-verified pair), so it
@@ -187,11 +208,18 @@ Everything below was verified against the GOG build (the harness works on a scra
   ammo corners); the world crop cuts those off, while the port frame still has its own HUD. Compare
   the world region.
 - **Pose rows:** numeric rows work through the patched `warp` and are verified against `coords`
-  (`warp_verified` in the sidecar). `warp` sets position and yaw only — pitch/roll keep the level's
-  own view angles — so rows use `pitch 0` and the sidecar records the achieved pitch.
-- **Pitch:** the port's `--shot-at` aims horizontally only. Retail `warp` keeps the level's own view
-  angles (level 1 is at PYR pitch 1.04), so a numeric pair carries about a degree of pitch difference;
-  the gate's floors tolerate it. Adding pitch to `--shot-at` is the Phase 0 fix that removes it.
+  (`warp_verified` in the sidecar). `warp` sets position and yaw; pitch/roll are not settable (see the
+  next bullet), so rows request pitch 0 and the sidecar records whatever `coords` reports.
+- **Pitch:** `--shot-at` takes a fifth number — pitch in degrees. The retail `warp` cannot set pitch,
+  and the `coords` PYR pitch is not the rendered camera pitch: level 1 prints 1.04, yet its frame
+  matches a port pitch of 0 (a 0.25° port pitch already drops the spawn pair 0.63 → 0.59). The rows
+  therefore request 0. A pose whose retail camera is genuinely pitched needs a retail-side way to set
+  it, which is not known yet.
+- **Scripted effects and the player's pose.** A `--shot-at` capture moves the camera only, so scripts
+  that react to the player's sector or position do not fire on the port side. `route_catwalk` and
+  `route_door` show one: retail's reference ramps a red screen tint in over its series (a
+  position-triggered effect), which is why those two rows are ungraded. Fixing that needs port-side
+  player warp plus the trigger routing around it — the Phase 0.5 work.
 - **Retail script coverage:** the menu coordinates and key timing are tied to the GOG build (and
   to `player\Lee\Lee.plr`); a different build/player may need the constants updated.
 - **Level 1's spawn — what the pair showed, and the fix.** Retail's spawn frame is the player camera:

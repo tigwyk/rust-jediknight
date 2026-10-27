@@ -5,9 +5,22 @@
 # Positions are the **camera eye** in game/world units; PYR are degrees in the retail `coords`
 # convention. The retail side warps the player body to `z - 0.037` so the eye lands at `z`
 # (`sithCamera_Update` rides `thing + 0x168`); the port's `--shot-at` takes the eye directly.
-# Pitch must be 0: the port's `--shot-at` is horizontal aim only (see port-capture.ps1).
+#
+# The `pitch` column is the **port camera** pitch in degrees. Retail's `warp` sets position and yaw
+# only; its rendered camera pitch is not the `coords` PYR pitch (level 1 prints 1.04, yet a 0.25
+# degree port pitch already drops the spawn pair 0.63 -> 0.59), so keep it 0 until a retail frame is
+# measured to say otherwise.
+#
+# The route rows are the level's own `walkplayer` placements (things 167, 169, 170, 171 and 174 of
+# 01narshadda) — the multiplayer start points — so every pose is an authored, standable camera in
+# the cantina, on the way up, and at the upper door. Eye = thing position + the 0.037 eye offset.
 # The staged JK.EXE is patched so `warp` exists (see Set-JkDevCommandsEnabled in retail-lib.ps1).
 name	level	x	y	z	pitch	yaw
 spawn	01narshadda	-	-	-	-	-
 spawn_pose	01narshadda	-10.443433	-5.455094	-1.092886	0	-59.994
 spawn_yaw30	01narshadda	-10.443433	-5.455094	-1.092886	0	-30
+route_cantina	01narshadda	-2.200043	-2.900013	-1.142886	0	-74.999908
+route_lower	01narshadda	4.074969	-6.875029	0.257114	0	15.000092
+route_street	01narshadda	5.474939	-1.899975	0.657119	0	-134.988342
+route_catwalk	01narshadda	7.749950	-1.175000	2.857114	0	0
+route_door	01narshadda	1.400084	9.700065	6.357114	0	105.000092

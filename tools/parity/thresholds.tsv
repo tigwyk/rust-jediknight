@@ -15,7 +15,16 @@
 # (`--frames 600`), the window sized from the retail sidecar, and whatever renderer
 # retail-capture.ps1 used (16-bit D3D via dgVoodoo2 by default). Changing either side's
 # framing or frame count invalidates them.
+#
+# route_catwalk and route_door are captured but intentionally not gated: retail's reference there
+# shows a scripted red screen tint that ramps in over the 1 s series (a position-triggered effect),
+# while a port capture with `--shot-at` only moves the camera and leaves the player at the level
+# start, so its scripts never fire. They are triage rows until the port can warp the player (Phase
+# 0.5), and their measured 0.46/0.41 is the size of that difference, not a renderer tolerance.
 name	min_ssim	max_mean_abs_diff
 spawn	0.55	28.0
 spawn_pose	0.55	28.0
 spawn_yaw30	0.55	28.0
+route_cantina	0.65	30.0
+route_lower	0.65	30.0
+route_street	0.65	30.0
