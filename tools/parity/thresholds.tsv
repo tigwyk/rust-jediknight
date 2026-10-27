@@ -16,11 +16,14 @@
 # retail-capture.ps1 used (16-bit D3D via dgVoodoo2 by default). Changing either side's
 # framing or frame count invalidates them.
 #
-# route_catwalk and route_door are captured but intentionally not gated: retail's reference there
-# shows a scripted red screen tint that ramps in over the 1 s series (a position-triggered effect),
-# while a port capture with `--shot-at` only moves the camera and leaves the player at the level
-# start, so its scripts never fire. They are triage rows until the port can warp the player (Phase
-# 0.5), and their measured 0.46/0.41 is the size of that difference, not a renderer tolerance.
+# route_catwalk and route_door are captured but intentionally not gated. The port now warps the
+# player to the row's pose (`--warp`, the same pose retail's `warp` gives its body), so scripts and
+# AI see a body there — but retail's reference in these two rooms is **red from damage tint**: the
+# body is being damaged (level 1's door: health 100 -> 44 over the series; catwalk: 100/100 ->
+# 81/11) and `sithActor_DamageActor` adds `damage * 0.04` red to the player's palette tint
+# (`sithPlayer_AddDynamicTint`, decaying 0.4/s). The port has no such layer yet, and at the catwalk
+# it also cannot stand its body on the catwalk model (the model is not a sector floor), so the
+# 0.45/0.42 measured here is the size of two named engine gaps, not a renderer tolerance.
 name	min_ssim	max_mean_abs_diff
 spawn	0.55	28.0
 spawn_pose	0.55	28.0

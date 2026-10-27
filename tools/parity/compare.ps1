@@ -342,7 +342,7 @@ function Format-Pose {
     }
     $note = ''
     if ($Row.Pitch -ne '-' -and [double]$Row.Pitch -ne 0) {
-        $note = " (pitch $($Row.Pitch) unsupported: port --shot-at is horizontal-only)"
+        $note = " (pitch $($Row.Pitch), which the retail warp cannot set)"
     }
     return "x=$($Row.X) y=$($Row.Y) z=$($Row.Z) yaw=$($Row.Yaw)$note"
 }
@@ -599,10 +599,11 @@ $lines.Add('  SSIM and mean absolute difference. This deliberately ignores each 
 $lines.Add('  and the extra port HUD, so the number ranks pairs for triage; the side-by-side and')
 $lines.Add('  contact sheet are the real evidence. The retail PNG also carries a 4:3 pixel')
 $lines.Add('  sample-aspect tag (ffmpeg reports DAR 16:9); the normalization uses square pixels.')
-$lines.Add('- Pose: shots.tsv `-` means the level spawn (plain `--start`, no `--shot-at`). A')
-$lines.Add('  numeric row is passed to the port as `--shot-at "x,y,z,yaw"`; the port has horizontal')
-$lines.Add('  aim only and the retail `warp` keeps the level''s own pitch (1.04 degrees at level 1),')
-$lines.Add('  so a pair tolerates about a degree of pitch. Both are known limitations, recorded here.')
+$lines.Add('- Pose: shots.tsv `-` means the level spawn (plain `--start`, no fixed pose). A')
+$lines.Add('  numeric row is passed to the port as `--shot-at "x,y,z,yaw,pitch"` (camera) and')
+$lines.Add('  `--warp "x,y,z,yaw"` (the player, one eye offset below the recorded eye, as retail''s')
+$lines.Add('  `warp` leaves its body). The retail `warp` keeps the level''s own pitch (1.04 degrees')
+$lines.Add('  at level 1), so rows request pitch 0 and a pair tolerates about a degree of pitch.')
 $lines.Add('- Port captures never run while JK.EXE is running; `port-capture.ps1` waits or aborts.')
 $lines.Add('- Reproduce: `pwsh -File tools/parity/port-capture.ps1` then')
 $lines.Add('  `pwsh -File tools/parity/compare.ps1`; the regression check is')

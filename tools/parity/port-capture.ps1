@@ -12,8 +12,11 @@
   running JK.EXE (the retail-capture side owns it) and waits for it to exit;
   if it is still running after the wait, the batch aborts.
 
-  Rows with an explicit pose in shots.tsv also get `--shot-at "x,y,z,yaw,pitch"`. The pitch is the
-  port camera pitch in degrees (from the row; retail `warp` cannot set pitch — see shots.tsv).
+  Rows with an explicit pose in shots.tsv also get `--shot-at "x,y,z,yaw,pitch"` for the camera and
+  `--warp "x,y,z,yaw"` for the **player**: retail's reference frame is captured with the body at
+  that pose, so its scripts, AI and hazards have a body to react to, and a camera-only capture
+  leaves the port's player at the level start. The pitch is the port camera pitch in degrees
+  (from the row; retail `warp` cannot set pitch — see shots.tsv).
 
   The port window is rendered at the retail view size: for each row this reads
   target/parity/retail/<name>.json (the world crop inside the retail frame) and
@@ -146,6 +149,10 @@ foreach ($row in $rows) {
     if ($hasPose) {
         $pitchText = $shotPitch.ToString('0.######', [System.Globalization.CultureInfo]::InvariantCulture)
         $argLine += ' --shot-at "' + (@($row.X, $row.Y, $row.Z, $row.Yaw) -join ',') + ',' + $pitchText + '"'
+        # The player, not just the camera: retail's reference frame has the body at the pose, so the
+        # room's scripts, AI and hazards act on it. Without this the port's body stays at the level
+        # start and the state the retail frame shows never happens.
+        $argLine += ' --warp "' + (@($row.X, $row.Y, $row.Z, $row.Yaw) -join ',') + '"'
     }
 
     $outPath = Join-Path $OutDir '_run.out'

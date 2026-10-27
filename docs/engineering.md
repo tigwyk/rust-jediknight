@@ -566,6 +566,10 @@ cargo run --release -- --near crate4_3   # frame the first thing of a template
 cargo run --release -- --look 35         # pitch the default view up at the sky
 cargo run --release -- --shot out.png    # render, save a PNG, exit
 cargo run --release -- --shot out.png --frames 400 --sim   # …after 400 frames of script time
+cargo run --release -- --shot at.png --shot-at "7.749950,-1.175000,2.857114,0,0"   # camera at a pose
+cargo run --release -- --shot at.png --shot-at "7.749950,-1.175000,2.857114,0,0" --warp "7.749950,-1.175000,2.857114,0"
+                                         # …and the *player* there too (parity rows; --warp takes the
+                                         # camera eye, body one eye offset below, yaw only)
 cargo run --release -- --cogs              # parse + run the level's scripts
 cargo run --release -- --cogs all          # the same for all 540 scripts in the install
 cargo run --release -- --run               # start the level's scripts against a live world
@@ -685,10 +689,10 @@ is why it was recoverable.
 
 Every check in one page: [docs/gates.txt](gates.txt) records each flag and what it printed
 against this install; the sweep now is **61 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
-`0 of 61 failed, 9 skipped`), plus 134 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
+`0 of 61 failed, 9 skipped`), plus 136 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
 
 [CI](../.github/workflows/ci.yml) runs on Windows: it installs the MSRV from `Cargo.toml`, builds
-with `--locked`, runs the 134 unit tests, builds the i686 film helper, produces the native
+with `--locked`, runs the 136 unit tests, builds the i686 film helper, produces the native
 `setup.exe` as an artifact, and checks every relative documentation link. The 61 gates are not
 in CI on purpose — they require a retail game install, which the repository does not ship and
 CI does not download.

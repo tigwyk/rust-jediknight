@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 134 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 136 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -267,14 +267,14 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    gap the level authored (`walk_player`; the walking half is a `ponytail:` entry in the porting
    roadmap's deviation ledger). Measured: the port's spawn eye was `-1.148` against retail's `-1.093`;
    a port capture at the recorded pose is pixel-identical to a `--shot-at` capture there (SSIM 0.9999),
-   and the `spawn` pair went **0.2284 → 0.62–0.63** SSIM (MAD 31.3 → 23.2), the equal of the two
+   and the `spawn` pair went **0.2284 → 0.62–0.65** SSIM (MAD 31.3 → 23.2), the equal of the two
    warp-verified pairs. `pwsh -File tools/parity/compare.ps1 -Gate` now fails on the pre-fix frame
    (0.2284) and passes the fixed one; the same command is the regression check.
 
    **The route set: five poses, three gated, two triage; and the player starts it exposed.** The
    `route_*` rows in `tools/parity/shots.tsv` are the level's own `walkplayer` placements (things
    167/169/170/171/174). Retail verified all five through `warp` + `coords` (position delta ≤0.02).
-   Three pairs (`route_cantina`, `route_lower`, `route_street`) score **0.72/0.72/0.73** SSIM and are
+   Three pairs (`route_cantina`, `route_lower`, `route_street`) score **0.73/0.72/0.74** SSIM and are
    gated at 0.65. The first one also proved a port renderer bug: retail's frame at that pose is clean,
    while the port put a Kyle model in the camera because it spawned the level's other eleven
    `walkplayer` things as ordinary animated actors. Those rows are the multiplayer spawn points, not
@@ -283,12 +283,35 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    the other markers are not bodies at all). The comment that called them NPCs ("the training arena
    does") was wrong and is corrected.
 
-   Two upper rows (`route_catwalk` 0.46, `route_door` 0.41) are **ungraded on purpose**: retail's
-   reference there carries a scripted red screen tint that ramps in over the 1 s series (its world-region
-   SSIM falls to 0.45–0.56), a position-triggered effect; the port capture only moves the camera, so its
-   player never enters the sector and its scripts never fire (moving the player with `BK_SPAWN_THING`
-   also failed to reproduce it, because the port lands in a different sector than retail's `warp`). That
-   is the missing port-side player warp in the porting roadmap's Phase 0.5, not a renderer tolerance.
+   **The port warps its player too, and that moved the two triage rows' blockage onto the damage
+   tint (2026-10-27).** `--warp "x,y,z,yaw"` takes the same camera-eye pose as `--shot-at`, puts the
+   body one template eye offset below it and re-derives the sector; `port-capture.ps1` passes it for
+   every numeric row, so both sides now capture with a body at the pose. The port's derived sector
+   matched the sector retail's `coords` reports on all eight level-1 rows (339 ×3, 254, 137, 156, 175,
+   60) — the earlier `BK_SPAWN_THING` attempt had landed in the wrong sector, which is why it failed.
+   With the body present, the port's scripts and AI do react (actors walk and fire, the shield-recharge
+   pickup is taken at the catwalk) — and that exposed a combat bug in the port: live projectiles were
+   **collected as weapon pickups**. `collect_items` took any thing of type weapon (3) within a unit of
+   the body, and `fire` gives every shot that type, so bolts heading for the player were removed as
+   "picked up +elaser" before they could hit: the port's player was immune to close-range gunfire, which
+   is why the door capture showed no damage at all. `is_pickup` now excludes any thing that carries
+   `damage=` (a shot in flight); with that guard the port's body takes hits at the door (shield 100 → 91
+   on the first volley), as retail's does. The two upper rows still score 0.45/0.42, and the reason is
+   the engine's **damage tint**, not a scripted effect: retail's own series shows the body losing health as
+   the picture reddens (door 100 → 44 over the eight frames, catwalk 100/100 → 81/11), and the decomp
+   gives the rule — `sithActor_DamageActor` calls `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)` for
+   the local player, `sithPlayer_Update` decays the three channels by 0.4 per second, and
+   `stdPalEffects_UpdatePalette` adds `round(byte * tint * 0.5)` to each palette channel. The port
+   records `AddDynamicTint` but never decays or draws it, and it applies no tint in its damage paths.
+   At the catwalk there is a second gap: the recorded body stands on a `3x10catwalk` *model* (a solid
+   thing, top at 2.675) 0.145 below it and on no sector floor, and the port's idle attach needs a floor
+   within one radius, so its body falls and dies; retail's `coords` holds z 2.80 for the whole capture.
+   Whether retail's placement step keeps the pose there or its collider has a surface the port's does
+   not is for the movement port (Phase 1 step 3) to settle.
+
+   *Next for these rows (in dependency order):* the palette-tint layer (`AddDynamicTint` + the
+   0.4/s decay + the `byte += round(byte * tint/2)` draw), and the attachment state
+   (`sithPhysics_UpdateAttachedThingPhysics`) plus solid-thing floors for the catwalk.
 
    **Pitch does not mean what `coords` says.** Adding pitch to `--shot-at` and sweeping it against the
    verified spawn reference gave a sharp answer: port pitch 0 matches retail best (0.6296), 0.25° drops

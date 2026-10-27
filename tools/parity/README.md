@@ -14,7 +14,7 @@ comparable even if the mouse moves between them.
 | Step | Script | What happens |
 |---|---|---|
 | 1 | `retail-capture.ps1` | Copies the retail install to a scratch folder, launches the **GOG `JK.EXE`** in `-devMode`, drives its menus with the mouse, reads the player pose from the game's own `coords` console command, `warp`s to each pose in `shots.tsv`, presses F12 (the game writes `JSHOT*.PCX/BMP`) and converts the frames to PNG. |
-| 2 | `port-capture.ps1` | Runs `bevi-knight.exe` once per shot with `--start`, `--shot`, and (for numeric poses) `--shot-at`. |
+| 2 | `port-capture.ps1` | Runs `bevi-knight.exe` once per shot with `--start`, `--shot`, and (for numeric poses) `--shot-at` plus `--warp`: the camera at the recorded eye, the **player** at the recorded pose, as retail's `warp` leaves it. |
 | 3 | `compare.ps1` | Pairs `retail/<name>.png` with `port/<name>.png`, writes a side-by-side, a contact sheet, and `report.md` with framing facts and a triage score (SSIM / mean absolute difference). |
 | 4 | `compare.ps1 -Gate` | Scores every row of `thresholds.tsv` against its SSIM/MAD floors and exits non-zero if one is missing or failed. This is the regression check. |
 
@@ -93,21 +93,26 @@ route_street   0.65      30.0
 ```
 
 The floors are tolerances, not equality: retail (1997 renderer) and the port (Bevy) differ, and the
-port's HUD is inside its frame while the retail world crop has none. The spawn pairs sit at 0.62–0.63
-and the gated route pairs at 0.72–0.73; the floors sit under those, and the gate is known to fail on a
-real regression: the pre-fix spawn camera (0.055 units low) scores 0.2284, the fixed one 0.62–0.63.
+port's HUD is inside its frame while the retail world crop has none. The spawn pairs sit at 0.62–0.65
+and the gated route pairs at 0.72–0.74; the floors sit under those, and the gate is known to fail on a
+real regression: the pre-fix spawn camera (0.055 units low) scores 0.2284, the fixed one 0.62–0.65.
 
-`route_catwalk` and `route_door` are captured but deliberately **ungraded**: retail's reference at
-those poses shows a scripted red screen tint that ramps in over its 1 s series (a position-triggered
-effect), while a port `--shot-at` capture moves only the camera and leaves the player at the level
-start, so the port's scripts never fire. They report `UNGRADED` at 0.46/0.41 — that gap is the missing
-player warp, not a renderer tolerance; see `docs/gaps.md` §5.9.
+`route_catwalk` and `route_door` are captured but deliberately **ungraded**, and the reason is now
+measured rather than assumed. The port warps the player to the row's pose (`--warp`), the way retail's
+`warp` leaves its body, so scripts and AI do see a body there. Retail's reference in those two rooms
+is **red from damage tint**, though: the body is taking damage (level 1's door: health 100 → 44 over
+the series; catwalk: 100/100 → 81/11), and the engine's damage path adds a red palette tint
+(`sithActor_DamageActor` calls `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)`; it decays 0.4 per
+second and is applied as `palette += round(palette * tint * 0.5)`). The port has no such layer yet,
+and at the catwalk it also cannot stand its body on the catwalk *model* — that is a solid thing, not
+a sector floor, so the body falls out of the level. They report `UNGRADED` at 0.45/0.42: those are
+two named engine gaps, not a renderer tolerance (see `docs/gaps.md` §5.9).
 
 The numbers are tied to the capture policy above (600 frames, window from the retail sidecar, default
 16-bit retail renderer) — changing framing or frame count invalidates them.
 
 The gate needs a retail install and captured references on the machine, so it is a developer check, not
-a CI job; the port's own 134 tests and 61 gates remain the CI-able surface.
+a CI job; the port's own 136 tests and 61 gates remain the CI-able surface.
 
 ## The shot list: `tools/parity/shots.tsv`
 
@@ -130,8 +135,10 @@ route_door	01narshadda	1.400084	9.700065	6.357114	0	105.000092
 The `route_*` rows are the level's own `walkplayer` placements — the multiplayer start points (things
 167, 169, 170, 171 and 174 of `01narshadda`) — so each is an authored, standable camera covering the
 cantina, the way up and the upper door. Retail does not draw those marker things in single player; the
-port used to (a Kyle model filled the camera at each), and now skips them the same way. The two upper
-rows are the ungraded ones described above.
+port used to (a Kyle model filled the camera at each), and now skips them the same way. Both sides put
+a body at those poses: retail through `warp`, the port through `--warp` (the sector the port derives
+from the position matches the sector retail's `coords` reports on all eight rows: 339 ×3, 254, 137,
+156, 175, 60). The two upper rows are the ungraded ones described above.
 
 `spawn` (no warp) captures the level's own start; retail reads the pose with `coords` and the sidecar
 marks it `first_frame_is_player_camera` (its frame is pixel-identical to the warp-verified pair), so it
@@ -142,10 +149,14 @@ use them when a pair has to be trusted independently of the level's start.
 - `z` is the **eye** height — the value the port's `--shot-at` takes. Retail's `warp` moves the player
   body, and the engine rides the camera at `thing + 0x168` (the template's `eyeoffset=(0,0,0.037)`),
   so the retail side warps to `z - 0.037`. It reads `coords` back and marks the row
-  `warp_verified` when the position (offset restored) and yaw agree.
-- `pitch` must be **0**: the port's `--shot-at` is horizontal aim only, and retail's `warp` sets
-  position + yaw while pitch/roll keep the level's own view angles (level 1 stays at PYR pitch 1.04,
-  which the sidecar records).
+  `warp_verified` when the position (offset restored) and yaw agree. The port's `--warp` takes the
+  same eye and puts its body one template eye offset below it, so both sides' bodies are at the same
+  recorded pose.
+- `pitch` is the port camera's pitch in degrees, taken by `--shot-at` (a fifth number, 0 when omitted).
+  Retail's `warp` cannot set pitch, so it keeps the level's own view angles (level 1 stays at `coords`
+  PYR pitch 1.04, which the sidecar records) — and that PYR number is not the rendered camera pitch
+  (a 0.25° port pitch already drops the spawn pair 0.63 → 0.59), so rows request 0. `--warp` is yaw
+  only, like retail's.
 - `warp` exists because the staged copy's `JK.EXE` is patched — see "How the retail side is driven".
 
 ## How the retail side is driven (for maintainers)
@@ -215,18 +226,26 @@ Everything below was verified against the GOG build (the harness works on a scra
   matches a port pitch of 0 (a 0.25° port pitch already drops the spawn pair 0.63 → 0.59). The rows
   therefore request 0. A pose whose retail camera is genuinely pitched needs a retail-side way to set
   it, which is not known yet.
-- **Scripted effects and the player's pose.** A `--shot-at` capture moves the camera only, so scripts
-  that react to the player's sector or position do not fire on the port side. `route_catwalk` and
-  `route_door` show one: retail's reference ramps a red screen tint in over its series (a
-  position-triggered effect), which is why those two rows are ungraded. Fixing that needs port-side
-  player warp plus the trigger routing around it — the Phase 0.5 work.
+- **The player's pose.** `--shot-at` moves the camera only; `--warp "x,y,z,yaw"` moves the *player*
+  to the same recorded eye (body one eye offset below it) and re-derives its sector, which is what
+  lets the room's scripts, AI and hazards act on a body the way retail's reference capture has them
+  act. Without `--shot-at`, `--warp` alone lets the camera ride the warped body (retail's mode;
+  identical framing at a standing pose); the batch passes both so the framing stays deterministic.
+  The port's player warp still has two limits: it keeps the body where it is put only when a
+  floor is within the idle-attach reach (at the catwalk pose there is none in reach and the catwalk
+  model is 0.145 below, so the port's body falls while retail's `coords` holds z 2.80), and the
+  port does not draw the engine's damage tint. Both show up on `route_catwalk`/`route_door`.
+- **Damage tint.** The engine's `sithActor_DamageActor` adds `damage * 0.04` to the local player's
+  red palette tint (`sithPlayer_AddDynamicTint`), `sithPlayer_Update` decays it by 0.4 per second,
+  and `stdPalEffects_UpdatePalette` applies the sum as `byte += round(byte * tint * 0.5)` per channel.
+  That is the red in the two ungraded route references; it is not a scripted effect.
 - **Retail script coverage:** the menu coordinates and key timing are tied to the GOG build (and
   to `player\Lee\Lee.plr`); a different build/player may need the constants updated.
 - **Level 1's spawn — what the pair showed, and the fix.** Retail's spawn frame is the player camera:
   the 1 s series is static in its world regions (`first_frame_is_player_camera` in the sidecar) and it
   is pixel-identical to the warp-verified `spawn_pose` reference. The 0.23 pair was the *port's* spawn
   camera, 0.055 units low: setup replaced the level's recorded pose with a floor-seated one. The port
-  now starts at the recorded pose and keeps it while idle, so `spawn` scores 0.618–0.630 — the equal of the
+  now starts at the recorded pose and keeps it while idle, so `spawn` scores 0.62–0.65 — the equal of the
   warp-verified pairs — and `compare.ps1 -Gate` fails the pre-fix frame. The thing at the eye is one
   decor thing (`tuskensoused`, thing 215) that `01_TuskenTwitch.cog` animates with `PlayKey`; the
   loader used to skip script-named keyfiles, which is what froze it. Retail draws that patron in the

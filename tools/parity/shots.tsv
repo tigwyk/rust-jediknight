@@ -4,7 +4,10 @@
 #                                Port: plain `--start <level>`, no `--shot-at`.
 # Positions are the **camera eye** in game/world units; PYR are degrees in the retail `coords`
 # convention. The retail side warps the player body to `z - 0.037` so the eye lands at `z`
-# (`sithCamera_Update` rides `thing + 0x168`); the port's `--shot-at` takes the eye directly.
+# (`sithCamera_Update` rides `thing + 0x168`); the port warps its player the same way (the
+# port-capture side passes `--warp "x,y,z,yaw"`, whose body also goes one eye offset below `z`) and
+# keeps `--shot-at` to pin the camera to the recorded vantage. Both sides therefore have a body at
+# the pose — scripts, AI and hazards react to it — not just a camera there.
 #
 # The `pitch` column is the **port camera** pitch in degrees. Retail's `warp` sets position and yaw
 # only; its rendered camera pitch is not the `coords` PYR pitch (level 1 prints 1.04, yet a 0.25

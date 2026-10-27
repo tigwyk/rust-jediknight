@@ -373,6 +373,8 @@ fn main() {
     let mut fall_check = false;
     let mut falldeath_check = false;
     let mut door_check = false;    let mut shot_at: Option<([f32; 3], f32, f32)> = None;
+    // `--warp "x,y,z,yaw"`: the *player's* eye pose, not the camera's (see `setup`).
+    let mut warp: Option<([f32; 3], f32)> = None;
 
     let mut sim = false;
     let mut dump: Option<String> = None;
@@ -547,6 +549,17 @@ fn main() {
                     let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
                     (v.len() == 4 || v.len() == 5)
                         .then(|| ([v[0], v[1], v[2]], v[3], v.get(4).copied().unwrap_or(0.0)))
+                });
+            }
+            // `--warp "x,y,z,yaw"`: put the **player** at a recorded pose before the level acts, which
+            // is what retail's dev `warp` does and what a capture needs to see rooms the way retail's
+            // reference does. The pose is the camera eye, the same convention `--shot-at` and
+            // `tools/parity/shots.tsv` use; `setup` puts the body one eye offset below it. Yaw only,
+            // like retail: its `warp` leaves pitch alone.
+            "--warp" => {
+                warp = arg_value(&args, &mut i).cloned().and_then(|s| {
+                    let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+                    (v.len() == 4).then(|| ([v[0], v[1], v[2]], v[3]))
                 });
             }
             "--frames" => {
@@ -9670,6 +9683,9 @@ fn main() {
 
     if let Some(vantage) = shot_at {
         let _ = SHOT_AT.set(vantage);
+    }
+    if let Some(pose) = warp {
+        let _ = WARP.set(pose);
     }
 
     // A capture or a probe is not a play session: it wants frames, not sound. This used to be the
@@ -19145,7 +19161,7 @@ fn collect_items(
         if other == index || thing.destroyed {
             continue;
         }
-        if !matches!(rt.types.get(other).copied(), Some(5) | Some(3)) {
+        if !is_pickup(rt.types.get(other).copied().unwrap_or(0), thing.damage) {
             continue;
         }
         let d = ((thing.pos[0] - body[0]).powi(2)
@@ -19189,6 +19205,33 @@ fn collect_items(
                 commands.entity(entity).despawn();
             }
         }
+    }
+}
+
+/// Whether walking into a thing picks it up: the engine's collect step takes items and *dropped*
+/// weapons, so a live projectile is not one.
+///
+/// `fire` gives every shot its template's weapon type and a `damage=`, which is the difference the
+/// port has: without it a bolt that came within the pickup radius was collected (as `+elaser`) before
+/// it could hit, so the player was immune to close-range fire. `--warp` at level 1's upper door found
+/// it: retail's body there is being shot, while the port's stayed at full health even though its AI
+/// fired at it.
+fn is_pickup(kind: i32, damage: f32) -> bool {
+    matches!(kind, 3 | 5) && damage <= 0.0
+}
+
+#[cfg(test)]
+mod pickup_tests {
+    use super::is_pickup;
+
+    /// Items and dropped weapons are picked up; a thing carrying damage is a shot in flight.
+    #[test]
+    fn a_live_projectile_is_not_a_pickup() {
+        assert!(is_pickup(5, 0.0), "an item is a pickup");
+        assert!(is_pickup(3, 0.0), "a dropped weapon is a pickup");
+        assert!(!is_pickup(3, 12.0), "a 12-damage projectile must not be picked up");
+        assert!(!is_pickup(5, 12.0), "anything carrying damage is a live shot");
+        assert!(!is_pickup(2, 0.0), "an actor is not a pickup");
     }
 }
 
@@ -20342,23 +20385,9 @@ fn setup(
         println!("walker: BK_SPAWN_OFFSET moved the body to {start:?}, sector {sector}");
     }
 
-    let player_yaw = forced_yaw.unwrap_or_else(|| facing.unwrap_or_else(|| yaw.unwrap_or_else(|| aim.z.atan2(aim.x))));
+    let mut player_yaw = forced_yaw.unwrap_or_else(|| facing.unwrap_or_else(|| yaw.unwrap_or_else(|| aim.z.atan2(aim.x))));
     // The camera sits at `position + eyeOffset` (`sithCamera.c`): the template's `eyeoffset=(x/y/z)` is
     // in level units (`walkplayer`: 0.037), applied to the body centre the engine placed.
-    // A sector with a low ceiling still bounds it below, so a body in a crawlspace does not put the camera
-    // through the roof.
-    let mut ceilings: Vec<f32> = std::iter::once(sector)
-        .chain(solids.sectors_around(start))
-        .filter_map(|s| solids.ceiling_above(s, start))
-        .filter(|c| *c > start[2] + 0.25)
-        .collect();
-    ceilings.sort_by(f32::total_cmp);
-    // The measured ceilings do not explain it: level 1's spawn has 6.8 units of headroom, so
-    // `PLAYER_EYE` = 1.45 is nowhere near the ceiling — and yet a camera at 1.45 renders the
-    // inside of a solid while one at 0.35 is clear. What is in the way is therefore not a
-    // sector plane: it is a model (nothing in the collider) or geometry belonging to a sector
-    // the point is not in. Until placement can see both, the eye stays at the sweep's height,
-    // which is known to work on all 34 levels, and the ceiling is printed for the next attempt.
     let derived_eye = world
         .level
         .template_param("walkplayer", "eyeoffset")
@@ -20373,6 +20402,34 @@ fn setup(
         .map(|z| z * MODEL_SCALE)
         .filter(|z| *z > 0.0)
         .unwrap_or(PLAYER_EYE);
+    // `--warp "x,y,z,yaw"`: put the **player** at a recorded pose before the level starts acting, which
+    // is what retail's dev `warp` does. The pose is the camera eye (the `shots.tsv` convention), so the
+    // body goes one eye offset below it, exactly as the retail capture side warps it. The sector is
+    // re-derived from the position: it is the room whose `entered` links, AI sight and damage the
+    // capture is there to see, and a camera-only `--shot-at` leaves the body at the level start.
+    // Position and yaw only — retail's `warp` leaves pitch alone too.
+    if let Some((at, yaw)) = WARP.get().copied() {
+        start = warp_body(at, derived_eye);
+        sector = solids.sector_for_body(start).unwrap_or(sector);
+        player_yaw = yaw.to_radians();
+        println!(
+            "walker: warped the player to {start:?} (eye {at:?}) facing {yaw:.1} deg, sector {sector}"
+        );
+    }
+    // A sector with a low ceiling still bounds it below, so a body in a crawlspace does not put the camera
+    // through the roof.
+    let mut ceilings: Vec<f32> = std::iter::once(sector)
+        .chain(solids.sectors_around(start))
+        .filter_map(|s| solids.ceiling_above(s, start))
+        .filter(|c| *c > start[2] + 0.25)
+        .collect();
+    ceilings.sort_by(f32::total_cmp);
+    // The measured ceilings do not explain it: level 1's spawn has 6.8 units of headroom, so
+    // `PLAYER_EYE` = 1.45 is nowhere near the ceiling — and yet a camera at 1.45 renders the
+    // inside of a solid while one at 0.35 is clear. What is in the way is therefore not a
+    // sector plane: it is a model (nothing in the collider) or geometry belonging to a sector
+    // the point is not in. Until placement can see both, the eye stays at the sweep's height,
+    // which is known to work on all 34 levels, and the ceiling is printed for the next attempt.
     let eye_height = env_f32("BK_EYE", derived_eye).min(
         ceilings
             .first()
@@ -20531,6 +20588,33 @@ const PLAYER_RADIUS: f32 = 0.065;
 /// `--shot-at` vantage, set once in `main` and read by `setup`: eye, yaw and pitch (degrees). A global
 /// because `setup` already takes as many parameters as Bevy will accept.
 static SHOT_AT: std::sync::OnceLock<([f32; 3], f32, f32)> = std::sync::OnceLock::new();
+
+/// `--warp` pose, set once in `main` and read by `setup`: the player's eye and yaw (degrees). Kept
+/// apart from [`SHOT_AT`] because they are different things: the camera can be anywhere, and the
+/// player must be where the level's scripts and AI look for him.
+static WARP: std::sync::OnceLock<([f32; 3], f32)> = std::sync::OnceLock::new();
+
+/// Where a `--warp` eye pose puts the body: the engine's camera rides `position + eyeOffset`
+/// (`sithCamera.c`, `walkplayer`'s 0.037), so a recorded eye is one eye offset above the body. The
+/// retail capture side does the same subtraction (`z - 0.037` in `retail-capture.ps1`), which keeps
+/// both sides' bodies at the pose `shots.tsv` names.
+fn warp_body(eye: [f32; 3], eye_offset: f32) -> [f32; 3] {
+    [eye[0], eye[1], eye[2] - eye_offset]
+}
+
+#[cfg(test)]
+mod warp_tests {
+    use super::warp_body;
+
+    /// `shots.tsv` holds camera eyes; a warp body is one eye offset below one, and that is the only
+    /// arithmetic the flag performs on the pose, so it is the part worth pinning.
+    #[test]
+    fn a_warp_eye_becomes_a_body_one_eye_offset_below_it() {
+        let body = warp_body([7.75, -1.175, 2.857114], 0.037);
+        assert_eq!((body[0], body[1]), (7.75, -1.175), "the pose moved sideways");
+        assert!((body[2] - 2.820114).abs() < 1e-5, "body z is {}", body[2]);
+    }
+}
 
 /// Silence everything. Captures are muted outright — a screenshot run has no business making noise — and
 /// `--mute` (or `BK_MUTE=1`) silences any other run.
