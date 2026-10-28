@@ -9230,7 +9230,7 @@ fn main() {
         let mut vy = 0.0f32;
         let dt = 1.0 / 30.0;
         for _ in 0..60 {
-            walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+            walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.radius, rules.gravity, false);
         }
         // Drop from the roomiest place the level has, not from the spawn: level 1's walkplayer stands in a
         // crawlspace 0.3 units tall, and a body lifted above its own ceiling is *outside its sector*, which
@@ -9268,7 +9268,7 @@ fn main() {
             // the old `before < 0` test then never fired at all.
             let mut peak = 0.0f32;
             for _ in 0..900 {
-                walker_step(&solids, collide::Gates::default(), &mut sector, &mut p2, &mut v2, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut p2, &mut v2, [0.0, 0.0], dt, rules.radius, rules.radius, rules.gravity, false);
                 peak = peak.max(-v2);
                 if v2 == 0.0 && peak > 0.0 {
                     break;
@@ -9645,7 +9645,7 @@ fn main() {
             // Settle on the floor first: the thing's origin is at the level's walkplayer
             // point, which is not necessarily a radius above the floor.
             for _ in 0..30 {
-                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.radius, rules.gravity, false);
             }
             let base = pos[2];
             let mut airetime = 0.0f32;
@@ -9654,7 +9654,7 @@ fn main() {
             vy = rules.jump;
             let trace = std::env::var_os("BK_JUMP_TRACE").is_some();
             for frame in 0..300 {
-                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.radius, rules.gravity, false);
                 if trace && (frame < 6 || (18..28).contains(&frame) || (60..64).contains(&frame)) {
                     eprintln!(
                         "jump trace {frame}: z {:.3} base {base:.3} vy {vy:.2} support {:?} floor {:?}",
@@ -12777,6 +12777,11 @@ fn walker_step(
     move_dir: [f32; 2],
     dt: f32,
     radius: f32,
+    // How far the body's centre rests above a floor it lands on. The engine's `GetThingHeight` (the
+    // model's insert offset: `walkplayer` 0.120114) puts a body at the height the level placed it, so a
+    // walking body keeps the authored pose instead of settling to the collision radius. The
+    // geometry-only callers pass the radius, which is their old behaviour.
+    rest: f32,
     gravity: f32,
     allow_step: bool,
 ) -> (f32, bool, bool) {
@@ -12801,7 +12806,7 @@ fn walker_step(
         let land = solids
             .floor_under(*sector, *pos, -drop + radius, radius)
             .filter(|(_, travelled, _)| *travelled <= -drop + 1e-3)
-            .map(|(floor, _, _)| (floor + radius, 0usize));
+            .map(|(floor, _, _)| (floor + rest, 0usize));
         match land.map(|(z, _)| z) {
             Some(z) => {
                 if std::env::var_os("BK_WALK_TRACE").is_some() {
@@ -12980,6 +12985,7 @@ fn walk_level(level: &jkl::Level, frames: u32, quiet: bool, turn: f32) -> Option
             &mut 0.0,
             [forward[0] * step_speed, forward[1] * step_speed],
             STEP,
+            radius,
             radius,
             0.0,
             false,
@@ -21953,6 +21959,7 @@ fn walk_player(
             dir,
             1.0 / 50.0,
             player.rules.radius,
+            body_height,
             gravity,
             true,
         );
@@ -22880,7 +22887,7 @@ mod walker_tests {
         // One body radius: the same pair `setup` and `walk_level` start a body from.
         let (mut sector, mut pos, mut vy) = (0usize, [0.5f32, 0.0, PLAYER_RADIUS], 0.0f32);
         for _ in 0..60 {
-            walker_step(solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [1.0, 0.0], 1.0 / 30.0, PLAYER_RADIUS, 0.0, true);
+            walker_step(solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [1.0, 0.0], 1.0 / 30.0, PLAYER_RADIUS, PLAYER_RADIUS, 0.0, true);
         }
         (sector, pos)
     }

@@ -517,8 +517,16 @@ acceleration to `maxthrust * 0.7 * axis * runScale` (0.7 at 0x522f24; run 2.0 at
 `maxthrust / surfdrag` = 0.667 while only running on shift. Both are fixed: `Rules::from_level` uses
 `maxthrust * 0.7 / (surfdrag + 0.2)` as the walk and `Rules::speed` applies the engine's run scale,
 with plain forward movement running by default (shift walks). The first trace leg is
-**collision-limited** (the cantina pose walks into furniture at x -3.64 in the port), so its travel
-still reads 0.61 u/s; a clear straight leg is the next fixture, not another code change.
+**collision-limited** (the cantina pose walks into furniture at x -3.98 in the port), so its travel
+still reads 0.59 u/s; a clear straight leg is the next fixture, not another code change.
+
+The **resting height** the trace measured is fixed at the same layer: `walker_step` now lands a body at
+`floor + rest` where `rest` is `sithPhysics_GetThingHeight` (the `walkplayer` model insert offset,
+0.120114) instead of the collision radius, so a walking body keeps the authored pose. On the
+`walk_cantina` leg the z delta goes **0.055 -> 0.034** (the 0.034 is a step the port climbs mid-leg),
+the port covers 1.41 units against retail 2.17, and the remaining xy gap is the collision difference -
+retail is stopped at x -4.37 by furniture the port walks through at -3.98 (thing collision, an
+absent subsystem).
 ## 6. Recently closed, so it is not mistaken for missing
 
 * **Sprites render, and the two "renderer bugs" that hid it were both in the probe.** `--sprite
