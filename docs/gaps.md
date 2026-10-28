@@ -489,6 +489,26 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
 
 ---
 
+### The movement trace is live, and it already measures two gaps (round 10)
+
+Phase 0.5 trace v0's harness runs: `tools/parity/walk-shots.tsv` defines the legs,
+`retail-capture.ps1 -WalkTraceMs` drives retail (hold UP in foreground-verified segments, read
+`coords` between holds), `port-trace.ps1` replays the leg at a fixed 1/60 s step, and `trace-compare.ps1`
+puts them on one held-key clock. The first leg (`walk_cantina`, 2.4 s held forward) measures:
+
+- the start pose agrees to **0.000 units**, so the `--warp`/eye convention is right;
+- z is **0.055 low at every moving sample**: a walking body settles to `floor + radius` while retail
+  keeps its authored pose (`floor + model height` - `sithPhysics_GetThingHeight`). This is the
+  idle-only attachment ceiling, previously asserted from the spawn alone and now measured against a
+  retail walk;
+- xy diverges with distance: retail covers 2.17 units (0.9 u/s), the port 1.06 (0.44 u/s), and retail
+  crosses into sector 103 while the port is still in 254. The port walks at `maxthrust / surfdrag`
+  = 0.667 u/s and accelerates slower than that; `walkplayer maxvel = 1.0` is the likely law, so the
+  next movement fix is the player speed/acceleration rule, not the harness.
+
+The retail side's own samples are a little irregular (`coords` latency, and the console dialog takes
+the foreground, which is why the trace re-activates the window before each hold); the comparison
+reports per-sample deltas and marks samples where retail is stopped rather than hiding them.
 ## 6. Recently closed, so it is not mistaken for missing
 
 * **Sprites render, and the two "renderer bugs" that hid it were both in the probe.** `--sprite

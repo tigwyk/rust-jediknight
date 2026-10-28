@@ -568,6 +568,14 @@ fn main() {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(30);
             }
+            // `--trace-out <path>`: the walked body's per-frame trace (Phase 0.5 trace v0; the retail
+            // side is `tools/parity/retail-capture.ps1 -WalkTrace`, compared by
+            // `tools/parity/trace-compare.ps1`).
+            "--trace-out" => {
+                if let Some(path) = arg_value(&args, &mut i) {
+                    let _ = TRACE_OUT.set(std::path::PathBuf::from(path));
+                }
+            }
             "--sim" => sim = true,
             // `--pose <model> <key> <frame>`: one model, posed from one keyframe.
             "--pose" => {
@@ -20768,6 +20776,13 @@ const PLAYER_RADIUS: f32 = 0.065;
 
 /// Temporary experiment hooks: the player's radius, eye offset and step, overridable per run so a scale
 /// can be judged from a screenshot without a rebuild. Remove once the values are settled.
+/// `--trace-out <path>`: write the walked body's per-frame position/sector history as TSV.
+///
+/// This is Phase 0.5 trace v0's port half: the retail half is
+/// `tools/parity/retail-capture.ps1 -WalkTrace`, and `tools/parity/trace-compare.ps1` compares the two
+/// by distance travelled. Only the windowed player writes it, so it is a live/capture flag.
+static TRACE_OUT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
 /// `--shot-at` vantage, set once in `main` and read by `setup`: eye, yaw and pitch (degrees). A global
 /// because `setup` already takes as many parameters as Bevy will accept.
 static SHOT_AT: std::sync::OnceLock<([f32; 3], f32, f32)> = std::sync::OnceLock::new();
@@ -21628,6 +21643,8 @@ fn walk_player(
     mut chase: ResMut<Chase>,
     // the walker's view never moves (which is what happened for every round before this one).
     mut cam: Query<&mut Transform, (With<Camera3d>, With<WorldCamera>)>,
+    // `--trace-out`: the frame counter for the written trace (Phase 0.5 trace v0).
+    mut trace_tick: Local<u32>,
 ) {
     let (Some(solids), Some(player)) = (solids, player.as_mut()) else { return };
     // `--overview` and `--near` exist to frame a fixed shot; a walker would fight them.
@@ -22013,6 +22030,49 @@ fn walk_player(
     // zero vertical speed, and such a body could never jump. A landing this frame, or a resting body
     // (vy already zero), is on the ground.
     player.grounded = landed || player.vy == 0.0;
+    // Phase 0.5 trace v0: one line per frame, so a retail walk trace (`coords` polled on a cadence)
+    // can be compared against it by distance travelled (`tools/parity/trace-compare.ps1`). Health and
+    // shields are what `coords` cannot carry; they are here because the port's body has them.
+    if let Some(path) = TRACE_OUT.get() {
+        use std::io::Write;
+        if *trace_tick == 0
+            && let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(path)
+        {
+            let _ = writeln!(file, "tick\tt_s\tx\ty\tz\tsector\tvy\thealth\tshields");
+        }
+        let (health, shields) = sim
+            .as_deref()
+            .map(|sim| {
+                let rt = sim.world.borrow();
+                rt.templates
+                    .iter()
+                    .position(|name| name.eq_ignore_ascii_case("walkplayer"))
+                    .and_then(|at| rt.things.get(at))
+                    .map(|thing| (thing.health, rt.player_shields))
+                    .unwrap_or((0.0, 0.0))
+            })
+            .unwrap_or((0.0, 0.0));
+        if let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path) {
+            let _ = writeln!(
+                file,
+                "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.3}\t{:.1}\t{:.1}",
+                *trace_tick,
+                f64::from(*trace_tick) * f64::from(dt),
+                player.pos.x,
+                player.pos.y,
+                player.pos.z,
+                player.sector,
+                player.vy,
+                health,
+                shields
+            );
+        }
+        *trace_tick += 1;
+    }
     if std::env::var_os("BK_JUMP_TRACE").is_some() {
         eprintln!("jump trace: z {:.3} vy {vy:.2} landed {landed} sector {sector}", player.pos.z);
     }

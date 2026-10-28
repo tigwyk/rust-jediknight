@@ -1,0 +1,10 @@
+# Phase 0.5 trace v0 walk legs. One leg per row; the port and retail sides both start the body at
+# the row's pose (eye convention, as tools/parity/shots.tsv) and hold forward for the same game time.
+# name <TAB> level <TAB> x <TAB> y <TAB> z <TAB> pitch <TAB> yaw
+#
+# walk_cantina is route_cantina turned 180 degrees: level 1's cantina pose facing yaw 105 is the
+# flattest run measured in the port (1.46 units in 3 s, sector 254 throughout). A walking body
+# settles 0.055 lower than the authored pose (floor + radius vs model height) - the gap this trace
+# exists to measure.
+walk_cantina	01narshadda	-2.200043	-2.900013	-1.142886	0	105.000092
+walk_street	01narshadda	5.474939	-1.899975	0.657119	0	45.000000

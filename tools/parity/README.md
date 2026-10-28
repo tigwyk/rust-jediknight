@@ -211,6 +211,52 @@ Everything below was verified against the GOG build (the harness works on a scra
   force-kill); `restore-display.ps1` does the same manually. Killing the process skips the engine's
   DirectDraw shutdown, which is what used to leave the monitor at 640x480.
 
+## Movement traces (Phase 0.5 trace v0)
+
+`coords` polling plus a replay is how "the same inputs produce the same positions" becomes
+measurable (Phase 1 step 3's exit criterion). Three scripts and two fixtures:
+
+- `tools/parity/walk-shots.tsv` - the legs: `name level x y z pitch yaw`, the eye convention of
+  `shots.tsv`. A leg is "start the body at this pose, hold forward for a while".
+- `retail-capture.ps1 -Shots tools/parity/walk-shots.tsv -Only <name> -WalkTraceMs 2400` - the retail
+  half. It warps the body to the leg, then holds the UP arrow (the engine's forward binding) and reads
+  `coords` between holds; output `target/parity/trace/<name>-walk.tsv`.
+- `port-trace.ps1 [-Only <name>]` - the port half: `--warp` to the same pose, `BK_WALK_FORWARD=1`,
+  one line per 1/60 s frame, output `target/parity/trace/<name>.tsv`.
+- `trace-compare.ps1 -Name <name> [-Epsilon <units>]` - interpolates the port path to the retail sample
+  times and prints per-sample `d_xy`/`d_z` plus the sector sequence; without `-Epsilon` it reports, with
+  it the exit code is the verdict.
+
+The retail clock is **held-key time, not wall time**. Reading `coords` goes through the dev-console
+dialog, and that dialog pauses the game - a "hold W and poll" walk moves only in the gaps between
+polls, which is why the trace is built from hold segments: activate the game window (verify it is
+foreground), hold the key for exactly `HoldMs`, release, then read the pose while the game is frozen.
+`held_ms` is the sum of those segments. The port is deterministic by construction: capture-mode
+`--shot` pins `dt` at 1/60 s and `BK_WALK_FORWARD` replaces the keyboard, so a rerun is identical.
+
+Formats (tab separated, `#` comments allowed):
+
+```text
+<name>-walk.tsv    held_ms  x  y  z  sector  yaw        (retail; one row per hold segment)
+<name>.tsv         tick  t_s  x  y  z  sector  vy  health  shields   (port; one row per frame)
+```
+
+First measured leg (`walk_cantina`, 2.4 s of held forward, 2026-10-28):
+
+- start poses agree exactly (0.000 at `held_ms` 0) - the eye/warp convention matches retail's;
+- **z is 0.055 low at every moving sample** - the port's walking body settles to `floor + radius`
+  while retail keeps the authored pose (`floor + model height`). This is the idle-only attachment
+  ceiling in the deviation ledger, now measured against retail instead of asserted;
+- **x/y diverges with distance travelled**: retail covers 2.17 units in 2.4 s (0.9 u/s) where the
+  port covers 1.06 (0.44 u/s), and retail enters sector 103 while the port is still in 254. The
+  port's derived speed (`maxthrust / surfdrag` = 0.667 u/s) is under retail's, and its effective
+  acceleration is slower still; `walkplayer maxvel=1.0` is the likely law. That is the next movement
+  fix, not a harness problem. Retail's own samples are a little irregular (`coords` latency and the
+  refocus dance); the comparison reports per-sample deltas and marks samples where retail is stopped.
+
+Dense per-tick tracing (the fallback the roadmap's Phase 0.5 step 4 names) is not needed yet: segment
+density is enough for the first comparison, and the Frida `sithThing_SetPositionAndOrient` hook is the
+plan if a finer trace is required.
 ## Known limitations / follow-ups
 
 - **Triage, not equality.** Retail runs its 16-bit DirectDraw/D3D path, translated by dgVoodoo2 to

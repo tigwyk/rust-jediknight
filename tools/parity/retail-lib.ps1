@@ -61,6 +61,10 @@ public static class JkRetail {
   public static void KeyHold(ushort scan, bool extended, int holdMs) {
     One(scan, true, extended); System.Threading.Thread.Sleep(holdMs); One(scan, false, extended);
   }
+  // Press and release separately, for a key held across other console work (`-WalkTraceMs`): a
+  // focus change can drop the game's key state, so the trace re-presses after each `coords` poll.
+  public static void KeyDown(ushort scan, bool extended) { One(scan, true, extended); }
+  public static void KeyUp(ushort scan, bool extended) { One(scan, false, extended); }
   // Scancode + virtual-key pair: needed to type into normal Win32 controls (the dev-console
   // Edit box) because only the virtual key produces WM_CHAR there.
   static void OneVk(ushort vk, ushort scan, bool down, bool extended) {
@@ -157,6 +161,23 @@ function Send-JkKey {
   if (-not $script:JkScan.ContainsKey($key)) { throw "no scancode for key '$Name'" }
   $extended = $script:JkExtended -contains $key
   [JkRetail]::Key([ushort]$script:JkScan[$key], $extended)
+}
+
+# Press / release without the tap's delay, for a key that has to stay down across console work.
+# The game drops key state when its window loses focus (the dev console dialog takes it), so a
+# caller holding a movement key re-presses it after each poll.
+function Send-JkKeyDown {
+  param([Parameter(Mandatory)][string]$Name)
+  $key = $Name.ToUpperInvariant()
+  if (-not $script:JkScan.ContainsKey($key)) { throw "no scancode for key '$Name'" }
+  [JkRetail]::KeyDown([ushort]$script:JkScan[$key], ($script:JkExtended -contains $key))
+}
+
+function Send-JkKeyUp {
+  param([Parameter(Mandatory)][string]$Name)
+  $key = $Name.ToUpperInvariant()
+  if (-not $script:JkScan.ContainsKey($key)) { throw "no scancode for key '$Name'" }
+  [JkRetail]::KeyUp([ushort]$script:JkScan[$key], ($script:JkExtended -contains $key))
 }
 
 # Slow, held typing: the in-game T console drops keys sent faster than this (NOTES.md).

@@ -57,7 +57,15 @@ param(
   [string]$WorkCopy = 'target/parity/retailcopy',
   [int]$SeriesFrames = 8,
   [int]$LevelTimeoutSec = 45,
-  [switch]$Software
+  [switch]$Software,
+  # Phase 0.5 trace v0, retail half: after the level loads (and any warp) hold the forward key in
+  # undisturbed 600 ms segments, reading `coords` in between, and write <name>-walk.tsv into
+  # target/parity/trace. 0 keeps the normal screenshot captures.
+  [int]$WalkTraceMs = 0,
+  # Which key the walk trace holds (default W; UP is the engine's own forward binding).
+  [string]$WalkTraceKey = 'UP',
+  # Row names to run (default: every row of the shots file). A trace run uses one row.
+  [string[]]$Only = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -81,6 +89,8 @@ if ($GamePath) { $GamePath = Resolve-FromRepo $GamePath }
 $script:DisplayStatePath = Join-Path $repoRoot 'target/parity/display-pre.json'
 
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
+$script:TraceOut = Resolve-FromRepo 'target/parity/trace'
+New-Item -ItemType Directory -Force -Path $script:TraceOut | Out-Null
 $script:LogPath = Join-Path $Out 'retail.log'
 function Log([string]$Message) { Write-JkLog -Message $Message -LogPath $script:LogPath }
 
@@ -314,6 +324,72 @@ function Read-JkCoords {
   return $null
 }
 
+# `-WalkTraceMs`: hold the forward key in undisturbed segments and read `coords` between them.
+#
+# This is Phase 0.5 trace v0's retail half. The dev console is a **dialog**: while it has focus the
+# game's clock stops advancing, so a naive "hold the key and poll" walk is a sequence of frozen
+# instants, not a continuous one. The trace is therefore built from hold segments: each one walks for
+# `HoldMs` of real (== game) time with the game window focused and no console traffic, then the pose
+# and sector are read while the game is frozen. The `held_ms` column is the sum of the hold
+# segments - the game time the body actually walked - not wall time.
+#
+# The port replays the same thing with `--trace-out` and `BK_WALK_FORWARD=1` (fixed 1/60 s step), and
+# `tools/parity/trace-compare.ps1` compares the two at the segment times.
+function Invoke-JkWalkTrace {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][string]$Name,
+    [int]$Milliseconds = 3000,
+    [int]$HoldMs = 600,
+    [string]$Key = 'UP'
+  )
+  $path = Join-Path $script:TraceOut ("{0}-walk.tsv" -f $Name)
+  $segments = [math]::Max(1, [int][math]::Floor($Milliseconds / $HoldMs))
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add((@("held_ms", "x", "y", "z", "sector", "yaw") -join ([char]9)))
+  $start = Read-JkCoords -ProcessId $ProcessId
+  if (-not $start) { throw 'walk trace: the start pose could not be read from coords' }
+  Log ("walk trace: start " + $start.Raw)
+  $lines.Add((@(0, $start.Pos[0], $start.Pos[1], $start.Pos[2], $start.Sector, $start.Pyr[1]) -join ([char]9)))
+  $samples = 0
+  # Held down across the whole trace and re-asserted after each poll: pressing and releasing per
+  # segment let the body coast down between segments and read as if it had stopped. The poll itself
+  # pauses the game (the console is a dialog), so holding through it costs nothing.
+  Send-JkKeyDown -Name $Key
+  try {
+    for ($i = 1; $i -le $segments; $i++) {
+      # Foreground matters: DirectInput reads the keyboard only while the game window is active, and
+      # reading `coords` through the console dialog takes the foreground away. Activate it and wait
+      # until it really is foreground, then hold: the segment moves for exactly `HoldMs`.
+      $gameWindow = Get-JkWindow -ProcessId $ProcessId
+      for ($attempt = 0; $attempt -lt 8; $attempt++) {
+        if ($gameWindow -eq [IntPtr]::Zero) { break }
+        [void][JkRetail]::ShowWindow($gameWindow, 9)
+        [void][JkRetail]::SetForegroundWindow($gameWindow)
+        Start-Sleep -Milliseconds 120
+        if ([JkRetail]::ForegroundTitle() -eq 'Jedi Knight') { break }
+      }
+      Send-JkKeyDown -Name $Key
+      Start-Sleep -Milliseconds $HoldMs
+      Send-JkKeyUp -Name $Key
+      $held = $i * $HoldMs
+      $sample = Read-JkCoords -ProcessId $ProcessId
+      if (-not $sample) {
+        Log ("walk trace: segment $i produced no parseable coords line")
+        continue
+      }
+      $samples++
+      $lines.Add((@($held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $sample.Pyr[1]) -join ([char]9)))
+      Log ("walk trace: {0} ms held at ({1:N3}, {2:N3}, {3:N3}) sector {4}" -f $held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector)
+      Send-JkKeyDown -Name $Key
+    }
+  } finally {
+    Send-JkKeyUp -Name $Key
+  }
+  Set-Content -LiteralPath $path -Value $lines -Encoding utf8
+  Log ("walk trace: wrote $path ({0} sample(s) over {1} x {2} ms of held forward)" -f $samples, $segments, $HoldMs)
+  return $path
+}
 # Wait until FFmpeg reports the game window as bright (the Players screen is a bright static frame;
 # the intro movies are dark). Returns the luma average or $null.
 function Wait-JkBrightScreen {
@@ -534,6 +610,14 @@ function Invoke-JkCaptureRow {
       Log "warp command: $warp"
       $null = Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command $warp
       Start-Sleep -Milliseconds 900
+    }
+
+    # Phase 0.5 trace v0: a trace run replaces this row's screenshot captures (the `finally` below
+    # still closes the game and restores the desktop).
+    if ($WalkTraceMs -gt 0) {
+      $tracePath = Invoke-JkWalkTrace -ProcessId $process.Id -Name $name -Milliseconds $WalkTraceMs -Key $WalkTraceKey
+      Log "walk trace mode: skipped the screenshot series/reference for '$name' (wrote $tracePath)"
+      return
     }
 
     # Time series: capture the first seconds after the level becomes visible. These are kept as
@@ -809,7 +893,13 @@ Log "saved desktop mode baseline: $script:DisplayStatePath"
 
 Invoke-JkStaging -Source $GamePath -Destination $WorkCopy
 
-foreach ($row in $rows) {
+$selected = if ($Only.Count -gt 0) {
+  @($rows | Where-Object { $Only -contains $_.Name })
+} else { $rows }
+if ($selected.Count -eq 0) { throw ("-Only matched no row; the shots file has: " + (($rows | ForEach-Object { $_.Name }) -join ', ')) }
+Log ("selected rows: " + (($selected | ForEach-Object { $_.Name }) -join ', '))
+
+foreach ($row in $selected) {
   try {
     Invoke-JkCaptureRow -Row $row
   } catch {
