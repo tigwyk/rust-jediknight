@@ -1987,3 +1987,15 @@ therefore need one of the two remaining routes: a savegame whose recorded level 
 parses/writes the format in `src/jks.rs`, so the shape is known) or the retail campaign transition
 (play level 1 through its exit). `-JkArgs` stays in the harness for future engine parameters; the
 absence is now proved for both the console and the command line.
+
+**The retail console has 30 commands and no level loader (round 62).** `help` prints the whole
+vocabulary: `players coords trackshots ping kick tick session help disableai notarget outline
+disablepuppet cogtrace coglist cogstatus noaishots aistatus ailist fly mem dynamicmem memdump invul
+cogpause matlist warp activate slowmo jump version team framerate dispstats kill endlevel`. `endlevel`
+is there but **does not advance the campaign**: run at the cantina pose with no argument and with
+`1`, then waiting 9 s and 15 s, the body is still in level 1 (sector 254, same pose) - so it is not
+the transition trigger. With the console (round 60) and command line (round 61) both proved closed,
+Phase 2's only routes are a retail **savegame recorded in the next level** or playing level 1 to its
+own exit. The vocabulary list is saved as `tools/parity/dev-console-commands.txt`; `cogtrace`/`coglist`/
+`ailist` are the notable debug tools for Phase 1's trigger work (message tracing), and `activate` is
+the console twin of the engine's activation verb.

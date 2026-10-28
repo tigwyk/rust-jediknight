@@ -289,6 +289,15 @@ PASS  walk_street90  port  1.84 / retail  2.21 units (   83%)  sectors off 2
 PASS  walk_cantina   port  1.85 / retail  2.17 units (   85%)  sectors off 2
 trace gate: 3 leg(s), 0 failure(s)
 ```
+### The retail dev console's full vocabulary
+
+`help` in the retail console lists every command (saved as
+[dev-console-commands.txt](dev-console-commands.txt)): `players coords trackshots ping kick tick
+session help disableai notarget outline disablepuppet cogtrace coglist cogstatus noaishots aistatus
+ailist fly mem dynamicmem memdump invul cogpause matlist warp activate slowmo jump version team
+framerate dispstats kill endlevel`. There is **no level-loading command**; `endlevel` does not advance
+the campaign. `cogtrace`/`coglist`/`ailist` are the useful message/AI tracing tools for Phase 1's
+trigger work.
 ## Status commands (`cogstatus`, `aistatus`)
 
 Phase 0.5 step 2 pins the two dev-console status formats from the decomp and captures retail output:
