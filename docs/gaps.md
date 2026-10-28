@@ -1829,3 +1829,17 @@ sector. The `0.7` split is the heuristic that makes low ledges walkable (its com
 fix is to treat steep solid faces (|nz| between ~0.7 and 1.0 with a horizontal component) as walls
 in the sweep too - a classification change in one place, with `walk_cantina` as the repro and
 `walk_street45`/`walk_street90` as the regression fixtures.
+
+**The ramp is swept; the body creeps through it because the contact is placed with the 3D normal
+(round 46).** Classifying steep solid faces as walls too changes nothing (trace still 0.42 units to
+the same corner, 143 tests pass), and that is consistent with the build comment: every solid face is
+already in the sweep list `faces`, so surface 2473 *is* swept - round 43's trace shows the body
+hitting it at `travelled -0.0000` with normal (0, 0.45, -0.89). The body is therefore *touching* the
+ramp and creeping through it: the contact is resolved against the **3D** normal, but horizontal motion
+only needs the **horizontal** part of the normal - a steep face's xy normal is 0.45 long, so a body
+placed at `contact = plane + normal * radius` is only `radius * 0.45` clear of the face in plan, and
+each sub-step's contact lets it slide a little further south. Retail's body holds at y -3.03 (a full
+radius from the face in plan). Both the classification attempt and the earlier slide normalization
+only fixed half of that, which is why they changed nothing; the fix is to resolve the **horizontal
+penetration** of a swept contact in plan (`contact_xy + horizontal_normal * radius`) as well as the
+3D contact.
