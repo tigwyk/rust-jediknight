@@ -1758,3 +1758,14 @@ from the **destination floor height** (its floor pass re-sweeps at `range = move
 contact point, so the fix is to replace the `low` predicate with "the floor ahead is within `step` of
 the feet" (`floor_under` at the contact point, compare its height, then lift). That is a small
 change in `move_body`'s blocked branch, and this instrumentation is now in the tree to verify it.
+
+**The cantina block is a genuine wall in the port where retail passes (round 40).** The floor-based
+step decision (the engine rule: search just past the contact for a floor within `step` of the feet)
+was implemented and measured - the trace is **byte-identical** again (0.42 units, same end position),
+which means the blocked branch was never a step at all: the port's geometry has a solid face across
+the route the retail body walks through. The earlier `--surfaces-at` probe filtered by distance from
+the *start* point and would miss a slanted polygon whose vertices sit further away but whose plane
+crosses the path; the next probe must intersect faces against the **path segment** from
+(-2.2, -2.9) to (-2.6, -3.2), not a radius around one point. The floor-based step change is reverted
+(it needs its own gate run before landing, and it does not affect this leg); the instrumentation from
+round 39 stays in the tree.
