@@ -1966,3 +1966,14 @@ That is a useful negative fixture: the port must reproduce the same idle state f
 and the fixture is saved as `tools/parity/cogstatus0-after-streetwalk-01narshadda.txt`. The trigger
 that does fire cog 0 still needs finding (its `door0 = 4` names a thing, and the level's doors answer
 `activate`/`blocked` messages from their linked sides).
+
+**Retail exposes no console command to load another level (round 60).** A full scan of the staged
+`JK.EXE`'s printable strings finds the cog verbs `jkendlevel`/`endlevel` and every load-related GUI
+string, but no plain load/`level` console command; the decomp's console table has none either. So the
+retail harness cannot yet boot `02narshadda.jkl` for Phase 2's spawn audit: the options are a
+command-line level argument (unverified), a savegame whose recorded level is 2, or the retail
+campaign transition. The port side is already able to reach level 2 (`--complete-after`, the campaign
+graph's `01narshadda.jkl -> 02narshadda.jkl`), so once retail's load path is found the level-2 spawn
+pair is a two-capture job. Until then Phase 2's breadth work stays on level 1 + the port-only level
+audits (`--check`-family gates), which is why this round spends its budget proving the absence rather
+than guessing at a command that does not exist.
