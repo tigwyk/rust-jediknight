@@ -2102,3 +2102,15 @@ deletes `_JKAUTO_*.jks` from the scratch copy before every run - JK autosaves du
 launch can resume that pose instead of the level start, which would silently corrupt every capture
 (the door walk's 339 start was partly this). Both fixes are in; the door fixture is one clean pose
 away.
+
+**The switch's logic is in its script, and `--raw` dumps it (round 71).** `bevi-knight --raw
+cog\00_doorswitch.cog out` writes the shipped script verbatim, so a trigger's exact semantics are now
+readable instead of guessed. `00_doorswitch.cog` says: the switch opens its doors on the **`activated`
+message from sender id 2** (the player's use action; sender 1 plays the locked sound), it re-closes
+after `arrived` + `sleeptime`, and `blocked` reopens. Its visible effects are `setwallcel(switch0, 1)`,
+`sectoradjoins(doorsector, 1)` and a light change - i.e. the *adjoin* opens and the switch texture
+swaps cels, which is the state a port check must reproduce. The earlier key experiments failed because
+the use action needs the player's use control, not any of the keys we injected; the sender-id rule
+also means a trigger fires only when the *surface* linked with `linkid=2` is used. Both scripts are
+saved as fixtures (`tools/parity/cog-00_doorswitch.txt`, `cog-00_door.txt`) and `--raw` is the tool
+for reading the rest.
