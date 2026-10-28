@@ -2128,3 +2128,16 @@ band failed on retail's own variance. All four legs pass: street45 100%, street9
 door0 stop-pose. The door cog itself stays closed on both sides (its `blocked` handler needs the
 engine's blocked-message path, not a walk-by), so no interaction state changed - that path is the
 still-open Phase 1 step 4 question.
+
+**The retail profile is text, and it holds the key bindings (round 73).** `Lee.plr` carries ASCII
+`bind <slot> <virtual-key> <flags> [<scale>]` lines - the same format the engine's writer emits
+(`sithControl_WriteConf` prints `bind %d %d 0x%x`). The file has **88 bindings**: flags 0x2 press,
+0x6 release, 0x5 mouse press, 0x1/0x9/0xd analog with a scale; keys are Windows VK codes (200/208 =
+Up/Down, 17 = Ctrl, 1 = left mouse). Extracted as `tools/parity/player-bindings.txt`, which is what
+lets the harness inject the *actual* use binding instead of guessing keys - the last round's five
+key guesses were blind because the slot-to-action mapping is not in the profile; the game's own
+input layer is. Also confirmed this round: the **`blocked` message is only sent by a *moving* thing**
+whose animation is obstructed (`sithActor_thing_anim_blocked` measures the obstructing body in front
+and answers with `blocked`), so a body walking into a closed door can never fire a door's `blocked`
+handler - the door must be opened by `activate`, which is the use action. That closes the last
+alternative for the door trigger.
