@@ -1854,3 +1854,12 @@ units** (0.28 to 0.76 u/s; retail 2.17 / 0.91) and **no longer falls** - it ends
 (3.574 vs the wall at 3.265): the push also applies to a slanted face on that approach, so the
 contact resolution needs the same treatment for shallow faces (or the push should only fire when the
 horizontal normal dominates the vertical one). 143 tests and 61/61 engine gates pass with the change.
+
+**The street90 slowdown is the push fighting a shallow slope (round 48).** With the plan-clearance
+push in place, `walk_street90` walks at 1.38 u/s until t=1.5 s (x 4.62 -> 3.93) and then crawls
+(0.14 u/s for half a second, 0.24 later): a **shallow** slanted face around x 3.9 pushes the contact
+back every sub-step instead of letting the step-up path climb it. Bounding the push to steep faces
+(`|n_xy| < 0.6`; the cantina ramp is 0.45) is the right refinement, but the attempted edit broke the
+file's brace balance this round and was reverted rather than left half-applied. The cantina fix and
+the street45 match stand (`walk_cantina` 1.83 units vs retail 2.17, no falls; `walk_street45` 2.21 vs
+2.20); the next attempt should make the bounded-push edit against the read block in one pass.
