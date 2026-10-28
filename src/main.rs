@@ -4860,6 +4860,7 @@ fn main() {
                     "AISetMoveThing",
                     &[cog::Value::Num(actor as f64), cog::Value::Num(player as f64)],
                 );
+                let yaw_before_tick = rt.things[actor].yaw;
                 rt.ai_tick(player, 1.0 / 30.0);
                 let taken = rt.ai_route.get(&actor).cloned().unwrap_or_default();
                 let first = taken.first().copied();
@@ -4890,14 +4891,23 @@ fn main() {
                 );
                 assert!(drained_at.is_some(), "the route never drained: a waypoint is not popped");
                 // The tick may pick a different (equally short) doorway than the gate's search did,
-                // because a point can sit in two hulls; what must hold is that it turned toward the
-                // doorway it kept.
+                // because a point can sit in two hulls; what must hold is that the body *turned
+                // toward* the doorway it kept. The turn is rate-limited now (`maxrotthrust` over the
+                // surface drag), so the witness is the first tick's rotation toward it, not the yaw
+                // minutes later — by then the actor faces its final leg.
                 if let Some(centre) = first {
-                    let want_yaw = (centre[1] - a_pos[1]).atan2(centre[0] - a_pos[0]).to_degrees();
-                    let yaw = rt.things[actor].yaw;
+                    let want = (centre[1] - a_pos[1]).atan2(centre[0] - a_pos[0]).to_degrees();
+                    let off = |yaw: f32| {
+                        let mut d = (yaw - want).abs() % 360.0;
+                        if d > 180.0 {
+                            d = 360.0 - d;
+                        }
+                        d
+                    };
+                    let after = rt.things[actor].yaw;
                     assert!(
-                        (yaw - want_yaw).abs() < 5.0,
-                        "the follower did not turn toward its first doorway ({yaw:.0} vs {want_yaw:.0})"
+                        off(after) < off(yaw_before_tick) - 0.5 || off(after) < 5.0,
+                        "the follower did not turn toward its first doorway ({after:.0} vs {want:.0}, was {yaw_before_tick:.0})"
                     );
                 }
                 rt.ai_chase.remove(&actor);
@@ -5010,12 +5020,24 @@ fn main() {
                 "AISetLookPos",
                 &[cog::Value::Num(actor as f64), cog::Value::Vec(look.map(f64::from))],
             );
-            println!("  debug: look {:?} move {:?} chase {:?} last {:?}", rt.ai_look.get(&actor), rt.ai_move.get(&actor), rt.ai_chase.get(&actor), rt.ai_last_seen.get(&actor));
-            rt.ai_tick(player, 1.0 / 30.0);
+            // The turn is rate-limited (`maxrotthrust / drag`), so it takes a few ticks to arrive.
+            let off = |a: f32, b: f32| {
+                let mut d = (a - b).abs() % 360.0;
+                if d > 180.0 {
+                    d = 360.0 - d;
+                }
+                d
+            };
+            for _ in 0..600 {
+                rt.ai_tick(player, 1.0 / 30.0);
+                if off(rt.things[actor].yaw, 90.0) < 1.0 {
+                    break;
+                }
+            }
             let facing = rt.things[actor].yaw;
             println!("  scripted: AISetLookPos -> now facing {facing:.0} deg (+90 is +Y)");
             assert!(
-                (facing - 90.0).abs() < 1.0,
+                off(facing, 90.0) < 1.0,
                 "AISetLookPos did not turn the actor to face +Y ({facing:.1} deg)"
             );
         }
@@ -16755,7 +16777,7 @@ fn ai_probe(
     world: Option<Res<World>>,
     sim: Option<Res<Sim>>,
     mut player: Option<ResMut<Player>>,
-    mut state: Local<(u32, u8, usize)>,
+    mut state: Local<(u32, u8, usize, [f32; 3])>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if !probe.enabled {
@@ -16782,18 +16804,41 @@ fn ai_probe(
             let Some(pos) = sim.world.borrow().things.get(actor).map(|t| (t.pos, t.sector)) else {
                 return;
             };
-            // Three units in front, inside the usual `sightdist`, facing it so it can see a face.
-            player.pos = Vec3::new(pos.0[0], pos.0[1] - 3.0, pos.0[2]);
+            // Three units in front of the actor **along its own facing**, so the first shot is a
+            // firing check and not a turning one: an AI body turns at `maxrotthrust / surfdrag`
+            // (about 23 degrees a second for a Ree-Yees gunner, 60 for a human), which after the
+            // turn-rate port was faithfully slower than this probe's frame budget.
+            // Three units in front of the actor **along its own facing**, so the test is a firing
+            // check rather than a turning one: an AI body turns at `maxrotthrust / surfdrag` (about
+            // 23-60 degrees a second), and a spot it has to find first is a different test.
+            let facing = sim
+                .world
+                .borrow()
+                .things
+                .get(actor)
+                .map(|t| t.yaw.to_radians())
+                .unwrap_or(0.0);
+            let stand = [
+                pos.0[0] + facing.cos() * 3.0,
+                pos.0[1] + facing.sin() * 3.0,
+                pos.0[2],
+            ];
+            player.pos = Vec3::from(stand);
             player.sector = pos.1.max(0) as usize;
             player.yaw = std::f32::consts::FRAC_PI_2;
             player.vy = 0.0;
+            state.3 = stand;
             state.2 = sim.world.borrow().shots_fired;
             state.1 = 1;
             state.0 = 0;
             println!("ai-live: the body stands 3 units from actor {actor}");
         }
         1 => {
-            if state.0 < 90 {
+            // Hold the body where it was put: it is a probe, and this level puts the spot over a
+            // drop — the body falls a unit and out of the actor's sight before it can turn.
+            player.pos = Vec3::from(state.3);
+            player.vy = 0.0;
+            if state.0 < 600 {
                 return;
             }
             let (shots, health) = {
@@ -16811,7 +16856,7 @@ fn ai_probe(
             if shots > 0 {
                 println!("--- ai-live check passed ---");
             } else {
-                println!("ai-live: FAIL no actor fired at the body in 90 frames");
+                println!("ai-live: FAIL no actor fired at the body in 600 frames");
             }
             exit.write(AppExit::Success);
         }

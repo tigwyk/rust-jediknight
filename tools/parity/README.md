@@ -108,17 +108,17 @@ state (adds with the engine's clamps, the 0.4/s decay, the damage flash — unit
 (a fullscreen palette pass on the world camera that scales the finished picture's bytes by
 `1 + tint/2`; a 1.0 red tint measures ×1.52). The rows stay `UNGRADED` at 0.45/0.42 for a different
 reason: retail's own 1 s series turns red at ~5–6 s and its settled reference at ~10 s is saturated
-(r/g 2.0), while the port's 10 s capture now takes **6 hits (72 damage)** and draws only a weak tint
-(the red crop mean moves 46 → 51–63) — the damage is a third of retail's and the doorway geometry
-dominates that pair. At the catwalk the port also cannot stand its body on the catwalk *model* —
-that is a solid thing, not a sector floor, so the body falls out of the level. Those are named engine
-gaps (Phase 1 steps 3 and 5), not renderer tolerance (see `docs/gaps.md` §5.9).
+(r/g 2.0), while the port's 10 s capture now lands **15 hits** (≈165 damage, the body left at 29
+health) and draws red 46 → 67 — the state is close, the picture is not: retail's reference is a
+deeper red and the doorway framing dominates that pair. At the catwalk the port cannot stand its body
+on the catwalk *model* (a solid thing, not a sector floor), so the body leaves the pose — a named
+engine gap (Phase 1 step 3). Those are gaps, not renderer tolerance (see `docs/gaps.md` §5.9).
 
 The numbers are tied to the capture policy above (600 frames, window from the retail sidecar, default
 16-bit retail renderer) — changing framing or frame count invalidates them.
 
 The gate needs a retail install and captured references on the machine, so it is a developer check, not
-a CI job; the port's own 141 tests and 61 gates remain the CI-able surface.
+a CI job; the port's own 142 tests and 61 gates remain the CI-able surface.
 
 ## The shot list: `tools/parity/shots.tsv`
 
@@ -254,9 +254,9 @@ Everything below was verified against the GOG build (the harness works on a scra
   log says who hit whom; `BK_AI_TRACE=1` prints every actor-frame that has line of sight to the body
   (range, dot, `ready`); `BK_AI_ROSTER=1` dumps every actor near the body once — AI class, cone test,
   line of sight and how far off its facing the body is, which is the fastest way to see why a room is
-  quiet. At level 1's door: the capture now lands 6 real hits on the body (32 shots); the rest fall into a
+  quiet. At level 1's door: the capture now lands 15 hits on the body (41-47 shots); the rest fall into a
   Greedo standing in the lines; the roster shows 56 armed actors within 8 units, all with a clear line,
-  most facing >100° away. (They turn onto a target they have now: an actor keeps its aim while walking
+  most facing >100° away. (They turn onto a target they have now - rate-limited by `maxrotthrust` - and a side-mate's shot tells the rest where it is: `sithAIAwareness` modelled; an actor keeps its aim while walking
   and the chase keeps its class's `Follow` standoff.)
 - **Retail script coverage:** the menu coordinates and key timing are tied to the GOG build (and
   to `player\Lee\Lee.plr`); a different build/player may need the constants updated.

@@ -655,6 +655,27 @@ pub fn rotate_by_angles(v: [f32; 3], pitch: f32, yaw: f32, roll: f32) -> [f32; 3
         r[2] * v[0] + l[2] * v[1] + u[2] * v[2],
     ]
 }
+/// Turn `before` toward `wanted` by at most `rate * dt` degrees, taking the short way round.
+///
+/// The engine turns a thing with `maxrotthrust=`, an angular rate; snapping the yaw instead made
+/// every AI face the player the moment it noticed them, so engagements started and finished faster
+/// than retail's.
+fn turn_toward(before: f32, wanted: f32, rate: f32, dt: f32) -> f32 {
+    let mut delta = (wanted - before + 180.0).rem_euclid(360.0) - 180.0;
+    let limit = rate.max(0.0) * dt.max(0.0);
+    if delta.abs() > limit {
+        delta = limit * delta.signum();
+    }
+    before + delta
+}
+
+/// How far a fired shot tells an actor on the same side where the target is, and for how long.
+/// The engine propagates awareness through sector adjoins with attenuation
+/// (`sithAIAwareness_ProcessEvent`); that attenuation data is not recovered, so a flat radius stands
+/// in - a deliberate ceiling, measured on the door and catwalk captures.
+pub const AI_AWARE_RADIUS: f32 = 3.0;
+pub const AI_AWARE_SECONDS: f32 = 8.0;
+
 pub struct Runtime {
     pub things: Vec<ThingState>,
     /// Template name per thing, for `GetThingTemplate`.
@@ -1001,6 +1022,11 @@ pub struct Runtime {
     /// Where an actor last had the player in view (`sithAI`'s last known position). Losing sight
     /// means "walk there", and arriving clears it.
     pub ai_last_seen: BTreeMap<usize, [f32; 3]>,
+    /// `sithAIAwareness`: a position other actors of the same side were told about, and when. A
+    /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
+    /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
+    /// alert lands on buyers within a radius and expires (see `AWARE_RADIUS`/`AWARE_SECONDS`).
+    pub ai_aware: BTreeMap<usize, ([f32; 3], f32)>,
     /// Per actor, the doorway centres it is walking through when its straight line is walled off,
     /// from `Collision::route`. A waypoint is popped on arrival, and a scripted destination starts
     /// again with an empty route.
@@ -1023,6 +1049,9 @@ pub struct Runtime {
     /// An actor template's walking speed, `maxthrust / surfdrag` — the same conversion `Rules`
     /// uses for the player.
     pub template_speed: BTreeMap<String, f32>,
+    /// An actor template's turn rate, `maxrotthrust=` in degrees a second (`_actor` 180, a Ree-Yees
+    /// gunner 70). The body turns at this rate; it does not snap.
+    pub template_turn: BTreeMap<String, f32>,
     /// Redbook music: `(start track, end track, loop-back track)` as `PlaySong` set it.
     pub music: Option<(i32, i32, i32)>,
     /// `jkEndLevel(flag)`: the level is finished; the campaign advances when the app notices.
@@ -1511,6 +1540,7 @@ impl Runtime {
             ai_look: BTreeMap::new(),
             ai_route: BTreeMap::new(),
             ai_last_seen: BTreeMap::new(),
+            ai_aware: BTreeMap::new(),
             ai_fire_target: BTreeMap::new(),
             ai_flee: BTreeMap::new(),
             ai_classes: BTreeMap::new(),
@@ -1523,6 +1553,22 @@ impl Runtime {
                 .iter()
                 .map(|t| {
                     let thrust = level.template_f32(&t.name, "maxthrust").unwrap_or(0.0);
+                    let drag = level
+                        .template_f32(&t.name, "surfdrag")
+                        .filter(|d| *d > 0.0)
+                        .unwrap_or(3.0);
+                    (t.name.to_ascii_lowercase(), thrust / drag)
+                })
+                .collect(),
+            // `maxrotthrust` is an angular *thrust*, not a rate: the engine's `ApplyDrag` decays
+            // rotation the same way it decays velocity, so the steady turn is `maxrotthrust / drag`
+            // — a Ree-Yees gunner's 70 over the same `surfdrag` 3 is 23 degrees a second, which is
+            // what spaces retail's engagements out (its door series is still neutral at 8 s).
+            template_turn: level
+                .templates
+                .iter()
+                .map(|t| {
+                    let thrust = level.template_f32(&t.name, "maxrotthrust").unwrap_or(180.0);
                     let drag = level
                         .template_f32(&t.name, "surfdrag")
                         .filter(|d| *d > 0.0)
@@ -2495,6 +2541,16 @@ impl Runtime {
             thing.ai_wait = (thing.ai_wait - dt).max(0.0);
             let ready = thing.ai_wait <= 0.0;
             let (from, yaw) = (thing.pos, thing.yaw);
+            // `maxrotthrust=` is the angular rate the body can turn at (50-85 degrees a second for
+            // level 1's gunners). Snapping the yaw let every actor face the player the instant it
+            // noticed them, which is what made the port's fights start and finish faster than
+            // retail's; the turn is accumulated here and clamped once, below.
+            let turn_rate = self
+                .template_turn
+                .get(&ai_template)
+                .copied()
+                .unwrap_or(180.0);
+            let mut want_yaw = yaw;
             // A scripted destination wins over the chase: `AISetMovePos`/`AISetMoveThing` are how
             // `00_AIPatrol.cog` and the sidekick scripts walk a puppet somewhere. `AISetMoveThing`
             // keeps a *thing* rather than a point, and the engine re-reads its position every tick
@@ -2521,7 +2577,7 @@ impl Runtime {
                 let range = (sx * sx + sy * sy).sqrt().max(1e-4);
                 let (sin, cos) = yaw.to_radians().sin_cos();
                 eprintln!(
-                    "ai: sees {index} range {range:.2} dot {:.2} ready {ready} from {from:?} target {target:?}",
+                    "ai: sees {index} range {range:.2} dot {:.2} ready {ready} yaw {yaw:.1} rate {turn_rate:.1} from {from:?} target {target:?}",
                     (cos * sx + sin * sy) / range
                 );
             }
@@ -2539,25 +2595,39 @@ impl Runtime {
             if sighted {
                 self.ai_last_seen.insert(index, target);
             }
-            let remembered = self.ai_last_seen.get(&index).copied();
-            if scripted.is_none() && !sighted && aim.is_none() && remembered.is_none() {
+            // `sithAIAwareness`'s record is a *position*, which is used exactly like a last-seen
+            // one: the actor turns and walks there, and the fight reaches it without it having seen
+            // anything itself.
+            let remembered = self.ai_last_seen.get(&index).copied().or_else(|| {
+                self.ai_aware
+                    .get(&index)
+                    .filter(|(_, at)| self.time - at < AI_AWARE_SECONDS)
+                    .map(|(at, _)| *at)
+            });
+            // `AIFlee(actor, from)`: the actor runs away from that thing and does not shoot, which
+            // is a whole mode in the engine (`sithAI_Flee`). It is a script's order, so it does not
+            // need sight or a memory — read before the "nothing to do" return below, or a fleeing
+            // actor that has lost the player just stands there.
+            let fleeing = self
+                .ai_flee
+                .get(&index)
+                .and_then(|t| self.things.get(*t).map(|t| t.pos));
+            if scripted.is_none()
+                && !sighted
+                && aim.is_none()
+                && remembered.is_none()
+                && fleeing.is_none()
+            {
                 // Out of sight and nothing remembered: the actor stands where it is, turning to a
                 // scripted look target.
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.ai_target = None;
                     if let Some(yaw) = look_yaw {
-                        thing.yaw = yaw;
+                        thing.yaw = turn_toward(thing.yaw, yaw, turn_rate, dt);
                     }
                 }
                 continue;
             }
-            // `AIFlee(actor, from)`: the actor runs away from that thing and does not shoot, which
-            // is a whole mode in the engine (`sithAI_Flee`); here the goal is the opposite
-            // direction, ten units out.
-            let fleeing = self
-                .ai_flee
-                .get(&index)
-                .and_then(|t| self.things.get(*t).map(|t| t.pos));
             if let Some(threat) = fleeing {
                 let away = [from[0] - threat[0], from[1] - threat[1]];
                 let len = (away[0] * away[0] + away[1] * away[1]).sqrt().max(0.001);
@@ -2578,7 +2648,8 @@ impl Runtime {
                     if let Some(thing) = self.things.get_mut(index) {
                         thing.pos = next;
                         thing.ai_target = Some(goal);
-                        thing.yaw = away[1].atan2(away[0]).to_degrees();
+                        thing.yaw =
+                            turn_toward(thing.yaw, away[1].atan2(away[0]).to_degrees(), turn_rate, dt);
                     }
                     walked += 1;
                     self.walked.push(index);
@@ -2657,9 +2728,9 @@ impl Runtime {
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.pos = next;
                     thing.ai_target = Some(goal);
-                    if facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4 {
-                        thing.yaw = facing.1.atan2(facing.0).to_degrees();
-                    }
+                }
+                if facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4 {
+                    want_yaw = facing.1.atan2(facing.0).to_degrees();
                 }
                 walked += 1;
                 self.walked.push(index);
@@ -2692,11 +2763,11 @@ impl Runtime {
                 thing.ai_target = None;
                 // The same aim rule while standing: a target in sight wins over a scripted look.
                 if sighted {
-                    thing.yaw = (target[1] - from[1]).atan2(target[0] - from[0]).to_degrees();
+                    want_yaw = (target[1] - from[1]).atan2(target[0] - from[0]).to_degrees();
                 } else if let Some(yaw) = look_yaw {
-                    thing.yaw = yaw;
+                    want_yaw = yaw;
                 } else if reach > 0.001 {
-                    thing.yaw = dy.atan2(dx).to_degrees();
+                    want_yaw = dy.atan2(dx).to_degrees();
                 }
             }
             // Standing on the remembered spot and finding nobody there forgets the target — the
@@ -2725,6 +2796,12 @@ impl Runtime {
             //   intArg[9] ms between burst shots
             // so a `peddefault.ai` gunner and a `rydefault.ai` one fire at different rates, from
             // different ranges and with different accuracy — as the shipped files say.
+            // The one clamp for this frame's desired facing: `maxrotthrust * dt`. It has to happen
+            // for every active actor, not just the ones about to fire — an actor that is still
+            // turning spends most frames behind its `ai_wait` and would never rotate otherwise.
+            if let Some(thing) = self.things.get_mut(index) {
+                thing.yaw = turn_toward(yaw, want_yaw, turn_rate, dt);
+            }
             let shooting_at = aim.unwrap_or(target);
             let can_see = if aim.is_some() { true } else { sighted };
             if !can_see || !ready {
@@ -2797,12 +2874,41 @@ impl Runtime {
                 }
             }
         }
+        let mut shooters: Vec<usize> = Vec::new();
         for (index, weapon, error) in shots {
             if self.fire_spread(index as i64, &weapon, error).is_some() {
                 // The renderer plays a puppet's `fire` track off this: the engine's
                 // `sithPuppet_UpdateThingMove` picks the action track while the actor is shooting.
                 self.last_shot.insert(index, self.time);
+                shooters.push(index);
                 fired += 1;
+            }
+        }
+        // `sithAIAwareness_CreateTransmittingEvent`/`ProcessEvent`: firing tells the shooter's own
+        // side where the target is. The engine keeps a record per sector, propagates it through
+        // adjoins while the strength stays above its floor and fades it with distance; neither the
+        // per-adjoin attenuation nor the reader is recovered, so a flat radius around the target
+        // stands in below (a deliberate ceiling, measured on the door/catwalk captures).
+        self.ai_aware
+            .retain(|_, (_, at)| self.time - *at < AI_AWARE_SECONDS);
+        if !shooters.is_empty() {
+            let roster: Vec<(usize, f32)> = self.ai.iter().map(|(i, a)| (*i, a.alignment)).collect();
+            for shooter in shooters {
+                let Some(side) = self.ai.get(&shooter).map(|a| a.alignment) else { continue };
+                let dx = target[0] - self.things.get(shooter).map(|t| t.pos[0]).unwrap_or(target[0]);
+                let dy = target[1] - self.things.get(shooter).map(|t| t.pos[1]).unwrap_or(target[1]);
+                let _ = (dx, dy);
+                for (actor, alignment) in &roster {
+                    if *actor == shooter || (alignment - side).abs() > 1e-3 {
+                        continue;
+                    }
+                    let Some(thing) = self.things.get(*actor) else { continue };
+                    let (ax, ay) = (thing.pos[0] - target[0], thing.pos[1] - target[1]);
+                    if (ax * ax + ay * ay).sqrt() > AI_AWARE_RADIUS {
+                        continue;
+                    }
+                    self.ai_aware.insert(*actor, (target, self.time));
+                }
             }
         }
         let _ = walked;
@@ -6409,6 +6515,17 @@ mod tests {
         assert!((height / radius - 2.8).abs() < 0.01, "height follows the shipped models");
         assert_eq!(rt.template_hit["_actor"].0, 0.065);
         assert_eq!(rt.template_hit["barething"].0, 0.065, "an unnamed size keeps the player's");
+    }
+
+    /// `maxrotthrust / surfdrag` degrees a second, the short way round: a body that is 60 degrees
+    /// off turns 10 degrees in a 0.6 s frame at a 16 deg/s rate rather than snapping onto its aim.
+    #[test]
+    fn a_body_turns_at_its_own_rate() {
+        assert!((turn_toward(0.0, 60.0, 16.0, 0.6) - 9.6).abs() < 1e-4);
+        assert!((turn_toward(0.0, 5.0, 16.0, 0.6) - 5.0).abs() < 1e-4, "a small turn is reached");
+        // The short way: 350 -> 10 is +20, not -340.
+        assert!((turn_toward(350.0, 10.0, 100.0, 0.1) - 360.0).abs() < 1e-4);
+        assert!((turn_toward(10.0, 350.0, 100.0, 0.1)).abs() < 1e-4);
     }
 
     #[test]

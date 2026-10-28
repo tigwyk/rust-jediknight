@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 141 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 142 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -406,6 +406,30 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    hit ever** (actor 255). The pair scores do not move yet (door 0.4175, catwalk 0.4538): retail's tint
    is *saturated* at the shutter (r/g 2.0) and needs ~10 damage/s, while the port still only gets there
    in bursts — so the remaining gap is the AI's engagement rate, not the hit rules.
+
+   **The room wakes up, and the body turns at its own rate (2026-10-28).** The engagement rate was the
+   last two rounds' named gap, and two engine mechanisms close most of it:
+
+   - **`sithAIAwareness`**: firing tells the shooter's own side where the target is. The engine keeps a
+     record per sector, walks the adjoin graph while the attenuation stays above its floor, and the AI
+     reads it; the per-adjoin attenuation (`sithAdjoin +0x18`) and the reader are not in the recovered
+     source, so a flat **3-unit, 8-second** record stands in (deviation ledger). An actor that receives
+     one uses it exactly like a remembered position: it turns and walks there and joins the fight.
+   - **`maxrotthrust`** is an angular *thrust*, not a rate: `ApplyDrag` decays rotation the way it
+     decays velocity, so the turn is `maxrotthrust / surfdrag` — 23 deg/s for a Ree-Yees gunner, 60 for
+     a human. Snapping the yaw made every AI face the player the instant it noticed them; the port's
+     fights therefore started and finished faster than retail's. `turn_toward` clamps the turn per
+     frame, with a unit test.
+
+   Measured on the door capture (600 frames): **41–47 shots and 15 hits** (≈165 damage, the body left
+   at **29 health** where retail's own HUD at ~10 s reads 56), up from 32 shots and 6 hits; the body
+   survives the window and the frame is red (crop red mean 46 → 67). The catwalk body is hit too. The
+   pair scores do not move (door 0.417, catwalk 0.449): retail's reference is a deeper red and the
+   doorway framing dominates that pair, so the rows stay ungraded on picture, not on state.
+
+   The gate run also caught a real bug: `AIFlee` was ignored by the "out of sight and nothing
+   remembered" early return, so a fleeing actor that had lost the player stood still. The flee lookup is
+   now read *above* that return.
 
    **The room starts shooting (2026-10-28).** Two engine-backed corrections, both in `ai_tick`:
 
