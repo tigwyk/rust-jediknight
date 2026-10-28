@@ -142,7 +142,13 @@ function Invoke-JkStaging([string]$Source, [string]$Destination) {
   }
 
   # The scratch profile (never the real install) gets cutscenes disabled.
-  $plr = Join-Path $Destination 'player\Lee\Lee.plr'
+  # Stale autosaves are a trap: JK writes `_JKAUTO_<level>.jks` during play, and the next run resumes that
+# state instead of the level's spawn pose - a warp then arrives at the wrong body and the trace measures
+# nothing (which is how the door walk ended up starting in sector 339). The scratch copy is disposable,
+# so clear them before every capture.
+Get-ChildItem -Path (Join-Path $Destination 'player') -Recurse -Filter '_JKAUTO_*.jks' -ErrorAction SilentlyContinue |
+  ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force; Log "removed stale autosave $($_.Name)" }
+$plr = Join-Path $Destination 'player\Lee\Lee.plr'
   if (-not (Test-Path -LiteralPath $plr)) { throw "scratch player profile missing: $plr" }
   $text = Get-Content -LiteralPath $plr -Raw
   if ($text -match '(?m)^disablecutscenes\s+\S+') {

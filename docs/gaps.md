@@ -2089,3 +2089,16 @@ rejected pose and the trace it produced rather than guessing again.
 Also: the port's link tables are now proven to be populated by the shared `wire_links` call (the
 `--links` verb needed an explicit `wire_links` before printing, which is why the first run printed
 zero links - `Runtime::handle` alone does not wire them).
+
+**The door warp fails because (1.20, 8.60) is over a floor gap, and stale autosaves were a second
+trap (round 70).** The port's own surface data explains the rejected pose: the upper floor near the
+door exists at **z 6.200** in sectors 210 (`x 0.15..1.15, y 8.15..8.65`), 327/328
+(`x 1.25..1.55`) and the door's own 74/75/76 (`x 1.19..1.25, y 9.55..9.75`) - so x 1.15..1.25 at
+y 8.6 is a **gap between floor polygons**, and the engine refuses a warp to a point with no floor
+(it leaves the player at a deterministic fallback pose, sector 339, which is what all three runs
+showed). The fix is to warp onto a real polygon: `(0.80, 8.40, 6.237)` (sector 210) or
+`(1.30, 9.00, 6.237)` (sector 328), then walk north through the doorway. Separately, the harness now
+deletes `_JKAUTO_*.jks` from the scratch copy before every run - JK autosaves during play and the next
+launch can resume that pose instead of the level start, which would silently corrupt every capture
+(the door walk's 339 start was partly this). Both fixes are in; the door fixture is one clean pose
+away.
