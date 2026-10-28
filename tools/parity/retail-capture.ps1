@@ -25,7 +25,10 @@ param(
   [string[]]$JkArgs = @(),
   # Keys to press after the warp and before the console commands (e.g. 'ENTER' for the use action).
   # Phase 1 step 4's interaction probes need this: a switch is used, not walked into.
-  [string[]]$Keys = @()
+  [string[]]$Keys = @(),
+  # Stop on the Single Player submenu and save a screenshot, so Load Game's coordinates can be read
+  # off it (the harness otherwise clicks New Game and never shows the submenu).
+  [switch]$StopAtMenu
 )
 
 $ErrorActionPreference = 'Stop'
@@ -637,6 +640,22 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     Send-JkClick -X 320 -Y 195
     Start-Sleep -Milliseconds 1500
     Log 'clicked Single Player (320,195)'
+    if ($StopAtMenu) {
+      $menuPng = Join-Path $Out 'single-player-menu.png'
+      # Menus do not answer F12 (that binding is in-game), so grab the window itself.
+      Add-Type -AssemblyName System.Drawing
+      $rect = [JkRetail]::WindowRectText((Get-JkWindow -ProcessId $process.Id))
+      if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
+        $w = [int]$Matches[3] - [int]$Matches[1]; $h = [int]$Matches[4] - [int]$Matches[2]
+        $bmp = New-Object System.Drawing.Bitmap($w, $h)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen([int]$Matches[1], [int]$Matches[2], 0, 0, (New-Object System.Drawing.Size($w, $h)))
+        $bmp.Save($menuPng, [System.Drawing.Imaging.ImageFormat]::Png)
+        $g.Dispose(); $bmp.Dispose()
+      }
+      Log "stopped on the Single Player submenu; wrote $menuPng"
+      return
+    }
     Send-JkClick -X 304 -Y 115
     Start-Sleep -Milliseconds 1000
     Log 'clicked New Game (304,115)'

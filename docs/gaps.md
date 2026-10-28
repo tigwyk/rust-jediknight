@@ -2227,3 +2227,14 @@ flags=0x2000` - Phase 1 step 6's "carried state" is now a gate rather than an im
 and the whole suite is **143 tests, 62/62 gates**. The remaining step-6 item is the retail-side
 comparison (level 2's state after a real transition), which is the same boot problem the ledger's
 retail-trigger deviation records.
+
+**The Single Player submenu has a Load entry, and the harness can photograph menus (round 81).**
+`-StopAtMenu` stops on the submenu and saves a window screenshot - menus do not answer F12 (that
+binding is in-game), so the new path grabs the window with `Graphics.CopyFromScreen` over the window
+rect. The captured 640x480 menu (saved as `tools/parity/retail-single-player-menu.png`) shows
+**New Game** centred at (320,103), **Load** at **(534,103)**, **[Debug]** at (105,102) and **Cancel**
+at (320,443). That Load entry is the route to a savegame: a save whose recorded level is 2 could boot
+level 2 in retail, which is the one remaining way past the closed console and command-line routes.
+The next step is to click Load, photograph the save list, and then drive the list from the harness.
+The click helper's existing New Game coordinate (304,115) sits inside the New Game item, so the
+menu geometry is consistent with the layout here.
