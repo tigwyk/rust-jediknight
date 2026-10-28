@@ -6006,7 +6006,28 @@ fn main() {
                 .unwrap_or_default()
         };
         for (cog, link, surface) in &rt.surface_links {
-            println!("surface {surface:5} -> cog {cog:3} link {link:3}  {}", script_of(*cog));
+            // The face's centre, so a use-action probe knows exactly where to stand and aim.
+            let at = world
+                .level
+                .surfaces
+                .get(*surface)
+                .map(|face| {
+                    let mut sum = [0.0f32; 3];
+                    for (index, _) in &face.verts {
+                        if let Some(v) = world.level.vertices.get(*index as usize) {
+                            sum[0] += v[0];
+                            sum[1] += v[1];
+                            sum[2] += v[2];
+                        }
+                    }
+                    let n = face.verts.len().max(1) as f32;
+                    [sum[0] / n, sum[1] / n, sum[2] / n]
+                })
+                .unwrap_or([f32::NAN; 3]);
+            println!(
+                "surface {surface:5} -> cog {cog:3} link {link:3}  at {:.2},{:.2},{:.2}  {}",
+                at[0], at[1], at[2], script_of(*cog)
+            );
         }
         for (cog, link, thing) in &rt.thing_links {
             // The level's own thing list, not the runtime's: `Runtime::things` is in a different order

@@ -2166,3 +2166,17 @@ surfaces 2409/2403 (`linkid=2`), and its `doorsector` (74, from retail's own cog
 thing 56 stands. The `9` key at that switch and at the upper door still changes nothing, so the last
 step is injecting the **middle mouse button** for use; the harness's `Click` is left-button-only and
 needs a `MouseButton` method.
+
+**Synthetic mouse input does not fire the cantina switch (round 76).** The harness can now press mouse
+buttons (`JkRetail.MouseButton` + `MoveTo`, since *mouse* events follow the cursor while keyboard
+events follow the foreground window; `-Keys MOUSEMIDDLE` positions the cursor at the game window's
+centre first). At the exact aim pose the `--links` centroids give - surface 2409/2403 centres
+**(-4.29, -3.88, -1.15)** and **(-4.29, -3.62, -1.15)**, things 56/57 at (-4.75, -3.75)/(-4.45,
+-3.75) - a middle click and the `9` key both leave cog 11 at `doorstatus 0` after a 1.5 s wait. So
+either DirectInput ignores SendInput-generated mouse events (keyboard injection works, so only the
+mouse path differs), or the use binding is not what the profile implies. The port side is already
+verified (`--adjoins`: 42 scripts run, 7 doorways shut by their own `SetSectorAdjoins` calls), so the
+retail trigger capture is now a **ledger deviation** with its measurement and a retire condition
+(synthetic mouse reaches the switch, or a keyboard-only trigger is found) rather than an open-ended
+question. The `--links` verb also prints surface centroids now, which is the aim-pose tool for any
+future trigger capture.

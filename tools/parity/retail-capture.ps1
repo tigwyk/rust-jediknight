@@ -665,8 +665,21 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
 
     if ($Keys.Count -gt 0) {
       foreach ($key in @($Keys | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })) {
-        Log "pressing $key after the warp"
-        Send-JkKey -Name $key
+        if ($key -like 'MOUSE*') {
+          # Put the cursor in the game window first: mouse events land on whatever is under it.
+          $rect = [JkRetail]::WindowRectText((Get-JkWindow -ProcessId $process.Id))
+          if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
+            $cx = ([int]$Matches[1] + [int]$Matches[3]) / 2
+            $cy = ([int]$Matches[2] + [int]$Matches[4]) / 2
+            [JkRetail]::MoveTo([int]$cx, [int]$cy)
+            Start-Sleep -Milliseconds 120
+          }
+          Log "pressing $key after the warp (cursor $cx,$cy)"
+          Send-JkMouseButton -Button ($key -replace '^MOUSE', '')
+        } else {
+          Log "pressing $key after the warp"
+          Send-JkKey -Name $key
+        }
         Start-Sleep -Milliseconds 300
       }
     }

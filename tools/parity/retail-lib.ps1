@@ -76,6 +76,20 @@ public static class JkRetail {
   public static void KeyVk(ushort vk, ushort scan, bool extended) {
     OneVk(vk, scan, true, extended); System.Threading.Thread.Sleep(40); OneVk(vk, scan, false, extended);
   }
+  // Mouse-button press for the in-game action bindings: JK defaults are fire = left, alt-fire =
+  // right, use = middle (the profile encodes them as DirectInput 0x100/0x101/0x102).
+  // Mouse events go to the window **under the cursor** (keyboard goes to the foreground window), so a
+  // button press must first put the cursor inside the game window.
+  public static void MoveTo(int x, int y) { SetCursorPos(x, y); System.Threading.Thread.Sleep(60); }
+  public static void MouseButton(int button, bool down) {
+    uint flag = 0;
+    switch (button) {
+      case 1: flag = down ? 0x0002u : 0x0004u; break;
+      case 2: flag = down ? 0x0008u : 0x0010u; break;
+      case 3: flag = down ? 0x0020u : 0x0040u; break;
+    }
+    if (flag != 0) { mouse_event(flag, 0, 0, 0, UIntPtr.Zero); }
+  }
   public static void Click(int x, int y) {
     SetCursorPos(x, y); System.Threading.Thread.Sleep(150);
     mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero); System.Threading.Thread.Sleep(80);
@@ -201,6 +215,19 @@ function Send-JkTextSlow {
     [JkRetail]::KeyHold([ushort]$script:JkScan[$name], $extended, $HoldMs)
     Start-Sleep -Milliseconds $GapMs
   }
+}
+
+function Send-JkMouseButton {
+  param([Parameter(Mandatory)][string]$Button, [int]$HoldMs = 120)
+  $code = switch ($Button.ToUpperInvariant()) {
+    'LEFT' { 1 }
+    'RIGHT' { 2 }
+    'MIDDLE' { 3 }
+    default { throw "unknown mouse button '$Button'" }
+  }
+  [JkRetail]::MouseButton($code, $true)
+  Start-Sleep -Milliseconds $HoldMs
+  [JkRetail]::MouseButton($code, $false)
 }
 
 function Send-JkClick {
