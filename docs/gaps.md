@@ -1938,3 +1938,11 @@ all covered. So the remaining cogstatus-0 differences are a display ceiling, not
 `ponytail:` give the VM an ordered symbol table (or expose the assignment order in `Trace`) when a
 fixture needs byte-exact cog 0; the engine's own behaviour is unaffected, and `--cogstatus 1` already
 matches its retail fixture byte-for-byte.
+
+**Phase 1 step 3's movement trace is gated (round 57).** `tools/parity/trace-gate.ps1` records the
+port's walk traces and fails when a leg's displacement leaves the harness noise band or when more
+than 2 of its sector samples disagree; all three fixtures pass: `walk_street45` 2.21 vs retail 2.20
+with **0 sector samples off**, `walk_street90` 1.84 vs 2.21 (83%, harness clock), `walk_cantina`
+1.85 vs 2.17 (85%) - the cantina leg that was pinned in a wall corner and falling a few rounds ago.
+The gate's tolerances and their reasons are in the script header, so a rule change (speed, basis,
+collision) fails while the harness's timing noise does not.

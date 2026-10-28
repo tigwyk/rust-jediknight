@@ -265,6 +265,22 @@ release - the later segments are the steady ones.
 Dense per-tick tracing (the fallback the roadmap's Phase 0.5 step 4 names) is not needed yet: segment
 density is enough for the first comparison, and the Frida `sithThing_SetPositionAndOrient` hook is the
 plan if a finer trace is required.
+## Movement trace gate (Phase 1 step 3)
+
+`trace-gate.ps1` records the port's walk traces and checks them against the retail fixtures
+(`walk-shots.tsv` legs). It fails when a leg's displacement leaves the harness's noise band (port
+travel between 75% and 125% of retail's) or when more than 2 of its 600 ms sector samples disagree.
+Both numbers are documented in the script header with their reasons: retail's trace clock is held-key
+game time (its first segment carries deceleration coast, so its average runs high) and the samples are
+600 ms apart against 60 Hz traces.
+
+```powershell
+powershell -NoProfile -File tools/parity/trace-gate.ps1
+PASS  walk_street45  port  2.21 / retail  2.20 units (  100%)  sectors off 0
+PASS  walk_street90  port  1.84 / retail  2.21 units (   83%)  sectors off 2
+PASS  walk_cantina   port  1.85 / retail  2.17 units (   85%)  sectors off 2
+trace gate: 3 leg(s), 0 failure(s)
+```
 ## Status commands (`cogstatus`, `aistatus`)
 
 Phase 0.5 step 2 pins the two dev-console status formats from the decomp and captures retail output:
