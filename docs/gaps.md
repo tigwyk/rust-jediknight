@@ -2060,3 +2060,18 @@ wall, or it fires when a body **touches** its thing while walking through sector
 3.6 s cantina walk reaches). The next probe is positional: a yaw-180 leg from the switch-side warp
 that walks south into the thing, with `cogstatus 11` after it. Harness change is committed with the
 findings (`-Keys`, letters).
+
+**Touching the cantina switch does not fire it either (round 68).** A yaw-180 walk from the
+switch-side warp moves the body from (-4.75, -2.95) to **(-4.750, -3.670) sector 59** and stops -
+0.08 units from the switch thing at (-4.75, -3.75) - yet cog 11 still reads `doorstatus 0 /
+movestatus 0 / open_doors 0 / close_doors 0` afterwards. Together with round 67's five key presses,
+that rules out both a touch trigger and a use-key trigger from the reachable side: the switch's
+linked surfaces (2409/2403) must be used from the *other* face of the wall (the sector-103 side the
+warp starts in), i.e. the player has to stand in 103, aim at those surfaces and use. Also checked:
+**no `sector` link** covers the sectors this walk crosses (254/58/103/155/156/271), so there is no
+`entered` trigger on the route either. Better next targets, both near the spawn: the elevator
+(`00_std_elev.cog` 1, thing 6 at -0.70,-4.95,-1.36, surfaces 839/854 as its adjoins) whose timers
+(`start_wait 0.25`, `sleeptime 2`, `speed 4`) make its state change on a clock rather than a touch,
+and the bartender/sector-linked cogs (28, 29) for `entered` events. Fixtures:
+`tools/parity/walktrace-switch-01narshadda.tsv`,
+`tools/parity/cogstatus11-after-switchwalk-01narshadda.txt`.

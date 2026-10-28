@@ -24,3 +24,8 @@ walk_street45	01narshadda	5.474939	-1.899975	0.657119	0	45.000000
 # blocking, no drift, three sectors.
 walk_street90	01narshadda	5.474939	-1.899975	0.657119	0	90.000000
 walk_street0	01narshadda	5.474939	-1.899975	0.657119	0	0.000000
+
+# walk_switch: from the switch-side warp, walk south into the cantina door switch thing (cog 11).
+# Phase 1 step 4's positional trigger probe: the use key did nothing from 0.8 units, so the switch
+# is expected to fire on touch (thing link) rather than on use.
+walk_switch	01narshadda	-4.75	-2.95	-1.143	0	180.000000

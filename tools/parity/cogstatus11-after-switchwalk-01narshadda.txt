@@ -1,0 +1,12 @@
+> cogstatus 11
+  Symbol 14: 'doorstatus'  = 0
+  Symbol 15: 'movestatus'  = 0
+  Symbol 16: 'garbage'  = -1
+  Symbol 17: 'dummy'  = 0
+  Symbol 18: 'startup'  = 3
+  Symbol 19: 'activated'  = 1
+  Symbol 20: 'arrived'  = 11
+  Symbol 21: 'blocked'  = 5
+  Symbol 22: 'checkstatus'  = 0.000000
+  Symbol 23: 'open_doors'  = 0.000000
+  Symbol 24: 'close_doors'  = 0.000000
