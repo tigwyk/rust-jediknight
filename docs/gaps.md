@@ -1651,3 +1651,14 @@ yaw convention is right but the **movement basis is rotated by ~45 degrees again
 walk_target/forward conversion, not collision, is the defect that lets the body drift into the
 wall's corner and step over it. Next: compare `walk_target`'s yaw->direction conversion with the
 camera's (the parity gate is the control), then fix the movement side and re-run this leg.
+
+**The movement basis matches the decomp, so the retail observation needs a decisive probe
+(round 29).** `yaw_axes` at yaw 45 returns forward `(-sin 45, cos 45)` = `(-0.707, +0.707)`, which is
+exactly the port's measured `move_body` delta - and it is transcribed from `FUN_0043fcf0`/`FUN_004c56b0`
+(the camera looks along column 1, so a level yaw `a` faces `(-sin a, cos a)`). The port is therefore
+moving the way its own decompiled basis says, while retail at the same `coords` yaw moved pure -x
+with y fixed. Either retail's `coords` yaw is the *view* yaw and its body yaw differs, or the
+`warp` command's argument order in the harness puts the yaw somewhere else. The decisive probe is
+cheap: two retail traces on the same flat spot at **yaw 0 and yaw 90**, and read which world axis
+the body actually travels along; that pins the retail yaw->movement mapping without any more code.
+The port side needs no change until that answer exists.
