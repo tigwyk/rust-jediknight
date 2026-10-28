@@ -1701,3 +1701,16 @@ street route - the first route where the body's path, speed and sector sequence 
 blocked in the port at the start (the body faces furniture/geometry retail walks past) - the next
 movement question, and it is a different cause from the street stop.
 The parity gate is unchanged (6/6 thresholds, 8 pairs, 0 failures).
+
+**The cantina leg is blocked from its first sub-step (round 34).** `BK_WALK_TRACE` on `walk_cantina`
+shows `blocked true` on **all 152** sub-steps: the body still slides a little (moved 0.003-0.004 per
+step) but never frees up, and by the end it moves 0.000 while z drifts downward - it is pinned against
+something at the route_cantina pose that retail walks away from (retail covers 2.17 units, the port
+0.42). Nothing about the speed rule: retail and the port share the basis. Two candidate causes, both
+checkable without another retail run: (a) a blocker the port's hull extraction has that retail does
+not - `--surfaces-at "-2.2,-2.9,-1.1"` lists the faces there; (b) the **player radius**: `Rules::
+radius` multiplies the template's `size=0.065` by `MODEL_SCALE` and the level-1 walkplayer gives
+10x the authored 0.065 - if the port's hull sweep uses 0.65 while retail's sphere is 0.065, tight
+rooms pin the body exactly like this, and the street legs' 3.265 stop (3.20 + 0.065) hints the
+effective radius may already be the small one somewhere. Next: print `Rules::radius` on level 1 and
+run `--surfaces-at` at the cantina pose - one command each, no retail needed.
