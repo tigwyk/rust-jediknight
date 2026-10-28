@@ -1791,3 +1791,16 @@ loop (`bounce == 2`, the step-retry rejection, or a `sweep` that keeps reporting
 0 for a reason the slide math cannot see). The definitive tool is a per-bounce print inside
 `move_body` (bounce index, travelled, `into`, slide mag, resulting `dir`, `at`, `left`) - one run then
 names the exit instead of another guess. Change reverted; tree byte-identical to the last green commit.
+
+**The cantina body is falling into a gap while wedged (round 43).** The bounce instrumentation names
+the stuck state exactly: at (-2.545, -3.135, z drifting -1.039 -> -1.074 and down) every bounce hits
+a distance-0 contact with normal **(1,0,0)** (a vertical wall to its west) and then **(0,1,0)** (a
+wall to its south) - the body is in a corner and **sinking** (z falls 0.008 per sub-step while pinned),
+i.e. the vertical sweep finds no floor there: the port's body walked off the edge of the cantina
+floor into a gap. Retail at the same pose stays on the floor (z 0.620 throughout, y stops at -3.03).
+Normalizing the horizontal normal before the 2D slide (an arithmetic improvement, since a slanted
+face's 3D normal is shorter in xy) changes nothing here - the corner contacts are axis-aligned - so
+the slide was never the problem: the remaining defect is a **floor/ledge seam** south-west of the
+cantina pose, the same class the `floor_under` comment describes (a walkway slab in a sector nothing
+below links to). The revert restores the last green state; the next probe is the floor under that
+point (`floor_under`/`--surfaces-at` with z ranges around -1.3 and lower).
