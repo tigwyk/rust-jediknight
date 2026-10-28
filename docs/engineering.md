@@ -221,7 +221,7 @@ espawn= seconds (checked in --pickup). Not yet: pickup sounds, real inventory ma
 ate= per second floored at mindamage=): level 1''s bolt is 30 damage dropping to 10 over 1.33 s (§16.5). Not yet: explosions, ammo, force power effects, a body that falls |
 | actors animate | working: each placed actor plays its puppet's `stand` keyframe at the keyfile's own 15 fps on its own mesh, rebuilt only when the frame number changes; `--animate` checks the rendered vertices across every material — **1684 of 1697** actors move over the loop (§16.3), and `actor_state` picks `walk`/`run`/`walkback`/`strafe` from the velocity the actor walked at, plus `fire`/`hit`/`turn` |
 | cutscenes (`.smk`) | **it plays**: 25 files, 483 MB, 29,493 frames, all 640×300 at 15.2 fps (`--smk`); the decoder is `SMACKW32.DLL` (71 KB, named exports recovered), not JK.EXE. The VFS finds them through the `Resource/VIDEO` mount, `--cutscene` plays them once in the window in colour, and the known limit is 29 of 768 palette bytes against libsmacker (§16.9) — stage 8 |
-| level collision + adjoin (portal) traversal | working: a walker stays inside the level's own sectors, and a passage a script shut (a force field, a closed door's sector) is a wall |
+| level collision + adjoin (portal) traversal | working: a walker stays inside the level's own sectors, and a passage a script shut (a force field, a closed door's sector) is a wall. A **solid thing's model is a floor**: the loader registers each solid template's model top and footprint (`set_template_floors`, `collide=` through the template chain) and a body falls onto and attaches to it within `GetThingHeight * 1.1` (`thing_floor`, `--warp`, `BK_WARP_TRACE`), which is how level 1's catwalk pose stops dropping the body out of the level |
 | player motion | working: walk/run/back/strafe/crouch, jump and water derived from the level's own `walkplayer` template chain, gravity scaled from the level, and water halving movement from the floor's surface flags (§16.2); level 1 walks at 0.667 u/s (`maxthrust/surfdrag`), jumps to a 0.28-unit apex in 0.75 s. `--rules` prints the table, the level's flagged-surface counts, and checks the integrated jump against the closed form. Step-up is implemented: `move_body` retries a blocked move from one step up (`moveSize + 0.01` = 0.066 units) and keeps the raised result only when `support` finds a floor there, so a riser is climbed and a wall three times the allowance blocks (§16.2) |
 | sector visibility | working: one batch per (sector, material) + a per-frame clip-plane test, with **portal occlusion on** — the portal graph is symmetric and the seed is the candidate whose walk best covers the frustum, and the culled frame is 0.000% different from `--no-cull` over 230,400 sampled pixels (level 1's spawn: 21 of 462 sectors in the frustum, 11 hidden) (§16.1) |
 
@@ -707,10 +707,10 @@ is why it was recoverable.
 
 Every check in one page: [docs/gates.txt](gates.txt) records each flag and what it printed
 against this install; the sweep now is **61 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
-`0 of 61 failed, 9 skipped`), plus 142 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
+`0 of 61 failed, 9 skipped`), plus 143 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
 
 [CI](../.github/workflows/ci.yml) runs on Windows: it installs the MSRV from `Cargo.toml`, builds
-with `--locked`, runs the 142 unit tests, builds the i686 film helper, produces the native
+with `--locked`, runs the 143 unit tests, builds the i686 film helper, produces the native
 `setup.exe` as an artifact, and checks every relative documentation link. The 61 gates are not
 in CI on purpose — they require a retail game install, which the repository does not ship and
 CI does not download.

@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 142 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 143 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -430,6 +430,31 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    The gate run also caught a real bug: `AIFlee` was ignored by the "out of sight and nothing
    remembered" early return, so a fleeing actor that had lost the player stood still. The flee lookup is
    now read *above* that return.
+
+   **A body stands on a solid model (2026-10-28).** `sithCollision` treats a **thing's own model** as
+   solid for every body, so a `_walkstruct` (catwalk, crate, lift platform) is a floor. The port's
+   surface sweep only knew the level's own faces, so level 1's catwalk pose had `support None`: the
+   body fell out of the level while retail's `coords` held the pose for the whole capture. Two engine
+   rules close it:
+
+   - the loader now registers each **solid** template's (`collide=` non-zero through the chain) model
+     top and footprint from the model it draws (`set_template_floors`), and `Runtime::thing_floor`
+     answers "is there a solid thing under this body"; a **falling** body lands on it at `top + radius`
+     (the same sphere rule as any floor), with the landing band one frame's fall so a body standing
+     *under* a table is not teleported onto it;
+   - `sithPhysics_FindFloor` attaches a body to a surface it is within `GetThingHeight * 1.1` of, and
+     `sithThing_AttachThingToSurface` records the attachment **without moving the body** — which is why
+     retail's `warp` body stays at its authored pose over the catwalk. The idle attachment now counts a
+     solid thing's top in that reach, so the port's warped body holds the retail pose exactly
+     (2.8201141 at the catwalk, retail `coords` 2.857114 eye − 0.037).
+
+   The engine's height is the model's own insert offset (`sithPhysics_GetThingHeight` falls back to
+   `insertOffset.z`; `ky.3do` 0.120114, which is exactly how far the level's authored `walkplayer`
+   placements sit above their floor — level 1's spawn body is 0.120114 over z −1.25). That also settles
+   the attachment reach. Measured: `route_catwalk` 0.4493 → **0.4603** (the body no longer leaves the
+   pose), the other seven pairs unchanged, `--gates` 61/61 and 143 tests green. A **walking** body still
+   settles at `top + radius` (0.08 below retail's idle pose at the catwalk); the resting-height rule is
+   the movement/attachment port, not this floor probe, and is on the deviation ledger.
 
    **The room starts shooting (2026-10-28).** Two engine-backed corrections, both in `ai_tick`:
 

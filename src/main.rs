@@ -13775,6 +13775,29 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
             .collect(),
     );
 
+    // A solid thing's own model is a collider: `sithCollision` treats a thing's surfaces as solid for
+    // every body, which is how a body stands on a catwalk slab, a crate or a lift platform. The surface
+    // sweep only knows the level's faces, so the loader hands the runtime each **solid** template's
+    // model top and footprint (`solid_radius` is the engine's `collide=` rule). Model space is world
+    // space here — the mesh is drawn at the thing's position with its own coordinates.
+    runtime::set_template_floors(
+        template_model
+            .iter()
+            .filter(|(template, _)| runtime::solid_radius(&level, template).is_some())
+            .filter_map(|(template, model)| {
+                let model = models.get(model)?;
+                let pose = tdo::pose_nodes(model, None, 0.0);
+                let (lo, hi) = bounds(model, &pose);
+                (hi[2] > lo[2]).then(|| {
+                    (
+                        template.clone(),
+                        (hi[2], lo[0].abs().max(hi[0].abs()), lo[1].abs().max(hi[1].abs())),
+                    )
+                })
+            })
+            .collect(),
+    );
+
     Ok(World {
         palette: <[[u8; 3]; 256]>::try_from(palette.0).unwrap_or([[0u8; 3]; 256]),
         level,
@@ -20345,7 +20368,31 @@ fn setup(
         near.sort_by(|a, b| a.0.total_cmp(&b.0));
         for (d, template, solid) in near.iter().take(10) {
             match solid {
-                Some(r) => println!("near: {d:5.2} `{template}` solid, radius {r:.3}"),
+                Some(r) => {
+                    // The thing's model top, which is the surface a body would stand on: the mesh is
+                    // drawn at the thing's position with the model's own coordinates.
+                    let top = world
+                        .template_model
+                        .get(&template.to_ascii_lowercase())
+                        .and_then(|name| world.models.get(name))
+                        .map(|model| {
+                            let pose = tdo::pose_nodes(model, None, 0.0);
+                            bounds(model, &pose).1[2]
+                        });
+                    let at = level
+                        .things
+                        .iter()
+                        .find(|t| t.template.eq_ignore_ascii_case(template))
+                        .map(|t| t.pos)
+                        .unwrap_or([0.0; 3]);
+                    match top {
+                        Some(top) => println!(
+                            "near: {d:5.2} `{template}` solid, radius {r:.3}, top {:.3}",
+                            at[2] + top
+                        ),
+                        None => println!("near: {d:5.2} `{template}` solid, radius {r:.3}"),
+                    }
+                }
                 None => println!("near: {d:5.2} `{template}` passable"),
             }
         }
@@ -20517,6 +20564,40 @@ fn setup(
         println!(
             "walker: warped the player to {start:?} (eye {at:?}) facing {yaw:.1} deg, sector {sector}"
         );
+        // `BK_WARP_TRACE=1`: what is placed around the warped body, with the top of each solid thing's
+        // model — the surface a body would stand on.
+        if std::env::var_os("BK_WARP_TRACE").is_some() {
+            for thing in &world.level.things {
+                let d = ((thing.pos[0] - start[0]).powi(2)
+                    + (thing.pos[1] - start[1]).powi(2)
+                    + (thing.pos[2] - start[2]).powi(2))
+                .sqrt();
+                if d > 3.0 {
+                    continue;
+                }
+                let top = world
+                    .template_model
+                    .get(&thing.template.to_ascii_lowercase())
+                    .and_then(|name| world.models.get(name))
+                    .map(|model| {
+                        let pose = tdo::pose_nodes(model, None, 0.0);
+                        let (lo, hi) = bounds(model, &pose);
+                        (hi[2], lo[2])
+                    });
+                println!(
+                    "warp: {d:5.2} `{}` at {:?} solid {:?} insert {:?} model z {:?}",
+                    thing.template,
+                    thing.pos,
+                    runtime::solid_radius(&world.level, &thing.template),
+                    world
+                        .template_model
+                        .get(&thing.template.to_ascii_lowercase())
+                        .and_then(|name| world.models.get(name))
+                        .map(|m| m.insert_offset),
+                    top.map(|(hi, lo)| (hi + thing.pos[2], lo + thing.pos[2]))
+                );
+            }
+        }
     }
     // A sector with a low ceiling still bounds it below, so a body in a crawlspace does not put the camera
     // through the roof.
@@ -21789,10 +21870,26 @@ fn walk_player(
     // `sithPhysics_UpdateAttachedThingPhysics` half of the movement port (docs/gaps.md §2); until
     // that lands, a player who starts walking settles 0.055 lower at this spot.
     let idle = forward == 0.0 && strafe == 0.0;
+    // The engine's `FindFloor` also finds a **solid thing's** surfaces (`sithCollision` treats a
+    // thing's model as solid), and `AttachThingToSurface` records the attachment without moving the
+    // body — which is why retail's `warp` body stays at its pose over level 1's catwalk. The range is
+    // `sithPhysics_GetThingHeight * 1.1`, and a body's height is its model's insert offset.
+    let body_height = runtime::template_insert("walkplayer")[2].max(player.rules.radius + 0.005);
+    let on_thing = sim.as_deref().is_some_and(|sim| {
+        sim.world
+            .borrow()
+            .thing_floor([player.pos.x, player.pos.y, player.pos.z], player.rules.radius)
+            .is_some_and(|top| player.pos.z - player.rules.radius - top <= body_height * 1.1)
+    });
     let attached = idle
         && player.grounded
         && player.vy <= 0.0
-        && attaches_to_floor(&solids.0, [player.pos.x, player.pos.y, player.pos.z], player.rules.radius);
+        && (on_thing
+            || attaches_to_floor(
+                &solids.0,
+                [player.pos.x, player.pos.y, player.pos.z],
+                player.rules.radius,
+            ));
     let mut vy = player.vy + thrust[2] * dt;
     let gravity = if attached { 0.0 } else { player.gravity };
     let trace = std::env::var_os("BK_WALK_TRACE").is_some();
@@ -21863,6 +21960,25 @@ fn walk_player(
     // the frame, the fraction that survived is the velocity along the wall — that is the slide.
     if trace {
         eprintln!("walk trace: achieved {achieved_len:.5} vel-before-slide {:?}", player.vel);
+    }
+    // A solid model under the body is a floor. The engine's collision includes a thing's own surfaces,
+    // so a catwalk slab or a crate top stops a fall; the surface sweep above only knows the level's
+    // faces, which is why a catwalk pose used to drop the body out of the level. A **walking** body
+    // settles at `top + radius` (retail's idle body stays at its authored pose, which `attached`
+    // above reproduces instead).
+    if vy <= 0.0
+        && let Some(sim) = sim.as_deref()
+        && let Some(top) = sim.world.borrow().thing_floor(pos, player.rules.radius)
+    {
+        let feet = pos[2] - player.rules.radius;
+        // One frame's fall, so a body that has just dropped past the surface still lands on it, while
+        // a body standing *under* a table is not teleported onto it.
+        let step = (-vy * dt).max(0.02);
+        if top <= feet + step && top >= feet - 0.02 {
+            pos[2] = top + player.rules.radius;
+            vy = 0.0;
+            landed = true;
+        }
     }
     if achieved_len > 0.0 {
         let moved = [(pos[0] - before[0]) / dt.max(1e-4), (pos[1] - before[1]) / dt.max(1e-4)];

@@ -312,6 +312,25 @@ fn vec_param(raw: Option<&str>) -> Option<[f32; 3]> {
     Some([x, y, z])
 }
 
+/// Per solid template, the **top and footprint** of the model it draws: `(top_offset, half_x, half_y)`
+/// in model space, which is world space here. `sithCollision` treats a thing's own model as solid for
+/// every body, so a catwalk slab or a crate top is a floor; the port's surface sweep only knows the
+/// level's geometry. Filled by the loader (which has the models), read by `Runtime::thing_floor`.
+static TEMPLATE_FLOORS: std::sync::OnceLock<BTreeMap<String, (f32, f32, f32)>> =
+    std::sync::OnceLock::new();
+
+/// Register the solid templates' model tops. Called once by the loader; a later call is ignored.
+pub fn set_template_floors(map: BTreeMap<String, (f32, f32, f32)>) {
+    let _ = TEMPLATE_FLOORS.set(map);
+}
+
+fn template_floor(template: &str) -> Option<(f32, f32, f32)> {
+    TEMPLATE_FLOORS
+        .get()?
+        .get(&template.to_ascii_lowercase())
+        .copied()
+}
+
 /// The radius a placed thing's **collision volume** has, from the engine's own template rule.
 ///
 /// `misc\things.dat`'s class rows carry `collide=`: `_structure` is `collide=3` and `_decor` is
@@ -630,7 +649,11 @@ pub fn set_template_inserts(map: BTreeMap<String, [f32; 3]>) {
 }
 
 /// A template's model INSERT OFFSET, or zero when it has no model.
-fn template_insert(template: &str) -> [f32; 3] {
+///
+/// The z component is the engine's `sithPhysics_GetThingHeight` fallback: the height of the thing's
+/// model, which is also why a placed thing's `pos` sits that far above its feet (`ky.3do` 0.120114,
+/// `c3x10.3do` -0.012306).
+pub fn template_insert(template: &str) -> [f32; 3] {
     INSERT_OFFSETS
         .get()
         .and_then(|m| m.get(template))
@@ -3428,6 +3451,38 @@ impl Runtime {
         true
     }
 
+
+    /// The top of the highest **solid thing** under `pos` whose model the body's feet are on or just
+    /// above, or `None` when the body is over open level geometry.
+    ///
+    /// `sithCollision` treats a thing's own model as solid for every body, so a catwalk slab, a crate
+    /// or a lift platform is a floor. The surface sweep only knows the level's own faces, so without
+    /// this a body on a `_walkstruct` falls through it — level 1's catwalk pose is the standing case.
+    /// `ponytail:` the footprint is the model's axis-aligned half extents, so a thing rotated off the
+    /// axes is covered a little generously; the engine uses the drawn surfaces.
+    pub fn thing_floor(&self, pos: [f32; 3], body_radius: f32) -> Option<f32> {
+        let feet = pos[2] - body_radius;
+        let mut best: Option<f32> = None;
+        for (index, thing) in self.things.iter().enumerate() {
+            if thing.destroyed {
+                continue;
+            }
+            let Some(template) = self.templates.get(index) else { continue };
+            let Some((top_offset, half_x, half_y)) = template_floor(template) else { continue };
+            if (pos[0] - thing.pos[0]).abs() > half_x + body_radius
+                || (pos[1] - thing.pos[1]).abs() > half_y + body_radius
+            {
+                continue;
+            }
+            let top = thing.pos[2] + top_offset;
+            // A surface under the feet: the caller decides whether the body is close enough to rest on
+            // it. Anything above the feet is something the body is beside, not standing on.
+            if top <= feet + 0.1 && best.is_none_or(|at| top > at) {
+                best = Some(top);
+            }
+        }
+        best
+    }
 
     /// Every (shot, target, carried damage) impact this frame, from `first_created` onward.
     ///
@@ -6519,6 +6574,28 @@ mod tests {
 
     /// `maxrotthrust / surfdrag` degrees a second, the short way round: a body that is 60 degrees
     /// off turns 10 degrees in a 0.6 s frame at a 16 deg/s rate rather than snapping onto its aim.
+    /// A solid thing's own model is a surface the engine collides with: the loader registers its top
+    /// and footprint, and the body's floor probe finds it. Level 1's catwalk is the standing case.
+    #[test]
+    fn a_solid_things_model_is_a_floor() {
+        set_template_floors(BTreeMap::from([(
+            "testcatwalk".to_string(),
+            (0.0123, 0.5, 0.5),
+        )]));
+        let mut rt = door_runtime();
+        rt.templates = vec!["walkplayer".into(), "testcatwalk".into()];
+        rt.types = vec![10, 0];
+        let mut slab = rt.things[0].clone();
+        slab.pos = [0.0, 0.0, 1.0];
+        rt.things.push(slab);
+        // The model top sits `0.0123` above the thing's position; a body centre 0.065 over it is
+        // standing on the slab.
+        assert_eq!(rt.thing_floor([0.0, 0.0, 1.2], 0.065), Some(1.0123));
+        // Off the footprint is open air, and a surface above the feet is something the body is beside.
+        assert_eq!(rt.thing_floor([2.0, 0.0, 1.2], 0.065), None);
+        assert_eq!(rt.thing_floor([0.0, 0.0, 0.8], 0.065), None);
+    }
+
     #[test]
     fn a_body_turns_at_its_own_rate() {
         assert!((turn_toward(0.0, 60.0, 16.0, 0.6) - 9.6).abs() < 1e-4);

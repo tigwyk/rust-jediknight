@@ -110,15 +110,17 @@ state (adds with the engine's clamps, the 0.4/s decay, the damage flash — unit
 reason: retail's own 1 s series turns red at ~5–6 s and its settled reference at ~10 s is saturated
 (r/g 2.0), while the port's 10 s capture now lands **15 hits** (≈165 damage, the body left at 29
 health) and draws red 46 → 67 — the state is close, the picture is not: retail's reference is a
-deeper red and the doorway framing dominates that pair. At the catwalk the port cannot stand its body
-on the catwalk *model* (a solid thing, not a sector floor), so the body leaves the pose — a named
-engine gap (Phase 1 step 3). Those are gaps, not renderer tolerance (see `docs/gaps.md` §5.9).
+deeper red and the doorway framing dominates that pair. At the catwalk the body now **stands on the
+catwalk model** (a solid thing, whose top the loader registers and the idle attachment holds — the
+engine's `FindFloor`/`AttachThingToSurface` behaviour), which moved the pair 0.4493 → **0.4603**;
+the rest is retail's deeper red (Phase 1 step 3/5). Those are gaps, not renderer tolerance (see
+`docs/gaps.md` §5.9).
 
 The numbers are tied to the capture policy above (600 frames, window from the retail sidecar, default
 16-bit retail renderer) — changing framing or frame count invalidates them.
 
 The gate needs a retail install and captured references on the machine, so it is a developer check, not
-a CI job; the port's own 142 tests and 61 gates remain the CI-able surface.
+a CI job; the port's own 143 tests and 61 gates remain the CI-able surface.
 
 ## The shot list: `tools/parity/shots.tsv`
 
@@ -237,18 +239,20 @@ Everything below was verified against the GOG build (the harness works on a scra
   lets the room's scripts, AI and hazards act on a body the way retail's reference capture has them
   act. Without `--shot-at`, `--warp` alone lets the camera ride the warped body (retail's mode;
   identical framing at a standing pose); the batch passes both so the framing stays deterministic.
-  The port's player warp still has two limits: it keeps the body where it is put only when a
-  floor is within the idle-attach reach (at the catwalk pose there is none in reach and the catwalk
-  model is 0.145 below, so the port's body falls while retail's `coords` holds z 2.80), and the
-  world *draw* of the engine's damage tint is missing. Both show up on
-  `route_catwalk`/`route_door`.
+  A warped body keeps its pose while idle, as retail's does: the idle attachment reaches a solid
+  thing's model top within `GetThingHeight * 1.1` (`sithPhysics_FindFloor`), and
+  `sithThing_AttachThingToSurface` does not move the body — so at the catwalk the port's body now
+  holds 2.8201141 (retail `coords` 2.857114 eye − 0.037) instead of falling out of the level. A body
+  that *walks* still settles at `top + radius` (0.08 lower there), which is the movement port, not the
+  warp. `BK_WARP_TRACE=1` prints what is placed near a warped body with each solid thing's model top;
+  `BK_WALK_TRACE=1` prints the walker's per-frame sector/pos/support.
 - **Damage tint.** The engine's `sithActor_DamageActor` adds `damage * 0.04` to the local player's
   red palette tint (`sithPlayer_AddDynamicTint`), `sithPlayer_Update` decays it by 0.4 per second,
   and `stdPalEffects_UpdatePalette` applies the sum as `byte += round(byte * tint * 0.5)` per channel.
   That is the red in the two ungraded route references; it is not a scripted effect. The port draws
   it with a fullscreen palette pass on the world camera (`BK_TINT=r,g,b` paints a fixed value for
-  measuring it), but the body has to be *hit* for the tint to appear — which at the door only starts
-  around 15–20 s, past the 10 s capture window.
+  measuring it), but the body has to be *hit* for the tint to appear — at the door the first hits land around 6 s
+   and the 10 s capture is red (crop red mean 46 → 67).
 - **Reading a pair's contents.** `BK_HIT_TRACE=1` makes the port print each shot (`fire: <template>
   dmg … owner <thing> from <pos> yaw/pitch`) and put the shot's owner on each hit line, so a capture's
   log says who hit whom; `BK_AI_TRACE=1` prints every actor-frame that has line of sight to the body
