@@ -5927,7 +5927,8 @@ fn main() {
     }
 
     if let Some(index) = cogstatus {
-        let Some(inst) = world.level.cogs.get(index.saturating_sub(1)) else {
+        // Retail ids start at 0 (cogstatus 0 = the row numbered 0), so the argument is the index.
+        let Some(inst) = world.level.cogs.get(index) else {
             println!("cogstatus: no cog #{index}");
             return;
         };
@@ -5937,14 +5938,50 @@ fn main() {
             if let Ok(script) = cog::parse(&text) {
                 let mut values = inst.values.iter();
                 let mut symbol_index = 0;
+                let mut message_ordinal = 0usize;
                 for symbol in &script.symbols {
-                    if symbol.local || symbol.kind == cog::SymKind::Message {
+                    if symbol.kind == cog::SymKind::Message {
+                        // Retail prints message symbols too: their value is the message id
+                        // (`crossed = 8`, `arrived = 11`, `timer = 4` in the level-1 fixture).
+                        let id = cog::message_id(&symbol.name).unwrap_or(message_ordinal as i32);
+                        println!("  Symbol {symbol_index}: '{}'  = {id}", symbol.name);
+                        symbol_index += 1;
+                        message_ordinal += 1;
                         continue;
                     }
-                    let Some(raw) = values.next() else { break };
-                    let raw = raw.trim();
-                    if let Ok(f) = raw.parse::<f64>() {
-                        // `%f`: six decimals, exactly as the retail console prints floats.
+                    // A `.jkl` cog row carries one value per **non-message** symbol, locals included
+                    // (retail prints `doorsector = 74` and `i = 4.000000` from its row); only when the
+                    // row runs out does a local fall back to its declared initialiser.
+                    let init;
+                    let raw: &str = if let Some(next) = values.next() {
+                        next.trim()
+                    } else if symbol.local {
+                        init = symbol.init.clone().unwrap_or_else(|| "0".to_string());
+                        init.trim()
+                    } else {
+                        break;
+                    };
+                    // The engine prints `%d` for the integer-valued symbol kinds (link ids) and `%f`
+                    // (six decimals) for numeric variables - the fixture shows `lower_adjoin0 = 839`
+                    // next to `start_wait = 0.250000`.
+                    let integer_kind = matches!(
+                        symbol.kind,
+                        cog::SymKind::Thing
+                            | cog::SymKind::Sector
+                            | cog::SymKind::Surface
+                            | cog::SymKind::Sound
+                            | cog::SymKind::Template
+                            | cog::SymKind::Keyframe
+                            | cog::SymKind::Material
+                            | cog::SymKind::AiClass
+                            | cog::SymKind::Model
+                            | cog::SymKind::Cog
+                            | cog::SymKind::Int
+                    );
+                    if integer_kind {
+                        let value = raw.parse::<i64>().unwrap_or(0);
+                        println!("  Symbol {symbol_index}: '{}'  = {value}", symbol.name);
+                    } else if let Ok(f) = raw.parse::<f64>() {
                         println!("  Symbol {symbol_index}: '{}'  = {f:.6}", symbol.name);
                     } else {
                         println!("  Symbol {symbol_index}: '{}'  = {raw}", symbol.name);

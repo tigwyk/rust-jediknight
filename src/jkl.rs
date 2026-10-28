@@ -394,14 +394,30 @@ pub fn parse(text: &str) -> Level {
             // `-1` leaves a thing or sector unbound.
             let n = nth_f32(line, 2).unwrap_or(0.0) as usize;
             i += 1;
+            // The row's own index **is** the cog's id in the engine, and ids start at **0**: retail's
+            // `cogstatus 0` names the row numbered 0 (`00_door.cog`) and `cogstatus 1` the row numbered 1
+            // (`00_std_elev.cog`). Pushing in file order gave every script the wrong id - message
+            // routing, `getselfcog` and `setmastercog` all ride on it. Place by index instead; a level
+            // whose section is contiguous (all observed so far) gets no empty slots.
+            let mut rows_found: Vec<(usize, CogInstance)> = Vec::new();
             for row in read_rows(&lines, &mut i, n) {
-                let Some((_, rest)) = row.split_once(':') else { continue };
+                let Some((head, rest)) = row.split_once(':') else { continue };
+                let index = head.trim().parse::<usize>().unwrap_or(0);
                 let mut it = rest.split_whitespace();
                 let Some(script) = it.next() else { continue };
-                level.cogs.push(CogInstance {
-                    script: script.to_string(),
-                    values: it.map(|v| v.to_string()).collect(),
-                });
+                rows_found.push((
+                    index,
+                    CogInstance {
+                        script: script.to_string(),
+                        values: it.map(|v| v.to_string()).collect(),
+                    },
+                ));
+            }
+            if let Some(last) = rows_found.iter().map(|(index, _)| *index).max() {
+                level.cogs.resize(last + 1, CogInstance { script: String::new(), values: Vec::new() });
+                for (index, instance) in rows_found {
+                    level.cogs[index] = instance;
+                }
             }
             continue;
         }

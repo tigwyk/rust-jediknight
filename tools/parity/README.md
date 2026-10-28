@@ -290,6 +290,11 @@ Cog #1: Name:00_std_elev.cog  Script 00_std_elev.cog
   Symbol 8: 'speed'  = 4.000000
 ```
 
+Level 1 also has a **cog 0** fixture (`cogstatus0-01narshadda.txt`, `00_door.cog`): retail ids are the
+row index and start at 0. The port-side verb `bevi-knight --start 01narshadda --cogstatus <n>` reads
+`cogs[n]` and reproduces `cogstatus 1` byte-for-byte; for cog 0 it matches the first twelve symbols,
+the rest being runtime local values that need the script's `startup` to run.
+
 That sample is the fixture the port-side verb reproduces format-wise: `bevi-knight --start
 01narshadda --cogstatus 1` prints `Cog #1: Name:<script>  Script <script>` plus `  Symbol i:
 \'<name>\'  = <value>` (floats to six decimals, integers bare). It does **not** yet print the same

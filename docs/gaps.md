@@ -1905,3 +1905,15 @@ is one retail console command, `cogstatus 0`: if it prints `00_door.cog`, index 
 the array is 0-based with retail numbering 1-based; if it prints nothing, index 0 is not a cog
 instance and the port should exclude it from `level.cogs` while still running its script. Then
 placement by index minus one matches retail with no holes. Tree reverted to the committed state.
+
+**Cog ids are 0-based and now match retail (round 54).** Retail's `cogstatus 0` names
+`00_door.cog` and `cogstatus 1` names `00_std_elev.cog`, so the id **is the row index, starting at 0**
+- the port now places each parsed row at its own index (`jkl.rs`) and `--cogstatus <n>` reads
+`cogs[n]`. Two fixture checks pass: **`--cogstatus 1` is byte-identical** to
+`tools/parity/cogstatus-01narshadda.txt` (nine symbols), and `--cogstatus 0` matches the new
+`tools/parity/cogstatus0-01narshadda.txt` for the first twelve symbols; the remaining seven are
+**runtime local values** (`doorsector = 74`, `numdoors = 1.0`, `i = 4.0`, ...) that the port's
+declaration list does not initialise - matching those needs the verb to run the script's `startup`
+label and read the VM's variables, which is the documented next step for the verb.
+The fix also restores message-symbol printing (`crossed = 8`) and kind-based formatting
+(`%d` for link ids, `%f` six decimals for variables). 143 tests, 61/61 gates, `--ends` 28/35 pass.
