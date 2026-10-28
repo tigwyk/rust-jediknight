@@ -103,20 +103,21 @@ measured rather than assumed. The port warps the player to the row's pose (`--wa
 is **red from damage tint**, though: the body is taking damage (level 1's door: health 100 → 44 over
 the series; catwalk: 100/100 → 81/11), and the engine's damage path adds a red palette tint
 (`sithActor_DamageActor` calls `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)`; it decays 0.4 per
-second and is applied as `palette += round(palette * tint * 0.5)`). The port's tint *state* now
-follows that rule (adds with the engine's clamps, the 0.4/s decay, the damage flash — unit-tested),
-but the world *draw* does not: the palette multiply must run on the already-tonemapped bytes, and the
-cheap pre-tonemap multiply was measured to darken the frame even at an identity tint (crop mean
-55/50/56 → 41/36/41). At the catwalk the port also cannot stand its body on the catwalk *model* —
-that is a solid thing, not a sector floor, so the body falls out of the level. They report
-`UNGRADED` at 0.45/0.42: those are named engine gaps, not a renderer tolerance (see
-`docs/gaps.md` §5.9).
+second and is applied as `palette += round(palette * tint * 0.5)`). Both halves are ported now: the
+state (adds with the engine's clamps, the 0.4/s decay, the damage flash — unit-tested) and the draw
+(a fullscreen palette pass on the world camera that scales the finished picture's bytes by
+`1 + tint/2`; a 1.0 red tint measures ×1.52). The rows stay `UNGRADED` at 0.45/0.42 for a different
+reason: the port's body takes **no damage in the first 10 s** of the door capture — the AI's first
+hits land around 15–20 s — while retail's reference is already red in its first second. At the
+catwalk the port also cannot stand its body on the catwalk *model* — that is a solid thing, not a
+sector floor, so the body falls out of the level. Those are named engine gaps (Phase 1 steps 3 and
+5), not renderer tolerance (see `docs/gaps.md` §5.9).
 
 The numbers are tied to the capture policy above (600 frames, window from the retail sidecar, default
 16-bit retail renderer) — changing framing or frame count invalidates them.
 
 The gate needs a retail install and captured references on the machine, so it is a developer check, not
-a CI job; the port's own 138 tests and 61 gates remain the CI-able surface.
+a CI job; the port's own 139 tests and 61 gates remain the CI-able surface.
 
 ## The shot list: `tools/parity/shots.tsv`
 
@@ -243,10 +244,10 @@ Everything below was verified against the GOG build (the harness works on a scra
 - **Damage tint.** The engine's `sithActor_DamageActor` adds `damage * 0.04` to the local player's
   red palette tint (`sithPlayer_AddDynamicTint`), `sithPlayer_Update` decays it by 0.4 per second,
   and `stdPalEffects_UpdatePalette` applies the sum as `byte += round(byte * tint * 0.5)` per channel.
-  That is the red in the two ungraded route references; it is not a scripted effect. The port's tint
-  *state* matches that rule and is unit-tested; the draw is a post-tonemap palette pass that does not
-  exist yet — a multiply quad on either the screen-tint camera or the HUD camera's layer was measured
-  to darken the frame even at identity and to compress a 1.5× red tint to a few percent.
+  That is the red in the two ungraded route references; it is not a scripted effect. The port draws
+  it with a fullscreen palette pass on the world camera (`BK_TINT=r,g,b` paints a fixed value for
+  measuring it), but the body has to be *hit* for the tint to appear — which at the door only starts
+  around 15–20 s, past the 10 s capture window.
 - **Reading a pair's contents.** `BK_HIT_TRACE=1` makes the port print each shot (`fire: <template>
   dmg … owner <thing> from <pos> yaw/pitch`) and put the shot's owner on each hit line, so a capture's
   log says who hit whom; `BK_AI_TRACE=1` prints every actor-frame that has line of sight to the body

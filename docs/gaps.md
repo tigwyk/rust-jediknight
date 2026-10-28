@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 138 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 139 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -304,8 +304,10 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    `stdPalEffects_UpdatePalette` adds `round(byte * tint * 0.5)` to each palette channel. The port's
    **state** now follows that rule — `damage_player`/`damage_typed` add `damage * 0.04` red,
    `sithPlayer_Update`'s 0.4/s decay runs in `Runtime::step`, and the `AddDynamicTint` verb adds with
-   the engine's clamps (red/green 1.0, blue 0.5) instead of replacing — and is unit-tested. Its world
-   **draw** is not there: the renderer has no post-tonemap palette pass.
+   the engine's clamps (red/green 1.0, blue 0.5) instead of replacing — and is unit-tested. The world
+   **draw** is a fullscreen palette pass now (`src/palette.rs`): the finished picture's bytes scale by
+   `1 + tint/2`, measured at ×1.52 for a 1.0 red tint against the engine's 1.5, and an identity tint
+   leaves the frame byte-identical because the pass is only attached while the tint is non-zero.
    At the catwalk there is a second gap: the recorded body stands on a `3x10catwalk` *model* (a solid
    thing, top at 2.675) 0.145 below it and on no sector floor, and the port's idle attach needs a floor
    within one radius, so its body falls and dies; retail's `coords` holds z 2.80 for the whole capture.
@@ -343,29 +345,32 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    modelled on the name cut the room to *one* shot in 6 s — retail's door fight is exactly that crowded
    — and was reverted; do not repeat it.
 
-   **A pre-tonemap multiply is not the palette rule (2026-10-27).** The cheap draw was tried: a
-   full-screen `AlphaMode::Multiply` quad on the existing screen-tint camera, `1 + tint/2` per channel.
-   Measured on the cantina route capture, even an *identity* tint darkened the frame (crop mean
-   55/50/56 → 41/36/41) because the camera tonemaps what is under the quad, and a 1.5× red tint moved
-   the door frame's red mean only +9% (33 → 36) where the engine's byte rule moves it +50%. The same
-   quad on the HUD camera's layer (behind the HUD, over the world camera's output) behaves the same way
-   (46/45/52 → 36/35/41 at identity). The palette multiply therefore has to run on the already-
-   tonemapped bytes — the place the HUD canvas already applies the same rule exactly — which makes it a
-   renderer item (Phase 1 step 2), not a wash quad. The state half is tested and kept; the draw half is
-   deliberately absent rather than wrong.
+   **The palette tint cannot be a quad, and is a fullscreen pass instead (2026-10-27).** A full-screen
+   `AlphaMode::Multiply` quad was measured on both the screen-tint camera and the HUD camera's layer:
+   an *identity* tint darkened the frame (crop mean 55/50/56 → 41/36/41) and a 1.5× red tint moved red
+   only ~+9% where the engine's byte rule moves it +50%. The cause is Bevy's non-HDR mesh pass, which
+   tone maps **each fragment in-shader** (`TONEMAP_IN_SHADER` in `pbr_functions.wesl`): the quad's own
+   colour was tone mapped too, so `tonemap(1.0) ≈ 0.78` and a factor above 1 saturated back to 1.0 — and
+   a multiply blend cannot express the rule's brightening half on an sRGB target anyway.
 
-   **A pre-tonemap multiply is not the palette rule (2026-10-27).** The cheap draw was tried: a
-   full-screen `AlphaMode::Multiply` quad on the existing screen-tint camera, `1 + tint/2` per channel.
-   Measured on the cantina route capture, even an *identity* tint darkened the frame (crop mean
-   55/50/56 → 41/36/41) because the camera tonemaps what is under the quad, and a 1.5× red tint moved
-   the door frame's red mean only +9% (33 → 36) where the engine's byte rule moves it +50%. The palette
-   multiply therefore has to run on the already-tonemapped bytes — the place the HUD canvas already
-   applies the same rule exactly — which makes it a renderer item (Phase 1 step 2), not a wash quad.
-   The state half is tested and kept; the draw half is deliberately absent rather than wrong.
+   So the draw is a `FullscreenMaterial` pass on the world camera (`src/palette.rs`, `src/palette.wesl`)
+   that runs after that camera's main pass: it scales the sampled picture by `(1 + tint/2)^2.2` in
+   linear light, so the stored bytes change by exactly `1 + tint/2` and the sRGB target clamps a >255
+   channel the way the palette does. Measured on the door pose: a 1.0 red tint scales the red crop mean
+   46 → 70 (×1.52 against the engine's 1.5) with green/blue untouched, and an identity tint's frame is
+   byte-identical because the pass is only attached while the tint is non-zero. `ponytail:` the pass
+   carries the damage tint only; the scripted `NewColorEffect` filter/tint/add channels still go
+   through the wash quad.
 
-   *Next for these rows (in dependency order):* a post-tonemap palette pass for the world
-   (`byte += round(byte * tint/2)` on tonemapped bytes); the AI's positioning/aim at the door (the
-   room's fire reaches the player from one body, the rest into a friend's back); and the attachment
+   The two rows still want the **tint to arrive when retail's does**. A 10 s door capture takes no
+   damage at all in the port — the first hits land around 15–20 s, from one actor (155) — while retail's
+   door reference is already red at the first second; a 30 s port run does draw the tint (398 tinted
+   frames, peak tint 0.47 after the first hit). So the picture is faithful where damage lands; the row
+   waits on AI engagement, not on the palette.
+
+   *Next for these rows (in dependency order):* the AI's engagement timing at the door (retail's body
+   is hit in the first second; the port's first hits land around 15–20 s, from one actor); the AI's
+   positioning/aim there (the rest of the room's fire goes into a friend's back); and the attachment
    state (`sithPhysics_UpdateAttachedThingPhysics`) plus solid-thing floors for the catwalk.
 
    **Pitch does not mean what `coords` says.** Adding pitch to `--shot-at` and sweeping it against the

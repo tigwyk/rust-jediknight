@@ -20,6 +20,7 @@ mod menus;
 mod nav;
 mod key;
 mod level_mat;
+mod palette;
 mod ppm;
 mod pup;
 mod rows;
@@ -9811,7 +9812,7 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins(level_mat::LevelMaterialPlugin)
+        .add_plugins((level_mat::LevelMaterialPlugin, palette::PalettePlugin))
         .insert_resource(Archives(gobs))
         .insert_resource(Screens(menus))
         .insert_resource(CaptureMode(
@@ -9954,6 +9955,7 @@ fn main() {
                 .before(cull_sectors)
                 .run_if(no_screen_open),
         )
+        .add_systems(Update, palette_tint_pass.run_if(no_screen_open))
         .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open))
         .add_systems(Update, save_slots_probe)
         .add_systems(Update, play_intro_films.after(swap_level))
@@ -11225,6 +11227,7 @@ fn setup_overlay(
         cull_mode: None,
         ..default()
     });
+
     let material = materials.add(StandardMaterial {
         base_color_texture: Some(overlay.image.clone()),
         unlit: true,
@@ -11240,6 +11243,7 @@ fn setup_overlay(
             OverlayQuad,
             RenderLayers::layer(1),
         ));
+
         // A camera that sees only layer 1: the world camera keeps layer 0, so the UI is
         // never depth-tested against the scene and never clipped by it. Order 3, so the screen
         // effects below draw under the HUD rather than over it.
@@ -11270,6 +11274,7 @@ fn setup_overlay(
                 clear_color: ClearColorConfig::None,
                 ..default()
             },
+
             RenderLayers::layer(2),
             ScreenTintCamera,
         ));
@@ -11331,6 +11336,8 @@ fn cutscene_fills_screen(
 #[derive(Component)]
 struct ScreenTintQuad;
 
+
+
 /// The camera that draws the screen-effect wash on its own layer.
 #[derive(Component)]
 struct ScreenTintCamera;
@@ -11382,6 +11389,39 @@ fn scene_wash(
         material.alpha_mode = AlphaMode::Blend;
         // `base_color` carries the alpha for a blended unlit quad.
         material.base_color.set_alpha(alpha);
+    }
+}
+
+/// Feed the local player's dynamic tint to the palette pass on the world camera.
+///
+/// `sithActor_DamageActor`/`AddDynamicTint` record the tint in `Runtime`; the engine applies it to the
+/// palette after the picture is drawn (`palette.rs`). The pass is only attached while the tint is not
+/// the identity, so an untouched run pays nothing and its picture is byte-identical.
+fn palette_tint_pass(
+    sim: Option<Res<Sim>>,
+    camera: Query<Entity, With<WorldCamera>>,
+    attached: Query<&palette::PaletteTint, With<WorldCamera>>,
+    mut commands: Commands,
+) {
+    let Some(sim) = sim else { return };
+    let Ok(camera) = camera.single() else { return };
+    let mut tint = sim.world.borrow().tint;
+    // `BK_TINT=r,g,b`: paint the palette at this value, to measure the pass without waiting for a
+    // room to shoot the body. Debug only.
+    if let Ok(text) = std::env::var("BK_TINT") {
+        let v: Vec<f32> = text.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+        if v.len() == 3 {
+            tint = [v[0], v[1], v[2]];
+        }
+    }
+    let pass = palette::PaletteTint::from_tint(tint);
+
+    if pass.is_identity() {
+        if !attached.is_empty() {
+            commands.entity(camera).remove::<palette::PaletteTint>();
+        }
+    } else {
+        commands.entity(camera).insert(pass);
     }
 }
 

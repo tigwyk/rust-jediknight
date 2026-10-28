@@ -489,6 +489,23 @@ that disagrees where sectors overlap (level 1 has 462 sectors for 352 things, ma
 trigger slivers). The window runs the same `walker_step` the sweep measures, so walking
 into a wall stops at the wall and walking through a doorway changes sector.
 
+### …and its palette effects land on the finished picture
+
+The engine's `stdPalEffects_UpdatePalette` scales the palette **bytes** after the renderer has drawn
+(`byte += round(byte * tint * 0.5)`), which is what reddens the screen when the player is shot
+(`sithActor_DamageActor` -> `AddDynamicTint(damage * 0.04, 0, 0)`, decaying 0.4/s). A fixed-function
+blend cannot express that: on a non-HDR camera Bevy tone maps **each fragment in-shader**
+(`TONEMAP_IN_SHADER` in `pbr_functions.wesl`), so an overlay quad's own colour is tone mapped first —
+an identity multiply reads as `tonemap(1.0) ≈ 0.78` and a factor above 1 saturates back to 1.
+
+`src/palette.rs` therefore draws it as a `FullscreenMaterial` pass attached to the **world camera**
+only while `Runtime::tint` is non-zero: it runs after that camera's main pass, samples the finished
+picture and scales it by `(1 + tint/2)^2.2` in linear light, so the stored bytes change by exactly
+`1 + tint/2` and the sRGB target clamps a channel the way the palette does. An identity tint removes
+the component again, so an untouched run's frame is byte-identical (the parity capture gate depends on
+that). Measured at the door pose: a 1.0 red tint moves the red crop mean ×1.52 against the engine's
+1.5, green and blue untouched. `BK_TINT=r,g,b` paints a fixed tint for measuring it.
+
 ### …and its models assemble from their joint hierarchies
 
 A `.3do` puppet stores each mesh's vertices around its own *pivot*, so the parts only
@@ -689,10 +706,10 @@ is why it was recoverable.
 
 Every check in one page: [docs/gates.txt](gates.txt) records each flag and what it printed
 against this install; the sweep now is **61 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
-`0 of 61 failed, 9 skipped`), plus 138 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
+`0 of 61 failed, 9 skipped`), plus 139 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
 
 [CI](../.github/workflows/ci.yml) runs on Windows: it installs the MSRV from `Cargo.toml`, builds
-with `--locked`, runs the 138 unit tests, builds the i686 film helper, produces the native
+with `--locked`, runs the 139 unit tests, builds the i686 film helper, produces the native
 `setup.exe` as an artifact, and checks every relative documentation link. The 61 gates are not
 in CI on purpose — they require a retail game install, which the repository does not ship and
 CI does not download.
