@@ -1817,3 +1817,15 @@ body. The engine treats the body as a sphere (`sithIntersect_IsSphereInSector`),
 never enters. The fix belongs in the containment step: after the sweep, reject (or slide) a position
 where the body's circle overlaps a wall it is between, not just where the centre is outside a
 sector. That is the last movement defect the cantina leg exposes.
+
+**The cantina wall is classified as a floor (round 45).** `Solids::build` splits solid faces by
+normal orientation: `normal[2] < -0.7` becomes a **floor**, `|normal[2]| < 0.7` becomes a **wall**,
+and everything else is only in the sweep list. Surface 2473 - the cantina's south ramp - has normal
+**(0, 0.45, -0.89)**, so `normal[2] = -0.89 < -0.7`: it is filed as a **floor**, not a wall, and the
+body walking south past its footprint is never blocked by it; it walks into the 0.10 slot behind it
+and falls. That also explains why the earlier experiments changed nothing: the face never reaches the
+wall list the sweep uses, and the containment ring test cannot see a missing floor inside one
+sector. The `0.7` split is the heuristic that makes low ledges walkable (its comment says so), so the
+fix is to treat steep solid faces (|nz| between ~0.7 and 1.0 with a horizontal component) as walls
+in the sweep too - a classification change in one place, with `walk_cantina` as the repro and
+`walk_street45`/`walk_street90` as the regression fixtures.
