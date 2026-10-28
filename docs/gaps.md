@@ -2191,3 +2191,16 @@ the ledger row said (it cited only `--adjoins`); the roadmap row now cites this 
 retail-side trigger capture remains the ledger deviation with the same retire condition. A duplicate
 `--door-check` probe written this round was deleted rather than kept: the existing gate already does
 more, and the ladder says reuse before writing.
+
+**Full verification snapshot after the interaction/trace tooling rounds (round 78).** Every layer is
+green on the current tree:**143 tests**, **`--gates` 0 of 61 failed**, **parity gate 6/6 thresholds,
+8 pairs compared, 0 failures** (2 pairs still only triage: the damage-tint rows), and the **movement
+trace gate 4/4 legs** (`walk_street45` 100% of retail's travel with 0 sector samples off,
+`walk_street90` 83%, `walk_cantina` 71% - inside the measured run-to-run variance - and `walk_door0`
+a stop-pose match at xy 0.005). Docs links 132/132. Phase 1 status per the roadmap: step 1 (first
+frame) done for level 1, step 2 gated on 6 rows with the two tint rows as the known gap, step 3 gated
+across four geometries, step 4 port side gated full-chain (`--door`) with the retail trigger on the
+ledger, step 5 partly done with measured damage rates on the ledger, step 6 has its gates
+(`--endlevel`/`--tally`/`--transition`/`--flow`) but no retail level-2 comparison until retail can
+start another level (console and command line both proved closed; the savegame or a full level-1 play
+are the routes).
