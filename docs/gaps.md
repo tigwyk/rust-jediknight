@@ -2023,3 +2023,14 @@ Also discovered in the same directory scan: `cogtrace` is a **persistent player-
 (`Lee.plr`), not a per-session flag - a run can leave tracing on/off for the next one, which is why
 `cogtrace 1` sometimes printed "disabled". Its output does not land in the console ListBox while the
 console is closed, so capturing a trace needs the console kept open during movement.
+
+**The console `activate` command is inventory item use, not cog activation (round 65).**
+`sithCommand_Activate` (`decomp/004eeb90_sithCommand_Activate.c`) parses an integer, requires
+`sithInventory_IsInventoryAvailable(world, n)`, then sends message **1 (`activate`)** from the
+inventory cog with `(n, 3, playerThing, 0)` - i.e. "use inventory item n". `activate 0` on level 1
+therefore does nothing (slot 0 is not an available item), which is why the door cog stayed at
+`doorstatus 0` after the command. So the console offers **no cog-activation cheat**: the only in-engine
+route to a trigger is walking (or firing) into it, and the door's `crossed`/`activate`/`blocked`
+messages come from its linked sides. For Phase 1 step 4 the harness therefore stays positional - the
+`cogtrace` toggle and state captures are instruments, not triggers. This also closes the last
+cheat-command candidate for driving interactions without a scripted walk.
