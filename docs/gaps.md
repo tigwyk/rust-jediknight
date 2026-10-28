@@ -1804,3 +1804,16 @@ the slide was never the problem: the remaining defect is a **floor/ledge seam** 
 cantina pose, the same class the `floor_under` comment describes (a walkway slab in a sector nothing
 below links to). The revert restores the last green state; the next probe is the floor under that
 point (`floor_under`/`--surfaces-at` with z ranges around -1.3 and lower).
+
+**The cantina body falls into a slot narrower than the body itself (round 44).** The numbers pin the
+final position: the body wedges at (-2.545, -3.135), which is the west wall at x -2.6 plus 0.055 and
+the south wall at y -3.2 plus 0.065 - it fell off the **floor polygon's south edge (y -3.10)** into
+the 0.10-wide slot between that edge and the wall, then sank because nothing supports it there.
+Retail stops at **y -3.03 = floor edge + its 0.065 radius**: the body cannot fit into a slot narrower
+than its 0.13 diameter, so retail rests on the edge. The port gets in because every test in the walk
+path is **centre/point based** - `sweep_rooms` sweeps the centre with the radius applied at the
+contact, and the containment check tests the feet as a point - so a slot 0.10 wide accepts a 0.13
+body. The engine treats the body as a sphere (`sithIntersect_IsSphereInSector`), which is why retail
+never enters. The fix belongs in the containment step: after the sweep, reject (or slide) a position
+where the body's circle overlaps a wall it is between, not just where the centre is outside a
+sector. That is the last movement defect the cantina leg exposes.
