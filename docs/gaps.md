@@ -1917,3 +1917,13 @@ declaration list does not initialise - matching those needs the verb to run the 
 label and read the VM's variables, which is the documented next step for the verb.
 The fix also restores message-symbol printing (`crossed = 8`) and kind-based formatting
 (`%d` for link ids, `%f` six decimals for variables). 143 tests, 61/61 gates, `--ends` 28/35 pass.
+
+**The cogstatus verb now prints runtime values (round 55).** It runs the script's `startup` on a
+throwaway world (`cog::Vm`) and reads the symbol table back, which is what retail prints - so
+`doorsector = 74` and `i = 4.0` now come out of the VM instead of defaults. `--cogstatus 1` remains
+byte-identical to its fixture. `--cogstatus 0` differs only in the *formatting* of five plain numeric
+locals (`numdoors`, `i` print as integers where retail prints six decimals - so retail's `%d`/`%f`
+split is not the port's symbol-kind mapping) and in three symbols the port's declaration parser
+drops (`checkstatus`, `opendoors`, `closedoors`, retail prints them as `0.000000`), so the kind
+mapping and unknown-type handling are the verb's remaining gaps. 143 tests, 61/61 gates, `--ends`
+pass all green with the change.

@@ -5936,7 +5936,14 @@ fn main() {
         if let Some(data) = gobs.read(&inst.script) {
             let text = String::from_utf8_lossy(&data).into_owned();
             if let Ok(script) = cog::parse(&text) {
-                let mut values = inst.values.iter();
+                // Retail prints the **runtime** symbol table, so run the script's `startup` on a
+                // throwaway world and read the values back; the row values and declared initialisers
+                // are only what the VM starts from (retail's cog 0 shows `doorsector = 74`,
+                // `i = 4.0`, which nothing in the row provides).
+                let handle = runtime::Runtime::handle(&world.level);
+                let mut vm = cog::Vm::with_world(handle);
+                script.bind(&mut vm, &inst.values);
+                let _ = vm.run_label(&script, "startup");
                 let mut symbol_index = 0;
                 let mut message_ordinal = 0usize;
                 for symbol in &script.symbols {
@@ -5949,18 +5956,7 @@ fn main() {
                         message_ordinal += 1;
                         continue;
                     }
-                    // A `.jkl` cog row carries one value per **non-message** symbol, locals included
-                    // (retail prints `doorsector = 74` and `i = 4.000000` from its row); only when the
-                    // row runs out does a local fall back to its declared initialiser.
-                    let init;
-                    let raw: &str = if let Some(next) = values.next() {
-                        next.trim()
-                    } else if symbol.local {
-                        init = symbol.init.clone().unwrap_or_else(|| "0".to_string());
-                        init.trim()
-                    } else {
-                        break;
-                    };
+                    let value = vm.var(&symbol.name).num();
                     // The engine prints `%d` for the integer-valued symbol kinds (link ids) and `%f`
                     // (six decimals) for numeric variables - the fixture shows `lower_adjoin0 = 839`
                     // next to `start_wait = 0.250000`.
@@ -5979,12 +5975,9 @@ fn main() {
                             | cog::SymKind::Int
                     );
                     if integer_kind {
-                        let value = raw.parse::<i64>().unwrap_or(0);
-                        println!("  Symbol {symbol_index}: '{}'  = {value}", symbol.name);
-                    } else if let Ok(f) = raw.parse::<f64>() {
-                        println!("  Symbol {symbol_index}: '{}'  = {f:.6}", symbol.name);
+                        println!("  Symbol {symbol_index}: '{}'  = {}", symbol.name, value as i64);
                     } else {
-                        println!("  Symbol {symbol_index}: '{}'  = {raw}", symbol.name);
+                        println!("  Symbol {symbol_index}: '{}'  = {value:.6}", symbol.name);
                     }
                     symbol_index += 1;
                 }
