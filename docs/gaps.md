@@ -1977,3 +1977,13 @@ graph's `01narshadda.jkl -> 02narshadda.jkl`), so once retail's load path is fou
 pair is a two-capture job. Until then Phase 2's breadth work stays on level 1 + the port-only level
 audits (`--check`-family gates), which is why this round spends its budget proving the absence rather
 than guessing at a command that does not exist.
+
+**Retail rejects a level argument on the command line too (round 61).** With `-JkArgs` added to the
+harness three forms were tried - `-level 02narshadda`, `-level 02narshadda.jkl` and a bare
+`02narshadda.jkl` - and in every case JK.EXE never created its window (the harness times out after
+20 s; the process is killed). So the engine exits on an unrecognised argument rather than ignoring it,
+and retail cannot be booted into an arbitrary level from the command line. Phase 2's spawn audits
+therefore need one of the two remaining routes: a savegame whose recorded level is 2 (the port already
+parses/writes the format in `src/jks.rs`, so the shape is known) or the retail campaign transition
+(play level 1 through its exit). `-JkArgs` stays in the harness for future engine parameters; the
+absence is now proved for both the console and the command line.

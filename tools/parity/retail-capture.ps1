@@ -18,7 +18,11 @@ param(
   # Dev-console commands to run after the level loads (and after the warp), e.g. `cogstatus 1`.
   # Each row's output is written to target/parity/trace/<name>-console.txt, which is how Phase 0.5
   # step 2 captures one level's cog variables and AI status.
-  [string[]]$ConsoleCommands = @()
+  [string[]]$ConsoleCommands = @(),
+  # Extra JK.EXE command-line arguments. Retail has no console command that loads a level (round 60),
+  # so this is the harness's only route to boot a level other than the campaign's first - Phase 2's
+  # spawn audits need it. `-File` splits `-level,02narshadda` into two arguments.
+  [string[]]$JkArgs = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -569,7 +573,8 @@ function Invoke-JkCaptureRow {
   $consoleWindow = [IntPtr]::Zero
   try {
     $exe = Join-Path $WorkCopy 'JK.EXE'
-    $process = Start-Process -FilePath $exe -ArgumentList '-devMode' -WorkingDirectory $WorkCopy -PassThru
+    $launchArgs = @('-devMode') + $JkArgs
+$process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirectory $WorkCopy -PassThru
     Log "launched JK.EXE -devMode (pid=$($process.Id), cwd=$WorkCopy)"
 
     # Window + dev console dialog.
