@@ -1572,3 +1572,12 @@ first time and published the release.
   the deployed URL.
 - Deliberately not added: analytics, comments, JavaScript, or a build step for the page. It is
   four files plus images.
+
+**Attempted and reverted (round 17).** The solid-set widening (every thing with a model, not only
+templates with `collide=`), a self-skip (the body's own thing was the round-15 self-block), and a
+slide response made the port **stop exactly where retail stops**: `walk_street45` ends at
+(3.265, -1.833) sector 155 against retail's (3.270, -1.860) sector 155, instead of walking off the
+ledge to the level spawn. But the windowed `--save-live` engine gate then hangs (>13 min, no
+verdict) with the change, so it cannot be committed until that gate is understood - the likely cause
+is a body that starts inside a blocked footprint having no slide escape. The code is reverted; the
+measurement and this gate observation are the round's result.
