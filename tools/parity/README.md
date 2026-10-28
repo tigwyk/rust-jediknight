@@ -289,6 +289,14 @@ PASS  walk_street90  port  1.84 / retail  2.21 units (   83%)  sectors off 2
 PASS  walk_cantina   port  1.85 / retail  2.17 units (   85%)  sectors off 2
 trace gate: 3 leg(s), 0 failure(s)
 ```
+### Retail's cog namespace
+
+`coglist` prints `<id>: <script> <script>` per instance. The console buffer only keeps the tail, which
+on level 1 is **system cogs** at ids **70+** (`00_smoketrail.cog`, `pow_saber.cog`, ... `pow_bryar.cog`)
+- weapon/trail/power-up scripts present in every level. The level's own placed scripts fill **0..41**
+(the port's load line reports 42 instances), which is the 0-based range the port's placement produces.
+Tail fixture: [coglist-01narshadda.txt](coglist-01narshadda.txt). The port's `level.cogs` holds only the
+placed instances, so engine-wide ids above that range are not represented there yet.
 ### The retail dev console's full vocabulary
 
 `help` in the retail console lists every command (saved as

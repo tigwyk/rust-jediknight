@@ -1999,3 +1999,14 @@ Phase 2's only routes are a retail **savegame recorded in the next level** or pl
 own exit. The vocabulary list is saved as `tools/parity/dev-console-commands.txt`; `cogtrace`/`coglist`/
 `ailist` are the notable debug tools for Phase 1's trigger work (message tracing), and `activate` is
 the console twin of the engine's activation verb.
+
+**Retail's cog namespace reserves ids 0..41 for the level and 70+ for system cogs (round 63).**
+`coglist` in retail prints `<id>: <script> <script>` lines; the console buffer shows only the tail,
+which is all **system** cogs - `70: 00_smoketrail.cog`, `71: pow_saber.cog`, ... `90: pow_bryar.cog`
+and on - i.e. weapon/trail/power-up scripts that exist in every level. Level 1's own placed scripts
+fill ids 0..41 (the port's load line says "42 placed script instances"), which is exactly the
+0-based range the round-54 placement fixes: the port's cog 0/1 now match retail's, and the placed
+set's size agrees with the id range the system cogs leave free. The tail is saved as
+`tools/parity/coglist-01narshadda.txt`. The important architectural point for later phases: the port
+keeps only placed instances in `level.cogs`, while retail's engine-wide table also holds these
+system cogs, so cog-id-addressed messages can target ids above the placed range.
