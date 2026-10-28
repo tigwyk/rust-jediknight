@@ -1871,3 +1871,13 @@ average, ends at the 3.265 wall = retail's 3.27); `walk_street45` **2.21 vs reta
 **0 of 5 sector mismatches**; `walk_cantina` **1.85 vs 2.17** with no falls (it ends
 (-4.32, -2.75, -1.196) sector 103 against retail's (-4.36, -3.04), the remaining cantina difference
 being the slide direction along the ramp). 143 tests and 61/61 engine gates pass, parity 6/6.
+
+**The port's cog ids do not line up with retail's (round 51).** The `--cogstatus 1` verb prints the
+retail format exactly, but the cog it names is **`00_door.cog`** where retail's `cogstatus 1` names
+**`00_std_elev.cog`**. The .jkl `world cogs` rows carry their own index (`jkl.rs` parses it as `n`
+but only `push`es, so the port's order is the section's *file* order), and retail's ids evidently
+follow the row index, not the file order. That is a real bug, not a console cosmetic: cog ids drive
+message routing, `getselfcog`, `setmastercog` and every per-instance value binding. The fix is to
+place each row at its own index while parsing (`level.cogs[n] = ...` with a resize, base checked
+against the first row), then have `--cogstatus 1` print `00_std_elev.cog` with the retail fixture's
+nine symbols - the fixture becomes the port check for it.

@@ -427,6 +427,10 @@ fn main() {
     let mut ui_sounds = false;
     let mut feel_check = false;
     let mut collide_check = false;
+    // `--cogstatus <n>`: print one placed cog the way the retail console's `cogstatus` does
+    // (`sithCog_CogStatus`, formats 0x54aaf4 / 0x54ab1c / 0x54ab30 / 0x54ab38) - Phase 0.5 step 2's
+    // port-side fixture check against `tools/parity/cogstatus-01narshadda.txt`.
+    let mut cogstatus: Option<usize> = None;
     // `--surfaces-at "x,y,z"`: with `--collide`, print the level surfaces near a point - the geometry
     // probe behind the `walk_street45` stop (retail stops at x 3.27 where the port walks off).
     let mut surfaces_at: Option<[f32; 3]> = None;
@@ -729,6 +733,12 @@ fn main() {
             "--ui-sounds" => ui_sounds = true,
             "--feel" => feel_check = true,
             "--collide" => collide_check = true,
+            "--cogstatus" => {
+                cogstatus = args.get(i + 1).and_then(|v| v.parse().ok());
+                if cogstatus.is_some() {
+                    i += 1;
+                }
+            }
             "--surfaces-at" => {
                 surfaces_at = arg_value(&args, &mut i).and_then(|s| {
                     let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
@@ -5913,6 +5923,36 @@ fn main() {
         println!("mana: clamps at {full:.1} (pool {})", rt.mana_max);
         assert!((full - rt.mana_max as f64).abs() < 0.5, "mana did not clamp at the pool ceiling");
         println!("--- mana check passed ---");
+        return;
+    }
+
+    if let Some(index) = cogstatus {
+        let Some(inst) = world.level.cogs.get(index.saturating_sub(1)) else {
+            println!("cogstatus: no cog #{index}");
+            return;
+        };
+        println!("Cog #{index}: Name:{}  Script {}", inst.script, inst.script);
+        if let Some(data) = gobs.read(&inst.script) {
+            let text = String::from_utf8_lossy(&data).into_owned();
+            if let Ok(script) = cog::parse(&text) {
+                let mut values = inst.values.iter();
+                let mut symbol_index = 0;
+                for symbol in &script.symbols {
+                    if symbol.local || symbol.kind == cog::SymKind::Message {
+                        continue;
+                    }
+                    let Some(raw) = values.next() else { break };
+                    let raw = raw.trim();
+                    if let Ok(f) = raw.parse::<f64>() {
+                        // `%f`: six decimals, exactly as the retail console prints floats.
+                        println!("  Symbol {symbol_index}: '{}'  = {f:.6}", symbol.name);
+                    } else {
+                        println!("  Symbol {symbol_index}: '{}'  = {raw}", symbol.name);
+                    }
+                    symbol_index += 1;
+                }
+            }
+        }
         return;
     }
 

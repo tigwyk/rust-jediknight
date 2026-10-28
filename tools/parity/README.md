@@ -290,7 +290,12 @@ Cog #1: Name:00_std_elev.cog  Script 00_std_elev.cog
   Symbol 8: 'speed'  = 4.000000
 ```
 
-That sample is the fixture a port-side `cogstatus` verb has to reproduce.
+That sample is the fixture the port-side verb reproduces format-wise: `bevi-knight --start
+01narshadda --cogstatus 1` prints `Cog #1: Name:<script>  Script <script>` plus `  Symbol i:
+\'<name>\'  = <value>` (floats to six decimals, integers bare). It does **not** yet print the same
+cog: the port's cog #1 is `00_door.cog` while retail's is `00_std_elev.cog`, so the placed-cog
+**ids do not line up** - a real bug with consequences beyond the console (message routing,
+`getselfcog`, the master cog) and the next thing to fix.
 ## Known limitations / follow-ups
 
 - **Triage, not equality.** Retail runs its 16-bit DirectDraw/D3D path, translated by dgVoodoo2 to
