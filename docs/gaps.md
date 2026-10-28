@@ -1629,3 +1629,14 @@ the face's end, and either a step-up (the wall top is 0.48 above the body) or th
 handling lets it slip past and over the ledge. So the remaining bug is in `collide.rs`'s wall/step
 handling near a face edge, not in thing collision - and the `--surfaces-at` probe is the tool that
 shows it.
+
+**At the corrected run speed the walker slips past the wall (round 27).** On the committed tree the
+`walk_street45` trace now covers the first 1.8 s correctly (port x 4.995 / 4.490 vs retail 4.090 /
+3.610 - the port is *ahead*, as the 0.875 u/s run rule predicts) but then the body ends at the level
+spawn: between 1.8 s and 2.4 s it gets past the x = 3.20 wall (surface 1513, z 0.5..1.1, y -2.40..-1.80)
+and falls. The older trace that stopped at 3.265 was made at the pre-round-11 walking speed (0.667
+u/s), so it reached the face at 3 s and stopped on it; the faster body reaches it with more velocity
+and the sweep/slide lets it through. So this is a **collision bug exposed by the corrected speed**,
+not a thing-collision problem: the wall is level geometry, and the face must be a stop at that speed.
+Next: instrument `solids.move_body` on this leg (print blocked/step/slide per sub-step around x 3.20)
+and compare with the slower speed, which stops.
