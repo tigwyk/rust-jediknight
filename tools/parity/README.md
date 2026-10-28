@@ -254,6 +254,14 @@ First measured leg (`walk_cantina`, 2.4 s of held forward, 2026-10-28):
   fix, not a harness problem. Retail's own samples are a little irregular (`coords` latency and the
   refocus dance); the comparison reports per-sample deltas and marks samples where retail is stopped.
 
+Second leg (`walk_street45`, the flat straight run): retail 2.20 units over 2.4 s held (0.9 u/s) and
+the port 1.59; the port crosses the same first sectors but **steps off a ledge at x 3.27 where retail
+is stopped by furniture**, so the leg measures the collision difference between the two (the port has
+no thing-on-thing collision) as well as the movement rule. Two harness facts learned here: the trace
+must not leave the movement key down between segments (the window re-activation sleeps while the engine
+runs, which silently moved the body outside the counted segments and made the first traces read
+1.5 u/s), and the first segment of a trace can include a few frames of deceleration coast after the
+release - the later segments are the steady ones.
 Dense per-tick tracing (the fallback the roadmap's Phase 0.5 step 4 names) is not needed yet: segment
 density is enough for the first comparison, and the Frida `sithThing_SetPositionAndOrient` hook is the
 plan if a finer trace is required.

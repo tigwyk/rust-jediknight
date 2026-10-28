@@ -2,9 +2,13 @@
 # the row's pose (eye convention, as tools/parity/shots.tsv) and hold forward for the same game time.
 # name <TAB> level <TAB> x <TAB> y <TAB> z <TAB> pitch <TAB> yaw
 #
-# walk_cantina is route_cantina turned 180 degrees: level 1's cantina pose facing yaw 105 is the
-# flattest run measured in the port (1.46 units in 3 s, sector 254 throughout). A walking body
-# settles 0.055 lower than the authored pose (floor + radius vs model height) - the gap this trace
-# exists to measure.
+# walk_cantina is route_cantina turned 180 degrees: level 1's cantina pose facing yaw 105. The port
+# walks into furniture around x -3.98 and retail into its own at x -4.37, so it measures the start
+# pose and the resting height but not a steady speed.
+#
+# walk_street45 is the flat straight run: 2.21 units in 3 s in the port, z within 0.01, four sectors.
+# Retail crosses 271 -> 157 -> 155 and stops at x 3.27 (furniture); the port keeps going and steps
+# off a ledge there, so the leg also measures that collision difference (thing collision is absent).
 walk_cantina	01narshadda	-2.200043	-2.900013	-1.142886	0	105.000092
 walk_street	01narshadda	5.474939	-1.899975	0.657119	0	45.000000
+walk_street45	01narshadda	5.474939	-1.899975	0.657119	0	45.000000

@@ -381,7 +381,9 @@ function Invoke-JkWalkTrace {
       $samples++
       $lines.Add((@($held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $sample.Pyr[1]) -join ([char]9)))
       Log ("walk trace: {0} ms held at ({1:N3}, {2:N3}, {3:N3}) sector {4}" -f $held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector)
-      Send-JkKeyDown -Name $Key
+      # Do **not** re-press here: the next iteration activates the window (sleeping up to a second
+      # while the engine runs), and a key left down over that sleep moves the body outside the measured
+      # segments - which is what made the first traces read 1.5 u/s against a 0.875 u/s rule.
     }
   } finally {
     Send-JkKeyUp -Name $Key
