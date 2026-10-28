@@ -292,6 +292,10 @@ function Invoke-JkDevConsoleCommand {
     $lines = @(Get-JkConsoleLines -ProcessId $ProcessId)
     if ($lines.Count -gt $before) { $newLines = @($lines | Select-Object -Skip $before); break }
   }
+  # The dialog's ListBox is cleared between commands, so a second command's output can be shorter than
+  # `$before` and never trip the count test above. Fall back to the whole current box: a state snapshot
+  # per command is all the phase-0.5 captures need.
+  if ($newLines.Count -eq 0) { $newLines = @(Get-JkConsoleLines -ProcessId $ProcessId) }
   if ($gameWindow -ne [IntPtr]::Zero) { [JkRetail]::ForceFocus($gameWindow) }
   Start-Sleep -Milliseconds 250
   Log "dev console command '$Command' -> $($newLines.Count) new ListBox line(s)"
@@ -621,7 +625,17 @@ function Invoke-JkCaptureRow {
     if ($ConsoleCommands.Count -gt 0) {
       $consolePath = Join-Path $script:TraceOut ("{0}-console.txt" -f $name)
       $consoleLines = New-Object System.Collections.Generic.List[string]
-      foreach ($command in $ConsoleCommands) {
+      # `-File` passes a comma-joined token as one string, so split it back into commands.
+      $commands = @($ConsoleCommands | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
+      foreach ($command in $commands) {
+        # `wait:<ms>` pauses instead of issuing a command, so one capture can show a cog's state
+        # before and after a trigger (Phase 1 step 4's "cog variable/state trace at each trigger").
+        if ($command -like 'wait:*') {
+          $milliseconds = [int]($command -replace '^wait:', '')
+          $consoleLines.Add("> wait $milliseconds ms")
+          Start-Sleep -Milliseconds $milliseconds
+          continue
+        }
         $consoleLines.Add("> $command")
         foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command $command)) {
           $consoleLines.Add($line)

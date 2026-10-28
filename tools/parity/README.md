@@ -265,6 +265,14 @@ release - the later segments are the steady ones.
 Dense per-tick tracing (the fallback the roadmap's Phase 0.5 step 4 names) is not needed yet: segment
 density is enough for the first comparison, and the Frida `sithThing_SetPositionAndOrient` hook is the
 plan if a finer trace is required.
+### Cog state trace at a level's spawn (Phase 1 step 4 baseline)
+
+`retail-capture.ps1` accepts a comma-joined command list where `wait:<ms>` pauses: that is how one
+capture shows a cog's state before *and* after time passes, the shape Phase 1 step 4 needs at a
+trigger. Level 1's door cog (`cogstatus 0`) reads **identically at t≈0 and t≈3 s** - `doorstatus 0`,
+`movestatus 0`, `opendoors 0`, `closedoors 0` - so the door is idle at spawn and no timer fires before
+a trigger. That snapshot is the fixture ([cogstatus0-t3-01narshadda.txt](cogstatus0-t3-01narshadda.txt));
+the same capture machinery will record the state *after* the player walks through the trigger.
 ## Movement trace gate (Phase 1 step 3)
 
 `trace-gate.ps1` records the port's walk traces and checks them against the retail fixtures

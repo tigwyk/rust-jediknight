@@ -1946,3 +1946,12 @@ with **0 sector samples off**, `walk_street90` 1.84 vs 2.21 (83%, harness clock)
 1.85 vs 2.17 (85%) - the cantina leg that was pinned in a wall corner and falling a few rounds ago.
 The gate's tolerances and their reasons are in the script header, so a rule change (speed, basis,
 collision) fails while the harness's timing noise does not.
+
+**Phase 1 step 4's capture machinery works, and the door is idle at spawn (round 58).**
+`retail-capture.ps1` now takes a comma-joined command list with a `wait:<ms>` pause, so one run can
+show a cog's state before and after time passes; repeated commands work because the helper falls back
+to the whole ListBox when the dialog clears it between commands. The level-1 door cog reads
+**identically at t≈0 and t≈3 s** (`doorstatus 0`, `movestatus 0`, `opendoors 0`, `closedoors 0`):
+the door is idle at spawn and no timer fires before a trigger. That is the step-4 "before" fixture
+(`tools/parity/cogstatus0-t3-01narshadda.txt`); the "after" capture needs the player to walk through
+a trigger, which is the next use of the same machinery.
