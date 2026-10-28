@@ -6009,7 +6009,15 @@ fn main() {
             println!("surface {surface:5} -> cog {cog:3} link {link:3}  {}", script_of(*cog));
         }
         for (cog, link, thing) in &rt.thing_links {
-            let at = rt.things.get(*thing).map(|t| t.pos).unwrap_or([f32::NAN; 3]);
+            // The level's own thing list, not the runtime's: `Runtime::things` is in a different order
+            // (the player is inserted first), so indexing it with a level thing id prints the wrong
+            // position - which is how the cantina switch looked like it sat at the door.
+            let at = world
+                .level
+                .things
+                .get(*thing)
+                .map(|t| t.pos)
+                .unwrap_or([f32::NAN; 3]);
             println!(
                 "thing   {thing:5} -> cog {cog:3} link {link:3}  at {:.2},{:.2},{:.2}  {}",
                 at[0], at[1], at[2], script_of(*cog)

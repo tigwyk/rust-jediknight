@@ -2154,3 +2154,15 @@ the failed key guesses. Table saved as `tools/parity/control-names.txt`. On the 
 adjoin changes, 7 doorways shut**, and `ClearAdjoinFlags`/`SetSectorAdjoins`/`SetSectorFlags` all
 change crossing behaviour as the scripts demand - so the port's door *state* is verified; only the
 retail-side use-action capture is missing.
+
+**Device codes decoded, and `--links` now prints level positions (round 75).** The profile's codes
+above 255 are DirectInput device indices: **0x100 = left mouse (256), 0x101 = right (257),
+0x102 = middle (258)** - so JK's defaults fall out exactly: FIRE1 = left mouse, FIRE2 = right mouse,
+**ACTIVATE (use) = middle mouse** (plus VK 57, the `9` key). That is why every keyboard guess failed:
+the use action is a *mouse button*. Also `--links` was printing runtime-array positions indexed with
+level thing ids (the runtime inserts the player first), so it now reads `world.level.things` - the
+cog 11 link map is still door0 = thing 56 at (-4.75, -3.75) with `linkid=1` arrays and switch0/1 the
+surfaces 2409/2403 (`linkid=2`), and its `doorsector` (74, from retail's own cogstatus) is where
+thing 56 stands. The `9` key at that switch and at the upper door still changes nothing, so the last
+step is injecting the **middle mouse button** for use; the harness's `Click` is left-button-only and
+needs a `MouseButton` method.
