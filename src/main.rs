@@ -4160,9 +4160,10 @@ fn main() {
     }
 
     if muzzle_check {
-        // A shot's origin: the shooter's own `fireoffset=`, rotated into its facing and scaled out
-        // of model units. One borrow for the whole check — a gate that takes a second borrow of a
-        // world it already holds deadlocks (round 106 did exactly that twice).
+        // A shot's origin: the shooter's own `fireoffset=`, rotated into its facing. The offset is in
+        // level units (the engine adds it to the thing's position with no scale). One borrow for the
+        // whole check — a gate that takes a second borrow of a world it already holds deadlocks
+        // (round 106 did exactly that twice).
         let sim_world = runtime::Runtime::handle(&world.level);
         let (shooter, shooter_name, offset, at) = {
             let mut rt = sim_world.borrow_mut();
@@ -4216,8 +4217,13 @@ fn main() {
             (shooter, name, offset, rt.things[bolt].pos)
         };
         let _ = shooter;
-        // Yaw 0 faces +X, so the template's y is forward and x is to the left of that.
-        let want = [offset[1] * 10.0, -offset[0] * 10.0, offset[2] * 10.0];
+        // Yaw 0 faces +X, so the template's y is forward and x is to the left of that. The offset is
+        // in level units: `sithWeapon_FireProjectile` transforms the vector with the shooter's orient
+        // (`rdMatrix_TransformVector34Acc`) and adds it to the thing's position, with no scale, and the
+        // same templates' `size=` fields are level units too. A ten-times-scaled offset put a
+        // Ree-Yees' muzzle 0.8 units ahead of a 0.07-radius body — past a target standing at arm's
+        // length, which is where retail hits.
+        let want = [offset[1], -offset[0], offset[2]];
         println!(
             "muzzle: `{shooter_name}` names fireoffset=({:.6}/{:.6}/{:.6}); its shot starts at {at:?}, the offset puts it at {want:?}",
             offset[0], offset[1], offset[2]

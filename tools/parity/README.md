@@ -112,7 +112,7 @@ The numbers are tied to the capture policy above (600 frames, window from the re
 16-bit retail renderer) — changing framing or frame count invalidates them.
 
 The gate needs a retail install and captured references on the machine, so it is a developer check, not
-a CI job; the port's own 136 tests and 61 gates remain the CI-able surface.
+a CI job; the port's own 137 tests and 61 gates remain the CI-able surface.
 
 ## The shot list: `tools/parity/shots.tsv`
 

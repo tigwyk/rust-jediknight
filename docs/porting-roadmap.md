@@ -5,7 +5,7 @@ something is ported**, or **what to work on next when the build is not yet fun t
 
 ## Why this exists
 
-As of 0.1.1 the port reports 10 of 10 roadmap stages "done", 61 gates and 136 tests green, a signed-off
+As of 0.1.1 the port reports 10 of 10 roadmap stages "done", 61 gates and 137 tests green, a signed-off
 release, an installer, CI and a landing page — and level 1 still had fundamental playability problems.
 The first retail reference frame (`tools/parity/`, gaps §5.9) looked like it found the cause at once:
 the spawn view appeared to sit inside a cantina table that retail does not draw through the eye. The
@@ -194,7 +194,14 @@ tier, not a checkbox.
 4. **Interaction.** Doors, lifts, switches, pickups through cogs; thing parenting; timing (`Sleep`,
    pulses) at engine granularity. Exit: cog variable/state trace matches at each trigger.
 5. **Combat.** Weapon fire, hit detection, damage, AI sight and routing, puppet states. Exit: the same
-   encounter plays out with matching health and kill order from the same script.
+   encounter plays out with matching health and kill order from the same script. *Partly done:* shots
+   leave the shooter's own `fireoffset=` in level units (the port scaled it by ten, which put a
+   Ree-Yees' muzzle 0.8 units ahead of a 0.07-radius body) and the `.ai` aim error jitters the aim
+   vector the way `sithAI_RandomFireVector` does (the port used a yaw cone ±`error` right angles wide),
+   both pinned by the `--muzzle` check and a unit test; projectiles are no longer collectable as
+   pickups. Measured at level 1's door: the body takes 4 hits (48 damage) in 12 s against retail's
+   ~22 damage/s, because actors fire through each other — target selection
+   (`sithAI_FirstThingInView`) is the next gap.
 6. **Exit.** End-of-level tally, transition, carried state (health, shields, bins). Exit: level 2 starts
    in retail's state.
 

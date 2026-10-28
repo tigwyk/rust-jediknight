@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 136 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 137 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -309,9 +309,33 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    Whether retail's placement step keeps the pose there or its collider has a surface the port's does
    not is for the movement port (Phase 1 step 3) to settle.
 
+   **Two combat-parity bugs fell out of the same door measurement (2026-10-27).** With the pickup bug
+   fixed the port's body still took almost no damage, and the AI's own hits landed on its friends. Two
+   causes, both recovered from the executable:
+
+   - **The muzzle offset was scaled by ten.** `fireoffset=` is in level units — the engine's
+     `sithWeapon_FireProjectile` transforms the vector by the shooter's orientation and adds it to the
+     thing's position with no scale, and the same templates' `size=` fields are level units too. The
+     port multiplied by ten, so `reeyeesgun`'s muzzle sat 0.8 units ahead of a 0.07-radius body, past a
+     target standing at arm's length — the range retail's door fight actually happens at. The
+     `--muzzle` check had been written against the same wrong number and now pins the template's own.
+   - **The aim error was a yaw cone of ±`error` right angles.** `sithAI_RandomFireVector` (0x4eb920)
+     jitters the aim *vector*: `((rand/32768) - 0.5) * error` on each component, then normalized
+     (`FUN_00512d00` is `rand()`, `DAT_0052307c` is 1/32768), so `rydefault.ai`'s 0.20 is ±0.1 per axis
+     — a small cone. The port's ±18° yaw was several times wider and left elevation untouched;
+     `jitter_aim` now follows the engine's rule.
+
+   Measured after both fixes: at the door the body takes 4 hits (48 damage, all on shields) in the first
+   ~12 s, against retail's ~22 damage/s. The remaining gap is **targeting, not ballistics**: the room's
+   actors fire through each other, so the bolts hit nearby Ree-Yees (`hit: thing 263/154`) instead of the
+   player. The engine decides what an actor may fire at with `sithAI_FirstThingInView`, which the port
+   does not model yet (Phase 1 step 5).
+
    *Next for these rows (in dependency order):* the palette-tint layer (`AddDynamicTint` + the
-   0.4/s decay + the `byte += round(byte * tint/2)` draw), and the attachment state
-   (`sithPhysics_UpdateAttachedThingPhysics`) plus solid-thing floors for the catwalk.
+   0.4/s decay + the `byte += round(byte * tint/2)` draw); the AI's target selection
+   (`sithAI_FirstThingInView`) so the room's fire reaches the player rather than the nearest friend;
+   and the attachment state (`sithPhysics_UpdateAttachedThingPhysics`) plus solid-thing floors for the
+   catwalk.
 
    **Pitch does not mean what `coords` says.** Adding pitch to `--shot-at` and sweeping it against the
    verified spawn reference gave a sharp answer: port pitch 0 matches retail best (0.6296), 0.25° drops

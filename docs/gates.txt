@@ -120,11 +120,12 @@ flag                                                   exit  what it prints
                                                              dark letter is the engine's 0.0 rule
 --muzzle                                               0  --- muzzle check passed ---
                                                              a shot starts at the shooter's own
-                                                             fireoffset= (greedo: 0.55 ahead, the
-                                                             real number), not a guessed unit
-                                                             ahead of the eye. The lateral sign is
-                                                             all three axes pinned to 0.02:
-                                                             the lateral sign came from the
+                                                             fireoffset= (greedo: 0.055 ahead, the
+                                                             template's level-unit number: the
+                                                             engine adds the offset without a
+                                                             scale), not a guessed unit ahead of
+                                                             the eye. All three axes are pinned to
+                                                             0.02: the lateral sign came from the
                                                              engine, not from a guess
 --use-item                                             0  --- use-item check passed ---
                                                              UseBin(40) sends `activated` to
@@ -526,7 +527,7 @@ flag                   runs       result verdict
 gates: 0 of 61 failed, 0 skipped
 ```
 
-That is **61 gates**, 0 failures, with **132** unit tests alongside. The nine window-only
+That is **61 gates**, 0 failures, with **137** unit tests alongside. The nine window-only
 gates are reported as skipped under `BK_HEADLESS=1` (`0 of 61 failed, 9 skipped`), never as
 passes. `--tour` checks the campaign by row on both arms (28 rows, 25 distinct files, 23 film
 hops, 2 finale rows), and `--tour-live` finishes and swaps all 21 light-side levels in the

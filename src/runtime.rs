@@ -1082,8 +1082,10 @@ impl Runtime {
             })
             .collect();
         // `fireoffset=(x/y/z)`: where a shot leaves the shooter, in the template's own frame and
-        // model units (x lateral, y forward, z up). The port spawned every bolt a flat unit ahead
-        // of the eye as a stand-in; the shipped templates carry the real numbers.
+        // level units (x lateral, y forward, z up) — the port used to scale it by ten, which put a
+        // Ree-Yees' muzzle 0.8 units ahead of a 0.07-radius body and made retail's point-blank hits
+        // impossible. The port spawned every bolt a flat unit ahead of the eye as a stand-in; the
+        // shipped templates carry the real numbers.
         let template_fire_offset: BTreeMap<String, [f32; 3]> = level
             .templates
             .iter()
@@ -2702,28 +2704,39 @@ impl Runtime {
     }
 
     /// [`Self::fire`] with the actor's aim error: `sithAICmd_PrimaryFire` passes
-    /// `percentageErrorInAim` and the engine spreads the shot inside that fraction of a right
-    /// angle. A missed shot is a shot that flies wide, which is what makes a firefight survivable.
+    /// `percentageErrorInAim` and `sithAI_RandomFireVector` (0x4eb920) jitters the aim **vector** by
+    /// that fraction — `((rand/32768) - 0.5) * error` on each component, then normalized. A missed
+    /// shot is a shot that flies wide, which is what makes a firefight survivable.
     pub fn fire_spread(&mut self, shooter: i64, template: &str, error: f32) -> Option<usize> {
-        let spread = if error > 0.0 {
-            // A fresh heading inside +/- `error` of a right angle, jittered around the aim line.
-            let r = crate::cog::pseudo_random() as f32;
-            ((r - 0.5) * 2.0) * error * std::f32::consts::FRAC_PI_2
-        } else {
-            0.0
-        };
-        self.fire_with_spread(shooter, template, spread)
+        self.fire_with_spread(shooter, template, error)
     }
 
     pub fn fire(&mut self, shooter: i64, template: &str) -> Option<usize> {
         self.fire_with_spread(shooter, template, 0.0)
     }
 
+    /// `sithAI_RandomFireVector` (0x4eb920): add `((rand/32768) - 0.5) * error` to each component of
+    /// the aim direction and renormalize. `FUN_00512d00` is the engine's `rand()` and `DAT_0052307c` is
+    /// 1/32768, so the jitter is ±error/2 per axis — a small cone, not the fraction-of-a-right-angle
+    /// yaw offset the port used to apply (0.2 spread that way was ±18 degrees, and it left pitch
+    /// untouched, so an AI gunner missed far more than retail's does at close range).
+    fn jitter_aim(forward: [f32; 3], error: f32) -> [f32; 3] {
+        let speed = (forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2])
+            .sqrt()
+            .max(1e-4);
+        let mut unit = [forward[0] / speed, forward[1] / speed, forward[2] / speed];
+        for channel in &mut unit {
+            *channel += (crate::cog::pseudo_random() as f32 - 0.5) * error;
+        }
+        let len = (unit[0] * unit[0] + unit[1] * unit[1] + unit[2] * unit[2]).sqrt().max(1e-4);
+        [unit[0] / len * speed, unit[1] / len * speed, unit[2] / len * speed]
+    }
+
     fn fire_with_spread(
         &mut self,
         shooter: i64,
         template: &str,
-        spread: f32,
+        error: f32,
     ) -> Option<usize> {
         // Every shot the runtime spawns, counted where it is actually spawned. A check that samples
         // live things misses a bolt that dies between two frames, and at 10 fps that is most of them.
@@ -2732,25 +2745,27 @@ impl Runtime {
         let src = self.thing(shooter)?;
         let (pos, yaw, sector) = (src.pos, src.yaw, src.sector);
         let speed = self.template_vel.get(&template).copied().unwrap_or([0.0; 3]);
-        // The template's velocity is in the thing's own frame: forward is +Y there. `spread` is the
-        // aim error an AI instinct carries: it turns the whole shot, so a missed shot flies wide.
+        // The template's velocity is in the thing's own frame: forward is +Y there.
         //
         // The shot flies along the shooter's whole **orientation**, not just its yaw: the engine's
         // `senderOrient` carries pitch too (an actor's `headPYR` on top of it). Yaw alone meant every
         // shot left level, however the player was aiming.
         let pitch = src.pitch;
-        let (sin, cos) = (yaw.to_radians() + spread).sin_cos();
+        let (sin, cos) = yaw.to_radians().sin_cos();
         let flat = [speed[1] * cos - speed[0] * sin, speed[1] * sin + speed[0] * cos];
         // Pitch tilts that horizontal aim up or down and the template's own z rides along, so a shot
         // aimed 30 degrees up leaves with `speed * sin(30)` in z. `rotate_by_angles` is the engine's
         // `rdMatrix_Build34`, whose yaw starts at +Y; this world's camera yaw starts at +X, so the
         // rotation is written out here rather than reused.
         let (sp, cp) = pitch.to_radians().sin_cos();
-        let forward = [
+        let mut forward = [
             flat[0] * cp,
             flat[1] * cp,
             (flat[0] * flat[0] + flat[1] * flat[1]).sqrt() * sp + speed[2] * cp,
         ];
+        if error > 0.0 {
+            forward = Self::jitter_aim(forward, error);
+        }
         let health = self.template_health.get(&template).copied().unwrap_or(1.0);
         let kind = self.template_types.get(&template).copied().unwrap_or(3);
         // The shot starts at full damage and loses it in flight when the weapon decays.
@@ -2760,10 +2775,9 @@ impl Runtime {
         }
         let key = template.clone();
         self.things.push(ThingState {
-            // The engine's muzzle is the template's `fireoffset=`, in model units and the shooter's
-            // frame (x lateral, y forward, z up). A template that names no offset — or one so short
-            // the bolt would start inside the shooter's own body (0.6 + the bolt's 0.15, which is
-            // what `--hit` caught) — falls back to a unit ahead of the eye.
+            // The engine's muzzle is the template's `fireoffset=`, in level units and the shooter's
+            // frame (x lateral, y forward, z up). A template that names no offset falls back to a unit
+            // ahead of the eye.
             pos: {
                 let len = (forward[0] * forward[0] + forward[1] * forward[1]).sqrt().max(1e-4);
                 let ahead = [forward[0] / len, forward[1] / len];
@@ -2777,9 +2791,7 @@ impl Runtime {
                 let offset = shooter_template
                     .as_ref()
                     .and_then(|t| self.template_fire_offset.get(t))
-                    .copied()
-                    // Model units to level units: a `.3do` node carries a 10x scale.
-                    .map(|o| [o[0] * 10.0, o[1] * 10.0, o[2] * 10.0]);
+                    .copied();
                 match offset {
                     // The real offset, even when it sits inside the shooter's body: `impacts` skips
                     // the owner, so nothing needs the old "push it out" distance.
@@ -6370,6 +6382,26 @@ mod tests {
         rt.things[0].pitch = -45.0;
         let shot = rt.fire(0, &bolt).expect("projectile");
         assert!(rt.things[shot].vel[2] < -2.5, "vel {:?}", rt.things[shot].vel);
+    }
+
+    /// `sithAI_RandomFireVector` (0x4eb920): the aim error jitters the aim **vector** by ±error/2 per
+    /// axis and keeps the shot's speed — a small cone. The old version turned the yaw inside ±error
+    /// right angles, which was several times wider and left elevation alone.
+    #[test]
+    fn an_aim_error_jitters_the_shot_inside_a_small_cone() {
+        let aim = [4.0, 0.0, 0.0];
+        let clean = Runtime::jitter_aim(aim, 0.0);
+        assert_eq!(clean, aim, "an error of zero must not move the shot");
+        for _ in 0..500 {
+            let jittered = Runtime::jitter_aim(aim, 0.2);
+            let speed = (jittered[0] * jittered[0]
+                + jittered[1] * jittered[1]
+                + jittered[2] * jittered[2])
+                .sqrt();
+            assert!((speed - 4.0).abs() < 1e-3, "the jitter changed the speed: {jittered:?}");
+            // ±0.1 per axis is at most ~8.1 degrees off the aim line; 0.98 is 11.5.
+            assert!(jittered[0] / speed > 0.98, "a 0.2 error threw the shot wide: {jittered:?}");
+        }
     }
 
     #[test]
