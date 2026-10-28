@@ -1725,3 +1725,14 @@ it open) or the **containment veto** (the moved feet land in no sector and the s
 final sub-steps show moved 0.000 with z drifting, which is what a veto loop looks like). The next
 probe needs a reason code: print which of `move_body`'s paths fired (wall slide, step-up,
 containment veto) per sub-step under `BK_WALK_TRACE`.
+
+**The cantina block is the step-retry ceiling `collide.rs` already marks (round 36).** `move_body`'s
+blocked path takes the sweep's contact point and only then tries the step-up: a low obstruction
+(`hit.point[2] - radius < pos[2] - radius + step`) retries one step up, but the four-way clearance
+test rejects a body that merely *touches* the riser - which is exactly the cantina case (the sub-step
+lines end with `moved 0.000`, i.e. contact at distance 0 from the first sub-step of that step). That
+is the `ponytail:` comment in `move_body`: "the four-way test rejects a body that merely touches the
+riser... a step only succeeds when the lift clears the riser's polygon top outright". The named
+upgrade is to test the rise against the polygon's own top edge rather than a swept sphere at the
+raised height - a small change in `collide.rs`, and the cantina pose is its repro. The street legs
+are unaffected (they are flat and already match retail).
