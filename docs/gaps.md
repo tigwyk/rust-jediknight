@@ -526,7 +526,16 @@ The **resting height** the trace measured is fixed at the same layer: `walker_st
 `walk_cantina` leg the z delta goes **0.055 -> 0.034** (the 0.034 is a step the port climbs mid-leg),
 the port covers 1.41 units against retail 2.17, and the remaining xy gap is the collision difference -
 retail is stopped at x -4.37 by furniture the port walks through at -3.98 (thing collision, an
-absent subsystem).
+absent subsystem)
+
+**A blocking-first thing collision does not reproduce that stop (round 15).** Tested and reverted: a
+`Runtime::thing_blocks` AABB test (solid model rising more than step height above the feet) hooked
+into the walker's sub-step made the body **stop dead in the street** (0.01 units over 3 s) with a
+tight clearance, and with a raised step threshold it still **walked off the same ledge** as before
+while a windowed save/load gate failed. So the retail stop at x 3.27 is not a simple solid thing in
+the way: either the obstacle is level geometry (a `_structure` surface, not a thing) or the collision
+response has to push the body out along the surface rather than revert the sub-step. The next attempt
+starts from the measured stop position and asks which sector surfaces are there..
 ## 6. Recently closed, so it is not mistaken for missing
 
 * **Sprites render, and the two "renderer bugs" that hid it were both in the probe.** `--sprite
