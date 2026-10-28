@@ -1581,3 +1581,12 @@ ledge to the level spawn. But the windowed `--save-live` engine gate then hangs 
 verdict) with the change, so it cannot be committed until that gate is understood - the likely cause
 is a body that starts inside a blocked footprint having no slide escape. The code is reverted; the
 measurement and this gate observation are the round's result.
+
+**Frame-level check works, but `--save-live` fails (round 19).** The obstacle test moved out of the
+sub-step loop into one frame-level check with an escape guard (a body that starts inside a footprint
+keeps moving) was measured: `walk_street45` ends at (3.265, -1.833) sector 155 against retail's
+(3.270, -1.860), tests pass, and the window gates that had panicked now run and pass - the panic was
+a **double borrow** of the runtime world (the skip lookup borrowed while the obstacle scan held a
+guard). But `--save-live` then fails with a printed verdict, so the change is reverted: the save/load
+check is the one behaviour the obstacle response breaks, and it is the next thing to inspect (the
+gate likely asserts the body does not move across a load, which the slide response now violates).
