@@ -103,16 +103,20 @@ measured rather than assumed. The port warps the player to the row's pose (`--wa
 is **red from damage tint**, though: the body is taking damage (level 1's door: health 100 → 44 over
 the series; catwalk: 100/100 → 81/11), and the engine's damage path adds a red palette tint
 (`sithActor_DamageActor` calls `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)`; it decays 0.4 per
-second and is applied as `palette += round(palette * tint * 0.5)`). The port has no such layer yet,
-and at the catwalk it also cannot stand its body on the catwalk *model* — that is a solid thing, not
-a sector floor, so the body falls out of the level. They report `UNGRADED` at 0.45/0.42: those are
-two named engine gaps, not a renderer tolerance (see `docs/gaps.md` §5.9).
+second and is applied as `palette += round(palette * tint * 0.5)`). The port's tint *state* now
+follows that rule (adds with the engine's clamps, the 0.4/s decay, the damage flash — unit-tested),
+but the world *draw* does not: the palette multiply must run on the already-tonemapped bytes, and the
+cheap pre-tonemap multiply was measured to darken the frame even at an identity tint (crop mean
+55/50/56 → 41/36/41). At the catwalk the port also cannot stand its body on the catwalk *model* —
+that is a solid thing, not a sector floor, so the body falls out of the level. They report
+`UNGRADED` at 0.45/0.42: those are named engine gaps, not a renderer tolerance (see
+`docs/gaps.md` §5.9).
 
 The numbers are tied to the capture policy above (600 frames, window from the retail sidecar, default
 16-bit retail renderer) — changing framing or frame count invalidates them.
 
 The gate needs a retail install and captured references on the machine, so it is a developer check, not
-a CI job; the port's own 137 tests and 61 gates remain the CI-able surface.
+a CI job; the port's own 138 tests and 61 gates remain the CI-able surface.
 
 ## The shot list: `tools/parity/shots.tsv`
 
@@ -234,11 +238,14 @@ Everything below was verified against the GOG build (the harness works on a scra
   The port's player warp still has two limits: it keeps the body where it is put only when a
   floor is within the idle-attach reach (at the catwalk pose there is none in reach and the catwalk
   model is 0.145 below, so the port's body falls while retail's `coords` holds z 2.80), and the
-  port does not draw the engine's damage tint. Both show up on `route_catwalk`/`route_door`.
+  world *draw* of the engine's damage tint is missing. Both show up on
+  `route_catwalk`/`route_door`.
 - **Damage tint.** The engine's `sithActor_DamageActor` adds `damage * 0.04` to the local player's
   red palette tint (`sithPlayer_AddDynamicTint`), `sithPlayer_Update` decays it by 0.4 per second,
   and `stdPalEffects_UpdatePalette` applies the sum as `byte += round(byte * tint * 0.5)` per channel.
-  That is the red in the two ungraded route references; it is not a scripted effect.
+  That is the red in the two ungraded route references; it is not a scripted effect. The port's tint
+  *state* matches that rule and is unit-tested; the draw is a post-tonemap palette pass that does not
+  exist yet — a pre-tonemap multiply quad was measured to darken the frame even at identity.
 - **Retail script coverage:** the menu coordinates and key timing are tied to the GOG build (and
   to `player\Lee\Lee.plr`); a different build/player may need the constants updated.
 - **Level 1's spawn — what the pair showed, and the fix.** Retail's spawn frame is the player camera:

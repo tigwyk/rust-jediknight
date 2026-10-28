@@ -553,6 +553,26 @@ pub struct ColorEffect {
     pub started: f32,
 }
 
+/// `sithPlayer_AddDynamicTint`: how much red a point of damage adds to the player's palette tint.
+///
+/// `sithActor_DamageActor` (0x4ecc90) calls `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)` for
+/// the local player; the 0.04 is `DAT_005230b4`.
+pub const DAMAGE_TINT: f32 = 0.04;
+/// `sithPlayer_Update`'s decay on every dynamic-tint channel, per second (`DAT_00522e38`).
+pub const TINT_DECAY: f32 = 0.4;
+/// `sithPlayer_AddDynamicTint`'s ceilings after adding: red and green stop at 1.0
+/// (`DAT_00522e4c`), blue at 0.5 (`DAT_00522e58`).
+pub const TINT_CEILING: [f32; 3] = [1.0, 1.0, 0.5];
+
+/// `sithPlayer_AddDynamicTint` (`0x4c8c10`): **add** to the player's palette tint and clamp each
+/// channel to its ceiling. The damage flash and the `AddDynamicTint` cog verb share these channels,
+/// which is why this replaces nothing.
+fn add_dynamic_tint(tint: &mut [f32; 3], add: [f32; 3]) {
+    for k in 0..3 {
+        tint[k] = (tint[k] + add[k]).clamp(0.0, TINT_CEILING[k]);
+    }
+}
+
 /// [`Runtime::carry`]: the player's own state, which survives a level change.
 #[derive(Clone, Debug, Default)]
 pub struct CarryOver {
@@ -1013,7 +1033,8 @@ pub struct Runtime {
     /// The last hold time `DeactivateBin` reported, kept so a caller can inspect it after
     /// the entry has been popped.
     pub last_hold: f32,
-    /// `AddDynamicTint`: the last screen tint a script asked for.
+    /// `AddDynamicTint`'s player palette tint: the damage flash adds to it and `sithPlayer_Update`
+    /// decays it 0.4/s. Scripts share the same channels (`force_seeing`, powerup flashes).
     pub tint: [f32; 3],
     /// `NewColorEffect`'s live screen effects, keyed by the handle the verb answered. Each carries the
     /// engine's three channels — a per-channel `filter`, a `tint` and an additive `add` — plus the fade
@@ -1830,6 +1851,7 @@ impl Runtime {
             self.bin_due = still;
         }
         self.decay_damage(dt);
+        self.decay_dynamic_tint(dt);
         self.advance_surface_cels();
         self.advance_material_cels();
         self.bump_scroll_epoch();
@@ -2700,6 +2722,14 @@ impl Runtime {
             if thing.decay > 0.0 && thing.damage > thing.min_damage {
                 thing.damage = (thing.damage - thing.decay * dt).max(thing.min_damage);
             }
+        }
+    }
+
+    /// `sithPlayer_Update`: the dynamic tint falls by 0.4 per second on every channel, never below
+    /// zero. The damage flash and the `AddDynamicTint` verb are the only things that raise it.
+    fn decay_dynamic_tint(&mut self, dt: f32) {
+        for channel in &mut self.tint {
+            *channel = (*channel - dt * TINT_DECAY).max(0.0);
         }
     }
 
@@ -3645,6 +3675,9 @@ impl Runtime {
                 self.things.get(player).map(|t| t.health).unwrap_or(0.0),
             );
         }
+        // `sithActor_DamageActor` tints the local player's palette on damage that lands, before the
+        // shields are spent: its call is `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)`.
+        add_dynamic_tint(&mut self.tint, [amount * DAMAGE_TINT, 0.0, 0.0]);
         let mut left = amount;
         if self.player_shields > 0.0 {
             let absorbed = left.min(self.player_shields);
@@ -3723,6 +3756,10 @@ impl Runtime {
         let Ok(index) = usize::try_from(target) else { return 0.0 };
         if self.invulnerable(index, kind) {
             return self.things.get(index).map(|t| t.health).unwrap_or(0.0);
+        }
+        // The player's palette flashes red on every hit that lands, whichever path applied it.
+        if index == self.player_thing() {
+            add_dynamic_tint(&mut self.tint, [amount * DAMAGE_TINT, 0.0, 0.0]);
         }
         let mut died = false;
         // A hit flinches: `sithPuppet_SetMode` plays the puppet's `hit` track off a damage message,
@@ -6011,13 +6048,11 @@ impl Runtime {
                 self.inv_available.insert(idx(0) as i32, idx(1) != 0);
                 Value::Nil
             }
-            // `AddDynamicTint(player, r, g, b)`: the screen tint a powerup flashes. Recorded
-            // as the player's tint so the renderer can use it later.
+            // `AddDynamicTint(player, r, g, b)`: `sithPlayer_AddDynamicTint` **adds** to the player's
+            // palette tint with the engine's clamps — a powerup flash and damage share the channels —
+            // so this is not a replacement.
             "adddynamictint" => {
-                if let Some(t) = self.thing_mut(idx(0)) {
-                    let _ = t;
-                }
-                self.tint = [num(1) as f32, num(2) as f32, num(3) as f32];
+                add_dynamic_tint(&mut self.tint, [num(1) as f32, num(2) as f32, num(3) as f32]);
                 Value::Nil
             }
             // `NewColorEffect(filterR, filterG, filterB, tintR, tintG, tintB, addR, addG, addB, fade)`:
@@ -6426,6 +6461,29 @@ mod tests {
         assert_eq!(rt.damage(0, 30.0), 70.0);
         assert_eq!(rt.damage(0, 80.0), 0.0);
         assert!(rt.things[0].destroyed);
+    }
+
+    /// `sithActor_DamageActor` flashes the player's palette red at `damage * 0.04`, `sithPlayer_Update`
+    /// decays every channel at 0.4/s, and `AddDynamicTint` **adds** to the same channels with the
+    /// engine's ceilings (red/green 1.0, blue 0.5). These are the numbers the door capture needed.
+    #[test]
+    fn damage_and_scripts_add_to_one_decaying_palette_tint() {
+        let mut rt = door_runtime();
+        // 20 damage adds 0.8 of red — before the shields are spent, as the engine's call is.
+        rt.damage_player(20.0, 0);
+        assert!((rt.tint[0] - 0.8).abs() < 1e-5, "tint {:?}", rt.tint);
+        // A script adds its own channels: red clamps at 1.0, blue at 0.5, and it is an add.
+        rt.call(
+            "AddDynamicTint",
+            &[Value::Num(0.0), Value::Num(0.5), Value::Num(0.0), Value::Num(1.0)],
+        );
+        assert!((rt.tint[0] - 1.0).abs() < 1e-5, "red not clamped: {:?}", rt.tint);
+        assert!((rt.tint[2] - 0.5).abs() < 1e-5, "blue not clamped: {:?}", rt.tint);
+        // Half a second of `sithPlayer_Update` takes 0.2 off the red, and it reaches zero.
+        rt.step(0.5);
+        assert!((rt.tint[0] - 0.8).abs() < 1e-4, "tint after half a second {:?}", rt.tint);
+        rt.step(10.0);
+        assert_eq!(rt.tint, [0.0; 3], "the tint did not decay away");
     }
 
     #[test]

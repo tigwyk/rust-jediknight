@@ -5,7 +5,7 @@ something is ported**, or **what to work on next when the build is not yet fun t
 
 ## Why this exists
 
-As of 0.1.1 the port reports 10 of 10 roadmap stages "done", 61 gates and 137 tests green, a signed-off
+As of 0.1.1 the port reports 10 of 10 roadmap stages "done", 61 gates and 138 tests green, a signed-off
 release, an installer, CI and a landing page — and level 1 still had fundamental playability problems.
 The first retail reference frame (`tools/parity/`, gaps §5.9) looked like it found the cause at once:
 the spawn view appeared to sit inside a cantina table that retail does not draw through the eye. The
@@ -109,7 +109,7 @@ partials is still to be written; these are the entries this round created or mea
 | `compare.ps1 -Gate` | the port's HUD is inside its frame while the retail world crop has none, so a pair's ceiling is renderer/HUD-limited | verified pairs cap at 0.62–0.65 (spawn) and 0.72–0.74 (route); thresholds sit at 0.55 / 0.65 | HUD-free capture, or a HUD-masked metric |
 | `shots.tsv` / `--shot-at` | retail's rendered camera pitch is ~0 while its `coords` reports PYR pitch 1.04, and `warp` cannot set pitch, so a pair cannot reproduce a pitched retail view; rows request pitch 0 | port pitch 0.25° already drops the spawn pair 0.63 → 0.59; `coords` PYR is in every sidecar | a retail-side way to set or read the rendered view pitch (none known); the port side already takes pitch |
 | camera pinned vs retail camera on the body | a port capture puts the **player** at the recorded pose (`--warp`) but keeps the camera pinned to the row's eye (`--shot-at`), while retail's camera rides the body; where the body is moved by a script or the floor the two cameras diverge | same framing at the warp instant (sector and yaw match retail: 8/8 rows); no row shows a moved body yet | a capture that lets the port's camera ride the warped body once bodies stay put (attachment state and damage tint below) |
-| damage tint | the engine tints the palette red as the player is damaged: `sithActor_DamageActor` adds `damage * 0.04` to the local player's red tint, `sithPlayer_Update` decays 0.4/s, `stdPalEffects_UpdatePalette` applies `byte += round(byte * tint * 0.5)`; the port records `AddDynamicTint` but never draws it and applies no damage tint | `route_catwalk`/`route_door` score 0.45/0.42 against 0.72–0.74 for the untinted rows; retail's own series shows the body losing health (door 100 → 44, catwalk 100/100 → 81/11) as the red ramps in | the palette-tint layer in `Runtime` + the draw path, fed by the damage the player actually takes |
+| damage tint | the engine tints the palette red as the player is damaged: `sithActor_DamageActor` adds `damage * 0.04` to the local player's red tint, `sithPlayer_Update` decays 0.4/s, `stdPalEffects_UpdatePalette` applies `byte += round(byte * tint * 0.5)`. The **state** is ported (adds with the engine's clamps, decay, damage flash; unit-tested); the world **draw** is not: a multiply quad on the screen-tint camera goes through the camera's tone map, which darkened the frame even at an identity tint (cantina route crop mean 55 → 41) and turned a 1.5× red tint into +9% red instead of +50% | `route_catwalk`/`route_door` score 0.45/0.42 against 0.72–0.74 for the untinted rows; retail's own series shows the body losing health (door 100 → 44, catwalk 100/100 → 81/11) as the red ramps in | a **post-tonemap** palette pass (the engine's byte rule) in the renderer, Phase 1 step 2 |
 | warp attachment | after a warp the port's idle attach still needs a floor within one radius; at the catwalk pose there is no sector floor in that reach (and the catwalk itself is a solid *model* 0.145 below the body), so the body falls — while retail's `coords` holds z 2.80 for the whole capture. Whether retail's placement step keeps the pose or its collider has a surface the port's does not is not settled | `--warp` catwalk: support `None`, body falls and dies within 3 s; retail's `coords` stays at z 2.80 across 12 s | the floor/attachment step (`sithPhysics_UpdateAttachedThingPhysics`, `sithThing_AttachThingToSurface`) and solid-thing floors, Phase 1 step 3 |
 
 ## Phases
@@ -182,11 +182,12 @@ tier, not a checkbox.
    the three spawn rows. The player is warped to each pose, matching how retail's reference was taken.
    Three route pairs are gated at 0.72–0.74 SSIM; `route_catwalk`/`route_door` stay triage-only: their
    retail frames are red from **damage tint** (the body is being hurt where it stands — door health
-   100 → 44 over the series), which the port does not draw yet, and the catwalk pose also needs
-   standing on a solid model. The renderer differences this step exists for — model back-face
-   behaviour, transparency order, sky, distance light ramp, sprites — are still T1 and unfixed. Exit:
-   the fixed pose set within threshold, including the two upper rows once the damage-tint layer and
-   the attachment state land.
+   100 → 44 over the series). The tint's state is ported and tested; its world draw is not, because the
+   palette multiply has to run after the camera's tone map (see the deviation ledger), and the catwalk
+   pose also needs standing on a solid model. The renderer differences this step exists for — model
+   back-face behaviour, transparency order, sky, distance light ramp, sprites — are still T1 and
+   unfixed. Exit: the fixed pose set within threshold, including the two upper rows once the
+   post-tonemap palette pass and the attachment state land.
 3. **Movement.** Replace the unscoped sweep with the engine's sector-scoped collision; non-player
    thing physics (props, corpses, dropped items); step, slope and ledge behaviour. Exit: a recorded
    input script yields the same position/sector trace as retail, within a stated epsilon, across the
@@ -235,7 +236,8 @@ Reviewed `tools/parity/` (retail-capture, retail-lib, port-capture, compare, thr
 It drives the GOG `JK.EXE -devMode` on a scratch copy, so it is the oracle this roadmap needs. It has
 eight level-1 pairs: the spawn row and two warp-verified spawn poses (0.62–0.65), and five route poses
 (things 167/169/170/171/174), of which three are gated at 0.72–0.74 and two are triage-only because
-retail's reference there is red from the engine's **damage tint**, which the port does not draw yet.
+retail's reference there is red from the engine's **damage tint**: the port's tint state matches the
+decomp, but the world draw needs a post-tonemap palette pass.
 
 | Question | Answer from the harness |
 |---|---|
@@ -301,7 +303,7 @@ The exported decompilation in `decomp/` already settles part of this. Plan for t
 - Palette-index diff: have the port emit an indexed frame, or quantise through the retail palette.
 - Route poses beyond the first set: five `walkplayer` eyes are captured (three gated, two triage).
   More poses are cheap now — the port warps its player too (Phase 0.5 item 5, done) — but the two
-  triage rows stay ungraded until the damage-tint layer and the attachment state land.
+  triage rows stay ungraded until the post-tonemap damage-tint pass and the attachment state land.
 
 Still open after the review:
 
@@ -314,8 +316,10 @@ Still open after the review:
   scripts and AI react to a body as they do in retail's reference. Two engine gaps still differ after
   the warp: the port re-probes the floor each idle frame instead of keeping the attachment state
   (retail's catwalk body stays 0.145 above the catwalk model; the port's falls), and the port does not
-  draw the engine's damage tint — which is the red in `route_catwalk`/`route_door`. Both are on the
-  deviation ledger with their measured symptoms.
+  draw the engine's damage tint — which is the red in `route_catwalk`/`route_door`. The tint's state is
+  ported (units/clamps/decay/death damage) but its palette multiply must run after the camera tone map;
+  a pre-tonemap multiply darkened the frame at identity. Both are on the deviation ledger with their
+  measured symptoms.
 - **Input replay determinism.** Retail frame timing is not ours; T4 needs fixed-step or a tolerance, and
   the harness has no replay of movement yet.
 - **Better than SSIM.** Confirmed the PCX is palette-indexed on the software path (above); what remains

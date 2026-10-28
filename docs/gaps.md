@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 137 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 138 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -301,8 +301,11 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    the picture reddens (door 100 → 44 over the eight frames, catwalk 100/100 → 81/11), and the decomp
    gives the rule — `sithActor_DamageActor` calls `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)` for
    the local player, `sithPlayer_Update` decays the three channels by 0.4 per second, and
-   `stdPalEffects_UpdatePalette` adds `round(byte * tint * 0.5)` to each palette channel. The port
-   records `AddDynamicTint` but never decays or draws it, and it applies no tint in its damage paths.
+   `stdPalEffects_UpdatePalette` adds `round(byte * tint * 0.5)` to each palette channel. The port's
+   **state** now follows that rule — `damage_player`/`damage_typed` add `damage * 0.04` red,
+   `sithPlayer_Update`'s 0.4/s decay runs in `Runtime::step`, and the `AddDynamicTint` verb adds with
+   the engine's clamps (red/green 1.0, blue 0.5) instead of replacing — and is unit-tested. Its world
+   **draw** is not there: the renderer has no post-tonemap palette pass.
    At the catwalk there is a second gap: the recorded body stands on a `3x10catwalk` *model* (a solid
    thing, top at 2.675) 0.145 below it and on no sector floor, and the port's idle attach needs a floor
    within one radius, so its body falls and dies; retail's `coords` holds z 2.80 for the whole capture.
@@ -331,8 +334,17 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    player. The engine decides what an actor may fire at with `sithAI_FirstThingInView`, which the port
    does not model yet (Phase 1 step 5).
 
-   *Next for these rows (in dependency order):* the palette-tint layer (`AddDynamicTint` + the
-   0.4/s decay + the `byte += round(byte * tint/2)` draw); the AI's target selection
+   **A pre-tonemap multiply is not the palette rule (2026-10-27).** The cheap draw was tried: a
+   full-screen `AlphaMode::Multiply` quad on the existing screen-tint camera, `1 + tint/2` per channel.
+   Measured on the cantina route capture, even an *identity* tint darkened the frame (crop mean
+   55/50/56 → 41/36/41) because the camera tonemaps what is under the quad, and a 1.5× red tint moved
+   the door frame's red mean only +9% (33 → 36) where the engine's byte rule moves it +50%. The palette
+   multiply therefore has to run on the already-tonemapped bytes — the place the HUD canvas already
+   applies the same rule exactly — which makes it a renderer item (Phase 1 step 2), not a wash quad.
+   The state half is tested and kept; the draw half is deliberately absent rather than wrong.
+
+   *Next for these rows (in dependency order):* a post-tonemap palette pass for the world
+   (`byte += round(byte * tint/2)` on tonemapped bytes); the AI's target selection
    (`sithAI_FirstThingInView`) so the room's fire reaches the player rather than the nearest friend;
    and the attachment state (`sithPhysics_UpdateAttachedThingPhysics`) plus solid-thing floors for the
    catwalk.
