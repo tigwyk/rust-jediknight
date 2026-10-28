@@ -1843,3 +1843,14 @@ radius from the face in plan). Both the classification attempt and the earlier s
 only fixed half of that, which is why they changed nothing; the fix is to resolve the **horizontal
 penetration** of a swept contact in plan (`contact_xy + horizontal_normal * radius`) as well as the
 3D contact.
+
+**The plan-clearance contact fix frees the cantina leg (round 47).** The swept contact is
+`plane + normal * radius` in 3D, so a steep face leaves only `radius * |normal_xy|` clearance in plan;
+pushing the contact out along the horizontal normal by the shortfall (`radius * (1 - |n_xy|) / |n_xy|`)
+gives horizontal motion the full radius it needs. Measured: `walk_cantina` goes from **0.42 to 1.83
+units** (0.28 to 0.76 u/s; retail 2.17 / 0.91) and **no longer falls** - it ends at
+(-4.035, -3.106, -1.031) in sector 255, on the floor, against retail's (-4.36, -3.04).
+`walk_street45` still matches (2.21 vs 2.20), but `walk_street90` now stops **0.3 units early**
+(3.574 vs the wall at 3.265): the push also applies to a slanted face on that approach, so the
+contact resolution needs the same treatment for shallow faces (or the push should only fire when the
+horizontal normal dominates the vertical one). 143 tests and 61/61 engine gates pass with the change.

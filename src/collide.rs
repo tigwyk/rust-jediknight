@@ -997,6 +997,21 @@ impl Solids {
                     blocked = true;
                     let travelled = (hit.point[0] - at[0]) * dir[0] + (hit.point[1] - at[1]) * dir[1];
                     at = hit.point;
+                    // The contact point is `plane + normal * radius` in 3D, so a **steep** face leaves only
+                    // `radius * |normal_xy|` clearance in plan (the cantina ramp's xy normal is 0.45 long,
+                    // so the body sat 0.45 of a radius clear and crept through it a sub-step at a time).
+                    // Horizontal motion needs a full radius of plan clearance: push the contact out along
+                    // the horizontal normal by the shortfall. Vertical walls (|n_xy| ~ 1) need no push,
+                    // floors (|n_xy| ~ 0) are skipped.
+                    let nl = (hit.normal[0] * hit.normal[0] + hit.normal[1] * hit.normal[1]).sqrt();
+                    if nl > 1e-4 && nl < 1.0 {
+                        let push = radius * (1.0 - nl) / nl;
+                        at = [
+                            at[0] + hit.normal[0] * push,
+                            at[1] + hit.normal[1] * push,
+                            at[2],
+                        ];
+                    }
                     here = far;
                     left -= travelled.max(0.0);
                     if left < 1e-4 {
