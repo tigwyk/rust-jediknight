@@ -1781,3 +1781,13 @@ contact, the slide direction is tangential so the next bounce's `into` is ~0, `m
 hit at distance ~0 with a tangential direction is not a block - drop the tiny into-component and keep
 walking instead of breaking. That would make the cantina leg behave like retail's (slide south wall,
 continue west) and is a small, local change; the fixture and the geometry are now both pinned.
+
+**The cantina stop is not the `mag < 1e-4` slide break (round 42).** Implementing a tangential-contact
+nudge in `move_body`'s slide path (the hypothesised fix) let the body move further but it **fell off
+the walkway** (z -2.83, sector 100) - and the arithmetic says the hypothesis was wrong: the walk
+direction (-0.966, -0.259) against the wall normal's xy (0, 0.89) gives `into` = -0.23 and a slide
+magnitude ~0.97, nowhere near the 1e-4 break. So the stop is one of the *other* exits of the bounce
+loop (`bounce == 2`, the step-retry rejection, or a `sweep` that keeps reporting a contact at distance
+0 for a reason the slide math cannot see). The definitive tool is a per-bounce print inside
+`move_body` (bounce index, travelled, `into`, slide mag, resulting `dir`, `at`, `left`) - one run then
+names the exit instead of another guess. Change reverted; tree byte-identical to the last green commit.
