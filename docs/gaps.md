@@ -1672,3 +1672,13 @@ in y by the x = 3.20 wall's edge at -1.865, and both slide along it; the port th
 climb the 0.066 corner step and round the wall, which retail does not. The remaining fix is the
 **corner/step-up handling in `collide.rs`**, and `walk_street90` (no blocking, no drift, three
 sectors, 2.2 units in 1.8 s) is the new clean fixture for the steady-speed comparison.
+
+**Correction: the round-12 walk-speed rule never landed (round 31).** The committed source has
+`walk: thrust * physics_scale() / drag` (0.667 u/s), not the `thrust * 0.7 / (surfdrag + 0.2)` rule
+round 12 reported. That edit was applied with a text replacement whose anchor did not match the
+committed block, so the report described a change the tree never had - the same silent-replace
+failure mode the notes warn about. The `run = !shift` default *did* land, so the port always runs the
+old walk speed doubled; the clean `walk_street90` leg measures the port at **0.66 u/s** against
+retail's **1.07-1.23 u/s**, and the speed rule is exactly what needs re-deriving. The next attempt
+must (a) patch `walk:` with the anchor read from the file, (b) rebuild in its own command, (c)
+confirm the new constant is in the binary by re-running the clean leg, before updating any doc.
