@@ -1893,3 +1893,15 @@ gate but renumbered the cogs (base 0), breaking the fixture. So the fix is two e
 The working tree is back to the committed state; both halves are known and the fixture is the check.
 A unit test over `jkl::parse` with deliberately out-of-order rows would pin the placement without
 needing a retail run.
+
+**Cog row indices start at 0 and retail's printed ids start at 1 (round 53).** Compacting the rows
+by their own index puts `00_door.cog` at position 0, and retail's `cogstatus 1` names
+`00_std_elev.cog` - so `00_door`'s row index is **0** and `00_std_elev`'s is **1**: retail's
+array/id is the row index with id 1 = index 1, i.e. index 0 is outside the printed range (probably the
+level's global/startup script rather than a placed cog). That also explains both failed attempts:
+placement by `index - 1` reproduced the fixture but left a hole at 0 (so scans met empty slots and
+`--ends` lost two levels), while compaction renumbered everything (fixture broke). The decisive probe
+is one retail console command, `cogstatus 0`: if it prints `00_door.cog`, index 0 is a valid id and
+the array is 0-based with retail numbering 1-based; if it prints nothing, index 0 is not a cog
+instance and the port should exclude it from `level.cogs` while still running its script. Then
+placement by index minus one matches retail with no holes. Tree reverted to the committed state.
