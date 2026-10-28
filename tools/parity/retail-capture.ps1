@@ -22,7 +22,10 @@ param(
   # Extra JK.EXE command-line arguments. Retail has no console command that loads a level (round 60),
   # so this is the harness's only route to boot a level other than the campaign's first - Phase 2's
   # spawn audits need it. `-File` splits `-level,02narshadda` into two arguments.
-  [string[]]$JkArgs = @()
+  [string[]]$JkArgs = @(),
+  # Keys to press after the warp and before the console commands (e.g. 'ENTER' for the use action).
+  # Phase 1 step 4's interaction probes need this: a switch is used, not walked into.
+  [string[]]$Keys = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -652,6 +655,14 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       Log "warp command: $warp"
       $null = Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command $warp
       Start-Sleep -Milliseconds 900
+    }
+
+    if ($Keys.Count -gt 0) {
+      foreach ($key in @($Keys | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })) {
+        Log "pressing $key after the warp"
+        Send-JkKey -Name $key
+        Start-Sleep -Milliseconds 300
+      }
     }
 
     # In walk-trace mode the console runs *after* the walk (opening the dev-console dialog before the

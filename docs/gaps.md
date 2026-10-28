@@ -2048,3 +2048,15 @@ state shows the switch and door 5 unchanged on that path (`doorstatus 0`), so th
 precise approach - its thing sits 0.6 units south of where the forward walk ends. Fixtures saved:
 `tools/parity/walktrace-cantina-01narshadda.tsv` and
 `tools/parity/cogstatus-after-cantinawalk-01narshadda.txt`.
+
+**The cantina door switch is not a use-key trigger from 0.8 units (round 67).** With the trigger map
+from `--links` (thing 56 -> cog 11 at (-4.75, -3.75, -1.10)) the harness gained post-warp key presses
+(`-Keys`) and letter scancodes (A-Z added to `JkScan`; only ESC/ENTER/SPACE/TAB/BACKSPACE/digits/
+F-keys existed before, so the default bindings could not be exercised). A warp to
+**(-4.75, -2.95, -1.143) facing south** then pressing **ENTER, SPACE, E, F and T** leaves cog 11 at
+`doorstatus 0 / movestatus 0 / open_doors 0 / close_doors 0` every time. So the switch is not a
+proximity use-key trigger from that spot: either its surfaces (2409/2403) face the other side of the
+wall, or it fires when a body **touches** its thing while walking through sector 103 (the corridor the
+3.6 s cantina walk reaches). The next probe is positional: a yaw-180 leg from the switch-side warp
+that walks south into the thing, with `cogstatus 11` after it. Harness change is committed with the
+findings (`-Keys`, letters).
