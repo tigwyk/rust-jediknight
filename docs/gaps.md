@@ -1881,3 +1881,15 @@ message routing, `getselfcog`, `setmastercog` and every per-instance value bindi
 place each row at its own index while parsing (`level.cogs[n] = ...` with a resize, base checked
 against the first row), then have `--cogstatus 1` print `00_std_elev.cog` with the retail fixture's
 nine symbols - the fixture becomes the port check for it.
+
+**The cog-id fix needs two changes together (round 52).** Index placement alone reproduces the retail
+fixture exactly (`--cogstatus 1` printed `00_std_elev.cog` and its nine symbols, byte-identical to
+`tools/parity/cogstatus-01narshadda.txt`), but the `--ends` gate then fails on `07yun` and `11gorc`
+because sparse row indices leave **empty placeholder slots** and the ends scan stops at the first empty
+script (28 -> 26 of 35 levels found). A base-aware variant (base = smallest index) fixed the ends
+gate but renumbered the cogs (base 0), breaking the fixture. So the fix is two edits: place by
+`index - 1` (ids are 1-based: retail's id 1 is the row numbered 1) and make every scan over
+`level.cogs` **skip empty script slots** (the ends scan, `run_level_cogs`, and any other consumer).
+The working tree is back to the committed state; both halves are known and the fixture is the check.
+A unit test over `jkl::parse` with deliberately out-of-order rows would pin the placement without
+needing a retail run.
