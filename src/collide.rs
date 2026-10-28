@@ -1004,7 +1004,10 @@ impl Solids {
                     // the horizontal normal by the shortfall. Vertical walls (|n_xy| ~ 1) need no push,
                     // floors (|n_xy| ~ 0) are skipped.
                     let nl = (hit.normal[0] * hit.normal[0] + hit.normal[1] * hit.normal[1]).sqrt();
-                    if nl > 1e-4 && nl < 1.0 {
+                    // Only **steep** faces need it: a shallow slope (|n_xy| near 1) is what the step-up
+                    // path climbs, and pushing there fights it - `walk_street90` crawled at 0.14 u/s
+                    // past a shallow face at x 3.9 with an unbounded push. The cantina ramp is 0.45.
+                    if nl > 1e-4 && nl < 0.6 {
                         let push = radius * (1.0 - nl) / nl;
                         at = [
                             at[0] + hit.normal[0] * push,

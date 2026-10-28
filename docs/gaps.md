@@ -1863,3 +1863,11 @@ back every sub-step instead of letting the step-up path climb it. Bounding the p
 file's brace balance this round and was reverted rather than left half-applied. The cantina fix and
 the street45 match stand (`walk_cantina` 1.83 units vs retail 2.17, no falls; `walk_street45` 2.21 vs
 2.20); the next attempt should make the bounded-push edit against the read block in one pass.
+
+**Bounding the plan push to steep faces fixes the street crawl and closes the movement set
+(round 49).** With `|n_xy| < 0.6` the shallow face at x 3.9 no longer pushes back, so the step-up
+path climbs it as retail does. Measured, all level-1 legs: `walk_street90` **1.84 units** (1.02 u/s
+average, ends at the 3.265 wall = retail's 3.27); `walk_street45` **2.21 vs retail's 2.20** with
+**0 of 5 sector mismatches**; `walk_cantina` **1.85 vs 2.17** with no falls (it ends
+(-4.32, -2.75, -1.196) sector 103 against retail's (-4.36, -3.04), the remaining cantina difference
+being the slide direction along the ramp). 143 tests and 61/61 engine gates pass, parity 6/6.
