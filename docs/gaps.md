@@ -1690,3 +1690,14 @@ and its unit test pin the measured value, and the clean leg proves it: `walk_str
 ramp explaining the gap), and the port now **stops at 3.265 = retail's 3.27** in sector 155 instead
 of walking off the ledge. 143 tests and 61/61 engine gates stay green. The ledger row names the
 retire condition: recover the `thing + 0x144` thrust term and re-derive instead of measuring.
+
+**The movement trace matches retail on the street leg (round 33).** With the measured walk speed
+in place every leg was re-run: `walk_street45` now covers **2.21 units over 2.4 s held against
+retail's 2.20** (0.92 vs 0.92 u/s), with **0 of 5 sector mismatches** and a 0.60-unit max position
+delta (a sample-timing offset, not a rule difference); `walk_street90` and `walk_street` both stop at
+**3.265 = retail's 3.27** in sector 155. That is Phase 1 step 3's "movement trace match" for the
+street route - the first route where the body's path, speed and sector sequence all agree.
+`walk_cantina` does not: the port covers only 0.42 units against retail's 2.17, so that pose is
+blocked in the port at the start (the body faces furniture/geometry retail walks past) - the next
+movement question, and it is a different cause from the street stop.
+The parity gate is unchanged (6/6 thresholds, 8 pairs, 0 failures).
