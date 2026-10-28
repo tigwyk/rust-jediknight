@@ -109,7 +109,7 @@ partials is still to be written; these are the entries this round created or mea
 | `compare.ps1 -Gate` | the port's HUD is inside its frame while the retail world crop has none, so a pair's ceiling is renderer/HUD-limited | verified pairs cap at 0.62–0.65 (spawn) and 0.72–0.74 (route); thresholds sit at 0.55 / 0.65 | HUD-free capture, or a HUD-masked metric |
 | `shots.tsv` / `--shot-at` | retail's rendered camera pitch is ~0 while its `coords` reports PYR pitch 1.04, and `warp` cannot set pitch, so a pair cannot reproduce a pitched retail view; rows request pitch 0 | port pitch 0.25° already drops the spawn pair 0.63 → 0.59; `coords` PYR is in every sidecar | a retail-side way to set or read the rendered view pitch (none known); the port side already takes pitch |
 | camera pinned vs retail camera on the body | a port capture puts the **player** at the recorded pose (`--warp`) but keeps the camera pinned to the row's eye (`--shot-at`), while retail's camera rides the body; where the body is moved by a script or the floor the two cameras diverge | same framing at the warp instant (sector and yaw match retail: 8/8 rows); no row shows a moved body yet | a capture that lets the port's camera ride the warped body once bodies stay put (attachment state and damage tint below) |
-| damage tint | the engine tints the palette red as the player is damaged: `sithActor_DamageActor` adds `damage * 0.04` to the local player's red tint, `sithPlayer_Update` decays 0.4/s, `stdPalEffects_UpdatePalette` applies `byte += round(byte * tint * 0.5)`. Both halves are ported: the state (adds with the engine's clamps, decay, damage flash) and the draw (`src/palette.rs`, a `FullscreenMaterial` pass on the world camera that scales the finished picture's bytes by `1 + tint/2` — measured ×1.52 for a 1.0 red tint, identity byte-identical; the gated cantina pair rose 0.7315 → 0.7497 with it) | `route_catwalk`/`route_door` still score 0.45/0.42 against 0.72–0.74 for the untinted rows, because the port's body takes no damage in the first 10 s of the door capture while retail's reference is red at the first second — the tint draws correctly where damage lands (a 30 s run draws 398 tinted frames) | the AI's engagement timing (Phase 1 step 5); no port-side renderer gap remains |
+| damage tint | the engine tints the palette red as the player is damaged: `sithActor_DamageActor` adds `damage * 0.04` to the local player's red tint, `sithPlayer_Update` decays 0.4/s, `stdPalEffects_UpdatePalette` applies `byte += round(byte * tint * 0.5)`. Both halves are ported: the state (adds with the engine's clamps, decay, damage flash) and the draw (`src/palette.rs`, a `FullscreenMaterial` pass on the world camera that scales the finished picture's bytes by `1 + tint/2` — measured ×1.52 for a 1.0 red tint, identity byte-identical; the gated cantina pair rose 0.7315 → 0.7497 with it) | `route_catwalk`/`route_door` still score 0.45/0.42 against 0.72–0.74 for the untinted rows, because retail's own series turns red at ~5–6 s and the reference at ~10 s is saturated while the port takes no damage in those 10 s (first hits ~15–20 s) — the tint draws correctly where damage lands (a 30 s run draws 398 tinted frames) | the AI's engagement timing (Phase 1 step 5); no port-side renderer gap remains |
 | warp attachment | after a warp the port's idle attach still needs a floor within one radius; at the catwalk pose there is no sector floor in that reach (and the catwalk itself is a solid *model* 0.145 below the body), so the body falls — while retail's `coords` holds z 2.80 for the whole capture. Whether retail's placement step keeps the pose or its collider has a surface the port's does not is not settled | `--warp` catwalk: support `None`, body falls and dies within 3 s; retail's `coords` stays at z 2.80 across 12 s | the floor/attachment step (`sithPhysics_UpdateAttachedThingPhysics`, `sithThing_AttachThingToSurface`) and solid-thing floors, Phase 1 step 3 |
 
 ## Phases
@@ -203,10 +203,14 @@ tier, not a checkbox.
    pickups. Measured at level 1's door with the shot's owner traced: 6 hits on the body (72 damage in
    8 s, ~9 damage/s against retail's ~22) — all from one actor, while the rest of the room's fire lands
    on a Greedo standing in the lines. `BK_AI_TRACE` shows only a handful of actors ever see the body
-   there. So the damage rate is now the same order as retail's and the gap is AI positioning/aim, not
-   a missing firing rule — the engine's `FirstThingInView` is the cog-verb snapshot behind force
-   pull/grip (`firstthinginview` here), and a segment-clearance firing gate modelled on it was tried,
-   cut the room to one shot in 6 s, and was reverted.
+   there. So the damage rate is now the same order as retail's and the gap is AI acquisition and
+   positioning, not a missing firing rule — the engine's `FirstThingInView` is the cog-verb snapshot
+   behind force pull/grip (`firstthinginview` here), and a segment-clearance firing gate modelled on it
+   was tried, cut the room to one shot in 6 s, and was reverted. `BK_AI_ROSTER` measures the remaining
+   gap: 56 armed actors within 8 units of the body at the door, all with an AI class and a clear line,
+   but most facing >100° away — and a standing actor never turns onto a target it has, so only ~3 of
+   them ever acquire. Retail's series turns red at ~5–6 s and is saturated by ~10 s; the port's first
+   hits land at ~15–20 s.
 6. **Exit.** End-of-level tally, transition, carried state (health, shields, bins). Exit: level 2 starts
    in retail's state.
 
@@ -241,7 +245,8 @@ It drives the GOG `JK.EXE -devMode` on a scratch copy, so it is the oracle this 
 eight level-1 pairs: the spawn row and two warp-verified spawn poses (0.62–0.65), and five route poses
 (things 167/169/170/171/174), of which three are gated at 0.72–0.74 and two are triage-only because
 retail's reference there is red from the engine's **damage tint**: the port draws that tint faithfully
-now, but takes no damage in the first seconds of those captures (AI engagement, Phase 1 step 5).
+now, but its body takes no damage in those captures' window (retail turns red at ~5–6 s and is saturated
+by ~10 s; the port's first hits land at ~15–20 s — AI engagement, Phase 1 step 5).
 
 | Question | Answer from the harness |
 |---|---|
@@ -320,8 +325,8 @@ Still open after the review:
   scripts and AI react to a body as they do in retail's reference. Two engine gaps still differ after
   the warp: the port re-probes the floor each idle frame instead of keeping the attachment state
   (retail's catwalk body stays 0.145 above the catwalk model; the port's falls), and the damage that
-  reddens `route_catwalk`/`route_door` in retail does not land in the first seconds of the port's
-  capture — the AI engages late. The tint itself is ported on both halves now (state and the
+  reddens `route_catwalk`/`route_door` in retail does not land inside the port's
+  10 s capture — the AI engages late. The tint itself is ported on both halves now (state and the
   fullscreen palette draw); the timing gap is Phase 1 step 5. Both are on the deviation ledger with
   their measured symptoms.
 - **Input replay determinism.** Retail frame timing is not ours; T4 needs fixed-step or a tolerance, and

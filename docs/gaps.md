@@ -364,16 +364,35 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    carries the damage tint only; the scripted `NewColorEffect` filter/tint/add channels still go
    through the wash quad.
 
-   The two rows still want the **tint to arrive when retail's does**. A 10 s door capture takes no
-   damage at all in the port — the first hits land around 15–20 s, from one actor (155) — while retail's
-   door reference is already red at the first second; a 30 s port run does draw the tint (398 tinted
-   frames, peak tint 0.47 after the first hit). So the picture is faithful where damage lands; the row
-   waits on AI engagement, not on the palette.
+   The two rows still want the **tint to arrive when retail's does**. Retail's own 8×1 s series measures
+   its onset directly: frames 0–4 are neutral (whole-crop r/g 0.82–0.91) and frames 5–7 are red (1.23,
+   1.62, 1.68), with the settled reference at ~10 s saturated (r/g 2.0, i.e. red bytes ×1.5 with the
+   other channels crushed). So retail's body starts taking damage about **5–6 s** after the warp and has
+   taken ~156 damage by 10 s. The port takes **no damage at all** in those 10 s: its first hits land
+   around 15–20 s (all from one actor, 155) and amount to 72 damage in 20 s. A 30 s port run does draw
+   the tint (398 tinted frames), so the picture is faithful where damage lands; the row waits on AI
+   engagement, not on the palette.
 
-   *Next for these rows (in dependency order):* the AI's engagement timing at the door (retail's body
-   is hit in the first second; the port's first hits land around 15–20 s, from one actor); the AI's
-   positioning/aim there (the rest of the room's fire goes into a friend's back); and the attachment
-   state (`sithPhysics_UpdateAttachedThingPhysics`) plus solid-thing floors for the catwalk.
+   **Why the room does not wake up (2026-10-28).** `BK_AI_ROSTER=1` dumps every actor near the body at
+   the pose, with its AI class, its cone and line-of-sight tests and how far off its facing the body
+   is. At the door there are **56 armed actors within 8 units, every one with an AI class and a clear
+   line**, and the blocker is the facing cone: most of them are >100° off their bearing to the player
+   (154 at 0.34 units is 107° off, 156 at 0.81 is 108° off, 244 at 1.19 is 103° off), and nothing makes
+   a standing actor turn — the port only faces an actor while it is walking its chase or when a script
+   sets a look, and neither happens without sight. Only ~3 of the 56 ever acquire (157 for the whole
+   run, 159, 291). Recovered for the next step from `JK.EXE`: `sithAIClass_LoadEntry` maps `+0x14`
+   sightdist (default 20), `+0x18` heardist (default 10) and `+0x1c` the sine/cosine of **half** the
+   `fov=` angle (`fov * 0.5` in degrees; 0x523128 = 0.5, 0x523074 = 90.0); `sithAI_CanDetectSightThing`
+   guarantees detection, for a thing already in view, within **2 units** (0x523078 = 2.0);
+   `sithAI_CheckSightThing` treats a `-1.0` class field (0x523064) as "no cone". The unported
+   `sithAIAwareness_*` event system (`CreateTransmittingEvent`/`ProcessEvent`) is the likely reason
+   retail's whole room wakes once the first hits land.
+
+   *Next for these rows (in dependency order):* the AI's engagement — turning a standing actor onto a
+   target it has, and the awareness events that wake a room (retail is red by ~6 s and saturated by
+   ~10 s; the port's first hits land around 15–20 s, from one actor); the AI's positioning/aim there
+   (the rest of the room's fire goes into a friend's back); and the attachment state
+   (`sithPhysics_UpdateAttachedThingPhysics`) plus solid-thing floors for the catwalk.
 
    **Pitch does not mean what `coords` says.** Adding pitch to `--shot-at` and sweeping it against the
    verified spawn reference gave a sharp answer: port pitch 0 matches retail best (0.6296), 0.25° drops

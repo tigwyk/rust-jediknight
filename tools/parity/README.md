@@ -107,11 +107,12 @@ second and is applied as `palette += round(palette * tint * 0.5)`). Both halves 
 state (adds with the engine's clamps, the 0.4/s decay, the damage flash — unit-tested) and the draw
 (a fullscreen palette pass on the world camera that scales the finished picture's bytes by
 `1 + tint/2`; a 1.0 red tint measures ×1.52). The rows stay `UNGRADED` at 0.45/0.42 for a different
-reason: the port's body takes **no damage in the first 10 s** of the door capture — the AI's first
-hits land around 15–20 s — while retail's reference is already red in its first second. At the
-catwalk the port also cannot stand its body on the catwalk *model* — that is a solid thing, not a
-sector floor, so the body falls out of the level. Those are named engine gaps (Phase 1 steps 3 and
-5), not renderer tolerance (see `docs/gaps.md` §5.9).
+reason: retail's own 1 s series turns red at ~5–6 s and its settled reference at ~10 s is saturated,
+while the port's body takes **no damage in its 10 s capture** — its first hits land around 15–20 s,
+because a standing actor never turns onto a target it has. At the catwalk the port also cannot stand
+its body on the catwalk *model* — that is a solid thing, not a sector floor, so the body falls out
+of the level. Those are named engine gaps (Phase 1 steps 3 and 5), not renderer tolerance (see
+`docs/gaps.md` §5.9).
 
 The numbers are tied to the capture policy above (600 frames, window from the retail sidecar, default
 16-bit retail renderer) — changing framing or frame count invalidates them.
@@ -251,9 +252,11 @@ Everything below was verified against the GOG build (the harness works on a scra
 - **Reading a pair's contents.** `BK_HIT_TRACE=1` makes the port print each shot (`fire: <template>
   dmg … owner <thing> from <pos> yaw/pitch`) and put the shot's owner on each hit line, so a capture's
   log says who hit whom; `BK_AI_TRACE=1` prints every actor-frame that has line of sight to the body
-  (range, dot, `ready`). At level 1's door: 38 shots and 6 hits on the body from one actor in 8 s, the
-  rest into a Greedo standing in the lines — the damage rate is near retail's, the aim/positioning is
-  not.
+  (range, dot, `ready`); `BK_AI_ROSTER=1` dumps every actor near the body once — AI class, cone test,
+  line of sight and how far off its facing the body is, which is the fastest way to see why a room is
+  quiet. At level 1's door: 38 shots and 6 hits on the body from one actor in 8 s, the rest into a
+  Greedo standing in the lines; the roster shows 56 armed actors within 8 units, all with a clear line,
+  most facing >100° away — and standing actors never turn.
 - **Retail script coverage:** the menu coordinates and key timing are tied to the GOG build (and
   to `player\Lee\Lee.plr`); a different build/player may need the constants updated.
 - **Level 1's spawn — what the pair showed, and the fix.** Retail's spawn frame is the player camera:

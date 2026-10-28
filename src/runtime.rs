@@ -2391,6 +2391,45 @@ impl Runtime {
     /// delay — and no scheduler. Returns how many shots were fired.
     pub fn ai_tick(&mut self, player: usize, dt: f32) -> usize {
         let Some(target) = self.things.get(player).map(|t| t.pos) else { return 0 };
+        // `BK_AI_ROSTER=1`: what stands near the body and which of them the port has given an AI
+        // class. An actor outside `self.ai` is never ticked at all, so this is the first thing to
+        // look at when a room fires nothing. Debug only.
+        if std::env::var_os("BK_AI_ROSTER").is_some() {
+            static ROSTER: std::sync::Once = std::sync::Once::new();
+            let mut near: Vec<(f32, usize)> = self
+                .things
+                .iter()
+                .enumerate()
+                .filter(|(index, thing)| {
+                    !thing.destroyed && self.types.get(*index).copied() == Some(2)
+                })
+                .map(|(index, thing)| {
+                    let d = (thing.pos[0] - target[0]).powi(2) + (thing.pos[1] - target[1]).powi(2);
+                    ((d + (thing.pos[2] - target[2]).powi(2)).sqrt(), index)
+                })
+                .filter(|(d, _)| *d <= 8.0)
+                .collect();
+            near.sort_by(|a, b| a.0.total_cmp(&b.0));
+            ROSTER.call_once(|| {
+                for (distance, index) in near {
+                    let template = self.templates.get(index).cloned().unwrap_or_default();
+                    let pos = self.things[index].pos;
+                    let yaw = self.things[index].yaw;
+                    let class = self.ai.get(&index);
+                    let in_cone = class.is_some_and(|ai| ai.sees(pos, yaw, target));
+                    let los = self.solids.as_ref().is_none_or(|s| !s.segment_blocked(pos, target));
+                    let bearing = (target[1] - pos[1]).atan2(target[0] - pos[0]).to_degrees();
+                    let mut off = (bearing - yaw).abs() % 360.0;
+                    if off > 180.0 {
+                        off = 360.0 - off;
+                    }
+                    eprintln!(
+                        "roster: {index} `{template}` d {distance:.2} cone {in_cone} los {los} yaw {yaw:.0} bearing {bearing:.0} off {off:.0} ai {}",
+                        if class.is_some() { "yes" } else { "NO" }
+                    );
+                }
+            });
+        }
         let mut fired = 0;
         let mut walked = 0;
         self.walked.clear();
