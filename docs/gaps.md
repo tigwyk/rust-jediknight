@@ -1746,3 +1746,15 @@ step-up code at all (e.g. `hit.point[2] - radius` is not below the step threshol
 must instrument those four predicates (a one-line `BK_WALK_TRACE` print of each) rather than change
 the logic blind - three hypothesis-killing rounds in a row came from changing logic first. The patch
 is reverted; the tree is byte-identical to the last green commit.
+
+**The step-up is entered but fails on `clear` and `advance` - because the "low" test reads the
+sphere's contact height, not the obstacle's top (round 39).** The `BK_WALK_TRACE` step
+instrumentation shows, for the cantina pose: `step candidate low true contact z -1.185 feet -1.250
+step 0.066`, then `step predicates clear false lands true inside true advance false`. So the body is
+blocked by a face whose *sphere contact* sits only 0.065 above the feet (below the 0.066 step), but
+raising the body one step does **not** clear it (`advance false`) - the face is taller than its
+contact point suggests, because a sphere meets a wall at its lowest point. The engine decides a step
+from the **destination floor height** (its floor pass re-sweeps at `range = moveSize`), not from the
+contact point, so the fix is to replace the `low` predicate with "the floor ahead is within `step` of
+the feet" (`floor_under` at the contact point, compare its height, then lift). That is a small
+change in `move_body`'s blocked branch, and this instrumentation is now in the tree to verify it.

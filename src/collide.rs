@@ -1004,7 +1004,15 @@ impl Solids {
                     }
                     // A low obstruction is a step rather than a wall: retry the rest of the move from
                     // one step up. `hit.point` is the centre at contact, so the feet are `radius` below.
-                    if hit.point[2] - radius < pos[2] - radius + step {
+                    let low = hit.point[2] - radius < pos[2] - radius + step;
+                    if std::env::var_os("BK_WALK_TRACE").is_some() {
+                        eprintln!(
+                            "walk trace:   step candidate low {low} contact z {:.3} feet {:.3} step {step:.3}",
+                            hit.point[2],
+                            pos[2] - radius
+                        );
+                    }
+                    if low {
                         let raised = [at[0], at[1], at[2] + step];
                         // Retry the move one step up, the way `FindFloor` re-sweeps at `range = moveSize`.
                         // The destination's floor may be a frame away (a ledge whose top edge starts just
@@ -1036,7 +1044,11 @@ impl Solids {
                         // afterwards (`decomp/004e7950_sithCollision_MoveThing.c:251`).
                         let inside = self.inside_sector(here, [raised[0], raised[1], raised[2] - radius], 0.0);
 
-    if clear && lands && inside && self.sweep(here, raised, dir, left, radius, gates).is_none() {
+    let advance = self.sweep(here, raised, dir, left, radius, gates).is_none();
+    if std::env::var_os("BK_WALK_TRACE").is_some() {
+        eprintln!("walk trace:   step predicates clear {clear} lands {lands} inside {inside} advance {advance}");
+    }
+    if clear && lands && inside && advance {
                             at = raised;
                             continue;
                         }
