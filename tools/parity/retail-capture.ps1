@@ -1,54 +1,3 @@
-<#
-.SYNOPSIS
-  Repeatable screenshot capture from the real GOG Star Wars Jedi Knight: Dark Forces II
-  (JK.EXE) for retail-vs-port parity checks.
-
-.DESCRIPTION
-  Drives the retail game the way target/parity/NOTES.md documents it:
-    * copies the install to a scratch WorkCopy (the real install is never modified),
-    * stages dgVoodoo2 into the copy and sets the HKCU VirtualStore b3DAccel=1 key (never HKLM),
-      because the 1997 build's Direct3D path calls the system D3DIM.DLL, which crashes on Windows 11;
-      the wrapper's 16-bit renderer works and F12 writes JSHOT##.BMP (24-bit) instead of the
-      palettised 8-bit PCX. `-Software` forces the old software path (b3DAccel=0),
-    * launches JK.EXE -devMode from the scratch copy and skips the intro movies,
-    * mouse-navigates Players -> Ok -> Single Player -> New Game (640x480 fullscreen,
-      screen coords == game coords for the menus),
-    * waits for the level-parse line in the dev-console ListBox (id 1037),
-    * writes the pose with `warp` when a row has an explicit pose,
-    * captures a time series of F12 screenshots plus the settled reference screenshot,
-    * reads `coords` through the dev-console dialog (best effort; falls back to the known
-      walkplayer pose for the level's own spawn row),
-    * converts JSHOT*.PCX/BMP raw frames to PNG with ffmpeg, detects the world box
-      (letterbox + -devMode corner overlays are stripped) and saves <name>.png plus
-      <name>-raw.png and <name>.json.
-
-  Input rows come from tools/parity/shots.tsv (owned by the Lead; never edited here).
-
-.PARAMETER Shots
-  TSV with header comments and columns: name, level, x, y, z, pitch, yaw.
-  A pose of "-" means the level's own spawn pose (no warp; pose read from `coords`).
-
-.PARAMETER Out
-  Output directory (PNG, JSON, retail.log, <name>-series-*.png).
-
-.PARAMETER GamePath
-  Retail install root. Default: resolve the GOG install (JK.EXE + Resource) via
-  HKLM\SOFTWARE\WOW6432Node\GOG.com\Games\*\path.
-
-.PARAMETER WorkCopy
-  Scratch copy of the install that gets launched and modified (player profile,
-  JSHOT files). Default: target/parity/retailcopy.
-
-.PARAMETER SeriesFrames
-  Number of F12 screenshots at ~1 s intervals right after the level loads (0 disables).
-
-.PARAMETER Software
-  Force the old software renderer path (b3DAccel=0, 8-bit JSHOT##.PCX). The default is the
-  dgVoodoo wrapper's 16-bit path (b3DAccel=1, 24-bit JSHOT##.BMP).
-
-.EXAMPLE
-  pwsh -File tools/parity/retail-capture.ps1
-#>
 [CmdletBinding()]
 param(
   [string]$Shots = 'tools/parity/shots.tsv',
@@ -270,6 +219,84 @@ function Invoke-JkF12Shot {
 # when its Edit control (id 1024) has focus in the game's own input queue, so cross-process
 # focus is forced; the command is submitted as WM_COMMAND/IDOK (verified against JK.EXE).
 # Returns the ListBox lines that appeared after the command.
+function Invoke-JkConsoleCapture {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][string]$Name,
+    [Parameter(Mandatory)][string[]]$Commands
+  )
+  $consolePath = Join-Path $script:TraceOut ("{0}-console.txt" -f $Name)
+  $consoleLines = New-Object System.Collections.Generic.List[string]
+  # `-File` passes a comma-joined token as one string, so split it back into commands.
+  $split = @($Commands | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
+  foreach ($command in $split) {
+    # `wait:<ms>` pauses instead of issuing a command, so one capture can show a cog's state before and
+    # after a trigger (Phase 1 step 4's "cog variable/state trace at each trigger").
+    if ($command -like 'wait:*') {
+      $milliseconds = [int]($command -replace '^wait:', '')
+      $consoleLines.Add("> wait $milliseconds ms")
+      Start-Sleep -Milliseconds $milliseconds
+      continue
+    }
+    $consoleLines.Add("> $command")
+    foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $ProcessId -Command $command)) {
+      $consoleLines.Add($line)
+    }
+  }
+  Set-Content -LiteralPath $consolePath -Value $consoleLines -Encoding utf8
+  Log "console: wrote $consolePath ($($split.Count) command(s))"
+}
+<#
+.SYNOPSIS
+  Repeatable screenshot capture from the real GOG Star Wars Jedi Knight: Dark Forces II
+  (JK.EXE) for retail-vs-port parity checks.
+
+.DESCRIPTION
+  Drives the retail game the way target/parity/NOTES.md documents it:
+    * copies the install to a scratch WorkCopy (the real install is never modified),
+    * stages dgVoodoo2 into the copy and sets the HKCU VirtualStore b3DAccel=1 key (never HKLM),
+      because the 1997 build's Direct3D path calls the system D3DIM.DLL, which crashes on Windows 11;
+      the wrapper's 16-bit renderer works and F12 writes JSHOT##.BMP (24-bit) instead of the
+      palettised 8-bit PCX. `-Software` forces the old software path (b3DAccel=0),
+    * launches JK.EXE -devMode from the scratch copy and skips the intro movies,
+    * mouse-navigates Players -> Ok -> Single Player -> New Game (640x480 fullscreen,
+      screen coords == game coords for the menus),
+    * waits for the level-parse line in the dev-console ListBox (id 1037),
+    * writes the pose with `warp` when a row has an explicit pose,
+    * captures a time series of F12 screenshots plus the settled reference screenshot,
+    * reads `coords` through the dev-console dialog (best effort; falls back to the known
+      walkplayer pose for the level's own spawn row),
+    * converts JSHOT*.PCX/BMP raw frames to PNG with ffmpeg, detects the world box
+      (letterbox + -devMode corner overlays are stripped) and saves <name>.png plus
+      <name>-raw.png and <name>.json.
+
+  Input rows come from tools/parity/shots.tsv (owned by the Lead; never edited here).
+
+.PARAMETER Shots
+  TSV with header comments and columns: name, level, x, y, z, pitch, yaw.
+  A pose of "-" means the level's own spawn pose (no warp; pose read from `coords`).
+
+.PARAMETER Out
+  Output directory (PNG, JSON, retail.log, <name>-series-*.png).
+
+.PARAMETER GamePath
+  Retail install root. Default: resolve the GOG install (JK.EXE + Resource) via
+  HKLM\SOFTWARE\WOW6432Node\GOG.com\Games\*\path.
+
+.PARAMETER WorkCopy
+  Scratch copy of the install that gets launched and modified (player profile,
+  JSHOT files). Default: target/parity/retailcopy.
+
+.PARAMETER SeriesFrames
+  Number of F12 screenshots at ~1 s intervals right after the level loads (0 disables).
+
+.PARAMETER Software
+  Force the old software renderer path (b3DAccel=0, 8-bit JSHOT##.PCX). The default is the
+  dgVoodoo wrapper's 16-bit path (b3DAccel=1, 24-bit JSHOT##.BMP).
+
+.EXAMPLE
+  pwsh -File tools/parity/retail-capture.ps1
+#>
 function Invoke-JkDevConsoleCommand {
   param(
     [Parameter(Mandatory)][int]$ProcessId,
@@ -623,26 +650,7 @@ function Invoke-JkCaptureRow {
     }
 
     if ($ConsoleCommands.Count -gt 0) {
-      $consolePath = Join-Path $script:TraceOut ("{0}-console.txt" -f $name)
-      $consoleLines = New-Object System.Collections.Generic.List[string]
-      # `-File` passes a comma-joined token as one string, so split it back into commands.
-      $commands = @($ConsoleCommands | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
-      foreach ($command in $commands) {
-        # `wait:<ms>` pauses instead of issuing a command, so one capture can show a cog's state
-        # before and after a trigger (Phase 1 step 4's "cog variable/state trace at each trigger").
-        if ($command -like 'wait:*') {
-          $milliseconds = [int]($command -replace '^wait:', '')
-          $consoleLines.Add("> wait $milliseconds ms")
-          Start-Sleep -Milliseconds $milliseconds
-          continue
-        }
-        $consoleLines.Add("> $command")
-        foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command $command)) {
-          $consoleLines.Add($line)
-        }
-      }
-      Set-Content -LiteralPath $consolePath -Value $consoleLines -Encoding utf8
-      Log "console: wrote $consolePath ($($ConsoleCommands.Count) command(s))"
+      $null = Invoke-JkConsoleCapture -ProcessId $process.Id -Name $name -Commands $ConsoleCommands
     }
 
     # Phase 0.5 trace v0: a trace run replaces this row's screenshot captures (the `finally` below
@@ -650,6 +658,10 @@ function Invoke-JkCaptureRow {
     if ($WalkTraceMs -gt 0) {
       $tracePath = Invoke-JkWalkTrace -ProcessId $process.Id -Name $name -Milliseconds $WalkTraceMs -Key $WalkTraceKey
       Log "walk trace mode: skipped the screenshot series/reference for '$name' (wrote $tracePath)"
+      if ($ConsoleCommands.Count -gt 0) {
+        # After the walk: this is where a trigger's effect shows up (cog state after the trigger).
+        $null = Invoke-JkConsoleCapture -ProcessId $process.Id -Name $name -Commands $ConsoleCommands
+      }
       return
     }
 

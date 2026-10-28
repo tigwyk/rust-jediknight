@@ -1955,3 +1955,14 @@ to the whole ListBox when the dialog clears it between commands. The level-1 doo
 the door is idle at spawn and no timer fires before a trigger. That is the step-4 "before" fixture
 (`tools/parity/cogstatus0-t3-01narshadda.txt`); the "after" capture needs the player to walk through
 a trigger, which is the next use of the same machinery.
+
+**A capture can now walk, wait, then read a cog's state (round 59).** `retail-capture.ps1` runs its
+console commands after the walk trace as well as at the row, so one retail session produces the
+"at the trigger" sequence Phase 1 step 4 needs: walk (the recorded `coords` trace), wait 3 s,
+`cogstatus 0`. Measured on `walk_street45`: the body walks into the street wall and stops at
+**(3.270, -1.860, 0.620) sector 155** (retail's recorded stop), and after a further 3 s the door cog
+still reads `doorstatus 0`, `movestatus 0` - **walking into the street wall does not trigger cog 0**.
+That is a useful negative fixture: the port must reproduce the same idle state for the same walk,
+and the fixture is saved as `tools/parity/cogstatus0-after-streetwalk-01narshadda.txt`. The trigger
+that does fire cog 0 still needs finding (its `door0 = 4` names a thing, and the level's doors answer
+`activate`/`blocked` messages from their linked sides).
