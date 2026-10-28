@@ -1617,3 +1617,15 @@ question is narrower: which retail surface/step is the stopper, and how does the
 (a step-up the port climbs? a wall face the port extracts with the wrong height? a closed adjoin the
 port opens?). Answer it by dumping the port's surfaces within a unit of (3.27, -1.86, 0.62) and
 comparing their normals/heights against the retail stop, not by another collision-response patch.
+
+**The stopper is a real wall face, and the port has it (round 26).** The new
+`--surfaces-at "x,y,z"` probe (with `--collide`) prints every level surface near a point. At retail's
+stop (3.27, -1.86, 0.620) the port has **surface 1513**: a vertical face at **x = 3.20**, z
+0.500..1.100, y -2.40..-1.80, normal (1,0,0), sector 155, solid. Retail's stop is 3.20 + its body
+radius 0.065 = **3.265** exactly - so retail is stopped by this wall, and the round-17/19 port runs
+that ended at 3.265 were colliding with it correctly. The runs that fall are the ones where the
+port's y drifts to -1.8334, within 0.034 of the wall's y edge (-1.80): the walker is walking along
+the face's end, and either a step-up (the wall top is 0.48 above the body) or the face's corner
+handling lets it slip past and over the ledge. So the remaining bug is in `collide.rs`'s wall/step
+handling near a face edge, not in thing collision - and the `--surfaces-at` probe is the tool that
+shows it.

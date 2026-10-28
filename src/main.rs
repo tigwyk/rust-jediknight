@@ -427,6 +427,9 @@ fn main() {
     let mut ui_sounds = false;
     let mut feel_check = false;
     let mut collide_check = false;
+    // `--surfaces-at "x,y,z"`: with `--collide`, print the level surfaces near a point - the geometry
+    // probe behind the `walk_street45` stop (retail stops at x 3.27 where the port walks off).
+    let mut surfaces_at: Option<[f32; 3]> = None;
     let mut controls_check = false;
     let mut move_check = false;
     let mut winding_check = false;
@@ -726,6 +729,12 @@ fn main() {
             "--ui-sounds" => ui_sounds = true,
             "--feel" => feel_check = true,
             "--collide" => collide_check = true,
+            "--surfaces-at" => {
+                surfaces_at = arg_value(&args, &mut i).and_then(|s| {
+                    let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+                    (v.len() == 3).then(|| [v[0], v[1], v[2]])
+                });
+            }
             "--controls" => controls_check = true,
             "--move" => move_check = true,
             "--winding" => winding_check = true,
@@ -5927,6 +5936,39 @@ fn main() {
                 .collect()
         };
         let solid = |s: &jkl::Surface| s.adjoin < 0 && s.surfflags & 0x4 != 0 && s.verts.len() >= 3;
+        if let Some(at) = surfaces_at {
+            // Every surface with a vertex within 1.5 units: normal, height range, sector and flags. The
+            // walk trace says retail stops at x 3.27 and the port walks off; this shows what is there.
+            for (i, s) in world.level.surfaces.iter().enumerate() {
+                let pts = pts_of(s);
+                if pts.len() < 3 {
+                    continue;
+                }
+                let near = pts.iter().any(|p| {
+                    ((p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2) + (p[2] - at[2]).powi(2)).sqrt() < 1.5
+                });
+                if !near {
+                    continue;
+                }
+                let (lo, hi) = pts.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(mut lo, mut hi), p| {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                    (lo, hi)
+                });
+                let u = [pts[1][0] - pts[0][0], pts[1][1] - pts[0][1], pts[1][2] - pts[0][2]];
+                let v = [pts[2][0] - pts[0][0], pts[2][1] - pts[0][1], pts[2][2] - pts[0][2]];
+                let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+                println!(
+                    "surfaces-at {i}: sector {:?} z {:.3}..{:.3} x {:.2}..{:.2} y {:.2}..{:.2} verts {} adjoin {} flags {:#x} n ({:.2}, {:.2}, {:.2}) solid {}",
+                    claimed.get(i).copied().filter(|c| *c != usize::MAX),
+                    lo[2], hi[2], lo[0], hi[0], lo[1], hi[1], pts.len(), s.adjoin, s.surfflags,
+                    n[0] / len, n[1] / len, n[2] / len, solid(s)
+                );
+            }
+        }
         let missing: Vec<usize> = world
             .level
             .surfaces
