@@ -2034,3 +2034,17 @@ route to a trigger is walking (or firing) into it, and the door's `crossed`/`act
 messages come from its linked sides. For Phase 1 step 4 the harness therefore stays positional - the
 `cogtrace` toggle and state captures are instruments, not triggers. This also closes the last
 cheat-command candidate for driving interactions without a scripted walk.
+
+**`--links` maps a level's triggers, and pre-walk console commands broke the walk (round 66).** The
+new `--links` verb prints every `sithCog_LinkCogTo*` binding as `surface|thing|sector <id> -> cog <n>
+link <k> <script>`: level 1 has **91** bindings, including the cantina's door switch at
+**thing 56 -> cog 11 (00_doorswitch.cog) at (-4.75, -3.75, -1.10)** and its linked doors
+(thing 23 -> cog 5 at 8.10,10.62,6.35). That is the first time the trigger geometry is available
+without playing the level. Two harness facts fell out of using it: opening the dev-console dialog
+**before** a walk steals the movement keys (the body drifted 0.5 units instead of walking), so in
+walk-trace mode the console now runs only after the walk - and the corrected 3.6 s cantina walk
+reaches **(-4.84, -3.14)** through sectors 254 -> 58 -> 103, further than the old trace. The post-walk
+state shows the switch and door 5 unchanged on that path (`doorstatus 0`), so the switch needs a more
+precise approach - its thing sits 0.6 units south of where the forward walk ends. Fixtures saved:
+`tools/parity/walktrace-cantina-01narshadda.tsv` and
+`tools/parity/cogstatus-after-cantinawalk-01narshadda.txt`.

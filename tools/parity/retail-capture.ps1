@@ -654,7 +654,9 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       Start-Sleep -Milliseconds 900
     }
 
-    if ($ConsoleCommands.Count -gt 0) {
+    # In walk-trace mode the console runs *after* the walk (opening the dev-console dialog before the
+    # walk steals the movement keys, which makes the body drift instead of walking).
+    if ($ConsoleCommands.Count -gt 0 -and $WalkTraceMs -le 0) {
       $null = Invoke-JkConsoleCapture -ProcessId $process.Id -Name $name -Commands $ConsoleCommands
     }
 

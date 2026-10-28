@@ -427,6 +427,10 @@ fn main() {
     let mut ui_sounds = false;
     let mut feel_check = false;
     let mut collide_check = false;
+    // `--links`: which cog is bound to which surface/thing/sector. That is the geometry a player walks
+    // into (`crossed`/`activated`/`entered`), so it is how the harness finds a level's triggers without
+    // playing the whole level. `sithCog_LinkCogToSurface`/`_ToThing`/`_ToSector` in tabular form.
+    let mut links_check = false;
     // `--cogstatus <n>`: print one placed cog the way the retail console's `cogstatus` does
     // (`sithCog_CogStatus`, formats 0x54aaf4 / 0x54ab1c / 0x54ab30 / 0x54ab38) - Phase 0.5 step 2's
     // port-side fixture check against `tools/parity/cogstatus-01narshadda.txt`.
@@ -733,6 +737,7 @@ fn main() {
             "--ui-sounds" => ui_sounds = true,
             "--feel" => feel_check = true,
             "--collide" => collide_check = true,
+            "--links" => links_check = true,
             "--cogstatus" => {
                 cogstatus = args.get(i + 1).and_then(|v| v.parse().ok());
                 if cogstatus.is_some() {
@@ -5982,6 +5987,36 @@ fn main() {
                     symbol_index += 1;
                 }
             }
+        }
+        return;
+    }
+
+    if links_check {
+        let handle = runtime::Runtime::handle(&world.level);
+        handle
+            .borrow_mut()
+            .wire_links(&world.level.cogs, &world.cogs);
+        let rt = handle.borrow();
+        let script_of = |cog: usize| {
+            world
+                .level
+                .cogs
+                .get(cog)
+                .map(|instance| instance.script.clone())
+                .unwrap_or_default()
+        };
+        for (cog, link, surface) in &rt.surface_links {
+            println!("surface {surface:5} -> cog {cog:3} link {link:3}  {}", script_of(*cog));
+        }
+        for (cog, link, thing) in &rt.thing_links {
+            let at = rt.things.get(*thing).map(|t| t.pos).unwrap_or([f32::NAN; 3]);
+            println!(
+                "thing   {thing:5} -> cog {cog:3} link {link:3}  at {:.2},{:.2},{:.2}  {}",
+                at[0], at[1], at[2], script_of(*cog)
+            );
+        }
+        for (cog, link, sector) in &rt.sector_links {
+            println!("sector  {sector:5} -> cog {cog:3} link {link:3}  {}", script_of(*cog));
         }
         return;
     }
