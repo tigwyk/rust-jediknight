@@ -1769,3 +1769,15 @@ crosses the path; the next probe must intersect faces against the **path segment
 (-2.2, -2.9) to (-2.6, -3.2), not a radius around one point. The floor-based step change is reverted
 (it needs its own gate run before landing, and it does not affect this leg); the instrumentation from
 round 39 stays in the tree.
+
+**The cantina block is a slanted wall the port gets stuck on (round 41).** Probing faces across the
+block path names it: **surface 2473** (sector 256, z -1.300..-1.100, x -2.60..-2.00, y -3.20..-3.10,
+normal **(0.00, 0.89, 0.45)**, solid) is the cantina's south wall, and the port's body hits it at
+y ≈ -3.10 while retail slides along it: retail's y stops at -3.03 (just north of the wall) and its x
+keeps decreasing to -4.36, while the port's body stops dead at (-2.545, -3.135) after 0.42 units.
+So the defect is **sliding along a wall once already touching it**: the first sweep stops at the
+contact, the slide direction is tangential so the next bounce's `into` is ~0, `mag < 1e-4` hits the
+`break`, and the body is treated as fully blocked. The fix is in `move_body`'s slide/break path: a
+hit at distance ~0 with a tangential direction is not a block - drop the tiny into-component and keep
+walking instead of breaking. That would make the cantina leg behave like retail's (slide south wall,
+continue west) and is a small, local change; the fixture and the geometry are now both pinned.
