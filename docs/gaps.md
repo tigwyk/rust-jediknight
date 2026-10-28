@@ -1598,3 +1598,13 @@ gate failed on the committed tree *without* any obstacle change - which is what 
 change look guilty. The tolerance is now 2.0 s, still orders of magnitude below the +100 s
 disturbance, so a load that fails to restore the snapshot still fails the gate. `--save-live` passes
 again, which unblocks landing the frame-level obstacle check.
+
+**The obstacle-map hypothesis is probably the wrong cause (round 23).** The probe was re-read
+against the stop itself: at retail's stop (3.27, -1.86, 0.620) the nearest things are `crate4_3` at
+(3.55, -2.55) - 0.8 away, mostly in y - and `nman1` at (3.425, -1.925, **-0.47**), which is more
+than a unit **below** the walker's feet (0.555). So nothing with a model actually sits in the
+body's way at that point; the crate the round-16 note blamed is beside and below the path. Retail's
+stop is therefore most likely a **level-geometry edge/step** the port does not have (or has at a
+different height) - the port walks over it and falls. The thing-obstacle patch preserved in
+`target/parity/exp/obstacle.patch` is not the fix; the next probe is the port's own floors/walls at
+x 3.27 (does a wall face exist there?) against retail, before any collision code.
