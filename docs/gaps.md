@@ -1714,3 +1714,14 @@ radius` multiplies the template's `size=0.065` by `MODEL_SCALE` and the level-1 
 rooms pin the body exactly like this, and the street legs' 3.265 stop (3.20 + 0.065) hints the
 effective radius may already be the small one somewhere. Next: print `Rules::radius` on level 1 and
 run `--surfaces-at` at the cantina pose - one command each, no retail needed.
+
+**The radius is right, and the cantina blocker is not a hull wall (round 35).** `--rules --start
+01narshadda` prints **radius 0.065** (`size` scaled by 1, not 10), so the fat-body hypothesis is dead.
+`--surfaces-at "-2.2,-2.9,-1.1"` lists 130 surfaces near the pose, but **none solid west of the
+body** (no face spanning x -2.4..-2.8 at y -2.9) - yet `move_body` reports `blocked true` from the
+first sub-step while retail walks 2.17 units west. So the blocker is not a hull wall in that cell:
+the remaining candidates are a **gate/closed adjoin** (a cog door the port has shut where retail has
+it open) or the **containment veto** (the moved feet land in no sector and the step is restored - the
+final sub-steps show moved 0.000 with z drifting, which is what a veto loop looks like). The next
+probe needs a reason code: print which of `move_body`'s paths fired (wall slide, step-up,
+containment veto) per sub-step under `BK_WALK_TRACE`.
