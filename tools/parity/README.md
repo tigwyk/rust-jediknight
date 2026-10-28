@@ -286,8 +286,9 @@ game time (its first segment carries deceleration coast, so its average runs hig
 powershell -NoProfile -File tools/parity/trace-gate.ps1
 PASS  walk_street45  port  2.21 / retail  2.20 units (  100%)  sectors off 0
 PASS  walk_street90  port  1.84 / retail  2.21 units (   83%)  sectors off 2
-PASS  walk_cantina   port  1.85 / retail  2.17 units (   85%)  sectors off 2
-trace gate: 3 leg(s), 0 failure(s)
+PASS  walk_cantina   port  1.85 / retail  2.59 units (   71%)  sectors off 1
+PASS  walk_door0     port  0.13 / retail  0.07 units (stop-pose)  sectors off 0
+trace gate: 4 leg(s), 0 failure(s)
 ```
 ### Retail's cog namespace
 

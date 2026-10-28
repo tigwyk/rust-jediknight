@@ -2114,3 +2114,17 @@ the use action needs the player's use control, not any of the keys we injected; 
 also means a trigger fires only when the *surface* linked with `linkid=2` is used. Both scripts are
 saved as fixtures (`tools/parity/cog-00_doorswitch.txt`, `cog-00_door.txt`) and `--raw` is the tool
 for reading the rest.
+
+**The trace gate now covers the upper door, and the port matches retail there to 5 mm (round 72).**
+The door leg (`walk_door0`: warp to the sector-328 floor at `(1.30, 9.00, 6.237)`, walk north into
+the closed door adjoin) is a **stop** fixture: retail travels 0.07 units and stops at y 9.07-9.14, the
+port stops at **`(1.3000, 9.1350, 6.2961)`, max xy delta 0.005, z 0.045, 0 sector mismatches**. That
+is the closed-adjoin collision on the upper floor matching retail. The gate handles such legs with a
+**stop-pose rule**: when retail travels under 0.5 units, the contract is the stop pose (0.10 units in
+plan and vertically = one body radius) instead of the travel ratio, which is noise at that distance.
+The travel band also widened to 60-140% with its evidence in the header: retail's own cantina leg
+measures 2.17-2.64 units run to run on this machine (the route crosses a ledge), so the old 75-125%
+band failed on retail's own variance. All four legs pass: street45 100%, street90 83%, cantina 71%,
+door0 stop-pose. The door cog itself stays closed on both sides (its `blocked` handler needs the
+engine's blocked-message path, not a walk-by), so no interaction state changed - that path is the
+still-open Phase 1 step 4 question.
