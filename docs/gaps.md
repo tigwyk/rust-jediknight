@@ -1640,3 +1640,14 @@ and the sweep/slide lets it through. So this is a **collision bug exposed by the
 not a thing-collision problem: the wall is level geometry, and the face must be a stop at that speed.
 Next: instrument `solids.move_body` on this leg (print blocked/step/slide per sub-step around x 3.20)
 and compare with the slower speed, which stops.
+
+**The walk direction is rotated against the camera (round 28).** `BK_WALK_TRACE` on `walk_street45`
+shows the per-sub-step move: `delta [-0.0153, +0.0155]` - the port walks **-x and +y** at yaw 45,
+slides along the x = 3.20 wall as y rises, reaches the wall's y edge (-1.80), and there **steps up
+0.066** (`z 0.62011397 -> 0.68611395`, exactly `STEP_UP`) onto the ledge beside it, then falls off
+that. Retail at the same yaw and pose moves **pure -x** with y constant at -1.860 and stops at the
+face. Since the draw-parity gate shows the port's *camera* at a pose matches retail's, the camera
+yaw convention is right but the **movement basis is rotated by ~45 degrees against it** - the
+walk_target/forward conversion, not collision, is the defect that lets the body drift into the
+wall's corner and step over it. Next: compare `walk_target`'s yaw->direction conversion with the
+camera's (the parity gate is the control), then fix the movement side and re-run this leg.
