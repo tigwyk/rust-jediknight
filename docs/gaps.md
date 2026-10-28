@@ -2180,3 +2180,14 @@ retail trigger capture is now a **ledger deviation** with its measurement and a 
 (synthetic mouse reaches the switch, or a keyboard-only trigger is found) rather than an open-ended
 question. The `--links` verb also prints surface centroids now, which is the aim-pose tool for any
 future trigger capture.
+
+**The port side of step 4 is already a full-chain gate: `--door` (round 77).** The GATES list has
+`--door` ("the use key against a linked door, through real input"), and its output is the complete
+interaction path on the level's own scripts: **cog 0 (thing 4) runs 1 label, the piece reaches frame
+1 after 3 s, 1 sector flag changes, and 4 doorways the solver refused become passable**. It goes
+through `Runtime::use_thing` (the player use action) -> the `used` message -> the script's
+`MoveToFrame`/`SetSectorAdjoins` -> `collide::Gates`. So Phase 1 step 4's *port* side is stronger than
+the ledger row said (it cited only `--adjoins`); the roadmap row now cites this full chain, and the
+retail-side trigger capture remains the ledger deviation with the same retire condition. A duplicate
+`--door-check` probe written this round was deleted rather than kept: the existing gate already does
+more, and the ladder says reuse before writing.
