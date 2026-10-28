@@ -1736,3 +1736,13 @@ riser... a step only succeeds when the lift clears the riser's polygon top outri
 upgrade is to test the rise against the polygon's own top edge rather than a swept sphere at the
 raised height - a small change in `collide.rs`, and the cantina pose is its repro. The street legs
 are unaffected (they are flat and already match retail).
+
+**The step-retry clearance is not the cantina blocker (round 38).** Relaxing `move_body`'s four-way
+clearance to only the directions perpendicular to the move (the lazy form of the upgrade named in
+its `ponytail:` comment) compiles and leaves the trace **byte-identical** (`walk_cantina` still 0.42
+units, same end position and sectors). So the step retry is not the path that pins the body: either
+`clear`, `lands`, `inside` or the final `sweep` rejects it, or the blocked branch never enters the
+step-up code at all (e.g. `hit.point[2] - radius` is not below the step threshold). The next probe
+must instrument those four predicates (a one-line `BK_WALK_TRACE` print of each) rather than change
+the logic blind - three hypothesis-killing rounds in a row came from changing logic first. The patch
+is reverted; the tree is byte-identical to the last green commit.
