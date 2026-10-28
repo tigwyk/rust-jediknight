@@ -2141,3 +2141,16 @@ whose animation is obstructed (`sithActor_thing_anim_blocked` measures the obstr
 and answers with `blocked`), so a body walking into a closed door can never fire a door's `blocked`
 handler - the door must be opened by `activate`, which is the use action. That closes the last
 alternative for the door trigger.
+
+**The control table is ordered, and ACTIVATE is close to the front (round 74).** The engine's binding
+slots are the control indices in the key-binding UI's own order: `FORWARD TURN SLIDE SLIDETOGGLE
+JUMP DUCK FAST SLOW PITCH CENTER FIRE1 FIRE2 ACTIVATE SELECT1..9 GAMESAVE DEBUG NEXTINV PREVINV
+USEINV NEXTWEAPON ...` (74 entries; `sithControl_WriteConf` strides 0x64 bytes per action and prints
+`bind <slot> <vk> <flags>`). So slot 12 is **ACTIVATE** (the use action) and slot 11 FIRE2; the
+profile binds slot 12 to VK **57** (`9`) and **258**, slot 11 to 44/82/257/282 - codes above 255 are
+mouse/joystick, so the use action is bound to a device button, not only a keyboard key. That explains
+the failed key guesses. Table saved as `tools/parity/control-names.txt`. On the port side, the
+`--adjoins` gate already proves the door machinery: **42 placed scripts run at startup, 7 sector
+adjoin changes, 7 doorways shut**, and `ClearAdjoinFlags`/`SetSectorAdjoins`/`SetSectorFlags` all
+change crossing behaviour as the scripts demand - so the port's door *state* is verified; only the
+retail-side use-action capture is missing.
