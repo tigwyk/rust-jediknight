@@ -2075,3 +2075,17 @@ warp starts in), i.e. the player has to stand in 103, aim at those surfaces and 
 and the bartender/sector-linked cogs (28, 29) for `entered` events. Fixtures:
 `tools/parity/walktrace-switch-01narshadda.tsv`,
 `tools/parity/cogstatus11-after-switchwalk-01narshadda.txt`.
+
+**A warp to the upper door is rejected, so the door trigger needs a valid floor point (round 69).**
+`warp 1.20 8.60 6.39` (south of the level-1 door thing at 1.20,9.65,6.35) does not put the body
+there: the walk trace starts at **(-10.44, -5.46, -1.13) sector 339**, i.e. the engine refused the
+pose and left the player somewhere else entirely, so the 2.4 s walk measured nothing relevant and cog
+0 stayed idle. The lesson: `warp` needs a point the engine considers standable (a floor in a sector),
+and the door's thing origin (z 6.35) may be above/below its walkable floor. The port can find the
+right pose offline with `--surfaces-at "1.20,8.60,6.40"` - list the faces and read the walkable z and
+sector, then warp exactly there. That is the next move for the door fixture; this round records the
+rejected pose and the trace it produced rather than guessing again.
+
+Also: the port's link tables are now proven to be populated by the shared `wire_links` call (the
+`--links` verb needed an explicit `wire_links` before printing, which is why the first run printed
+zero links - `Runtime::handle` alone does not wire them).
