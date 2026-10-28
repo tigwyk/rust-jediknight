@@ -535,7 +535,16 @@ tight clearance, and with a raised step threshold it still **walked off the same
 while a windowed save/load gate failed. So the retail stop at x 3.27 is not a simple solid thing in
 the way: either the obstacle is level geometry (a `_structure` surface, not a thing) or the collision
 response has to push the body out along the surface rather than revert the sub-step. The next attempt
-starts from the measured stop position and asks which sector surfaces are there..
+starts from the measured stop position and asks which sector surfaces are there.
+
+**Asked, and answered (round 16): the port's solid set is the gap.** `BK_NEAR_THINGS` at retail's
+measured stop (3.27, -1.86, 0.620) lists a physical `crate4_3` 0.8 units away at (3.55, -2.55,
+0.40), two `reeyees` actors within a unit, and prints the crate and the actors as **passable** -
+only the `walkplayer` line is solid. So the port's `solid_radius` set (which feeds both the
+template floors and the thing obstacle test) excludes level furniture and actors that retail's
+`sithCollision` treats as solid; the street leg stops in retail because a crate is in the way. The
+next attempt makes the solid set match retail (props like `crate4_3`, and actors) and gives the
+walker a response that slides along the footprint instead of reverting the whole sub-step..
 ## 6. Recently closed, so it is not mistaken for missing
 
 * **Sprites render, and the two "renderer bugs" that hid it were both in the probe.** `--sprite
