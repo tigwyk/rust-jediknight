@@ -200,9 +200,13 @@ tier, not a checkbox.
    Ree-Yees' muzzle 0.8 units ahead of a 0.07-radius body) and the `.ai` aim error jitters the aim
    vector the way `sithAI_RandomFireVector` does (the port used a yaw cone ±`error` right angles wide),
    both pinned by the `--muzzle` check and a unit test; projectiles are no longer collectable as
-   pickups. Measured at level 1's door: the body takes 4 hits (48 damage) in 12 s against retail's
-   ~22 damage/s, because actors fire through each other — target selection
-   (`sithAI_FirstThingInView`) is the next gap.
+   pickups. Measured at level 1's door with the shot's owner traced: 6 hits on the body (72 damage in
+   8 s, ~9 damage/s against retail's ~22) — all from one actor, while the rest of the room's fire lands
+   on a Greedo standing in the lines. `BK_AI_TRACE` shows only a handful of actors ever see the body
+   there. So the damage rate is now the same order as retail's and the gap is AI positioning/aim, not
+   a missing firing rule — the engine's `FirstThingInView` is the cog-verb snapshot behind force
+   pull/grip (`firstthinginview` here), and a segment-clearance firing gate modelled on it was tried,
+   cut the room to one shot in 6 s, and was reverted.
 6. **Exit.** End-of-level tally, transition, carried state (health, shields, bins). Exit: level 2 starts
    in retail's state.
 

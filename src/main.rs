@@ -19091,10 +19091,17 @@ fn projectile_hits(
     }
     for (shot, target, damage) in impacts {
         // The player has a shield bar in front of their health; everything else is health only.
+        // `BK_HIT_TRACE` adds the shot's owner, so a trace can say who hit whom.
+        let owner = rt.things.get(shot).and_then(|t| t.owner);
+        let suffix = if std::env::var_os("BK_HIT_TRACE").is_some() {
+            format!(" owner {owner:?}")
+        } else {
+            String::new()
+        };
         let left = if Some(target) == player_index {
             let (shields, health) = rt.damage_player(damage, runtime::DAMAGE_ENERGY);
             println!(
-                "hit: the player took {damage:.0}, {shields:.0} shield(s) and {health:.0} health left"
+                "hit: the player took {damage:.0}, {shields:.0} shield(s) and {health:.0} health left{suffix}"
             );
             health
         } else {
@@ -19107,7 +19114,7 @@ fn projectile_hits(
             }
         }
         println!(
-            "hit: thing {target} ({}), {damage:.0} damage, {left:.0} health left",
+            "hit: thing {target} ({}), {damage:.0} damage, {left:.0} health left{suffix}",
             rt.templates.get(target).cloned().unwrap_or_default()
         );
     }

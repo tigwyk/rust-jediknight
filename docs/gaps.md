@@ -328,11 +328,31 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
      — a small cone. The port's ±18° yaw was several times wider and left elevation untouched;
      `jitter_aim` now follows the engine's rule.
 
-   Measured after both fixes: at the door the body takes 4 hits (48 damage, all on shields) in the first
-   ~12 s, against retail's ~22 damage/s. The remaining gap is **targeting, not ballistics**: the room's
-   actors fire through each other, so the bolts hit nearby Ree-Yees (`hit: thing 263/154`) instead of the
-   player. The engine decides what an actor may fire at with `sithAI_FirstThingInView`, which the port
-   does not model yet (Phase 1 step 5).
+   **Who shoots whom at the door (2026-10-27).** `BK_HIT_TRACE` now prints the shooter's body and the
+   shot's owner on every hit, and an 8 s door capture reads: 38 shots, **6 hits on the body from one
+   actor** (155) — 72 damage in 8 s, ~9 damage/s against retail's ~22 — and the rest of the room's fire
+   landing on friends (6 of 157's hits on Greedo 291, which stood in its line). `BK_AI_TRACE` shows only
+   a handful of actors ever have line of sight there: 157 for the whole run, 291 permanently "ready" but
+   outside its class's 3.0 `maxDistToFire`, everyone else a frame at a time. So the port's damage rate is
+   the same order as retail's, and the remaining difference is **AI positioning and aim**, not a missing
+   firing rule.
+
+   That also corrects the earlier guess: `sithAI_FirstThingInView` is the snapshot behind the
+   `FirstThingInView`/`NextThingInView`/`ThingViewDot` **cog verbs** (force pull/grip; the port already
+   implements them as `firstthinginview`), not a firing rule for the AI. A segment-clearance gate
+   modelled on the name cut the room to *one* shot in 6 s — retail's door fight is exactly that crowded
+   — and was reverted; do not repeat it.
+
+   **A pre-tonemap multiply is not the palette rule (2026-10-27).** The cheap draw was tried: a
+   full-screen `AlphaMode::Multiply` quad on the existing screen-tint camera, `1 + tint/2` per channel.
+   Measured on the cantina route capture, even an *identity* tint darkened the frame (crop mean
+   55/50/56 → 41/36/41) because the camera tonemaps what is under the quad, and a 1.5× red tint moved
+   the door frame's red mean only +9% (33 → 36) where the engine's byte rule moves it +50%. The same
+   quad on the HUD camera's layer (behind the HUD, over the world camera's output) behaves the same way
+   (46/45/52 → 36/35/41 at identity). The palette multiply therefore has to run on the already-
+   tonemapped bytes — the place the HUD canvas already applies the same rule exactly — which makes it a
+   renderer item (Phase 1 step 2), not a wash quad. The state half is tested and kept; the draw half is
+   deliberately absent rather than wrong.
 
    **A pre-tonemap multiply is not the palette rule (2026-10-27).** The cheap draw was tried: a
    full-screen `AlphaMode::Multiply` quad on the existing screen-tint camera, `1 + tint/2` per channel.
@@ -344,10 +364,9 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    The state half is tested and kept; the draw half is deliberately absent rather than wrong.
 
    *Next for these rows (in dependency order):* a post-tonemap palette pass for the world
-   (`byte += round(byte * tint/2)` on tonemapped bytes); the AI's target selection
-   (`sithAI_FirstThingInView`) so the room's fire reaches the player rather than the nearest friend;
-   and the attachment state (`sithPhysics_UpdateAttachedThingPhysics`) plus solid-thing floors for the
-   catwalk.
+   (`byte += round(byte * tint/2)` on tonemapped bytes); the AI's positioning/aim at the door (the
+   room's fire reaches the player from one body, the rest into a friend's back); and the attachment
+   state (`sithPhysics_UpdateAttachedThingPhysics`) plus solid-thing floors for the catwalk.
 
    **Pitch does not mean what `coords` says.** Adding pitch to `--shot-at` and sweeping it against the
    verified spawn reference gave a sharp answer: port pitch 0 matches retail best (0.6296), 0.25° drops

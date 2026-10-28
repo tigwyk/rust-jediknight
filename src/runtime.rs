@@ -2384,12 +2384,6 @@ impl Runtime {
         )
     }
 
-    /// Fire `template` from the shooter: spawn it just in front of the shooter's eye and
-    /// give it the template's own `vel=`, rotated into the shooter's facing.
-    ///
-    /// The engine's projectile is a `SITH_THING_WEAPON` created by `CreateThing` from the
-    /// weapon template, launched along the barrel; the speed in the shipped templates is
-    /// `vel=(0/4/0)` for `+bryarbolt`, i.e. 4 units per second down the model's +Y.
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
     /// The engine runs an instinct scheduler over the `.ai` file's weights; this build uses the
@@ -2446,6 +2440,15 @@ impl Runtime {
             // sight ray (`sithAI.c`); one segment test is the same rule here.
             let sighted = ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target))
                 && self.solids.as_ref().is_none_or(|s| !s.segment_blocked(from, target));
+            if sighted && std::env::var_os("BK_AI_TRACE").is_some() {
+                let (sx, sy) = (target[0] - from[0], target[1] - from[1]);
+                let range = (sx * sx + sy * sy).sqrt().max(1e-4);
+                let (sin, cos) = yaw.to_radians().sin_cos();
+                eprintln!(
+                    "ai: sees {index} range {range:.2} dot {:.2} ready {ready} from {from:?}",
+                    (cos * sx + sin * sy) / range
+                );
+            }
             // `AISetFireTarget`: what this actor shoots at, when a script names it. That replaces the
             // player as the thing it has in sight — `00_AITurnCoat.cog` turns an actor on a victim —
             // so it is computed here, before the out-of-sight early return below.
@@ -2741,6 +2744,12 @@ impl Runtime {
         self.fire_with_spread(shooter, template, error)
     }
 
+    /// Fire `template` from the shooter: spawn it just in front of the shooter's eye and give it the
+    /// template's own `vel=`, rotated into the shooter's facing.
+    ///
+    /// The engine's projectile is a `SITH_THING_WEAPON` created by `CreateThing` from the weapon
+    /// template, launched along the barrel; the speed in the shipped templates is `vel=(0/4/0)` for
+    /// `+bryarbolt`, i.e. 4 units per second down the model's +Y.
     pub fn fire(&mut self, shooter: i64, template: &str) -> Option<usize> {
         self.fire_with_spread(shooter, template, 0.0)
     }
@@ -2801,7 +2810,11 @@ impl Runtime {
         // The shot starts at full damage and loses it in flight when the weapon decays.
         let damage = self.template_damage.get(&template).copied().unwrap_or(0.0);
         if std::env::var_os("BK_HIT_TRACE").is_some() {
-            eprintln!("fire: {template} dmg {damage:.1} vel {forward:?} kind {kind}");
+            // The shooter's body and the shot's heading, so a trace can say who hit whom: a bolt's
+            // origin alone cannot tell a point-blank friendly hit from a wide shot.
+            eprintln!(
+                "fire: {template} dmg {damage:.1} vel {forward:?} kind {kind} owner {shooter} from {pos:?} yaw {yaw:.1} pitch {pitch:.1}"
+            );
         }
         let key = template.clone();
         self.things.push(ThingState {

@@ -245,7 +245,14 @@ Everything below was verified against the GOG build (the harness works on a scra
   and `stdPalEffects_UpdatePalette` applies the sum as `byte += round(byte * tint * 0.5)` per channel.
   That is the red in the two ungraded route references; it is not a scripted effect. The port's tint
   *state* matches that rule and is unit-tested; the draw is a post-tonemap palette pass that does not
-  exist yet — a pre-tonemap multiply quad was measured to darken the frame even at identity.
+  exist yet — a multiply quad on either the screen-tint camera or the HUD camera's layer was measured
+  to darken the frame even at identity and to compress a 1.5× red tint to a few percent.
+- **Reading a pair's contents.** `BK_HIT_TRACE=1` makes the port print each shot (`fire: <template>
+  dmg … owner <thing> from <pos> yaw/pitch`) and put the shot's owner on each hit line, so a capture's
+  log says who hit whom; `BK_AI_TRACE=1` prints every actor-frame that has line of sight to the body
+  (range, dot, `ready`). At level 1's door: 38 shots and 6 hits on the body from one actor in 8 s, the
+  rest into a Greedo standing in the lines — the damage rate is near retail's, the aim/positioning is
+  not.
 - **Retail script coverage:** the menu coordinates and key timing are tied to the GOG build (and
   to `player\Lee\Lee.plr`); a different build/player may need the constants updated.
 - **Level 1's spawn — what the pair showed, and the fix.** Retail's spawn frame is the player camera:
