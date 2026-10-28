@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 139 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 140 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -387,6 +387,24 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    `sithAI_CheckSightThing` treats a `-1.0` class field (0x523064) as "no cone". The unported
    `sithAIAwareness_*` event system (`CreateTransmittingEvent`/`ProcessEvent`) is the likely reason
    retail's whole room wakes once the first hits land.
+
+   **The room starts shooting (2026-10-28).** Two engine-backed corrections, both in `ai_tick`:
+
+   - an actor that has a target keeps its **aim** on it while its legs carry it elsewhere
+     (`sithActor_UpdateAimJoints`); the port either faced the walk heading or applied a scripted look,
+     so a patrol leg turned the body out of its own view cone and the actor never fired;
+   - the chase standoff is the class's own `Follow` second argument (`rydefault` 0.75, `grdefault`
+     2.0), not a fixed 0.25: the old value crowded friends onto the player, where they absorbed every
+     bolt aimed at it. `Ai::standoff` reads it, with a unit test on the shipped shapes.
+
+   Measured on the same 10 s door capture: **26 shots, 6 hits on the body** (72 damage, ~7 damage/s
+   against retail's ~15.6), all from actor 155, where before there were 8 shots and **0** hits; the
+   damage tint now appears in the captured frame (crop red mean 46 → 51–63 depending on where the last
+   hit falls). `route_door` still scores 0.412 (0.417 before): retail's reference is far more saturated
+   (its series reaches r/g 2.0 by 10 s) and the doorway geometry dominates that pair. The gated rows
+   moved with the AI: `spawn_pose` 0.6296 → 0.6543, `route_cantina` 0.7315 → 0.7697, `route_street`
+   0.7369 → 0.7574, `route_lower` 0.7229 → 0.7174, `spawn_yaw30` 0.6231 → 0.6117 — all inside their
+   floors.
 
    *Next for these rows (in dependency order):* the AI's engagement — turning a standing actor onto a
    target it has, and the awareness events that wake a room (retail is red by ~6 s and saturated by

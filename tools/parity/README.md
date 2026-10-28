@@ -107,18 +107,18 @@ second and is applied as `palette += round(palette * tint * 0.5)`). Both halves 
 state (adds with the engine's clamps, the 0.4/s decay, the damage flash — unit-tested) and the draw
 (a fullscreen palette pass on the world camera that scales the finished picture's bytes by
 `1 + tint/2`; a 1.0 red tint measures ×1.52). The rows stay `UNGRADED` at 0.45/0.42 for a different
-reason: retail's own 1 s series turns red at ~5–6 s and its settled reference at ~10 s is saturated,
-while the port's body takes **no damage in its 10 s capture** — its first hits land around 15–20 s,
-because a standing actor never turns onto a target it has. At the catwalk the port also cannot stand
-its body on the catwalk *model* — that is a solid thing, not a sector floor, so the body falls out
-of the level. Those are named engine gaps (Phase 1 steps 3 and 5), not renderer tolerance (see
-`docs/gaps.md` §5.9).
+reason: retail's own 1 s series turns red at ~5–6 s and its settled reference at ~10 s is saturated
+(r/g 2.0), while the port's 10 s capture now takes **6 hits (72 damage)** and draws only a weak tint
+(the red crop mean moves 46 → 51–63) — the damage is a third of retail's and the doorway geometry
+dominates that pair. At the catwalk the port also cannot stand its body on the catwalk *model* —
+that is a solid thing, not a sector floor, so the body falls out of the level. Those are named engine
+gaps (Phase 1 steps 3 and 5), not renderer tolerance (see `docs/gaps.md` §5.9).
 
 The numbers are tied to the capture policy above (600 frames, window from the retail sidecar, default
 16-bit retail renderer) — changing framing or frame count invalidates them.
 
 The gate needs a retail install and captured references on the machine, so it is a developer check, not
-a CI job; the port's own 139 tests and 61 gates remain the CI-able surface.
+a CI job; the port's own 140 tests and 61 gates remain the CI-able surface.
 
 ## The shot list: `tools/parity/shots.tsv`
 
@@ -256,7 +256,8 @@ Everything below was verified against the GOG build (the harness works on a scra
   line of sight and how far off its facing the body is, which is the fastest way to see why a room is
   quiet. At level 1's door: 38 shots and 6 hits on the body from one actor in 8 s, the rest into a
   Greedo standing in the lines; the roster shows 56 armed actors within 8 units, all with a clear line,
-  most facing >100° away — and standing actors never turn.
+  most facing >100° away. (They turn onto a target they have now: an actor keeps its aim while walking
+  and the chase keeps its class's `Follow` standoff.)
 - **Retail script coverage:** the menu coordinates and key timing are tied to the GOG build (and
   to `player\Lee\Lee.plr`); a different build/player may need the constants updated.
 - **Level 1's spawn — what the pair showed, and the fix.** Retail's spawn frame is the player camera:

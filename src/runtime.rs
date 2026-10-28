@@ -2484,7 +2484,7 @@ impl Runtime {
                 let range = (sx * sx + sy * sy).sqrt().max(1e-4);
                 let (sin, cos) = yaw.to_radians().sin_cos();
                 eprintln!(
-                    "ai: sees {index} range {range:.2} dot {:.2} ready {ready} from {from:?}",
+                    "ai: sees {index} range {range:.2} dot {:.2} ready {ready} from {from:?} target {target:?}",
                     (cos * sx + sin * sy) / range
                 );
             }
@@ -2570,11 +2570,17 @@ impl Runtime {
             let speed = self.template_speed.get(&ai_template).copied().unwrap_or(0.0)
                 * self.actor_speed.get(&index).copied().unwrap_or(1.0);
             // A scripted destination is walked all the way onto; the chase stops at its standoff, and
-            // so does each doorway on a route.
+            // so does each doorway on a route. The standoff is the class's own `Follow` instinct: its
+            // second argument is the distance the chase keeps from the target (`rydefault` 0.75,
+            // `grdefault` 2.0). The port used a single 0.25 for everything, so the room's friends
+            // crowded onto the player and absorbed every bolt aimed at it; the engine's gunners stand
+            // off and shoot from there.
             let standoff = if scripted.is_some() || route_goal.is_some() {
                 0.0
             } else {
-                self.ai_standoff
+                ai.as_ref()
+                    .and_then(|a| a.standoff())
+                    .unwrap_or(self.ai_standoff)
             };
 
             // The line to the *destination* is what decides whether a route is needed: testing the
@@ -2605,11 +2611,18 @@ impl Runtime {
                     from[1] + dy / reach * step,
                     from[2],
                 ];
-                let heading = (dx, dy);
+                // `sithActor_UpdateAimJoints`: an actor that has a target keeps its **aim** on it
+                // while its legs carry it somewhere else. Facing the walk heading instead made a
+                // scripted move (a patrol leg) turn the body away from the player it could see, lose
+                // the view cone, and never fire — which is why level 1's door room stayed quiet.
+                let face = if sighted { target } else { goal };
+                let facing = (face[0] - from[0], face[1] - from[1]);
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.pos = next;
                     thing.ai_target = Some(goal);
-                    thing.yaw = heading.1.atan2(heading.0).to_degrees();
+                    if facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4 {
+                        thing.yaw = facing.1.atan2(facing.0).to_degrees();
+                    }
                 }
                 walked += 1;
                 self.walked.push(index);
@@ -2640,7 +2653,10 @@ impl Runtime {
                 );
             } else if let Some(thing) = self.things.get_mut(index) {
                 thing.ai_target = None;
-                if let Some(yaw) = look_yaw {
+                // The same aim rule while standing: a target in sight wins over a scripted look.
+                if sighted {
+                    thing.yaw = (target[1] - from[1]).atan2(target[0] - from[0]).to_degrees();
+                } else if let Some(yaw) = look_yaw {
                     thing.yaw = yaw;
                 } else if reach > 0.001 {
                     thing.yaw = dy.atan2(dx).to_degrees();

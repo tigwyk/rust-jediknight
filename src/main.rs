@@ -4632,7 +4632,8 @@ fn main() {
         // A target standing **above** the actor: the aim has to point up or the bolt passes under
         // the ledge. `sithActor_UpdateAimJoints` aims in three dimensions, and the shot flies along
         // that aim (round 109), so this is what makes a raised player hittable.
-        let ledge = [at[0] + GAP, at[1], at[2] + 2.5];
+        // The ledge sits at+0.6: inside the class standoff's sight, above the actor.
+        let ledge = [at[0] + 0.6, at[1], at[2] + 2.5];
         rt.things[player].pos = ledge;
         // First with no scripted target, so the answer says whether the sight rule *alone* lets an
         // actor engage someone above it. `sightdist` is 3D (`sithAI_CheckSightThing` subtracts the
@@ -4662,15 +4663,20 @@ fn main() {
         rt.things[player].pos = inside;
         rt.ai_fire_target.remove(&actor);
         // Chase: inside sight, further than the standoff, so it walks in and turns to face. The gap is
-        // about four body radii and the actor walks ~0.3 units a second over the two seconds simulated
-        // below, so it has room to close it — a gap in the old level units would be tens of body
-        // heights and never close.
-        const GAP: f32 = 0.6;
+        // the class's own standoff (`Follow`'s second argument) plus about four body radii, and the
+        // actor walks ~0.3 units a second over the two seconds simulated below, so it has room to
+        // close it — a gap in the old level units would be tens of body heights and never close.
+        let standoff = rt
+            .ai
+            .get(&actor)
+            .and_then(|ai| ai.standoff())
+            .unwrap_or(rt.ai_standoff);
+        let gap = standoff + 0.5;
         rt.things[actor].pos = at;
         // Off to one side, so "turned toward it" is observable rather than already true. The
         // 200-degree cone is 100 either side, so 80 is inside it — 179 would not be.
         rt.things[actor].yaw = 80.0;
-        rt.things[player].pos = [at[0] + GAP, at[1], at[2]];
+        rt.things[player].pos = [at[0] + gap, at[1], at[2]];
         let start = rt.things[actor].pos;
         let before_angle = rt.things[actor].yaw;
         for _ in 0..60 {
@@ -4905,20 +4911,18 @@ fn main() {
                 println!("ai: this level has no walled-off pair of rooms to route between");
             }
         }
-        let distance = ((at[0] + GAP - after[0]).powi(2) + (at[1] - after[1]).powi(2)).sqrt();
+        let distance = ((at[0] + gap - after[0]).powi(2) + (at[1] - after[1]).powi(2)).sqrt();
         let turned = (rt.things[actor].yaw - before_angle).abs();
         println!(
             "  {template} ({class}): player at 3 units -> {seen} shot(s), {spawned} thing(s); 8 units -> {far}; behind -> {back}"
         );
         println!(
-            "  chase: walked {moved:.2} units in 1 s, now {distance:.2} units away (standoff {:.1}), turned {turned:.1} deg",
-            rt.ai_standoff
+            "  chase: walked {moved:.2} units in 2 s, now {distance:.2} units away (standoff {standoff:.2}), turned {turned:.1} deg"
         );
         assert!(moved > 0.1, "the actor did not chase ({moved:.2} units)");
         assert!(
-            (distance - rt.ai_standoff).abs() < 0.05,
-            "the actor stopped {distance:.2} units away, not at the {:.2} standoff",
-            rt.ai_standoff
+            (distance - standoff).abs() < 0.05,
+            "the actor stopped {distance:.2} units away, not at the {standoff:.2} standoff"
         );
         assert!(turned > 1.0, "the actor did not turn toward the player");
         // Scripted legs: `AISetMovePos` walks the puppet onto a point and drops the destination when

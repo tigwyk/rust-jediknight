@@ -61,6 +61,18 @@ impl Ai {
         self.instincts.iter().find(|i| i.name.eq_ignore_ascii_case(name))
     }
 
+    /// The distance the chase keeps from its target: `Follow`'s **second** argument, which the
+    /// shipped classes set per archetype (`rydefault` 0.75, `grdefault` 2.0). `None` when the class
+    /// has no usable `Follow` line.
+    pub fn standoff(&self) -> Option<f32> {
+        // The parser keeps an instinct line's first number as `weight` (the engine's `fltArg[0]`)
+        // and the rest in `args`, so `Follow`'s second argument is `args[0]`.
+        self.instinct("Follow")
+            .and_then(|follow| follow.args.first())
+            .map(|distance| *distance as f32)
+            .filter(|distance| *distance > 0.0)
+    }
+
     /// Whether the actor can see a point: inside `sightdist` and inside the cone.
     ///
     /// `fov=` is read as a **total** cone in degrees (`rybdefault.ai` says 200), which is what
@@ -164,6 +176,21 @@ OpenDoors
         assert_eq!(ai.instinct("PrimaryFire").unwrap().args.len(), 9);
         // A bare instinct (no numbers) still exists.
         assert_eq!(ai.instinct("OpenDoors").unwrap().weight, 0.0);
+    }
+
+    /// `Follow`'s second argument is the chase standoff: 0.75 units for a Ree-Yees, 2.0 for a
+    /// Greedo. The port used a fixed 0.25 for every class, so the room's friends walked onto the
+    /// player and absorbed the bolts aimed at it.
+    #[test]
+    fn follow_distance_is_the_chase_standoff() {
+        // A `.ai` file is a real text file, so the parser wants real newlines here.
+        let reeyees = "alignment=-1.0, rank=0.5\nFollow\t0.0, 0.75\n";
+        assert_eq!(parse(reeyees).standoff(), Some(0.75));
+        let greedo = "alignment=-1.0, rank=0.5\nFollow\t0.5, 2.0\n";
+        assert_eq!(parse(greedo).standoff(), Some(2.0));
+        assert_eq!(parse(RYB).standoff(), None, "the fixture has no Follow line");
+        // A zero standoff would put the chase on top of the target; it is not used.
+        assert_eq!(parse("Follow 0.0, 0.0\n").standoff(), None);
     }
 
     #[test]
