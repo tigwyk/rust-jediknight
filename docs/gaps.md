@@ -1590,3 +1590,11 @@ a **double borrow** of the runtime world (the skip lookup borrowed while the obs
 guard). But `--save-live` then fails with a printed verdict, so the change is reverted: the save/load
 check is the one behaviour the obstacle response breaks, and it is the next thing to inspect (the
 gate likely asserts the body does not move across a load, which the slide response now violates).
+
+**`--save-live` was frame-rate sensitive (round 20).** The probe saves, disturbs the clock by +100 s,
+loads, waits 10 frames and asserted the clock was within **0.5 s** of the saved value. On a loaded
+machine those 10 windowed frames cost a whole second (measured: "clock 3.45 (saved 2.45)"), so the
+gate failed on the committed tree *without* any obstacle change - which is what made the round-19
+change look guilty. The tolerance is now 2.0 s, still orders of magnitude below the +100 s
+disturbance, so a load that fails to restore the snapshot still fails the gate. `--save-live` passes
+again, which unblocks landing the frame-level obstacle check.

@@ -17036,7 +17036,11 @@ fn save_probe(
                 let rt = sim.world.borrow();
                 (rt.time, rt.inv.get(&2).copied().unwrap_or(0.0))
             };
-            let restored = (time - state.2).abs() < 0.5;
+            // The tolerance covers the frames this probe spends **after** the load: the windowed clock
+            // advances by the render step, and on a slow first frame 10 frames can be a whole second,
+            // which is what made this gate fail on a loaded machine ("clock 3.45, saved 2.45"). It still
+            // fails if the load did not restore the snapshot, because the disturbance is +100 s.
+            let restored = (time - state.2).abs() < 2.0;
             println!(
                 "save-live: clock {time:.2} (saved {:.2}), bin 2 = {bin:.0}",
                 state.2
