@@ -358,7 +358,9 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    linear light, so the stored bytes change by exactly `1 + tint/2` and the sRGB target clamps a >255
    channel the way the palette does. Measured on the door pose: a 1.0 red tint scales the red crop mean
    46 → 70 (×1.52 against the engine's 1.5) with green/blue untouched, and an identity tint's frame is
-   byte-identical because the pass is only attached while the tint is non-zero. `ponytail:` the pass
+   byte-identical because the pass is only attached while the tint is non-zero. It is also the first
+   thing to move a graded pair: `route_cantina` goes 0.7315 → **0.7497**, because the body is being
+   damaged there and retail's own cantina reference carries the tint, which the port can now draw. `ponytail:` the pass
    carries the damage tint only; the scripted `NewColorEffect` filter/tint/add channels still go
    through the wash quad.
 
