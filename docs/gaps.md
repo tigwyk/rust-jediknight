@@ -2204,3 +2204,15 @@ ledger, step 5 partly done with measured damage rates on the ledger, step 6 has 
 (`--endlevel`/`--tally`/`--transition`/`--flow`) but no retail level-2 comparison until retail can
 start another level (console and command line both proved closed; the savegame or a full level-1 play
 are the routes).
+
+**The damage-tint layer is exact, verified against the EXE's own float constants (round 79).**
+Reading the constants the decomp refers to: `_DAT_00522e48` = **0** (tint floor), `_DAT_00522e4c` =
+**1.0** (red/green ceiling), `_DAT_00522e58` = **0.5** (blue ceiling), `_DAT_005230b4` = **0.04**
+(tint added per damage point), and `_DAT_005230ac` = 0 (no-damage sentinel). The port's
+`runtime.rs` mirrors all of them with the same addresses in its comments (`DAMAGE_TINT = 0.04`,
+`TINT_CEILING = [1.0, 1.0, 0.5]`, decay 0.4), so the palette half of the two triage-only parity rows
+is closed: with ~44 damage retail reaches tint 1.76 -> clamped to 1.0 -> red byte x1.5, and the port's
+165 damage clamps to the same 1.0 -> x1.5 (measured 46 -> 67 = x1.45). The ledger row now says so. The
+two rows' remaining difference is therefore **scene content** - who is standing, dead or shooting at
+the 10 s mark - which is Phase 1 step 5's AI engagement, not a renderer gap. `CarryOver` (the
+transition's health/shields/bins) already exists in `runtime.rs` for step 6.
