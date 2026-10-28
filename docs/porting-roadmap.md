@@ -5,7 +5,7 @@ something is ported**, or **what to work on next when the build is not yet fun t
 
 ## Why this exists
 
-As of 0.1.1 the port reports 10 of 10 roadmap stages "done", 61 gates and 140 tests green, a signed-off
+As of 0.1.1 the port reports 10 of 10 roadmap stages "done", 61 gates and 141 tests green, a signed-off
 release, an installer, CI and a landing page — and level 1 still had fundamental playability problems.
 The first retail reference frame (`tools/parity/`, gaps §5.9) looked like it found the cause at once:
 the spawn view appeared to sit inside a cantina table that retail does not draw through the eye. The
@@ -109,7 +109,7 @@ partials is still to be written; these are the entries this round created or mea
 | `compare.ps1 -Gate` | the port's HUD is inside its frame while the retail world crop has none, so a pair's ceiling is renderer/HUD-limited | verified pairs cap at 0.62–0.65 (spawn) and 0.72–0.74 (route); thresholds sit at 0.55 / 0.65 | HUD-free capture, or a HUD-masked metric |
 | `shots.tsv` / `--shot-at` | retail's rendered camera pitch is ~0 while its `coords` reports PYR pitch 1.04, and `warp` cannot set pitch, so a pair cannot reproduce a pitched retail view; rows request pitch 0 | port pitch 0.25° already drops the spawn pair 0.63 → 0.59; `coords` PYR is in every sidecar | a retail-side way to set or read the rendered view pitch (none known); the port side already takes pitch |
 | camera pinned vs retail camera on the body | a port capture puts the **player** at the recorded pose (`--warp`) but keeps the camera pinned to the row's eye (`--shot-at`), while retail's camera rides the body; where the body is moved by a script or the floor the two cameras diverge | same framing at the warp instant (sector and yaw match retail: 8/8 rows); no row shows a moved body yet | a capture that lets the port's camera ride the warped body once bodies stay put (attachment state and damage tint below) |
-| damage tint | the engine tints the palette red as the player is damaged: `sithActor_DamageActor` adds `damage * 0.04` to the local player's red tint, `sithPlayer_Update` decays 0.4/s, `stdPalEffects_UpdatePalette` applies `byte += round(byte * tint * 0.5)`. Both halves are ported: the state (adds with the engine's clamps, decay, damage flash) and the draw (`src/palette.rs`, a `FullscreenMaterial` pass on the world camera that scales the finished picture's bytes by `1 + tint/2` — measured ×1.52 for a 1.0 red tint, identity byte-identical; the gated cantina pair rose 0.7315 → 0.7497 with it) | `route_catwalk`/`route_door` still score 0.45/0.42 against 0.72–0.74 for the untinted rows, because retail's own series turns red at ~5–6 s and the reference at ~10 s is saturated (r/g 2.0) while the port's 10 s capture now takes 6 hits (72 damage) and draws a weaker tint (red crop mean 46 → 51–63) — same direction, less than half the damage and a much softer red | the AI's engagement timing (Phase 1 step 5); no port-side renderer gap remains |
+| damage tint | the engine tints the palette red as the player is damaged: `sithActor_DamageActor` adds `damage * 0.04` to the local player's red tint, `sithPlayer_Update` decays 0.4/s, `stdPalEffects_UpdatePalette` applies `byte += round(byte * tint * 0.5)`. Both halves are ported: the state (adds with the engine's clamps, decay, damage flash) and the draw (`src/palette.rs`, a `FullscreenMaterial` pass on the world camera that scales the finished picture's bytes by `1 + tint/2` — measured ×1.52 for a 1.0 red tint, identity byte-identical; the gated cantina pair rose 0.7315 → 0.7497 with it) | `route_catwalk`/`route_door` still score 0.45/0.42 against 0.72–0.74 for the untinted rows, because retail's own series turns red at ~5–6 s and the reference at ~10 s is saturated (r/g 2.0) while the port's 10 s capture lands 6 hits (≈66 damage, bursty) and draws a softer red — same direction, less than half the rate | the AI's engagement timing (Phase 1 step 5); no port-side renderer gap remains |
 | warp attachment | after a warp the port's idle attach still needs a floor within one radius; at the catwalk pose there is no sector floor in that reach (and the catwalk itself is a solid *model* 0.145 below the body), so the body falls — while retail's `coords` holds z 2.80 for the whole capture. Whether retail's placement step keeps the pose or its collider has a surface the port's does not is not settled | `--warp` catwalk: support `None`, body falls and dies within 3 s; retail's `coords` stays at z 2.80 across 12 s | the floor/attachment step (`sithPhysics_UpdateAttachedThingPhysics`, `sithThing_AttachThingToSurface`) and solid-thing floors, Phase 1 step 3 |
 
 ## Phases
@@ -216,7 +216,12 @@ tier, not a checkbox.
    the damage tint appears in the captured frame; the pair still scores 0.412 because retail's
    reference is far more saturated (r/g 2.0 at 10 s) and the doorway geometry dominates. The gated rows
    moved with it: `spawn_pose` 0.6296 → 0.6543, `route_cantina` 0.7315 → 0.7697, `route_street`
-   0.7369 → 0.7574, `route_lower` 0.7229 → 0.7174, `spawn_yaw30` 0.6231 → 0.6117.
+   0.7369 → 0.7574, `route_lower` 0.7229 → 0.7174, `spawn_yaw30` 0.6231 → 0.6117. Two body-size bugs at
+   the projectile layer then fell out of chasing the same red: a bolt was resolved as a 0.4-radius body
+   and stopped on doorway jambs (now its template `movesize`), and a hit used a 0.6-radius body so the
+   crowd absorbed every shot (now `movesize`, the engine's own radius, with the model height). The door
+   capture now lands **6 real hits** and the catwalk takes its first hit; the pair scores still wait on
+   retail's saturated tint because the port's fire is bursty — the engagement rate is the remaining gap.
 6. **Exit.** End-of-level tally, transition, carried state (health, shields, bins). Exit: level 2 starts
    in retail's state.
 

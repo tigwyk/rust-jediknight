@@ -847,6 +847,11 @@ pub struct Runtime {
     /// targets are bodies, not points: a bolt fired at eye height flies a metre above a placed
     /// actor's origin, and a point test at `0.5` therefore never landed (§16.5).
     pub template_body: BTreeMap<String, (f32, f32)>,
+    /// Per template, the body a **projectile** has to touch to hit it: `(radius, height)` from the
+    /// engine's `moveSize` (`movesize=` in the template, the value the `getthingmovesize` verb
+    /// returns), with the height the shipped models imply (2.8 x the radius; actor models measure
+    /// 2.7-2.8). Separate from `template_body`, which the explosion pass uses.
+    pub template_hit: BTreeMap<String, (f32, f32)>,
     pub template_rate: BTreeMap<String, f32>,
     pub template_decay: std::collections::BTreeSet<String>,
     /// Templates whose `typeflags` carry `SITHEXPLOSION_FLAG_ANIMATED_SPRITE` (`0x1`), the bit
@@ -1133,6 +1138,23 @@ impl Runtime {
                 (name, body)
             })
             .collect();
+        // The engine's collision radius is the template's `movesize=` (every shipped actor carries
+        // it, and it is what `getthingmovesize` reads). The port used a 0.6 default, which made a
+        // bolt count as a hit on any actor within 0.75 of its path, so a crowd absorbed every shot
+        // aimed at the player. The height is the model height the templates imply.
+        let template_hit: BTreeMap<String, (f32, f32)> = level
+            .templates
+            .iter()
+            .map(|t| {
+                let name = t.name.to_ascii_lowercase();
+                let radius = level
+                    .template_f32(&t.name, "movesize")
+                    .or_else(|| level.template_f32(&t.name, "size"))
+                    .unwrap_or(0.065)
+                    .max(0.02);
+                (name, (radius, radius * 2.8))
+            })
+            .collect();
         let template_phys_flags: BTreeMap<String, u32> = level
             .templates
             .iter()
@@ -1293,6 +1315,7 @@ impl Runtime {
                 })
                 .collect(),
             template_body,
+            template_hit,
             template_explode,
             template_fire_offset,
             template_timer,
@@ -2005,7 +2028,21 @@ impl Runtime {
                 // stops the player. The engine's `SearchForSurfaceCollisions` treats it as solid for
                 // every body; putting projectiles and actors on the swept path is the upgrade.
                 let sector = t.sector.max(0) as usize;
-                let (resolved, hit) = solids.resolve_stepped(sector, t.pos, 0.4);
+                // A projectile is not a 0.4-radius body: the engine collides it by its template's
+                // own `movesize` (`+bryarbolt` is 0.001), and the fixed 0.4 made every bolt stop on
+                // a doorway jamb half a unit short of its target — level 1's door and catwalk fights
+                // never landed a shot because of it. Doors and lifts keep the old reach.
+                let radius = if self.types.get(i).copied() == Some(3) {
+                    self.templates
+                        .get(i)
+                        .map(|name| name.to_ascii_lowercase())
+                        .and_then(|name| self.template_hit.get(&name).map(|(r, _)| *r))
+                        .unwrap_or(0.02)
+                        .max(0.02)
+                } else {
+                    0.4
+                };
+                let (resolved, hit) = solids.resolve_stepped(sector, t.pos, radius);
                 // A push-out is one signal; a fast mover can also step clean through a plane between
                 // two frames, so "the new position is in no sector" counts too. That is the swept
                 // test a position-only resolver cannot make.
@@ -3315,6 +3352,7 @@ impl Runtime {
                 if !armed || other == index || thing.destroyed {
                     continue;
                 }
+
                 if self.shot_hits(index, other) {
                     impacts.push((index, other, shot.damage));
                     break;
@@ -3795,8 +3833,11 @@ impl Runtime {
         let (Some(a), Some(b)) = (self.things.get(shot), self.things.get(target)) else {
             return false;
         };
+        // The target's body, in the engine's own terms: its `movesize` radius and the model height
+        // that implies. A missing template keeps the old cylinder so a script-spawned thing is still
+        // hittable.
         let name = self.templates.get(target).cloned().unwrap_or_default().to_ascii_lowercase();
-        let (radius, height) = self.template_body.get(&name).copied().unwrap_or((0.5, 1.8));
+        let (radius, height) = self.template_hit.get(&name).copied().unwrap_or((0.065, 0.18));
         let (dx, dy) = (a.pos[0] - b.pos[0], a.pos[1] - b.pos[1]);
         let flat = (dx * dx + dy * dy).sqrt();
         // A bolt has its own small radius; a hit is when the two touch.
@@ -6339,6 +6380,35 @@ mod tests {
         rt.adjoin_flags = vec![0x7];
         rt.surface_adjoin = vec![0];
         rt
+    }
+
+    /// The projectile body is the template's `movesize` — the engine's collision radius and what
+    /// `getthingmovesize` returns — not the model's bounding radius (which includes the gun) and not
+    /// a guess. This pins both the value and the height rule the hit test uses.
+    #[test]
+    fn a_templates_hit_body_is_its_movesize() {
+        let mut level = Level::default();
+        let template = |name: &str, params: &[(&str, &str)]| crate::jkl::Template {
+            name: name.to_string(),
+            base: None,
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            model3d: Some("x.3do".to_string()),
+            sprite: None,
+        };
+        level.templates = vec![
+            template("reeyeesgun", &[("movesize", "0.0729"), ("size", "0.0729")]),
+            template("_actor", &[("movesize", "0.065")]),
+            template("barething", &[]),
+        ];
+        let rt = Runtime::new(&level);
+        let (radius, height) = rt.template_hit["reeyeesgun"];
+        assert!((radius - 0.0729).abs() < 1e-4, "movesize is the radius, got {radius}");
+        assert!((height / radius - 2.8).abs() < 0.01, "height follows the shipped models");
+        assert_eq!(rt.template_hit["_actor"].0, 0.065);
+        assert_eq!(rt.template_hit["barething"].0, 0.065, "an unnamed size keeps the player's");
     }
 
     #[test]

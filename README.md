@@ -175,7 +175,7 @@ cargo run --release -- --gates          # 61 behaviour gates, one process each
 ## Verification
 
 [docs/gates.txt](docs/gates.txt) records what every check printed against the retail install:
-**61 gates, 0 failures** (windowed; `BK_HEADLESS=1` skips 9 that need a window), plus **140 unit
+**61 gates, 0 failures** (windowed; `BK_HEADLESS=1` skips 9 that need a window), plus **141 unit
 tests**. CI builds, tests and packages on Windows with the MSRV pinned in `Cargo.toml` and uploads
 the setup artifact. The 61 gates are not in CI on purpose — they require the game data, which the
 repository does not ship and CI does not download.

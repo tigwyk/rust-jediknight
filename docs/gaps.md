@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 140 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **61 gates, 141 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -387,6 +387,25 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    `sithAI_CheckSightThing` treats a `-1.0` class field (0x523064) as "no cone". The unported
    `sithAIAwareness_*` event system (`CreateTransmittingEvent`/`ProcessEvent`) is the likely reason
    retail's whole room wakes once the first hits land.
+
+   **Why bolts never landed, and what a body is (2026-10-28).** Chasing the missing red on the upper
+   rows found two body-size bugs, both at the projectile layer:
+
+   - a moving projectile was collision-resolved as a **0.4-radius body**, so a bolt stopped on the
+     doorway jamb half a unit short of its target (traced: a shot from 155 flying at the body stops at
+     0.81 units out with `vel` zeroed). Projectiles now use their template's `movesize` (`+bryarbolt`
+     0.001, floored at 0.02); doors and lifts keep the old reach;
+   - a projectile *hit* test used a 0.6-radius body per template, so a bolt counted as a hit on any
+     actor within 0.75 of its path and the crowd absorbed every shot aimed at the body. The hit body is
+     now the template's `movesize` — the engine's own radius (`getthingmovesize`) and `walkplayer`'s
+     0.065 matches `PLAYER_RADIUS` — with the height the shipped models imply (2.8 x the radius;
+     measured 2.7–2.8 on the actor models). Pinned by `a_templates_hit_body_is_its_movesize`.
+
+   Measured at the door (600 frames): **32 shots and 6 real hits** on the body (≈66 damage, from 153
+   and 155) where the oversized body had produced 6 grazes; at the catwalk the body takes its **first
+   hit ever** (actor 255). The pair scores do not move yet (door 0.4175, catwalk 0.4538): retail's tint
+   is *saturated* at the shutter (r/g 2.0) and needs ~10 damage/s, while the port still only gets there
+   in bursts — so the remaining gap is the AI's engagement rate, not the hit rules.
 
    **The room starts shooting (2026-10-28).** Two engine-backed corrections, both in `ai_tick`:
 

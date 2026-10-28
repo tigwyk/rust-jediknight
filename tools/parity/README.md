@@ -118,7 +118,7 @@ The numbers are tied to the capture policy above (600 frames, window from the re
 16-bit retail renderer) — changing framing or frame count invalidates them.
 
 The gate needs a retail install and captured references on the machine, so it is a developer check, not
-a CI job; the port's own 140 tests and 61 gates remain the CI-able surface.
+a CI job; the port's own 141 tests and 61 gates remain the CI-able surface.
 
 ## The shot list: `tools/parity/shots.tsv`
 
@@ -254,7 +254,7 @@ Everything below was verified against the GOG build (the harness works on a scra
   log says who hit whom; `BK_AI_TRACE=1` prints every actor-frame that has line of sight to the body
   (range, dot, `ready`); `BK_AI_ROSTER=1` dumps every actor near the body once — AI class, cone test,
   line of sight and how far off its facing the body is, which is the fastest way to see why a room is
-  quiet. At level 1's door: 38 shots and 6 hits on the body from one actor in 8 s, the rest into a
+  quiet. At level 1's door: the capture now lands 6 real hits on the body (32 shots); the rest fall into a
   Greedo standing in the lines; the roster shows 56 armed actors within 8 units, all with a clear line,
   most facing >100° away. (They turn onto a target they have now: an actor keeps its aim while walking
   and the chase keeps its class's `Follow` standoff.)

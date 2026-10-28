@@ -216,6 +216,7 @@ are the unit-by-unit account behind them.
 | AI | actors carry their shipped `.ai`: sight distance and cone decide whether an armed actor fires its own `weapon=`, and `--ai` checks that an actor fires at 3 units, holds at 8 and stays silent from behind (§16.8). Pathfinding is a breadth-first route over the adjoin graph (`Collide::route`) and `PrimaryFire`'s aim-error fraction is applied; the instinct scheduler's weights and reactions are not done |
 | items | pickups work through the item's **own script**: touching a powerup runs its cog's `touched` then `taken`, so `pow_shields.cog` lands `bin 60 +20` from its own `bin=60`/`ChangeInv` (§16.6); `--pickup` asserts it on level 1's `shieldrecharge`. Also fixed the inventory verbs' argument order (thing first) and `TakeItem` double-counting. Taking a weapon changes what the player fires (runtime weapon: `+bryarbolt` 30 damage -> `+elaser` 12, checked by --weapon), and a taken powerup comes back after its 
 espawn= seconds (checked in --pickup). Not yet: pickup sounds, real inventory maxima |
+| combat: projectiles | a projectile flies its template's `vel=`, collides by its own `movesize` radius (the 0.4 the resolver used stopped bolts on doorway jambs) and hits a body of the target's `movesize` radius with the model height (0.6 was making the crowd absorb shots aimed at the player; `movesize` is what `getthingmovesize` returns and `walkplayer`'s 0.065 matches `PLAYER_RADIUS`) | `--hit`, `--muzzle`, the door/catwalk captures, `BK_HIT_TRACE` |
 | combat: firing | working in the window: **left mouse** fires the level's own weapon template, the bolt is drawn and flown with the template's `vel=`, stops at the sector graph and applies its `damage=`; `--fire +bryarbolt` checks flight and the 30 points of damage headlessly, and `--fire-demo` shows the bolt on screen (§16.5). a projectile damages what it reaches and a killed actor plays the puppet's own `death` keyframe (`kyftdeth.key`, 45 frames at 15 fps) and holds its last frame; --fire asserts the kill. Damage decays in flight the way the engine does it (SITH_WF_DAMAGE_DECAY 0x4000, 
 ate= per second floored at mindamage=): level 1''s bolt is 30 damage dropping to 10 over 1.33 s (§16.5). Not yet: explosions, ammo, force power effects, a body that falls |
 | actors animate | working: each placed actor plays its puppet's `stand` keyframe at the keyfile's own 15 fps on its own mesh, rebuilt only when the frame number changes; `--animate` checks the rendered vertices across every material — **1684 of 1697** actors move over the loop (§16.3), and `actor_state` picks `walk`/`run`/`walkback`/`strafe` from the velocity the actor walked at, plus `fire`/`hit`/`turn` |
@@ -706,10 +707,10 @@ is why it was recoverable.
 
 Every check in one page: [docs/gates.txt](gates.txt) records each flag and what it printed
 against this install; the sweep now is **61 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
-`0 of 61 failed, 9 skipped`), plus 140 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
+`0 of 61 failed, 9 skipped`), plus 141 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
 
 [CI](../.github/workflows/ci.yml) runs on Windows: it installs the MSRV from `Cargo.toml`, builds
-with `--locked`, runs the 140 unit tests, builds the i686 film helper, produces the native
+with `--locked`, runs the 141 unit tests, builds the i686 film helper, produces the native
 `setup.exe` as an artifact, and checks every relative documentation link. The 61 gates are not
 in CI on purpose — they require a retail game install, which the repository does not ship and
 CI does not download.
