@@ -21759,7 +21759,11 @@ fn walk_player(
     }
     // The engine's own scaling: FAST doubles, crouch halves and also halves the jump,
     // and standing on water halves whatever is left.
-    let run = keys.pressed(KeyCode::ShiftLeft);
+    // Retail's walker **runs by default** (`sithControl_PlayerMovement`'s run flag is on unless the
+    // slow modifier is held: `DAT_008bd020 & 2`), so plain forward movement is the 2.0 scale and
+    // shift is the 0.5 walk. The port had the inverse, which is why its walk trace covered half the
+    // distance retail's did.
+    let run = !keys.pressed(KeyCode::ShiftLeft);
     let crouch = keys.pressed(KeyCode::ControlLeft);
     // `BK_WALK_FORWARD=1` holds the forward key, which is how the camera-follows-the-walker fix
     // is verified without a hand on the keyboard: the trace then shows the body moving and the

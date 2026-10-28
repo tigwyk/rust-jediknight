@@ -509,6 +509,16 @@ puts them on one held-key clock. The first leg (`walk_cantina`, 2.4 s held forwa
 The retail side's own samples are a little irregular (`coords` latency, and the console dialog takes
 the foreground, which is why the trace re-activates the window before each hold); the comparison
 reports per-sample deltas and marks samples where retail is stopped rather than hiding them.
+
+**The walking rule came out of the decomp (round 11).** `sithControl_PlayerMovement` sets the body's
+acceleration to `maxthrust * 0.7 * axis * runScale` (0.7 at 0x522f24; run 2.0 at 0x522f18's path) and
+`UpdateAttachedThingPhysics` damps a grounded body by `surfdrag + 0.2` (0x5231a4 = -0.2), so retail's
+**default run** is 2.8/3.2 = 0.875 u/s and its walking is 0.4375 - and the port was deriving
+`maxthrust / surfdrag` = 0.667 while only running on shift. Both are fixed: `Rules::from_level` uses
+`maxthrust * 0.7 / (surfdrag + 0.2)` as the walk and `Rules::speed` applies the engine's run scale,
+with plain forward movement running by default (shift walks). The first trace leg is
+**collision-limited** (the cantina pose walks into furniture at x -3.64 in the port), so its travel
+still reads 0.61 u/s; a clear straight leg is the next fixture, not another code change.
 ## 6. Recently closed, so it is not mistaken for missing
 
 * **Sprites render, and the two "renderer bugs" that hid it were both in the probe.** `--sprite
