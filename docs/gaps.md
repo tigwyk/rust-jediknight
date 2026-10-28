@@ -2216,3 +2216,14 @@ is closed: with ~44 damage retail reaches tint 1.76 -> clamped to 1.0 -> red byt
 two rows' remaining difference is therefore **scene content** - who is standing, dead or shooting at
 the 10 s mark - which is Phase 1 step 5's AI engagement, not a renderer gap. `CarryOver` (the
 transition's health/shields/bins) already exists in `runtime.rs` for step 6.
+
+**`--carry-check`: the level-change player state arrives (round 80).** New gate (62 total, 0
+failed): it sets every field a fresh spawn would not have on level 1 - an inventory bin (14 = 37),
+the armed weapon (`saber`), the armed bin (5), shields 120, health 42, `jkFlags` 0x2000 - calls
+`Runtime::carry`, builds **level 2** from its own `.jkl` and calls `adopt`, then asserts each field
+arrived with the engine's ceilings (`health` within the level's template maximum, shields capped at
+200). Measured: `bins[14]=Some(37.0) weapon=Some("saber") cur_bin=5 shields=120 health=42
+flags=0x2000` - Phase 1 step 6's "carried state" is now a gate rather than an implementation detail,
+and the whole suite is **143 tests, 62/62 gates**. The remaining step-6 item is the retail-side
+comparison (level 2's state after a real transition), which is the same boot problem the ledger's
+retail-trigger deviation records.

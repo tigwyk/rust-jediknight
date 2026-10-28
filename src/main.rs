@@ -161,6 +161,9 @@ const GATES: &[&str] = &[
     "--save-live --start 01narshadda",
     // Eight slots, two of them holding different games at once.
     "--save-slots --start 01narshadda",
+    // Level 1's player state (bins, weapon, bin index, shields, health, jkFlags) arrives on level 2
+    // through the level-change hand-off.
+    "--carry-check --start 01narshadda",
     // The use key against a linked door, through real input.
     "--use-live --start 01narshadda",
     // An actor in a real level shoots at the living body.
@@ -405,6 +408,7 @@ fn main() {
     let mut muzzle_check = false;
     // `--adjoins`: the sector/adjoin flag verbs, and that collision and the cull read them.
     let mut adjoin_check = false;
+    let mut carry_check = false;
     let mut geomode_check = false;
     let mut cel_check = false;
     let mut camera_check = false;
@@ -701,6 +705,7 @@ fn main() {
             "--muzzle" => muzzle_check = true,
             // The adjoin/sector flag verbs, and the two consumers that must read them.
             "--adjoins" => adjoin_check = true,
+            "--carry-check" => carry_check = true,
             // The surface geomode: a script hides a face and the world's batches drop its polygons.
             "--geomode" => geomode_check = true,
             // `--cel`: a surface's cel reaches the mesh the level shader draws.
@@ -8621,6 +8626,58 @@ fn main() {
             "hiding one surface did not remove exactly the {verts} verts' triangles"
         );
         println!("--- geomode check passed ---");
+        return;
+    }
+
+    if carry_check {
+        // `--carry-check`: the level change's player-state hand-off. The engine keeps its `jkPlayer_*`
+        // state across a level load, but this build rebuilds the runtime from the incoming `.jkl`, so
+        // `Runtime::carry`/`adopt` have to move inventory, armed bin, weapon, saber, `jkFlags`, health and
+        // shields. Set every field to a value a fresh spawn would not have, carry it, adopt it on level 2,
+        // and require each one to arrive (with the engine's own health/shield ceilings).
+        let handle = runtime::Runtime::handle(&world.level);
+        let carried = {
+            let mut rt = handle.borrow_mut();
+            rt.inv.insert(14, 37.0);
+            rt.weapon = Some("saber".to_string());
+            rt.cur_bin = 5;
+            rt.player_shields = 120.0;
+            let player = rt.player_thing();
+            if let Some(thing) = rt.things.get_mut(player) {
+                thing.health = 42.0;
+                thing.jk_flags = 0x2000;
+            }
+            rt.carry()
+        };
+        let Some(raw) = gobs.read("jkl\\02narshadda.jkl") else {
+            panic!("level 2 is missing from the archives");
+        };
+        let next_level = jkl::parse(&String::from_utf8_lossy(&raw));
+        let next = runtime::Runtime::handle(&next_level);
+        next.borrow_mut().adopt(&carried);
+        let rt = next.borrow();
+        let player = rt.player_thing();
+        let health = rt.things.get(player).map(|t| t.health).unwrap_or(-1.0);
+        let flags = rt.things.get(player).map(|t| t.jk_flags).unwrap_or(0);
+        println!(
+            "carry: level 2 adopts bins[14]={:?} weapon={:?} cur_bin={} shields={} health={} flags=0x{:x}",
+            rt.inv.get(&14),
+            rt.weapon,
+            rt.cur_bin,
+            rt.player_shields,
+            health,
+            flags
+        );
+        assert_eq!(rt.inv.get(&14).copied(), Some(37.0), "an inventory bin was lost");
+        assert_eq!(rt.weapon.as_deref(), Some("saber"), "the armed weapon was lost");
+        assert_eq!(rt.cur_bin, 5, "the armed bin was lost");
+        assert_eq!(rt.player_shields, 120.0, "the shield bar was lost");
+        assert_eq!(flags, 0x2000, "the player's jkFlags were lost");
+        assert!(
+            health >= 42.0 && health <= 100.1,
+            "health did not arrive within the level's ceiling (got {health})"
+        );
+        println!("--- carry check passed: level 1's player state arrives on level 2 ---");
         return;
     }
 

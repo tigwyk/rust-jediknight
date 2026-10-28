@@ -531,4 +531,5 @@ That is **61 gates**, 0 failures, with **140** unit tests alongside. The nine wi
 gates are reported as skipped under `BK_HEADLESS=1` (`0 of 61 failed, 9 skipped`), never as
 passes. `--tour` checks the campaign by row on both arms (28 rows, 25 distinct files, 23 film
 hops, 2 finale rows), and `--tour-live` finishes and swaps all 21 light-side levels in the
-running app.
+running app.--carry-check --start 01narshadda                        0   level 2 adopts bins[14]=Some(37.0) weapon="saber" cur_bin=5
+                                                             shields=120 health=42 flags=0x2000 from level 1
