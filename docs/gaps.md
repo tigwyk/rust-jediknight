@@ -1662,3 +1662,13 @@ with y fixed. Either retail's `coords` yaw is the *view* yaw and its body yaw di
 cheap: two retail traces on the same flat spot at **yaw 0 and yaw 90**, and read which world axis
 the body actually travels along; that pins the retail yaw->movement mapping without any more code.
 The port side needs no change until that answer exists.
+
+**The movement basis is confirmed shared; the divergence is the corner step-up (round 30).** Two
+retail probes at the street pose settle it: at **yaw 90** the body walks pure -x (5.47 -> 4.20 ->
+3.56 -> 3.27 over 1.8 s, y fixed at -1.90, sectors 271/157/155) and at **yaw 0** it nudges +0.04 in y
+and stops. That is exactly `(-sin a, cos a)`, the basis both sides already use, so round 28's
+"movement basis is rotated" reading was wrong - at yaw 45 both sides move diagonally, both are stopped
+in y by the x = 3.20 wall's edge at -1.865, and both slide along it; the port then lets the body
+climb the 0.066 corner step and round the wall, which retail does not. The remaining fix is the
+**corner/step-up handling in `collide.rs`**, and `walk_street90` (no blocking, no drift, three
+sectors, 2.2 units in 1.8 s) is the new clean fixture for the steady-speed comparison.
