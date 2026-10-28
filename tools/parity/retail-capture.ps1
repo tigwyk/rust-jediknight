@@ -65,7 +65,11 @@ param(
   # Which key the walk trace holds (default W; UP is the engine's own forward binding).
   [string]$WalkTraceKey = 'UP',
   # Row names to run (default: every row of the shots file). A trace run uses one row.
-  [string[]]$Only = @()
+  [string[]]$Only = @(),
+  # Dev-console commands to run after the level loads (and after the warp), e.g. `cogstatus 1`.
+  # Each row's output is written to target/parity/trace/<name>-console.txt, which is how Phase 0.5
+  # step 2 captures one level's cog variables and AI status.
+  [string[]]$ConsoleCommands = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -612,6 +616,19 @@ function Invoke-JkCaptureRow {
       Log "warp command: $warp"
       $null = Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command $warp
       Start-Sleep -Milliseconds 900
+    }
+
+    if ($ConsoleCommands.Count -gt 0) {
+      $consolePath = Join-Path $script:TraceOut ("{0}-console.txt" -f $name)
+      $consoleLines = New-Object System.Collections.Generic.List[string]
+      foreach ($command in $ConsoleCommands) {
+        $consoleLines.Add("> $command")
+        foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command $command)) {
+          $consoleLines.Add($line)
+        }
+      }
+      Set-Content -LiteralPath $consolePath -Value $consoleLines -Encoding utf8
+      Log "console: wrote $consolePath ($($ConsoleCommands.Count) command(s))"
     }
 
     # Phase 0.5 trace v0: a trace run replaces this row's screenshot captures (the `finally` below

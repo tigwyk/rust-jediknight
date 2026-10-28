@@ -265,6 +265,32 @@ release - the later segments are the steady ones.
 Dense per-tick tracing (the fallback the roadmap's Phase 0.5 step 4 names) is not needed yet: segment
 density is enough for the first comparison, and the Frida `sithThing_SetPositionAndOrient` hook is the
 plan if a finer trace is required.
+## Status commands (`cogstatus`, `aistatus`)
+
+Phase 0.5 step 2 pins the two dev-console status formats from the decomp and captures retail output:
+
+- `cogstatus <n>` - `sithCog_CogStatus` (`decomp/004e0480_sithCog_CogStatus.c`): prints
+  `Cog #%d: Name:%s  Script %s` then one line per cog symbol, `  Symbol %d: '%s' ` followed by
+  ` = %f` for float symbols or ` = %d` for integer ones (format strings at `0x54aaf4`, `0x54ab1c`,
+  `0x54ab30`, `0x54ab38`). Out-of-range indices print nothing.
+- `aistatus <n>` - `sithAI_AIStatus` (`decomp/004ea230_sithAI_AIStatus.c`): an inactive block prints
+  `That AI block is not currently active.`; an active one prints its actor lines, then
+  `Current instincts:` and per instinct
+  `Instinct %d: Params: %f/%f/%f/%f, nextUpdate=%d, mask=0x%x, mode=0x%x.`
+  (the two header lines' formats are not recoverable from this decomp).
+
+Capture with `retail-capture.ps1 -ConsoleCommands 'cogstatus 1' ...` - each row's output lands in
+`target/parity/trace/<name>-console.txt`. Level 1's first cog is captured in
+[cogstatus-01narshadda.txt](cogstatus-01narshadda.txt):
+
+```text
+Cog #1: Name:00_std_elev.cog  Script 00_std_elev.cog
+  Symbol 0: 'crossed'  = 8
+  ...
+  Symbol 8: 'speed'  = 4.000000
+```
+
+That sample is the fixture a port-side `cogstatus` verb has to reproduce.
 ## Known limitations / follow-ups
 
 - **Triage, not equality.** Retail runs its 16-bit DirectDraw/D3D path, translated by dgVoodoo2 to

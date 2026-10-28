@@ -1,0 +1,12 @@
+> cogstatus 1
+>cogstatus 1
+Cog #1: Name:00_std_elev.cog  Script 00_std_elev.cog
+  Symbol 0: 'crossed'  = 8
+  Symbol 1: 'arrived'  = 11
+  Symbol 2: 'timer'  = 4
+  Symbol 3: 'lower_adjoin0'  = 839
+  Symbol 4: 'lower_adjoin1'  = 854
+  Symbol 5: 'elevator'  = 6
+  Symbol 6: 'start_wait'  = 0.250000
+  Symbol 7: 'sleeptime'  = 2.000000
+  Symbol 8: 'speed'  = 4.000000
