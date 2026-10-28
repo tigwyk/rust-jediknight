@@ -1608,3 +1608,12 @@ stop is therefore most likely a **level-geometry edge/step** the port does not h
 different height) - the port walks over it and falls. The thing-obstacle patch preserved in
 `target/parity/exp/obstacle.patch` is not the fix; the next probe is the port's own floors/walls at
 x 3.27 (does a wall face exist there?) against retail, before any collision code.
+
+**Level 1 surface extraction is verified, so the street stop is not a hole (round 25).**
+`--collide --start 01narshadda` passes: every solid surface is claimed, the tightest eye clearance is
+0.157 (near plane 0.015625), and 322 solid things have model spans 0.02..2.10. The port therefore
+*has* floor at x 3.27 and walks off it, while retail stops on something at that x. The remaining
+question is narrower: which retail surface/step is the stopper, and how does the loader represent it
+(a step-up the port climbs? a wall face the port extracts with the wrong height? a closed adjoin the
+port opens?). Answer it by dumping the port's surfaces within a unit of (3.27, -1.86, 0.62) and
+comparing their normals/heights against the retail stop, not by another collision-response patch.
