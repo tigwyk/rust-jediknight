@@ -1927,3 +1927,14 @@ split is not the port's symbol-kind mapping) and in three symbols the port's dec
 drops (`checkstatus`, `opendoors`, `closedoors`, retail prints them as `0.000000`), so the kind
 mapping and unknown-type handling are the verb's remaining gaps. 143 tests, 61/61 gates, `--ends`
 pass all green with the change.
+
+**The three missing cogstatus symbols are runtime-created, not declared (round 56).** `checkstatus`,
+`opendoors` and `closedoors` are not in `00_door.cog`'s `symbols` section: the script's `startup`
+assigns them, and the engine's symbol table creates a symbol on first assignment (which is why retail
+prints them as `0.000000`). The port's VM already does that function (`Vm.vars`), so scripts see the
+variables; only the *verb* cannot list them, because `Vm.vars` is a `HashMap` and retail's order is
+insertion order. The new vocabulary is not missing from `SymKind::parse` - the standard type words are
+all covered. So the remaining cogstatus-0 differences are a display ceiling, not a script bug:
+`ponytail:` give the VM an ordered symbol table (or expose the assignment order in `Trace`) when a
+fixture needs byte-exact cog 0; the engine's own behaviour is unaffected, and `--cogstatus 1` already
+matches its retail fixture byte-for-byte.
