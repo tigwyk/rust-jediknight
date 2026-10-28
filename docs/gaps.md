@@ -1682,3 +1682,11 @@ old walk speed doubled; the clean `walk_street90` leg measures the port at **0.6
 retail's **1.07-1.23 u/s**, and the speed rule is exactly what needs re-deriving. The next attempt
 must (a) patch `walk:` with the anchor read from the file, (b) rebuild in its own command, (c)
 confirm the new constant is in the binary by re-running the clean leg, before updating any doc.
+
+**The measured walk speed landed and matches retail (round 32).** `Rules::walk` is now the measured
+**1.2 u/s** (the previous `thrust / surfdrag` = 0.667 was retired, not derived), the `--rules` gate
+and its unit test pin the measured value, and the clean leg proves it: `walk_street90` port travel
+**1.19 -> 1.84 units in 1.8 s** (1.02 u/s average against retail's 1.23, with the port's 3.0 drag
+ramp explaining the gap), and the port now **stops at 3.265 = retail's 3.27** in sector 155 instead
+of walking off the ledge. 143 tests and 61/61 engine gates stay green. The ledger row names the
+retire condition: recover the `thing + 0x144` thrust term and re-derive instead of measuring.

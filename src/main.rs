@@ -9546,10 +9546,14 @@ fn main() {
             let thrust = world.level.template_f32("walkplayer", "maxthrust").unwrap_or(f32::NAN);
             let drag = world.level.template_f32("walkplayer", "surfdrag").unwrap_or(f32::NAN);
             let jump = world.level.template_f32("walkplayer", "jumpspeed").unwrap_or(f32::NAN);
-            let want_walk = thrust / drag;
+            // The walk speed is **measured** from retail, not derived: `maxthrust/surfdrag` = 0.667 was
+            // 40% under because `sithControl_PlayerMovement` adds a `thing + 0x144` term no recovered
+            // template parser produces. `walk_street90` gives 1.07-1.23 u/s, so the base is 1.2 and the
+            // ratio checks below it still hold. The derivation is retired on the deviation ledger.
+            let want_walk = 1.2;
             assert!(
                 (rules.walk - want_walk).abs() < want_walk * 1e-4,
-                "walk {:.3} is not maxthrust/surfdrag = {want_walk:.3}",
+                "walk {:.3} is not the measured retail 1.2 u/s",
                 rules.walk
             );
             assert!(
@@ -20973,7 +20977,14 @@ impl Rules {
         let drag = level.template_f32(name, "surfdrag").filter(|d| *d > 0.0).unwrap_or(3.0);
         let jump_speed = level.template_f32(name, "jumpspeed").unwrap_or(1.5);
         Rules {
-            walk: thrust * physics_scale() / drag,
+            // Measured, not derived: the clean retail straight leg (`walk_street90`, yaw 90 at the
+            // street) covers 1.07-1.23 u/s; the port moved 0.66 u/s with `thrust / surfdrag` = 0.667.
+            // The engine's thrust carries a term the recovered parsers do not see
+            // (`thing + 0x144` in `sithControl_PlayerMovement`), so the base speed is the measured
+            // retail value here and the derivation is retired on the ledger until that term is
+            // understood. `drag` stays `surfdrag` for the damping, so the acceleration is ~1.2 * 3 =
+            // 3.6 u/s^2 against the decompiled thrust of ~3.92.
+            walk: 1.2 * physics_scale(),
             jump: jump_speed * physics_scale(),
             gravity: level.gravity * physics_scale(),
             // `sithThing.c` sets `moveSize` from the template's `size=` (0.065 on `walkplayer`), and the
@@ -22721,9 +22732,10 @@ mod rules_tests {
     #[test]
     fn the_walker_moves_at_the_engines_own_ratios() {
         let rules = shipped();
-        // `sithPhysics_ApplyDrag` settles velocity at acceleration / drag, and the player control sets the
-        // acceleration to `maxThrust`, so the walk speed is 2 / 3 in level units exactly — no scale factor.
-        assert!((rules.walk - 2.0 / 3.0).abs() < 1e-4, "walk {}", rules.walk);
+        // The base speed is **measured** from retail (`walk_street90`: 1.07-1.23 u/s on a clean straight
+        // leg), not derived: `thrust / surfdrag` = 0.667 was 40% under because `sithControl_PlayerMovement`
+        // adds a `thing + 0x144` term no recovered parser sees. The derivation is retired on the ledger.
+        assert!((rules.walk - 1.2).abs() < 1e-4, "walk {}", rules.walk);
         // FAST doubles; crouch replaces that with a half; backwards is half; strafe 0.7.
         assert_eq!(rules.speed(1.0, 0.0, false, false, false), [rules.walk, 0.0]);
         assert_eq!(rules.speed(1.0, 0.0, true, false, false), [rules.walk * 2.0, 0.0]);
