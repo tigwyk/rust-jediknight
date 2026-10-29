@@ -259,10 +259,14 @@ tier, not a checkbox.
    record decoding to the **player at that level's spawn** (level 2: 10.798, −11.983, 3.020 against the
    `level2_spawn` row's 10.80/−11.98/3.02), pinned by a test on the committed fixtures. The container had
    been modelled from the in-memory message header; on disk a record is `u32 type, u32 length, payload`
-   and the prefix carries a 0x24-byte game-side block before the level name (see `formats.md`). What is
-   still missing for the exit: neither the game-state record (type 0x1F) nor the player's thing payload
-   exposes health, shields or bins in a decoded position, so the carried *values* cannot yet be compared
-   with retail's.
+   and the prefix carries a 0x24-byte game-side block before the level name (see `formats.md`). The
+   engine's own bin table rides in the save as records of type 0x10 (`sithDSS_Inventory`), and the two
+   autosaves differ in exactly **five** bins — 71 6→8, 73 0→10.5, 75 0→20, 99 1000→2000, 102 0→1 — so
+   retail's level-1→2 inventory delta is measured and pinned by a test; 100 is `SITHBIN_GOAL00` and 60
+   is the shield charge, so 99/102 are goal/score shaped while 71/73/75 are unnamed. What is still
+   missing for the exit: neither the game-state record (type 0x1F) nor the player's thing payload
+   exposes **health or shields** in a decoded position, so those carried *values* cannot yet be compared
+   with retail's, and the port side of the five-bin comparison is not written.
 
 ### Phase 2 — Generalise
 

@@ -80,6 +80,53 @@ impl Section {
     }
 }
 
+/// The engine's own bin records: `sithDSS_Inventory` @ `0x4f9900` sends one per inventory bin the
+/// player's table knows, with a **fixed 28-byte payload**:
+///
+/// ```text
+/// +0x00  u16  thing + 0x04      template index (the player's)
+/// +0x02  u16  the bin index
+/// +0x04  u32  bin record +0x00  the bin's value
+/// +0x08  u32  bin record +0x08
+/// +0x0C  u32  bin record +0x04
+/// +0x10  u32  bin record +0x0C
+/// +0x14  u32  bin record +0x10
+/// +0x18  u32  bin record +0x14
+/// ```
+///
+/// The six words are kept in the order the writer sends them, so two saves can be compared word
+/// by word; `value` is the first of them, which is where the engine keeps the bin's amount.
+pub const INVENTORY_RECORD: u32 = 0x10;
+pub const INVENTORY_PAYLOAD: usize = 0x1C;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InventoryBin {
+    pub template: u16,
+    pub bin: u16,
+    /// The bin record's six words, in the order the writer sends them (`+0x00` first).
+    pub words: [u32; 6],
+}
+
+impl InventoryBin {
+    pub fn parse(data: &[u8]) -> Option<InventoryBin> {
+        if data.len() != INVENTORY_PAYLOAD {
+            return None;
+        }
+        let word16 = |at: usize| u16::from_le_bytes([data[at], data[at + 1]]);
+        let mut words = [0u32; 6];
+        for (i, word) in words.iter_mut().enumerate() {
+            let at = 4 + i * 4;
+            *word = u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
+        }
+        Some(InventoryBin { template: word16(0), bin: word16(2), words })
+    }
+
+    /// The bin's amount, the way the engine keeps it: a float in the first word it sends.
+    pub fn value(&self) -> f32 {
+        f32::from_bits(self.words[0])
+    }
+}
+
 /// A savegame: the recovered prefix plus typed records.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Save {
@@ -125,6 +172,15 @@ impl Save {
         String::from_utf8_lossy(&self.episode[0..EPISODE_LEN.min(0x20)])
             .trim_end_matches('\0')
             .to_string()
+    }
+
+    /// The engine's own bin records, in file order (one per bin the player's table knows).
+    pub fn bins(&self) -> Vec<InventoryBin> {
+        self.sections
+            .iter()
+            .filter(|s| s.kind == INVENTORY_RECORD)
+            .filter_map(|s| InventoryBin::parse(&s.data))
+            .collect()
     }
 
     /// Serialise: prefix, then every record as its type, length and payload.
@@ -409,5 +465,47 @@ mod tests {
             assert_eq!(again.sections.len(), save.sections.len(), "{name}: rewrite lost records");
             assert_eq!(again.sections[0], save.sections[0], "{name}: rewrite changed record 0");
         }
+    }
+
+    /// What the engine carries from level 1 to level 2, measured on its own two autosaves. The
+    /// inventory records are the engine's whole bin table (82 bins, one fixed-size record each);
+    /// exactly five of them differ between the two saves, so those five are the level change's
+    /// measurable inventory delta. Bins 71, 73, 75, 99 and 102 are engine bins, not `items.dat`
+    /// entries (that table has 1-10, 20-34, 40-51, 60, 83-84), so naming them is still open.
+    #[test]
+    fn a_real_autosave_carries_five_inventory_bins_between_levels() {
+        let (Some(first), Some(second)) = (
+            fixture("jkauto-01narshadda.jks"),
+            fixture("jkauto-02narshadda.jks"),
+        ) else {
+            return;
+        };
+        let first = Save::read(&first).expect("level 1's autosave").bins();
+        let second = Save::read(&second).expect("level 2's autosave").bins();
+        assert_eq!(first.len(), 82, "the bin table is not the engine's 82 entries");
+        assert_eq!(second.len(), 82, "the bin table is not the engine's 82 entries");
+        // The engine's own bin table, in the order it sends: the contiguous ranges are its class
+        // ranges (weapons, force powers, items, shields, goals, ...) rather than 0..81.
+        let mut table: Vec<u16> = Vec::new();
+        for range in [0..=18u16, 20..=34, 40..=51, 60..=66, 70..=75, 80..=84, 99..=115] {
+            table.extend(range);
+        }
+        table.push(150);
+        assert_eq!(
+            first.iter().map(|b| b.bin).collect::<Vec<_>>(),
+            table,
+            "the records are not the engine's bin table in order"
+        );
+        let changed: Vec<(u16, f32, f32)> = first
+            .iter()
+            .zip(second.iter())
+            .filter(|(a, b)| a.words != b.words)
+            .map(|(a, b)| (a.bin, a.value(), b.value()))
+            .collect();
+        assert_eq!(
+            changed,
+            vec![(71, 6.0, 8.0), (73, 0.0, 10.5), (75, 0.0, 20.0), (99, 1000.0, 2000.0), (102, 0.0, 1.0)],
+            "the level 1 -> level 2 inventory delta moved"
+        );
     }
 }

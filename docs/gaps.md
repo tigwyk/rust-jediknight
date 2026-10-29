@@ -2540,3 +2540,24 @@ itself is **still broken and still reachable** — loading a save made on anothe
 it was already reachable before this round (a level-2 quicksave loaded in level 1 has always had a
 different name). Reproduction: write a save on level 1 (`F5`), start the port on level 2, press `F9`;
 the level reload begins and a system parameter validation fails before `restore_pending` runs.
+
+**Retail's level-1 -> level-2 carried inventory, measured (round 101).** `sithDSS_Inventory` (0x4f9900)
+is record **type 0x10**, one fixed 28-byte payload per bin the player's table knows, and the payload's
+first word is the bin's amount. Both engine autosaves carry the same 82-bin table in the same order
+(bins 0-18, 20-34, 40-51, 60-66, 70-75, 80-84, 99-115, 150), and `--save <autosave>` now prints the
+non-zero ones:
+
+```text
+level 1: 1=1, 2=1, 11=50, 13=100, 42=1, 60=100, 63=1, 71=6, 99=1000, 100=1
+level 2: 1=1, 2=1, 11=50, 13=100, 42=1, 60=100, 63=1, 71=8, 73=10.5, 75=20, 99=2000, 100=1, 102=1
+```
+
+so the engine's own **level-change inventory delta is exactly five bins**: 71 6 -> 8, 73 0 -> 10.5,
+75 0 -> 20, 99 1000 -> 2000, 102 0 -> 1, and every other bin is identical. `items.dat` names the
+item bins (1 fists, 2 bryar_pistol, 42 fieldlight, 60 shields = 100 of its 200 max), so the five that
+moved are engine bins: 100 is `SITHBIN_GOAL00` (the port's own `GOAL_BIN`), which makes 99/102
+score-and-goal shaped, while 71/73/75 are unnamed. `jks::tests::a_real_autosave_carries_five_inventory_bins_between_levels`
+pins the table, the order and the five-value delta on the committed fixtures, so a re-read cannot
+silently drift. This is the retail side of Phase 1 step 6 ("level 2 starts in retail's state") for
+**bins**; health and shields are still not located in a save (bin 60 is the shield *charge*, not the
+player's current shields).

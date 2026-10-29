@@ -3268,6 +3268,22 @@ fn main() {
                             first.template, first.kind, first.pos, first.angles[1]
                         );
                     }
+                    // The engine's bin table rides in one fixed-size record per bin; printing the
+                    // non-zero ones is how a real save's carried inventory is read.
+                    let bins = save.bins();
+                    if !bins.is_empty() {
+                        let held: Vec<String> = bins
+                            .iter()
+                            .filter(|b| b.value() != 0.0)
+                            .map(|b| format!("{}={}", b.bin, b.value()))
+                            .collect();
+                        println!(
+                            "  inventory: {} bin record(s), {} with a value: {}",
+                            bins.len(),
+                            held.len(),
+                            held.join(", ")
+                        );
+                    }
                     println!("--- save check passed ---");
                 }
                 Err(error) => {
