@@ -2238,3 +2238,16 @@ level 2 in retail, which is the one remaining way past the closed console and co
 The next step is to click Load, photograph the save list, and then drive the list from the harness.
 The click helper's existing New Game coordinate (304,115) sits inside the New Game item, so the
 menu geometry is consistent with the layout here.
+
+**Retail can boot level 2 from a patched savegame (round 82).** The Load Game screen (saved as
+`tools/parity/retail-load-game.png`) shows **Level: 1 - Double Cross on Nar Shaddaa** for
+`save0000.jks`; the save's header carries the level name **twice** (offsets 132 and 1616,
+`01narshadda.jkl`) and a **level number int32 at offset 1612** (`1`). Patching the name to
+`02narshadda.jkl` and the number to `2`, then clicking **Load (534,103) -> Ok (547,443)**, makes the
+engine load **level 2**: the captured loading screen reads **"2 - The Lost Disk"** and the console
+prints the new level's parse sections (`tools/parity/retail-level2-loading.png`). The harness has a
+`-LoadSave` mode that drives the two clicks and waits for the parse line; a crafted save is committed
+as `tools/parity/save-level2-craft.jks`. This is the unblock Phase 2 needed: retail can now be put on
+level 2 for spawn captures and the retail side of steps 2/5/6. What remains is to give the load enough
+time (the screenshot caught the loading screen), then read `coords`/`cogstatus` on level 2, and to
+move the save patching into the staging step so every run boots level 2 the same way.

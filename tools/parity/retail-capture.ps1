@@ -28,7 +28,13 @@ param(
   [string[]]$Keys = @(),
   # Stop on the Single Player submenu and save a screenshot, so Load Game's coordinates can be read
   # off it (the harness otherwise clicks New Game and never shows the submenu).
-  [switch]$StopAtMenu
+  [switch]$StopAtMenu,
+  # Click Load on the submenu and photograph the save list (retail's only remaining route to a
+  # level other than the campaign's first, which Phase 2''s spawn audits need).
+  [switch]$LoadShot,
+  # Load the first savegame instead of starting a new game. With the save's recorded level
+  # patched this is how retail boots a level other than the campaign's first (Phase 2).
+  [switch]$LoadSave
 )
 
 $ErrorActionPreference = 'Stop'
@@ -570,6 +576,23 @@ function Get-JkEdgeYavg {
   return $null
 }
 
+
+# Menus do not answer F12 (that binding is in-game), so a menu screenshot grabs the window itself
+# with CopyFromScreen over the window rect.
+function Save-JkWindowPng {
+  param([Parameter(Mandatory)][int]$ProcessId, [Parameter(Mandatory)][string]$Path)
+  Add-Type -AssemblyName System.Drawing
+  $rect = [JkRetail]::WindowRectText((Get-JkWindow -ProcessId $ProcessId))
+  if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
+    $w = [int]$Matches[3] - [int]$Matches[1]; $h = [int]$Matches[4] - [int]$Matches[2]
+    $bmp = New-Object System.Drawing.Bitmap($w, $h)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen([int]$Matches[1], [int]$Matches[2], 0, 0, (New-Object System.Drawing.Size($w, $h)))
+    $bmp.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    $g.Dispose(); $bmp.Dispose()
+  }
+}
+
 function Invoke-JkCaptureRow {
   param([Parameter(Mandatory)]$Row)
 
@@ -640,6 +663,28 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     Send-JkClick -X 320 -Y 195
     Start-Sleep -Milliseconds 1500
     Log 'clicked Single Player (320,195)'
+    if ($LoadShot) {
+      Send-JkClick -X 534 -Y 103
+      Start-Sleep -Milliseconds 1800
+      $loadPng = Join-Path $Out 'load-menu.png'
+      Save-JkWindowPng -ProcessId $process.Id -Path $loadPng
+      Log "clicked Load (534,103); wrote $loadPng"
+      return
+    }
+    if ($LoadSave) {
+      Send-JkClick -X 534 -Y 103
+      Start-Sleep -Milliseconds 1800
+      Send-JkClick -X 547 -Y 443
+      Start-Sleep -Milliseconds 6000
+      $null = Wait-JkConsoleLine -ProcessId $process.Id -Pattern 'parse section things' -TimeoutSec $LevelTimeoutSec
+      foreach ($command in @($ConsoleCommands | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })) {
+        foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command $command)) { Log "console| $line" }
+      }
+      $png = Join-Path $Out 'loaded-level.png'
+      Save-JkWindowPng -ProcessId $process.Id -Path $png
+      Log "loaded the savegame; wrote $png"
+      return
+    }
     if ($StopAtMenu) {
       $menuPng = Join-Path $Out 'single-player-menu.png'
       # Menus do not answer F12 (that binding is in-game), so grab the window itself.
