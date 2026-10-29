@@ -2403,3 +2403,24 @@ from the placed start (sector 405). Six of eight levels are exact matches and th
 explained, so Phase 2's spawn evidence holds for the campaign: the port places the player on the
 level's own start thing in every case. `tools/parity/spawn-levels.tsv` now records both poses plus the
 verdict and note, and `spawn-levels.tsv` is the fixture to extend past level 9.
+
+**The level list scrolls with the arrow keys, so levels past nine boot too (round 93).** `-StartLevel n`
+now clicks the list's first row and presses **DOWN (n-1)** times before Ok, which scrolls and selects
+past the visible nine: level **12** booted and its retail `coords` reads
+**Pos (-0.67, -8.15, -4.08) sector 420**, matching the port's `--sim --start 12escape` walkplayer
+start `[-0.668488, -8.14832, -4.0403857] sector 420` exactly. The campaign order in the list is the
+episode's own level order (1-21: 01narshadda ... 21ajerec), so the sweep can now cover all 21 levels;
+a background batch is walking 10, 11, 13-21 with each retail run closing itself and any stale JK
+process killed between runs.
+
+**Campaign-wide spawn parity: 16 of 21 single-player levels match retail exactly (round 93).** The
+retail level list scrolls with **DOWN** (click the first row, press DOWN n-1 times, Ok), so all 21
+single-player levels were booted through the devMode selector and their `coords` compared with the
+port's walkplayer start: **16 match within 0.15 units and in sector** (mean delta ~0.01), including
+level 1 (0.006), 2 (0.003), 10 (0.012), 12 (0.003), 20 and 21 (0.000). The **5 that differ** are levels
+whose opening moves the body before `coords` is readable - 3 (`03katarn`, scripted opening), 9 (fuel
+station launch), 17 `18Ascend`, 18 `19A`, 19 `19B` (the tower lift levels: the port's placed start is
+up to 2.9 units below where retail's lift has already carried the body). Every one is a "settling/opening
+motion" row in `tools/parity/spawn-levels.tsv`, with both poses recorded. That table is Phase 2's
+campaign-wide spawn evidence; the port places the player on the level's own start thing in all 21
+levels, and the retail body agrees wherever nothing moves at load.

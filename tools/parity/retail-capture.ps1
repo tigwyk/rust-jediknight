@@ -704,7 +704,15 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       Start-Sleep -Milliseconds 800
       Send-JkClick -X 505 -Y 443
       Start-Sleep -Milliseconds 1500
-      $lvlY = 238 + 15 * ([int]$StartLevel - 1)
+      # Click the list's first row to select it, then walk down with the arrow key: this scrolls the
+      # list for levels past the visible nine, which a y-coordinate click cannot reach.
+      Send-JkClick -X 330 -Y 238
+      Start-Sleep -Milliseconds 600
+      for ($k = 1; $k -lt [int]$StartLevel; $k++) {
+        Send-JkKey -Name 'DOWN'
+        Start-Sleep -Milliseconds 220
+      }
+      Start-Sleep -Milliseconds 400
       Send-JkClick -X 330 -Y $lvlY
       Start-Sleep -Milliseconds 800
       Send-JkClick -X 505 -Y 443
