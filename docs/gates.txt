@@ -533,3 +533,16 @@ passes. `--tour` checks the campaign by row on both arms (28 rows, 25 distinct f
 hops, 2 finale rows), and `--tour-live` finishes and swaps all 21 light-side levels in the
 running app.--carry-check --start 01narshadda                        0   level 2 adopts bins[14]=Some(37.0) weapon="saber" cur_bin=5
                                                              shields=120 health=42 flags=0x2000 from level 1
+
+## Latest sweep — round 102
+
+- `--gates`: **62 gates, 0 failed, 0 skipped** (the set grew by `--pickup` since the 61-gate sweep
+  above).
+- `cargo test --release`: **146 passed, 0 failed**.
+- `--save-live` now also asserts level 1's start inventory against the engine-written autosave:
+  `save-live: start inventory matches retail's autosave (10 bin(s))`.
+- Parity gate re-run on refreshed port frames: **6/6** — spawn 0.6246, spawn_pose 0.6130,
+  spawn_yaw30 0.6206, route_cantina 0.7279, route_lower 0.7081, route_street 0.7236.
+- Movement trace gate: **4/4** — `walk_street45` 100 %, `walk_street90` 83 %, `walk_cantina` 71 %,
+  `walk_door0` stop-pose xy 0.005, 0 sectors off.
+- Docs links: 132 relative links across 10 Markdown files resolve.
