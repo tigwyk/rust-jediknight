@@ -1995,11 +1995,19 @@ impl Runtime {
                 self.pending_messages.push((instance, "timer", [0.0; 2], None));
             }
         }
-        // Force mana regenerates. `force_heal.cog` spends `20 * rank` of bin 14 and the shipped
-        // scripts expect the pool to come back; the *rate* is calibrated (§16.5) because the engine's
-        // own tick lives in `jkPlayer.c`, which this source tree does not carry.
-        if let Some(mana) = self.inv.get_mut(&14) {
-            *mana = (*mana + self.mana_regen * dt).min(self.mana_max);
+        // Force mana regenerates — but only for a Jedi that has a pool. `kyle.cog`'s class script
+        // carries the rule (`Set Mana to full`: `SetInv(player, 14, GetInv(player, 20) * 50)`), so a
+        // rank-0 player has no mana to regenerate; retail's level-2 save carries no bin 14 for exactly
+        // that reason, while the port used to credit a pool out of nothing. A pool a script or a save
+        // already gave the player still regenerates whatever the rank.
+        let rank = self.inv.get(&crate::force::RANK).copied().unwrap_or(0.0);
+        let has_pool = self.inv.get(&14).copied().unwrap_or(0.0) > 0.0;
+        if rank > 0.0 || has_pool {
+            // `force_heal.cog` spends `20 * rank` of bin 14; the *rate* is calibrated (§16.5) because
+            // the engine's own tick lives in `jkPlayer.c`, which this source tree does not carry.
+            if let Some(mana) = self.inv.get_mut(&14) {
+                *mana = (*mana + self.mana_regen * dt).min(self.mana_max);
+            }
         }
         // `ApplyForce(thing, v)`: the impulse the force scripts apply. `force_pull.cog` gives a pulled
         // item `30` units/s toward the player with gravity cleared (`ClearPhysicsFlags(thing, 0x1)`);
@@ -4498,22 +4506,21 @@ impl Runtime {
         true
     }
 
-    /// End of level: raise the rank and credit the level's stars, in the order the engine does it.
+    /// End of level: `jkMain_EndLevel` lands the finished level's state before the tally draws it.
     ///
-    /// `jkMain_EndLevel` is where a finished level's state lands, before the tally draws it, so the
-    /// rank goes up and bin `0x10` — the "stars earned" the tally repeats — takes this level's award.
-    /// Returns `(rank, stars earned)`.
-    ///
-    /// ponytail: one rank and three stars per level is the port's stand-in. The dump reaches
-    /// `jkPlayer_SetRank`/`jkPlayer_FixStars` only from multiplayer's new-character screen and nothing
-    /// writes the point bins, so where retail credits them is unrecovered; three a rank matches
-    /// `FixStars`' budget (`rank * 3`) exactly, which is why the reconcile afterwards is a no-op.
+    /// **Nothing is granted here.** Retail's own saves prove it: the level-1 load-time autosave and the
+    /// level-2 save (written after level 1 was finished and its tally shown) carry **no rank bin** (20)
+    /// and **no star bins** (16/17) at all, and the decomp reaches `jkPlayer_SetRank`/`jkPlayer_FixStars`
+    /// only from multiplayer's new-character screen — nothing writes the point bins. Single-player force
+    /// powers come from the episode table instead (`grant_episode_powers`, e.g. level 3 grants force
+    /// speed), which is why the port's earlier one-rank-three-stars award per level was a stand-in and
+    /// not a rule. The tally still *reads* the rank and the stars earned (bin `0x10`); in a single-player
+    /// run they are zero unless a script writes them, exactly as retail shows.
     pub fn finish_level(&mut self) -> (f32, f32) {
-        let rank = (self.inv.get(&crate::force::RANK).copied().unwrap_or(0.0) + 1.0).min(13.0);
-        self.set_bin(crate::force::RANK, rank);
-        let earned = self.inv.get(&0x10).copied().unwrap_or(0.0) + 3.0;
-        self.set_bin(0x10, earned);
-        (rank, earned)
+        (
+            self.inv.get(&crate::force::RANK).copied().unwrap_or(0.0),
+            self.inv.get(&0x10).copied().unwrap_or(0.0),
+        )
     }
 
     /// `jkGuiForce_Show`'s opening move: fold the level's award (bin `0x10`) into the pool (`0x11`).

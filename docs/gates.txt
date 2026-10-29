@@ -586,3 +586,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   of at level load, so the ledger's thing-activation deviation is retired.
 - `cargo test --release`: **147 passed**; parity gate re-run **6/6** (the captures' rooms are unaffected);
   docs links 132/132.
+
+## Update — round 108
+
+- `--gates`: **64 gates, 0 failed, 0 skipped**. `jkMain_EndLevel` no longer invents a rank/star award
+  (retail's saves carry no `16`/`20`; the decomp only reaches `jkPlayer_SetRank`/`jkPlayer_FixStars`
+  from multiplayer's screen), and force mana (bin 14) only regenerates for a player that has a pool
+  (`kyle.cog`: `SetInv(player, 14, GetInv(player, 20) * 50)`), which removes the port's invented mana
+  bin from the carry. `--mana` now sets the rank it needs.
+- Measured with `--tour-live`: the level-2 carry is retail's `jkauto-02narshadda.jks` **bin for bin
+  except the route-dependent population bin 73** (`1, 2, 11, 13, 42, 60, 63, 71=8, 75=20, 99=2000,
+  100=1, 102=1`) — step 6's carry comparison is closed.
+- `cargo test --release`: **147 passed**; docs links 132/132.

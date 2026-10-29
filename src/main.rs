@@ -6179,6 +6179,9 @@ fn main() {
             .iter()
             .position(|t| t.eq_ignore_ascii_case("walkplayer"))
             .expect("a level has a walkplayer");
+        // The pool is the rank's: `kyle.cog`'s `Set Mana to full` is `SetInv(player, 14,
+        // GetInv(player, 20) * 50)`, so a Jedi needs a rank before there is anything to regenerate.
+        rt.inv.insert(force::RANK, 4.0);
         rt.inv.insert(14, 0.0);
         let empty = rt.inv.get(&14).copied().unwrap_or(0.0) as f64;
         for _ in 0..60 {

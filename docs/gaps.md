@@ -2883,3 +2883,34 @@ activation: load is dormant (bin 73 = 0, retail's level-1 autosave); thing 29 (`
 
 The port now matches retail's load-time fixture exactly where it used to be wrong by 12.5, and the
 after-play number becomes a function of the route (as it is in retail) rather than a constant.
+
+**The level-end rank/star grant was a stand-in, and retail's saves say so (round 108).** Round 104 put the
+remaining step-6 deviation on the ledger as `16=3, 20=1` in the port's level-2 carry against retail's
+`jkauto-02narshadda.jks`, which carries neither. The same evidence retires it: the port's per-level
+`+1` rank and `+3` stars is *not* what `jkMain_EndLevel` does. Retail's level-1 load-time autosave and its
+level-2 save — written after level 1 was finished and the tally drawn — carry no rank bin (20) and no
+star bins (16/17) at all, and the decomp reaches `jkPlayer_SetRank`/`jkPlayer_FixStars` only from
+multiplayer's new-character screen; nothing recovered writes the point bins. Single-player force powers
+come from the **episode table** instead (`grant_episode_powers`, e.g. level 3 grants force speed), which
+is why the stand-in was a guess and not a rule. `Runtime::finish_level` now grants nothing and just lands
+the end-of-level state the tally reads; the tally's rank row shows 0 in a single-player run, as retail's
+does, and `--tally`/`--force-economy` set the bins they exercise themselves.
+
+That exposed one more invented bin in the carry: **force mana (14)**. `kyle.cog`'s class script carries
+the rule — `Set Mana to full: SetInv(player, 14, GetInv(player, 20) * 50)` — so a rank-0 Jedi has no
+pool, and retail's level-2 save indeed carries no bin 14. The port created `14 = 0` (the class script
+sets it unconditionally) and then regenerated it at 20/s, so the carry grew a mana pool out of nothing.
+Regeneration is now gated on having a pool (`rank > 0` or bin 14 already positive); `--mana` sets a rank
+first, with a comment saying why.
+
+Measured with `--tour-live`, the level-2 state as carried into level 3 is now **exactly retail's
+`jkauto-02narshadda.jks` bin for bin except the route-dependent population bin 73**:
+
+```text
+port (level 3 start): 1=1, 2=1, 11=50, 13=100, 42=1, 60=100, 63=1, 71=8, 75=20, 99=2000, 100=1, 102=1
+retail jkauto-02     : 1,   2,   11,   13,    42,   60,    63,   71=8, 75=20, 99=2000, 100=1, 102=1, 73=10.5
+```
+
+Step 6's carry comparison is closed: the only remaining difference is the population bin, whose value
+is route-dependent on both sides now that dormancy is real (round 107). The ledger's rank/force-point
+row is retired.
