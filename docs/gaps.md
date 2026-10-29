@@ -2447,3 +2447,17 @@ the two sides are not at the same point in it, so the frames are not comparable 
 as a deviation: non-level-1 spawn *draw* pairs are only gradeable once both sides can be captured after
 a common "player has control" event; the level-2 pair stays ungraded in the parity set meanwhile
 (level-1's six thresholds still pass 6/6).
+
+**The first non-level-1 draw pair works at the pipeline level and exposes a water-spawn difference
+(round 96).** Level 5 (`06abarons`, Barons Hed) was captured through the level-select pipeline with
+`-PreShotMs 6000 -Keys 'SPACE,ENTER,SPACE'`: the reference is a **player-camera frame** (weapon at
+the bottom of frame shows it) at the exact retail pose `10.58,14.91,0.22 sector 35`. Note the
+`first_frame_is_player_camera` sidecar flag reads false - the crop detector fails on this sky/water
+frame - but the image itself is the player view. The port renders the **same courtyard at the same
+pose**: same curved wall, same glyph plaque, same water. The pair still scores **SSIM 0.31** because
+the two views differ in *camera height and pitch*: retail's horizon sits high (water fills the lower
+60 %, the body standing), the port's horizon sits near mid-frame (camera lower, as if the body has
+sunk toward the water). The spawn is on a water sector, so the remaining difference is the port's
+water/float handling moving the body down, not a renderer gap. That is recorded as a deviation to
+retire when the port's water behaviour keeps the camera where retail's does; the pair stays
+ungraded (level-1's six thresholds still pass 6/6).
