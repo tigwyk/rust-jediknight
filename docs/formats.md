@@ -3908,8 +3908,9 @@ Names and messages, all observed strings: `save%04d.jks` (0x53C010, 0x53C020), `
 
 Still unknown: the **internal field layout of the 1580-byte header** (only its size, the version
 word and the level name are pinned), the meaning of the `u32` inside the episode block, the 24-byte
-player block's fields (the save writes `{1, 0, 0, 0, 1, 0}` at level 2's start), and 63 of the 65
-section types.
+player block's fields (it is six u32s — `{1, 0, 0, 0, 1, 0}` in every shipped save — so it is flags,
+not the health and shield values: those live in the player's thing record below and in inventory
+bin 60), and 63 of the 65 section types.
 
 **The record framing is now known.** `FUN_004f4210` @ `0x4f4210` is the thing serializer, and its
 tail stages the in-memory message header exactly:
@@ -3965,6 +3966,27 @@ _DAT_00847da0 = &LAB_004f9050;   // 0x0E
 | `+0x26` | f32 ×3 | `+0x94` | |
 | `+0x32` | f32 ×3 | `+0xA0` | |
 | `+0x3E` | u16 | `*(thing+0x5C)` | |
+
+**The type-specific tail, and the player's health.** After that common block the same function
+switches on the thing *type* (`+0x02` / `thing+0x0C`) and appends the type's own fields. For types
+**2, 9 and 10** it writes, from `puVar3 = &DAT_008b4c8f` (payload `0x67`, plus four bytes when
+`*(thing+0x2A8) & 0x400` is set — the shipped player sets it):
+
+```text
+puVar3[0] = thing + 0x130      puVar3[1] = thing + 0x134      puVar3[2] = thing + 0x144
+puVar3[3] = thing + 0x15C      puVar3[4] = thing + 0x160      puVar3[5] = thing + 0x164
+puVar3[6] = thing + 0x1A4      puVar3[7] = thing + 0x194      puVar3[8] = thing + 0x1BC
+```
+
+`thing + 0x134` is the **health**: `0x5014e0` registers `GetThingHealth`/`GetHealth` on
+`0x502570`, and that handler answers `*(f32 *)(thing + 0x134)` for exactly those two types, while
+`SetThingHealth`/`SetHealth` (`0x5025c0`) writes it. So the player's health is the f32 at
+**payload `0x6F`**, and the record's 183-byte payload confirms the shifted block: the common block
+ends at `0x67`, the four-byte shift puts the type block at `0x6B`..`0x96`, the AI tail follows to
+`0x9B`, and the physics tail (`thing+0x1D0 …`, `+0x9B`..`+0xB7`, 28 bytes) lands exactly on `183`.
+Both engine-written autosaves in `tools/parity/` hold `100.0` there — a full bar at spawn — and
+`--save` prints it (`player: 100 health`). Shields need no tail field: they are inventory bin 60,
+which the `0x10` bin records already carry.
 
 ### The campaign is a graph, and it branches
 

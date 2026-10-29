@@ -2726,3 +2726,30 @@ re-captured at the sidecar's size, level 2's pair reads **0.3359 full-frame / 0.
 coherent (masked above full) and in the same band as level 5 (0.2982/0.3648), which is where a dark
 outdoor vista belongs. Both stay ungraded: the remaining gap is renderer/content, so the ledger's
 retire condition is unchanged.
+
+**The player's carried health is decoded, and level 1's start state is now retail-asserted on both
+halves (round 104).** Step 6's remaining "neither the game-state record nor the player's thing payload
+exposes health or shields" is closed for health, from the decomp rather than from guessing:
+
+- `0x5014e0` registers `GetThingHealth`/`GetHealth` on `0x502570`, which pushes
+  `*(f32 *)(thing + 0x134)` for types 2 and 10; `SetThingHealth`/`SetHealth` (`0x5025c0`) writes
+  the same word.
+- `sithDSSThing_FullDescription` (`0x4f4210`) writes that word into the thing record's
+  **type-specific tail**: for types 2/9/10 the block starts at payload `0x67`, plus four bytes when
+  `*(thing+0x2A8) & 0x400` is set (the shipped player sets it), and its second entry is
+  `thing + 0x134`. The player record's 183-byte payload confirms the shifted variant to the byte:
+  common block to `0x67`, +4 shift, 9-word type block to `0x96`, 12-byte AI tail to `0x9B`, then
+  the 28-byte physics tail to `0xB7` (183).
+- Both engine-written autosaves hold `100.0` at payload **`0x6F`**, and nothing else in the record
+  is a health-shaped float. `--save` now prints it (`player: 100 health`), and the
+  `--save-live` gate asserts the port's snapshot restores the same 100 after its F9 round trip —
+  `save-live: player health 100.0 (retail's autosaves hold 100)`.
+- Shields needed no new field: they are inventory bin 60, which the `0x10` bin records already
+  carry (retail 100 at both level starts, port 100).
+- The 24-byte block in the prefix that round 101 hoped would hold vitals is six u32s
+  (`{1, 0, 0, 0, 1, 0}` in every shipped save) — flags, not values. That is recorded in
+  `formats.md` next to the health field map.
+
+What is left in step 6 is the campaign side, not the save format: the port pre-grants the episode
+rank/force bins (`16`, `20`) that retail's autosaves do not carry, and the alignment bins
+(`72/73/75`) need a fight before they are written at all.

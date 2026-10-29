@@ -3273,6 +3273,12 @@ fn main() {
                             "  first thing: template {}, type {}, at {:?} facing {:.1} deg",
                             first.template, first.kind, first.pos, first.angles[1]
                         );
+                        // The player's carried health — `thing + 0x134` inside the thing record's
+                        // type-specific tail (see `jks::ThingRecord`). Retail's two autosaves both
+                        // hold a full bar at spawn; this is the value the exit comparison needs.
+                        if let Some(health) = first.health {
+                            println!("  player: {health} health");
+                        }
                     }
                     // The engine's bin table rides in one fixed-size record per bin; printing the
                     // non-zero ones is how a real save's carried inventory is read.
@@ -3352,6 +3358,9 @@ fn main() {
                 kind,
                 pos: thing.pos,
                 angles: [0.0, thing.yaw, 0.0],
+                // The type-specific tail is decoded, not written: this build's own player state
+                // rides in its `SAVE_SECTION`, and a made-up tail would not be the engine's.
+                health: None,
             };
             save.sections.push(jks::Section::new(0x0C, record.to_payload()));
             expected.push(record);
@@ -17346,7 +17355,21 @@ fn save_probe(
             } else {
                 println!("save-live: FAIL start inventory differs: {}", wrong.join(", "));
             }
-            if restored && bin < 99.0 && wrong.is_empty() {
+            // The other half of the level's start state: the player's health. The engine writes it
+            // in the player thing record's type-specific tail (`thing + 0x134`, payload 0x6F; see
+            // `jks::ThingRecord`), and both of its own autosaves hold `100` there — so this is the
+            // retail value the snapshot has to restore, not a number this build chose.
+            let health = {
+                let rt = sim.world.borrow();
+                let player = rt.player_thing();
+                rt.things.get(player).map(|thing| thing.health).unwrap_or(0.0)
+            };
+            let health_ok = (health - 100.0).abs() < 1e-3;
+            println!(
+                "save-live: player health {health:.1} (retail's autosaves hold 100){}",
+                if health_ok { "" } else { " FAIL" }
+            );
+            if restored && bin < 99.0 && wrong.is_empty() && health_ok {
                 println!("--- save-live check passed ---");
             } else {
                 println!("save-live: FAIL the load did not restore the snapshot");

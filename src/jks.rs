@@ -282,8 +282,20 @@ impl Save {
 /// Checked against a real save: level 2's autosave opens with a type-0x0C record whose type
 /// word is 10 (a player) at (10.78, -11.98, 3.02) — that level's spawn pose. The record's own
 /// variable-length tail (the type-specific fields the switch in `0x4f4210` packs after the
-/// common block) is not modelled, so a payload longer than this struct keeps its extra bytes.
+/// common block) is decoded for the one field the exit comparison needs: the player's health.
+/// `0x5014e0` registers `GetThingHealth`/`GetHealth` on `0x502570`, and that handler pushes
+/// `*(f32 *)(thing + 0x134)` for types 2 and 10 — the very word the type-specific block writes as
+/// `puVar3[1]` (its first word is `thing + 0x130`, the second `thing + 0x134`). The block starts at
+/// payload 0x67, plus four bytes when `*(thing + 0x2A8) & 0x400` is set (the shipped player sets it),
+/// so the player's health is the f32 at **payload 0x6F**, which is where every shipped save holds
+/// `100.0`. The unpadded block plus its AI tail plus the physics tail adds up to the 183-byte
+/// payload the player's record carries, which is what confirms the shifted variant.
 pub const THING_PAYLOAD: usize = 0x50;
+
+/// The thing type that means "player" (`GetThingHealth` accepts 2 and 10; the player is 10).
+pub const PLAYER_KIND: u16 = 10;
+/// Where the player record's health word is (`thing + 0x134`).
+pub const PLAYER_HEALTH_OFFSET: usize = 0x6F;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThingRecord {
@@ -291,12 +303,17 @@ pub struct ThingRecord {
     pub kind: u16,
     pub pos: [f32; 3],
     pub angles: [f32; 3],
+    /// The player's health, from the type-specific tail. `None` for anything but a player record
+    /// (or for a payload too short to hold it) — the tail is only modelled this far.
+    pub health: Option<f32>,
 }
 
 impl ThingRecord {
-    /// The payload bytes, with the writer's field offsets.
+    /// The payload bytes, with the writer's field offsets. The common block is `THING_PAYLOAD`
+    /// long; a record that carries a health word is extended to reach it.
     pub fn to_payload(&self) -> Vec<u8> {
-        let mut out = vec![0u8; THING_PAYLOAD];
+        let len = if self.health.is_some() { PLAYER_HEALTH_OFFSET + 4 } else { THING_PAYLOAD };
+        let mut out = vec![0u8; len];
         out[0x00..0x02].copy_from_slice(&self.template.to_le_bytes());
         out[0x02..0x04].copy_from_slice(&self.kind.to_le_bytes());
         for (i, value) in self.pos.iter().enumerate() {
@@ -306,6 +323,10 @@ impl ThingRecord {
         for (i, value) in self.angles.iter().enumerate() {
             let at = 0x1A + i * 4;
             out[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        if let Some(health) = self.health {
+            out[PLAYER_HEALTH_OFFSET..PLAYER_HEALTH_OFFSET + 4]
+                .copy_from_slice(&health.to_le_bytes());
         }
         out
     }
@@ -325,7 +346,15 @@ impl ThingRecord {
             pos[i] = float(0x0E + i * 4);
             angles[i] = float(0x1A + i * 4);
         }
-        Some(ThingRecord { template: word(0), kind: word(2), pos, angles })
+        let kind = word(2);
+        // The player's health word is only read where the writer puts it for a shipped player
+        // record, and only when it is a plausible health: a payload that stops short of the
+        // type-specific tail, or a value outside the engine's own 0..1000 band, stays unknown
+        // rather than reporting a coincidence of the common block.
+        let health = (kind == PLAYER_KIND && data.len() >= PLAYER_HEALTH_OFFSET + 4)
+            .then(|| float(PLAYER_HEALTH_OFFSET))
+            .filter(|health| health.is_finite() && (0.0..=1000.0).contains(health));
+        Some(ThingRecord { template: word(0), kind, pos, angles, health })
     }
 }
 
@@ -395,6 +424,7 @@ mod tests {
             kind: 2,
             pos: [1.5, -2.25, 0.75],
             angles: [10.0, 20.0, 30.0],
+            health: None,
         };
         let payload = thing.to_payload();
         assert_eq!(payload.len(), THING_PAYLOAD);
@@ -411,6 +441,42 @@ mod tests {
         );
         let back = ThingRecord::from_payload(&payload).expect("payload");
         assert_eq!(back, thing);
+    }
+
+    /// A player record carries its health in the type-specific tail: `0x5014e0` registers
+    /// `GetThingHealth` on `0x502570`, which pushes `*(f32 *)(thing + 0x134)`, and
+    /// `sithDSSThing_FullDescription` writes that word as the type-specific block's second
+    /// entry — payload 0x6F for the shipped player (the block starts at 0x67; a flag bit
+    /// shifts it by four). Every shipped save holds 100.0 there, and nothing else in the record
+    /// is a health-shaped value, so this pins both the offset and the plausibility guard.
+    #[test]
+    fn a_player_payload_carries_its_health() {
+        let player = ThingRecord {
+            template: 0,
+            kind: PLAYER_KIND,
+            pos: [1.0, 2.0, 3.0],
+            angles: [0.0; 3],
+            health: Some(80.0),
+        };
+        let payload = player.to_payload();
+        assert_eq!(payload.len(), PLAYER_HEALTH_OFFSET + 4);
+        assert_eq!(
+            f32::from_le_bytes([
+                payload[PLAYER_HEALTH_OFFSET],
+                payload[PLAYER_HEALTH_OFFSET + 1],
+                payload[PLAYER_HEALTH_OFFSET + 2],
+                payload[PLAYER_HEALTH_OFFSET + 3],
+            ]),
+            80.0
+        );
+        assert_eq!(ThingRecord::from_payload(&payload).expect("payload"), player);
+        // A non-player keeps `None` even when the bytes happen to look like a health, and a
+        // payload that stops before the tail keeps it unknown too.
+        let mut other = player.clone();
+        other.kind = 2;
+        assert_eq!(ThingRecord::from_payload(&other.to_payload()).expect("payload").health, None);
+        let short = ThingRecord::from_payload(&payload[..THING_PAYLOAD]).expect("common block");
+        assert_eq!(short.health, None);
     }
 
     #[test]
@@ -453,9 +519,12 @@ mod tests {
                 .filter_map(|s| ThingRecord::from_payload(&s.data))
                 .collect();
             assert!(things.len() > 100, "{name}: only {} thing records", things.len());
+            let player = things.first().expect("a first record");
+            assert_eq!(player.kind, 10, "{name}: the first record is not a player");
+            // The player's health, from the type-specific tail (`thing + 0x134`, what
+            // `GetThingHealth` reads): the engine's own saves both carry a full bar at spawn.
+            assert_eq!(player.health, Some(100.0), "{name}: the player's health");
             if let Some(want) = spawn {
-                let player = things.first().expect("a first record");
-                assert_eq!(player.kind, 10, "{name}: the first record is not a player");
                 for (got, want) in player.pos.iter().zip(want.iter()) {
                     assert!((got - want).abs() < 0.05, "{name}: player at {:?}, want {want}", player.pos);
                 }

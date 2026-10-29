@@ -546,3 +546,11 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Movement trace gate: **4/4** — `walk_street45` 100 %, `walk_street90` 83 %, `walk_cantina` 71 %,
   `walk_door0` stop-pose xy 0.005, 0 sectors off.
 - Docs links: 132 relative links across 10 Markdown files resolve.
+
+## Update — round 104
+
+- `--gates`: **62 gates, 0 failed, 0 skipped**; `cargo test --release`: **147 passed, 0 failed**.
+- `--save-live` asserts the other half of level 1's start state too, against the engine-written
+  autosave: `save-live: player health 100.0 (retail's autosaves hold 100)`.
+- `--save tools/parity/jkauto-01narshadda.jks` (and level 2's) prints `player: 100 health`, decoded
+  from the player thing record's type-specific tail (`thing + 0x134`, payload `0x6F`).
