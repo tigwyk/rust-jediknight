@@ -21696,7 +21696,17 @@ impl Rules {
     fn from_level(level: &jkl::Level) -> Rules {
         let name = "walkplayer";
         let thrust = level.template_f32(name, "maxthrust").unwrap_or(2.0);
-        let drag = level.template_f32(name, "surfdrag").filter(|d| *d > 0.0).unwrap_or(3.0);
+        // `sithPhysics_UpdatePlayerPhysics` (0x4f6860) damps the horizontal velocity with
+        // `ApplyDrag(vel, thing+0x20c - DAT_005231a4, 0, dt)`, and `DAT_005231a4` is **−0.2** in the
+        // retail image (read at VA 0x5231a4 of the staged JK.EXE), so the rate is `surfdrag + 0.2`,
+        // not `surfdrag`. The extra 0.2 is also what reconciles the port's earlier note: with drag 3.2
+        // the acceleration `speed * drag` is 3.84 u/s^2, matching the decompiled thrust of ~3.92,
+        // where drag 3.0 gave 3.6.
+        let drag = level
+            .template_f32(name, "surfdrag")
+            .filter(|d| *d > 0.0)
+            .unwrap_or(3.0)
+            + 0.2;
         let jump_speed = level.template_f32(name, "jumpspeed").unwrap_or(1.5);
         Rules {
             // Measured, not derived: the clean retail straight leg (`walk_street90`, yaw 90 at the

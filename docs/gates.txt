@@ -706,3 +706,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   the port's `target * surfdrag`; `sithControl_PlayerMovement` only yields the multiplier, so the physics
   update is the routine to read.
 - No physics change this round (diagnostics only): tests, gates, parity and the trace gate re-run below.
+
+## Update — round 117
+
+- Recovered the player's drag constant from the staged retail image: `sithPhysics_UpdatePlayerPhysics`
+  damps with `ApplyDrag(vel, thing+0x20c − DAT_005231a4, …)` and `DAT_005231a4` = **−0.2** (read at VA
+  0x5231a4), so the rate is `surfdrag + 0.2`. `Rules::drag` now does that (3.2 on these levels); the
+  acceleration then reads 3.84 u/s², matching the decompiled thrust of ~3.92. Neighbouring constants
+  recovered and written down: 0x523194 = 1.0 (drag clamp), 0x52319c = 1e-05 (deadzone), 0x522f18 = 2.0
+  (run), 0x522f1c = 0.5 (slow), 0x522f24 = 0.7 (strafe).
+- Verified: walk trace velocity 0.10 → 0.20 u/s over the first two frames (5.7 u/s²); trace gate **4/4**
+  with street45/street90 at **100 %**; gated draw parity unchanged (6/6); tests **147 passed**; full gate
+  sweep **0 of 64 failed**. Level 5's wedge is unaffected — it is the slab geometry, not the ramp.

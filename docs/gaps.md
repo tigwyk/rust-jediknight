@@ -3170,3 +3170,27 @@ port reaches ~1.5 u/s in the first 600 ms where retail's window implies ~1.0 uni
 `drag` ≈ 5 or a larger thrust than `target * surfdrag`. The engine's `sithControl_PlayerMovement`
 (`decomp/004d8a00`) only produces the speed *multiplier* (1 / 2 / 0.5); the thrust/drag live in the
 physics update, so that is the routine to read next.
+
+**The player's drag constant is recovered from the retail image: `surfdrag + 0.2` (round 117).** The
+port damped the player's horizontal velocity with the template's `surfdrag` (3.0) while the engine's
+`sithPhysics_UpdatePlayerPhysics` (`0x4f6860`) calls
+`ApplyDrag(vel, thing+0x20c − DAT_005231a4, 0, dt)`. Reading the staged `JK.EXE` (PE map: image base
+`0x400000`, sections `.text/.rdata/.data`…) gives that constant and its neighbours:
+
+```text
+0x5231a4 = -0.2      the drag offset  -> rate = surfdrag + 0.2
+0x523194 = 1.0       ApplyDrag's clamp on `dt * drag`
+0x52319c = 1e-05     the deadzone the port already uses
+0x523180 = 0.0       0x522f18 = 2.0 (run), 0x522f1c = 0.5 (slow), 0x522f24 = 0.7 (strafe)
+```
+
+Every horizontal drag site uses the same offset (`UpdateThingPhysics`, the player update, the underwater
+variant); only the *angular* drag is the plain `surfdrag`. So `Rules::drag` is now `surfdrag + 0.2`
+(3.2 on these levels), which is also what the port's own comment predicted from the other direction:
+"acceleration is ~1.2 * 3 = 3.6 u/s^2 against the decompiled thrust of ~3.92" — with 3.2 it is 3.84.
+
+Measured after the change: the walk trace's velocity ramp is 0.10 → 0.20 u/s on the first two frames
+(5.7 u/s^2, i.e. target x drag as the engine computes it), the trace gate stays **4/4** with street45 and
+street90 at **100 %** (travel 2.21 against retail's 2.20/2.21), and the gated draw pairs are unchanged
+(spawn 0.6602 … route_street 0.7327). Level 5's 1.41-unit wedge is unaffected, as expected: that leg is
+blocked on the slab geometry, not on the ramp.
