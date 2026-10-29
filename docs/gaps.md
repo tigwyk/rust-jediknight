@@ -2662,3 +2662,67 @@ Two step-6 gaps are now named and measured:
   and 75 = 20 after level 1, and those come from the `actor_*.cog` scripts' `ChangeInv(player, 72/73)`
   on kills plus `jkPlayer_CalcAlignment` writing 75. With no combat in the tour, the port carries
   neither; measuring the alignment path needs a scripted level-1 fight, not a walk.
+
+**A HUD-masked metric exists, and it says what the ledger claimed (round 103).** The roadmap's Phase 0
+"open" bullet asked for a HUD-free capture or a HUD-masked metric so a pair's score is not mostly the
+port's own HUD difference. `compare.ps1` now reports a **world-band SSIM** next to the full-frame
+number: the same SSIM over the world above the port's HUD band (bottom 22 % of the crop, `HudBandFraction`
+= 0.22), dropped from both sides because retail's weapon and HUD corners sit inside its raw frame too.
+Measured on the current captures:
+
+```text
+pair              full SSIM   world-band SSIM
+spawn              0.6246      0.7128
+spawn_pose         0.6130      0.6978
+spawn_yaw30        0.6206      0.6914
+route_cantina      0.7279      0.7877
+route_lower        0.7081      0.7456
+route_street       0.7236      0.7957
+route_catwalk      0.4510      0.4891
+route_door         0.4091      0.4524
+switch_cantina     0.1722      0.1979
+switch_cantina2    0.4267      0.4775
+level2_spawn       0.3041      0.2734
+level5_spawn       0.2982      0.3648
+```
+
+Three readings the ledger needed: the HUD term is **worth ~0.07-0.09** on the level-1 pairs (so the
+full-frame floor was measuring the renderer, not the HUD); `route_catwalk`/`route_door` barely move
+(+0.04) even though their bodies are lit red in retail's reference - their gap is **content** (damage
+tint state and AI engagement), not the HUD; and `level2_spawn` gets **worse** without the HUD band
+(0.3041 -> 0.2734), which rules the HUD out as its cause and points at the reference frame itself
+(level 2's reference was captured round the opening cutscene, not a player camera - the same trap level
+5 was in before its re-capture). `thresholds.tsv` gains an **optional fourth column** for a world-band
+floor, unused today: the six gated rows keep their full-frame floors (all still pass) and no ungated
+pair is rescued by the new number, so nothing was quietly re-graded.
+
+**Level 2's reference was a mis-cropped *player-camera* frame, not a cutscene (round 103).** Round
+101 recorded level 2's retail reference as "retail mid-cutscene (pad close-up)" on the strength of its
+0.31 score; the world-band metric then showed its masked score *below* its full-frame one, which no HUD
+difference can do. Re-capturing the pair past the opening with the level-5 recipe (`-StartLevel 2`,
+`-SeriesFrames 20 -PreShotMs 26000 -Keys 'SPACE,ENTER,SPACE'`) produced a confirmed player camera
+(`first_frame_is_player_camera: true`, static series, `coords` at the row's pose) — but the saved
+reference was **1094x355** out of a 1440x900 frame. The cause was the harness's world-box detector,
+not the capture: it counted rows/columns as "lit" when more than 50 % of their pixels exceeded 16 luma,
+and level 2's opening plaza is dark, so its world rows were scored as letterbox and the crop collapsed
+to a strip. The detector now counts **detail** — pixels differing from the frame's own corner value by
+at least 2 — and, because the engine centres the view, symmetrises each margin on the smaller of the
+pair (a detected margin can only come out too large). Probed against every retained raw frame:
+
+```text
+raw frame              box (new detector)     old saved crop
+spawn                 1170x731+135+84        1170x731+135+84  (unchanged)
+spawn_pose            1170x731+135+84        unchanged
+level5_spawn          1170x731+135+84        unchanged
+route_catwalk         1170x731+135+84        unchanged
+route_door            1170x731+135+84        unchanged
+switch_cantina        1170x731+135+84        unchanged
+level2_spawn          1170x730+135+85        was 1094x355+211+460
+```
+
+`retail-capture.ps1 -ProbeBox <raw.png>[;…]` runs the detector alone on retained raw frames, which is
+how those rows were checked without a retail run. With the reference re-cropped and the port frame
+re-captured at the sidecar's size, level 2's pair reads **0.3359 full-frame / 0.3489 world-band** —
+coherent (masked above full) and in the same band as level 5 (0.2982/0.3648), which is where a dark
+outdoor vista belongs. Both stay ungraded: the remaining gap is renderer/content, so the ledger's
+retire condition is unchanged.

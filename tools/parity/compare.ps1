@@ -53,6 +53,10 @@ $ContactWidth     = 960
 # The retail pal8 letterbox bars are ~16 luma; bbox treats <= this value as border.
 # (This is also ffmpeg cropdetect's default limit=24.)
 $BorderThreshold  = 24
+# How much of the world crop's height the port's HUD band covers, for `Measure-WorldSsim`: the
+# health and shield panels and the viewmodel sit in the bottom fifth of the port's frame, and the
+# retail crop drops them from the raw frame's letterbox corners. 0.22 of 731 px is 161 px.
+$HudBandFraction  = 0.22
 
 $Ffmpeg = $null
 
@@ -82,10 +86,19 @@ function Get-ThresholdRows {
         if ($line -match '^\s*(#|$)') { continue }
         $f = $line -split "`t"
         if ($f.Count -lt 3 -or $f[0].Trim() -eq 'name') { continue }
+        # The fourth column is optional: the world-band (HUD-masked) SSIM floor. Rows that carry it
+        # are parity-checked on that number and use the full-frame floor as a gross-breakage check;
+        # rows without it (the level-1 pairs, whose HUD difference is small against their content)
+        # gate on the full-frame number alone.
+        $world = $null
+        if ($f.Count -ge 4 -and $f[3].Trim() -ne '' -and $f[3].Trim() -ne '-') {
+            $world = [double]::Parse($f[3].Trim(), [System.Globalization.CultureInfo]::InvariantCulture)
+        }
         $rows += [pscustomobject]@{
-            Name    = $f[0].Trim()
-            MinSsim = [double]::Parse($f[1].Trim(), [System.Globalization.CultureInfo]::InvariantCulture)
-            MaxMad  = [double]::Parse($f[2].Trim(), [System.Globalization.CultureInfo]::InvariantCulture)
+            Name      = $f[0].Trim()
+            MinSsim   = [double]::Parse($f[1].Trim(), [System.Globalization.CultureInfo]::InvariantCulture)
+            MaxMad    = [double]::Parse($f[2].Trim(), [System.Globalization.CultureInfo]::InvariantCulture)
+            MinWorld  = $world
         }
     }
     return $rows
@@ -300,6 +313,35 @@ function Measure-Mad {
     return [double]$m.Groups[1].Value
 }
 
+# The port draws its HUD (health/shield panels, weapon) **inside** its frame, while the retail
+# reference is the world crop of a frame whose HUD sits out in the letterbox corners — so every pair
+# carries a fixed HUD term that has nothing to do with the drawing. The deviation ledger's retire
+# condition for that asymmetry is "HUD-free capture or a HUD-masked metric", and this is the metric:
+# the same SSIM over the **world band** above the HUD, dropping the bottom `HudBandPixels` from both
+# sides. Retail's own weapon (and its HUD corners) are inside the raw frame, so the band drops the
+# weapon from both sides; what is compared is the world. The gate's floors stay on the full-frame
+# numbers; rows that carry a world-band floor use this number as the parity check and the full-frame
+# floor as a gross-breakage check.
+function Measure-WorldSsim {
+    param([string]$Retail, $Crop, [string]$Port)
+    $band = [int][math]::Round($Crop.Height * $HudBandFraction)
+    $height = $Crop.Height - $band
+    if ($height -lt 32) {
+        throw "world band is ${height}px tall from a $($Crop.Height)px crop: the frame is too short for the HUD mask"
+    }
+    $scaled = [int][math]::Round($NormalizedWidth * $height / $Crop.Width)
+    $chain = "[0:v]crop=$($Crop.Width):${height}:$($Crop.X):$($Crop.Y)," +
+        "scale=${NormalizedWidth}:${scaled}:flags=bilinear,setsar=1,format=gray[a];" +
+        "[1:v]crop=iw:${height}:0:0," +
+        "scale=${NormalizedWidth}:${scaled}:flags=bilinear,setsar=1,format=gray[b];[a][b]ssim"
+    $res = Invoke-Ffmpeg @('-hide_banner', '-loglevel', 'info', '-i', $Retail, '-i', $Port,
+        '-filter_complex', $chain, '-f', 'null', '-')
+    if ($res.ExitCode -ne 0) { throw "ffmpeg world-band ssim failed: $($res.Stderr)" }
+    $m = [regex]::Match($res.Stderr, 'SSIM Y:([0-9.]+) \(([^)]+)\) All:([0-9.]+)')
+    if (-not $m.Success) { throw "ffmpeg reported no world-band SSIM line: $($res.Stderr)" }
+    return [double]$m.Groups[3].Value
+}
+
 function New-SideBySide {
     param([string]$Retail, $Crop, [string]$Port, [string]$Out)
     $chain = "[0:v]crop=$($Crop.Width):$($Crop.Height):$($Crop.X):$($Crop.Y),setsar=1," +
@@ -397,6 +439,7 @@ foreach ($row in $rows) {
         }
         $ssim = Measure-Ssim -Retail $retailPath -Crop $crop -Port $portPath
         $mad  = Measure-Mad  -Retail $retailPath -Crop $crop -Port $portPath
+        $worldSsim = Measure-WorldSsim -Retail $retailPath -Crop $crop -Port $portPath
         $sidePath = Join-Path $CompareDir "$($row.Name)-side.png"
         New-SideBySide -Retail $retailPath -Crop $crop -Port $portPath -Out $sidePath
 
@@ -408,11 +451,13 @@ foreach ($row in $rows) {
             Borders    = $borders
             Ssim       = $ssim
             Mad        = $mad
+            WorldSsim  = $worldSsim
             Side       = $sidePath
             Pose       = (Format-Pose $row)
             RetailMeta = (Get-RetailMeta $retailPath)
         }
-        Write-Host ("{0}: SSIM {1:F4} ({2} dB), mean abs diff {3:F1}/255" -f $row.Name, $ssim.All, $ssim.Db, $mad)
+        Write-Host ("{0}: SSIM {1:F4} ({2} dB), mean abs diff {3:F1}/255, world-band SSIM {4:F4}" -f
+            $row.Name, $ssim.All, $ssim.Db, $mad, $worldSsim)
     } catch {
         $errors += [pscustomobject]@{ Name = $row.Name; Message = $_.Exception.Message }
         Write-Host ("{0}: FAILED - {1}" -f $row.Name, $_.Exception.Message)
@@ -446,8 +491,8 @@ if ($Gate) {
     foreach ($e in $errors) { $null = $failedNames.Add($e.Name) }
     foreach ($t in $thresholds) {
         $result = [pscustomobject]@{
-            Name = $t.Name; MinSsim = $t.MinSsim; MaxMad = $t.MaxMad
-            Ssim = $null; Mad = $null; Verdict = 'PASS'; Detail = ''
+            Name = $t.Name; MinSsim = $t.MinSsim; MaxMad = $t.MaxMad; MinWorld = $t.MinWorld
+            Ssim = $null; Mad = $null; World = $null; Verdict = 'PASS'; Detail = ''
         }
         if ($failedNames.Contains($t.Name)) {
             $result.Verdict = 'FAIL'; $result.Detail = 'capture or metric failed'
@@ -457,18 +502,25 @@ if ($Gate) {
             $pair = $byName[$t.Name]
             $result.Ssim = $pair.Ssim.All
             $result.Mad = $pair.Mad
+            $result.World = $pair.WorldSsim
             if ($pair.Ssim.All -lt $t.MinSsim) {
                 $result.Verdict = 'FAIL'
                 $result.Detail = 'SSIM {0:F4} < {1:F2}' -f $pair.Ssim.All, $t.MinSsim
             } elseif ($pair.Mad -gt $t.MaxMad) {
                 $result.Verdict = 'FAIL'
                 $result.Detail = 'MAD {0:F1} > {1:F1}' -f $pair.Mad, $t.MaxMad
+            } elseif ($null -ne $t.MinWorld -and $pair.WorldSsim -lt $t.MinWorld) {
+                $result.Verdict = 'FAIL'
+                $result.Detail = 'world-band SSIM {0:F4} < {1:F2}' -f $pair.WorldSsim, $t.MinWorld
             }
         }
         $gateResults += $result
         if ($result.Verdict -eq 'PASS') {
-            Write-Host ("gate: PASS  {0}  SSIM {1:F4} >= {2:F2}  MAD {3:F1} <= {4:F1}" -f
-                $result.Name, $result.Ssim, $result.MinSsim, $result.Mad, $result.MaxMad)
+            $worldText = if ($null -ne $result.MinWorld) {
+                '  world-band SSIM {0:F4} >= {1:F2}' -f $result.World, $result.MinWorld
+            } else { '' }
+            Write-Host ("gate: PASS  {0}  SSIM {1:F4} >= {2:F2}  MAD {3:F1} <= {4:F1}{5}" -f
+                $result.Name, $result.Ssim, $result.MinSsim, $result.Mad, $result.MaxMad, $worldText)
         } else {
             $gateFailures++
             Write-Host ("gate: FAIL  {0}  {1}" -f $result.Name, $result.Detail)
@@ -505,15 +557,15 @@ if ($ordered.Count -eq 0) {
 } else {
     $lines.Add('## Summary (worst first)')
     $lines.Add('')
-    $lines.Add('| # | shot | level | SSIM (All) | SSIM (dB) | mean abs diff | retail world crop | port frame |')
-    $lines.Add('|--:|------|-------|-----------:|----------:|--------------:|-------------------|------------|')
+    $lines.Add('| # | shot | level | SSIM (All) | SSIM (dB) | mean abs diff | world-band SSIM | retail world crop | port frame |')
+    $lines.Add('|--:|------|-------|-----------:|----------:|--------------:|----------------:|-------------------|------------|')
     $n = 0
     foreach ($p in $ordered) {
         $n++
         $cropText = if ($p.Crop.WorldBox) { $p.Crop.WorldBox } else { "$($p.Crop.Width)x$($p.Crop.Height)+$($p.Crop.X)+$($p.Crop.Y)" }
         $portText = "$($p.PortInfo.Width)x$($p.PortInfo.Height)"
-        $lines.Add(("| {0} | {1} | {2} | {3:F4} | {4} | {5:F1} | {6} | {7} |" -f
-            $n, $p.Row.Name, $p.Row.Level, $p.Ssim.All, $p.Ssim.Db, $p.Mad, $cropText, $portText))
+        $lines.Add(("| {0} | {1} | {2} | {3:F4} | {4} | {5:F1} | {6:F4} | {7} | {8} |" -f
+            $n, $p.Row.Name, $p.Row.Level, $p.Ssim.All, $p.Ssim.Db, $p.Mad, $p.WorldSsim, $cropText, $portText))
     }
     $lines.Add('')
     $lines.Add('Contact sheet (worst first, top to bottom): `target/parity/compare/contact.png`')

@@ -1,12 +1,19 @@
 # Per-shot parity gate thresholds for tools/parity/compare.ps1 -Gate.
 #
-# Format: name <TAB> min_ssim <TAB> max_mean_abs_diff
+# Format: name <TAB> min_ssim <TAB> max_mean_abs_diff [<TAB> min_world_ssim]
+#
+# The fourth column is optional. It is the **world-band** SSIM floor: compare.ps1 also scores each
+# pair with the port's HUD band (bottom 22 % of the crop) removed from both sides, which separates the
+# renderer/HUD term from the world's own parity (round 103: the HUD is worth 0.07-0.09 on a level-1
+# pair). A row that names it is parity-checked on that number, with the full-frame floor left as a
+# gross-breakage check; a row without it gates on the full-frame number alone. No row uses it yet:
+# none of the ungated pairs is rescued by the world-band score.
 #
 # These are tolerances, not equality: retail (1997 D3D via dgVoodoo2, or software) and the port
 # (Bevy) are different renderers, and the port's HUD is inside its frame while the retail world
-# crop has none. A *verified* pose pair currently scores 0.62-0.63 SSIM here, so the floors sit
-# just under that: a real camera or draw regression is caught (moving the level-1 eye by 0.03
-# units drops the pair to ~0.24), while renderer/HUD noise is not.
+# crop has none. A *verified* pose pair currently scores 0.62-0.63 SSIM here (0.69-0.71 world-band),
+# so the floors sit just under that: a real camera or draw regression is caught (moving the level-1
+# eye by 0.03 units drops the pair to ~0.24), while renderer/HUD noise is not.
 #
 # Raising a floor is the right move when a renderer change improves a pair; lowering one needs
 # a reason in the commit message. A pair captured without a row here is reported as UNGRADED.
@@ -21,9 +28,10 @@
 # AI see a body there — but retail's reference in these two rooms is **red from damage tint**: the
 # body is being damaged (level 1's door: health 100 -> 44 over the series; catwalk: 100/100 ->
 # 81/11) and `sithActor_DamageActor` adds `damage * 0.04` red to the player's palette tint
-# (`sithPlayer_AddDynamicTint`, decaying 0.4/s). The port has no such layer yet, and at the catwalk
-# it also cannot stand its body on the catwalk model (the model is not a sector floor), so the
-# 0.45/0.42 measured here is the size of two named engine gaps, not a renderer tolerance.
+# (`sithPlayer_AddDynamicTint`, decaying 0.4/s). Both halves of that layer are ported now (state and
+# draw), and the world-band score confirms the residual is content, not the HUD: the two rows move
+# by only +0.04 when the HUD band is removed, because retail's reference is a *saturated* tint at
+# ~10 s while the port's capture is still at a different point in the fight (AI engagement, step 5).
 name	min_ssim	max_mean_abs_diff
 spawn	0.55	28.0
 spawn_pose	0.55	28.0

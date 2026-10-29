@@ -15,6 +15,9 @@ param(
   [string]$WalkTraceKey = 'UP',
   # Row names to run (default: every row of the shots file). A trace run uses one row.
   [string[]]$Only = @(),
+  # Retained raw frame(s) to run the world-box detector on instead of capturing anything, e.g.
+  # `-ProbeBox target/parity/retail/level2_spawn-raw.png`. Prints the box and exits.
+  [string[]]$ProbeBox = @(),
   # Dev-console commands to run after the level loads (and after the warp), e.g. `cogstatus 1`.
   # Each row's output is written to target/parity/trace/<name>-console.txt, which is how Phase 0.5
   # step 2 captures one level's cog variables and AI status.
@@ -526,10 +529,12 @@ function Get-JkRegionSsim {
 #
 # The 3D path's JSHOT BMP holds the world view letterboxed inside the display mode, plus HUD corners
 # and the "Screenshot Taken" notification in the black margins, so a bounding box of *any* non-black
-# pixel covers nearly the whole frame. Instead this counts, per row and per column, how much of it is
-# lit: the world view rows/columns are mostly content (>50%), while the HUD and notification are
-# small islands in the bars. That also works for the 8-bit PCX path (whose -devMode overlay text sits
-# in the top corners the same way).
+# pixel covers nearly the whole frame. Instead this counts, per row and per column, how many pixels
+# carry *detail* (a value differing from the frame's corner value): the world view rows/columns are
+# mostly textured (>50%), while the letterbox bars, the HUD corners and the notification are uniform
+# islands. Brightness is not the test - level 2's opening plaza is dark but highly dithered, and a
+# 'lit' test cropped it to a 1094x355 strip of a 1440x900 frame (round 103). That also works for the
+# 8-bit PCX path (whose -devMode overlay text sits in the top corners the same way).
 # Returns @{ X; Y; W; H; Text = "WxH+X+Y"; RowFill; ColFill }.
 function Get-JkWorldBox {
   param([Parameter(Mandatory)][string]$RawPng, [string]$LogPath = $null)
@@ -544,14 +549,23 @@ function Get-JkWorldBox {
     if (-not (Test-Path -LiteralPath $tmp)) { throw "ffmpeg could not dump '$RawPng' to gray" }
     $gray = [System.IO.File]::ReadAllBytes($tmp)
     if ($gray.Length -lt ($imageW * $imageH)) { throw "gray dump of '$RawPng' is short ($($gray.Length) bytes)" }
-    $threshold = 16
+    # What separates a bar row from a world row is not brightness but *detail*: the letterbox bars are
+    # one uniform value (the frame's own corner, ~16 luma), while a world row is textured. Round 103
+    # found this the hard way: level 2's opening plaza is dark, so most of its world pixels sat at or
+    # below the 16-luma "lit" threshold and a 1440x900 player-camera frame was cropped to a 1094x355
+    # strip. Rows/columns are now scored by how many pixels differ from the corner value by at least
+    # `barTolerance`; a dark floor is still full of dithering, so world rows score high and bars stay
+    # near zero (the HUD corners and the notification are small islands either way).
+    $corner = $gray[0]
+    $barTolerance = 2
     $rowHits = New-Object 'int[]' $imageH
     $colHits = New-Object 'int[]' $imageW
     $i = 0
     for ($y = 0; $y -lt $imageH; $y++) {
       $row = 0
       for ($x = 0; $x -lt $imageW; $x++) {
-        if ($gray[$i] -gt $threshold) { $row++; $colHits[$x]++ }
+        $delta = [int]$gray[$i] - [int]$corner
+        if ($delta -ge $barTolerance -or $delta -le -$barTolerance) { $row++; $colHits[$x]++ }
         $i++
       }
       $rowHits[$y] = $row
@@ -566,6 +580,24 @@ function Get-JkWorldBox {
     $x = $minX; $y = $minY; $w = $maxX - $minX + 1; $h = $maxY - $minY + 1
     if ($minX -lt 0 -or $minY -lt 0 -or $w -lt 64 -or $h -lt 64) {
       throw "could not detect the world view in '$RawPng' (rows/columns above the fill threshold: none)"
+    }
+    # The engine centres the view inside the display mode, so the opposite margins are equal by
+    # construction. When a frame's top and bottom margins disagree beyond rounding, the detail test
+    # swallowed dark world rows on one side (level 2's plaza: top 115 px against the real 84), and a
+    # detected margin can only come out *too big*, never too small - so both sides take the smaller.
+    $topMargin = $y
+    $bottomMargin = $imageH - ($y + $h)
+    if ([math]::Abs($topMargin - $bottomMargin) -gt 2) {
+      $margin = [math]::Min($topMargin, $bottomMargin)
+      $y = $margin
+      $h = $imageH - 2 * $margin
+    }
+    $leftMargin = $x
+    $rightMargin = $imageW - ($x + $w)
+    if ([math]::Abs($leftMargin - $rightMargin) -gt 2) {
+      $margin = [math]::Min($leftMargin, $rightMargin)
+      $x = $margin
+      $w = $imageW - 2 * $margin
     }
     $result = [pscustomobject]@{
       X = $x; Y = $y; W = $w; H = $h
@@ -1126,6 +1158,19 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
 }
 
 # --- main -------------------------------------------------------------------
+
+# `-ProbeBox <raw.png>`: run only the world-box detector on a retained raw frame and print the box.
+# A capture's crop is the one thing this harness cannot re-derive later (the raw frames are kept, the
+# reticle of bright pixels is not), so this makes the detector testable on any frame already on disk.
+if ($ProbeBox) {
+    # `-File` binding hands a list through as one string, so accept semicolon-separated paths too.
+    foreach ($raw in @($ProbeBox | ForEach-Object { $_ -split ';' } | Where-Object { $_ })) {
+        $box = Get-JkWorldBox -RawPng $raw
+        Write-Host ("{0}: {1} (edge fill: rows {2:P0}, columns {3:P0})" -f
+            $raw, $box.Text, $box.RowFill, $box.ColFill)
+    }
+    exit 0
+}
 
 Log "=== retail-capture run $(Get-Date -Format o) ==="
 Log "repo=$repoRoot"
