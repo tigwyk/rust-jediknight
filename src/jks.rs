@@ -1,73 +1,82 @@
 //! `.jks` savegames: the record container JK.EXE writes.
 //!
-//! From `JK.EXE` (Ghidra), the writer is `FUN_004da9c0` @ `0x4da9c0`, the reader
-//! `FUN_004dab70` @ `0x4dab70`, and the per-object record writer `FUN_004f4210` @ `0x4f4210`.
-//! Its tail pins the record framing:
+//! From `JK.EXE` (Ghidra), the writer is `sithGamesave_Process` @ `0x4da9c0`, the reader
+//! `sithGamesave_RestoreFile` @ `0x4dab70`, and the per-thing record writer
+//! `sithDSSThing_FullDescription` @ `0x4f4210`. The file is a fixed prefix, then a stream of
+//! `[u32 type][u32 length][payload]` records — the reader pins that framing:
 //!
-//! ```asm
-//! 0x4f4693: SUB ECX, 0x8b4c28          ; payload bytes = end - payload start
-//! 0x4f4699: MOV [0x008b4c20], ECX      ; length at header + 0x20
-//! 0x4f46ac: MOV [0x008b4c04], 0        ; header field at + 0x04 = 0
-//! 0x4f46b6: MOV word [0x008b4c24], 0xc ; record type 0x0C (a thing) at + 0x24
-//! 0x4f46bf: CALL 0x004e1910            ; write header, then payload
+//! ```c
+//! stdConffile_Read(&DAT_008b4c24,4);                  // the record TYPE
+//! while (iVar2 != 0) {
+//!   stdConffile_Read(&DAT_008b4c20,4);                // the payload LENGTH
+//!   stdConffile_Read(&DAT_008b4c28,DAT_008b4c20);     // payload at the message body
+//!   sithMessage_Process(&DAT_008b4c00);               // dispatch on the type
+//!   stdConffile_Read(&DAT_008b4c24,4);                // next type; a failed read ends the file
+//! }
 //! ```
 //!
 //! so the file is:
 //!
 //! ```text
 //! 0x000  0x62C (1580)  save header; int32 at +0 must be 6
-//! 0x62C  0x20  (32)    level name
-//! 0x64C  4             one field, DAT_00836c14
-//! 0x650  0x18  (24)    player block, DAT_008ee660
-//! 0x668  ...           records: 0x28-byte header, then `length` payload bytes
+//! 0x62C  0x24  (36)    game-side header callback block: the episode tag ("JK1") + one u32
+//! 0x650  0x20  (32)    level name ("02narshadda.jkl")
+//! 0x670  4             game time (`DAT_00836c14`, passed to `sithTime_SetGameTime`)
+//! 0x674  0x18  (24)    player block (`DAT_008ee660`, the game-state block)
+//! 0x68C  ...           records: u32 type, u32 length, then `length` payload bytes
 //! ```
 //!
-//! A record header is **0x28 bytes**: `+0x04` is zero, `+0x20` holds the payload length and
-//! `+0x24` the record type (`0x0C` for a thing; `FUN_004e1dd0` @ `0x4e1dd0` dispatches on it
-//! through a 65-entry table). Payload field layouts are not modelled here — the bytes are kept
-//! verbatim, which is enough to read a real save's record list and to write one back.
+//! The 0x28-byte message header the writers stage (`+0x04` zero, `+0x20` length, `+0x24`
+//! type) never reaches the file: only its type, length and body do, so the length and type
+//! are each written once and 8 bytes of the in-memory header are dropped. The prefix was
+//! checked against both engine-written autosaves in `tools/parity/`: from `0x68C` the record
+//! walk lands exactly on EOF (5856 records for level 1, 7704 for level 2), and level 2's first
+//! record is the player at that level's spawn (10.78, -11.98, 3.02), which is the payload
+//! layout below.
+//!
+//! Payload field layouts are only modelled for thing records (`ThingRecord`); every other
+//! record's body is kept verbatim, which is enough to read and rewrite a real save.
 
 use std::io::{Error, ErrorKind};
 
 /// The version the engine demands in the header's first `int32`.
 pub const VERSION: u32 = 6;
-/// The header block's size (`FUN_00431470(&DAT_00835918, 0x62c)`).
+/// The header block's size (`stdConffile_Read(local_62c, 0x62c)`).
 pub const HEADER_LEN: usize = 0x62C;
+/// The game-side header callback block: episode tag plus one undecoded word.
+pub const EPISODE_LEN: usize = 0x24;
+/// The level name's field (`stdConffile_Write(level + 4, 0x20)`).
 pub const LEVEL_LEN: usize = 0x20;
+/// The game time word, `DAT_00836c14`.
+pub const TIME_LEN: usize = 4;
 pub const PLAYER_LEN: usize = 0x18;
-/// A record's header: length at +0x20, type at +0x24, payload after.
-pub const RECORD_HEADER: usize = 0x28;
+/// A record's on-disk framing: the type, then the payload length.
+pub const RECORD_HEADER: usize = 8;
 /// Everything before the first record.
-pub const PREFIX_LEN: usize = HEADER_LEN + LEVEL_LEN + 4 + PLAYER_LEN;
+pub const PREFIX_LEN: usize = HEADER_LEN + EPISODE_LEN + LEVEL_LEN + TIME_LEN + PLAYER_LEN;
 
-/// One record: its raw 0x28-byte header and its payload.
+/// One record: its type (the message the engine dispatches on) and its payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Section {
-    pub header: [u8; RECORD_HEADER],
+    /// The record type, the value the engine reads into `DAT_008b4c24` (0x0C is a thing).
+    pub kind: u32,
     pub data: Vec<u8>,
 }
 
 impl Section {
-    /// A record of `kind` with an empty header otherwise, ready to be filled in.
-    pub fn new(kind: u16, data: Vec<u8>) -> Section {
-        let mut header = [0u8; RECORD_HEADER];
-        header[0x24..0x26].copy_from_slice(&kind.to_le_bytes());
-        Section { header, data }
+    /// A record of `kind` with an empty payload, ready to be filled in.
+    pub fn new(kind: u32, data: Vec<u8>) -> Section {
+        Section { kind, data }
     }
 
-    /// The record type at `+0x24`.
-    pub fn kind(&self) -> u16 {
-        u16::from_le_bytes([self.header[0x24], self.header[0x25]])
+    /// The record type.
+    pub fn kind(&self) -> u32 {
+        self.kind
     }
 
-    /// The payload length the header claims at `+0x20`.
+    /// The payload length the file's length word carries.
     pub fn length(&self) -> usize {
-        u32::from_le_bytes([
-            self.header[0x20],
-            self.header[0x21],
-            self.header[0x22],
-            self.header[0x23],
-        ]) as usize
+        self.data.len()
     }
 }
 
@@ -76,21 +85,31 @@ impl Section {
 pub struct Save {
     /// The 1580-byte block, opaque: only the version word inside it is understood.
     pub header: Vec<u8>,
+    /// The game-side header callback block: the first bytes are the episode tag (`JK1` for the
+    /// single-player campaign), then a u32 whose meaning is not recovered (1 in level 1's
+    /// autosave, 3 in level 2's).
+    pub episode: Vec<u8>,
     pub level: String,
-    pub field: u32,
+    pub time: u32,
     pub player: [u8; PLAYER_LEN],
     pub sections: Vec<Section>,
 }
 
 impl Save {
-    /// A fresh save for a level, with the version set and the name padded.
+    /// A fresh save for a level, with the version set and the name padded. The engine stores the
+    /// bare file name (`02narshadda.jkl`), so a path from the archive index is cut down to it.
     pub fn new(level: &str) -> Save {
         let mut header = vec![0u8; HEADER_LEN];
         header[0..4].copy_from_slice(&VERSION.to_le_bytes());
+        let mut episode = vec![0u8; EPISODE_LEN];
+        // The engine's own tag for this campaign; a save without it would not restore.
+        episode[0..3].copy_from_slice(b"JK1");
+        let name = level.rsplit(['/', '\\']).next().unwrap_or(level);
         Save {
             header,
-            level: level.to_ascii_lowercase(),
-            field: 0,
+            episode,
+            level: name.to_ascii_lowercase(),
+            time: 0,
             player: [0u8; PLAYER_LEN],
             sections: Vec::new(),
         }
@@ -101,22 +120,28 @@ impl Save {
         u32::from_le_bytes([self.header[0], self.header[1], self.header[2], self.header[3]])
     }
 
-    /// Serialise: prefix, then every record with its length and type filled in.
+    /// The episode tag from the game-side header block.
+    pub fn episode_tag(&self) -> String {
+        String::from_utf8_lossy(&self.episode[0..EPISODE_LEN.min(0x20)])
+            .trim_end_matches('\0')
+            .to_string()
+    }
+
+    /// Serialise: prefix, then every record as its type, length and payload.
     pub fn write(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(PREFIX_LEN + 64);
         out.extend_from_slice(&self.header);
+        out.extend_from_slice(&self.episode);
         let mut name = [0u8; LEVEL_LEN];
         for (slot, byte) in name.iter_mut().zip(self.level.as_bytes()) {
             *slot = byte.to_ascii_lowercase();
         }
         out.extend_from_slice(&name);
-        out.extend_from_slice(&self.field.to_le_bytes());
+        out.extend_from_slice(&self.time.to_le_bytes());
         out.extend_from_slice(&self.player);
         for section in &self.sections {
-            let mut header = section.header;
-            header[0x04..0x08].copy_from_slice(&0u32.to_le_bytes());
-            header[0x20..0x24].copy_from_slice(&(section.data.len() as u32).to_le_bytes());
-            out.extend_from_slice(&header);
+            out.extend_from_slice(&section.kind.to_le_bytes());
+            out.extend_from_slice(&(section.data.len() as u32).to_le_bytes());
             out.extend_from_slice(&section.data);
         }
         out
@@ -139,43 +164,50 @@ impl Save {
                 format!("version {version}, the engine only loads {VERSION}"),
             ));
         }
-        let level = String::from_utf8_lossy(&bytes[HEADER_LEN..HEADER_LEN + LEVEL_LEN])
+        let episode = bytes[HEADER_LEN..HEADER_LEN + EPISODE_LEN].to_vec();
+        let at = HEADER_LEN + EPISODE_LEN;
+        let level = String::from_utf8_lossy(&bytes[at..at + LEVEL_LEN])
             .trim_end_matches('\0')
             .to_string();
-        let at = HEADER_LEN + LEVEL_LEN;
-        let field = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+        let at = at + LEVEL_LEN;
+        let time = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
         let mut player = [0u8; PLAYER_LEN];
-        player.copy_from_slice(&bytes[at + 4..at + 4 + PLAYER_LEN]);
+        player.copy_from_slice(&bytes[at + TIME_LEN..at + TIME_LEN + PLAYER_LEN]);
         let mut sections = Vec::new();
         let mut cursor = PREFIX_LEN;
         while cursor + RECORD_HEADER <= bytes.len() {
-            let mut record = [0u8; RECORD_HEADER];
-            record.copy_from_slice(&bytes[cursor..cursor + RECORD_HEADER]);
-            let section = Section { header: record, data: Vec::new() };
-            let len = section.length();
+            let kind = u32::from_le_bytes([
+                bytes[cursor],
+                bytes[cursor + 1],
+                bytes[cursor + 2],
+                bytes[cursor + 3],
+            ]);
+            let len = u32::from_le_bytes([
+                bytes[cursor + 4],
+                bytes[cursor + 5],
+                bytes[cursor + 6],
+                bytes[cursor + 7],
+            ]) as usize;
             let start = cursor + RECORD_HEADER;
             if start + len > bytes.len() {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
                     format!(
-                        "record of type 0x{:02X} claims {len} bytes, {} remain",
-                        section.kind(),
+                        "record of type 0x{kind:02X} claims {len} bytes, {} remain",
                         bytes.len() - start
                     ),
                 ));
             }
-            let mut section = section;
-            section.data = bytes[start..start + len].to_vec();
-            sections.push(section);
+            sections.push(Section { kind, data: bytes[start..start + len].to_vec() });
             cursor = start + len;
         }
-        Ok(Save { header, level, field, player, sections })
+        Ok(Save { header, episode, level, time, player, sections })
     }
 }
 
-/// A thing record's payload, in the layout `FUN_004f4210` stages.
+/// A thing record's payload, in the layout `sithDSSThing_FullDescription` stages.
 ///
-/// The writer fills the record buffer from the thing (Ghidra, `0x4f4210`):
+/// The writer fills the message body from the thing (Ghidra, `0x4f4210`):
 ///
 /// ```text
 /// payload + 0x00  u16  thing + 0x04      template index
@@ -191,10 +223,10 @@ impl Save {
 /// payload + 0x22  f32  thing + 0x90      roll
 /// ```
 ///
-/// The reader's own field order is not recovered (its entry is a bare `LAB_` block at
-/// `0x4f46f0`, not a Ghidra function), so this struct models the writer's fields and zero-fills
-/// the rest: enough to store and restore a thing's identity, position and angles, not yet to
-/// rebuild one the engine would accept.
+/// Checked against a real save: level 2's autosave opens with a type-0x0C record whose type
+/// word is 10 (a player) at (10.78, -11.98, 3.02) — that level's spawn pose. The record's own
+/// variable-length tail (the type-specific fields the switch in `0x4f4210` packs after the
+/// common block) is not modelled, so a payload longer than this struct keeps its extra bytes.
 pub const THING_PAYLOAD: usize = 0x50;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -241,6 +273,17 @@ impl ThingRecord {
     }
 }
 
+/// The engine-written autosaves kept as parity fixtures, read only if this checkout has them.
+/// They are the only ground truth for the container's layout, so the tests below refuse to
+/// guess: absent fixtures skip, present ones must walk to EOF.
+fn fixture(name: &str) -> Option<Vec<u8>> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tools")
+        .join("parity")
+        .join(name);
+    std::fs::read(path).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,19 +292,29 @@ mod tests {
     fn a_save_round_trips_with_the_engine_prefix() {
         let mut save = Save::new("01narshadda.jkl");
         save.player[0] = 0x42;
-        save.field = 7;
-        // Type 0x0C is a thing record, straight out of `FUN_004f4210`'s tail.
+        save.time = 500;
+        save.episode[0x20..0x24].copy_from_slice(&7u32.to_le_bytes());
+        // Type 0x0C is a thing record, straight out of `sithDSSThing_FullDescription`'s tail.
         save.sections.push(Section::new(0x0C, vec![1, 2, 3]));
         let bytes = save.write();
         assert_eq!(bytes.len(), PREFIX_LEN + RECORD_HEADER + 3);
-        // The writer's own fields: length at +0x20, type at +0x24, +0x04 zero.
+        // The framing the reader walks: type at +0, length at +4, payload after.
         let record = &bytes[PREFIX_LEN..PREFIX_LEN + RECORD_HEADER];
-        assert_eq!(u32::from_le_bytes([record[0x20], record[0x21], record[0x22], record[0x23]]), 3);
-        assert_eq!(u16::from_le_bytes([record[0x24], record[0x25]]), 0x0C);
-        assert_eq!(&record[0x04..0x08], &[0, 0, 0, 0]);
+        assert_eq!(u32::from_le_bytes([record[0], record[1], record[2], record[3]]), 0x0C);
+        assert_eq!(u32::from_le_bytes([record[4], record[5], record[6], record[7]]), 3);
         let back = Save::read(&bytes).expect("round trip");
         assert_eq!(back.level, "01narshadda.jkl");
-        assert_eq!(back.field, 7);
+        assert_eq!(back.episode_tag(), "JK1");
+        assert_eq!(
+            u32::from_le_bytes([
+                back.episode[0x20],
+                back.episode[0x21],
+                back.episode[0x22],
+                back.episode[0x23]
+            ]),
+            7
+        );
+        assert_eq!(back.time, 500);
         assert_eq!(back.player[0], 0x42);
         assert_eq!(back.sections[0].kind(), 0x0C);
         assert_eq!(back.sections[0].data, vec![1, 2, 3]);
@@ -316,5 +369,45 @@ mod tests {
     fn a_truncated_prefix_is_refused() {
         let error = Save::read(&[0u8; 16]).expect_err("too short");
         assert!(error.to_string().contains("shorter"), "{error}");
+    }
+
+    /// The two autosaves JK.EXE wrote itself. This is the check that pins the container: the
+    /// walk must consume the file exactly, the level name must be the level, and the first
+    /// thing record must be the player standing at that level's spawn.
+    #[test]
+    fn a_real_autosave_walks_to_eof() {
+        for (name, level, spawn) in [
+            ("jkauto-01narshadda.jks", "01narshadda.jkl", None),
+            (
+                "jkauto-02narshadda.jks",
+                "02narshadda.jkl",
+                Some([10.78f32, -11.98, 3.02]),
+            ),
+        ] {
+            let Some(bytes) = fixture(name) else { continue };
+            let save = Save::read(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(save.version(), VERSION);
+            assert_eq!(save.episode_tag(), "JK1", "{name}: the episode tag");
+            assert_eq!(save.level, level, "{name}: the level name");
+            assert!(!save.sections.is_empty(), "{name}: no records");
+            let things: Vec<ThingRecord> = save
+                .sections
+                .iter()
+                .filter(|s| s.kind() == 0x0C)
+                .filter_map(|s| ThingRecord::from_payload(&s.data))
+                .collect();
+            assert!(things.len() > 100, "{name}: only {} thing records", things.len());
+            if let Some(want) = spawn {
+                let player = things.first().expect("a first record");
+                assert_eq!(player.kind, 10, "{name}: the first record is not a player");
+                for (got, want) in player.pos.iter().zip(want.iter()) {
+                    assert!((got - want).abs() < 0.05, "{name}: player at {:?}, want {want}", player.pos);
+                }
+            }
+            // Rewriting keeps the record stream: same count, same types and payloads.
+            let again = Save::read(&save.write()).expect("the rewritten save parses");
+            assert_eq!(again.sections.len(), save.sections.len(), "{name}: rewrite lost records");
+            assert_eq!(again.sections[0], save.sections[0], "{name}: rewrite changed record 0");
+        }
     }
 }

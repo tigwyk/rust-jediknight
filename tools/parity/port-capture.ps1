@@ -25,11 +25,13 @@
 
 .EXAMPLE
   pwsh -File tools/parity/port-capture.ps1
+  pwsh -File tools/parity/port-capture.ps1 -Only level5_spawn
 #>
 [CmdletBinding()]
 param(
     [string]$Game = 'G:\Games\Star Wars Jedi Knight - Dark Forces 2',
-    [int]$TimeoutSec = 120
+    [int]$TimeoutSec = 120,
+    [string[]]$Only = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -97,6 +99,10 @@ if (-not (Test-Path -LiteralPath $Exe)) {
 }
 
 $rows = @(Get-ShotRows)
+if ($Only.Count -gt 0) {
+    $rows = @($rows | Where-Object { $Only -contains $_.Name })
+    if ($rows.Count -eq 0) { throw "no shots matched -Only $($Only -join ',')" }
+}
 
 # If a previous retail run was interrupted, the primary monitor can be stuck in the game's 640x480
 # mode. The port then opens its 1024x768 window on a 640x480 desktop and looks clipped/wrong, so put

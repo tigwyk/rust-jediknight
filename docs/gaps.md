@@ -2495,3 +2495,48 @@ camera** running longer than the waits, so retail's frame is probably an intro v
 records the player's `coords`. The ledger row now says exactly that, and the next step is a true
 player-camera reference (find the intro's end - longer wait, or the key/trigger that ends it - then
 re-pair); no port-side renderer change is warranted until then.
+
+**Retail saves decode: the container was mis-modelled, and the real files say how (round 101).** Both
+engine-written autosaves (`tools/parity/jkauto-01narshadda.jks`, 360,232 B and
+`jkauto-02narshadda.jks`, 452,495 B) failed the port's reader at the first record. Re-reading
+`sithGamesave_Process` (0x4da9c0) against `sithGamesave_RestoreFile` (0x4dab70) showed the file is
+**not** the in-memory 0x28-byte message header the writer stages: on disk a record is
+`u32 type, u32 length, payload`, and the prefix is header(0x62C), a 0x24-byte game-side callback block
+(episode tag `JK1` + one u32), level name(0x20), game time(4), player block(0x18) — so records start at
+**0x68C**, not 0x668. Walking both files from 0x68C lands exactly on EOF (5856 and 7704 records), and
+with the fix `--save <autosave>` reports `version 6, episode JK1, level 02narshadda.jkl, game time 500,
+7704 record(s), 330 thing record(s)`. The payload offsets hold too: the first thing record in each save
+is type **10** (a player) at that level's spawn — level 2 `[10.798077, -11.982778, 3.020114]` against
+the `level2_spawn` row's 10.80/-11.98/3.02, level 1 `[-10.443433, -5.455094, -1.129886]` against the
+`walkplayer` pose. A new unit test (`jks::tests::a_real_autosave_walks_to_eof`) pins all of it on the
+committed fixtures. The `u32` inside the episode block is 1 for level 1's save and 3 for level 2's;
+still undecoded, as are the player block's fields and 63 record types. Neither the game-state record
+(type 0x1F, 189 B, mostly zeros and -1 sentinels) nor the player's thing payload exposes health or
+shields in a decoded position, so "level 2 starts in retail's state" is still **not** measurable from
+a save alone.
+
+**Level 5 has a player-camera reference, and the pose is the recorded one (round 101).** A 26-frame
+series with intro-skip keys ends on a settled frame whose world crop shows the player's weapon at
+bottom centre (the HUD gauges sit *outside* the crop, in the raw frame's letterbox corners), so the
+reference is a player camera, not the intro view. Against it, at the retail view size
+(`BK_WINDOW=1170x731`), the port's pitch sweep peaks at the row's own 1.12 (0.3054 vs <=0.28 for
+0.5/1.5 and <=0.24 for 0/-1) and a yaw sweep peaks at the row's 134.99 (0.3057 vs 0.23-0.26 for
+100/110/115/120/125/130/140/145/150/155/160/170), so camera *framing* is verified. What remains is
+renderer and scene state: the port draws its HUD (retail's is outside the crop), its dev overlay
+(red 50/8/5000), a sharper 24-bit image against retail's blocky 16-bit one, and animated water over
+half the frame. Layout-normalised SSIM (HUD strip cropped, blur sigma 2, 234x112) is 0.5925 for
+level 5 against 0.8344 for the known-good level-1 spawn pair, 0.9102 for `route_cantina` — so the
+pair stays **ungraded** and the ledger row now records the framing verification instead of the
+intro-camera hypothesis.
+
+**A bare level name in the save exposed a broken reload branch (round 101).** With `Save::new` now
+storing the engine's own bare file name (`01narshadda.jkl`) instead of the archive index's path
+(`jkl\01narshadda.jkl`), `--save-live` stopped restoring in place: `quick_save` compared the save's
+name with `FlowPlan::level` and took the "load that level first" path, which reloads the level and
+panics a system with `Resource does not exist` (the log reaches `level: the player carries over 8
+inventory bin(s)...`, then two compute-task panics). The comparison is now on file names
+(`quick_save`), so a same-level save restores in place again and the gate passes. The reload branch
+itself is **still broken and still reachable** — loading a save made on another level takes it — and
+it was already reachable before this round (a level-2 quicksave loaded in level 1 has always had a
+different name). Reproduction: write a save on level 1 (`F5`), start the port on level 2, press `F9`;
+the level reload begins and a system parameter validation fails before `restore_pending` runs.

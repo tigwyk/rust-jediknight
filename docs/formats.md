@@ -3873,11 +3873,19 @@ so the file layout is:
 
 | offset | size | what |
 |---|---|---|
-| `0x000` | `0x62C` (1580) | save header; **`int32` at +0 must be 6** — the reader rejects anything else (`local_62c[0] != 6`) |
-| `0x62C` | `0x20` (32) | level name, compared against the running level's name |
-| `0x64C` | 4 | one field, `DAT_00836c14` |
-| `0x650` | `0x18` (24) | player block, `DAT_008ee660` |
-| `0x668` | … | sections: `int32 type`, `int32 length`, payload |
+| `0x000` | `0x62C` (1580) | save header; **`int32` at +0 must be 6** — the reader rejects anything else (`local_62c[0] != 6`); the level name also sits at `+0x84` |
+| `0x62C` | `0x24` (36) | the game-side header block: episode tag `JK1` then one `u32` (1 in level 1's autosave, 3 in level 2's) |
+| `0x650` | `0x20` (32) | level name (`02narshadda.jkl`), compared against the running level's name |
+| `0x670` | 4 | game time, `DAT_00836c14` — the reader passes it to `sithTime_SetGameTime` |
+| `0x674` | `0x18` (24) | player block, `DAT_008ee660` (the game-state block) |
+| `0x68C` | … | records: `int32 type`, `int32 length`, payload |
+
+The `0x24`-byte episode block and the 24-byte player block are read and written by **game-side
+callbacks** (`(*DAT_00835f44)()` after the header write, `(*DAT_0083590c)()` after the header read),
+which is why a pure `sithMain` reading of the writer's four `stdConffile_Write` calls puts the level
+name at `0x62C`: the callback consumes `0x24` bytes that do not appear in its own listing. Both
+engine-written autosaves in `tools/parity/` show the block, and with it the record walk from `0x68C`
+lands exactly on EOF (5856 records for level 1, 7704 for level 2).
 
 `FUN_004e1dd0` @ `0x4e1dd0` dispatches a loaded section on **the `uint16` at +0x24**, through
 the jump table `DAT_00847d68` which has **0x41 (65) entries**. So the section payload is a
@@ -3888,35 +3896,38 @@ Names and messages, all observed strings: `save%04d.jks` (0x53C010, 0x53C020), `
 `GAME_SAVED` (0x54A66C, the "game saved" message id), and the save/load menu is
 `FUN_0041e010` @ `0x41e010` (it builds the slot list and calls the writer/reader).
 
-Still unknown: the **internal field layout of the 1580-byte header** (only its size and the
-version word are pinned), the meaning of the 4-byte field at `0x64C`, the 24-byte player block's
-fields, and the 65 section types. Those need field-by-field work with a real savegame in hand.
+Still unknown: the **internal field layout of the 1580-byte header** (only its size, the version
+word and the level name are pinned), the meaning of the `u32` inside the episode block, the 24-byte
+player block's fields (the save writes `{1, 0, 0, 0, 1, 0}` at level 2's start), and 63 of the 65
+section types.
 
 **The record framing is now known.** `FUN_004f4210` @ `0x4f4210` is the thing serializer, and its
-tail writes the record header exactly:
+tail stages the in-memory message header exactly:
 
 ```asm
 0x4f4693: SUB ECX, 0x8b4c28          ; payload bytes = end - payload start (0x8b4c28)
 0x4f4699: MOV [0x008b4c20], ECX      ; length at header + 0x20
 0x4f46ac: MOV [0x008b4c04], 0        ; header field at + 0x04 = 0
 0x4f46b6: MOV word [0x008b4c24], 0xc ; record type 0x0C (a thing) at + 0x24
-0x4f46bf: CALL 0x004e1910            ; write the header, then the payload
+0x4f46bf: CALL 0x004e1910            ; send the message
 ```
 
-So a record is a **0x28-byte header** followed by `length` payload bytes:
+That header is **delivery staging, not the file format**: the reader writes only three of its words
+to disk, in this order (`FUN_004dab70`, loop above):
 
-| offset | size | what |
-|---|---|---|
-| `+0x04` | 4 | zero for this record type |
-| `+0x20` | 4 | payload length |
-| `+0x24` | 2 | record type (`0x0C` for a thing) |
-| `+0x28` | `length` | payload |
+```text
++0x000  u32  record type      (the word at header +0x24; 0x0C is a thing)
++0x004  u32  payload length   (the word at header +0x20)
++0x008  ...  payload          (the message body, which begins at header +0x28)
+```
 
-and the payload starts with the thing's own fields in order (`+0x00` = `thing+0x04`,
-`+0x02` = `thing+0x0C`, then position floats from `thing+0xB8`, angles from `thing+0x88`, …).
-`FUN_004da770` @ `0x4da770` is the driver that walks the world's arrays — things at stride
-`0x2B0`, sectors at `0xA7` dwords, surfaces at `0x14C4` — and calls a per-object serializer for
-each with the section type mask.
+so a record is **8 bytes of framing plus the payload** — the 0x28-byte header never reaches the file
+and the record stream is 4-byte aligned. The payload starts with the thing's own fields in order
+(`+0x00` = `thing+0x04`, `+0x02` = `thing+0x0C`, then position floats from `thing+0xB8`, angles from
+`thing+0x88`, …). `FUN_004da770` @ `0x4da770` is the driver that walks the world's arrays — things at
+stride `0x2B0`, sectors at `0xA7` dwords, surfaces at `0x14C4` — and calls a per-object serializer
+for each with the section type mask.
+
 
 **The type table.** `FUN_004e1700` @ `0x4e1700` zeroes `DAT_00847d68[0x41]` and then installs
 one handler per record type, which is why the table reads as zeros in the file image:
@@ -4008,25 +4019,40 @@ the chain exists in the archives. What it does **not** do is swap the loaded lev
 running window: the app still loads one level per process, so a real transition needs the
 world torn down and rebuilt, which is the remaining work for this stage.
 
-**What this build implements** (`src/jks.rs`): the prefix with the engine's own version check,
-records with the real 0x28-byte header (length at +0x20 filled on write, type at +0x24, +0x04
-zeroed), and a `ThingRecord` over the payload offsets above — template index, type, position and
-angles. `--save` writes one record per placed thing and reads every one back:
+**What this build implements** (`src/jks.rs`): the prefix with the engine's own version check, the
+episode block, the level name, the game time, the player block, and records with the on-disk
+framing above. `--save` writes one record per placed thing and reads every one back, and it reads
+**both engine-written autosaves** in `tools/parity/` end to end:
 
 ```text
-jks: wrote 9320 bytes to `...\things.jks` (version 6, level `01narshadda.jkl`, 64 record(s)), read back health 100, 64 things
-jks: 9320 bytes, version 6, level `01narshadda.jkl`, field 0, 64 record(s), 64 thing record(s)
-  first thing: template 0, type 10, at [-10.443433, -5.455094, -1.129886] facing -60.0 deg
+jks: wrote 7308 bytes to `...\new-save.jks` (version 6, level `01narshadda.jkl`, 64 record(s)), read back health 100, 64 things
+jks: 452495 bytes, version 6, episode `JK1`, level `02narshadda.jkl`, game time 500, 7704 record(s), 330 thing record(s)
+  first thing: template 0, type 10, at [10.798077, -11.982778, 3.020114] facing -1.0 deg
+jks: 360232 bytes, version 6, episode `JK1`, level `01narshadda.jkl`, game time 500, 5856 record(s), 321 thing record(s)
+  first thing: template 0, type 10, at [-10.443433, -5.455094, -1.129886] facing -0.9 deg
 ```
 
-That first record is level 1's `walkplayer`: type **10** is a player thing, and the position and
--60° facing are the level's own spawn, so the record round-trips real world data rather than
-synthetic bytes. Not modelled yet: the remaining payload fields (`+0x04`, `+0x06`, `+0x0A`,
-`+0x26`, `+0x32`, `+0x3E` and everything after), the reader's field order (its entry is a bare
-`LAB_004f46f0` block, not a Ghidra function), and the 1580-byte header's internals.
+Those first records are the **player things** (type **10**) at each level's own spawn — level 1's
+`walkplayer` pose and level 2's shipped start — so the payload offsets above are checked against
+real engine output, not just against each other. The unit test
+`jks::tests::a_real_autosave_walks_to_eof` is that check: both fixtures must parse to EOF, name
+their own level, and open with the player at the level's spawn.
+
+The record types in the two autosaves are **0x0A** (8/1), **0x0C** things (330/321), **0x0D**
+(145/131), **0x0E** (6235/4595 — sector status), **0x0F**, **0x10** (82/82 — AI status), **0x11**,
+**0x12** (641/462 — cog state), **0x15**, **0x16**, **0x17**, **0x18**, **0x1E**, **0x1F** (one —
+`sithDSS_SyncGameState`'s 189-byte game-state record), **0x31**, **0x32**, **0x35**, **0x36**,
+**0x3A**. The game-state record is mostly zeros and -1 sentinels in both files, and neither it nor
+the thing payload exposes health or shields in a form this build decodes: the recovered sync
+writers stage things, attachments, AI, cogs, surfaces and sectors, while the player's health and
+inventory are not yet located in a real save.
+
+Not modelled yet: the remaining payload fields (`+0x04`, `+0x06`, `+0x0A`, `+0x26`, `+0x32`,
+`+0x3E` and everything after), the per-type variable tail, the reader's field order (its entry is a
+bare `LAB_004f46f0` block, not a Ghidra function), and the 1580-byte header's internals.
 
 `--save <path>` writes a save for the selected level and reads it back (version 6, level name,
-24-byte player block, one section), and on an existing file it **inspects** it instead:
+game time, 24-byte player block, one section), and on an existing file it **inspects** it instead:
 
 ```text
 jks: `...\bad.jks` did not parse: version 5, the engine only loads 6

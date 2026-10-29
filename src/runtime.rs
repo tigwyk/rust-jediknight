@@ -279,7 +279,7 @@ pub const GOAL_BIN: i32 = 100;
 /// The `.jks` section kind this build puts [`Snapshot::to_bytes`]'s payload in. The engine's own
 /// records are 0x0C (things) and up; this claims an unused kind so a retail save and a port save can
 /// be told apart by their contents rather than by their name.
-pub const SAVE_SECTION: u16 = 0x1001;
+pub const SAVE_SECTION: u32 = 0x1001;
 /// `SithDamageType`: what kind of hurt, as a bitmask. Only the bits this port distinguishes.
 pub const DAMAGE_IMPACT: u32 = 0x01;
 pub const DAMAGE_ENERGY: u32 = 0x02;

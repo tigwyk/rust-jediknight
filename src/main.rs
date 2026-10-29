@@ -3253,11 +3253,12 @@ fn main() {
                         .filter_map(|s| jks::ThingRecord::from_payload(&s.data))
                         .collect();
                     println!(
-                        "jks: {} bytes, version {}, level `{}`, field {}, {} record(s), {} thing record(s)",
+                        "jks: {} bytes, version {}, episode `{}`, level `{}`, game time {}, {} record(s), {} thing record(s)",
                         bytes.len(),
                         save.version(),
+                        save.episode_tag(),
                         save.level,
-                        save.field,
+                        save.time,
                         save.sections.len(),
                         things.len()
                     );
@@ -3282,7 +3283,7 @@ fn main() {
         // The player block is the engine's own 24 bytes; this build fills the health word so
         // the round trip has something to check.
         save.player[0..4].copy_from_slice(&100.0f32.to_le_bytes());
-        save.field = 0;
+        save.time = 500;
         // One record per placed thing, in the layout `FUN_004f4210` stages: template index,
         // type, position and angles. The first 64 things keep the write fast.
         let mut expected: Vec<jks::ThingRecord> = Vec::new();
@@ -10942,9 +10943,11 @@ fn quick_save(
             return;
         };
         let here = plan.as_ref().map(|p| p.level.clone()).unwrap_or_default();
-        // The level name a `.jks` carries is the one the level file has, which is what the archive
-        // index takes (`jkl\01narshadda.jkl`), so it can be handed straight to a load.
-        if level == here || level.is_empty() {
+        // A `.jks` carries the bare level file name (`02narshadda.jkl`), the way the engine writes
+        // it, while `here` is the archive index's path (`jkl\02narshadda.jkl`). Compare the file
+        // names, not the raw strings, or a same-level save is mistaken for a level change.
+        let file_name = |s: &str| s.rsplit(['/', '\\']).next().unwrap_or(s).to_ascii_lowercase();
+        if file_name(&level) == file_name(&here) || level.is_empty() {
             sim.world.borrow_mut().restore(&snapshot);
             println!("quicksave: loaded `{}` in place ({} things)", path.display(), snapshot.things.len());
         } else {
