@@ -954,6 +954,12 @@ pub struct Runtime {
     pub cur_weapon_thing: Option<usize>,
     /// `GetThingClassCog`: the cog a thing's class names.
     pub thing_class_cog: BTreeMap<usize, i32>,
+    /// Things the engine has woken. `sithRender` latches `SITH_SECTOR_SEEN` the first time a sector is
+    /// drawn, and a thing's class cog is sent `created` when its thing is woken — **not** at level
+    /// load. Retail's own saves show it: level 1's load-time autosave carries no population bin
+    /// (73 = 0), while level 2's carries 10.5 after the level was played. Every placed thing used to
+    /// wake at load here, so level 1's population read 12.5 before the player had moved.
+    pub awakened: std::collections::BTreeSet<usize>,
     /// `jkEnableSaber`/`jkDisableSaber`, and the saber camera the scripts switch to.
     pub saber_enabled: bool,
     pub saber_cam: i32,
@@ -1323,6 +1329,7 @@ impl Runtime {
             major_mode: BTreeMap::new(),
             cur_weapon_thing: None,
             thing_class_cog: BTreeMap::new(),
+            awakened: std::collections::BTreeSet::new(),
             saber_enabled: true,
             saber_cam: 0,
             item_cog: BTreeMap::new(),
@@ -3734,6 +3741,28 @@ impl Runtime {
         best.map(|(centre, _)| centre)
     }
 
+    /// Wake every thing standing in `sector` and answer the class instances that should be sent
+    /// `created`. A thing wakes once: the second call for the same sector answers nothing, which is
+    /// what makes the wake idempotent across frames.
+    pub fn awaken_sector(&mut self, sector: i32) -> Vec<usize> {
+        let things: Vec<usize> = self
+            .things
+            .iter()
+            .enumerate()
+            .filter(|(_, thing)| thing.sector == sector && !thing.destroyed)
+            .map(|(index, _)| index)
+            .collect();
+        let mut woke = Vec::new();
+        for thing in things {
+            if !self.awakened.insert(thing) {
+                continue;
+            }
+            if let Some(instance) = self.thing_class_cog.get(&thing).copied() {
+                woke.push(instance as usize);
+            }
+        }
+        woke
+    }
     /// Which instances are linked to `thing`, so a damage or death can message them.
     pub fn thing_instances(&self, thing: usize) -> Vec<usize> {
         self.thing_links

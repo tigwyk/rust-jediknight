@@ -193,6 +193,7 @@ const GATES: &[&str] = &[
     "--move",
     "--pickup",
     "--align",
+    "--activation",
     "--save",
     "--items",
     "--weapons",
@@ -465,6 +466,7 @@ fn main() {
     let mut sprite_template: Option<String> = None;
     let mut pickup_check = false;
     let mut align_check = false;
+    let mut activation_check = false;
     let mut weapon_check: Option<String> = None;
     let mut bins_check = false;
     let mut force_check: Option<String> = None;
@@ -809,6 +811,7 @@ fn main() {
             // `--pickup`: walk the player onto level 1's own powerup and check it is taken.
             "--pickup" => pickup_check = true,
             "--align" => align_check = true,
+            "--activation" => activation_check = true,
             // `--weapon <template>`: taking a weapon changes what the player fires.
             "--weapon" => {
                 i += 1;
@@ -5440,6 +5443,109 @@ fn main() {
         return;
     }
 
+    if activation_check {
+        // Dormancy, held to retail's own two autosaves: level 1's *load-time* save carries no
+        // population bin (73 = 0) and level 2's carries 10.5 after the level was played, so a thing's
+        // class cog is sent `created` when its sector is first drawn -- not at level load. The port
+        // used to wake every placed thing at load. This check builds the class instances the way
+        // `setup` does, asserts the load state is dormant, wakes one sector the way `cull_sectors`
+        // does, and ticks the armed timer the way `run_pulses_and_timers` does.
+        let sim_world = runtime::Runtime::handle(&world.level);
+        let player = sim_world.borrow().player_thing();
+        let mut scripts: Vec<(usize, String, cog::Vm)> = Vec::new();
+        let mut target: Option<(usize, i32, String, String)> = None;
+        for (index, thing) in world.level.things.iter().enumerate() {
+            if index == player {
+                continue;
+            }
+            let Some(name) = world
+                .level
+                .template_param(&thing.template, "cog")
+                .map(|s| s.to_ascii_lowercase())
+            else {
+                continue;
+            };
+            let Some(script) = world.cogs.get(&name) else { continue };
+            // Only a script that arms a `timer` from `created:` measures the wake: its handler is
+            // where the actor scripts credit the population bin.
+            if script.label("created").is_none() || script.label("timer").is_none() {
+                continue;
+            }
+            let mut vm = cog::Vm::with_world(sim_world.clone());
+            script.bind(&mut vm, &[]);
+            vm.cog_index = scripts.len() as i32;
+            vm.sender_ref = index as i64;
+            vm.source = index as i64;
+            {
+                let mut rt = sim_world.borrow_mut();
+                rt.thing_class_cog.insert(index, scripts.len() as i32);
+                rt.thing_links.push((scripts.len(), 0, index));
+            }
+            if target.is_none() {
+                target = Some((index, thing.sector, thing.template.clone(), name.clone()));
+            }
+            scripts.push((index, name, vm));
+        }
+        let Some((thing, sector, template, name)) = target else {
+            eprintln!("activation: no class script arms a timer from `created:`");
+            std::process::exit(1);
+        };
+        let population = |rt: &runtime::Runtime| rt.inv.get(&73).copied().unwrap_or(0.0);
+        assert_eq!(
+            population(&sim_world.borrow()),
+            0.0,
+            "a civilian was awake at load; retail's level-1 autosave has bin 73 = 0"
+        );
+        // Not every `created:` timer is a civilian's: a crane or a lamp arms one too, so wake
+        // candidates until one credits the population bin, the way the engine's own pass would.
+        let mut credited: Option<(usize, i32, String, String, f32)> = None;
+        for slot in 0..scripts.len() {
+            let (thing_index, _name, _) = &scripts[slot];
+            let thing_index = *thing_index;
+            let sector = world.level.things[thing_index].sector;
+            let before = population(&sim_world.borrow());
+            let woke = sim_world.borrow_mut().awaken_sector(sector);
+            if woke.is_empty() {
+                continue;
+            }
+            for &instance in &woke {
+                let Some((_, script_name, vm)) = scripts.get_mut(instance) else { continue };
+                let Some(script) = world.cogs.get(script_name) else { continue };
+                sim_world.borrow_mut().last_params = vec![0.0, 0.0];
+                let _ = vm.run_label(script, "created");
+                // The timer `created:` armed, ticked the way the app's pulse system ticks it.
+                vm.now += 2.0;
+                if let Some((due, id, params)) = vm.timer
+                    && vm.now >= due
+                {
+                    vm.timer = None;
+                    vm.sender = id;
+                    sim_world.borrow_mut().last_params = params.to_vec();
+                    let _ = vm.run_label(script, "timer");
+                }
+            }
+            let after = population(&sim_world.borrow());
+            if after > before {
+                let template = world.level.things[thing_index].template.clone();
+                let name = scripts[slot].1.clone();
+                credited = Some((thing_index, sector, template, name, after));
+                break;
+            }
+        }
+        let Some((thing, sector, template, name, after)) = credited else {
+            eprintln!("activation: no woken class script credited the population bin");
+            std::process::exit(1);
+        };
+        assert!(
+            sim_world.borrow_mut().awaken_sector(sector).is_empty(),
+            "a sector woke its things twice"
+        );
+        println!(
+            "activation: load is dormant (bin 73 = 0, retail's level-1 autosave); thing {thing} (`{template}`, `{name}`) in sector {sector} woke and credited bin 73 by {after:.1}; waking the sector again is a no-op"
+        );
+        println!("--- activation check passed ---");
+        return;
+    }
     if align_check {
         // A civilian's `killed:` handler credits alignment bin 72 only when the player was the
         // killer — `actor_<class>.cog` does `killer = GetSourceRef(); if (player == killer)
@@ -16078,6 +16184,23 @@ fn cull_sectors(
                 rt.sector_sighted(sector);
             }
         }
+        // A thing's class cog is sent `created` when its sector is **first drawn**, not at level
+        // load: retail's level-1 autosave (written at load) carries no population bin 73, and its
+        // level-2 autosave (after the level was played) carries 10.5. `awaken_sector` is idempotent,
+        // so this only fires once per thing however many frames the room stays in view.
+        let mut woke = 0usize;
+        for (sector, &visible) in wanted.iter().enumerate() {
+            if !visible {
+                continue;
+            }
+            for instance in rt.awaken_sector(sector as i32) {
+                rt.pending_messages.push((instance, "created", [0.0; 2], None));
+                woke += 1;
+            }
+        }
+        if woke > 0 && std::env::var_os("BK_CULL_TRACE").is_some() {
+            println!("wake: {woke} class script(s) woke with their sector");
+        }
         // A thing counts as drawn when its own sector is visible and its body is inside the frustum.
         // That is coarser than the engine's per-thing clip (no per-triangle test), so it can fire a
         // frame early for something in the same room behind a pillar.
@@ -20605,10 +20728,8 @@ fn setup(
             let mut rt = sim.world.borrow_mut();
             rt.thing_class_cog.insert(index, instance as i32);
             class_links.push((instance, index));
-            // `created:` is sent once the thing exists — the actor scripts arm their timers there.
-            if script.label("created").is_some() {
-                rt.pending_messages.push((instance, "created", [0.0; 2], None));
-            }
+            // `created:` is *not* sent here: the engine sends it when the thing's sector is first
+            // drawn (`cull_sectors` wakes the room), which is what retail's load-time autosave shows.
             started += 1;
         }
         if started > 0 {

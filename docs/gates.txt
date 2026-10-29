@@ -575,3 +575,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - The damage bus carries its attacker (`damage_typed_from`, filled from the bolt's/explosion's owner),
   so `killed:` handlers can tell the player's kills from the world's.
 - `cargo test --release`: **147 passed**: parity gate re-run **6/6**.
+
+## Update — round 107
+
+- `--gates`: **64 gates, 0 failed, 0 skipped**. The new `--activation` gate holds dormancy to retail's
+  own autosaves: the load state is dormant (`bin 73 = 0`, exactly what retail's level-1 load-time save
+  carries), the first wake of a sector credits the population bin (`powerdroid`, `actor_go.cog`:
+  +0.5), and the second wake is a no-op.
+- Things now wake when their sector is first drawn (`cull_sectors` -> `Runtime::awaken_sector`) instead
+  of at level load, so the ledger's thing-activation deviation is retired.
+- `cargo test --release`: **147 passed**; parity gate re-run **6/6** (the captures' rooms are unaffected);
+  docs links 132/132.

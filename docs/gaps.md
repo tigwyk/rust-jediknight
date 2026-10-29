@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **63 gates, 147 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **64 gates, 147 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -1349,7 +1349,7 @@ more blockers behind the first-run ones; all are fixed and now gated.
   found next to the executable's checkout as well as the cwd (`BK_SMKDEC` overrides); the declared
   MSRV is Bevy's real one, **1.97.1**; the release note's audit line now quotes the whole summary.
 
-Current: **63 gates** (`--gates` windowed `0 of 63 failed, 0 skipped`; `BK_HEADLESS=1`
+Current: **64 gates** (`--gates` windowed `0 of 64 failed, 0 skipped`; `BK_HEADLESS=1`
 `0 of 61 failed, 9 skipped`) and **130 tests**. `--tour`: 28 rows (25 files), 5543 things, 23 films,
 2 terminal rows, 0 script errors, 1 sound missing from retail data. `--audit`: 540 cogs parsed,
 1854 labels, 7683 symbols, 35/35 levels clean, 10 unresolved asset references, 57 undecoded files.
@@ -1468,7 +1468,7 @@ Remaining owner actions: explicit approval to push, and the human playthrough ca
 - **Documentation:** `scripts/check-docs-links.ps1` resolves every relative link against the
   file that contains it (the failure mode that once left 34 broken links in the progress log);
   CI runs it, and it passes locally with 108 links across 7 files.
-- **What is deliberately not in CI:** the 63 gates under `--gates` need the retail game install,
+- **What is deliberately not in CI:** the 64 gates under `--gates` need the retail game install,
   which the repository does not ship and CI must not download. `cargo fmt --check` is not
   enforced yet because the tree is not rustfmt-clean, and clippy runs with ~140 warnings (no
   errors), so neither is a gate. Both are noted as future tightening, not hidden.
@@ -2855,3 +2855,31 @@ That is the alignment chain end to end: a civilian killed by the player credits 
 1.0 for a person — the scripts' own amounts), `CalcAlignment`'s ratio term `20 − (72/73)·100` turns it
 into a lower alignment, and the value is stored in bin 75 the way the tally stores it. The gate is in
 the `--gates` registry, which is now **63 gates**.
+
+**Things wake with their sector, as retail's own saves require (round 107).** Round 105's class scripts all
+woke at level load, so level 1's population bin (73) read 12.5 before the player had moved, against
+retail's 10.5. Retail's *two* autosaves settle what the engine does: the **level-1 load-time** save
+carries no bin 73 at all, and the **level-2** save carries 10.5 after the level was played. So a thing's
+class cog is sent `created` when its *sector is first drawn* (`sithRender` latches
+`SITH_SECTOR_SEEN`), not when the level loads.
+
+- `Runtime::awakened` tracks the things that have woken, and `Runtime::awaken_sector(sector)` wakes the
+  sector's things once and answers the class instances that should be sent `created` (idempotent: the
+  second call for the same sector answers nothing, so it can run every frame).
+- `cull_sectors` — which already computes each frame's visible sectors for rendering, the `sighted`
+  pass and the `sector_sighted` latch — now calls it, queues `created` for the instances, and the live
+  bus delivers them on the next frame. `setup` no longer queues `created` for every class instance.
+- New **`--activation` gate** holds the behaviour to retail: it builds the class instances the way
+  `setup` does, asserts the load state is dormant (`bin 73 = 0`, retail's level-1 autosave), wakes one
+  sector the way `cull_sectors` does, ticks the timer `created:` armed the way `run_pulses_and_timers`
+  does, and requires the population bin to move — then requires the second wake to be a no-op:
+
+```text
+activation: load is dormant (bin 73 = 0, retail's level-1 autosave); thing 29 (`powerdroid`,
+            `actor_go.cog`) in sector 106 woke and credited bin 73 by 0.5; waking the sector again
+            is a no-op
+--- activation check passed ---
+```
+
+The port now matches retail's load-time fixture exactly where it used to be wrong by 12.5, and the
+after-play number becomes a function of the route (as it is in retail) rather than a constant.
