@@ -612,3 +612,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
   surfdrag`), several outside their class's 3.0–3.5-unit firing range, and two `nman` spectators with no
   `PrimaryFire` — the measurement step 5 needs.
 - `cargo test --release`: **147 passed**; `--gates` green (see below); docs links 132/132.
+
+## Update — round 110
+
+- `sithAIAwareness` is ported: `Runtime::sector_adjoins` (openings paired through their adjoin `mirror`
+  rows, attenuation = the mirror row's `dist`), `transmit_awareness` (records per sector and side,
+  `next = strength − dist`, floor `0x52315c` = 0.00277) and `awareness_at` (the AI's reader). The flat
+  3-unit radius stand-in is gone.
+- The `--adjoins` gate now checks the propagation against level 1's graph: sector 0 → 13 costs 1.13, a
+  shot's 4.0 crosses, a below-floor event crosses nothing, and a side's record stays its own.
+- The door capture is unchanged (3 shots, 0 hits): `BK_AI_TRACE=2` shows the firing gates
+  (`facing dot < minDot`, `range > maxDist`) are what stop the room, so those are the remaining step-5
+  work.
+- `cargo test --release`: **147 passed**; `--gates` and parity re-run below; docs links 132/132.

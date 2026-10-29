@@ -2945,3 +2945,37 @@ face it; several never close inside 3.5 units, the `bh` classes fire only inside
 `nman` spectators have no `PrimaryFire` at all. Only three gunners ever convert, which is why the port's
 frame is un-tinted where retail's reference is saturated — so the ledger row's remaining difference is
 **AI engagement timing**, and the trace is the instrument for closing it.
+
+**`sithAIAwareness` is ported: per-sector records, adjoin attenuation, side masking (round 110).** The
+deviation row's stand-in was a flat 3-unit radius around the target. The recovered routines pin the
+real shape: `CreateTransmittingEvent` (`0x4f2a90`) queues an event at the shooter with a strength
+(`sithWeapon_WeaponFire` uses `0x40800000` = 4.0, `KillActor` 5.0, `DestroyWeapon` 2.0), and
+`ProcessEvent` (`0x4f2c30`) keeps, per **sector and side**, the strongest record — the event position,
+the adjoin entry point and the source thing — then recurses into each of the sector's adjoins with
+`next = strength − *(adjoin->link + 0x18)`, only while the value stays above the floor constant at
+`0x52315c` = **0.00277**.
+
+The port now does that on the data the level actually ships:
+
+- `Runtime::sector_adjoins` pairs an opening through its adjoin rows: each surface owns one row and the
+  row's `mirror` names the row on the other side (`World adjoins 0: 0x7 50 2.00` — flags, mirror, dist).
+  The attenuation is the **mirror row's `dist`**, the only per-portal float the level carries and the
+  field `ProcessEvent` reads through the adjoin link.
+- `Runtime::transmit_awareness(sector, side, pos, strength)` records the strongest event per
+  `(sector, side)` and walks the graph, subtracting each opening's `dist` and stopping under the floor.
+  `awareness_at(sector, side)` is the reader the AI needed: an actor whose own room and alignment have a
+  fresh record uses the shooter's position as its remembered target, so reinforcements converge on
+  gunfire the way the engine's do. The 3-unit/8-second radius and its field are deleted.
+- New assertions in the **`--adjoins` gate** hold it to level 1's own graph: the first affordable
+  opening is sector 0 → 13 at a cost of **1.13**, a shot's 4.0 crosses it, a below-floor event crosses
+  no opening, and a record for one side never leaks to the other:
+
+```text
+adjoins: awareness sector 0 -> 13 costs 1.13 (a shot carries 4, the floor is 0.00277); a below-floor
+         event crosses no opening and a side's record stays its own
+```
+
+Measured on the door capture afterwards: still **3 shots, 0 hits**. Awareness was not the binding
+constraint — with `BK_AI_TRACE=2` the refusals are dominated by `facing dot < minDot` (the gunners start
+100–170° off and turn at 23°/s) and `range > maxDist` (3.0–3.5 units for these classes), so **the AI's
+facing/range dynamics are the remaining step-5 item**.

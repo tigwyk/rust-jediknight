@@ -692,11 +692,15 @@ fn turn_toward(before: f32, wanted: f32, rate: f32, dt: f32) -> f32 {
     before + delta
 }
 
-/// How far a fired shot tells an actor on the same side where the target is, and for how long.
-/// The engine propagates awareness through sector adjoins with attenuation
-/// (`sithAIAwareness_ProcessEvent`); that attenuation data is not recovered, so a flat radius stands
-/// in - a deliberate ceiling, measured on the door and catwalk captures.
-pub const AI_AWARE_RADIUS: f32 = 3.0;
+/// `sithAIAwareness_ProcessEvent`'s floor (`0x52315c`): a propagated event stops crossing adjoins
+/// once its strength falls below this.
+pub const AI_AWARE_FLOOR: f32 = 0.00277;
+/// The strength a fired shot's event carries: `sithWeapon_WeaponFire` (`0x4d44f0`) creates it with
+/// `0x40800000` = 4.0. `sithActor_KillActor` uses 5.0 and `sithWeapon_DestroyWeapon` 2.0; the port
+/// raises the firing one, which is what a fight is mostly made of.
+pub const AI_AWARE_SHOT: f32 = 4.0;
+/// How long a record stays fresh. The engine's own fade is not recovered; the flat value keeps the
+/// old stand-in's window.
 pub const AI_AWARE_SECONDS: f32 = 8.0;
 
 pub struct Runtime {
@@ -1059,7 +1063,14 @@ pub struct Runtime {
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
     /// alert lands on buyers within a radius and expires (see `AWARE_RADIUS`/`AWARE_SECONDS`).
-    pub ai_aware: BTreeMap<usize, ([f32; 3], f32)>,
+    /// `sithAIAwareness`'s record: per sector and side, the strongest event still fresh —
+    /// `(strength, position, time)`. The engine keeps a 25-dword block per sector (`ProcessEvent`
+    /// indexes it by side); this keeps the two values the AI reads plus the fade time.
+    pub sector_awareness: BTreeMap<(i32, i32), (f32, [f32; 3], f32)>,
+    /// The adjoin graph the record propagates through: `(neighbour sector, cost)` per sector. The
+    /// cost is the adjoin's own `dist` float — the only per-portal number a level carries, and the
+    /// field `004f2c30_sithAIAwareness_ProcessEvent.c` reads through the adjoin link.
+    pub sector_adjoins: Vec<Vec<(i32, f32)>>,
     /// Per actor, the doorway centres it is walking through when its straight line is walled off,
     /// from `Collision::route`. A waypoint is popped on arrival, and a scripted destination starts
     /// again with an empty route.
@@ -1169,6 +1180,52 @@ impl Runtime {
                     .map(|e| (t.name.to_ascii_lowercase(), e.to_ascii_lowercase()))
             })
             .collect();
+        // `sithAIAwareness` propagates through the **adjoin graph** (`ProcessEvent` recurses over a
+        // sector's adjoin list, subtracting each adjoin's attenuation). An adjoin is shared by the
+        // two surfaces of one opening, so pairing those surfaces gives the sector-to-sector links;
+        // the cost is the adjoin row's `dist` float, which is the only per-portal number shipped.
+        let mut sector_adjoins: Vec<Vec<(i32, f32)>> = vec![Vec::new(); level.sectors.len()];
+        {
+            // A surface's sector: the level groups surfaces per room (`SECTOR` rows carry
+            // `(first, count)` over the surface list).
+            let mut surface_sector: Vec<i32> = vec![-1; level.surfaces.len()];
+            for (sector, room) in level.sectors.iter().enumerate() {
+                let (first, count) = room.surfaces;
+                for index in first..(first + count).min(level.surfaces.len()) {
+                    surface_sector[index] = sector as i32;
+                }
+            }
+            // Each surface owns one adjoin row, and the row's `mirror` names the row of the surface on
+            // the other side of the same opening (`World adjoins 0: 0x7 50 2.00` — flags, mirror,
+            // dist). Pairing those rows gives the sector-to-sector links.
+            let mut surface_of_adjoin: Vec<Option<usize>> = vec![None; level.adjoins.len()];
+            for (index, surface) in level.surfaces.iter().enumerate() {
+                if let Some(slot) = usize::try_from(surface.adjoin).ok().filter(|slot| *slot < level.adjoins.len()) {
+                    surface_of_adjoin[slot] = Some(index);
+                }
+            }
+            for (adjoin, row) in level.adjoins.iter().enumerate() {
+                let Ok(mirror) = usize::try_from(row.mirror) else { continue };
+                let (Some(first), Some(second)) = (
+                    surface_of_adjoin[adjoin],
+                    surface_of_adjoin.get(mirror).copied().flatten(),
+                ) else {
+                    continue;
+                };
+                if mirror <= adjoin {
+                    continue; // one link per opening
+                }
+                let (a, b) = (surface_sector[first], surface_sector[second]);
+                if a < 0 || b < 0 || a == b {
+                    continue;
+                }
+                // `ProcessEvent` subtracts the attenuation it finds through the adjoin's link; the
+                // link is the mirror row, so its `dist` is the cost.
+                let cost = level.adjoins.get(mirror).map(|a| a.dist).unwrap_or(0.0).max(0.0);
+                sector_adjoins[a as usize].push((b, cost));
+                sector_adjoins[b as usize].push((a, cost));
+            }
+        }
         // `fireoffset=(x/y/z)`: where a shot leaves the shooter, in the template's own frame and
         // level units (x lateral, y forward, z up) — the port used to scale it by ten, which put a
         // Ree-Yees' muzzle 0.8 units ahead of a 0.07-radius body and made retail's point-blank hits
@@ -1575,7 +1632,8 @@ impl Runtime {
             ai_look: BTreeMap::new(),
             ai_route: BTreeMap::new(),
             ai_last_seen: BTreeMap::new(),
-            ai_aware: BTreeMap::new(),
+            sector_awareness: BTreeMap::new(),
+            sector_adjoins: sector_adjoins.clone(),
             ai_fire_target: BTreeMap::new(),
             ai_flee: BTreeMap::new(),
             ai_classes: BTreeMap::new(),
@@ -2510,6 +2568,44 @@ impl Runtime {
         )
     }
 
+    /// `sithAIAwareness_ProcessEvent` (`0x004f2c30`): record the event in its own sector for its
+    /// side, then walk the adjoin graph, subtracting each adjoin's attenuation and stopping under the
+    /// engine's floor. The engine stores the strongest record per sector and side (with the event's
+    /// position and the adjoin entry point); the position is what the AI uses, so that is kept.
+    pub fn transmit_awareness(&mut self, sector: i32, side: i32, pos: [f32; 3], strength: f32) {
+        let mut stack = vec![(sector, strength)];
+        let mut visited = 0usize;
+        while let Some((at, strength)) = stack.pop() {
+            visited += 1;
+            if visited > 4096 {
+                break; // ponytail: a breadth guard; the strength floor ends real propagation first.
+            }
+            if at < 0 || at as usize >= self.sector_adjoins.len() {
+                continue;
+            }
+            if self.sector_awareness.get(&(at, side)).is_some_and(|r| r.0 >= strength) {
+                continue;
+            }
+            self.sector_awareness.insert((at, side), (strength, pos, self.time));
+            for (next, cost) in &self.sector_adjoins[at as usize] {
+                let next_strength = strength - cost;
+                if next_strength > AI_AWARE_FLOOR {
+                    stack.push((*next, next_strength));
+                }
+            }
+        }
+        // Fade the records that are past the window, the way the engine's own timer does.
+        self.sector_awareness
+            .retain(|_, (_, _, at)| self.time - *at < AI_AWARE_SECONDS);
+    }
+
+    /// What an actor standing in `sector` on `side` would read as the last known enemy position.
+    pub fn awareness_at(&self, sector: i32, side: i32) -> Option<[f32; 3]> {
+        self.sector_awareness
+            .get(&(sector, side))
+            .filter(|(_, _, at)| self.time - *at < AI_AWARE_SECONDS)
+            .map(|(_, pos, _)| *pos)
+    }
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
     /// The engine runs an instinct scheduler over the `.ai` file's weights; this build uses the
@@ -2640,12 +2736,12 @@ impl Runtime {
             }
             // `sithAIAwareness`'s record is a *position*, which is used exactly like a last-seen
             // one: the actor turns and walks there, and the fight reaches it without it having seen
-            // anything itself.
+            // anything itself. The record lives per **sector and side**, so an actor reads the one
+            // its own room and alignment own — that is the reader the stand-in could not express.
             let remembered = self.ai_last_seen.get(&index).copied().or_else(|| {
-                self.ai_aware
-                    .get(&index)
-                    .filter(|(_, at)| self.time - at < AI_AWARE_SECONDS)
-                    .map(|(at, _)| *at)
+                let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
+                let side = ai.as_ref().map(|ai| ai.alignment as i32).unwrap_or(0);
+                self.awareness_at(sector, side)
             });
             // `AIFlee(actor, from)`: the actor runs away from that thing and does not shoot, which
             // is a whole mode in the engine (`sithAI_Flee`). It is a script's order, so it does not
@@ -2946,32 +3042,15 @@ impl Runtime {
                 fired += 1;
             }
         }
-        // `sithAIAwareness_CreateTransmittingEvent`/`ProcessEvent`: firing tells the shooter's own
-        // side where the target is. The engine keeps a record per sector, propagates it through
-        // adjoins while the strength stays above its floor and fades it with distance; neither the
-        // per-adjoin attenuation nor the reader is recovered, so a flat radius around the target
-        // stands in below (a deliberate ceiling, measured on the door/catwalk captures).
-        self.ai_aware
-            .retain(|_, (_, at)| self.time - *at < AI_AWARE_SECONDS);
-        if !shooters.is_empty() {
-            let roster: Vec<(usize, f32)> = self.ai.iter().map(|(i, a)| (*i, a.alignment)).collect();
-            for shooter in shooters {
-                let Some(side) = self.ai.get(&shooter).map(|a| a.alignment) else { continue };
-                let dx = target[0] - self.things.get(shooter).map(|t| t.pos[0]).unwrap_or(target[0]);
-                let dy = target[1] - self.things.get(shooter).map(|t| t.pos[1]).unwrap_or(target[1]);
-                let _ = (dx, dy);
-                for (actor, alignment) in &roster {
-                    if *actor == shooter || (alignment - side).abs() > 1e-3 {
-                        continue;
-                    }
-                    let Some(thing) = self.things.get(*actor) else { continue };
-                    let (ax, ay) = (thing.pos[0] - target[0], thing.pos[1] - target[1]);
-                    if (ax * ax + ay * ay).sqrt() > AI_AWARE_RADIUS {
-                        continue;
-                    }
-                    self.ai_aware.insert(*actor, (target, self.time));
-                }
-            }
+        // `sithAIAwareness_CreateTransmittingEvent` (`0x4f2a90`) + `ProcessEvent` (`0x4f2c30`):
+        // firing raises an event at the shooter with strength 4.0, and the engine's propagation
+        // carries it through the adjoin graph for the shooter's own side. The record is the
+        // shooter's position, which is what makes reinforcements converge on gunfire.
+        for shooter in shooters {
+            let Some(side) = self.ai.get(&shooter).map(|a| a.alignment as i32) else { continue };
+            let Some(thing) = self.things.get(shooter) else { continue };
+            let (sector, pos) = (thing.sector, thing.pos);
+            self.transmit_awareness(sector, side, pos, AI_AWARE_SHOT);
         }
         let _ = walked;
         fired
