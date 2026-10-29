@@ -2327,3 +2327,16 @@ the **first non-level-1 retail spawn** this project has captured and identified,
 first level pair: `tools/parity/retail-c1-spawn.png` + `coords-c1-spawn.txt` are the retail reference
 for a port `--start c1` capture. Episode 1 is JK1's `01narshadda` (sector 339), episode 2 is CTF's
 `c1` (sector 36), and episode 3 remains to be captured the same way.
+
+**Correction: the chooser rows are level *categories*, not single-player episodes (round 88).** The
+three rows in the `[Debug]` chooser are the JK1 single-player campaign, the multiplayer maps
+(JK1CTF: `c1`-`c3`) and **Jedi Training** (JK1MP: `m2`, `m4`, ...) - so rows 2 and 3 boot multiplayer
+and training content, which is **not part of the single-player experience**. The captures are exact
+(`c1`: retail Pos (4.20,-0.00,0.12) sector 36 vs port spawn [4.2,-0.00005,0.157114] sector 36;
+`m2`: retail (-0.02,-0.50,0.12) sector 61 vs port [-0.01995,-0.5,0.157114] sector 61) and prove the
+harness can drive the category selector, but they are **not** Phase 2 campaign breadth. Level 1
+remains the only single-player level retail can boot; levels 2-21 still need a genuine level-2 save.
+Phase 2's port side is covered instead by `--soak-all`, which just ran: **35 level(s) ran, 0 with a
+non-finite position**, one finding - `m5` (a training-category level, out of SP scope) has 4 bodies
+outside every sector. So every archived level boots and runs in the port; the retail spawn comparison
+for levels 2-21 stays on the deviation ledger (genuine-save requirement).
