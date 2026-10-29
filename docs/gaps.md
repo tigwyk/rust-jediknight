@@ -2979,3 +2979,46 @@ Measured on the door capture afterwards: still **3 shots, 0 hits**. Awareness wa
 constraint — with `BK_AI_TRACE=2` the refusals are dominated by `facing dot < minDot` (the gunners start
 100–170° off and turn at 23°/s) and `range > maxDist` (3.0–3.5 units for these classes), so **the AI's
 facing/range dynamics are the remaining step-5 item**.
+
+**Captures are now deterministic in game time, and that was the door-capture mystery (round 111).** Round
+109 recorded that the ledger's "door capture: 41–47 shots and 15 hits" could not be reproduced on any of
+three binaries. The cause was the harness, not the port: a `--shot` run stepped the simulation by the
+frame's **wall-clock** delta, so "600 frames" was a different amount of game time on every machine and
+every run — the same command produced 3 shots when the window rendered fast and dozens when it lagged.
+
+The capture path now owns its clock: `CaptureDt` is inserted with `1/60` whenever `--shot` names a path,
+and every simulation system reads `sim_dt(&time, capture)` instead of `time.delta_secs()`
+(`advance_sim`, `ai_shots`, `walk_player`, `animate_actors`, `resume_sleeping_labels`,
+`run_pulses_and_timers`). 600 frames are now exactly **10.00 s** of game time, which is what retail's
+harness assumes. Measured on the door capture:
+
+```text
+run 1: 44 shots, 15 hits
+run 2: 47 shots, 15 hits
+run 3: 44 shots, 15 hits
+```
+
+— the ledger's figure, reproduced (the residual shot spread is the AI's own ±20% fire-delay jitter). The
+round-109 "not reproducible" conclusion is superseded: the recorded numbers were right, and the harness
+was measuring an unknown amount of time.
+
+**Re-captured with the fixed clock, the gated parity pairs all improved**, because the old frames were
+taken at the wrong game moment: spawn 0.6246 → **0.6602**, spawn_pose 0.6130 → **0.6603**, spawn_yaw30
+0.6206 → **0.6385**, route_cantina 0.7279 → **0.7381**, route_lower 0.7081 → **0.7119**, route_street
+0.7236 → **0.7327** (gate: 6/6 pass, unchanged thresholds).
+
+**`LookForTarget` is implemented** (a deliberate stand-in: `sithAICmd_LookForTarget` is not in the
+recovered source). An idle actor with nothing in sight and no memory now runs the instinct on its shipped
+interval (the first argument, 500 ms in every class) and, if the player is inside its own `sightdist`
+with a clear line, drops the position into the last-seen slot — so the body turns at the same
+`maxrotthrust / surfdrag` clamp as everything else and comes round to find it. Measured at the
+deterministic clock, `BK_NO_SCAN=1` as the control:
+
+```text
+with the scan:    46 shots, 15 hits   (matches retail's saturation point)
+without:          31 shots,  2 hits   (gunners start 100-170 deg off and never come round)
+```
+
+The pair scores of the two combat rows (catwalk 0.4577 / door 0.4111) are still dominated by retail's
+saturated damage tint and the doorway framing, so they stay ungraded on picture — but the *state* behind
+them is now the ledger's 15-hit fight, on a clock that means the same thing every run.

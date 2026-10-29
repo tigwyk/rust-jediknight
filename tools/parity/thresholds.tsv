@@ -20,8 +20,11 @@
 #
 # The numbers are tied to the capture policy in tools/parity/port-capture.ps1: 600 frames
 # (`--frames 600`), the window sized from the retail sidecar, and whatever renderer
-# retail-capture.ps1 used (16-bit D3D via dgVoodoo2 by default). Changing either side's
-# framing or frame count invalidates them.
+# retail-capture.ps1 used (16-bit D3D via dgVoodoo2 by default). `--shot` runs step the
+# simulation by a fixed 1/60 s (`CaptureDt`) so 600 frames are exactly 10 s of game time,
+# which is the moment the retail side's capture represents; a wall-clock step made the same
+# command measure a different amount of play on every machine. Changing either side's
+# framing or frame count invalidates the numbers.
 #
 # route_catwalk and route_door are captured but intentionally not gated. The port now warps the
 # player to the row's pose (`--warp`, the same pose retail's `warp` gives its body), so scripts and

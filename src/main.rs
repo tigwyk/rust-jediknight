@@ -10438,6 +10438,7 @@ fn main() {
         .insert_resource(ForceEconomyProbe { enabled: force_economy })
         .insert_resource(ForceGrantProbe { enabled: force_grant })
         .insert_resource(PulseCount::default())
+        .insert_resource(CaptureDt(shot.as_ref().and_then(|s| (!s.is_empty()).then_some(1.0 / 60.0))))
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
         .insert_resource(Cull(cull))
@@ -13890,7 +13891,8 @@ fn pose_view(
         ..default()
     }))
     .add_plugins(level_mat::LevelMaterialPlugin)
-    .insert_resource(Shot(shot.map(PathBuf::from)))
+    .insert_resource(CaptureDt(shot.as_ref().and_then(|s| (!s.is_empty()).then_some(1.0 / 60.0))))
+        .insert_resource(Shot(shot.map(PathBuf::from)))
     .insert_resource(ShotFrame(30))
     .insert_resource(ClearColor(Color::srgb(0.06, 0.06, 0.08)))
     .add_systems(Startup, move |mut commands: Commands,
@@ -16473,7 +16475,7 @@ fn actors_follow_runtime(
 /// tick (15/s per actor), which holds for the ~120 actors a level places; the upgrade
 /// path is to keep the topology and rewrite positions/normals in place, or to bind the
 /// puppet's joints as a skin.
-fn animate_actors(
+fn animate_actors(mut capture: Option<Res<CaptureDt>>, 
     time: Res<Time>,
     on: Option<Res<Animate>>,
     sim: Option<Res<Sim>>,
@@ -16486,7 +16488,7 @@ fn animate_actors(
         return;
     }
     let (Some(world), Some(mut actors)) = (world, actors) else { return };
-    let dt = time.delta_secs();
+    let dt = sim_dt(&time, capture.as_deref());
     // A dead actor plays `death` once and holds its last frame. The runtime is the source of
     // truth for health, so the renderer reads it each frame rather than being told.
     let dead: std::collections::HashSet<usize> = sim
@@ -17245,14 +17247,14 @@ fn share_collider(
 ///
 /// `sithCog_ProcessCog` wakes a waiting cog when its deadline passes; here the label is run again and
 /// `run_label` continues from the statement after the `sleep`.
-fn resume_sleeping_labels(
+fn resume_sleeping_labels(capture: Option<Res<CaptureDt>>, 
     time: Res<Time>,
     world: Option<Res<World>>,
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<PulseCount>>,
 ) {
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
-    let dt = time.delta_secs().min(0.1);
+    let dt = sim_dt(&time, capture.as_deref());
     let mut resumed = 0usize;
     for (script_name, vm) in &mut sim.instances {
         vm.now += dt;
@@ -17282,14 +17284,14 @@ fn resume_sleeping_labels(
 /// rest. Level 1's soundtrack is the clearest example: `SetPulse(0.1)` plus `SetMusicVol` inside
 /// `pulse` is what fades the track in, so without this the music stays at the volume the first
 /// `SetMusicVol` gave it.
-fn run_pulses_and_timers(
+fn run_pulses_and_timers(capture: Option<Res<CaptureDt>>, 
     time: Res<Time>,
     world: Option<Res<World>>,
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<PulseCount>>,
 ) {
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
-    let dt = time.delta_secs().min(0.1);
+    let dt = sim_dt(&time, capture.as_deref());
     if dt <= 0.0 {
         return;
     }
@@ -20357,14 +20359,14 @@ fn billboard_sprites(
 ///
 /// The instinct scheduler's weights are not implemented (see `Runtime::ai_tick`); what this
 /// does use is the file's own `sightdist=` and `fov=`, and the actor's own `weapon=`.
-fn ai_shots(
+fn ai_shots(capture: Option<Res<CaptureDt>>, 
     time: Res<Time>,
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
     collisions: Option<Res<Collision>>,
 ) {
     let (Some(sim), Some(player)) = (sim, player) else { return };
-    let dt = time.delta_secs().min(0.1);
+    let dt = sim_dt(&time, capture.as_deref());
     let mut rt = sim.world.borrow_mut();
     let mut adjusted = 0usize;
     let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer"))
@@ -22175,6 +22177,21 @@ struct Shot(Option<PathBuf>);
 #[derive(Resource)]
 struct ShotFrame(u32);
 
+/// The simulation's time step when a capture run is driving the app (`--shot`).
+///
+/// A capture must be **reproducible in game time**, not in wall-clock time: retail's harness assumes
+/// 600 frames are ten seconds, and a wall-clock step made the same capture produce 3 shots on one run
+/// and dozens on a slower one (round 109 could not reproduce the ledger's door figure at any commit).
+/// With `Some(step)` every sim system advances exactly that much per frame, so 600 frames is 10.00 s
+/// however fast the machine renders.
+#[derive(Resource)]
+struct CaptureDt(Option<f32>);
+
+/// The step the simulation systems use: the capture's fixed step, else the frame's own delta.
+fn sim_dt(time: &Time, capture: Option<&CaptureDt>) -> f32 {
+    capture.and_then(|c| c.0).unwrap_or_else(|| time.delta_secs().min(0.1))
+}
+
 /// The level's scripts running against the renderer: the world state they mutate, the
 /// bound instances (kept so a message can be delivered later), and which entities draw
 /// which thing.
@@ -22195,9 +22212,9 @@ struct Sim {
 struct Deliver(bool);
 
 /// Step the scripts' world and push the moved things' poses into the renderer.
-fn advance_sim(time: Res<Time>, sim: Option<ResMut<Sim>>, mut drawn: Query<&mut Transform>) {
+fn advance_sim(capture: Option<Res<CaptureDt>>, time: Res<Time>, sim: Option<ResMut<Sim>>, mut drawn: Query<&mut Transform>) {
     let Some(mut sim) = sim else { return };
-    let moved = sim.world.borrow_mut().step(time.delta_secs().min(0.1));
+    let moved = sim.world.borrow_mut().step(sim_dt(&time, capture.as_deref()));
     for &i in &moved {
         let Some(entities) = sim.entities.get(&i) else { continue };
         let pose = {
@@ -22215,7 +22232,7 @@ fn advance_sim(time: Res<Time>, sim: Option<ResMut<Sim>>, mut drawn: Query<&mut 
     }
     // Once a second, say what the renderer is actually showing for one moving thing:
     // the entity's own transform, not the runtime's copy of the position.
-    sim.elapsed += time.delta_secs();
+    sim.elapsed += sim_dt(&time, capture.as_deref());
     if !moved.is_empty() && (sim.reported == 0.0 || sim.elapsed - sim.reported >= 1.0) {
         sim.reported = sim.elapsed;
         let i = moved[0];
@@ -22394,7 +22411,7 @@ fn in_water(
             .is_some_and(|flags| flags & collide::SECTOR_UNDERWATER != 0)
 }
 
-fn walk_player(
+fn walk_player(capture: Option<Res<CaptureDt>>, 
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     world: Option<Res<World>>,

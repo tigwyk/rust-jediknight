@@ -625,3 +625,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   (`facing dot < minDot`, `range > maxDist`) are what stop the room, so those are the remaining step-5
   work.
 - `cargo test --release`: **147 passed**; `--gates` and parity re-run below; docs links 132/132.
+
+## Update — round 111
+
+- **Capture runs are now deterministic in game time**: `CaptureDt` gives every `--shot` run a fixed
+  1/60 s step (`sim_dt` replaces `time.delta_secs()` in `advance_sim`, `ai_shots`, `walk_player`,
+  `animate_actors`, `resume_sleeping_labels`, `run_pulses_and_timers`), so `--frames 600` is exactly
+  10.00 s of play. The door capture now reproduces the ledger's figure on every run (44/47/44 shots,
+  **15 hits**), which supersedes round 109's "not reproducible" finding: the harness, not the port, was
+  drifting.
+- Re-captured with the fixed clock, the gated parity pairs all rose: spawn 0.6246 → **0.6602**,
+  spawn_pose 0.6130 → **0.6603**, spawn_yaw30 0.6206 → **0.6385**, route_cantina 0.7279 → **0.7381**,
+  route_lower 0.7081 → **0.7119**, route_street 0.7236 → **0.7327** (6/6 pass).
+- `LookForTarget` implemented as the acquisition instinct (interval from the shipped first argument),
+  measured against `BK_NO_SCAN=1`: **46 shots / 15 hits with it, 31 / 2 without**.
+- `cargo test --release`: **147 passed**; docs links 132/132.

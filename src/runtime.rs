@@ -1059,6 +1059,10 @@ pub struct Runtime {
     /// Where an actor last had the player in view (`sithAI`'s last known position). Losing sight
     /// means "walk there", and arriving clears it.
     pub ai_last_seen: BTreeMap<usize, [f32; 3]>,
+    /// When each actor may run its `LookForTarget` scan next. The instinct's first shipped argument
+    /// is the interval (500 ms in every class), and a scan that finds a target hands it to the normal
+    /// chase/aim logic rather than snapping the body round.
+    pub ai_scan: BTreeMap<usize, f32>,
     /// `sithAIAwareness`: a position other actors of the same side were told about, and when. A
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
@@ -1632,6 +1636,7 @@ impl Runtime {
             ai_look: BTreeMap::new(),
             ai_route: BTreeMap::new(),
             ai_last_seen: BTreeMap::new(),
+            ai_scan: BTreeMap::new(),
             sector_awareness: BTreeMap::new(),
             sector_adjoins: sector_adjoins.clone(),
             ai_fire_target: BTreeMap::new(),
@@ -2741,7 +2746,11 @@ impl Runtime {
             let remembered = self.ai_last_seen.get(&index).copied().or_else(|| {
                 let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
                 let side = ai.as_ref().map(|ai| ai.alignment as i32).unwrap_or(0);
-                self.awareness_at(sector, side)
+                let aware = self.awareness_at(sector, side);
+                if aware.is_some() && std::env::var_os("BK_AI_TRACE").is_some() {
+                    eprintln!("ai: {index} reads the awareness record of sector {sector} side {side}");
+                }
+                aware
             });
             // `AIFlee(actor, from)`: the actor runs away from that thing and does not shoot, which
             // is a whole mode in the engine (`sithAI_Flee`). It is a script's order, so it does not
@@ -2757,6 +2766,41 @@ impl Runtime {
                 && remembered.is_none()
                 && fleeing.is_none()
             {
+                // `LookForTarget`: an idle actor with nothing in sight periodically scans for one.
+                // The command itself (`sithAICmd_LookForTarget`) is not in the recovered source, so
+                // this reads its shipped arguments the way the other instincts are read — the first
+                // is the interval in milliseconds — and searches no further than the actor's own
+                // `sightdist`, i.e. "notices you when you are close enough to notice", never an
+                // omniscient sweep. A find goes into the last-seen slot, so the body turns and walks
+                // at the same `maxrotthrust / surfdrag` clamp as everything else instead of snapping.
+                if std::env::var_os("BK_NO_SCAN").is_none()
+                    && let Some(look) = ai.as_ref().and_then(|ai| ai.instinct("LookForTarget")).cloned()
+                {
+                    let interval = (look.weight / 1000.0).max(0.05);
+                    let due = self.ai_scan.get(&index).copied().unwrap_or(0.0);
+                    if self.time >= due {
+                        self.ai_scan.insert(index, self.time + interval);
+                        let sight = ai.as_ref().map(|ai| ai.sightdist).unwrap_or(0.0);
+                        if let Some(thing) = self.things.get(index).map(|t| (t.pos, t.sector)) {
+                            let (dx, dy, dz) = (
+                                target[0] - thing.0[0],
+                                target[1] - thing.0[1],
+                                target[2] - thing.0[2],
+                            );
+                            let range = (dx * dx + dy * dy + dz * dz).sqrt();
+                            let clear = self.solids.as_ref().is_none_or(|s| {
+                                !s.segment_blocked(thing.0, target)
+                            });
+                            if range <= sight && clear {
+                                self.ai_last_seen.insert(index, target);
+                                if std::env::var_os("BK_AI_TRACE").is_some() {
+                                    eprintln!("ai: {index} `{ai_template}` LookForTarget finds the body at {range:.2}");
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
                 // Out of sight and nothing remembered: the actor stands where it is, turning to a
                 // scripted look target.
                 if let Some(thing) = self.things.get_mut(index) {
