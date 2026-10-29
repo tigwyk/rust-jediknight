@@ -1,0 +1,5 @@
+# Retail spawn on level 2 ("The Lost Disk"), reached through the devMode level select:
+# [Debug] -> first category row -> Ok -> level row 2 -> Ok. Console coords after the load:
+# Pos: (10.80, -11.98, 3.02) PYR: (0.66, -99.98, 0.66) Sector: 22.
+# The port agrees: --sim --start 02narshadda prints "spawn sector center
+# [10.798077, -11.982778, 3.057114] radius 3.2 (walkplayer sector 22)".

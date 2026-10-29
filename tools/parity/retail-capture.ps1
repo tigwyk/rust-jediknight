@@ -35,6 +35,9 @@ param(
   # Click Load on the submenu and photograph the save list (retail's only remaining route to a
   # level other than the campaign's first, which Phase 2''s spawn audits need).
   [switch]$LoadShot,
+  # Boot a single-player level by number from the [Debug] level list (1 = level 1, 2 = The Lost
+  # Disk, ...). The level list opens after the first category row and its Ok.
+  [string]$StartLevel = '',
   # Click [Debug] on the Single Player submenu and photograph what it offers (devMode may
   # list levels, which would be the clean route to every level).
   [switch]$DebugShot,
@@ -691,6 +694,26 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     Send-JkClick -X 320 -Y 195
     Start-Sleep -Milliseconds 1500
     Log 'clicked Single Player (320,195)'
+    if ($StartLevel) {
+      Send-JkClick -X 105 -Y 102
+      Start-Sleep -Milliseconds 1500
+      Send-JkClick -X 330 -Y 220
+      Start-Sleep -Milliseconds 800
+      Send-JkClick -X 505 -Y 443
+      Start-Sleep -Milliseconds 1500
+      $lvlY = 238 + 15 * ([int]$StartLevel - 1)
+      Send-JkClick -X 330 -Y $lvlY
+      Start-Sleep -Milliseconds 800
+      Send-JkClick -X 505 -Y 443
+      Start-Sleep -Milliseconds 1000
+      $null = Wait-JkConsoleLine -ProcessId $process.Id -Pattern 'parse section things' -TimeoutSec $LevelTimeoutSec
+      Start-Sleep -Milliseconds 12000
+      foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command 'coords')) { Log "console| $line" }
+      $lvlPng = Join-Path $Out ('level-' + $StartLevel + '.png')
+      Save-JkWindowPng -ProcessId $process.Id -Path $lvlPng
+      Log "started level $StartLevel; wrote $lvlPng"
+      return
+    }
     if ($StartEpisode) {
       Send-JkClick -X 105 -Y 102
       Start-Sleep -Milliseconds 1500

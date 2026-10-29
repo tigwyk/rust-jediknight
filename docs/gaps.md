@@ -2353,3 +2353,17 @@ the fixture `tools/parity/jkauto-02narshadda.jks` (level 1's is `jkauto-01narsha
 level-2 captures are possible by loading it, and the same goal-warp + tally + autosave loop should
 advance through the whole campaign - which is Phase 2 breadth without any save-format reverse
 engineering. Harness: `-KeysAfter` (post-console key presses) added for the tally.
+
+**Retail level select: any single-player level boots from the [Debug] menu (round 90).** `[Debug]` ->
+the **first** category row (the single-player campaign) -> **Ok** opens a **Choose Level** list
+(*1 - Double Cross on Nar Shaddaa, 2 - The Lost Disk, 3 - The Return Home to Sulon, 4 - The Jedi's
+Lightsaber, 5 - Barons Hed - The Fallen City, 6 - Into the Dark Palace, 7 - YUN - The Dark Youth,
+8 - Palace Escape, 9 - Fuel Station Launch*, scrolls further). Row spacing is 15 px from y 238, so a
+level is addressed by index. Level 2 boots for real: console `coords` reads
+**Pos (10.80, -11.98, 3.02) sector 22**, and `--sim --start 02narshadda` prints
+**spawn sector center [10.798077, -11.982778, 3.057114] radius 3.2 (walkplayer sector 22)** - an exact
+match. That is the first **single-player level-2 retail capture** (screenshot + pose) and the template
+for the whole campaign: every level 1-21 is now reachable in retail, so Phase 2 breadth and the retail
+sides of steps 2/5/6 can be captured level by level. Harness: `-StartLevel <n>` drives it. (The level
+list screenshot is `tools/parity/retail-debug-levels.png`; the harness was briefly truncated by a bad
+line-list edit and restored from git before the run - the fixture exists because of that.)
