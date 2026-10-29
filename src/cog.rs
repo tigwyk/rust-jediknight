@@ -964,7 +964,11 @@ pub struct Vm {
     /// the interval and the next due time, and every cog tick that is due sends the `pulse` message.
     pub pulse: Option<(f32, f32)>,
     /// This cog's one-shot timer (`SITH_COG_TIMER_SET`): the `timer` message fires once when due.
-    pub timer: Option<f32>,
+    /// `SetTimerEx(seconds, id, val, val2)` also stores the id the handler reads back through
+    /// `GetSenderId()` and the two parameter words — the shipped actor scripts branch on exactly
+    /// that id (`timer:` in `actor_<class>.cog`: id 0 resets a count, id 1 credits the level's
+    /// population bin), so a timer that arrived with sender 0 would take the wrong arm.
+    pub timer: Option<(f32, i64, [f64; 2])>,
     /// Seconds this cog has been running, which is what pulse and timer deadlines are measured against.
     pub now: f32,
     /// When a `sleep` in the interrupted label may continue.
@@ -1370,7 +1374,12 @@ impl Vm {
             }
             "settimer" | "settimerex" => {
                 let value = args.first().map(|v| v.num()).unwrap_or(0.0) as f32;
-                self.timer = (value > 0.0).then_some(self.now + value);
+                let id = args.get(1).map(|v| v.num() as i64).unwrap_or(0);
+                let params = [
+                    args.get(2).map(|v| v.num()).unwrap_or(0.0),
+                    args.get(3).map(|v| v.num()).unwrap_or(0.0),
+                ];
+                self.timer = (value > 0.0).then_some((self.now + value, id, params));
                 return Value::Nil;
             }
             _ => {}

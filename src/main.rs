@@ -17014,6 +17014,9 @@ fn run_pulses_and_timers(
         return;
     }
     let mut fired = 0usize;
+    // The handle, not the field: `instances` is borrowed mutably for the loop and a timer's handler
+    // may reach this same runtime through its verbs.
+    let handle = sim.world.clone();
     for (script_name, vm) in &mut sim.instances {
         vm.now += dt;
         let Some(script) = world.cogs.get(script_name) else { continue };
@@ -17030,12 +17033,20 @@ fn run_pulses_and_timers(
                 fired += 1;
             }
         }
-        if let Some(due) = vm.timer
+        if let Some((due, id, params)) = vm.timer
             && vm.now >= due
         {
             vm.timer = None;
             if script.label("timer").is_some() {
-                let _ = vm.run_label(script, "timer");
+                // The engine sends the message with the timer's own id as the sender
+                // (`sithCogFunction_SetTimerEx`'s second argument) and its two words as the
+                // handler's parameters: the actor scripts branch on `GetSenderId()`.
+                vm.sender = id;
+                handle.borrow_mut().last_params = params.to_vec();
+                let result = vm.run_label(script, "timer");
+                if std::env::var_os("BK_PULSE_TRACE").is_some() {
+                    println!("timer: {script_name} id {id} -> {result:?}");
+                }
                 fired += 1;
             }
         }
@@ -20446,6 +20457,53 @@ fn setup(
             }
         }
     }
+    // Every *other* thing whose template names a class script gets one VM of its own, the way the
+    // engine starts a class cog per thing: the actor scripts hang their wake-up (`created:`), damage
+    // answering (`damaged:`) and death (`killed:`) labels off it, and the tally's ratio bins 72/73
+    // are credited from those labels (`actor_<class>.cog`). The port parsed the scripts but never
+    // instantiated them, so no actor's labels ran; `thing_class_cog` stayed empty and `damaged`/
+    // `killed` messages had nowhere to go (`thing_instances` reads the link table this fills).
+    //
+    // The class instances' thing links are collected here but **pushed after `wire_links`**: that
+    // function bails when any link table is already populated ("wire once"), so pushing them at this
+    // point left every *placed* trigger, door and goal link unwired (the `--goal` gate caught it).
+    let mut class_links: Vec<(usize, usize)> = Vec::new();
+    {
+        let player = sim.world.borrow().player_thing();
+        let mut started = 0usize;
+        for (index, thing) in level.things.iter().enumerate() {
+            if index == player {
+                continue; // the player's class script is the block above
+            }
+            let Some(name) = level.template_param(&thing.template, "cog").map(|s| s.to_string()) else {
+                continue;
+            };
+            let Some(script) = world.cogs.get(&name) else { continue };
+            let mut vm = cog::Vm::with_world(sim.world.clone());
+            script.bind(&mut vm, &[]);
+            // The instance speaks for its own thing: `GetSenderRef`/`GetSelf` inside the class
+            // script are the thing, and the damage bus addresses the instance.
+            vm.sender_ref = index as i64;
+            vm.source = index as i64;
+            vm.cog_index = sim.instances.len() as i32;
+            if script.label("startup").is_some() {
+                let _ = vm.run_label(script, "startup");
+            }
+            sim.instances.push((name.clone(), vm));
+            let instance = sim.instances.len() - 1;
+            let mut rt = sim.world.borrow_mut();
+            rt.thing_class_cog.insert(index, instance as i32);
+            class_links.push((instance, index));
+            // `created:` is sent once the thing exists — the actor scripts arm their timers there.
+            if script.label("created").is_some() {
+                rt.pending_messages.push((instance, "created", [0.0; 2]));
+            }
+            started += 1;
+        }
+        if started > 0 {
+            println!("scripts: started {started} thing class script(s) from their templates");
+        }
+    }
     let moving = sim.world.borrow().things.iter().filter(|t| t.is_moving()).count();
     let mut kinds: Vec<String> = sim
         .world
@@ -20517,6 +20575,11 @@ fn setup(
                 rt.surface_links.len(),
                 rt.sector_links.len()
             );
+            // The class scripts' own thing links, held back until `wire_links` had run: it wires the
+            // placed instances once and bails if the tables are already populated.
+            for (instance, thing) in class_links.drain(..) {
+                rt.thing_links.push((instance, 0, thing));
+            }
         }
         // Portals for the actors' steering: a surface two sectors share is a doorway, and its centre
         // is where an actor heads when the straight line to its target is walled off.

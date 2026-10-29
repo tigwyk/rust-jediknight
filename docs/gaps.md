@@ -2798,3 +2798,32 @@ delivery bus (`deliver_thing_messages`, addressed by instance, and `thing_instan
 start each class script with its own thing as the sender ref, send it `startup` then `created`, and
 watch the gates for the actor scripts' own verbs (`damaged:` handlers, spawn-on-death powerups,
 `SetTimerEx`) taking effect.
+
+**Per-thing class scripts are instantiated, and the timer bus now carries its sender (round 105).**
+The gap round 104 named is closed: every thing whose template names a `cog=` now gets its own VM
+(level 1: **249** of 352 things), registered in `thing_class_cog` and linked to its thing so the
+`damaged`/`killed` bus reaches it, with `startup` then a queued `created:` message. Three things
+followed from that, all measured:
+
+- **`SetTimerEx`'s sender id was dropped.** The VM kept only the deadline, so a `timer:` handler's
+  `GetSenderId()` read 0 and the actor scripts took the wrong branch (`id == 0` resets a count,
+  `id == 1` credits the level's population bin). The timer now carries `(due, id, params)` and the
+  delivery sets `vm.sender` and the handler's two words, which is what `sithCogFunction_SetTimerEx`
+  passes. Measured on level 1: `timer: actor_bt.cog id 1 -> Ok(Nil)` and bin 73 climbing as each
+  placed civilian wakes.
+- **The class loop first broke link wiring.** `Runtime::wire_links` wires the *placed* instance tables
+  once and bails when any of the three is already populated, so pushing the class links before it
+  left every placed trigger, door and goal link unwired — the `--goal` gate caught it on the next
+  sweep (`goal: this level has no script waiting on sighted`). The class links are now held in a
+  vector and pushed immediately after `wire_links`, and the gate is green again (37 thing, 44
+  surface, 10 sector links on level 1).
+- **Bin 73 now exists, and its value is 12.5 against retail's 10.5.** The difference is
+  *dormancy*: retail counts the civilians that woke during the captured level-1 run (things activate
+  by sector and sight, `sithThing_CanSync` gating the sync), while the port wakes every placed thing
+  at load, so it counts the level's whole standing population. The alignment itself is unaffected
+  (`72/73 = 0/x` either way, so `CalcAlignment` answers the neutral 20, which the level-2 carry
+  already matches), and the deviation is on the ledger with "sector/sight-based thing activation" as
+  its retire condition.
+- The class scripts also make the damage bus real: `actor_<class>.cog`'s `damaged:`/`killed:`
+  handlers now receive their messages, which is the same bus alignment bin 72 rides when the player
+  kills a civilian.

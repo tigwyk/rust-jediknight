@@ -554,3 +554,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   autosave: `save-live: player health 100.0 (retail's autosaves hold 100)`.
 - `--save tools/parity/jkauto-01narshadda.jks` (and level 2's) prints `player: 100 health`, decoded
   from the player thing record's type-specific tail (`thing + 0x134`, payload `0x6F`).
+
+## Update — round 105
+
+- `--gates`: **62 gates, 0 failed, 0 skipped** after starting 249 per-thing class scripts on level 1
+  and fixing the timer bus: `--goal` is the gate that caught the first attempt (the class instances'
+  thing links were pushed before `wire_links`, which bails when the tables are populated, so no placed
+  trigger/door/goal link was wired).
+- `cargo test --release`: **147 passed, 0 failed**; parity gate unchanged at **6/6** (the extra class
+  scripts do not move the gated frames); docs links 132/132.
+- Measured with `--tour-live`: the level-1 population bin 73 is now **12.5** (retail's own autosave:
+  10.5) — the port wakes every placed thing at load, retail wakes by sector/sight; the ledger carries
+  the deviation and `CalcAlignment`'s answer (20, bin 75) is unchanged.

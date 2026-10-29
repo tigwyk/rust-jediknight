@@ -118,6 +118,7 @@ partials is still to be written; these are the entries this round created or mea
 | warp attachment | an idle body is attached to the surface under it within `GetThingHeight * 1.1` (the engine's `FindFloor` range) and then does not move: `sithThing_AttachThingToSurface` records the attachment without moving the body, which is why retail's `coords` holds the pose. The port now does the same over a solid thing's model (level 1's catwalk), and a **walking** body settles at `floor + GetThingHeight` (`walker_step`'s `rest`, round 12), so it keeps the authored pose — measured on the walk trace, z delta 0.055 → 0.034 | `--warp` catwalk: body holds 2.8201141 (retail `coords` 2.857114 eye − 0.037); walking lands at 2.7401; `route_catwalk` 0.4493 → 0.4603 | the resting-height and attachment port (`sithPhysics_UpdateAttachedThingPhysics`, Phase 1 step 3) |
 | solid things are floors | a solid template's model **axis-aligned bounding box** (top + footprint, `set_template_floors`) stands in for the engine's drawn collision surfaces, so a thing rotated off the axes is covered a little generously and an L-shaped model offers its whole box as floor | the catwalk pose holds at retail's z; `BK_WARP_TRACE` prints every solid thing's model top around a pose; a unit test pins the probe | thing-model collision surfaces (`sithCollision` against `_walkstruct` models) are ported |
 | rank and force-point crediting | `Runtime::finish_level` is the port's stand-in for retail's unrecovered crediting: each finished level raises the jedi rank (bin `20`) by one and credits three stars (bin `16`), and `grant_episode_powers` raises the episode row's force-power bins as the next level loads. Retail's own autosaves carry **none** of `16`/`20` at the start of levels 1 and 2, and its level-1→2 delta has no rank or star movement at all | port level-2 carry: `16=3, 20=1`; retail's `jkauto-02narshadda.jks`: neither. The code marks it `ponytail:` — `jkPlayer_SetRank`/`jkPlayer_FixStars` are reached only from multiplayer's new-character screen in the dump, and nothing recovered writes the point bins, so three stars/level is a GUESS that happens to satisfy `FixStars`' `rank * 3` budget | the tally's star-spending screen (or wherever retail credits the bins) is recovered and feeds them; the stand-in is then deleted and the level-2 carry matches retail bin for bin |
+| thing activation | the engine wakes things by sector and sight: `sithThing_CanSync` gates the sync, so a level-load save counts only the things the player's run has reached. The port instantiates every class script and wakes every placed thing at load | level 1's population bin (`73`, what the tally's ratio term divides by) reads **12.5** in the port against **10.5** in retail's own autosave — the port counts the level's whole standing population, retail counts what the captured run woke. Bin 72 (civilians killed) is 0 on both, so `CalcAlignment` answers 20 either way and the stored bin 75 matches | sector/sight-based thing activation (an `active`/`dormant` flag on `ThingState`, set by the cull/visibility pass) lands, and 73 matches retail's number for a replay of the same route |
 
 ## Phases
 
@@ -288,14 +289,15 @@ tier, not a checkbox.
    (`sithPlayer_SetInvItemAmount(0x4b, …)`) and the tally is its single-player caller, so the level-end
    path calls `Runtime::calc_alignment` and the `--tally` gate asserts the store; the port's level-2
    carry is therefore retail's autosave **bin for bin except bin 73**: `71=8, 75=20, 99=2000, 100=1,
-   102=1` all match. Bin 73 is `CalcAlignment`'s ratio denominator (the scripts' `created:` timer
-   credits it per woken civilian; 72 is the kills numerator), and it is zero in the port because
-   **per-thing class scripts are never instantiated**: the port parses every template's `cog=` but
-   only starts the player's, so no actor's `created:`/`damaged:`/`killed:`/`timer:` runs and the
-   runtime's `thing_class_cog` map stays empty. Starting one VM per class-script thing and registering
-   it there (the delivery bus and `thing_instances` already exist) is the next engine-behaviour task,
-   and it is the last thing between the port's carry and retail's bins — the rest is the recorded
-   rank/star stand-in (`16`, `20`).
+   102=1` all match. Bin 73 is `CalcAlignment`'s ratio denominator (the actor scripts' `created:`
+   timer credits it per woken civilian; 72 is the kills numerator). That timer path is now live: every
+   thing whose template names a `cog=` gets its own VM (level 1: 249), `SetTimerEx` keeps the id its
+   handler branches on, and the timer bus delivers it — so the port's population bin is **12.5**
+   against retail's **10.5**. The difference is *dormancy*, not arithmetic: retail wakes things by
+   sector and sight, so its number counts what the captured run reached, while the port wakes every
+   placed thing at load. `72/73 = 0/x` on both sides, so `CalcAlignment` answers 20 and bin 75 still
+   matches; the deviation is on the ledger under thing activation. The remaining step-6 deviation is
+   the recorded rank/star stand-in (`16`, `20`).
 
 ### Phase 2 — Generalise
 
