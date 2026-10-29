@@ -2472,3 +2472,14 @@ physics - the port does read water sectors (`SECTOR_UNDERWATER` halves movement,
 surface-under-feet flags). The ledger row was rewritten accordingly: a pitch sweep (+1.12, -5, -10,
 -15) against the retail reference is the next measurement, and the fix depends on which one wins.
 Level-1's six thresholds are unaffected (their pitches are under 2 deg).
+
+**The level-5 difference is texture scale, and the pitch sweep rules its own hypothesis out (round 98).**
+Six pitches were rendered against the retail reference: 1.12 gives **0.312**, and both signs of
+±5/±10/15 make it worse (0.18-0.23), so shot-mode pitch is not the problem. The side-by-side
+(`target/parity/compare/level5_spawn-side.png`) shows the same geometry with the port's **wall plaque
+and water ripples about three times retail's texture scale** - the plaque is small in retail's frame
+and large in the port's. Two side notes: the water textures animate, so this level can never produce a
+pixel-static series verdict (`series_static` false by construction), and the player-camera crop flag
+rides on that, so treat the image, not the flag. The ledger row now names texture-coordinate scale on
+that level's surfaces as the gap, with the pitch evidence recorded as the reason it is not framing.
+The six sweep rows were probe evidence and were removed from the parity set afterwards.
