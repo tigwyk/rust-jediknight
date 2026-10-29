@@ -2632,3 +2632,33 @@ an index that really is a bit. `--cogstatus 28` now prints `maxsecrets = 6`, and
 inventory matches retail's own autosave - the ten bins retail carries at load are now asserted by the
 `--save-live` gate (`save-live: start inventory matches retail's autosave (10 bin(s))`), so the
 deviation ledger's level-start-inventory row is retired.
+
+**The carry went on *after* the level's scripts, so level-specific bins lost (round 102).** The level
+change's player state was applied by an `adopt_carried` system a frame after `setup`, which meant the
+incoming level's scripts had already run on a fresh inventory and their `SetInv`s were then overwritten.
+The measurement: the port's level-3 carry (i.e. level 2's own state) read bin **71 = 6**, while retail's
+level-2 autosave reads **8** — `00_secretareas.cog` sets `SetInv(player, 71, maxSecrets)` from level 2's
+own sector list at load, and the stale carry (level 1's 6) landed on top of it. The carry now rides on
+the incoming `World` (`World::carried`) and `setup` applies it right after building the runtime and
+**before** binding the level's scripts, which is the engine's order: `jkPlayer_*` state outlives the
+level, and the new level's cogs adjust it (`kyle.cog`'s minimums keep the carried amounts when they are
+already higher). The carried-in state on level 2 now matches retail's autosave bin for bin apart from
+the two port-side extras below:
+
+```text
+retail level 2 autosave: 1=1, 2=1, 11=50, 13=100, 42=1, 60=100, 63=1, 71=8, 99=2000, 100=1, 102=1
+port, carried out of level 2 (tour): 1=1, 2=1, 11=50, 13=100, 42=1, 60=100, 63=1, 71=8, 99=2000,
+                        100=1, 102=1, plus 16=3, 20=1 (below), 73/75 absent (below) and 14 regen
+```
+
+Two step-6 gaps are now named and measured:
+
+- **16/20 are granted by the port, not by retail.** `grant_episode_powers` credits the episode
+  manifest's light/dark power grant as bins 16 (force points) and 20 (jedi rank) on every level load;
+  retail's own level-1 *and* level-2 autosaves carry neither. In the engine the tally screen lets the
+  player spend the stars, so a save taken at level start shows nothing. The port should not pre-grant
+  them; that is a Phase 1 step 6 follow-up with the tally screen as its fixture.
+- **72/73/75 (alignment) are never written by the port.** Retail's level-2 autosave carries 73 = 10.5
+  and 75 = 20 after level 1, and those come from the `actor_*.cog` scripts' `ChangeInv(player, 72/73)`
+  on kills plus `jkPlayer_CalcAlignment` writing 75. With no combat in the tour, the port carries
+  neither; measuring the alignment path needs a scripted level-1 fight, not a walk.

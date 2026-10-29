@@ -269,11 +269,15 @@ tier, not a checkbox.
    99=1000, 100=1`), asserted by the `--save-live` gate: it needed the player's **template** cog
    (`walkplayer` carries `cog=kyle.cog` and the placement table has no row for the player) plus fixes to
    `GetInvMax` (a flat 100 stub), the scripted pickup's `taken` label, pickup reach (contact, not a
-   unit) and `array[index]` resolution (`linkid` is a message bit, not an ordinal) — see `gaps.md`. What
-   is still missing for the exit: neither the game-state record (type 0x1F) nor the player's thing
-   payload exposes **health or shields** in a decoded position, so those carried *values* cannot yet be
-   compared with retail's, and the level-1→2 *transition* has not been run with the bins asserted on the
-   far side.
+   unit) and `array[index]` resolution (`linkid` is a message bit, not an ordinal) — see `gaps.md`. The
+   level change's carry now also applies **before** the incoming level's scripts (the engine's order:
+   `jkPlayer_*` outlives the level and the new level's cogs adjust it), so the port's level-2 state
+   carries `71=8, 99=2000, 100=1, 102=1` like retail's own level-2 autosave instead of keeping level 1's
+   secret count. Two measured step-6 gaps remain: the port pre-grants the episode rank/force bins
+   (`16`, `20`) that retail's autosaves do not carry (the tally screen is where the stars are spent),
+   and the alignment bins (`72/73/75`) need a fight to be written at all. And neither the game-state
+   record (type 0x1F) nor the player's thing payload exposes **health or shields** in a decoded
+   position, so those carried *values* cannot yet be compared with retail's.
 
 ### Phase 2 — Generalise
 

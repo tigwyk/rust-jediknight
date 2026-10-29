@@ -69,6 +69,12 @@ struct World {
     item_cogs: std::collections::BTreeMap<i32, String>,
     /// The whole `misc\items.dat` table, so the status bar can name the bins the player holds.
     item_defs: Vec<hud::ItemDef>,
+    /// The player state in flight from the level being swapped out. `setup` applies it to the new
+    /// runtime **before** the incoming level's own scripts run, which is the engine's order: the
+    /// `jkPlayer_*` state already exists when a level's cogs start, so their `SetInv`s (the level's
+    /// secret count, a powerup's minimums) win. Applying it afterwards — as one system did — kept
+    /// level 1's secret count (bin 71 = 6) on level 2, where retail's autosave reads 8.
+    carried: Option<runtime::CarryOver>,
     /// Material indices whose `tex_type & 2` marks them as portal materials: `sithSurface.c` refuses to
     /// give those a geometry mode, so the engine never draws them. Drawing one seals a doorway.
     /// Lowercase template name -> lowercase `.3do` name.
@@ -10236,7 +10242,6 @@ fn main() {
                     animate_actors,
                     actors_follow_runtime,
                     things_follow_geomode,
-                    adopt_carried,
                     autosave,
                     restore_pending,
                     load_item_cogs,
@@ -10672,15 +10677,10 @@ fn swap_level(world: &mut bevy::prelude::World) {
     );
     // What the *player* keeps: the engine's `jkPlayer_*` state outlives the level, and this build
     // rebuilds the runtime from the incoming `.jkl`, so it has to be taken off the old one first.
-    // `setup` puts it back on the new level's player.
+    // It rides on the incoming `World` and `setup` applies it before the new level's scripts run.
     let carried = world
         .get_resource::<Sim>()
         .map(|sim| sim.world.borrow().carry());
-    if let Some(mut carried) = carried {
-        // The rank and the level's stars were credited when the level ended (`finish_level`), so the
-        // inventory being handed over already carries them.
-        world.insert_resource(Carried(carried));
-    }
     // Everything the old level spawned, and nothing else: the cameras, lights and overlay are
     // not tagged `LevelEntity`.
     let stale: Vec<Entity> = world
@@ -10692,6 +10692,8 @@ fn swap_level(world: &mut bevy::prelude::World) {
             world.despawn(entity);
         }
     }
+    let mut next = next;
+    next.carried = carried;
     world.insert_resource(next);
     if let Some(mut plan) = world.get_resource_mut::<FlowPlan>() {
         plan.level = name.clone();
@@ -11175,29 +11177,6 @@ fn restore_pending(
     );
     commands.remove_resource::<PendingRestore>();
 }
-
-/// Put the player's carried state onto the level that just loaded, or a loaded savegame onto it.
-///
-/// Its own system rather than part of `setup`, because `setup` is already at Bevy's parameter limit
-/// and because `Sim` arrives through `Commands` — by the next frame both exist.
-fn adopt_carried(mut commands: Commands, carried: Option<Res<Carried>>, sim: Option<Res<Sim>>) {
-    let (Some(carried), Some(sim)) = (carried, sim) else { return };
-    sim.world.borrow_mut().adopt(&carried.0);
-    println!(
-        "level: the player carries over {} inventory bin(s), weapon {:?}, saber {}, {:.0} health and {:.0} shield(s)",
-        carried.0.inv.len(),
-        carried.0.weapon,
-        carried.0.saber.is_some(),
-        carried.0.health,
-        carried.0.shields
-    );
-    commands.remove_resource::<Carried>();
-}
-
-/// [`runtime::CarryOver`] in flight: `swap_level` takes the player's state off the level it is
-/// leaving and `setup` puts it on the one it is building.
-#[derive(Resource)]
-struct Carried(runtime::CarryOver);
 
 /// The screens recovered from the executable.
 #[derive(Resource, Deref)]
@@ -14116,6 +14095,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
             .read("misc\\items.dat")
             .map(|d| hud::items(&String::from_utf8_lossy(&d)))
             .unwrap_or_default(),
+        carried: None,
         material_cels,
         template_model,
         models,
@@ -20342,6 +20322,30 @@ fn setup(
     // against nothing and `pow_shields.cog` keeps taking (its +20 landed every frame).
     sim.world.borrow_mut().item_max =
         world.item_defs.iter().map(|def| (def.id, def.max as f32)).collect();
+    // A level change's player state goes on **now**, before the incoming level's scripts: the engine's
+    // `jkPlayer_*` state outlives the level and the new level's cogs then adjust it (`kyle.cog`'s
+    // minimums, `00_secretareas.cog`'s own secret count). Applying it after the scripts — as the
+    // `adopt_carried` system did, one frame behind — kept level 1's secret count (bin 71 = 6) on
+    // level 2, where retail's autosave reads 8.
+    if let Some(carried) = &world.carried {
+        let mut rt = sim.world.borrow_mut();
+        rt.adopt(carried);
+        let held: Vec<String> = carried
+            .inv
+            .iter()
+            .filter(|(_, value)| **value != 0.0)
+            .map(|(bin, value)| format!("{bin}={value}"))
+            .collect();
+        println!(
+            "level: the player carries over {} inventory bin(s) ({}), weapon {:?}, saber {}, {:.0} health and {:.0} shield(s)",
+            carried.inv.len(),
+            held.join(", "),
+            carried.weapon,
+            carried.saber.is_some(),
+            carried.health,
+            carried.shields
+        );
+    }
     // `GetKeyLen` answers a `.key`'s frame count, which the loader already parsed.
     sim.world.borrow_mut().key_lengths =
         world.keys.iter().map(|(name, key)| (name.clone(), key.frames as f32)).collect();
