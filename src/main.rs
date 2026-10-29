@@ -192,6 +192,7 @@ const GATES: &[&str] = &[
     "--things",
     "--move",
     "--pickup",
+    "--align",
     "--save",
     "--items",
     "--weapons",
@@ -463,6 +464,7 @@ fn main() {
     let mut fire_demo = false;
     let mut sprite_template: Option<String> = None;
     let mut pickup_check = false;
+    let mut align_check = false;
     let mut weapon_check: Option<String> = None;
     let mut bins_check = false;
     let mut force_check: Option<String> = None;
@@ -806,6 +808,7 @@ fn main() {
             }
             // `--pickup`: walk the player onto level 1's own powerup and check it is taken.
             "--pickup" => pickup_check = true,
+            "--align" => align_check = true,
             // `--weapon <template>`: taking a weapon changes what the player fires.
             "--weapon" => {
                 i += 1;
@@ -2583,7 +2586,7 @@ fn main() {
             // The queued list is moved out **before** the loop: `World` is an `Arc<Mutex<..>>`, so a
             // guard held by the `for` head would deadlock on the first verb the label calls.
             let pending = std::mem::take(&mut sim_world.borrow_mut().pending_messages);
-            for (instance, label, params) in pending {
+            for (instance, label, params, source) in pending {
                 let Some((script_name, vm)) = vms.get_mut(instance) else { continue };
                 let Some(script) = world.cogs.get(script_name) else { continue };
                 if script.label(label).is_none() {
@@ -3800,7 +3803,7 @@ fn main() {
                         (label.to_string(), Some(player), Some(instance as i32), [0.0; 2])
                     })
                     .collect();
-                for (instance, label, params) in std::mem::take(&mut rt.pending_messages) {
+                for (instance, label, params, _source) in std::mem::take(&mut rt.pending_messages) {
                     queued.push((label.to_string(), Some(player), Some(instance as i32), params));
                 }
                 rt.step(dt);
@@ -5437,6 +5440,100 @@ fn main() {
         return;
     }
 
+    if align_check {
+        // A civilian's `killed:` handler credits alignment bin 72 only when the player was the
+        // killer — `actor_<class>.cog` does `killer = GetSourceRef(); if (player == killer)
+        // ChangeInv(player, 72, 1.0)`. Both halves were missing until rounds 105/106: the class
+        // script has to be running for its thing, and the kill has to arrive with the player as the
+        // message's *source*. This check drives exactly that path and then the tally's arithmetic.
+        let sim_world = runtime::Runtime::handle(&world.level);
+        let player = sim_world.borrow().player_thing();
+        let mut credited: Option<(usize, String, String, f32)> = None;
+        for (index, thing) in world.level.things.iter().enumerate() {
+            if index == player {
+                continue;
+            }
+            let Some(name) = world
+                .level
+                .template_param(&thing.template, "cog")
+                .map(|s| s.to_ascii_lowercase())
+            else {
+                continue;
+            };
+            let Some(script) = world.cogs.get(&name) else { continue };
+            if script.label("killed").is_none() {
+                continue;
+            }
+            let mut vm = cog::Vm::with_world(sim_world.clone());
+            script.bind(&mut vm, &[]);
+            vm.sender_ref = index as i64;
+            vm.source = index as i64;
+            vm.cog_index = 0;
+            {
+                let mut rt = sim_world.borrow_mut();
+                rt.thing_class_cog.insert(index, 0);
+                rt.thing_links.push((0, 0, index));
+            }
+            let before = sim_world.borrow().inv.get(&72).copied().unwrap_or(0.0);
+            sim_world.borrow_mut().damage_typed_from(
+                index as i64,
+                10_000.0,
+                runtime::DAMAGE_ENERGY,
+                player as i64,
+            );
+            // Drain exactly as `deliver_thing_messages` does, source and all.
+            let pending = std::mem::take(&mut sim_world.borrow_mut().pending_messages);
+            for (inst, label, params, source) in pending {
+                if inst != 0 || script.label(label).is_none() {
+                    continue;
+                }
+                sim_world.borrow_mut().last_params = params.to_vec();
+                let own = vm.source;
+                if let Some(source) = source {
+                    vm.source = source;
+                }
+                let ran = vm.run_label(script, label);
+                vm.source = own;
+                if ran.is_err() {
+                    continue;
+                }
+            }
+            let after = sim_world.borrow().inv.get(&72).copied().unwrap_or(0.0);
+            {
+                let mut rt = sim_world.borrow_mut();
+                rt.thing_links.retain(|(instance, _, _)| *instance != 0);
+                rt.thing_class_cog.remove(&index);
+            }
+            if after > before {
+                credited = Some((index, thing.template.clone(), name, after - before));
+                break;
+            }
+        }
+        let Some((index, template, name, credit)) = credited else {
+            eprintln!("align: no class script credited bin 72 when the player killed its thing");
+            std::process::exit(1);
+        };
+        println!(
+            "align: killing thing {index} (`{template}`, `{name}`) with the player as the message source credited bin 72 by {credit:.1}"
+        );
+        // The tally's ratio term: `CalcAlignment` subtracts (72/73)*100 and stores its answer in 75.
+        let alignment = {
+            let mut rt = sim_world.borrow_mut();
+            rt.inv.insert(73, 4.0);
+            rt.calc_alignment()
+        };
+        let want = (20.0 - (credit / 4.0) * 100.0).clamp(-100.0, 100.0);
+        assert!((alignment - want).abs() < 1e-3, "alignment {alignment}, want {want}");
+        assert_eq!(
+            sim_world.borrow().inv.get(&75).copied(),
+            Some(alignment),
+            "the tally did not store its alignment in bin 75"
+        );
+        println!("align: with bin 73 = 4 the tally answers {alignment:.1} and stores it in bin 75");
+        println!("--- align check passed ---");
+        return;
+    }
+
     if pickup_check {
         let sim_world = runtime::Runtime::handle(&world.level);
         let mut rt = sim_world.borrow_mut();
@@ -6938,7 +7035,7 @@ fn main() {
                 let queued = rt
                     .pending_messages
                     .iter()
-                    .filter(|(_, label, _)| *label == "arrived")
+                    .filter(|(_, label, _, _)| *label == "arrived")
                     .count();
                 println!(
                     "  thing {thing} with {frames} frame(s): {} `arrived` message(s) queued",
@@ -6972,7 +7069,7 @@ fn main() {
                 activated += rt
                     .pending_messages
                     .iter()
-                    .filter(|(_, label, _)| *label == "activate")
+                    .filter(|(_, label, _, _)| *label == "activate")
                     .count();
             }
         }
@@ -7054,7 +7151,7 @@ fn main() {
             stopped = rt
                 .pending_messages
                 .iter()
-                .filter(|(_, label, _)| *label == "blocked")
+                .filter(|(_, label, _, _)| *label == "blocked")
                 .count();
             println!(
                 "  thing {thing} flew from {from:?} into a wall: {stopped} `blocked` message(s), now at {:?}",
@@ -9680,12 +9777,12 @@ fn main() {
             // Another linked thing can be nearer than the one this candidate names; what matters is that
             // the use action finds *a* linked thing, and that its script changes the world.
             // Drain exactly as `deliver_thing_messages` does, so this is the real path and not a shortcut.
-            let pending: Vec<(usize, &'static str, [f64; 2])> = {
+            let pending: Vec<(usize, &'static str, [f64; 2], Option<i64>)> = {
                 let mut rt = handle.borrow_mut();
                 std::mem::take(&mut rt.pending_messages)
             };
             let mut ran = 0;
-            for (inst, label, params) in &pending {
+            for (inst, label, params, _source) in &pending {
                 let Some(data) = world.level.cogs.get(*inst) else { continue };
                 let Some(script) = world.cogs.get(&data.script) else { continue };
                 let Some(vm) = vms.get_mut(*inst).and_then(|v| v.as_mut()) else { continue };
@@ -16733,7 +16830,7 @@ fn deliver_crossed(
         let mut rt = sim.world.borrow_mut();
         for (instance, _, linked) in &rt.surface_links.clone() {
             if *linked == surface {
-                rt.pending_messages.push((*instance, "crossed", [0.0; 2]));
+                rt.pending_messages.push((*instance, "crossed", [0.0; 2], None));
                 queued += 1;
             }
         }
@@ -16769,7 +16866,7 @@ fn deliver_thing_messages(
     // Which thing each `damaged` instance was for, and the amount the handler allows, so the answer
     // is applied after the last handler on that thing has had its say.
     let mut answers: Vec<(usize, Option<f32>)> = Vec::new();
-    for (instance, label, params) in pending {
+    for (instance, label, params, source) in pending {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
         let Some(script) = world.cogs.get(script_name) else { continue };
         if script.label(label).is_none() {
@@ -16777,7 +16874,17 @@ fn deliver_thing_messages(
         }
         // `GetParam(0)`/`GetParam(1)` inside the handler: the engine's own two words.
         handle.borrow_mut().last_params = params.to_vec();
-        if vm.run_label(script, label).is_err() {
+        // The message's source is the thing that caused it: for `damaged`/`killed` that is the
+        // attacker (`sithActor_DamageActor` sends it), and the actor scripts read it back through
+        // `GetSourceRef()` to tell the player's kills from the world's. The VM's own source — the
+        // thing the instance is placed on — is put back afterwards, because the answer below reads it.
+        let own_source = vm.source;
+        if let Some(source) = source {
+            vm.source = source;
+        }
+        let ran = vm.run_label(script, label);
+        vm.source = own_source;
+        if ran.is_err() {
             continue;
         }
         fired += 1;
@@ -16833,7 +16940,7 @@ fn deliver_cog_messages(
     // Taken into a local first: a `handle.borrow_mut()` in the `for` header lives for the whole loop,
     // and the `last_params` write inside it would borrow again on the same thread.
     let pending = std::mem::take(&mut handle.borrow_mut().pending_messages);
-    for (instance, label, params) in pending {
+    for (instance, label, params, source) in pending {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
         let Some(script) = world.cogs.get(script_name) else { continue };
         if script.label(label).is_none() {
@@ -19559,7 +19666,8 @@ fn projectile_hits(
                 let (shields, health) = rt.damage_player(damage, runtime::DAMAGE_IMPACT);
                 println!("blast {template}: the player took {damage:.0}, {shields:.0} shield(s), {health:.0} health");
             } else {
-                let left = rt.damage(victim as i64, damage);
+                let owner = rt.things.get(*explosion).and_then(|t| t.owner).unwrap_or(0) as i64;
+                let left = rt.damage_typed_from(victim as i64, damage, runtime::DAMAGE_IMPACT, owner);
                 println!(
                     "blast {template}: thing {victim} ({}) took {damage:.0}, {left:.0} health left",
                     rt.templates.get(victim).cloned().unwrap_or_default()
@@ -19584,7 +19692,10 @@ fn projectile_hits(
             );
             health
         } else {
-            rt.damage_typed(target as i64, damage, runtime::DAMAGE_ENERGY)
+            // The bolt's owner is the thing that fired it (`sithThing`'s owner field), and the
+            // engine sends it as the damage message's source: a `killed:` handler's `GetSourceRef()`
+            // is how a script knows this death was the player's.
+            rt.damage_typed_from(target as i64, damage, runtime::DAMAGE_ENERGY, owner.unwrap_or(0) as i64)
         };
         rt.things[shot].destroyed = true;
         if let Some(entities) = created.drawn.remove(&shot) {
@@ -20496,7 +20607,7 @@ fn setup(
             class_links.push((instance, index));
             // `created:` is sent once the thing exists — the actor scripts arm their timers there.
             if script.label("created").is_some() {
-                rt.pending_messages.push((instance, "created", [0.0; 2]));
+                rt.pending_messages.push((instance, "created", [0.0; 2], None));
             }
             started += 1;
         }

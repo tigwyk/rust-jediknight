@@ -296,8 +296,12 @@ tier, not a checkbox.
    against retail's **10.5**. The difference is *dormancy*, not arithmetic: retail wakes things by
    sector and sight, so its number counts what the captured run reached, while the port wakes every
    placed thing at load. `72/73 = 0/x` on both sides, so `CalcAlignment` answers 20 and bin 75 still
-   matches; the deviation is on the ledger under thing activation. The remaining step-6 deviation is
-   the recorded rank/star stand-in (`16`, `20`).
+   matches; the deviation is on the ledger under thing activation. The alignment chain itself is now
+   complete and gated: a kill carries its **killer** as the damage message's source
+   (`damage_typed_from`, filled from the bolt's owner), the actor script's `GetSourceRef()` test
+   credits bin 72, and the tally's ratio term stores the result in 75 — the `--align` gate drives that
+   end to end (`bin 72` +0.5 for a droid, alignment 7.5 with bin 73 = 4, stored in bin 75). The
+   remaining step-6 deviation is the recorded rank/star stand-in (`16`, `20`).
 
 ### Phase 2 — Generalise
 

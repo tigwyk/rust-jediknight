@@ -566,3 +566,12 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Measured with `--tour-live`: the level-1 population bin 73 is now **12.5** (retail's own autosave:
   10.5) — the port wakes every placed thing at load, retail wakes by sector/sight; the ledger carries
   the deviation and `CalcAlignment`'s answer (20, bin 75) is unchanged.
+
+## Update — round 106
+
+- `--gates`: **63 gates, 0 failed, 0 skipped**. The new `--align` gate drives the kill→alignment chain:
+  a civilian class script's `killed:` handler credits bin 72 when the player is the damage message's
+  source, `CalcAlignment`'s ratio term answers 7.5 with bin 73 = 4, and the tally stores it in bin 75.
+- The damage bus carries its attacker (`damage_typed_from`, filled from the bolt's/explosion's owner),
+  so `killed:` handlers can tell the player's kills from the world's.
+- `cargo test --release`: **147 passed**: parity gate re-run **6/6**.

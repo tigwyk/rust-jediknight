@@ -2827,3 +2827,31 @@ followed from that, all measured:
 - The class scripts also make the damage bus real: `actor_<class>.cog`'s `damaged:`/`killed:`
   handlers now receive their messages, which is the same bus alignment bin 72 rides when the player
   kills a civilian.
+
+**Kills carry their killer, so alignment bin 72 is reachable (round 106).** Round 105 made the actor
+scripts run, but their `killed:` handlers could not tell *who* killed them: the engine's damage message
+carries the attacker as the message's **source**, and `actor_<class>.cog` reads it back with
+`killer = GetSourceRef(); if (player == killer) ChangeInv(player, 72, …)`. The port's queue had no
+sender at all (`pending_messages` was `(instance, label, params)`), so `GetSourceRef()` inside a kill
+handler answered the instance's own thing and bin 72 could never be credited. The bus now carries an
+optional source: `Runtime::damage_typed_from(target, amount, kind, source)` fills it from the bolt's
+own `owner` (and from the explosion's), and `deliver_thing_messages` sets `vm.source` to it for the
+duration of the handler, restoring the instance's own source afterwards (the `damaged` answer reads
+that field). The interface is unchanged for every other message — `created`, `sighted`, `timers` etc.
+queue `None`.
+
+The new **`--align` gate** drives the whole path headlessly: it finds a class script with a `killed:`
+label, starts it the way `setup` does, kills its thing with `damage_typed_from(..., player)`, drains the
+queue exactly as the live bus does, and requires bin 72 to move. Measured:
+
+```text
+align: killing thing 29 (`powerdroid`, `actor_go.cog`) with the player as the message source
+       credited bin 72 by 0.5
+align: with bin 73 = 4 the tally answers 7.5 and stores it in bin 75
+--- align check passed ---
+```
+
+That is the alignment chain end to end: a civilian killed by the player credits 72 (0.5 for a droid,
+1.0 for a person — the scripts' own amounts), `CalcAlignment`'s ratio term `20 − (72/73)·100` turns it
+into a lower alignment, and the value is stored in bin 75 the way the tally stores it. The gate is in
+the `--gates` registry, which is now **63 gates**.

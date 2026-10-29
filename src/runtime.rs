@@ -751,10 +751,10 @@ pub struct Runtime {
     /// `sithCog_LinkCogToThing` in tabular form.
     pub thing_links: Vec<(usize, i32, usize)>,
     /// Messages a script has earned but that have not been delivered yet: the runtime holds no VM,
-    /// so it queues `(cog instance, label, params)` and a system drains it. The params are what
+    /// so it queues `(cog instance, label, params, sender)` and a system drains it. The params are what
     /// `GetParam(0)`/`GetParam(1)` answer inside the handler — `damaged` carries the amount and the
     /// damage type, which is how `force_absorb.cog` decides how much of it to take.
-    pub pending_messages: Vec<(usize, &'static str, [f64; 2])>,
+    pub pending_messages: Vec<(usize, &'static str, [f64; 2], Option<i64>)>,
     /// Force mana regeneration per second, and the pool's ceiling. The rate is calibrated: the
     /// engine's own tick is in `jkPlayer.c`, absent here. `force_heal.cog` spends `20 * rank` of bin
     /// 14, so a full pool is 200.
@@ -1985,7 +1985,7 @@ impl Runtime {
         for index in due {
             self.thing_timer.remove(&index);
             for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "timer", [0.0; 2]));
+                self.pending_messages.push((instance, "timer", [0.0; 2], None));
             }
         }
         // Force mana regenerates. `force_heal.cog` spends `20 * rank` of bin 14 and the shipped
@@ -2024,7 +2024,7 @@ impl Runtime {
                 thing.arrived = false;
             }
             for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "arrived", [0.0; 2]));
+                self.pending_messages.push((instance, "arrived", [0.0; 2], None));
             }
         }
         // Powerups with `respawn=` come back. The countdown runs in the same step as
@@ -2142,7 +2142,7 @@ impl Runtime {
         }
         for index in blocked {
             for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "blocked", [0.0; 2]));
+                self.pending_messages.push((instance, "blocked", [0.0; 2], None));
             }
         }
         // `RotatePivot`: a thing turning about the pivot its frame names, a whole turn of `seconds`.
@@ -3608,7 +3608,7 @@ impl Runtime {
         let (surface, _) = best?;
         for (instance, _, linked) in &self.surface_links {
             if *linked == surface {
-                self.pending_messages.push((*instance, "activate", [0.0; 2]));
+                self.pending_messages.push((*instance, "activate", [0.0; 2], None));
             }
         }
         Some(surface)
@@ -3677,7 +3677,7 @@ impl Runtime {
         for (instance, _, linked) in &self.thing_links {
             if *linked == target {
                 // `activate`, not `used`: no shipped cog declares a `used` label (0 of 540), while 82 of them -- every door, switch and item -- answer `activate`. It is also what the surface half of this action already sends.
-                self.pending_messages.push((*instance, "activate", [0.0; 2]));
+                self.pending_messages.push((*instance, "activate", [0.0; 2], None));
             }
         }
         Some(target)
@@ -3778,7 +3778,7 @@ impl Runtime {
         let mut sent = 0;
         for (instance, _link, target) in &self.thing_links {
             if *target == thing {
-                self.pending_messages.push((*instance, "sighted", [0.0; 2]));
+                self.pending_messages.push((*instance, "sighted", [0.0; 2], None));
                 sent += 1;
             }
         }
@@ -3801,7 +3801,7 @@ impl Runtime {
         let mut sent = 0;
         for (instance, _link, target) in &self.sector_links {
             if *target == sector {
-                self.pending_messages.push((*instance, "sighted", [0.0; 2]));
+                self.pending_messages.push((*instance, "sighted", [0.0; 2], None));
                 sent += 1;
             }
         }
@@ -4028,6 +4028,15 @@ impl Runtime {
     /// invulnerability does not save anyone from a long drop. `01_endlevel.cog` sets that flag while it
     /// freezes Kyle for the level-end fade.
     pub fn damage_typed(&mut self, target: i64, amount: f32, kind: u32) -> f32 {
+        self.damage_typed_from(target, amount, kind, 0)
+    }
+
+    /// Damage with the thing that caused it. `sithActor_DamageActor`'s message carries the attacker
+    /// as the message's sender, which is how a `killed:` handler's `GetSourceRef()` tells the player's
+    /// kills from the world's: the actor scripts credit alignment bin 72 only when
+    /// `player == GetSourceRef()`, so a message without a sender can never credit a kill. `source` is
+    /// a thing index, or 0 for "the world did it" (falls, scripts).
+    pub fn damage_typed_from(&mut self, target: i64, amount: f32, kind: u32, source: i64) -> f32 {
         let Ok(index) = usize::try_from(target) else { return 0.0 };
         if self.invulnerable(index, kind) {
             return self.things.get(index).map(|t| t.health).unwrap_or(0.0);
@@ -4057,9 +4066,9 @@ impl Runtime {
         // `GetParam(0)`/`GetParam(1)` read (`force_absorb.cog`, `force_protection.cog`).
         let params = [amount as f64, kind as f64];
         for instance in self.thing_instances(index) {
-            self.pending_messages.push((instance, "damaged", params));
+            self.pending_messages.push((instance, "damaged", params, Some(source)));
             if died {
-                self.pending_messages.push((instance, "killed", params));
+                self.pending_messages.push((instance, "killed", params, Some(source)));
             }
         }
         // What a handler's answer has to amend: the engine applies the amount the `damaged` handler
