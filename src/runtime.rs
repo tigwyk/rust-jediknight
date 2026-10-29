@@ -2847,10 +2847,21 @@ impl Runtime {
             }
             let shooting_at = aim.unwrap_or(target);
             let can_see = if aim.is_some() { true } else { sighted };
+            // `BK_AI_TRACE=2`: name the gate that stops an in-sight actor from firing. The engine's
+            // `sithAICmd_PrimaryFire` has exactly three besides readiness — the instinct itself, its
+            // range, and its `minDot` facing test — so one line per refusal is enough to tell an AI
+            // that is asleep from one that is merely still turning.
+            let fire_trace = std::env::var("BK_AI_TRACE").is_ok_and(|v| v == "2");
             if !can_see || !ready {
+                if fire_trace && can_see {
+                    eprintln!("ai: {index} ready {ready} not firing yet");
+                }
                 continue;
             }
             let Some(primary) = ai.as_ref().and_then(|ai| ai.instinct("PrimaryFire")).cloned() else {
+                if fire_trace {
+                    eprintln!("ai: {index} `{ai_template}` has no PrimaryFire instinct");
+                }
                 continue;
             };
             // The parser stores the first number as `weight`; the engine reads the whole list as
@@ -2868,6 +2879,11 @@ impl Runtime {
             let (sx, sy) = (shooting_at[0] - from[0], shooting_at[1] - from[1]);
             let range = (sx * sx + sy * sy).sqrt();
             if range > max_dist.max(0.001) || range < min_dist {
+                if fire_trace {
+                    eprintln!(
+                        "ai: {index} range {range:.2} outside PrimaryFire [{min_dist:.2}, {max_dist:.2}]"
+                    );
+                }
                 continue;
             }
             // A script that names a fire target is telling the actor to shoot *that*, so it turns to
@@ -2887,6 +2903,9 @@ impl Runtime {
                 1.0
             };
             if dot < min_dot {
+                if fire_trace {
+                    eprintln!("ai: {index} facing dot {dot:.2} < PrimaryFire minDot {min_dot:.2}");
+                }
                 continue;
             }
             let Some(weapon) = self

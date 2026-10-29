@@ -598,3 +598,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
   except the route-dependent population bin 73** (`1, 2, 11, 13, 42, 60, 63, 71=8, 75=20, 99=2000,
   100=1, 102=1`) — step 6's carry comparison is closed.
 - `cargo test --release`: **147 passed**; docs links 132/132.
+
+## Update — round 109
+
+- The deviation ledger's door-capture damage figures (**41–47 shots / 15 hits**) were found to be
+  **not reproducible**: the harness's own invocation (`port-capture.ps1 -Only route_door`) gives
+  **3 shots / 0 hits** on three binaries — HEAD, the commit that made the claim (`f62c5df`), and round
+  104's. The pair scores are reproducible (catwalk 0.4512 / 0.4887 world-band, door 0.4095 / 0.4529), so
+  only the shot/hit numbers were restated. Both rows now name the reproducing command.
+- New diagnostic: `BK_AI_TRACE=2` prints the gate that stops each in-sight actor from firing — the three
+  `sithAICmd_PrimaryFire` gates besides readiness (missing instinct, range vs `maxDist`, facing `dot` vs
+  `minDot`). On the door capture it shows gunners starting 100–170° off at 23°/s turning (`maxrotthrust /
+  surfdrag`), several outside their class's 3.0–3.5-unit firing range, and two `nman` spectators with no
+  `PrimaryFire` — the measurement step 5 needs.
+- `cargo test --release`: **147 passed**; `--gates` green (see below); docs links 132/132.

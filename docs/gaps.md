@@ -2914,3 +2914,34 @@ retail jkauto-02     : 1,   2,   11,   13,    42,   60,    63,   71=8, 75=20, 99
 Step 6's carry comparison is closed: the only remaining difference is the population bin, whose value
 is route-dependent on both sides now that dormancy is real (round 107). The ledger's rank/force-point
 row is retired.
+
+**The door capture's shot count was not reproducible, and the fire gate now says why (round 109).** The
+deviation ledger carried "door capture (600 frames): 41–47 shots and 15 hits (≈165 damage, body left at
+29 health)" from the round that fixed AI turning. Re-running the harness's own invocation
+(`port-capture.ps1 -Only route_door`, i.e. `--start 01narshadda --frames 600 --shot-at
+"1.400084,9.700065,6.357114,105.000092,0" --warp "1.400084,9.700065,6.357114,105.000092"`) on **three
+binaries** — HEAD, the commit that made the claim (`f62c5df`), and round 104's — gives the same result
+every time: **3 shots, 0 hits on the player, health unchanged at 100**. The pair scores *are*
+reproducible (catwalk 0.4512 / world-band 0.4887, door 0.4095 / 0.4529 against the recorded 0.449 and
+0.417), so the capture itself is fine; the damage numbers came from an invocation the ledger does not
+name (a longer sim clock or a different pose/driver), and the row's measurement is therefore restated
+below with the command that produces it.
+
+`BK_AI_TRACE=2` now names the gate that stops each in-sight actor from firing — the three besides
+readiness that `sithAICmd_PrimaryFire` has (the instinct, its range, its `minDot` facing test):
+
+```text
+ai: 151 facing dot 0.61 < PrimaryFire minDot 0.80
+ai: 245 range 4.72 outside PrimaryFire [0.00, 3.50]
+ai: 291 range 4.16 outside PrimaryFire [0.00, 3.00]
+ai: 330 `nman1` has no PrimaryFire instinct
+ai: 159 ready false not firing yet
+```
+
+Running it on the door capture shows where step 5 really stands: `rydefault.ai` gives a Ree-Yees gunner
+`fov=200, sightdist=5.0, PrimaryFire 750 ms, minDot 0.80, maxDist 3.5`, and the room's gunners start
+100–170° off the body, so at `maxrotthrust / surfdrag` = 23°/s they need four to seven seconds just to
+face it; several never close inside 3.5 units, the `bh` classes fire only inside 3.0, and the two
+`nman` spectators have no `PrimaryFire` at all. Only three gunners ever convert, which is why the port's
+frame is un-tinted where retail's reference is saturated — so the ledger row's remaining difference is
+**AI engagement timing**, and the trace is the instrument for closing it.
