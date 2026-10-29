@@ -2483,3 +2483,15 @@ pixel-static series verdict (`series_static` false by construction), and the pla
 rides on that, so treat the image, not the flag. The ledger row now names texture-coordinate scale on
 that level's surfaces as the gap, with the pitch evidence recorded as the reason it is not framing.
 The six sweep rows were probe evidence and were removed from the parity set afterwards.
+
+**The level-5 reference, not the renderer, is in doubt (round 99).** The level-1 spawn side-by-side was
+inspected as the control: retail (left) and port (right) show the same architecture, the same texture
+scale on the wall panel, the same FOV and the same dead body - only the HUD differs - so the port's
+texture scaling is right on level 1 and the round-98 "3x texture scale" reading of level 5 is not
+supported by a control. For level 5 the retail reference itself is suspect: `series_static` false and
+`first_frame_is_player_camera` false at +6 s, +15 s and +30 s with intro-skip keys, and a 12-frame
+series spanning ~14 s never produced a player camera. That is consistent with the level's **intro
+camera** running longer than the waits, so retail's frame is probably an intro view while the sidecar
+records the player's `coords`. The ledger row now says exactly that, and the next step is a true
+player-camera reference (find the intro's end - longer wait, or the key/trigger that ends it - then
+re-pair); no port-side renderer change is warranted until then.
