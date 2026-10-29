@@ -34,7 +34,11 @@ param(
   [switch]$LoadShot,
   # Load the first savegame instead of starting a new game. With the save's recorded level
   # patched this is how retail boots a level other than the campaign's first (Phase 2).
-  [switch]$LoadSave
+  [switch]$LoadSave,
+  # Level to boot by patching the scratch savegame before launch (e.g. '02narshadda.jkl').
+  # The save records the level name twice (offsets 132/1616) and its number (int32 at 1612);
+  # patching all three is the only way retail will load a level other than the first.
+  [string]$BootSaveLevel = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -157,6 +161,21 @@ function Invoke-JkStaging([string]$Source, [string]$Destination) {
 # so clear them before every capture.
 Get-ChildItem -Path (Join-Path $Destination 'player') -Recurse -Filter '_JKAUTO_*.jks' -ErrorAction SilentlyContinue |
   ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force; Log "removed stale autosave $($_.Name)" }
+  if ($script:BootSaveLevel) {
+    $savePath = Join-Path $Destination 'player\Lee\save0000.jks'
+    if (Test-Path -LiteralPath $savePath) {
+      $bytes = [System.IO.File]::ReadAllBytes($savePath)
+      $name = $script:BootSaveLevel.ToLowerInvariant()
+      if ($name.Length -ne 15) { throw "BootSaveLevel must be 15 characters like 02narshadda.jkl (got $name)" }
+      $number = [int]$name.Substring(0, 2)
+      $encoded = [System.Text.Encoding]::ASCII.GetBytes($name)
+      [Array]::Copy($encoded, 0, $bytes, 132, 15)
+      [Array]::Copy($encoded, 0, $bytes, 1616, 15)
+      [BitConverter]::GetBytes([int]$number).CopyTo($bytes, 1612)
+      [System.IO.File]::WriteAllBytes($savePath, $bytes)
+      Log "patched the savegame to boot $name (level number $number)"
+    } else { Log "no savegame to patch at $savePath" }
+  }
 $plr = Join-Path $Destination 'player\Lee\Lee.plr'
   if (-not (Test-Path -LiteralPath $plr)) { throw "scratch player profile missing: $plr" }
   $text = Get-Content -LiteralPath $plr -Raw
@@ -676,8 +695,20 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       Start-Sleep -Milliseconds 1800
       Send-JkClick -X 547 -Y 443
       Start-Sleep -Milliseconds 6000
+      # The load takes a while and the dev console answers only once the level is up, so poll `coords`
+      # until it returns a position instead of guessing one sleep.
       $null = Wait-JkConsoleLine -ProcessId $process.Id -Pattern 'parse section things' -TimeoutSec $LevelTimeoutSec
-      foreach ($command in @($ConsoleCommands | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })) {
+      $deadline = [Diagnostics.Stopwatch]::StartNew()
+      $booted = $false
+      while (-not $booted -and $deadline.Elapsed.TotalSeconds -lt 40) {
+        foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command 'coords')) {
+          Log "console| $line"
+          if ($line -match 'Pos:') { $booted = $true }
+        }
+        if (-not $booted) { Start-Sleep -Milliseconds 2000 }
+      }
+      Log "level booted: $booted after $([math]::Round($deadline.Elapsed.TotalSeconds, 1)) s"
+      foreach ($command in @($ConsoleCommands | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' -and $_ -ne 'coords' })) {
         foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command $command)) { Log "console| $line" }
       }
       $png = Join-Path $Out 'loaded-level.png'

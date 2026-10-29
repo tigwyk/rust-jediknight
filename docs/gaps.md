@@ -2251,3 +2251,17 @@ as `tools/parity/save-level2-craft.jks`. This is the unblock Phase 2 needed: ret
 level 2 for spawn captures and the retail side of steps 2/5/6. What remains is to give the load enough
 time (the screenshot caught the loading screen), then read `coords`/`cogstatus` on level 2, and to
 move the save patching into the staging step so every run boots level 2 the same way.
+
+**Retail parses level 2 from the patched save, then aborts the restore (round 83).** The boot is now
+repeatable: `-BootSaveLevel 02narshadda.jkl` patches the scratch save during staging - the level name
+at offsets **132** and **1616** and the level number (int32) at **1612** - and `-LoadSave` drives
+Load -> Ok and polls `coords` until it answers. The engine **parses level 2 fully** (the console shows
+every level-2 section: sounds, materials, georesource, sectors, aiclass, models, sprites, keyframes,
+animclass, soundclass, cogscripts, cogs, templates, things) and then **returns to the main menu**: the
+screenshot at the end of the wait (`tools/parity/retail-level2-load-aborted.png`) is the title screen,
+and `coords` never answered in 40 s. The cause is the rest of the save: its player/entity records are
+level 1's (352 things vs level 2's 391), so the state restore cannot apply them and JK bails to the
+menu. Getting a *genuine* level-2 save is therefore the remaining requirement - candidates: a save the
+engine writes itself after a real level 2 (none appeared in the scratch profile - the abort happens
+before the autosave), a minimal hand-built save (its record format is not recovered yet), or playing
+level 1 through in retail. The parse half is proven, which narrows the problem to the save payload.
