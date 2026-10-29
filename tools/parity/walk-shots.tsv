@@ -34,3 +34,7 @@ walk_switch	01narshadda	-4.75	-2.95	-1.143	0	180.000000
 # face north and walk through its adjoin. Phase 1 step 4's door trigger: `crossed` should move
 # `doorstatus`/`movestatus` in cog 0, which `cogstatus 0` reports.
 walk_door0	01narshadda	1.30	9.00	6.237	0	0.000000
+#
+# walk2_spawn: Phase 2's first non-level-1 leg. Level 2's spawn pose (retail coords: 10.798,-11.983,3.020
+# yaw -99.98); forward there is the plaza the level opens onto. Row fields are name, level, x, y, z, pitch, yaw.
+walk2_spawn	02narshadda	10.798	-11.983	3.020	0.66	-99.98

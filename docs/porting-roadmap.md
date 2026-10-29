@@ -313,6 +313,13 @@ Run the Phase 1 harness on levels 2–5, then all 34. Replace "the walker reache
 trace matches a retail trace" for each. Fix by bucket, not by level. Add the retail-trace fixtures to the
 repo so regressions are caught without a retail run.
 
+*Progress (round 112).* The trace fixtures are in the repo and wired: `trace-gate.ps1` seeds a missing
+`target/parity/trace/<leg>-walk.tsv` from `tools/parity/walktrace/<leg>-walk.tsv`, so the four level-1
+legs gate from a clean checkout with no retail install (proved by deleting the live traces and passing
+4/4). The first non-level-1 leg (`walk2_spawn`, level 2's spawn pose) was captured and **is not yet
+gateable**: level 2's opening scripts move the body during the 3 s window (retail goes forward, back,
+forward over sectors 22/45) while the port walks straight -- the leg needs a pose the opening has settled.
+
 ### Phase 3 — Breadth, by shipped-content weight
 
 Only now take the remaining units from `gaps.md`, ordered by how many shipped levels and scripts need

@@ -640,3 +640,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - `LookForTarget` implemented as the acquisition instinct (interval from the shipped first argument),
   measured against `BK_NO_SCAN=1`: **46 shots / 15 hits with it, 31 / 2 without**.
 - `cargo test --release`: **147 passed**; docs links 132/132.
+
+## Update — round 112
+
+- `trace-gate.ps1` is fixture-driven: the five captured retail traces are committed under
+  `tools/parity/walktrace/<leg>-walk.tsv` and seeded into `target/parity/trace/` when a live capture is
+  absent, so Phase 1 step 3's gate runs from a clean checkout. Proved by deleting the live traces and
+  passing **4/4 legs** (street45 100 %, street90 83 %, cantina 71 %, door0 stop-pose).
+- Phase 2's first non-level-1 leg (`walk2_spawn`) was added and captured on both sides: it is **not
+  gateable yet** because level 2's opening scripts move the body during the window (measured, recorded
+  in gaps.md and Phase 2's section).

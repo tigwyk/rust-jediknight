@@ -3022,3 +3022,36 @@ without:          31 shots,  2 hits   (gunners start 100-170 deg off and never c
 The pair scores of the two combat rows (catwalk 0.4577 / door 0.4111) are still dominated by retail's
 saturated damage tint and the doorway framing, so they stay ungraded on picture — but the *state* behind
 them is now the ledger's 15-hit fight, on a clock that means the same thing every run.
+
+**Phase 2's harness: the trace gate now runs from committed retail fixtures (round 112).** The
+roadmap's Phase 2 asks for the retail-trace fixtures to live in the repo so regressions are caught
+without a retail run. They were not wired: `trace-gate.ps1` compares against
+`target/parity/trace/<leg>-walk.tsv`, which only a live retail capture writes, while the captured traces
+sat in the repo as `tools/parity/walktrace-<leg>-<level>.tsv` with names nothing read. Now:
+
+- The five captured retail traces are committed as `tools/parity/walktrace/<leg>-walk.tsv`
+  (`walk_cantina`, `walk_door0`, `walk_street45`, `walk_street90`, `walk_switch`), and
+  `trace-gate.ps1` seeds any missing live trace from them — a fresh retail capture still wins, and a
+  leg with neither says exactly which command fills it. Proved from a clean slate: the live files were
+  deleted and the gate passed from the fixtures alone:
+
+```text
+seeded walk_street45 from the committed retail fixture
+seeded walk_street90 from the committed retail fixture
+seeded walk_cantina from the committed retail fixture
+seeded walk_door0 from the committed retail fixture
+PASS  walk_street45  port  2.21 / retail  2.20 units (  100%)  sectors off 1
+PASS  walk_street90  port  1.84 / retail  2.21 units (   83%)  sectors off 2
+PASS  walk_cantina   port  1.85 / retail  2.59 units (   71%)  sectors off 1
+PASS  walk_door0     port  0.13 / retail  0.07 units (stop-pose)  sectors off 0
+trace gate: 4 leg(s), 0 failure(s)
+```
+
+**The first non-level-1 leg was attempted and is not gateable yet (measured).** `walk2_spawn` was added
+to `walk-shots.tsv` at level 2's spawn pose (`10.798,-11.983,3.020` yaw -99.98) and captured with the
+level-2 recipe (`-StartLevel 2 -PreShotMs 26000 -WalkTraceMs 3000`). Retail's trace is **not a walk**:
+the body goes 10.80 → 12.07 → 12.56, then **back to 11.07**, then forward again, alternating sectors
+22/45 — level 2's opening scripts are moving the body while the forward key is held. The port's trace is
+a clean straight walk (10.80,-11.98 → 12.00,-13.23, sector 22), so the two are measuring different
+things: the leg needs a pose the opening has already settled (or a sample window after it), which is the
+first item on Phase 2's queue.

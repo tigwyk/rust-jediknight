@@ -26,6 +26,26 @@ param([string[]]$Only = @('walk_street45', 'walk_street90', 'walk_cantina', 'wal
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
+# The retail side is a **committed fixture**: `tools/parity/walktrace/<leg>-walk.tsv` holds the trace a
+# retail run produced (`retail-capture.ps1 -WalkTraceMs`). A fresh retail capture writes the same file
+# into target/parity/trace and takes precedence; this only fills in the ones that are not there, so the
+# gate catches regressions on a checkout with no retail install. Phase 2 asks for exactly that.
+$TraceDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'target/parity/trace'
+New-Item -ItemType Directory -Force -Path $TraceDir | Out-Null
+$FixtureDir = Join-Path $PSScriptRoot 'walktrace'
+foreach ($leg in $Only) {
+  $live = Join-Path $TraceDir ("{0}-walk.tsv" -f $leg)
+  $fixture = Join-Path $FixtureDir ("{0}-walk.tsv" -f $leg)
+  if (Test-Path -LiteralPath $live) { continue }
+  if (Test-Path -LiteralPath $fixture) {
+    Copy-Item -LiteralPath $fixture -Destination $live
+    Write-Host ("seeded {0} from the committed retail fixture" -f $leg)
+  } else {
+    Write-Host ("FAIL  {0}: no retail trace and no fixture; capture one with tools/parity/retail-capture.ps1 -Shots tools/parity/walk-shots.tsv -Only {0} -WalkTraceMs 3000" -f $leg)
+    $failed++
+  }
+}
+
 Write-Host 'recording port traces...'
 & pwsh -NoProfile -File tools/parity/port-trace.ps1 2>&1 | Out-Null
 
