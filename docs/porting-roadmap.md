@@ -60,7 +60,7 @@ Everything else (installer, site, extra screens, multiplayer) is downstream of t
 | Tier | Meaning | Evidence |
 |---|---|---|
 | T0 Parsed | The data loads, nothing is dropped | `--audit`, unit tests |
-| T1 Implemented | Runs in the live game | the existing 61 gates |
+| T1 Implemented | Runs in the live game | the existing 63 gates |
 | T2 **State parity** | Numbers match retail for the same inputs: position, sector, velocity, health, bins, cog variables | a retail-recorded trace (`coords` and friends, or an instrumented run) diffed against the port |
 | T3 **Visual parity** | Same pose gives the same picture within a stated tolerance | `tools/parity` shot pairs with a per-shot SSIM/diff threshold |
 | T4 **Play parity** | A recorded input script reaches the same end state in both builds | replay script plus end-state diff |

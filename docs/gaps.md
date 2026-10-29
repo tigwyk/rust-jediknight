@@ -3,7 +3,7 @@
 A map of the engine's own source units (`sith*`, `jk*`) against this port, so the remaining work is a list
 rather than a feeling. Every row names its evidence: the gate that runs it, or the file that holds it.
 
-The port's checks at the time of writing: **61 gates, 143 tests, 0 failures.** Stubbed script surface:
+The port's checks at the time of writing: **63 gates, 147 tests, 0 failures.** Stubbed script surface:
 **0 verbs, 0 call sites across the 34 shipped levels** (706 script verb calls, all answered).
 
 Two rules for reading this file:
@@ -1349,7 +1349,7 @@ more blockers behind the first-run ones; all are fixed and now gated.
   found next to the executable's checkout as well as the cwd (`BK_SMKDEC` overrides); the declared
   MSRV is Bevy's real one, **1.97.1**; the release note's audit line now quotes the whole summary.
 
-Current: **61 gates** (`--gates` windowed `0 of 61 failed, 0 skipped`; `BK_HEADLESS=1`
+Current: **63 gates** (`--gates` windowed `0 of 63 failed, 0 skipped`; `BK_HEADLESS=1`
 `0 of 61 failed, 9 skipped`) and **130 tests**. `--tour`: 28 rows (25 files), 5543 things, 23 films,
 2 terminal rows, 0 script errors, 1 sound missing from retail data. `--audit`: 540 cogs parsed,
 1854 labels, 7683 symbols, 35/35 levels clean, 10 unresolved asset references, 57 undecoded files.
@@ -1468,7 +1468,7 @@ Remaining owner actions: explicit approval to push, and the human playthrough ca
 - **Documentation:** `scripts/check-docs-links.ps1` resolves every relative link against the
   file that contains it (the failure mode that once left 34 broken links in the progress log);
   CI runs it, and it passes locally with 108 links across 7 files.
-- **What is deliberately not in CI:** the 61 gates under `--gates` need the retail game install,
+- **What is deliberately not in CI:** the 63 gates under `--gates` need the retail game install,
   which the repository does not ship and CI must not download. `cargo fmt --check` is not
   enforced yet because the tree is not rustfmt-clean, and clippy runs with ~140 warnings (no
   errors), so neither is a gate. Both are noted as future tightening, not hidden.
