@@ -2316,3 +2316,14 @@ is rows **2 and 3** (JK1CTF `c1`, JK1MP `m2`), whose spawns the port can now ide
 (`--sim --start m2` etc.). `--sim` also gives every level's spawn sector, which is the cheap
 identification key for any future retail boot: compare the console's `coords` sector/position with
 the port's spawn list instead of guessing from screenshots.
+
+**The episode chooser commits with a *second* Ok, and episode 2 is level c1 (round 87).** The chooser
+needs **Ok twice**: the first Ok closes the episode list and returns to the Single Player submenu, the
+second Ok commits the level select and starts it (clicking New Game there restarts the default
+episode, which is what it did before). With that fixed, `-StartEpisode 2` boots **c1** - the console
+reads **Pos (4.20, -0.00, 0.12) PYR (0, 90, 0) Sector 36**, and the port's `--sim --start c1` prints
+exactly **spawn sector center [4.2, -0.00005, 0.157114] radius 1.9 (walkplayer sector 36)**. That is
+the **first non-level-1 retail spawn** this project has captured and identified, so Phase 2 has its
+first level pair: `tools/parity/retail-c1-spawn.png` + `coords-c1-spawn.txt` are the retail reference
+for a port `--start c1` capture. Episode 1 is JK1's `01narshadda` (sector 339), episode 2 is CTF's
+`c1` (sector 36), and episode 3 remains to be captured the same way.

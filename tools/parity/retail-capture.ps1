@@ -695,10 +695,17 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       Send-JkClick -X 330 -Y $rowY
       Start-Sleep -Milliseconds 800
       Send-JkClick -X 505 -Y 443
+      # Ok on the chooser returns to the submenu; the level select then needs a second Ok to commit
+      # (clicking New Game instead restarts the default episode - the user found this in play).
+      Start-Sleep -Milliseconds 1500
+      Send-JkClick -X 505 -Y 443
+      Start-Sleep -Milliseconds 1500
+      # Ok stores the chosen episode and returns to the submenu; New Game then starts its campaign
+      # (with the chooser itself already closed).
       Start-Sleep -Milliseconds 1200
-      # The chooser only stores the episode; New Game then starts that episode's first level.
       Send-JkClick -X 304 -Y 115
       Start-Sleep -Milliseconds 1000
+      Start-Sleep -Milliseconds 1200
       $null = Wait-JkConsoleLine -ProcessId $process.Id -Pattern 'parse section things' -TimeoutSec $LevelTimeoutSec
       Start-Sleep -Milliseconds 12000
       foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command 'coords')) { Log "console| $line" }
