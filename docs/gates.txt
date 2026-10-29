@@ -678,3 +678,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - `cargo test --release`: **147 passed**; `--gates`: **0 of 64 failed**; parity **6/6** (scores unchanged:
   spawn 0.6602, spawn_pose 0.6603, spawn_yaw30 0.6385, route_cantina 0.7381, route_lower 0.7119,
   route_street 0.7327); trace gate **4/4**.
+
+## Update — round 115
+
+- Restored the documented `BK_STEP` experiment hook (it had no reader left) and swept the step allowance:
+  0.066 / 0.2 / 0.35 give **identical** end poses on `walk5_spawn`, so the stall is not a riser.
+- Level 5's remaining travel gap (1.41 of retail's 3.73) is now narrowed to the **ground itself**: with
+  the landing fix the body grounds every frame (drag 3.000, velocity 0.93 vs 1.2 target), then falls
+  0.44 in the first second (z 0.22 → −0.22) and slides in −x where retail holds z ≈ 0.00 with a steady
+  −y drift. `--near` shows only `waterpump` (1.1 away), `fullshield`/`revivepack` (2.7, z −1.71) about.
+- Retail's walk-trace cadence is now documented: 600 ms held windows with the key released for the paused
+  `coords` read, so its window distances (1.00, 1.06, 0.87, 0.68, 0.61) read as land 2.4 then water 1.2,
+  and the port is water-halved from the spawn — the next measurement.
+- All suites re-run with the hook in place: tests, gates, parity, trace gate below.

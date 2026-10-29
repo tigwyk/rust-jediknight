@@ -3120,3 +3120,27 @@ Two things this round ruled out, so the next attempt starts further in:
   movement — which is why the walk trace printed `blocked true` on healthy level-1 walks and sent this
   round looking for a wall that was never there. `BK_MOVE_TRACE=1` now names the face (and the
   thing-cylinder push) when there really is one.
+
+**Level 5's walk: not a kerb, and not the step allowance (round 115).** Last round's fix grounded the
+body (every frame now lands, `drag 3.000`, velocity at 0.93 against the water-halved 1.2 target), but
+`walk5_spawn` still stops at 1.41 of retail's 3.73 units. Two hypotheses died in measurements:
+
+- **Not a step.** The `BK_STEP` experiment hook that the constants file documents was stale (no reader
+  left); restoring it and sweeping the allowance produced *identical* end poses at 0.066, 0.2 and 0.35 —
+  the body stops at (9.17, 14.64, −0.22) whatever the step height, so it is not wedging on a riser.
+- **Not a closed gate or a solid thing's cylinder.** `BK_GATES_OPEN=1` and the push-out trace agree:
+  nothing blocks the sweep; the body simply **falls 0.44** (z 0.22 → −0.22) in the first second and then
+  slides in −x while retail walks on at z ≈ 0.00 with a steady −y drift. The port's ground under that
+  path is a third of a unit lower than retail's — the raised-street problem again, but reached by
+  *walking off* the spawn surface rather than by climbing from beside it.
+
+Retail's trace structure is also now understood, which matters for how the leg is read: the retail harness
+holds the key in 600 ms segments and releases it to read `coords` between them (the console dialog pauses
+the game), so its per-segment distances are 600 ms windows of movement; the port holds continuously and
+samples per frame, so the windows do correspond. Retail's window distances (1.00, 1.06, 0.87, 0.68, 0.61)
+are consistent with **land speed 2.4 then water 1.2** — the port is already water-halved at the spawn
+(target 1.2), which is the next thing to check against retail's first window (1.00 unit ⇒ a 2.4-speed ramp).
+
+`--near` at the spawn lists the only nearby things: `waterpump` (cog, 1.1 away at z −0.23), `fullshield`
+and `revivepack` (2.7 away, z −1.71); the next step is to dump the surface/plane the body stands on at the
+spawn and at the wedge, and compare with the level's raised-street geometry.

@@ -13387,7 +13387,10 @@ fn walker_step(
     // Lateral: the engine's own move — sweep, slide along whatever was hit, step over anything low.
     let delta = [move_dir[0] * dt, move_dir[1] * dt, 0.0];
     let before = *pos;
-    let step_up = STEP_UP;
+    // `BK_STEP` is the experiment hook the constants file documents: the step allowance is a scale
+    // the walker exercises (`--walk all` is sensitive to it), and a level whose kerb is taller than
+    // `STEP_UP` wedges a walking body against it. Default stays the engine's `moveSize + 0.01`.
+    let step_up = env_f32("BK_STEP", STEP_UP);
     let (moved_to, crossed_to, mut blocked) = solids.move_body(*sector, *pos, delta, radius, step_up, gates);
     if std::env::var_os("BK_WALK_TRACE").is_some() {
         let dm = ((moved_to[0] - pos[0]).powi(2) + (moved_to[1] - pos[1]).powi(2)).sqrt();
