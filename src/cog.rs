@@ -329,19 +329,32 @@ impl Cog {
         }
     }
 
-    /// `door0` + index 2 → `door2`: the engine resolves an indexed symbol by link id.
+    /// `door0` + index 2 → `door2`: the array element is the symbol whose **name** is the base plus
+    /// the index. `linkid` is not an ordinal — it is the *bit* that identifies the symbol in a
+    /// linked message (`GetSenderId()` returns it: `00_secretareas.cog` declares `secret1 linkid=1`,
+    /// `secret2 linkid=2`, `secret3 linkid=4`, …, and its `entered:` handler does
+    /// `flags = flags | GetSenderId()`), so resolving by it put `secret0[4]` on `secret3` and made
+    /// the level's secret count 8 instead of 6. It stays as a last resort for an index that is a
+    /// bit rather than an element number.
     fn indexed_name(&self, name: &str, index: i64) -> Option<String> {
         let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
         let want = index as u32;
-        // Prefer an explicit `linkid=`; fall back to `<base><index>`.
-        self.symbols
+        let candidate = format!("{base}{index}");
+        let found = self
+            .symbols
             .iter()
-            .find(|s| s.linkid == Some(want) && s.name.starts_with(base))
-            .map(|s| s.name.clone())
+            .any(|s| s.name == candidate)
+            .then_some(candidate)
             .or_else(|| {
-                let candidate = format!("{base}{index}");
-                self.symbols.iter().any(|s| s.name == candidate).then_some(candidate)
-            })
+                self.symbols
+                    .iter()
+                    .find(|s| s.linkid == Some(want) && s.name.starts_with(base))
+                    .map(|s| s.name.clone())
+            });
+        if std::env::var_os("BK_INDEX_TRACE").is_some() {
+            eprintln!("index: {name}[{index}] base `{base}` -> {found:?}");
+        }
+        found
     }
 }
 
@@ -1568,5 +1581,24 @@ end
         let mut vm = Vm::new();
         vm.run_label(&cog, "startup").expect("runs");
         assert_eq!(vm.trace.prints, vec!["door shut".to_string()]);
+    }
+
+    /// `array[index]` is the symbol the base name plus the index names. The shipped scripts declare
+    /// their array elements with **bit** link ids (`secret1 linkid=1`, `secret2 linkid=2`,
+    /// `secret3 linkid=4`, …) because the link id is what `entered:` tests against `GetSenderId()`,
+    /// so resolving by link id put `secret0[4]` on `secret3` and made level 1 count 8 secret areas
+    /// instead of 6.
+    #[test]
+    fn an_array_index_is_the_symbols_name_not_its_link_id() {
+        let cog = parse(
+            "symbols\nsector secret0 nolink local\nsector secret1 linkid=1\nsector secret2 linkid=2\n\
+             sector secret3 linkid=4\nsector secret4 linkid=8\nend\ncode\nstartup:\n\treturn;\nend\n",
+        )
+        .expect("parses");
+        assert_eq!(cog.indexed_name("secret0", 3).as_deref(), Some("secret3"));
+        assert_eq!(cog.indexed_name("secret0", 4).as_deref(), Some("secret4"));
+        assert_eq!(cog.indexed_name("secret0", 5), None, "no element 5 exists");
+        // A bit, rather than an element number, still finds the symbol that carries it.
+        assert_eq!(cog.indexed_name("secret0", 8).as_deref(), Some("secret4"));
     }
 }

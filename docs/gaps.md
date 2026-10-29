@@ -2581,3 +2581,54 @@ clamped alignment score, so the level-change delta 73 0→10.5 / 75 0→20 is th
 after level 1; 0x47 (71) and 99/102 remain unnamed. The comparison is recorded as a deviation (port
 level-start inventory vs retail's table) rather than fixed, because which script or startup pass sets
 13/42/60/63/71 is not yet located.
+
+**The player's class script was never started, and three item bugs were behind it (round 102).** The
+level-start inventory gap of round 101 is explained: `walkplayer`'s own template carries
+`cog=kyle.cog` (it is in the JKL's TEMPLATES section, and the level's `cogs` placement table has no row
+for the player), and the port only bound placement rows, so `kyle.cog`'s `init_kyle` never ran. That
+one label grants exactly the bins retail's autosave shows: shields 60 -> 100, battery 13 -> 100, power
+boost 63 -> 1.0, field light 42 -> 1, fists and bryar. The port now starts the player's template cog
+after the placement instances (`scripts: started the player's class script `kyle.cog` (from template
+`walkplayer`)`), and level 1's inventory reads `1=1, 2=1, 11=50, 13=100, 42=1, 60=100, 63=1,
+99=1000, 100=1` - nine of retail's ten bins exactly. Starting it exposed three real bugs:
+
+- **`GetInvMax` answered a flat 100 for every bin**, so `pow_shields.cog`'s `amount < GetInvMax(...)`
+  guard passed at every amount. It now answers `misc\items.dat`'s own `max` column (shields 200, energy
+  50, …), handed to the runtime the way `item_cog` already is; a bin the table does not name reports
+  its current amount, so a powerup declines instead of stacking without end.
+- **The scripted pickup ran `taken` whether or not `touched` took the item.** The engine's `TakeItem`
+  is what sends `taken`; running both labels unconditionally made the shields powerup beside level 1's
+  spawn add its +20 **every frame** - bin 60 read 680 after 0.39 s. `taken` now runs only when
+  `touched` left the thing destroyed, and all 43 shipped `pow_*`/`item_*` scripts follow the
+  `touched: … TakeItem(…)` pattern, so the rule holds across the set.
+- **Pickup reach was a flat 1.0 unit.** The engine collects on contact, so the reach is now the two
+  templates' `movesize` radii; the level-1 spawn's shield recharge is no longer swallowed from a step
+  away, and retail's own save (bin 60 = 100) is reproduced.
+
+What is left in the comparison: bin **71** is the level's secret-area count (`00_secretareas.cog` sets
+`SetInv(player, 71, maxSecrets)`, and that script counts `secret0[i] >= 0` over 20 linkid symbols).
+Level 1 binds 6 sectors (243, 306, 8, 417, 427, 281) and 14 values of -1, and the port's `--cogstatus
+28` shows those bindings correctly, yet the count comes out 8 - an off-by-two in the indexed-symbol
+loop, not in the data. Bin 14 reads 6.8 only because the snapshot is 0.34 s into play and mana
+regenerates; retail's autosave is taken at load.
+
+Correction to the `GetInvMax` note above: a bin `misc\items.dat` does not name answers **roomy**
+(1e9), not "the current amount". The engine's own bin records do carry maxima, but they are not
+recovered here, and answering the current amount made the `--pickup` gate fail (a bare runtime has no
+`items.dat` table, so the shields powerup's guard read 0 < 0 and declined). The repeat-stacking bug was
+the `taken` gating, which is fixed properly; roomy keeps a powerup working on bins whose ceiling this
+build does not know.
+
+**Bin 71 closed: `linkid` is the linked-message bit, not an array index (round 102).** The last
+level-start inventory difference was bin 71 (the level's secret count): retail 6, port 8. The data was
+bound correctly - `--cogstatus 28` showed `secret1..secret6` at 243, 306, 8, 417, 427, 281 and
+`secret7..secret20` at -1 - so the count itself was wrong. `cog::indexed_name` resolved `array[index]`
+**by linkid first**, and `linkid` is not an ordinal: `00_secretareas.cog` declares `secret1 linkid=1`,
+`secret2 linkid=2`, `secret3 linkid=4`, ... because the link id is the *bit* its `entered:` handler
+tests against (`flags = flags | GetSenderId()`). So `secret0[4]` resolved to `secret3`, `secret0[8]` to
+`secret4`, and two of the six real sectors were counted twice while two were unreachable. Resolution
+is now **name first** (`secret0[4]` -> `secret4`), with the linkid lookup kept only as a fallback for
+an index that really is a bit. `--cogstatus 28` now prints `maxsecrets = 6`, and level 1's whole start
+inventory matches retail's own autosave - the ten bins retail carries at load are now asserted by the
+`--save-live` gate (`save-live: start inventory matches retail's autosave (10 bin(s))`), so the
+deviation ledger's level-start-inventory row is retired.

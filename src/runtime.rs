@@ -960,6 +960,10 @@ pub struct Runtime {
     /// `misc\items.dat`'s `cog=` column: inventory bin -> the script that bin runs. The loader fills
     /// it once, because the runtime has no file access.
     pub item_cog: BTreeMap<i32, String>,
+    /// `misc\items.dat`'s `max` column: inventory bin -> the ceiling `GetInvMax` answers. The engine
+    /// keeps it in the bin record (`sithInventory_GetInventoryMaximum`); the loader fills it here,
+    /// because the runtime has no file access.
+    pub item_max: BTreeMap<i32, f32>,
     /// Inventory bin -> the `cog_index` of the VM running that bin's script, filled by the loader when
     /// it starts one. `UseBin` needs it: the engine sends the bin's message to *its own cog*, and the
     /// runtime cannot see the app's instance list.
@@ -1322,6 +1326,7 @@ impl Runtime {
             saber_enabled: true,
             saber_cam: 0,
             item_cog: BTreeMap::new(),
+            item_max: BTreeMap::new(),
             bin_cog_index: BTreeMap::new(),
             pending_cogs: Vec::new(),
             spawned_cogs: std::collections::BTreeSet::new(),
@@ -6310,10 +6315,19 @@ impl Runtime {
             // bin is the second. Reading the bin from argument 0 put every pickup's count in
             // bin 0 — the inventory looked empty and the bins never moved.
             "getinv" => Value::Num(self.inv.get(&(idx(1) as i32)).copied().unwrap_or(0.0) as f64),
-            // How many of a bin the player can hold. The engine's table is per item class
-            // (`jkInventory`); without it, a bin is treated as roomy, which is what lets a
-            // powerup script's `if (amount < GetInvMax(...))` guard pass and `TakeItem` run.
-            "getinvmax" => Value::Num(100.0),
+            // How many of a bin the player can hold. The engine's `sithInventory_GetInventoryMaximum`
+            // answers the class's own ceiling; the loader hands `items.dat`'s `max` column over, so a
+            // bin the file names gets its real number (shields 200, energy 50, …). A bin it does not
+            // name — the engine's own counters (goals, alignment, mana) — has no ceiling here, so the
+            // current amount is reported and a powerup guard declines instead of stacking without end.
+            "getinvmax" => Value::Num(match self.item_max.get(&(idx(1) as i32)) {
+                Some(max) => *max as f64,
+                // A bin `items.dat` does not name — the engine's own counters, and every bin in a
+                // check that builds a runtime without the loader's table — has no known ceiling, so
+                // answer roomy: a powerup's guard then accepts the item the way retail's does. The
+                // engine's own bin records do carry maxima, but they are not recovered here.
+                None => 1.0e9,
+            }),
             "setinvavailable" => {
                 self.inv_available.insert(idx(0) as i32, idx(1) != 0);
                 Value::Nil

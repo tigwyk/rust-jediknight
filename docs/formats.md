@@ -1623,6 +1623,16 @@ end
 `message` symbols are entry points: the engine calls the label of the same name
 when the script's thing receives that message. `local` marks per-instance state.
 
+**Which script a thing runs comes from its template, not from the placement table.** A template
+carries `cog=<file>` in the TEMPLATES section (`walkplayer` in every shipped level carries
+`cog=kyle.cog`), and the level's `cogs` section supplies that instance's symbol values
+(`0:.00_door.cog.4 -1 -1 -1 8.000000 …` — the number after the script is a thing index). The two
+lists are not the same length: level 1 has 65 entries in `cogscripts`, 42 rows in `cogs`, and the
+player's own instance has **no row** — it is created when the player thing is, from its template.
+`kyle.cog`'s `init_kyle` is where the single-player start inventory comes from (`SetInv(player, 60,
+100)` shields, `13` battery, `63` power boost, `42` field light, fists and bryar), so a build that
+binds only the placement rows starts the body without it.
+
 The language is **C-like and case-insensitive** (`For`/`for`, `Print`/`print`,
 `thinglight`/`ThingLight` all appear). It has `if`/`else`, `while`, `do…while`,
 `for (init; cond; step)`, `call <label>`, `return`, `break`, assignments,

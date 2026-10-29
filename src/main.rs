@@ -12684,7 +12684,21 @@ fn take_item_with_script(
     vm.sender_ref = item as i64;
     vm.source = player as i64;
     let _ = vm.run_label(script, "touched");
-    let _ = vm.run_label(script, "taken");
+    // The engine's `TakeItem` is what sends the item's `taken:` label, so a script that *declines*
+    // (its own `if (amount < GetInvMax(...))` guard failed) must not run it. Running both labels
+    // unconditionally made `pow_shields.cog` add its +20 every frame the body stood on the pickup:
+    // level 1's level-start inventory read bin 60 = 680 before this, against retail's 100.
+    let taken = sim_world.borrow().things.get(item).map(|t| t.destroyed).unwrap_or(false);
+    if taken {
+        let _ = vm.run_label(script, "taken");
+    }
+    if std::env::var_os("BK_TAKE_TRACE").is_some() {
+        let rt = sim_world.borrow();
+        println!(
+            "take: item {item} `{template}` taken={taken} inv60={:?}",
+            rt.inv.get(&60)
+        );
+    }
     let mut bins: Vec<i32> = sim_world.borrow().inv.keys().copied().collect();
     bins.sort();
     Some((cog_name, bins))
@@ -17320,7 +17334,39 @@ fn save_probe(
                 "save-live: clock {time:.2} (saved {:.2}), bin 2 = {bin:.0}",
                 state.2
             );
-            if restored && bin < 99.0 {
+            // Level 1's start inventory, against the engine's **own autosave**
+            // (`tools/parity/jkauto-01narshadda.jks`): fists and bryar, energy 50, battery 100,
+            // shields 100, power boost 1.0, field light 1, the level's 6 secret areas, score 1000 and
+            // `SITHBIN_GOAL00`. Mana (bin 14) is left out on purpose: it regenerates from frame one,
+            // while retail's autosave is written at load. A miss here is a start-state regression —
+            // the player's class script (`walkplayer`'s `cog=kyle.cog`) is what grants these.
+            let bins = sim.world.borrow().inv.clone();
+            let want: [(i32, f32); 10] = [
+                (1, 1.0),
+                (2, 1.0),
+                (11, 50.0),
+                (13, 100.0),
+                (42, 1.0),
+                (60, 100.0),
+                (63, 1.0),
+                (71, 6.0),
+                (99, 1000.0),
+                (100, 1.0),
+            ];
+            let wrong: Vec<String> = want
+                .iter()
+                .filter(|(bin, value)| (bins.get(bin).copied().unwrap_or(0.0) - value).abs() > 1e-3)
+                .map(|(bin, value)| format!("bin {bin} = {:?}, retail {value}", bins.get(bin)))
+                .collect();
+            if wrong.is_empty() {
+                println!(
+                    "save-live: start inventory matches retail's autosave ({} bin(s))",
+                    want.len()
+                );
+            } else {
+                println!("save-live: FAIL start inventory differs: {}", wrong.join(", "));
+            }
+            if restored && bin < 99.0 && wrong.is_empty() {
                 println!("--- save-live check passed ---");
             } else {
                 println!("save-live: FAIL the load did not restore the snapshot");
@@ -19574,6 +19620,18 @@ fn collect_items(
         return;
     };
     let body = [player.pos.x, player.pos.y, player.pos.z];
+    // Contact, not proximity: the engine collects a thing when its collide volume meets the player's,
+    // so the reach is the two templates' `movesize` radii. The flat 1.0 that stood here swept up
+    // everything in a unit — level 1 starts the body beside a `shieldrecharge`, and the port took it
+    // (and, before the `taken` fix, took it again every frame) while retail's own save reads 100.
+    let radius_of = |name: &str| {
+        rt.templates
+            .iter()
+            .position(|t| t.eq_ignore_ascii_case(name))
+            .and_then(|i| rt.template_hit.get(&rt.templates[i].to_ascii_lowercase()).map(|(r, _)| *r))
+            .unwrap_or(0.065)
+    };
+    let reach_body = radius_of("walkplayer");
     let mut taken: Vec<usize> = Vec::new();
     for (other, thing) in rt.things.iter().enumerate() {
         if other == index || thing.destroyed {
@@ -19586,7 +19644,8 @@ fn collect_items(
             + (thing.pos[1] - body[1]).powi(2)
             + (thing.pos[2] - body[2]).powi(2))
         .sqrt();
-        if d < 1.0 {
+        let reach = reach_body + radius_of(&rt.templates.get(other).cloned().unwrap_or_default());
+        if d < reach {
             taken.push(other);
         }
     }
@@ -20279,6 +20338,10 @@ fn setup(
     // has no file access, so the loader hands the counts over once. The inventory's own `cog=`
     // column comes over the same way, so a pickup can name the script that bin runs.
     sim.world.borrow_mut().item_cog = world.item_cogs.clone();
+    // `GetInvMax` needs the same table's `max` column, or a powerup's "is there room" guard compares
+    // against nothing and `pow_shields.cog` keeps taking (its +20 landed every frame).
+    sim.world.borrow_mut().item_max =
+        world.item_defs.iter().map(|def| (def.id, def.max as f32)).collect();
     // `GetKeyLen` answers a `.key`'s frame count, which the loader already parsed.
     sim.world.borrow_mut().key_lengths =
         world.keys.iter().map(|(name, key)| (name.clone(), key.frames as f32)).collect();
@@ -20319,6 +20382,28 @@ fn setup(
         // engine creates them in — so this is the same number a script compares against.
         vm.cog_index = sim.instances.len() as i32;
         sim.instances.push((inst.script.clone(), vm));
+    }
+    // The player's class script comes from its **template**, not from a `cogs` row: every shipped
+    // level's `walkplayer` carries `cog=kyle.cog`, and that script's `init_kyle` is what grants the
+    // start inventory (shields 100 in bin 60, battery 100 in 13, power boost 1.0 in 63, field light
+    // 42, fists and bryar). The placement table has no row for the player, so without this the body
+    // starts with only what the templates give and retail's level-start bins do not appear.
+    {
+        let player = sim.world.borrow().player_thing();
+        let template = level.things.get(player).map(|t| t.template.clone()).unwrap_or_default();
+        let class_cog = level.template_param(&template, "cog").map(|s| s.to_string());
+        if let Some(name) = class_cog {
+            if let Some(script) = world.cogs.get(&name) {
+                let mut vm = cog::Vm::with_world(sim.world.clone());
+                script.bind(&mut vm, &[]);
+                if script.label("startup").is_some() {
+                    let _ = vm.run_label(script, "startup");
+                }
+                vm.cog_index = sim.instances.len() as i32;
+                sim.instances.push((name.clone(), vm));
+                println!("scripts: started the player's class script `{name}` (from template `{template}`)");
+            }
+        }
     }
     let moving = sim.world.borrow().things.iter().filter(|t| t.is_moving()).count();
     let mut kinds: Vec<String> = sim
