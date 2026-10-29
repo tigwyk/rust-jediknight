@@ -650,3 +650,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Phase 2's first non-level-1 leg (`walk2_spawn`) was added and captured on both sides: it is **not
   gateable yet** because level 2's opening scripts move the body during the window (measured, recorded
   in gaps.md and Phase 2's section).
+
+## Update — round 113
+
+- Phase 2's first non-level-1 walker trace: level 2's spawn was rejected (its opening scripts move the
+  body during the window), and level 5 (`06abarons`, calm spawn) was captured on both sides. Retail walks
+  3.73 units cleanly (sectors 35 → 33 → 34 → 33 → 33 → 24); the port wedges after **0.90 units** at
+  (9.78,14.49), body 0.34 units below retail's, `move_body ... blocked true` with `ahead None` — the
+  signature of a floor the port does not stand on. The retail trace is committed as
+  `tools/parity/walktrace/walk5_spawn-walk.tsv`; the leg is Phase 2's first bucket (**walker floor support
+  for solid things**) and joins the gate when it passes. The four level-1 legs still gate from fixtures.

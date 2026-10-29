@@ -320,6 +320,14 @@ legs gate from a clean checkout with no retail install (proved by deleting the l
 gateable**: level 2's opening scripts move the body during the 3 s window (retail goes forward, back,
 forward over sectors 22/45) while the port walks straight -- the leg needs a pose the opening has settled.
 
+Level 5 (`06abarons`) has a calm spawn, so `walk5_spawn` is the working non-level-1 leg: retail's trace is
+a clean 3.73-unit walk over six samples (sectors 35 → 33 → 34 → 33 → 33 → 24, committed as
+`tools/parity/walktrace/walk5_spawn-walk.tsv`), and the port wedges after **0.90 units** at
+(9.78,14.49) with the body 0.34 units below retail's — it is standing in a gutter beside a raised
+surface retail's walker treats as ground. That is Phase 2's first measured bucket: **walker floor
+support for solid things** (`--warp` attachment already reads them; the walking support probe does not).
+The leg joins the gate as soon as it passes.
+
 ### Phase 3 — Breadth, by shipped-content weight
 
 Only now take the remaining units from `gaps.md`, ordered by how many shipped levels and scripts need

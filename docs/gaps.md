@@ -3055,3 +3055,30 @@ the body goes 10.80 → 12.07 → 12.56, then **back to 11.07**, then forward ag
 a clean straight walk (10.80,-11.98 → 12.00,-13.23, sector 22), so the two are measuring different
 things: the leg needs a pose the opening has already settled (or a sample window after it), which is the
 first item on Phase 2's queue.
+
+**Phase 2's first non-level-1 walker trace is captured, and it measures a real divergence (round 113).**
+Level 5 (`06abarons`, the debug list's "Barons Hed - The Fallen City", booted with `-StartLevel 5`) has a
+calm spawn — its `level5_spawn` reference is a static player-camera frame — so `walk5_spawn` was added to
+`walk-shots.tsv` at that pose and captured with `-WalkTraceMs 3000`. Retail's trace is a clean straight
+walk: (10.58,14.91,0.22) → (7.19,13.36) across sectors 35 → 33 → 34 → 33 → 33 → 24, **3.73 units** at
+1.24 u/s.
+
+The port's trace diverges after **0.90 units**: it walks to (9.78,14.49) and wedges there for the rest of
+the window, sector 33, body z **−0.23** where retail's stays at ≈0.00. The walk trace names the wedge:
+
+```text
+move_body delta [-0.0070, -0.0006, 0.0] -> moved 0.006, blocked true, z -0.2278 -> -0.2278
+  -> sector 33 pos [9.778853, 14.491369, -0.22777206] vy -0.08 vel [-0.350, -0.029] ahead None
+support Some(-0.338) floor Some(-0.338)
+```
+
+`blocked true` while the walker's own probe reports `ahead None`, with the body standing 0.34 units lower
+than retail's — the signature of a **floor the port does not stand on**: retail's street has a raised
+surface (a solid thing, the sidewalk/porch class) that the engine's walker treats as ground and the port's
+level-surface `support` does not, so the port steps down into the gutter beside it and then wedges against
+its side. Two controls rule out the easy explanations: `BK_GATES_OPEN=1` (no closed adjoin involved) and
+`BK_NO_SOLIDS=1` (that switch only detaches the *runtime's* collider for AI/moving things, not the
+walker's) both end at exactly the same pose. Retail's trace is committed as
+`tools/parity/walktrace/walk5_spawn-walk.tsv` so the leg can be gated as soon as the walker stands on
+thing floors; until then it is a measured Phase 2 bucket (**walker floor support for solid things**), and
+`trace-gate.ps1`'s default set stays the four passing level-1 legs.
