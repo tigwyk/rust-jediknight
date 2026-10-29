@@ -41,7 +41,10 @@ param(
   # Level to boot by patching the scratch savegame before launch (e.g. '02narshadda.jkl').
   # The save records the level name twice (offsets 132/1616) and its number (int32 at 1612);
   # patching all three is the only way retail will load a level other than the first.
-  [string]$BootSaveLevel = ''
+  [string]$BootSaveLevel = '',
+  # Start a different episode from the [Debug] chooser (1 = The Force Within, 2 = Jedi's Quests
+  # for the Flag, 3 = Jedi Training) instead of the campaign's first level, then log coords.
+  [string]$StartEpisode = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -685,6 +688,25 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     Send-JkClick -X 320 -Y 195
     Start-Sleep -Milliseconds 1500
     Log 'clicked Single Player (320,195)'
+    if ($StartEpisode) {
+      Send-JkClick -X 105 -Y 102
+      Start-Sleep -Milliseconds 1500
+      $rowY = 220 + 18 * ([int]$StartEpisode - 1)
+      Send-JkClick -X 330 -Y $rowY
+      Start-Sleep -Milliseconds 800
+      Send-JkClick -X 505 -Y 443
+      Start-Sleep -Milliseconds 1200
+      # The chooser only stores the episode; New Game then starts that episode's first level.
+      Send-JkClick -X 304 -Y 115
+      Start-Sleep -Milliseconds 1000
+      $null = Wait-JkConsoleLine -ProcessId $process.Id -Pattern 'parse section things' -TimeoutSec $LevelTimeoutSec
+      Start-Sleep -Milliseconds 12000
+      foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command 'coords')) { Log "console| $line" }
+      $epPng = Join-Path $Out ('episode-' + $StartEpisode + '-level.png')
+      Save-JkWindowPng -ProcessId $process.Id -Path $epPng
+      Log "started episode $StartEpisode; wrote $epPng"
+      return
+    }
     if ($DebugShot) {
       Send-JkClick -X 105 -Y 102
       Start-Sleep -Milliseconds 1800

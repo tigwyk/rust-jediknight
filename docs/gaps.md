@@ -2292,3 +2292,15 @@ modal and eats console keys, which is why the `coords` polling never answered. A
 itself; but selecting an episode then Ok may start that episode's first level, which is a new lever
 for Phase 2 breadth (the other episodes' first levels are not the campaign's first). Next probes:
 cycle the episode list, and test whether a *same-episode* level load behaves differently.
+
+**The [Debug] episode chooser boots other content in retail (round 85).** `-StartEpisode 1` drives
+Single Player -> [Debug] -> row 1 -> Ok, and the game **starts that episode's first level directly**
+(the extra New Game click is ignored). The captured frame
+(`tools/parity/retail-episode-1-spawn.png`) is a real interior - green/beige panels, grating, pipes,
+the saber hilt at the bottom right, HUD clock 1:11 - and `coords` answers
+**Pos (-10.44, -5.46, -1.13) sector 339**, which is the first **retail spawn outside level 1** this
+project has captured. So Phase 2 breadth has a working retail route after all: the episode chooser
+(reachable only in devMode) picks one of three episodes and starts its campaign. Next: enumerate the
+three rows and identify each level (the port already renders every campaign level, so a port shot of
+each candidate first level is the matching key), then carry the `coords`/screenshot pair per level into
+the parity set exactly as the level-1 captures work.
