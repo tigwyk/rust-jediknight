@@ -698,6 +698,9 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       # The load takes a while and the dev console answers only once the level is up, so poll `coords`
       # until it returns a position instead of guessing one sleep.
       $null = Wait-JkConsoleLine -ProcessId $process.Id -Pattern 'parse section things' -TimeoutSec $LevelTimeoutSec
+      # The dev console dialog fights the loading loop for focus, so let the level come up quietly
+      # before touching the console at all.
+      Start-Sleep -Milliseconds 45000
       $deadline = [Diagnostics.Stopwatch]::StartNew()
       $booted = $false
       while (-not $booted -and $deadline.Elapsed.TotalSeconds -lt 40) {

@@ -2265,3 +2265,17 @@ menu. Getting a *genuine* level-2 save is therefore the remaining requirement - 
 engine writes itself after a real level 2 (none appeared in the scratch profile - the abort happens
 before the autosave), a minimal hand-built save (its record format is not recovered yet), or playing
 level 1 through in retail. The parse half is proven, which narrows the problem to the save payload.
+
+**Retail level 2: parse works, restore does not (round 84).** Two load shapes were tried on the
+patched level-2 save. **Full save**: the engine parses level 2 completely and then **returns to the
+main menu** - its thing records are level 1's. **Truncated save** (header + level name + game time +
+the 24-byte player block, so the record loop hits EOF and the restore path takes its success branch):
+the engine **stays on the level-2 loading screen indefinitely** - 45 s quiet wait plus 40 s of `coords`
+polling never produced a position, and the screenshot is still "2 - The Lost Disk". So neither an
+empty nor a foreign record set is enough: the restore needs records that match level 2, which only a
+real level-2 save has. The decomp shows why the parse half is fine (`sithGamesave_RestoreFile` reads
+the 0x62C header with version 6, the 32-byte level name, game time, a 24-byte player block and then
+size-prefixed thing records; `local_62c[0] != 6` is the only header check). The remaining requirement
+is unchanged: a genuine level-2 save. Meanwhile the port side of Phase 2/3 breadth (every level boots
+and draws its first frame) is fully testable with `--boot`/`--audit`/`--campaign` and needs no retail
+boot; the retail spawn comparison stays on the deviation ledger.
