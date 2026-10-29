@@ -3624,6 +3624,24 @@ So a force power is an inventory bin whose *value* is the power's level, and for
 bin 14 — there is no separate force resource to model. `pow_shields.cog` landing `bin 60` in
 §16.6 is the same mechanism on the powerup side.
 
+The **score/ending** group is bins 70–75, and the shipped data names all of it:
+
+```text
+18  jkGetChoice        the ending choice: 1 = light, 2 = dark (jkPlayer_CalcAlignment answers ±100 for it)
+70  secrets found      `00_secretareas.cog` `entered:` -> ChangeInv(player, 70, 1.0)
+71  secrets in level   `00_secretareas.cog` `startup:` -> SetInv(player, 71, maxSecrets)
+72  civilians killed   `actor_<class>.cog` `killed:` when the player was the killer (1.0 civilian, 0.5 droid)
+73  civilians present  the same files' `created:` arms SetTimerEx(1.0, 1, …) and the `timer:` handler
+                       credits it — it is the ratio's *denominator*, not a kill count
+75  alignment          written by jkPlayer_CalcAlignment itself (sithPlayer_SetInvItemAmount(0x4b, …))
+```
+
+`jkPlayer_CalcAlignment` turns 72/73 into the ratio term: `alignment = powers − (72/73)*100 + 20`,
+clamped to ±100 (and short-circuited to ±100 by bin 18). That is why retail's level-2 autosave
+carries `72=0, 73=10.5, 75=20`: ten and a half "population units" woke up during level 1, none of
+them killed through a script that credits a pedestrian, so the ratio term is zero and the tally's
+stored alignment is the neutral 20.
+
 `SetCurInvWeapon(thing, bin)` and `SelectWeapon(thing, bin)` both arm a weapon by that number
 (the port's `sithCogFunction_SelectWeapon` and `sithCogFunctionThing_SetCurInvWeapon` do the
 same `sithWeapon_SelectWeapon`), and `GetCurInvWeapon` reads it back. All three were stubbed —

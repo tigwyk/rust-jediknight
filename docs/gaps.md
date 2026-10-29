@@ -2753,3 +2753,48 @@ exposes health or shields" is closed for health, from the decomp rather than fro
 What is left in step 6 is the campaign side, not the save format: the port pre-grants the episode
 rank/force bins (`16`, `20`) that retail's autosaves do not carry, and the alignment bins
 (`72/73/75`) need a fight before they are written at all.
+
+**Bin 75 is written at level end, so the level-2 carry now matches retail's alignment (round 105).**
+Round 104 left step 6's carry differing from retail's level-2 autosave in `73=10.5, 75=20`. The decomp
+answers both:
+
+- `jkPlayer_CalcAlignment` (`0x405cf0`) is not a pure read: after its arithmetic it calls
+  `sithPlayer_SetInvItemAmount(0x4b, value)` — **bin 75 is where the alignment is stored**. Its only
+  two callers are `jkGuiForce_Show` (passing a global) and `jkGuiSingleTally_Show` (`0x417e30`),
+  which passes 0 (include the secrets ratio) as the tally draws at the end of a level. That is why
+  retail's level-2 autosave carries 75 = 20: level 1's tally wrote it before level 2 loaded.
+- The port now does the same: `Runtime::finish_level` is joined by `Runtime::calc_alignment`, which
+  computes the number and stores it in bin 75, and the level-end path calls it. The `--tally` gate
+  asserts the store, and the runtime test covers the arithmetic, the clamp, the store and the
+  ending-choice short-circuit (bin 18 = 1 -> +100, 2 -> -100) that the port's reader had omitted.
+- Measured on a `--tour-live` run: the level-2 carry is now `... 71=6, 75=20, 99=1000, 100=1` and
+  the level-3 carry (level 2's own state) is `1=1, 2=1, 11=50, 13=100, 42=1, 60=100, 63=1, 71=8,
+  75=20, 99=2000, 100=1, 102=1` — **bin for bin retail's level-2 autosave except bin 73** and the
+  already-recorded rank/star stand-in (`16=3, 20=1`).
+
+**Bin 73 is the one left, and its cause is a missing engine behaviour, not a format gap.** The
+scripts decode the whole 70–75 group: `00_secretareas.cog` writes 70/71 (secrets found/total),
+`actor_<class>.cog`'s `killed:` writes **72** ("Player killed a pedestrian", 1.0 for a civilian,
+0.5 for a droid), and **73** is written from the same files' `timer:` label — `created:` arms
+`SetTimerEx(1.0, 1, …)` and the timer's handler does `ChangeInv(player, 73, 1.0)`. So 72/73 are the
+numerator and denominator of `CalcAlignment`'s ratio term (civilians killed / civilians present), and
+retail's `0 / 10.5` gives the same alignment as the port's `0 / 0` — the number matches, only the
+denominator does not exist. The reason is that **the port never sends `created:` to a placed thing**:
+it runs each placed cog's `startup` and stops, so the actor scripts' wake-up timers never arm. That
+is a real engine behaviour to add (the JKL's `cogs` rows will have to carry, or the runtime rediscover,
+each instance's linked thing so `GetSenderRef()` inside `created:` is the actor); until it lands the
+port's 73 stays 0 and the carry differs from retail in that one bin.
+
+**The next step the 73 gap names: per-thing class scripts are never instantiated.** Following the
+missing `created:` delivery one level down: the port *parses* every template's `cog=` file but only
+ever instantiates the player's (`walkplayer` -> `kyle.cog`) and the item bins' scripts. Every other
+thing whose template names a class script — level 1 alone has 128 `actor_*.cog` actors, plus the
+powerups' `pow_*` and the weapons' `weap_*` — gets no VM, so its `startup:`, `created:`, `damaged:`,
+`killed:` and `timer:` labels never run. That is why bin 73 stays 0 and why the runtime's
+`thing_class_cog` map (`GetThingClassCog`, `sithCog.c`) is never filled: the runtime already has the
+delivery bus (`deliver_thing_messages`, addressed by instance, and `thing_instances(thing)` for the
+`damaged`/`killed` pair), so instantiating one VM per class-script thing and registering it in
+`thing_class_cog` is the missing half of that bus, not a new one. It is the next engine-behaviour task:
+start each class script with its own thing as the sender ref, send it `startup` then `created`, and
+watch the gates for the actor scripts' own verbs (`damaged:` handlers, spawn-on-death powerups,
+`SetTimerEx`) taking effect.

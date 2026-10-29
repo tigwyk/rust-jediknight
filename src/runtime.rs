@@ -4201,7 +4201,17 @@ impl Runtime {
     ///
     /// Dark-side powers (bins 30–33) count against the alignment and light-side ones (25–28) for it.
     /// A player who found no secrets is spared the ratio term (`0x522054` is 0.0).
+    ///
+    /// The **choice comes first**, as it does in the binary: `jkGetChoice` is bin 18, and
+    /// `jkPlayer_CalcAlignment` returns `+100` for 1 (the light ending) and `-100` for 2 (the dark
+    /// one) before any power or secret arithmetic. The tally screen is the only single-player caller
+    /// that passes 0 (include the secrets term); the force screen passes a global instead.
     pub fn alignment(&self) -> f32 {
+        match self.inv.get(&18).copied().unwrap_or(0.0) as i32 {
+            1 => return 100.0,
+            2 => return -100.0,
+            _ => {}
+        }
         let mut value = 0.0f32;
         for bin in 30..34 {
             value -= self.inv.get(&bin).copied().unwrap_or(0.0) * 6.25;
@@ -4216,6 +4226,17 @@ impl Runtime {
             value = value - (found / total) * 100.0 + 20.0;
         }
         value.clamp(-100.0, 100.0)
+    }
+
+    /// `jkPlayer_CalcAlignment` as the tally calls it: compute the number and **store** it in bin
+    /// 75, which is the engine's own last step (`sithPlayer_SetInvItemAmount(0x4b, value)`). The
+    /// write is why retail's level-2 autosave carries `75 = 20`: `jkGuiSingleTally_Show`
+    /// (`0x417e30`) calls this when the tally draws, at the end of level 1, and the next level's
+    /// save carries the result. The port's level end does the same, so the carry matches.
+    pub fn calc_alignment(&mut self) -> f32 {
+        let value = self.alignment();
+        self.set_bin(75, value);
+        value
     }
 
     /// The screen effect the live `color_effects` add up to: `(filter, tint, add, alpha)` for
@@ -7058,6 +7079,19 @@ mod tests {
         // The clamp is the engine's: never past 100 either way.
         rt.inv.insert(25, 40.0);
         assert!((rt.alignment() - 100.0).abs() < 1e-3, "alignment {}", rt.alignment());
+
+        // `jkPlayer_CalcAlignment` answers the ending choice first (bin 18, `jkGetChoice`), and it
+        // stores its answer in bin 75 - the value retail's level-2 autosave carries as 20.
+        rt.inv.clear();
+        rt.inv.insert(72, 0.0);
+        rt.inv.insert(73, 0.0);
+        assert!((rt.calc_alignment() - 20.0).abs() < 1e-3, "the neutral alignment is 20");
+        assert_eq!(rt.inv.get(&75).copied(), Some(20.0), "the tally's alignment was not stored");
+        rt.inv.insert(18, 1.0);
+        assert_eq!(rt.calc_alignment(), 100.0, "the light choice is +100");
+        assert_eq!(rt.inv.get(&75).copied(), Some(100.0), "the choice did not overwrite bin 75");
+        rt.inv.insert(18, 2.0);
+        assert_eq!(rt.calc_alignment(), -100.0, "the dark choice is -100");
     }
 
     /// A weapon template found by its own `inv=` rather than by a name hint: the engine types it

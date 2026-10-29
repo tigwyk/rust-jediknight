@@ -4104,7 +4104,15 @@ fn main() {
             rt.inv.insert(73, 5.0);
             // A light-side power, so the alignment lands on the light side of zero.
             rt.inv.insert(25, 4.0);
-            (rt.jedi_rank(), rt.alignment(), rt.secrets().0, rt.secrets().1)
+            // The tally stores its calculated alignment in bin 75 (`jkGuiSingleTally_Show` calls
+            // `jkPlayer_CalcAlignment`), so the gate reads it the way the save would.
+            let alignment = rt.calc_alignment();
+            assert_eq!(
+                rt.inv.get(&75).copied(),
+                Some(alignment),
+                "the tally did not store its alignment in bin 75"
+            );
+            (rt.jedi_rank(), alignment, rt.secrets().0, rt.secrets().1)
         };
         let rows = tally_lines(screen, &strings, rank, alignment, found, total)
             .expect("the tally screen has no force-star panel");
@@ -10500,9 +10508,15 @@ fn watch_level_complete(
     if !*tallied {
         *tallied = true;
         // The level's own state lands here, before the tally draws it: `jkMain_EndLevel` raises the
-        // rank and credits the stars the tally then repeats.
+        // rank and credits the stars the tally then repeats, and `jkGuiSingleTally_Show` computes
+        // the alignment and stores it (bin 75) as it draws — which is why retail's level-2 autosave
+        // carries `75 = 20`. Doing both here puts the same numbers in the save the next level loads.
         let (rank, earned) = sim.world.borrow_mut().finish_level();
-        println!("level: `{}` finished — rank {rank}, {earned} star(s) earned", plan.level);
+        let alignment = sim.world.borrow_mut().calc_alignment();
+        println!(
+            "level: `{}` finished — rank {rank}, {earned} star(s) earned, alignment {alignment:.1}",
+            plan.level
+        );
         let playing_for_real = capture.is_some_and(|capture| !capture.0)
             // `BK_TALLY=1` forces it in a capture run, which is the only way this screen can be
             // photographed without a player at the keyboard.

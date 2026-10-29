@@ -283,10 +283,19 @@ tier, not a checkbox.
    decoded from the thing record's type-specific tail (`thing + 0x134`, payload `0x6F`, derived from
    `GetThingHealth` at `0x502570` and the serializer at `0x4f4210`; both autosaves hold 100), `--save`
    prints it, and the `--save-live` gate asserts the port restores the same 100. Shields needed no new
-   field — they are bin 60, already in the bin comparison. Two measured step-6 gaps remain: the port
-   pre-grants the episode rank/force bins (`16`, `20`) that retail's autosaves do not carry (the tally
-   screen is where the stars are spent), and the alignment bins (`72/73/75`) need a fight to be written
-   at all.
+   field — they are bin 60, already in the bin comparison. The carry's **alignment** bin is now written
+   the way the engine writes it: `jkPlayer_CalcAlignment` stores its answer in bin 75
+   (`sithPlayer_SetInvItemAmount(0x4b, …)`) and the tally is its single-player caller, so the level-end
+   path calls `Runtime::calc_alignment` and the `--tally` gate asserts the store; the port's level-2
+   carry is therefore retail's autosave **bin for bin except bin 73**: `71=8, 75=20, 99=2000, 100=1,
+   102=1` all match. Bin 73 is `CalcAlignment`'s ratio denominator (the scripts' `created:` timer
+   credits it per woken civilian; 72 is the kills numerator), and it is zero in the port because
+   **per-thing class scripts are never instantiated**: the port parses every template's `cog=` but
+   only starts the player's, so no actor's `created:`/`damaged:`/`killed:`/`timer:` runs and the
+   runtime's `thing_class_cog` map stays empty. Starting one VM per class-script thing and registering
+   it there (the delivery bus and `thing_instances` already exist) is the next engine-behaviour task,
+   and it is the last thing between the port's carry and retail's bins — the rest is the recorded
+   rank/star stand-in (`16`, `20`).
 
 ### Phase 2 — Generalise
 
