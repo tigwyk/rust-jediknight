@@ -2279,3 +2279,16 @@ size-prefixed thing records; `local_62c[0] != 6` is the only header check). The 
 is unchanged: a genuine level-2 save. Meanwhile the port side of Phase 2/3 breadth (every level boots
 and draws its first frame) is fully testable with `--boot`/`--audit`/`--campaign` and needs no retail
 boot; the retail spawn comparison stays on the deviation ledger.
+
+**The level-2 load error is "Could not load level", and the [Debug] menu is the episode chooser
+(round 84).** Captured after clicking Ok on the patched save: a modal **Error / "Could not load
+level" / Ok** box over the level-2 loading screen (`tools/parity/retail-level2-load-error.png`). The
+level-2 sections all parse, so the failure is after the parse - the restore cannot put the level's
+world together (the records are level 1's; the truncated variant hangs the same way). The box is
+modal and eats console keys, which is why the `coords` polling never answered. Also photographed the
+**[Debug]** entry of the Single Player submenu (`tools/parity/retail-debug-menu.png`): it is a
+**Choose Episode** list - *The Force Within*, *Jedi's Quests for the Flag* (selected), *Jedi Training***
+- with Cancel/Ok. That is an episode picker, not a level picker, so it does not boot level 2 by
+itself; but selecting an episode then Ok may start that episode's first level, which is a new lever
+for Phase 2 breadth (the other episodes' first levels are not the campaign's first). Next probes:
+cycle the episode list, and test whether a *same-episode* level load behaves differently.

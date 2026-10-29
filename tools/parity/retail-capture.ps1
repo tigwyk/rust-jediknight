@@ -32,6 +32,9 @@ param(
   # Click Load on the submenu and photograph the save list (retail's only remaining route to a
   # level other than the campaign's first, which Phase 2''s spawn audits need).
   [switch]$LoadShot,
+  # Click [Debug] on the Single Player submenu and photograph what it offers (devMode may
+  # list levels, which would be the clean route to every level).
+  [switch]$DebugShot,
   # Load the first savegame instead of starting a new game. With the save's recorded level
   # patched this is how retail boots a level other than the campaign's first (Phase 2).
   [switch]$LoadSave,
@@ -682,6 +685,14 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     Send-JkClick -X 320 -Y 195
     Start-Sleep -Milliseconds 1500
     Log 'clicked Single Player (320,195)'
+    if ($DebugShot) {
+      Send-JkClick -X 105 -Y 102
+      Start-Sleep -Milliseconds 1800
+      $dbgPng = Join-Path $Out 'debug-menu.png'
+      Save-JkWindowPng -ProcessId $process.Id -Path $dbgPng
+      Log "clicked [Debug] (105,102); wrote $dbgPng"
+      return
+    }
     if ($LoadShot) {
       Send-JkClick -X 534 -Y 103
       Start-Sleep -Milliseconds 1800
@@ -694,6 +705,14 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       Send-JkClick -X 534 -Y 103
       Start-Sleep -Milliseconds 1800
       Send-JkClick -X 547 -Y 443
+      # A failed restore shows a modal message box ("failed to load save"), which freezes the loading
+      # screen and eats the console keys: show what is actually on screen, then dismiss it with ACTIVATE.
+      Start-Sleep -Milliseconds 8000
+      $earlyPng = Join-Path $Out 'load-after-ok.png'
+      Save-JkWindowPng -ProcessId $process.Id -Path $earlyPng
+      Log "screenshot 8 s after Ok: $earlyPng"
+      Send-JkKey -Name 'ENTER'
+      Start-Sleep -Milliseconds 1500
       Start-Sleep -Milliseconds 6000
       # The load takes a while and the dev console answers only once the level is up, so poll `coords`
       # until it returns a position instead of guessing one sleep.
