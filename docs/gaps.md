@@ -2340,3 +2340,16 @@ Phase 2's port side is covered instead by `--soak-all`, which just ran: **35 lev
 non-finite position**, one finding - `m5` (a training-category level, out of SP scope) has 4 bodies
 outside every sector. So every archived level boots and runs in the port; the retail spawn comparison
 for levels 2-21 stays on the deviation ledger (genuine-save requirement).
+
+**Retail reaches level 2 by playing the goal, and the engine writes its own level-2 save (round 89).**
+The route: port `--goal` names the goal (thing 204 in sector 215) and prints its position after the
+`--goal` printout gained the coordinates `[-4.475998, 15.876687, 3.840393]`; `--surfaces-at` then found
+a legal floor **in sector 215** (surface 2052, z 3.825) because a thing's own origin is not a legal
+warp point (`Position not in world` - the same lesson as the door warp). Warping to
+`(-5.45, 16.9, 3.865)` facing 8t88 fired the goal script's `sighted` message (`01_goal0.cog` waits for
+it), the level ended, **ENTER/SPACE dismissed the tally**, and the engine wrote
+**`_JKAUTO_02narshadda.jks` (452,495 bytes)** - a genuine, engine-written level-2 save. That save is now
+the fixture `tools/parity/jkauto-02narshadda.jks` (level 1's is `jkauto-01narshadda.jks`), so retail
+level-2 captures are possible by loading it, and the same goal-warp + tally + autosave loop should
+advance through the whole campaign - which is Phase 2 breadth without any save-format reverse
+engineering. Harness: `-KeysAfter` (post-console key presses) added for the tally.

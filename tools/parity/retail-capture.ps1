@@ -26,6 +26,9 @@ param(
   # Keys to press after the warp and before the console commands (e.g. 'ENTER' for the use action).
   # Phase 1 step 4's interaction probes need this: a switch is used, not walked into.
   [string[]]$Keys = @(),
+  # Keys pressed after the console commands (e.g. to dismiss the end-of-level tally and let
+  # the next level load, which is how a genuine level-2 save can come out of retail).
+  [string[]]$KeysAfter = @(),
   # Stop on the Single Player submenu and save a screenshot, so Load Game's coordinates can be read
   # off it (the harness otherwise clicks New Game and never shows the submenu).
   [switch]$StopAtMenu,
@@ -846,6 +849,15 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
         $null = Invoke-JkConsoleCapture -ProcessId $process.Id -Name $name -Commands $ConsoleCommands
       }
       return
+    }
+
+    if ($KeysAfter.Count -gt 0) {
+      foreach ($key in @($KeysAfter | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })) {
+        Log "pressing $key after the console commands"
+        Send-JkKey -Name $key
+        Start-Sleep -Milliseconds 1500
+      }
+      Start-Sleep -Milliseconds 12000
     }
 
     # Time series: capture the first seconds after the level becomes visible. These are kept as

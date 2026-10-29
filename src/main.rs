@@ -17349,7 +17349,7 @@ fn goal_probe(
     player.vy = 0.0;
     if !state.1 {
         state.1 = true;
-        println!("goal: placed the body 8 units from thing {goal} in sector {sector}");
+        println!("goal: placed the body 8 units from thing {goal} in sector {sector} at {pos:?} (body at y-8, yaw 90)");
     }
     if state.0 == 120 {
         let flags = sim
