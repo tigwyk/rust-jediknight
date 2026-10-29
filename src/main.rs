@@ -3284,6 +3284,25 @@ fn main() {
                             held.join(", ")
                         );
                     }
+                    // A save this build wrote keeps its own runtime state in one section; printing
+                    // that inventory is how the port's bins are read next to retail's.
+                    if let Some(section) = save.sections.iter().find(|s| s.kind == runtime::SAVE_SECTION) {
+                        if let Some(state) = runtime::Snapshot::from_bytes(&section.data) {
+                            let held: Vec<String> = state
+                                .inv
+                                .iter()
+                                .filter(|(_, value)| **value != 0.0)
+                                .map(|(bin, value)| format!("{bin}={value}"))
+                                .collect();
+                            println!(
+                                "  state: {} thing(s) at {:.2} s, {} bin(s) with a value: {}",
+                                state.things.len(),
+                                state.time,
+                                held.len(),
+                                held.join(", ")
+                            );
+                        }
+                    }
                     println!("--- save check passed ---");
                 }
                 Err(error) => {

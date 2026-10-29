@@ -2561,3 +2561,23 @@ pins the table, the order and the five-value delta on the committed fixtures, so
 silently drift. This is the retail side of Phase 1 step 6 ("level 2 starts in retail's state") for
 **bins**; health and shields are still not located in a save (bin 60 is the shield *charge*, not the
 player's current shields).
+
+**The port's level-start inventory next to retail's (round 101).** `--save <this build's quicksave>` now
+prints the runtime state's bins too, so the port's side of the comparison is readable. At level 1's
+start (a `--save-live` quicksave at clock 0.35 s) the port holds
+
+```text
+port:   1=1, 2=1, 11=50, 60=20, 71=8, 99=1000, 100=1
+retail: 1=1, 2=1, 11=50, 13=100, 42=1, 60=100, 63=1, 71=6, 99=1000, 100=1
+```
+
+Five bins match exactly (fists, bryar, 11, score 99=1000, goal 100=1). Five differ: the port has
+**no** 13=100, 42=1 or 63=1, bin 60 (the shields *item*, max 200) is 20 where retail has 100, and bin
+71 is 8 where retail has 6. Note bin 71 in retail's autosaves is 6 at level 1 and 8 at level 2, so the
+port's 8 is retail's *later* value: whatever sets it at level-1 setup is not running (or not running
+in time) in the port. The five bins that move between retail's two autosaves now have two named:
+`jkPlayer_CalcAlignment` (0x405cf0) reads bins 0x48/0x49 (72/73) and writes 0x4b (**75**) as the
+clamped alignment score, so the level-change delta 73 0→10.5 / 75 0→20 is the player's **alignment**
+after level 1; 0x47 (71) and 99/102 remain unnamed. The comparison is recorded as a deviation (port
+level-start inventory vs retail's table) rather than fixed, because which script or startup pass sets
+13/42/60/63/71 is not yet located.
