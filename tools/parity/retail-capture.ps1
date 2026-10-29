@@ -41,6 +41,9 @@ param(
   # Extra time the level list boot waits before reading `coords` (levels that open with a
   # scripted sequence need longer for the body to settle where retail puts it).
   [int]$SettleMs = 12000,
+  # Milliseconds to wait after the level load before the reference frame, for levels whose
+  # opening animation has to finish before the player camera exists (level 2's ship launch).
+  [int]$PreShotMs = 0,
   # Click [Debug] on the Single Player submenu and photograph what it offers (devMode may
   # list levels, which would be the clean route to every level).
   [switch]$DebugShot,
@@ -713,22 +716,11 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
         Start-Sleep -Milliseconds 220
       }
       Start-Sleep -Milliseconds 400
-      Send-JkClick -X 330 -Y $lvlY
-      Start-Sleep -Milliseconds 800
       Send-JkClick -X 505 -Y 443
       Start-Sleep -Milliseconds 1000
-      $null = Wait-JkConsoleLine -ProcessId $process.Id -Pattern 'parse section things' -TimeoutSec $LevelTimeoutSec
-      Start-Sleep -Milliseconds $SettleMs
-      $coordLines = @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command 'coords')
-      foreach ($line in $coordLines) { Log "console| $line" }
-      $coordsPath = Join-Path $Out ("spawn-coords-{0}.txt" -f $StartLevel)
-      $coordLines | Set-Content -LiteralPath $coordsPath -Encoding utf8
-      Log "wrote $coordsPath"
-      $lvlPng = Join-Path $Out ('level-' + $StartLevel + '.png')
-      Save-JkWindowPng -ProcessId $process.Id -Path $lvlPng
-      Log "started level $StartLevel; wrote $lvlPng"
-      return
+      Log "chose level $StartLevel through the [Debug] level select"
     }
+
     if ($StartEpisode) {
       Send-JkClick -X 105 -Y 102
       Start-Sleep -Milliseconds 1500
@@ -824,7 +816,7 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       Log "stopped on the Single Player submenu; wrote $menuPng"
       return
     }
-    Send-JkClick -X 304 -Y 115
+    if (-not $StartLevel) { Send-JkClick -X 304 -Y 115 }
     Start-Sleep -Milliseconds 1000
     Log 'clicked New Game (304,115)'
 
@@ -840,6 +832,7 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
 
     # Let the load fade finish, then optionally warp to the requested pose (best effort).
     Start-Sleep -Milliseconds 1200
+    if ($PreShotMs -gt 0) { Start-Sleep -Milliseconds $PreShotMs }
     if ($null -ne $requestedPose) {
       # shots.tsv gives the camera eye; `warp` positions the player body, and the camera rides it at
       # `thing + 0x168` (see $script:JkEyeOffset), so the body goes 0.037 below the requested eye.

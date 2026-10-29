@@ -2435,3 +2435,15 @@ the committed version and the integration is the next task. Meanwhile the genuin
 reference was accidentally overwritten by a level-2 run and **re-captured** (spawn.json now reads
 `level=01narshadda`, `pos=-10.44,-5.46,-1.13`, `sector=339`), so the parity set is clean again, and a
 `level2_spawn` row was added to `shots.tsv` for the future pair.
+
+**Level-2 draw parity is a timing problem, not a renderer one (round 95).** The level-select boot now
+falls through into the normal capture pipeline (`PreShotMs` waits out the opening animation), so a
+level-2 reference frame and sidecar are produced exactly like level 1's: static player-camera frame,
+`pos 10.80,-11.98,3.02 sector 22`, PNG 1092x351 with its world crop. The port side captures the same
+pose. The pair scores **SSIM 0.31** - and the images say why: retail at +11 s is a close view of the
+landing pad with the player's weapon at the bottom of frame, while the port's sim at the same +10 s
+still has the **orange ship overhead** mid-takeoff. The level opens with a long scripted sequence and
+the two sides are not at the same point in it, so the frames are not comparable yet. This is recorded
+as a deviation: non-level-1 spawn *draw* pairs are only gradeable once both sides can be captured after
+a common "player has control" event; the level-2 pair stays ungraded in the parity set meanwhile
+(level-1's six thresholds still pass 6/6).
