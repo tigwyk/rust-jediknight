@@ -38,6 +38,9 @@ param(
   # Boot a single-player level by number from the [Debug] level list (1 = level 1, 2 = The Lost
   # Disk, ...). The level list opens after the first category row and its Ok.
   [string]$StartLevel = '',
+  # Extra time the level list boot waits before reading `coords` (levels that open with a
+  # scripted sequence need longer for the body to settle where retail puts it).
+  [int]$SettleMs = 12000,
   # Click [Debug] on the Single Player submenu and photograph what it offers (devMode may
   # list levels, which would be the clean route to every level).
   [switch]$DebugShot,
@@ -707,7 +710,7 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       Send-JkClick -X 505 -Y 443
       Start-Sleep -Milliseconds 1000
       $null = Wait-JkConsoleLine -ProcessId $process.Id -Pattern 'parse section things' -TimeoutSec $LevelTimeoutSec
-      Start-Sleep -Milliseconds 12000
+      Start-Sleep -Milliseconds $SettleMs
       $coordLines = @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command 'coords')
       foreach ($line in $coordLines) { Log "console| $line" }
       $coordsPath = Join-Path $Out ("spawn-coords-{0}.txt" -f $StartLevel)

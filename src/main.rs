@@ -20572,9 +20572,12 @@ fn setup(
             }
         }
     } else {
+        // The sector centre is the camera's starting area, not where the body stands; print the
+        // walkplayer's own placed pose too, because that is what a retail `coords` reading compares to.
         println!(
-            "spawn: sector center {eye} radius {area:.1} (walkplayer sector {})",
-            player.map(|t| t.sector).unwrap_or(-1)
+            "spawn: sector center {eye} radius {area:.1} (walkplayer sector {}, start {:?})",
+            player.map(|t| t.sector).unwrap_or(-1),
+            player.map(|t| [t.pos[0], t.pos[1], t.pos[2]])
         );
         // `BK_NEAR_THINGS=1`: what is standing at the spawn, and whether it is the kind of thing
         // the engine lets a body walk through. Decor is `type=ghost` (no collision, by design), and

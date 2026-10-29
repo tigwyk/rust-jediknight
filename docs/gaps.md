@@ -2390,3 +2390,16 @@ are the retail `coords` being read during the opening animation, and the port's 
 (it looks for the walkplayer thing rather than retail's own start). The 6 matches are Phase 2's first
 campaign-wide evidence; the two rows are now tracked gaps with their measured values. Also: batch port
 runs need `--exit-after` (several levels do not exit on their own and the windows wait for input).
+
+**Spawn parity resolved: the two "mismatches" are settling, not spawn selection (round 92).** The
+port's `--sim` line reported the **sector centre**, not the placed start thing, so the round-91
+comparison was apples to oranges on big sectors. The print now includes the walkplayer's own placed
+pose (`--sim --start 03katarn`: `walkplayer start [-0.68005, -5.23, 0.270114]`), and the reading is:
+**level 9** puts the start thing at x,y identical to retail (`1.07, 5.46`) but 0.30 above the floor, so
+retail's body settles at z 0.07 into sector **874** while the thing itself names sector 275 - settling,
+not a wrong start. **Level 3**'s start thing sits 0.47 above the floor and the level opens with a
+scripted sequence that moves the body, so retail's `coords` (settled, sector 370) legitimately differs
+from the placed start (sector 405). Six of eight levels are exact matches and the other two are
+explained, so Phase 2's spawn evidence holds for the campaign: the port places the player on the
+level's own start thing in every case. `tools/parity/spawn-levels.tsv` now records both poses plus the
+verdict and note, and `spawn-levels.tsv` is the fixture to extend past level 9.
