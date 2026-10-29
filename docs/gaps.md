@@ -2461,3 +2461,14 @@ sunk toward the water). The spawn is on a water sector, so the remaining differe
 water/float handling moving the body down, not a renderer gap. That is recorded as a deviation to
 retire when the port's water behaviour keeps the camera where retail's does; the pair stays
 ungraded (level-1's six thresholds still pass 6/6).
+
+**Level-5 framing: the world matches, the shot-mode vantage is ~10 deg off (round 97).** A closer look
+at the pair retracts the water explanation: the port camera for `--shot-at` renders **from the retail
+eye pose** (shot mode places the camera there and returns before the player-camera path), and both
+images show the same courtyard, wall, plaque and water. What differs is framing: retail's centre wall
+sits ~13 % of frame height lower (i.e. the port's view is pitched ~10 deg up relative to retail's) and
+the water band starts lower. That points at the shot-mode **pitch units/order** or its FOV, not at water
+physics - the port does read water sectors (`SECTOR_UNDERWATER` halves movement, `in_water` reads the
+surface-under-feet flags). The ledger row was rewritten accordingly: a pitch sweep (+1.12, -5, -10,
+-15) against the retail reference is the next measurement, and the fix depends on which one wins.
+Level-1's six thresholds are unaffected (their pitches are under 2 deg).
