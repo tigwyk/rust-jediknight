@@ -708,7 +708,11 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       Start-Sleep -Milliseconds 1000
       $null = Wait-JkConsoleLine -ProcessId $process.Id -Pattern 'parse section things' -TimeoutSec $LevelTimeoutSec
       Start-Sleep -Milliseconds 12000
-      foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command 'coords')) { Log "console| $line" }
+      $coordLines = @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command 'coords')
+      foreach ($line in $coordLines) { Log "console| $line" }
+      $coordsPath = Join-Path $Out ("spawn-coords-{0}.txt" -f $StartLevel)
+      $coordLines | Set-Content -LiteralPath $coordsPath -Encoding utf8
+      Log "wrote $coordsPath"
       $lvlPng = Join-Path $Out ('level-' + $StartLevel + '.png')
       Save-JkWindowPng -ProcessId $process.Id -Path $lvlPng
       Log "started level $StartLevel; wrote $lvlPng"

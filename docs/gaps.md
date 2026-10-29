@@ -2367,3 +2367,26 @@ for the whole campaign: every level 1-21 is now reachable in retail, so Phase 2 
 sides of steps 2/5/6 can be captured level by level. Harness: `-StartLevel <n>` drives it. (The level
 list screenshot is `tools/parity/retail-debug-levels.png`; the harness was briefly truncated by a bad
 line-list edit and restored from git before the run - the fixture exists because of that.)
+
+**Batch port runs must carry `--exit-after` (round 91).** Running the port over many levels with
+`--sim --start <level>` left windows open: several levels do not reach a natural exit, so the process
+sat waiting for input and had to be closed by hand. The port already has the switch for this -
+`--exit-after <seconds>` (used by the gate runner as its budget) - so any future multi-level batch
+appends it, and a batch that still hangs must be killed rather than left running. The retail side is
+already bounded: `retail-capture.ps1` launches JK, captures, and closes it with `WM_CLOSE` each run.
+Also fixed this round: `-StartLevel` now writes `target/parity/retail/spawn-coords-<n>.txt` per run
+instead of relying on the shared log (the first spawn batch read stale `Pos:` lines that way, which is
+why every level reported the same pose).
+
+**Spawn parity across the campaign: 6 of 8 levels match retail exactly (round 91).** With the devMode
+level select driving the retail side, levels 2-9 were each booted and their spawn read from `coords`,
+then compared with the port's `--sim --start` spawn: **level 2, 4, 5, 6, 7 and 8 match within 4 cm and
+in sector** (`tools/parity/spawn-levels.tsv`), e.g. level 4 retail `(-4.38, 1.37, 0.74) sector 800` vs
+port `[-4.38, 1.37005, 0.732067] sector 800`. Two don't: **level 3** (retail `(-0.76, -4.73, -0.20)
+sector 370` vs port `[-0.68005, -5.23, 0.307114] sector 405`) and **level 9** (retail
+`(1.07, 5.46, 0.07) sector 874` vs port `[1.070451, 5.460619, 0.407112] sector 275`). Both levels open
+with scripted sequences (level 3's opening, level 9's "Fuel Station Launch"), so the first suspects
+are the retail `coords` being read during the opening animation, and the port's start-thing selection
+(it looks for the walkplayer thing rather than retail's own start). The 6 matches are Phase 2's first
+campaign-wide evidence; the two rows are now tracked gaps with their measured values. Also: batch port
+runs need `--exit-after` (several levels do not exit on their own and the windows wait for input).
