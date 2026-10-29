@@ -2424,3 +2424,14 @@ up to 2.9 units below where retail's lift has already carried the body). Every o
 motion" row in `tools/parity/spawn-levels.tsv`, with both poses recorded. That table is Phase 2's
 campaign-wide spawn evidence; the port places the player on the level's own start thing in all 21
 levels, and the retail body agrees wherever nothing moves at load.
+
+**Level-2 parity references need the level-select boot inside the capture pipeline (round 94).** The
+level-2 spawn screenshot and `coords` are committed fixtures, but they were captured with the
+comparison pipeline's *pre-capture* path (a window screenshot at 640x480), while level-1's parity
+references are the pipeline's raw F12 frame plus a detected world crop (1095x354). To make a
+level-2 pair the level-select boot has to fall through into the normal capture path rather than return
+early; an attempt at that restructure left the harness's try/catch unbalanced, so it was reverted to
+the committed version and the integration is the next task. Meanwhile the genuine level-1 spawn
+reference was accidentally overwritten by a level-2 run and **re-captured** (spawn.json now reads
+`level=01narshadda`, `pos=-10.44,-5.46,-1.13`, `sector=339`), so the parity set is clean again, and a
+`level2_spawn` row was added to `shots.tsv` for the future pair.
