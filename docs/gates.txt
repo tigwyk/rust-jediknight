@@ -691,3 +691,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   `coords` read, so its window distances (1.00, 1.06, 0.87, 0.68, 0.61) read as land 2.4 then water 1.2,
   and the port is water-halved from the spawn — the next measurement.
 - All suites re-run with the hook in place: tests, gates, parity, trace gate below.
+
+## Update — round 116
+
+- Level 5's spawn street measured with `--surfaces-at`: a raised slab at z 0.000 (surface 401, sector 34,
+  with its underside 367 in sector 33), a portal plane at z 0.100 (391, adjoin 140), and a sunken sector 33
+  at −0.452 reached by 45° ramps. Retail crosses the slab's ramp opening at speed (z dips to −0.01, recovers
+  to 0.07); the port drops through it and lands on a ramp (`landed on -0.226`), then wedges — the leg now
+  measures the slab crossing plus the acceleration ramp.
+- Corrected the previous note: level 5's target is **2.4 u/s (run)** and water is **false**
+  (`water false sector 35 (gate flags 0x5000, floor surface 445 flags 0x5)`); the halved reading predated
+  the landing fix.
+- Remaining candidate is the ramp: retail's first 600 ms window implies drag ≈ 5 or a bigger thrust than
+  the port's `target * surfdrag`; `sithControl_PlayerMovement` only yields the multiplier, so the physics
+  update is the routine to read.
+- No physics change this round (diagnostics only): tests, gates, parity and the trace gate re-run below.

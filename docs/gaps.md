@@ -3144,3 +3144,29 @@ are consistent with **land speed 2.4 then water 1.2** — the port is already wa
 `--near` at the spawn lists the only nearby things: `waterpump` (cog, 1.1 away at z −0.23), `fullshield`
 and `revivepack` (2.7 away, z −1.71); the next step is to dump the surface/plane the body stands on at the
 spawn and at the wedge, and compare with the level's raised-street geometry.
+
+**Level 5's spawn street is a raised slab with an opening, and the port falls into it (round 116).** The
+`--surfaces-at` probe at the spawn turns the leg's divergence into geometry:
+
+```text
+surface 401  sector 34  z 0.000 flat up   x 7.50..10.94 y 11.81..15.26   (the slab the street walks on)
+surface 367  sector 33  z 0.000 flat down x 7.50..10.94 y 11.81..15.26   (its underside: sector 33 below)
+surface 391  sector 34  z 0.100 flat     x 7.37..11.07 y 11.69..15.38   adjoin 140 (a *portal* plane)
+surfaces 335/336/341/342  sector 33  z -0.249..0.000  n_z 0.78          (45-degree ramps down)
+surfaces 346/347/358/361  sector 33  z -0.452..-0.249 n_z 0.95          (steeper ramps)
+surface 382  sector 33  z -0.452 flat    (the sunken room's floor)
+```
+
+Retail walks the slab: its body dips to z −0.01 crossing the ramp opening and comes back up to 0.07, i.e.
+it crosses the hole at speed and lands on the far side. The port's body, slower off the mark, drops through
+the same opening and lands on a ramp (`landed on -0.226`, `support -0.338`), then slides in −x along it —
+the 1.41-unit wedge. So the leg now measures **two** separate things, both recorded: the slab/opening (the
+port's body does not cross it at its current speed) and the acceleration ramp.
+
+That second half is a correction to last round's note: the port's target at level 5 is **2.4 u/s (run)**
+with water **false** (the halved 1.2 reading predates the landing fix; a new trace line prints
+`water false sector 35 (gate flags 0x5000, floor surface 445 flags 0x5)`). What remains is the ramp: the
+port reaches ~1.5 u/s in the first 600 ms where retail's window implies ~1.0 unit travelled, which needs
+`drag` ≈ 5 or a larger thrust than `target * surfdrag`. The engine's `sithControl_PlayerMovement`
+(`decomp/004d8a00`) only produces the speed *multiplier* (1 / 2 / 0.5); the thrust/drag live in the
+physics update, so that is the routine to read next.

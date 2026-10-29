@@ -22909,7 +22909,22 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // `SetSectorFlags(sector, 2)` sets for the shipped "passthru layer" water.
     player.water = world.as_deref().is_some_and(|world| {
         let feet = [pos[0], pos[1], pos[2] - player.rules.radius + 0.01];
-        in_water(&world.level, &solids.0, sector, feet, gates.sectors)
+        {
+            let wet = in_water(&world.level, &solids.0, sector, feet, gates.sectors);
+            if std::env::var_os("BK_WALK_TRACE").is_some() {
+                let under = solids.0.floor_surface(sector, feet).map(|(_, surface)| surface);
+                let flags = under
+                    .and_then(|surface| world.level.surfaces.get(surface))
+                    .map(|s| s.surfflags);
+                eprintln!(
+                    "walk trace: water {wet} sector {sector} (gate flags {:#x}, floor surface {:?} flags {:?})",
+                    gates.sectors.get(sector).copied().unwrap_or(0),
+                    under,
+                    flags
+                );
+            }
+            wet
+        }
     });
     if crossed {
         println!("sector {sector}");
