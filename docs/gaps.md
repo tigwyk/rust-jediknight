@@ -2304,3 +2304,15 @@ project has captured. So Phase 2 breadth has a working retail route after all: t
 three rows and identify each level (the port already renders every campaign level, so a port shot of
 each candidate first level is the matching key), then carry the `coords`/screenshot pair per level into
 the parity set exactly as the level-1 captures work.
+
+**The three episodes are the three GOBs, and row 1 is JK1 (round 86).** `--episodes` names them:
+**JK1.GOB "The Force Within"** (type 1, 37 level rows), **JK1MP.GOB "Jedi Training"** (type 2, levels
+`m2/m4/m5/m10/m_boss15/m_boss17`), **JK1CTF.GOB "Jedi Capture the Flag"** (type 8, `c1/c2/c3`). The
+Debug chooser rows are those episodes, so `-StartEpisode 1` started JK1 - and the spawn it reached is
+level 1's own: `--sim --start 01narshadda` prints **spawn sector center
+[-10.443433, -5.455094, -1.092886] radius 17.2 (walkplayer sector 339)**, matching the retail
+console's **Pos (-10.44, -5.46, -1.13) sector 339** exactly. So row 1 is not new content; the lever
+is rows **2 and 3** (JK1CTF `c1`, JK1MP `m2`), whose spawns the port can now identify the same way
+(`--sim --start m2` etc.). `--sim` also gives every level's spawn sector, which is the cheap
+identification key for any future retail boot: compare the console's `coords` sector/position with
+the port's spawn list instead of guessing from screenshots.
