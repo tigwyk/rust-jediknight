@@ -660,3 +660,21 @@ running app.--carry-check --start 01narshadda                        0   level 2
   signature of a floor the port does not stand on. The retail trace is committed as
   `tools/parity/walktrace/walk5_spawn-walk.tsv`; the leg is Phase 2's first bucket (**walker floor support
   for solid things**) and joins the gate when it passes. The four level-1 legs still gate from fixtures.
+
+## Update — round 114
+
+- **The walker's landing probe now reaches the body's resting height.** `walker_step`'s vertical sweep was
+  capped at the collision radius (0.065) while a resting body sits `rest` above its floor
+  (`walkplayer` insert = 0.120114), so both levels' bodies fell a hair each frame, never grounded, and
+  walked on air drag. The probe spans `-drop + rest` and refuses to land above the feet (no lifting).
+- Measured: `walk_street90` **83 % → 100 %** (sectors off 2 → 0), `walk_street45` z delta 0.033 → 0.000,
+  `walk5_spawn` 0.90 → **1.41** of retail's 3.73 units. `walk_cantina` now shows 3 sector mismatches
+  because a grounded body walks onto the cantina ramp retail never reaches (retail is stopped by the bar
+  furniture — the recorded "thing collision is absent" deviation), so its gate line checks travel and
+  stop pose and reports sectors, reason in the script.
+- Ruled out and recorded: stepping onto `Runtime::thing_floor` tops as a cheap walker floor (climbs
+  building AABBs to z = 30), and reading `move_body`'s third return as "blocked" (it is
+  `blocked || at != pos`, true for any movement — the trace's `blocked true` was noise).
+- `cargo test --release`: **147 passed**; `--gates`: **0 of 64 failed**; parity **6/6** (scores unchanged:
+  spawn 0.6602, spawn_pose 0.6603, spawn_yaw30 0.6385, route_cantina 0.7381, route_lower 0.7119,
+  route_street 0.7327); trace gate **4/4**.

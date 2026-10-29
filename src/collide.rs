@@ -995,6 +995,16 @@ impl Solids {
 
                 (Some(hit), far, _) => {
                     blocked = true;
+                    // `BK_MOVE_TRACE`: name the face that stopped the body. A body that reports
+                    // blocked while a single-room probe sees nothing is being stopped by a face the
+                    // portal-crossing sweep found in a *neighbouring* room, and this is the only
+                    // place that knows which.
+                    if std::env::var_os("BK_MOVE_TRACE").is_some() {
+                        eprintln!(
+                            "move: blocked by surface {} at {:?} normal {:?} after {:.3} of {:.3} (from sector {here} at {:?})",
+                            hit.surface, hit.point, hit.normal, hit.distance, left, at
+                        );
+                    }
                     let travelled = (hit.point[0] - at[0]) * dir[0] + (hit.point[1] - at[1]) * dir[1];
                     at = hit.point;
                     // The contact point is `plane + normal * radius` in 3D, so a **steep** face leaves only
@@ -1128,6 +1138,15 @@ impl Solids {
             } else {
                 // Dead centre: pick a direction rather than divide by zero.
                 at[0] = centre[0] + least;
+            }
+            // `BK_MOVE_TRACE`: a body pushed out of a solid thing every frame is a body walking
+            // inside a model — `move_body` reports `blocked` only because of this push, which is why
+            // the sweep said "nothing ahead" while the walker crawled.
+            if std::env::var_os("BK_MOVE_TRACE").is_some() {
+                eprintln!(
+                    "move: pushed out of the collision cylinder at {:?} radius {thing_radius:.3} (z {z_min:.2}..{z_max:.2}) to {:?}",
+                    centre, [at[0], at[1], at[2]]
+                );
             }
         }
         at

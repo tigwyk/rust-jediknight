@@ -13348,9 +13348,23 @@ fn walker_step(
     if drop < 0.0 {
         // The floor probe, not the sector-scoped sweep: a fall must find the slab under it even when that
         // slab belongs to a sector nothing in the body's sector links to.
+        // The probe has to reach as far as a *resting* body sits above its floor, not just its
+        // collision radius: `rest` is the model's insert height (`walkplayer` 0.120114), so a body
+        // resting at `floor + rest` has its floor 0.12 away while `radius` is only 0.065, and a probe
+        // capped at the radius can never see the floor it is standing on. Level 1 and level 5 both
+        // showed the symptom -- a body creeping down 0.008 a frame and therefore always "airborne"
+        // (air drag, no ground ramp), which is what made level 5's walk crawl (`walk5_spawn`: the
+        // velocity stuck near 0.3 u/s against a 1.2 u/s target).
+        // A landing may lower the body onto a floor or hold it there; it must never *lift* it. A
+        // floor whose resting height is above the body is a step the step-up path owns
+        // (`moveSize + 0.01`), and a landing probe that reached up `rest` let the cantina leg climb
+        // 0.14 onto a ledge retail never climbs (walk_cantina read three sector mismatches).
+        let at_feet = pos[2] - radius;
         let land = solids
-            .floor_under(*sector, *pos, -drop + radius, radius)
-            .filter(|(_, travelled, _)| *travelled <= -drop + 1e-3)
+            .floor_under(*sector, *pos, -drop + rest, radius)
+            .filter(|(floor, travelled, _)| {
+                *travelled <= -drop + rest + 1e-3 && *floor <= at_feet + 1e-3
+            })
             .map(|(floor, _, _)| (floor + rest, 0usize));
         match land.map(|(z, _)| z) {
             Some(z) => {

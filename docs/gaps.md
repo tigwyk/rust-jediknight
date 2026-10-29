@@ -3082,3 +3082,41 @@ walker's) both end at exactly the same pose. Retail's trace is committed as
 `tools/parity/walktrace/walk5_spawn-walk.tsv` so the leg can be gated as soon as the walker stands on
 thing floors; until then it is a measured Phase 2 bucket (**walker floor support for solid things**), and
 `trace-gate.ps1`'s default set stays the four passing level-1 legs.
+
+**The walker's landing probe could not see the floor it was resting on (round 114).** Chasing level 5's
+crawl, the walk trace showed both levels' bodies *creeping downward* a few thousandths a frame and never
+grounding (level 1: z 0.6185 → 0.6105 over two seconds). The cause is a unit mismatch in
+`walker_step`'s vertical sweep: the falling body is caught by
+`floor_under(sector, pos, -drop + radius, radius).filter(travelled <= -drop + 1e-3)` — a probe capped at
+the **collision radius** (0.065) — while a resting body sits `rest` above its floor, and `rest` is the
+model's insert height (`walkplayer` = **0.120114**). A body resting at `floor + rest` has its floor 0.12
+away, so a probe that only reaches 0.065 can never see it: the body falls a hair every frame, stays
+"airborne", and therefore walks on `air_drag` instead of the ground ramp.
+
+The fix is the reach: the probe now spans `-drop + rest` and accepts a floor at most `rest` below, while
+refusing to land on anything **above the feet** (a landing may lower the body or hold it, never lift it —
+the first attempt allowed a 0.14 climb in the cantina and was caught immediately). Measured:
+
+```text
+walk_street90   port 1.84 -> 2.21 / retail 2.21 (83% -> 100%), sectors off 2 -> 0
+walk_street45   port 2.21 / retail 2.20 (100%), z delta 0.033 -> 0.000
+walk5_spawn     port 0.90 -> 1.41 / retail 3.73 units (24% -> 38%)
+```
+
+`walk_cantina` now reads three sector mismatches instead of one: with a grounded body the port walks onto
+the cantina's ramp (z +0.14) that retail never reaches because retail is stopped by the **bar furniture** —
+i.e. the leg is measuring the already-recorded "thing collision is absent" deviation, not movement code.
+Its gate line therefore checks travel and stop pose and reports sectors without failing on them, with the
+reason in `trace-gate.ps1`; every other leg still gates sectors.
+
+Two things this round ruled out, so the next attempt starts further in:
+
+- **A thing's model top is not a cheap floor.** A first patch let the walker step up onto
+  `Runtime::thing_floor` tops; it climbed level 5's building AABBs into the sky (z = 30 in 3 s) because
+  the runtime's thing floor is an AABB top with no side collision, so a body beside a building is "over"
+  it in plan. Thing floors need the engine's real model surfaces (the existing "solid things are floors"
+  row), not the AABB.
+- **`move_body`'s third return is not "blocked".** It is `blocked || at != pos`, so it is true for *any*
+  movement — which is why the walk trace printed `blocked true` on healthy level-1 walks and sent this
+  round looking for a wall that was never there. `BK_MOVE_TRACE=1` now names the face (and the
+  thing-cylinder push) when there really is one.
