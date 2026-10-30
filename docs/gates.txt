@@ -1171,3 +1171,19 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Level 16 (`17asarris`) spawn read: `Pos (2.61, −0.55, 2.06), yaw 134.99, sector 1`.
 - `--gates` reported `--move headless FAIL (no verdict)` once right after the fixture writes and passed on a
   clean re-run (0 of 64) — flaky under back-to-back I/O; tests **147 passed**, trace gate **10 legs, 0 failures**.
+
+## Update — round 152
+
+- Level 14's startup uses the camera triplet `SetCameraFocus(0, 45)`, `SetCurrentCamera(0)`,
+  `PlayKey(45, "MAcamera.key")` — a script camera, not a video cutscene (the harness sets
+  `disablecutscenes 1`).
+- Implemented the first slice: `SetCurrentCamera` sets a `script_camera` flag, and while it is set the walker
+  takes **no movement input** (suppressed before `speed()`/`walk_target`). Measured: level 14 **0.00 vs retail
+  0.00**, level 7 **0.00 vs retail 0.11**, both 0 sector mismatches. They join the gate as **stop-pose** legs —
+  **trace gate 12 legs, 0 failures**.
+- Not done in this slice: the **view** still renders the player camera (the `Camera3d` is not posed at the focus
+  thing) — the drawing half of the script-camera feature, and the next item.
+- Level 10's 0.12-unit pin stays unexplained (no camera verb in its startup); level 8 walks 0.96 and stops.
+- Determinism caveat: `walk5_spawn` read 3.09 units / 3 sectors once under load and 2.61 / 2 sectors on clean
+  re-runs (cog/AI ticks use wall-clock dt) — re-run a single failure before believing it.
+- Tests **147 passed**, `--gates` **0 of 64 failed**, parity **6 thresholds, 0 failures**.

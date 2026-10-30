@@ -802,6 +802,10 @@ pub struct Runtime {
     pub camera_focus: [Option<usize>; 7],
     pub camera_secondary: [Option<usize>; 7],
     pub current_camera: usize,
+    /// `SetCurrentCamera`: a **script** camera is current, not the player's own view. A level's opening
+    /// uses it to take the body over — level 14 points slot 0 at thing 45 (`MAcamera.key`) and retail's
+    /// body then moves 0.00 units with forward held.
+    pub script_camera: bool,
     /// `SetPOVShake(posOffset, angleOffset, posDelta, angleDelta)`: the offset the view gets and the
     /// rate it decays at, back to zero. Every weapon script in the game calls it on a shot.
     pub shake_pos: [f32; 3],
@@ -1604,6 +1608,7 @@ impl Runtime {
             camera_focus: [None; 7],
             camera_secondary: [None; 7],
             current_camera: 0,
+            script_camera: false,
             shake_pos: [0.0; 3],
             shake_angle: [0.0; 3],
             shake_pos_rate: 0.0,
@@ -5784,6 +5789,7 @@ impl Runtime {
                 let slot = idx(0);
                 if (0..7).contains(&slot) {
                     self.current_camera = slot as usize;
+                    self.script_camera = true;
                 }
                 Value::Nil
             }

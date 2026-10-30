@@ -22676,6 +22676,20 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     } else {
         forward
     };
+    // A **script camera** takes the body over (`SetCurrentCamera`): level 14's opening points slot 0 at
+    // thing 45 (`MAcamera.key`) and retail's body moves **0.00 units** with forward held, level 10 0.12 and
+    // level 7 0.11 — against the port's 2.5–5.1 before this. So while a script camera is current the walker
+    // takes no input. The suppression has to land **before** `speed()`/`walk_target` (an earlier attempt
+    // shadowed `forward` after `along/across` were already computed and did nothing). The engine hands the
+    // view back on a 30 s timer (`sithControl_Update`) that a walk window never reaches.
+    let (forward, strafe) = if sim
+        .as_deref()
+        .is_some_and(|sim| sim.world.borrow().script_camera)
+    {
+        (0.0, 0.0)
+    } else {
+        (forward, strafe)
+    };
     let [along, across] = player.rules.speed(forward, strafe, run, crouch, player.water);
     // A force-speed term adds to `maxThrust` in the engine, so it scales both axes.
     let force = if player.extra_speed > 0.0 {

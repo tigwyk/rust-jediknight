@@ -4033,3 +4033,35 @@ spawn pose (round 151).** The breadth sweep reached level 15 and sharpened two h
 Also noted for the harness: `--gates` reported `--move headless FAIL (no verdict)` once immediately after the
 fixture writes and **passed on a clean re-run** (0 of 64), so that check is flaky under back-to-back I/O — a
 re-run is the right response, and the gate script's "no verdict" wording is what makes it recognisable.
+
+**The cutscene bucket's first functional slice: a script camera takes the body over — levels 7 and 14 join the
+gate as stop-pose legs (round 152).** Level 14 answered the question the last rounds could not: its startup
+calls the camera triplet explicitly —
+
+```
+verb: SetCameraFocus [Num(0.0), Num(45.0)]
+verb: SetCurrentCamera [Num(0.0)]
+verb: PlayKey [Num(45.0), Str("MAcamera.key"), Num(1.0), Num(4.0)]
+```
+
+— the level-11 idiom again, and with `disablecutscenes 1` set by the harness it is not a video cutscene. Slot 0
+focuses thing 45, which plays a camera keyfile; retail's body then moves **0.00 units** with forward held.
+
+The port now models the state: `SetCurrentCamera` sets a `script_camera` flag on the runtime, and while it is
+set the walker takes **no movement input** (suppression placed before `speed()`/`walk_target` — an earlier
+attempt this round shadowed `forward` after `along/across` were computed and did nothing, which is recorded in
+the code comment). Measured: level 14 port **0.00 vs retail 0.00**, 0 sector mismatches; level 7 port
+**0.00 vs retail 0.11**, 0 sectors. Both are now gate legs under the gate's existing `stop-pose` contract
+(retail travel < 0.5 ⇒ both sides within 0.10 in plan and z): **the trace gate is 12 legs, 0 failures**.
+
+What the slice does *not* do yet: the **view still renders the player camera** — the walker's movement is
+handed over, but the `Camera3d` is not posed at the focus thing, so a scripted camera's picture is missing. That
+is the next slice (the camera pose from the focus thing's animated frame, plus the POV pass choosing the player
+camera only while it is current), and it is a *drawing* item: the walk traces already gate the movement half.
+
+Level 10's pin remains unexplained by this: its startup calls no camera verb, so its 0.12-unit pin comes from
+something else and stays documented. Level 8 moves 0.96 and stops — also outside this slice.
+
+A determinism caveat was also measured: `walk5_spawn`'s port trace read 3.09 units / 3 sectors once under system
+load and 2.61 / 2 sectors on two clean re-runs (the sim's cog/AI ticks use wall-clock dt), so the gate can flake
+under load — re-run before believing a single failure, as with the `--move` check.
