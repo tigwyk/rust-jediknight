@@ -1096,3 +1096,19 @@ running app.--carry-check --start 01narshadda                        0   level 2
   legs running at 2.1–2.4 means the state is not constant, which points at the player-state word.
 - Fixtures: `walk13_spawn-walk.tsv` committed. Tests **147 passed**, `--gates` **0 of 64 failed**, trace gate
   **8 legs, 0 failures**.
+
+## Update — round 147
+
+- **Harness integrity finding**: the committed cantina fixture (2.59 units, ~2.1 u/s) is **not reproducible
+  from today's game** — re-captured with no settle *and* with a 6000 ms settle, the same pose/yaw/sector moves
+  retailer **0.34 units** and stops at (−2.54, −3.09). The old fixtures were captured in a session state this
+  harness can no longer recreate; the round-145/146 legs (levels 6, 12, 13) are reproducible (level 12's
+  F1-held control moves 0.00 units).
+- The engine's default is **walk** (`sithControl_PlayerMovement`, round 146). A walk-default port was built and
+  measured: level 12 → **0 sector mismatches, 116 %**; cantina/street45 → 0 sectors off; but level 5 → **35 %**
+  because at walk speed the port sinks and slides (z 0.22 → −0.25 where retail stays ≈0) instead of walking its
+  ramp — a pre-existing walker defect masked by running momentum. Reverted; gate back to **8 legs, 0 failures**.
+- Next: (1) a fixture **re-capture sweep** in one documented session (settle policy in the row's 8th column),
+  (2) the level-5 sink fix (a step/ramp the walker slides down instead of onto), (3) then re-decide the
+  run/walk default with trustworthy fixtures.
+- Tests **147 passed**, trace gate **8 legs, 0 failures**; no code shipped.

@@ -3919,3 +3919,31 @@ or a level verb (all measured this round and round 145). The two remaining candi
 comment says "retail walks by default, shift walks") and the `0x120000` player-state test. Level 1's legs run
 at 2.1–2.4 in retail, so at least one of those states is not constant across levels — the always-run option
 cannot be, which points at the player-state bits and makes level 1's run the anomaly to re-check.
+
+**The committed retail fixtures are not reproducible from today's game — a harness-integrity finding (round
+147).** The speed-mode question from rounds 145–146 (retail walks at ~1.05 u/s on levels 12/13 where the port
+runs) sent this round back to the *old* fixtures, and the answer is not about speed at all:
+
+- **Today's retail cannot reproduce the cantina fixture.** The committed `walk_cantina-walk.tsv` has retail
+  moving from (−2.20, −2.90) to (−4.78, −3.12) over 2.4 s — 2.59 units, running at ~2.1 u/s. Captured again
+  today, with no settle and again with a **6000 ms** settle, the same spawn pose and the same yaw (105) move
+  retail **0.34 units** and then stop at (−2.54, −3.09), for the rest of the window. The pose and sector agree
+  exactly; the movement does not.
+- So the fixtures captured in earlier rounds were taken in a session state this harness can no longer
+  recreate, and the trace gate's comparisons rest on them. The legs captured this round (levels 6, 12, 13) are
+  reproducible — level 12's F1-held control moved **0.00 units**, so its walk is input-driven, and its speed
+  is 1.09 u/s consistently.
+- The engine's own rule (round 146) says the default is **walk** unless the always-run option is on or the run
+  key is held (`sithControl_PlayerMovement`). Switching the port to that default was built and measured: level
+  12 goes to **0 sector mismatches and 116 % travel** and cantina/street45 move to 0 sectors off, but **level
+  5 drops to 35 %** — because at walk speed the port *sinks and slides* (z 0.22 → −0.25 while retail stays at
+  z ≈ 0) instead of walking its ramp, an existing walker defect that running momentum was masking. The change
+  was reverted rather than shipped against a red gate.
+- Level 5's fixture is walk-speed consistent (1.24 u/s) but its *port* trace at the correct mode exposes the
+  sink: that is the next walker fix, and the fixtures need re-capturing in one documented session before the
+  speed question can be settled either way.
+
+This is recorded as a harness integrity issue, not a port defect: `docs/gates.txt` now says which fixtures are
+pre-round-147 and which are reproducible, and the next breadth/speed work starts with a **fixture re-capture
+sweep** (one session, documented settle policy, the `-WalkTraceSettleMs` row column) followed by the level-5
+sink fix.
