@@ -58,6 +58,10 @@ foreach ($line in Get-Content -LiteralPath $LegsPath) {
   if ($line -match '^\s*(#|$)') { continue }
   $f = $line -split ([char]9)
   if ($f.Length -lt 7 -or $f[0].Trim() -eq 'name') { continue }
+  # Optional 8th column: milliseconds to stay idle before holding forward. A level whose opening is
+  # scripted is not walkable from its first frame (retail locks the player's input), so both sides settle
+  # for the same window and the comparison starts after it.
+  $settle = if ($f.Length -ge 8) { [double]$f[7].Trim() } else { 0.0 }
   $legRows.Add([pscustomobject]@{
       Name  = $f[0].Trim()
       Level = $f[1].Trim()
@@ -66,6 +70,7 @@ foreach ($line in Get-Content -LiteralPath $LegsPath) {
       Z     = [double]$f[4].Trim()
       Pitch = [double]$f[5].Trim()
       Yaw   = [double]$f[6].Trim()
+      Settle = $settle
     })
 }
 if ($legRows.Count -eq 0) { throw "no legs in $LegsPath" }
@@ -75,21 +80,41 @@ if ($Only) {
 }
 
 $totalMs = $HoldMs * $Segments
-$frames = [int][math]::Round($totalMs / 1000.0 * 60.0)
 
 foreach ($leg in $legRows) {
   $trace = Join-Path $OutDir ("{0}.tsv" -f $leg.Name)
   $scratch = Join-Path $OutDir ("{0}-shot.png" -f $leg.Name)
   $pose = '{0},{1},{2},{3}' -f $leg.X, $leg.Y, $leg.Z, $leg.Yaw
   $shotAt = '{0},{1}' -f $pose, $leg.Pitch
-  Write-Host ("port trace '{0}' level={1} pose=({2}) frames={3} ({4} ms held)" -f $leg.Name, $leg.Level, $pose, $frames, $totalMs)
+  $settle = [double]$leg.Settle
+  $frames = [int][math]::Round(($settle + $totalMs) / 1000.0 * 60.0)
+  Write-Host ("port trace '{0}' level={1} pose=({2}) frames={3} ({4} ms held after {5} ms idle)" -f $leg.Name, $leg.Level, $pose, $frames, $totalMs, $settle)
   $env:BK_WALK_FORWARD = '1'
+  if ($settle -gt 0) { $env:BK_WALK_HOLD_AFTER = "$settle" } else { Remove-Item Env:BK_WALK_HOLD_AFTER -ErrorAction SilentlyContinue }
   try {
     & $Exe --start $leg.Level --frames $frames --shot $scratch --shot-at $shotAt --warp $pose --trace-out $trace --mute *> (Join-Path $OutDir ("{0}-port.log" -f $leg.Name))
   } finally {
     Remove-Item Env:BK_WALK_FORWARD -ErrorAction SilentlyContinue
+    Remove-Item Env:BK_WALK_HOLD_AFTER -ErrorAction SilentlyContinue
   }
   $lines = @(Get-Content -LiteralPath $trace)
+  # The settle frames are not part of the comparison: drop them and rebase the clock to 0.
+  if ($settle -gt 0 -and $lines.Count -gt 2) {
+    $header = $lines[0]
+    $rebased = New-Object System.Collections.Generic.List[string]
+    foreach ($row in ($lines | Select-Object -Skip 1)) {
+      $cols = @($row -split "`t")
+      if ($cols.Count -lt 6) { continue }
+      $t = 0.0
+      if (-not [double]::TryParse($cols[1], [ref]$t)) { continue }
+      if ($t * 1000.0 -lt $settle) { continue }
+      $cols[1] = ([math]::Round($t - $settle / 1000.0, 4)).ToString('0.0000')
+      $rebased.Add(($cols -join "`t"))
+    }
+    Write-Host ("  trimmed {0} settle frame(s); the trace now starts after the settle" -f ($lines.Count - 1 - $rebased.Count))
+    $lines = @($header) + $rebased.ToArray()
+    Set-Content -LiteralPath $trace -Value $lines -Encoding utf8
+  }
   if ($lines.Count -lt 2) { throw "the port wrote no samples for $($leg.Name)" }
   $last = $lines[-1] -split "`t"
   Write-Host ("  wrote {0}: {1} frame(s), ends at ({2}, {3}, {4}) sector {5}" -f $trace, ($lines.Count - 1), $last[2], $last[3], $last[4], $last[5])

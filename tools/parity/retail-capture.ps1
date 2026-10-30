@@ -13,6 +13,10 @@ param(
   [int]$WalkTraceMs = 0,
   # Which key the walk trace holds (default W; UP is the engine's own forward binding).
   [string]$WalkTraceKey = 'UP',
+  # Milliseconds to stay idle **before** the hold: a level whose opening is scripted locks the player's
+  # input, so a leg that starts after the opening settles for this window first. The trace's `held_ms`
+  # starts at 0 after it, and `port-trace.ps1` takes the same value from the row's optional 8th column.
+  [int]$WalkTraceSettleMs = 0,
   # Row names to run (default: every row of the shots file). A trace run uses one row.
   [string[]]$Only = @(),
   # Retained raw frame(s) to run the world-box detector on instead of capturing anything, e.g.
@@ -138,7 +142,8 @@ function Read-ShotList([string]$Path) {
     if ($line -match '^\s*$' -or $line -match '^\s*#') { continue }
     $cols = $line -split "`t"
     if ($cols.Count -eq 7 -and $cols[0].Trim() -eq 'name' -and $cols[1].Trim() -eq 'level') { continue }  # header row
-    if ($cols.Count -ne 7) { throw "shots file line ${lineNo}: expected 7 tab-separated columns, got $($cols.Count)" }
+    # 8th column (walk legs only): milliseconds to settle before the hold, see -WalkTraceSettleMs.
+    if ($cols.Count -notin 7, 8) { throw "shots file line ${lineNo}: expected 7 or 8 tab-separated columns, got $($cols.Count)" }
     $pose = @($cols[2], $cols[3], $cols[4], $cols[5], $cols[6])
     if ($pose[0] -eq '-') {
       $pose = $null
@@ -438,7 +443,8 @@ function Invoke-JkWalkTrace {
     [Parameter(Mandatory)][string]$Name,
     [int]$Milliseconds = 3000,
     [int]$HoldMs = 600,
-    [string]$Key = 'UP'
+    [string]$Key = 'UP',
+    [int]$SettleMs = 0
   )
   $path = Join-Path $script:TraceOut ("{0}-walk.tsv" -f $Name)
   $segments = [math]::Max(1, [int][math]::Floor($Milliseconds / $HoldMs))
@@ -449,6 +455,10 @@ function Invoke-JkWalkTrace {
   Log ("walk trace: start " + $start.Raw)
   $lines.Add((@(0, $start.Pos[0], $start.Pos[1], $start.Pos[2], $start.Sector, $start.Pyr[1]) -join ([char]9)))
   $samples = 0
+  if ($SettleMs -gt 0) {
+    Log ("walk trace: settling {0} ms before the hold" -f $SettleMs)
+    Start-Sleep -Milliseconds $SettleMs
+  }
   # Held down across the whole trace and re-asserted after each poll: pressing and releasing per
   # segment let the body coast down between segments and read as if it had stopped. The poll itself
   # pauses the game (the console is a dialog), so holding through it costs nothing.
@@ -912,7 +922,7 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     # Phase 0.5 trace v0: a trace run replaces this row's screenshot captures (the `finally` below
     # still closes the game and restores the desktop).
     if ($WalkTraceMs -gt 0) {
-      $tracePath = Invoke-JkWalkTrace -ProcessId $process.Id -Name $name -Milliseconds $WalkTraceMs -Key $WalkTraceKey
+      $tracePath = Invoke-JkWalkTrace -ProcessId $process.Id -Name $name -Milliseconds $WalkTraceMs -Key $WalkTraceKey -SettleMs $WalkTraceSettleMs
       Log "walk trace mode: skipped the screenshot series/reference for '$name' (wrote $tracePath)"
       if ($ConsoleCommands.Count -gt 0) {
         # After the walk: this is where a trigger's effect shows up (cog state after the trigger).

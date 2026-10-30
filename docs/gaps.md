@@ -3433,3 +3433,31 @@ Two levels still fail their legs, and this round names the reason for each rathe
 - **Level 3**: retail is frozen for the first 600 ms and then moves in a slow arc that stops at 1.71 units —
   the signature of a scripted opening (like level 2's), so the leg is not a plain walk until the scripted
   player control is ported. Recorded as such rather than as a movement divergence.
+
+**A settle window exists for the walk legs now, and level 3's leg is geometry, not script lock (round 127).**
+The scripted-opening bucket needed the two sides to start their comparison at the same moment: retail locks
+the player's input while a level's opening runs, so a leg captured from frame one measures the cutscene, not
+the walk. The plumbing is small and now in place:
+
+- `retail-capture.ps1 -WalkTraceSettleMs <ms>` sleeps before the hold (`walk trace: settling 8000 ms before
+  the hold`), so the trace's `held_ms` starts after the opening.
+- `walk-shots.tsv` rows take an optional **8th column** = that settle; `port-trace.ps1` reads it, passes
+  `BK_WALK_HOLD_AFTER` to the walker (which stays idle until that much game time has elapsed), and trims the
+  trace back to the hold window on the same clock.
+- Checked with a probe: idle to t = 2.0 s, then 2 u/s walk — the hook does what it says.
+
+Measured use on level 3, from its spawn pose:
+
+```text
+settle 0 ms    retail frozen 600 ms, then 1.71 units        port 4.55 units (266 %)
+settle 8000     retail 1.35 units in the first window (2.25 u/s, run), then 0.18/0.30/0.40/0.36,
+                yaw snapping to 118.65 at 2.4 s; retail total 1.98      port 4.55 units (230 %)
+settle 20000    same shape: 1.35 burst, then slow; retail total 2.26      port 4.55 units (202 %)
+```
+
+So the freeze *was* the opening's input lock (the 8 s settle removes it), but the leg still diverges 2 units
+because retail's body **stops making progress after its first burst** — it slides slowly in −x and ends at
+(−1.10, −2.50) where the port runs straight to (−2.12, −0.30). That is level-3 geometry meeting the retail
+body (the same class as the level-6 staircase), not a scripted lock, and it is what the next read of that leg
+has to name. The row keeps its 7 columns and the committed trace; the settle column stays available for the
+levels whose openings do need it.

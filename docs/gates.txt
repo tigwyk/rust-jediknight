@@ -827,3 +827,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   0.13-high sill) where retail walks the treads; level 3's retail motion is a scripted opening (frozen
   600 ms, then a slow arc), so the leg is not a plain walk until scripted player control is ported.
 - Parity re-captured: **6/6** (scores unchanged).
+
+## Update — round 127
+
+- Walk legs can now start **after** a level's opening: `retail-capture.ps1 -WalkTraceSettleMs` sleeps before
+  the hold, `walk-shots.tsv` rows take an optional 8th column (settle ms), and `port-trace.ps1` passes
+  `BK_WALK_HOLD_AFTER` to the walker and trims the trace to the hold window. The walker hook is checked with
+  a probe (idle to t = 2.0 s, then 2 u/s).
+- Measured on level 3: the 600 ms freeze was the opening's input lock (an 8 s settle removes it: retail
+  bursts 1.35 units at 2.25 u/s), but retail then stops making progress and ends at (−1.10, −2.50) against
+  the port's (−2.12, −0.30) — **geometry, not script lock**, for the next read.
+- Suites: tests **147 passed**; trace gate **6 legs, 0 failures**; row restored to 7 columns with the
+  committed trace so the fixture and the row agree.

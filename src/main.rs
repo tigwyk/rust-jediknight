@@ -22598,7 +22598,13 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // is verified without a hand on the keyboard: the trace then shows the body moving and the
     // camera with it.
     let forward = if std::env::var_os("BK_WALK_FORWARD").is_some() {
-        1.0
+        // `BK_WALK_HOLD_AFTER=<ms>`: stay idle for that much game time first. A level that opens with a
+        // scripted sequence is not walkable from its first frame (retail locks the player's input while
+        // the opening runs), so the walk legs that start after it pass this, and both sides settle for
+        // the same window before the held-forward comparison begins.
+        let settle = env_f32("BK_WALK_HOLD_AFTER", 0.0) / 1000.0;
+        let elapsed = sim.as_deref().map(|s| s.elapsed).unwrap_or(0.0);
+        if elapsed + 1e-3 >= settle { 1.0 } else { 0.0 }
     } else {
         forward
     };
