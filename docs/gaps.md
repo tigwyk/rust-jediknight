@@ -4086,3 +4086,37 @@ the thing's pose (the port already loads the keyfiles for `PlayKey` and parses k
 Two harness notes recorded: retail `F12` produced no JSHOT on the first two attempts and worked with
 `-SettleMs 20000` (the same start-up settling that the walk traces needed); and the capture's own region checks
 still exited 0 while writing the shot JSON, so the JSON is the artefact to trust.
+
+**Camera key playback: the script camera now flies its `MAcamera.key` (round 154).** Round 153 named the gap —
+the port's `playkey` only recorded a puppet track, so level 14's `droidcam` stayed at its placed pose and the
+opening view was a dark wall. The new `--key <name>` probe settled the question by dumping the file:
+
+```
+key: `MAcamera.key` frames 411 fps 15.000 joints 1 node(s) 1
+node 0 mesh `CameraBox` entries 329
+  frame    0 pos (  -0.000    0.000    0.001) rot (    0.00     0.00     0.00)
+  frame   91 pos (   0.003   -9.791   -5.046) rot (  323.93     5.39     0.23)
+  ...
+  frame  328 pos (   0.188  -17.960   -6.783) rot (    0.00   129.99     0.09)
+```
+
+One node, `CameraBox`, moving **−18.6 in y and −6.8 in z** with up to a full turn in yaw — a dolly from the
+placed droidcam onto Kyle: `(39.465, 11.375, 35.145) + (0.19, −17.96, −6.78)` is `(39.65, −6.59, 28.36)`,
+Kyle's own position. The runtime now samples that node each step: `playkey` records the thing's pose as the
+key's **base**, and `step` sets the thing's pos/yaw/pitch/roll from `base + node.at(start + time * fps)`.
+
+Measured (level 14, camera trace): `f0 (39.4653, 11.375, 35.145)` → `f240 (39.4644, 4.187, 30.809)` →
+`f600 (39.4832, −3.176, 29.853)` → `f840 (39.4956, −6.953, 28.422)` — the key's own trajectory, ending on Kyle.
+The rendered frame at f840 is retail's scene: looking down the tower walkway with **Maw** standing in it, where
+before it was a dark wall from the droidcam's placed pose and meters away. Retail's own series frames
+(`level14_spawn-series-0…7`) are the same walkway shot mid-flight, so the next step can grade the view per time
+step; this round's evidence is the trajectory plus the matching scene.
+
+Two small corrections ridden along: the camera's look used `yaw_axes(thing.yaw)` with **degrees** where
+`yaw_axes` takes radians (invisible while the placed camera's yaw was 0, wrong the moment a key turns it), and a
+`--key` probe that consumes its argument (the shared arg loop was reading the key name as the level).
+
+Limits: the sampling ignores `flags` (the engine's playback-rate flags) and treats only a single-node key whose
+mesh names a camera as a thing track — `ponytail:` the engine's root-track rule in
+`sithPuppet_UpdateThingMove` is the upgrade path. The script camera is cleared by the level's script at ~15 s
+(the trace shows `scripted "none"` from f960), after which the view is the player camera again.

@@ -1200,3 +1200,20 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Harness notes: retail `F12` needs the same start-up settling (worked with `-SettleMs 20000`), and the capture
   writes its shot JSON even when its own region checks fail.
 - Tests **147 passed**, `--gates` **0 of 64 failed**, trace gate **12 legs, 0 failures**.
+
+## Update — round 154
+
+- New `--key <name>` probe dumps a parsed `.key`. `MAcamera.key`: 411 frames at 15 fps, one node (`CameraBox`),
+  329 entries moving **−18.6 y / −6.8 z** and up to a full yaw turn — a dolly from the placed `droidcam`
+  `(39.465, 11.375, 35.145)` onto Kyle `(39.65, −6.59, 28.36)`.
+- Implemented camera key playback: `playkey` records the thing's pose as the key's **base**, and `step` sets the
+  thing's pos/yaw/pitch/roll from `base + node.at(start + time * fps)`. Camera trace on level 14: f0
+  `(39.4653, 11.375, 35.145)` → f240 `(39.4644, 4.187, 30.809)` → f840 `(39.4956, −6.953, 28.422)` — the key's
+  own trajectory, ending on Kyle; the rendered f840 frame is retail's scene (the tower walkway with Maw).
+- Fixed along the way: camera look used `yaw_axes` with **degrees** (invisible at yaw 0, wrong once a key turns
+  the camera); `--key` consumes its argument.
+- Limits: `flags` playback rates ignored; only a single-node key whose mesh names a camera is treated as a thing
+  track (`ponytail:`; the engine's root-track rule is the upgrade path). The level's script clears the camera at
+  ~15 s, after which the view is the player camera.
+- Tests **147 passed**, `--gates` **0 of 64 failed**, trace gate **12 legs, 0 failures**, parity **6 thresholds,
+  0 failures**.

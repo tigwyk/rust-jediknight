@@ -864,6 +864,11 @@ pub struct Runtime {
     /// own state track — (keyfile, flags, start frame). Level 1's TIE bomber swaps in `01VTieB.key`
     /// the moment the player sees it.
     pub play_key: std::collections::BTreeMap<usize, (String, i32, i32)>,
+    /// The parsed `.key` files the scripts name, so a key that drives a **thing's** pose (a script
+    /// camera's dolly) can be sampled. The loader fills this once; `key_lengths` already needed it.
+    pub keys: std::collections::BTreeMap<String, crate::key::Key>,
+    /// The pose each `PlayKey` started from: a key's node transform is relative to it.
+    pub key_base: std::collections::BTreeMap<usize, ([f32; 3], f32, f32, f32)>,
     /// `PlayMode`: which animation a script asked a thing to play.
     pub play_mode: std::collections::BTreeMap<usize, i32>,
     /// `GetThingSignature`: a stable id per thing, so a timer can tell "still the same thing" from
@@ -1604,6 +1609,8 @@ impl Runtime {
             master_cog: None,
             multi_mode_flags: 0,
             play_key: BTreeMap::new(),
+            keys: BTreeMap::new(),
+            key_base: BTreeMap::new(),
             face_geomode: BTreeMap::new(),
             camera_focus: [None; 7],
             camera_secondary: [None; 7],
@@ -2008,6 +2015,43 @@ impl Runtime {
     pub fn step(&mut self, dt: f32) -> Vec<usize> {
         let mut moved = Vec::new();
         self.time += dt;
+        // `PlayKey` on a **thing** (a script camera's `MAcamera.key`) moves its pose: the key's single
+        // node carries the dolly, relative to the pose the key started from. Level 14's opening key walks
+        // its `droidcam` from (39.47, 11.38, 35.15) to about (39.65, -6.6, 28.4) — onto Kyle — where the
+        // retail shot looks down at him; without it the view stays at the placed pose. Actors' `PlayKey`
+        // names a puppet track, whose nodes pose the *model*, so only a key whose single node is a camera
+        // box is a thing track. `ponytail:` a mesh-name test, not the engine's root-track rule in
+        // `sithPuppet_UpdateThingMove`; the upgrade path is to read that rule and drop the name test.
+        if !self.play_key.is_empty() {
+            let entries: Vec<(usize, String, i32)> = self
+                .play_key
+                .iter()
+                .map(|(thing, (name, _flags, start))| (*thing, name.clone(), *start))
+                .collect();
+            for (thing, name, start) in entries {
+                let Some(key) = self.keys.get(&name) else { continue };
+                if key.nodes.len() != 1 {
+                    continue;
+                }
+                let node = &key.nodes[0];
+                if !node.mesh.to_ascii_lowercase().contains("camera") {
+                    continue;
+                }
+                let Some(base) = self.key_base.get(&thing).copied() else { continue };
+                let Some(pose) = node.at(start as f32 + self.time * key.fps) else { continue };
+                let Some(t) = self.things.get_mut(thing) else { continue };
+                let (sin, cos) = base.1.to_radians().sin_cos();
+                t.pos = [
+                    base.0[0] + pose.pos[0] * cos - pose.pos[1] * sin,
+                    base.0[1] + pose.pos[0] * sin + pose.pos[1] * cos,
+                    base.0[2] + pose.pos[2],
+                ];
+                t.yaw = base.1 + pose.rot[1];
+                t.pitch = base.2 + pose.rot[0];
+                t.roll = base.3 + pose.rot[2];
+                moved.push(thing);
+            }
+        }
         // `sithInventory_SendFire`: an active bin with a delay sends its own cog a `fire` every delay,
         // which is what makes a held force power keep doing its thing. Re-armed while the bin stays in
         // `bin_active`, so `DeactivateBin` ends the loop.
@@ -5698,6 +5742,11 @@ impl Runtime {
                     let flags = args.get(2).map(|v| v.num() as i32).unwrap_or(0);
                     let frame = args.get(3).map(|v| v.num() as i32).unwrap_or(0);
                     self.play_key.insert(thing, (key.to_ascii_lowercase(), flags, frame));
+                    // A key on a **thing** (a script camera's `MAcamera.key`) moves its pose; the key's
+                    // node transform is relative to where the thing stood when the key started.
+                    if let Some(t) = self.things.get(thing) {
+                        self.key_base.insert(thing, (t.pos, t.yaw, t.pitch, t.roll));
+                    }
                 }
                 Value::Num(0.0)
             }

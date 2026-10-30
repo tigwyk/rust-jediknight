@@ -456,6 +456,9 @@ fn main() {
     // `--levels`: list the single-player episode's level rows (file, chapter, comment) — the shipped
     // order Phase 2's breadth sweep walks.
     let mut levels_probe = false;
+    // `--key <name>`: dump a parsed `.key` (header + the first node's frames). `PlayKey` names one in the
+    // scripts, and whether it moves a *thing* or only a model is the question a camera's path turns on.
+    let mut key_probe: Option<String> = None;
     let mut controls_check = false;
     let mut move_check = false;
     let mut winding_check = false;
@@ -767,6 +770,8 @@ fn main() {
             }
             "--cameras" => cameras_probe = true,
         "--levels" => levels_probe = true,
+        // `--key <name>`: consume the value so the shared loop does not read it as the level.
+        "--key" => key_probe = arg_value(&args, &mut i).cloned(),
         "--surfaces-at" => {
                 surfaces_at = arg_value(&args, &mut i).and_then(|s| {
                     let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
@@ -1930,6 +1935,31 @@ fn main() {
     // next row is the level that loads. Resolved once, here, so the watcher only has to act.
     // `campaign_start` is where "New Game" begins, which is not the same thing once the campaign
     // has moved on: `--level` and a level transition both change `level_name`, neither changes this.
+    if let Some(name) = &key_probe {
+        let Some(raw) = gobs.read(&name.to_ascii_lowercase()) else {
+            println!("key: `{name}` not found in the archives");
+            return;
+        };
+        let parsed = key::parse(&String::from_utf8_lossy(&raw));
+        println!(
+            "key: `{name}` frames {} fps {:.3} joints {} node(s) {}",
+            parsed.frames,
+            parsed.fps,
+            parsed.joints,
+            parsed.nodes.len()
+        );
+        for (index, node) in parsed.nodes.iter().enumerate() {
+            println!("node {index} mesh `{}` entries {}", node.mesh, node.frames.len());
+            let step = (node.frames.len() / 8).max(1);
+            for entry in node.frames.iter().step_by(step).take(9) {
+                println!(
+                    "  frame {:4} pos ({:8.3} {:8.3} {:8.3}) rot ({:8.2} {:8.2} {:8.2})",
+                    entry.frame, entry.pos[0], entry.pos[1], entry.pos[2], entry.rot[0], entry.rot[1], entry.rot[2]
+                );
+            }
+        }
+        return;
+    }
     if levels_probe {
         if let Some((_, episode)) = episodes_of(&gobs)
             .into_iter()
@@ -20787,6 +20817,9 @@ fn setup(
     // `GetKeyLen` answers a `.key`'s frame count, which the loader already parsed.
     sim.world.borrow_mut().key_lengths =
         world.keys.iter().map(|(name, key)| (name.clone(), key.frames as f32)).collect();
+    // A key that drives a *thing's* pose (a script camera) is sampled from the parsed file, so the
+    // runtime needs them too — the loader is the only place with archive access.
+    sim.world.borrow_mut().keys = world.keys.iter().map(|(name, key)| (name.clone(), key.clone())).collect();
     sim.world.borrow_mut().surface_cels = level
         .surfaces
         .iter()
@@ -23128,7 +23161,9 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     let shake = camera_read.1;
 
     if let Some((pos, yaw, pitch)) = focus_camera {
-        let (forward, _) = yaw_axes(yaw);
+        // `thing.yaw` is in **degrees**; `yaw_axes` takes radians like every other view angle here. With
+        // the placed `droidcam` at yaw 0 the mix-up was invisible; a key that turns the camera exposes it.
+        let (forward, _) = yaw_axes(yaw.to_radians());
         let pitch = pitch.to_radians();
         eye = Vec3::from(pos);
         look = Vec3::new(
