@@ -19536,6 +19536,15 @@ fn solid_things(world: &World, solids: &collide::Solids) -> Vec<([f32; 3], f32, 
         if is_local_player(&thing.template) {
             continue;
         }
+        // An **actor** is not a fixed obstacle for a walking body. The engine's actor collision is soft:
+        // the player walks through an NPC and the NPC gives way, where the port's cylinder list made every
+        // actor a solid post. Level 11 shows it plainly -- the body walked into `gorc` standing in the
+        // doorway and was shoved around him 67 times in 90 frames (each push carried the body -x), ending
+        // at (-0.54, 13.27), where retail's body walks straight to the closed door and stops at
+        // (0.01, 13.20). Actors keep their own collision and AI; they are simply not in the *walker*'s list.
+        if crate::runtime::thing_type_of(&world.level, &thing.template) == 2 {
+            continue;
+        }
         let Some(radius) = crate::runtime::solid_radius(&world.level, &thing.template) else {
             continue;
         };

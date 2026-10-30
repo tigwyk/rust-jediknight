@@ -1005,3 +1005,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   movement).
 - Code: the probe plus `runtime::thing_type_of` only; tests **147 passed**, **gates 0 of 64 failed**, trace
   gate **7 legs, 0 failures**.
+
+## Update — round 141
+
+- Level 11's drift found and fixed at the owning layer: `BK_MOVE_TRACE` showed **67** cylinder pushes in 90
+  frames, nearly all from the actor `gorc` in the doorway — the port had made every actor a solid post for the
+  walker and shoved the body around him. Retail's own trace walks **through** him (gorc at y 13.008, retail
+  goes 12.38 → 13.20), so `solid_things` now skips `type=actor`: the port's door stop moved from
+  (−0.54, 13.27) to **(−0.27, 13.28)** against retail's (0.01, 13.20).
+- Level 11 remains off the gate for the *other* face of the cutscene bucket: retail is frozen for its first
+  **1.2 s** (identical samples at 600/1200 ms) and only moves at 1800 ms — a scripted startup delay, so its
+  sector samples and the port's cannot align even though both reach the door.
+- Harness note: the trace gate refreshes port traces every run but seeds retail traces from
+  `tools/parity/walktrace/`; deleting `target/parity/trace/*.tsv` without restoring the fixtures breaks
+  `trace-compare`.
+- Suites: tests **147 passed**, **gates 0 of 64 failed**, trace gate **7 legs, 0 failures**.

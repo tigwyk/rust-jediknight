@@ -3747,3 +3747,26 @@ conclusions.
 The ledger row's plan is corrected accordingly: the camera work is "slot camera = focus thing's animated
 pose, view-relative movement/look while it is current, and the engine's 30 s return to the player camera
 (`sithControl_Update`)" — no camera objects to enumerate.
+
+**Actors are not walker obstacles: retail's own level-11 trace walks through the NPC (round 141).** Level 11's
+port leg drifted −x to (−0.54, 13.27) where retail reaches the door at (0.01, 13.20), and the cause was the
+solid-thing list. `BK_MOVE_TRACE` showed **67** `pushed out of the collision cylinder` events in 90 frames,
+nearly all from the actor `gorc` standing in the doorway: the port had made every actor a solid post, so the
+walker was shoved around him each frame and each push carried it −x.
+
+The engine's actors do not stop a walking body — and retail's own trace proves it: `gorc` stands at y 13.008
+and retail's body walks from y 12.38 to 13.20, straight through him. `solid_things` now skips `type=actor`
+templates (their own AI and collision are untouched; they are only absent from the *walker's* obstacle list).
+Measured: the port's door stop moved (−0.54 → **−0.27**, retail 0.01) and the 7-leg trace gate stays green, as
+do the 64 gates and 147 tests.
+
+Level 11 is still not a gate leg, for a different reason that this round also pinned: **retail is frozen for
+its first 1.2 s** (samples at 600 and 1200 ms are identical at (−0.17, 12.38)) and only starts moving at
+1800 ms — a scripted delay in the level's startup, the same *timing* face of the cutscene bucket rather than
+the pin. The port has no delay, so its samples land in different sectors even though both bodies end at the
+door. Ranked with the other cutscene levels, level 11 needs the same feature (script-owned start), just for
+the delay rather than a camera.
+
+A harness lesson is recorded too: the trace gate refreshes the *port* traces on every run but seeds the
+*retail* ones from `tools/parity/walktrace/`, so a run that deletes `target/parity/trace/*.tsv` must restore
+the fixtures or `trace-compare` stops with "missing trace".
