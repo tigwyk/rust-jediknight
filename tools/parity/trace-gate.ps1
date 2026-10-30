@@ -26,10 +26,10 @@ powershell -NoProfile -File tools/parity/trace-gate.ps1
 #  * walk3_spawn: retail's walk *stops* against a model at (-0.77, -3.60); the port now walks past it
 #    (212 % / 5 sectors). Before round 123 the port was stopped there by a push that ran against the
 #    motion — the same bug that wedged level 4 — so the pass was accidental.
-#  * walk5_spawn: level 5 is now 3.92 of retail's 3.73 units (105 %) after the level-4 fix, but 3 of 6
-#    sectors differ on the slab ramp; it needs a closer read before it can gate.
+#  * walk5_spawn: joined in round 125 (81 % with 2 of 6 sectors) once the model footprint replaced the
+#    template cylinder; the slab-ramp sector difference is within the gate's allowance.
 # Both legs stay runnable with -Only.
-param([string[]]$Only = @('walk_street45', 'walk_street90', 'walk_cantina', 'walk_door0', 'walk4_spawn'))
+param([string[]]$Only = @('walk_street45', 'walk_street90', 'walk_cantina', 'walk_door0', 'walk4_spawn', 'walk5_spawn'))
 
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))

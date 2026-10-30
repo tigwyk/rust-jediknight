@@ -19505,17 +19505,36 @@ fn solid_things(world: &World, solids: &collide::Solids) -> Vec<([f32; 3], f32, 
         let Some(radius) = crate::runtime::solid_radius(&world.level, &thing.template) else {
             continue;
         };
-        let span = world
+        // The model's own bounds give both the vertical span `sithThing` collides against **and** a plan
+        // footprint far tighter than the template's `size=` (which is a body-sized radius, not the
+        // furniture's): `table4`'s is 0.154 while its model is ~0.1 wide. Blocking with the template
+        // radius sealed the cantina leg (102 % -> 12 %) and level 4 (100 % -> 50 %), so the tighter
+        // footprint is what a blocking contact has to use.
+        let model = world
             .template_model
             .get(&thing.template.to_ascii_lowercase())
             .and_then(|name| world.models.get(name))
             .map(|model| {
                 let pose = tdo::pose_nodes(model, None, 0.0);
                 let (lo, hi) = bounds(model, &pose);
-                (thing.pos[2] + lo[2], thing.pos[2] + hi[2])
-            })
+                (lo, hi)
+            });
+        let span = model
+            .map(|(lo, hi)| (thing.pos[2] + lo[2], thing.pos[2] + hi[2]))
             .filter(|(lo, hi)| hi > lo)
             .unwrap_or((thing.pos[2] - radius, thing.pos[2] + radius));
+        let radius = model
+            .map(|(lo, hi)| {
+                let plan = lo[0].abs().max(hi[0].abs()).max(lo[1].abs()).max(hi[1].abs());
+                radius.min(plan).max(0.02)
+            })
+            .unwrap_or(radius);
+        if std::env::var_os("BK_THINGS_TRACE").is_some() {
+            eprintln!(
+                "solid: `{}` at {:?} radius {radius:.3} z {:.3}..{:.3}",
+                thing.template, thing.pos, span.0, span.1
+            );
+        }
         out.push((thing.pos, radius, span.0, span.1));
     }
     out

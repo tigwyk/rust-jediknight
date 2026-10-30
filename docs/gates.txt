@@ -801,3 +801,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
     correct blocker clears that leg.
 - No code shipped: tree restored to `5fd58cb`; trace gate still **5/5** (street45/90 100 %, cantina 102 %,
   door0 stop-pose, level4 100 %). Tests, gates and parity re-verified below.
+
+## Update — round 125
+
+- **Solid models block**: `solid_things` sizes each cylinder from the **model's own plan bounds** (min of the
+  template `size=` and the model extent) instead of the template radius, and `move_body` sweeps the body's
+  circle against it (`sweep_things`), stopping and sliding. Round 124's template-radius blocking was the
+  reason it sealed gaps; with the footprint it does not.
+- Trace gate **6 legs, 0 failures**: street45 100 %, street90 100 %, cantina **102 %** (1 sector), door0
+  stop-pose, level 4 **100 %** (1 sector), level 5 **81 %** (2 sectors) — `walk5_spawn` joins.
+- Still outside with their reasons measured: `walk3_spawn` 266 % (retail's stop is not a prop), `walk6_spawn`
+  190 % (retail climbs steps at 0.36 u/s against the port's 0.69).
+- Tests **147 passed**; full gate sweep **0 of 64 failed**; parity **6/6** (route_cantina 0.7381 → 0.7286
+  from the changed walker, still above its 0.65 floor).

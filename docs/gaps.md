@@ -3376,3 +3376,27 @@ needs to pass through. The blocking experiment also shows the payoff clearly —
 `walk5_spawn` lands at 80 % travel with 2 sector mismatches, i.e. inside the gate's rules. The ledger row
 for thing collision keeps its measurement and its retire condition is unchanged, now with this negative
 result recorded so the next attempt starts from "real model surfaces", not "a smaller radius".
+
+**Solid models block now, sized by the model instead of the template — level 5 joins the gate (round 125).**
+Round 124's blocking failed because it used the template's `size=` cylinder (`table4` 0.154) where the model
+is ~0.1 wide. The fix is at the owning layer: `solid_things` now computes each solid thing's radius from the
+**model's own bounds** (`min(template size, plan extent)`, floored at 0.02 — the same `bounds()` call that
+already gives the vertical span), and `move_body` sweeps the body's circle against those cylinders
+(`sweep_things`: `|P + d t − C| = R + r`), stopping at the contact and sliding along the radial normal like
+any other wall.
+
+Measured with the model footprint:
+
+```text
+walk_cantina  102 % (1 sector)   PASS
+walk4_spawn   100 % (1 sector)   PASS
+walk5_spawn    81 % (2 sectors)  PASS  -- level 5's slab ramp no longer wedges the body
+walk3_spawn   266 % (5 sectors)  fails -- retail's stop there is not a prop
+walk6_spawn   190 % (5 sectors)  fails -- retail's stop there is the stair climb, not a prop
+trace gate: 6 legs, 0 failures
+```
+
+So the trace gate now covers **three legs beyond level 1** (levels 3, 4 and 5), two of them passing. What the
+two remaining failures say about the next bucket: level 3's retail body stops where no solid thing sits
+(its leg is still scripted-opening territory), and level 6's retail body is *slowed* on a staircase — 0.36
+u/s against the port's 0.69 — so the gait on steps, not collision, is what remains there.

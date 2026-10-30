@@ -983,6 +983,49 @@ impl Solids {
     /// A step is tried as the engine does it — the same sweep from a raised start, see
     /// `sithPhysics_FindFloor`'s second pass at `range = moveSize` — and the vertical sweep then settles
     /// the body onto whatever it landed on.
+    /// The nearest **solid model** the body would run into: `(travel, normal)` in plan.
+    ///
+    /// `sithCollision` treats a collidable thing's model as solid surfaces, so a walking body is
+    /// **blocked** by a crate or a table and slides along it. The port's model of a thing is a
+    /// cylinder sized from the model's own plan footprint (see `solid_things`), so the equivalent test
+    /// is a swept circle against a circle: solve `|P + d t - C| = R + r`. The normal is radial, which is
+    /// the right slide frame for a round obstacle and is what makes a body round it instead of stopping.
+    fn sweep_things(
+        &self,
+        at: [f32; 3],
+        dir: [f32; 3],
+        left: f32,
+        radius: f32,
+    ) -> Option<(f32, [f32; 3])> {
+        let mut best: Option<(f32, [f32; 3])> = None;
+        for &(centre, thing_radius, z_min, z_max) in &self.things {
+            if at[2] + radius < z_min || at[2] - radius > z_max {
+                continue;
+            }
+            let span = thing_radius + radius;
+            let (dx, dy) = (at[0] - centre[0], at[1] - centre[1]);
+            let b = 2.0 * (dir[0] * dx + dir[1] * dy);
+            let c = dx * dx + dy * dy - span * span;
+            // Already overlapping: the push resolver owns that state, not the sweep.
+            if c <= 0.0 {
+                continue;
+            }
+            let disc = b * b - 4.0 * c;
+            if disc < 0.0 {
+                continue;
+            }
+            let t = (-b - disc.sqrt()) / 2.0;
+            if !(0.0..=left).contains(&t) {
+                continue;
+            }
+            if best.is_none_or(|(near, _)| t < near) {
+                let (hx, hy) = (dx + dir[0] * t, dy + dir[1] * t);
+                let len = (hx * hx + hy * hy).sqrt().max(1e-6);
+                best = Some((t, [hx / len, hy / len, 0.0]));
+            }
+        }
+        best
+    }
     pub fn move_body(
         &self,
         sector: usize,
@@ -1006,7 +1049,37 @@ impl Solids {
             if std::env::var_os("BK_MOVE_TRACE").is_some() {
                 eprintln!("move: loop {bounce} at {:?} dir {:?} left {left:.5}", at, [dir[0], dir[1]]);
             }
-            match self.sweep_rooms(here, at, dir, left, radius, gates) {
+            let room = self.sweep_rooms(here, at, dir, left, radius, gates);
+            // A solid model is a contact like a wall: whichever comes first stops the move. A body that
+            // walks into a crate stops against it (retail does: `walk3_spawn` and `walk6_spawn` both
+            // halt at props), and the radial normal makes the slide round it.
+            let body = self.sweep_things(at, dir, left, radius);
+            if let Some((travel, normal)) = body
+                && room.0.is_none_or(|hit| travel < hit.distance)
+            {
+                blocked = true;
+                if std::env::var_os("BK_MOVE_TRACE").is_some() {
+                    eprintln!(
+                        "move: blocked by a solid model at {:?} normal {:?} after {travel:.3} of {left:.3}",
+                        [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2]],
+                        normal
+                    );
+                }
+                at = [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2]];
+                left -= travel.max(0.0);
+                if left < 1e-4 {
+                    break;
+                }
+                let into = dir[0] * normal[0] + dir[1] * normal[1];
+                let slide = [dir[0] - normal[0] * into, dir[1] - normal[1] * into];
+                let mag = (slide[0] * slide[0] + slide[1] * slide[1]).sqrt();
+                if mag < 1e-4 || bounce == 2 {
+                    break;
+                }
+                dir = [slide[0] / mag, slide[1] / mag, 0.0];
+                continue;
+            }
+            match room {
 
                 (Some(hit), far, _) => {
                     blocked = true;
