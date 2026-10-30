@@ -497,6 +497,32 @@ function Invoke-JkWalkTrace {
   }
   Set-Content -LiteralPath $path -Value $lines -Encoding utf8
   Log ("walk trace: wrote $path ({0} sample(s) over {1} x {2} ms of held forward)" -f $samples, $segments, $HoldMs)
+  # A **leg-quality check**: a walk leg is only a walk while the player is under input control. When a
+  # level's script owns the player (a cutscene) the body is pinned and the *camera* is driven instead, so
+  # the recorded yaw swings instead of staying put. That is what level 7's opening does (positions flat,
+  # yaw 43.6 -> -80.8 -> 161.1 over three windows), and a comparison against such a trace measures
+  # nothing. Flag it at capture time so the fixture is not mistaken for a walk.
+  $yaws = @($lines | Select-Object -Skip 1 | ForEach-Object { [double](($_ -split "`t")[5]) })
+  if ($yaws.Count -ge 2) {
+    if ($span -gt 5.0) {
+      Log ("walk trace: WARNING camera is scripted (yaw spans {0:N1} degrees over the window); the leg is not a plain walk" -f $span)
+    }
+    # A pinned body is the other cutscene signature: the camera can hold still while the script keeps the
+    # player where it is, so the window records 0.1 units of a "walk" that never happened (level 7's
+    # forward trace moves 0.11 units in 3 s with yaw 0 the whole way).
+    $pts = @($lines | Select-Object -Skip 1 | ForEach-Object { $c = $_ -split "`t"; ,@([double]$c[1], [double]$c[2]) })
+    if ($pts.Count -ge 2) {
+      $travel = 0.0
+      for ($k = 1; $k -lt $pts.Count; $k++) {
+        $dx = $pts[$k][0] - $pts[$k - 1][0]
+        $dy = $pts[$k][1] - $pts[$k - 1][1]
+        $travel += [math]::Sqrt($dx * $dx + $dy * $dy)
+      }
+      if ($travel -lt 0.3) {
+        Log ("walk trace: WARNING the body travelled {0:N2} units in the window; the leg is not a plain walk" -f $travel)
+      }
+    }
+  }
   return $path
 }
 # Wait until FFmpeg reports the game window as bright (the Players screen is a bright static frame;

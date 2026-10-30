@@ -3500,3 +3500,25 @@ for re-capture.
 Also measured and reverted this round (no effect on any leg): a `sweep_things` rule requiring a real
 vertical overlap (2 cm) instead of a graze, aimed at level 3's canopy whose span overlaps the body by one
 centimetre. It changed neither `walk3_spawn` (still 4.70 units) nor the gate, so it did not ship.
+
+**"Cutscene" is a measurable bucket, and the harness now flags a fake walk (round 130).** Level 7's leg was
+left as "a cutscene level" last round; this round pinned down what that means in retail terms, with two
+probes on the same spawn:
+
+- **Forward held**, 12 s after the level boots: retail moves **0.11 units** in the whole 3 s window and the
+  recorded yaw stays 0. The body is pinned where the script put it.
+- **LEFT held**, same settle: retail moves **0.03 units** while the recorded yaw sweeps **240.1°**
+  (43.6 → −80.8 → 161.1 across three windows). A body that cannot move in *any* direction while its view
+  spins is not blocked — it is being driven by a camera, i.e. the player is under script control.
+
+That is the third cutscene level (with 2 and 6) and it is a **missing subsystem**, not a movement bug: the
+port has no cutscene camera and no script-owned player mode, so the held key walks the body off (2.57 units
+on the same input). It is now a ledger row with those measurements and the retire condition
+(`SetCamera…`-style verbs + a script-owned player mode).
+
+The useful product for the next rounds is the **leg-quality check** the harness now performs on every walk
+capture: it warns `camera is scripted (yaw spans …)` when the view moves and `the body travelled … not a
+plain walk` when the window records under 0.3 units. Both fire on level 7's two probes. It also re-reads
+level 3: the *original* spawn capture (yaw 0 for the whole leg) is a genuine walk, while the 8 s-settled one
+shows a scripted camera by 2.4 s (yaw snapping to 118.65) — so a settle is only a valid fix while the yaw
+stays steady, and the leg-quality check is what tells the two apart.

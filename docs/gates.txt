@@ -864,3 +864,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Ledger unchanged this round; the "slanted-floor sliding" row's measurement stands (the port's lateral
   drift is what decides which prop each body meets).
 - Suites: tests **147 passed**; trace gate **6 legs, 0 failures**.
+
+## Update — round 130
+
+- "Cutscene" is now a measured bucket: level 7 (`07yun`) with forward held 12 s after boot moves **0.11
+  units** with yaw 0; with **LEFT** held it moves **0.03** while the recorded yaw spans **240.1°** — a
+  camera, not a player. New ledger row **cutscenes (camera + player lock)** with the retire condition.
+- The retail harness now **flags a fake walk at capture**: `WARNING camera is scripted (yaw spans …)` and
+  `WARNING the body travelled … not a plain walk` (both verified firing on level 7's two probes). This also
+  re-reads level 3: its original capture is a real walk (steady yaw), the 8 s-settled one is a cutscene by
+  2.4 s — so a settle is only valid while the yaw stays steady.
+- Suites: tests **147 passed**; trace gate **6 legs, 0 failures**.
