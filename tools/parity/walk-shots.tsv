@@ -68,3 +68,6 @@ walk10_spawn	10cargo	-6.78	15.28	1.507	0	134.99
 #
 # walk11_spawn: level 11 (the debug list's eleventh entry).
 walk11_spawn	11gorc	-0.17	12.38	-0.193	0	0
+#
+# walk12_spawn: level 12 (12escape).
+walk12_spawn	12escape	-0.67	-8.15	-4.016	0	180.00

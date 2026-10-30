@@ -1063,3 +1063,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   guards (`|n_z| < 0.7`, `along >= 0`) were measured first and rejected: both dropped level 5 to 44 %.
 - `walk6_spawn` joins the trace gate: **8 legs, 0 failures**. Tests **147 passed**, `--gates` **0 of 64
   failed**.
+
+## Update — round 145
+
+- New `--levels` probe prints the single-player episode's rows (id, chapter, file, comment) — the mapping from
+  the Debug select's n-th entry to the n-th level row, and the shipped order for the breadth sweep.
+- Level 12 (`12escape`) measured: spawn (−0.67, −8.15, −4.08) yaw 180, sector 420. Retail freezes 600 ms then
+  walks at **1.09 u/s**; the port's **path is exact (0 of 6 sector mismatches)** but it travels **5.03 against
+  2.60 (194 %)** because it runs at 2.4 where retail moves at half that. A new **speed-mode** bucket: geometry
+  and walker agree, the level's start speed does not.
+- Ruled out: `SetActorFlags(player, 8)` (level 1 sets it too and runs at 2.1–2.4), any speed/thrust/gravity verb
+  on level 12 (none in 120 frames), and the port's water rule (floor surfflags 5, sector 420 has no
+  `SECTOR_UNDERWATER`). Next read: `sithControl_PlayerMovement`'s speed selection / `sithPhysics.c:43`'s
+  halving conditions against sector 420's flags (0x1000, 0x5000 after a script).
+- `walk12_spawn`'s retail fixture committed; not gated while the speed mode is open. Tests **147 passed**,
+  `--gates` **0 of 64 failed**, trace gate **8 legs, 0 failures**.

@@ -3852,3 +3852,40 @@ leg the original push was added for, keeps its clearance and improves slightly (
 Two narrower guards were measured first and rejected: `|n_z| < 0.7` (level 5 fell to 44 % — its clearance
 needs the push on up-facing faces too) and `along >= 0` (same 44 %, because the sideways part of those pushes
 is what level 5 uses). Trimming only the backwards component is what keeps both legs.
+
+**`--levels` maps the Debug entries to level files, and level 12 is a *speed-mode* divergence (round 145).**
+Phase 2's breadth sweep had reached level 11 by hand, one boot at a time. The new `--levels` probe prints the
+single-player episode's rows — id, chapter, file, comment — which gives the mapping and the shipped order in
+one command:
+
+```
+level 11 chapter 1 `01narshadda.jkl` — Level 1: Narshadda
+...
+level 111 chapter 11 `11gorc.jkl` — Level 11: Gorc & Pic [Healing/Throwing]
+level 120 chapter 12 `12escape.jkl` — Level 12: Escape Cargo Ship
+level 131 chapter 13 `14tower.jkl` — Level 13: Tower [Persuasion/Grip]
+level 141 chapter 14 `15maw.jkl` — Level 14: Maw [Blinding/Lightning]
+```
+
+The Debug select's n-th entry is the n-th *level* row (the sequence ids differ — level 12's row id is 120), so
+the sweep can now name any level and run it.
+
+**Level 12 (`12escape`, debug entry 12)** — spawn `Pos (−0.67, −8.15, −4.08), yaw 180, sector 420`. Retail is
+frozen for the first 600 ms, then walks a dead-straight line at **1.09 u/s** for the rest of the window
+(y −8.15 → −10.74, x −0.67 → −0.86). The port's **path is exact** — 0 of 6 sector mismatches, ending at
+(−0.86, −13.18) against retail's (−0.86, −10.74) — but it covers **5.03 units against retail's 2.60 (194 %)**.
+The port's own trace shows why the *shape* matches and the *speed* does not: same heading (target
+`[0.0, −2.4]`), same sector, same floor surface (3964, flags 5) — but the port runs at the 2.4 thrust where
+retail moves at almost exactly **half** that. So level 12 is a new bucket, *speed mode*: the geometry and the
+walker agree, the speed the level's start puts the player in does not.
+
+What was ruled out this round: `SetActorFlags(player, 8)` is not the walk flag — level 1 sets the same bit in
+a repeating `SetActorFlags 8 / ClearActorFlags 4` pair and its cantina leg runs at 2.1–2.4 u/s; level 12's
+verbs contain no speed/thrust/gravity verb at all (`SetSpeed`, `SetSectorThrust`, `SetGravity` are absent from
+its 120-frame trace). The port's water rule is also not firing (floor surfflags 5 has neither 0x20000 nor
+0x100000, and sector 420 does not carry `SECTOR_UNDERWATER`). The next read is the engine's own speed
+selection in `sithControl_PlayerMovement` (`sithPhysics.c:43`'s halving conditions) against level 12's sector
+flags (0x1000, 0x5000 after a script) — the port halves on water and crouch only.
+
+`walk12_spawn`'s retail trace is committed as the fixture; the leg is not in the gate while its speed mode is
+open (the path already passes).

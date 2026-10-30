@@ -453,6 +453,9 @@ fn main() {
     // `--cameras`: list the level's placed camera things (the engine's seven camera slots attach to
     // them in file order, and a scripted opening makes one current — a level 7/8/10/11-style cutscene).
     let mut cameras_probe = false;
+    // `--levels`: list the single-player episode's level rows (file, chapter, comment) — the shipped
+    // order Phase 2's breadth sweep walks.
+    let mut levels_probe = false;
     let mut controls_check = false;
     let mut move_check = false;
     let mut winding_check = false;
@@ -763,6 +766,7 @@ fn main() {
                 }
             }
             "--cameras" => cameras_probe = true,
+        "--levels" => levels_probe = true,
         "--surfaces-at" => {
                 surfaces_at = arg_value(&args, &mut i).and_then(|s| {
                     let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
@@ -1926,6 +1930,27 @@ fn main() {
     // next row is the level that loads. Resolved once, here, so the watcher only has to act.
     // `campaign_start` is where "New Game" begins, which is not the same thing once the campaign
     // has moved on: `--level` and a level transition both change `level_name`, neither changes this.
+    if levels_probe {
+        if let Some((_, episode)) = episodes_of(&gobs)
+            .into_iter()
+            .find(|(_, e)| e.kind == episode::KIND_SINGLE)
+        {
+            println!("levels: {} row(s) in `{}`", episode.sequences.len(), episode.title);
+            for row in episode.levels() {
+                println!(
+                    "level {} chapter {} `{}`{}{}",
+                    row.id,
+                    row.number,
+                    row.file,
+                    if row.comment.is_empty() { "" } else { " — " },
+                    row.comment
+                );
+            }
+        } else {
+            println!("levels: no single-player episode found");
+        }
+        return;
+    }
     let campaign_start = start_level(&gobs).unwrap_or_else(|| level_name.clone());
     let plan = {
         let episode = episodes_of(&gobs)
