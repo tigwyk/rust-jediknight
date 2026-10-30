@@ -1129,3 +1129,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   is dormant until a row carries a settle and the gate stays **8 legs, 0 failures**. Next: adopt the settle,
   re-baseline those two legs, and re-check levels 11–13's speed question with aligned holds.
 - Tests **147 passed**, `--gates` **0 of 64 failed**.
+
+## Update — round 149
+
+- Adopted the row settle (1000 ms) on every walk-shots row. Trace gate **9 legs, 0 failures** — `walk12_spawn`
+  joins: **127 % travel (3.95 retail / 5.03 port), 0 of 6 sector mismatches**. Its round-145/147 "retail walks
+  at 1.09 u/s" reading was the missing-settle artifact; with the settle retail runs 2.2 u/s in its first
+  window and settles to ~1.0.
+- The apparent regressions under adoption were mixed trace states: with the row settle and the committed
+  fixtures, street90 is 100 % (1 sector) and level 9 is 100 % (0 sectors), and all nine legs pass.
+- With aligned holds the remaining verdicts are measured: level 11 is still frozen 1200 ms (`0.00` at 600 and
+  1200) — a genuine scripted start delay — with 5 of 6 sectors off at 108 % travel; level 13 moves 1.30 against
+  the port's 3.13 (241 %) with 3 sectors (port walks off a 0.30 step retail stops on).
+- Walk legs now cover levels 1 (4 legs), 4, 5, 6, 9, 12 = **9 gated legs**; remaining levels have measured
+  reasons (3 drift, 11 scripted delay, 13 step-off, 2/7/8/10 script-owned openings).
+- Tests **147 passed**, `--gates` **0 of 64 failed**, parity **6 thresholds, 0 failures**.

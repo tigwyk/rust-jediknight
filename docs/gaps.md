@@ -3970,3 +3970,25 @@ window" that rounds 145–147 mistook for a scripted level delay:
 
 The lesson for the harness is recorded: a captured trace is only evidence about the **port** once the same
 settle is applied on both sides, and the row column is the single place that policy lives.
+
+**The settle is adopted on every leg, and level 12 joins the gate — its "walk" was the harness (round 149).**
+With round 148's fix in place (the walk-shots 8th column reaching `Invoke-JkWalkTrace`) every row now carries
+**1000 ms**, and the trace gate is **9 legs, 0 failures** with `walk12_spawn` among them:
+
+- **Level 12 (`12escape`) is gate-leg nine**: travel **3.95 retail vs 5.03 port (127 %)**, **0 of 6 sector
+  mismatches**. With the settle the retail trace runs 2.2 u/s in its first window and then settles to ~1.0 —
+  the "retail walks at 1.09" reading of rounds 145–147 was the *missing settle*, not a speed mode.
+- The two legs that looked like regressions under the adoption were a mixed-state artifact: with the row settle
+  and the **committed** fixtures, `street90` matches at 100 % (1 sector) and level 9 at 100 % (0 sectors), and
+  the gate is green across all nine.
+- Two levels keep their own verdicts, now measured with aligned holds: **level 11** is *still* frozen for
+  1200 ms with the settle (`0.00, 0.00` at 600/1200) — a genuine scripted startup delay — and ends with 5 of 6
+  sectors off at 108 % travel; **level 13** moves 1.30 units against the port's 3.13 (241 %) with 3 sectors, the
+  port walking down a 0.30 step retail stops on.
+- The walk legs now cover levels **1 (4 legs), 4, 5, 6, 9 and 12** — 9 gated legs — with the remaining levels
+  each carrying a measured reason: 3 (slanted-floor drift), 11 (scripted start delay), 13 (step-off), and
+  2/7/8/10 (script-owned openings).
+
+The harness lesson stands corrected and is recorded: the 8th column is now the single place the settle policy
+lives, retail and port both honour it, and a trace captured without it is evidence about the *harness*, not the
+port.

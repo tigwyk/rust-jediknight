@@ -13,64 +13,64 @@
 # falls to the spawn (sector 339). Do not re-try a thing-obstacle patch for this leg (rounds 15-23).
 # Retail crosses 271 -> 157 -> 155; the port keeps going and steps
 # off a ledge there, so the leg also measures that collision difference (thing collision is absent).
-walk_cantina	01narshadda	-2.200043	-2.900013	-1.142886	0	105.000092
-walk_street	01narshadda	5.474939	-1.899975	0.657119	0	45.000000
-walk_street45	01narshadda	5.474939	-1.899975	0.657119	0	45.000000
+walk_cantina	01narshadda	-2.200043	-2.900013	-1.142886	0	105.000092	1000
+walk_street	01narshadda	5.474939	-1.899975	0.657119	0	45.000000	1000
+walk_street45	01narshadda	5.474939	-1.899975	0.657119	0	45.000000	1000
 #
 # walk_street90 / walk_street0 are the yaw-mapping probes (round 30). Retail at yaw 90 walks pure -x
 # (5.47 -> 4.20 -> 3.56 -> 3.27 over 1.8 s, y fixed at -1.90, sectors 271/157/155) and at yaw 0 it
 # nudges +0.04 in y and stops: that is exactly the decompiled basis `forward = (-sin a, cos a)`, so
 # the port and retail share a movement basis. walk_street90 is the cleanest straight leg yet - no
 # blocking, no drift, three sectors.
-walk_street90	01narshadda	5.474939	-1.899975	0.657119	0	90.000000
-walk_street0	01narshadda	5.474939	-1.899975	0.657119	0	0.000000
+walk_street90	01narshadda	5.474939	-1.899975	0.657119	0	90.000000	1000
+walk_street0	01narshadda	5.474939	-1.899975	0.657119	0	0.000000	1000
 
 # walk_switch: from the switch-side warp, walk south into the cantina door switch thing (cog 11).
 # Phase 1 step 4's positional trigger probe: the use key did nothing from 0.8 units, so the switch
 # is expected to fire on touch (thing link) rather than on use.
-walk_switch	01narshadda	-4.75	-2.95	-1.143	0	180.000000
+walk_switch	01narshadda	-4.75	-2.95	-1.143	0	180.000000	1000
 
 # walk_door0: warp on the upper floor south of the level-1 door (cog 0, thing 4 at 1.20,9.65,6.35),
 # face north and walk through its adjoin. Phase 1 step 4's door trigger: `crossed` should move
 # `doorstatus`/`movestatus` in cog 0, which `cogstatus 0` reports.
-walk_door0	01narshadda	1.30	9.00	6.237	0	0.000000
+walk_door0	01narshadda	1.30	9.00	6.237	0	0.000000	1000
 #
 # walk2_spawn: Phase 2's first non-level-1 leg. Level 2's spawn pose (retail coords: 10.798,-11.983,3.020
 # yaw -99.98); forward there is the plaza the level opens onto. Row fields are name, level, x, y, z, pitch, yaw.
-walk2_spawn	02narshadda	10.798	-11.983	3.020	0.66	-99.98
+walk2_spawn	02narshadda	10.798	-11.983	3.020	0.66	-99.98	1000
 #
 # walk5_spawn: Phase 2's second non-level-1 probe. level5_spawn's pose (the debug list's entry 5 boots
 # 06abarons); that reference is a static player-camera frame, so the spawn should be calm.
-walk5_spawn	06abarons	10.58	14.91	0.22	0	134.99
+walk5_spawn	06abarons	10.58	14.91	0.22	0	134.99	1000
 #
 # walk3_spawn: level 3 (the debug list's third entry). The pose is retail's own level-start coords, read
 # by retail-capture.ps1's -StartLevel boot now that -SettleMs feeds that read.
-walk3_spawn	03katarn	-0.72	-4.73	-0.173	0	0
+walk3_spawn	03katarn	-0.72	-4.73	-0.173	0	0	1000
 #
 # walk4_spawn: level 4 (the debug list's fourth entry, 'The Jedi's Lightsaber'), which is
 # 04escapehouse -- the debug list's numbering is not the file numbering (learned this round).
-walk4_spawn	04escapehouse	-4.22	1.36	0.777	0	17.92
+walk4_spawn	04escapehouse	-4.22	1.36	0.777	0	17.92	1000
 #
 # walk6_spawn: level 6 (the debug list's sixth entry, 'Into the Dark Palace').
-walk6_spawn	06bbarons	22.46	38.21	1.057	0	-45.01
+walk6_spawn	06bbarons	22.46	38.21	1.057	0	-45.01	1000
 #
 # walk7_spawn: level 7 (the debug list's seventh entry, 'Yun - The Dark Youth'), which is 07yun.
-walk7_spawn	07yun	-2.00	-0.80	-0.043	0	0
+walk7_spawn	07yun	-2.00	-0.80	-0.043	0	0	1000
 #
 # walk8_spawn: level 8 (the debug list's eighth entry, 'Palace Escape'), which is 08escape88.
-walk8_spawn	08escape88	52.56	62.82	34.457	0	90
+walk8_spawn	08escape88	52.56	62.82	34.457	0	90	1000
 #
 # walk9_spawn: level 9 (the debug list's ninth entry, 'Fuel Station Launch'), which is 09fuelstation.
-walk9_spawn	09fuelstation	1.07	5.46	0.107	0	54.99
+walk9_spawn	09fuelstation	1.07	5.46	0.107	0	54.99	1000
 #
 # walk10_spawn: level 10 (the debug list's tenth entry).
-walk10_spawn	10cargo	-6.78	15.28	1.507	0	134.99
+walk10_spawn	10cargo	-6.78	15.28	1.507	0	134.99	1000
 #
 # walk11_spawn: level 11 (the debug list's eleventh entry).
-walk11_spawn	11gorc	-0.17	12.38	-0.193	0	0
+walk11_spawn	11gorc	-0.17	12.38	-0.193	0	0	1000
 #
 # walk12_spawn: level 12 (12escape).
-walk12_spawn	12escape	-0.67	-8.15	-4.016	0	180.00
+walk12_spawn	12escape	-0.67	-8.15	-4.016	0	180.00	1000
 #
 # walk13_spawn: level 13 (14tower).
-walk13_spawn	14tower	-0.86	-5.53	2.905	0.92	-20.98
+walk13_spawn	14tower	-0.86	-5.53	2.905	0.92	-20.98	1000
