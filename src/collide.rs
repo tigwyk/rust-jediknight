@@ -1084,6 +1084,12 @@ impl Solids {
                     let into = dir[0] * hit.normal[0] + dir[1] * hit.normal[1];
                     let slide = [dir[0] - hit.normal[0] * into, dir[1] - hit.normal[1] * into];
                     let mag = (slide[0] * slide[0] + slide[1] * slide[1]).sqrt();
+                    if std::env::var_os("BK_MOVE_TRACE").is_some() {
+                        eprintln!(
+                            "move: bounce {bounce} hit t {travelled:.5} left {left:.5} dir {:?} slide {:?} mag {mag:.3} at {:?}",
+                            [dir[0], dir[1]], [slide[0], slide[1]], at
+                        );
+                    }
                     if mag < 1e-4 || bounce == 2 {
                         break;
                     }
@@ -1109,7 +1115,39 @@ impl Solids {
         // The placed models come last because they are not sector planes: a `_structure` column or a
         // `_walkstruct` table is a body-sized cylinder the sweep knows nothing about, and pushing out
         // of it after the walls keeps the two solvers from fighting over the same step.
-        let at = self.push_out_of_things(at, radius);
+        // A solid model's cylinder is resolved **after** the walls, and the radial push it computes can
+        // carry a body through the wall beside it — then every later slide is blocked and the body
+        // wedges in the corner (level 4's `table2` against the doorway panel: the port stopped at
+        // (-4.41, 1.885) where retail walks through the open half of the same doorway). So the push is
+        // applied only where geometry allows: straight out first, then tangentially (which slides the
+        // body along whatever it is pressed against), and not at all when every direction is blocked.
+        let at = if std::env::var_os("BK_NO_THINGS").is_some() {
+            at
+        } else {
+            let pushed = self.push_out_of_things(at, radius);
+            if pushed == at {
+                at
+            } else {
+                let out = [pushed[0] - at[0], pushed[1] - at[1]];
+                let len = (out[0] * out[0] + out[1] * out[1]).sqrt();
+                if len < 1e-6 {
+                    at
+                } else {
+                    let unit = [out[0] / len, out[1] / len];
+                    let clear = |dir: [f32; 2]| {
+                        self.sweep(here, at, [dir[0], dir[1], 0.0], len, radius, gates).is_none()
+                    };
+                    // Straight out only. When the wall beside the model blocks it, the body keeps the
+                    // geometry solver's position and slides along the wall next frame — the push is a
+                    // last resort, not a teleport. (A tangential shove was tried and halved the level-1
+                    // legs: it moved every body sideways by the overlap every frame.)
+                    if clear(unit) { pushed } else { at }
+                }
+            }
+        };
+        if std::env::var_os("BK_MOVE_TRACE").is_some() {
+            eprintln!("move: end at {:?} here {here} blocked {} from {:?}", at, blocked, pos);
+        }
         (at, here, blocked || at != pos)
     }
 

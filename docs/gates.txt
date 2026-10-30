@@ -761,3 +761,19 @@ running app.--carry-check --start 01narshadda                        0   level 2
     instead of stopping.
 - Level 4's trace is committed and its row stays outside the gate until door movement lands; trace gate
   still 5/5.
+
+## Update — round 122
+
+- Level 4's block is a **two-face corner**, not a static door (round 121's row corrected): with
+  `BK_NO_THINGS=1` the port matches retail exactly (1.11 units, pose (−4.775, 2.321), sector 770), and the
+  `BK_MOVE_TRACE` bounce log shows the slide hitting the door panel (t 0.002) then a **portal face**
+  (t 0.033, `surface usize::MAX`, touched at gap 0) before `bounce == 2` discards the frame's advance.
+  Ledger row replaced with **wall slide in a corner** and the retire condition (retry the slide with the
+  remainder, skip portals only touched).
+- **Wall-aware thing push** landed: the radial push out of a solid model applies only where geometry is
+  clear. `walk_cantina` **71 % → 102 %** travel, sector mismatches **3 → 1**; street45/90 stay 100 %,
+  door0 stop-pose, level 3 66 % — trace gate **5/5**. A tangential push was tried and rejected (halved the
+  level-1 legs).
+- The position→velocity rewrite was re-measured and kept: removing it leaves level 4 unchanged and makes
+  level 5 worse (1.41 → 0.84), so it was reverted.
+- Tests, gates and parity re-run on the final tree below.

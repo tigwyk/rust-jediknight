@@ -3292,3 +3292,36 @@ they pass; `walk-shots.tsv` carries both rows.
 So both legs stay outside the gate for reasons already on the ledger (one of them newly written down), and
 the fix order for Phase 2 is the same as Phase 1's: door movement first (it unblocks level 4's leg and the
 `--door` work), then thing collision (which unblocks level 6 and the cantina leg's surviving sector count).
+
+**Level 4's wedge is a wall-slide corner, not a static door — and the push is wall-aware now (round 122).**
+Round 121 called level 4's block "a scripted door". The A/B measurement says otherwise: with the
+solid-model push disabled (`BK_NO_THINGS=1`, a new experiment hook) the port travels **exactly retail's
+1.11 units** and stops at retail's own pose (−4.775, 2.321, sector 770). So the doorway was open all along
+(the portal 6928 spans the half retail walks through; the panel 6929 is the closed half), and the body was
+wedged between that panel and the `table2` at (−4.54, 1.49) sitting at the spawn.
+
+What the trace shows, frame by frame, is a **two-face corner the bounce loop cannot resolve**:
+
+```text
+move: blocked by surface 6929 at (-4.4112, 1.8850) normal (0, -1, 0) after 0.002 of 0.043
+move: bounce 0 hit t 0.00236 left 0.04103 dir [-0.31, 0.95] slide [-0.31, 0.0] mag 0.308
+move: blocked by surface 18446744073709551615 (a *portal*) at (-4.4438, 1.8850) after 0.033 of 0.041
+move: bounce 1 ... slide [-1.0, -0.000006] mag 1.000
+  -> move_body returns the pre-move position (the frame's 0.033 advance is discarded)
+```
+
+The slide retries along the wall, hits the *portal face* only because its normal's x component is 6e-6
+(the body is merely touching it, gap 0), and `bounce == 2` breaks the loop — then the returned position is
+the original one, so the body never moves again. Fixing that is the next step (retry the slide with the
+remaining distance, and skip a portal the body only touches).
+
+Two things did land and are measured:
+
+- **The push is wall-aware.** A solid model's radial push is now applied only where geometry allows
+  (`move_body` checks the push direction with the sweep and otherwise keeps the solver's position). This
+  lifts `walk_cantina` to **102 %** of retail's travel with **1** sector mismatch (was 71 % / 3) and keeps
+  street45/street90 at 100 %, door0 at stop-pose and level 3 at 66 % — the gate is 5/5. Pushing
+  tangentially was tried and rejected: it halved the level-1 legs by shoving every body sideways.
+- **Removing the position→velocity rewrite** (the engine keeps velocity; `drag` is the only scaling) was
+  re-measured: it leaves level 4 unchanged and makes level 5 worse (1.41 → 0.84), so it was reverted. The
+  rewrite is not level 4's cause; the bounce loop is.
