@@ -718,3 +718,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Verified: walk trace velocity 0.10 → 0.20 u/s over the first two frames (5.7 u/s²); trace gate **4/4**
   with street45/street90 at **100 %**; gated draw parity unchanged (6/6); tests **147 passed**; full gate
   sweep **0 of 64 failed**. Level 5's wedge is unaffected — it is the slab geometry, not the ramp.
+
+## Update — round 118
+
+- Level 5's ramp investigated with two targeted changes, both reverted on measurement:
+  exempting walkable faces (`normal_z > 0.7`) from the lateral sweep gives an *identical* end pose, and
+  removing the walker's position→velocity rewrite makes the leg **worse** (1.41 → 0.84 units) though the
+  cantina leg's sectors improve 3 → 2. So neither the lateral sweep nor the rewrite is the cause; the
+  remaining candidate is the gravity/vertical-sweep interplay on a sloped floor.
+- No code shipped this round (tree restored to `abfc62f`); level 5 stays 1.41 of retail's 3.73 and outside
+  the gate. Suites re-checked after the revert.

@@ -3194,3 +3194,26 @@ Measured after the change: the walk trace's velocity ramp is 0.10 → 0.20 u/s o
 street90 at **100 %** (travel 2.21 against retail's 2.20/2.21), and the gated draw pairs are unchanged
 (spawn 0.6602 … route_street 0.7327). Level 5's 1.41-unit wedge is unaffected, as expected: that leg is
 blocked on the slab geometry, not on the ramp.
+
+**Level 5's ramp: two candidate fixes measured, both wrong (round 118).** With the drag exact and the
+geometry known (raised slab at z 0.000, sunken sector 33 at −0.452, 45° ramps between them), the port's
+body walks *down* the ramp smoothly — support drops 0.100 → 0.0008 → −0.022 → −0.046 → −0.070 → −0.094 →
+… — but at roughly half horizontal speed, and it ends wedged at (9.16, 14.64, −0.22). Two targeted changes
+were tried and reverted because the measurement said no:
+
+- **Exempting walkable faces (`normal[2] > 0.7`) from the lateral sweep** — the theory that slopes are
+  being slid against like walls. Result: *identical* end pose to the millimetre on `walk5_spawn`, and
+  unchanged level-1 legs. The ramp motion is not produced by lateral sweep hits (a descending body is
+  already skipped by the `dot(dir, normal) >= 0` guard).
+- **Removing the walker's position→velocity rewrite** (the clip that turns a wall-hit frame's horizontal
+  travel back into velocity), on the theory that a slope spends motion on z and so every ramp frame looks
+  like a partial wall. Result: level 5 got **worse**, 1.41 → 0.84 units, while the cantina leg's sector
+  count improved 3 → 2. So the rewrite *helps* on the ramp (it keeps the body's velocity along the slide
+  it actually made) and is not the cause.
+
+What is left is the interplay of gravity along the ramp and the vertical sweep, not the lateral one: the
+body is descending and its horizontal velocity decays while `support` follows the slope. That is the next
+trace to take (velocity and support through the descent, and how `rest` behaves on a sloped floor).
+
+The round changed no code: both experiments were reverted to the verified state (`abfc62f`), and the level
+5 leg stays **1.41 of retail's 3.73 units** and outside the gate.
