@@ -4065,3 +4065,24 @@ something else and stays documented. Level 8 moves 0.96 and stops — also outsi
 A determinism caveat was also measured: `walk5_spawn`'s port trace read 3.09 units / 3 sectors once under system
 load and 2.61 / 2 sectors on two clean re-runs (the sim's cog/AI ticks use wall-clock dt), so the gate can flake
 under load — re-run before believing a single failure, as with the `--move` check.
+
+**The script camera's view half exists but the camera *key* does not move it — retail's level-14 shot compared
+(round 153).** Round 152 shipped the movement half (a script camera takes the body over) and noted the view as
+missing; that note was wrong. The camera system already poses the `Camera3d` at the current slot's focus thing
+(`camera_focus_thing()` → that thing's pos/yaw/pitch), and with level 14's `SetCurrentCamera(0)` the port's
+camera trace shows `camera: eye Vec3(39.4653, 11.375, 35.145) look [-0.0, 1.0, 0.0] scripted "a scripted
+camera"` — precisely thing 45.
+
+The *picture* is still wrong, and this round produced the retail oracle that shows it. A new shot row
+(`level14_spawn`, `15maw`, spawn pose) captured with `-SettleMs 20000` gives retail's opening frame: **Kyle prone
+on the floor with Maw standing over him, seen from a low, close angle**. The port's frame from its script camera
+is a dark wall seen from the droidcam's *base* pose — meters away and aimed +y. The camera thing is a
+`droidcam` (type=cog, template without `type=camera`, which is why `--cameras` counts zero) whose keyfile
+`MAcamera.key` **moves it**: the port's `playkey` only records a puppet animation for the model
+(`play_key.insert(thing, (key, flags, frame))`) and never drives the thing's *path*, so the camera stays at its
+placed pose. That is the remaining slice: **camera key playback** — parse the `.key` and apply its root track to
+the thing's pose (the port already loads the keyfiles for `PlayKey` and parses keyframe tracks for puppets).
+
+Two harness notes recorded: retail `F12` produced no JSHOT on the first two attempts and worked with
+`-SettleMs 20000` (the same start-up settling that the walk traces needed); and the capture's own region checks
+still exited 0 while writing the shot JSON, so the JSON is the artefact to trust.

@@ -1187,3 +1187,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Determinism caveat: `walk5_spawn` read 3.09 units / 3 sectors once under load and 2.61 / 2 sectors on clean
   re-runs (cog/AI ticks use wall-clock dt) — re-run a single failure before believing it.
 - Tests **147 passed**, `--gates` **0 of 64 failed**, parity **6 thresholds, 0 failures**.
+
+## Update — round 153
+
+- The script-camera **view** half already exists: the camera system poses the `Camera3d` at the current slot's
+  focus thing, and level 14's trace shows `camera: eye Vec3(39.4653, 11.375, 35.145) look [0, 1, 0] scripted`.
+- The *picture* is still wrong: retail's opening frame (new `level14_spawn` shot row, `-SettleMs 20000`) shows
+  Kyle prone with Maw over him from a low close angle; the port shows a dark wall from the `droidcam`'s base
+  pose. The camera thing is a `droidcam` (type=cog, so `--cameras` counts zero) whose `MAcamera.key` **moves**
+  it, and the port's `playkey` only records a puppet animation — it never drives the thing's path. Remaining
+  slice: **camera key playback** (apply the `.key`'s root track to the thing's pose).
+- Harness notes: retail `F12` needs the same start-up settling (worked with `-SettleMs 20000`), and the capture
+  writes its shot JSON even when its own region checks fail.
+- Tests **147 passed**, `--gates` **0 of 64 failed**, trace gate **12 legs, 0 failures**.
