@@ -1037,3 +1037,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Next: widen the floor test to the engine's facing rule and measure the whole gate — it is walker-wide
   (levels 3, 4, 5 and 9 all stand on slopes), so it needs its own round. No code changed this round; tests
   **147**, gates **0 of 64**, trace gate **7/7**.
+
+## Update — round 143
+
+- Level 6's mechanism measured with `BK_MOVE_TRACE`: the slide along the riser (surface 2830) is **+x**, correct,
+  and the ramp is *not* the blocking face — refuting round 142's threshold theory for this leg. But between
+  bounce 0 and bounce 1 the body's x moves **23.1193 → 23.1165** while y advances 0.017, and the next frame's
+  direction is `[-0.14, 0.99]`: the tiny backwards creep is locked in by the achieved-movement overwrite
+  (`player.vel = moved` when `moved_len < want_len * 0.99`), so the body walks *left* along the riser away from
+  the ramp mouth.
+- Two threshold experiments (`normal[2] > 0.5` as floors; skipping up-facing faces in both horizontal sweeps)
+  were built, measured as **neutral** on level 6 (identical end pose and sector mask) and reverted.
+- Next: find the `at` rewind (~0.003) between the bounces in `move_body`'s wall branch (step-candidate path vs
+  `push_out_of_things`), and decide whether the velocity overwrite should apply while a slide is in effect.
+- Tests **147 passed**, trace gate **7 legs, 0 failures**; no code shipped.

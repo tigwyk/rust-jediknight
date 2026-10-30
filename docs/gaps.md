@@ -3793,3 +3793,35 @@ all — it is only ever a wall. The engine does not classify floors by a normal 
 belongs to the floor pass and is climbed by it. Widening the floor test is the fix to try next — but it is a
 walker-wide threshold (steeper slopes become standable, and levels 3/4/5/9 all sit on slopes), so it needs its
 own round with the full gate.
+
+**Level 6's −x creep is measured: the slide is computed correctly and the *velocity overwrite* locks in
+a backwards few thousandths (round 143).** `BK_MOVE_TRACE` at the riser tells the whole sequence, and it
+refutes the ramp-threshold theory of round 142:
+
+```
+move: bounce 0 hit t 0.02920 dir [0.7072302, 0.7069834] slide [0.7072302, 0.0]      <- +x slide, correct
+move: blocked by surface 2830 at [23.119268, 38.8642, 1.018515] normal [0.0, -1.0, 0.0] after 0.000
+move: bounce 1 hit t 0.03164 dir [1.0, 0.0] slide [0.86666, 0.066670015] at [23.116505, 38.8814]
+move: bounce 2 hit t 0.00000 dir [0.9970542, 0.07670092] slide [0.9970542, 0.0]
+move: blocked by surface 2830 at [23.116505, 38.8814, 1.0153149] normal [0.0, -1.0, 0.0] after 0.000
+move: bounce 0 hit t 0.00000 left 0.02098 dir [-0.14049153, 0.99008185] slide [-0.14049153, 0.0]
+```
+
+The slide along the riser is **+x**, which is right, and the ramp is never the blocking face (2830 is the
+riser, a legitimate 1.5-high wall). But between bounce 0 and bounce 1 the body's x goes **23.1193 → 23.1165**
+while its y advances 0.017 — a −0.0028 creep — and bounce 1's hit is then computed from the moved-back start
+(t 0.03164 lands at 23.1164). By the next frame the horizontal direction is `[-0.14, 0.99]`, i.e. the body is
+walking *left* along the riser, away from the ramp mouth, and stays there. So the wrongness is small per
+bounce (a few thousandths) but it is **locked in** by the walker's achieved-movement overwrite
+(`player.vel = moved` whenever `moved_len < want_len * 0.99`): once a bounce yields a −x component the velocity
+takes it, and each later frame's slide is computed from that direction.
+
+Two threshold experiments were built and reverted as neutral, with measurements: classifying up-facing solid
+faces (`normal[2] > 0.5`) as floors, and skipping up-facing faces in both horizontal sweeps. Neither changed
+level 6's trace by a digit (same end pose, same 5 sector mismatches), because the ramp is not the blocking
+face on that leg — the riser is — so they were reverted rather than shipped unproven.
+
+The next probe is narrow and named: find what moves `at` backwards by ~0.003 between bounce 0 and bounce 1 in
+`move_body`'s wall branch (the step-candidate path and `push_out_of_things` are the two candidates), and
+decide whether `player.vel` should keep the input-driven direction while a slide is being applied (the
+engine's `MoveThing` slides the *move*, not the velocity).
