@@ -961,3 +961,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   (`|n_z| = 0.71`) that the port's `> 0.70` floor test calls walkable; the engine's `sithPhysics_FindFloor`
   slope limit is the next read, potentially a one-constant fix with a retail measurement behind it.
 - Suites on the reverted tree: tests **147 passed**; trace gate **7 legs, 0 failures**.
+
+## Update — round 138
+
+- **Slope-limit hypothesis falsified**: the engine has no slope/angle test — `SearchForSurfaceCollisions`'s
+  only threshold is `_DAT_00523008 = 0` (one-sided face), and `MoveThing`'s constants are
+  `3.4e38, 0, 1e-5, 100, 1, -2, 0.2`. The port's `|n_z| > 0.70` floor test is therefore not the difference on
+  level 7, and the committed 45°-face lead is retired.
+- The port's level-7 escape is measured: wall push (surface 4) → slide along the wall → climb the slanted
+  face (z −0.080 → −0.104 → 0.047 → 0.121), sectors 0 → 9 → 5 → 15. A body under input control would do
+  exactly that, so retail's body is not under input control.
+- **New lead**: `player->flags & 0x202`. `sithControl_Update` gates its camera-cycle block on
+  `(*player & 0x202) == 0`, and `sithPlayer_Update`'s knockout path sets `*player |= 0x200` (and
+  `0x400000`) before arming the kill timer. Bit `0x200` ("player out of action") plus the script event that
+  sets it on level 7 is the next read; `jk_flags & 1` and actor flag 8 are both shared with levels that walk.
+- Tests **147 passed**; trace gate **7 legs, 0 failures** (no code shipped).

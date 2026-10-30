@@ -3679,3 +3679,23 @@ that face is climbable and the body walks out of the cell; retail's body cannot 
 own slope limit in `sithPhysics_FindFloor` is the thing to read next, and if it is stricter than 0.70 that is
 a one-constant walker fix with a retail measurement behind it (level 7's `walk7_spawn` would then hold still
 like retail, and the leg would pass without any cutscene subsystem).
+
+**The slope-limit hypothesis is falsified too; the cutscene pin is a player *flag*, and the engine's own code
+points at 0x200 (round 138).** Round 137 left geometry as the lead (level 7's cell exits over a 45° face that
+the port's `|n_z| > 0.70` floor test accepts). This round read the engine's collision path and the port's own
+trace:
+
+- **No slope limit exists in the engine.** `sithCollision_SearchForSurfaceCollisions`'s only threshold is
+  `_DAT_00523008 = 0` (a one-sided face test, not an angle), and `sithCollision_MoveThing`'s constants are
+  `3.4e38, 0, 1e-5, 100, 1, -2, 0.2` — no normal/angle comparison anywhere in either function. So the engine
+  would climb the same 45° face; the port's `> 0.70` threshold is not what differs.
+- **The port's escape is wall-slide + ramp climb**, which retail cannot do: the trace shows the body pushed
+  into the cell wall (surface 4, normal (−1, 0, 0)), sliding along it to the +y side, then rising
+  z −0.080 → −0.104 → 0.047 → 0.121 as it climbs the slanted face and crosses sectors 0 → 9 → 5 → 15. A body
+  that is under input control would do exactly that, so retail's body is *not* under input control.
+- **The flag the engine tests is `player->flags & 0x202`.** `sithControl_Update` gates its whole camera-cycle
+  block on `(*player & 0x202) == 0`, and `sithPlayer_Update`'s knockout path sets `*player |= 0x200` (with
+  `player->flags |= 0x400000`) before arming `sithPlayer_KillPlayer`'s timer. Bit `0x200` — "the player is
+  out of action" — is the next read, together with which script event (a `damaged` message or a threshold in
+  `sithPlayer_Update`) sets it on level 7; `jk_flags & 1` (round 137) and actor flag 8 are both shared with
+  levels that walk, so neither is it.
