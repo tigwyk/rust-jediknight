@@ -991,3 +991,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Code: only the diagnostic trace line added; tests **147 passed**, **gates 0 of 64 failed**, trace gate
   **7 legs, 0 failures**. Phase 2's walkable-level work (levels 3, 6, 11) is independent, so the next rounds
   alternate a walkable fix with the camera feature's first slice.
+
+## Update — round 140
+
+- New probe `--cameras`: lists a level's placed camera things (template chain `type=camera`). Levels 1, 2, 5,
+  7 and 11 all report **0** — JK does not place camera objects in them, so a scripted camera **is the focus
+  thing's animated pose** (level 11: `SetCameraFocus(0, 13)` + `playkey(13, "gocamera.key")`).
+- That corrects level 11's classification: its retail yaw stays **0** across the window, so the pan is
+  positional and the body is under input control — retail walks 0.84 units and is stopped by geometry at
+  (0.01, 13.20) while the port drifts −x to (−0.54, 13.27). It is a **path divergence** like levels 3 and 6,
+  not a cutscene leg; back on the walkable list for the next round.
+- Levels 7/8/10 remain pinned by the *rotational* signature (level 7: yaw sweep 240.1° with 0.03 units of
+  movement).
+- Code: the probe plus `runtime::thing_type_of` only; tests **147 passed**, **gates 0 of 64 failed**, trace
+  gate **7 legs, 0 failures**.

@@ -350,6 +350,12 @@ pub fn solid_radius(level: &crate::jkl::Level, template: &str) -> Option<f32> {
     let size = level.template_param(template, "size")?.trim().parse::<f32>().ok()?;
     (size > 0.0).then_some(size)
 }
+/// A placed template's thing type (`type=camera`, `actor`, `item`, ...), for probes and for the camera
+/// slots: `thing_type` is the file-format word table, this is the level lookup around it.
+pub fn thing_type_of(level: &Level, template: &str) -> i32 {
+    thing_type(level.template_param(template, "type"))
+}
+
 fn thing_type(word: Option<&str>) -> i32 {
     match word.map(str::to_ascii_lowercase).as_deref() {
         Some("camera") => 1,
@@ -4729,6 +4735,19 @@ impl Runtime {
 
     /// The thing the view follows, when a script has pointed a camera away from the player.
     ///
+    /// `sithCamera_Open`: the engine's seven camera slots, each attached to a **placed camera thing**,
+    /// in file order. The scripts address them by slot (`SetCurrentCamera(0)`, `SetCameraFocus(0,
+    /// thing)`), and level 11's opening uses exactly that pair before playing `gocamera.key` on the
+    /// camera thing, so the mapping has to be the level's own order.
+    pub fn camera_thing(&self, slot: usize) -> Option<usize> {
+        self.types
+            .iter()
+            .enumerate()
+            .filter(|(_, kind)| **kind == 1)
+            .nth(slot)
+            .map(|(index, _)| index)
+    }
+
     /// The engine's camera table is seven slots (`sithCamera_g_aCameras[7]`); `SetCameraFocus(slot,
     /// thing)` points one at a thing and `SetCurrentCamera(slot)` picks it. `None` means the player's
     /// own eyes, which is both the default and what a focus on the player means.

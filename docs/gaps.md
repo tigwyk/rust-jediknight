@@ -3724,3 +3724,26 @@ camera pose from the current camera's thing, movement and look relative to that 
 choosing the player camera only while it is current. The plan is written on the ledger row; the walkable
 levels' remaining work (level 3's drift, level 6's sill, level 11's sector path) is independent of it, so the
 next rounds should alternate: one walkable-level fix, then the camera feature's first slice.
+
+**`--cameras` probe: the levels place no camera things, so a scripted camera *is its focus thing* — and level
+11 is not pinned after all (round 140).** The camera feature's first slice is data, and it changed two
+conclusions.
+
+- **A `--cameras` probe now lists a level's camera things** (`runtime::thing_type_of` reads the template
+  chain's `type=`; the probe prints each camera thing's slot, template, pose, sector and whether its model
+  loaded). Run on levels 1, 2, 5, 7 and 11: **every one reports `0 camera thing(s)`**. So the engine's seven
+  camera slots are not attached to placed camera objects in these levels; a JK cutscene camera is the
+  script's **focus thing**: `SetCameraFocus(0, thing)` makes slot 0 look at that thing, and
+  `playkey(thing, "gocamera.key", 1, 4)` walks the thing's own keyframes — which is exactly level 11's
+  startup (`SetCurrentCamera [0]`, `SetCameraFocus [0, 13]`, `playkey [13, "gocamera.key", 1, 4]`).
+- **Level 11 is therefore not a cutscene-pinned leg.** Its retail trace's yaw stays **0** for the whole
+  window, so the camera pan is *positional* only: movement direction is unaffected, and the body really is
+  under input control — it walks 0.84 units and is stopped by geometry at (0.01, 13.20). The port walks 0.97
+  but drifts −x and ends in sector 9: a **path divergence** (the same class as levels 3 and 6), not the
+  camera bucket. That moves it back to the walkable-level list for the next round.
+- The pinned levels stay pinned by the *rotational* signature: level 7's LEFT probe recorded a yaw sweep of
+  240.1° while the body moved 0.03 units, which is a camera rotating, not a dolly.
+
+The ledger row's plan is corrected accordingly: the camera work is "slot camera = focus thing's animated
+pose, view-relative movement/look while it is current, and the engine's 30 s return to the player camera
+(`sithControl_Update`)" — no camera objects to enumerate.

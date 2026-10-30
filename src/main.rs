@@ -450,6 +450,9 @@ fn main() {
     // `--surfaces-at "x,y,z"`: with `--collide`, print the level surfaces near a point - the geometry
     // probe behind the `walk_street45` stop (retail stops at x 3.27 where the port walks off).
     let mut surfaces_at: Option<[f32; 3]> = None;
+    // `--cameras`: list the level's placed camera things (the engine's seven camera slots attach to
+    // them in file order, and a scripted opening makes one current — a level 7/8/10/11-style cutscene).
+    let mut cameras_probe = false;
     let mut controls_check = false;
     let mut move_check = false;
     let mut winding_check = false;
@@ -759,7 +762,8 @@ fn main() {
                     i += 1;
                 }
             }
-            "--surfaces-at" => {
+            "--cameras" => cameras_probe = true,
+        "--surfaces-at" => {
                 surfaces_at = arg_value(&args, &mut i).and_then(|s| {
                     let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
                     (v.len() == 3).then(|| [v[0], v[1], v[2]])
@@ -6319,6 +6323,30 @@ fn main() {
         }
         return;
     }
+
+        if cameras_probe {
+            let type_of = |template: &str| {
+                runtime::thing_type_of(&world.level, template)
+            };
+            let mut slot = 0usize;
+            for (index, thing) in world.level.things.iter().enumerate() {
+                if type_of(&thing.template) != 1 {
+                    continue;
+                }
+                println!(
+                    "camera slot {slot}: thing {index} `{}` at ({:.2}, {:.2}, {:.2}) yaw {:.2} sector {} model {}",
+                    thing.template,
+                    thing.pos[0],
+                    thing.pos[1],
+                    thing.pos[2],
+                    thing.yaw,
+                    thing.sector,
+                    if world.template_model.contains_key(&thing.template.to_ascii_lowercase()) { "yes" } else { "no" }
+                );
+                slot += 1;
+            }
+            println!("cameras: {slot} camera thing(s) in {}", world.level.things.len());
+        }
 
     if collide_check {
         // The ported search: `sithIntersect_CheckSphereHit` + `TestSphereFaceHit` + the adjoin walk of
