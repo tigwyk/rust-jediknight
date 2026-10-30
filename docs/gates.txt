@@ -852,3 +852,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   round.
 - A doorway-landing tolerance was tried and reverted (no measurable change).
 - Suites: tests **147 passed**; trace gate **6 legs, 0 failures**.
+
+## Update — round 129
+
+- Phase 2 breadth: level 7 (`07yun`) measured. Its spawn (−2.00, −0.80, −0.08) matches the port's level start
+  exactly, so the file mapping is confirmed; but retail is frozen 1.2 s and then moves only **0.11 units**
+  in the window (port 2.57) — a **cutscene level**, like 2 and 6, and the settle window cannot recover it
+  (the script is still running 3 s in). Trace committed for the day scripted control lands.
+- A vertical-overlap rule for solid models (aimed at level 3's canopy graze) was measured and reverted: no
+  change to `walk3_spawn` (4.70 units) or the gate, so it did not ship.
+- Ledger unchanged this round; the "slanted-floor sliding" row's measurement stands (the port's lateral
+  drift is what decides which prop each body meets).
+- Suites: tests **147 passed**; trace gate **6 legs, 0 failures**.

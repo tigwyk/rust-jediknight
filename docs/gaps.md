@@ -3483,3 +3483,20 @@ movement bucket — **slanted-floor sliding** — not a level-geometry read.
 
 The doorway tolerance (`inside_sector` tolerance 1e-3 at the landing test) was tried and reverted: it
 changed nothing measurable on the leg.
+
+**Phase 2 breadth reaches level 7, which is a cutscene level (round 129).** The recipe is now one boot, one
+trace run and one comparison per level, so the sweep continued into level 7 (`07yun`, "Yun – The Dark
+Youth"): its spawn reads **Pos (−2.00, −0.80, −0.08), yaw 0.00, sector 0**, which matches the port's own
+level start to the last digit (`walkplayer sector 0, start Some([-2.00005, -0.8, -0.079886])`), so the file
+mapping is confirmed without another probe.
+
+The leg itself is not a walk: retail is frozen for 1.2 s and then moves **0.11 units** over the remaining
+window, while the port walks 2.57 (2434 %, 4 of 6 sectors off). That is the third level whose opening is
+under script control (with 2 and 6), and unlike level 3 the settle window cannot recover it — the script is
+still running three seconds in. The retail trace is committed as `tools/parity/walktrace/walk7_spawn-walk.tsv`
+so the leg can join the gate the day scripted player control lands, and the row stays in `walk-shots.tsv`
+for re-capture.
+
+Also measured and reverted this round (no effect on any leg): a `sweep_things` rule requiring a real
+vertical overlap (2 cm) instead of a graze, aimed at level 3's canopy whose span overlaps the body by one
+centimetre. It changed neither `walk3_spawn` (still 4.70 units) nor the gate, so it did not ship.

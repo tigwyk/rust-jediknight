@@ -343,6 +343,20 @@ on; level 6 travels 2.11 of 1.08 (195 %) and ends in sector 78 against retail's 
 stop where retail halts. Their retail traces are committed, and the debug list's numbering was
 corrected: entry 4 is `04escapehouse`, entry 6 is `06bbarons` (not the file numbers they looked like).
 
+*Progress (rounds 121–129).* Five levels measured end to end with the same recipe, and **two of them are**
+**in the gate**: level 4 `walk4_spawn` (100 % of retail's 1.11 units, 1 sector) and level 5 `walk5_spawn`
+(81 % of 3.73, 2 sectors), alongside level 1's three legs — `trace-gate.ps1` is **6 legs, 0 failures**, with
+retail traces committed for levels 3, 4, 5, 6 and 7. The measured remainders are each named against a
+deviation instead of "walks too far": level 3 drifts **1.41** in x on slanted ground against retail's 0.38
+and passes the crate retail stops at (ledger: slanted-floor sliding); level 6 stops against face 788
+(`top 1.150`, twice the step allowance) where retail walks the treads; levels 2, 6 and 7 open under script
+control (level 7 moves 0.11 units in the whole window, so it is not a walk at all until scripted player
+control lands). Three buckets were fixed on the way and are on the ledger: the **thing-collision push**
+(never against the motion, wall-aware, and blocking on cylinders sized by the model's plan bounds — this
+took level 4 from 50 % to 100 % and level 5 from 1.41 to 3.02 units), the **step-up test** (judged by the
+face's top edge, so stairs climb), and the **walk-leg start pose** (retail's own trace start, not the
+spawn `coords`). The next item in Phase 2's own order is the rest of levels 2–5, then all 34: the recipe is
+
 ### Phase 3 — Breadth, by shipped-content weight
 
 Only now take the remaining units from `gaps.md`, ordered by how many shipped levels and scripts need
