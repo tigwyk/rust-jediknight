@@ -1120,13 +1120,27 @@ impl Solids {
                     // Only **steep** faces need it: a shallow slope (|n_xy| near 1) is what the step-up
                     // path climbs, and pushing there fights it - `walk_street90` crawled at 0.14 u/s
                     // past a shallow face at x 3.9 with an unbounded push. The cantina ramp is 0.45.
+                    // ...but only when the push carries the body **along** its motion. An up-facing ramp's
+                    // normal has a downhill plan component, so on a slope the same push that gives a steep
+                    // wall its plan clearance shoves the body backwards: level 6's surface 2831 (a sloped
+                    // floor, normal (−0.365, 0.183, 0.913), `nl` 0.41) pushed it 0.094 downhill — the
+                    // measured 23.1509 → 23.1165 rewind against a +x move — and the body then slid away from
+                    // the ramp mouth. A push opposite the motion is never a clearance, it is a rewind.
                     if nl > 1e-4 && nl < 0.6 {
                         let push = radius * (1.0 - nl) / nl;
-                        at = [
-                            at[0] + hit.normal[0] * push,
-                            at[1] + hit.normal[1] * push,
-                            at[2],
-                        ];
+                        let (mut px, mut py) = (hit.normal[0] * push, hit.normal[1] * push);
+                        // Keep the push's *clearance* (its sideways component) but never its backwards
+                        // part: an up-facing ramp's normal carries a downhill plan component, so on a
+                        // slope the same push shoves the body back along its own motion — level 6's
+                        // surface 2831 (normal (−0.365, 0.183, 0.913), `nl` 0.41) rewound it 0.094 against
+                        // a +x move, and the body slid away from the ramp mouth instead of entering it.
+                        // A plan push opposite the motion is never a clearance, it is a rewind.
+                        let along = px * dir[0] + py * dir[1];
+                        if along < 0.0 {
+                            px -= dir[0] * along;
+                            py -= dir[1] * along;
+                        }
+                        at = [at[0] + px, at[1] + py, at[2]];
                     }
                     here = far;
                     left -= travelled.max(0.0);

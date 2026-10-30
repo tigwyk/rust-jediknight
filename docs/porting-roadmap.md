@@ -374,7 +374,7 @@ held-out walkable levels improved sharply (level 3: 208 % → 125 %, sectors 3 o
 
 *Progress (rounds 134–136).* The sweep reached level 11 and every measured leg now carries its own
 verdict: **gated** — level 1's four, level 4 (100 %), level 5 (68 %); **named deviation** — level 3
-(slanted-floor drift, 125 % with 3 sectors), level 6 (0.55 sill, 155 %), level 11 (115 % travel but 5 of 6
+(slanted-floor drift, 125 % with 3 sectors), level 6 (now gated, 96 %), level 11 (115 % travel but 5 of 6
 sectors, scripted-looking start); **not a walk** — levels 2, 7, 8 and 10 (script-owned openings, flagged by
 the harness's leg-quality check). Slope gravity's source was also recovered from the decomp
 (`sithPhysics_UpdateThingPhysics` subtracts `world->gravity * dt` from the z velocity, `DAT_008339c8 + 0xd4`,

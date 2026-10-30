@@ -3825,3 +3825,30 @@ The next probe is narrow and named: find what moves `at` backwards by ~0.003 bet
 `move_body`'s wall branch (the step-candidate path and `push_out_of_things` are the two candidates), and
 decide whether `player.vel` should keep the input-driven direction while a slide is being applied (the
 engine's `MoveThing` slides the *move*, not the velocity).
+
+**Level 6 joins the gate: the steep-face plan push was rewinding the body (round 144).** Round 143 measured a
+~0.003 backwards creep between bounces and named two candidates. Instrumenting `move_body`'s bounce loop
+identified it exactly — not the step path and not the cylinder push, but the **steep-face plan push**:
+
+```
+loop 1 at [23.119268, 38.8642] dir [1.0, 0.0] left 0.04019
+blocked by surface 2831 at [23.150908, 38.8642] normal [-0.36515754, 0.18257877, 0.9128663] after 0.032
+bounce 1 ... at [23.116505, 38.8814]      <- 0.032 forward became 0.034 back + 0.017 aside
+```
+
+Surface 2831 is a **sloped floor** (normal (−0.365, 0.183, 0.913)); its plan normal length `nl` is 0.41, so the
+"steep face needs plan clearance" code pushed the contact out by `radius * (1 − nl) / nl` = 0.094 along
+(−0.365, 0.183) — a **downhill** direction, i.e. straight back against the body's +x motion. That is the whole
+rewind: 23.1509 − 0.034 = 23.1165, exactly what the trace showed, after which the walker's achieved-movement
+overwrite kept the body heading that way.
+
+The fix keeps the clearance and drops only the rewind: the push is applied, and if its component along the
+motion is negative, that component is projected out (`px -= dir[0] * along`). A push opposite the motion is
+never a clearance. Measured: level 6 goes from **155 % / 5 sectors** (ending 1.05 units past retail at
+z 1.020) to **96 % / 2 sectors**, ending (23.27, 38.86, 1.092) in **sector 315** where retail ends
+(23.31, 38.85, 1.14) — and `walk6_spawn` is now the gate's **eighth leg**, 8 legs 0 failures. Level 5, the
+leg the original push was added for, keeps its clearance and improves slightly (68 % → 70 %).
+
+Two narrower guards were measured first and rejected: `|n_z| < 0.7` (level 5 fell to 44 % — its clearance
+needs the push on up-facing faces too) and `along >= 0` (same 44 %, because the sideways part of those pushes
+is what level 5 uses). Trimming only the backwards component is what keeps both legs.
