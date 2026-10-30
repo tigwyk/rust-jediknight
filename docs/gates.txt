@@ -1112,3 +1112,20 @@ running app.--carry-check --start 01narshadda                        0   level 2
   (2) the level-5 sink fix (a step/ramp the walker slides down instead of onto), (3) then re-decide the
   run/walk default with trustworthy fixtures.
 - Tests **147 passed**, trace gate **8 legs, 0 failures**; no code shipped.
+
+## Update — round 148
+
+- **Harness fix**: `retail-capture.ps1` now stores the walk-shots 8th column on the row and passes it to
+  `Invoke-JkWalkTrace` when `-WalkTraceSettleMs` is not given. Before this, every capture ran with **no settle**
+  (the column was validated but dropped), which lost retail's first ~600 ms — the "frozen first window" that
+  rounds 145–147 read as a scripted level delay.
+- With the fix and settle 1000 ms, **all five gate levels reproduce their committed fixtures** (4 and 5
+  endpoint-identical; 6 final 23.30 vs 23.31; 9 identical; 1's legs within a sample). Round 147's "fixtures
+  not reproducible" was the broken re-capture, not the fixtures.
+- Cantina is the one genuine state-dependent leg: today's capture stops at (−3.17, −3.03) after 0.98 units where
+  the fixture walks to (−4.78, −3.12) from the same pose/yaw/sector — the cantina's own actors/state.
+- Adopting settle 1000 ms on every row shifts both sides and moves the gate to 6/8 (street90 128 %/3 sectors,
+  cantina 270 % against its blocked capture), so rows stay at the verified baseline this round; the harness fix
+  is dormant until a row carries a settle and the gate stays **8 legs, 0 failures**. Next: adopt the settle,
+  re-baseline those two legs, and re-check levels 11–13's speed question with aligned holds.
+- Tests **147 passed**, `--gates` **0 of 64 failed**.

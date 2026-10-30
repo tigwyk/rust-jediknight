@@ -154,7 +154,7 @@ function Read-ShotList([string]$Path) {
       }
       $pose = @($pose | ForEach-Object { [double]$_ })
     }
-    $rows.Add([pscustomobject]@{ Name = $cols[0]; Level = $cols[1]; Pose = $pose; Line = $lineNo })
+    $rows.Add([pscustomobject]@{ Name = $cols[0]; Level = $cols[1]; Pose = $pose; Settle = $(if ($cols.Count -ge 8) { [int]$cols[7] } else { 0 }); Line = $lineNo })
   }
   if ($rows.Count -eq 0) { throw "shots file has no capture rows: $Path" }
   return $rows
@@ -948,7 +948,7 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     # Phase 0.5 trace v0: a trace run replaces this row's screenshot captures (the `finally` below
     # still closes the game and restores the desktop).
     if ($WalkTraceMs -gt 0) {
-      $tracePath = Invoke-JkWalkTrace -ProcessId $process.Id -Name $name -Milliseconds $WalkTraceMs -Key $WalkTraceKey -SettleMs $WalkTraceSettleMs
+      $tracePath = Invoke-JkWalkTrace -ProcessId $process.Id -Name $name -Milliseconds $WalkTraceMs -Key $WalkTraceKey -SettleMs $(if ($WalkTraceSettleMs -gt 0) { $WalkTraceSettleMs } else { $Row.Settle })
       Log "walk trace mode: skipped the screenshot series/reference for '$name' (wrote $tracePath)"
       if ($ConsoleCommands.Count -gt 0) {
         # After the walk: this is where a trigger's effect shows up (cog state after the trigger).

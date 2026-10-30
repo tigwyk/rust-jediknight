@@ -3947,3 +3947,26 @@ This is recorded as a harness integrity issue, not a port defect: `docs/gates.tx
 pre-round-147 and which are reproducible, and the next breadth/speed work starts with a **fixture re-capture
 sweep** (one session, documented settle policy, the `-WalkTraceSettleMs` row column) followed by the level-5
 sink fix.
+
+**Round 147's "fixtures are not reproducible" was a harness bug, now fixed: the 8th column is honoured
+(round 148).** `Read-ShotList` validated the walk-shots 8th column (the settle) but never stored it, and the
+walk-trace call passed only the CLI `-WalkTraceSettleMs` (0 by default), so **every capture ran with no
+settle** — while `port-trace.ps1` *did* read the column for the port side. The result: retail's first ~600 ms
+of input was lost (the game is still settling after the console `warp`), which is exactly the "frozen first
+window" that rounds 145–147 mistook for a scripted level delay:
+
+- with the column wired into `Invoke-JkWalkTrace` and a settle of 1000 ms, **all five gate levels reproduce
+  their committed fixtures** — levels 4 and 5 endpoint-identical, level 6's final pose 23.30/23.31 against the
+  fixture's 23.31, level 9 identical, street45/street90/door0 within a sample. Nothing was lost; the fixtures
+  were right and my re-captures in round 147 were the broken ones.
+- The cantina leg is the one genuine state-dependence: today's capture stops at (−3.17, −3.03) after 0.98
+  units where the fixture walks to (−4.78, −3.12) — the same pose, yaw and sector, so the difference is the
+  cantina's own actors/state, not the harness.
+- Adopting settle=1000 for every row changes both sides' phase (the port holds the same second) and moves the
+  gate to 6/8: `street90` overruns to 128 % with 3 sectors off and cantina becomes 270 % against its blocked
+  capture — so the rows are left at their verified baseline this round and the settle adoption is the *next*
+  round's job, together with re-baselining those two legs. The harness fix itself is dormant until a row
+  carries a settle, so the gate stays **8 legs, 0 failures**.
+
+The lesson for the harness is recorded: a captured trace is only evidence about the **port** once the same
+settle is applied on both sides, and the row column is the single place that policy lives.
