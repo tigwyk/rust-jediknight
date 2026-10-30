@@ -961,7 +961,16 @@ impl Solids {
                 from[1] + dir[1] * advance,
                 from[2] + dir[2] * advance,
             ];
-            if self.inside_sector(adjoin, [landing[0], landing[1], landing[2] - radius], 0.0) {
+            // The body may stand one **step** higher on the far side. This port's level data tiles the
+            // ground with slanted triangles whose floors differ slightly at the seams: level 3's doorway
+            // into sector 369 has its floor ~0.02 *above* the body's feet, so the strict test called the
+            // opening a wall and the body slid along a seam it should walk over. The engine re-tests the
+            // hull after the move and its floor pass steps the body up, so a step's worth of rise is legal
+            // here — the same allowance `move_body` uses (`moveSize + 0.01`).
+            const STEP: f32 = 0.07;
+            if self.inside_sector(adjoin, [landing[0], landing[1], landing[2] - radius], 0.0)
+                || self.inside_sector(adjoin, [landing[0], landing[1], landing[2] - radius + STEP], 0.0)
+            {
                 return Some(advance);
             }
         }

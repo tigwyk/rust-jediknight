@@ -3572,3 +3572,46 @@ trace gate: 7 legs, 0 failures
 The `low` step candidate also gained a `hit.top <= feet + step` condition (a step needs the *face* to be
 climbable, not just its contact point). It did not change any measurement on its own — the landing lift was
 the climb — so it is recorded as a guard, not as the fix.
+
+**Level 3's remainder is lateral drift, not its doorway (round 134).** With the climb fixed, level 3 sits at
+125 % travel and three sector mismatches. Two suspects were read and one cleared:
+
+- **The spawn doorway is legal but the port rejects it.** `BK_MOVE_TRACE` prints `move: portal into 369 link
+  982 passable true advance None flags 0x7` — visible|move|sound, i.e. an open opening — and then the same
+  frame reads `move: blocked by surface 18446744073709551615` (a portal treated as a wall). `doorway_advance`
+  is what returns `None`, and its own trace shows why it is not the depth rule: `move: doorway depth inf`
+  (the far triangle has no plane facing the walk direction at all). The landing test — the point must be
+  inside the far sector — is what fails. Two experiments (relaxing the depth rule to `1e-3`, and letting the
+  landing stand one step higher) changed **neither** the rejection nor any measurement, so both were
+  reverted: this doorway costs one contact of slide, not the leg.
+- **What actually diverges.** Both bodies start at the same pose (first sample exact); retail runs 1.35 units
+  in its first window, the port only **0.26** — the port accelerates from rest where retail is already at
+  speed — and then the *direction*: retail drifts −x by 0.38 over the leg, the port **+1.2**, so by the end
+  retail is at (−1.10, −2.50) and the port at (0.07, −2.02). That lateral difference is the slanted-floor
+  slide the ledger already carries (`slanted-floor sliding`), and the three sector mismatches are its
+  consequence: the port's path crosses a different set of ground triangles.
+- The slow start is worth its own note: the first-window gap is bigger than any later sample's, so a leg
+  comparison is measuring the port's thrust ramp against retail's instant speed for the first ~0.5 s.
+
+No code shipped this round; the tree is at `b964377`, the gate 7/7 and the ledger's row already names the
+retire condition (project the walker's velocity onto the supporting surface's plane).
+
+**Level 3's remainder is retail's downhill slide, and the doorway seam is fixed while we are here (round
+134).** With the climb fixed, level 3 sits at 125 % travel and three sector mismatches. Two suspicions were
+run down:
+
+- **The spawn doorway.** `doorway_advance` rejected an open opening (`passable true`, flags 0x7) because its
+  landing test asks whether the body fits *inside* the far sector, and this port's level data tiles the ground
+  with slanted triangles whose floors differ by a centimetre or two at the seams — level 3's doorway into
+  sector 369 has its floor ~0.02 above the body's feet, so every landing attempt read `inside false` and the
+  opening became a wall. The fix is the engine's own allowance: a body may stand **one step** higher on the
+  far side (`inside_sector(..., feet + 0.07)` as a second attempt), the same `moveSize + 0.01` `move_body`
+  uses. Measured effect: portal rejections on the leg go **1 → 0** (the false wall is gone); the leg's travel
+  and sectors are unchanged, and all 64 gates, 7 trace legs and 147 tests stay green.
+- **What actually diverges is a downhill slide.** Retail's first 600 ms covers **1.35 units** — 2.25 u/s
+  average, faster than the port's flat-ground run ramp — and over the leg it drifts **−x** by 0.38, while the
+  port drifts **+x** by 1.2. The slopes there lean (−0.43, 0.05, 0.90), whose downhill horizontal direction is
+  (−1, 0.12): retail's drift is *downhill*, i.e. the engine's gravity pulls the body down the slope and the
+  collision slides it. The port applies no slope gravity at all, so its slower first window and its different
+  path both follow. That is the ledger's `slanted-floor sliding` row, now with the mechanism named as gravity
+  along the surface rather than a velocity projection.

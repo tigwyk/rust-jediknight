@@ -900,3 +900,27 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - The step candidate also requires the blocking face's `top` to be climbable; no measurement moved from that
   alone, so it is recorded as a guard rather than the fix.
 - Tests **147 passed**; full gate sweep **0 of 64 failed**; parity re-captured **6/6** (scores unchanged).
+
+## Update — round 134
+
+- Level 3's three sector mismatches were read. Its spawn doorway is an **open** opening (`passable true`,
+  flags 0x7) that `doorway_advance` still rejects (`move: doorway depth inf` then a landing-test failure), but
+  two experiments — relax the depth rule to `1e-3`, and allow the landing one step higher — changed neither
+  the rejection nor any measurement, so both were reverted; the doorway costs one contact of slide.
+- The divergence is **lateral drift**: retail drifts −x 0.38 over the leg, the port +1.2 (port ends
+  (0.07, −2.02) against retail's (−1.10, −2.50)) — the ledger's `slanted-floor sliding` row. Also recorded:
+  the port's thrust ramp makes its first 600 ms 0.26 units against retail's 1.35, the largest single-window
+  gap of the leg.
+- No code shipped; tree at `b964377`. Tests **147 passed**; trace gate **7 legs, 0 failures**.
+
+## Update — round 134
+
+- Level 3's spawn doorway was an **open** opening (`passable true`, flags 0x7) that `doorway_advance` rejected
+  because the far ground triangle's floor sits ~0.02 above the body's feet, so every landing test read
+  `inside false`. Fixed with the engine's step allowance: the landing may stand **one step higher** on the far
+  side (0.07, the same `moveSize + 0.01` `move_body` uses). Portal rejections on the leg **1 → 0**; the leg's
+  travel/sectors unchanged; tests **147**, gate sweep **0 of 64 failed**, trace gate **7/7** all green.
+- The leg's real divergence is **retail's downhill slide**: first window 1.35 units (2.25 u/s, faster than a
+  full-speed ramp) with a −x drift of 0.38, against the port's +1.2 — the slopes lean (−0.43, 0.05, 0.90) and
+  their downhill direction is (−1, 0.12). The port applies no slope gravity. Ledger row updated with that
+  mechanism; the retire condition is now "gravity along the supporting surface is applied".
