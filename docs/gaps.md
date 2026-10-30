@@ -3461,3 +3461,25 @@ because retail's body **stops making progress after its first burst** — it sli
 body (the same class as the level-6 staircase), not a scripted lock, and it is what the next read of that leg
 has to name. The row keeps its 7 columns and the committed trace; the settle column stays available for the
 levels whose openings do need it.
+
+**Level 3's divergence is lateral drift on slanted floors, and its leg now starts where retail starts
+(round 128).** Two things came out of reading the leg properly.
+
+First, a plain measurement error: the row's pose was the level's *spawn* `coords` (−0.76, −4.73) while
+retail's own walk trace starts at (−0.72, −4.73) — the warp lands 0.04 off, and 0.04 was enough to put the
+port's body on a diagonal doorway plane at the level start (the first `move: blocked by surface
+18446744073709551615 … normal (0.894, −0.447, 0)` line of the leg). With the row set to retail's actual
+start pose the first sample is exact (`d_xy 0.000`). The 20 s settle capture also showed the walk is not
+script-locked after the opening.
+
+Second, the divergence itself. Both bodies walk the same way at the start (port 1.64 units in the first
+second, retail 1.35 in the first 600 ms), and both drift −x on level 3's slanted ground — but the port
+drifts **1.41** in x over the leg against retail's **0.38**, which is what then decides everything else: at
+the crate's y the port is 0.36 clear of the `woodcratebig` at (−1.111, −2.287) and walks past, while retail
+is 0.21 from it, hits it and stops (its last two samples are 0.02 apart). The lateral drift is the port's
+slide on a slanted floor (the ground planes there lean 0.2–0.43 in plan, e.g. surface 3212 with normal
+(−0.43, 0.05, 0.90)); the engine slides the body along the *floor plane*, so its drift is small. That is a
+movement bucket — **slanted-floor sliding** — not a level-geometry read.
+
+The doorway tolerance (`inside_sector` tolerance 1e-3 at the landing test) was tried and reverted: it
+changed nothing measurable on the leg.

@@ -45,7 +45,7 @@ walk5_spawn	06abarons	10.58	14.91	0.22	0	134.99
 #
 # walk3_spawn: level 3 (the debug list's third entry). The pose is retail's own level-start coords, read
 # by retail-capture.ps1's -StartLevel boot now that -SettleMs feeds that read.
-walk3_spawn	03katarn	-0.76	-4.73	-0.163	0	0
+walk3_spawn	03katarn	-0.72	-4.73	-0.173	0	0
 #
 # walk4_spawn: level 4 (the debug list's fourth entry, 'The Jedi's Lightsaber'), which is
 # 04escapehouse -- the debug list's numbering is not the file numbering (learned this round).

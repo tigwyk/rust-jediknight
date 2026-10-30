@@ -839,3 +839,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
   the port's (−2.12, −0.30) — **geometry, not script lock**, for the next read.
 - Suites: tests **147 passed**; trace gate **6 legs, 0 failures**; row restored to 7 columns with the
   committed trace so the fixture and the row agree.
+
+## Update — round 128
+
+- Level 3's leg row now starts at **retail's own trace start** (−0.72, −4.73, −0.173), not the spawn
+  `coords` (−0.76, …): the warp had been landing 0.04 off, which put the port's body on a diagonal doorway
+  plane at the start. First sample is now exact (`d_xy 0.000`).
+- The remaining divergence is **slanted-floor sliding**: both bodies drift −x on level 3's slanted ground,
+  the port 1.41 in x against retail's 0.38, and that difference decides which prop each meets (retail hits
+  the `woodcratebig` at (−1.111, −2.287) and stops, the port passes 0.36 clear). The engine slides the body
+  along the floor plane; the port's horizontal slide does not. Recorded as a movement bucket for the next
+  round.
+- A doorway-landing tolerance was tried and reverted (no measurable change).
+- Suites: tests **147 passed**; trace gate **6 legs, 0 failures**.
