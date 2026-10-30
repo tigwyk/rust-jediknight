@@ -948,3 +948,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Walk legs now measured on levels 2–11; two are gated beyond level 1 (level 4 100 %, level 5 68 %) and every
   other leg carries a named deviation (drift, sill, script-owned opening, or sector path).
 - Tests **147 passed**; trace gate **7 legs, 0 failures**; parity unchanged (no code shipped).
+
+## Update — round 137
+
+- Read the cutscene levels' own scripts with `BK_VERB_TRACE`: level 7's startup calls `MoveToFrame` ×8,
+  `SetActorFlags` ×3, `AiSetMode`, and `jkSetFlags(player, 1)`; level 4's calls `jkSetFlags(player, 129)`.
+- **Two hypotheses falsified** (both reverted, tree unchanged): `jk_flags & 1` as the script-owned-player bit
+  (it made level 7 match retail exactly — 0.00 units, 0 sectors — but broke the level-4 gate leg, whose
+  scripts set the same bit while retail walks), and Escape as a cutscene skip (it opens the in-game menu and
+  froze the body entirely).
+- New lead recorded: level 7's pinning is **geometry** — its spawn cell's exit is a 45° face
+  (`|n_z| = 0.71`) that the port's `> 0.70` floor test calls walkable; the engine's `sithPhysics_FindFloor`
+  slope limit is the next read, potentially a one-constant fix with a retail measurement behind it.
+- Suites on the reverted tree: tests **147 passed**; trace gate **7 legs, 0 failures**.

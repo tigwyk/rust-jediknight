@@ -3656,3 +3656,26 @@ So of the eleven levels measured with walk legs so far, **two are in the gate fr
 at 100 %, level 5 at 68 %), alongside level 1's four, and the rest are each named: level 3 (slanted-floor
 drift), level 6 (0.55 sill), levels 2/7/8/10 (script-owned openings), level 11 (path/sector divergence at
 115 % travel). `trace-gate.ps1` remains 7 legs, 0 failures.
+
+**Two cutscene hypotheses tested and falsified, and the verb trace that tests them is now a tool (round 137).**
+The cutscene bucket (levels 2, 6, 7, 8, 10) needs to know *what* pins the player, so this round read the
+levels' own scripts through `BK_VERB_TRACE` (every cog verb call with its arguments) and tested the two
+plausible locks.
+
+- **`jkSetFlags(player, 1)` is not the lock.** Level 7's startup calls `jkSetFlags [Num(0.0), Num(1.0)]` on
+  the local player, which looked like the cutscene bit. Gating the walker on it (suppress forward/strafe when
+  the player's `jk_flags & 1`) made level 7's leg **match retail exactly** — port 0.00 units over the window,
+  sector mask 0 — so it looked solved. But level 4's startup calls `jkSetFlags [Num(0.0), Num(129.0)]`
+  (0x81, also containing bit 1) and retail's body walks there after its opening: under the gate the port's
+  level-4 leg dropped to **0.00 units** against retail's 1.11 and failed its gate. A bit both levels set
+  cannot be the pin, so the gate was reverted and level 7's match is a coincidence of the pin on that level.
+- **Esc does not skip the opening.** The harness can now press Escape through a settle window; on level 7 the
+  body then moved **0.00** units — Escape opens JK's in-game menu (and pauses the sim), so it is the wrong key
+  and the experiment was reverted with the switch.
+
+The next lead is geometry, not scripting: level 7's spawn sits in a small cell whose +y side is a **45° face**
+(`surfaces-at`: z −0.200..0.000, normal (0, −0.71, 0.71)). The port's floor test accepts `|n_z| > 0.70`, so
+that face is climbable and the body walks out of the cell; retail's body cannot leave it at all. The engine's
+own slope limit in `sithPhysics_FindFloor` is the thing to read next, and if it is stricter than 0.70 that is
+a one-constant walker fix with a retail measurement behind it (level 7's `walk7_spawn` would then hold still
+like retail, and the leg would pass without any cutscene subsystem).
