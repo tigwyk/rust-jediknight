@@ -1078,3 +1078,21 @@ running app.--carry-check --start 01narshadda                        0   level 2
   halving conditions against sector 420's flags (0x1000, 0x5000 after a script).
 - `walk12_spawn`'s retail fixture committed; not gated while the speed mode is open. Tests **147 passed**,
   `--gates` **0 of 64 failed**, trace gate **8 legs, 0 failures**.
+
+## Update — round 146
+
+- `sithControl_PlayerMovement` read in full: movement scale = walk 1.0 / run 2.0 (always-run option or run key),
+  then ×0.5 for the slow modifier, ×0.5 for crouch (also setting thing flag 0x10000), **×0.5 when thing flag
+  0x200000 is set**, and ×0.5 when `(templateFlagsByte & 1) && (playerFlags & 0x120000)`. The port implements
+  walk/run, crouch and water only. `walkplayer`'s typeflags are **0x1** (printed by the walk trace), so the
+  0x200000 rule cannot fire here; the `0x120000` player-state word is the next lead.
+- Level 13 (`14tower`) measured: spawn (−0.86, −5.53, 2.97) yaw −20.98 sector 462. Retail walks at **1.04 u/s**,
+  steps down 0.30 (z 2.97 → 2.67) and stops at (−0.50, −4.30) sector 209; the port covers **3.13 vs 1.28
+  (244 %)** and ends at z 1.17 in sector 248 (walks off the step). Same speed-mode divergence as level 12 plus
+  a step-off.
+- Levels 12 and 13 both put retail at walk speed while the port runs; not explained by thing/template flags,
+  water, crouch or level verbs (all measured). Two remaining candidates recorded: the always-run option
+  (`DAT_008bd020 & 2`, which the port hard-codes as on) and the `0x120000` player-state bits — level 1's
+  legs running at 2.1–2.4 means the state is not constant, which points at the player-state word.
+- Fixtures: `walk13_spawn-walk.tsv` committed. Tests **147 passed**, `--gates` **0 of 64 failed**, trace gate
+  **8 legs, 0 failures**.

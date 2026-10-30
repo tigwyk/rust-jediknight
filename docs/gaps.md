@@ -3889,3 +3889,33 @@ flags (0x1000, 0x5000 after a script) — the port halves on water and crouch on
 
 `walk12_spawn`'s retail trace is committed as the fixture; the leg is not in the gate while its speed mode is
 open (the path already passes).
+
+**The engine's speed rule is read in full, and levels 12/13 are both "retail walks, port runs" (round 146).**
+`sithControl_PlayerMovement` (004d8a00) builds the movement scale `param_1` from five multiplicative
+conditions, in order:
+
+1. `param_1 = 1.0`; if the always-run option is off (`DAT_008bd020 & 2 == 0`) and the run key (`GetKey(6)`) is
+   not held, **stay 1.0 (walk)**; otherwise `param_1 = 2.0` (run).
+2. slow modifier key (`GetKey(7)`) → `× _DAT_00522f1c` (**0.5**).
+3. crouch key (`GetKey(5)`) → **0.5** outright (and sets thing flag 0x10000).
+4. **`thing->flags & 0x200000` → 0.5** outright.
+5. `(thing->templateFlagsByte & 1) && (*(thing + 0x58 + 0x10) & 0x120000)` → `× 0.5`.
+
+The port's `Rules::speed` implements walk/run, crouch and water only. `walkplayer`'s template `typeflags` is
+**0x1** (the trace now prints it: `player actor flags 0x8 jk flags 0x0 template typeflags 0x1`), so condition 4
+cannot fire on these levels; condition 5's `(thing + 0x58)` is the **player struct** and `+0x10` a flags word
+(`0x120000` = two bits), which is the next lead — the port's `Player` has no such flags.
+
+**Level 13 (`14tower`, debug entry 13)** — spawn `Pos (−0.86, −5.53, 2.97) PYR (0.92, −20.98, 0.92), sector
+462`. Retail freezes 600 ms, then walks at **1.04 u/s** (x −0.86 → −0.50, y −5.53 → −4.30), steps **down**
+0.30 (z 2.97 → 2.67) at ~1800 ms and stops against something at (−0.50, −4.30) in sector 209. The port covers
+**3.13 units against 1.28 (244 %)** and ends at z **1.17** — 1.8 units lower, in sector 248. So the same
+speed-mode divergence as level 12, plus a step the port walks off instead of stopping on.
+
+Both levels put retail at ~1.04–1.09 u/s — the **walk** speed (1.2 with ramp) — against the port's run (2.1).
+That is the same ratio on the two levels, and it is not explained by thing flags, template flags, water, crouch
+or a level verb (all measured this round and round 145). The two remaining candidates are both engine state:
+`DAT_008bd020 & 2` (the always-run *option*, which the port currently hard-codes as on — the walker's own
+comment says "retail walks by default, shift walks") and the `0x120000` player-state test. Level 1's legs run
+at 2.1–2.4 in retail, so at least one of those states is not constant across levels — the always-run option
+cannot be, which points at the player-state bits and makes level 1's run the anomaly to re-check.

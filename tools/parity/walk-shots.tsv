@@ -71,3 +71,6 @@ walk11_spawn	11gorc	-0.17	12.38	-0.193	0	0
 #
 # walk12_spawn: level 12 (12escape).
 walk12_spawn	12escape	-0.67	-8.15	-4.016	0	180.00
+#
+# walk13_spawn: level 13 (14tower).
+walk13_spawn	14tower	-0.86	-5.53	2.905	0.92	-20.98
