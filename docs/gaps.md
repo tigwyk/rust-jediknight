@@ -3356,3 +3356,23 @@ the round *proves* about the remaining deviation: the port's solid models **push
 **block** it, so a body that should stop at a prop now walks through (levels 3 and 6 overrun). That is the
 thing-collision bucket the ledger row now carries, with its retire condition (sweep the model's real
 surfaces as blockers).
+
+**Cylinders are not blockers: the template radius is too fat to stand in for a model (round 124).** The
+next step after round 123 was to turn the solid-model push into a **blocking** contact (swept circle against
+the cylinder, sliding along the radial normal), which is what the ledger's retire condition implies. It was
+built, measured, and reverted: blocking on the *template's* cylinder closes gaps retail walks through.
+
+```text
+walk_cantina  2.65 -> 0.31 units (102% -> 12%)   the bar's furniture seals the leg
+walk4_spawn   1.11 -> 0.55 units (100% -> 50%)   the spawn furniture seals the doorway again
+walk3_spawn   212% -> 212%                        the model retail stops at is not in the port's list
+walk6_spawn   190% -> 190%                        same
+walk5_spawn   3.92 -> 3.00 of 3.73 (105% -> 80%)  **but only 2 of 6 sectors off — this leg would gate**
+```
+
+So the blocker needs the model's *real* surfaces (or at least its plan footprint from the `.3do`), not the
+template cylinder: `table2`'s collision radius (0.213 world units) is about twice the gap the cantina leg
+needs to pass through. The blocking experiment also shows the payoff clearly — with a correct blocker,
+`walk5_spawn` lands at 80 % travel with 2 sector mismatches, i.e. inside the gate's rules. The ledger row
+for thing collision keeps its measurement and its retire condition is unchanged, now with this negative
+result recorded so the next attempt starts from "real model surfaces", not "a smaller radius".

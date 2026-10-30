@@ -789,3 +789,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   no longer stops — the recorded thing-collision deviation (models must be swept as blockers).
 - Trace gate: **5 legs, 0 failures** (street45/90 100 %, cantina 102 %, door0 stop-pose, level4 100 %).
 - Tests **147 passed**; full gate sweep **0 of 64 failed**; parity **6/6** unchanged.
+
+## Update — round 124
+
+- Built swept-circle **blocking** against the solid-model cylinders (the ledger's retire direction), measured,
+  and reverted: the template radius is too fat to stand in for a model.
+  * `walk_cantina` 102 % → **12 %**, `walk4_spawn` 100 % → **50 %** (furniture seals both legs).
+  * `walk3_spawn` 212 % and `walk6_spawn` 190 % unchanged — the models retail stops at are not in the
+    port's cylinder list.
+  * `walk5_spawn` 105 % → **3.00 of 3.73 (80 %) with 2 of 6 sectors off** — inside the gate's rules, so a
+    correct blocker clears that leg.
+- No code shipped: tree restored to `5fd58cb`; trace gate still **5/5** (street45/90 100 %, cantina 102 %,
+  door0 stop-pose, level4 100 %). Tests, gates and parity re-verified below.
