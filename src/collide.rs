@@ -603,6 +603,11 @@ pub struct Sweep {
     /// Where the sphere's centre is at the contact, in world space. A sweep that crossed a doorway
     /// spends part of its distance there, so this — not `distance` — is what a caller can place a body by.
     pub point: [f32; 3],
+    /// The touched face's highest vertex. A step-up may lift the body over a face whose **top edge** is
+    /// within the step allowance — a stair riser's top is the next tread — while a wall whose top is
+    /// high is not a step, whatever height its contact point happens to sit at. Without this the step
+    /// test can only ask about the contact point, which cannot tell a riser from a wall.
+    pub top: f32,
 }
 
 /// `sithIntersect_CheckSphereHit`: the travel distance at which a sphere first meets a plane.
@@ -802,6 +807,7 @@ impl Solids {
                         normal,
                         sector,
                         point: at,
+                        top: face.verts.iter().map(|v| v[2]).fold(f32::MIN, f32::max),
                     });
                 }
             }
@@ -862,7 +868,7 @@ impl Solids {
                         door = Some((t, portal.adjoin));
                     }
                 } else if wall.is_none_or(|w| t < w.distance) {
-                    wall = Some(Sweep { distance: t, surface: usize::MAX, normal, sector, point: at });
+                    wall = Some(Sweep { distance: t, surface: usize::MAX, normal, sector, point: at, top: f32::MAX });
                 }
             }
 
@@ -1139,12 +1145,19 @@ impl Solids {
     // (the sweep reports a hit at distance 0, and the contact is at exactly the body radius), so a step
     // only succeeds when the lift clears the riser's polygon top outright. The upgrade is to test the
     // rise against the polygon's own top edge rather than a swept sphere at the raised height.
+    // A **stair riser** is the case this test used to reject: after the lift the body is still flush
+    // against the *next* step, so a swept sphere at the raised height reports a hit at distance 0 and the
+    // step fails on every stair (level 6: the port stopped at the foot of a staircase, z 1.020, while
+    // retail climbed it). The old `ponytail:` note named the upgrade — judge the rise against the face's
+    // own top edge: a stair riser's top is the next tread (`<= raised feet + step`), a wall's is high.
+    let raised_feet = raised[2] - radius;
+    let clears = |hit: Option<Sweep>| match hit {
+        None => true,
+        Some(h) => h.distance > radius * 0.5 || h.top <= raised_feet + step,
+    };
     let clear = [[1.0f32, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]]
         .iter()
-        .all(|d| {
-            self.sweep(here, raised, *d, radius * 2.0, radius, gates)
-                .is_none_or(|h| h.distance > radius * 0.5)
-        });
+        .all(|d| clears(self.sweep(here, raised, *d, radius * 2.0, radius, gates)));
                         // A step must land *somewhere*: lifting the body at a spot where nothing is below it
                         // is how it walked off the walkway's seam and fell. Eight units is generous, so a
                         // step down into a room still works while a step over a void does not.
@@ -1160,7 +1173,7 @@ impl Solids {
                         // afterwards (`decomp/004e7950_sithCollision_MoveThing.c:251`).
                         let inside = self.inside_sector(here, [raised[0], raised[1], raised[2] - radius], 0.0);
 
-    let advance = self.sweep(here, raised, dir, left, radius, gates).is_none();
+    let advance = clears(self.sweep(here, raised, dir, left, radius, gates));
     if std::env::var_os("BK_WALK_TRACE").is_some() {
         eprintln!("walk trace:   step predicates clear {clear} lands {lands} inside {inside} advance {advance}");
     }

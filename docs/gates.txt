@@ -814,3 +814,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
   190 % (retail climbs steps at 0.36 u/s against the port's 0.69).
 - Tests **147 passed**; full gate sweep **0 of 64 failed**; parity **6/6** (route_cantina 0.7381 → 0.7286
   from the changed walker, still above its 0.65 floor).
+
+## Update — round 126
+
+- `Sweep` gained `top` (the touched face's highest vertex) and the walker's step-up paths now judge an
+  obstruction by it: `h.top <= raised_feet + step` is a step, a higher top is a wall. This is the upgrade the
+  code's own `ponytail:` note named; the `a_low_ledge_is_stepped_onto_and_a_tall_wall_is_not` test pins it and
+  passes (147 tests). A contact-height version was tried first and let bodies climb walls.
+- Trace gate unchanged and green: **6 legs, 0 failures** (street45/90 100 %, cantina 102 %, door0 stop-pose,
+  level 4 100 %, level 5 81 %); no leg over-climbs (z deltas 0.000/0.025).
+- The two failing levels are now attributed: level 6 stops against face 788 (sector 78, `top 1.150`, a
+  0.13-high sill) where retail walks the treads; level 3's retail motion is a scripted opening (frozen
+  600 ms, then a slow arc), so the leg is not a plain walk until scripted player control is ported.
+- Parity re-captured: **6/6** (scores unchanged).

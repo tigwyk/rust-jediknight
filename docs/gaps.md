@@ -3400,3 +3400,36 @@ So the trace gate now covers **three legs beyond level 1** (levels 3, 4 and 5), 
 two remaining failures say about the next bucket: level 3's retail body stops where no solid thing sits
 (its leg is still scripted-opening territory), and level 6's retail body is *slowed* on a staircase — 0.36
 u/s against the port's 0.69 — so the gait on steps, not collision, is what remains there.
+
+**The step-up test now asks the face's top edge, not the contact height (round 126).** Level 6's port was
+stuck at the foot of a staircase (`step predicates clear false lands true inside true advance false`) while
+retail climbed it. The code's own `ponytail:` note named the fix: "test the rise against the polygon's own
+top edge rather than a swept sphere at the raised height". `Sweep` now carries `top` (the touched face's
+highest vertex, `f32::MAX` for a portal opening, which is never a step), and the step paths judge an
+obstruction by it:
+
+```rust
+let raises = |hit: Option<Sweep>| match hit {
+    None => true,
+    Some(h) => h.distance > radius * 0.5 || h.top <= raised_feet + step,
+};
+```
+
+A stair riser's top is the next tread, inside the allowance; a wall's top is high, so a wall is still not a
+step. The repo's own `a_low_ledge_is_stepped_onto_and_a_tall_wall_is_not` test pins both halves and passes
+(147 tests). A first attempt that judged the *contact point* instead of the top edge let bodies climb walls
+and broke that test, which is why the face's geometry is the right input.
+
+Measured: the trace gate is unchanged at **6 legs, 0 failures** (street45/90 100 % z-delta 0.000, cantina
+102 %, door0 stop-pose, level 4 100 %, level 5 81 %) and no leg over-climbs.
+
+Two levels still fail their legs, and this round names the reason for each rather than leaving them as
+"the port walks too far":
+
+- **Level 6**: the port now stops against **face 788** (sector 78, normal (0,−1,0), `top 1.150`) at
+  (23.64, 39.90, 1.020) — a 0.13-high obstruction, twice the step allowance, while retail's trace rises
+  1.02 → 1.08 → 1.14 (three 0.06 steps) and halts *on the staircase*. So the port meets a rail/riser where
+  retail walks the treads; the next read is the staircase's own geometry around that face.
+- **Level 3**: retail is frozen for the first 600 ms and then moves in a slow arc that stops at 1.71 units —
+  the signature of a scripted opening (like level 2's), so the leg is not a plain walk until the scripted
+  player control is ported. Recorded as such rather than as a movement divergence.
