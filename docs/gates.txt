@@ -924,3 +924,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
   full-speed ramp) with a −x drift of 0.38, against the port's +1.2 — the slopes lean (−0.43, 0.05, 0.90) and
   their downhill direction is (−1, 0.12). The port applies no slope gravity. Ledger row updated with that
   mechanism; the retire condition is now "gravity along the supporting surface is applied".
+
+## Update — round 135
+
+- Slope gravity's source is now cited from the decomp: `sithPhysics_UpdateThingPhysics` subtracts
+  `world->gravity * dt` from the z velocity (`DAT_008339c8 + 0xd4`, the `.jkl`'s `world gravity`, which the
+  port parses — 4.0 in the shipped levels), halved by thing flag `0x40000`, with `0.3` settling damping.
+- A planar implementation (acceleration along the support normal's downhill direction, using a new
+  `Solids::support_normal` that mirrors `support` and flips downward-stored floor normals) was built and
+  **reverted**: it double-counts in a floor-locked walker. Level 3's drift moved slightly toward retail's but
+  its 3 sector mismatches stayed, and **level 5's passing leg regressed** (sectors 2 → 3, gate failure) on its
+  45° ramp.
+- Conclusion on the ledger row: retiring `slanted-floor sliding` needs the **vertical half of `MoveThing`**
+  (leave the floor, fall under world gravity, let the sweep redirect it), not an added horizontal term.
+- Tree back at `60f119e`: tests **147 passed**, trace gate **7 legs, 0 failures**.

@@ -3615,3 +3615,24 @@ run down:
   collision slides it. The port applies no slope gravity at all, so its slower first window and its different
   path both follow. That is the ledger's `slanted-floor sliding` row, now with the mechanism named as gravity
   along the surface rather than a velocity projection.
+
+**Slope gravity is in the decomp, but a planar version of it double-counts — measured and reverted (round
+135).** The engine's slope slide is now pinned to code: `sithPhysics_UpdateThingPhysics` (004f6270, line ~125)
+subtracts **`*(float *)(DAT_008339c8 + 0xd4) * dt`** from the thing's z velocity, where `DAT_008339c8` is the
+world the level's header creates (`sithWorld_NewEntry`, 004c47d0) — i.e. the `.jkl`'s own `world gravity`,
+which the port already parses (`Level::gravity`, 4.0 in the shipped levels, read as `slope gravity 4.000`).
+A `0x40000` thing flag halves it (`_DAT_00523198 = 0.5`), and `_DAT_005231a8 = 0.3` damps the velocity when a
+thing settles.
+
+The port's walker keeps a body *on* its floor (the landing path sets `pos[2] = floor + rest`), so adding the
+same force as a planar acceleration along the support normal's downhill direction is an approximation that
+**double-counts**: with the support normal read (and flipped to the up side, since the stored floor faces point
+down), level 3's drift moved toward retail's but its three sector mismatches stayed, while **level 5's passing
+leg regressed** — its 45° ramp's lift (0.78) made the added pull large enough to push the body off its
+sector path (sectors 2 → 3, gate failure). The experiment was reverted and the tree is back at `60f119e`.
+
+So the ledger's `slanted-floor sliding` row now carries the mechanism *and* the reason the cheap version does
+not work: the engine's slide comes from gravity acting on a **z velocity** that the collision then slides along
+the surface, and a floor-locked walker has no z velocity to slide. Retiring it needs the vertical half of
+`MoveThing` (the body leaving the floor, falling under gravity, and the sweep redirecting it), not an added
+horizontal term.
