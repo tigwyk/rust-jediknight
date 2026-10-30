@@ -3699,3 +3699,28 @@ trace:
   out of action" — is the next read, together with which script event (a `damaged` message or a threshold in
   `sithPlayer_Update`) sets it on level 7; `jk_flags & 1` (round 137) and actor flag 8 are both shared with
   levels that walk, so neither is it.
+
+**The cutscene bucket is feature-sized, and the port now prints the flags that would have shown it (round 139).**
+The last three rounds chased a cheap lock. This round ruled out the script side and named the real shape.
+
+- **Nothing in the scripts moves the player.** Over three seconds of level 7 (`BK_VERB_TRACE`, 111 calls) the
+  only verbs are inventory/sound/actor/frame work — `MoveToFrame` on *actors* 8–15, `SetActorFlags`,
+  `SetSectorAdjoins`, `PlaySoundThing`, `AiSetMode`. There is no `SetThingPos`/`MoveToFrame` on the player and
+  no camera verb at all, so the pin comes from the engine, not from the cog's own calls.
+- **The player's flags are 0xa0000c, and none of the candidate bits appears.** The walker now prints
+  `walk trace: player actor flags {:#x} jk flags {:#x}`; on level 7 that is **0xa0000c** (bits 0x4, 0x8,
+  0x200000, 0x800000) and `jk flags 0x1`. Neither `0x200` (the bit `sithControl_Update` tests) nor `0x2` is
+  set, so the flag hypothesis from round 138 is out too — the fourth candidate falsified.
+- **Input reading is unconditional in the engine.** `DAT_00835838` is only "the control subsystem is open"
+  (`sithControl_Open`), and `sithControl_Update` reads controls on every path that reaches its label; the
+  camera branches above it only decide *which* camera is current. So the body is not being fed zero thrust by
+  a lock. What is left is that **movement is relative to the current view**: with a scripted camera current,
+  "forward" is the *camera's* forward, not the body's facing, which is why retail's body (0.11 units) pins
+  itself against the cell while the port's body, using its own yaw, slides the wall and climbs out.
+
+That makes the cutscene work a **feature, not a probe**: a camera-thing list with focus and current-camera
+state (`sithCamera_NewEntry`/`SetCurrentCamera`/`SetCameraFocus`, 004c52b0/004c5420/004c5670), a per-frame
+camera pose from the current camera's thing, movement and look relative to that camera, and the POV render
+choosing the player camera only while it is current. The plan is written on the ledger row; the walkable
+levels' remaining work (level 3's drift, level 6's sill, level 11's sector path) is independent of it, so the
+next rounds should alternate: one walkable-level fix, then the camera feature's first slice.

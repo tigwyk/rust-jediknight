@@ -976,3 +976,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   `0x400000`) before arming the kill timer. Bit `0x200` ("player out of action") plus the script event that
   sets it on level 7 is the next read; `jk_flags & 1` and actor flag 8 are both shared with levels that walk.
 - Tests **147 passed**; trace gate **7 legs, 0 failures** (no code shipped).
+
+## Update — round 139
+
+- Cutscene bucket ruled out on the script side: three seconds of level 7's verbs (111 calls) contain no
+  `SetThingPos`/`MoveToFrame` on the player and no camera verb. The walker now prints
+  `walk trace: player actor flags {:#x} jk flags {:#x}`; level 7's player is **0xa0000c** with `jk flags 0x1` —
+  neither `0x200` nor `0x2` (the bits `sithControl_Update` tests) is set, so round 138's flag lead is
+  falsified as well. Input reading is unconditional (`DAT_00835838` is just the control subsystem's open flag).
+- Conclusion recorded: the pin is **camera-relative movement** — with a scripted camera current, "forward" is
+  the camera's forward, which pins retail's body in the cell while the port's yaw-relative body climbs out.
+  That makes the bucket **feature-sized** (camera things + focus/current camera + per-frame camera pose +
+  view-relative movement), and the ledger row now carries that plan.
+- Code: only the diagnostic trace line added; tests **147 passed**, **gates 0 of 64 failed**, trace gate
+  **7 legs, 0 failures**. Phase 2's walkable-level work (levels 3, 6, 11) is independent, so the next rounds
+  alternate a walkable fix with the camera feature's first slice.

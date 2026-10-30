@@ -22764,6 +22764,20 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
             player.extra_speed
         );
         eprintln!("walk trace: dt {dt:.4} drag {:.3} grounded {} steps?", drag, player.grounded);
+        // The player thing's `SetActorFlags` bits and `jkSetFlags` bits: a level's opening script uses these
+        // to take the body out of action (the flag the engine's control loop tests is `player->flags & 0x202`).
+        let (actor, jk) = sim
+            .as_deref()
+            .map(|sim| {
+                let rt = sim.world.borrow();
+                let index = rt.player_thing();
+                (
+                    rt.actor_flags.get(&index).copied().unwrap_or(0),
+                    rt.things.get(index).map(|t| t.jk_flags).unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0));
+        eprintln!("walk trace: player actor flags {actor:#x} jk flags {jk:#x}");
         let around = solids.0.sectors_around(pos);
         let mut floors: Vec<(usize, Option<f32>)> = around
             .iter()
