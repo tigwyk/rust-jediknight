@@ -3217,3 +3217,31 @@ trace to take (velocity and support through the descent, and how `rest` behaves 
 
 The round changed no code: both experiments were reverted to the verified state (`abfc62f`), and the level
 5 leg stays **1.41 of retail's 3.73 units** and outside the gate.
+
+**Phase 2's first non-level-1 leg passes: `walk3_spawn` on level 3 (round 119).** The missing piece was
+data: the retail harness's `-SettleMs` parameter was documented as "extra time the level-list boot waits
+before reading `coords`" and had never been used, so `-StartLevel` boots gave no spawn pose. The boot now
+sleeps `-SettleMs` and then sends `coords`, logging `spawn| Pos: …` — which reads the pose retail itself
+puts the body at, with no warp. That is what a Phase 2 walk leg needs, and it works for every level in the
+debug list.
+
+Level 3 (`03katarn`, the list's third entry) reads **Pos (−0.76, −4.73, −0.20), yaw 0.00, sector 370**. Its
+retail walk trace is a scripted opening first — the body does not move for 600 ms — then a steady +y walk:
+
+```text
+held_ms   x      y      z     sector
+0        -0.72  -4.73  -0.21  370
+600      -0.72  -4.73  -0.21  370   (the level's opening holds the body)
+1200     -0.70  -4.10  -0.22  369
+1800     -0.70  -3.40  -0.26  369
+2400     -0.86  -3.32  -0.26  369
+3000     -1.11  -3.06  -0.29  375
+```
+
+The port walks immediately (no opening hold) and **stops at (−0.77, −3.60) after 1.2 s** — it is blocked at
+that spot — but the comparison still lands inside the gate's rules: travel **1.13 of retail's 1.71 units
+(66 %)**, **2 sector mismatches**, z within 0.04. The leg is committed as
+`tools/parity/walktrace/walk3_spawn-walk.tsv` and joins `trace-gate.ps1`'s defaults, which are now **5
+legs** (street45 100 %, street90 100 %, cantina 71 %, door0 stop-pose, level3 66 %). Two things it records
+for the next round: the port has no opening-script hold on level 3, and whatever stops it at
+(−0.77, −3.60) is a blocking difference worth naming the same way the door capture's was.

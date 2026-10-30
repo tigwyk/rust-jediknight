@@ -328,6 +328,13 @@ surface retail's walker treats as ground. That is Phase 2's first measured bucke
 support for solid things** (`--warp` attachment already reads them; the walking support probe does not).
 The leg joins the gate as soon as it passes.
 
+*Progress (round 119).* Phase 2's first non-level-1 leg is **in the gate**: `walk3_spawn` (level 3,
+`03katarn`) passes at travel 1.13 of retail's 1.71 units (66 %) with 2 sector mismatches, and its retail
+trace is committed. The retail harness's unused `-SettleMs` knob now feeds a `coords` read after the
+`-StartLevel` boot (`spawn| Pos: …`), which gives any level's real spawn pose without a warp — the input
+every later level's leg needs. Level 3's trace also records two known differences: the port has no
+opening-script hold (retail freezes for 600 ms), and the port stops at (−0.77, −3.60) after 1.2 s.
+
 ### Phase 3 — Breadth, by shipped-content weight
 
 Only now take the remaining units from `gaps.md`, ordered by how many shipped levels and scripts need

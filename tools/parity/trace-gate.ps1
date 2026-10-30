@@ -21,7 +21,7 @@ basis, collision) while tolerating the harness's timing noise.
 .EXAMPLE
 powershell -NoProfile -File tools/parity/trace-gate.ps1
 #>
-param([string[]]$Only = @('walk_street45', 'walk_street90', 'walk_cantina', 'walk_door0'))
+param([string[]]$Only = @('walk_street45', 'walk_street90', 'walk_cantina', 'walk_door0', 'walk3_spawn'))
 
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))

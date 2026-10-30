@@ -751,6 +751,13 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       Send-JkClick -X 505 -Y 443
       Start-Sleep -Milliseconds 1000
       Log "chose level $StartLevel through the [Debug] level select"
+      # `-SettleMs` was documented for exactly this and never used: a level that opens with a scripted
+      # sequence moves the body after the load, so read `coords` only once it has settled. This is the
+      # pose retail itself puts the body at -- what Phase 2's walk legs need, with no warp.
+      Start-Sleep -Milliseconds $SettleMs
+      foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command 'coords')) {
+        Log "spawn| $line"
+      }
     }
 
     if ($StartEpisode) {

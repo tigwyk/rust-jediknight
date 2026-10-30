@@ -42,3 +42,7 @@ walk2_spawn	02narshadda	10.798	-11.983	3.020	0.66	-99.98
 # walk5_spawn: Phase 2's second non-level-1 probe. level5_spawn's pose (the debug list's entry 5 boots
 # 06abarons); that reference is a static player-camera frame, so the spawn should be calm.
 walk5_spawn	06abarons	10.58	14.91	0.22	0	134.99
+#
+# walk3_spawn: level 3 (the debug list's third entry). The pose is retail's own level-start coords, read
+# by retail-capture.ps1's -StartLevel boot now that -SettleMs feeds that read.
+walk3_spawn	03katarn	-0.76	-4.73	-0.163	0	0

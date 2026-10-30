@@ -728,3 +728,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
   remaining candidate is the gravity/vertical-sweep interplay on a sloped floor.
 - No code shipped this round (tree restored to `abfc62f`); level 5 stays 1.41 of retail's 3.73 and outside
   the gate. Suites re-checked after the revert.
+
+## Update — round 119
+
+- Phase 2's first non-level-1 leg enters the trace gate: `walk3_spawn` (level 3, `03katarn`) **PASSES** at
+  travel 1.13 / retail 1.71 units (66 %) with 2 sector mismatches; trace committed as
+  `tools/parity/walktrace/walk3_spawn-walk.tsv`, gate defaults now 5 legs, 0 failures.
+- The retail harness's documented-but-unused `-SettleMs` now feeds a `coords` read after the
+  `-StartLevel` boot (`spawn| Pos: …`), so any level's real spawn pose can be read without a warp. That is
+  how level 3's pose was learned: `Pos (-0.76, -4.73, -0.20), yaw 0.00, sector 370`.
+- Recorded in gaps: the port has no opening-script hold on level 3 (retail freezes the first 600 ms) and
+  the port stops at (-0.77, -3.60) after 1.2 s.
