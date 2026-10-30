@@ -4009,3 +4009,27 @@ Level 6 improves a little too (96 % → 98 %).
 Levels 3 and 11 keep their verdicts with the new rule: level 3 is 2.75 against retail's 1.71 with 4 sectors
 (slanted-floor drift), level 11 is 0.90 against 0.83 (108 %) but 5 of 6 sectors off (its genuine 1200 ms
 scripted start). Both stay documented deviations, not gate legs.
+
+**Levels 14 and 15 measured; the pinned levels are not video cutscenes, and a slope's settled pose is not its
+spawn pose (round 151).** The breadth sweep reached level 15 and sharpened two harness facts.
+
+- **Level 14 (`15maw`, debug entry 14)** — spawn (39.47, −7.28, 28.32), yaw 0, sector 32. Forward held for 3 s
+  moves the body **0.00 units** with static yaw: fully pinned. **Level 10 (`10cargo`)** stays pinned too
+  (0.12–0.14), and **level 7** at 0.11. All three are the same bucket as before — but the harness log shows it
+  sets **`disablecutscenes 1` in the staged player file**, so these pins are *not* video cutscenes; they are the
+  level's own script/state holding the player. That is worth knowing before the camera feature is built: the
+  camera verbs are absent from level 7's startup (round 139), and the body is pinned with cutscenes disabled.
+- **Level 8 (`08escape88`)** is not pinned: with the settle it walks **0.96 units** and stops (the port covers
+  2.14, 223 %). Its earlier "0.02 units" reading was the harness latency of rounds 145–147.
+- **Level 15 (`16aEscapeShip`, debug entry 15)** — its spawn is on a **slope**, and with the 1000 ms settle the
+  body *slides* during the settle, so the settled pose is not the console spawn pose and is not stable between
+  runs: console (−0.00, 5.19, −2.12), settled sample 0 (0, 4.73, −2.47), and after re-capturing from that pose
+  (0, 4.19, −3.01). The walk-shots row must therefore use the **settled** pose (or a settle of 0) for sloped
+  spawns. Its travel matches well — **1.56 retail vs 1.54 port (98 %)** — but with 6 of 6 sector mismatches,
+  because the slope slide moves the port through a different sector order; not a gate leg yet.
+- Level 16 (`17asarris`) spawn read for the next round: `Pos (2.61, −0.55, 2.06) PYR (1.12, 134.99, 1.12),
+  sector 1`.
+
+Also noted for the harness: `--gates` reported `--move headless FAIL (no verdict)` once immediately after the
+fixture writes and **passed on a clean re-run** (0 of 64), so that check is flaky under back-to-back I/O — a
+re-run is the right response, and the gate script's "no verdict" wording is what makes it recognisable.

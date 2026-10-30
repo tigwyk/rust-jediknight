@@ -1156,3 +1156,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Levels 3 (2.75 vs 1.71, 4 sectors — drift) and 11 (0.90 vs 0.83, 5 sectors — genuine 1200 ms scripted start)
   keep their documented verdicts under the new rule.
 - Tests **147 passed**, `--gates` **0 of 64 failed**, parity **6 thresholds, 0 failures**.
+
+## Update — round 151
+
+- Breadth at level 14/15. Level 14 (`15maw`) is fully pinned (0.00 units, static yaw); level 8 (`08escape88`)
+  walks 0.96 then stops (port 2.14, 223 % — its old "0.02" was the harness latency); level 15 (`16aEscapeShip`)
+  is a slope spawn where the 1000 ms settle lets the body slide, so its settled pose differs from the console
+  spawn and between runs (console (−0.00, 5.19, −2.12); settled (0, 4.73, −2.47); then (0, 4.19, −3.01)).
+  Travel matches (1.56 vs 1.54, 98 %) but sectors do not (6 of 6) — the slide moves a different sector order.
+- **Harness fact**: the staged player file has **`disablecutscenes 1`**, so the pinned levels (7, 10, 14) are
+  pinned by their own script/state, not by video cutscenes — relevant to the camera feature's design.
+- **Harness rule recorded**: on a sloped spawn the row pose must be the *settled* pose (or the leg must use
+  settle 0), because the body slides during the settle.
+- Level 16 (`17asarris`) spawn read: `Pos (2.61, −0.55, 2.06), yaw 134.99, sector 1`.
+- `--gates` reported `--move headless FAIL (no verdict)` once right after the fixture writes and passed on a
+  clean re-run (0 of 64) — flaky under back-to-back I/O; tests **147 passed**, trace gate **10 legs, 0 failures**.
