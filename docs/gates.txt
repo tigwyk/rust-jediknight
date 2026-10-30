@@ -938,3 +938,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Conclusion on the ledger row: retiring `slanted-floor sliding` needs the **vertical half of `MoveThing`**
   (leave the floor, fall under world gravity, let the sweep redirect it), not an added horizontal term.
 - Tree back at `60f119e`: tests **147 passed**, trace gate **7 legs, 0 failures**.
+
+## Update — round 136
+
+- Levels 10 and 11 measured. Level 10 (`10cargo`) is another **script-owned opening**: forward held moves
+  **0.12 units** with steady yaw (leg-quality check fires); its trace is committed, not gated. Level 11
+  (`11gorc`) matches travel (**0.97 vs 0.84 units, 115 %**) but its path is in the wrong sectors (5 of 6, port
+  sector 9 against retail's 15) on a slow scripted-looking start.
+- Walk legs now measured on levels 2–11; two are gated beyond level 1 (level 4 100 %, level 5 68 %) and every
+  other leg carries a named deviation (drift, sill, script-owned opening, or sector path).
+- Tests **147 passed**; trace gate **7 legs, 0 failures**; parity unchanged (no code shipped).

@@ -3636,3 +3636,23 @@ not work: the engine's slide comes from gravity acting on a **z velocity** that 
 the surface, and a floor-locked walker has no z velocity to slide. Retiring it needs the vertical half of
 `MoveThing` (the body leaving the floor, falling under gravity, and the sweep redirecting it), not an added
 horizontal term.
+
+**Phase 2 breadth reaches levels 10 and 11 (round 136).** The sweep continued past level 9 with the same
+recipe, and the leg-quality check did its job on both.
+
+**Level 10 (`10cargo`)** — spawn `Pos (−6.78, 15.28, 1.47), yaw 134.99, sector 333`. Forward held: the body
+moves **0.12 units** with yaw steady at 135.01 and the harness flags it (`the body travelled 0.12 units … not
+a plain walk`). That is the fifth script-owned opening (2, 6, 7, 8, 10) — the cutscene bucket again — and the
+trace is committed as a measurement rather than a gate leg.
+
+**Level 11 (`11gorc`)** — spawn `Pos (−0.17, 12.38, −0.23), yaw 0.00, sector 19`. Retail is frozen for 1.2 s
+and then covers 0.84 units over the window (sectors 19 → 15), which is the same slow-start shape; the
+leg-quality check does not fire (the body does move) but the trace reads as a scripted opening in a corridor.
+The port covers 0.97 units (**115 %**, inside the travel band) but ends in **sector 9 against retail's 15**,
+five of six samples in the wrong sector — the port's path drifts −x where retail's is +y then +x. Not
+gateable; trace committed.
+
+So of the eleven levels measured with walk legs so far, **two are in the gate from beyond level 1** (level 4
+at 100 %, level 5 at 68 %), alongside level 1's four, and the rest are each named: level 3 (slanted-floor
+drift), level 6 (0.55 sill), levels 2/7/8/10 (script-owned openings), level 11 (path/sector divergence at
+115 % travel). `trace-gate.ps1` remains 7 legs, 0 failures.

@@ -62,3 +62,9 @@ walk8_spawn	08escape88	52.56	62.82	34.457	0	90
 #
 # walk9_spawn: level 9 (the debug list's ninth entry, 'Fuel Station Launch'), which is 09fuelstation.
 walk9_spawn	09fuelstation	1.07	5.46	0.107	0	54.99
+#
+# walk10_spawn: level 10 (the debug list's tenth entry).
+walk10_spawn	10cargo	-6.78	15.28	1.507	0	134.99
+#
+# walk11_spawn: level 11 (the debug list's eleventh entry).
+walk11_spawn	11gorc	-0.17	12.38	-0.193	0	0

@@ -371,6 +371,18 @@ landing could raise a body by `rest − radius` (0.055) per frame, so a body blo
 that into a climb. With the landing unable to leave a body higher than it was, **level 9 `walk9_spawn`
 passes at 100 % with 0 sector mismatches** and joins the gate — now **7 legs, 0 failures** — and the two
 held-out walkable levels improved sharply (level 3: 208 % → 125 %, sectors 3 of 6; level 6: 190 % → 155 %).
+
+*Progress (rounds 134–136).* The sweep reached level 11 and every measured leg now carries its own
+verdict: **gated** — level 1's four, level 4 (100 %), level 5 (68 %); **named deviation** — level 3
+(slanted-floor drift, 125 % with 3 sectors), level 6 (0.55 sill, 155 %), level 11 (115 % travel but 5 of 6
+sectors, scripted-looking start); **not a walk** — levels 2, 7, 8 and 10 (script-owned openings, flagged by
+the harness's leg-quality check). Slope gravity's source was also recovered from the decomp
+(`sithPhysics_UpdateThingPhysics` subtracts `world->gravity * dt` from the z velocity, `DAT_008339c8 + 0xd4`,
+4.0 in the shipped levels) and a planar implementation was measured and reverted: it double-counts for a
+floor-locked walker and regressed level 5. Phase 2's remaining work is therefore exactly two buckets plus
+breadth: the vertical half of `MoveThing` (retires the drift row and level 3's sectors) and cutscene camera
++ player control (turns four "not a walk" levels into walkable ones); the breadth sweep itself is now
+mechanical and each new level costs one boot, one trace and one comparison.
 What is left in Phase 2 is now a short list: level 3 needs its 3 sector mismatches read (lateral drift on
 slanted ground), level 6 its 0.55 sill, and levels 2, 6, 7, 8 their script-owned openings (the cutscene
 row).
