@@ -1217,3 +1217,19 @@ running app.--carry-check --start 01narshadda                        0   level 2
   ~15 s, after which the view is the player camera.
 - Tests **147 passed**, `--gates` **0 of 64 failed**, trace gate **12 legs, 0 failures**, parity **6 thresholds,
   0 failures**.
+
+## Update — round 155
+
+- The camera trace prints the camera state: script camera with focus 45 until **f920**, then `None` — the
+  level's script clears it with `SetCameraFocus(0, 0)` / `SetCurrentCamera(0)`, **the same calls retail makes**
+  (longer verb trace, 555 calls).
+- Retail's settled frame is a staged **knocked-down** shot (Kyle prone, Maw over him, camera above/close) —
+  with the focus cleared in both, that view is the engine's **third-person/knocked-down camera** on the prone
+  player, which the port lacks (its body stands, view first person; forcing third person at the same moment
+  shows a wall).
+- Per-time-step SSIM against retail's series (world crop): 0.212, 0.220, 0.137, 0.122, 0.185, 0.203, 0.156,
+  0.146 for t=1…8 s — the pose mismatch that remains (start offset + knocked-down view) is what to fix before
+  the numbers mean anything; the key's own trajectory is already right (round 154).
+- `SetCameraFocus(slot, 0)` is the script's "camera off" idiom (thing 0 = the player), which the port already
+  treats as no script camera.
+- Tests **147 passed**, trace gate **12 legs, 0 failures**.

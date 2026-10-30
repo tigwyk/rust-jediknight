@@ -4120,3 +4120,27 @@ Limits: the sampling ignores `flags` (the engine's playback-rate flags) and trea
 mesh names a camera as a thing track — `ponytail:` the engine's root-track rule in
 `sithPuppet_UpdateThingMove` is the upgrade path. The script camera is cleared by the level's script at ~15 s
 (the trace shows `scripted "none"` from f960), after which the view is the player camera again.
+
+**The camera key works; what retail shows *after* the script camera is a knocked-down third-person view
+(round 155).** The level-14 view was graded frame by frame and the remaining gap moved one step along.
+
+- The camera trace now also prints the camera state: `state Some((true, 0, Some(45)))` until **f920**, then
+  `state Some((true, 0, None))` — the level's script clears the focus. A longer verb trace names the call and
+  it is the **same call in retail**: `SetCameraFocus(0, 45)` / `SetCurrentCamera(0)` / `PlayKey(45,
+  "MAcamera.key")` at the start, then `SetCameraFocus(0, 0)` / `SetCurrentCamera(0)` twice, around 15 s.
+- Retail's *settled* frame (20 s, `level14_spawn-raw.png`) is still a staged shot: Kyle **prone on the floor**
+  with Maw standing over him, seen from above/close. Since retail has cleared the focus too, that view is not a
+  script camera — it is the engine's **third-person/knocked-down camera on the prone player**, which this port
+  does not have (its body stands and its view is first person). The port's own third-person probe at the same
+  moment shows a wall, and its first-person view shows the floor from the standing body's eye.
+- Per-time-step SSIM against retail's series (`level14_spawn-series-0…7`, ~1 s apart) with a world crop:
+  t=1 s 0.212, 2 s 0.220, 3 s 0.137, 4 s 0.122, 5 s 0.185, 6 s 0.203, 7 s 0.156, 8 s 0.146. The low values are
+  the *pose mismatch* that follows: retail's opening frames are the camera dolly already in motion while the
+  port's starts from the placed pose on the same key — the key's numbers are right (round 154) and the next
+  step is to align the *start offset* and the knocked-down view before these numbers mean anything.
+- So the cutscene bucket now has two named items: the **prone/knockdown player state** (its view and its pose —
+  the animation and the camera mode), and the **key start offset** for the dolly's opening frames.
+
+Also recorded: `SetCameraFocus(slot, 0)` is the script's own "camera off" idiom — thing 0 is the player in
+these levels, so the engine reads it as "stop focusing a camera thing", which the port already treats as no
+script camera.

@@ -23210,10 +23210,15 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         }
     }    tf.translation = eye;
     if std::env::var_os("BK_CAMERA_TRACE").is_some() {
+        let state = sim.as_deref().map(|sim| {
+            let rt = sim.world.borrow();
+            (rt.script_camera, rt.current_camera, rt.camera_focus_thing())
+        });
         println!(
-            "camera: eye {eye:?} look {:?} scripted {:?}",
+            "camera: eye {eye:?} look {:?} scripted {:?} state {:?}",
             look.to_array(),
-            focus_camera.map(|_| "a scripted camera").unwrap_or("none")
+            focus_camera.map(|_| "a scripted camera").unwrap_or("none"),
+            state
         );
     }
     if let Some(dir) = look.try_normalize() {
