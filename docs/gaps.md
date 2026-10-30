@@ -3770,3 +3770,26 @@ the delay rather than a camera.
 A harness lesson is recorded too: the trace gate refreshes the *port* traces on every run but seeds the
 *retail* ones from `tools/parity/walktrace/`, so a run that deletes `target/parity/trace/*.tsv` must restore
 the fixtures or `trace-compare` stops with "missing trace".
+
+**Level 6's divergence is a ramp just under the port's floor threshold (round 142).** Retail's body ends on
+z 1.14 at (23.31, 38.85) having climbed 0.12; the port ends at z 1.02 at (23.64, 39.40), 1.05 units further in
++y. The geometry says why. Around that spot sector 315 has a floor at z 0.900 (surface 2831), a **1.5-high
+riser** at y 38.91 (surface 2830, `z 0.900..2.400`, normal (0,1,0)), and — just past it in x — a **ramp**
+(surface 2832, `z 1.000..1.400`, normal (−0.70, 0.35, 0.62)) behind a portal (2833, adjoin 795). Retail walks
+into the ramp's mouth (x 23.20..23.41) and climbs it to z 1.14; its horizontal approach is 0.08 to the right of
+the port's.
+
+The port instead hits the riser at x 23.12 and the trace names the sequence exactly: a step candidate is
+rejected (`step predicates clear false`), the slide runs along the **ramp plane's** leaning xy normal
+(−0.70, 0.35 → a −x component), and `player.vel` is then overwritten by the achieved movement (the
+`moved_len < want_len * 0.99` branch), so the body's x velocity *flips sign* to −0.15 and stays there. It
+slides left into sector 82, then 79, and wedges.
+
+The root cause is a threshold mismatch: the ramp's **|n_z| is 0.62** while every floor query in `collide.rs`
+(`support`, `floor_below`, `floor_under`) requires `|n_z| >= 0.70`, so the ramp is not a floor to the port at
+all — it is only ever a wall. The engine does not classify floors by a normal threshold: `FindFloor` /
+`SearchForSurfaceCollisions` split surfaces by their **plane's facing** and the JKL surface flags, and
+`MoveThing`'s horizontal sweep is the wall half of that split (`SearchForCollisions` flags 0x2802), so a ramp
+belongs to the floor pass and is climbed by it. Widening the floor test is the fix to try next — but it is a
+walker-wide threshold (steeper slopes become standable, and levels 3/4/5/9 all sit on slopes), so it needs its
+own round with the full gate.

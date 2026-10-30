@@ -1020,3 +1020,20 @@ running app.--carry-check --start 01narshadda                        0   level 2
   `tools/parity/walktrace/`; deleting `target/parity/trace/*.tsv` without restoring the fixtures breaks
   `trace-compare`.
 - Suites: tests **147 passed**, **gates 0 of 64 failed**, trace gate **7 legs, 0 failures**.
+
+## Update — round 142
+
+- Level 6's divergence pinned to geometry and a threshold. Sector 315 holds a floor at z 0.900, a **1.5-high
+  riser** at y 38.91 (surface 2830, z 0.900..2.400) and a **ramp** just past it (surface 2832,
+  z 1.000..1.400, normal (−0.70, 0.35, 0.62)) behind a portal. Retail enters the ramp's mouth at x 23.20..23.41
+  and climbs it to z 1.14; the port approaches 0.08 further left, is stopped by the riser, has its step
+  candidate rejected (`clear false`), slides along the ramp's leaning normal (−x component) and then has
+  `player.vel` overwritten with the achieved movement, flipping its x velocity to −0.15 — it ends up wedged in
+  sectors 82/79.
+- Root cause: the ramp's **|n_z| = 0.62** is below the port's floor threshold (`|n_z| >= 0.70` in `support`,
+  `floor_below`, `floor_under`), so the ramp can never be a floor — only a wall. The engine splits surfaces by
+  plane facing and JKL flags (`FindFloor`/`SearchForSurfaceCollisions` vs `MoveThing`'s 0x2802 wall sweep)
+  instead of a normal threshold, which is why retail climbs it.
+- Next: widen the floor test to the engine's facing rule and measure the whole gate — it is walker-wide
+  (levels 3, 4, 5 and 9 all stand on slopes), so it needs its own round. No code changed this round; tests
+  **147**, gates **0 of 64**, trace gate **7/7**.
