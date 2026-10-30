@@ -3245,3 +3245,32 @@ that spot — but the comparison still lands inside the gate's rules: travel **1
 legs** (street45 100 %, street90 100 %, cantina 71 %, door0 stop-pose, level3 66 %). Two things it records
 for the next round: the port has no opening-script hold on level 3, and whatever stops it at
 (−0.77, −3.60) is a blocking difference worth naming the same way the door capture's was.
+
+**Phase 2 breadth: levels 4 and 6 measured, both fail their walk legs (round 120).** The spawn read added
+last round now makes a per-level leg cheap (one retail run, one port run, one comparison), and it paid for
+itself immediately by correcting an assumption: **the debug list's numbering is not the file numbering.**
+Entry 4 ("The Jedi's Lightsaber") is `04escapehouse`, not `04t_mill` (which does not exist); entry 6
+("Into the Dark Palace") is `06bbarons`. Both were confirmed by matching the booted spawn against the
+port's own level start (`walkplayer` sector 318 at (22.462, 38.213, 1.020) for 06bbarons).
+
+Measured legs, both outside the gate:
+
+```text
+level 4  walk4_spawn  retail 1.11 units  port 0.56 (50%)  port stops at (-4.41, 1.885), 0.43 short
+level 6  walk6_spawn  retail 1.08 units  port 2.11 (195%), 5 of 6 sectors off; port ends sector 78,
+                      retail 315 — the port walks on where retail is stopped
+```
+
+Level 3 is the only non-level-1 leg that passes (66 %, 2 sectors). The two new failure shapes are
+different from level 5's wedge and worth keeping apart:
+
+- **Level 4: the port stops early.** Retail walks 1.11 units from the settled pose and stops; the port
+  stops after 0.56 at (−4.41, 1.885), i.e. a surface the port blocks on that retail passes. (The level's
+  opening also rotates the body: the spawn yaw is −90.00 but the settled yaw is 17.92, so the leg was
+  captured at the settled pose — otherwise the two sides walk different directions.)
+- **Level 6: the port does not stop.** Retail halts at 1.8 s in sector 315; the port walks through and
+  ends in sector 78, having covered twice the distance. That is the opposite failure — a missing blocker
+  (a closed adjoin the level's scripts own, or a surface the port's hull lacks).
+
+Retail traces for both are committed under `tools/parity/walktrace/` so the legs can join the gate the day
+they pass; `walk-shots.tsv` carries both rows.

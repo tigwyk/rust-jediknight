@@ -335,6 +335,12 @@ trace is committed. The retail harness's unused `-SettleMs` knob now feeds a `co
 every later level's leg needs. Level 3's trace also records two known differences: the port has no
 opening-script hold (retail freezes for 600 ms), and the port stops at (−0.77, −3.60) after 1.2 s.
 
+*Progress (round 120).* Levels 4 and 6 measured with the same recipe. Both fail and stay outside the
+gate: level 4 travels 0.56 of retail's 1.11 units (50 %) and stops at (−4.41, 1.885) where retail walks
+on; level 6 travels 2.11 of 1.08 (195 %) and ends in sector 78 against retail's 315 — the port does not
+stop where retail halts. Their retail traces are committed, and the debug list's numbering was
+corrected: entry 4 is `04escapehouse`, entry 6 is `06bbarons` (not the file numbers they looked like).
+
 ### Phase 3 — Breadth, by shipped-content weight
 
 Only now take the remaining units from `gaps.md`, ordered by how many shipped levels and scripts need

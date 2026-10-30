@@ -739,3 +739,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
   how level 3's pose was learned: `Pos (-0.76, -4.73, -0.20), yaw 0.00, sector 370`.
 - Recorded in gaps: the port has no opening-script hold on level 3 (retail freezes the first 600 ms) and
   the port stops at (-0.77, -3.60) after 1.2 s.
+
+## Update — round 120
+
+- Phase 2 breadth with the new spawn read: levels 4 and 6 measured end to end. Both fail and stay outside
+  the gate — level 4 **walk4_spawn** 0.56 of retail's 1.11 units (50 %; the port stops at (-4.41, 1.885)
+  where retail walks on), level 6 **walk6_spawn** 2.11 of 1.08 (195 %; the port does not stop where retail
+  halts at 1.8 s and ends in sector 78 against retail's 315). Retail traces committed for both.
+- Corrected a standing assumption: the debug level list's numbering is not the level-file numbering —
+  entry 4 is `04escapehouse`, entry 6 is `06bbarons` (confirmed against the port's own level start).
+- Level 3's `walk3_spawn` remains the only passing non-level-1 leg (66 %, 2 sectors); trace gate 5/5.
