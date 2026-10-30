@@ -3992,3 +3992,20 @@ With round 148's fix in place (the walk-shots 8th column reaching `Invoke-JkWalk
 The harness lesson stands corrected and is recorded: the 8th column is now the single place the settle policy
 lives, retail and port both honour it, and a trace captured without it is evidence about the *harness*, not the
 port.
+
+**Level 13 joins the gate: a near-head-on hit stops instead of creeping (round 150) — 10 legs now.** The port's
+level-13 walk ended at (0.17, −2.57, **1.17**) with **health 72.6** — it fell off the ledge — where retail stops
+at (−0.5, −4.3, 2.67). The trace named the mechanism: the body hits surface **2125** (a wall, normal
+(−0.42, −0.91), z 2.55..4.45) at an almost exactly head-on angle, so the slide — `dir − normal·(dir·normal)` —
+is only a few thousandths per frame. Retail's body simply stops; the port's creep accumulates, walks the body
+past the wall's left edge (x −0.55) over a second and drops it into the lower room.
+
+The fix is the slide's own threshold: `mag` is `|dir × normal|`, the **sine of the grazing angle**, so a small
+`mag` means a head-on hit — stop (`break`) rather than slide. It was `mag < 1e-4` (only exact 0); it is now
+`mag < 0.2` (~11°). Measured: level 13 goes from **3.13 units / 3 sectors** to **1.27 against retail's 1.30
+(98 %) with 1 of 6 sector mismatches**, and `walk13_spawn` is the gate's **tenth leg** — 10 legs, 0 failures.
+Level 6 improves a little too (96 % → 98 %).
+
+Levels 3 and 11 keep their verdicts with the new rule: level 3 is 2.75 against retail's 1.71 with 4 sectors
+(slanted-floor drift), level 11 is 0.90 against 0.83 (108 %) but 5 of 6 sectors off (its genuine 1200 ms
+scripted start). Both stay documented deviations, not gate legs.

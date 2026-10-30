@@ -372,16 +372,14 @@ that into a climb. With the landing unable to leave a body higher than it was, *
 passes at 100 % with 0 sector mismatches** and joins the gate — now **7 legs, 0 failures** — and the two
 held-out walkable levels improved sharply (level 3: 208 % → 125 %, sectors 3 of 6; level 6: 190 % → 155 %).
 
-*Progress (rounds 134–149).* The sweep reached level 13 and every measured leg now carries its own verdict:
-**gated, 9 legs** — level 1's four, level 4 (100 %), level 5 (70 %), level 6 (96 %), level 9 (100 %), level 12
-(127 %, 0 sectors, round 149); **named deviation** — level 3 (slanted-floor drift, 125 % with 3 sectors), level
-11 (genuine 1200 ms scripted start delay, 108 % travel but 5 of 6 sectors), level 13 (walks off a 0.30 step
-retail stops on, 241 %); **not a walk** — levels 2, 7, 8 and 10 (script-owned openings). The harness itself was
-fixed twice on the way: the walk-shots 8th column now reaches both sides (round 148) and every row carries a
-1000 ms settle (round 149), which retired the "retail walks on 12/13" theory of rounds 145–147 — that was the
-missing settle. Slope gravity's source was recovered from the decomp and its planar implementation measured and
-reverted; the level-6 sill was closed by trimming the steep-face push's backwards component (level 6 joined the
-gate at 96 %).
+*Progress (rounds 134–150).* **Ten gated walk legs**: level 1's four, level 4 (100 %), level 5 (70 %), level 6
+(98 %), level 9 (100 %), level 12 (127 %, 0 sectors), level 13 (98 %, 1 sector). Remaining levels each carry a
+measured reason: level 3 (slanted-floor drift, 2.75 vs 1.71), level 11 (genuine 1200 ms scripted start, 108 %
+travel but 5 of 6 sectors), and levels 2/7/8/10 (script-owned openings). Walker fixes landed along the way: the
+landing may not raise a body (level 9), the steep-face push is trimmed of its backwards component (level 6), a
+near-head-on hit stops instead of creeping (level 13), actors are no longer walker obstacles (level 11), a
+doorway landing may stand a step higher, and the harness now honours the walk-shots settle column on both sides
+(rounds 148–149), which retired the "retail walks on 12/13" theory — that was the missing settle.
 
 ### Phase 3 — Breadth, by shipped-content weight
 

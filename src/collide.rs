@@ -1221,7 +1221,13 @@ impl Solids {
                             [dir[0], dir[1]], [slide[0], slide[1]], at
                         );
                     }
-                    if mag < 1e-4 || bounce == 2 {
+                    // A **near-head-on** hit has almost no tangential component, and creeping along it is
+                    // how a body rounds a wall the engine stops it at: level 13's wall (surface 2125,
+                    // normal (−0.42, −0.91)) is hit at ~8° by the walking direction, so the slide is a few
+                    // thousandths per frame — over a second it walks the body past the wall's left edge and
+                    // off the ledge (health 72.6 from the fall). `mag` is `|dir × normal|` (the sine of the
+                    // grazing angle), so a small `mag` is a head-on hit: stop rather than slide.
+                    if mag < 0.2 || bounce == 2 {
                         break;
                     }
                     dir = [slide[0] / mag, slide[1] / mag, 0.0];

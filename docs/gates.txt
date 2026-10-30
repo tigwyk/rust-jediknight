@@ -1144,3 +1144,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Walk legs now cover levels 1 (4 legs), 4, 5, 6, 9, 12 = **9 gated legs**; remaining levels have measured
   reasons (3 drift, 11 scripted delay, 13 step-off, 2/7/8/10 script-owned openings).
 - Tests **147 passed**, `--gates` **0 of 64 failed**, parity **6 thresholds, 0 failures**.
+
+## Update — round 150
+
+- Level 13's fall found and fixed: the body hit wall 2125 (normal (−0.42, −0.91)) almost head-on, so the slide
+  was a few thousandths per frame and the accumulation walked it past the wall's edge and off the ledge (health
+  72.6 from the fall). The slide now **stops on a near-head-on hit** (`mag < 0.2`, where `mag = |dir × normal|`
+  is the sine of the grazing angle), instead of creeping.
+- Measured: level 13 **3.13 units / 3 sectors → 1.27 vs retail's 1.30 (98 %) / 1 sector**; `walk13_spawn` joins
+  the gate: **10 legs, 0 failures**. Level 6 also improves 96 % → 98 %.
+- Levels 3 (2.75 vs 1.71, 4 sectors — drift) and 11 (0.90 vs 0.83, 5 sectors — genuine 1200 ms scripted start)
+  keep their documented verdicts under the new rule.
+- Tests **147 passed**, `--gates` **0 of 64 failed**, parity **6 thresholds, 0 failures**.
