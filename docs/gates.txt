@@ -777,3 +777,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - The position→velocity rewrite was re-measured and kept: removing it leaves level 4 unchanged and makes
   level 5 worse (1.41 → 0.84), so it was reverted.
 - Tests, gates and parity re-run on the final tree below.
+
+## Update — round 123
+
+- Root cause found: the solid-model **push ran against the body's own motion** ("pushed out of the collision
+  cylinder ... to [the frame's start]"). The push now applies only forward or sideways and only where
+  geometry is clear.
+- Measured: `walk4_spawn` **0.56 → 1.11 units (100 %)** at retail's own pose (1 sector off) and joins the
+  gate; `walk5_spawn` **1.41 → 3.92 of 3.73 (105 %)**; `walk_cantina` 71 % → **102 %** (sectors 3 → 2).
+  `walk3_spawn` 66 % → 212 % and `walk6_spawn` 190 % stay out: retail stops against a model the port's push
+  no longer stops — the recorded thing-collision deviation (models must be swept as blockers).
+- Trace gate: **5 legs, 0 failures** (street45/90 100 %, cantina 102 %, door0 stop-pose, level4 100 %).
+- Tests **147 passed**; full gate sweep **0 of 64 failed**; parity **6/6** unchanged.

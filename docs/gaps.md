@@ -3325,3 +3325,34 @@ Two things did land and are measured:
 - **Removing the position→velocity rewrite** (the engine keeps velocity; `drag` is the only scaling) was
   re-measured: it leaves level 4 unchanged and makes level 5 worse (1.41 → 0.84), so it was reverted. The
   rewrite is not level 4's cause; the bounce loop is.
+
+**The thing push was running against the body's own motion — fixing that unwedged levels 4 and 5 (round
+123).** The bounce-loop theory from last round was close but pointed at the wrong half. `BK_MOVE_TRACE`
+showed the geometry slide *does* advance the body ~0.0027 a frame and then the **solid-model push sends it
+straight back**:
+
+```text
+move: loop 1 at (-4.41038, 1.88500) dir (-1.0, 4.8e-06) left 0.00273
+move: pushed out of the collision cylinder at (-4.688284, 1.897734, 0.671202) radius 0.213 to (-4.4103403, 1.8848735)
+move: end at (-4.4103403, 1.8848735)  -- i.e. exactly where the frame began
+```
+
+The level-4 spawn is furniture-packed: a `table2` pushes one way and a second cylinder the other, and one
+of them pushes *backwards* along the walk. The engine's contact slides a body past a model; it never shoves
+it back the way it came. So the push is now applied only when it has a forward or sideways component
+(`dot(push, movement) >= -0.1`) and where geometry is clear. Measured:
+
+```text
+walk4_spawn  0.56 -> 1.11 units (100%), ends (-4.775, 2.321) = retail's own pose, 1 sector off  PASS
+walk5_spawn  1.41 -> 3.92 of retail's 3.73 units (105%), 3 of 6 sectors off   (near; sectors to read)
+walk_cantina 71% -> 102%, sector mismatches 3 -> 2                            PASS
+walk3_spawn  66% -> 212% (retail stops against a model the port now walks past)
+walk6_spawn  2.11 -> 2.06 units (190%, retail 1.08)                           (unchanged failure)
+```
+
+`walk4_spawn` joins the trace gate's defaults — the gate is now **5 legs, 0 failures**, with two legs from
+levels other than 1 measured (level 3 and level 5 both stay runnable with `-Only` and are documented). What
+the round *proves* about the remaining deviation: the port's solid models **push** a body, they do not
+**block** it, so a body that should stop at a prop now walks through (levels 3 and 6 overrun). That is the
+thing-collision bucket the ledger row now carries, with its retire condition (sweep the model's real
+surfaces as blockers).

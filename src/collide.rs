@@ -779,7 +779,13 @@ impl Solids {
                 // tests `Dot3(moveNorm, pushVel) < 0` before pushing the hit. Without that, a body flush
                 // against a face reports a zero-distance hit for every direction — including the slide
                 // along the wall — and the move wedges. This is the guard that makes sliding work.
-                if dot(dir, normal) >= 0.0 {
+                // `>= -1e-4`, not `>= 0`: a body resting *flush* against a face has a normal with a few
+                // millionths of tangential dust, so a slide along that face reads as `dot = -6e-6` and
+                // the face blocks it at distance 0 — the body could never slide out of a corner it was
+                // touching (level 4's doorway panel plus the portal beside it). The engine's
+                // `Dot3(moveNorm, pushVel) < 0` test carries the same intent; the tolerance keeps
+                // floating-point dust from turning "tangent" into "into".
+                if dot(dir, normal) >= -1e-4 {
                     continue;
                 }
                 let Some(t) = sphere_plane(from, dir, left, radius, normal, face.point) else {
@@ -817,7 +823,13 @@ impl Solids {
                 } else {
                     face.normal
                 };
-                if dot(dir, normal) >= 0.0 {
+                // `>= -1e-4`, not `>= 0`: a body resting *flush* against a face has a normal with a few
+                // millionths of tangential dust, so a slide along that face reads as `dot = -6e-6` and
+                // the face blocks it at distance 0 — the body could never slide out of a corner it was
+                // touching (level 4's doorway panel plus the portal beside it). The engine's
+                // `Dot3(moveNorm, pushVel) < 0` test carries the same intent; the tolerance keeps
+                // floating-point dust from turning "tangent" into "into".
+                if dot(dir, normal) >= -1e-4 {
                     continue;
                 }
                 let Some(t) = sphere_plane(from, dir, left, radius, normal, face.point) else {
@@ -991,6 +1003,9 @@ impl Solids {
         let mut dir = [delta[0] / len, delta[1] / len, 0.0];
 
         for bounce in 0..3 {
+            if std::env::var_os("BK_MOVE_TRACE").is_some() {
+                eprintln!("move: loop {bounce} at {:?} dir {:?} left {left:.5}", at, [dir[0], dir[1]]);
+            }
             match self.sweep_rooms(here, at, dir, left, radius, gates) {
 
                 (Some(hit), far, _) => {
@@ -1137,11 +1152,20 @@ impl Solids {
                     let clear = |dir: [f32; 2]| {
                         self.sweep(here, at, [dir[0], dir[1], 0.0], len, radius, gates).is_none()
                     };
-                    // Straight out only. When the wall beside the model blocks it, the body keeps the
-                    // geometry solver's position and slides along the wall next frame — the push is a
-                    // last resort, not a teleport. (A tangential shove was tried and halved the level-1
-                    // legs: it moved every body sideways by the overlap every frame.)
-                    if clear(unit) { pushed } else { at }
+                    // The push must not run **against** the frame's movement. A body squeezing past a
+                    // model's cylinder gets a radial push that is mostly backwards along its own motion
+                    // (level 4: two pieces of furniture either side of the spawn pushed the walking body
+                    // straight back to where it started, every frame, for the whole leg); the engine's
+                    // contact slides the body instead. So only pushes with a forward or sideways
+                    // component are applied, and only where geometry is clear.
+                    let want = [delta[0], delta[1]];
+                    let want_len = (want[0] * want[0] + want[1] * want[1]).sqrt();
+                    let forward = if want_len > 1e-6 {
+                        (unit[0] * want[0] + unit[1] * want[1]) / want_len
+                    } else {
+                        1.0
+                    };
+                    if forward >= -0.1 && clear(unit) { pushed } else { at }
                 }
             }
         };
