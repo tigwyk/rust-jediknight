@@ -56,3 +56,9 @@ walk6_spawn	06bbarons	22.46	38.21	1.057	0	-45.01
 #
 # walk7_spawn: level 7 (the debug list's seventh entry, 'Yun - The Dark Youth'), which is 07yun.
 walk7_spawn	07yun	-2.00	-0.80	-0.043	0	0
+#
+# walk8_spawn: level 8 (the debug list's eighth entry, 'Palace Escape'), which is 08escape88.
+walk8_spawn	08escape88	52.56	62.82	34.457	0	90
+#
+# walk9_spawn: level 9 (the debug list's ninth entry, 'Fuel Station Launch'), which is 09fuelstation.
+walk9_spawn	09fuelstation	1.07	5.46	0.107	0	54.99

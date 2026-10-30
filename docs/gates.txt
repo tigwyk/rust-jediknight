@@ -875,3 +875,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   re-reads level 3: its original capture is a real walk (steady yaw), the 8 s-settled one is a cutscene by
   2.4 s — so a settle is only valid while the yaw stays steady.
 - Suites: tests **147 passed**; trace gate **6 legs, 0 failures**.
+
+## Update — rounds 131–132
+
+- Level 8 (`08escape88`) measured: spawn (52.56, 62.82, 34.42) yaw 90.00 sector 399; forward held moves
+  **0.02 units** with steady yaw — the leg-quality check fires (`the body travelled 0.02 units … not a plain
+  walk`). Fourth script-owned opening (2, 6, 7, 8); trace committed as a measurement, not a gate leg.
+- Level 9 (`09fuelstation`) measured: spawn (1.07, 5.46, 0.07) yaw 54.99 sector 874; retail walks
+  **1.68 units** on a steady yaw to (−0.29, 6.45, 0.07). The port matches the distance (1.75, 104 %) but
+  **climbs 0.34** and ends airborne on an edge (`support None floor None` at (−0.19, 6.69, 0.37)) against a
+  0.55-high ledge (surfaces 2514/2515) — 4 of 6 sectors off, so not gateable. One more measured instance of
+  "the port climbs where retail walks flat"; retail trace committed.
+- Suites: tests **147 passed**; trace gate **6 legs, 0 failures**.

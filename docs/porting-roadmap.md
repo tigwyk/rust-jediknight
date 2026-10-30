@@ -358,6 +358,16 @@ took level 4 from 50 % to 100 % and level 5 from 1.41 to 3.02 units), the **step
 face's top edge, so stairs climb), and the **walk-leg start pose** (retail's own trace start, not the
 spawn `coords`). The next item in Phase 2's own order is the rest of levels 2–5, then all 34: the recipe is
 
+*Progress (rounds 130–132).* The sweep reached levels 7, 8 and 9, and the **leg-quality check** the
+harness now runs (`camera is scripted`, `the body travelled … not a plain walk`) separates the two shapes
+it found: **script-owned openings** on levels 2, 6, 7 and 8 (level 7: body pinned to 0.11 units while the
+yaw spans 240.1°; level 8: 0.02 units with a steady yaw), and **real walks** on level 9, where retail moves
+1.68 units on a steady yaw and the port matches the distance (104 %) but climbs 0.34 and ends airborne on an
+edge against a 0.55-high ledge — one more instance of "the port climbs where retail walks flat", now with
+the pose and surface ids recorded. Retail traces for levels 7, 8 and 9 are committed; the cutscene bucket
+(camera + player lock) is a ledger row with its retire condition, so the gate stays at the 6 measured
+legs until that subsystem lands or a post-cutscene pose is captured.
+
 ### Phase 3 — Breadth, by shipped-content weight
 
 Only now take the remaining units from `gaps.md`, ordered by how many shipped levels and scripts need

@@ -3522,3 +3522,22 @@ plain walk` when the window records under 0.3 units. Both fire on level 7's two 
 level 3: the *original* spawn capture (yaw 0 for the whole leg) is a genuine walk, while the 8 s-settled one
 shows a scripted camera by 2.4 s (yaw snapping to 118.65) — so a settle is only a valid fix while the yaw
 stays steady, and the leg-quality check is what tells the two apart.
+
+**Levels 8 and 9 measured: level 8 is another pinned opening, level 9 is a real walk the port climbs out of
+(rounds 131–132).** The sweep continued in shipped-content order.
+
+**Level 8 (`08escape88`, "Palace Escape")** — spawn `Pos (52.56, 62.82, 34.42), yaw 90.00, sector 399`.
+With forward held the body moves **0.02 units** over the window with the recorded yaw constant at 90, and the
+harness's new leg-quality check fires (`WARNING the body travelled 0.02 units … not a plain walk`). That is
+the pinned-opening signature again — the fourth level whose opening is script-owned (2, 6, 7, 8) — so the
+trace is committed as the measurement, not as a gate leg.
+
+**Level 9 (`09fuelstation`, "Fuel Station Launch")** — spawn `Pos (1.07, 5.46, 0.07), yaw 54.99, sector 874`.
+This one *is* a walk: retail pauses 600 ms and then moves 1.68 units on a steady yaw of 54.99, ending
+(−0.29, 6.45, 0.07). The port matches the **distance** (1.75 units, 104 %) but not the path: it climbs
+0.34 in z and comes to rest *airborne* on an edge — the walker trace shows `support None floor None` at
+(−0.19, 6.69, 0.37), pressed against a 0.55-high ledge (surfaces 2514/2515, `top 0.55`), while retail walks
+flat at z 0.07 the whole way. Four of six samples sit in the wrong sector, so the leg is not gateable yet;
+what it records is one more instance of "the port climbs where retail walks flat", with the exact pose and
+surface ids for the next read (the step predicates there reject with `clear false advance false` and the
+body's support is lost, which is how it ends up standing on nothing).
