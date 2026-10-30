@@ -887,3 +887,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
   0.55-high ledge (surfaces 2514/2515) — 4 of 6 sectors off, so not gateable. One more measured instance of
   "the port climbs where retail walks flat"; retail trace committed.
 - Suites: tests **147 passed**; trace gate **6 legs, 0 failures**.
+
+## Update — round 133
+
+- **Root cause of the climb**: a landing could raise a body by `rest - radius` (0.055) per frame because the
+  filter tested `floor <= feet` while it places the body at `floor + rest`. Fixed to `floor + rest <= pos[2]`
+  (a landing never leaves the body higher than it was). Level 9's trace showed the compounding exactly:
+  blocked at a 0.55-high ledge, the body rose 0.07 → 0.41 in eight frames and ended on the ledge edge.
+- Measured: `walk9_spawn` **1.75 → 1.68 units of retail's 1.68 (100 %), sectors 4 → 0**, ends at retail's own
+  pose — it **joins the gate**, which is now **7 legs, 0 failures**. `walk3_spawn` 208 % → **125 %** (sectors
+  3 of 6), `walk6_spawn` 190 % → **155 %**, `walk5_spawn` 81 % → 68 % (still passing).
+- The step candidate also requires the blocking face's `top` to be climbable; no measurement moved from that
+  alone, so it is recorded as a guard rather than the fix.
+- Tests **147 passed**; full gate sweep **0 of 64 failed**; parity re-captured **6/6** (scores unchanged).

@@ -13363,7 +13363,13 @@ fn walker_step(
         let land = solids
             .floor_under(*sector, *pos, -drop + rest, radius)
             .filter(|(floor, travelled, _)| {
-                *travelled <= -drop + rest + 1e-3 && *floor <= at_feet + 1e-3
+                // The body may only be *placed on* a floor, never raised onto one. `floor + rest` is
+                // where it would rest, so it must not exceed where the body already is: with `rest`
+                // (0.120114) greater than `radius` (0.065), the older `floor <= feet` test allowed a
+                // landing to lift the body by `rest - radius` — 0.055 a frame — and against a step's
+                // corner that compounded into a climb (level 9: retail stops at the 0.55-high ledge,
+                // the port rose 0.07 -> 0.41 over eight frames and ended standing on its edge).
+                *travelled <= -drop + rest + 1e-3 && *floor + rest <= pos[2] + 1e-3
             })
             .map(|(floor, _, _)| (floor + rest, 0usize));
         match land.map(|(z, _)| z) {

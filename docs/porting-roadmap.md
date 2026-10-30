@@ -365,6 +365,15 @@ yaw spans 240.1°; level 8: 0.02 units with a steady yaw), and **real walks** on
 1.68 units on a steady yaw and the port matches the distance (104 %) but climbs 0.34 and ends airborne on an
 edge against a 0.55-high ledge — one more instance of "the port climbs where retail walks flat", now with
 the pose and surface ids recorded. Retail traces for levels 7, 8 and 9 are committed; the cutscene bucket
+
+*Progress (round 133).* The "walker climbs where retail walks flat" bucket was root-caused and fixed: a
+landing could raise a body by `rest − radius` (0.055) per frame, so a body blocked at a ledge compounded
+that into a climb. With the landing unable to leave a body higher than it was, **level 9 `walk9_spawn`
+passes at 100 % with 0 sector mismatches** and joins the gate — now **7 legs, 0 failures** — and the two
+held-out walkable levels improved sharply (level 3: 208 % → 125 %, sectors 3 of 6; level 6: 190 % → 155 %).
+What is left in Phase 2 is now a short list: level 3 needs its 3 sector mismatches read (lateral drift on
+slanted ground), level 6 its 0.55 sill, and levels 2, 6, 7, 8 their script-owned openings (the cutscene
+row).
 (camera + player lock) is a ledger row with its retire condition, so the gate stays at the 6 measured
 legs until that subsystem lands or a post-cutscene pose is captured.
 

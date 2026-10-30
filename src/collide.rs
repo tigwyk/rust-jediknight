@@ -1126,7 +1126,14 @@ impl Solids {
                     }
                     // A low obstruction is a step rather than a wall: retry the rest of the move from
                     // one step up. `hit.point` is the centre at contact, so the feet are `radius` below.
-                    let low = hit.point[2] - radius < pos[2] - radius + step;
+                    // A step candidate needs the *face itself* to be climbable, not just its contact point.
+                    // A tall ledge's contact is at the body's feet (the body is standing at its base), so
+                    // the contact-height test alone called it "low" and the walker could step up against
+                    // it frame after frame — level 9's body climbed 0.34 up a 0.55-high ledge while retail
+                    // simply stopped at its base. `Sweep::top` is the face's highest vertex; the step
+                    // allowance is measured against that.
+                    let low = hit.point[2] - radius < pos[2] - radius + step
+                        && hit.top <= pos[2] - radius + step + 1e-3;
                     if std::env::var_os("BK_WALK_TRACE").is_some() {
                         eprintln!(
                             "walk trace:   step candidate low {low} contact z {:.3} feet {:.3} step {step:.3}",

@@ -3541,3 +3541,34 @@ flat at z 0.07 the whole way. Four of six samples sit in the wrong sector, so th
 what it records is one more instance of "the port climbs where retail walks flat", with the exact pose and
 surface ids for the next read (the step predicates there reject with `clear false advance false` and the
 body's support is lost, which is how it ends up standing on nothing).
+
+**A landing may not raise a body — that was the climb, and it puts level 9 in the gate (round 133).** The
+walker's landing probe places the body at `floor + rest`, where `rest` is the model's insert height
+(0.120114) and `radius` is the collision radius (0.065). The filter that was supposed to stop a landing from
+lifting the body read `floor <= feet` — but because `rest > radius`, that still allowed a lift of
+`rest - radius` (0.055) per frame, and against a step's corner it compounded into a climb. Level 9's trace
+shows it exactly: the body walks retail's path for 1.7 units (both agree at (−0.29, 6.45)), then, blocked by
+a 0.55-high ledge, the landing path raises it 0.07 → 0.41 over eight frames and leaves it standing on the
+ledge's edge with `support None`, oscillating 0.372 ↔ 0.409 forever.
+
+The fix is the condition the comment already intended: a landing must not leave the body higher than it
+already is —
+
+```rust
+*travelled <= -drop + rest + 1e-3 && *floor + rest <= pos[2] + 1e-3
+```
+
+Measured, with every gate leg re-run:
+
+```text
+walk9_spawn  1.75 -> 1.68 units of retail's 1.68 (100 %), sector mismatches 4 -> 0,
+             ends (-0.2896, 6.4460) = retail's own (-0.29, 6.45)      PASS, joins the gate
+walk3_spawn  4.70 -> 2.82 units of retail's 2.26 (208 % -> 125 %), sectors 3 of 6   (inside travel)
+walk6_spawn  2.06 -> 1.67 units of retail's 1.08 (190 % -> 155 %)                   (closer)
+walk5_spawn  3.02 -> 2.52 units of retail's 3.73 (81 % -> 68 %)                     still PASS
+trace gate: 7 legs, 0 failures
+```
+
+The `low` step candidate also gained a `hit.top <= feet + step` condition (a step needs the *face* to be
+climbable, not just its contact point). It did not change any measurement on its own — the landing lift was
+the climb — so it is recorded as a guard, not as the fix.
