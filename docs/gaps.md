@@ -3274,3 +3274,21 @@ different from level 5's wedge and worth keeping apart:
 
 Retail traces for both are committed under `tools/parity/walktrace/` so the legs can join the gate the day
 they pass; `walk-shots.tsv` carries both rows.
+
+**Levels 4 and 6 bucket to two known deviations, not two new bugs (round 121).** Naming the blockers with
+`--surfaces-at` and `BK_MOVE_TRACE` split the two failures cleanly:
+
+- **Level 4's early stop is a door.** The port is stopped by **surface 6929**, a solid face at y = 1.95 in
+  sector 800 whose neighbour 6928 is the *portal* 3127 — i.e. a doorway whose panel is a level surface. The
+  level's scripts slide that panel open for retail; the port draws and collides the authored position, so
+  the door is a wall here. `BK_GATES_OPEN=1` changes nothing (it is a solid panel, not an adjoin gate). That
+  is a deviation the ledger did not have: **doors are static surfaces**, now on the ledger with this
+  measurement and its retire condition (scripted surface/sector movement).
+- **Level 6's overrun is the missing thing collision.** Retail halts at (23.31, 38.85, 1.14) with the props
+  — `table4`, `chair04`, `woodcrate3`, a detonator and a battery — sitting 0.8 to 1.3 units ahead at
+  y 39.6…40.1; the port pushes past solid-model cylinders instead of being stopped by them, which is the
+  already-recorded "thing collision is absent" gap. Nothing about level 6 is a new failure mode.
+
+So both legs stay outside the gate for reasons already on the ledger (one of them newly written down), and
+the fix order for Phase 2 is the same as Phase 1's: door movement first (it unblocks level 4's leg and the
+`--door` work), then thing collision (which unblocks level 6 and the cantina leg's surviving sector count).
