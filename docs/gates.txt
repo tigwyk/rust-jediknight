@@ -1972,3 +1972,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
   was warranted; the remaining approximations stay ledgered (vertical limit, forward half-space nuance, model-offset
   eye, target radius).
 - No game run and no port window; tests unchanged at **150 passed**.
+
+## Update — round 214
+
+- **AI class layout and defaults recovered** from `sithAIClass_LoadEntry`: `+0x08` alignment, `+0x0c` rank, `+0x10`
+  maxstep (default 0.5), `+0x14` sightdist (20.0), `+0x18` heardist (10.0), `+0x20` wakeupdist, `+0x24` accuracy (0.5),
+  `+0x1c` fov stored as a trig value of `0.5·fov` (multiplier `0.5` at `0x523128`).
+- Two named consequences: **`wakeupdist` is a class key the port does not parse** (kept in `params`, unread — the
+  "how far a shot wakes an actor" roll, part of the scan recursion), and the **instinct entry layout** is 0x90 bytes
+  with the three registration words at `+0x0/+0x4/+0x8`, the handler at `+0x8c`, sixteen float arguments at `+0x0c`
+  and their rounded copies at `+0x4c` — which is why `LookForTarget` reads its interval from `+0x4c` (the first
+  argument, matching the port's weight-as-first-number model) and what `PrimaryFire` reads for pacing.
+- Still open and recorded as such: the exact role of the `1 − fov-trig` comparison inside `CheckSightThing` does not
+  yet line up with a cone of `fov` degrees, so it stays a question rather than a claimed formula.
+- No game run and no port window; docs only. Tests **150 passed**.

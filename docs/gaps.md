@@ -5731,3 +5731,31 @@ So the port's `Ai::sees` is equivalent to the engine's **horizontal** test for a
 yaw| ≤ fov/2` ⟺ the dot test against `sin(half)`), and the named approximations are exactly the remaining ones: the
 separate vertical limit, the forward half-space nuance, the model-offset eye point, and the target radius. No code
 change was warranted this round — the flat test is not wrong, just narrower than the engine only in those listed ways.
+
+**The AI class layout and its defaults are recovered from `sithAIClass_LoadEntry` (round 214).** The loader sets these
+defaults first, then overwrites each key the parameter line carries, so an `.ai` file that omits a key still gets a
+defined value:
+
+| class offset | key | default |
+| --- | --- | --- |
+| `+0x08` | `alignment` | 0 (set only when present) |
+| `+0x0c` | `rank` (5-char key) | 0 |
+| `+0x10` | `maxstep` | **0.5** |
+| `+0x14` | `sightdist` | **20.0** |
+| `+0x18` | `heardist` | **10.0** |
+| `+0x20` | `wakeupdist` | 0 |
+| `+0x24` | `accuracy` | **0.5** |
+| `+0x1c` | `fov` | 0 (stored as a trig value of **`0.5 · fov`**: the multiplier at `0x523128` is `0.5`, and the loader runs `stdMath_SinCos` before storing) |
+
+Two consequences worth naming. First, **`wakeupdist` is a class key this port does not parse** — `ai.rs` keeps it in
+`params` but nothing reads it, and it is one of the class fields `sithAI_GetThingsInView`'s caller threads into the
+scan recursion (`param_3` grows by the sector-entry distance plus the class's wakeup radius), i.e. the roll for how far
+a shot wakes a nearby actor; it belongs on the list of acquisition approximations. Second, the **instinct entries are
+0x90 bytes**: `+0x0`/`+0x4`/`+0x8` are the three registration words (`p3`, `p4`, `p5`), `+0x8c` the handler pointer,
+**sixteen float arguments at `+0x0c`** and their rounded copies at `+0x4c`. That is why `LookForTarget`'s handler reads
+its interval from `+0x4c` — the *first argument* (500 in the shipped line), not the weight — and the port's
+`weight`-as-first-number model is equivalent for that read (500 ms/1000). The same layout explains `PrimaryFire`'s
+argument reads (`+0x10…+0x1c` four args, `+0x24`/`+0x28` two probabilities, `+0x70` its pacing value), which is the
+next piece for the engagement-timing comparison; the exact axis/limit roles inside `CheckSightThing` are still being
+worked out (the `1 − fov-trigh` comparison there does not yet line up with a cone of `fov` degrees, so it stays an open
+question rather than a claimed formula).
