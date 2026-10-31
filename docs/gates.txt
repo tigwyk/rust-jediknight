@@ -1863,3 +1863,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
   `--gates` reported "no verdict". The gate now **fast-forwards the sleep deadline** (`vm.resume`'s due time), which
   still exercises the resume path and runs in **1.7 s**.
 - `--gates`: **65 of 65, 0 failed, 0 skipped** (`sight-live` passes). Tests **149 passed**.
+
+## Update — round 207
+
+- **Retail AI instrument discovered**: `aistatus <index>` dumps the AI class, flags, moods, nextUpdate and every
+  instinct's params/mask/mode (index = AI-list position; a thing index is rejected, and the bare form dumps level-load
+  timings). Fixture committed at `tools/parity/aistatus-01narshadda.txt`.
+- Level 1 has **no combat AI** (the only armed actor is the patrolling intro Ry, cog 30, whose variables are patrol
+  positions; the bartender's guards are non-combat), so the engagement-timing comparison needs a trooper level (2/3).
+- The port's `--ai-live` gate engages on level 1: 1 shot at 3 units, health 100, `--- ai-live check passed ---`.
+- Tests **149 passed** (no code change).

@@ -5504,3 +5504,32 @@ advances slowly — `--gates` timed out with "(no verdict)". The gate now **fast
 (`vm.resume`'s due time moves to `vm.now`, so `resume_sleeping_labels` resumes it next frame): the resume path is still
 exercised, and the gate runs in **1.7 s**. `--gates` is **65 of 65, 0 skipped** again, with `sight-live` passing.
 `cargo test --release` **149 passed**.
+
+**Retail's AI instrument is found: `aistatus <index>` dumps class, flags, moods and instincts (round 207).** Phase 1
+step 5 needs a way to read the engine's AI state, and the dev console has one — the syntax is an index into the
+**AI list**, not a thing:
+
+```
+>aistatus 3
+AI Status dump for thing 29 (powerdroid).
+Class 'gonkroam.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.0/0.0/0.0/0.0, nextUpdate=0, mask=0x7, mode=0x4.
+...
+
+>aistatus 0
+Class 'rydefault.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts: ... 11 rows with mask/mode words ...
+
+>aistatus 207
+cannot process AIStatus command.   (a thing index is out of range)
+>aistatus
+0.004000 seconds to parse section soundclass.   (bare form dumps level-load timings, not AI state)
+```
+
+The capture is committed as `tools/parity/aistatus-01narshadda.txt`. What it also settles: **level 1 has no combat
+AI**. Its only armed actor is the patrolling intro Ry (thing 207, `01_initialry.cog`, cog 30) whose variables are
+patrol positions (`curpos`, `ck`, `waa`, `pos1..pos5`), and the bartender's guards are `01_bartender.cog` things with
+no combat state. The port's own `--ai-live` gate still engages correctly on this level — one shot at 3 units, health
+100 — but a *timing* comparison needs a level with troopers (2/3), which is the next round's target: capture
+`aistatus <n>,wait:…` timelines there and compare the same instinct/mode transitions against the port's AI trace.
