@@ -1233,3 +1233,19 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - `SetCameraFocus(slot, 0)` is the script's "camera off" idiom (thing 0 = the player), which the port already
   treats as no script camera.
 - Tests **147 passed**, trace gate **12 legs, 0 failures**.
+
+## Update — rounds 156–157
+
+- `sithCamera_Update` modes read: **1** first person (thing matrix + strafe lean), **4** chase (thing + 0xb8,
+  eye + 0x168, boom pull, LookAt at the secondary focus), 0x20 overhead, 0x40 free camera, 0x80 fixed matrix.
+  The level-14 post-cutscene view must be **mode 4 on the prone player** — that is the knockdown view item.
+- Level 10's player flags are `0x8` (level 8: `0x81`), so the knockdown flags (0xA00000, levels 7/14) are not
+  its pin; its body simply cannot go where the port climbs.
+- Route rows re-measured with the current build: catwalk **0.4560**, door **0.4239** (others 0.66–0.74).
+  Retail's door reference is at the row's pose (`coords Pos (1.40, 9.72, 6.32) yaw 105`, `warp_verified`), and
+  the port's capture uses the same eye/body and the engine's 90° horizontal FOV — yet the port's door is
+  **2× zoomed** (texture, not geometry): model texverts are divided by the whole texture image
+  (`[t[0] / tex_size.0, t[1] / tex_size.1]`) while a JK material's cels live in one image, so a half-width cel
+  is mapped into half the UV range. Next: divide model UVs by the **cel** size and re-measure both rows.
+- Tests **147 passed**, `--gates` **0 of 64 failed**, trace gate **12 legs, 0 failures**, parity **6 thresholds,
+  0 failures**.

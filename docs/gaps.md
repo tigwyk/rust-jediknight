@@ -4144,3 +4144,34 @@ mesh names a camera as a thing track — `ponytail:` the engine's root-track rul
 Also recorded: `SetCameraFocus(slot, 0)` is the script's own "camera off" idiom — thing 0 is the player in
 these levels, so the engine reads it as "stop focusing a camera thing", which the port already treats as no
 script camera.
+
+**The engine's camera modes are read in full, and the door row's gap is a texture scale, not a pose (rounds
+156–157).** Two rounds of triage on the two route rows that never gated (`route_catwalk` 0.4560,
+`route_door` 0.4239 — the other five are 0.66–0.74).
+
+*Camera modes.* `sithCamera_Update` (004c56b0) switches on a camera entry's mode word: **1** copies the focus
+thing's matrix and adds the player's strafe lean — first person; **4** is the chase view the port models
+(`thing + 0xb8` position, `thing + 0x168` eye offset, the aim from the thing's angles, `sithCamera_
+SearchSectorInRadius`'s 0.02-radius boom pull, then `rdMatrix_LookAt` at the secondary focus); **0x20** an
+overhead offset, **0x40** a free camera built from a direction and two up-vectors, **0x80** a fixed matrix.
+That settles what the post-cutscene level-14 view must be: mode 4 on the prone player, not the player camera —
+the next item for that bucket.
+
+*Level flags.* Level 10's player carries only `0x8` (`0x81` on level 8), so the knockdown flags that level 7 and
+14 set (`0xA00000`) are not level 10's pin; its body simply cannot walk where the port climbs 5.06 units.
+
+*The door pair.* Retail's reference is **not stale and is at the row's pose**: re-captured with
+`-SettleMs 20000`, the JSON's own `coords` read `Pos: (1.40, 9.72, 6.32) PYR: (0.79, 105.00, 0.79)` — the row's
+eye `(1.400084, 9.700065, 6.357114)` yaw 105, `warp_verified` true. The port's own capture runs the same pose
+(`--shot-at` = the eye, `--warp` = the body). Both therefore stand at the same point with the engine's 90°
+horizontal FOV (`ENGINE_H_FOV_DEG`), and yet the port's door fills the frame where retail's occupies about half
+of it: the door's *texture* is **2× zoomed** (its slats are twice as blocky, the central red motif twice as
+wide), while the geometry — the doorway, the wall around it — lines up. The model mesh builder divides a
+model's texverts by the **whole texture image** (`[t[0] / tex_size.0, t[1] / tex_size.1]`), and a JK material's
+cels live in one image: a door texvert that addresses a half-width cel is then mapped into half the UV range,
+which is exactly a 2× zoom. That is the named next step: divide model UVs by the **cel** size (the level's own
+surface path already tracks animated cels), then re-measure the two rows.
+
+Also recorded from round 156: `sithControl_PlayerMovement`'s five speed multipliers are all read (walk/run,
+slow modifier, crouch, thing flag 0x200000, and the `(templateFlagsByte & 1) && (playerFlags & 0x120000)`
+test), and the camera-mode table above comes from the same read-through.
