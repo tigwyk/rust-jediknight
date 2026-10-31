@@ -1998,3 +1998,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Audit wording corrected: "91 take loader defaults", samples labelled `defaulted class:` instead of `odd class:`;
   counts unchanged (this changed what the classes mean, not how many there are). `--audit` still passes.
 - No game run and no port window: the audit and asset reads are pre-app/headless.
+
+## Update — round 216
+
+- New headless probe **`--grep-assets <text>`**: literal, case-insensitive search over every text archive entry,
+  printing `file:line: text` plus a summary — one pass replaces hundreds of `--asset` reads for "does anything use
+  this key" questions.
+- Measured the class-key usage across the **231 shipped `.ai` files**: `alignment`/`rank`/`fov`/`sightdist`/`heardist`
+  are set by all 231; **`maxstep` by 197 (34 take the default 0.5)**; **`accuracy` by 159 (72 take the default 0.5)**;
+  **`wakeupdist` by none**. So of the loader defaults only `maxstep` and `accuracy` are exercised by shipped content.
+- Two earlier claims corrected against that measurement: round 215's "four omit `accuracy`" is actually **72** (91
+  defaulted classes = 34 maxstep + 72 accuracy − 15 in both), and `wakeupdist` is **content-unused**, so the port's
+  missing read is measured as harmless rather than an active acquisition gap.
+- No game run and no port window; tests unchanged at **151 passed**.

@@ -5750,7 +5750,9 @@ defined value:
 Two consequences worth naming. First, **`wakeupdist` is a class key this port does not parse** — `ai.rs` keeps it in
 `params` but nothing reads it, and it is one of the class fields `sithAI_GetThingsInView`'s caller threads into the
 scan recursion (`param_3` grows by the sector-entry distance plus the class's wakeup radius), i.e. the roll for how far
-a shot wakes a nearby actor; it belongs on the list of acquisition approximations. Second, the **instinct entries are
+a shot wakes a nearby actor. **Measured in round 216: none of the 231 shipped `.ai` files sets it** (`--grep-assets
+wakeupdist` → 0 files), so the loader default 0 applies everywhere and the missing read costs shipped content nothing —
+it is a content-unused field, not an active gap. Second, the **instinct entries are
 0x90 bytes**: `+0x0`/`+0x4`/`+0x8` are the three registration words (`p3`, `p4`, `p5`), `+0x8c` the handler pointer,
 **sixteen float arguments at `+0x0c`** and their rounded copies at `+0x4c`. That is why `LookForTarget`'s handler reads
 its interval from `+0x4c` — the *first argument* (500 in the shipped line), not the weight — and the port's
@@ -5760,9 +5762,26 @@ next piece for the engagement-timing comparison; the exact axis/limit roles insi
 worked out (the `1 − fov-trigh` comparison there does not yet line up with a cone of `fov` degrees, so it stays an open
 question rather than a claimed formula).
 
+**Which class keys the shipped content actually uses (round 216, `--grep-assets`, 231 `.ai` files).** This is what
+decides which loader defaults can matter in play:
+
+| key | files that set it | files taking the default |
+| --- | --- | --- |
+| `alignment`, `rank`, `fov`, `sightdist`, `heardist` | **231 of 231** | none |
+| `maxstep` | 197 | **34** (default 0.5) |
+| `accuracy` | 159 | **72** (default 0.5) |
+| `wakeupdist` | **0** | all (default 0) |
+
+So of the loader's defaults only `maxstep` and `accuracy` are exercised by shipped content, and the round-215 fix
+matters exactly there — in particular the **72 classes that omit `accuracy`**, which the port would otherwise have run
+at accuracy 0 (never missing) instead of the engine's 0.5. The new headless probe is `--grep-assets <text>`: a literal,
+case-insensitive search over every text archive entry, printing `file:line: text` and a summary. It is how a
+"does anything use this key" question is answered in one pass instead of 231 reads.
+
 **Omitted AI parameters now take the engine's defaults, not zero (round 215).** The headless `--audit` pass reported
-**91 of the 231 shipped `.ai` classes take a default for at least one parameter** (four omit `accuracy` entirely, e.g.
-`misc\ai\boc.ai`). `sithAIClass_LoadEntry` writes the defaults *before* it reads the parameter line — `maxstep` 0.5,
+**91 of the 231 shipped `.ai` classes take a default for at least one parameter**; round 216's `--grep-assets` count
+shows that is the union of the **34 classes without `maxstep`** and the **72 without `accuracy`** (with 15 in both, hence
+91). `sithAIClass_LoadEntry` writes the defaults *before* it reads the parameter line — `maxstep` 0.5,
 `sightdist` 20.0, `heardist` 10.0, `accuracy` 0.5 — so a missing key is a normal shipped class, not damage. The port's
 parser started from zero instead, which made those classes **blind** (`sightdist` 0) and **perfectly accurate**
 (`accuracy` 0, where the engine gives 0.5). `ai::parse` now starts from the loader's four defaults and only the keys a

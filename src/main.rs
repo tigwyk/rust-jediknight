@@ -449,6 +449,10 @@ fn main() {
     // matching a `prefix*` pattern. The shipped data is read directly, so a format question is
     // answered without launching the game.
     let mut asset: Option<String> = None;
+    // `--grep-assets <text>`: every archive entry whose text contains a literal, with the matching
+    // line. The shipped files are small text formats (`.jkl`, `.ai`, `.cog`, `.snd`, `.key`), so a
+    // "does anything actually use this key" question is one headless pass instead of 231 file reads.
+    let mut grep_assets: Option<String> = None;
     // `--stand <template>`: put the player next to the first thing of that template, so an
     // actor can be watched in the world instead of only in the runtime.
     let mut stand: Option<String> = None;
@@ -663,6 +667,7 @@ fn main() {
                 }
             }
             "--asset" => asset = arg_value(&args, &mut i).cloned(),
+            "--grep-assets" => grep_assets = arg_value(&args, &mut i).cloned(),
             "--shot" => shot = arg_value(&args, &mut i).cloned(),
             "--fall" => fall_check = true,
         "--falldeath" => falldeath_check = true,
@@ -6596,6 +6601,32 @@ fn main() {
                 }
             }
         }
+        return;
+    }
+
+    // `--grep-assets <text>`: a literal, case-insensitive search over every archive entry that is
+    // text. One pass over the shipped data answers "does anything use this key/word", which is how
+    // a port-side field with no reader gets checked against the content instead of guessed at.
+    if let Some(needle) = grep_assets {
+        let needle = needle.to_ascii_lowercase();
+        let mut files = 0usize;
+        let mut hits = 0usize;
+        for name in gobs.names() {
+            let Some(data) = gobs.read(&name) else { continue };
+            let Ok(text) = std::str::from_utf8(&data) else { continue };
+            let text = text.to_ascii_lowercase();
+            if !text.contains(&needle) {
+                continue;
+            }
+            files += 1;
+            for (number, line) in text.lines().enumerate() {
+                if line.contains(&needle) {
+                    hits += 1;
+                    println!("{name}:{}: {}", number + 1, line.trim());
+                }
+            }
+        }
+        println!("grep-assets: {hits} line(s) in {files} file(s) contain {needle:?}");
         return;
     }
 
