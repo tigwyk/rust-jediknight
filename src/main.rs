@@ -22503,9 +22503,22 @@ struct ShotFrame(u32);
 #[derive(Resource)]
 struct CaptureDt(Option<f32>);
 
-/// The step the simulation systems use: the capture's fixed step, else the frame's own delta.
+/// The step the simulation systems use: the capture's fixed step, else `BK_FIXED_DT` if it is set,
+/// else the frame's own delta. The walker already pins itself to `1/60` on a capture and to
+/// `BK_FIXED_DT` otherwise; without the same rule here the *scripts* advanced on the wall clock, so a
+/// walk trace mixed two clocks and read different numbers at different frame rates (the trace gate's
+/// `walk5_spawn` flake at ~2 fps). One pinned step for every system makes the trace a function of the
+/// frame count, which is what the comparison assumes.
 fn sim_dt(time: &Time, capture: Option<&CaptureDt>) -> f32 {
-    capture.and_then(|c| c.0).unwrap_or_else(|| time.delta_secs().min(0.1))
+    if let Some(step) = capture.and_then(|c| c.0) {
+        return step;
+    }
+    static FIXED: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    let fixed = *FIXED.get_or_init(|| {
+        std::env::var_os("BK_FIXED_DT")
+            .map(|_| env_f32("BK_FIXED_DT", 1.0 / 60.0).clamp(1.0 / 240.0, 0.1))
+    });
+    fixed.unwrap_or_else(|| time.delta_secs().min(0.1))
 }
 
 /// The level's scripts running against the renderer: the world state they mutate, the

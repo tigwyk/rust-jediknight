@@ -1532,3 +1532,23 @@ running app.--carry-check --start 01narshadda                        0   level 2
   call**, so the pin is not set through those verbs in the walk window.
 - Reusable workflow recorded (program identity `target-59ce8a1b8134.EXE`; interior labels need `search_procedures`;
   quote only `normalized_result` from bulky error payloads). Tests **149 passed**.
+
+## Update — round 180
+
+- **`walk5_spawn` is not a per-run flake**: two back-to-back runs at ~2 fps produced byte-identical traces and the
+  same result (ends at (7.8225,12.1534,0.4202) sector 35; port 3.90 units; 5 of 6 sector mismatches). Its numbers
+  changing between sessions (3.09/3 in round 169, 3.90/5 since round 171) is therefore a session-level difference,
+  not run-to-run noise — the "fps flake" label is wrong and the leg needs a real investigation.
+- Wall-clock audit: the only `delta_secs` reads are `sim_dt`'s fallback, `walk_player`'s fallback (both bypassed in
+  a capture) and `--complete-after`'s wait (flow only).
+- `sim_dt` now honours **`BK_FIXED_DT`** as well as `CaptureDt`, matching `walk_player`: before this, a live check run
+  advanced the walker on the pinned step and the scripts on the wall clock. Capture runs are unaffected (measured).
+- Tests **149 passed**.
+
+## Update — round 180 (gate)
+
+- Full walk-trace gate after the clock fix: **15 legs, 2 failures**, both reproducible: `walk5_spawn` 3.90/3.73 with 5
+  sector mismatches and `walk6_spawn` 1.35/1.08 with 5 (gate allows 2 each). The other 13 legs pass, including
+  `walk17_spawn` (117 %, 0), `walk19_spawn` (stop-pose), `walk26_spawn` (0.42, 0).
+- Both failing levels are the `06*barons` pair, whose doors and Baron actors run scripted sequences inside the walk
+  window; the port keeps walking/crossing where retail stops. This is the measured open defect for a later round.

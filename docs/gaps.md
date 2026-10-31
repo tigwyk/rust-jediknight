@@ -4824,3 +4824,41 @@ of the thing's typeflags word), alongside `param_1[0x4c] &= 0xffbfffff` and `par
 resets those flags rather than setting them, and neither `typeflags & 0x202` (the `sithControl_Update` gate) nor
 `thingflags & 8` (the `sithThing_UpdateMove` gate) is set by it — the pinned state remains an *actor* state, not a
 player-spawn one.
+
+**Two identical walk-trace runs prove `walk5_spawn` is not a per-run flake — and one clock now serves the whole sim
+(round 180).** Running `walk5_spawn` twice back to back at ~2 fps gave **byte-identical traces** and identical
+results both times:
+
+```
+run 1: ends at (7.8225, 12.1534, 0.4202) sector 35, port 3.90 units, 5 of 6 sector mismatches
+run 2: ends at (7.8225, 12.1534, 0.4202) sector 35, port 3.90 units, 5 of 6 sector mismatches
+```
+
+So the leg's failure is **reproducible**, not noise: the numbers that changed between sessions (3.09 / 3 sectors in
+round 169's gate, 3.90 / 5 sectors in round 171's control and here) come from something outside the per-run path —
+not from run-to-run instability. The audit that produced this also found the only wall-clock reads left in the app
+(`delta_secs`): `sim_dt`'s fallback, `walk_player`'s fallback (both bypassed in a capture), and
+`--complete-after`'s wait, which is flow-only. Everything the walk trace depends on already runs on `CaptureDt`.
+
+One real inconsistency was fixed while measuring: `sim_dt` — the scripts/actors clock — honoured `CaptureDt` but not
+**`BK_FIXED_DT`**, while `walk_player` honoured both. A live check run with `BK_FIXED_DT` therefore advanced the
+walker on a pinned step and the level's scripts on the wall clock. `sim_dt` now reads `BK_FIXED_DT` once
+(`OnceLock`) and falls back the same way, so every simulation system shares one clock. Capture runs are unaffected
+(they take `CaptureDt` first), which the two identical `walk5_spawn` runs confirm.
+
+**The full gate's verdict is reproducible too: 15 legs, 2 failures, both deterministic (round 180).** With the
+fixed clock in place the gate reads:
+
+```
+PASS  walk_street45 100% (2)   PASS walk_street90 100% (1)  PASS walk_cantina 102% (2)   PASS walk_door0 stop-pose
+PASS  walk4_spawn 100% (1)     FAIL walk5_spawn 3.90/3.73 (5)  FAIL walk6_spawn 1.35/1.08 (5)
+PASS  walk9_spawn 100% (0)     PASS walk12_spawn 127% (0)   PASS walk13_spawn 98% (0)    PASS walk7_spawn stop-pose
+PASS  walk14_spawn stop-pose   PASS walk17_spawn 117% (0)   PASS walk19_spawn stop-pose  PASS walk26_spawn 0.42 (0)
+trace gate: 15 leg(s), 2 failure(s)
+```
+
+The two failures are the two `06*barons` levels, and both over-travel with **five** sector mismatches (the gate allows
+two). Round 169's gate had `walk6` passing (1.06, 2 sectors) and `walk5` at 3.09/3, so both legs changed between
+sessions — reproducibly, not noisily. That is now the *measured* open defect: the port keeps walking/crossing where
+retail stops, on the levels whose doors and Baron actors run scripted sequences during the window. Everything else,
+including the newest legs (17, 19, 26), is green.
