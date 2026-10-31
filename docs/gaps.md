@@ -4200,3 +4200,31 @@ of its own, and `d10x10`'s 3× span is the sharpest test case for it.
 
 Probe committed: `--tex <model>` prints each material's bitmap size, cel count and texvert range, so the next
 round can test the divisor against real models instead of guessing.
+
+**Phase 2 breadth reaches level 18, and both new spawns expose a fall the walker must explain (round 159).** The
+sweep now covers levels 1–18 with committed fixtures; the two newest rows:
+
+| leg | spawn (retail `coords`) | retail | port |
+| --- | --- | --- | --- |
+| `walk17_spawn` (`18Ascend`, entry 17) | (3.24, −9.21, −8.10), yaw 0, sector 485 | walks **0.70** and stands at (3.33, −8.52, −8.08) | travels **0.16**, then **falls 4.8 units** to z −12.98 (sector 505) |
+| `walk18_spawn` (`19A.jkl`, entry 18) | (−0.35, −2.15, 0.12), yaw 0, sector 723 | walks **0.88** and stands at (−0.27, −1.27, 0.12) | travels **0.15**, then **falls 2 units** to z −1.90 (sector 722) |
+
+Both faults have the same shape: at the warped spawn the port resolves the *right* sector and finds the floor
+beneath it (level 17: sector 504, `floor Some(-8.252)`), then after one step it adopts a **stacked sector whose
+floor is far lower** and drops. Level 17's spawn point sits inside several hulls at once — retail's own `coords`
+names sector 485, the port's trace starts in 504, and the shaft around them (505) also contains the point.
+
+The engine resolves this by construction: `sithCollision_MoveThing` sets the sector *behind the adjoin it
+crossed*, never by a global point test. A fallback doing the same — try the current sector's portal neighbours
+before `sector_at`'s smallest-hull pick — was implemented and **measured: no change** (both levels still fell,
+same end poses), so it was **reverted** rather than kept as unproven code. That rules the sector *pick* out as
+the cause: the body's adopted sector at the spawn was already the right one, so the fall must come from the
+floor/step itself — the spawn's floor patch is small or the step takes the body over its edge.
+
+`walk17_spawn`/`walk18_spawn`'s retail traces are committed as fixtures. Both levels join the documented list
+with "spawn fall" as their measured reason until that is fixed.
+
+Environment note: this round's `--gates` run was attempted twice and each time slowed to ~1 min per check and
+hung after `--tour` (the machine has been running heavy game captures all session). Verification for the round is
+therefore the test suite and the trace gate, both clean; the full `--gates` and parity runs are to re-run at the
+start of the next round on a quieter machine.

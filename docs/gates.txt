@@ -1262,3 +1262,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Tests **147 passed**, `--gates` **0 of 64 failed**, trace gate **12 legs, 0 failures** (one load-flake run
   showed walk5 at 3 sectors, re-ran clean — the caveat already in `gates.txt`), parity **6 thresholds,
   0 failures**.
+
+## Update — round 159
+
+- Phase 2 breadth: levels **17** (`18Ascend`, debug entry 17) and **18** (`19A.jkl`, entry 18) measured, fixtures
+  committed. Level 17 spawn (3.24, −9.21, −8.10) sector 485: retail walks 0.70 and stands; the port travels 0.16
+  and **falls 4.8 units** (to z −12.98, sector 505). Level 18 spawn (−0.35, −2.15, 0.12) sector 723: retail walks
+  0.88 and stands; the port travels 0.15 and **falls 2 units** (to z −1.90, sector 722).
+- Same shape on both: the port resolves the right sector at the spawn (level 17: sector 504, `floor
+  Some(-8.252)`) and then adopts a stacked sector with a far lower floor after one step. An **adjoin-first**
+  sector fallback (the engine's `MoveThing` rule) was implemented and measured: **no change**, so it was
+  reverted rather than kept unproven. The sector pick is ruled out — the fall is in the floor/step itself.
+- `walk17_spawn`/`walk18_spawn` fixtures committed; both levels documented with "spawn fall" as the reason.
+- Environment note: the `--gates` run was attempted twice, slowed to ~1 min per check and hung after `--tour`
+  (heavy captures all session). Round verification = tests **147 passed** and trace gate; the full `--gates`
+  and parity runs to be re-run on a quieter machine.
