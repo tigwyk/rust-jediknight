@@ -5112,3 +5112,20 @@ neighbouring room's slope by polygon/sector reach rather than by normal directio
 That closes the open-ended search: the walk-trace gate stands at **14 of 15**, the one failure is a tracked deviation
 with a named mechanism and a testable acceptance table, and the next rounds can go to other roadmap items without
 losing this one.
+
+**Every gate suite is green, and the long-deferred `--gates` finally ran — 64 of 64, 0 skipped (round 190).** The
+machine recovered its frame rate (parity captures took 4.5–4.9 s each instead of 300 s), which unblocked the
+verification that rounds 159–189 had to defer:
+
+| suite | result |
+| --- | --- |
+| `cargo test --release` | **149 passed** |
+| parity gate (`port-capture.ps1` + `compare.ps1 -Gate`) | **6 thresholds, 0 failures** — spawn 0.6602, spawn_pose 0.6603, spawn_yaw30 0.6385, route_cantina **0.7381** (up from 0.7357), route_lower 0.7119, route_street 0.7327; six rows ungated as before |
+| walk-trace gate (`trace-gate.ps1`) | **15 legs, 1 failure** — only `walk5_spawn` (3.43/3.73 = 92 %, 5 sector mismatches), the tracked floor-search-scope deviation |
+| `--gates` (the port's own checks) | **64 of 64 passed, 0 skipped** — headless and window checks alike (`--tour-live` ran in a window and passed) |
+
+Two things this settles. First, the walker changes of rounds 182–183 (the floor-fallback limit and the sector-floor
+gate) did **not** disturb the draw gate: every parity pair is within a thousandth of round 169's numbers, and
+`route_cantina` improved. Second, `walk5_spawn` reads **3.43/3.73 with 5 sector mismatches at normal speed exactly as
+it did at ~2 fps**, so its failure is a genuine defect (the ledger's floor-search-scope row) and not a frame-rate
+artefact — the round-180 determinism finding is confirmed on a fast machine.

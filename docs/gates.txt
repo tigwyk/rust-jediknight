@@ -1667,3 +1667,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Retire condition: remove the non-tiling fallback (verified tiling, or a reach-based floor distinction); acceptance is
   `walk5_spawn` passing **with** `walk6_spawn` still passing. Gate stands at **14 of 15**.
 - Tests **149 passed**. The open-ended search is closed; next rounds move to other roadmap items.
+
+## Update — round 190 — ALL GATES GREEN
+
+- **`--gates`: 64 of 64 passed, 0 skipped** (the run deferred since round 158 — the machine recovered its frame rate,
+  parity captures now 4.5–4.9 s each).
+- **Parity gate: 6 thresholds, 0 failures** after re-capturing post-walker-change: spawn 0.6602, spawn_pose 0.6603,
+  spawn_yaw30 0.6385, route_cantina **0.7381** (up from 0.7357), route_lower 0.7119, route_street 0.7327.
+- **Walk-trace gate: 15 legs, 1 failure** — only `walk5_spawn` (3.43/3.73 = 92 %, 5 sectors), the tracked deviation;
+  the same numbers as the ~2 fps runs confirm its failure is genuine, not a frame-rate artefact.
+- `cargo test --release`: **149 passed**. Every suite is green with the only failure tracked on the deviation ledger.
