@@ -2176,3 +2176,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   **161 tests, 0 failures**.
 - AI instinct coverage now **13 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198, audio). No game
   run and no port window.
+
+## Update — round 228
+
+- **`flee` completed** (49 classes): the row was *partial* because the port had the script's `AIFlee` verb but not the
+  instinct. Reading both shows they are one behaviour at the same seam as `retreat`/`withdraw`: `AIFlee` (`0x501420`)
+  stores the flee-from thing at `ai + 0x1c0` and raises AI flag `0x800`; the `Flee` instinct (`0x50aeb0`) is the walk that
+  consumes that state and **clears the mode on its third argument's seconds** (`1.0, 5000, 2.0` shipped), waking the actor.
+- The missing piece was the bound: a scripted `AIFlee` ran forever. The verb now records the class's own `Flee` duration
+  (`Runtime::ai_flee_until`, 2 s when there is no `Flee` line), the tick drops the state at the deadline, and a **negative**
+  second argument stops it immediately.
+- Headless check `a_scripted_flee_expires_after_the_instincts_duration` (still fleeing 1 s in, not fleeing after 2 s).
+  Measured before/after: deadline disabled → fails with `the scripted flee never expired`; enabled → passes. Suite
+  **162 tests, 0 failures**.
+- AI instinct coverage now **14 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198, audio). No game
+  run and no port window.

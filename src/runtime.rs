@@ -1087,6 +1087,10 @@ pub struct Runtime {
     /// actor back to `ai + 0x93` (`SetMoveThing`) and then turns it there (`SetLookFrame`), so the
     /// anchor is the thing's spawn position. Set when the instincts are attached to the live runtime.
     pub ai_home: BTreeMap<usize, [f32; 3]>,
+    /// When each scripted `AIFlee` ends. The verb (`0x501420`) only sets the fleeing mode; the class's
+    /// `Flee` instinct is what walks, and its third argument is the duration in seconds (1–2 s in the
+    /// shipped classes), after which the handler clears the mode. The port records the same deadline.
+    pub ai_flee_until: BTreeMap<usize, f32>,
     /// Actors in the `retreat`/`withdraw` mode: the thing they are backing away from, and when the
     /// mode expires. `retreat` (`0x50bc60`) sets it when health falls under `arg0 × max` and its
     /// `arg1` chance succeeds; `withdraw` (`0x50b150`) walks the actor away from that thing. The port
@@ -1689,6 +1693,7 @@ impl Runtime {
             ai_scan: BTreeMap::new(),
             ai_opendoors: BTreeMap::new(),
             ai_home: BTreeMap::new(),
+            ai_flee_until: BTreeMap::new(),
             ai_withdraw: BTreeMap::new(),
             ai_strafe: BTreeMap::new(),
             ai_hitrun: BTreeMap::new(),
@@ -2981,6 +2986,17 @@ impl Runtime {
                         self.ai_hitrun.remove(&index);
                     }
                 }
+            }
+            // A scripted flee lasts the class's own `Flee` instinct duration (shipped: 1-2 s); the
+            // engine's handler clears the mode at that deadline and wakes the actor again, so the port
+            // drops the state when it passes rather than running from a script order forever.
+            if self
+                .ai_flee_until
+                .get(&index)
+                .is_some_and(|until| self.time >= *until)
+            {
+                self.ai_flee.remove(&index);
+                self.ai_flee_until.remove(&index);
             }
             let fleeing = self
                 .ai_flee
@@ -5439,9 +5455,30 @@ impl Runtime {
             }
             // `AIFlee(actor, from)`: the actor keeps its distance from that thing and stops firing —
             // `sithAI_Flee` sets the fleeing mode, which `ai_tick` reads as "walk away, do not shoot".
+            // The engine's verb (`0x501420`) only stores the thing and raises AI flag 0x800; the walk is
+            // the class's `Flee` instinct, and that instinct **ends on the instinct's third argument's
+            // seconds** (shipped lines are `1.0, 5000, 2.0` and `1.5, 10000, 1.0`), so a scripted flee is
+            // a burst, not a permanent state. A negative second argument stops the flee now.
             "aiflee" => {
-                if let (Ok(actor), Ok(from)) = (usize::try_from(idx(0)), usize::try_from(idx(1))) {
-                    self.ai_flee.insert(actor, from);
+                if let Ok(actor) = usize::try_from(idx(0)) {
+                    let from = idx(1);
+                    if from < 0 {
+                        self.ai_flee.remove(&actor);
+                        self.ai_flee_until.remove(&actor);
+                    } else if let Ok(from) = usize::try_from(from)
+                        && from < self.things.len()
+                    {
+                        let seconds = self
+                            .ai
+                            .get(&actor)
+                            .and_then(|class| class.instinct("Flee"))
+                            .and_then(|flee| flee.args.get(1).copied())
+                            .map(|s| s as f32)
+                            .unwrap_or(2.0)
+                            .max(0.1);
+                        self.ai_flee.insert(actor, from);
+                        self.ai_flee_until.insert(actor, self.time + seconds);
+                    }
                 }
                 Value::Nil
             }
@@ -8285,6 +8322,47 @@ mod tests {
         assert!(
             rt.shots_fired > 0,
             "the actor did not come back after its mode was cleared"
+        );
+    }
+
+    /// `AIFlee` (`0x501420`) sets the fleeing mode, and the class's `Flee` instinct ends it after its
+    /// third argument's seconds (shipped `1.0, 5000, 2.0`): a scripted flee is a burst, not forever.
+    #[test]
+    fn a_scripted_flee_expires_after_the_instincts_duration() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = base.clone();
+        player.pos = [1.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\nFlee 1.0, 5000.0, 2.0\n",
+            ),
+        );
+        rt.call("AIFlee", &[crate::cog::Value::Num(1.0), crate::cog::Value::Num(0.0)]);
+        assert!(rt.ai_flee.contains_key(&1), "AIFlee did not start the flee");
+
+        for _ in 0..30 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            rt.ai_flee.contains_key(&1),
+            "the flee ended before the instinct's duration"
+        );
+        for _ in 0..40 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            !rt.ai_flee.contains_key(&1),
+            "the scripted flee never expired"
         );
     }
 

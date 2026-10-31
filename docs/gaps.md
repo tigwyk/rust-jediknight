@@ -5809,7 +5809,7 @@ handler:
 | returnhome | 97 | `0x50bd70` | **yes** (round 220: walks back to its anchor) |
 | jump | 92 | `0x50abf0` | no |
 | circlestrafe | 70 | `0x509890` | **yes** (round 222: orbits at close range) |
-| flee | 49 | `0x50aeb0` | partial: scripts' `AIFlee` verb only, not the instinct |
+| flee | 49 | `0x50aeb0` | **yes** (round 228: `AIFlee` sets the mode the handler walks, now with the instinct's duration) |
 | forcepowers | 45 | `0x40ff40` | no |
 | saberfighting | 45 | `0x40fa40` | no |
 | retreat | 42 | `0x50bc60` | **yes** (round 221: arms the withdraw mode when hurt) |
@@ -5825,11 +5825,29 @@ handler:
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **13 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+So the port runs **14 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
 the counts are how many classes depend on each: `listen` (200) and `talk` (198) are the biggest remaining behavioural
 gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
 it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair, `circlestrafe`,
-`hitandrun`, `randomturn`, `roam` and `turretfire` (below). `sabermove` needs no work at all: nothing names it.
+`hitandrun`, `randomturn`, `roam`, `turretfire` and `flee` (below). `sabermove` needs no work at all: nothing names it.
+
+**`flee` is complete, and its duration now bounds the walk (round 228, 49 classes).** The row read *partial* because the
+port had the script's `AIFlee` verb but not the instinct; reading both settles that they are the same behaviour split at
+the same seam as `retreat`/`withdraw`: `AIFlee` (`0x501420`) checks the target is an actor, stores the flee-from thing at
+`ai + 0x1c0` and raises AI flag `0x800`, while the `Flee` instinct (`0x50aeb0`) is the walk that consumes exactly that
+state — it steps away from the stored thing with random lateral jitter, and **clears the mode on the instinct's third
+argument's seconds** (`1.0, 5000, 2.0` and `1.5, 10000, 1.0` in the shipped classes), waking the actor again. So the
+port's direct walk *is* the instinct's behaviour.
+
+What was missing is the bound: a scripted `AIFlee` ran forever until another script cleared it. The verb now records the
+class's own `Flee` duration (`Runtime::ai_flee_until`, two seconds when the class has no `Flee` line, since such an actor
+has no engine walk at all), the tick drops the state when the deadline passes, and a **negative** second argument stops
+the flee immediately — which is how scripts asked for that and which the old handler could not represent.
+
+The headless check is `a_scripted_flee_expires_after_the_instincts_duration`: after `AIFlee(actor, thing)` the actor is
+still fleeing one second in, and no longer fleeing after the instinct's two have passed. Measured before/after: with the
+deadline disabled the test fails with `the scripted flee never expired`; enabled it passes. Suite: **162 tests, 0
+failures**.
 
 **Turrets fire again, and they stand still (round 227, `turretfire`, 12 classes).** Reading the shipped class settled two
 problems at once: `misc\ai\turdefault.ai` carries **only `TurretFire`** — no `PrimaryFire` at all — so the port's fire gate
