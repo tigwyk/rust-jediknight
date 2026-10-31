@@ -1728,3 +1728,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Next probe: grid-scan the volume at the walking body's z and pick an approach whose body truly enters it; the
   harness's post-walk console capture already prints a cog's state after the walk.
 - Tests **149 passed**.
+
+## Update — round 195
+
+- **Retail movement-trigger fixture captured**: level 1's bartender trigger slab is sector 353 in the band
+  z −1.2..−1.0 at (−9.0,−5.0) (scan: −2.0..−1.4 → sector 102, −1.2..−1.0 → 353, −0.8 → 364/365). Warping retail to
+  `-9 -5 -1.077 0 0 0` puts the body inside the slab and `cogstatus 29` reads **`trouble = 137`** against 0 at load —
+  the cog's `entered` label ran off a movement trigger. Committed as `tools/parity/interaction/` (walk_trigger,
+  switch_control, switch_use captures).
+- A walking body cannot reach the slab (centre −1.30 vs band −1.2..−1.0), which is why every walk leg misses triggers;
+  the port side needs a **post-run cog print** (`--cogstatus` is load-time only) before it can be compared.
+- Tests **149 passed**.

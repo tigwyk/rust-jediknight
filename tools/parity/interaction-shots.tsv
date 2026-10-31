@@ -1,9 +1,8 @@
 # Interaction rows: a pose plus the keys/console commands that make the retail engine act.
 # Same format as shots.tsv; the harness applies `-Keys`/`-KeysAfter` and `-ConsoleCommands` to every row.
-# switch_use: the level-1 cantina door switch. Things 56/57 are linked to cog 11 (`00_doorswitch.cog`,
-# link 1) at (-4.75,-3.75,-1.10)/(-4.45,-3.75,-1.10). The warp at eye z -1.09 is coords-verified:
-# `warp -4 -3 -1.09 0 135 0` gives body (-4.00,-3.00,-1.18) PYR (1.12,135.02,1.12) sector 254, facing
-# the switch. Round 192/193 pressed every use binding from poses 0.4 to 1.1 units away -- `9`, ENTER,
-# E, SPACE, U, MOUSEMIDDLE -- both before and after the console closed (13.5 s of re-acquired input),
-# and cog 11 stayed `doorstatus 0` every time. Kept as the reproducible pose for a trigger-based probe.
-switch_use	01narshadda	-4.0	-3.0	-1.09	0	135
+# walk_trigger: level 1's bartender trigger slab. Cog 29 (`01_bartender.cog`) is linked to sectors
+# 350 (`bar2`), 370 (`bar1`) and 353 (`bar3`); a `--faces-at` scan finds sector 353 only in a thin band
+# at (-9.0,-5.0), z -1.2..-1.0, while a walking body's centre sits at z -1.30 (floor -1.42 + rest
+# 0.1201). The warp below puts the retail body at z ~-1.077 (eye - 0.037), inside the band, so the
+# engine's sector for the player becomes 353 and the cog's `entered` label should run.
+walk_trigger	01narshadda	-9.0	-5.0	-1.04	0	0

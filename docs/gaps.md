@@ -5234,3 +5234,28 @@ through the room sectors, not through the trigger slabs. The next probe is to fi
 scan at the walking body's z −1.17, and at a few more z) and then choose an approach whose body genuinely enters it —
 the harness side is ready (post-walk console capture prints a cog's state after the walk, which is the fixture's other
 half).
+
+**Phase 1 step 4's movement-trigger interaction is captured from retail: `trouble 0 -> 137` (round 195).** The
+bartender trigger slab was located precisely and retail was warped into it:
+
+```
+--faces-at (-9.0,-5.0,z) scan:   -2.0..-1.4 -> sector 102 (the room)
+                                 -1.2..-1.0  -> sector 353 (cog 29's `bar3` trigger slab)
+                                 -0.8         -> sector 364/365 (above)
+
+warp -9 -5 -1.077 0 0 0   (body z ~-1.077, inside the slab)
+cogstatus 29  ->  'trouble' = 137      (load-time value: 0)
+```
+
+The cog's `entered` label ran and set `trouble` from **0 to 137** — a movement-triggered cog state change, captured
+by the harness's console command and now committed as `tools/parity/interaction/walk_trigger-console.txt` (with the
+switch's control/use captures beside it). The row is `walk_trigger` in `tools/parity/interaction-shots.tsv`, its
+comment recording the slab's band and why a walking body cannot reach it (the slab sits at z −1.2..−1.0 while a
+walker's centre is at −1.30, so a *warp* into the band is how the engine is put in the trigger; retail's own warp then
+settles the body 0.24 away and the trigger still fires).
+
+The port side of the fixture is the open half: the port's `--cogstatus` prints at **load**, so it cannot show the
+post-trigger value yet. The check to add is a post-run cog print (e.g. `--cogstatus-after <n>` printed when the run
+ends) — then the port's own trigger path can be compared against this retail value, and the trigger-fidelity question
+(the port's `sector_for_body` picks max hull clearance, so a thin slab only wins when the body's centre is inside it,
+exactly as the warp demonstrates) can be answered against a fixture rather than by argument.
