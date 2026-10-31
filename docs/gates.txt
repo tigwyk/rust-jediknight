@@ -2026,3 +2026,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - The port runs **3 of the 24 used instincts** (follow, lookfortarget, primaryfire). Biggest gaps: `listen`, `talk`,
   `opendoors` (an AI that cannot open a door can be trapped by one) and `blindfire`.
 - Audit prints the tally permanently; `--audit` still passes; tests **151 passed**. No game run and no port window.
+
+## Update — round 218
+
+- **`opendoors` implemented** (142 of 231 classes name it). The handler `0x50abc0` just calls
+  `sithPlayerActions_Activate` — the player's own use action — on the actor's body, throttled 250 ms, messaging a
+  captured thing or cog-linked surface with `activated` (id 1). The port reuses `use_thing` + `activate_near` from the
+  actor's position/facing on a 250 ms clock, so no new door logic was needed.
+- Headless check `an_actor_with_opendoors_activates_the_door_in_front` plus a control actor without the instinct
+  (queues nothing). Measured before/after: block disabled → test fails with
+  `the actor did not activate the door in front: []`; enabled → passes. Suite **152 tests, 0 failures**.
+- Deviation recorded: the engine sweeps a sphere at the body's leading edge and uses the actor's body radius; the port
+  uses the 1.5-unit use reach and a look-cone approximation. Needs a windowed fixture (walk an actor at a closed door)
+  to settle, so it waits for the QA window.
+- AI instinct coverage now **4 of 24 used instincts**; remaining top gaps are `listen` (200), `talk` (198), `blindfire`
+  (134). No game run and no port window this round.

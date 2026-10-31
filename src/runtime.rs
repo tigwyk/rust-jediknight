@@ -1078,6 +1078,11 @@ pub struct Runtime {
     /// is the interval (500 ms in every class), and a scan that finds a target hands it to the normal
     /// chase/aim logic rather than snapping the body round.
     pub ai_scan: BTreeMap<usize, f32>,
+    /// When each actor may try the `opendoors` action next. Its handler (`0x50abc0`) calls
+    /// `sithPlayerActions_Activate` — the **player's** use action — on the actor's own body, and that
+    /// function throttles itself to 250 ms. An actor with the instinct opens the door it is walking
+    /// into instead of being trapped behind it.
+    pub ai_opendoors: BTreeMap<usize, f32>,
     /// `sithAIAwareness`: a position other actors of the same side were told about, and when. A
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
@@ -1655,6 +1660,7 @@ impl Runtime {
             ai_route: BTreeMap::new(),
             ai_last_seen: BTreeMap::new(),
             ai_scan: BTreeMap::new(),
+            ai_opendoors: BTreeMap::new(),
             sector_awareness: BTreeMap::new(),
             sector_adjoins: sector_adjoins.clone(),
             ai_fire_target: BTreeMap::new(),
@@ -2730,6 +2736,27 @@ impl Runtime {
         for index in actors {
             let ai = self.ai.get(&index).cloned();
             let ai_template = self.templates.get(index).cloned().unwrap_or_default();
+            // `opendoors` (handler 0x50abc0): the engine runs the **player's activate action**
+            // (`sithPlayerActions_Activate`, 0x4fc0a0) on the actor's own body, throttled to 250 ms,
+            // and that messages the captured thing or cog-linked surface in front with `activated`
+            // (id 1). The port reuses the same two scans the use key drives, so an actor with the
+            // instinct opens the door it is walking into instead of standing behind it. The engine
+            // sweeps a small sphere at the body's leading edge; the use scans are a look-cone
+            // approximation of that, and the reach is the port's use reach.
+            if ai
+                .as_ref()
+                .is_some_and(|class| class.instinct("OpenDoors").is_some())
+                && let Some(body) = self.things.get(index)
+            {
+                let (pos, yaw) = (body.pos, body.yaw);
+                let due = self.ai_opendoors.get(&index).copied().unwrap_or(0.0);
+                if self.time >= due {
+                    self.ai_opendoors.insert(index, self.time + 0.25);
+                    let facing = [-yaw.to_radians().sin(), yaw.to_radians().cos()];
+                    self.activate_near(pos, facing, 1.5);
+                    self.use_thing(pos, facing, 1.5);
+                }
+            }
             let Some(thing) = self.things.get_mut(index) else { continue };
             if thing.destroyed || self.types.get(index).copied() != Some(2) {
                 continue;
@@ -7778,6 +7805,63 @@ mod tests {
         next.adopt(&carried);
         assert_eq!(next.things[0].health, 41.0, "the carried health was not restored");
         assert_eq!(next.player_shields, 73.0, "the carried shields were not restored");
+    }
+
+    /// `opendoors` (handler 0x50abc0) runs the **player's activate action** on the actor's own body:
+    /// the engine calls `sithPlayerActions_Activate` and messages a captured thing in front with
+    /// `activated` (id 1). The port reuses the use scans, so an actor facing a closed door queues its
+    /// `activate` — which is what stops it from being trapped behind the door.
+    #[test]
+    fn an_actor_with_opendoors_activates_the_door_in_front() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        // Player at the origin, the actor at the origin facing -x (the port's forward is
+        // `(-sin, cos)`), and a door thing 1.5 units along -x, linked to cog 0 as link 3.
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 90.0;
+        let mut door = base.clone();
+        door.pos = [-1.5, 0.0, 0.0];
+        rt.things = vec![base, actor, door];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into(), "door".into()];
+        rt.types = vec![10, 2, 0];
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, maxstep=0.3, sightdist=5.0, heardist=2.0, accuracy=0.15\n\n\
+                 OpenDoors\n",
+            ),
+        );
+        rt.thing_links.push((0, 3, 2));
+
+        rt.ai_tick(0, 0.1);
+        assert!(
+            rt.pending_messages.iter().any(|(instance, label, _, sender)| {
+                *instance == 0 && *label == "activate" && *sender == Some(3)
+            }),
+            "the actor did not activate the door in front: {:?}",
+            rt.pending_messages
+        );
+
+        // Without the instinct the same body does nothing to the door.
+        let mut quiet = door_runtime();
+        let base = quiet.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 90.0;
+        let mut door = base.clone();
+        door.pos = [-1.5, 0.0, 0.0];
+        quiet.things = vec![base, actor, door];
+        quiet.templates = vec!["walkplayer".into(), "tuskan".into(), "door".into()];
+        quiet.types = vec![10, 2, 0];
+        quiet.ai.insert(1, crate::ai::parse("alignment=-1.0, rank=0.5, fov=180\n\nLookForTarget 500.0\n"));
+        quiet.thing_links.push((0, 3, 2));
+        quiet.ai_tick(0, 0.1);
+        assert!(
+            quiet.pending_messages.is_empty(),
+            "an actor without `opendoors` activated something: {:?}",
+            quiet.pending_messages
+        );
     }
 
     /// `LookForTarget` scans the class's **view cone**, not just its range. The engine's recovered

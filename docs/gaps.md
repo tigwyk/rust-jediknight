@@ -5804,7 +5804,7 @@ handler:
 | talk | 198 | `0x50be20` | no |
 | primaryfire | 166 | `0x509e40` | **yes** (fire cadence) |
 | follow | 159 | `0x5093f0` | **yes** (chase + standoff) |
-| opendoors | 142 | `0x50abc0` | no — an actor never opens a door |
+| opendoors | 142 | `0x50abc0` | **yes** (round 218: the use scans on the actor's own body) |
 | blindfire | 134 | `0x509b30` | no |
 | returnhome | 97 | `0x50bd70` | no |
 | jump | 92 | `0x50abf0` | no |
@@ -5825,7 +5825,25 @@ handler:
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **3 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
-the counts are how many classes depend on each: `listen` (200), `talk` (198), `opendoors` (142) and `blindfire` (134)
-are the biggest behavioural gaps, and `opendoors` is the one with a visible consequence today (an AI that cannot open a
-door can be trapped behind one). `sabermove` needs no work at all — nothing names it.
+So the port runs **4 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+the counts are how many classes depend on each: `listen` (200), `talk` (198) and `blindfire` (134) are the biggest
+remaining behavioural gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be
+trapped behind one — and it is now implemented (below). `sabermove` needs no work at all: nothing names it.
+
+**`opendoors` is implemented (round 218).** Its handler (`0x50abc0`) does almost nothing itself: when the AI's flag bit
+0 is set it calls `sithPlayerActions_Activate` (`0x4fc0a0`) — **the player's own use action** — on the actor's body, and
+that function throttles itself to 250 ms and messages either a captured **thing** (`SITH_TF_CAPTURED`, types other than
+item/weapon) or a **cog-linked surface** in front with `activated` (id 1). The port already has both scans — `use_thing`
+and `activate_near` — so the AI path is those two calls from the actor's own position and facing, on a 250 ms clock
+(`Runtime::ai_opendoors`). No new door logic, no new data.
+
+Home-rolled in the port: the engine sweeps a small sphere at the body's leading edge, the port's use scans are a
+look-cone approximation, and the reach is the port's 1.5-unit use reach rather than the actor's own body radius
+(`thing + 0x2c − 0.1`). That is the one deviation to keep an eye on, and it is the kind that only a fixture can settle
+(walk an actor at a closed door and compare which door it opens) — so it waits for the next QA window along with the
+other windowed checks.
+
+The headless check is `an_actor_with_opendoors_activates_the_door_in_front`: a two-actor runtime with a door thing
+1.5 units in front, linked as cog 0 / link 3, must queue `activate` with sender 3 — and a control actor without the
+instinct must queue nothing. Measured before/after: with the block disabled the test fails on
+`the actor did not activate the door in front: []`; enabled, it passes. Suite: **152 tests, 0 failures**.
