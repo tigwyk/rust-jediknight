@@ -6081,3 +6081,46 @@ The headless check is `an_actor_with_opendoors_activates_the_door_in_front`: a t
 1.5 units in front, linked as cog 0 / link 3, must queue `activate` with sender 3 — and a control actor without the
 instinct must queue nothing. Measured before/after: with the block disabled the test fails on
 `the actor did not activate the door in front: []`; enabled, it passes. Suite: **152 tests, 0 failures**.
+
+**The QA window (round 231) found one real bug and one rendering gap, and both are fixed from data.** The first sweep of
+`--gates` came back **62 of 65**: `--ai`, `--live-check` and `--save-live`. Each was diagnosed rather than waved through.
+
+`--ai` was a **stale gate**: its "player outside sightdist" probe fires the actor once inside sight first, which leaves a
+remembered position, and `BlindFire` (0x509b30) legitimately fires at a remembered position wherever the body has gone. The
+gate now clears `ai_last_seen` before the far and behind probes, so it measures the sight rule on a clean memory.
+
+`--live-check` was a **stale invariant**: it required the number of doors still shut to equal the count of script door
+changes. `opendoors` runs the engine's own activate action on an actor's body, so an actor can re-open a door a script
+shut — the script count is an upper bound. The invariant is now `shut <= changes` (every shut door still came from a
+script), with the reason in the code.
+
+`--save-live` found a **real bug**, and it is the one behind two separate symptoms. `load_item_cogs` armed an item script
+when its bin was acquired by sending it `activated:`, on the theory that "the engine sends it when the weapon is drawn".
+But `activated:` is the *use* label for an item: `item_fieldlight.cog`'s `activated:` switches the field light **on** and
+calls `SetPulse(1.5)`, whose `pulse:` then spends one unit of bin 13 (field-light power) every 1.5 s. So the port started
+every level with the field light on and burned its first charge — retail's start has the light off and bin 13 at 100, which
+is exactly what the gate compares against retail's own autosave. Only **weapon** bins are armed now, decided by
+`items.dat`'s own flag word (**bit 0x4**: fists 0x024, bryar 0x0a4; the force powers 0x108 and the field light 0x122 are
+not weapons).
+
+The same seam explains the missing **first-person weapon model**. `weap_bryar.cog`'s `selected:` label is what calls
+`jkSetPOVModel(player, bryv.3do)`, and the level's own startup (`kyle.cog`: `SelectWeapon(player, 1);
+SelectWeapon(player, AutoSelectWeapon(player, 1))`) runs **before** the item cogs exist, so both `selected:` messages were
+dropped and the label never ran — the port only had a HUD icon. `load_item_cogs` now runs `selected:` for the bin the
+player is actually holding once that cog exists.
+
+Drawing it needed the placement *removed*, not tuned. Retail's `jkPlayer_DrawPov` (`0x4051e0`) builds the weapon's matrix
+from the camera's own view, pre-translates the negated eye offset (`thing + 0x168` — which nothing in the dump writes, so
+it is zero) and pre-multiplies a small sway rotation, then calls `rdThing_Draw`; that goes to `rdModel3_Draw`
+(`0x445e10`), which applies **no scale and no offset**. So the `.3do`'s authored coordinates *are* the framing. The new
+headless probe `--model <name>` dumps exactly those numbers — header radius, insert offset, node pivots and the rest-pose
+box of the drawn geoset — and `--model bryv.3do` reports radius 0.0661 and a box of min (0.020, -0.033, -0.062), max
+(0.032, -0.007, 0.010): right of the eye, below it, in front of it. A bottom-right gun at arm's length, authored at that
+size *because* it sits 0.06 units from the eye. `draw_viewmodel` now uses the identity placement and the `recentre_mesh` /
+`view_frame` / `view_offset` guesses are deleted; the check is
+`the_authored_weapon_box_lands_in_the_lower_right_corner`, which projects that measured box through the port's own
+projection (1.02 rad vertical, 4:3) and asserts it lands in frame, in the lower-right quadrant, and at a readable size.
+
+QA-window state after the round: `--gates` **65 of 65** (the fixed sweep), walk-trace gate **15 legs, 1 tracked failure**
+(`walk5_spawn`, the ledger's floor-search deviation), `cargo test` **164 passed**. The retail parity capture was not run
+(the window was used for the gate sweep and the fixes above); it stays a QA-window item.

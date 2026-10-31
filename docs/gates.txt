@@ -2222,3 +2222,31 @@ running app.--carry-check --start 01narshadda                        0   level 2
   older 1.5 units +y inside it → must walk +y). Measured before/after: reading the freshest record → walks toward +x
   (`[1.33, 0.0, 0.0]`, wrong sound); scanning the ring → near one. Suite **164 tests, 0 failures**.
 - `listen` stays *partial*; `talk` (198, audio) remains the largest unported name. No game run and no port window.
+
+## Update — round 231 (QA window)
+
+- **QA window run.** `--gates` first sweep: **62 of 65** — `--ai`, `--live-check`, `--save-live`. All three diagnosed.
+- `--ai` stale gate: the outside-sightdist probe left a remembered position from the inside probe, and `BlindFire`
+  legitimately fires at memory. The gate now clears `ai_last_seen` before the far/behind probes. Passes.
+- `--live-check` stale invariant: `opendoors` runs the engine's own activate action, so an actor can re-open a
+  script-shut door — the script count is an upper bound. Invariant relaxed to `shut <= changes` with the reason inline.
+  Passes.
+- `--save-live` real bug: `load_item_cogs` sent `activated:` to **every** acquired bin's cog; that is the item *use*
+  label, so `item_fieldlight.cog` switched the field light on at level start and its `SetPulse(1.5)` spent one unit of
+  bin 13 every 1.5 s (retail starts with the light off and bin 13 = 100). Only weapon bins are armed now, classified by
+  `items.dat`'s flag word (bit 0x4: fists 0x024, bryar 0x0a4; force powers 0x108, field light 0x122). Passes.
+- Same seam fixed the **first-person weapon model**: `weap_bryar.cog`'s `selected:` (which calls
+  `jkSetPOVModel(player, bryv.3do)`) never ran, because `kyle.cog` startup selects the weapon before the item cogs
+  exist and the messages were dropped. `load_item_cogs` now runs `selected:` for the held bin once its cog exists.
+- Placement was **removed, not tuned**: retail `jkPlayer_DrawPov` (0x4051e0) draws the POV thing with the camera's view
+  matrix (+ sway rotation; the `thing + 0x168` eye offset nothing writes), and `rdModel3_Draw` (0x445e10) applies no
+  scale or offset — so the `.3do`'s authored coordinates are the framing. New headless probe `--model <name>` dumps
+  radius, insert offset, nodes and the rest-pose drawn bbox; `--model bryv.3do` gives radius 0.0661 and box
+  min (0.020, -0.033, -0.062) / max (0.032, -0.007, 0.010) = right of, below and in front of the eye. `draw_viewmodel`
+  now uses the identity transform; `recentre_mesh`/`view_frame`/`view_offset` deleted. New test
+  `the_authored_weapon_box_lands_in_the_lower_right_corner` projects the measured box through the port's own projection.
+- Fixed sweep: `--gates` **65 of 65, 0 skipped**. Walk-trace gate after the AI rounds: **15 legs, 1 tracked failure**
+  (`walk5_spawn` 3.43/3.73 = 92 %, the ledger's floor-search deviation); all other legs unchanged. `cargo test`
+  **164 passed**; headless `--items` and `--weapons` pass, and `--weapons` confirms the named POV model
+  (`bryv.3do`, 117 vertices) and its `jkPlayPOVKey` clip (`bryvpst1.key`, 13 frames).
+- The retail parity capture was not run in this window; it stays a QA-window item.

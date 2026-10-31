@@ -449,6 +449,12 @@ fn main() {
     // matching a `prefix*` pattern. The shipped data is read directly, so a format question is
     // answered without launching the game.
     let mut asset: Option<String> = None;
+    // `--model <name>`: dump a `.3do`'s own numbers — header radius, insert offset, node pivots and
+    // the rest-pose bounding box of the geometry that is actually drawn (in model units, before the
+    // world scale). A first-person weapon is drawn by the engine with the camera matrix and no
+    // placement of its own (`jkPlayer_DrawPov`), so the authored coordinates are the framing: this
+    // probe measures them instead of eyeballing a screenshot.
+    let mut model_probe: Option<String> = None;
     // `--grep-assets <text>`: every archive entry whose text contains a literal, with the matching
     // line. The shipped files are small text formats (`.jkl`, `.ai`, `.cog`, `.snd`, `.key`), so a
     // "does anything actually use this key" question is one headless pass instead of 231 file reads.
@@ -667,6 +673,7 @@ fn main() {
                 }
             }
             "--asset" => asset = arg_value(&args, &mut i).cloned(),
+            "--model" => model_probe = arg_value(&args, &mut i).cloned(),
             "--grep-assets" => grep_assets = arg_value(&args, &mut i).cloned(),
             "--shot" => shot = arg_value(&args, &mut i).cloned(),
             "--fall" => fall_check = true,
@@ -5050,15 +5057,20 @@ fn main() {
             (3.0..=7.0).contains(&max_dist),
             "the instinct's firing range did not come from the .ai ({max_dist})"
         );
-        let mut shots = |pos: [f32; 3]| {
+        let shots = |rt: &mut runtime::Runtime, pos: [f32; 3]| {
             rt.things[player].pos = pos;
             let before = rt.things.len();
             let fired = rt.ai_tick(player, 1.0);
             (fired, rt.things.len() - before)
         };
-        let (seen, spawned) = shots(inside);
-        let (far, _) = shots(outside);
-        let (back, _) = shots(behind);
+        let (seen, spawned) = shots(&mut rt, inside);
+        // `BlindFire` (`0x509b30`) legitimately fires at a **remembered** position, and the inside
+        // probe just left one; clear it so the two sight gates below measure the sight rule and not
+        // a blind shot at where the player used to stand.
+        rt.ai_last_seen.remove(&actor);
+        let (far, _) = shots(&mut rt, outside);
+        rt.ai_last_seen.remove(&actor);
+        let (back, _) = shots(&mut rt, behind);
         // A target standing **above** the actor: the aim has to point up or the bolt passes under
         // the ledge. `sithActor_UpdateAimJoints` aims in three dimensions, and the shot flies along
         // that aim (round 109), so this is what makes a raised player hittable.
@@ -6600,6 +6612,95 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        return;
+    }
+
+    // `--model <name>`: a `.3do`'s own numbers. The engine draws the first-person weapon with the
+    // camera matrix and nothing else (`jkPlayer_DrawPov`: view matrix × sway rotation, pre-translated
+    // by the negated eye offset), so the authored geometry **is** the framing — measure it rather
+    // than guessing an offset or a scale on screen.
+    if let Some(name) = model_probe {
+        let mut key = name.replace('/', "\\");
+        if gobs.read(&key).is_none() {
+            let wanted = key
+                .rsplit('\\')
+                .next()
+                .unwrap_or(&key)
+                .to_ascii_lowercase();
+            match gobs.names().into_iter().find(|n| {
+                n.rsplit(['\\', '/'])
+                    .next()
+                    .is_some_and(|base| base.eq_ignore_ascii_case(&wanted))
+            }) {
+                Some(found) => key = found,
+                None => {
+                    eprintln!("model: `{name}` is not in the archives");
+                    std::process::exit(1);
+                }
+            }
+        }
+        let raw = gobs.read(&key).expect("model bytes");
+        let model = tdo::parse(&String::from_utf8_lossy(&raw));
+        println!("model: {key} ({} bytes)", raw.len());
+        println!(
+            "  radius {:.4}, insert offset {:?}, {} node(s), {} mesh(es), {} geoset(s) of {}",
+            model.radius,
+            model.insert_offset,
+            model.nodes.len(),
+            model.meshes.len(),
+            model.geosets,
+            model.meshes_per_geoset
+        );
+        for (index, node) in model.nodes.iter().enumerate() {
+            println!(
+                "  node {index}: mesh {}, parent {}, pos {:?}, pivot {:?}, rot {:?}",
+                node.mesh, node.parent, node.pos, node.pivot, node.rot
+            );
+        }
+        let posed = tdo::pose_nodes(&model, None, 0.0);
+        let owners = model.mesh_nodes();
+        let geoset = model.pick_geoset();
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        let mut verts = 0usize;
+        for (mesh_index, mesh) in model.meshes.iter().enumerate() {
+            if mesh.geoset != geoset {
+                continue;
+            }
+            let owner = owners
+                .get(mesh_index)
+                .copied()
+                .filter(|i| *i != usize::MAX)
+                .and_then(|i| posed.get(i));
+            for p in &mesh.vertices {
+                let p = match owner {
+                    Some(x) => x.apply(*p),
+                    None => *p,
+                };
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+                verts += 1;
+            }
+        }
+        let round = |v: [f32; 3]| v.map(|x| (x * 1000.0).round() / 1000.0);
+        if verts > 0 {
+            let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+            let centre = [
+                (lo[0] + hi[0]) * 0.5,
+                (lo[1] + hi[1]) * 0.5,
+                (lo[2] + hi[2]) * 0.5,
+            ];
+            println!("  drawn geometry: {verts} vertex(es) in geoset {geoset}");
+            println!("  bbox min {:?}  max {:?}", round(lo), round(hi));
+            println!(
+                "  bbox size {:?}  centre {:?} (model units, rest pose)",
+                round(size),
+                round(centre)
+            );
+        } else {
+            println!("  the drawn geoset has no vertices");
         }
         return;
     }
@@ -19286,7 +19387,10 @@ fn live_check(
     say(
         rt.adjoin_flags.len() == world.level.adjoins.len()
             && rt.sector_flags.len() == world.level.sectors.len()
-            && (rt.adjoins_changes == 0 || shut == rt.adjoins_changes),
+            // A script's change count is an **upper bound** on the doors still shut: `opendoors` AI
+            // runs the engine's own activate action, so an actor can re-open a door a script closed
+            // (and a script can open its own again). Every shut door still came from a script.
+            && (rt.adjoins_changes == 0 || shut <= rt.adjoins_changes),
         format!(
             "{} adjoin row(s), {} sector flag(s), {shut} doorway(s) shut by {} script change(s)",
             rt.adjoin_flags.len(),
@@ -19788,32 +19892,68 @@ fn load_item_cogs(
         } else {
             false
         };
-        // `activated:` is what a weapon cog arms itself from (`ActivateWeapon(player, …)`), and the
-        // engine sends it when the weapon is drawn — which is now, since the player just got it.
+        // The bins this script belongs to, from `items.dat`.
+        let bins: Vec<i32> = sim
+            .world
+            .borrow()
+            .item_cog
+            .iter()
+            .filter(|(_, script_name)| script_name.eq_ignore_ascii_case(&name))
+            .map(|(bin, _)| *bin)
+            .collect();
+        // `items.dat`'s flag word marks a weapon with **bit 0x4** — fists `0x024`, bryar `0x0a4`,
+        // the force powers `0x108`, the field light `0x122` — which is the engine's own
+        // classification, so no name guessing is needed here.
+        let is_weapon = world.item_defs.iter().any(|def| {
+            bins.contains(&def.id)
+                && u32::from_str_radix(def.flags.trim_start_matches("0x"), 16)
+                    .is_ok_and(|word| word & 0x4 != 0)
+        });
+        // `activated:` is the *use* label for an item and the *draw* label for a weapon: the field
+        // light's `activated:` switches the light on and arms its power pulse (which then spends bin
+        // 13 every 1.5 s), so sending it to **every** acquired bin switched the light on at level
+        // start and burned the first charge — which retail leaves at 100. Only a weapon bin is armed
+        // here, because only a weapon is "drawn" by having been acquired.
         let mut armed = false;
-        if script.label("activated").is_some() {
+        if is_weapon && script.label("activated").is_some() {
             if let Ok(player) = i64::try_from(sim.world.borrow().player_thing()) {
                 vm.sender = player;
                 vm.sender_ref = player;
             }
             armed = vm.run_label(script, "activated").is_ok();
         }
+        // The level's own start selects the weapon (`kyle.cog` startup is
+        // `SelectWeapon(player, 1); SelectWeapon(player, AutoSelectWeapon(player, 1));`) **before**
+        // the item cogs exist, so both `selected:` messages went nowhere and the label never ran.
+        // `selected:` is where `weap_bryar.cog` calls `jkSetPOVModel(player, bryv.3do)` — which is why
+        // the first-person weapon was never drawn at all, only its HUD icon. Run it for the bin the
+        // player is holding now, which is what retail's "the starting weapon is drawn" means.
+        let is_current = bins.contains(&sim.world.borrow().cur_bin);
+        let mut held = false;
+        if is_current && script.label("selected").is_some() {
+            if let Ok(player) = i64::try_from(sim.world.borrow().player_thing()) {
+                vm.sender = player;
+                vm.sender_ref = player;
+            }
+            held = vm.run_label(script, "selected").is_ok();
+        }
         println!(
-            "items: started `{name}` for the player (cog {}, startup {}, activated {})",
+            "items: started `{name}` for the player (cog {}, startup {}, activated {}, selected {})",
             vm.cog_index,
             if started { "ran" } else { "has none" },
-            if armed { "ran" } else { "none" }
+            if armed {
+                "ran"
+            } else if is_weapon {
+                "none"
+            } else {
+                "not a weapon"
+            },
+            if held { "ran" } else { "none" }
         );
         {
             // The bin's own cog index, so `UseBin` can send `activated` to it the way the engine
             // does (`sithInventory_ActivateBin` targets the bin's cog, not a broadcast).
             let mut rt = sim.world.borrow_mut();
-            let bins: Vec<i32> = rt
-                .item_cog
-                .iter()
-                .filter(|(_, script)| script.eq_ignore_ascii_case(&name))
-                .map(|(bin, _)| *bin)
-                .collect();
             for bin in bins {
                 rt.bin_cog_index.insert(bin, vm.cog_index);
             }
@@ -19957,14 +20097,7 @@ fn draw_viewmodel(
         .iter()
         .position(|mat| gobs.0.read(mat).is_some())
         .unwrap_or(0) as i32;
-    let handle = meshes.add(model_mesh(&model, material, (1.0, 1.0)));
-    // The framing comes from the **mesh that is actually drawn**, and the mesh has to be recentred
-    // first. A `.3do`'s node transforms place its parts away from the model's origin — that is what
-    // made the weapon appear as a sliver at the edge of the view, and what made any scale derived from
-    // the raw vertices put it out of sight entirely. Recentring on the drawn bounding box and scaling
-    // the box to a fixed fraction of the view is the placement that cannot disagree with the screen.
-    let (drawn_size, _centre) = recentre_mesh(&mut meshes, &handle);
-    let mesh = handle;
+    let mesh = meshes.add(model_mesh(&model, material, (1.0, 1.0)));
     // `rdCamera_SetAmbientLight(camera, sector->ambient + sector->extraLight)` is how retail lights the
     // POV pass, and the runtime tracks that number per sector (`SetSectorLight` moves it). The world is
     // drawn unlit from its own baked vertex light, so the weapon is unlit as well — an unlit material
@@ -19991,43 +20124,25 @@ fn draw_viewmodel(
         cull_mode: None,
         ..default()
     });
-    let Some((camera, camera_rot, projection)) = cam.iter().next() else {
+    let Some((camera, _camera_rot, _projection)) = cam.iter().next() else {
         return;
     };
-    // The weapon lives in **camera space**: parented to the viewmodel camera, so its transform is
-    // relative to the view and no world geometry can ever reach it (`jkPlayer_DrawPov` builds it from
-    // the camera matrix the same way). The orientation is the one the world-space placement used,
-    // expressed in the camera's own frame, so the model sits exactly as before — only now it cannot
-    // be clipped.
-    let (_, rotation) = view_offset(camera_rot);
-    // Where the weapon sits, and how big it is drawn, from the mesh that is actually drawn.
-    //
-    // A view model is authored small — `bryv.3do`'s geometry is 0.05 units across — so it has to be
-    // scaled to the *view*, not to the world. `jkPlayer_DrawPov` gets that from the POV thing's own
-    // scale and offset (`thing + 0x168`), and no decompiled writer sets either, so the numbers are
-    // derived here instead: at arm's length the weapon covers a fixed fraction of the view's
-    // half-height, which frames a pistol and a rifle alike and cannot disagree with the mesh on
-    // screen.
-    let (fov, aspect) = match projection {
-        Projection::Perspective(p) => (p.fov, p.aspect_ratio),
-        _ => (1.0, 1.0),
-    };
-    // The draw scale is the engine's own (`RADIUS` is the size the game gives this model), so the
-    // framing comes from the **distance**: a body of radius `r` at distance `d` subtends about `r / d`,
-    // and putting that at 0.8 of the view's half-height gives `d = r / (0.8 tan(fov/2))`. That is a
-    // number the data supplies, not one tuned against a screenshot — and it is why scaling by the
-    // mesh's own bounding box never worked: `bryv.3do` carries the arms as well, so its box is the arm
-    // span, not the pistol.
-    let (base, scale) = view_frame(fov, aspect, drawn_size);
-    view.base = view_override.unwrap_or(base);
-    view.scale = scale;
+    // The weapon is drawn **exactly as authored**, in camera space — which is what retail does:
+    // `jkPlayer_DrawPov` builds its matrix from the camera's own view, pre-translates the negated eye
+    // offset (`thing + 0x168`, which nothing writes, so it is zero) and pre-multiplies a small sway
+    // rotation, then `rdThing_Draw`s the model with it. `rdModel3_Draw` applies no scale and no
+    // offset of its own. `--model bryv.3do` shows what the author put there: x 0.020..0.032 (right of
+    // the eye), y −0.033..−0.007 (below it), z −0.062..0.010 (in front of it) — a bottom-right gun at
+    // arm's length. The old code recentred that box on the origin and scaled it to fill a fraction of
+    // the view, on the assumption that a 0.07-unit model had to be enlarged; the model is authored at
+    // that size *because* it sits 0.06 units from the eye.
+    view.base = view_override.unwrap_or(Vec3::ZERO);
+    view.scale = 1.0;
     let local = Transform {
         translation: view.base,
-        // The model in the camera's own axes: a `.3do`'s barrel is +Y, and `model_mesh` already
-        scale: Vec3::splat(view.scale),
-        // converts the file's frame to the renderer's, so the view frame needs no extra turn. The old
-        // world placement composed one from ``from_rotation_arc``, which pointed the weapon sideways
-        // and — at the placement the model's radius asks for — behind the eye altogether.
+        // `model_mesh` already converts the file's frame to the renderer's, and a POV model's own
+        // coordinates are the view frame: no extra turn and no scale.
+        scale: Vec3::ONE,
         rotation: Quat::IDENTITY,
         ..default()
     };
@@ -20050,76 +20165,6 @@ fn draw_viewmodel(
     );
 }
 
-/// Recentre a mesh on its own bounding box, and report the box's largest extent.
-///
-/// A `.3do`'s node transforms place its parts relative to the model's origin, which is not where the
-/// geometry sits: `bryv.3do`'s parts land away from the origin, so a view model drawn at a fixed offset
-/// appears at the edge of the view (or off it). Everything downstream — the placement and the scale —
-/// wants the geometry around the origin, so this does that once, at build time.
-fn recentre_mesh(meshes: &mut Assets<Mesh>, handle: &Handle<Mesh>) -> (f32, Vec3) {
-    let Some(mut mesh) = meshes.get_mut(handle) else { return (1.0, Vec3::ZERO) };
-    let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
-        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
-    else {
-        return (1.0, Vec3::ZERO);
-    };
-    if positions.is_empty() {
-        return (1.0, Vec3::ZERO);
-    }
-    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-    for p in positions.iter() {
-        let p = Vec3::from(*p);
-        lo = lo.min(p);
-        hi = hi.max(p);
-    }
-    let centre = (lo + hi) * 0.5;
-    for p in positions.iter_mut() {
-        let shifted = Vec3::from(*p) - centre;
-        *p = shifted.to_array();
-    }
-    // A view model draws more than its pistol — `bryv.3do` carries the arms too — so the bounding box
-    // measures the arm span, and scaling by it draws the weapon as a speck. The 75th percentile of the
-    // vertex distances is the size of the model's *mass*, which is what wants to fill the frame.
-    let mut spread: Vec<f32> = positions.iter().map(|p| Vec3::from(*p).length()).collect();
-    spread.sort_by(|a, b| a.total_cmp(b));
-    let size = if spread.is_empty() {
-        1.0
-    } else {
-        let at = ((spread.len() as f32 * 0.75) as usize).min(spread.len() - 1);
-        2.0 * spread[at]
-    };
-    (size.max(1e-5), centre)
-}
-/// Where a first-person weapon sits in the view, and how big it is drawn.
-///
-/// The view model is authored small and its parts sit away from the model's origin, so the numbers come
-/// from the **drawn mesh**: recentred on its own box (see [`recentre_mesh`]), scaled so that box covers a
-/// set fraction of the view's half-height, and placed low and right of the centre. The fraction is the
-/// one thing here that is a choice rather than a decoded constant — retail composes the placement from
-/// the POV thing's own offset (`thing + 0x168`), and no decompiled writer sets it.
-///
-/// What the decompilation does say, and what this derives instead of guessing:
-///
-/// - `thing + 0x168` is the **eye offset** — the local vector `sithCamera_Update` pre-translates the
-///   thing`s matrix by (`rdMatrix_PreTranslate34(puVar10, iVar7 + 0x168)`) and `jkPlayer_DrawPov`
-///   negates (`local_3c = -*(float *)(iVar3 + 0x168)`). Nothing in the dump *writes* it, so its value
-///   is the same calibration the eye height uses (`PLAYER_EYE`, clamped by the nearest ceiling), not a
-///   fresh number.
-/// - `thing + 0x21c` is **not a scale**: `jkPlayer_DrawPov` divides the sway by it
-///   (`_DAT_00552bc0 = local_44 / *(float *)(iVar3 + 0x21c)`), and `sithPuppet_UpdatePuppet` uses it as
-///   the reference speed in `(0x21c + node offset) - 0xbc`. The bob the port calls `waggle` is its
-///   counterpart.
-///
-/// ponytail: the box includes everything the model draws (hands as well as the weapon), so a model with
-/// far-flung parts reads smaller than its pistol. The `.3do` node scale is where the real answer lives.
-fn view_frame(fov: f32, aspect: f32, drawn_size: f32) -> (Vec3, f32) {
-    let distance = 0.25f32;
-    let half_height = distance * (fov * 0.5).tan();
-    let half_width = half_height * aspect.max(0.05);
-    let size = drawn_size.max(1e-5);
-    let base = Vec3::new(half_width * 0.34, -half_height * 0.55, -distance);
-    (base, (half_height * 0.62) / size)
-}
 /// Marks the entity [`draw_player_body`] puts the player's model on.
 #[derive(Component)]
 struct PlayerBodyMesh;
@@ -20238,17 +20283,6 @@ fn sector_light(sim: &Sim, level: &jkl::Level) -> f32 {
     let scripted = rt.sectors.get(sector).map(|s| s.light).unwrap_or(0.0);
     (baked + scripted).clamp(0.0, 1.0)
 }
-/// Where a first-person weapon sits relative to the view: low and right, angled in.
-fn view_offset(camera: &GlobalTransform) -> (Vec3, Quat) {
-    let forward = camera.forward().as_vec3();
-
-/// Where a first-person weapon sits relative to the view: low and right, angled in.
-    let right = camera.right().as_vec3();
-    let up = camera.up().as_vec3();
-    let translation = camera.translation() + forward * 0.42 + right * 0.16 - up * 0.14;
-    (translation, Quat::from_rotation_arc(Vec3::Z, forward))
-}
-
 /// The player's lightsaber blade, drawn from the eye when `jkSetSaberInfo` armed one.
 ///
 /// The engine hangs a polyline of `length` from the player's hand; this build has no first-person
@@ -24615,29 +24649,59 @@ mod plan_view_tests {
 }
 
 #[cfg(test)]
-mod view_frame_tests {
-    use super::view_frame;
+mod viewmodel_framing_tests {
+    /// `bryv.3do`'s drawn geometry, measured by `--model bryv.3do`: the bounding box over the vertices
+    /// of the picked geoset after the node transforms, in model units (`[min, max]`). The engine draws
+    /// a first-person weapon with the camera's own matrix and no placement of its own
+    /// (`jkPlayer_DrawPov`; `rdModel3_Draw` applies no scale or offset), so these authored numbers are
+    /// the framing — this check is what the old recentre-and-scale guess got wrong twice.
+    const BRYV: ([f32; 3], [f32; 3]) = ([0.020, -0.033, -0.062], [0.032, -0.007, 0.010]);
 
-    /// The weapon has to land **inside the frame and in front of the near plane**; a scale or a distance
-    /// that puts it off the edge is exactly how this went wrong twice.
+    /// The engine's projection at a 4:3 window: the vertical FOV the port draws with.
+    const FOV: f32 = 1.02;
+    const ASPECT: f32 = 4.0 / 3.0;
+
     #[test]
-    fn the_weapon_frames_inside_the_view() {
-        let (fov, aspect) = (1.02f32, 16.0 / 9.0);
-        for size in [0.005f32, 0.05, 0.5] {
-            let (base, scale) = view_frame(fov, aspect, size);
-            let distance = -base.z;
-            assert!(distance > 0.1, "the weapon sits {distance} from the eye, inside the near plane");
-            let half_height = distance * (fov * 0.5).tan();
-            let half_width = half_height * aspect;
-            assert!(base.x.abs() < half_width, "the weapon is off the right edge at {size}");
-            assert!(base.y.abs() < half_height, "the weapon is off the bottom edge at {size}");
-            // Visible rather than a speck or a wall: between a tenth of a radian and half the view.
-            let drawn = size * scale / distance;
-            assert!(
-                drawn > 0.1 && drawn < fov * 0.5,
-                "a {size} unit model subtends {drawn} rad at the placement"
-            );
+    fn the_authored_weapon_box_lands_in_the_lower_right_corner() {
+        let (lo, hi) = BRYV;
+        let half = (FOV * 0.5).tan();
+        let (mut min_x, mut max_x) = (f32::MAX, f32::MIN);
+        let (mut min_y, mut max_y) = (f32::MAX, f32::MIN);
+        let mut seen = 0;
+        for x in [lo[0], hi[0]] {
+            for y in [lo[1], hi[1]] {
+                for z in [lo[2], hi[2]] {
+                    // Behind (or on) the eye's near plane: not drawn.
+                    if -z <= 0.015625 {
+                        continue;
+                    }
+                    let ndc_x = x / (-z * half * ASPECT);
+                    let ndc_y = y / (-z * half);
+                    min_x = min_x.min(ndc_x);
+                    max_x = max_x.max(ndc_x);
+                    min_y = min_y.min(ndc_y);
+                    max_y = max_y.max(ndc_y);
+                    seen += 1;
+                }
+            }
         }
+        assert!(seen >= 4, "no part of the weapon is in front of the eye");
+        // In frame, in the lower-right quadrant: right of centre and below it.
+        assert!(
+            min_x > -1.0 && max_x < 1.0 && min_y > -1.0 && max_y < 1.0,
+            "the authored box leaves the frame: x {min_x:.2}..{max_x:.2}, y {min_y:.2}..{max_y:.2}"
+        );
+        assert!(
+            max_x > 0.0 && min_y < 0.0,
+            "the authored box is not in the lower-right corner: x {min_x:.2}..{max_x:.2}, y {min_y:.2}..{max_y:.2}"
+        );
+        // Big enough to read as the weapon, not a speck: it covers a real part of the view.
+        assert!(
+            (max_x - min_x) > 0.15 || (max_y - min_y) > 0.15,
+            "the authored box is a speck: {:.2} by {:.2} of the frame",
+            max_x - min_x,
+            max_y - min_y
+        );
     }
 }
 

@@ -427,7 +427,7 @@ focus thing) is the next slice.
 Every "needs a windowed fixture" note in this document lands here. Both the retail harness and the port's own window
 take over the mouse and keyboard, so this is **one session, run deliberately** — at a release candidate, or when the
 accumulated behaviour changes are worth a regression — not a per-question tool. Everything that can be checked from
-files (tests, `--audit`, `--asset`, `--grep-assets`, the data-derived probes) has already been checked that way; this
+files (tests, `--audit`, `--asset`, `--grep-assets`, `--model`, the data-derived probes) has already been checked that way; this
 list is only what is left.
 
 Run, in order, from the repo root with `pwsh`:
