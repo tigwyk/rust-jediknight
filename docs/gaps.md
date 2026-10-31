@@ -4862,3 +4862,29 @@ two). Round 169's gate had `walk6` passing (1.06, 2 sectors) and `walk5` at 3.09
 sessions — reproducibly, not noisily. That is now the *measured* open defect: the port keeps walking/crossing where
 retail stops, on the levels whose doors and Baron actors run scripted sequences during the window. Everything else,
 including the newest legs (17, 19, 26), is green.
+
+**The `06*barons` freeze is a cross-frame climb onto something 0.32 above the floor (round 181).** The failing body
+ends at (7.8225, 12.1534, **0.4202**) in sector 35 with `support Some(0.100059)` and `floor Some(0.100060)` — it is
+**0.32 above its own floor** and `move_body` reports `blocked true` at zero movement every frame. The tracer shows the
+climb, and the wall it ends against:
+
+```
+landed on 0.420 after 0.002
+  step candidate low false contact z 0.420 feet 0.355 step 0.066
+  move_body delta [-0.0317, -0.0317, 0.0] -> moved 0.017, blocked true, z 0.420173 -> 0.420173
+  ahead Some(Sweep { distance: 0.0, surface: 422, normal: [0.7071, 0.7071, 0.0], top: 0.900059 })
+```
+
+So the body is standing **0.32 above its floor** and pressed against surface 422 (a diagonal wall whose top is 0.900),
+and the geometry probe confirms the same thing: at z 0.42 the sector is 35 with `floor_under -> None`, at z 0.22 the
+floor is `0.1001` — nothing at 0.42 is a floor. Retail's body stays at z ≈ 0.0-0.22 in the same room and reaches
+sector **24** (its path bends: x drops 3.39 while y drops 1.55, i.e. it slides along the wall), so retail never climbs
+this.
+
+One candidate fix was implemented and **measured, then reverted**: `move_body`'s loop can `continue` after a
+successful step lift, so one call may lift more than the engine's single `FindFloor` retry. Limiting it to one lift
+per call left `walk5_spawn` byte-identical (same end pose, same 5 sector mismatches) and every reference leg
+unchanged — the climb happens **across frames** (each frame's vertical settle lands the body on whatever the previous
+lift reached), so the in-call limit is not the mechanism. The next probe is the vertical settle: at the pose where
+the body sits 0.32 above `floor_under`'s answer it should fall back rather than stay, which points at the
+`support`/`floor` pair disagreeing with the landing surface.

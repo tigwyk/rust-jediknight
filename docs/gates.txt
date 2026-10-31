@@ -1552,3 +1552,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   `walk17_spawn` (117 %, 0), `walk19_spawn` (stop-pose), `walk26_spawn` (0.42, 0).
 - Both failing levels are the `06*barons` pair, whose doors and Baron actors run scripted sequences inside the walk
   window; the port keeps walking/crossing where retail stops. This is the measured open defect for a later round.
+
+## Update — round 181
+
+- `walk5_spawn`/`walk6_spawn` freeze diagnosed: the body ends at (7.8225,12.1534,**0.4202**) in sector 35 while its
+  `support`/`floor` is **0.100** — 0.32 above its own floor — pressed against surface 422 (normal (0.707,0.707), top
+  0.900), with `move_body` blocked at zero movement every frame. Retail stays at z ≈ 0-0.22 and reaches sector 24 by
+  sliding along the wall.
+- A one-step-per-`move_body` limit was implemented and **measured then reverted**: `walk5_spawn` was byte-identical
+  (same pose, same 5 sector mismatches) and every reference leg was unchanged, so the climb is **across frames** (the
+  vertical settle keeps the reached height), not within one call.
+- Next probe: the vertical settle — a body 0.32 above `floor_under`'s answer should fall back instead of staying.
+- Tests **149 passed**.
