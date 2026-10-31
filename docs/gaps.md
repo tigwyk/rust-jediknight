@@ -5259,3 +5259,24 @@ post-trigger value yet. The check to add is a post-run cog print (e.g. `--cogsta
 ends) — then the port's own trigger path can be compared against this retail value, and the trigger-fidelity question
 (the port's `sector_for_body` picks max hull clearance, so a thin slab only wins when the body's centre is inside it,
 exactly as the warp demonstrates) can be answered against a fixture rather than by argument.
+
+**`--cogstatus-after` lands — and the movement-trigger fixture fails on the port: `trouble 0` against retail's 137
+(round 196).** The new probe prints a placed cog's **live** symbol table when the run ends, in both exit paths (the
+frame budget and the `--shot` capture, which is the one the trace/parity harnesses take). The symbol-table printer was
+extracted to `print_symbol_table` and is now shared with the load-time `--cogstatus` probe, so the two cannot drift.
+
+Against round 195's retail fixture, with the body warped into the trigger slab's band:
+
+| run | `trouble` | `needsl` |
+| --- | --- | --- |
+| retail, `warp -9 -5 -1.077 0 0 0` | **137** | 0 |
+| port, `--warp -9.0,-5.0,-1.114,0` (body z −1.077, `sector_for_body` = 353) | **0** | 0 |
+| port, level spawn (control) | 0 | 0 |
+
+So the port never delivers the sector's `entered` to cog 29 even though its own `sector_for_body` at the warped pose is
+353. The likely owner is the runtime's **player-sector bookkeeping**: the sector is resolved once (at spawn/level load)
+and updated only by the lateral crossing machinery, so a body placed *inside* a trigger slab by a warp (or a walk whose
+centre enters a slab without crossing a portal) never changes its sector and the `sector_links` message is never sent.
+That is the next probe: log the player's runtime sector across the warp and compare with `sector_for_body`, then decide
+whether the runtime should re-resolve the sector when the body's centre enters another sector's hull (the engine's
+`sithThing` does exactly that) — with this fixture as the acceptance check.

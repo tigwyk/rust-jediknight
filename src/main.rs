@@ -220,14 +220,79 @@ const GATES: &[&str] = &[
 /// A run that cannot terminate is not a test: without this, a flag that forgets to quit sits on a
 /// window forever, and one such flag hangs a whole `--gates` sweep. `BK_EXIT_FRAMES` sets the same
 /// budget without the flag.
+/// One placed cog's symbol table in the retail `cogstatus` format, from whichever VM is passed: the
+/// load-time probe runs `startup` on a throwaway VM, `--cogstatus-after` passes the **running**
+/// instance's VM so a trigger's effect is visible (Phase 1 step 4).
+fn print_symbol_table(script: &cog::Cog, vm: &cog::Vm) {
+    let mut symbol_index = 0;
+    let mut message_ordinal = 0usize;
+    for symbol in &script.symbols {
+        if symbol.kind == cog::SymKind::Message {
+            // Retail prints message symbols too: their value is the message id
+            // (`crossed = 8`, `arrived = 11`, `timer = 4` in the level-1 fixture).
+            let id = cog::message_id(&symbol.name).unwrap_or(message_ordinal as i32);
+            println!("  Symbol {symbol_index}: '{}'  = {id}", symbol.name);
+            symbol_index += 1;
+            message_ordinal += 1;
+            continue;
+        }
+        let value = vm.var(&symbol.name).num();
+        // The engine prints `%d` for the integer-valued symbol kinds (link ids) and `%f`
+        // (six decimals) for numeric variables - the fixture shows `lower_adjoin0 = 839` next to
+        // `start_wait = 0.250000`.
+        let integer_kind = matches!(
+            symbol.kind,
+            cog::SymKind::Thing
+                | cog::SymKind::Sector
+                | cog::SymKind::Surface
+                | cog::SymKind::Sound
+                | cog::SymKind::Template
+                | cog::SymKind::Keyframe
+                | cog::SymKind::Material
+                | cog::SymKind::AiClass
+                | cog::SymKind::Model
+                | cog::SymKind::Cog
+                | cog::SymKind::Int
+        );
+        if integer_kind {
+            println!("  Symbol {symbol_index}: '{}'  = {}", symbol.name, value as i64);
+        } else {
+            println!("  Symbol {symbol_index}: '{}'  = {value:.6}", symbol.name);
+        }
+        symbol_index += 1;
+    }
+}
+
+/// Print one placed cog's live table (`--cogstatus-after`). Both exits call this: the frame budget and
+/// the `--shot` capture. The load-time `--cogstatus` probe cannot show a trigger's effect; this can.
+fn print_cog_status_after(world: Option<&World>, sim: Option<&Sim>, index: usize) {
+    let (Some(world), Some(sim)) = (world, sim) else { return };
+    let Some(inst) = world.level.cogs.get(index) else { return };
+    let Some(script) = world.cogs.get(&inst.script) else { return };
+    let Some((_, vm)) = sim.instances.get(index) else { return };
+    println!("Cog #{index} (after the run): Name:{}  Script {}", inst.script, inst.script);
+    print_symbol_table(script, vm);
+}
+/// `--cogstatus-after <n>`: print cog `n`'s **live** symbol table when the frame budget ends the run.
+#[derive(Resource)]
+struct CogStatusAfter(Option<usize>);
+
 fn exit_after_frames(
     after: Option<Res<ExitAfter>>,
+    after_status: Option<Res<CogStatusAfter>>,
+    world: Option<Res<World>>,
+    sim: Option<Res<Sim>>,
     mut frames: Local<u64>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(after) = after else { return };
     *frames += 1;
     if *frames >= after.0 {
+        // `--cogstatus-after`: read the running instance, not a startup VM -- a trigger's effect is
+        // exactly what a load-time probe cannot show.
+        if let Some(index) = after_status.and_then(|a| a.0) {
+            print_cog_status_after(world.as_deref(), sim.as_deref(), index);
+        }
         exit.write(AppExit::Success);
     }
 }
@@ -447,6 +512,10 @@ fn main() {
     // (`sithCog_CogStatus`, formats 0x54aaf4 / 0x54ab1c / 0x54ab30 / 0x54ab38) - Phase 0.5 step 2's
     // port-side fixture check against `tools/parity/cogstatus-01narshadda.txt`.
     let mut cogstatus: Option<usize> = None;
+    // `--cogstatus-after <n>`: the same table, printed from the **running** instance when the run
+    // ends. Phase 1 step 4's movement-trigger fixture needs exactly this: `--cogstatus` prints at load
+    // (before a trigger can fire), while retail's capture reads whatever the walk/trigger left behind.
+    let mut cogstatus_after: Option<usize> = None;
     // `--surfaces-at "x,y,z"`: with `--collide`, print the level surfaces near a point - the geometry
     // probe behind the `walk_street45` stop (retail stops at x 3.27 where the port walks off).
     let mut surfaces_at: Option<[f32; 3]> = None;
@@ -772,6 +841,12 @@ fn main() {
             "--cogstatus" => {
                 cogstatus = args.get(i + 1).and_then(|v| v.parse().ok());
                 if cogstatus.is_some() {
+                    i += 1;
+                }
+            }
+            "--cogstatus-after" => {
+                cogstatus_after = args.get(i + 1).and_then(|v| v.parse().ok());
+                if cogstatus_after.is_some() {
                     i += 1;
                 }
             }
@@ -6428,43 +6503,7 @@ fn main() {
                 let mut vm = cog::Vm::with_world(handle);
                 script.bind(&mut vm, &inst.values);
                 let _ = vm.run_label(&script, "startup");
-                let mut symbol_index = 0;
-                let mut message_ordinal = 0usize;
-                for symbol in &script.symbols {
-                    if symbol.kind == cog::SymKind::Message {
-                        // Retail prints message symbols too: their value is the message id
-                        // (`crossed = 8`, `arrived = 11`, `timer = 4` in the level-1 fixture).
-                        let id = cog::message_id(&symbol.name).unwrap_or(message_ordinal as i32);
-                        println!("  Symbol {symbol_index}: '{}'  = {id}", symbol.name);
-                        symbol_index += 1;
-                        message_ordinal += 1;
-                        continue;
-                    }
-                    let value = vm.var(&symbol.name).num();
-                    // The engine prints `%d` for the integer-valued symbol kinds (link ids) and `%f`
-                    // (six decimals) for numeric variables - the fixture shows `lower_adjoin0 = 839`
-                    // next to `start_wait = 0.250000`.
-                    let integer_kind = matches!(
-                        symbol.kind,
-                        cog::SymKind::Thing
-                            | cog::SymKind::Sector
-                            | cog::SymKind::Surface
-                            | cog::SymKind::Sound
-                            | cog::SymKind::Template
-                            | cog::SymKind::Keyframe
-                            | cog::SymKind::Material
-                            | cog::SymKind::AiClass
-                            | cog::SymKind::Model
-                            | cog::SymKind::Cog
-                            | cog::SymKind::Int
-                    );
-                    if integer_kind {
-                        println!("  Symbol {symbol_index}: '{}'  = {}", symbol.name, value as i64);
-                    } else {
-                        println!("  Symbol {symbol_index}: '{}'  = {value:.6}", symbol.name);
-                    }
-                    symbol_index += 1;
-                }
+                print_symbol_table(&script, &vm);
             }
         }
         return;
@@ -10687,6 +10726,7 @@ fn main() {
         .insert_resource(PendingLevel::default())
         .insert_resource(CompleteAfter(complete_after))
         .insert_resource(ExitAfter(exit_after.unwrap_or(u64::MAX)))
+        .insert_resource(CogStatusAfter(cogstatus_after))
         .add_systems(Startup, setup)
         .add_systems(PostStartup, setup_overlay)
         // Always on: the collider hand-off, the gate that samples the running game, the mute, the
@@ -22632,12 +22672,24 @@ fn trace_state(
     );
 }
 
-fn auto_shot(shot: Res<Shot>, at: Res<ShotFrame>, mut commands: Commands, mut frame: Local<u32>) {
+fn auto_shot(
+    shot: Res<Shot>,
+    at: Res<ShotFrame>,
+    after_status: Option<Res<CogStatusAfter>>,
+    world: Option<Res<World>>,
+    sim: Option<Res<Sim>>,
+    mut commands: Commands,
+    mut frame: Local<u32>,
+) {
     let Some(path) = shot.0.clone() else { return };
     *frame += 1;
     // Few enough frames that a scripted run stays short, enough that texture
     // uploads and the first render pass have happened.
     if *frame == at.0.max(1) {
+        // `--cogstatus-after`: the capture exit is the one the trace/parity harnesses take.
+        if let Some(index) = after_status.as_ref().and_then(|a| a.0) {
+            print_cog_status_after(world.as_deref(), sim.as_deref(), index);
+        }
         println!("saving {} after {} frames", path.display(), *frame);
         commands
             .spawn(Screenshot::primary_window())

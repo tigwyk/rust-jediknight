@@ -1739,3 +1739,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - A walking body cannot reach the slab (centre −1.30 vs band −1.2..−1.0), which is why every walk leg misses triggers;
   the port side needs a **post-run cog print** (`--cogstatus` is load-time only) before it can be compared.
 - Tests **149 passed**.
+
+## Update — round 196
+
+- Added **`--cogstatus-after <n>`**: prints cog `n`'s live symbol table when the run ends, wired into **both** exit
+  paths (frame budget and the `--shot` capture the harnesses use). The symbol printer is now one shared
+  `print_symbol_table` with the load-time `--cogstatus` probe.
+- **The movement-trigger fixture fails on the port**: retail `trouble = 137`, port `trouble = 0` (control at spawn
+  also 0), from the same warped pose whose `sector_for_body` is 353. The port never delivers the sector's `entered`
+  to cog 29.
+- Likely owner: the runtime's **player-sector bookkeeping** (resolved at spawn, updated only by lateral crossing), so
+  a body placed inside a trigger slab never changes sector. Next probe: log the runtime sector across the warp vs
+  `sector_for_body`, then re-resolve on hull entry with this fixture as the acceptance check.
+- Tests **149 passed**.
