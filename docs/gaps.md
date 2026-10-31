@@ -5413,3 +5413,30 @@ in the same run.
 
 Verification: `cargo test --release` **149 passed**; `--gates` **64 of 64, 0 skipped**; the cantina-use run's
 `use: activated surface 2403` and `doorstatus = 2` quoted above.
+
+**The interaction chain is a permanent gate now: `--use-live` presses the key and asserts the door opens (round 203).**
+Round 201 proved the chain by hand; this round extends the windowed `use_probe` gate so the *gate suite* proves it:
+
+```
+use-live: E in front of thing 4 (sector 74)
+use-live: 36 script message(s) answered the key (was 0)
+use-live: E at the cantina switch (cog instance 11); waiting for the door
+use-live: doorstatus 2 of numdoors 2 -- the switch opened the door
+--- use-live check passed ---
+```
+
+The probe keeps its original key-reaches-a-script stage, then warps the body to the coords-verified switch pose, presses
+the same key through the real `use_key` system, and reads the switch script's **live** `doorstatus`/`numdoors` from
+the running VM; it passes only when both door pieces reached frame 1. Levels without a door-switch cog fall back to
+the key test alone, so the gate stays level-agnostic. `--gates` is still **64 of 64** (the gate kept its flag) and the
+output now includes the door line.
+
+One log-accuracy fix came with it: a handler that **sleeps** reports the `::sleeping` unwind from `run_label`, and
+three delivery sites printed it as `failed`. Sleeping is delivery, not failure — the handler resumes on its own clock
+(`00_doorswitch.cog`'s `arrived` sleeps 2 s before closing the door) — so those sites now count it and stay quiet.
+
+**Regression verification for round 201's four fixes** (full suite):
+`cargo test --release` **149 passed**; walk-trace gate **15 legs, 1 failure** (only `walk5_spawn`, the tracked
+floor-search deviation — identical numbers); parity gate **6 thresholds, 0 failures** (spawn 0.6602, spawn_pose
+0.6603, spawn_yaw30 0.6385, route_cantina 0.7381, route_lower 0.7119, route_street 0.7327); `--gates` **64 of 64, 0
+skipped**.

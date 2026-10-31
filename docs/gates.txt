@@ -1820,3 +1820,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
   (3) both message buses **resolve message names by id** (`activate` → `activated`); (4) both buses **carry the link
   id as the sender** (`GetSenderId()` = 2 for the switch surface, 1 for door things).
 - `cargo test --release` 149 passed; `--gates` **64 of 64, 0 skipped** (including `--use-live`).
+
+## Update — round 203
+
+- `--use-live` now proves the **whole interaction chain** in the gate suite: real key → `use_key` → switch surface →
+  `activated` (sender 2) → the shipped door script → **`doorstatus 2 of numdoors 2`**. It reads the live VM, so
+  `--gates` output carries `--- use-live check passed ---` only when the door actually opened; non-switch levels fall
+  back to the key test.
+- Sleep-unwind fix: a handler that sleeps reports `::sleeping` from `run_label`; three delivery sites printed it as
+  `failed`. Sleeping is delivery (the handler resumes), so it is counted and not reported as an error.
+- Regression verification of round 201's fixes: tests **149 passed**; walk-trace gate **15 legs, 1 failure** (only
+  `walk5_spawn`); parity gate **6 thresholds, 0 failures** (cantina 0.7381); `--gates` **64 of 64, 0 skipped**.

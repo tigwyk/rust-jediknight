@@ -5903,7 +5903,10 @@ fn main() {
                 }
                 let ran = vm.run_label(script, label);
                 vm.source = own;
-                if ran.is_err() {
+        // `::sleeping` is the sleep unwind, not a failure: the handler is suspended and resumes later.
+        if let Err(error) = ran
+            && error != "::sleeping"
+        {
                     continue;
                 }
             }
@@ -17442,7 +17445,10 @@ fn deliver_thing_messages(
         }
         let ran = vm.run_label(script, &resolved);
         vm.source = own_source;
-        if ran.is_err() {
+        // `::sleeping` is the sleep unwind, not a failure: the handler is suspended and resumes later.
+        if let Err(error) = ran
+            && error != "::sleeping"
+        {
             continue;
         }
         fired += 1;
@@ -17517,7 +17523,12 @@ fn deliver_cog_messages(
                     println!("sighted: `{script_name}` ran `{label}`");
                 }
             }
-            Err(error) => println!("sighted: `{script_name}`'s `{label}` failed: {error}"),
+                // `::sleeping` is the sleep unwind, not a failure: the handler is suspended and
+                // resumes on its own clock (`00_doorswitch.cog`'s `arrived` sleeps 2 s before closing).
+                Err(error) if error == "::sleeping" => {
+                    fired += 1;
+                }
+                Err(error) => println!("sighted: `{script_name}`'s `{label}` failed: {error}"),
         }
         vm.sender = own_sender;
     }
@@ -17893,6 +17904,7 @@ fn use_probe(
     mut player: Option<ResMut<Player>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     count: Option<Res<TriggerCount>>,
+    world: Option<Res<World>>,
     mut state: Local<(u32, u8, usize)>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -17919,7 +17931,7 @@ fn use_probe(
             let Some(pos) = sim.world.borrow().things.get(target).map(|t| (t.pos, t.sector)) else {
                 return;
             };
-            // Two units away on -Y, facing +Y: inside the 3-unit reach and the 0.3 facing cone.
+            // Two units away on -Y, facing +Y: inside the reach and the facing cone.
             player.pos = Vec3::new(pos.0[0], pos.0[1] - 2.0, pos.0[2]);
             player.sector = pos.1.max(0) as usize;
             player.yaw = std::f32::consts::FRAC_PI_2;
@@ -17941,14 +17953,51 @@ fn use_probe(
                 now.saturating_sub(state.2),
                 state.2
             );
-            if now > state.2 {
-                println!("--- use-live check passed ---");
-            } else {
+            if now <= state.2 {
                 println!("use-live: FAIL the key reached no script");
+                exit.write(AppExit::Success);
+                return;
             }
-            exit.write(AppExit::Success);
+            // The **same key press** must also end with the shipped door chain open: level 1's
+            // cantina switch, at the coords-verified pose from the retail capture (rounds 191/201).
+            // The witness is the script's own `doorstatus == numdoors`, read from the live VM.
+            let switch = world.as_ref().and_then(|w| {
+                w.level
+                    .cogs
+                    .iter()
+                    .position(|c| c.script.eq_ignore_ascii_case("00_doorswitch.cog"))
+            });
+            let Some(instance) = switch else {
+                println!("use-live: no door-switch cog in this level; the key test stands alone");
+                println!("--- use-live check passed ---");
+                exit.write(AppExit::Success);
+                return;
+            };
+            player.pos = Vec3::new(-4.0, -3.0, -1.18);
+            player.sector = 254;
+            player.yaw = 135.0f32.to_radians();
+            player.vy = 0.0;
+            state.2 = instance;
+            keys.press(KeyCode::KeyE);
+            state.1 = 2;
+            state.0 = 0;
+            println!("use-live: E at the cantina switch (cog instance {instance}); waiting for the door");
         }
-        _ => {}
+        _ => {
+            keys.release(KeyCode::KeyE);
+            let (open, total) = {
+                let Some((_, vm)) = sim.instances.get(state.2) else { return };
+                (vm.var("doorstatus").num(), vm.var("numdoors").num())
+            };
+            if open > 0.0 && (open - total).abs() < 0.5 {
+                println!("use-live: doorstatus {open:.0} of numdoors {total:.0} -- the switch opened the door");
+                println!("--- use-live check passed ---");
+                exit.write(AppExit::Success);
+            } else if state.0 > 240 {
+                println!("use-live: FAIL doorstatus {open:.0} of numdoors {total:.0} after 240 frames");
+                exit.write(AppExit::Success);
+            }
+        }
     }
 }
 
