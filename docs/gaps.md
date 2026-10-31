@@ -5819,17 +5819,33 @@ handler:
 | specialattack | 24 | `0x40fd00` | no |
 | hitandrun | 23 | `sithAICmd_HitAndRun` | **yes** (round 223: fires, then breaks off) |
 | sensedanger | 14 | `0x50b9b0` | partial: the awareness reader already turns and walks an actor to the event; the player-target acquisition the handler also does is not ported |
-| turretfire | 12 | `0x50a0f0` | no |
+| turretfire | 12 | `0x50a0f0` | **yes** (round 227: fires, stands still; head sweep not modelled) |
 | randomturn | 9 | `0x50b700` | **yes** (round 224: idle actors sweep their view) |
 | lobfire | 7 | `0x509cd0` | no |
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **12 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+So the port runs **13 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
 the counts are how many classes depend on each: `listen` (200) and `talk` (198) are the biggest remaining behavioural
 gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
 it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair, `circlestrafe`,
-`hitandrun`, `randomturn` and `roam` (below). `sabermove` needs no work at all: nothing names it.
+`hitandrun`, `randomturn`, `roam` and `turretfire` (below). `sabermove` needs no work at all: nothing names it.
+
+**Turrets fire again, and they stand still (round 227, `turretfire`, 12 classes).** Reading the shipped class settled two
+problems at once: `misc\ai\turdefault.ai` carries **only `TurretFire`** — no `PrimaryFire` at all — so the port's fire gate
+found no instinct and left every turret in every level silent; and the handler (`0x50a0f0`) never calls `SetMovePos`, it
+only turns the articulated head and fires the weapon from it, so the port was also walking turrets at the player.
+
+The port now fires a `TurretFire` class when there is no `PrimaryFire`: the delay is the shipped first number (750 ms),
+the reach is the class's own `sightdist` (5.0), there is no facing gate (the turret's `fov` is 360), no burst, and the
+shot is modelled as accurate. And a class with `TurretFire` never walks. The handler's distinctive part is the **aim-head
+sweep**: it stores ±160° yaw and pitch jitter in the thing's head joints (`+0x15c`, `+0x160`) and steps them at the
+instinct's 75-degrees-a-second rate, which is what makes a turret's fire wobble. The port has no articulated turret head,
+so that sweep is on the ledger as a deviation rather than silently dropped.
+
+The headless check is `a_turret_fires_and_does_not_walk`: a turret with the shipped class, a visible target 2 units away
+and a walking speed of 1.0 must spawn a projectile and must not move. Measured before/after: with the turret path
+disabled the test fails with `the turret never fired`; enabled it passes. Suite: **161 tests, 0 failures**.
 
 **`roam` is implemented, completing the wander half of the home pair (round 225, 27 classes).** The handler (`0x50b830`)
 does exactly what its name says: a random direction, a random distance **inside the instinct's first argument**, at the

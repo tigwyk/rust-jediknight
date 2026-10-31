@@ -3183,7 +3183,11 @@ impl Runtime {
             let destination_reach =
                 ((want[0] - from[0]).powi(2) + (want[1] - from[1]).powi(2)).sqrt();
 
-            if reach > standoff && speed > 0.0 {
+            // A class with `TurretFire` never moves its body: its handler (`0x50a0f0`) only turns the
+            // articulated head and fires the weapon, so the port leaves a turret where it was placed
+            // instead of walking it at the player.
+            let turret = ai.as_ref().is_some_and(|class| class.instinct("TurretFire").is_some());
+            if reach > standoff && speed > 0.0 && !turret {
                 let step = (speed * dt).min(reach - standoff);
                 let next = [
                     from[0] + dx / reach * step,
@@ -3298,7 +3302,22 @@ impl Runtime {
             if blind {
                 shooting_at = self.ai_last_seen.get(&index).copied().unwrap_or(shooting_at);
             }
-            let instinct = if blind { "BlindFire" } else { "PrimaryFire" };
+            let instinct = if blind {
+                "BlindFire"
+            } else if ai.as_ref().and_then(|class| class.instinct("PrimaryFire")).is_none()
+                && ai.as_ref().is_some_and(|class| class.instinct("TurretFire").is_some())
+            {
+                "TurretFire"
+            } else {
+                "PrimaryFire"
+            };
+            // `turretfire` (`0x50a0f0`): a turret's class carries **no `PrimaryFire`** (the shipped
+            // `turdefault.ai` has only `TurretFire`), so a turret that falls back to this path would
+            // never fire at all. The handler aims the articulated head and fires the weapon from it;
+            // the body never moves. The port fires from the body, with the class's own `sightdist` as
+            // the reach, no facing gate and no burst — the ±160-degree head sweep the handler applies
+            // is a joint articulation the port cannot reproduce, so that is on the ledger, not hidden.
+            let turret_shot = instinct == "TurretFire";
             let Some(primary) = ai.as_ref().and_then(|ai| ai.instinct(instinct)).cloned() else {
                 if fire_trace {
                     eprintln!("ai: {index} `{ai_template}` has no {instinct} instinct");
@@ -3318,10 +3337,20 @@ impl Runtime {
                 // Every shipped line is `750, 0.80, 0, 0.8, 0.0, 0.30`: delay, chance, unused, cos
                 // limit, minimum distance, spread. The reach is the engine's fixed 10 units.
                 (arg(0), arg(2), 10.0, arg(4), arg(3))
+            } else if turret_shot {
+                // `turretfire`'s shipped line is `750, 75, 160, 160, 5.0, 0.20, 500, 10000, 0`: the first
+                // number is the delay, and the rest are the aim-head sweep and cooldown. The port has no
+                // articulated head, so the shot uses the class's own `sightdist` as the reach and no
+                // facing gate (the turret's fov is 360), and is modelled as accurate.
+                (arg(0), 0.0, ai.as_ref().map(|a| a.sightdist).unwrap_or(5.0), 0.0, 0.0)
             } else {
                 (arg(0), arg(1), arg(2), arg(3), arg(4))
             };
-            let (burst, burst_ms) = if blind { (1.0, 0.0) } else { (arg(8), arg(9)) };
+            let (burst, burst_ms) = if blind || turret_shot {
+                (1.0, 0.0)
+            } else {
+                (arg(8), arg(9))
+            };
             // The engine rolls the chance on its own tick; the port rolls it when the shot slot is up.
             if blind && arg(1) > 0.0 && crate::cog::pseudo_random() > arg(1) as f64 {
                 continue;
@@ -8257,6 +8286,40 @@ mod tests {
             rt.shots_fired > 0,
             "the actor did not come back after its mode was cleared"
         );
+    }
+
+    /// `turretfire` (`0x50a0f0`): a turret's class (`turdefault.ai`) carries **no `PrimaryFire`**, so
+    /// the port used to leave every turret silent; and the handler never calls `SetMovePos`, so a
+    /// turret must not walk either.
+    #[test]
+    fn a_turret_fires_and_does_not_walk() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [2.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "turret".into()];
+        rt.types = vec![10, 2];
+        // Even at a walking speed a turret must not move.
+        rt.template_speed.insert("turret".into(), 1.0);
+        rt.template_weapon.insert("turret".into(), "blaster".into());
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=360, sightdist=5.0, heardist=2.0\n\n\
+                 TurretFire 750.0, 75.0, 160.0, 160.0, 5.0, 0.20, 500.0, 10000.0, 0.0\n",
+            ),
+        );
+        let emplaced = rt.things[1].pos;
+        for _ in 0..30 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(rt.shots_fired > 0, "the turret never fired");
+        assert_eq!(rt.things[1].pos, emplaced, "the turret walked");
     }
 
     /// `circlestrafe` (`0x509890`): within the instinct's engage distance (0.6–1.0 in the shipped

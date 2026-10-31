@@ -2161,3 +2161,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Recorded as still unread: the other script bits (`0x1`, `0x4` wake, `0x200`/`0x202`); gating on `0x4` needs the
   engine's own wake logic first, or every actor a script never wakes would freeze.
 - No game run and no port window.
+
+## Update — round 227
+
+- **Turrets fire again, and stand still** (`turretfire`, 12 classes). `misc\ai\turdefault.ai` carries **only `TurretFire`**
+  (no `PrimaryFire`), so the port's fire gate found no instinct and left every turret in every level silent; and the
+  handler (`0x50a0f0`) never calls `SetMovePos`, so the port was also walking turrets at the player.
+- The port now fires a `TurretFire` class when there is no `PrimaryFire`: delay = shipped first number (750 ms), reach =
+  the class's own `sightdist` (5.0), no facing gate (fov 360), no burst, accurate shot. A class with `TurretFire` never
+  walks. Deviation recorded: the handler's ±160° **aim-head sweep** (`+0x15c`/`+0x160`, 75°/s) is a joint articulation
+  the port cannot reproduce, so it is on the ledger rather than silently dropped.
+- Headless check `a_turret_fires_and_does_not_walk` (visible target at 2 units, walking speed 1.0 → must fire, must not
+  move). Measured before/after: turret path disabled → fails with `the turret never fired`; enabled → passes. Suite
+  **161 tests, 0 failures**.
+- AI instinct coverage now **13 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198, audio). No game
+  run and no port window.
