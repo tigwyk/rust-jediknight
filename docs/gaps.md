@@ -5310,3 +5310,27 @@ that matters is the trigger-message delivery, which both the trace and the port'
 The `--cogstatus-after` probe and the before/after harness reads from rounds 193/196 stay: they are how the mistake was
 caught, and they will show a real state change when a target is chosen whose label actually mutates a variable (e.g.
 cog 28's `00_SecretAreas` counters, or the level-1 door chain).
+
+**Sector messages now carry their link id as the sender id — the port reproduces retail's secret counter (round
+198).** A movement-trigger fixture with a *real* state change was found this round, and it exposed a genuine defect:
+
+| run | cog 28 `maxsecrets` | cog 28 `flags` |
+| --- | --- | --- |
+| retail, at load (control) | 6 | 0 |
+| retail, warped into secret sector 306 | 6 | **2** |
+| port, warped into secret sector 306 (before the fix) | 6 | **0** |
+| port, warped into secret sector 306 (after the fix) | 6 | **2** |
+| port, level spawn (control) | 6 | 0 |
+
+The target is cog 28 `00_SecretAreas.cog`, whose `entered` label does `if (flags & GetSenderId()) Return; flags = flags
+| GetSenderId(); ChangeInv(player, 70, 1.0)` — the secret counter. Its six trigger sectors were located with a new
+`--sector-locate <cog>` probe (the collision build's own sphere per sector): 243 at (−6.40,−4.22,−0.72) r 1.37, **306 at
+(4.45,−4.69,−1.16) r 0.98**, 8, 417, 427, 281. The defect was that `Runtime::sector_messages` returned
+`(instance, label)` and dropped the link id, so `vm.sender` stayed 0 and `flags = flags | 0` never set the bit — the
+engine sends `entered` with the **link id as the sender id** (`00_SecretAreas.cog` is the script that proves it). The
+link now rides through `sector_messages` (`(instance, label, link)`) and is assigned to `vm.sender` in the live
+delivery, the soak probe and the `--triggers` gate, which also **asserts** every sector message carries a link id from
+that sector's link list — the runnable check for this behaviour.
+
+Verification: the port matches retail at 306 (`flags = 2`) and at the spawn control (`flags = 0`), `cargo test
+--release` **149 passed**, and the full gate suite **64 of 64, 0 skipped** with the new assertion included.

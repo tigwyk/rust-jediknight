@@ -3982,13 +3982,16 @@ impl Runtime {
     /// `sithThing_EnterSector` sends `entered` to the sector's links and `sithThing_LeaveSector`
     /// sends `exited` (§16.10). The link id and mask are carried but not filtered on, which is a
     /// documented simplification: every link to that sector hears the message.
-    pub fn sector_messages(&self, old: Option<usize>, new: Option<usize>) -> Vec<(usize, &'static str)> {
+    pub fn sector_messages(&self, old: Option<usize>, new: Option<usize>) -> Vec<(usize, &'static str, i32)> {
         let mut out = Vec::new();
-        for (instance, _link, sector) in &self.sector_links {
+        for (instance, link, sector) in &self.sector_links {
             if Some(*sector) == new {
-                out.push((*instance, "entered"));
+                // `sithThing_EnterSector` sends `entered` with the **link id as the sender id**:
+                // `00_SecretAreas.cog`'s handler is `flags = flags | GetSenderId()`, so a message
+                // with sender 0 loses the bit (round 198: retail `flags` 0 -> 2, the port stayed 0).
+                out.push((*instance, "entered", *link));
             } else if Some(*sector) == old {
-                out.push((*instance, "exited"));
+                out.push((*instance, "exited", *link));
             }
         }
         out

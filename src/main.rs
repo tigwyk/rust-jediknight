@@ -508,6 +508,9 @@ fn main() {
     // into (`crossed`/`activated`/`entered`), so it is how the harness finds a level's triggers without
     // playing the whole level. `sithCog_LinkCogToSurface`/`_ToThing`/`_ToSector` in tabular form.
     let mut links_check = false;
+    // `--sector-locate <cog>`: where each sector linked to a cog actually is (the collision build's
+    // own sphere per sector), so a trigger volume can be found without a grid scan.
+    let mut sector_locate: Option<usize> = None;
     // `--cogstatus <n>`: print one placed cog the way the retail console's `cogstatus` does
     // (`sithCog_CogStatus`, formats 0x54aaf4 / 0x54ab1c / 0x54ab30 / 0x54ab38) - Phase 0.5 step 2's
     // port-side fixture check against `tools/parity/cogstatus-01narshadda.txt`.
@@ -838,6 +841,12 @@ fn main() {
             "--feel" => feel_check = true,
             "--collide" => collide_check = true,
             "--links" => links_check = true,
+            "--sector-locate" => {
+                sector_locate = args.get(i + 1).and_then(|v| v.parse().ok());
+                if sector_locate.is_some() {
+                    i += 1;
+                }
+            }
             "--cogstatus" => {
                 cogstatus = args.get(i + 1).and_then(|v| v.parse().ok());
                 if cogstatus.is_some() {
@@ -4086,8 +4095,8 @@ fn main() {
                 let mut queued: Vec<(String, Option<usize>, Option<i32>, [f64; 2])> = rt
                     .sector_messages(before, after)
                     .into_iter()
-                    .map(|(instance, label)| {
-                        (label.to_string(), Some(player), Some(instance as i32), [0.0; 2])
+                    .map(|(instance, label, link)| {
+                        (label.to_string(), Some(link as usize), Some(instance as i32), [0.0; 2])
                     })
                     .collect();
                 for (instance, label, params, _source) in std::mem::take(&mut rt.pending_messages) {
@@ -4136,12 +4145,15 @@ fn main() {
                 let rt = sim_world.borrow();
                 rt.sector_messages(Some(before.max(0) as usize), Some(watched))
             };
-            for (instance, label) in links {
+            for (instance, label, link) in links {
                 if let Some((_, vm)) = vms.iter_mut().find(|(_, vm)| vm.cog_index == instance as i32)
                     && let Some(script) = world.cogs.get(&world.level.cogs[instance].script)
-                    && vm.run_label(script, label).is_ok()
                 {
-                    messages += 1;
+                    // The link id rides as the sender id, as the engine sends it.
+                    vm.sender = link as i64;
+                    if vm.run_label(script, label).is_ok() {
+                        messages += 1;
+                    }
                 }
             }
             println!("soak: placed the body in watched sector {watched} at {pos:?} and asked its links");
@@ -6509,6 +6521,23 @@ fn main() {
         return;
     }
 
+    if let Some(cog) = sector_locate {
+        let handle = runtime::Runtime::handle(&world.level);
+        handle.borrow_mut().wire_links(&world.level.cogs, &world.cogs);
+        let rt = handle.borrow();
+        let solids = collide::build(&world.level);
+        let script = world.level.cogs.get(cog).map(|c| c.script.clone()).unwrap_or_default();
+        println!("sector-locate: cog {cog} ({script}) sectors:");
+        for (instance, link, sector) in &rt.sector_links {
+            if *instance != cog { continue; }
+            match solids.spheres.get(*sector) {
+                Some((point, radius)) => println!("  sector {sector:5} link {link:3}  centre ({:.2},{:.2},{:.2}) radius {:.2}", point[0], point[1], point[2], radius),
+                None => println!("  sector {sector:5} link {link:3}  (no collision sphere)"),
+            }
+        }
+        return;
+    }
+
     if links_check {
         let handle = runtime::Runtime::handle(&world.level);
         handle
@@ -7380,7 +7409,17 @@ fn main() {
                 (name, entered)
             };
             let messages = rt.sector_messages(None, Some(*sector));
-            let listed = messages.iter().any(|(i, l)| i == instance && *l == "entered");
+            // The sender id must ride with every sector message: `00_SecretAreas.cog` does
+            // `flags = flags | GetSenderId()`, so a message without its link id silently loses the bit
+            // (round 198: retail `flags` 0 -> 2, the port stayed 0 until this was asserted).
+            assert!(
+                messages.iter().all(|(_, _, sent)| rt
+                    .sector_links
+                    .iter()
+                    .any(|(_, link, sec)| *sec == *sector && link == sent)),
+                "a sector message lost its link id as the sender id"
+            );
+            let listed = messages.iter().any(|(i, l, _)| i == instance && *l == "entered");
             if listed && present {
                 heard += 1;
             }
@@ -17521,9 +17560,11 @@ fn deliver_sector_triggers(
         (rt.sector_messages(previous, Some(sector)), rt.music_volume)
     };
     let mut fired = 0usize;
-    for (instance, label) in messages {
+    for (instance, label, link) in messages {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
         let Some(script) = world.cogs.get(script_name) else { continue };
+        // The link id is the sender id the engine passes to `entered`/`exited`.
+        vm.sender = link as i64;
         if script.label(label).is_none() {
             continue;
         }

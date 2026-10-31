@@ -1766,3 +1766,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
   sound-table id. Dev-console fidelity only; game behaviour unaffected (trigger delivery has its own trace and gate).
 - `--cogstatus-after` and the before/after harness reads stay — they are what caught the error.
 - Tests **149 passed**.
+
+## Update — round 198
+
+- **Real movement-trigger fixture, real defect, fixed**: cog 28 `00_SecretAreas.cog`'s `flags` — retail 0 at load,
+  **2** after warping into secret sector 306 (`ChangeInv(player, 70, 1)` is the secret counter). The port gave 0
+  before the fix and **2** after; spawn control 0 on both sides; `maxsecrets = 6` on both.
+- Cause: `Runtime::sector_messages` dropped the **link id**, so `vm.sender` stayed 0 and `flags = flags |
+  GetSenderId()` never set the bit (the engine sends `entered` with the link id as sender id — `00_SecretAreas.cog`
+  is the script that proves it). The link now rides through to `vm.sender` in the live delivery, the soak probe and
+  the `--triggers` gate, which asserts every sector message carries a link from that sector's link list.
+- New reusable probe **`--sector-locate <cog>`**: each linked sector's centre and radius from the collision build
+  (how the secret sectors were found without a grid scan).
+- `cargo test --release`: **149 passed**; `--gates`: **64 of 64, 0 skipped**.
