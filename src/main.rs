@@ -1972,6 +1972,57 @@ fn main() {
         // under the point? `sector_for_body` prefers clearance, which on a stacked shaft picks the
         // shaft (levels 17/18 fall at their spawn from exactly that).
         println!("faces-at: sector_for_body -> {:?}", solids.sector_for_body(at));
+        if let Some(id) = std::env::var_os("BK_SURFACE")
+            .and_then(|v| v.to_str().and_then(|s| s.parse::<usize>().ok()))
+            && let Some(s) = world.level.surfaces.get(id)
+        {
+            println!(
+                "surface {id}: adjoin {} surfflags {:#x} verts {} texinfo {}",
+                s.adjoin,
+                s.surfflags,
+                s.verts.len(),
+                s.material
+            );
+            for &(v, _) in &s.verts {
+                if let Some(p) = world.level.vertices.get(v as usize) {
+                    println!("  vertex {v}: ({:.3}, {:.3}, {:.3})", p[0], p[1], p[2]);
+                }
+            }
+        }
+        // Solid *things* block the sweep through a separate list (`Solids.things`, model cylinders);
+        // a door or crate in front of the body is invisible to the face scan.
+        // The level's own surfaces near the point, with `adjoin` and `surfflags`: a face the sweep treats
+        // as solid but whose surface is an adjoin is the "retail walks through, the port blocks" case.
+        for (i, s) in world.level.surfaces.iter().enumerate() {
+            let pts: Vec<[f32; 3]> = s
+                .verts
+                .iter()
+                .filter_map(|&(v, _)| world.level.vertices.get(v as usize).copied())
+                .collect();
+            if pts.len() < 3 {
+                continue;
+            }
+            let near = pts.iter().any(|p| {
+                (p[0] - at[0]).abs() < 0.6 && (p[1] - at[1]).abs() < 0.6 && (p[2] - at[2]).abs() < 1.2
+            });
+            if !near {
+                continue;
+            }
+            println!(
+                "  level surface {i}: adjoin {} surfflags {:#x} verts {} first ({:.2},{:.2},{:.2})",
+                s.adjoin, s.surfflags, pts.len(), pts[0][0], pts[0][1], pts[0][2]
+            );
+        }
+        for (centre, radius, _height, top) in &solids.things {
+            let d = ((centre[0] - at[0]).powi(2) + (centre[1] - at[1]).powi(2)).sqrt();
+            if d > 3.0 || (centre[2] - at[2]).abs() > 3.0 {
+                continue;
+            }
+            println!(
+                "  thing at ({:.2},{:.2},{:.2}) radius {radius:.3} top {:.3} distance {d:.2}",
+                centre[0], centre[1], centre[2], top
+            );
+        }
         for sector in solids.sectors_around(at) {
             println!(
                 "  sector {sector}: clearance {:?} floor_below {:?}",

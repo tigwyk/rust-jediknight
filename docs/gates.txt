@@ -1338,3 +1338,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Adopting the landed floor's owning sector was tried and **reverted**: `walk18_spawn` 5.83/0.88 (663 %),
   `walk17_spawn` 6.06/0.70 (862 %, fell again). The port does not **stop** where retail does — levels 17/18 are
   the same class as level 8 (a blocking difference, not a floor one). Committed state keeps the fallback.
+
+## Update — round 164
+
+- Level 18's block is pinned: the body stalls at (−0.44, −1.88) with `blocked true`, the sweep naming **surface
+  7332** at distance 0.0 — a four-vertex **vertical plate at x −0.48..−0.50, z 0.0..0.4** at the doorway's west
+  edge (surface 7 is the `adjoin 0` opening beside it). Retail slides **east** past it (x −0.35 → −0.27, ending
+  at (−0.27, −1.27) inside the octagonal room); the port slides **west** into it (x −0.35 → −0.44) and wedges.
+- So the remaining level-18 difference is the **resolver's push direction at a doorway edge**, not floor,
+  sector or landing — the same class as `collide.rs`'s slide work. `--faces-at` gained solid-thing, level-surface
+  and `BK_SURFACE=<id>` diagnostics. Tests **148 passed**.

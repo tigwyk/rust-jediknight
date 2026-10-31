@@ -4378,3 +4378,21 @@ Both went the wrong way, and the shape of the numbers is informative: the port d
 Levels 17 and 18 are the same class as level 8 (retail walks 0.96 and stops; the port keeps going) — a **blocking**
 difference, not a floor one. Reverted; the committed state keeps the fallback that fixed the fall (17: 117%,
 0 sectors; 18: settles at retail's rest height, 0.28 travel).
+
+**Level 18's block is a push-direction difference at a doorway edge, not geometry (round 164).** `--faces-at`
+grew three short diagnostics (solid *things* near the point; the level's own surfaces near it with `adjoin` and
+`surfflags`; and `BK_SURFACE=<id>` printing one surface's record and vertices). With them the obstruction is
+exact:
+
+- The body walks from its spawn to **(−0.44, −1.88)** and then reports `blocked true` on every move, with the
+  sweep's `ahead` naming **surface 7332**, distance 0.0.
+- Surface 7332 is a four-vertex **vertical plate at x ≈ −0.48..−0.50, y −1.81..−1.90, z 0.0..0.4**
+  (`adjoin -1`, `surfflags 0x4`) — a 0.4-high plate standing at the **west edge of the doorway** (surface 7 is the
+  `adjoin 0` opening next to it).
+- Retail's own trace slides **east**: x −0.35 → −0.27, ending inside the octagonal room at (−0.27, −1.27). The
+  port's slides **west**: x −0.35 → −0.44, pressing itself against the plate, where a zero-distance sweep
+  blocks every subsequent step.
+
+So the remaining difference is the **direction the resolver pushes a body that grazes a face at a doorway
+edge** — the same class as the slide work in `collide.rs` (round 150's near-head-on stop and the steep-face plan
+push). The floor, the sector and the landing are all correct on level 18 now; only this push is wrong.
