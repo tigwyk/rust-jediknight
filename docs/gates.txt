@@ -1474,3 +1474,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
   retail does" list (level 8, level 18 travel).
 - Label correction: rows 22–28 are `16b, 17b, 18Ascend, 19A, 19B, 20b, 21b`; five fixtures committed under the
   corrected names. Tests **149 passed**.
+
+## Update — round 175
+
+- The walker/pinned split is **not** in the script's verbs: `17bsarris` (retail walks 4.00) and `21ajerec`
+  (retail 0.34) both do `SetActorFlags(thing, 0xA00000)`, `SetCameraFocus`, `SetCurrentCamera`,
+  `SetActorFlags(thing, 8)`, `SetActorFlags(0, 4)`; the animated camera key is not the split either (level 21 has
+  one and is pinned, level 20 has none and walks). The port's recorded player flags (`0xa00008`) are identical
+  across both groups.
+- So the split is in **`sithActor`'s state machine**, which the available decomp does not include; the deviation's
+  retire condition is updated to say it needs `sithActor` recovered from the EXE. Groups measured:
+  walks = 16b (1.03), 20 (4.20), 20b (3.24), 17b (4.00); still = 14 (0.00), 7 (0.11), 21 (0.33), 21b (0.34).

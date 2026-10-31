@@ -4688,3 +4688,29 @@ list with level 8 and level 18's travel as "the port does not stop where retail 
 The row-22/23/26/27 labels were first guessed from the `--levels` listing and **corrected** against the sector
 fingerprints: rows 22–28 map to `16b, 17b, 18Ascend, 19A, 19B, 20b, 21b`, so what started as "walk26 = 20b" is
 actually row 26 = `19B` and "walk27 = 21b" is row 27 = `20b`. Five fixtures are committed with the corrected names.
+
+**The walker/pinned split is not in the script's own verbs (round 175).** A script camera does not decide it: the
+levels whose openings hold one divide cleanly by retail's own travel, and their openings are the *same shape*:
+
+```
+walker  17bsarris : SetActorFlags(19, 0xA00000) · SetCameraFocus(0,38) · SetCurrentCamera(0)
+                    · SetActorFlags(19, 8) · SetActorFlags(0, 4)      retail walks 4.00
+pinned  21ajerec  : SetActorFlags(3, 0xA00000)  · SetCameraFocus(0,23) · SetCurrentCamera(0)
+                    · PlayKey(23,"JEcamera.key") · SetActorFlags(3,8) ×2 · SetActorFlags(0,4)   retail 0.34
+```
+
+Both set a camera focus and switch to it, both flag a thing `0xA00000` and then `8`, and both end with
+`SetActorFlags(0, 4)` — so the actor flags the port records (`0xa00008` on the player in level 20, 21, 14 and 7
+alike) do not separate the groups, and neither does the animated camera key (level 21 has `JEcamera.key`, level 20
+does not, yet level 20 walks 4.20). The split is therefore in **`sithActor`'s state machine** — which the available
+decomp does not include (the decomp's `sithControl` set is complete, but the actor/animation half is not) — not in
+the script's call sequence.
+
+That sharpens the deviation's retire condition: it retires when the engine's **actor pinning state** is ported
+(the knockdown/prone state that level 14 shows, and whatever holds level 21's body), which needs the `sithActor`
+functions recovered from the EXE — the decomp subset does not carry them. The measured groups:
+
+```
+retail walks under a script camera : 16b (1.03), 20 (4.20), 20b (3.24), 17b (4.00)
+retail stays still under one      : 14 (0.00), 7 (0.11), 21 (0.33), 21b (0.34)
+```
