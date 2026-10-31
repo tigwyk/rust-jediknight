@@ -292,23 +292,26 @@ tier, not a checkbox.
 *Progress (rounds 209–239).* Combat's AI side is now measured off the shipped `.ai` files rather than guessed. The
 instinct registry is complete (25 registrations across `sithAICmd_Startup` and the JK-side startup; the four unnamed
 entries resolved from the EXE's string data), and `--audit` tallies which names shipped content actually uses: **24**.
-Of those, **18 are implemented** — `follow`, `lookfortarget`, `primaryfire`, `opendoors`, `blindfire`, `returnhome`,
-`retreat`, `withdraw`, `circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`, `flee`, `listen`, `talk`,
-`sensedanger`, `dodge` — with `sabermove` unused by any class. The remaining gameplay gap is the **Jedi set**
-(`forcepowers` and `saberfighting` 45 class-uses each, `specialattack` 24) plus the movement instincts (`jump` 92,
-`lobfire` 7, `crouch` 3); 18 of 24 closed in rounds 209–242. Each instinct landed with a headless test and a measured
-before/after (suite 149 → 185). Reading the handlers also corrected behaviour underneath them: the view cone of
-`LookForTarget`, the engine's class defaults for omitted `.ai` keys, the script-set AI bits from `AISetMode` (`0x2000`
-switches an actor off and `0x4` is the awake bit `listen`/`sensedanger` gate on), turrets firing from `TurretFire` (a
-turret class has no `PrimaryFire`), `listen`'s `heardist` gate, its 3-slot sound ring, its line-of-sight/1.0-unit/60°
-hearing gates and its per-sound reaction chance, `talk`'s 95-name sound-mode table with its flag/health mood selection,
-`sensedanger`'s alert bit `0x800` (which `talk` reads for `fear`/`gloat`) and its strength-3.0 awareness burst, `dodge`'s
-damage event and 1000 ms cooldown plus its player-side shot pre-sweep (which also put the `typeflags=` word on the
-runtime and showed it is not the `thingflags=` word the sweep tests), the engine's **AI event dispatcher** with its
-complete emit-site inventory (round 241 — which proved two handler branches dead), and the **detection chance** that
-sits under every sight test (`sithAI_CanDetectSightThing`, round 242, constants from the `.rdata`), plus most of the
-movement constants from the EXE's `.rdata`. The per-instinct class counts and the port's status are the table in
-`gaps.md`.
+Of those, **17 of the 22 instincts shipped content can actually load** are implemented — `follow`, `lookfortarget`,
+`primaryfire`, `opendoors`, `blindfire`, `returnhome`, `retreat`, `withdraw`, `circlestrafe`, `hitandrun`,
+`randomturn`, `roam`, `turretfire`, `flee`, `listen`, `talk`, `sensedanger`, `dodge` (18 handlers, but `randomturn`'s
+nine class files are named by no shipped content — round 243) — with `sabermove` unused by any class and `crouch` likewise
+dead content. The remaining gameplay gap is the **Jedi set** (`forcepowers` and `saberfighting` 45 class-uses each,
+`specialattack` 24 — all loadable) plus `jump` (85 of 92 loadable, and its handler only runs on the track-target event)
+and `lobfire` (6 of 7, needing projectile gravity); 17 of 22 closed in rounds 209–243. Each instinct landed with a
+headless test and a measured before/after (suite 149 → 186). Reading the handlers also corrected behaviour underneath
+them: the view cone of `LookForTarget`, the engine's class defaults for omitted `.ai` keys, the script-set AI bits from
+`AISetMode` (`0x2000` switches an actor off and `0x4` is the awake bit `listen`/`sensedanger` gate on), turrets firing
+from `TurretFire` (a turret class has no `PrimaryFire`), `listen`'s `heardist` gate, its 3-slot sound ring, its
+line-of-sight/1.0-unit/60° hearing gates and its per-sound reaction chance, `talk`'s 95-name sound-mode table with its
+flag/health mood selection, `sensedanger`'s alert bit `0x800` (which `talk` reads for `fear`/`gloat`) and its
+strength-3.0 awareness burst, `dodge`'s damage event and 1000 ms cooldown plus its player-side shot pre-sweep (which also
+put the `typeflags=` word on the runtime and showed it is not the `thingflags=` word the sweep tests), the engine's **AI
+event dispatcher** with its complete emit-site inventory (round 241 — which proved two handler branches dead), the
+**detection chance** that sits under every sight test (`sithAI_CanDetectSightThing`, round 242, constants from the
+`.rdata`), and the **loadable-class accounting** that retired `crouch`/`randomturn` from the work list (round 243), plus
+most of the movement constants from the EXE's `.rdata`. The per-instinct class counts and the port's status are the table
+in `gaps.md`.
 
 6. **Exit.** End-of-level tally, transition, carried state (health, shields, bins). Exit: level 2 starts
    in retail's state. *Partly done:* the savegame **container** now matches the real files — the port

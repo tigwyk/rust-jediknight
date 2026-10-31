@@ -15728,7 +15728,22 @@ fn audit(gobs: &gob::GobSet) -> Result<(), String> {
         }
     }
 
-    let undecoded = coverage_audit(gobs);
+    // Which instinct classes shipped content can actually **load**: a level template's `aiclass=` or a
+    // cog symbol block's `ai name=file.ai`. The per-instinct counts below say how many class files name
+    // an instinct; this says how many of those any shipped thing ever names — `stcrouch.ai`'s three
+    // files are referenced by nothing, so its `crouch` lines are not shipped usage (round 243).
+    let mut referenced_ai_stems: std::collections::BTreeSet<String> = Default::default();
+    for name in gobs.names() {
+        let lower = name.to_ascii_lowercase();
+        if !(lower.ends_with(".jkl") || lower.ends_with(".cog")) {
+            continue;
+        }
+        let Some(data) = gobs.read(&name) else { continue };
+        for stem in ai_class_references(&String::from_utf8_lossy(&data)) {
+            referenced_ai_stems.insert(stem.to_ascii_lowercase());
+        }
+    }
+    let undecoded = coverage_audit(gobs, &referenced_ai_stems);
 
     // `PAR 1.0` particle clouds. `sphere.par` and `sphere2.par` are the Force shield's, `test.par`
     // the editor's sample; nothing draws them yet (no particle renderer), so this is the data-side
@@ -15776,11 +15791,21 @@ fn audit(gobs: &gob::GobSet) -> Result<(), String> {
     Ok(())
 }
 
+/// Every `*.ai` class **reference** in a text asset: a level template's `aiclass=grdefault.ai` and a
+/// cog symbol block's `ai trooper_ai=stdefault.ai`. Returns lowercased **stems** (`grdefault`,
+/// `stdefault`), so a class's per-difficulty files (`.ai`, `.ai0`, `.ai2`) all match its one name.
+fn ai_class_references(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '\\' || c == '/'))
+        .filter(|token| token.len() > 4 && token.to_ascii_lowercase().ends_with(".ai"))
+        .map(|token| token.rsplit(['\\', '/']).next().unwrap_or(token))
+        .map(|token| token.split('.').next().unwrap_or(token))
+}
+
 /// Sweep every file in the install and report, per format, how many this build can
 /// actually decode. Serves as the drop-in coverage scoreboard: a format with no
 /// decoder shows up as a whole column of zeroes instead of a silent gap.
 /// Returns the number of files in formats that have no decoder at all.
-fn coverage_audit(gobs: &gob::GobSet) -> usize {
+fn coverage_audit(gobs: &gob::GobSet, referenced_ai_stems: &std::collections::BTreeSet<String>) -> usize {
     use std::collections::BTreeMap;
     let mut table: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut flat_samples: Vec<String> = Vec::new();
@@ -15807,6 +15832,7 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
     let mut ai_params = 0usize;
     let mut ai_instincts = 0usize;
     let mut ai_incomplete = 0usize;
+    let mut ai_referenced = 0usize;
     let mut ai_samples: Vec<String> = Vec::new();
     let mut pup_files = 0usize;
     let mut pup_states = 0usize;
@@ -15821,6 +15847,9 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
     // Which instinct names the shipped classes actually use, and how many classes use each. This is
     // the content side of the AI gap list: an instinct no class names needs no handler at all.
     let mut ai_instinct_names: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    // Of those classes, how many name each instinct **and** are loadable by shipped content.
+    let mut ai_instinct_used: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
     let mut sft_files = 0usize;
     let mut sft_glyphs = 0usize;
@@ -15953,10 +15982,22 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
                 ai_files += 1;
                 ai_params += class.params.len();
                 ai_instincts += class.instincts.len();
+                // Whether *shipped content can load this class at all*: a template's `aiclass=` or a
+                // script's `ai name=file.ai` symbol names its stem. A class nobody references is data,
+                // but its instincts are not shipped usage — `stcrouch.ai`'s three files are the case
+                // that made this worth counting (round 243).
+                let basename = name.rsplit(['\\', '/']).next().unwrap_or(&name);
+                let stem = basename.split('.').next().unwrap_or(basename).to_ascii_lowercase();
+                let referenced = referenced_ai_stems.contains(&stem);
+                if referenced {
+                    ai_referenced += 1;
+                }
                 for instinct in &class.instincts {
-                    *ai_instinct_names
-                        .entry(instinct.name.to_ascii_lowercase())
-                        .or_default() += 1;
+                    let key = instinct.name.to_ascii_lowercase();
+                    *ai_instinct_names.entry(key.clone()).or_default() += 1;
+                    if referenced {
+                        *ai_instinct_used.entry(key).or_default() += 1;
+                    }
                 }
                 // A class that omits a key is **not** broken: `sithAIClass_LoadEntry` gives every
                 // field a default before it reads the line, and `ai::parse` applies those same
@@ -16105,14 +16146,16 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
     }
     if ai_files > 0 {
         println!(
-            "ai classes (ai)       {ai_files} files, {ai_params} parameters, {ai_instincts} instincts, {ai_incomplete} take loader defaults"
+            "ai classes (ai)       {ai_files} files, {ai_params} parameters, {ai_instincts} instincts, {ai_incomplete} take loader defaults, {ai_referenced} referenced by shipped content"
         );
         for s in &ai_samples {
             println!("  defaulted class: {s}");
         }
-        // The content side of the AI gap list: a name no class uses needs no handler at all.
+        // The content side of the AI gap list: a name no class uses needs no handler at all — and a
+        // class no shipped template or script names does not make its instincts shipped usage.
         for (name, classes) in &ai_instinct_names {
-            println!("  instinct {name:<16} {classes} class(es)");
+            let used = ai_instinct_used.get(name).copied().unwrap_or(0);
+            println!("  instinct {name:<16} {classes:>3} class(es), {used} referenced");
         }
     }
     if pup_files > 0 {
@@ -24409,6 +24452,25 @@ mod draw_row_tests {
         assert_eq!(draw_row(1, 1), None);
         // Modes beyond armed/unarmed are not the port's (crouch and the rest are a separate row).
         assert_eq!(draw_row(1, 2), None);
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::ai_class_references;
+
+    /// A class reference is found in both shipped spellings — a level template's `aiclass=` and a cog
+    /// symbol block's `ai name=file.ai` — and reduced to its stem so the per-difficulty files
+    /// (`.ai`, `.ai0`, `.ai2`) all match the one reference.
+    #[test]
+    fn ai_class_references_finds_templates_and_script_symbols() {
+        let level = "st1 aiclass=grdefault.ai move=physics\nst2 aiclass=misc\\ai\\boc.ai\n";
+        let cog = "symbols\n ai trooper_ai=stdefault.ai local\nend\n";
+        let found: Vec<&str> = ai_class_references(level)
+            .chain(ai_class_references(cog))
+            .collect();
+        assert_eq!(found, vec!["grdefault", "boc", "stdefault"]);
+        assert!(ai_class_references("a file.txt and a.bai").next().is_none());
     }
 }
 

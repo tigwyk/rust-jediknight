@@ -2470,3 +2470,19 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - No window and no game run. On the roadmap ledger: the engine's darkness term (needs the target's sector light, which
   the port does not keep), its second falloff gate (`thing + 0x2a8`, unrecovered), and the engine re-rolling the chance
   on every target refresh where the port rolls on acquisition.
+## Update — round 243
+
+- **Which instincts shipped content can actually load**: `--audit` now scans every level template's `aiclass=` and every
+  cog symbol block's `ai name=file.ai`, reduces them to class stems (so a class's `.ai`/`.ai0`/`.ai2` files match one
+  reference) and reports each instinct as `N class(es), M referenced`, plus `… 197 referenced by shipped content` on the
+  `ai classes` line.
+- Measured: **197 of 231 class files are loadable**. **`crouch` (3 classes, 0 referenced)** and **`randomturn` (9, 0)**
+  are named only by class files nothing loads — dead content, retired from the priority list (round 224's `randomturn`
+  behaviour stays in the port but retail content never invokes it). The remaining shipped-usage gap is the Jedi set
+  (`forcepowers` 45/45, `saberfighting` 45/45, `specialattack` 24/24) plus `jump` (85/92; handler only acts on the
+  track-target event `0x400`) and `lobfire` (6/7; needs projectile gravity).
+- Checks: `audit_tests::ai_class_references_finds_templates_and_script_symbols` (both reference spellings, the
+  `misc\ai\…` path and the stem reduction). Measured before/after: the audit line `instinct crouch 3 class(es)` became
+  `instinct crouch 3 class(es), 0 referenced`, and the `ai classes` line gained `, 197 referenced by shipped content`.
+  Suite **186 passed**; `--audit` passes; docs **132/132**.
+- No window and no game run.

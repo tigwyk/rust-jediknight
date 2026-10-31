@@ -5809,7 +5809,7 @@ handler:
 | opendoors | 142 | `0x50abc0` | **yes** (round 218: the use scans on the actor's own body) |
 | blindfire | 134 | `0x509b30` | **yes** (round 219: fires at the remembered position) |
 | returnhome | 97 | `0x50bd70` | **yes** (round 220: walks back to its anchor) |
-| jump | 92 | `0x50abf0` | no |
+| jump | 92 | `0x50abf0` | no — and it is not ordinary foot combat: the handler only acts on AI event `0x400` (a track-target arrival; `sithAI_idk_msgarrived_target` emits it), so it needs the track-thing system rather than a physics jump |
 | circlestrafe | 70 | `0x509890` | **yes** (round 222: orbits at close range) |
 | flee | 49 | `0x50aeb0` | **yes** (round 228: `AIFlee` sets the mode the handler walks, now with the instinct's duration) |
 | forcepowers | 45 | `0x40ff40` | no |
@@ -5822,16 +5822,19 @@ handler:
 | hitandrun | 23 | `sithAICmd_HitAndRun` | **yes** (round 223: fires, then breaks off) |
 | sensedanger | 14 | `0x50b9b0` | **yes** (round 236: the scheduler path — awake gate, alert bit `0x800`, `fear` sound, 3.0 awareness event, player target; round 241: the **damage path** through the engine's event dispatcher — `surprise` sound, attacker (or its parent) as the target, `flags & !0x4 \| 0x800`; the handler's event-2/event-4 branches are unreachable in retail content because nothing emits those events) |
 | turretfire | 12 | `0x50a0f0` | **yes** (round 227: fires, stands still; head sweep not modelled) |
-| randomturn | 9 | `0x50b700` | **yes** (round 224: idle actors sweep their view) |
-| lobfire | 7 | `0x509cd0` | no |
-| crouch | 3 | `0x509ad0` | no |
+| randomturn | 9 | `0x50b700` | **yes** (round 224: idle actors sweep their view) — but its 9 class files name only themselves: no shipped template or script references them (round 243), so the behaviour never runs in retail content |
+| lobfire | 7 | `0x509cd0` | no — 6 of its 7 classes are loadable; it fires on AI event `0x100` and needs the projectile gravity arm |
+| crouch | 3 | `0x509ad0` | no — and its three classes (`stcrouch.ai/.ai0/.ai2`) are named by no shipped template or script: dead content (round 243). The handler is event-`0x100`-driven and only flips the crouch physflag `0x10000` |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **18 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
-the counts are how many classes depend on each: the remaining gameplay gap is the **Jedi set** (`forcepowers` and
-`saberfighting` 45 each, `specialattack` 24) plus the movement instincts (`jump` 92, `lobfire` 7, `crouch` 3);
-`listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and 235, `sensedanger`, the last
-partial entry, in round 236, and `dodge` in round 239. `opendoors` was the one with a visible consequence — an AI that
+So the port runs **17 of the 22 instincts that shipped content can actually load**. The list is also a priority order,
+since the counts are how many classes depend on each: the remaining gameplay gap is the **Jedi set** (`forcepowers` and
+`saberfighting` 45 each, `specialattack` 24, all 45 loadable) plus `jump` (85 of its 92 loadable, and its handler only
+runs on the track-target event) and `lobfire` (6 of 7, needs projectile gravity). `listen` (200) and `talk` (198), the
+two largest used names, closed in rounds 233 and 235, `sensedanger`, the last partial entry, in round 236, and `dodge`
+in round 239. **`crouch` and `randomturn` are named by classes nobody loads** (round 243: `stcrouch.ai` and
+`strandom`/`turandom`/`tuprodrandom` appear in no level template and no script), so the 24 named instincts are 22 that
+can reach the game; `randomturn`'s 224 implementation is filed as dead-content behaviour rather than shipped usage. `opendoors` was the one with a visible consequence — an AI that
 cannot open a door can be trapped behind one — and it is now implemented (below), as are `blindfire`, `returnhome`, the
 `retreat`/`withdraw` pair, `circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`, `flee`, `listen`, `talk`,
 `sensedanger` and `dodge` (below). `sabermove` needs no work at all: nothing names it.
@@ -6521,3 +6524,28 @@ within 200 ticks and fires at point-blank range once engaged. Measured before/af
 the acquisition check fails ("the actor never acquired the player at 8 units"). The level-1 and level-3 soaks pass
 (0 outside bodies, 0 non-finite positions); `--ai`, `--hit`, `--weapons`, `--sound` and `--things` pass. No window and
 no game run.
+## Update — round 243 (which instincts shipped content can actually load)
+
+The instinct table above counts class **files** that name each instinct, which overstates the work: a class file that
+nothing loads cannot run its instincts. `--audit` now separates the two. It scans every level template's `aiclass=`
+and every cog symbol block's `ai name=file.ai`, reduces them to class **stems** (so a class's per-difficulty
+`.ai`/`.ai0`/`.ai2` files match its one reference), and reports each instinct as `N class(es), M referenced`, plus a new
+`… 197 referenced by shipped content` on the `ai classes` line.
+
+The measurement: **197 of the 231 class files are loadable from shipped content**, and of the 24 named instincts two
+have no loadable class at all — **`crouch` (3 classes, 0 referenced)** and **`randomturn` (9, 0)**. Both are data-only:
+nothing in the 34 levels or 540 scripts names `stcrouch.ai`, `strandom.ai`, `turandom.ai` or `tuprodrandom.ai`. The rest
+are real: the Jedi handlers are fully loadable (`forcepowers` 45 of 45, `saberfighting` 45 of 45, `specialattack` 24 of
+24), `jump` 85 of 92, `lobfire` 6 of 7. So the remaining shipped-usage gap is the **Jedi set + `jump` + `lobfire`**;
+`crouch` and `randomturn` leave the priority list (round 224's `randomturn` behaviour stays in the port, but retail
+content never invokes it — filed as dead-content behaviour, not shipped usage).
+
+Two more things the same scan settled: `jump`'s handler is not an idle movement instinct — it only acts on AI event
+`0x400` (a track-target arrival), so it belongs with the track-thing system; and `lobfire`/`crouch` subscribe to event
+`0x100`, the AI update cascade the port does not run because it has no instinct scheduler.
+
+Checks (186 tests): `audit_tests::ai_class_references_finds_templates_and_script_symbols` pins both reference spellings
+(`aiclass=grdefault.ai`, `ai trooper_ai=stdefault.ai`, and a `misc\ai\…` path) and the stem reduction. Measured
+before/after: the audit's instinct lines went from `instinct crouch 3 class(es)` to
+`instinct crouch 3 class(es), 0 referenced`, and the `ai classes` line gained `, 197 referenced by shipped content` —
+the `crouch`/`randomturn` rows above say dead content now. `--audit` passes; docs 132/132. No window and no game run.
