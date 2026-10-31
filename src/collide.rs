@@ -861,8 +861,19 @@ impl Solids {
                 // `337` is 0.05 wide against 0.065), so no origin position inside it is legal: crossing
                 // in put the body outside its own sector, `MoveThing`'s restore undid it, and the body
                 // re-crossed on the next frame — 713 times in 700.
-                let lands_inside = gates.passable(sector, portal.adjoin, portal.link)
-                    && self.doorway_advance(from, dir, t, radius, portal.adjoin).is_some();
+                let advance = self.doorway_advance(from, dir, t, radius, portal.adjoin);
+                let lands_inside = gates.passable(sector, portal.adjoin, portal.link) && advance.is_some();
+                if std::env::var_os("BK_SECTOR_TRACE").is_some() && t < 0.5 {
+                    // *Every* portal evaluated, not just the accepted ones: each room keeps its own copy
+                    // of a doorway's plane, and a rejected copy that becomes a wall is otherwise silent.
+                    eprintln!(
+                        "sector trace: portal into {} from sector {sector} t {t:.6} dir {dir:?} \
+                         normal ({:.4},{:.4},{:.4}) point ({:.4},{:.4},{:.4}) advance {advance:?} inside {lands_inside}",
+                        portal.adjoin,
+                        normal[0], normal[1], normal[2],
+                        face.point[0], face.point[1], face.point[2]
+                    );
+                }
                 if lands_inside {
                     if door.is_none_or(|(dt, _)| t < dt) {
                         door = Some((t, portal.adjoin));

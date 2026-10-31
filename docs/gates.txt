@@ -1386,3 +1386,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
   **second copy** of the doorway plane evaluated with `t > 0`; the depth rule then rejects it (0.1032 < 0.13).
 - Reverted: sub-epsilon `1e-4` portal skip (level 18 unchanged, `walk_cantina` 2.65 → 1.64, recovered on revert).
   Next probe: log every portal evaluation per sweep (adjoin, t, depth, accepted/wall).
+
+## Update — round 168
+
+- New per-portal trace (every evaluation, not only accepted): level 18's rejected portal is the doorway **into
+  sector 719** from 721, at `t ≈ 4e-7`, `advance None` — a **thin door sector** (0.1032 against the 0.13 rule),
+  where the body should pass through to the room beyond rather than stand inside it.
+- The "flush slide" experiment (spend the remaining step along the slide when the contact is flush) was reverted:
+  no leg changed, because in the plate + doorway corner the slide along the plate is exactly opposite the doorway
+  normal, so bounce 1's slide is 0 and the loop breaks before the advance can run. Tests **149 passed**.
+- Next: make the crossing **chain** through a thin far sector to its own further adjoin (721 → 719 → 0).

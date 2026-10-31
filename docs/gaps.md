@@ -4487,3 +4487,23 @@ Experiments measured and **reverted** this round: treating sub-epsilon (`1e-4`) 
 (level 18 unchanged; `walk_cantina` regressed 2.65 → 1.64, recovered on revert). Combined with round 166's three
 reverted attempts, the next probe is explicit: log **every** portal evaluation of a sweep (adjoin, t, depth,
 accepted/as-wall) rather than only the accepted ones, so the second copy can be named.
+
+**The portal the sweep rejects is into sector 719, from 721, at t ≈ 4e-7 — a thin door sector, not the octagon
+(round 168).** The new per-portal trace (every evaluation, not just accepted ones) on the harness's own run:
+
+```
+sector trace: portal into 719 from sector 721 t 0.000000 dir (0.195, 0.981) \
+  normal (-0.1951,-0.9808,0.0000) point (-0.4102,-1.8210,0.0000) advance None inside false
+```
+
+So the second copy is the doorway **into 719** (the octagon is 0), evaluated at a hair's travel (`t ≈ 4e-7`, which
+rounds to 0.000000 and slips past the `t <= 0.0` skip). `doorway_advance` refuses it because 719 is 0.1032 deep
+against the `2 * radius = 0.13` rule — it is a **thin door sector**, and the body should pass *through* it to the
+room beyond, not stand inside it. In the corner formed by the plate (surface 7332, normal `(0.98, −0.195)`) and
+this doorway's plane (normal `(−0.195, −0.981)`), the slide along the plate is exactly opposite the doorway
+normal, so bounce 1's slide magnitude is **0** and the loop breaks — the "flush slide" experiment added this round
+never gets to run (it was reverted; no leg changed).
+
+The fix is therefore in the crossing, not the slide: a rejected *thin* far sector should **chain** to its own
+further adjoin (721 → 719 → 0) instead of being a wall, which is what the engine's per-adjoin walk does. The
+per-portal trace stays in (gated on `BK_SECTOR_TRACE`).
