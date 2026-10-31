@@ -5008,3 +5008,37 @@ trace gate: 15 leg(s), 1 failure(s)
 `walk6_spawn` is the round-182/183 gain (it was 1.35/1.08 with five sector mismatches before). `walk5_spawn` remains
 the only failure and its travel reads 3.43 here versus 3.70 in the isolated measurement — the plateau/bounce makes it
 state-sensitive between runs, which is consistent with the diagnosis rather than noise in the gate.
+
+**The engine's floor-search rule is front-facing only — and applying it needs the face normals fixed at build time,
+not the search patched (round 186).** `sithCollision_SearchForSurfaceCollisions` (`decomp/004e86d0`) admits a floor
+candidate only when the face is **front-facing to the search direction**:
+
+```c
+/* param_3 = search direction, (local_c, local_8, local_4) = face normal */
+(*param_3 * local_c + param_3[2] * local_4 + param_3[1] * local_8 < _DAT_00523008)
+```
+
+i.e. `dot(search_dir, normal) < 0`: for the engine's downward floor search, a face whose normal points **down** (the
+ceiling of the room below) can never be a floor. The port instead *flips* a face's normal whenever the body is on its
+far side, so a downward face becomes a "floor" — which is exactly the level-5 plateau.
+
+Applying the rule in `floor_under` was measured twice and **reverted both times**:
+
+| leg | baseline | exclude `normal[2] < -0.2` | exclude `normal[2] < -0.5` |
+| --- | --- | --- | --- |
+| `walk5_spawn` | 3.70 (99 %), 5 | 3.39 (91 %), 5 | 3.39 (91 %), 5 |
+| `walk6_spawn` | 1.06 (98 %), 2 — pass | 0.85 (79 %), 3 — broken | 0.85 (79 %), 3 — broken |
+| `walk_cantina` | 2.65, 2 | 2.65, 0 | 2.65, 1 |
+| `walk9`, `17`, `19`, `26` | — | unchanged | unchanged |
+| unit tests | 149 pass | **2 fail** | **2 fail** |
+
+The threshold makes no difference, which says the faces involved are not marginal: the flip is **load-bearing for
+shipped geometry** — walk6's body lands on a face whose file normal points the "wrong" way, and two unit tests encode
+that tolerance.
+
+So the fix belongs one layer down, where the normals are made: `collide::build` already computes, for every surface,
+`own` — the **sector's own hull-plane normal**, oriented into the sector — and separately keeps the file's `normal` for
+the `Face`. If `Face.normal` used `own` instead of the file normal, every floor/ceiling would be oriented the way the
+engine assumes (the `.jkl` normals are documented to point into the room; the ones that do not are the defect), the
+front-facing rule would be sound, and the flip in `floor_under` could go. That is the next change to implement and
+measure against the same table.

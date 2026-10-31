@@ -1621,3 +1621,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   100 %, 12 127 %, 13 98 %, 7/14/19/26 stop-pose, 17 117 %.
 - `walk5_spawn`'s travel reads 3.70 in the isolated run and 3.43 in the gate — the plateau/bounce is run-state
   sensitive, consistent with the diagnosis.
+
+## Update — round 186
+
+- The engine's floor search admits only **front-facing** faces (`dot(search_dir, normal) < 0`,
+  `sithCollision_SearchForSurfaceCollisions`); the port's `floor_under` normal-flip turns a downward face (a ceiling
+  of the room below) into a "floor", which is level 5's plateau.
+- Patching the search with the rule (`exclude normal[2] < -0.2`, then `-0.5`) was measured and **reverted both
+  times**: walk5 3.70→3.39, walk6 1.06 (passing) → 0.85 with 3 sectors (**broken**), cantina 2→0/1, two unit tests
+  failing. The threshold makes no difference, so the flip is load-bearing for shipped geometry whose file normals
+  point the wrong way.
+- Next change: orient `Face.normal` from the sector's own hull plane (`own`, already computed in `collide::build`)
+  instead of the file normal, then drop the flip. Tests **149 passed**.
