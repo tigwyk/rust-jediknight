@@ -5838,6 +5838,30 @@ class interval, measured from the **home anchor** (`ai + 0x93` — the same anch
 fallback of the remembered-position chain, so the walk is the one already tuned and the order is meaningful: a remembered
 enemy beats an awareness record, which beats walking home, which beats wandering. No new movement code.
 
+**Script `aisetmode` bits now reach the AI tick (round 226).** The port stored `AISetMode`/`AIClearMode` in
+`Runtime::actor_flags`, but no AI code ever read the map, so every shipped script that switches an actor off did nothing.
+The verb's own implementation settles what the bits are: `sithCogFunctionAI_AISetMode` (`0x500f50`) checks that the
+target is a thing of type 2 (an actor), takes `thing + 0x278` — the **AI struct** — and ORs the argument into
+`ai + 8`, the flag word the instinct handlers themselves test (and raises a `0x100` mode-change event). The shipped
+content uses a small vocabulary, with comments that name it: `0x2000` **switches the AI off** (`00_aisleep.cog`
+`aisetmode(enemy, 0x2000)`; `00_cameratricks.cog` "shuts off dark jedi"; `06_hidethings1.cog`, `06_brokendoor.cog`), and
+`0x4` wakes it again (`00_moveai.cog`, `04_remotes*.cog`, `06_atstelev.cog`). There are 79 `aisetmode` lines across the
+shipped cogs.
+
+`ai_tick` now honours the off switch: an actor whose flags carry `0x2000` is skipped entirely — no scan, no walk, no
+shot — and keeps standing until a script clears it (`aiclearmode(turret, 0x2000)` in `06_turrettrap.cog`). That is the
+sleep/trap behaviour those scripts exist for, and it costs one flag read per actor.
+
+Still unread, and listed here rather than implied: the other script bits (`0x1` sidekick, `0x4` wake, `0x200`/`0x202`
+target). They need the engine's own wake logic (the bit that sets `0x4` on sight/hearing) before gating on them would be
+correct; the port has no awake flag yet, and treating `0x4` as "must be set" would freeze every actor the scripts never
+wake.
+
+The headless check is `a_switched_off_actor_does_nothing_until_its_mode_is_cleared`: an actor with a visible target in
+front and a firing class, carrying `0x2000`, must fire zero shots and not move over a second; after the flag is cleared
+it must fire. Measured before/after: with the gate disabled the test fails with `a switched-off actor fired`; enabled it
+passes. Suite: **160 tests, 0 failures**.
+
 So the home anchor recorded for `returnhome` now drives two behaviours, and an actor whose template names both will go
 home when it is away from it and wander around home when it is there — which is what the shipped patrol classes
 (`tuprodroam.ai`, `turoam.ai`) are for.

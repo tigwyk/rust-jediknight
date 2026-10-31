@@ -2769,6 +2769,19 @@ impl Runtime {
         for index in actors {
             let ai = self.ai.get(&index).cloned();
             let ai_template = self.templates.get(index).cloned().unwrap_or_default();
+            // `AISetMode`/`AIClearMode` (`sithCogFunctionAI_AISetMode`, recovered at `0x500f50`) OR the
+            // argument into the AI's **own** flag word (`ai + 8`), which is the word every instinct
+            // handler tests — so those flags are behaviour, not decoration. `0x2000` is the switch-off
+            // the shipped sleep/trap scripts use (`00_aisleep.cog` "aisetmode(enemy, 0x2000)",
+            // `06_hidethings1.cog`, `00_cameratricks.cog` "shuts off dark jedi"), and with it set the
+            // engine's instincts do nothing at all; the actor stays standing until a script clears it
+            // (`aiclearmode(turret, 0x2000)` in `06_turrettrap.cog`).
+            if self.actor_flags.get(&index).copied().unwrap_or(0) & 0x2000 != 0 {
+                if let Some(thing) = self.things.get_mut(index) {
+                    thing.ai_target = None;
+                }
+                continue;
+            }
             // `opendoors` (handler 0x50abc0): the engine runs the **player's activate action**
             // (`sithPlayerActions_Activate`, 0x4fc0a0) on the actor's own body, throttled to 250 ms,
             // and that messages the captured thing or cog-linked surface in front with `activated`
@@ -8196,6 +8209,54 @@ mod tests {
             quiet.ai_tick(0, 1.0 / 30.0);
         }
         assert_eq!(quiet.things[1].pos, [0.0, 0.0, 0.0], "an actor without `Roam` wandered");
+    }
+
+    /// `AISetMode`/`AIClearMode` (`0x500f50`) OR the argument into the AI's own flag word (`ai + 8`),
+    /// which every instinct handler tests, so those script bits are behaviour. `0x2000` is the
+    /// switch-off the shipped sleep/trap scripts use: an actor carrying it must do nothing until a
+    /// script clears it.
+    #[test]
+    fn a_switched_off_actor_does_nothing_until_its_mode_is_cleared() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [1.0, 0.0, 0.0]; // right in front, well inside sight
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.template_weapon.insert("tuskan".into(), "blaster".into());
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 PrimaryFire 100.0, 0.0, 5.0, 0.0, 0.0, 500.0, 0.0, 0.0, 1.0, 0.0\n\
+                 Follow 0.0, 0.5\n",
+            ),
+        );
+        // `aisetmode(actor, 0x2000)`: asleep.
+        rt.actor_flags.insert(1, 0x2000);
+        let asleep_at = rt.things[1].pos;
+        for _ in 0..30 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(rt.shots_fired, 0, "a switched-off actor fired");
+        assert_eq!(rt.things[1].pos, asleep_at, "a switched-off actor walked");
+
+        // `aiclearmode(0x2000)`: back to normal.
+        rt.actor_flags.insert(1, 0);
+        for _ in 0..30 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            rt.shots_fired > 0,
+            "the actor did not come back after its mode was cleared"
+        );
     }
 
     /// `circlestrafe` (`0x509890`): within the instinct's engage distance (0.6–1.0 in the shipped

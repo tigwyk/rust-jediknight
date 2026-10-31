@@ -2147,3 +2147,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
   shipped unverifiable.
 - AI instinct coverage now **12 of 24 used instincts** (plus `sensedanger` partial); remaining top gaps `listen` (200)
   and `talk` (198). No game run and no port window.
+
+## Update — round 226
+
+- **Script `aisetmode` bits now reach the AI tick.** `AISetMode` (`0x500f50`) ORs its argument into the **AI struct's**
+  flag word (`ai + 8`), the word the handlers test — but the port stored the map and never read it. `0x2000` is the
+  switch-off the shipped sleep/trap scripts use (`00_aisleep.cog`, `00_cameratricks.cog` "shuts off dark jedi",
+  `06_hidethings1.cog`; 79 `aisetmode` lines across the cogs), and `ai_tick` now skips an actor carrying it entirely —
+  no scan, no walk, no shot — until a script clears it (`aiclearmode` in `06_turrettrap.cog`).
+- Headless check `a_switched_off_actor_does_nothing_until_its_mode_is_cleared` (visible target + firing class + 0x2000
+  → zero shots, no movement; cleared → fires). Measured before/after: gate disabled → fails with
+  `a switched-off actor fired`; enabled → passes. Suite **160 tests, 0 failures**.
+- Recorded as still unread: the other script bits (`0x1`, `0x4` wake, `0x200`/`0x202`); gating on `0x4` needs the
+  engine's own wake logic first, or every actor a script never wakes would freeze.
+- No game run and no port window.
