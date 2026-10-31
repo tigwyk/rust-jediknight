@@ -1873,3 +1873,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   positions; the bartender's guards are non-combat), so the engagement-timing comparison needs a trooper level (2/3).
 - The port's `--ai-live` gate engages on level 1: 1 shot at 3 units, health 100, `--- ai-live check passed ---`.
 - Tests **149 passed** (no code change).
+
+## Update — round 208
+
+- Retail AI-state fixtures committed: `tools/parity/aistatus-03katarn-spawn.txt` and
+  `aistatus-03katarn-warp.txt`. Level 3's first AI actor (index 0 = thing 24 `tuskan`, `tuproddefault.ai`) dumps
+  identical instinct masks/modes across all samples (spawn: six samples over 6 s; warp pose: four samples over 2.4 s).
+- The `(0,0,0.037)` pose the port's trace uses is **not a valid retail vantage**: the rendered frame is inside geometry
+  (HUD health 100 / shields 50, no damage), so retail's AI cannot see the player there and the two traces are not
+  comparable at that point.
+- Next probe: a valid combat vantage (a retail walk-trace pose, or three units from an actor as `--ai-live` does),
+  verified by screenshot/HUD, then compare `aistatus` timelines against the port's AI trace.
+- Tests **149 passed** (no code change).

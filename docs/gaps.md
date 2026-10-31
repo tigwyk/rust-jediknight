@@ -5533,3 +5533,20 @@ patrol positions (`curpos`, `ck`, `waa`, `pos1..pos5`), and the bartender's guar
 no combat state. The port's own `--ai-live` gate still engages correctly on this level — one shot at 3 units, health
 100 — but a *timing* comparison needs a level with troopers (2/3), which is the next round's target: capture
 `aistatus <n>,wait:…` timelines there and compare the same instinct/mode transitions against the port's AI trace.
+
+**The AI timeline is captured, but the comparison poses are not valid retail vantages yet (round 208).** Two retail
+captures of level 3's AI state are committed:
+
+- `tools/parity/aistatus-03katarn-spawn.txt` — at the level spawn, the first AI actor (index 0 = thing 24, a
+  `tuskan`, class `tuproddefault.ai`) dumps eleven instinct rows whose masks and modes are **identical across six
+  samples over 6 s** (e.g. `Instinct 0: mask=0x604, mode=0x0`, `Instinct 9: mask=0xf05, mode=0x800`).
+- `tools/parity/aistatus-03katarn-warp.txt` — the same at `(0,0,0.037)`, where the **port's** `BK_AI_TRACE` reports nine
+  Tuskens `sees … ready true`. Retail stays equally idle there — and its rendered frame explains why: the camera is
+  **inside geometry** (a texture-shard view; HUD health 100 / shields 50, no damage), so the pose is not a vantage at
+  all and the actors cannot have the player in sight.
+
+So the round's finding is a measurement caveat, not an AI divergence: the port's `sees … ready` trace and retail's
+`aistatus` words cannot be compared at a pose retail renders from inside the world. The next probe is a **valid combat
+vantage**: take a pose from the retail walk trace (or the `--ai-live` gate's measured stand-off — three units from an
+actor), verify retail renders a real view there (screenshot + HUD), and only then compare `aistatus` timelines against
+the port's trace. The AI-status format itself is now banked, which is what Phase 1 step 5 was missing.

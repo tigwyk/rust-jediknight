@@ -1,4 +1,7 @@
-# goal_sight (round 204): the one retail-warppable pose near 8t88 -- (-4.5,15.0,4.1), yaw -90 (+y).
-# Retail accepts this warp (coords confirm the pose) but `done` stays 0; the screenshot shows whether
-# 8t88 is drawn there at all.
-goal_sight	01narshadda	-4.5	15.0	4.1	0	-90
+# Interaction rows: a pose plus the keys/console commands that make the retail engine act.
+# Same format as shots.tsv; the harness applies `-Keys`/`-KeysAfter` and `-ConsoleCommands` to every row.
+#
+# katarn_ai: level 3's AI engagement probe. The port's `BK_AI_TRACE` at (0,0,0) shows nine Tuskens seeing
+# the body (`sees ... ready true`), so this row asks retail the same question: warp there and read
+# `aistatus` for the first AI actors over time (index = AI-list position, not a thing id).
+katarn_ai	03katarn	0.0	0.0	0.037	0	0
