@@ -4761,3 +4761,39 @@ it, exactly as retail's does.
 
 That closes the level-20 question to the one measured fact: the port suppresses input under a script camera and
 retail does not, and the engine's own lock in the decomp is for *video* cutscenes only. The deviation row stands.
+
+**The movement gate is `thing+0x34 & 8` and `physicsType == 1` — both set at runtime, not by the level (round 178).**
+`sithThing_UpdateMove` (`decomp/004cc4c0`) is the gate, and it is explicit:
+
+```c
+if ((*(byte *)(param_1 + 0x34) & 8) == 0) {         // thing flag byte bit 3 gates the whole move
+  if (*(int *)(param_1 + 0x10) == 1) {              // physicsType 1 = player-controlled
+    *pfVar1 = *(float *)(param_1 + 0x234);          // take the control's desired velocity
+  } else {
+    uVar2 = 4; *pfVar1 = 0.0; ...                   // otherwise the move vector is zeroed
+  }
+  ...
+  sithCollision_MoveThing(param_1, local_c, (float)fVar3, uVar2);
+}
+```
+
+The same byte is read by `sithCollision_MoveThing`, `sithCollision_RotateThing`, and all four physics updaters
+(`sithPhysics_UpdateThingPhysics`, `_UpdatePlayerPhysics`, `_UpdateUnderwaterThingPhysics`,
+`_UpdateAttachedThingPhysics`), so it is the engine's general "held" state — the closest candidate for the pinned
+levels' stillness, alongside `physicsType != 1`.
+
+**Neither is the level's doing.** The new `BK_THING_ROW=1` diagnostic prints each raw JKL thing row, and every
+level's *active* `walkplayer` row carries no `thingflags` at all:
+
+```
+20aboc   43: walkplayer ... 16                        (no flags)
+21ajerec  3: walkplayer ... 5                         (no flags)
+07yun     0: walkplayer ... 0                         (no flags)
+17bsarris 19: walkplayer ... 0                        (no flags)
+15maw     0: walkplayer ... 32                        (no flags)
+```
+
+The `thingflags=0x20080501` rows are *extra* walkplayer placements (level 14 has one at thing 4, level 21 at thing 9,
+level 19B at seven spots) — spawn points, not the active player. So the holding bit is set by the script or the player
+spawn path at runtime; finding it needs an xref pass over the EXE (Ghidra/REA) on writes to `thing+0x34` bit 3.
+That is the concrete next step; the deviation row keeps its measured groups until then.

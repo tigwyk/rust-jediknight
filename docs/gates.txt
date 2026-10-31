@@ -1509,3 +1509,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
   teleport — the intro plays its 16 s dialogue and the walk window sits inside it, as retail's does.
 - The only measured difference remains the script-camera input suppression (the round-173 deviation). Tests
   **149 passed**.
+
+## Update — round 178
+
+- The movement gate is now specified from the decomp: `sithThing_UpdateMove` runs a body's move only when
+  `*(byte*)(thing + 0x34) & 8 == 0` **and** `thing+0x10 == 1` (physicsType 1, the player); otherwise the desired
+  move vector is zeroed. The same byte is read by `sithCollision_MoveThing`/`RotateThing` and all four physics
+  updaters — it is the engine's general "held" state.
+- New `BK_THING_ROW=1` diagnostic prints raw JKL thing rows: every level's **active** `walkplayer` row carries no
+  `thingflags`, so the holding bit is set at runtime (script or player spawn), not by the level. The
+  `thingflags=0x20080501` rows are extra spawn placements. Finding the writer needs an xref pass over the EXE.
+- Tests **149 passed**.

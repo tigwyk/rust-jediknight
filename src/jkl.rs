@@ -621,6 +621,11 @@ fn parse_surface_normal(line: &str) -> Option<(usize, [f32; 3])> {
 
 /// `num: template name X Y Z Pitch Yaw Roll Sector [extra...]`
 fn parse_thing(line: &str) -> Option<Thing> {
+    // `BK_THING_ROW=1`: the raw row, so the keys the engine writes after the sector column can be
+    // read without guessing which ones this parser keeps (`thingflags=`, `frame=`, `vel=`).
+    if std::env::var_os("BK_THING_ROW").is_some() {
+        eprintln!("thing row: {line}");
+    }
     let f = fields(line);
     if f.len() < 10 {
         return None;
