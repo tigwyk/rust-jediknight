@@ -1809,3 +1809,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - **Still open:** the switch surfaces (2403/2409, link 2) are not in the surface candidate set, so cog 11's
   `doorstatus` stays 0. Next probe: dump `Runtime::surfaces` for the linked surface ids (the `--surfaces-at` probe hung).
 - `cargo test --release` 149 passed; `--gates` **64 of 64, 0 skipped**.
+
+## Update — round 201 — the interaction chain works
+
+- **The cantina door opens via the use action**: one press gives cog 11 `doorstatus 0 -> 2` (= `numdoors`), the full
+  shipped chain (use → `activated` sender 2 → `checkstatus` → `sectoradjoins(260,1)` → `open_doors` → `arrived` →
+  `doorstatus`).
+- Four fixes: (1) the **forward axis** — the port's frame is `(-sin, cos)`, `use_key` used `(cos, sin)`, so every
+  switch was 90° off (candidate `dot` -0.45 → 0.89); (2) the **reach is 3D** (round 200; death floor at z −18.5 gone);
+  (3) both message buses **resolve message names by id** (`activate` → `activated`); (4) both buses **carry the link
+  id as the sender** (`GetSenderId()` = 2 for the switch surface, 1 for door things).
+- `cargo test --release` 149 passed; `--gates` **64 of 64, 0 skipped** (including `--use-live`).

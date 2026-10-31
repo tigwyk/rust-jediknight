@@ -5390,3 +5390,26 @@ surface candidates the scan sees — the run falls through to `use_thing` — so
 does not open yet. The next probe is that candidate set: whether `Runtime::surfaces` carries those two surface centres
 at all (the `--surfaces-at` probe hung on this run, so the check is a direct dump of the surface table for the linked
 ids). Verification: `cargo test --release` 149 passed; `--gates` **64 of 64, 0 skipped**.
+
+**The cantina door opens through the use action: `doorstatus 0 -> 2` from one press (round 201).** Four defects in
+the use chain, each found by the fixture and fixed at its owning layer:
+
+1. **The forward axis was 90° off.** The port's own frame is `yaw_axes`' `(-sin, cos)` (what the walker and camera
+   use), but `use_key`'s facing was `(cos, sin)`. With the correct axis the candidate traces show the switch
+   *behind* the player (`dot -0.45`) becoming *in front* (`dot 0.89`), and the scan now selects the switch:
+   `use: activated surface 2403` (cog 11's `switch0`, link 2) instead of a wall or the death floor.
+2. **The reach was flat-only** (round 200): `00_deathfloor.cog`'s plane at z −18.50 is no longer a candidate.
+3. **`activate` never became `activated`**: two message buses (`deliver_thing_messages` and
+   `deliver_cog_messages`) checked `script.label("activate")` and dropped the message before any name resolution.
+   Both now resolve through `label_for_name` (message-id fallback: `activate`/`activated` share id 1).
+4. **The sender id never reached the VM**: `00_doorswitch.cog` branches on `GetSenderId()` (door things linkid=1 =
+   lock sound, switch surfaces linkid=2 = open). The second bus set no sender at all and the first set `source` but
+   not `sender`; both now carry the link id, restored after the handler.
+
+With all four the whole shipped chain runs end to end: use → `activated` on cog 11 with sender 2 → `checkstatus` →
+`sectoradjoins(260, 1)` → `open_doors` (`movetoframe` each door) → `arrived` → `checkstatus` → **`doorstatus = 2`
+(= `numdoors`)**, i.e. both door pieces reached frame 1. The trace also lists the door things' `movetoframe` movement
+in the same run.
+
+Verification: `cargo test --release` **149 passed**; `--gates` **64 of 64, 0 skipped**; the cantina-use run's
+`use: activated surface 2403` and `doorstatus = 2` quoted above.

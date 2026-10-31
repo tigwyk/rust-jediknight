@@ -3810,6 +3810,9 @@ impl Runtime {
             // units below the cantina switch and won the switch's use on flat distance alone (round 200).
             let dz = centre[2] - eye[2];
             let dist = (flat * flat + dz * dz).sqrt();
+            if std::env::var_os("BK_USE_TRACE").is_some() {
+                println!("use-candidate: surface {} centre {:?} dist {:.2} dz {:.2} dot {:.2}", surface, centre, dist, dz, if flat > 0.01 { (dx / flat) * facing[0] + (dy / flat) * facing[1] } else { 1.0 });
+            }
             if dist > reach {
                 continue;
             }

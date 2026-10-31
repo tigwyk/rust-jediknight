@@ -2888,6 +2888,9 @@ fn main() {
         // The sender/source rides with the message: `activated` handlers branch on
         // `GetSenderId()` (`00_doorswitch.cog` opens only for its switch-surface link id 2).
         vm.sender = source.map_or(0, |s| s as i64);
+        if std::env::var_os("BK_TRIGGER_TRACE").is_some() {
+            println!("pending: `{script_name}` gets `{label}` sender {source:?}");
+        }
         vm.source = source.map_or(0, |s| s as i64);
                 if script.label(label).is_none() {
                     continue;
@@ -17324,7 +17327,11 @@ fn use_key(
         }
     }
     let eye = [player.pos.x, player.pos.y, player.pos.z];
-    let facing = [player.yaw.cos(), player.yaw.sin()];
+    // The port's forward axis is `yaw_axes`' `(-sin, cos)` (`sithCamera`'s own frame), not `(cos, sin)`:
+
+    // with the wrong axis the use action's cone faced 90 degrees off and every switch was "behind" the
+    // player (`dot` was -0.45 for the cantina switch, round 201).
+    let facing = [-player.yaw.sin(), player.yaw.cos()];
     // Things first: a door's script is linked with `thing` symbols, and using it is what sends `used`
     // (`sithPlayer`'s use action). Surfaces are the other kind of link, and a level may have both.
     let mut rt = sim.world.borrow_mut();
@@ -17416,9 +17423,10 @@ fn deliver_thing_messages(
     for (instance, label, params, source) in pending {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
         let Some(script) = world.cogs.get(script_name) else { continue };
-        if script.label(label).is_none() {
-            continue;
-        }
+        // A **message name** resolves through the message-id table (`activate` is `activated`, id 1):
+        // `script.label(label)` alone dropped the use action for every door/switch script, which
+        // declares `message activated` + `activated:` and no literal `activate` label (round 201).
+        let Some(resolved) = script.label_for_name(label) else { continue };
         // `GetParam(0)`/`GetParam(1)` inside the handler: the engine's own two words.
         handle.borrow_mut().last_params = params.to_vec();
         // The message's source is the thing that caused it: for `damaged`/`killed` that is the
@@ -17429,7 +17437,10 @@ fn deliver_thing_messages(
         if let Some(source) = source {
             vm.source = source;
         }
-        let ran = vm.run_label(script, label);
+        if std::env::var_os("BK_TRIGGER_TRACE").is_some() {
+            println!("pending: `{script_name}` runs `{resolved}` (message `{label}`) sender {source:?}");
+        }
+        let ran = vm.run_label(script, &resolved);
         vm.source = own_source;
         if ran.is_err() {
             continue;
@@ -17490,11 +17501,16 @@ fn deliver_cog_messages(
     for (instance, label, params, source) in pending {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
         let Some(script) = world.cogs.get(script_name) else { continue };
-        if script.label(label).is_none() {
-            continue;
-        }
+        // A **message name** resolves through the message-id table (`activate` is `activated`, id 1):
+        // `script.label(label)` alone dropped the use action for every door/switch script (round 201).
+        let Some(resolved) = script.label_for_name(label) else { continue };
         handle.borrow_mut().last_params = params.to_vec();
-        match vm.run_label(script, label) {
+        // The sender id rides with the message: `activated` handlers branch on `GetSenderId()`
+        // (`00_doorswitch.cog` opens only for its switch-surface link id 2), and this bus never set it,
+        // so every `activate` arrived with sender 0 and the door stayed shut (round 201).
+        let own_sender = vm.sender;
+        vm.sender = source.map_or(0, |s| s as i64);
+        match vm.run_label(script, &resolved) {
             Ok(_) => {
                 fired += 1;
                 if std::env::var_os("BK_TRIGGER_TRACE").is_some() {
@@ -17503,6 +17519,7 @@ fn deliver_cog_messages(
             }
             Err(error) => println!("sighted: `{script_name}`'s `{label}` failed: {error}"),
         }
+        vm.sender = own_sender;
     }
     // A script may answer with another message, so drain until quiet. Bounded, because two scripts
     // that greet each other forever must not wedge a frame.
@@ -20650,7 +20667,8 @@ fn play_requested_sounds(
     }
     let eye = [player.pos.x, player.pos.y, player.pos.z];
     let yaw = player.yaw.to_radians();
-    let facing = (yaw.cos(), yaw.sin());
+    // `yaw_axes`' forward: `(-sin, cos)`, the same frame the walker and camera use.
+    let facing = (-yaw.sin(), yaw.cos());
     let mut played = 0;
     for request in requests {
         let Some((clip, min, max, volume)) = bank.clips.get(&request.name.to_ascii_lowercase())
