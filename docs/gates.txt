@@ -1366,3 +1366,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Two fixes measured and **reverted**: extending the retry distances (level 18 unchanged; `walk_cantina`
   regressed 2.65 -> 1.71 and recovered to 2.65 on revert) and exempting a thin far room the body already
   occupies (all four measured legs unchanged; no effect). Tests **149 passed**.
+
+## Update — round 166 (later)
+
+- Skipping a room's **self-adjoined portal** in `sweep_rooms` (level 18's blocking doorway is listed in sector 721
+  and names 721) was measured: `walk18_spawn` unchanged and every measured gated leg unchanged (17, cantina,
+  door0, 9). Reverted.
+- Diagnosis state: the manual warp run shows the crossing into 721 refused (`depth 0.1032`), yet permitting it
+  three different ways leaves the body at exactly (−0.4425, −1.8809). Next probe: the **harness's own child** with
+  `BK_MOVE_TRACE`/`BK_SECTOR_TRACE` captured to a file (the harness currently swallows the child's stderr), so the
+  real decision stream can be read instead of the manual warp's.

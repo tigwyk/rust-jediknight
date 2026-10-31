@@ -4448,3 +4448,18 @@ The next step is therefore to see the *whole* decision stream of the port-trace 
 run: the manual run shows the crossing being refused, yet two different ways of permitting it do not move the
 body, which means either the refused crossing is not the binding constraint on the trace's path or the body is
 blocked a step later. The instrumentation stays in (gated on `BK_SECTOR_TRACE`).
+
+**Skipping a room's self-adjoined portal is not the fix either (round 166, later).** The doorway that blocks
+level 18 is listed *in* sector 721 and names sector 721 as its far side, which looks like a room's own copy of an
+opening — crossing it goes nowhere. Skipping such portals in `sweep_rooms` was measured: `walk18_spawn` unchanged
+(0.28 of 0.88, 5 sectors) and all gated legs measured with it unchanged (level 17 0.82/0.70, cantina 2.65/2.59,
+door0 0.13/0.07, level 9 1.68/1.68). Reverted.
+
+The state of the diagnosis is therefore: the manual warp run shows the crossing into 721 refused (`depth 0.1032`),
+but *every* way of permitting that crossing — longer advances, a thin-room exemption, and skipping the
+self-adjoined portal — leaves the body at exactly (−0.4425, −1.8809). Either the refusal is not the binding
+constraint (the walk stops for a second reason that happens to produce the same pose), or the crossing is
+permitted but the *advance* is not applied because the caller keeps the pre-crossing position. The next probe must
+run the **harness's own** child with `BK_MOVE_TRACE`/`BK_SECTOR_TRACE` visible (the harness's redirects swallow
+the child's stderr today, so the manual run has been the only window), which is a harness change: capture the
+child's stderr to a file next to the trace.
