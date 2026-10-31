@@ -715,6 +715,35 @@ pub const AI_AWARE_SECONDS: f32 = 8.0;
 pub const AI_LISTEN_NEAR: f32 = 1.0;
 pub const AI_LISTEN_FRONT_DOT: f32 = 0.5;
 
+/// A `soundclass=` value reduced to the `.snd` class key the loader uses: the lowercase basename,
+/// because templates name `ky.snd` while the archive may carry it under a path.
+pub(crate) fn sound_class_key(name: &str) -> String {
+    name.rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(name)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// `sithAICmd_Talk`'s mood table (`0x50be20`): the AI flag word's `0x200` is the gate (`00_aisleep.cog`
+/// wakes an enemy with `AISetMode(enemy, 0x200)`; `0x202` is that plus the "enemy" bit scripts also
+/// set), then `0x800` and `0x400` pick a mood family and the health fraction picks the word inside it.
+/// The two health gates are the handler's own constants, **0.5** and **0.25** (`_DAT_005232f8` read
+/// from the retail EXE's `.rdata`). Returns the `.snd` class event name the mode is indexed by:
+/// `happy`/`search`, `boast`/`fear`, or `gloat`/`fear`.
+fn talk_mode(flags: u32, health_fraction: f32) -> Option<&'static str> {
+    if flags & 0x200 == 0 {
+        return None;
+    }
+    if flags & 0x800 != 0 {
+        return Some(if health_fraction > 0.5 { "gloat" } else { "fear" });
+    }
+    if flags & 0x400 != 0 {
+        return Some(if health_fraction >= 0.25 { "boast" } else { "fear" });
+    }
+    Some(if health_fraction >= 0.5 { "happy" } else { "search" })
+}
+
 /// Whether an actor at `from` facing `forward` **hears** the sound at `pos` — the `listen` handler's
 /// own test (`0x50a6f0`). Inside `heardist` always; a sound the path finds `blocked` (geometry
 /// between the two) only when it is nearer than [`AI_LISTEN_NEAR`] and the forward dot is above
@@ -765,6 +794,13 @@ pub struct Runtime {
     pub template_min_damage: BTreeMap<String, f32>,
     /// `maxhealth=`, the ceiling `HealThing` clamps to.
     pub template_max_health: BTreeMap<String, f32>,
+    /// A template's `soundclass=`, keyed by template name and reduced to the `.snd` class's lowercase
+    /// basename: the class `talk` picks its mood sounds from (`sithSoundClass_PlayModeRandom`).
+    pub template_soundclass: BTreeMap<String, String>,
+    /// Every shipped `.snd` class's rows, by the class's lowercase basename and then by the engine's
+    /// sound-mode **event name** (`create`, `happy`, `fear`, …), each a list of `(wav, maxVolume)`.
+    /// The runtime has no file access, so `setup` hands this over after the loader parses them.
+    pub sound_classes: BTreeMap<String, BTreeMap<String, Vec<(String, f32)>>>,
     /// `timer=`: how long a created thing lives, in seconds, before `sithThing_Update` destroys it.
     /// An impact effect's whole lifetime is this field.
     pub template_timer: BTreeMap<String, f32>,
@@ -1108,6 +1144,10 @@ pub struct Runtime {
     /// the class's reaction chance passed. `sithAI_EmitEvent` invokes the handler once per event, so
     /// a failed roll must not be retried while that same sound is still in the sector's ring.
     pub ai_listen: BTreeMap<usize, (f32, [f32; 3], bool)>,
+    /// When each actor may run its `Talk` instinct next. The handler sets its own next run from the
+    /// instinct's first number (`talk 10000.0, 0.10` in most shipped classes), so it keeps no global
+    /// interval.
+    pub ai_talk: BTreeMap<usize, f32>,
     /// When each actor may try the `opendoors` action next. Its handler (`0x50abc0`) calls
     /// `sithPlayerActions_Activate` — the **player's** use action — on the actor's own body, and that
     /// function throttles itself to 250 ms. An actor with the instinct opens the door it is walking
@@ -1527,6 +1567,16 @@ impl Runtime {
             template_explode,
             template_fire_offset,
             template_timer,
+            template_soundclass: level
+                .templates
+                .iter()
+                .filter_map(|t| {
+                    level
+                        .template_param(&t.name, "soundclass")
+                        .map(|name| (t.name.to_ascii_lowercase(), sound_class_key(name)))
+                })
+                .collect(),
+            sound_classes: BTreeMap::new(),
             thing_timer: BTreeMap::new(),
             player_shields: 100.0,
             player_dead: false,
@@ -1724,6 +1774,7 @@ impl Runtime {
             ai_last_seen: BTreeMap::new(),
             ai_scan: BTreeMap::new(),
             ai_listen: BTreeMap::new(),
+            ai_talk: BTreeMap::new(),
             ai_opendoors: BTreeMap::new(),
             ai_home: BTreeMap::new(),
             ai_flee_until: BTreeMap::new(),
@@ -2781,6 +2832,18 @@ impl Runtime {
             })
             .map(|(_, pos, at)| (*pos, *at))
     }
+
+    /// One random row of an actor's own `.snd` class for a sound-mode event — what
+    /// `sithSoundClass_PlayModeRandom` (`0x4e6b70`) picks: `class->+0x20 + mode*4` is the mode's list
+    /// and a random entry is played. The class comes from the template's `soundclass=`.
+    fn chatter_wav(&self, index: usize, mode: &str) -> Option<String> {
+        let template = self.templates.get(index)?.to_ascii_lowercase();
+        let class = self.template_soundclass.get(&template)?;
+        let rows = self.sound_classes.get(class)?.get(mode)?;
+        let pick = (crate::cog::pseudo_random() * rows.len() as f64) as usize;
+        rows.get(pick.min(rows.len().saturating_sub(1)))
+            .map(|(wav, _)| wav.clone())
+    }
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
     /// The engine runs an instinct scheduler over the `.ai` file's weights; this build uses the
@@ -2888,7 +2951,47 @@ impl Runtime {
             // stopping for a second every shot.
             thing.ai_wait = (thing.ai_wait - dt).max(0.0);
             let ready = thing.ai_wait <= 0.0;
-            let (from, yaw) = (thing.pos, thing.yaw);
+            let (from, yaw, health) = (thing.pos, thing.yaw, thing.health);
+            // `talk` (`0x50be20`, the second-most-used instinct after `listen`: 198 classes): idle
+            // chatter on the instinct's own clock. Its first number is the interval in milliseconds
+            // (`talk 10000.0, 0.10` in most shipped classes, `3000.0, 0.40` in `boc`) and the second
+            // the chance; a success picks a mood from the AI flag word and the health fraction
+            // (`talk_mode`) and plays a random row of the actor's own `.snd` class for it. The
+            // handler's own upstream gate (the AI's one-shot bit) is not modelled.
+            if let Some(talk) = ai.as_ref().and_then(|class| class.instinct("Talk")).cloned() {
+                let due = self.ai_talk.get(&index).copied().unwrap_or(self.time);
+                if self.time >= due {
+                    self.ai_talk
+                        .insert(index, self.time + (talk.weight / 1000.0).max(0.05));
+                    let chance = talk.args.first().copied().unwrap_or(0.0) as f64;
+                    let max_health = self
+                        .template_max_health
+                        .get(&ai_template)
+                        .copied()
+                        .unwrap_or(health)
+                        .max(1.0);
+                    if crate::cog::pseudo_random() < chance
+                        && let Some(mode) = talk_mode(
+                            self.actor_flags.get(&index).copied().unwrap_or(0),
+                            health / max_health,
+                        )
+                        && let Some(wav) = self.chatter_wav(index, mode)
+                    {
+                        // `PlayModeEntry` plays at full volume; the mixer owns the fade and rear-pan,
+                        // which is what `play_requested_sounds` applies from the class's own radii.
+                        let channel = self.sound_volume.len();
+                        self.sound_volume.push(1.0);
+                        self.sound_pitch.push(1.0);
+                        self.sounds.push(SoundRequest {
+                            name: wav,
+                            volume: 1.0,
+                            pos: Some(from),
+                            channel,
+                            pitch: 1.0,
+                        });
+                    }
+                }
+            }
             // `maxrotthrust=` is the angular rate the body can turn at (50-85 degrees a second for
             // level 1's gunners). Snapping the yaw let every actor face the player the instant it
             // noticed them, which is what made the port's fights start and finish faster than
@@ -8625,6 +8728,83 @@ mod tests {
         };
         assert!(hearable(from, ahead, bearing(45.0, 0.5), 3.0, true), "inside the 60-degree cone");
         assert!(!hearable(from, ahead, bearing(75.0, 0.5), 3.0, true), "outside the 60-degree cone");
+    }
+
+    /// `talk`'s mood table (`0x50be20`): the AI flag word's `0x200` is the gate, `0x800` and `0x400`
+    /// pick the family, and the health fraction picks the word inside it. The handler's health gates are
+    /// 0.5 and 0.25 (`_DAT_005232f8`, read from the retail EXE's `.rdata`), and `AISetMode` is what the
+    /// shipped scripts set (`0x200` in `00_aisleep.cog`, `0x202` in `00_aishootbarrel.cog`).
+    #[test]
+    fn talk_picks_its_mood_from_the_ai_flags_and_health() {
+        // Awake and neither mood flag: happy from half health up, searching below it.
+        assert_eq!(talk_mode(0x200, 1.0), Some("happy"));
+        assert_eq!(talk_mode(0x200, 0.5), Some("happy"));
+        assert_eq!(talk_mode(0x200, 0.49), Some("search"));
+        // `0x202` — the scripts' "enemy" bit on top — is still the plain family.
+        assert_eq!(talk_mode(0x202, 0.6), Some("happy"));
+        // 0x400: boast down to a quarter health, fear under it.
+        assert_eq!(talk_mode(0x200 | 0x400, 0.25), Some("boast"));
+        assert_eq!(talk_mode(0x200 | 0x400, 0.24), Some("fear"));
+        // 0x800 wins over 0x400 and wants strictly more than half to gloat.
+        assert_eq!(talk_mode(0x200 | 0x400 | 0x800, 0.51), Some("gloat"));
+        assert_eq!(talk_mode(0x200 | 0x400 | 0x800, 0.5), Some("fear"));
+        // Not awake: silent, whatever else is set (`AISetMode(enemy, 0x2000)` shuts an actor down).
+        assert_eq!(talk_mode(0x0, 1.0), None);
+        assert_eq!(talk_mode(0x1000 | 0x4, 1.0), None);
+    }
+
+    /// The handler's clock and roll are wired into `ai_tick`: `talk`'s first number is its interval in
+    /// milliseconds and its second the chance (most classes ship `10000.0, 0.10`, `boc` ships
+    /// `3000.0, 0.40`). A success queues the mood sound at the actor's own position, from the actor's own
+    /// `.snd` class; a chance of zero never does.
+    #[test]
+    fn a_talking_actor_queues_its_mood_sound_on_the_instincts_clock() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [2.0, 0.0, 0.0];
+        let mut player = base.clone();
+        player.pos = [-9.0, 0.0, 0.0]; // out of sight, nothing remembered
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "barkeep".into()];
+        rt.types = vec![10, 2];
+        rt.template_max_health.insert("barkeep".into(), 100.0);
+        rt.things[1].health = 100.0;
+        rt.template_soundclass.insert("barkeep".into(), "pednarsh.snd".into());
+        rt.sound_classes.insert(
+            "pednarsh.snd".into(),
+            std::collections::BTreeMap::from([(
+                "happy".to_string(),
+                vec![("happy1.wav".to_string(), 0.8)],
+            )]),
+        );
+        rt.actor_flags.insert(1, 0x200);
+        let class = |chance: &str| {
+            crate::ai::parse(&format!(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\n\
+                 LookForTarget 500.0, 40000.0\nTalk 10000.0, {chance}\n"
+            ))
+        };
+        rt.ai.insert(1, class("1.0"));
+        rt.time = 0.0;
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert_eq!(rt.sounds.len(), 1, "the talking actor queued no sound");
+        assert_eq!(rt.sounds[0].name, "happy1.wav");
+        assert_eq!(rt.sounds[0].pos, Some([2.0, 0.0, 0.0]));
+        // The handler sets its own next run from the instinct's interval: nothing inside it.
+        for _ in 0..30 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(rt.sounds.len(), 1, "the actor talked again inside its interval");
+        // A zero chance never queues anything, even after the interval passes.
+        rt.sounds.clear();
+        rt.ai.insert(1, class("0.0"));
+        for _ in 0..600 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(rt.sounds.is_empty(), "a 0.0 chance still talked");
     }
 
     /// `turretfire` (`0x50a0f0`): a turret's class (`turdefault.ai`) carries **no `PrimaryFire`**, so

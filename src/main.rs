@@ -105,6 +105,13 @@ struct World {
     wav_bytes: HashMap<String, Vec<u8>>,
     /// Lowercase `.wav` name -> `(minRadius, maxRadius, maxVolume)` from its sound class.
     sound_radii: HashMap<String, (f32, f32, f32)>,
+    /// `.snd` class (lowercase basename) -> sound-mode event name -> `(wav, maxVolume)`. This is what
+    /// `talk` picks its mood sounds from (`sithSoundClass_PlayModeRandom`); the runtime has no file
+    /// access, so `setup` hands it over.
+    sound_classes: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, Vec<(String, f32)>>,
+    >,
     gob_entries: usize,
 }
 
@@ -3413,6 +3420,11 @@ fn main() {
         let mut entries = 0;
         let mut widest = (0.0f32, String::new(), 0.0f32, 0.0f32, 0.0f32);
         let mut silent = 0;
+        // `.snd` class (lowercase basename) -> the sound-mode event names its rows carry.
+        let mut class_rows: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            std::collections::BTreeMap::new();
+        // Every `.snd` basename the archives carry, including classes whose rows do not parse.
+        let mut snd_files: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for name in gobs.names() {
             let lower = name.to_ascii_lowercase();
             if !lower.ends_with(".snd") {
@@ -3420,8 +3432,14 @@ fn main() {
             }
             let Some(raw) = gobs.read(&name) else { continue };
             files += 1;
+            let class = runtime::sound_class_key(&name);
+            snd_files.insert(class.clone());
             for entry in snd::parse(&String::from_utf8_lossy(&raw)) {
                 entries += 1;
+                class_rows
+                    .entry(class.clone())
+                    .or_default()
+                    .insert(entry.event.clone());
                 if entry.max_radius <= entry.min_radius {
                     silent += 1;
                 }
@@ -3471,6 +3489,20 @@ fn main() {
         assert!((behind - near * 0.7).abs() < 1e-5, "the rear pan is not 0.3");
         // And the shipped data covers a real range of radii, not one constant.
         assert!(widest.3 > 1.0, "no .snd entry has a fade radius above one unit");
+        // `talk` picks a random row of the actor's class by the engine's **sound-mode name**
+        // (`sithSoundClass_LoadEntry` keys each row's first column through the mode table). The shipped
+        // data must carry the five mood events the handler asks for.
+        let moods = ["happy", "search", "boast", "fear", "gloat"];
+        let present = moods
+            .iter()
+            .filter(|mood| class_rows.values().any(|events| events.contains(**mood)))
+            .count();
+        println!(
+            "  talk moods: {present}/{} of them appear across {} shipped classes",
+            moods.len(),
+            class_rows.len()
+        );
+        assert_eq!(present, moods.len(), "a `talk` mood event is missing from the .snd data");
         // `ChangeSoundVol`/`ChangeSoundPitch` name a **channel** the `PlaySound*` verbs answered, and
         // `SectorSound` replaces a sector's ambient. `sithCogFunctionSound_ChangeVolume` clamps to
         // [0, 1.5] and ignores a non-positive fade; `ChangePitch` needs a positive pitch *and* time.
@@ -3479,6 +3511,40 @@ fn main() {
             .or_else(|| start_level(&gobs).and_then(|n| gobs.read(&n)));
         if let Some(raw) = sound_level {
             let level = jkl::parse(&String::from_utf8_lossy(&raw));
+            // `talk` reads the class a template's `soundclass=` names through
+            // `runtime::sound_class_key`; check the level's own values all resolve.
+            let named: Vec<String> = level
+                .templates
+                .iter()
+                .filter_map(|t| level.template_param(&t.name, "soundclass"))
+                .map(runtime::sound_class_key)
+                .collect();
+            let resolved = named.iter().filter(|class| class_rows.contains_key(*class)).count();
+            let archived = named.iter().filter(|class| snd_files.contains(*class)).count();
+            println!(
+                "  talk: {archived}/{} of the level's `soundclass=` templates name an archived class; {resolved} of those have parsed rows",
+                named.len()
+            );
+            let unarchived: Vec<&str> = level
+                .templates
+                .iter()
+                .filter_map(|t| {
+                    let raw = level.template_param(&t.name, "soundclass")?;
+                    (!snd_files.contains(&runtime::sound_class_key(raw))).then_some(t.name.as_str())
+                })
+                .collect();
+            if !unarchived.is_empty() {
+                println!(
+                    "  talk: {unarchived:?} name classes the retail install does not ship (the same kind of data gap as level 18's missing `LTSaberHit012.wav`)"
+                );
+            }
+            // The key convention is what matters: every class the install *does* ship has to parse to
+            // rows for the templates that name it. A template naming a class retail does not ship is
+            // retail's own gap, recorded above, and simply means no chatter for that thing.
+            assert_eq!(
+                resolved, archived,
+                "an archived sound class produced no rows for a template that names it"
+            );
             let state = runtime::Runtime::handle(&level);
             let mut rt = state.borrow_mut();
             let before = rt.sound_volume.len();
@@ -14772,16 +14838,29 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
     // the wavs a class mentions are read, so this is a few hundred kilobytes each at most.
     let mut wav_bytes: HashMap<String, Vec<u8>> = HashMap::new();
     let mut sound_radii: HashMap<String, (f32, f32, f32)> = HashMap::new();
+    let mut sound_classes: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, Vec<(String, f32)>>,
+    > = std::collections::BTreeMap::new();
     for name in gobs.names() {
         if !name.to_ascii_lowercase().ends_with(".snd") {
             continue;
         }
         let Some(raw) = gobs.read(&name) else { continue };
+        let class = runtime::sound_class_key(&name);
         for entry in snd::parse(&String::from_utf8_lossy(&raw)) {
             let wav = entry.wav.to_ascii_lowercase();
             sound_radii
                 .entry(wav.clone())
                 .or_insert((entry.min_radius, entry.max_radius, entry.max_volume));
+            // `sithSoundClass_LoadEntry` keys each row's first column (the engine's mode name, e.g.
+            // `happy`) through the sound-mode table and keeps the row in that mode's list.
+            sound_classes
+                .entry(class.clone())
+                .or_default()
+                .entry(entry.event.clone())
+                .or_default()
+                .push((wav.clone(), entry.max_volume));
             if wav_bytes.contains_key(&wav) {
                 continue;
             }
@@ -15002,6 +15081,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         ai_classes,
         wav_bytes,
         sound_radii,
+        sound_classes,
         gob_entries: gobs.len(),
     })
 }
@@ -21524,6 +21604,9 @@ fn setup(
     // against nothing and `pow_shields.cog` keeps taking (its +20 landed every frame).
     sim.world.borrow_mut().item_max =
         world.item_defs.iter().map(|def| (def.id, def.max as f32)).collect();
+    // `talk` picks a mood sound from the actor's own `.snd` class. The runtime has no file access, so
+    // the loader's parsed classes come over the same way the inventory tables do.
+    sim.world.borrow_mut().sound_classes = world.sound_classes.clone();
     // A level change's player state goes on **now**, before the incoming level's scripts: the engine's
     // `jkPlayer_*` state outlives the level and the new level's cogs then adjust it (`kyle.cog`'s
     // minimums, `00_secretareas.cog`'s own secret count). Applying it after the scripts — as the

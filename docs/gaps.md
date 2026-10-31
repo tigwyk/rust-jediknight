@@ -5801,7 +5801,7 @@ handler:
 | --- | --- | --- | --- |
 | lookfortarget | 215 | `0x50aa80` | **yes** (view-cone scan, round 211) |
 | listen | 200 | `0x50a6f0` | **yes** (round 233: the ring scan, the `heardist`/sight/near-and-front hearing gates, and the class's per-sound reaction chance) |
-| talk | 198 | `0x50be20` | no |
+| talk | 198 | `0x50be20` | **yes** (round 235: the instinct's own interval and chance, the flag/health mood table, and a random row of the actor's own `.snd` class for the mood) |
 | primaryfire | 166 | `0x509e40` | **yes** (fire cadence) |
 | follow | 159 | `0x5093f0` | **yes** (chase + standoff) |
 | opendoors | 142 | `0x50abc0` | **yes** (round 218: the use scans on the actor's own body) |
@@ -5825,12 +5825,13 @@ handler:
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **15 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
-the counts are how many classes depend on each: `talk` (198) is the biggest remaining behavioural gap; `listen` (200), the
-largest used name, closed in round 233. `opendoors` was the one with a visible consequence — an AI that cannot open a door
-can be trapped behind one — and it is now implemented (below), as are `blindfire`, `returnhome`, the
-`retreat`/`withdraw` pair, `circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`, `flee` and `listen` (below).
-`sabermove` needs no work at all: nothing names it.
+So the port runs **16 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+the counts are how many classes depend on each: the remaining gameplay gap is the **Jedi set** (`forcepowers` and
+`saberfighting` 45 each, `specialattack` 24) plus the movement instincts (`jump` 92, `dodge` 27, `lobfire` 7, `crouch` 3);
+`listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and 235. `opendoors` was the one with a
+visible consequence — an AI that cannot open a door can be trapped behind one — and it is now implemented (below), as are
+`blindfire`, `returnhome`, the `retreat`/`withdraw` pair, `circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`,
+`flee`, `listen` and `talk` (below). `sabermove` needs no work at all: nothing names it.
 
 **The sector's awareness record is a 3-slot sound ring now (round 230), which is what `listen` scans.** The handler
 (`0x50a6f0`) does not read one "strongest event": it scans the sector's ring of recent sounds **newest first**, up to
@@ -6205,8 +6206,8 @@ entry `+0x10`), then picks a mode from the actor's AI script flags and health fr
 `_DAT_005232f8` else `fear`; flags `0x800` -> `gloat` at health > 0.5 else `fear`; and plays
 `sithSoundClass_PlayModeRandom(thing, mode)`, which picks a random row from the actor's own `.snd` class. The port has
 the pieces — every `.snd` is parsed for the sound bank, templates carry `soundclass=`, `snd::Entry` has the event name —
-so this is class->event->wav plumbing plus a scheduler, not a new subsystem. (`_DAT_005232f8` is the one constant
-left unread.)
+so this is class->event->wav plumbing plus a scheduler, not a new subsystem. (`_DAT_005232f8` was then read from the
+EXE as **0.25**.) It landed in round 235 — see the section at the end.
 
 **The first-person weapon's own sway** (recovered round 233, **ported round 234**): `jkPlayer_SetWaggle` (`0x405930`)
 stores the script's amplitude vector in `DAT_00552ba0/ba4/ba8` and its rate in `DAT_00552bac` (the port's `jksetwaggle`
@@ -6250,3 +6251,45 @@ bounds the drawn result: at full waggle a corner of the authored `bryv.3do` box 
 against the old translation's 10. Still open and on the roadmap ledger: `rdMatrix_BuildRotate34`'s composition order
 (composed yaw-pitch-roll here) and its sign, which only a QA-window frame at a known phase would settle. `--weapons`
 passes headless (the cog still names `bryv.3do`/`bryvpst1.key`); no window and no game run.
+
+## Update — round 235 (`talk`, the second-largest instinct, lands)
+
+`talk` is the last of the two big "every class uses it" instincts (`listen` closed in round 233). Its handler
+(`0x50be20`) is short and is now ported whole:
+- every run sets its **own** next time — `now + round(arg0)`, the first number on the class's `talk` line (`10000.0` in
+  most classes, `3000.0` in `boc`; the loader stores the rounded int at class entry `+0x4c`);
+- then it rolls `rand()/32768 < arg1`, the second number (`0.10` in most classes, `0.40` in `boc`);
+- on a success it picks a **mood** from the AI flag word and the health fraction: flag `0x200` is the gate
+  (`00_aisleep.cog` wakes an enemy with `AISetMode(enemy, 0x200)`, and `0x202` adds the scripts' enemy bit); `0x800`
+  gives `gloat` at health > 0.5 else `fear`; `0x400` gives `boast` at health >= the engine constant `_DAT_005232f8` =
+  **0.25** else `fear`; with neither, `happy` at health >= 0.5 else `search`;
+- and plays a random row of the actor's own `.snd` class for that mood (`sithSoundClass_PlayModeRandom`, `0x4e6b70`:
+  the class's mode list at `class + 0x20 + mode*4`).
+
+The data side is complete: the engine's 95 sound-mode names were dumped from `sithSoundClass_Startup`'s pointer array at
+`0x54b40c` last round, and the mood names are real `.snd` row events — `--sound` now proves it: **5 of 5 mood events**
+appear across the install's **102** `.snd` classes, and **72 of the 73** `soundclass=` classes level 1's templates name
+are archived and parse to rows. The 73rd is a retail data gap (`+crossbowbolt2` names a class the install does not
+ship, the same kind of gap as level 18's missing `LTSaberHit012.wav`), printed rather than failed.
+
+The port:
+- `Runtime::template_soundclass` maps each template's `soundclass=` to the `.snd` class's lowercase basename
+  (`sound_class_key`), and `Runtime::sound_classes` holds every class's `(event, wav, maxVolume)` rows. The runtime has no
+  file access, so the loader builds the table (in the same pass that already parses every `.snd` for the sound bank) and
+  `setup` hands it over beside the inventory tables.
+- `talk_mode` is the handler's flag/health table as a pure function; `ai_tick` gives each actor its own `ai_talk`
+  deadline and, on a hit, queues the mood wav as a `SoundRequest` at the actor's own position, through the same
+  distance/facing attenuation the script sounds use.
+- Shipped scripts mostly set `0x200`/`0x202`, so in the shipped content the mood is `happy` above half health and
+  `search` below it; `0x400`/`0x800` are engine-internal states the port already stores in `actor_flags`.
+
+Checks (171 tests, headless): `talk_picks_its_mood_from_the_ai_flags_and_health` pins all seven branches of the table
+(including the strict `>` on `0x800`'s half-health and the gap at 0.5/0.49); `a_talking_actor_queues_its_mood_sound_on_the_instincts_clock`
+runs `ai_tick` with a shipped-shaped class (`Talk 10000.0, 1.0`) and asserts the request's wav and position, that nothing
+plays inside the interval, and that a `0.0` chance never plays. Measured before/after: with the talk clock removed the
+actor queues **0** requests and the check fails ("the talking actor queued no sound"). `--sound`, `--ai` and `--weapons`
+pass headless; no window and no game run.
+
+Still open, and on the roadmap ledger: the audio goes out through the port's one-shot 2D request pipeline with the
+actor's position for attenuation, not the engine's mixer channels/3D buffer (same ceiling every script sound already has),
+and the handler's one upstream gate — the AI's "already doing a one-shot" bit — is not modelled.

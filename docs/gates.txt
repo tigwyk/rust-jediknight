@@ -2299,3 +2299,25 @@ running app.--carry-check --start 01narshadda                        0   level 2
   Suite **169 passed**; headless `--weapons` passes; docs **132/132**.
 - No window and no game run. Still open on the roadmap ledger: `rdMatrix_BuildRotate34`'s composition order and sign
   (composed yaw-pitch-roll here), which needs a QA-window frame at a known phase.
+
+## Update — round 235
+
+- **`talk` (198 classes, the last of the two big instincts) ported from `0x50be20`.** Every run sets its own next time
+  from the instinct's first number in milliseconds (`talk 10000.0, 0.10` in most classes, `3000.0, 0.40` in `boc`), rolls
+  the second as a chance, then picks a mood from the AI flag word and health fraction — `0x200` is the gate, `0x800`
+  gives `gloat` above half health else `fear`, `0x400` gives `boast` at health >= the engine constant **0.25**
+  (`_DAT_005232f8`, read from the EXE's `.rdata`) else `fear`, neither gives `happy` at >= 0.5 else `search` — and plays a
+  random row of the actor's own `.snd` class for the mood (`sithSoundClass_PlayModeRandom`).
+- `Runtime::template_soundclass` and `Runtime::sound_classes` carry the class data (the loader builds it in the same
+  pass that parses every `.snd`; `setup` hands it over beside the inventory tables). `talk_mode` is the table as a pure
+  function; `ai_tick` keeps a per-actor `ai_talk` deadline and queues the mood wav at the actor's position through the
+  same attenuation as script sounds (`chatter_wav` picks the row).
+- `--sound` now proves the data headlessly: **5/5** mood events appear across **102** `.snd` classes, and **72/73** of
+  level 1's `soundclass=` classes are archived and parse (the 73rd, `+crossbowbolt2`, a retail data gap it prints).
+- Checks: `talk_picks_its_mood_from_the_ai_flags_and_health` (all seven branches, including the strict `>` on the 0x800
+  half-health); `a_talking_actor_queues_its_mood_sound_on_the_instincts_clock` (queued wav + position, silence inside the
+  10 s interval, a `0.0` chance never talking). Measured before/after: with the clock removed the actor queues 0 requests
+  and the check fails ("the talking actor queued no sound"). Suite **171 passed**; headless `--ai`, `--weapons` and
+  `--sound` pass; docs **132/132**.
+- No window and no game run. Deviations on the roadmap ledger: one-shot 2D audio instead of the engine's mixer channels,
+  and the handler's upstream one-shot bit is not modelled.
