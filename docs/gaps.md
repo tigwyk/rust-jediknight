@@ -4343,3 +4343,24 @@ committed with "no floor plane in its own sector" as the reason.
 Trace gate this round: **11 of 12 pass**. The one failure, `walk5_spawn` (3.43/5 sectors), is the documented
 load-flake *and* the machine's 2 fps: with the fix reverted it reads 3.09/3 sectors — it fails either way, and the
 comparison assumes a normal frame rate. `cargo test --release` is **148 passed**.
+
+**Level 18 no longer falls: a sector with no floor plane gets the floor of the sectors around it (round 163).**
+Round 162 left level 18 falling because it resolves to its authored sector **723**, whose `floor_below` is `None`
+(the `19a` defect), while the floors under the point belong to sectors 0 and 717 whose hulls do not contain it. The
+landing now falls back, **only when the face probe yields nothing**, to the highest floor *plane* of the sectors
+around the body that is below it, settling the body at `floor + rest` — which is what the engine's first physics
+step does to an authored pose that sits low. Measured:
+
+```
+walk18_spawn  port ends (-0.44, -1.88, 0.1201) sector 721   [floor 0.0 + rest 0.120114 = retail's 0.12]
+walk17_spawn  port 0.82 / retail 0.70 units (117 %), sectors off 0, ends z -8.0799  [retail -8.08]
+```
+
+The fall is fixed on both; the **faces path keeps its strict never-lift rule** (which level 9's ledge needs), so
+the fallback cannot affect it. Spot-checked gated legs after the change: `walk_cantina` 2.65/2.59, `walk9_spawn`
+1.68/1.68 (0 sectors), `walk12_spawn` 5.03/3.95 (127 %, 0 sectors) — unchanged.
+
+Level 18 still **fails its leg**: travel 0.28 / retail 0.88 and 5 of 6 sector mismatches — the body stands and
+settles but barely walks (it ends in sector 721, likely wedged by the sectors around the floorless sliver). It
+stays out of the gate; its fixture is committed and the remaining cause is "the room it should stand in is not
+the sector the point resolves to", the same class as level 17 but one layer further out.

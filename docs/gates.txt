@@ -1321,3 +1321,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
   `19a` defect), while the floors belong to sectors 0/717 that do not contain the point.
 - Trace gate: **11 of 12 pass**; the failure `walk5_spawn` (3.43/5 sectors) also fails with the fix reverted
   (3.09/3) — the documented load-flake made worse by the machine's ~2 fps. Tests **148 passed**.
+
+## Update — round 163
+
+- **Level 18's fall fixed**: when the face probe yields nothing, the landing falls back to the highest floor
+  *plane* of the sectors around the body below it, settling at `floor + rest` (the engine's first-step behaviour
+  for a low authored pose). Measured: `walk18_spawn` ends at **z 0.1201** (floor 0.0 + rest 0.120114 = retail's
+  0.12); `walk17_spawn` improves to z −8.0799 (retail −8.08), travel **117 %**, 0 sectors.
+- The faces path keeps its strict never-lift rule (level 9's ledge), so the fallback cannot affect it.
+  Spot-checked: cantina 2.65/2.59, level 9 1.68/1.68 (0 sectors), level 12 5.03/3.95 (127 %, 0) — unchanged.
+- Level 18 still **fails its leg**: 0.28 / retail 0.88 travel, 5 of 6 sectors — it settles but barely walks
+  (likely wedged by the sectors around the floorless sliver). Not gated. Tests **148 passed**.

@@ -13554,7 +13554,26 @@ fn walker_step(
                 *travelled <= -drop + rest + 1e-3 && *floor + rest <= pos[2] + 1e-3
             })
             .map(|(floor, _, _)| (floor + rest, 0usize));
-        match land.map(|(z, _)| z) {
+        let mut land = land;
+        if land.is_none() {
+            // A sector may carry **no floor plane at all** — `19A`'s sector 723 is the shipped case, and
+            // level 18's spawn stands in it (its floors belong to sectors 0 and 717, whose hulls do not
+            // contain the point). The engine's `FindFloor` reads the sector's own floor plane; when the
+            // body's sector has none, the floor under a falling body is the highest floor plane of a
+            // sector around it that is below the body. Lifting the body to `floor + rest` is what the
+            // engine's first physics step does to an authored pose that sits low (level 18: body 0.083
+            // above a floor at 0.0 against a 0.120114 rest height), so this path permits it; the *faces*
+            // path above keeps its strict never-lift rule, which is what level 9's ledge needs.
+            land = solids
+                .sectors_around(*pos)
+                .into_iter()
+                .filter_map(|other| solids.floor_below(other, *pos))
+                .filter(|floor| *floor <= pos[2] + 1e-3)
+                .fold(None, |best: Option<f32>, floor| {
+                    Some(best.map_or(floor, |b| b.max(floor)))
+                })
+                .map(|floor| (floor + rest, 0usize));
+        }        match land.map(|(z, _)| z) {
             Some(z) => {
                 if std::env::var_os("BK_WALK_TRACE").is_some() {
                     eprintln!("walk trace:     landed on {z:.3} after {:.3}", -drop);
