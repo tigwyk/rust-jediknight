@@ -777,7 +777,7 @@ walker a response that slides along the footprint instead of reverting the whole
 * The camera used to spawn inside an NPC: the clearance rule wanted `radius * 2` = 0.7, exactly an NPC's
   width. It wants 2.0 units now.
 
-| Known defect | level m5 | **four weapon pickups rise out of the world**: m5railgun and m5concrifle carry vel= in their templates and the thing-motion path integrates velocity with no gravity and no surface stop, so they climb ~10 units/s from z −0.2 to +39 in four seconds (--soak-all reports it; BK_SOAK_TRACE names them) | the motion path needs sithPhysics' gravity and collision, or vel restricted to the types the engine launches (debris, particles, explosions) |
+| Known defect | level m5 | **retired round 237 — the pickups were never falling, they were being blown up.** `_powerup` ships `physflags=0x400000`, and `sithPhysics_UpdateThingPhysics`'s thrust arm (`0x4f6270`) skips a body carrying that flag; the port's thrust loop applied `SetSectorThrust`'s vector to every body in the sector, so the four weapon pickups in m5's updraft sectors climbed from z −0.2 to **89.3 in six seconds** (`BK_SOAK_TRACE` named them). The gravity arm is untouched and still missing (the row below explains why it is not a one-line fix) | measured with the exemption: m5 soak's `outside` count **4 → 0** (no bodies outside every sector, 0 non-finite positions); a new unit check pins the exemption (`a_thrust_sector_lifts_bodies_except_the_ones_flagged_against_it`) and `--soak` on level 1 still passes (30 messages, 32 crossings, 0 outside). The engine also gates thrust on the body's `mass != 0`, which the port does not track per thing — on the ledger |
 
 ### Why gravity for goods is not a one-line fix (round 120)
 
@@ -787,6 +787,8 @@ Measured, twice:
 2. **Gravity + a vertical stop** is still wrong: Solids::floor_below(sector, pos) returns None for every good on level 1 — the sector-keyed plane list finds no downward-facing plane under them — and Solids::support(pos, radius, drop), which is what the walker uses, catches only some (169 -> 68 bodies still leaving).
 
 So the prerequisite is not 'add gravity' but 'give goods a ground test that works for their radius and their sectors'. support depends on face coverage (over_face) at the body's radius; items are 0.05-0.10 units, and the coverage test is calibrated for the player. Naming that is the deliverable; the m5 defect stays reported.
+
+**Round 237:** the m5 half of the defect turned out not to be gravity at all — those four pickups were being blown **up** by the thrust arm, which skipped the engine's `physflags & 0x400000` exemption (`_powerup` ships that flag). With the exemption the m5 soak's `outside` count is 4 → 0, and the gravity prerequisite above is unchanged and still owed.
 
 
 ### Objectives text is not a string-table lookup (round 124)
@@ -6329,3 +6331,30 @@ Still open, on the roadmap ledger: the handler's **event paths** (`param_4` 1/2/
 `surprise` `0x57` and targets the attacker) need the engine's AI event dispatch (`sithAI_EmitEvent`), which this build
 does not have; and its target refresh is the port's `sighted` plus the last-seen slot rather than the engine's own
 `CheckSightThing` state.
+
+## Update — round 237 (the m5 "rising pickups" defect retired: they were being blown up, not falling)
+
+The known-defect row had read "four weapon pickups rise out of the world … the thing-motion path integrates velocity
+with no gravity and no surface stop". The site visit says otherwise: `m5railgun`/`m5concrifle` inherit `_powerup`, which
+ships **`physflags=0x400000`** and no `vel=` at all, and the port's step loop applies a sector's `SetSectorThrust` vector
+to every body in that sector. `sithPhysics_UpdateThingPhysics` (`0x4f6270`) gates that arm three ways — body `mass != 0`,
+the sector's own `SITH_SECTOR_USETHRUST` flag (`sector + 0x34 & 8`), and **`(physflags & 0x400000) == 0`** — and the
+pickups are exempt by the third. So the four weapons sat in m5's updraft sectors and climbed from z −0.2 to **89.3** in
+the six-second soak, while retail leaves them hovering where the level placed them.
+
+The fix is the exemption on the port's thrust loop (`t.phys_flags & 0x400000 == 0`), which is the engine's own test.
+Measured: with `BK_SOAK_TRACE=1`, before the fix the m5 soak reports four `outside:` lines (`m5railgun`/`m5concrifle`,
+z 2.2 after one second and 89.3 after six) and `outside=4`; after it reports **`outside=0`**, 0 non-finite positions, and
+the level-1 soak is unchanged (30 messages, 32 crossings, 0 outside, 45 s), so `--soak` still passes. The new check
+`a_thrust_sector_lifts_bodies_except_the_ones_flagged_against_it` pins both halves: a body with physflags 0 still rises
+(5 u/s over the step — which is also what `--things`' `SetSectorThrust` check measures), and one carrying `0x400000`
+does not move.
+
+Two halves of the engine's arm are still owed, and are on the roadmap ledger as one row: the `mass != 0` gate (the port
+does not track per-thing mass on that path, so a massless body in a thrust sector is still accelerated) and the player's
+own copy of the arm — `sithPhysics_UpdatePlayerPhysics` (`0x4f6860`) has the same thrust and gravity blocks, while the
+port's `walk_player` owns the player body and applies neither (level 21's core tube is the shipped case that needs the
+thrust half). The gravity arm stays deferred for the reason the round-120 section gives.
+
+Suite **174 passed**; headless `--soak` (level 1), `--things`, `--ai`, `--weapons` and `--sound` pass; docs 132/132. No
+window and no game run.

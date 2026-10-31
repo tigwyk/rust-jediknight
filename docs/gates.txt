@@ -2344,3 +2344,22 @@ running app.--carry-check --start 01narshadda                        0   level 2
   **132/132**.
 - No window and no game run. Still open on the roadmap ledger: the handler's damage/surprise event paths need the AI
   event dispatch (`sithAI_EmitEvent`), which this build does not have.
+
+## Update — round 237
+
+- **The m5 "rising weapon pickups" known defect is retired, and it was never gravity.** `m5railgun`/`m5concrifle`
+  inherit `_powerup`, which ships `physflags=0x400000` and no `vel=`: the port's step loop applied a sector's
+  `SetSectorThrust` vector to every body, and `sithPhysics_UpdateThingPhysics` (`0x4f6270`) exempts a body carrying
+  `0x400000` (alongside `mass != 0` and the sector's own `USETHRUST` flag). So the four weapons climbed from z −0.2 to
+  **89.3** in m5's updraft sectors instead of hovering where the level placed them.
+- Fix: the thrust loop now honours the engine's `physflags & 0x400000` exemption. Measured with `BK_SOAK_TRACE=1`:
+  before, four `outside:` lines (`m5railgun`/`m5concrifle`, z 2.2 at 1 s, 89.3 at 6 s) and `outside=4`; after,
+  **`outside=0`** and 0 non-finite positions. Level-1 soak unchanged and passing (45 s, 30 messages, 32 crossings,
+  0 outside); `--things`' `SetSectorThrust` check still lifts a free body (z 0.00 → 2.58 at 5 u/s) and its zero vector
+  still clears the drive.
+- Checks: `a_thrust_sector_lifts_bodies_except_the_ones_flagged_against_it` — a free body in a 5 u/s thrust sector rises
+  over the step, an otherwise identical body with physflags `0x400000` does not move. Suite **174 passed**; headless
+  `--soak` (level 1), `--things`, `--ai`, `--weapons` and `--sound` pass; docs **132/132**.
+- No window and no game run. On the roadmap ledger: the engine's `mass != 0` gate and the **player's** copy of the thrust
+  arm (`sithPhysics_UpdatePlayerPhysics`, `0x4f6860` — the port's `walk_player` applies neither; level 21's core tube is
+  the shipped case). The gravity arm stays deferred for the round-120 reason.

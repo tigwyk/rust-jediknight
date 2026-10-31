@@ -2324,8 +2324,7 @@ impl Runtime {
         // `ponytail:` gravity for the physics goods is **not** a line: the collision resolve below
         // corrects only x and y, so a settling item sinks straight through the floor — tried this
         // round, and 231 of level 1's bodies left the world. `sithPhysics` resolves the vertical axis
-        // against the sector's surfaces first; that is the prerequisite, not gravity itself. m5's four
-        // weapon pickups rise because a thrust sector accelerates them and nothing pulls back.
+        // against the sector's surfaces first; that is the prerequisite, not gravity itself.
         // The player is **not** a generic mover: `walk_player` integrates the body and consumes a
         // scripted velocity (`force_jump.cog`'s `SetThingVel`) into `player.vy`. Letting both loops run
         // meant the generic one moved the *thing*, hit the level, zeroed the velocity and rewound the
@@ -2343,6 +2342,11 @@ impl Runtime {
             }
             if let Some(drive) = usize::try_from(t.sector).ok().and_then(|s| thrust.get(s)).copied()
                 && drive != [0.0; 3]
+                // `sithPhysics_UpdateThingPhysics`'s thrust arm (`0x4f6270`) skips a body whose
+                // physflags carry `0x400000` — the flag `_powerup` ships (`physflags=0x400000`), which
+                // is why m5's four weapon pickups stay put in the sectors a script gives an updraft
+                // instead of climbing to z 89.3. The player is excluded below: `walk_player` owns it.
+                && t.phys_flags & 0x400000 == 0
                 && !t.destroyed
             {
                 for k in 0..3 {
@@ -8958,6 +8962,45 @@ mod tests {
         assert_eq!(sample(0, "0.10, 1.00"), (0, 0, 0), "a dormant actor alerted");
         // Already alerted: the handler's gate stops it running again.
         assert_eq!(sample(0x4 | 0x800, "0.10, 1.00"), (0x800, 0, 0), "an alerted actor re-alerted");
+    }
+
+    /// `sithPhysics_UpdateThingPhysics`'s thrust arm (`0x4f6270`): a body in a thrust sector is
+    /// accelerated by the sector's vector **unless its physflags carry `0x400000`** — the flag `_powerup`
+    /// ships, and the reason m5's four weapon pickups must not climb in the sectors a script gives an
+    /// updraft (before the exemption they reached z 89.3 in six seconds).
+    #[test]
+    fn a_thrust_sector_lifts_bodies_except_the_ones_flagged_against_it() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut free = base.clone();
+        free.pos = [1.0, 0.0, 0.0];
+        free.sector = 0;
+        let mut exempt = base.clone();
+        exempt.pos = [2.0, 0.0, 0.0];
+        exempt.sector = 0;
+        exempt.phys_flags = 0x400000;
+        rt.things = vec![rt.things[0].clone(), free, exempt];
+        rt.templates = vec!["walkplayer".into(), "crate".into(), "crate".into()];
+        rt.types = vec![10, 5, 5];
+        rt.sectors = vec![SectorState {
+            thrust: [0.0, 0.0, 5.0],
+            light: 0.0,
+            light_from: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
+            tint: [0.0; 3],
+            colormap: 0,
+        }];
+        rt.step(1.0);
+        assert!(
+            rt.things[1].pos[2] > 4.0,
+            "the thrust sector did not lift a free body: {}",
+            rt.things[1].pos[2]
+        );
+        assert_eq!(
+            rt.things[2].pos[2], 0.0,
+            "a body with physflags 0x400000 was lifted anyway"
+        );
     }
 
     /// `turretfire` (`0x50a0f0`): a turret's class (`turdefault.ai`) carries **no `PrimaryFire`**, so
