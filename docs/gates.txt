@@ -1779,3 +1779,19 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - New reusable probe **`--sector-locate <cog>`**: each linked sector's centre and radius from the collision build
   (how the secret sectors were found without a grid scan).
 - `cargo test --release`: **149 passed**; `--gates`: **64 of 64, 0 skipped**.
+
+## Update — round 199
+
+- Same sender-id defect confirmed present in the **thing/surface** link paths: `00_doorswitch.cog` branches on
+  `GetSenderId()` (doors linkid=1 = lock sound, switch surface linkid=2 = open), and the port's `activate` carried no
+  sender; `label_for_name` also dropped `activate` for scripts that declare `message activated` (same id 1).
+- Fixing both and trying **surfaces first** made the port print `use: activated surface 466` — a wall in the facing
+  cone, not cog 11's switch — with `doorstatus`/`movestatus` still 0. So the real defect is the **use-target model**:
+  the engine looks at what the crosshair is on, the port takes the nearest linked surface in a 3-unit cone by flat
+  distance. All three edits were reverted (unmeasured: tests 149 and `--gates` 64/64 with them, but no state change
+  demonstrated).
+- Next probe: cast the use ray along the camera's forward axis, first linked **surface** hit (the engine's use scan;
+  no named decomp function, so the REA path). Fixture ready: cog 11's `doorstatus` must become 1 after one use at the
+  switch pose; `--cogstatus-after` already prints it.
+- Regression: walk-trace gate unchanged at **15 legs, 1 failure** (`walk5_spawn`, tracked) — round 198's fix cost
+  nothing.

@@ -5334,3 +5334,30 @@ that sector's link list — the runnable check for this behaviour.
 
 Verification: the port matches retail at 306 (`flags = 2`) and at the spawn control (`flags = 0`), `cargo test
 --release` **149 passed**, and the full gate suite **64 of 64, 0 skipped** with the new assertion included.
+
+**The use action targets the wrong thing: the port's "nearest linked surface in the cone" picks wall 466 over the
+switch, and nothing in the door script fires (round 199).** After round 198's sector-link sender fix, the same
+sender-id defect was found in the **thing and surface** link paths:
+
+- `00_doorswitch.cog` links its doors as `thing door0 linkid=1` and its switch as `surface switch0 linkid=2`, and its
+  `activated` label branches on `GetSenderId()` — only id 2 opens the door, id 1 just plays the lock sound. The port
+  pushed `activate` with no sender (`None`), so `GetSenderId()` was 0.
+- `label_for_name` resolved only literal labels, so `use_thing`'s `activate` could never reach a script that declares
+  `message activated` + `activated:` (they share id 1 in `MESSAGE_IDS`) — the message was silently dropped.
+- Those two were fixed, and `use_key` was tried with **surfaces first** (a switch is the surface link name), and the
+  port then printed `use: activated surface 466` — a *wall* surface in the facing cone, not cog 11's switch. The
+  door's `doorstatus`/`movestatus` stayed 0.
+
+So the model itself is wrong: the engine's use is a **look at what the crosshair is on** (a ray hit in
+`sithPlayer`'s use scan), while the port picks the nearest linked surface within a 3-unit cone by flat distance —
+which a wall between the body and the switch wins. The three edits (label-name-by-id fallback, link id as the
+activated message's sender, surface-first ordering) were **measured only to produce that evidence and then reverted**:
+`cargo test --release` 149 passed and `--gates` 64/64 with them, but no state change was demonstrated, so none stays.
+
+The next probe is the use-target rule: cast the use ray along the camera's forward axis and take the first linked
+**surface** hit (the engine's own use scan; `decomp` has no named `sithPlayer` use function, so the ray test needs the
+REA path). The fixture is ready: cog 11's `doorstatus` must become 1 (its `checkstatus` reads `getcurframe(door0)`)
+after one use at the switch pose, which is a variable the port's `--cogstatus-after` already prints.
+
+Regression check: the walk-trace gate is unchanged at **15 legs, 1 failure** (`walk5_spawn`, the tracked floor-search
+deviation), so round 198's sector-link fix cost nothing.
