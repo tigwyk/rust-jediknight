@@ -950,6 +950,12 @@ impl Solids {
         // A room shallower than the body cannot hold it, however legal its origin's position looks: a
         // closed door's slab is exactly that (level 1's `337` is 0.05 deep against a 0.13 body). Such an
         // opening is a wall — otherwise the body stands *inside the door*.
+        if std::env::var_os("BK_SECTOR_TRACE").is_some() {
+            eprintln!(
+                "sector trace: doorway {adjoin} depth {depth:.4} (needs {:.4}) radius {radius:.3}",
+                2.0 * radius
+            );
+        }
         if depth < 2.0 * radius {
             return None;
         }
@@ -968,9 +974,14 @@ impl Solids {
             // hull after the move and its floor pass steps the body up, so a step's worth of rise is legal
             // here — the same allowance `move_body` uses (`moveSize + 0.01`).
             const STEP: f32 = 0.07;
-            if self.inside_sector(adjoin, [landing[0], landing[1], landing[2] - radius], 0.0)
-                || self.inside_sector(adjoin, [landing[0], landing[1], landing[2] - radius + STEP], 0.0)
-            {
+            let inside = self.inside_sector(adjoin, [landing[0], landing[1], landing[2] - radius], 0.0);
+            let stepped = self.inside_sector(adjoin, [landing[0], landing[1], landing[2] - radius + STEP], 0.0);
+            if std::env::var_os("BK_SECTOR_TRACE").is_some() {
+                eprintln!(
+                    "sector trace:   advance {advance:.4} landing {landing:?} inside {inside} stepped {stepped}"
+                );
+            }
+            if inside || stepped {
                 return Some(advance);
             }
         }

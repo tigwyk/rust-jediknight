@@ -4418,3 +4418,33 @@ wall moving parallel to it must advance, and it does — the contact is not the 
 room is far wider than the body, yet the function reports nowhere to stand. The next probe is its rejection
 reason at this doorway — the three constraints it lists (clear the plane, stay inside a shallow room, retry the
 3 mm-offset copies) with the actual numbers.
+
+**The doorway into sector 721 is called a wall because the far room is thinner than the body (round 166).** The
+`BK_SECTOR_TRACE` instrumentation added to `doorway_advance` prints the depth it measures and every landing it
+tries. At level 18's threshold it says:
+
+```
+sector trace: doorway 721 depth 0.1032 (needs 0.1300) radius 0.065
+sector trace:   advance 0.0660 landing [...] inside false stepped false
+sector trace:   advance 0.0760 landing [...] inside false stepped false
+sector trace:   advance 0.1310 landing [...] inside false stepped false
+```
+
+So the sweep wants to cross into sector **721**, whose depth along the travel direction is **0.1032** against the
+`2 * radius = 0.13` rule — shallower than the body — and classifies the opening as a **wall** (surface
+`usize::MAX` at distance 0), which is the block. The interesting part is that the body is *already standing in*
+sector 721, so the rule's premise ("a room shallower than the body cannot hold it") does not hold for a thin
+passage the body legitimately occupies.
+
+Two candidate fixes were measured and **reverted**:
+
+- **Extending the retry distances** (`{0, 0.01, radius}` → up to `8 * radius`, every one still judged by
+  `inside_sector`): level 18 unchanged (0.28 of retail's 0.88), and `walk_cantina` **regressed** from 2.65/2.59 to
+  1.71/2.59 — so it was reverted, and the cantina confirmed back at 2.65 after the revert.
+- **Allowing a thin far room the body already occupies** (`inside_sector(adjoin, feet)` as an exemption): all four
+  measured legs (level 18, cantina, door0, level 9) unchanged — no effect, reverted.
+
+The next step is therefore to see the *whole* decision stream of the port-trace run rather than my manual warp
+run: the manual run shows the crossing being refused, yet two different ways of permitting it do not move the
+body, which means either the refused crossing is not the binding constraint on the trace's path or the body is
+blocked a step later. The instrumentation stays in (gated on `BK_SECTOR_TRACE`).

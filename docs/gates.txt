@@ -1357,3 +1357,12 @@ running app.--carry-check --start 01narshadda                        0   level 2
   wall because `doorway_advance` returns `None` (its far-room depth test). The body stops at the threshold.
 - New regression test `a_body_touching_a_wall_slides_along_it` (a single wall contact slides correctly). Tests
   **149 passed**. Next: `doorway_advance`'s rejection reason at this doorway, with numbers.
+
+## Update — round 166
+
+- `doorway_advance` now traces its measurements (`BK_SECTOR_TRACE`): at level 18's threshold it measures the far
+  sector 721 as **depth 0.1032** against `2 * radius = 0.13` and classifies the opening as a wall, trying
+  advances 0.066/0.076/0.131 that all land outside it. The body is already standing in that thin sector.
+- Two fixes measured and **reverted**: extending the retry distances (level 18 unchanged; `walk_cantina`
+  regressed 2.65 -> 1.71 and recovered to 2.65 on revert) and exempting a thin far room the body already
+  occupies (all four measured legs unchanged; no effect). Tests **149 passed**.
