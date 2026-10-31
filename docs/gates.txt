@@ -2403,3 +2403,28 @@ running app.--carry-check --start 01narshadda                        0   level 2
   away from its attacker"). Suite **178 passed**; headless `--ai` and `--hit` pass; docs **132/132**.
 - No window and no game run. On the roadmap ledger: the `0x1000` projectile-passing sidestep (the engine emits it from
   `sithWeapon_WeaponFireProjectile`'s collision search), the event-2 path, and the handler's 2.5 walk speed.
+
+## Update — round 240
+
+- **`dodge` lands its shot-passing path** — the one players see: shooting at an enemy makes it juke. It is driven from
+  the weapon side: `sithWeapon_WeaponFireProjectile` (`0x4d45a0`), before the projectile is created, and only for the
+  player, tests `typeflags & 0x200000` on it and sweeps its first five units (`sithCollision_SearchForCollisions`);
+  the first actor found gets AI event **`0x1000`** with the projectile. `+bryarbolt` ships `typeflags=0x20440d` (bit
+  set) while its `thingflags=0x20000001` clears the bit — the field is `typeflags` (`thing + 0x130`), which is also what
+  `sithWeapon_Update` reads for damage decay.
+- The handler's `0x1000` branch: AI bit `0x200`, non-zero class step, `sithAI_CheckSightThing(actor, actor->pos,
+  projectile, class sightdist, class fov)` (the actor must see the shot), then normalize the direction to the shot,
+  rotate it by a random **45–90°** (`rand*45 + 45`, negated on `rand < 0.5`; EXE constants `_DAT_005232b0` 45,
+  `_DAT_005232b4` -45, `_DAT_005232a0` 0.5), and step `arg0` along the **negated** rotated direction via
+  `sithAI_SetMoveThing(ai, point, 2.5)` — sideways, not a retreat.
+- Port: `Runtime::template_typeflags` (the full word; `thingflags=` stays a separate map and the shot starts with it),
+  `first_actor_on_path` (five-unit sweep against actors, wall-checked), `dodge_from_shot` (gate, sight test, rotation,
+  destination), called from `fire_with_spread` after the muzzle is computed (the muzzle expression moved into a `let`
+  so the sweep and the shot share it).
+- Checks: `a_player_shot_that_would_hit_an_actor_makes_it_dodge_sideways` (shot's flags, class step 0.2 read from the
+  class's *second* number, 90–135° off the shot direction, same floor) and
+  `the_shot_dodge_needs_the_actor_awake_the_sight_line_and_the_player_shooter` (AI bit, facing, sightdist, typeflags
+  bit, player-only). Measured before/after: reaction removed -> both fail ("the actor did not dodge a shot that would
+  hit it"). Suite **180 passed**; headless `--ai`, `--hit` and `--weapons` pass; docs **132/132**.
+- No window and no game run. On the roadmap ledger: the event-2 path, the handler's 2.5 walk speed, and the sweep's
+  approximation (actor `movesize` against the shot's line, not the full collision search).

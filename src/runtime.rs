@@ -797,6 +797,13 @@ pub struct Runtime {
     pub template_min_damage: BTreeMap<String, f32>,
     /// `maxhealth=`, the ceiling `HealThing` clamps to.
     pub template_max_health: BTreeMap<String, f32>,
+    /// A template's `thingflags=`, the word `SITH_TF_*` bits live in: a shot starts with it, and the
+    /// player-fire pre-sweep tests its bit `0x200000` before raising `dodge`'s shot event.
+    pub template_thingflags: BTreeMap<String, u32>,
+    /// A template's full `typeflags=` word (the `SITH_WF_*`/`SITHEXPLOSION_FLAG_*` bits). `+bryarbolt`
+    /// ships `0x20440d`, whose bit `0x200000` is what `sithWeapon_WeaponFireProjectile`'s player
+    /// pre-sweep tests before it raises `dodge`'s shot event.
+    pub template_typeflags: BTreeMap<String, u32>,
     /// A template's `soundclass=`, keyed by template name and reduced to the `.snd` class's lowercase
     /// basename: the class `talk` picks its mood sounds from (`sithSoundClass_PlayModeRandom`).
     pub template_soundclass: BTreeMap<String, String>,
@@ -1422,6 +1429,37 @@ impl Runtime {
                     .map(|flags| (t.name.to_ascii_lowercase(), flags))
             })
             .collect();
+        // `thingflags=` (`sithThing_ParseArg`'s `typeflags` is the other word): a shot inherits it, and
+        // `sithWeapon_WeaponFireProjectile`'s player pre-sweep tests `thingflags & 0x200000` on the
+        // projectile before it emits `dodge`'s event — `+bryarbolt` ships `0x20000001`.
+        let template_thingflags: BTreeMap<String, u32> = level
+            .templates
+            .iter()
+            .filter_map(|t| {
+                level
+                    .template_param(&t.name, "thingflags")
+                    .and_then(|raw| {
+                        let raw = raw.trim();
+                        u32::from_str_radix(raw.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+                    })
+                    .map(|flags| (t.name.to_ascii_lowercase(), flags))
+            })
+            .collect();
+        // The same parse for the `typeflags=` word: `sithWeapon_WeaponFireProjectile`'s player pre-sweep
+        // tests `typeflags & 0x200000` on the projectile (`+bryarbolt` is `0x20440d`).
+        let template_typeflags: BTreeMap<String, u32> = level
+            .templates
+            .iter()
+            .filter_map(|t| {
+                level
+                    .template_param(&t.name, "typeflags")
+                    .and_then(|raw| {
+                        let raw = raw.trim();
+                        u32::from_str_radix(raw.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+                    })
+                    .map(|flags| (t.name.to_ascii_lowercase(), flags))
+            })
+            .collect();
         // `timer=` is the thing's life left, in seconds: `THINGPARAM_TIMER` stores
         // `lifeLeftSec * 1000` in `msecLifeLeft` and `sithThing_Update` destroys the thing when it
         // runs out. It is what makes an impact spark a spark — `+laserhit` ships `timer=0.5`.
@@ -1576,6 +1614,8 @@ impl Runtime {
             template_explode,
             template_fire_offset,
             template_timer,
+            template_thingflags,
+            template_typeflags,
             template_soundclass: level
                 .templates
                 .iter()
@@ -2918,6 +2958,124 @@ impl Runtime {
         }
     }
 
+    /// The nearest actor a shot from `from` along `dir` would sweep into within `range` — the port's
+    /// stand-in for the engine's `sithCollision_SearchForCollisions` in the player-fire pre-sweep. The
+    /// engine collides the shot by its own `movesize` against the actor's body cylinder; this uses the
+    /// actor's own `movesize` radius against the shot's line, with a wall check on the segment.
+    fn first_actor_on_path(&self, from: [f32; 3], dir: [f32; 3], range: f32) -> Option<usize> {
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        if len < 1e-4 {
+            return None;
+        }
+        let unit = [dir[0] / len, dir[1] / len, dir[2] / len];
+        let mut best: Option<(f32, usize)> = None;
+        for (index, thing) in self.things.iter().enumerate() {
+            if thing.destroyed || self.types.get(index).copied() != Some(2) {
+                continue;
+            }
+            let d = [
+                thing.pos[0] - from[0],
+                thing.pos[1] - from[1],
+                thing.pos[2] - from[2],
+            ];
+            let along = d[0] * unit[0] + d[1] * unit[1] + d[2] * unit[2];
+            if along <= 0.0 || along > range {
+                continue;
+            }
+            let miss = [
+                d[0] - unit[0] * along,
+                d[1] - unit[1] * along,
+                d[2] - unit[2] * along,
+            ];
+            let radius = self
+                .templates
+                .get(index)
+                .map(|name| name.to_ascii_lowercase())
+                .and_then(|name| self.template_hit.get(&name))
+                .map(|(r, _)| *r)
+                .unwrap_or(0.065);
+            if (miss[0] * miss[0] + miss[1] * miss[1] + miss[2] * miss[2]).sqrt() > radius {
+                continue;
+            }
+            let at = [
+                from[0] + unit[0] * along,
+                from[1] + unit[1] * along,
+                from[2] + unit[2] * along,
+            ];
+            if self
+                .solids
+                .as_ref()
+                .is_some_and(|solids| solids.segment_blocked(from, at))
+            {
+                continue;
+            }
+            if best.is_none_or(|(was, _)| along < was) {
+                best = Some((along, index));
+            }
+        }
+        best.map(|(_, index)| index)
+    }
+
+    /// `dodge`'s shot-passing path (`0x50b360`, event `0x1000`): the player's pre-swept shot found the
+    /// actor, and the actor **sees the shot** — the handler runs `sithAI_CheckSightThing(actor,
+    /// actor->pos, projectile, class sightdist, class fov)` and only then reacts. It rotates the
+    /// direction to the shot by a random **45-90 degrees** (`rand * 45 + 45`, negated on a second roll
+    /// against 0.5 — the constants are the EXE's `_DAT_005232b0` 45, `_DAT_005232b4` -45 and
+    /// `_DAT_005232a0` 0.5) and steps `arg0` units along the **negated** rotated direction: a sideways
+    /// dodge, not a retreat.
+    fn dodge_from_shot(&mut self, actor: usize, shot: [f32; 3]) {
+        if self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x200 == 0 {
+            return;
+        }
+        let Some(step) = self
+            .ai
+            .get(&actor)
+            .and_then(|class| class.instinct("Dodge"))
+            .and_then(|dodge| dodge.args.first().copied())
+        else {
+            return;
+        };
+        let step = step as f32;
+        if step == 0.0 {
+            return;
+        }
+        let Some((from, yaw)) = self.things.get(actor).map(|t| (t.pos, t.yaw)) else {
+            return;
+        };
+        if !self
+            .ai
+            .get(&actor)
+            .is_some_and(|class| class.sees(from, yaw, shot))
+        {
+            return;
+        }
+        if self
+            .solids
+            .as_ref()
+            .is_some_and(|solids| solids.segment_blocked(from, shot))
+        {
+            return;
+        }
+        let (dx, dy) = (shot[0] - from[0], shot[1] - from[1]);
+        let flat = (dx * dx + dy * dy).sqrt();
+        if flat < 1e-4 {
+            // The shot is on the actor: there is no direction to step around.
+            return;
+        }
+        let mut angle = crate::cog::pseudo_random() as f32 * 45.0 + 45.0;
+        if (crate::cog::pseudo_random() as f32) < 0.5 {
+            angle = -angle;
+        }
+        let (sin, cos) = angle.to_radians().sin_cos();
+        let dir = [dx / flat, dy / flat];
+        let rotated = [dir[0] * cos - dir[1] * sin, dir[0] * sin + dir[1] * cos];
+        let point = [from[0] - rotated[0] * step, from[1] - rotated[1] * step, from[2]];
+        self.ai_move.insert(actor, point);
+        if std::env::var_os("BK_AI_TRACE").is_some() {
+            eprintln!("ai: {actor} dodges the shot from {shot:?} sideways to {point:?}");
+        }
+    }
+
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
     /// The engine runs an instinct scheduler over the `.ai` file's weights; this build uses the
@@ -3854,51 +4012,65 @@ impl Runtime {
             );
         }
         let key = template.clone();
+        // The engine's muzzle is the template's `fireoffset=`, in level units and the shooter's frame
+        // (x lateral, y forward, z up). A template that names no offset falls back to a unit ahead of
+        // the eye.
+        let muzzle = {
+            let len = (forward[0] * forward[0] + forward[1] * forward[1]).sqrt().max(1e-4);
+            let ahead = [forward[0] / len, forward[1] / len];
+            // The offset belongs to the **shooter's** template (`reeyeesgun`, `greedo`):
+            // `fireoffset=` is where that gun leaves that body, not where the bolt is born. The
+            // bolt templates carry none, so reading theirs silently used the fallback.
+            let shooter_template = usize::try_from(shooter)
+                .ok()
+                .and_then(|i| self.templates.get(i))
+                .map(|t| t.to_ascii_lowercase());
+            let offset = shooter_template
+                .as_ref()
+                .and_then(|t| self.template_fire_offset.get(t))
+                .copied();
+            match offset {
+                // The real offset, even when it sits inside the shooter's body: `impacts` skips
+                // the owner, so nothing needs the old "push it out" distance.
+                //
+                // `sithWeapon_FireProjectile` does `rdMatrix_TransformVector34Acc(offset,
+                // &senderOrient)` — the offset is in the shooter's own frame, whose model +Y is
+                // forward and +X is **right**. With yaw 0 facing +X and up +Z, that right is
+                // (0, -1), which is `(ahead[1], -ahead[0])` for a general heading.
+                Some([x, y, z]) => [
+                    pos[0] + ahead[0] * y + ahead[1] * x,
+                    pos[1] + ahead[1] * y - ahead[0] * x,
+                    pos[2] + z,
+                ],
+                _ => [
+                    pos[0] + ahead[0] * 1.0,
+                    pos[1] + ahead[1] * 1.0,
+                    pos[2] + 0.1,
+                ],
+            }
+        };
+        // `sithWeapon_WeaponFireProjectile`'s **player-only pre-sweep**: when the shooter is the local
+        // player and the projectile's `typeflags` (the `SITH_WF_*` word, `thing + 0x130`, which
+        // `sithWeapon_Update` also reads) carry `0x200000` (`+bryarbolt` ships
+        // `typeflags=0x20440d`), the engine sweeps the shot's first five units and emits AI event
+        // `0x1000` with the projectile on the actor it found — `dodge`'s shot-passing path. It runs
+        // before the projectile exists, so this is a reaction to the shot, not to a hit.
+        if usize::try_from(shooter).ok() == Some(self.player_thing())
+            && self.template_typeflags.get(&template).copied().unwrap_or(0) & 0x200000 != 0
+            && let Some(actor) = self.first_actor_on_path(muzzle, forward, 5.0)
+        {
+            self.dodge_from_shot(actor, muzzle);
+        }
         self.things.push(ThingState {
-            // The engine's muzzle is the template's `fireoffset=`, in level units and the shooter's
-            // frame (x lateral, y forward, z up). A template that names no offset falls back to a unit
-            // ahead of the eye.
-            pos: {
-                let len = (forward[0] * forward[0] + forward[1] * forward[1]).sqrt().max(1e-4);
-                let ahead = [forward[0] / len, forward[1] / len];
-                // The offset belongs to the **shooter's** template (`reeyeesgun`, `greedo`):
-                // `fireoffset=` is where that gun leaves that body, not where the bolt is born. The
-                // bolt templates carry none, so reading theirs silently used the fallback.
-                let shooter_template = usize::try_from(shooter)
-                    .ok()
-                    .and_then(|i| self.templates.get(i))
-                    .map(|t| t.to_ascii_lowercase());
-                let offset = shooter_template
-                    .as_ref()
-                    .and_then(|t| self.template_fire_offset.get(t))
-                    .copied();
-                match offset {
-                    // The real offset, even when it sits inside the shooter's body: `impacts` skips
-                    // the owner, so nothing needs the old "push it out" distance.
-                    //
-                    // `sithWeapon_FireProjectile` does `rdMatrix_TransformVector34Acc(offset,
-                    // &senderOrient)` — the offset is in the shooter's own frame, whose model +Y is
-                    // forward and +X is **right**. With yaw 0 facing +X and up +Z, that right is
-                    // (0, -1), which is `(ahead[1], -ahead[0])` for a general heading.
-                    Some([x, y, z]) => [
-                        pos[0] + ahead[0] * y + ahead[1] * x,
-                        pos[1] + ahead[1] * y - ahead[0] * x,
-                        pos[2] + z,
-                    ],
-                    _ => [
-                        pos[0] + ahead[0] * 1.0,
-                        pos[1] + ahead[1] * 1.0,
-                        pos[2] + 0.1,
-                    ],
-                }
-            },
+            pos: muzzle,
             insert: [0.0; 3],
             owner: usize::try_from(shooter).ok(),
             yaw,
             pitch: 0.0,
             roll: 0.0,
             sector,
-            flags: 0,
+            // A shot carries its template's `thingflags=`; the pre-sweep above read the same word.
+            flags: self.template_thingflags.get(&key).copied().unwrap_or(0),
             health,
             frame: 0.0,
             target: None,
@@ -9140,6 +9312,90 @@ mod tests {
         assert_eq!(sample(0x1, Some(class)), None, "a walking actor dodged anyway");
         assert_eq!(sample(0, Some("alignment=-1.0, rank=0.5\n\nDodge 0.3, 0.0\n")), None, "a zero step dodged");
         assert_eq!(sample(0, None), None, "an actor with no instinct dodged");
+    }
+
+    /// A runtime for the shot-dodge checks: player thing 0 at the origin facing +X, one actor at
+    /// (2, 0, 0) whose class has `Dodge 0.3, 0.2` (weight 0.3, step 0.2). The template tables hold what
+    /// `fire` needs — the bolt's `vel=(0/7/0)` and its shipped `typeflags=0x20440d` /
+    /// `thingflags=0x20000001` — and the player's muzzle is its own eye (no `fireoffset=`), so the
+    /// sweep is a clean +X line.
+    fn shot_dodge_runtime(flags: u32, actor_yaw: f32, bolt_typeflags: u32, sightdist: f32) -> Runtime {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [2.0, 0.0, 0.0];
+        actor.yaw = actor_yaw;
+        rt.things = vec![base, actor];
+        rt.templates = vec!["walkplayer".into(), "grunt".into()];
+        rt.types = vec![10, 2];
+        rt.things[1].health = 100.0;
+        rt.template_health.insert("grunt".into(), 100.0);
+        rt.template_fire_offset.insert("walkplayer".into(), [0.0; 3]);
+        rt.template_vel.insert("+bryarbolt".into(), [0.0, 7.0, 0.0]);
+        rt.template_typeflags.insert("+bryarbolt".into(), bolt_typeflags);
+        rt.template_thingflags.insert("+bryarbolt".into(), 0x20000001);
+        rt.actor_flags.insert(1, flags);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(&format!(
+                // Weight 0.3, step 0.2: the handler reads `entry + 0x10`, the *second* number (the
+                // port's `args[0]`), which is why the two differ here.
+                "alignment=-1.0, rank=0.5, fov=90, sightdist={sightdist}, heardist=2.0\n\n\
+                 Dodge 0.3, 0.2\n"
+            )),
+        );
+        rt
+    }
+
+    /// `dodge`'s shot-passing path (`0x50b360`, event `0x1000`): the **player's** shot with
+    /// `thingflags & 0x200000` runs a five-unit pre-sweep, and the actor it would hit — if it can see
+    /// the shot (the class's `sightdist`/`fov`, clear line) — steps `arg0` units along the *negated*
+    /// direction-to-the-shot rotated by a random 45-90 degrees: a sideways dodge, not a retreat.
+    #[test]
+    fn a_player_shot_that_would_hit_an_actor_makes_it_dodge_sideways() {
+        let mut rt = shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0);
+        assert!(rt.fire(0, "+bryarbolt").is_some(), "the shot did not spawn");
+        let shot = rt.things.last().expect("a shot thing");
+        assert_eq!(shot.flags, 0x20000001, "the shot did not inherit its template's thingflags");
+        let actor = [2.0, 0.0, 0.0];
+        let Some(dest) = rt.ai_move.get(&1).copied() else {
+            panic!("the actor did not dodge a shot that would hit it");
+        };
+        let (dx, dy) = (dest[0] - actor[0], dest[1] - actor[1]);
+        let step = (dx * dx + dy * dy).sqrt();
+        assert!((step - 0.2).abs() < 1e-3, "the dodge stepped {step}, not the class's 0.2");
+        // The step is the negated rotated direction-to-the-shot, so it is 90-135 degrees off it.
+        let to_shot = [-1.0, 0.0];
+        let dot = (dx * to_shot[0] + dy * to_shot[1]) / step;
+        assert!(dot < 0.2, "the dodge went toward the shot instead of sideways (dot {dot:.2})");
+        assert!(dest[2] == 0.0, "the dodge left the actor's floor: {dest:?}");
+    }
+
+    /// The handler's gates: the AI's `0x200` bit (`AISetMode` wakes an actor with it), the class's
+    /// non-zero step, the actor being able to see the shot, and the engine's two pre-sweep conditions —
+    /// the **player** is the shooter and the projectile's `typeflags` carry `0x200000`.
+    #[test]
+    fn the_shot_dodge_needs_the_actor_awake_the_sight_line_and_the_player_shooter() {
+        // The player fires the shipped `+bryarbolt` (`typeflags=0x20440d`, `thingflags=0x20000001`).
+        let fires = |mut rt: Runtime| {
+            assert!(rt.fire(0, "+bryarbolt").is_some(), "the shot did not spawn");
+            rt.ai_move.contains_key(&1)
+        };
+        // Awake, facing the player, and the shipped bolt typeflags: this is the one that dodges.
+        assert!(fires(shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0)));
+        // Not awake: the handler's first gate.
+        assert!(!fires(shot_dodge_runtime(0x0, 180.0, 0x20440d, 5.0)));
+        // Facing away: `CheckSightThing`'s cone fails.
+        assert!(!fires(shot_dodge_runtime(0x200, 0.0, 0x20440d, 5.0)));
+        // Too far for the class's sight.
+        assert!(!fires(shot_dodge_runtime(0x200, 180.0, 0x20440d, 0.5)));
+        // A projectile without the engine's typeflag bit: no pre-sweep, so no event at all.
+        assert!(!fires(shot_dodge_runtime(0x200, 180.0, 0x440d, 5.0)));
+        // A non-player shooter: the pre-sweep is player-only in `WeaponFireProjectile`.
+        let mut rt = shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0);
+        rt.things[1].yaw = 180.0;
+        assert!(rt.fire(1, "+bryarbolt").is_some(), "the actor's own shot did not spawn");
+        assert!(!rt.ai_move.contains_key(&1), "an actor's own shot made somebody dodge");
     }
 
     /// `turretfire` (`0x50a0f0`): a turret's class (`turdefault.ai`) carries **no `PrimaryFire`**, so

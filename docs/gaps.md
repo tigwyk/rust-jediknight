@@ -5816,7 +5816,7 @@ handler:
 | saberfighting | 45 | `0x40fa40` | no |
 | retreat | 42 | `0x50bc60` | **yes** (round 221: arms the withdraw mode when hurt) |
 | withdraw | 30 | `0x50b150` | **yes** (round 221: backs away from what hurt it) |
-| dodge | 27 | `0x50b360` | **yes** (round 239: the damage path — the AI event 1 `sithActor_DamageActor` raises before subtracting health, the step away from the attacker, the walking-flag gate and the 1000 ms cooldown — while the projectile-passing (`0x1000`) sidestep and the event-2 path still need the AI event dispatch) |
+| dodge | 27 | `0x50b360` | **yes** (rounds 239–240: both mechanical paths are in — the **damage** path (AI event 1, raised before health is subtracted: step away from the attacker, walking-flag gate, 1000 ms cooldown) and the **shot-passing** path (the player's `typeflags & 0x200000` projectile pre-sweep of five units, the actor's own sight test of the shot, and the random 45–90° sideways step); only the event-2 path through the level's thing table is still unported) |
 | roam | 27 | `0x50b830` | **yes** (round 225: wanders around its home anchor) |
 | specialattack | 24 | `0x40fd00` | no |
 | hitandrun | 23 | `sithAICmd_HitAndRun` | **yes** (round 223: fires, then breaks off) |
@@ -6408,6 +6408,48 @@ cooldown it re-arms from the new position; `dodge_needs_the_instinct_and_a_clear
 a zero first number blocks, no class blocks. Measured before/after: with the call removed both fail ("the actor did not
 step 0.3 away from its attacker"). `--ai` and `--hit` pass; no window and no game run.
 
-Still open, on the roadmap ledger: the other two event paths — the **projectile-passing** (`0x1000`) sidestep (the engine
-emits it from the projectile's own collision search, `sithWeapon_WeaponFireProjectile`, and the handler sidesteps on a
-random lateral direction) and the event-2 path — both need event plumbing this build does not have yet.
+Still open, on the roadmap ledger: the event-2 path through the level's thing table (`DAT_008553a8`), which needs the AI
+event dispatch; the damage path's and the shot path's step both use the class's own `arg0`.
+
+## Update — round 240 (`dodge` lands its shot-passing path)
+
+The second mechanical path of `dodge` is the one players actually see: **shooting at an enemy makes it juke**. It is
+driven from the weapon side, not the AI side. `sithWeapon_WeaponFireProjectile` (`0x4d45a0`) has a player-only block
+that runs *before* the projectile is created:
+
+```
+if ((DAT_00832628 == 0) && (DAT_008ee670 != 0) && (param_1 == DAT_008319a4) &&
+    ((*(uint *)(projectile + 0x130) & 0x200000) != 0)) { ... collision_search(sector, thing, pos, dir, min(range,5.0), 0, 2) ... }
+```
+
+The field at `thing + 0x130` is the **`typeflags`** word — the same word `sithWeapon_Update` tests for
+`SITH_WF_DAMAGE_DECAY` — and `+bryarbolt` ships `typeflags=0x20440d`, whose bit `0x200000` is set. (The word is *not*
+`thingflags`: `+bryarbolt`'s `thingflags=0x20000001` clears that bit. Reading the wrong word first is what the
+measurement caught: the check silently never fired, and putting the parse on the correct word is what turned it on.)
+The sweep's first actor (within five units) gets AI event **`0x1000`** with the projectile.
+
+The handler's `0x1000` branch then gates on the AI's **`0x200`** bit and a non-zero class step, runs
+`sithAI_CheckSightThing(actor, actor->pos, projectile, class sightdist, class fov)` — the actor has to *see the shot* —
+and on success normalizes the direction to the shot (`rdVector_Normalize3Acc`), rotates it by a random
+**45–90 degrees** (`rand * 45 + 45`, negated on a second roll against 0.5 — the constants `_DAT_005232b0` 45,
+`_DAT_005232b4` -45, `_DAT_005232a0` 0.5 all read out of the EXE's `.rdata`), and steps `arg0` units along the
+**negated** rotated direction with `sithAI_SetMoveThing(ai, point, 2.5)`. The result is a sideways dodge, not a
+retreat.
+
+The port has the data half now: `Runtime::template_typeflags` (the full `typeflags=` word; `thingflags=` is a separate
+map and the shot starts with it), `first_actor_on_path` (the five-unit sweep against actors with a wall check) and
+`dodge_from_shot` (the gate, sight test, random rotation and destination), called from `fire_with_spread` after the
+muzzle is computed. `fire_with_spread`'s muzzle expression moved into a `let` so the sweep and the shot see the same
+position.
+
+Checks (180 tests, headless): `a_player_shot_that_would_hit_an_actor_makes_it_dodge_sideways` — the shot spawns with
+`thingflags=0x20000001`, the actor at 2 units steps the class's 0.2 sideways (the class line `Dodge 0.3, 0.2` proves the
+handler reads the *second* number), the step is 90–135° off the direction to the shot, and it stays on its floor;
+`the_shot_dodge_needs_the_actor_awake_the_sight_line_and_the_player_shooter` — the AI bit, the actor's facing, its
+`sightdist`, the projectile's `typeflags` bit, and a non-player shooter each block the dodge. Measured before/after:
+with the reaction removed both fail ("the actor did not dodge a shot that would hit it"). `--ai`, `--hit` and
+`--weapons` pass; no window and no game run.
+
+Still open, on the ledger: the event-2 path, and the handler's `SetMoveThing(..., 2.5)` walk speed (the port walks the
+destination at the actor's own speed); the five-unit sweep uses the actor's `movesize` against the shot's line rather
+than the engine's full collision search.
