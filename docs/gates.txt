@@ -1843,3 +1843,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Open: the port draws/latches 8t88 where retail's nearest vantage is an empty room — a visibility/culling difference
   to probe next. Fixture rows `goal_sight`/`goal_sight_away` committed with the notes.
 - Tests **149 passed** (no code change this round).
+
+## Update — round 205
+
+- The port screenshot at (−4.5,14.0,3.84) shows **8t88 on the landing pad**, so round 204's `done = 1` is legitimate
+  render-latch behaviour; retail's accepted warp lands in a neighbouring room (empty walkway), so there is no
+  divergence — a pose/warp limitation.
+- New windowed gate **`--sight-live`**: stands the body facing 8t88 and requires `01_goal0.cog`'s `done = 1`
+  (`--- sight-live check passed ---`).
+- `--gates`: **65 of 65, 0 failed, 0 skipped**. With `--use-live` the suite now covers both Phase 1 interaction paths
+  (linked-surface use → door chain; render sight latch → level objective). Tests **149 passed**.

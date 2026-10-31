@@ -5461,3 +5461,21 @@ That leaves a genuine open question for the next probe: at (−4.5,14.0,3.84) th
 while retail's nearest achievable vantage is an empty room. Either the port's visibility differs (a culling/flag
 divergence worth finding) or retail's camera at that height simply sees a different part of the level. The fixture rows
 (`goal_sight`, `goal_sight_away`) and the retail screenshot are kept for the comparison.
+
+**The sight latch is a gate now — `--sight-live`, 65 of 65 in the suite (round 205).** Round 204 left the question of
+whether the port's `done = 1` was legitimate; the committed port screenshot answers it: at (−4.5,14.0,3.84) the frame
+shows **8t88 standing on the landing pad, lit**, so the renderer really draws him and the latch fires. Retail's nearest
+accepted warp lands in a neighbouring room (its screenshot is an empty walkway), so there is no contradiction — a pose
+and warp limitation, not a visibility divergence.
+
+The new gate makes that permanent and level-shaped:
+
+```
+sight-live: standing at (-4.5,14.0) facing 8t88
+sight-live: `01_goal0.cog` saw 8t88 (done = 1) -- the render latch fired the goal
+--- sight-live check passed ---
+```
+
+`--gates` now runs **65 checks, 0 failed, 0 skipped** with `--sight-live` among them (windowed). Together with
+`--use-live` (round 203) the suite covers both Phase 1 interaction paths: using a linked surface opens the shipped door
+chain, and the renderer's sight latch runs the level's first objective script.
