@@ -4608,3 +4608,34 @@ gated behaviour. The finding that motivated them is unaffected and stands: level
 `SetCameraFocus(0, 44)` + `SetCurrentCamera(0)` and never clears it in the traced window, while retail's body walks
 4.20 units from 600 ms — so the input-suppression premise needs re-testing against the retail side, not against the
 port's own latch.
+
+**The engine confirms the script-camera lock — and level 20's startup script stalls before its teleport in the port
+(round 172).** `sithControl_Update` (`decomp/004d6c70_sithControl_Update.c`) is the lock, verbatim:
+
+```c
+if (((DAT_008319a4 != 0) && ((DAT_008319a4[0x4c] & 0x800000) == 0)) &&
+    ((*DAT_008319a4 & 0x202) == 0) && (((byte)DAT_008ee5a4 & 1) == 0)) {
+  if (DAT_0055d5d4 != 0) {                 // a script camera is current
+    DAT_00835830 = DAT_00835830 + param_2;
+    if ((30000 < DAT_00835830) && (DAT_0082f104 != &DAT_008ed700))
+      sithCamera_SetCurrentCamera(&DAT_008ed700);   // hand the view back after 30 s
+    goto LAB_004d6d0a;                    // <-- skips stdControl_ReadControls entirely
+  }
+  DAT_00835830 = 0;
+}
+```
+
+So the port's rule is right: while a script camera is current the engine reads **no controls at all**, and its only
+automatic hand-back is the 30 s timer. Level 20's `4.20` units of retail walking therefore means retail's camera was
+**already cleared** — the level's own intro did it.
+
+The port's intro does not get there. `BK_VERB_TRACE` over 4 s of game time shows the camera set once
+(`SetCameraFocus(0, 44)`, `SetCurrentCamera(0)`) and **never cleared**, with the script settling into a polling loop
+(`HasLOS`, `GetLevelTime`, `ChangeInv`, `GetInv`, … repeated). Running the same level **without `--warp`** shows the
+same thing, and the body never reaches retail's teleport target either: retail's own trace moves the body from
+(−0.00005, −1.90, −0.18) to (0, 0, −0.18) at startup, and the port stays at the first position for 200 frames.
+
+So this is a **cog/script execution** defect (Phase 3), not a walker one: level 20's opening script stalls before its
+teleport and camera clear. Both fixtures stay committed with that reason; the next probe is the intro cog itself —
+which verb it is waiting on (the trace's last actions are a `HasLOS`/level-time poll, so the stall is upstream of
+that loop).

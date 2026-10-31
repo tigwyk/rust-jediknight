@@ -1439,3 +1439,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - The level-20 finding stands: its opening sets `SetCameraFocus(0, 44)` + `SetCurrentCamera(0)` and never clears it
   in the traced window, while retail's body walks 4.20 units from 600 ms → the input-suppression premise must be
   re-tested against the retail side.
+
+## Update — round 172
+
+- **Decomp confirms the script-camera lock**: `sithControl_Update` (`004d6c70`) skips `stdControl_ReadControls`
+  entirely while `DAT_0055d5d4` (a script camera) is current, with a 30 s automatic hand-back — so the port's
+  suppression rule is right and level 20's retail walking means retail's camera was **already cleared** by the
+  level's intro.
+- The port's intro **stalls before its teleport and camera clear**: over 4 s of game time the camera is set once
+  (`SetCameraFocus(0,44)`, `SetCurrentCamera(0)`) and never cleared, and the script settles into a
+  `HasLOS`/`GetLevelTime` polling loop. Without `--warp` the result is the same, and the body never reaches retail's
+  teleport target ((−0.00005,−1.90,−0.18) → (0,0,−0.18)). That is a **cog/script execution** defect (Phase 3), not
+  a walker one.
