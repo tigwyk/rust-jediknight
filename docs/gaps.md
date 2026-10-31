@@ -4507,3 +4507,43 @@ never gets to run (it was reverted; no leg changed).
 The fix is therefore in the crossing, not the slide: a rejected *thin* far sector should **chain** to its own
 further adjoin (721 → 719 → 0) instead of being a wall, which is what the engine's per-adjoin walk does. The
 per-portal trace stays in (gated on `BK_SECTOR_TRACE`).
+
+**The deferred verification, re-run on the degraded machine (round 169).** The trace gate now runs 13 legs including
+level 17 and reads:
+
+```
+PASS walk_street45 100%  | PASS walk_street90 100% | PASS walk_cantina 102% (2 sectors) | PASS walk_door0 stop-pose
+PASS walk4_spawn 100%    | FAIL walk5_spawn 3.09/3.73 (83%, 3 sectors) | PASS walk6_spawn 98% (2) | PASS walk9_spawn 100% (0)
+PASS walk12_spawn 127% (0) | PASS walk13_spawn 98% (1) | PASS walk7_spawn stop-pose | PASS walk14_spawn stop-pose
+PASS walk17_spawn 117% (0 sectors)  <-- the level-17 fix holds in the gate
+trace gate: 13 leg(s), 1 failure(s)
+```
+
+The one failure is `walk5_spawn`, the documented load/frame-rate flake: at ~2 fps the comparison's assumptions
+break, and it reads 3.09/3 sectors here exactly as it did before the level-17 sector fix (3.09/3 with that fix
+reverted). Every other leg, including level 17's 117 % / 0 sectors, is green.
+
+The **parity gate cannot run on this machine**: each capture is 600 fixed-`dt` frames, and at ~2 fps that is 300 s,
+past `port-capture.ps1`'s default `-TimeoutSec 120`. The first attempt failed five of six rows with
+`timeout after 120s` — a measurement of the environment, not of the renderer. Re-running with `-TimeoutSec 900`
+(the parameter already exists) is the workaround; the scores are reported when it finishes.
+
+**Parity gate re-run clean after the level-17 fix: 6 thresholds, 0 failures (round 169).** Captured with
+`-TimeoutSec 900` (each capture is 600 fixed-`dt` frames, ~300 s at this machine's ~2 fps):
+
+```
+spawn          0.6602  (MAD 22.7)   world-band 0.7305
+spawn_pose     0.6603  (MAD 22.7)   world-band 0.7306
+spawn_yaw30    0.6385  (MAD 23.2)   world-band 0.7039
+route_cantina  0.7357  (MAD 25.1)   world-band 0.7970
+route_lower    0.7119  (MAD 18.0)   world-band 0.7501
+route_street   0.7327  (MAD 20.4)   world-band 0.8070
+UNGRADED: route_catwalk 0.4560, route_door 0.4239, switch_cantina 0.1788,
+          switch_cantina2 0.4301, level2_spawn 0.3705, level5_spawn 0.3009
+```
+
+The floors (0.55/28 for the three spawn rows, 0.65/30 for the three route rows) all hold, and the numbers are
+within a thousandth of round 158's — the sector-centre fix changed the walker's *walking* poses, not the settled
+capture poses, which is exactly what a draw gate should show. `--gates` still cannot complete on this machine: its
+window checks each burn a 1200-frame budget (600 s at 2 fps) and the sweep's per-check wall clock has no timeout;
+it is re-run when the frame rate recovers.

@@ -1396,3 +1396,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   no leg changed, because in the plate + doorway corner the slide along the plate is exactly opposite the doorway
   normal, so bounce 1's slide is 0 and the loop breaks before the advance can run. Tests **149 passed**.
 - Next: make the crossing **chain** through a thin far sector to its own further adjoin (721 → 719 → 0).
+
+## Update — round 169
+
+- **Trace gate: 13 legs, 1 failure** — only `walk5_spawn` (3.09/3.73, 83 %, 3 sectors), the documented
+  load/frame-rate flake that reads the same with recent fixes reverted. Level 17 passes at **117 %, 0 sectors**.
+- **Parity gate: 6 thresholds, 0 failures** after re-capturing with `-TimeoutSec 900` (600 fixed-`dt` frames ≈ 300 s
+  at ~2 fps): spawn 0.6602, spawn_pose 0.6603, spawn_yaw30 0.6385, route_cantina 0.7357, route_lower 0.7119,
+  route_street 0.7327 — within a thousandth of round 158, so the walker change did not disturb the draw gate.
+- Around this: a thin-far-sector passability experiment was measured and **reverted** (level 18 0.28 → 0.25 travel;
+  other measured legs unchanged).
+- `--gates` still cannot complete at ~2 fps (1200-frame window checks = 600 s each, no per-check timeout); deferred.
+  Tests **149 passed**.
