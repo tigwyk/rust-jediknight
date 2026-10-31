@@ -2486,3 +2486,23 @@ running app.--carry-check --start 01narshadda                        0   level 2
   `instinct crouch 3 class(es), 0 referenced`, and the `ai classes` line gained `, 197 referenced by shipped content`.
   Suite **186 passed**; `--audit` passes; docs **132/132**.
 - No window and no game run.
+## Update — round 244
+
+- **The `PAR 1.0` cloud's draw half**: the level loader now builds `World::template_particle` for every `particle=`
+  template (elements, `INSERT OFFSET`, element size, material cel count) and `draw_created` spawns one camera-facing
+  `Sprite3d` quad per element — `SIZE` across, that element's cel, at the element offset plus `INSERT OFFSET` rotated by
+  the thing's yaw (`particle_element_offset`). Level 1 reports
+  `1 particle cloud(s) for 1 template(s): +force_shield (100 elements, '00teleport.mat', 0.0020 each)`.
+- The cloud material is an **effect** material: `00teleport.mat` is 196 bytes, type 0, **5 cels, 0 bitmaps**, so
+  `tex::parse_mat` has no bitmap and the new `tex::material_header` supplies `(type, cels, bitmaps)` for the engine's cel
+  bound. `test.par` names `test.mat`, which the install lacks — reported as a retail data gap, not a failure.
+- New probe `--par <name>` prints the cloud (header, bounds, cel histogram) and the material's counts, and asserts what
+  `rdParticle_LoadEntry` asserts. All three shipped files pass:
+  `sphere.par` (100 elements, cel 0, 0.002 each), `sphere2.par` (100, 0.005), `test.par` (94, missing material).
+- Checks: `particle_tests::a_particle_element_is_offset_from_the_cloud_origin_and_rotated_with_the_body`;
+  `--par` on all three files; `--audit`, `--things`, `--ai` pass. Suite **187 passed**; docs **132/132**.
+- No window and no game run — the visual is the QA-window item the ledger row already carries.
+- Measured and still open: the shipped **`type=particle` templates (`+force_blind`, `+dustcloud`, `+sspks_saber` and
+  friends) are not `.par` clouds** — they carry `material=`, `rate=`, `elementsize=`, `range=` and the engine generates
+  their elements; nothing draws them yet. The `thingflags` cel-cycling/grow arms, `sithParticle_New`'s spawn path, the
+  cloud's pitch/roll + `angvel` spin, and the texture-less material's effect state remain on the ledger.

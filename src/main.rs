@@ -88,6 +88,10 @@ struct World {
     /// (`+laserhit` is `bryx.spr`). A sprite is a list of camera-facing rectangles, so every effect
     /// in the game is one of these.
     template_sprite: HashMap<String, Vec<spr::Face>>,
+    /// Lowercase template name -> its `particle=` cloud (`PAR 1.0` elements, `INSERT OFFSET`,
+    /// element size) plus the cloud material's cel count. `rdParticle_Draw` builds one camera-facing
+    /// quad per element, `SIZE` across, showing that element's cel.
+    template_particle: HashMap<String, (par::Par, u32)>,
     /// Lowercase `.mat` name -> its cel count from the `.mat` header. A sprite draws one cel of the
     /// strip at a time; the count is the engine's (`num_texinfo`), not the bitmap's aspect.
     sprite_cels: HashMap<String, u32>,
@@ -463,6 +467,8 @@ fn main() {
     // placement of its own (`jkPlayer_DrawPov`), so the authored coordinates are the framing: this
     // probe measures them instead of eyeballing a screenshot.
     let mut model_probe: Option<String> = None;
+    // `--par <name>`: one `PAR 1.0` particle cloud, as the loader reads it (`rdParticle_LoadEntry`).
+    let mut par_probe: Option<String> = None;
     // `--grep-assets <text>`: every archive entry whose text contains a literal, with the matching
     // line. The shipped files are small text formats (`.jkl`, `.ai`, `.cog`, `.snd`, `.key`), so a
     // "does anything actually use this key" question is one headless pass instead of 231 file reads.
@@ -682,6 +688,7 @@ fn main() {
             }
             "--asset" => asset = arg_value(&args, &mut i).cloned(),
             "--model" => model_probe = arg_value(&args, &mut i).cloned(),
+    "--par" => par_probe = arg_value(&args, &mut i).cloned(),
             "--grep-assets" => grep_assets = arg_value(&args, &mut i).cloned(),
             "--shot" => shot = arg_value(&args, &mut i).cloned(),
             "--fall" => fall_check = true,
@@ -6685,6 +6692,85 @@ fn main() {
                 }
             }
         }
+        return;
+    }
+
+    // `--par <name>`: a `PAR 1.0` particle cloud's own numbers — the format `rdParticle_LoadEntry`
+    // reads, checked against the material it names. The draw path trusts these (element cel, size,
+    // insert offset), so this is its data-side check.
+    if let Some(name) = par_probe {
+        let wanted = name.replace('/', "\\").to_ascii_lowercase();
+        let key = if gobs.read(&wanted).is_some() {
+            wanted.clone()
+        } else {
+            format!("misc\\par\\{wanted}")
+        };
+        let Some(raw) = gobs.read(&key) else {
+            eprintln!("par: `{name}` is not in the archives");
+            std::process::exit(1);
+        };
+        let cloud = par::parse(&String::from_utf8_lossy(&raw));
+        println!("par: {key} ({} bytes)", raw.len());
+        println!(
+            "  PAR 1.0: size {:.6}, material `{}`, lighting {}, radius {:.6}, insert {:?}, {} element(s)",
+            cloud.size,
+            cloud.material,
+            cloud.lighting,
+            cloud.radius,
+            cloud.insert,
+            cloud.vertices.len()
+        );
+        let (lo, hi) = cloud.bounds();
+        println!("  element bounds {lo:?} .. {hi:?}");
+        let mut cels: std::collections::BTreeMap<i32, usize> = Default::default();
+        for element in &cloud.vertices {
+            *cels.entry(element.cel).or_default() += 1;
+        }
+        println!(
+            "  cels: {}",
+            cels.iter()
+                .map(|(cel, n)| format!("{cel} x{n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        assert!(cloud.is_complete(), "`{key}` did not parse as a complete PAR cloud");
+        let data = gobs.read(&cloud.material);
+        match data {
+            // The editor's sample names `test.mat`, which the install does not ship: a retail data
+            // gap, not a parse failure, so it is reported and the cloud itself still passes.
+            None => println!(
+                "  material `{}`: not in the archives (retail data gap; the cloud parses)",
+                cloud.material
+            ),
+            Some(data) => {
+                let (kind, header_cels, bitmaps) = tex::material_header(&data).unwrap_or_else(|| {
+                    panic!("`{key}` names `{}`, which is not a MAT container", cloud.material)
+                });
+                println!(
+                    "  material `{}`: type {kind}, {header_cels} cel(s), {bitmaps} bitmap(s), {} bytes",
+                    cloud.material,
+                    data.len()
+                );
+                match tex::parse_mat(&data) {
+                    Some(bitmap) => println!(
+                        "    bitmap {}x{} ({}x{} strip), {} pixel(s)",
+                        bitmap.width,
+                        bitmap.height,
+                        bitmap.cels,
+                        bitmap.height / bitmap.cels.max(1),
+                        bitmap.indices.len()
+                    ),
+                    None => println!("    no bitmap: an effect material (drawn untextured)"),
+                }
+                // `rdParticle_LoadEntry` rejects a vertex whose cel is not a valid material index.
+                assert!(
+                    cloud.vertices.iter().all(|v| v.cel < header_cels as i32),
+                    "`{key}` has an element cel past `{}`'s {header_cels} cel(s)",
+                    cloud.material
+                );
+            }
+        }
+        println!("--- par check passed ---");
         return;
     }
 
@@ -14823,6 +14909,66 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         template_sprite.keys().take(4).cloned().collect::<Vec<_>>().join(", ")
     );
 
+    // A `particle=` template draws a `PAR 1.0` cloud instead of a model or sprite (`+force_shield`,
+    // `particle=sphere.par`, is the only shipped user). `rdParticle_LoadEntry` gives the cloud's
+    // elements and their material cels; the material comes through the same `.mat` path as a sprite's.
+    let mut template_particle: HashMap<String, (par::Par, u32)> = HashMap::new();
+    for template in &level.templates {
+        let Some(name) = level.template_param(&template.name, "particle") else { continue };
+        let key = name.trim().to_ascii_lowercase();
+        let Some(raw) = gobs.read(&format!("misc\\par\\{key}")).or_else(|| gobs.read(&key)) else {
+            continue;
+        };
+        let cloud = par::parse(&String::from_utf8_lossy(&raw));
+        if !cloud.is_complete() {
+            continue;
+        }
+        // The cloud's material is an **effect** material: `00teleport.mat` carries no bitmap at all
+        // (196 bytes, `num_textures == 0`), so there is nothing to texture the element quads with —
+        // `rdParticle_Draw` draws them through the material's own effect state. The cel count still
+        // comes from the header (`rdParticle_LoadEntry` bounds-checks against it).
+        let material = gobs.read(&cloud.material);
+        let cels = match material.as_deref() {
+            Some(data) => {
+                let header_cels = tex::material_header(data).map(|(_, cels, _)| cels).unwrap_or(1);
+                if let Some(bitmap) = tex::parse_mat(data) {
+                    if !model_images.contains_key(&cloud.material) {
+                        // Effect artwork: keyed on the palette's entry 0, like a sprite's.
+                        let keyed = keyed_rgba(&bitmap, &palette);
+                        model_images.insert(
+                            cloud.material.clone(),
+                            image_from_rgba(bitmap.width, bitmap.height, keyed),
+                        );
+                    }
+                    sprite_cels.insert(cloud.material.clone(), bitmap.cels);
+                    bitmap.cels
+                } else {
+                    sprite_cels.insert(cloud.material.clone(), header_cels);
+                    header_cels
+                }
+            }
+            None => 1,
+        };
+        template_particle.insert(template.name.to_ascii_lowercase(), (cloud, cels));
+    }
+    if !template_particle.is_empty() {
+        println!(
+            "{} particle cloud(s) for {} template(s): {}",
+            template_particle.len(),
+            template_particle.len(),
+            template_particle
+                .iter()
+                .map(|(name, (cloud, _))| format!(
+                    "{name} ({} elements, `{}`, {:.4} each)",
+                    cloud.vertices.len(),
+                    cloud.material,
+                    cloud.size
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
     // The instinct classes the level's actors name. `aiclass=` resolves through the template
     // chain, so an actor that inherits one still gets the class.
     let mut ai_classes: HashMap<String, String> = HashMap::new();
@@ -15080,6 +15226,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         model_images,
         template_sprite,
         sprite_cels,
+        template_particle,
         ambient,
         cogs,
         puppets,
@@ -20731,6 +20878,52 @@ fn draw_created(
                 println!("drawing sprite thing {index} ({template}, {} face(s))", faces.len());
                 continue;
             }
+            // A `particle=` template draws a `PAR 1.0` cloud (`+force_shield`, `particle=sphere.par`,
+            // is the only shipped user): `rdParticle_Draw` builds one camera-facing quad per element,
+            // `SIZE` units across, showing that element's material cel, at the element position plus
+            // the cloud's `INSERT OFFSET`, in the thing's own frame. `Sprite3d` billboards each quad;
+            // the thing's yaw rotates the offsets at spawn (the engine also carries pitch/roll and an
+            // `angvel` spin — ledger).
+            if let Some((cloud, cels)) = world.template_particle.get(&template_key) {
+                let mut spawned = Vec::new();
+                let last_cel = cels.saturating_sub(1);
+                for element in &cloud.vertices {
+                    let cel = element.cel.clamp(0, last_cel as i32) as u32;
+                    let key = (template_key.clone(), cloud.material.clone(), cel);
+                    let mesh = created
+                        .sprite_meshes
+                        .entry(key)
+                        .or_insert_with(|| {
+                            meshes.add(sprite_quad(cloud.size, cloud.size, *cels as f32, cel))
+                        })
+                        .clone();
+                    let mut material = StandardMaterial {
+                        unlit: true,
+                        double_sided: true,
+                        cull_mode: None,
+                        alpha_mode: AlphaMode::Blend,
+                        ..default()
+                    };
+                    material.base_color_texture =
+                        world.model_images.get(&cloud.material).map(|image| images.add(image.clone()));
+                    let offset = particle_element_offset(cloud, thing.yaw, element);
+                    let entity = commands
+                        .spawn((
+                            Mesh3d(mesh),
+                            MeshMaterial3d(materials.add(material)),
+                            Transform::from_translation(Vec3::from(thing.pos) + Vec3::from(offset)),
+                            Sprite3d,
+                        ))
+                        .id();
+                    spawned.push(entity);
+                }
+                created.drawn.insert(index, spawned);
+                println!(
+                    "drawing particle cloud thing {index} ({template}, {} element(s))",
+                    cloud.vertices.len()
+                );
+                continue;
+            }
             let Some(model_name) = world.template_model.get(&template_key) else {
                 // A template with no model and no sprite (a hint) has nothing to draw yet.
                 created.drawn.insert(index, Vec::new());
@@ -21314,6 +21507,20 @@ fn play_requested_sounds(
     if played > 0 {
         println!("sound: {played} request(s) played with attenuation");
     }
+}
+
+/// One particle element's offset from its cloud's origin, in world axes: the cloud's `INSERT OFFSET`
+/// plus the element position, rotated about Z by the owning thing's yaw (the engine draws the cloud in
+/// the thing's own matrix; the port's world is yaw-up, so a yaw rotation is the part its draw path
+/// carries).
+///
+/// `rdParticle_Draw` (`0x46c750`) places each quad at `element + insert` inside that matrix and makes
+/// it camera-facing — the quad orientation, not this offset, is the billboard.
+fn particle_element_offset(cloud: &par::Par, yaw: f32, element: &par::Vertex) -> [f32; 3] {
+    let x = element.pos[0] + cloud.insert[0];
+    let y = element.pos[1] + cloud.insert[1];
+    let (sin, cos) = (-yaw.to_radians()).sin_cos();
+    [x * cos - y * sin, x * sin + y * cos, element.pos[2] + cloud.insert[2]]
 }
 
 /// One sprite rectangle, with the UVs of a single animation cel.
@@ -24452,6 +24659,27 @@ mod draw_row_tests {
         assert_eq!(draw_row(1, 1), None);
         // Modes beyond armed/unarmed are not the port's (crouch and the rest are a separate row).
         assert_eq!(draw_row(1, 2), None);
+    }
+}
+
+#[cfg(test)]
+mod particle_tests {
+    use super::{par, particle_element_offset};
+
+    /// The element offset the cloud's draw path uses: the cloud's `INSERT OFFSET` plus the element
+    /// position, rotated about Z by the owning body's yaw — and the z component untouched by the turn.
+    #[test]
+    fn a_particle_element_is_offset_from_the_cloud_origin_and_rotated_with_the_body() {
+        let cloud = par::parse(
+            "PAR 1.0\nSIZE .01\nMATERIAL 00teleport.mat\nRADIUS 1.0\n\
+             INSERT OFFSET 0.0 0.0 0.108216\nVERTICES 1\n 0: 0.5 0.0 0.0 0\n",
+        );
+        let element = &cloud.vertices[0];
+        assert_eq!(particle_element_offset(&cloud, 0.0, element), [0.5, 0.0, 0.108216]);
+        let [x, y, z] = particle_element_offset(&cloud, 90.0, element);
+        assert!(x.abs() < 1e-5, "x {x}");
+        assert!((y + 0.5).abs() < 1e-5, "y {y}");
+        assert!((z - 0.108216).abs() < 1e-5, "z {z}");
     }
 }
 

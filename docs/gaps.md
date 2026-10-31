@@ -6549,3 +6549,36 @@ Checks (186 tests): `audit_tests::ai_class_references_finds_templates_and_script
 before/after: the audit's instinct lines went from `instinct crouch 3 class(es)` to
 `instinct crouch 3 class(es), 0 referenced`, and the `ai classes` line gained `, 197 referenced by shipped content` —
 the `crouch`/`randomturn` rows above say dead content now. `--audit` passes; docs 132/132. No window and no game run.
+## Update — round 244 (the particle cloud's draw half: loader, draw arm, probe)
+
+Round 238 read the `PAR 1.0` data. This round wires it through the level loader and the draw path, and adds a
+data-side probe:
+
+- **Loader**: every template naming `particle=<file>.par` gets its cloud loaded into `World::template_particle`
+  (elements, `INSERT OFFSET`, element size) plus the material's cel count. Level 1 prints
+  `1 particle cloud(s) for 1 template(s): +force_shield (100 elements, '00teleport.mat', 0.0020 each)`.
+- **The cloud's material is an effect material**: `00teleport.mat` is 196 bytes, `type 0`, **5 cels, 0 bitmaps** —
+  texture-less by design (the same class as `00red.mat`/`00gsmoke.mat`), which is why `tex::parse_mat` reports no
+  bitmap. `tex::material_header` reads `(type, cels, bitmaps)` from the header either way, so the loader and probe can
+  use the engine's cel count (`rdParticle_LoadEntry` bounds-checks each element cel against it). The editor's
+  `test.par` names `test.mat`, which the install does not ship: a retail data gap the probe now reports instead of
+  failing on.
+- **Draw arm** (`draw_created`): a `particle=` template now spawns one camera-facing quad per element —
+  `SIZE` across, that element's material cel, at the element offset plus `INSERT OFFSET`, rotated by the thing's yaw
+  (`particle_element_offset`) — and billboards them with the same `Sprite3d` path sprites use. The engine also carries
+  the body's pitch/roll and its `angvel` spin (the shield ships `angvel=(60/60/60)`); the port's cloud is built from
+  yaw at spawn (ledger).
+- **Probe** `--par <name>`: prints the cloud's header, element bounds, cel histogram, and the material's cell/bitmap
+  counts, and asserts what `rdParticle_LoadEntry` asserts (the cloud is complete, every element cel is inside the
+  material's cel count). All three shipped files pass: `sphere.par` (100 elements, cel 0 only, 0.002 each),
+  `sphere2.par` (100, 0.005 each), `test.par` (94, `test.mat` missing from the install).
+
+Checks (187 tests): `particle_tests::a_particle_element_is_offset_from_the_cloud_origin_and_rotated_with_the_body`
+pins the element offset and its yaw rotation; `--par` passes on all three shipped files; `--audit`, `--things` and
+`--ai` pass. No window and no game run — the visual is the QA-window item this ledger row already carries.
+
+What is still missing in this area, and now measured: the shipped **`type=particle` templates are not `.par` clouds at
+all** — `+force_blind`/`+dustcloud`/`+sspks_saber` and friends carry `material=`, `rate=`, `elementsize=`, `range=`,
+`pitchrange=` and the engine's `sithParticle_Initialize` generates their elements; nothing draws those yet. The
+`THINGFLAGS` cel-cycling (`0x20`) and grow (`0x1`) arms, `sithParticle_New`'s spawn path, and the texture-less effect
+material's own effect state (blend/color) are also still open — all on the roadmap ledger.
