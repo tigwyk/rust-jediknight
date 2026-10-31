@@ -2207,3 +2207,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   failures**.
 - AI instinct coverage stays 14 of 24 used instincts (`listen` now *partial* rather than *no*); `talk` remains the
   audio-layer gap. No game run and no port window.
+
+## Update — round 230
+
+- **The sector awareness record is now the engine's 3-slot sound ring** (what `listen`, `0x50a6f0`, actually scans):
+  `Runtime::sector_awareness` is `Vec<(strength, position, time)>` per sector/side — newest first, at most three, each
+  with its own position and fade time. `transmit_awareness` still propagates through the adjoins (only a stronger event
+  carries the propagation); `heard_at` scans newest-first and returns the first event inside the actor's `heardist`;
+  `awareness_at` keeps its old meaning (freshest) for the tree's own awareness gate.
+- Before this the port kept one strongest record per sector/side, so a fresh shot across a room could hide a nearer sound
+  in it. Still unported from the handler and on the table row: the facing test on the sound and the probability roll that
+  takes the shooter as a target.
+- Headless check `a_short_ranged_guard_hears_the_nearer_of_two_sounds_in_the_ring` (fresh shot 5 units +x out of earshot,
+  older 1.5 units +y inside it → must walk +y). Measured before/after: reading the freshest record → walks toward +x
+  (`[1.33, 0.0, 0.0]`, wrong sound); scanning the ring → near one. Suite **164 tests, 0 failures**.
+- `listen` stays *partial*; `talk` (198, audio) remains the largest unported name. No game run and no port window.

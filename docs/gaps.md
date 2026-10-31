@@ -5800,7 +5800,7 @@ handler:
 | instinct | classes using it | handler | port behaviour |
 | --- | --- | --- | --- |
 | lookfortarget | 215 | `0x50aa80` | **yes** (view-cone scan, round 211) |
-| listen | 200 | `0x50a6f0` | partial: the awareness reader turns and walks an actor toward a shot, now gated by the class's `heardist`; the engine's per-sector sound ring, ±60° facing test and probability-based target acquisition are not ported |
+| listen | 200 | `0x50a6f0` | partial: the reader scans the sector's **3-slot sound ring** newest-first inside the class's `heardist` and walks the actor toward it; the engine's facing test on the sound and its probability-based target acquisition are not ported |
 | talk | 198 | `0x50be20` | no |
 | primaryfire | 166 | `0x509e40` | **yes** (fire cadence) |
 | follow | 159 | `0x5093f0` | **yes** (chase + standoff) |
@@ -5830,6 +5830,23 @@ the counts are how many classes depend on each: `listen` (200) and `talk` (198) 
 gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
 it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair, `circlestrafe`,
 `hitandrun`, `randomturn`, `roam`, `turretfire` and `flee` (below). `sabermove` needs no work at all: nothing names it.
+
+**The sector's awareness record is a 3-slot sound ring now (round 230), which is what `listen` scans.** The handler
+(`0x50a6f0`) does not read one "strongest event": it scans the sector's ring of recent sounds **newest first**, up to
+three, and takes the first one that passes its gates. The port kept a single strongest record per sector and side, so a
+fresh shot across a room could hide a nearer sound in the same room. `Runtime::sector_awareness` is now
+`Vec<(strength, position, time)>` per sector/side — newest first, at most three, each with its own position and fade time
+— populated by `transmit_awareness` (which still propagates through the adjoins and still lets only a stronger event
+carry the propagation) and read by `heard_at`, which scans newest-first and returns the first event inside the actor's
+`heardist`. `awareness_at` keeps its old meaning for the tree's own awareness gate: the freshest event in the ring.
+
+What remains unported from the handler is unchanged and still on the table row: the engine's facing test on the sound
+and the probability roll that takes the shooter as a target once it reacts (the port always just walks toward the sound).
+
+The headless check is `a_short_ranged_guard_hears_the_nearer_of_two_sounds_in_the_ring`: a guard with `heardist 2.0` and
+a ring holding a fresh shot 5 units along +x and an older one 1.5 units along +y must walk toward +y. Measured
+before/after: reading the freshest record instead of scanning the ring makes the guard walk toward +x (`[1.33, 0.0,
+0.0]`, the wrong sound); scanning the ring it walks toward the near one. Suite: **164 tests, 0 failures**.
 
 **The awareness reader now honours `heardist` (round 229, the `listen` half of 200 classes).** `listen`'s handler
 (`0x50a6f0`) is the engine's per-sector sound reader, and the port already had two thirds of it: a firing event is

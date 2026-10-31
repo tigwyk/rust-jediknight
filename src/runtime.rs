@@ -1118,10 +1118,11 @@ pub struct Runtime {
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
     /// alert lands on buyers within a radius and expires (see `AWARE_RADIUS`/`AWARE_SECONDS`).
-    /// `sithAIAwareness`'s record: per sector and side, the strongest event still fresh —
-    /// `(strength, position, time)`. The engine keeps a 25-dword block per sector (`ProcessEvent`
-    /// indexes it by side); this keeps the two values the AI reads plus the fade time.
-    pub sector_awareness: BTreeMap<(i32, i32), (f32, [f32; 3], f32)>,
+    /// `sithAIAwareness`'s records: per sector and side, the **ring of recent sounds** — newest
+    /// first, at most three entries (the engine's listener scans three), each `(strength, position,
+    /// time)`. `ProcessEvent` keeps a 25-dword block per sector indexed by side; these are the fields
+    /// the AI actually reads plus the fade time.
+    pub sector_awareness: BTreeMap<(i32, i32), Vec<(f32, [f32; 3], f32)>>,
     /// The adjoin graph the record propagates through: `(neighbour sector, cost)` per sector. The
     /// cost is the adjoin's own `dist` float — the only per-portal number a level carries, and the
     /// field `004f2c30_sithAIAwareness_ProcessEvent.c` reads through the adjoin link.
@@ -2674,8 +2675,8 @@ impl Runtime {
 
     /// `sithAIAwareness_ProcessEvent` (`0x004f2c30`): record the event in its own sector for its
     /// side, then walk the adjoin graph, subtracting each adjoin's attenuation and stopping under the
-    /// engine's floor. The engine stores the strongest record per sector and side (with the event's
-    /// position and the adjoin entry point); the position is what the AI uses, so that is kept.
+    /// engine's floor. Each sector keeps a **ring of the three most recent events** with their own
+    /// positions — that is what `sithAICmd_Listen` scans (newest first), so three are kept here too.
     pub fn transmit_awareness(&mut self, sector: i32, side: i32, pos: [f32; 3], strength: f32) {
         let mut stack = vec![(sector, strength)];
         let mut visited = 0usize;
@@ -2687,10 +2688,14 @@ impl Runtime {
             if at < 0 || at as usize >= self.sector_adjoins.len() {
                 continue;
             }
-            if self.sector_awareness.get(&(at, side)).is_some_and(|r| r.0 >= strength) {
+            let ring = self.sector_awareness.entry((at, side)).or_default();
+            // A stronger event already in the ring carries the propagation; a new one only adds its
+            // own position for the listener to scan.
+            if ring.iter().any(|r| r.0 >= strength) {
                 continue;
             }
-            self.sector_awareness.insert((at, side), (strength, pos, self.time));
+            ring.insert(0, (strength, pos, self.time));
+            ring.truncate(3);
             for (next, cost) in &self.sector_adjoins[at as usize] {
                 let next_strength = strength - cost;
                 if next_strength > AI_AWARE_FLOOR {
@@ -2699,16 +2704,35 @@ impl Runtime {
             }
         }
         // Fade the records that are past the window, the way the engine's own timer does.
-        self.sector_awareness
-            .retain(|_, (_, _, at)| self.time - *at < AI_AWARE_SECONDS);
+        self.sector_awareness.retain(|_, ring| {
+            ring.retain(|(_, _, at)| self.time - *at < AI_AWARE_SECONDS);
+            !ring.is_empty()
+        });
     }
 
-    /// What an actor standing in `sector` on `side` would read as the last known enemy position.
+    /// What an actor standing in `sector` on `side` would read as the last known enemy position: the
+    /// freshest event in the sector's ring that is still inside the window.
     pub fn awareness_at(&self, sector: i32, side: i32) -> Option<[f32; 3]> {
         self.sector_awareness
-            .get(&(sector, side))
+            .get(&(sector, side))?
+            .iter()
+            .find(|(_, _, at)| self.time - *at < AI_AWARE_SECONDS)
+            .map(|(_, pos, _)| *pos)
+    }
+
+    /// The freshest event in `sector`'s ring that a body at `from` can actually **hear**: the engine's
+    /// `listen` scans the ring newest first and takes the first event inside the class's `heardist`,
+    /// which is why a shot across a room does not wake a short-ranged guard while a nearer one does.
+    pub fn heard_at(&self, sector: i32, side: i32, from: [f32; 3], heardist: f32) -> Option<[f32; 3]> {
+        self.sector_awareness
+            .get(&(sector, side))?
+            .iter()
             .filter(|(_, _, at)| self.time - *at < AI_AWARE_SECONDS)
             .map(|(_, pos, _)| *pos)
+            .find(|pos| {
+                let (dx, dy, dz) = (pos[0] - from[0], pos[1] - from[1], pos[2] - from[2]);
+                (dx * dx + dy * dy + dz * dz).sqrt() <= heardist
+            })
     }
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
@@ -2906,28 +2930,21 @@ impl Runtime {
             let remembered = self.ai_last_seen.get(&index).copied().or_else(|| {
                 let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
                 let side = ai.as_ref().map(|ai| ai.alignment as i32).unwrap_or(0);
-                let aware = self.awareness_at(sector, side);
-                // `listen` (`0x50a6f0`) checks the sound against the class's **heardist** before it
-                // reacts — a shot five units away does not wake a guard whose hearing reaches two —
-                // and only then turns, walks and (on its own roll) takes the shooter as a target. The
-                // port has the same record and the same walk; the gate was missing, so every actor in
-                // a room reacted to every shot in it however deaf its class was.
-                let Some(pos) = aware else { return None };
+                // `listen` (`0x50a6f0`) scans the sector's ring **newest first** and takes the first
+                // event inside the class's **heardist** — a shot five units away does not wake a guard
+                // whose hearing reaches two, while an older but nearer sound in the same ring does. The
+                // port reads the same ring through `heard_at`, so both halves hold; a class-less actor
+                // hears everything, which is the port's long-standing behaviour for scripted puppets.
                 let here = self.things.get(index)?.pos;
-                let heard = ai.as_ref().is_none_or(|class| {
-                    let (dx, dy, dz) = (pos[0] - here[0], pos[1] - here[1], pos[2] - here[2]);
-                    (dx * dx + dy * dy + dz * dz).sqrt() <= class.heardist
-                });
-                if !heard {
-                    if std::env::var_os("BK_AI_TRACE").is_some() {
-                        eprintln!("ai: {index} ignores a sound beyond its class's heardist");
-                    }
-                    return None;
+                let heardist = ai
+                    .as_ref()
+                    .map(|class| class.heardist)
+                    .unwrap_or(f32::INFINITY);
+                let aware = self.heard_at(sector, side, here, heardist);
+                if aware.is_some() && std::env::var_os("BK_AI_TRACE").is_some() {
+                    eprintln!("ai: {index} hears an event in sector {sector} side {side}");
                 }
-                if std::env::var_os("BK_AI_TRACE").is_some() {
-                    eprintln!("ai: {index} reads the awareness record of sector {sector} side {side}");
-                }
-                Some(pos)
+                aware
             }).or_else(|| {
                 // `returnhome` (handler `0x50bd70`): an awake actor with nothing else to do walks back
                 // to its home anchor (`SetMoveThing` to `ai + 0x93`, then `SetLookFrame` at it). The
@@ -8383,6 +8400,44 @@ mod tests {
         );
     }
 
+    /// The sector's sound **ring** matters when two shots land in one room: `listen` scans it newest
+    /// first and takes the first event inside `heardist`, so a nearer but older sound still wakes a
+    /// short-ranged guard while a fresh far one does not.
+    #[test]
+    fn a_short_ranged_guard_hears_the_nearer_of_two_sounds_in_the_ring() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = base.clone();
+        player.pos = [-9.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen\n",
+            ),
+        );
+        // Newest first: a fresh shot 5 units along +x (out of earshot), an older one 1.5 units along
+        // +y (inside it). The guard must walk toward the one it can hear.
+        rt.sector_awareness.insert(
+            (7, -1),
+            vec![(4.0, [5.0, 0.0, 0.0], 0.0), (3.0, [0.0, 1.5, 0.0], 0.0)],
+        );
+        for _ in 0..40 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        let p = rt.things[1].pos;
+        assert!(
+            p[1] > 0.2 && p[0].abs() < 0.1,
+            "the guard walked toward the wrong sound: {p:?}"
+        );
+    }
+
     /// `listen` (`0x50a6f0`) reacts to a sound only within the class's **heardist**: the port had the
     /// awareness record and the walk, but not the gate, so every actor in a room reacted to every shot
     /// in it however deaf its class was.
@@ -8406,7 +8461,7 @@ mod tests {
         );
         // A shot five units away: outside the two-unit hearing, so the guard must not react.
         rt.sector_awareness
-            .insert((7, -1), (4.0, [5.0, 0.0, 0.0], 0.0));
+            .insert((7, -1), vec![(4.0, [5.0, 0.0, 0.0], 0.0)]);
         for _ in 0..30 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
@@ -8418,7 +8473,7 @@ mod tests {
         );
         // A shot inside it: the same actor walks toward it.
         rt.sector_awareness
-            .insert((7, -1), (4.0, [1.5, 0.0, 0.0], rt.time));
+            .insert((7, -1), vec![(4.0, [1.5, 0.0, 0.0], rt.time)]);
         for _ in 0..30 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
