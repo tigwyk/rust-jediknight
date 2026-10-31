@@ -1589,3 +1589,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - `walk5_spawn` remains the only failing gated leg, and its residual is now a **path/floor-band** difference: retail
   descends ~0.2 while bending through the room (yaw 135°, motion ≈ (−0.91,−0.42)); the port holds z ≈ 0.17 and walks a
   straight 135° line. Gate: **14 of 15 legs**. Tests **149 passed**.
+
+## Update — round 184
+
+- `walk5_spawn` residual diagnosed: the port **does** visit sectors 33/34 (trace sector column `35, 34, 33`) and its
+  travel matches (99 %), but it walks a **plateau at z 0.1703** for the whole window. The walker's landing is at
+  0.1703 = a surface at **0.0502** + `rest` (0.1201), while `floor_below(sector, pos)` is **0.1001** — it stands on a
+  face the faces probe found, not the sector's floor plane, and holds that height. Retail's body ends ~0.22 lower
+  (trace z is *eye* space: body = column − 0.037), on a floor ≈ −0.17. A short manual run showed three landings
+  descending (0.150 → 0.136 → 0.121), so slope-following works sometimes; the walk's steady state is a plateau.
+- Next probe: name that 0.0502 face with `--faces-at` and decide whether the step path is holding the body on the
+  ramp's high tread. No code change this round; tests **149 passed**.

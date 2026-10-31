@@ -4948,3 +4948,25 @@ present** and made `walk5_spawn` *worse* (3.43), so it was reverted; the gate al
 bends (yaw stays 135° but the motion is ≈ (−0.91,−0.42), so the room's walls are constraining it), while the port
 holds z ≈ 0.17 and walks the straight 135° line — the port is in a different floor band in the same room, which is
 what the five sector mismatches measure.
+
+**`walk5_spawn`'s residual is a plateau 0.22 above retail's floor, on a surface that is not the sector's floor (round
+184).** With round 183's fallback gate in place the port's travel matches retail (3.70 / 3.73 = 99 %), and the port
+*does* visit sectors 33 and 34 (the trace's sector column is `35, 34, 33`), so the five mismatches are a **floor-band
+and path** difference, not a movement failure:
+
+```
+port trace  tick 60..240: z stays 0.1703 (vy oscillates 0 / -0.16 / -0.32), x 10.58 -> 7.96, y 14.91 -> 12.29
+retail      samples:      z (eye) 0.22 -> -0.01 .. 0.07 -> 0, x 10.58 -> 7.19, y 14.91 -> 13.36, sectors 35,33,34,33,33,24
+```
+
+The walker's own numbers explain the plateau: its landing is at **0.1703** = a surface at **0.0502** plus `rest`
+(0.1201), while `floor_below(sector, pos)` is **0.1001** — the body rests on a face the faces probe found (a slope's
+tread) rather than the sector's own floor plane, and it holds that height for the whole window. Retail's body ends
+~0.22 lower (its trace z is **eye** space: body = column − 0.037), on a floor around −0.17. A short manual run on the
+same path showed three landings descending (0.150 → 0.136 → 0.121), so slope-following works *sometimes*; the walk's
+steady state is a plateau.
+
+The next probe is that `0.0502` surface: which face it is, whether the step path is holding the body on the ramp's
+high tread, and whether the walker should follow the slope down (the sector floor 0.1001 is not what it stands on, and
+retail's floor is 0.22 below both). The `--faces-at` dump already lists every face within 2 units of a pose, so the
+ramp can be named directly.
