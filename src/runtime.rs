@@ -1154,6 +1154,9 @@ pub struct Runtime {
     /// When each not-yet-alerted actor may check for danger again (`sensedanger` retries once a second
     /// while the player is out of sight).
     pub ai_sense: BTreeMap<usize, f32>,
+    /// When each actor may dodge again. `dodge`'s damage path (`0x50b360` event 1) sets its own
+    /// cooldown to `now + 1000` ms (`ai + 0xa3`), and the shot-passing path has none of its own.
+    pub ai_dodge: BTreeMap<usize, f32>,
     /// When each actor may try the `opendoors` action next. Its handler (`0x50abc0`) calls
     /// `sithPlayerActions_Activate` — the **player's** use action — on the actor's own body, and that
     /// function throttles itself to 250 ms. An actor with the instinct opens the door it is walking
@@ -1782,6 +1785,7 @@ impl Runtime {
             ai_listen: BTreeMap::new(),
             ai_talk: BTreeMap::new(),
             ai_sense: BTreeMap::new(),
+            ai_dodge: BTreeMap::new(),
             ai_opendoors: BTreeMap::new(),
             ai_home: BTreeMap::new(),
             ai_flee_until: BTreeMap::new(),
@@ -2873,6 +2877,47 @@ impl Runtime {
             pitch: 1.0,
         });
     }
+    /// `dodge`'s damage path (`0x50b360`, event 1): an actor whose class carries the instinct and is
+    /// not already walking (AI flag bit `0x1` clear) steps a little **away** from whoever hit it.
+    /// The handler computes `point = self - arg0 * normalize(attacker - self)` and hands it to
+    /// `sithAI_SetMoveThing(ai, point, 2.5)` — the same `ai + 0x93` destination the port's `ai_move`
+    /// is — then sets its own 1000 ms cooldown. `arg0` is the first number after the class line's
+    /// weight (`dodge 0.1, 0.1` for a grunt, `0.3, 0.1` for a boss).
+    fn dodge_from_damage(&mut self, actor: usize, attacker: usize) {
+        if self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x1 != 0 {
+            return;
+        }
+        let Some(step) = self
+            .ai
+            .get(&actor)
+            .and_then(|class| class.instinct("Dodge"))
+            .and_then(|dodge| dodge.args.first().copied())
+        else {
+            return;
+        };
+        let step = step as f32;
+        if step == 0.0 || self.time < self.ai_dodge.get(&actor).copied().unwrap_or(0.0) {
+            return;
+        }
+        let (Some(from), Some(to)) = (
+            self.things.get(actor).map(|t| t.pos),
+            self.things.get(attacker).map(|t| t.pos),
+        ) else {
+            return;
+        };
+        let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+        let flat = (dx * dx + dy * dy).sqrt();
+        if flat < 1e-4 {
+            return;
+        }
+        let point = [from[0] - dx / flat * step, from[1] - dy / flat * step, from[2]];
+        self.ai_move.insert(actor, point);
+        self.ai_dodge.insert(actor, self.time + 1.0);
+        if std::env::var_os("BK_AI_TRACE").is_some() {
+            eprintln!("ai: {actor} dodges {step:.2} away from thing {attacker} to {point:?}");
+        }
+    }
+
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
     /// The engine runs an instinct scheduler over the `.ai` file's weights; this build uses the
@@ -4844,6 +4889,16 @@ impl Runtime {
         let Ok(index) = usize::try_from(target) else { return 0.0 };
         if self.invulnerable(index, kind) {
             return self.things.get(index).map(|t| t.health).unwrap_or(0.0);
+        }
+        // `sithActor_DamageActor` (`0x4ecc90`) emits AI **event 1** with the attacker *before* it
+        // subtracts the health (`if (param_2 != param_1 && thing->type == 2)
+        // sithAI_EmitEvent(thing->ai, 1, param_2)`), and `dodge`'s handler uses it to step away.
+        if source > 0
+            && self.types.get(index).copied() == Some(2)
+            && let Ok(attacker) = usize::try_from(source)
+            && attacker != index
+        {
+            self.dodge_from_damage(index, attacker);
         }
         // The player's palette flashes red on every hit that lands, whichever path applied it.
         if index == self.player_thing() {
@@ -9001,6 +9056,90 @@ mod tests {
             rt.things[2].pos[2], 0.0,
             "a body with physflags 0x400000 was lifted anyway"
         );
+    }
+
+    /// `dodge`'s damage path (`0x50b360`, event 1): `sithActor_DamageActor` emits AI event 1 with the
+    /// attacker, and the handler steps the actor `arg0` units **away** from it through
+    /// `sithAI_SetMoveThing`, with its own 1000 ms cooldown. Shipped classes are small steps: grunts
+    /// ship `dodge 0.1, 0.1`, bosses `0.3, 0.1`.
+    #[test]
+    fn an_actor_that_is_hit_dodges_away_from_its_attacker() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [1.0, 0.0, 0.0];
+        actor.sector = 0;
+        let mut attacker = base.clone();
+        attacker.pos = [3.0, 0.0, 0.0];
+        attacker.sector = 0;
+        rt.things = vec![base, actor, attacker];
+        rt.templates = vec!["walkplayer".into(), "grunt".into(), "grunt".into()];
+        rt.types = vec![10, 2, 2];
+        rt.things[1].health = 100.0;
+        rt.things[2].health = 100.0;
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\n\
+                 Dodge 0.3, 0.3\n",
+            ),
+        );
+        rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
+        assert_eq!(rt.things[1].health, 95.0, "the damage did not apply");
+        assert_eq!(
+            rt.ai_move.get(&1).copied(),
+            Some([0.7, 0.0, 0.0]),
+            "the actor did not step 0.3 away from its attacker"
+        );
+        // Its own cooldown: another hit inside a second leaves the destination alone …
+        rt.things[1].pos = [1.5, 0.0, 0.0];
+        rt.things[2].pos = [3.5, 0.0, 0.0];
+        rt.time = 0.5;
+        rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
+        assert_eq!(
+            rt.ai_move.get(&1).copied(),
+            Some([0.7, 0.0, 0.0]),
+            "a second hit inside the 1 s cooldown moved the body again"
+        );
+        // … and after it, the step is measured from where the body now is.
+        rt.time = 1.1;
+        rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
+        assert_eq!(
+            rt.ai_move.get(&1).copied(),
+            Some([1.2, 0.0, 0.0]),
+            "the dodge did not re-arm after its cooldown"
+        );
+    }
+
+    /// The handler's gates: no instinct (or a zero first number) means no dodge, and an actor whose AI
+    /// flag bit `0x1` is set — the engine's "already walking" bit — keeps its destination.
+    #[test]
+    fn dodge_needs_the_instinct_and_a_clear_moving_flag() {
+        let sample = |flags: u32, class: Option<&str>| {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let mut actor = base.clone();
+            actor.pos = [1.0, 0.0, 0.0];
+            actor.sector = 0;
+            let mut attacker = base.clone();
+            attacker.pos = [3.0, 0.0, 0.0];
+            attacker.sector = 0;
+            rt.things = vec![base, actor, attacker];
+            rt.templates = vec!["walkplayer".into(), "grunt".into(), "grunt".into()];
+            rt.types = vec![10, 2, 2];
+            rt.things[1].health = 100.0;
+            if let Some(text) = class {
+                rt.ai.insert(1, crate::ai::parse(text));
+            }
+            rt.actor_flags.insert(1, flags);
+            rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
+            rt.ai_move.get(&1).copied()
+        };
+        let class = "alignment=-1.0, rank=0.5\n\nDodge 0.3, 0.3\n";
+        assert_eq!(sample(0, Some(class)), Some([0.7, 0.0, 0.0]), "no dodge with a clear flag");
+        assert_eq!(sample(0x1, Some(class)), None, "a walking actor dodged anyway");
+        assert_eq!(sample(0, Some("alignment=-1.0, rank=0.5\n\nDodge 0.3, 0.0\n")), None, "a zero step dodged");
+        assert_eq!(sample(0, None), None, "an actor with no instinct dodged");
     }
 
     /// `turretfire` (`0x50a0f0`): a turret's class (`turdefault.ai`) carries **no `PrimaryFire`**, so

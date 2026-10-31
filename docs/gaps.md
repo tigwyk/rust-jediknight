@@ -5816,7 +5816,7 @@ handler:
 | saberfighting | 45 | `0x40fa40` | no |
 | retreat | 42 | `0x50bc60` | **yes** (round 221: arms the withdraw mode when hurt) |
 | withdraw | 30 | `0x50b150` | **yes** (round 221: backs away from what hurt it) |
-| dodge | 27 | `0x50b360` | no |
+| dodge | 27 | `0x50b360` | **yes** (round 239: the damage path — the AI event 1 `sithActor_DamageActor` raises before subtracting health, the step away from the attacker, the walking-flag gate and the 1000 ms cooldown — while the projectile-passing (`0x1000`) sidestep and the event-2 path still need the AI event dispatch) |
 | roam | 27 | `0x50b830` | **yes** (round 225: wanders around its home anchor) |
 | specialattack | 24 | `0x40fd00` | no |
 | hitandrun | 23 | `sithAICmd_HitAndRun` | **yes** (round 223: fires, then breaks off) |
@@ -5827,14 +5827,14 @@ handler:
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **17 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+So the port runs **18 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
 the counts are how many classes depend on each: the remaining gameplay gap is the **Jedi set** (`forcepowers` and
-`saberfighting` 45 each, `specialattack` 24) plus the movement instincts (`jump` 92, `dodge` 27, `lobfire` 7, `crouch` 3);
-`listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and 235, and `sensedanger`, the last
-partial entry, in round 236. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be
-trapped behind one — and it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair,
-`circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`, `flee`, `listen`, `talk` and `sensedanger` (below).
-`sabermove` needs no work at all: nothing names it.
+`saberfighting` 45 each, `specialattack` 24) plus the movement instincts (`jump` 92, `lobfire` 7, `crouch` 3);
+`listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and 235, `sensedanger`, the last
+partial entry, in round 236, and `dodge` in round 239. `opendoors` was the one with a visible consequence — an AI that
+cannot open a door can be trapped behind one — and it is now implemented (below), as are `blindfire`, `returnhome`, the
+`retreat`/`withdraw` pair, `circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`, `flee`, `listen`, `talk`,
+`sensedanger` and `dodge` (below). `sabermove` needs no work at all: nothing names it.
 
 **The sector's awareness record is a 3-slot sound ring now (round 230), which is what `listen` scans.** The handler
 (`0x50a6f0`) does not read one "strongest event": it scans the sector's ring of recent sounds **newest first**, up to
@@ -6382,3 +6382,32 @@ note is corrected at the same time — the loader reads `misc\items.dat` directl
 Remaining, on the roadmap ledger: draw a `particle=` thing's cloud (element quads of `SIZE` with the material's cel, at
 the thing plus `INSERT OFFSET`, camera-facing like the sprites), run the two update arms, and spawn the cloud thing
 `particle=` names (`sithParticle_New`). Suite **176 passed**; `--audit` passes; no window and no game run.
+
+## Update — round 239 (`dodge` lands its damage path)
+
+`dodge` (`0x50b360`, 27 classes) is registered with the event mask **`0x1003`** — events 1, 2 and `0x1000` — and its
+scheduler path (`param_4 == 0`) does nothing, so the whole instinct is event-driven. This round ports the **damage
+path**, the one shipped fights exercise constantly: `sithActor_DamageActor` (`0x4ecc90`) emits AI **event 1** with the
+attacker *before* it subtracts the health (`if (param_2 != param_1 && thing->type == 2)
+sithAI_EmitEvent(thing->ai, 1, param_2)`).
+
+The handler then does the work with the AI's bit **`0x1`** (the engine's already-walking bit) clear and the class's first
+number `arg0` non-zero: it computes `point = self - arg0 * normalize(attacker - self)` and hands that to
+`sithAI_SetMoveThing(ai, point, 2.5)` — the `ai + 0x93` destination the port's `ai_move` map is — and sets its own
+cooldown `ai[0xa3] = now + 1000` ms. The shipped steps are small: grunts ship `dodge 0.1, 0.1`, officers and bosses
+`0.3, 0.1`.
+
+The port has `Runtime::ai_dodge` for the cooldown, `dodge_from_damage` for the gate/step/destination, and it is called
+from `damage_typed_from` exactly where the engine emits — after the invulnerability check, before the health is
+subtracted. The step length is the class's `arg0`. (Deviation on the ledger: the port walks the destination at the
+actor's own walk speed, not the handler's 2.5.)
+
+Checks (178 tests, headless): `an_actor_that_is_hit_dodges_away_from_its_attacker` — the damage still applies, the
+destination is 0.3 back from a 2-unit-away attacker, a second hit inside the cooldown does not move it, and after the
+cooldown it re-arms from the new position; `dodge_needs_the_instinct_and_a_clear_moving_flag` — the walking bit blocks,
+a zero first number blocks, no class blocks. Measured before/after: with the call removed both fail ("the actor did not
+step 0.3 away from its attacker"). `--ai` and `--hit` pass; no window and no game run.
+
+Still open, on the roadmap ledger: the other two event paths — the **projectile-passing** (`0x1000`) sidestep (the engine
+emits it from the projectile's own collision search, `sithWeapon_WeaponFireProjectile`, and the handler sidesteps on a
+random lateral direction) and the event-2 path — both need event plumbing this build does not have yet.

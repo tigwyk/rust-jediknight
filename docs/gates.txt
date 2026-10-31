@@ -2386,3 +2386,20 @@ running app.--carry-check --start 01narshadda                        0   level 2
   install's own three files. Suite **176 passed**; `--audit` passes; docs **132/132**.
 - No window and no game run. On the roadmap ledger: the **renderer** (element quads of `SIZE` at the thing plus
   `INSERT OFFSET`, camera-facing), `sithParticle_Update`'s two arms, and `sithParticle_New`'s spawn path.
+
+## Update — round 239
+
+- **`dodge` (27 classes) lands its damage path.** It registers event mask `0x1003` (events 1, 2, `0x1000`) and its
+  scheduler path is a no-op, so the instinct is entirely event-driven. `sithActor_DamageActor` (`0x4ecc90`) emits AI
+  **event 1** with the attacker *before* subtracting health; `dodge`'s handler (`0x50b360`), with AI bit `0x1` (already
+  walking) clear and the class's first number `arg0` non-zero, computes `point = self - arg0 * normalize(attacker -
+  self)`, hands it to `sithAI_SetMoveThing(ai, point, 2.5)` (the `ai + 0x93` slot the port's `ai_move` is) and sets its
+  own 1000 ms cooldown (`ai[0xa3]`). Shipped steps: grunts `0.1`, officers/bosses `0.3`.
+- Port: `Runtime::ai_dodge` (the cooldown), `dodge_from_damage` (gate, step, destination), called from
+  `damage_typed_from` where the engine emits — after the invulnerability check, before the health is subtracted.
+- Checks: `an_actor_that_is_hit_dodges_away_from_its_attacker` (damage still applies, destination 0.3 back from a
+  2-unit attacker, cooldown holds a second hit, re-arms after it) and `dodge_needs_the_instinct_and_a_clear_moving_flag`
+  (walking bit, zero step, no class). Measured before/after: with the call removed both fail ("the actor did not step 0.3
+  away from its attacker"). Suite **178 passed**; headless `--ai` and `--hit` pass; docs **132/132**.
+- No window and no game run. On the roadmap ledger: the `0x1000` projectile-passing sidestep (the engine emits it from
+  `sithWeapon_WeaponFireProjectile`'s collision search), the event-2 path, and the handler's 2.5 walk speed.
