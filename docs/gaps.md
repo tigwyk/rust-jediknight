@@ -5808,7 +5808,7 @@ handler:
 | blindfire | 134 | `0x509b30` | **yes** (round 219: fires at the remembered position) |
 | returnhome | 97 | `0x50bd70` | **yes** (round 220: walks back to its anchor) |
 | jump | 92 | `0x50abf0` | no |
-| circlestrafe | 70 | `0x509890` | no |
+| circlestrafe | 70 | `0x509890` | **yes** (round 222: orbits at close range) |
 | flee | 49 | `0x50aeb0` | partial: scripts' `AIFlee` verb only, not the instinct |
 | forcepowers | 45 | `0x40ff40` | no |
 | saberfighting | 45 | `0x40fa40` | no |
@@ -5825,11 +5825,34 @@ handler:
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **8 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+So the port runs **9 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
 the counts are how many classes depend on each: `listen` (200) and `talk` (198) are the biggest remaining behavioural
 gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
-it is now implemented (below), as are `blindfire`, `returnhome` and the `retreat`/`withdraw` pair (below). `sabermove`
-needs no work at all: nothing names it.
+it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair and `circlestrafe`
+(below). `sabermove` needs no work at all: nothing names it.
+
+**`circlestrafe` is implemented (round 222, 70 classes).** The shipped lines are
+`circlestrafe 5000, 30, 0.6, 500, 0` (and `45, 1.0` for the second Jedi class), and the handler (`0x509890`) reads them
+as: engage when the target is within the **third** argument (0.6–1.0 units — this is close-range, lightsaber behaviour),
+step around the target by the **second** argument's angle (30–45°), and move at half speed while keeping the target in
+view. The handler also keeps a signed side in a slot, picking it at random the first time and flipping it when the step
+is blocked, so the actor does not jitter between sides every frame.
+
+The port does the same thing with the walk code that is already there: while it sees the target within the engage
+distance, the goal becomes the actor's offset-from-target vector rotated by ±angle around the target — which keeps the
+radius and moves the body along the ring — at `pace = 0.5`, with the side persisted in `Runtime::ai_strafe`. One
+behaviour had to be fixed at the same layer: the chase's `standoff` clamp (`reach - standoff`) is far larger than the
+chord between two orbit points (0.26 units), so the step would clamp to zero and the actor would freeze. A strafing
+actor now walks without the standoff — the orbit point already encodes the distance — exactly as a route waypoint does.
+
+Deviation: the engine replans every 300–500 ms (its fourth argument) while the port re-evaluates each frame, so the
+orbit is smoother than retail's. A windowed leg with a Jedi at melee range would settle it.
+
+The headless check is `a_close_actor_with_circlestrafe_circles_the_target`: an actor 0.5 units from the body, facing it,
+with the shipped line must gain a sideways offset while staying on the ring; a control class with the same `Follow` but
+no `CircleStrafe` must walk straight in with zero sideways offset. Measured before/after: with the strafe branch
+disabled the test fails with `the actor did not step sideways: [0.25, 0.0, 0.0]` (the control's own behaviour); enabled
+it passes. Suite: **156 tests, 0 failures**.
 
 **`retreat` + `withdraw` are implemented (round 221, 42 + 30 classes).** The two handlers are one behaviour split in
 two. `retreat` (`0x50bc60`) checks the actor's health against `arg0 × max` — 0.50 in every shipped class — and rolls

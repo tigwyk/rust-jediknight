@@ -2083,3 +2083,19 @@ running app.--carry-check --start 01narshadda                        0   level 2
   window.
 - AI instinct coverage now **8 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198). No game run
   and no port window.
+
+## Update — round 222
+
+- **`circlestrafe` implemented** (70 classes — the close-range/lightsaber behaviour). Handler `0x509890`: engage when the
+  target is within the third argument (0.6–1.0 units), step around it by the second argument's angle (30–45°), at half
+  speed, keeping it in view; a signed side is kept so the orbit does not jitter. Port: the goal becomes the
+  offset-from-target vector rotated by ±angle around the target, at `pace = 0.5`, side persisted in
+  `Runtime::ai_strafe`. The chase `standoff` clamp is skipped while strafing (the orbit point already encodes the
+  distance), or the 0.26-unit chord would clamp the step to zero.
+- Headless check `a_close_actor_with_circlestrafe_circles_the_target` + control class with the same `Follow` but no
+  `CircleStrafe` (walks straight in, zero sideways offset). Measured before/after: strafe branch disabled → fails with
+  `the actor did not step sideways: [0.25, 0.0, 0.0]`; enabled → passes. Suite **156 tests, 0 failures**.
+- Deviation recorded: the engine replans every 300–500 ms (its fourth argument); the port re-evaluates each frame, so
+  the orbit is smoother than retail's — needs a windowed Jedi-at-melee leg → QA window.
+- AI instinct coverage now **9 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198). No game run
+  and no port window.

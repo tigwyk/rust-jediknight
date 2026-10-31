@@ -1093,6 +1093,10 @@ pub struct Runtime {
     /// reuses the scripted flee walk and re-arms on the withdraw instinct's own interval (5000 ms in
     /// the shipped classes).
     pub ai_withdraw: BTreeMap<usize, (usize, f32)>,
+    /// The signed side (`, -1` or `+1`) each actor circles a target on, for `circlestrafe`
+    /// (`0x509890`). The handler picks it at random the first time and flips it when the step is
+    /// blocked; the port persists it the same way so the orbit does not jitter every frame.
+    pub ai_strafe: BTreeMap<usize, f32>,
     /// `sithAIAwareness`: a position other actors of the same side were told about, and when. A
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
@@ -1673,6 +1677,7 @@ impl Runtime {
             ai_opendoors: BTreeMap::new(),
             ai_home: BTreeMap::new(),
             ai_withdraw: BTreeMap::new(),
+            ai_strafe: BTreeMap::new(),
             sector_awareness: BTreeMap::new(),
             sector_adjoins: sector_adjoins.clone(),
             ai_fire_target: BTreeMap::new(),
@@ -2993,7 +2998,41 @@ impl Runtime {
             // A script's destination wins; otherwise the chase is the player while in sight and the
             // last place they were seen once they are not.
             let chase = if sighted { target } else { remembered.unwrap_or(target) };
-            let want = scripted.unwrap_or(chase);
+            let mut want = scripted.unwrap_or(chase);
+            let mut pace = 1.0f32;
+            let mut strafing = false;
+            // `circlestrafe` (`0x509890`): while it has a target **within the instinct's own engage
+            // distance** (0.6-1.0 units in the shipped lines — this is the close-range, lightsaber
+            // behaviour), the actor steps around the target by the instinct's angle (30-45 degrees)
+            // at half speed, and keeps facing it. The side is picked at random once and kept in a
+            // signed slot, exactly as the handler persists it. The engine replans every 300-500 ms;
+            // the port re-evaluates each frame, so the orbit is smoother than retail's — a deviation
+            // to watch in a windowed leg.
+            if scripted.is_none()
+                && sighted
+                && let Some(strafe) = ai.as_ref().and_then(|class| class.instinct("CircleStrafe"))
+            {
+                let (tx, ty) = (target[0] - from[0], target[1] - from[1]);
+                let dist = (tx * tx + ty * ty).sqrt();
+                let angle = strafe.args.first().copied().unwrap_or(30.0) as f32;
+                let engage = strafe.args.get(1).copied().unwrap_or(1.0) as f32;
+                if dist > 0.2 && dist <= engage.max(0.2) {
+                    let side = *self.ai_strafe.entry(index).or_insert_with(|| {
+                        if crate::cog::pseudo_random() < 0.5 { -1.0 } else { 1.0 }
+                    });
+                    let (sin, cos) = (angle * side).to_radians().sin_cos();
+                    // The target -> actor vector, rotated around the target, keeps the radius and
+                    // moves the body along the ring.
+                    let (vx, vy) = (-tx, -ty);
+                    want = [
+                        target[0] + vx * cos - vy * sin,
+                        target[1] + vx * sin + vy * cos,
+                        target[2],
+                    ];
+                    pace = 0.5;
+                    strafing = true;
+                }
+            }
             // A route in hand wins over the destination: each waypoint is a doorway centre the search
             // found, and reaching one pops it. When the route is empty the destination is the goal
             // again, which is what makes the last leg (doorway -> target) a straight walk.
@@ -3005,14 +3044,15 @@ impl Runtime {
             // `sithAI.c:814` steps the actor by `maxThrust * dt * moveSpeed`, so a scripted
             // `AISetMoveSpeed` scales the template's walking speed rather than replacing it.
             let speed = self.template_speed.get(&ai_template).copied().unwrap_or(0.0)
-                * self.actor_speed.get(&index).copied().unwrap_or(1.0);
+                * self.actor_speed.get(&index).copied().unwrap_or(1.0)
+                * pace;
             // A scripted destination is walked all the way onto; the chase stops at its standoff, and
             // so does each doorway on a route. The standoff is the class's own `Follow` instinct: its
             // second argument is the distance the chase keeps from the target (`rydefault` 0.75,
             // `grdefault` 2.0). The port used a single 0.25 for everything, so the room's friends
             // crowded onto the player and absorbed every bolt aimed at it; the engine's gunners stand
             // off and shoot from there.
-            let standoff = if scripted.is_some() || route_goal.is_some() {
+            let standoff = if scripted.is_some() || route_goal.is_some() || strafing {
                 0.0
             } else {
                 ai.as_ref()
@@ -7888,6 +7928,72 @@ mod tests {
         next.adopt(&carried);
         assert_eq!(next.things[0].health, 41.0, "the carried health was not restored");
         assert_eq!(next.player_shields, 73.0, "the carried shields were not restored");
+    }
+
+    /// `circlestrafe` (`0x509890`): within the instinct's engage distance (0.6–1.0 in the shipped
+    /// lines) the actor steps around the target by its angle (30–45 degrees) at half speed, keeping
+    /// the radius. Shipped line: `circlestrafe 5000, 30, 0.6, 500, 0`.
+    #[test]
+    fn a_close_actor_with_circlestrafe_circles_the_target() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.5, 0.0, 0.0];
+        actor.yaw = 180.0; // facing the body at the origin, so it is in sight
+        let mut player = base.clone();
+        player.pos = [0.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "yun".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("yun".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 CircleStrafe 5000.0, 30.0, 0.6, 500.0, 0.0\n\
+                 Follow 0.0, 0.25\n",
+            ),
+        );
+
+        for _ in 0..30 {
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        let p = rt.things[1].pos;
+        let radius = (p[0] * p[0] + p[1] * p[1]).sqrt();
+        assert!(p[1].abs() > 0.05, "the actor did not step sideways: {p:?}");
+        assert!(
+            (0.2..0.9).contains(&radius),
+            "the actor left the ring: radius {radius:.2}"
+        );
+
+        // A control class with the same Follow but no CircleStrafe walks straight in and stops at
+        // its standoff, so it never gains a sideways offset.
+        let mut straight = door_runtime();
+        let base = straight.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.5, 0.0, 0.0];
+        actor.yaw = 180.0;
+        let mut player = base.clone();
+        player.pos = [0.0, 0.0, 0.0];
+        straight.things = vec![player, actor];
+        straight.templates = vec!["walkplayer".into(), "yun".into()];
+        straight.types = vec![10, 2];
+        straight.template_speed.insert("yun".into(), 1.0);
+        straight.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 Follow 0.0, 0.25\n",
+            ),
+        );
+        for _ in 0..30 {
+            straight.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            straight.things[1].pos[1].abs() < 1e-4,
+            "an actor without `CircleStrafe` stepped sideways: {:?}",
+            straight.things[1].pos
+        );
     }
 
     /// `retreat` (`0x50bc60`) arms a withdraw when health falls under `arg0 × max` and its `arg1`
