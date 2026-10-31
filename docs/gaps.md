@@ -6124,3 +6124,17 @@ projection (1.02 rad vertical, 4:3) and asserts it lands in frame, in the lower-
 QA-window state after the round: `--gates` **65 of 65** (the fixed sweep), walk-trace gate **15 legs, 1 tracked failure**
 (`walk5_spawn`, the ledger's floor-search deviation), `cargo test` **164 passed**. The retail parity capture was not run
 (the window was used for the gate sweep and the fixes above); it stays a QA-window item.
+
+## Update — round 232 (the first-person weapon's other materials)
+
+Round 231 got the weapon *placed*, but it still drew **one** material: the old path used the model's first material for
+every face. A `.3do` face carries its own material index, and retail's `rdModel3_DrawFace` (`0x43e4e0`) binds that face's
+own material before drawing it — so a single-part draw is not the weapon. `--model <name>` now prints each used material
+beside the geometry, as `material N = NAME.MAT (K face(s), in the archives)`. `--model bryv.3do` reports **14 material
+indices over 76 faces**, all present in the archives: HDBACK 11, HDBOTTOM 4, HDFTIP 3, HDSDTHUM 8, HDINSID1 13, HND-WRT 6,
+HDGRIP 4, BRYVGNBK 3, BRYVRSD 10, BRYVFTP 1, BRYVFSD 6, BRYVGNTP 3, BRYVGSGF 1, BRYVGSGT 3. The old single part was
+material 0, `HDBACK.MAT` — eleven faces of the back of the hand and no gun. `draw_viewmodel` now spawns one entity per used
+material (its own face selection, material and texture) and rebuilds the parts when `jkPlayPOVKey` changes the frame; the
+sway offset applies to every part. `Viewmodel` is `name, parts, key, phase, base, frame`. Headless only: suite **164
+passed** (the framing test still passes), docs **132/132**, no window and no game run; what the 14 parts look like is left
+to the QA window's parity frame, since a texture's result cannot be read from a face count.

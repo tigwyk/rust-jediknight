@@ -6661,6 +6661,37 @@ fn main() {
         let posed = tdo::pose_nodes(&model, None, 0.0);
         let owners = model.mesh_nodes();
         let geoset = model.pick_geoset();
+        // Which materials the drawn geoset's **faces** actually use, and how many faces each has:
+        // `rdModel3_DrawFace` draws every face with its own face material, so a renderer that picks
+        // one material index and filters on it silently loses the rest of the model. This is the
+        // number that says whether that matters for a given `.3do`.
+        let mut by_material: std::collections::BTreeMap<i32, usize> =
+            std::collections::BTreeMap::new();
+        for mesh in model.meshes.iter().filter(|mesh| mesh.geoset == geoset) {
+            for face in mesh.faces.iter().filter(|f| f.verts.len() >= 3) {
+                *by_material.entry(face.material).or_default() += 1;
+            }
+        }
+        println!(
+            "  faces use {} material index(es); the material names are:",
+            by_material.len()
+        );
+        for (index, faces) in &by_material {
+            let name = model
+                .materials
+                .get(*index as usize)
+                .cloned()
+                .unwrap_or_default();
+            let present = gobs.read(&name).is_some();
+            println!(
+                "    material {index} = {name} ({faces} face(s), {})",
+                if present {
+                    "in the archives"
+                } else {
+                    "MISSING from the archives"
+                }
+            );
+        }
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         let mut verts = 0usize;
         for (mesh_index, mesh) in model.meshes.iter().enumerate() {
@@ -12211,17 +12242,18 @@ struct WorldCamera;
 #[derive(Resource, Default)]
 struct Viewmodel {
     name: Option<String>,
-    entity: Option<Entity>,
+    /// One entity per material the model's faces use (`rdModel3_DrawFace` draws each face with its
+    /// own material): the entity, its material index, and the bitmap size its UVs divide by.
+    parts: Vec<(Entity, i32, (f32, f32))>,
     /// The `.key` the cog last asked for (`jkPlayPOVKey`), with the clip's own frame cursor. A
-    /// viewmodel clip is short (`bryvpst1.key` is one shot's recoil), so its mesh is rebuilt on each
-    /// new frame — a handful of vertices, unlike a body puppet's.
+    /// viewmodel clip is short (`bryvpst1.key` is one shot's recoil), so its meshes are rebuilt on
+    /// each new frame -- a handful of vertices, unlike a body puppet's.
     key: Option<String>,
     phase: f32,
-    /// Where the weapon sits in the view, from the model's own geometry (`draw_viewmodel`).
+    /// Where the weapon sits in the view (`draw_viewmodel`). Zero: the authored origin, which is what
+    /// retail draws with (`jkPlayer_DrawPov`), so only the `BK_VIEW` capture override moves it.
     base: Vec3,
     frame: i32,
-    /// The view scale the drawn mesh needs to read as a weapon in hand rather than a speck.
-    scale: f32,
 }
 
 /// The viewmodel entity itself, spawned by [`draw_viewmodel`].
@@ -20025,64 +20057,59 @@ fn draw_viewmodel(
             .filter(|_| !crate::runtime::Runtime::is_saber(&weapon))
             .cloned()
     };
-    if want == view.name && (want.is_none() || view.entity.is_some()) {
+    if want == view.name && (want.is_none() || !view.parts.is_empty()) {
         // Same weapon: the sway moves, and a `jkPlayPOVKey` clip advances if the cog started one.
         let (sway, key, clock) = {
             let rt = sim.world.borrow();
             let player = rt.player_thing();
             (rt.waggle.get(&player).copied().unwrap_or([0.0; 3]), rt.pov_key.get(&player).cloned(), rt.time)
         };
-        if let Some(entity) = view.entity {
-            // A new clip restarts from its first frame; the same clip keeps its cursor.
-            if key != view.key {
-                view.key = key;
-                view.phase = 0.0;
-                view.frame = -1;
-            }
-            if let Some(name) = view.key.clone()
-                && let Some(keyfile) = gobs
-                    .0
-                    .read(&name)
-                    .map(|raw| key::parse(&String::from_utf8_lossy(&raw)))
-            {
-                let last = keyfile.frames.max(1) as f32 - 1.0;
-                let frame = (view.phase % (last + 1.0)).floor() as i32;
-                if frame != view.frame {
-                    view.frame = frame;
-                    if let Some(model) = gobs.0.read(&name.replace(".key", ".3do")).or_else(|| {
-                        // The model is the weapon's, not the clip's: reuse the one already drawn.
-                        view.name.as_ref().and_then(|n| gobs.0.read(n))
-                    }) {
-                        let model = tdo::parse(&String::from_utf8_lossy(&model));
-                        let material = model
-                            .materials
-                            .iter()
-                            .position(|mat| gobs.0.read(mat).is_some())
-                            .unwrap_or(0) as i32;
+        // A new clip restarts from its first frame; the same clip keeps its cursor.
+        if key != view.key {
+            view.key = key;
+            view.phase = 0.0;
+            view.frame = -1;
+        }
+        if let Some(name) = view.key.clone()
+            && let Some(keyfile) = gobs
+                .0
+                .read(&name)
+                .map(|raw| key::parse(&String::from_utf8_lossy(&raw)))
+        {
+            let last = keyfile.frames.max(1) as f32 - 1.0;
+            let frame = (view.phase % (last + 1.0)).floor() as i32;
+            if frame != view.frame {
+                view.frame = frame;
+                if let Some(raw) = gobs.0.read(&name.replace(".key", ".3do")).or_else(|| {
+                    // The model is the weapon's, not the clip's: reuse the one already drawn.
+                    view.name.as_ref().and_then(|n| gobs.0.read(n))
+                }) {
+                    let model = tdo::parse(&String::from_utf8_lossy(&raw));
+                    // Every material part is rebuilt from its own slice of the same pose, because
+                    // each part is a separate mesh with its own material index.
+                    for (entity, material, tex_size) in view.parts.clone() {
                         let posed = model_mesh_posed(
                             &model,
                             material,
-                            (1.0, 1.0),
+                            tex_size,
                             Some((&keyfile, frame as f32)),
                         );
-                        let handle = meshes.add(posed);
-                        if let Ok(mut mesh) = drawn.get_mut(entity) {
-                            let _ = &mut mesh;
-                        }
-                        commands.entity(entity).insert(Mesh3d(handle));
+                        commands.entity(entity).insert(Mesh3d(meshes.add(posed)));
                     }
                 }
-                view.phase += keyfile.fps * clock.max(0.0).min(0.1);
             }
+            view.phase += keyfile.fps * clock.max(0.0).min(0.1);
+        }
+        for (entity, _, _) in view.parts.clone() {
             if let Ok(mut transform) = drawn.get_mut(entity) {
                 // Camera-local: right is +X, up is +Y, forward is -Z. The sway is the waggle the
-                // weapon cog sets, applied along the camera axis as before.
+                // weapon cog sets, applied along the camera axis.
                 transform.translation = view.base + Vec3::X * sway[0] as f32;
             }
         }
         return;
     }
-    if let Some(entity) = view.entity.take() {
+    for (entity, _, _) in std::mem::take(&mut view.parts) {
         commands.entity(entity).despawn();
     }
     view.name = want.clone();
@@ -20092,38 +20119,30 @@ fn draw_viewmodel(
         return;
     };
     let model = tdo::parse(&String::from_utf8_lossy(&raw));
-    let material = model
-        .materials
+    // `rdModel3_DrawFace` draws every face with **its own face material**, so a view model is one
+    // entity per material the model's faces use, not one entity with the first readable material.
+    // `--model bryv.3do` prints the split: 14 of the file's 15 materials are used by 76 faces, and
+    // drawing only the first (`HDBACK.MAT`, 11 faces) drew the back of the hand and nothing else.
+    let geoset = model.pick_geoset();
+    let mut used: Vec<i32> = model
+        .meshes
         .iter()
-        .position(|mat| gobs.0.read(mat).is_some())
-        .unwrap_or(0) as i32;
-    let mesh = meshes.add(model_mesh(&model, material, (1.0, 1.0)));
+        .filter(|mesh| mesh.geoset == geoset)
+        .flat_map(|mesh| {
+            mesh.faces
+                .iter()
+                .filter(|face| face.verts.len() >= 3)
+                .map(|face| face.material)
+        })
+        .collect();
+    used.sort_unstable();
+    used.dedup();
     // `rdCamera_SetAmbientLight(camera, sector->ambient + sector->extraLight)` is how retail lights the
     // POV pass, and the runtime tracks that number per sector (`SetSectorLight` moves it). The world is
     // drawn unlit from its own baked vertex light, so the weapon is unlit as well — an unlit material
     // whose colour *is* the sector light gives the same result without a per-camera light.
     let light = world.as_ref().map(|w| sector_light(&sim, &w.level)).unwrap_or(1.0);
-    // The weapon's own bitmap. A view model is named by a cog at run time, so it is not in the level's
-    // `model_images`; it is decoded here through the same `.mat` path the world uses, with the level's
-    // palette. `sithThing`'s renderer draws the POV thing with its material, not with a flat colour.
-    let texture = world.as_ref().and_then(|world| {
-        model.materials.iter().find_map(|mat| {
-            let bitmap = gobs.0.read(mat).as_deref().and_then(tex::parse_mat)?;
-            Some(images.add(to_image(&bitmap, &tex::Palette(world.palette.to_vec()))))
-        })
-    });
-    let material = materials.add(StandardMaterial {
-        base_color_texture: texture,
-        base_color: bevy::color::Color::srgb(light, light, light),
-        perceptual_roughness: 0.7,
-        // `jkPlayer_DrawPov` lights this pass with `rdCamera_SetAmbientLight` from the sector's own
-        // light. The port has no per-camera ambient, so the weapon is unlit — visible and readable,
-        // but not yet lit like the room it is in.
-        // ponytail: sector ambient on the viewmodel camera is the upgrade.
-        unlit: true,
-        cull_mode: None,
-        ..default()
-    });
+    let palette = world.as_ref().map(|world| world.palette.to_vec());
     let Some((camera, _camera_rot, _projection)) = cam.iter().next() else {
         return;
     };
@@ -20137,7 +20156,6 @@ fn draw_viewmodel(
     // the view, on the assumption that a 0.07-unit model had to be enlarged; the model is authored at
     // that size *because* it sits 0.06 units from the eye.
     view.base = view_override.unwrap_or(Vec3::ZERO);
-    view.scale = 1.0;
     let local = Transform {
         translation: view.base,
         // `model_mesh` already converts the file's frame to the renderer's, and a POV model's own
@@ -20146,23 +20164,57 @@ fn draw_viewmodel(
         rotation: Quat::IDENTITY,
         ..default()
     };
-    let entity = commands
-        .spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            local,
-            ViewmodelMesh,
-            bevy::camera::visibility::NoFrustumCulling,
-            ChildOf(camera),
-
-        ))
-        .id();
-    view.entity = Some(entity);
+    let mut parts = Vec::new();
+    for index in used {
+        let mat_name = model
+            .materials
+            .get(index as usize)
+            .cloned()
+            .unwrap_or_default();
+        // The weapon's own bitmap. A view model is named by a cog at run time, so it is not in the
+        // level's `model_images`; it is decoded here through the same `.mat` path the world uses, with
+        // the level's palette. `sithThing`'s renderer draws the POV thing with its material.
+        let bitmap = gobs.0.read(&mat_name).as_deref().and_then(tex::parse_mat);
+        let tex_size = bitmap
+            .as_ref()
+            .map(|bitmap| (bitmap.width as f32, bitmap.height as f32))
+            .unwrap_or((1.0, 1.0));
+        let mesh = meshes.add(model_mesh(&model, index, tex_size));
+        let texture = match (&bitmap, &palette) {
+            (Some(bitmap), Some(palette)) => {
+                Some(images.add(to_image(bitmap, &tex::Palette(palette.clone()))))
+            }
+            _ => None,
+        };
+        let material = materials.add(StandardMaterial {
+            base_color_texture: texture,
+            base_color: bevy::color::Color::srgb(light, light, light),
+            perceptual_roughness: 0.7,
+            // `jkPlayer_DrawPov` lights this pass with `rdCamera_SetAmbientLight` from the sector's own
+            // light. The port has no per-camera ambient, so the weapon is unlit — visible and readable,
+            // but not yet lit like the room it is in.
+            // ponytail: sector ambient on the viewmodel camera is the upgrade.
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        });
+        let entity = commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                local,
+                ViewmodelMesh,
+                bevy::camera::visibility::NoFrustumCulling,
+                ChildOf(camera),
+            ))
+            .id();
+        parts.push((entity, index, tex_size));
+    }
     println!(
-        "viewmodel: drew `{name}` ({} meshes, material `{}`), sector light {light:.2}",
-        model.meshes.len(),
-        model.materials.first().cloned().unwrap_or_default()
+        "viewmodel: drew `{name}` ({} material part(s), sector light {light:.2})",
+        parts.len()
     );
+    view.parts = parts;
 }
 
 /// Marks the entity [`draw_player_body`] puts the player's model on.

@@ -455,6 +455,9 @@ What the session settles, all of it already on the deviation ledger with its ret
   first.
 - **AI engagement timing** — the level-3 same-pose pair: a port run and a retail capture at the recorded vantage, to
   confirm the view-cone fix moved acquisition to where retail acquires.
+- **viewmodel materials** — the data side is measured headless (`--model bryv.3do`: 14 materials over 76 faces, all
+  present), but whether the bryar's body and hand both draw correctly can only be judged in a frame; round 231 drew
+  material 0 alone (`HDBACK`, the hand's back).
 
 Safety and recovery: the retail harness never touches the real install — it copies it to `target/parity/retailcopy/`
 and records the desktop display modes to `target/parity/display-pre.json` before it starts. Keep hands off the mouse and
