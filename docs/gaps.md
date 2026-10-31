@@ -4970,3 +4970,41 @@ The next probe is that `0.0502` surface: which face it is, whether the step path
 high tread, and whether the walker should follow the slope down (the sector floor 0.1001 is not what it stands on, and
 retail's floor is 0.22 below both). The `--faces-at` dump already lists every face within 2 units of a pose, so the
 ramp can be named directly.
+
+**The plateau is the back of the room-below's ceiling face — and excluding downward faces from the floor search is
+wrong (round 185).** The plateau pose's face dump has **no up-facing floor** within two units: the nearby planes are
+verticals at z 0.100 (walls) and downward-facing slopes (`normal` z −0.78 and −0.95, points at z 0.000/−0.249) — the
+ceiling of the room *below* the walkway. The walker's landing at 0.1703 = 0.0502 + `rest` is therefore on the **back
+of one of those downward faces**, because `floor_under` flips a face's normal when the body is on its far side, which
+turns a ceiling into a "floor". That is a real defect.
+
+The candidate fix — skip faces whose normal has a real downward component (`face.normal[2] < -0.2`) before the flip —
+was implemented and **measured, then reverted**:
+
+| leg | before | with the exclusion |
+| --- | --- | --- |
+| `walk5_spawn` | 3.70 (99 %), 5 | 3.39 (91 %), 5 — worse |
+| `walk6_spawn` | 1.06 (98 %), 2 — pass | 0.85 (79 %), 3 — **broken** |
+| `walk_cantina` | 2.65, 2 | 2.65, **0** — better |
+| `walk9`, `17`, `19`, `26`, `18` | — | unchanged |
+
+and it failed two unit tests. So some shipped geometry *needs* the flip's tolerance (walk6 stops at a prop and its
+floor comes from a face the exclusion removed), while level 5 needs it *not* to apply. The distinguishing property is
+not the sign of the normal's z; it is which face is the body's support versus which is merely nearby, and the next
+probe is the support/landing pair at the plateau frame: `floor_under` returns the landing, `support()` returns −0.35
+there, and the two must be reconciled (the walker's own trace prints both).
+
+**Full gate confirmed after the round-182/183 fixes: 15 legs, 1 failure (round 185).** The complete walk-trace gate
+with the reverted candidate and round 183's fallback gate in place:
+
+```
+PASS walk_street45 100% (2)  PASS walk_street90 100% (1)  PASS walk_cantina 102% (2)  PASS walk_door0 stop-pose
+PASS walk4_spawn 100% (1)    FAIL walk5_spawn 3.43/3.73 (5)  PASS walk6_spawn 98% (2)  PASS walk9_spawn 100% (0)
+PASS walk12_spawn 127% (0)   PASS walk13_spawn 98% (1)     PASS walk7_spawn stop-pose  PASS walk14_spawn stop-pose
+PASS walk17_spawn 117% (0)   PASS walk19_spawn stop-pose    PASS walk26_spawn 0.42 (0)
+trace gate: 15 leg(s), 1 failure(s)
+```
+
+`walk6_spawn` is the round-182/183 gain (it was 1.35/1.08 with five sector mismatches before). `walk5_spawn` remains
+the only failure and its travel reads 3.43 here versus 3.70 in the isolated measurement — the plateau/bounce makes it
+state-sensitive between runs, which is consistent with the diagnosis rather than noise in the gate.

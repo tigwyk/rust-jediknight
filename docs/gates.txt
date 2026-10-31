@@ -1600,3 +1600,24 @@ running app.--carry-check --start 01narshadda                        0   level 2
   descending (0.150 → 0.136 → 0.121), so slope-following works sometimes; the walk's steady state is a plateau.
 - Next probe: name that 0.0502 face with `--faces-at` and decide whether the step path is holding the body on the
   ramp's high tread. No code change this round; tests **149 passed**.
+
+## Update — round 185
+
+- `walk5_spawn`'s plateau is the **back of the room-below's ceiling face**: the plateau pose has no up-facing floor
+  within two units, only walls at z 0.100 and downward slopes (normal z −0.78/−0.95) whose `floor_under` normal flip
+  turns into "floors". The landing 0.1703 = 0.0502 + `rest` is on one of those back faces.
+- Candidate fix (skip faces with `normal[2] < -0.2`) was **measured then reverted**: `walk5` 3.70→3.39 (worse),
+  `walk6` **1.06→0.85, 3 sectors (broke a passing leg)**, cantina improved (2→0 sectors), everything else unchanged,
+  plus two failing unit tests. Shipped geometry needs the flip's tolerance somewhere (walk6's prop) while level 5
+  needs it not to apply, so the sign of the normal is not the discriminator.
+- Next probe: reconcile `floor_under`'s landing with `support()` at the plateau frame (the walker prints both; support
+  reads −0.35 while the landing reads 0.17).
+- Tests **149 passed** (after the revert).
+
+## Update — round 185 (full gate)
+
+- Full walk-trace gate after the round-182/183 fixes: **15 legs, 1 failure** — only `walk5_spawn` (3.43/3.73 = 92 %,
+  5 sector mismatches). `walk6_spawn` now passes (98 %, 2 sectors), cantina 102 %/2, street45/90 100 %, 4 100 %, 9
+  100 %, 12 127 %, 13 98 %, 7/14/19/26 stop-pose, 17 117 %.
+- `walk5_spawn`'s travel reads 3.70 in the isolated run and 3.43 in the gate — the plateau/bounce is run-state
+  sensitive, consistent with the diagnosis.
