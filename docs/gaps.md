@@ -5595,3 +5595,30 @@ standpoint. The next probe is a controlled pair at the same frame time with the 
 capture** (`--thing-list` gives the spawn; the runtime/`BK_AI_TRACE` gives where the actor has walked to), and a check
 of whether retail's near fence occludes it — i.e. a visibility question, not an AI-timing one. That is the shape Phase 1
 step 5's timing comparison needs: same vantage, same time, both sides' actor positions known.
+
+**Retail's AI list is ordered by thing id, and its class names are now on record (round 209 continued).**
+`aistatus <index>` walks the level's AI actors in **thing-id order**, which the dump makes explicit — a committed
+capture (`tools/parity/aistatus-03katarn-list.txt`) maps indices 0–14 on level 3:
+
+| index | thing | template | class |
+| --- | --- | --- | --- |
+| 0 | 24 | tuskan | `tuproddefault.ai` |
+| 1 | 25 | tuskan | `tuproddefault.ai` |
+| 2 | 30 | tuskan | `tuproddefault.ai` |
+| 3 | 31 | tuskanbh | `tubproddefault.ai` |
+| 4 | 32 | tuskanbhgun | `tubdefault.ai` |
+| 5 | 33 | tuskangun | `tudefault.ai` |
+| 6 | 34 | tuskan | `tuproddefault.ai` |
+| 7 | 35 | tuskanbh | `tubproddefault.ai` |
+| 8 | 36 | tuskangun | `tudefault.ai` |
+| 9 | 37 | tuskan | `tuproddefault.ai` |
+| 10 | 38 | tuskan | `tuproddefault.ai` |
+| 11 | 39 | mynok | `maidefault.ai` |
+| 12 | 60 | tuskangun | `turoam.ai` (the one non-default: `Flags=0xd`, `NextUpdate=35153`) |
+| 13 | 61 | tuskan | `tuproddefault.ai` |
+| 14 | 62 | tuskan | `tuproddefault.ai` |
+
+That settles the earlier puzzle (0 → thing 24 but 3 → thing 29: the list is actors only, in level order, and the
+`powerdroid` seen earlier was an actor between them). The classes also name the **port's** AI table directly: the port
+reads `aiclass` from the same templates, so the next check is a class-for-class comparison — if the port's table agrees
+with this list, the level-3 engagement divergence is behavioural (acquisition), not data.

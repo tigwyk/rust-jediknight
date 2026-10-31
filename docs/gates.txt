@@ -1909,3 +1909,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
   near fence may occlude the actor, or the actor's walked-to position differs). Next: re-read the actor position at
   capture time on both sides and check occlusion before comparing engagement timings.
 - Tests **149 passed**.
+
+## Update — round 209 (AI list)
+
+- Retail's `aistatus <index>` list is **AI actors in thing-id order**; committed capture
+  `tools/parity/aistatus-03katarn-list.txt` maps indices 0–14 → things 24–62 and names the classes
+  (`tuproddefault.ai`, `tubproddefault.ai`, `tubdefault.ai`, `tudefault.ai`, `maidefault.ai`, and `turoam.ai` for
+  thing 60, the only non-default with `Flags=0xd`, `NextUpdate=35153`).
+- This resolves the earlier index puzzle (0→24, 3→29): actors only, in level order (thing 29 is an actor between them).
+- Next: compare the port's `aiclass` table class-for-class with this list; agreement there would make the level-3
+  engagement divergence behavioural (acquisition), not data.
+- Tests **149 passed** (docs and fixture only).
