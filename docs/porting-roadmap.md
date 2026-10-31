@@ -156,17 +156,21 @@ partials is still to be written; these are the entries this round created or mea
 
 ### Phase 0.5 — Retail trace v0 (unblocks Phase 1 steps 3–6)
 
-T3 works today because a screenshot is a complete observation. T2/T4 do not: `coords` is a manual
-console poll, no movement replay exists, and the `cogstatus`/`aistatus` output formats were not pinned
-under this round (both are now: `cogstatus` by the level-1 captures in `tools/parity/cogstatus-*.txt`,
-`aistatus` by criterion 2 below), so "the same inputs produce the same position/sector/health" could
-not be measured yet. Steps 3–6 all need this, so it is its own deliverable rather than a hidden
-dependency.
+**Exit criteria met (v0, rounds 100–213).** T3 always worked because a screenshot is a complete observation;
+T2/T4 needed a replayable trace and pinned console formats, and both exist now: `port-trace.ps1` replays a
+leg at a fixed 1/60 s step, the walk-trace gate replays 15 retail-derived legs, and the `cogstatus`/`aistatus`
+formats are pinned (criterion 2) with the shipped capture fixtures behind them. "The same inputs produce the
+same position/sector/health" is therefore measurable, and it is what Phase 1 steps 3–6 use. The criteria are
+kept below with their evidence; the dense Frida hook (criterion 4) is still not needed.
 
 Exit criteria:
 
-1. A scripted walk on retail yields a parseable position + sector trace (poll `coords` on a fixed
-   cadence, with `slowmo` if the console cannot keep up), and the format is documented.
+1. **Done (v0).** A scripted walk on retail yields a parseable position + sector trace (poll `coords` on a
+   fixed cadence, with `slowmo` if the console cannot keep up), and the format is documented. The format is
+   in `tools/parity/README.md` §"Movement traces (Phase 0.5 trace v0)": retail writes
+   `held_ms x y z sector yaw` per hold segment (held-key game time, because the console pauses the game),
+   the port writes `tick t_s x y z sector vy health shields` per 1/60 s frame, and the fixtures are the
+   committed `tools/parity/walktrace/*.tsv` legs that `trace-gate.ps1` replays (15 legs today).
 2. **Done (v0).** The `cogstatus`/`aistatus` handlers are decompiled and their output formats pinned; one
    level's cog variables are captured through them. The `aistatus` side: usage is `aistatus <index>`,
    where the index is a position in the level's **AI actor list in thing-id order** (`0` is the first

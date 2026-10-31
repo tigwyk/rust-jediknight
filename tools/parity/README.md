@@ -290,6 +290,10 @@ PASS  walk_cantina   port  1.85 / retail  2.59 units (   71%)  sectors off 1
 PASS  walk_door0     port  0.13 / retail  0.07 units (stop-pose)  sectors off 0
 trace gate: 4 leg(s), 0 failure(s)
 ```
+
+The table above is the gate's first four legs as it shipped. It now runs **15 legs** with **one tracked failure** -
+`walk5_spawn`, the floor-search-scope deviation on the roadmap's ledger; `docs/gates.txt` carries the current numbers
+each round rather than this snapshot.
 ### Retail's cog namespace
 
 `coglist` prints `<id>: <script> <script>` per instance. The console buffer only keeps the tail, which
@@ -315,11 +319,18 @@ Phase 0.5 step 2 pins the two dev-console status formats from the decomp and cap
   `Cog #%d: Name:%s  Script %s` then one line per cog symbol, `  Symbol %d: '%s' ` followed by
   ` = %f` for float symbols or ` = %d` for integer ones (format strings at `0x54aaf4`, `0x54ab1c`,
   `0x54ab30`, `0x54ab38`). Out-of-range indices print nothing.
-- `aistatus <n>` - `sithAI_AIStatus` (`decomp/004ea230_sithAI_AIStatus.c`): an inactive block prints
-  `That AI block is not currently active.`; an active one prints its actor lines, then
-  `Current instincts:` and per instinct
+- `aistatus <n>` - `sithAI_AIStatus` (`decomp/004ea230_sithAI_AIStatus.c`): the argument is a position in the
+  level's **AI actor list in thing-id order** (`0` is the first actor; a bare `aistatus` dumps level-load timings
+  instead, and a thing id is rejected). An inactive block prints `That AI block is not currently active.`; an active
+  one prints `AI Status dump for thing N (template).`, then `Class 'x.ai', Flags=0x…, Moods a/b/c, NextUpdate=n`,
+  then `Current instincts:` and one row per instinct:
   `Instinct %d: Params: %f/%f/%f/%f, nextUpdate=%d, mask=0x%x, mode=0x%x.`
-  (the two header lines' formats are not recoverable from this decomp).
+  **Row i is the class `.ai` file's i-th instinct line** (verified: eleven lines in `ai\tuproddefault.ai` ↔ eleven
+  rows for a `tuskan`; read any class with `bevi-knight --asset ai\<name>.ai`), and `mask`/`mode` are the two bit
+  words `sithAI_RegisterInstinct` stored - `sithAICmd_Startup` registers each instinct with them (`lookfortarget` is
+  handler `0x50aa80` with `0x204`, matching row 1 of that file). `Params` are the four per-instance numbers, 0 on an
+  idle actor. Example rows for a brown Tusken: Jump `mask 0x604`, LookForTarget `mode 0x204`, PrimaryFire
+  `mask 0x100 mode 2`, Follow `mask 0xe00 mode 2`, Flee `mask 0xf05 mode 0x800`, Talk `mode 0xffff`.
 
 Capture with `retail-capture.ps1 -ConsoleCommands 'cogstatus 1' ...` - each row's output lands in
 `target/parity/trace/<name>-console.txt`. Level 1's first cog is captured in
@@ -339,10 +350,10 @@ the rest being runtime local values that need the script's `startup` to run.
 
 That sample is the fixture the port-side verb reproduces format-wise: `bevi-knight --start
 01narshadda --cogstatus 1` prints `Cog #1: Name:<script>  Script <script>` plus `  Symbol i:
-\'<name>\'  = <value>` (floats to six decimals, integers bare). It does **not** yet print the same
-cog: the port's cog #1 is `00_door.cog` while retail's is `00_std_elev.cog`, so the placed-cog
-**ids do not line up** - a real bug with consequences beyond the console (message routing,
-`getselfcog`, the master cog) and the next thing to fix.
+\'<name>\'  = <value>` (floats to six decimals, integers bare). The ids now **do** line up: the port's
+`--links` probe lists retail's own script at each id (`thing 6 -> cog 1 ... 00_std_elev.cog`), which is
+the same `00_std_elev.cog` retail's `cogstatus 1` prints, so the earlier `00_door.cog`/`00_std_elev.cog`
+mismatch recorded here has been fixed; `--links` is the check.
 ## Known limitations / follow-ups
 
 - **Triage, not equality.** Retail runs its 16-bit DirectDraw/D3D path, translated by dgVoodoo2 to
