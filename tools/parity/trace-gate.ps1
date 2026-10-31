@@ -29,7 +29,7 @@ powershell -NoProfile -File tools/parity/trace-gate.ps1
 #  * walk5_spawn: joined in round 125 (81 % with 2 of 6 sectors) once the model footprint replaced the
 #    template cylinder; the slab-ramp sector difference is within the gate's allowance.
 # Both legs stay runnable with -Only.
-param([string[]]$Only = @('walk_street45', 'walk_street90', 'walk_cantina', 'walk_door0', 'walk4_spawn', 'walk5_spawn', 'walk6_spawn', 'walk9_spawn', 'walk12_spawn', 'walk13_spawn', 'walk7_spawn', 'walk14_spawn'))
+param([string[]]$Only = @('walk_street45', 'walk_street90', 'walk_cantina', 'walk_door0', 'walk4_spawn', 'walk5_spawn', 'walk6_spawn', 'walk9_spawn', 'walk12_spawn', 'walk13_spawn', 'walk7_spawn', 'walk14_spawn', 'walk17_spawn'))
 
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))

@@ -4311,3 +4311,35 @@ Environment, unchanged and measured again this round: a 120-frame window run tak
 earlier in the session), `--save-live` alone burned its 1200-frame budget for 599 s without a verdict, and the
 `--faces-at` probe did not complete in ten minutes. The code is unchanged from the verified round-158 tree apart
 from the probe and the test; `cargo test --release` is **148 passed** (147 + the seam test).
+
+**The level-17 spawn fall is fixed: the walker resolved the body's sector from its *feet* (round 162).** The
+chain that finally explained it, all measured this round:
+
+1. **The floor faces were there all along.** The new `--faces-at x,y,z` probe (moved *before* the Bevy app, so it
+   answers in 0.6 s even at the machine's current ~2 fps) lists the collision faces near a point. Level 17's spawn
+   floor is four wedge patches (surfaces 5618/5619/5621/5622, normals `(0,0,−1)`, `flags 0x80005`) meeting at an
+   **apex pinhole** exactly where the level places the player, with a **portal** (surface 5620, adjoin 1150)
+   covering the same area.
+2. `sector_for_body` at the spawn returns **485** — retail's own sector — with clearance +0.060 and
+   `floor_below` −8.200. So the resolution *rule* was right.
+3. But the walker **overwrote `player.sector` every frame from the feet**
+   (`sector_for_body(pos.z - radius)`): level 17's spawn has its feet 0.002 *below* the room's floor plane
+   (authored gap 0.063 against a 0.120114 insert height), the room hull rejects a point under its floor, and a
+   stacked shaft sector won — whose floor is 7.6 units lower. The body then fell 4.8 units and never landed,
+   because the landing probe found no floor over the pinhole.
+
+The fix is one block: resolve the sector from the body **centre** first, falling back to the feet (the levels the
+feet test was written for, `02narshadda`'s feet-at-2.905-over-a-3.0-floor, keep working). Measured:
+
+```
+walk17_spawn  port 0.82 / retail 0.70 units (117%), sectors off 0, ends (3.18, -8.40, -8.13) sector 485
+```
+
+Level 17 joins the walk-trace gate (13 legs). **Level 18 is not fixed** and its probe says why: the body resolves
+to its authored sector **723**, whose `floor_below` is **None** (the known `19a` defect — that sector reports no
+floor plane), while the floors under the point belong to sectors 0/717 that do not contain it. Its fixture stays
+committed with "no floor plane in its own sector" as the reason.
+
+Trace gate this round: **11 of 12 pass**. The one failure, `walk5_spawn` (3.43/5 sectors), is the documented
+load-flake *and* the machine's 2 fps: with the fix reverted it reads 3.09/3 sectors — it fails either way, and the
+comparison assumes a normal frame rate. `cargo test --release` is **148 passed**.

@@ -1306,3 +1306,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - **Environment still degraded**: a 120-frame window run takes 60 s (5 s earlier), `--save-live` ran 599 s
   without a verdict, `--faces-at` did not finish in ten minutes. Code unchanged from the verified round-158 tree
   apart from the probe and test; trace gate/parity/`--gates` deferred.
+
+## Update — round 162
+
+- **Level 17's spawn fall fixed.** `--faces-at` (now run before the Bevy app — 0.6 s even at 2 fps) showed the
+  floor is four wedge patches (5618/5619/5621/5622, `n (0,0,-1)`, `flags 0x80005`) meeting at an **apex pinhole**
+  where the spawn stands, with a portal (5620) over the same area. `sector_for_body` at the spawn correctly
+  returns retail's sector **485** (clearance +0.060, floor −8.200), but the walker overwrote `player.sector` from
+  the **feet** each frame; level 17's feet sit 0.002 below its floor plane (authored 0.063 vs 0.120114 insert),
+  so the room hull rejected them and a stacked shaft won — a 4.8-unit fall with no landing over the pinhole.
+  Fix: resolve from the body **centre** first, feet as fallback. Measured: **walk17_spawn port 0.82 / retail 0.70
+  (117 %), sectors off 0**, ends in sector 485. Added to the gate (now 13 legs).
+- **Level 18 remains**: it resolves to its authored sector **723**, whose `floor_below` is **None** (the known
+  `19a` defect), while the floors belong to sectors 0/717 that do not contain the point.
+- Trace gate: **11 of 12 pass**; the failure `walk5_spawn` (3.43/5 sectors) also fails with the fix reverted
+  (3.09/3) — the documented load-flake made worse by the machine's ~2 fps. Tests **148 passed**.

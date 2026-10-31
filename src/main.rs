@@ -1935,6 +1935,58 @@ fn main() {
 
     // `--scale`: how big the models really are against the level they are placed in. Both references
     // are the level's own geometry, so this answers "is the model scale right" without trusting it.
+    // `--faces-at x,y,z`: the **collision** faces near a point, plus `floor_under`'s answer there with
+    // the walker's numbers — the landing probe's own result on the real `Solids`, before the app starts
+    // (so it exits in under a second even when rendering is slow).
+    if let Some(text) = faces_probe.as_deref() {
+        let v: Vec<f32> = text.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+        if v.len() != 3 {
+            println!("faces-at: expected x,y,z");
+            return;
+        }
+        let at = [v[0], v[1], v[2]];
+        let solids = collide::build(&world.level);
+        println!(
+            "faces-at ({:.2}, {:.2}, {:.2}): {} collision face(s)",
+            at[0], at[1], at[2], solids.faces.len()
+        );
+        let mut found = 0;
+        for face in &solids.faces {
+            let dx = face.point[0] - at[0];
+            let dy = face.point[1] - at[1];
+            let dz = face.point[2] - at[2];
+            if dx * dx + dy * dy > 4.0 || dz.abs() > 2.0 {
+                continue;
+            }
+            found += 1;
+            println!(
+                "  face surface {} normal ({:>5.2},{:>5.2},{:>5.2}) point ({:.3},{:.3},{:.3}) verts {}",
+                face.surface,
+                face.normal[0], face.normal[1], face.normal[2],
+                face.point[0], face.point[1], face.point[2],
+                face.verts.len()
+            );
+        }
+        println!("faces-at: {found} within 2.0 plan / 2.0 vertical");
+        // Which sector does the body resolve to, and what floor does each nearby sector claim right
+        // under the point? `sector_for_body` prefers clearance, which on a stacked shaft picks the
+        // shaft (levels 17/18 fall at their spawn from exactly that).
+        println!("faces-at: sector_for_body -> {:?}", solids.sector_for_body(at));
+        for sector in solids.sectors_around(at) {
+            println!(
+                "  sector {sector}: clearance {:?} floor_below {:?}",
+                solids.clearance(sector, at),
+                solids.floor_below(sector, at)
+            );
+        }
+        for (height, radius) in [(0.1212f32, 0.065f32), (0.120114f32, 0.065f32), (0.03f32, 0.065f32)] {
+            println!(
+                "faces-at: floor_under(height {height:.4}, radius {radius:.3}) -> {:?}",
+                solids.floor_under(0, at, height, radius)
+            );
+        }
+        return;
+    }
     if scale_check {
         print_scale(&world);
         return;
@@ -6503,38 +6555,7 @@ fn main() {
                 );
             }
         }
-        if let Some(text) = faces_probe.as_deref() {
-            let v: Vec<f32> = text.split(',').filter_map(|n| n.trim().parse().ok()).collect();
-            if v.len() != 3 {
-                println!("faces-at: expected x,y,z");
-                return;
-            }
-            let at = [v[0], v[1], v[2]];
-            let solids = collide::build(&world.level);
-            println!(
-                "faces-at ({:.2}, {:.2}, {:.2}): {} collision face(s)",
-                at[0], at[1], at[2], solids.faces.len()
-            );
-            let mut found = 0;
-            for face in &solids.faces {
-                let dx = face.point[0] - at[0];
-                let dy = face.point[1] - at[1];
-                let dz = face.point[2] - at[2];
-                if dx * dx + dy * dy > 4.0 || dz.abs() > 2.0 {
-                    continue;
-                }
-                found += 1;
-                println!(
-                    "  face surface {} normal ({:>5.2},{:>5.2},{:>5.2}) point ({:.3},{:.3},{:.3}) verts {}",
-                    face.surface,
-                    face.normal[0], face.normal[1], face.normal[2],
-                    face.point[0], face.point[1], face.point[2],
-                    face.verts.len()
-                );
-            }
-            println!("faces-at: {found} within 2.0 plan / 2.0 vertical");
-            return;
-        }        let missing: Vec<usize> = world
+        let missing: Vec<usize> = world
             .level
             .surfaces
             .iter()
@@ -22878,8 +22899,20 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // feet at 2.905 with its floor at 3.0). One clamp here fixes the walk for all of them.
     // Sector first, then floor: the floor has to come from the room the body is standing in, not from
     // whatever sector the level named.
-    if let Some(sector) =
-        solids.0.sector_for_body([player.pos.x, player.pos.y, player.pos.z - player.rules.radius])
+    // The **centre** first, then the feet. A body whose feet poke a hair below its own floor fails a
+    // feet-based hull test: level 17's spawn places `walkplayer` 0.063 above a floor where the resting
+    // height is 0.120114, so the feet sit 0.002 *under* the plane, the room's hull rejects them, and
+    // `sector_for_body` handed the body to a stacked shaft sector whose floor is 7.6 units lower — the
+    // fall this round's traces chased. A hull contains a *body*, so test the centre; the feet test
+    // stays as the fallback for the levels it was written for (02narshadda: feet 2.905, floor 3.0).
+    if let Some(sector) = solids.0.sector_for_body([player.pos.x, player.pos.y, player.pos.z])
+        .or_else(|| {
+            solids.0.sector_for_body([
+                player.pos.x,
+                player.pos.y,
+                player.pos.z - player.rules.radius,
+            ])
+        })
     {
         player.sector = sector;
     }
@@ -22903,8 +22936,20 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // and 09fuelstation both place the player behind a wall plane of their own sector, so the
     // containment test undid every step and the body never moved. `sector_for_body` picks the room
     // with the most clearance around the feet, which is the room the body is actually standing in.
-    if let Some(sector) =
-        solids.0.sector_for_body([player.pos.x, player.pos.y, player.pos.z - player.rules.radius])
+    // The **centre** first, then the feet. A body whose feet poke a hair below its own floor fails a
+    // feet-based hull test: level 17's spawn places `walkplayer` 0.063 above a floor where the resting
+    // height is 0.120114, so the feet sit 0.002 *under* the plane, the room's hull rejects them, and
+    // `sector_for_body` handed the body to a stacked shaft sector whose floor is 7.6 units lower — the
+    // fall this round's traces chased. A hull contains a *body*, so test the centre; the feet test
+    // stays as the fallback for the levels it was written for (02narshadda: feet 2.905, floor 3.0).
+    if let Some(sector) = solids.0.sector_for_body([player.pos.x, player.pos.y, player.pos.z])
+        .or_else(|| {
+            solids.0.sector_for_body([
+                player.pos.x,
+                player.pos.y,
+                player.pos.z - player.rules.radius,
+            ])
+        })
     {
         player.sector = sector;
     }
