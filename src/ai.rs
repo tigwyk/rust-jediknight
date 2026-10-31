@@ -40,8 +40,11 @@ pub struct Ai {
 }
 
 impl Ai {
-    /// Whether the parameter line carried every field this build reads. The audit counts a
-    /// file as incomplete when one is missing, which is how a truncated `.ai` shows up.
+    /// Whether the parameter line spelled out every field this build reads. It is a
+    /// **fully-specified** check, not a validity one: `sithAIClass_LoadEntry` gives every field a
+    /// default before it reads the line, and `parse` applies the same defaults, so a class that
+    /// omits a key is a normal shipped class. The audit reports the count as "takes the loader's
+    /// defaults", which is how a file missing a field is noticed without calling it broken.
     pub fn complete(&self) -> bool {
         for key in ["alignment", "rank", "fov", "maxstep", "sightdist", "heardist", "accuracy"] {
             if !self.params.contains_key(key) {
@@ -102,8 +105,20 @@ impl Ai {
 
 /// Parse one `.ai` file. Unknown lines are ignored rather than rejected: the shipped files
 /// carry comments and blank lines, and an instinct this build cannot use is still data.
+///
+/// The fields start at the **engine's own defaults**, not zero: `sithAIClass_LoadEntry`
+/// (`decomp/004f15c0`) writes 0.5 to `maxstep`, 20.0 to `sightdist`, 10.0 to `heardist` and 0.5 to
+/// `accuracy` before it reads the parameter line, and only overwrites the keys a file carries.
+/// Ninety-one shipped classes omit at least one key (four omit `accuracy`), so a zero default made
+/// them blind or perfectly accurate where the engine gives them its defaults.
 pub fn parse(text: &str) -> Ai {
-    let mut ai = Ai::default();
+    let mut ai = Ai {
+        maxstep: 0.5,
+        sightdist: 20.0,
+        heardist: 10.0,
+        accuracy: 0.5,
+        ..Ai::default()
+    };
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -191,6 +206,22 @@ OpenDoors
         assert_eq!(parse(RYB).standoff(), None, "the fixture has no Follow line");
         // A zero standoff would put the chase on top of the target; it is not used.
         assert_eq!(parse("Follow 0.0, 0.0\n").standoff(), None);
+    }
+
+    /// A key a class omits takes the **engine's** default, not zero: `sithAIClass_LoadEntry`
+    /// (`decomp/004f15c0`) sets `maxstep` 0.5, `sightdist` 20.0, `heardist` 10.0 and `accuracy` 0.5
+    /// before reading the parameter line, and 91 shipped classes omit at least one key (four omit
+    /// `accuracy`). A zero default made those actors blind (sightdist 0) and perfectly accurate.
+    #[test]
+    fn omitted_parameters_take_the_engines_defaults() {
+        let sparse = parse("alignment=-1.0, rank=0.5, fov=180\n\nLookForTarget 500.0, 30000.0\n");
+        assert_eq!(sparse.sightdist, 20.0, "the loader's sightdist default");
+        assert_eq!(sparse.heardist, 10.0, "the loader's heardist default");
+        assert_eq!(sparse.maxstep, 0.5, "the loader's maxstep default");
+        assert_eq!(sparse.accuracy, 0.5, "the loader's accuracy default");
+        // A file that carries the keys still wins over the defaults.
+        assert_eq!(parse(RYB).sightdist, 5.0);
+        assert_eq!(parse(RYB).accuracy, 0.10);
     }
 
     #[test]

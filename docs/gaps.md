@@ -5759,3 +5759,16 @@ argument reads (`+0x10…+0x1c` four args, `+0x24`/`+0x28` two probabilities, `+
 next piece for the engagement-timing comparison; the exact axis/limit roles inside `CheckSightThing` are still being
 worked out (the `1 − fov-trigh` comparison there does not yet line up with a cone of `fov` degrees, so it stays an open
 question rather than a claimed formula).
+
+**Omitted AI parameters now take the engine's defaults, not zero (round 215).** The headless `--audit` pass reported
+**91 of the 231 shipped `.ai` classes take a default for at least one parameter** (four omit `accuracy` entirely, e.g.
+`misc\ai\boc.ai`). `sithAIClass_LoadEntry` writes the defaults *before* it reads the parameter line — `maxstep` 0.5,
+`sightdist` 20.0, `heardist` 10.0, `accuracy` 0.5 — so a missing key is a normal shipped class, not damage. The port's
+parser started from zero instead, which made those classes **blind** (`sightdist` 0) and **perfectly accurate**
+(`accuracy` 0, where the engine gives 0.5). `ai::parse` now starts from the loader's four defaults and only the keys a
+file carries override them, with a headless test (`omitted_parameters_take_the_engines_defaults`) pinning both halves:
+the sparse class gets 20/10/0.5/0.5, and a file that carries the keys still wins.
+
+The audit's wording follows: it now says "91 take loader defaults" and calls the samples `defaulted class:` rather than
+`odd class:` — a class that omits a key is not broken, it is defaulted. Suite: **151 tests, 0 failures**; the audit
+still passes and its counts are unchanged (this changed what those classes mean, not how many there are).

@@ -1986,3 +1986,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Still open and recorded as such: the exact role of the `1 − fov-trig` comparison inside `CheckSightThing` does not
   yet line up with a cone of `fov` degrees, so it stays a question rather than a claimed formula.
 - No game run and no port window; docs only. Tests **150 passed**.
+
+## Update — round 215
+
+- The headless `--audit` pass shows **91 of 231 shipped `.ai` classes take a default** for at least one parameter (four
+  omit `accuracy`). `sithAIClass_LoadEntry` defaults them (`maxstep` 0.5, `sightdist` 20, `heardist` 10, `accuracy`
+  0.5), so the port's zero start made those classes blind (`sightdist` 0) and perfectly accurate (`accuracy` 0).
+  `ai::parse` now starts from the loader's defaults; keys in the file still override.
+- Headless test `omitted_parameters_take_the_engines_defaults` pins both halves (sparse class → 20/10/0.5/0.5;
+  `RYB`'s explicit `sightdist 5` / `accuracy 0.10` still win). Suite **151 tests, 0 failures**.
+- Audit wording corrected: "91 take loader defaults", samples labelled `defaulted class:` instead of `odd class:`;
+  counts unchanged (this changed what the classes mean, not how many there are). `--audit` still passes.
+- No game run and no port window: the audit and asset reads are pre-app/headless.

@@ -15677,6 +15677,10 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
                 ai_files += 1;
                 ai_params += class.params.len();
                 ai_instincts += class.instincts.len();
+                // A class that omits a key is **not** broken: `sithAIClass_LoadEntry` gives every
+                // field a default before it reads the line, and `ai::parse` applies those same
+                // defaults (`maxstep` 0.5, `sightdist` 20, `heardist` 10, `accuracy` 0.5). So this
+                // count is "takes the loader's defaults for at least one field", not "incomplete".
                 if !class.complete() {
                     ai_incomplete += 1;
                     if ai_samples.len() < 5 {
@@ -15817,10 +15821,10 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
     }
     if ai_files > 0 {
         println!(
-            "ai classes (ai)       {ai_files} files, {ai_params} parameters, {ai_instincts} instincts, {ai_incomplete} without alignment/rank"
+            "ai classes (ai)       {ai_files} files, {ai_params} parameters, {ai_instincts} instincts, {ai_incomplete} take loader defaults"
         );
         for s in &ai_samples {
-            println!("  odd class: {s}");
+            println!("  defaulted class: {s}");
         }
     }
     if pup_files > 0 {
