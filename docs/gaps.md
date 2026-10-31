@@ -6182,3 +6182,37 @@ both look and walk — so on a failed roll retail turns toward the sound but doe
 **damage-event** path (`sithActor_DamageActor` emits type 1, which makes a hurt actor look at its attacker) is not read
 by the port's awareness; the handler's `ai + 8 & 1` "already moving" test and `SetMoveThing`'s cooldown are not modelled;
 and the alert sound modes (`sithSoundClass_PlayModeRandom`, 0x4b/0x57) have no audio layer yet.
+
+### Retail data collected for the next rounds (not yet ported)
+
+Two pieces of the retail binary were read while choosing the next item; they are recorded here so the next round
+starts from the data rather than from the decompile again.
+
+**The engine's sound-mode names.** `sithSoundClass_Startup` (`0x4e63e0`) registers a static pointer array at
+`0x54b40c` into a hash table with 1-based indices, and `sithSoundClass_LoadEntry` (`0x4e67d0`) keys each `.snd` row's
+first column through that table, storing it in the class's per-mode list at `class + 0x20 + mode*4`. Dumping the
+pointer array out of the retail `JK.EXE` gives all 95 modes: `create`=1, `activate`=2, `startmove`=3, `stopmove`=4,
+`moving`=5, walk/run surface sounds 6-25, water/swim 26-35, jump/land 36-45, hit/scrape 46-53, falling/corpse 54-55,
+the four damage types 56-59 (`hurtimpact` 56, `hurtenergy` 57, `hurtfire` 58, `hurtmagic` 59, `hurtspecial` 60),
+`drowning` 61, `choking` 62, deaths 63-67, `pant`/`breath`/`gasp` 68-70, `fire1`-`fire4` 71-74, and the moods 75-87
+(`curious`, `alert`, `idle`, `gloat`, `fear`, `boast`, `happy`, `victory`, `help`, `flee`, `search`, `calm`,
+`surprise`), then eight reserved. That mapping is the missing half of both `talk` and the per-type hurt sounds.
+
+**`talk`'s handler** (`0x50be20`) is now fully read: it sets its next run to `now + (int)arg0` (the first number on the
+class's `talk` line, rounded, stored at class entry `+0x4c`), rolls `rand()/32768 < arg1` (the second float, class
+entry `+0x10`), then picks a mode from the actor's AI script flags and health fraction: flags `0x200` and neither
+`0x800` nor `0x400` -> `happy` at health >= 0.5 else `search`; flags `0x200|0x400` -> `boast` at health >=
+`_DAT_005232f8` else `fear`; flags `0x800` -> `gloat` at health > 0.5 else `fear`; and plays
+`sithSoundClass_PlayModeRandom(thing, mode)`, which picks a random row from the actor's own `.snd` class. The port has
+the pieces — every `.snd` is parsed for the sound bank, templates carry `soundclass=`, `snd::Entry` has the event name —
+so this is class->event->wav plumbing plus a scheduler, not a new subsystem. (`_DAT_005232f8` is the one constant
+left unread.)
+
+**The first-person weapon's own sway.** The Camera row's missing `FUN_004051e0` sway is recovered:
+`jkPlayer_SetWaggle` (`0x405930`) stores the script's amplitude vector in `DAT_00552ba0/ba4/ba8` and its rate in
+`DAT_00552bac` (the port's `jksetwaggle` stores the vector and **drops the rate**). `jkPlayer_DrawPov` then, per
+frame: `phase += min(|move_speed|, 0.02) * rate` (reset to 0 when that product is 0; `move_speed` is the distance
+`sithCollision_MoveThing` returned, thing `+0x264`), `speed_norm = |velocity| / thing[0x21c]` (the thing's walking
+speed), and builds a rotation from `(sin(phase)`, forced negative, `* amp0 * speed_norm; cos(phase) * amp1 *
+speed_norm; cos(phase) * amp2 * speed_norm)`, then pre-multiplies it into the POV matrix after the negated eye offset.
+The port applies the waggle as a translation (`Vec3::X * sway[0]`) instead of this rotation.
