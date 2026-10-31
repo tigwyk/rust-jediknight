@@ -5816,11 +5816,11 @@ handler:
 | saberfighting | 45 | `0x40fa40` | no |
 | retreat | 42 | `0x50bc60` | **yes** (round 221: arms the withdraw mode when hurt) |
 | withdraw | 30 | `0x50b150` | **yes** (round 221: backs away from what hurt it) |
-| dodge | 27 | `0x50b360` | **yes** (rounds 239–240: both mechanical paths are in — the **damage** path (AI event 1, raised before health is subtracted: step away from the attacker, walking-flag gate, 1000 ms cooldown) and the **shot-passing** path (the player's `typeflags & 0x200000` projectile pre-sweep of five units, the actor's own sight test of the shot, and the random 45–90° sideways step); only the event-2 path through the level's thing table is still unported) |
+| dodge | 27 | `0x50b360` | **yes** (rounds 239–240: both mechanical paths are in — the **damage** path (AI event 1, raised before health is subtracted: step away from the attacker, walking-flag gate, 1000 ms cooldown) and the **shot-passing** path (the player's `typeflags & 0x200000` projectile pre-sweep of five units, the actor's own sight test of the shot, and the random 45–90° sideways step); its event-2 branch is unreachable in retail content — no emit site in the executable raises event 2) |
 | roam | 27 | `0x50b830` | **yes** (round 225: wanders around its home anchor) |
 | specialattack | 24 | `0x40fd00` | no |
 | hitandrun | 23 | `sithAICmd_HitAndRun` | **yes** (round 223: fires, then breaks off) |
-| sensedanger | 14 | `0x50b9b0` | **yes** (round 236: the awake gate, the alert bit `0x800`, the `fear` sound, the 3.0 awareness event and the player target; the handler's damage/surprise event paths are still the unported AI-event dispatch) |
+| sensedanger | 14 | `0x50b9b0` | **yes** (round 236: the scheduler path — awake gate, alert bit `0x800`, `fear` sound, 3.0 awareness event, player target; round 241: the **damage path** through the engine's event dispatcher — `surprise` sound, attacker (or its parent) as the target, `flags & !0x4 \| 0x800`; the handler's event-2/event-4 branches are unreachable in retail content because nothing emits those events) |
 | turretfire | 12 | `0x50a0f0` | **yes** (round 227: fires, stands still; head sweep not modelled) |
 | randomturn | 9 | `0x50b700` | **yes** (round 224: idle actors sweep their view) |
 | lobfire | 7 | `0x509cd0` | no |
@@ -6453,3 +6453,38 @@ with the reaction removed both fail ("the actor did not dodge a shot that would 
 Still open, on the ledger: the event-2 path, and the handler's `SetMoveThing(..., 2.5)` walk speed (the port walks the
 destination at the actor's own speed); the five-unit sweep uses the actor's `movesize` against the shot's line rather
 than the engine's full collision search.
+
+## Update — round 241 (the AI event dispatcher, and `sensedanger`'s damage path)
+
+Both event-driven instincts needed the engine's own event path, and reading it turned out to be worth more than the two
+handlers: `sithAI_EmitEvent` (`0x4e9f80`) is now a function in the runtime, and its **six call sites account for every
+event shipped content can raise**. In file order the class's instincts are tested against their registry masks
+(`sithAI_InstinctRegister`'s fifth argument), the matching handler is called, and the **first non-zero return stops the
+dispatch** — so one event is at most one reaction, and the class file's line order decides which. The outer gates are the
+engine's: a thing whose `flags` carry `0x202` has no AI, a dead body takes no events, the AI's `0x2000` bit switches it
+off, and the `0x1000` latch lets only event 2 through (clearing itself in the process).
+
+**The inventory is the finding.** The emit sites raise `1` (damage, `sithActor_DamageActor`), `0x100` (the
+`sithAI_InstinctUpdate` flags-changed cascade and the two AI-flag helpers), `0x400`/`0x800` (track target arrived/lost,
+`sithAI_idk_msgarrived_target`) and `0x1000` (the player's shot pre-sweep). **Nothing emits event 2 or event 4** — so
+`dodge`'s event-2 branch and `sensedanger`'s event-2/event-4 branches are dead code in the shipped game, and both ledger
+rows lose their "needs the AI event dispatch" item on evidence rather than on an approximation. The mask table in the port
+lists them anyway, because the handlers do.
+
+`sensedanger`'s **damage path** (`0x50b9b0`, event 1) is implemented through the dispatcher: an aware (`0x4`), not yet
+alerted (`0x800` clear) actor that is hit plays its **`surprise`** row (mode `0x57` — the seventh of the mood range
+75–87), takes `sithThing_GetThingParent(attacker)` as its target (the shooter, for a projectile) and swaps the awake bit
+for the alert bit (`flags & !0x4 | 0x800`). It raises **no** awareness event — that is the on-sight scheduler path's,
+which round 236 already ported. The two paths together are all fourteen shipped `sensedanger` classes can ever do.
+
+Checks (183 tests, headless): `sensedanger_reacts_to_damage_with_a_surprise_and_an_alert` (the damage still applies, the
+`surprise` row is queued at the actor, the flags swap, the attacker becomes the tracked target);
+`an_ai_event_stops_at_the_first_instinct_that_reacts` (a class listing `SenseDanger` before `Dodge` senses and does *not*
+dodge, the reverse dodges and does *not* alert — the engine's break); `ai_events_respect_the_engines_outer_gates`
+(`0x202` thing, dead body, `0x2000` switch-off and the `0x1000` latch). Measured before/after: with the `sensedanger` arm
+disabled the order check fails with "the sense-first class dodged after sensing" (left `Some([0.7, 0, 0])`, right
+`None`). `--ai`, `--hit` and `--weapons` pass; no window and no game run.
+
+Still open, on the ledger: the `0x100` flags-changed cascade (emitted after an instinct runs; no shipped instinct in this
+build subscribes to it), the `0x400`/`0x800` target events (they belong to the instinct scheduler / track-target code the
+port replaces with its own `ai_last_seen`/chase), and `SetMoveThing`'s speed parameter.

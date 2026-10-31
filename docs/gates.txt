@@ -2428,3 +2428,26 @@ running app.--carry-check --start 01narshadda                        0   level 2
   hit it"). Suite **180 passed**; headless `--ai`, `--hit` and `--weapons` pass; docs **132/132**.
 - No window and no game run. On the roadmap ledger: the event-2 path, the handler's 2.5 walk speed, and the sweep's
   approximation (actor `movesize` against the shot's line, not the full collision search).
+## Update — round 241
+
+- **The AI event dispatcher** (`sithAI_EmitEvent`, `0x4e9f80`) is a runtime function now: the engine's outer gates (a
+  `0x202`-flagged thing has no AI, a dead body takes no events, the AI's `0x2000` switch-off, and the `0x1000` latch
+  that lets only event 2 through and clears itself), then the class's instincts **in file order** against their registry
+  masks, the first non-zero handler return ending the dispatch.
+- **The emit-site inventory is the finding**: the executable's six call sites raise `1` (damage), `0x100` (the
+  `sithAI_InstinctUpdate` cascade and the two AI-flag helpers), `0x400`/`0x800` (track target arrived/lost) and `0x1000`
+  (the player's shot pre-sweep). Nothing emits event 2 or 4, so `dodge`'s event-2 branch and `sensedanger`'s
+  event-2/event-4 branches are **dead in the shipped game** — both ledger rows lose their "needs the AI event dispatch"
+  item on evidence.
+- **`sensedanger`'s damage path** lands through the dispatcher: an aware (`0x4`), not-yet-alerted (`0x800` clear) actor
+  that is hit plays its `surprise` row (mode `0x57`, the seventh mood), takes `sithThing_GetThingParent(attacker)` as its
+  target (the shooter for a projectile) and swaps the awake bit for the alert bit (`flags & !0x4 | 0x800`), with **no**
+  awareness event — that is the on-sight path's, ported in round 236.
+- Checks: `sensedanger_reacts_to_damage_with_a_surprise_and_an_alert`,
+  `an_ai_event_stops_at_the_first_instinct_that_reacts` (class line order decides: sense-first senses and does not dodge,
+  dodge-first dodges and does not alert), `ai_events_respect_the_engines_outer_gates`. Measured before/after: with the
+  `sensedanger` arm disabled the order check fails with "the sense-first class dodged after sensing"
+  (left `Some([0.7, 0, 0])`, right `None`). Suite **183 passed**; headless `--ai`, `--hit` and `--weapons` pass; docs
+  **132/132**.
+- No window and no game run. On the roadmap ledger: the `0x100` cascade (nothing in this build subscribes), the
+  `0x400`/`0x800` track-target events (replaced by the port's own `ai_last_seen`/chase), and `SetMoveThing`'s speed.

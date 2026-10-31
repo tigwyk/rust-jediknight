@@ -2922,10 +2922,11 @@ impl Runtime {
     /// The handler computes `point = self - arg0 * normalize(attacker - self)` and hands it to
     /// `sithAI_SetMoveThing(ai, point, 2.5)` — the same `ai + 0x93` destination the port's `ai_move`
     /// is — then sets its own 1000 ms cooldown. `arg0` is the first number after the class line's
-    /// weight (`dodge 0.1, 0.1` for a grunt, `0.3, 0.1` for a boss).
-    fn dodge_from_damage(&mut self, actor: usize, attacker: usize) {
+    /// weight (`dodge 0.1, 0.1` for a grunt, `0.3, 0.1` for a boss). Returns whether it reacted, which
+    /// is what stops `sithAI_EmitEvent`'s dispatch.
+    fn dodge_from_damage(&mut self, actor: usize, attacker: usize) -> bool {
         if self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x1 != 0 {
-            return;
+            return false;
         }
         let Some(step) = self
             .ai
@@ -2933,22 +2934,22 @@ impl Runtime {
             .and_then(|class| class.instinct("Dodge"))
             .and_then(|dodge| dodge.args.first().copied())
         else {
-            return;
+            return false;
         };
         let step = step as f32;
         if step == 0.0 || self.time < self.ai_dodge.get(&actor).copied().unwrap_or(0.0) {
-            return;
+            return false;
         }
         let (Some(from), Some(to)) = (
             self.things.get(actor).map(|t| t.pos),
             self.things.get(attacker).map(|t| t.pos),
         ) else {
-            return;
+            return false;
         };
         let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
         let flat = (dx * dx + dy * dy).sqrt();
         if flat < 1e-4 {
-            return;
+            return false;
         }
         let point = [from[0] - dx / flat * step, from[1] - dy / flat * step, from[2]];
         self.ai_move.insert(actor, point);
@@ -2956,6 +2957,113 @@ impl Runtime {
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} dodges {step:.2} away from thing {attacker} to {point:?}");
         }
+        true
+    }
+
+    /// `sensedanger`'s damage path (`0x50b9b0`, event 1): an **awake** actor (`0x4`) that has not
+    /// yet been alerted (`0x800` clear) plays its `surprise` sound (mode `0x57`, seventh of the mood
+    /// range 75–87), takes `sithThing_GetThingParent(attacker)` as its target — the shooter, for a
+    /// projectile — and swaps the awake bit for the alert bit (`flags & !0x4 | 0x800`). Unlike the
+    /// scheduler path it raises **no** awareness event: that is the on-sight branch's.
+    fn sensedanger_from_damage(&mut self, actor: usize, attacker: usize) -> bool {
+        let flags = self.actor_flags.get(&actor).copied().unwrap_or(0);
+        if flags & 0x4 == 0 || flags & 0x800 != 0 {
+            return false;
+        }
+        if self
+            .ai
+            .get(&actor)
+            .is_none_or(|class| class.instinct("SenseDanger").is_none())
+        {
+            return false;
+        }
+        let target = self
+            .things
+            .get(attacker)
+            .and_then(|t| t.owner)
+            .unwrap_or(attacker);
+        let (Some(at), Some(target_pos)) = (
+            self.things.get(actor).map(|t| t.pos),
+            self.things.get(target).map(|t| t.pos),
+        ) else {
+            return false;
+        };
+        self.actor_flags.insert(actor, (flags & !0x4) | 0x800);
+        // `ai[0x70]` is the target thing; the port's chase reads the target's last-seen position.
+        self.ai_last_seen.insert(actor, target_pos);
+        self.queue_mode_sound(actor, "surprise", at);
+        if std::env::var_os("BK_AI_TRACE").is_some() {
+            eprintln!("ai: {actor} is surprised by thing {attacker} (target {target})");
+        }
+        true
+    }
+
+    /// The event mask a registered instinct enables (the registry's fifth argument): only the two
+    /// instincts this build gives event handlers to are listed — `dodge` `0x1003` (damage, event 2,
+    /// the shot) and `sensedanger` `0x7` (damage, event 2, event 4). Everything else is
+    /// scheduler-only, which is why the mask table does not need the other 23 rows.
+    fn instinct_event_mask(name: &str) -> u32 {
+        match name.to_ascii_lowercase().as_str() {
+            "dodge" => 0x1003,
+            "sensedanger" => 0x7,
+            _ => 0,
+        }
+    }
+
+    /// `sithAI_EmitEvent` (`0x4e9f80`): raise one AI **event** on one actor. The engine's outer
+    /// gates come first — the thing is not `0x202`-flagged (`SITH_TF` says no AI), it is alive, the AI
+    /// is not switched off (`0x2000`), and the `0x1000` one-shot latch lets only event 2 through and
+    /// clears itself doing so — then every instinct whose class line enables the event's mask is
+    /// called **in file order**, stopping at the first handler that returns non-zero.
+    ///
+    /// Every emit site in the executable is accounted for: `sithActor_DamageActor` raises 1 (this
+    /// build calls it from `damage_typed_from`), `sithWeapon_WeaponFireProjectile` raises `0x1000`
+    /// (called from `fire_with_spread`), `sithAI_InstinctUpdate`/the two AI-flag helpers raise the
+    /// `0x100` cascade, and the track-target helper raises `0x400`/`0x800`. **Nothing emits event 2 or
+    /// event 4**, so those branches of `dodge` and `sensedanger` are dead in retail content too — the
+    /// dispatcher's mask table lists them because the handlers do, not because content reaches them.
+    pub fn emit_ai_event(&mut self, actor: usize, event: u32, source: Option<usize>) -> bool {
+        let Some(thing) = self.things.get(actor) else {
+            return false;
+        };
+        if thing.flags & 0x202 != 0 || thing.health <= 0.0 {
+            return false;
+        }
+        let flags = self.actor_flags.get(&actor).copied().unwrap_or(0);
+        if flags & 0x2000 != 0 {
+            return false;
+        }
+        if flags & 0x1000 != 0 {
+            if event != 2 {
+                return false;
+            }
+            self.actor_flags.insert(actor, flags & !0x1000);
+        }
+        let Some(class) = self.ai.get(&actor).cloned() else {
+            return false;
+        };
+        for instinct in &class.instincts {
+            if Self::instinct_event_mask(&instinct.name) & event == 0 {
+                continue;
+            }
+            let acted = match (instinct.name.to_ascii_lowercase().as_str(), event) {
+                ("dodge", 1) => {
+                    source.is_some_and(|attacker| self.dodge_from_damage(actor, attacker))
+                }
+                ("dodge", 0x1000) => {
+                    let shot = source.and_then(|s| self.things.get(s).map(|t| t.pos));
+                    shot.is_some_and(|shot| self.dodge_from_shot(actor, shot))
+                }
+                ("sensedanger", 1) => {
+                    source.is_some_and(|attacker| self.sensedanger_from_damage(actor, attacker))
+                }
+                _ => false,
+            };
+            if acted {
+                return true;
+            }
+        }
+        false
     }
 
     /// The nearest actor a shot from `from` along `dir` would sweep into within `range` — the port's
@@ -3023,9 +3131,9 @@ impl Runtime {
     /// against 0.5 — the constants are the EXE's `_DAT_005232b0` 45, `_DAT_005232b4` -45 and
     /// `_DAT_005232a0` 0.5) and steps `arg0` units along the **negated** rotated direction: a sideways
     /// dodge, not a retreat.
-    fn dodge_from_shot(&mut self, actor: usize, shot: [f32; 3]) {
+    fn dodge_from_shot(&mut self, actor: usize, shot: [f32; 3]) -> bool {
         if self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x200 == 0 {
-            return;
+            return false;
         }
         let Some(step) = self
             .ai
@@ -3033,34 +3141,34 @@ impl Runtime {
             .and_then(|class| class.instinct("Dodge"))
             .and_then(|dodge| dodge.args.first().copied())
         else {
-            return;
+            return false;
         };
         let step = step as f32;
         if step == 0.0 {
-            return;
+            return false;
         }
         let Some((from, yaw)) = self.things.get(actor).map(|t| (t.pos, t.yaw)) else {
-            return;
+            return false;
         };
         if !self
             .ai
             .get(&actor)
             .is_some_and(|class| class.sees(from, yaw, shot))
         {
-            return;
+            return false;
         }
         if self
             .solids
             .as_ref()
             .is_some_and(|solids| solids.segment_blocked(from, shot))
         {
-            return;
+            return false;
         }
         let (dx, dy) = (shot[0] - from[0], shot[1] - from[1]);
         let flat = (dx * dx + dy * dy).sqrt();
         if flat < 1e-4 {
             // The shot is on the actor: there is no direction to step around.
-            return;
+            return false;
         }
         let mut angle = crate::cog::pseudo_random() as f32 * 45.0 + 45.0;
         if (crate::cog::pseudo_random() as f32) < 0.5 {
@@ -3074,6 +3182,7 @@ impl Runtime {
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} dodges the shot from {shot:?} sideways to {point:?}");
         }
+        true
     }
 
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
@@ -4049,18 +4158,6 @@ impl Runtime {
                 ],
             }
         };
-        // `sithWeapon_WeaponFireProjectile`'s **player-only pre-sweep**: when the shooter is the local
-        // player and the projectile's `typeflags` (the `SITH_WF_*` word, `thing + 0x130`, which
-        // `sithWeapon_Update` also reads) carry `0x200000` (`+bryarbolt` ships
-        // `typeflags=0x20440d`), the engine sweeps the shot's first five units and emits AI event
-        // `0x1000` with the projectile on the actor it found — `dodge`'s shot-passing path. It runs
-        // before the projectile exists, so this is a reaction to the shot, not to a hit.
-        if usize::try_from(shooter).ok() == Some(self.player_thing())
-            && self.template_typeflags.get(&template).copied().unwrap_or(0) & 0x200000 != 0
-            && let Some(actor) = self.first_actor_on_path(muzzle, forward, 5.0)
-        {
-            self.dodge_from_shot(actor, muzzle);
-        }
         self.things.push(ThingState {
             pos: muzzle,
             insert: [0.0; 3],
@@ -4101,10 +4198,25 @@ impl Runtime {
                 0.0
             },
         });
+        // The projectile's typeflags decide whether the engine runs its player pre-sweep; read before
+        // the template String moves into `self.templates`.
+        let pre_sweep = self.template_typeflags.get(&template).copied().unwrap_or(0) & 0x200000 != 0;
         self.templates.push(template);
         self.types.push(kind);
         let index = self.things.len() - 1;
         self.arm_life(index);
+        // `sithWeapon_WeaponFireProjectile`'s **player-only pre-sweep**: when the shooter is the local
+        // player and the projectile's `typeflags` (the `SITH_WF_*` word, `thing + 0x130`, which
+        // `sithWeapon_Update` also reads) carry `0x200000` (`+bryarbolt` ships
+        // `typeflags=0x20440d`), the engine sweeps the shot's first five units and raises AI event
+        // `0x1000` with the projectile on the actor it found — `dodge`'s shot-passing path. The sweep
+        // runs once the projectile exists, exactly as the engine's does.
+        if pre_sweep
+            && usize::try_from(shooter).ok() == Some(self.player_thing())
+            && let Some(actor) = self.first_actor_on_path(muzzle, forward, 5.0)
+        {
+            self.emit_ai_event(actor, 0x1000, Some(index));
+        }
         Some(index)
     }
 
@@ -5062,15 +5174,16 @@ impl Runtime {
         if self.invulnerable(index, kind) {
             return self.things.get(index).map(|t| t.health).unwrap_or(0.0);
         }
-        // `sithActor_DamageActor` (`0x4ecc90`) emits AI **event 1** with the attacker *before* it
+        // `sithActor_DamageActor` (`0x4ecc90`) raises AI **event 1** with the attacker *before* it
         // subtracts the health (`if (param_2 != param_1 && thing->type == 2)
-        // sithAI_EmitEvent(thing->ai, 1, param_2)`), and `dodge`'s handler uses it to step away.
+        // sithAI_EmitEvent(thing->ai, 1, param_2)`); `dodge` steps away and `sensedanger` plays its
+        // surprise and turns on whoever hit it.
         if source > 0
             && self.types.get(index).copied() == Some(2)
             && let Ok(attacker) = usize::try_from(source)
             && attacker != index
         {
-            self.dodge_from_damage(index, attacker);
+            self.emit_ai_event(index, 1, Some(attacker));
         }
         // The player's palette flashes red on every hit that lands, whichever path applied it.
         if index == self.player_thing() {
@@ -9396,6 +9509,148 @@ mod tests {
         rt.things[1].yaw = 180.0;
         assert!(rt.fire(1, "+bryarbolt").is_some(), "the actor's own shot did not spawn");
         assert!(!rt.ai_move.contains_key(&1), "an actor's own shot made somebody dodge");
+    }
+
+    /// `sensedanger`'s damage path (`0x50b9b0`, event 1): an aware, not-yet-alerted actor that is hit
+    /// plays its `surprise` sound (mode `0x57`), takes the attacker — or the attacker's parent, for a
+    /// projectile — as its target, and swaps the awake bit for the alert bit.
+    #[test]
+    fn sensedanger_reacts_to_damage_with_a_surprise_and_an_alert() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [1.0, 0.0, 0.0];
+        let mut attacker = base.clone();
+        attacker.pos = [3.0, 0.0, 0.0];
+        rt.things = vec![base, actor, attacker];
+        rt.templates = vec!["walkplayer".into(), "grunt".into(), "grunt".into()];
+        rt.types = vec![10, 2, 2];
+        rt.things[1].health = 100.0;
+        rt.things[2].health = 100.0;
+        rt.template_soundclass.insert("grunt".into(), "grunt.snd".into());
+        rt.sound_classes.insert(
+            "grunt.snd".into(),
+            std::collections::BTreeMap::from([(
+                "surprise".to_string(),
+                vec![("surprise1.wav".to_string(), 1.0)],
+            )]),
+        );
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=5.0, heardist=2.0\n\n\
+                 SenseDanger 0.10, 1.00\n",
+            ),
+        );
+        rt.actor_flags.insert(1, 0x4);
+        rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
+        assert_eq!(rt.things[1].health, 95.0, "the damage did not apply");
+        let flags = rt.actor_flags.get(&1).copied().unwrap_or(0);
+        assert_eq!(flags & 0x4, 0, "the awake bit survived the surprise");
+        assert_ne!(flags & 0x800, 0, "the alert bit was not set");
+        assert_eq!(rt.sounds.len(), 1, "no surprise sound was queued");
+        assert_eq!(rt.sounds[0].name, "surprise1.wav");
+        assert_eq!(
+            rt.ai_last_seen.get(&1).copied(),
+            Some([3.0, 0.0, 0.0]),
+            "the surprise did not make the attacker the target"
+        );
+    }
+
+    /// The dispatcher calls the class's instincts **in file order** and stops at the first handler that
+    /// reacts (`sithAI_EmitEvent` breaks the loop on a non-zero return). So one hit is either a
+    /// surprise or a sidestep, never both — which order the class lists decides which.
+    #[test]
+    fn an_ai_event_stops_at_the_first_instinct_that_reacts() {
+        let hit = |sense_first: bool| {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let mut actor = base.clone();
+            actor.pos = [1.0, 0.0, 0.0];
+            let mut attacker = base.clone();
+            attacker.pos = [3.0, 0.0, 0.0];
+            rt.things = vec![base, actor, attacker];
+            rt.templates = vec!["walkplayer".into(), "grunt".into(), "grunt".into()];
+            rt.types = vec![10, 2, 2];
+            rt.things[1].health = 100.0;
+            rt.things[2].health = 100.0;
+            rt.template_soundclass.insert("grunt".into(), "grunt.snd".into());
+            rt.sound_classes.insert(
+                "grunt.snd".into(),
+                std::collections::BTreeMap::from([(
+                    "surprise".to_string(),
+                    vec![("surprise1.wav".to_string(), 1.0)],
+                )]),
+            );
+            let lines = if sense_first {
+                "SenseDanger 0.10, 1.00\nDodge 0.3, 0.3\n"
+            } else {
+                "Dodge 0.3, 0.3\nSenseDanger 0.10, 1.00\n"
+            };
+            rt.ai.insert(
+                1,
+                crate::ai::parse(&format!(
+                    "alignment=-1.0, rank=0.5, fov=90, sightdist=5.0\n\n{lines}"
+                )),
+            );
+            rt.actor_flags.insert(1, 0x4);
+            rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
+            (
+                rt.ai_move.get(&1).copied(),
+                rt.actor_flags.get(&1).copied().unwrap_or(0),
+                rt.sounds.len(),
+            )
+        };
+        let (moved, flags, sounds) = hit(true);
+        assert_eq!(moved, None, "the sense-first class dodged after sensing");
+        assert_ne!(flags & 0x800, 0);
+        assert_eq!(sounds, 1);
+        let (moved, flags, sounds) = hit(false);
+        assert!(moved.is_some(), "the dodge-first class did not dodge");
+        assert_eq!(flags & 0x4, 0x4, "the dodge-first class alerted after dodging");
+        assert_eq!(sounds, 0, "the dodge-first class played the surprise anyway");
+    }
+
+    /// `sithAI_EmitEvent`'s own outer gates: a thing whose `flags` carry `0x202` has no AI, a dead body
+    /// takes no events, `0x2000` switches the AI off, and the `0x1000` one-shot latch lets only event 2
+    /// through (clearing itself on the way).
+    #[test]
+    fn ai_events_respect_the_engines_outer_gates() {
+        let sample = |setup: &dyn Fn(&mut Runtime)| {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let mut actor = base.clone();
+            actor.pos = [1.0, 0.0, 0.0];
+            let mut attacker = base.clone();
+            attacker.pos = [3.0, 0.0, 0.0];
+            rt.things = vec![base, actor, attacker];
+            rt.templates = vec!["walkplayer".into(), "grunt".into(), "grunt".into()];
+            rt.types = vec![10, 2, 2];
+            rt.things[1].health = 100.0;
+            rt.things[2].health = 100.0;
+            rt.ai.insert(
+                1,
+                crate::ai::parse(
+                    "alignment=-1.0, rank=0.5, fov=90, sightdist=5.0\n\nDodge 0.3, 0.3\n",
+                ),
+            );
+            rt.actor_flags.insert(1, 0x200);
+            setup(&mut rt);
+            rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
+            (rt.ai_move.contains_key(&1), rt.actor_flags.get(&1).copied().unwrap_or(0))
+        };
+        assert!(sample(&|_| {}).0, "the plain case did not dodge");
+        assert!(!sample(&|rt| rt.things[1].flags = 0x202).0, "a 0x202 thing reacted");
+        assert!(!sample(&|rt| rt.things[1].health = 0.0).0, "a dead body reacted");
+        assert!(!sample(&|rt| {
+            rt.actor_flags.insert(1, 0x200 | 0x2000);
+        })
+        .0, "an AI switched off reacted");
+        let (moved, flags) = sample(&|rt| {
+            rt.actor_flags.insert(1, 0x200 | 0x1000);
+        });
+        assert!(!moved, "the 0x1000 latch let an event through");
+        assert_ne!(flags & 0x1000, 0, "the latch cleared without event 2");
     }
 
     /// `turretfire` (`0x50a0f0`): a turret's class (`turdefault.ai`) carries **no `PrimaryFire`**, so
