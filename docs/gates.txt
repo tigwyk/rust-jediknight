@@ -1497,3 +1497,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   records it only when a puppet exists. The next probe is the retail side's puppet mode at the walk instant (REA or
   Frida on the staged process), since the console does not expose it.
 - Tests **149 passed**.
+
+## Update — round 177
+
+- `BK_VERB_TRACE` now prints the **calling cog's index**, separating each script's stream (the lines name each cog via
+  `--links`). On level 20: cog 3 = `20_RahnLines` (camera key + dialogue sounds), cog 4 = `20_BocSearch` (the
+  HasLOS/GetLevelTime poll), cog 6 = a health/flags check.
+- No cog issues a player teleport. Retail's own startup displacement ((−0.00005,−1.90,−0.18) → (0,0,−0.18) during
+  the settle) is the **engine's spawn collision**, not a script effect; the port's walk harness starts at the
+  post-push pose the row carries, so the comparison is unaffected. The level-20 "intro stall" is not a missing
+  teleport — the intro plays its 16 s dialogue and the walk window sits inside it, as retail's does.
+- The only measured difference remains the script-camera input suppression (the round-173 deviation). Tests
+  **149 passed**.

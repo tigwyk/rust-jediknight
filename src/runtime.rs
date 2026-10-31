@@ -4874,7 +4874,10 @@ impl Runtime {
 
     pub fn call(&mut self, verb: &str, args: &[Value]) -> Value {
         if std::env::var_os("BK_VERB_TRACE").is_some() {
-            eprintln!("verb: {verb} {args:?}");
+            // The calling cog's **index** (`--links` names each one), so a trace of several scripts
+            // separates: the intro and the boss loops call the same verbs, and a mixed stream cannot
+            // say which one is stalled.
+            eprintln!("verb [cog {}]: {verb} {args:?}", self.caller_cog);
             if verb.eq_ignore_ascii_case("getthinghealth") {
                 for arg in args {
                     if let Value::Num(n) = arg {

@@ -4738,3 +4738,26 @@ call happens later in its intro than the walk window, so the port's map is still
 The next probe is the **retail** side's puppet move mode at the walk instant — the engine console does not expose it,
 so it needs either a retail-side memory read (REA/Frida against the staged process) or the intro script's full
 timeline recovered from the `.cog` binaries. Until then the deviation row stands with its measured groups.
+
+**The verb trace now names the calling cog — and the level-20 intro's missing teleport is not script-driven (round
+177).** `BK_VERB_TRACE` used to mix every script's calls into one stream. It now prints the calling cog's index
+(`--links` names each), which separates them on level 20:
+
+```
+cog 3 (20_RahnLines): SetMusicVol, PlayKey(44,"BOcamera.key"), AISetMoveSpeed(45), AISetLookFrame(45),
+                      AISetMoveFrame(45), PlaySoundLocal x3
+cog 4 (20_BocSearch): HasLOS(1,43), GetLevelTime   (the polling loop, repeated)
+cog 6:                GetThingHealth(43), GetThingFlags(43), GetPhysicsFlags(43), IsMulti
+```
+
+So the intro cog runs its camera key and dialogue sounds and then waits; no cog issues a **teleport** for the player.
+Retail's own trace moves the body from the level's recorded placement
+(−0.00005, −1.90, −0.18) to (0, 0, −0.18) during the capture's settle, which is therefore the **engine's spawn
+collision** (the recorded pose is embedded and the first physics frame pushes it out), not a script effect. The
+port's walk harness starts the body at the *post-push* pose the row carries (its first sample reads
+(0.00, 0.00, −0.225)), so the walk comparison is unaffected — and that also means the intro's "stall" recorded in
+round 172 is not a missing teleport; the intro simply plays its 16 s dialogue and the port's walk window sits inside
+it, exactly as retail's does.
+
+That closes the level-20 question to the one measured fact: the port suppresses input under a script camera and
+retail does not, and the engine's own lock in the decomp is for *video* cutscenes only. The deviation row stands.
