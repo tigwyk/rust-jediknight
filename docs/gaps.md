@@ -4714,3 +4714,27 @@ functions recovered from the EXE — the decomp subset does not carry them. The 
 retail walks under a script camera : 16b (1.03), 20 (4.20), 20b (3.24), 17b (4.00)
 retail stays still under one      : 14 (0.00), 7 (0.11), 21 (0.33), 21b (0.34)
 ```
+
+**No port-visible state separates the walker and pinned groups at the walk window (round 176).** The walk trace now
+also prints the player's **puppet play mode** (`sithPuppet_PlayMode`, recorded by the port's `play_mode` map but
+until now unread) and its **thing flags**, alongside the actor/jk flags and the script-camera state. Measured at the
+same instant for all five reference levels:
+
+```
+pinned-14  actor 0xa00008  jk 0x0   script camera (45)  play mode None  thing flags 0
+pinned-7   actor 0xa00008  jk 0x1   script camera (29)  play mode None  thing flags 0
+pinned-21  actor 0xa00008  jk 0x81  script camera (23)  play mode None  thing flags 0
+walker-20  actor 0xa00008  jk 0x81  script camera (44)  play mode None  thing flags 0
+walker-17b actor 0xa00008  jk 0x0   script camera (38)  play mode None  thing flags 0
+```
+
+Every field the port records is identical across the split (and `jk 0x81`/`0x0` each occur on one walker and one
+pinned level). The decomp explains why the *engine* can still differ: `sithPuppet_UpdateThingMove`
+(`004e4380`) derives the puppet **move mode** from the body's actual velocity and flag bits — `thing[0x74] & 0x2000`
+forces mode 2, a byte at `puppet+0x34 & 2` forces it too — and `sithPuppet_SetMoveMode` (`004e4760`) only records it
+when a puppet exists. Those are *runtime animation* states the port does not model; the level-14 script's `PlayMode`
+call happens later in its intro than the walk window, so the port's map is still empty at the moment measured.
+
+The next probe is the **retail** side's puppet move mode at the walk instant — the engine console does not expose it,
+so it needs either a retail-side memory read (REA/Frida against the staged process) or the intro script's full
+timeline recovered from the `.cog` binaries. Until then the deviation row stands with its measured groups.

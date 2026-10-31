@@ -1485,3 +1485,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - So the split is in **`sithActor`'s state machine**, which the available decomp does not include; the deviation's
   retire condition is updated to say it needs `sithActor` recovered from the EXE. Groups measured:
   walks = 16b (1.03), 20 (4.20), 20b (3.24), 17b (4.00); still = 14 (0.00), 7 (0.11), 21 (0.33), 21b (0.34).
+
+## Update — round 176
+
+- The walk trace now prints the player's **puppet play mode** and **thing flags**. Measured at the walk window, all
+  five reference levels are identical: `actor 0xa00008`, `play mode None`, `thing flags 0`, a script camera, and
+  `jk flags` of 0x0/0x1/0x81 each appearing on both a walker and a pinned level. No port-visible field separates
+  the groups.
+- The decomp shows the engine's difference is *runtime animation* state: `sithPuppet_UpdateThingMove` derives the
+  move mode from velocity and flag bits (`thing[0x74] & 0x2000`, `puppet+0x34 & 2`), and `sithPuppet_SetMoveMode`
+  records it only when a puppet exists. The next probe is the retail side's puppet mode at the walk instant (REA or
+  Frida on the staged process), since the console does not expose it.
+- Tests **149 passed**.
