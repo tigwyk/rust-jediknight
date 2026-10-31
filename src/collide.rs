@@ -1443,6 +1443,7 @@ impl Solids {
         // *lateral* answer stays sector-scoped, because a wall in another room must not block a corridor.
         let range = (height * 1.1).max(radius + 0.005);
         let mut best: Option<(f32, f32, usize)> = None;
+        let mut best_face: Option<Face> = None;
         for face in &self.faces {
             // A vertical face is not a floor, and a downward one is a ceiling.
             if face.normal[2].abs() < 0.2 {
@@ -1471,6 +1472,27 @@ impl Solids {
                 .unwrap_or(sector);
             if best.is_none_or(|(near, _, _)| floor > near) {
                 best = Some((floor, pos[2] - at[2], owner));
+                best_face = Some(face.clone());
+            }
+        }
+        // `BK_FLOOR_TRACE`: a landing *below the body's own sector floor* is how a body ends up standing on
+        // something its room does not call a floor (level 5's plateau: the landing was 0.0502 against a
+        // sector floor of 0.1001). Naming the face and both normals there is the only way to tell a
+        // legitimate off-sector landing (level 6, whose own sector's floor is elsewhere) from the plateau.
+        if std::env::var_os("BK_FLOOR_TRACE").is_some()
+            && let (Some((floor, _, owner)), Some(face)) = (best, best_face)
+        {
+            let here = self.floor_below(sector, pos);
+            if here.is_none_or(|h| floor < h - 0.03) {
+                eprintln!(
+                    "floor: landing {floor:.4} on surface {} owner {owner} (sector {sector} floor {here:?}) file normal {:?} room {:?} pos {pos:?}",
+                    face.surface,
+                    face.normal,
+                    self.sectors
+                        .get(owner)
+                        .and_then(|planes| planes.iter().find(|p| p.surface == face.surface))
+                        .map(|p| p.normal),
+                );
             }
         }
         best

@@ -5063,3 +5063,29 @@ plane, walk5 and walk6 land on faces that disagree — so the plateau is **not**
 discriminator must be something else about the two faces (their polygons, their sectors, or the probe's reach), and
 the next probe is to name them: print the landing face's `surface`, its sector and both normals when a landing happens
 below the *sector's* floor. The round's code was reverted (no measured benefit); tests **149 passed**.
+
+**The `BK_FLOOR_TRACE` probe names the offending faces — walk5 and walk6 land on the *same class* of face (round
+188).** A gated print in `floor_under` now reports any landing **below the body's own sector floor**, with the face,
+its owner sector and both normals:
+
+```
+walk5: landing -0.0415 on surface 342 owner 33 (sector 35 floor Some(0.100059))
+       file normal [0.443, 0.443, -0.779]  room Some([0.443, 0.443, -0.779])
+walk6: landing  0.9551 on surface 2837 owner 316 (sector 318 floor Some(0.999571))
+       file normal [0.597, -0.532, -0.601] room Some([0.597, -0.532, -0.601])
+```
+
+Both are **downward-facing slopes owned by another sector**, landed on *below* the body's own sector floor, and both
+normals agree (the file's and the sector's), which is why round 186/187's orientation rules could not separate them.
+The difference is only frequency: walk5 does it every frame of the window (six samples in the first two seconds),
+walk6 once. That corrects the earlier reading again — "walk6 needs the flip" is wrong; walk6 needs a face that *both*
+sources call downward, i.e. the walker standing briefly on a neighbouring room's slope, exactly like level 5.
+
+The obvious fix — reject a landing below the body's own sector floor — was implemented and **measured, then
+reverted**: `walk6_spawn` stayed at its passing 1.06 / 2 sectors, every other leg was unchanged, and `walk5_spawn`
+went 3.70 → 3.39 with five sector mismatches. The filter therefore does not fix the plateau's *path*: the body stops
+landing on the slope but still does not descend into the room retail crosses. The probe stays (env-gated, no runtime
+effect otherwise); the rule does not.
+
+Next probe: with the body no longer on the slope, where does it stand (the trace's sector line beside the landing
+print), and why does it not reach the sector 33/34/24 floors retail walks on.

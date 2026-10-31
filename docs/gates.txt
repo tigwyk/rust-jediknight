@@ -1643,3 +1643,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   so both sources call walk6's landing face "downward" and walk5's "upward" in the same sense that matters. The next
   probe names the landing faces (surface, sector, both normals) at a landing below the sector's own floor.
 - Tests **149 passed** (after the revert).
+
+## Update — round 188
+
+- New `BK_FLOOR_TRACE` probe: reports any landing **below the body's own sector floor** with the face, owner sector and
+  both normals. It shows walk5 (surface 342, owner 33, normal (0.44,0.44,−0.78)) and walk6 (surface 2837, owner 316,
+  normal (0.60,−0.53,−0.60)) land on the **same class** of face — a downward slope owned by another sector, below the
+  body's own sector floor — with file and room normals agreeing (why the orientation rules of rounds 186/187 could not
+  separate them). Frequency is the only difference: walk5 every frame, walk6 once.
+- The "reject a landing below the own sector floor" filter was measured and **reverted**: walk6 kept its passing
+  1.06/2, everything else unchanged, walk5 3.70→3.39 — no gain on the plateau's path (the body stops landing on the
+  slope but still does not descend to the room retail crosses).
+- Tests **149 passed**; the probe is kept, the rule is not.
