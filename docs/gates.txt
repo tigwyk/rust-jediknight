@@ -1633,3 +1633,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
   point the wrong way.
 - Next change: orient `Face.normal` from the sector's own hull plane (`own`, already computed in `collide::build`)
   instead of the file normal, then drop the flip. Tests **149 passed**.
+
+## Update — round 187
+
+- The planned sector-side normal change was implemented fully (`Solids::room_normals`, `floor_under` using the hull
+  plane's `own` normal with the engine's front-facing rule) and measured: it reproduced the exclusion candidates
+  **exactly** — walk5 3.39, walk6 0.85/3 (broken), cantina 0 sectors, everything else unchanged. Reverted.
+- The identity is the finding: orienting faces from the sector does not separate walk5's plateau from walk6's floor,
+  so both sources call walk6's landing face "downward" and walk5's "upward" in the same sense that matters. The next
+  probe names the landing faces (surface, sector, both normals) at a landing below the sector's own floor.
+- Tests **149 passed** (after the revert).

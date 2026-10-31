@@ -5042,3 +5042,24 @@ the `Face`. If `Face.normal` used `own` instead of the file normal, every floor/
 engine assumes (the `.jkl` normals are documented to point into the room; the ones that do not are the defect), the
 front-facing rule would be sound, and the flip in `floor_under` could go. That is the next change to implement and
 measure against the same table.
+
+**The sector-side normal map produces the same outcome as the file-normal exclusion — the discriminator is
+elsewhere (round 187).** The planned change was implemented in full: `Solids` gained
+`room_normals: HashMap<surface, [f32; 3]>` (the sector's own hull-plane normal, `own` in `build`), `floor_under`
+used it in place of the file normal with the engine's front-facing rule (`room[2] < 0.2` → not a floor), and the
+shipped-normal tolerance flip stayed only for faces without a room-normal entry (test geometry). It compiled, the 149
+tests passed, and the measured result was **exactly the exclusion candidates'**:
+
+| leg | baseline | room-normals in the floor search |
+| --- | --- | --- |
+| `walk5_spawn` | 3.70 (99 %), 5 | 3.39 (91 %), 5 |
+| `walk6_spawn` | 1.06 (98 %), 2 — pass | 0.85 (79 %), 3 — **broken** |
+| `walk_cantina` | 2.65, 2 | 2.65, **0** |
+| `walk9`, `17`, `19`, `26`, `street45`, `4`, `18` | — | unchanged |
+
+That identity is the finding: whether the orientation comes from the shipped face normal or from the sector's own hull
+plane, walk5 and walk6 land on faces that disagree — so the plateau is **not** resolved by orienting faces, and the
+"walk6 needs the flip" reading was wrong: what walk6 needs is a face that *both* sources call downward. The
+discriminator must be something else about the two faces (their polygons, their sectors, or the probe's reach), and
+the next probe is to name them: print the landing face's `surface`, its sector and both normals when a landing happens
+below the *sector's* floor. The round's code was reverted (no measured benefit); tests **149 passed**.
