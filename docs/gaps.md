@@ -4665,3 +4665,26 @@ So the suppression is a **deliberate deviation** that is right for 14/7 by accid
 row is rewritten with these numbers and the retire condition: port the **player's immobility state** (prone/knockdown
 after level 14's cutscene, and level 7's own pin), then drop the blanket suppression and let 20/21 into the gate.
 Reverted for now so the gate stays green; 149 tests pass.
+
+**Phase 2 breadth reaches the campaign's alternate branches — with one new gate leg (round 174).** The single-player
+episode's Debug list continues past chapter 21 with a second set of rows (22–28), and the mapping was established
+empirically rather than guessed: retail's spawn sector identifies the level, and the port's own `--faces-at` probe
+confirms where the geometry exists (each answers in under a second).
+
+| row | level | retail | port |
+| --- | --- | --- | --- |
+| 22 | `16bEscapeShip` | 1.03 units | **2.88** (280 %, 5 sectors) — over-travel |
+| 23 | `17bsarris` | **4.00** | **0.00** (5 sectors) — body frozen |
+| 24–25 | `18Ascend`, `19A` | — | the same levels as rows 17–18, already covered |
+| 26 | `19B` | 0.42 (448 → 51 at 600 ms, then still) | **0.42**, **0 sector mismatches** — **pass**, joins the gate (15 legs) |
+| 27 | `20bboc` | **3.24** | **0.00** (0 sectors) — body frozen |
+| 28 | `21bjerec` | 0.34 | **0.00** (0 sectors) — body frozen |
+
+The three frozen legs are the **same deviation** the round-173 ledger row names: their openings hold a script
+camera, the port suppresses input, and retail does not read the lock that way — level 20b walks **3.24** units under
+one. Level 22's over-travel is a different shape (the port keeps walking where retail stops at 1.03) and joins the
+list with level 8 and level 18's travel as "the port does not stop where retail does".
+
+The row-22/23/26/27 labels were first guessed from the `--levels` listing and **corrected** against the sector
+fingerprints: rows 22–28 map to `16b, 17b, 18Ascend, 19A, 19B, 20b, 21b`, so what started as "walk26 = 20b" is
+actually row 26 = `19B` and "walk27 = 21b" is row 27 = `20b`. Five fixtures are committed with the corrected names.

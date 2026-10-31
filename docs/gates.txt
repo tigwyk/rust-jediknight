@@ -1462,3 +1462,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   sectors), but `walk14` (5.21/0.00) and `walk7` (2.54/0.11) break. Reverted so the gate stays green; the ledger row
   now records the deviation with these numbers and the retire condition (port the player's immobility state).
 - Tests **149 passed**.
+
+## Update — round 174
+
+- Phase 2 breadth: the campaign's **alternate branch** (Debug rows 22–28) measured and fingerprinted by spawn
+  sector: `16bEscapeShip` (retail 1.03 / port 2.88, over-travel), `17bsarris` (4.00 / 0.00, frozen),
+  `19B` at row 26 (**0.42 / 0.42, 0 sector mismatches — pass, joins the gate: 15 legs**), `20bboc` (3.24 / 0.00,
+  frozen), `21bjerec` (0.34 / 0.00, frozen).
+- The frozen legs are the round-173 deviation (script-camera input suppression) on the alternate branch; level 20b
+  walks 3.24 units under a script camera in retail. Level 22's over-travel joins the "port does not stop where
+  retail does" list (level 8, level 18 travel).
+- Label correction: rows 22–28 are `16b, 17b, 18Ascend, 19A, 19B, 20b, 21b`; five fixtures committed under the
+  corrected names. Tests **149 passed**.

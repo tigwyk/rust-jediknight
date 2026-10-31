@@ -98,3 +98,18 @@ walk20_spawn	20aboc.jkl	0	0	-0.217	0	0	1000
 #
 # walk21_spawn: debug entry 21.
 walk21_spawn	21ajerec.jkl	0	0	-0.717	0	0	1000
+#
+# walk22_spawn: the campaign's alternate branch, chapter 15b (`16bEscapeShip`).
+walk22_spawn	16bEscapeShip.jkl	0	5.19	-2.157	0	0	1000
+#
+# walk23_spawn: alternate branch, chapter 16b (`17bsarris`).
+walk23_spawn	17bsarris.jkl	2.31	-2.75	-0.317	0	90	1000
+#
+# walk26_spawn: alternate branch, chapter 20b (`20bboc`).
+walk26_spawn	19B.jkl	3.01	-1.38	-14.567	0	-90	1000
+#
+# walk27_spawn: alternate branch, chapter 21b (`21bjerec`).
+walk27_spawn	20bboc.jkl	-0.31	-0	-0.217	0	0	1000
+#
+# walk28_spawn: alternate branch, chapter 21b (`21bjerec`).
+walk28_spawn	21bjerec.jkl	0	0	-0.717	0	0	1000
