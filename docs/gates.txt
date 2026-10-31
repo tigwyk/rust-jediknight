@@ -1277,3 +1277,20 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Environment note: the `--gates` run was attempted twice, slowed to ~1 min per check and hung after `--tour`
   (heavy captures all session). Round verification = tests **147 passed** and trace gate; the full `--gates`
   and parity runs to be re-run on a quieter machine.
+
+## Update — round 160
+
+- Level 17's spawn floor is in retail's own sector **485** at z −8.200 (surface 5618/5619/5621/5622), authored
+  with an **upward** normal and `flags 0x80005`; the spawn point sits exactly on the **seam** between two of the
+  patches. `floor_under` returns `None` for every spawn frame with **no candidate face reaching `sphere_plane`**,
+  while the point test `floor_below` finds a floor there — so the landing probe loses the body on a patch seam.
+  Next experiment: the probe's coverage test at the seam (the engine's `FindFloor` walks the hull, whose
+  footprint shares the seam).
+- Two experiments measured and **reverted** (house rule): a 0.02 authored-pose tolerance on the "never lift"
+  landing bound (no change — the probe yields no candidate at all), and (previous round) the adjoin-first sector
+  fallback.
+- **Environment**: the port renders at ~**2 fps** now (120 frames took 60 s; same work took 5 s earlier today),
+  `--save-live` ran 599 s and printed no verdict, so `--gates` reports frame-budget gates as `(no verdict)`.
+  Code is unchanged from the verified round-158 tree (`aab23a0`), display modes at baseline, no stuck game
+  process — the machine's state, not a regression. Tests **147 passed**; trace gate/parity deferred to a quieter
+  machine.

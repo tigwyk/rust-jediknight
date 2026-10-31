@@ -4228,3 +4228,64 @@ Environment note: this round's `--gates` run was attempted twice and each time s
 hung after `--tour` (the machine has been running heavy game captures all session). Verification for the round is
 therefore the test suite and the trace gate, both clean; the full `--gates` and parity runs are to re-run at the
 start of the next round on a quieter machine.
+
+**The level-17/18 spawn fall is pinned to the landing probe returning nothing (round 160).** The fall from round
+159 is not in the sector pick (that was ruled out) — it is in `floor_under`, the walker's falling-floor probe.
+Instrumented at the spawn:
+
+```
+walk trace:     floor_under sector 502 pos [3.24, -9.21, -8.137] height 0.1217 radius 0.065 -> None
+```
+
+and inside the probe, for those same frames, **no candidate face is even considered** (the per-face diagnostic
+printed only faces from a different caller, 3 units lower) — the body's own floor at z −8.252 exists and
+`floor_below(504, pos)` finds it, but `floor_under`'s scan reaches it through `sphere_plane(..., range, radius,
+normal, point)` and that returns `None` for every face the spawn has. So the body has no landing candidate at all
+and falls freely; the sector adoption (`502 → 504 → 503`) that follows is a symptom, not the cause.
+
+Two experiments this round, both **measured and reverted**:
+
+- **A 0.02 authored-pose tolerance on the "never lift" landing bound** — level 17 places its `walkplayer` 0.115
+  above the floor where the template insert height is 0.120114, so the body spawns 0.005 below its resting
+  height and the 1e-3 bound refuses every landing. Measured: **no change** (both levels still fell the same
+  distances), because the probe never yields a candidate — reverted per the house rule.
+- The adjoin-first sector fallback was reverted last round for the same reason.
+
+The next read is `sphere_plane` itself (`collide.rs`): with `dir = (0,0,−1)`, a plane whose oriented normal is
+`(0,0,+1)`, `range = 0.134` and `radius = 0.065`, a floor 0.115 below the body centre should give a hit at
+`t = 0.05`. It returns `None`, so either its range test measures from the wrong point or it rejects a plane the
+body is *already touching* — which is exactly the standing case (the body starts resting on that floor, 0.115
+above it against a 0.120114 rest height).
+
+Level 17/18's fixtures stay committed, both documented with "spawn fall" as the reason.
+
+**Level 17's spawn floor is a seam of upward-normal floor patches — and the environment itself degraded this
+round (round 160).**
+
+*The floor.* `--surfaces-at` around level 17's spawn (z −8.20) shows the real floor in **retail's own sector
+485**, not in the sector the port resolves the body to (502):
+
+```
+surfaces-at 5618: sector 485 z -8.200..-8.200 x 3.24..3.94 y -9.26..-8.33 verts 4 flags 0x80005 n (0,-0,+1) solid true
+surfaces-at 5619: sector 485 z -8.200..-8.200 x 2.36..3.26 y -10.01..-9.24 verts 6 flags 0x80005 n (0,-0,+1) solid true
+surfaces-at 5621: sector 485 z -8.200..-8.200 x 2.36..3.28 y -9.27..-8.33 verts 6 flags 0x80005 n (0,0,+1) solid true
+surfaces-at 5622: sector 485 z -8.200..-8.200 x 2.89..3.94 y -10.01..-9.04 verts 4 flags 0x80005 n (0,0,+1) solid true
+```
+
+Three facts fall out. The floor is authored with an **upward** normal (`build()` files floors by `normal[2] <
+−0.7`, so these are solid faces but never in the `floors` list — `floor_under`'s face scan still sees them and
+orients them toward the body, so that half is fine). It carries `flags 0x80005` (bit `0x80000`, which no other
+floor in the probe has). And the spawn point `(3.24, −9.21)` sits **exactly on the seam** between 5618 (x from
+3.24) and 5619 (y to −9.24): the diagnostic shows `floor_under` returning `None` for every spawn frame, with
+**no candidate face even reaching `sphere_plane`**, while `floor_below` — which tests the *point* — finds a floor
+0.05 below. So the landing probe's sphere test is losing the body on a floor-patch seam, and the next experiment
+is the probe's coverage test there: the engine's `FindFloor` walks the *hull*, whose footprint shares the seam
+between patches, where a sphere of the body's own radius at the exact edge is the marginal case.
+
+*The environment.* This round could not complete its verification runs: the port now renders at about **2 frames
+a second** (120 frames took 60 s; earlier today the same work took 5 s), `--save-live` alone ran its full 1200-frame
+budget for **599 s** and printed no verdict, and `--gates` therefore reports frame-budget gates as
+`(no verdict)` and fails them. The code is unchanged from the verified round-158 tree (working tree clean at
+`aab23a0`), the display modes are at their saved baseline and no game process is stuck — so this is the machine's
+state (hours of retail captures, a large desktop session), not a port regression. `cargo test --release` is
+**147 passed**; the trace gate and parity runs are deferred to a round on a quieter machine.
