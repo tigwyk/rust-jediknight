@@ -1677,3 +1677,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - **Walk-trace gate: 15 legs, 1 failure** — only `walk5_spawn` (3.43/3.73 = 92 %, 5 sectors), the tracked deviation;
   the same numbers as the ~2 fps runs confirm its failure is genuine, not a frame-rate artefact.
 - `cargo test --release`: **149 passed**. Every suite is green with the only failure tracked on the deviation ledger.
+
+## Update — round 191
+
+- New `tools/parity/interaction-shots.tsv` row `switch_use` drives the level-1 door switch with the harness's existing
+  `-Keys`/`-ConsoleCommands`. The pose is **coords-verified**: `warp -4 -3 -1.09 0 135 0` puts the body at
+  (-4.00,-3.00,-1.18) sector 254, in front of things 56/57 (cog 11 `00_doorswitch.cog`). Two heights (`-1.337`,
+  `-0.457`) print "Position not in world", so the working value matters and is recorded.
+- Measured: control and use (`9`) both leave `doorstatus 0 / movestatus 0` — the synthetic use key does not fire the
+  switch even from the verified pose. The next candidates are the middle-mouse binding and the engine's look/range
+  gate; the retie condition stays as recorded.
+- Tests **149 passed**.

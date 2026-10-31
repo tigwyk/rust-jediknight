@@ -1,0 +1,7 @@
+# Interaction rows: a pose plus the keys and console commands that make the retail engine act.
+# Same format as shots.tsv; the harness applies `-Keys` and `-ConsoleCommands` to every row it runs.
+# switch_use: the level-1 cantina door switch. Things 56/57 are linked to cog 11 (`00_doorswitch.cog`,
+# link 1) at (-4.75,-3.75,-1.10)/(-4.45,-3.75,-1.10). The warp at eye z -1.09 puts the body at
+# (-4.00,-3.00,-1.18) sector 254 (coords-verified); yaw 135 gives the direction (-0.707,-0.707),
+# straight at the switch. The use key is `9` (the profile's ACTIVATE binding, VK 57).
+switch_use	01narshadda	-4.0	-3.0	-1.09	0	135

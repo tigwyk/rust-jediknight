@@ -5129,3 +5129,32 @@ gate) did **not** disturb the draw gate: every parity pair is within a thousandt
 `route_cantina` improved. Second, `walk5_spawn` reads **3.43/3.73 with 5 sector mismatches at normal speed exactly as
 it did at ~2 fps**, so its failure is a genuine defect (the ledger's floor-search-scope row) and not a frame-rate
 artefact — the round-180 determinism finding is confirmed on a fast machine.
+
+**Phase 1 step 4's retail side: the switch pose is now coords-verified, and the use action still does not fire (round
+191).** With the fast machine back, a new `tools/parity/interaction-shots.tsv` row drives the level-1 door switch
+through the harness's existing `-Keys`/`-ConsoleCommands` support (which was written for exactly this probe):
+
+```
+switch_use  01narshadda  -4.0  -3.0  -1.09  0  135
+```
+
+`warp -4 -3 -1.09 0 135 0` puts the body at **(-4.00, -3.00, -1.18) PYR (1.12, 135.02, 1.12) sector 254** by the
+engine's own `coords` — directly in front of things 56/57 (cog 11 `00_doorswitch.cog`, link 1) at
+(-4.75,-3.75,-1.10). Two heights were rejected first — `-1.337` and `-0.457` both print **"Position not in world"**
+— so retail's warp has a narrow z window here, and the working value is recorded in the row's comment.
+
+The control and the use run then read the same cog state:
+
+```
+control (no key) : doorstatus = 0   movestatus = 0
+use     (`9`)    : doorstatus = 0   movestatus = 0
+```
+
+so the synthetic **`9`** (the profile's ACTIVATE binding, VK 57) does not open the switch even from the verified pose.
+The walk legs prove synthetic keys reach the engine's movement path, so the use action's own gate (a look/range test in
+`sithPlayer`'s use scan, or DirectInput-only delivery for the action bindings) is the remaining suspect — and the
+middle mouse is the other binding to try before the deviation's retire condition ("synthetic mouse input reaches the
+switch, or a keyboard-only trigger is found") can move.
+
+The row and its two console captures are committed; the ledger's interaction row gains the verified pose so the next
+attempt starts from it rather than re-deriving it.
