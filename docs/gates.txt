@@ -1408,3 +1408,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
   other measured legs unchanged).
 - `--gates` still cannot complete at ~2 fps (1200-frame window checks = 600 s each, no per-check timeout); deferred.
   Tests **149 passed**.
+
+## Update — round 170
+
+- Phase 2 breadth: **levels 19, 20, 21** measured with committed fixtures. `walk19_spawn` (`19B.jkl`) is a clean
+  **stop-pose pass** (retail 0.00, port 0.00, 0 sectors) and joins the gate (14 legs). `walk20_spawn` (retail 4.20,
+  port 0.00) and `walk21_spawn` (retail 0.33, port 0.00) fail for one cause: both levels open with a **script
+  camera** that is still current when the walk starts — `script camera (true, camera 0, focus Some(44))` for level
+  20, `Some(23)` for 21 — so the walker suppresses input by design, while retail's capture walks at 600 ms (its
+  script has cleared the camera). That is a **cog/script state** difference (Phase 3), not movement.
+- The walk trace now prints the script-camera state so the clearing event can be watched. Tests **149 passed**.

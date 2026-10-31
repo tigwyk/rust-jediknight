@@ -23091,7 +23091,17 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
                     .unwrap_or_default()
             })
             .unwrap_or_default();
-        eprintln!("walk trace: player actor flags {actor:#x} jk flags {jk:#x} template typeflags {template_flags}");
+        let scripted = sim
+            .as_deref()
+            .map(|sim| {
+                let rt = sim.world.borrow();
+                (rt.script_camera, rt.current_camera, rt.camera_focus_thing())
+            })
+            .unwrap_or((false, 0, None));
+        eprintln!(
+            "walk trace: player actor flags {actor:#x} jk flags {jk:#x} template typeflags {template_flags} script camera {:?}",
+            scripted
+        );
         let around = solids.0.sectors_around(pos);
         let mut floors: Vec<(usize, Option<f32>)> = around
             .iter()

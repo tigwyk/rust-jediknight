@@ -89,3 +89,12 @@ walk17_spawn	18Ascend	3.24	-9.21	-8.137	0	0	1000
 #
 # walk18_spawn: debug entry 18.
 walk18_spawn	19A.jkl	-0.35	-2.15	0.083	0	0	1000
+#
+# walk19_spawn: debug entry 19.
+walk19_spawn	19B.jkl	3.43	-1.38	-14.517	0	-90	1000
+#
+# walk20_spawn: debug entry 20.
+walk20_spawn	20aboc.jkl	0	0	-0.217	0	0	1000
+#
+# walk21_spawn: debug entry 21.
+walk21_spawn	21ajerec.jkl	0	0	-0.717	0	0	1000

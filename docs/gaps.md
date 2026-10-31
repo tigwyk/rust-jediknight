@@ -4547,3 +4547,27 @@ within a thousandth of round 158's — the sector-centre fix changed the walker'
 capture poses, which is exactly what a draw gate should show. `--gates` still cannot complete on this machine: its
 window checks each burn a 1200-frame budget (600 s at 2 fps) and the sweep's per-check wall clock has no timeout;
 it is re-run when the frame rate recovers.
+
+**Phase 2 breadth reaches level 21 — and levels 20/21 expose a script-camera difference (round 170).** Levels
+19–21 measured with committed fixtures:
+
+| leg | retail | port |
+| --- | --- | --- |
+| `walk19_spawn` (`19B.jkl`, chapter 19) | **0.00** units (body does not move) | **0.00**, 0 sector mismatches — **pass**, a stop-pose leg |
+| `walk20_spawn` (`20aboc.jkl`, chapter 20) | **4.20** units (1.40 u/s, sectors 16 → 49 → 47) | **0.00**, 3 sector mismatches |
+| `walk21_spawn` (`21ajerec.jkl`, chapter 21) | **0.33** then stops, sector 18 | **0.00**, 0 sector mismatches (travel fails) |
+
+The two failures are one cause, and it is not the walker: both levels open with a **script camera**, and the port's
+is still current when the walk window starts —
+
+```
+walk20: script camera (true, camera 0, focus Some(44))
+walk21: script camera (true, camera 0, focus Some(23))
+```
+
+— so `walk_player` suppresses input by design (a script camera takes the body over, round 152) and the body never
+moves. Retail's own capture walks at 600 ms, so its script camera has **ended** by then: the level's script clears
+it (`SetCameraFocus(0, 0)` / `SetCurrentCamera(0)`) and the port's script has not, or has not yet. That is a
+**cog/script state** difference (Phase 3), not a movement one, and the fixtures are committed with that reason.
+The walk trace now prints the script-camera state (`script camera (flag, slot, focus thing)`) so the next probe can
+watch for the clearing event. Level 19 joins the gate (now 14 legs).
