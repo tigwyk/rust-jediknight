@@ -10,8 +10,11 @@
 //! PrimaryFire         1250.0, 0.8, 4.0, 0.20, 0.0, 400.0, 0.00, 0.00, 1.0, 500.0
 //! ```
 //!
-//! The first number on an instinct line is its *weight* in the engine's instinct
-//! scheduler, not a period; this build keeps it as data and does not schedule yet.
+//! The first number on an instinct line is the instinct's **own first argument**, whatever its
+//! handler reads it as: `LookForTarget`'s scan interval (ms), `listen`'s reaction chance (0-1),
+//! `retreat`'s health fraction, `hitandrun`'s hold time. This build keeps it in
+//! [`Instinct::weight`] — the name the first parser gave it — and does not run the engine's
+//! instinct scheduler.
 
 use std::collections::BTreeMap;
 

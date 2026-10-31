@@ -2261,3 +2261,20 @@ running app.--carry-check --start 01narshadda                        0   level 2
   `name, parts, key, phase, base, frame`.
 - Suite **164 passed**; docs **132/132**; no window and no game run. The visual result stays on the QA-window list — a
   material's texture can only be judged in a frame.
+
+## Update — round 233
+
+- **`listen` is complete: the hearing gates and the class's reaction chance.** The handler (`0x50a6f0`) rejects a sound
+  it cannot hear — outside `heardist`, or (via `sithAI_sub_4EB300`, called with the class's **sightdist** and the cone
+  branch disabled) through geometry unless it is nearer than `_DAT_005232c8` = **1.0** unit and inside
+  `_DAT_005232a0` = **0.5** = 60°. Both constants were read from the retail `JK.EXE`'s `.rdata` (1.0 and 0.5; the
+  neighbouring view-cone values confirm the block). Once a sound passes, the handler rolls `rand()/32768 < arg0`, where
+  `arg0` is the first number on the class's `listen` line — shipped: 0.50 in most classes, 1.00 in `boc`/`gorc`, 0.00 in
+  `bosentry` — and only then `SetMoveThing`s; the roll is per sound event (`sithAI_EmitEvent`), not per tick.
+- `Runtime::heard_event` replaces `heard_at` (newest-first ring scan plus the gates, through a shared `hearable`
+  predicate) and `ai_tick` rolls once, remembering the decision per actor in `ai_listen`. Checks:
+  `a_listen_chance_of_zero_ignores_a_sound_in_clear_hearing` (roll removed: the `0.0` class walks to `[1.25, 0, 0]` and
+  the check fails) and `a_sound_through_geometry_is_heard_only_when_close_and_in_front` (gates removed: the blocked
+  1.5-unit case is accepted and the check fails). Suite **166 passed**; headless `--ai` passes; docs **132/132**.
+- No window and no game run. Remaining `listen` deviations are on the row: the look-only path on a failed roll, the
+  damage-event path, the already-moving/cooldown test, and the alert sound modes (no audio layer).

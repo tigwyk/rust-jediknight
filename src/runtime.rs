@@ -708,6 +708,30 @@ pub const AI_AWARE_SHOT: f32 = 4.0;
 /// How long a record stays fresh. The engine's own fade is not recovered; the flat value keeps the
 /// old stand-in's window.
 pub const AI_AWARE_SECONDS: f32 = 8.0;
+/// The `listen` handler's two distance/bearing constants, read from the retail `JK.EXE`:
+/// `_DAT_005232c8` = **1.0** unit and `_DAT_005232a0` = **0.5** (cos 60°). A sound heard through
+/// geometry is only heard when it is nearer than one unit **and** inside a 60° half-cone in front;
+/// a sound in clear line of sight is heard at any bearing inside `heardist`.
+pub const AI_LISTEN_NEAR: f32 = 1.0;
+pub const AI_LISTEN_FRONT_DOT: f32 = 0.5;
+
+/// Whether an actor at `from` facing `forward` **hears** the sound at `pos` — the `listen` handler's
+/// own test (`0x50a6f0`). Inside `heardist` always; a sound the path finds `blocked` (geometry
+/// between the two) only when it is nearer than [`AI_LISTEN_NEAR`] and the forward dot is above
+/// [`AI_LISTEN_FRONT_DOT`], i.e. within 60° of straight ahead.
+fn hearable(from: [f32; 3], forward: [f32; 2], pos: [f32; 3], heardist: f32, blocked: bool) -> bool {
+    let (dx, dy, dz) = (pos[0] - from[0], pos[1] - from[1], pos[2] - from[2]);
+    let reach = (dx * dx + dy * dy + dz * dz).sqrt();
+    if reach > heardist {
+        return false;
+    }
+    if !blocked {
+        return true;
+    }
+    reach < AI_LISTEN_NEAR
+        && reach > 1e-4
+        && (forward[0] * dx + forward[1] * dy) / reach > AI_LISTEN_FRONT_DOT
+}
 
 pub struct Runtime {
     pub things: Vec<ThingState>,
@@ -1078,6 +1102,10 @@ pub struct Runtime {
     /// is the interval (500 ms in every class), and a scan that finds a target hands it to the normal
     /// chase/aim logic rather than snapping the body round.
     pub ai_scan: BTreeMap<usize, f32>,
+    /// The one roll `listen` makes per heard sound: which event an actor has answered, and whether
+    /// the class's reaction chance passed. `sithAI_EmitEvent` invokes the handler once per event, so
+    /// a failed roll must not be retried while that same sound is still in the sector's ring.
+    pub ai_listen: BTreeMap<usize, (f32, [f32; 3], bool)>,
     /// When each actor may try the `opendoors` action next. Its handler (`0x50abc0`) calls
     /// `sithPlayerActions_Activate` — the **player's** use action — on the actor's own body, and that
     /// function throttles itself to 250 ms. An actor with the instinct opens the door it is walking
@@ -1692,6 +1720,7 @@ impl Runtime {
             ai_route: BTreeMap::new(),
             ai_last_seen: BTreeMap::new(),
             ai_scan: BTreeMap::new(),
+            ai_listen: BTreeMap::new(),
             ai_opendoors: BTreeMap::new(),
             ai_home: BTreeMap::new(),
             ai_flee_until: BTreeMap::new(),
@@ -2720,19 +2749,34 @@ impl Runtime {
             .map(|(_, pos, _)| *pos)
     }
 
-    /// The freshest event in `sector`'s ring that a body at `from` can actually **hear**: the engine's
-    /// `listen` scans the ring newest first and takes the first event inside the class's `heardist`,
-    /// which is why a shot across a room does not wake a short-ranged guard while a nearer one does.
-    pub fn heard_at(&self, sector: i32, side: i32, from: [f32; 3], heardist: f32) -> Option<[f32; 3]> {
+    /// `listen` (`0x50a6f0`, the `sithAICmd_Listen` handler): the newest sound in `sector`'s ring
+    /// that a body at `from`, facing `forward`, can actually **hear**, with the sound's event time.
+    ///
+    /// The handler's own conditions, and the constants it reads from the retail EXE
+    /// ([`AI_LISTEN_NEAR`], [`AI_LISTEN_FRONT_DOT`]): the sound must be inside the class's
+    /// `heardist`, and either in clear line of sight — then heard at any bearing — or, when the path
+    /// is blocked, nearer than one unit **and** inside a 60° half-cone in front (dot > 0.5). A slot
+    /// that fails is skipped and the next, older event in the ring is tried.
+    pub fn heard_event(
+        &self,
+        sector: i32,
+        side: i32,
+        from: [f32; 3],
+        forward: [f32; 2],
+        heardist: f32,
+    ) -> Option<([f32; 3], f32)> {
         self.sector_awareness
             .get(&(sector, side))?
             .iter()
             .filter(|(_, _, at)| self.time - *at < AI_AWARE_SECONDS)
-            .map(|(_, pos, _)| *pos)
-            .find(|pos| {
-                let (dx, dy, dz) = (pos[0] - from[0], pos[1] - from[1], pos[2] - from[2]);
-                (dx * dx + dy * dy + dz * dz).sqrt() <= heardist
+            .find(|(_, pos, _)| {
+                let blocked = self
+                    .solids
+                    .as_ref()
+                    .is_some_and(|solids| solids.segment_blocked(from, *pos));
+                hearable(from, forward, *pos, heardist, blocked)
             })
+            .map(|(_, pos, at)| (*pos, *at))
     }
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
@@ -2930,21 +2974,38 @@ impl Runtime {
             let remembered = self.ai_last_seen.get(&index).copied().or_else(|| {
                 let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
                 let side = ai.as_ref().map(|ai| ai.alignment as i32).unwrap_or(0);
-                // `listen` (`0x50a6f0`) scans the sector's ring **newest first** and takes the first
-                // event inside the class's **heardist** — a shot five units away does not wake a guard
-                // whose hearing reaches two, while an older but nearer sound in the same ring does. The
-                // port reads the same ring through `heard_at`, so both halves hold; a class-less actor
-                // hears everything, which is the port's long-standing behaviour for scripted puppets.
+                // `listen` (`0x50a6f0`): the ring is scanned **newest first**, and the handler's own
+                // conditions decide what is heard (`heard_event`: `heardist`, line of sight, and — for
+                // a sound through geometry — nearer than one unit and in front). It then rolls the
+                // class's reaction chance **once per sound** (`listen`'s first number: 0.50 in most
+                // shipped classes, 1.00 in some, 0.00 for a sentry, which never walks at one), and
+                // `SetMoveThing` only on success. A failed roll ignores that sound for good, so the
+                // decision is remembered here instead of re-rolled every tick.
                 let here = self.things.get(index)?.pos;
+                let yaw = self.things.get(index)?.yaw.to_radians();
                 let heardist = ai
                     .as_ref()
                     .map(|class| class.heardist)
                     .unwrap_or(f32::INFINITY);
-                let aware = self.heard_at(sector, side, here, heardist);
-                if aware.is_some() && std::env::var_os("BK_AI_TRACE").is_some() {
+                let (heard, at) =
+                    self.heard_event(sector, side, here, [yaw.cos(), yaw.sin()], heardist)?;
+                if let Some((last_at, last_pos, answered)) = self.ai_listen.get(&index).copied()
+                    && last_at == at
+                    && last_pos == heard
+                {
+                    return answered.then_some(heard);
+                }
+                let chance = ai
+                    .as_ref()
+                    .and_then(|class| class.instinct("Listen"))
+                    .map(|listen| listen.weight)
+                    .unwrap_or(1.0);
+                let answered = crate::cog::pseudo_random() < f64::from(chance);
+                self.ai_listen.insert(index, (at, heard, answered));
+                if answered && std::env::var_os("BK_AI_TRACE").is_some() {
                     eprintln!("ai: {index} hears an event in sector {sector} side {side}");
                 }
-                aware
+                answered.then_some(heard)
             }).or_else(|| {
                 // `returnhome` (handler `0x50bd70`): an awake actor with nothing else to do walks back
                 // to its home anchor (`SetMoveThing` to `ai + 0x93`, then `SetLookFrame` at it). The
@@ -8418,7 +8479,7 @@ mod tests {
         rt.ai.insert(
             1,
             crate::ai::parse(
-                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen\n",
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen 1.0\n",
             ),
         );
         // Newest first: a fresh shot 5 units along +x (out of earshot), an older one 1.5 units along
@@ -8456,7 +8517,7 @@ mod tests {
         rt.ai.insert(
             1,
             crate::ai::parse(
-                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen\n",
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen 1.0\n",
             ),
         );
         // A shot five units away: outside the two-unit hearing, so the guard must not react.
@@ -8483,6 +8544,79 @@ mod tests {
             "the actor ignored a sound inside its heardist: {:?}",
             rt.things[1].pos
         );
+    }
+
+    /// `listen`'s first number is the **reaction chance**, not a period: the handler rolls
+    /// `rand() / 32768 < arg0` once per sound event and only calls `SetMoveThing` when it passes.
+    /// Shipped classes carry 0.50 (most of them), 1.00 (`boc`, `gorc`) or 0.00 (`bosentry`, which
+    /// therefore never walks at a sound), so the roll has to be here and not a re-roll per tick.
+    #[test]
+    fn a_listen_chance_of_zero_ignores_a_sound_in_clear_hearing() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0]; // sector 7, alignment -1
+        let mut player = base.clone();
+        player.pos = [-9.0, 0.0, 0.0]; // out of sight, nothing remembered
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        let class = |chance: &str| {
+            crate::ai::parse(&format!(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen {chance}\n"
+            ))
+        };
+        rt.ai.insert(1, class("0.0"));
+        // Inside the two-unit hearing and in clear line — a sound a `Listen 1.0` class walks at — but
+        // this class's chance is zero, so it must only hear it.
+        rt.sector_awareness
+            .insert((7, -1), vec![(4.0, [1.5, 0.0, 0.0], 0.0)]);
+        for _ in 0..40 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(
+            rt.things[1].pos,
+            [0.0, 0.0, 0.0],
+            "a Listen 0.0 class walked at a sound it should only hear"
+        );
+        // The same chance 1.0 reacts to a *new* event; the same event would not be re-rolled.
+        rt.ai.insert(1, class("1.0"));
+        rt.sector_awareness
+            .insert((7, -1), vec![(4.0, [1.5, 0.0, 0.0], rt.time)]);
+        for _ in 0..40 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            rt.things[1].pos[0] > 0.2,
+            "the guard ignored a sound its class always reacts to: {:?}",
+            rt.things[1].pos
+        );
+    }
+
+    /// The `listen` handler's audibility gates, in its own order and with the constants it reads
+    /// from the retail EXE (`_DAT_005232c8` = 1.0 unit, `_DAT_005232a0` = 0.5 = cos 60°): inside
+    /// `heardist` a clear sound is heard at any bearing; a sound through geometry only when it is
+    /// nearer than one unit and within 60° of straight ahead.
+    #[test]
+    fn a_sound_through_geometry_is_heard_only_when_close_and_in_front() {
+        let from = [0.0, 0.0, 0.0];
+        let ahead = [1.0, 0.0]; // yaw 0 faces +X
+        let behind = [-1.0, 0.0];
+        // Clear line of sight: bearing does not matter, the class's hearing distance does.
+        assert!(hearable(from, behind, [2.0, 0.0, 0.0], 3.0, false));
+        assert!(!hearable(from, ahead, [4.0, 0.0, 0.0], 3.0, false), "beyond heardist");
+        // Blocked: one unit is the cut-off and the half-cone is 60 degrees.
+        assert!(hearable(from, ahead, [0.5, 0.0, 0.0], 3.0, true), "close and in front");
+        assert!(!hearable(from, ahead, [1.5, 0.0, 0.0], 3.0, true), "blocked and 1.5 away");
+        assert!(!hearable(from, behind, [0.5, 0.0, 0.0], 3.0, true), "blocked behind the actor");
+        let bearing = |degrees: f32, reach: f32| {
+            [degrees.to_radians().cos() * reach, degrees.to_radians().sin() * reach, 0.0]
+        };
+        assert!(hearable(from, ahead, bearing(45.0, 0.5), 3.0, true), "inside the 60-degree cone");
+        assert!(!hearable(from, ahead, bearing(75.0, 0.5), 3.0, true), "outside the 60-degree cone");
     }
 
     /// `turretfire` (`0x50a0f0`): a turret's class (`turdefault.ai`) carries **no `PrimaryFire`**, so

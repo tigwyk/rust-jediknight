@@ -282,18 +282,19 @@ tier, not a checkbox.
    capture now fires 41–47 shots and lands **15 hits** in 10 s (≈165 damage, the body left at 29 health
    where retail's own HUD at ~10 s reads 56), and the gate run exposed a real bug: `AIFlee` was ignored
    by the "nothing to do" early return, so a fleeing actor that had lost the player stood still.
-*Progress (rounds 209–231).* Combat's AI side is now measured off the shipped `.ai` files rather than guessed. The
+*Progress (rounds 209–233).* Combat's AI side is now measured off the shipped `.ai` files rather than guessed. The
 instinct registry is complete (25 registrations across `sithAICmd_Startup` and the JK-side startup; the four unnamed
 entries resolved from the EXE's string data), and `--audit` tallies which names shipped content actually uses: **24**.
-Of those, **14 are implemented** — `follow`, `lookfortarget`, `primaryfire`, `opendoors`, `blindfire`, `returnhome`,
-`retreat`, `withdraw`, `circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`, `flee` — with `listen` and
+Of those, **15 are implemented** — `follow`, `lookfortarget`, `primaryfire`, `opendoors`, `blindfire`, `returnhome`,
+`retreat`, `withdraw`, `circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`, `flee`, `listen` — with
 `sensedanger` *partial*, `sabermove` unused by any class, and `talk` audio whose mode table is recorded but unported.
-The remaining gameplay gap is the Jedi set (`forcepowers`, `saberfighting`, `specialattack`: 114 class-uses). Each
-instinct landed with a headless test and a measured before/after (suite 149 → 164). Reading the handlers also corrected
-behaviour underneath them: the view cone of `LookForTarget`, the engine's class defaults for omitted `.ai` keys, the
-script-set AI bits from `AISetMode` (`0x2000` switches an actor off), turrets firing from `TurretFire` (a turret class
-has no `PrimaryFire`), and `listen`'s `heardist` gate plus its 3-slot sound ring. The per-instinct class counts and the
-port's status are the table in `gaps.md`.
+The remaining gameplay gap is the Jedi set (`forcepowers`, `saberfighting`, `specialattack`: 114 class-uses), and `talk`
+(198 classes) is the largest unported name. Each instinct landed with a headless test and a measured before/after (suite
+149 → 166). Reading the handlers also corrected behaviour underneath them: the view cone of `LookForTarget`, the
+engine's class defaults for omitted `.ai` keys, the script-set AI bits from `AISetMode` (`0x2000` switches an actor
+off), turrets firing from `TurretFire` (a turret class has no `PrimaryFire`), and `listen`'s `heardist` gate, its 3-slot
+sound ring, its line-of-sight/1.0-unit/60° hearing gates and its per-sound reaction chance (the constants read from the
+EXE's `.rdata`). The per-instinct class counts and the port's status are the table in `gaps.md`.
 
 6. **Exit.** End-of-level tally, transition, carried state (health, shields, bins). Exit: level 2 starts
    in retail's state. *Partly done:* the savegame **container** now matches the real files — the port
@@ -450,7 +451,8 @@ What the session settles, all of it already on the deviation ledger with its ret
 - **`circlestrafe`** — the port replans every frame where the engine uses 300–500 ms.
 - **`hitandrun`** — break-off lands on the exact threshold instead of within the next AI update.
 - **`turretfire`** — the ±160° aim-head sweep is not modelled (turret fire is modelled as accurate).
-- **`listen`** — the facing test on the sound and the probability roll that acquires the shooter are unported.
+- **`listen`** — the hearing gates and the class's reaction chance are ported (round 233, measured headless); the
+  look-only turn on a failed roll and the damage-event path are still one remembered position.
 - **`AISetMode`** — only the `0x2000` off switch is honoured; the wake bit (`0x4`) needs the engine's own wake logic
   first.
 - **AI engagement timing** — the level-3 same-pose pair: a port run and a retail capture at the recorded vantage, to

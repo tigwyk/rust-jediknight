@@ -5800,7 +5800,7 @@ handler:
 | instinct | classes using it | handler | port behaviour |
 | --- | --- | --- | --- |
 | lookfortarget | 215 | `0x50aa80` | **yes** (view-cone scan, round 211) |
-| listen | 200 | `0x50a6f0` | partial: the reader scans the sector's **3-slot sound ring** newest-first inside the class's `heardist` and walks the actor toward it; the engine's facing test on the sound and its probability-based target acquisition are not ported |
+| listen | 200 | `0x50a6f0` | **yes** (round 233: the ring scan, the `heardist`/sight/near-and-front hearing gates, and the class's per-sound reaction chance) |
 | talk | 198 | `0x50be20` | no |
 | primaryfire | 166 | `0x509e40` | **yes** (fire cadence) |
 | follow | 159 | `0x5093f0` | **yes** (chase + standoff) |
@@ -5825,11 +5825,12 @@ handler:
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **14 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
-the counts are how many classes depend on each: `listen` (200) and `talk` (198) are the biggest remaining behavioural
-gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
-it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair, `circlestrafe`,
-`hitandrun`, `randomturn`, `roam`, `turretfire` and `flee` (below). `sabermove` needs no work at all: nothing names it.
+So the port runs **15 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+the counts are how many classes depend on each: `talk` (198) is the biggest remaining behavioural gap; `listen` (200), the
+largest used name, closed in round 233. `opendoors` was the one with a visible consequence — an AI that cannot open a door
+can be trapped behind one — and it is now implemented (below), as are `blindfire`, `returnhome`, the
+`retreat`/`withdraw` pair, `circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`, `flee` and `listen` (below).
+`sabermove` needs no work at all: nothing names it.
 
 **The sector's awareness record is a 3-slot sound ring now (round 230), which is what `listen` scans.** The handler
 (`0x50a6f0`) does not read one "strongest event": it scans the sector's ring of recent sounds **newest first**, up to
@@ -5842,6 +5843,7 @@ carry the propagation) and read by `heard_at`, which scans newest-first and retu
 
 What remains unported from the handler is unchanged and still on the table row: the engine's facing test on the sound
 and the probability roll that takes the shooter as a target once it reacts (the port always just walks toward the sound).
+Both landed in round 233 — see below.
 
 The headless check is `a_short_ranged_guard_hears_the_nearer_of_two_sounds_in_the_ring`: a guard with `heardist 2.0` and
 a ring holding a fresh shot 5 units along +x and an older one 1.5 units along +y must walk toward +y. Measured
@@ -6138,3 +6140,45 @@ material (its own face selection, material and texture) and rebuilds the parts w
 sway offset applies to every part. `Viewmodel` is `name, parts, key, phase, base, frame`. Headless only: suite **164
 passed** (the framing test still passes), docs **132/132**, no window and no game run; what the 14 parts look like is left
 to the QA window's parity frame, since a texture's result cannot be read from a face count.
+
+## Update — round 233 (the rest of `listen`: the hearing gates and the reaction roll)
+
+`listen` is the most-used instinct in the shipped `.ai` files (**200 classes**). Round 230 gave its reader the engine's
+3-slot sound ring, but the port still walked every actor at every sound it could hear: the handler's own **hearing gates**
+and the class's **reaction chance** were unused. The handler (`0x50a6f0`) and the constants it reads settle both.
+
+The gate order, from the decompiled handler and `sithAI_sub_4EB300` (`0x4eb300`, which answers "far, in-cone or
+blocked"): the sound must be inside the class's `heardist`; the helper is called with the class's **sightdist** and
+`param_4 = -1` (so its cone branch is skipped and only "beyond range" and "geometry in the way" can reject); a sound it
+calls far/blocked is still accepted only when `_DAT_005232c8` <= distance is **false** (nearer than **1.0 unit**) and
+`_DAT_005232a0` (0.5 = cos 60°) < forward dot — i.e. close and within 60° of straight ahead. A clear sound is heard at
+any bearing. Both constants were read out of the retail `JK.EXE`'s `.rdata` with a PE-header dump (1.0 and 0.5; the
+neighbouring 0.98 / 0.7 / 90.0 / 0.4 are the view-cone block, so the values sit where the decompile says they do).
+
+Then the handler **rolls the class's reaction chance** once a sound is chosen: `rand() / 32768 < arg0` (`FUN_00512d00`)
+and `SetMoveThing` is called on success only. `arg0` is the first number on the class's `listen` line — the shipped data
+(`--grep-assets Listen`) carries `0.50, 2.0` in most classes, `1.00, 2.0` in `boc`/`gorc`, `0.00, 0.0` in `bosentry`.
+The roll is **per sound event**, not per tick: `sithAI_EmitEvent` (`0x4e9f80`) invokes the handler when the event is
+emitted.
+
+The port now has both. `Runtime::heard_event` replaces `heard_at` (same newest-first, fade-window scan, plus the gates via
+the shared `hearable` predicate), and `ai_tick` rolls the class's chance once, keeping the decision per actor in
+`ai_listen` so the same sound is not re-rolled while it is still in the ring. A `Listen 0.0` sentry now only hears; a
+`Listen 1.0` body reacts to every in-earshot sound; a `0.50` class reacts to about half of them, as in retail.
+
+Two headless checks, measured before/after by removing each half:
+
+- `a_listen_chance_of_zero_ignores_a_sound_in_clear_hearing` — with the roll removed the `Listen 0.0` body walks to
+  `[1.25, 0.0, 0.0]` and the check fails; with it the body stays put, and a new event with `Listen 1.0` is walked at.
+- `a_sound_through_geometry_is_heard_only_when_close_and_in_front` — with the gates removed the "blocked and 1.5 away"
+  case is accepted and the check fails; with them only the blocked close-and-front case (and any clear sound inside
+  `heardist`) is heard.
+
+Suite **166 passed**; the headless `--ai` gate passes; docs 132/132. No window and no game run.
+
+Still on the table, and the listen row's remaining deviations: the handler also acts on the event's **source thing**
+(`SetLookFrame` at it, and sets the move position before the roll), while the port keeps one remembered position for
+both look and walk — so on a failed roll retail turns toward the sound but does not walk, and the port stays idle; the
+**damage-event** path (`sithActor_DamageActor` emits type 1, which makes a hurt actor look at its attacker) is not read
+by the port's awareness; the handler's `ai + 8 & 1` "already moving" test and `SetMoveThing`'s cooldown are not modelled;
+and the alert sound modes (`sithSoundClass_PlayModeRandom`, 0x4b/0x57) have no audio layer yet.
