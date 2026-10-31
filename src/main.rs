@@ -459,6 +459,9 @@ fn main() {
     // `--key <name>`: dump a parsed `.key` (header + the first node's frames). `PlayKey` names one in the
     // scripts, and whether it moves a *thing* or only a model is the question a camera's path turns on.
     let mut key_probe: Option<String> = None;
+    // `--tex <model>`: a model's materials against their `.mat` headers and texvert ranges — the numbers
+    // that decide whether a model's UVs are texel-space over the whole bitmap or over one cel.
+    let mut tex_probe: Option<String> = None;
     let mut controls_check = false;
     let mut move_check = false;
     let mut winding_check = false;
@@ -772,6 +775,7 @@ fn main() {
         "--levels" => levels_probe = true,
         // `--key <name>`: consume the value so the shared loop does not read it as the level.
         "--key" => key_probe = arg_value(&args, &mut i).cloned(),
+        "--tex" => tex_probe = arg_value(&args, &mut i).cloned(),
         "--surfaces-at" => {
                 surfaces_at = arg_value(&args, &mut i).and_then(|s| {
                     let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
@@ -1935,6 +1939,44 @@ fn main() {
     // next row is the level that loads. Resolved once, here, so the watcher only has to act.
     // `campaign_start` is where "New Game" begins, which is not the same thing once the campaign
     // has moved on: `--level` and a level transition both change `level_name`, neither changes this.
+    if let Some(name) = &tex_probe {
+        let Some(raw) = gobs.read(&name.to_ascii_lowercase()) else {
+            println!("tex: model `{name}` not found in the archives");
+            return;
+        };
+        let model = tdo::parse(&String::from_utf8_lossy(&raw));
+        println!("tex: model `{name}` materials {} meshes {}", model.materials.len(), model.meshes.len());
+        for (index, material) in model.materials.iter().enumerate() {
+            let (width, height, cels) = gobs
+                .read(material)
+                .as_deref()
+                .and_then(tex::parse_mat)
+                .map(|bitmap| (bitmap.width, bitmap.height, bitmap.cels))
+                .unwrap_or((0, 0, 0));
+            let mut lo = [f32::MAX; 2];
+            let mut hi = [f32::MIN; 2];
+            let mut faces = 0usize;
+            for mesh in &model.meshes {
+                for face in mesh.faces.iter().filter(|f| f.material == index as i32) {
+                    faces += 1;
+                    for &(_, t) in &face.verts {
+                        if let Some(tv) = mesh.texverts.get(t as usize) {
+                            lo[0] = lo[0].min(tv[0]);
+                            lo[1] = lo[1].min(tv[1]);
+                            hi[0] = hi[0].max(tv[0]);
+                            hi[1] = hi[1].max(tv[1]);
+                        }
+                    }
+                }
+            }
+            println!(
+                "material {index} `{material}` bitmap {width}x{height} cels {cels}, {faces} face(s) \
+                 texverts x {:.1}..{:.1} y {:.1}..{:.1}",
+                lo[0], hi[0], lo[1], hi[1]
+            );
+        }
+        return;
+    }
     if let Some(name) = &key_probe {
         let Some(raw) = gobs.read(&name.to_ascii_lowercase()) else {
             println!("key: `{name}` not found in the archives");

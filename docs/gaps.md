@@ -4175,3 +4175,28 @@ surface path already tracks animated cels), then re-measure the two rows.
 Also recorded from round 156: `sithControl_PlayerMovement`'s five speed multipliers are all read (walk/run,
 slow modifier, crouch, thing flag 0x200000, and the `(templateFlagsByte & 1) && (playerFlags & 0x120000)`
 test), and the camera-mode table above comes from the same read-through.
+
+**The door models' texverts are free-range tiled coordinates — the cel theory is dead, and the divisor is the
+open question (round 158).** Round 157 blamed a cel divisor for `route_door`'s 2× texture zoom. A new `--tex
+<model>` probe (each material's `.mat` size/cel count against the model's texvert range) says otherwise:
+
+```
+d2x3.3do   material 0 `D2X3.MAT`   bitmap 64x128  cels 1, 6 face(s) texverts x 0.3..63.7  y -95.7..-1.0
+d3x3_1.3do material 0 `00DWJAM2.MAT` bitmap 128x128 cels 1, 6 face(s) texverts x 0.4..111.4 y -112.2..0.1
+d4x3_1.3do material 0 `d4x3_1.mat`  bitmap 128x128 cels 1, 6 face(s) texverts x -0.2..128.2 y -123.9..-0.0
+d10x10.3do material 0 `E4X4TOP2.MAT` bitmap 128x128 cels 1, 6 face(s) texverts x -127.5..255.5 y -255.5..127.5
+d10x10.3do material 1 `CRANBASE.MAT` bitmap 32x8    cels 1, 1 face(s) texverts x -0.0..239.0 y -8.0..16.4
+```
+
+Every door material has **one cel**, and the texverts run **freely past the bitmap** on both axes — negative,
+and up to three times the size (`d10x10` spans 383 texels over a 128 bitmap). So JK model texverts are texel
+coordinates that **tile**, and the port already samples with `Repeat` (`image_from_rgba` sets
+`ImageAddressMode::Repeat` on both axes), which is why every other model row and all the gated route pairs look
+right. The door pair's remaining difference is therefore the **divisor**, not the cel: retail's door shows more
+texture per world unit than `texvert / bitmap_size` produces. The decomp's UV conversion sits in the
+rasteriser (`rdPrimit3_NoClipFace`/`rdModel3_DrawFace` pass the texverts through), not in the model loader, so
+the next read is `rdMaterial`'s own texture-size field against the bitmap's — the `.mat` header carries a size
+of its own, and `d10x10`'s 3× span is the sharpest test case for it.
+
+Probe committed: `--tex <model>` prints each material's bitmap size, cel count and texvert range, so the next
+round can test the divisor against real models instead of guessing.

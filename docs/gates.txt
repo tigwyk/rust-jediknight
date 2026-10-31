@@ -1249,3 +1249,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
   is mapped into half the UV range. Next: divide model UVs by the **cel** size and re-measure both rows.
 - Tests **147 passed**, `--gates` **0 of 64 failed**, trace gate **12 legs, 0 failures**, parity **6 thresholds,
   0 failures**.
+
+## Update — round 158
+
+- New `--tex <model>` probe: each material's `.mat` bitmap size, cel count and the model's texvert range.
+- It **disproves round 157's cel theory**: every door material has **cels 1**, and texverts tile freely past
+  the bitmap (`d2x3`: x 0.3..63.7 on a 64-wide, y −95.7..−1 on 128-tall; `d10x10`: ±255 on a 128 bitmap).
+  The port already samples `Repeat` on both axes, so the model UV path is sound; the door pair's difference is
+  the **divisor**, not cels. Next read: `rdMaterial`'s own texture-size field vs the bitmap's (the `.mat`
+  header carries one), with `d10x10`'s 3× span as the test case.
+- `route_catwalk` 0.4560 / `route_door` 0.4239 unchanged; other five rows 0.66–0.74.
+- Tests **147 passed**, `--gates` **0 of 64 failed**, trace gate **12 legs, 0 failures** (one load-flake run
+  showed walk5 at 3 sectors, re-ran clean — the caveat already in `gates.txt`), parity **6 thresholds,
+  0 failures**.
