@@ -1688,3 +1688,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
   switch even from the verified pose. The next candidates are the middle-mouse binding and the engine's look/range
   gate; the retie condition stays as recorded.
 - Tests **149 passed**.
+
+## Update — round 192
+
+- Swept every use binding from the coords-verified switch pose: `9`, `MOUSEMIDDLE` (DirectInput 0x102), `ENTER`, `E`,
+  `SPACE`, `U`, plus yaw 120/150, pitch −15 and a closer pose — cog 11 stayed `doorstatus 0` for all of them. The
+  harness's keyboard (`SendInput` + `INPUT`) and mouse (`mouse_event`, cursor moved into the window) injection is
+  hardware-level, so delivery is not the explanation.
+- Decomp: `stdControl_SetActivation` (`0042ed40`) is device acquisition/release on a focus change, not the game's use
+  action; the default binding table (`sithControl_RegisterKeyboardBindings`, `004d7d40`) binds control 0x1b to ENTER
+  (0x1c) and 0x27 to 0x57 (F11).
+- Remaining suspect: the warp runs **through the dev console**, which opens/closes the dialog and toggles the engine's
+  device acquisition — a tap 300 ms later may land before input is re-acquired. Next attempt: place the body by
+  **walking** (existing walk machinery, no console), then press the binding; or add an activation wait to the harness.
+- Tests **149 passed**.

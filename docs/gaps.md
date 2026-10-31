@@ -5158,3 +5158,30 @@ switch, or a keyboard-only trigger is found") can move.
 
 The row and its two console captures are committed; the ledger's interaction row gains the verified pose so the next
 attempt starts from it rather than re-deriving it.
+
+**Phase 1 step 4's retail probe: every use binding was swept from the coords-verified switch pose and none fired
+(round 192).** With the pose pinned last round (`warp -4 -3 -1.09 0 135 0` → body (-4.00,-3.00,-1.18), sector 254,
+in front of cog 11's switch), the round swept the bindings:
+
+| input | result |
+| --- | --- |
+| `9` (the profile's ACTIVATE, VK 57) | `doorstatus 0` |
+| `MOUSEMIDDLE` (DirectInput 0x102, the profile's other ACTIVATE) | `doorstatus 0` |
+| `ENTER`, `E`, `SPACE`, `U` | `doorstatus 0` each |
+| yaw 120 / 150 / pitch −15 / a closer pose | `doorstatus 0` each |
+
+The harness's injection is **hardware-level** either way — keyboard goes through `SendInput` with an `INPUT`
+structure, mouse through `mouse_event` with the cursor moved into the window first (`retail-lib.ps1`'s `JkRetail`
+class) — so delivery is not the explanation. Two decomp facts narrow it further:
+
+- `stdControl_SetActivation` (`decomp/0042ed40`) is **not** the game's use action: it acquires/releases the DirectInput
+  devices and toggles a flag (`DAT_0055d5d8`), i.e. it is what a focus change runs.
+- The default binding table (`sithControl_RegisterKeyboardBindings`, `decomp/004d7d40`) binds control **0x1b to
+  scancode 0x1c (ENTER)** and 0x27 to 0x57 (F11); the profile's ACTIVE binding (middle mouse) is what the harness's
+  staged `.plr` carries.
+
+The remaining suspect is the harness's own sequencing: the **warp is a dev-console command**, so the console dialog
+opens and closes around the pose, and the engine releases/re-acquires its devices through exactly that path — a key
+or button tap 300 ms after the warp may land while the game's input is still being re-acquired. The next attempt
+should place the body **without the console** (walk it there with the existing walk-trace machinery, then press the
+binding) or add an activation wait to the harness; the row above is the reproducible pose either way.
