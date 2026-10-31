@@ -1520,3 +1520,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   `thingflags`, so the holding bit is set at runtime (script or player spawn), not by the level. The
   `thingflags=0x20080501` rows are extra spawn placements. Finding the writer needs an xref pass over the EXE.
 - Tests **149 passed**.
+
+## Update — round 179
+
+- **REA/Ghidra works on the staged EXE** (33 s headless analysis, address-based queries with no symbols). The
+  decomp's `LAB_00503aa0` (`setthingflags` handler) resolves to `FUN_00503a70` (`0x503a70`), a small value helper —
+  the registration points at an interior label, which Ghidra merges into the preceding function.
+- The field identity is now pinned: the engine's `*(byte*)(thing + 0x34)` is the JKL `thingflags=` word the port
+  already parses (`jkl::Thing::flags`); `sithThing_UpdateMove` gates movement on **bit 3**, `sithControl_Update` gates
+  controls on `typeflags & 0x202`. Level 14's and 21's 240-frame verb streams contain **no SetThingFlags/ClearThingFlags
+  call**, so the pin is not set through those verbs in the walk window.
+- Reusable workflow recorded (program identity `target-59ce8a1b8134.EXE`; interior labels need `search_procedures`;
+  quote only `normalized_result` from bulky error payloads). Tests **149 passed**.

@@ -4797,3 +4797,30 @@ The `thingflags=0x20080501` rows are *extra* walkplayer placements (level 14 has
 level 19B at seven spots) — spawn points, not the active player. So the holding bit is set by the script or the player
 spawn path at runtime; finding it needs an xref pass over the EXE (Ghidra/REA) on writes to `thing+0x34` bit 3.
 That is the concrete next step; the deviation row keeps its measured groups until then.
+
+**REA/Ghidra now answers the EXE questions the decomp subset cannot — and the first answer names the flags field
+(round 179).** The staged `JK.EXE` (sha256 `59ce8a1b8134…`) opens in REA's Ghidra provider in **33 s** of headless
+analysis, and addresses resolve without symbols:
+`resolve_containing_procedure(0x503aa0)` → `not_in_procedure`, `search_procedures("FUN_00503[0-9a-f]{3}")` →
+`0x503a00`, `0x503a70`, `0x503b60`… so the decomp's `LAB_00503aa0` (the `setthingflags` handler registered in
+`decomp/005014e0_sithCogFunctionThing_Startup.c`) sits inside `FUN_00503a70`, and its pseudocode is a small value
+helper (`FUN_004e28c0` resolves the thing, `FUN_004e3340` stores the answer), not the flag write itself — the
+registration table points at an interior label, a boundary case Ghidra merges into the preceding function.
+
+The useful part is the field identity: the thing **flags word** the engine reads as `*(byte*)(thing + 0x34)` is the
+same `thingflags=0x…` word the JKL row carries and the port already parses (`jkl::Thing::flags`); `sithThing_UpdateMove`
+gates movement on its **bit 3**, `sithControl_Update` gates controls on `thing->typeflags & 0x202`, and both are
+runtime words. Level 14's and 21's verb streams over 240 frames contain **no `SetThingFlags`/`ClearThingFlags` call**
+at all, so the pinned state is not set through those verbs in the walk window either.
+
+Next probe, now one command: decompile `FUN_00503a70`'s *neighbourhood* by address (or `sithPlayer_NewPlayer` at
+`decomp/004c8ec0`) for the flags initialisation, and the `PlayMode`/`SetPuppetMode` handlers, in the same REA session —
+the workflow and the gotchas (program identity is `target-59ce8a1b8134.EXE`, interior labels need
+`search_procedures`, error payloads are large so quote only `normalized_result`) are recorded here for reuse.
+
+`sithPlayer_NewPlayer` (`FUN_004c8ec0`, `decomp/004c8ec0_sithPlayer_NewPlayer.c`) was decompiled in the same REA
+session and **clears** the engine's control-lock bits on spawn: `*param_1 = *param_1 & 0xfffffdfd` (bits 0x2 and 0x200
+of the thing's typeflags word), alongside `param_1[0x4c] &= 0xffbfffff` and `param_1[6] = 0`. So the spawn path
+resets those flags rather than setting them, and neither `typeflags & 0x202` (the `sithControl_Update` gate) nor
+`thingflags & 8` (the `sithThing_UpdateMove` gate) is set by it — the pinned state remains an *actor* state, not a
+player-spawn one.
