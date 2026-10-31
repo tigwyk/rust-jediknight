@@ -282,6 +282,19 @@ tier, not a checkbox.
    capture now fires 41–47 shots and lands **15 hits** in 10 s (≈165 damage, the body left at 29 health
    where retail's own HUD at ~10 s reads 56), and the gate run exposed a real bug: `AIFlee` was ignored
    by the "nothing to do" early return, so a fleeing actor that had lost the player stood still.
+*Progress (rounds 209–231).* Combat's AI side is now measured off the shipped `.ai` files rather than guessed. The
+instinct registry is complete (25 registrations across `sithAICmd_Startup` and the JK-side startup; the four unnamed
+entries resolved from the EXE's string data), and `--audit` tallies which names shipped content actually uses: **24**.
+Of those, **14 are implemented** — `follow`, `lookfortarget`, `primaryfire`, `opendoors`, `blindfire`, `returnhome`,
+`retreat`, `withdraw`, `circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`, `flee` — with `listen` and
+`sensedanger` *partial*, `sabermove` unused by any class, and `talk` audio whose mode table is recorded but unported.
+The remaining gameplay gap is the Jedi set (`forcepowers`, `saberfighting`, `specialattack`: 114 class-uses). Each
+instinct landed with a headless test and a measured before/after (suite 149 → 164). Reading the handlers also corrected
+behaviour underneath them: the view cone of `LookForTarget`, the engine's class defaults for omitted `.ai` keys, the
+script-set AI bits from `AISetMode` (`0x2000` switches an actor off), turrets firing from `TurretFire` (a turret class
+has no `PrimaryFire`), and `listen`'s `heardist` gate plus its 3-slot sound ring. The per-instinct class counts and the
+port's status are the table in `gaps.md`.
+
 6. **Exit.** End-of-level tally, transition, carried state (health, shields, bins). Exit: level 2 starts
    in retail's state. *Partly done:* the savegame **container** now matches the real files — the port
    reads both engine-written autosaves end to end (`version 6, episode JK1, level 02narshadda.jkl, game
@@ -335,6 +348,12 @@ tier, not a checkbox.
 Run the Phase 1 harness on levels 2–5, then all 34. Replace "the walker reaches the end" with "the walker
 trace matches a retail trace" for each. Fix by bucket, not by level. Add the retail-trace fixtures to the
 repo so regressions are caught without a retail run.
+
+*Progress (rounds 153–231).* The walk-trace gate stands at **15 legs, 1 tracked failure**: `walk5_spawn` at 3.43 of
+retail's 3.73 units (92 %, 5 sector mismatches), the "floor-search scope" deviation the ledger names with its retire
+condition; the other 14 legs pass. At the last windowed run `--gates` was **65/65, 0 skipped** and the parity draw gate
+**6 thresholds / 0 failures**. Everything still unmeasurable is listed in "The QA window" below — it is the single list
+of what a real-game session would settle, in the order a release candidate needs it.
 
 *Progress (round 112).* The trace fixtures are in the repo and wired: `trace-gate.ps1` seeds a missing
 `target/parity/trace/<leg>-walk.tsv` from `tools/parity/walktrace/<leg>-walk.tsv`, so the four level-1
@@ -402,6 +421,45 @@ this stretch: landing may not raise a body (level 9), the steep-face push is tri
 (level 11), a doorway landing may stand a step higher, a script camera suppresses movement (levels 7/14), plus
 the harness settle fix on both sides (rounds 148–149). The script camera's **view** (posing the camera at the
 focus thing) is the next slice.
+
+### The QA window — the gated checks that need the real game
+
+Every "needs a windowed fixture" note in this document lands here. Both the retail harness and the port's own window
+take over the mouse and keyboard, so this is **one session, run deliberately** — at a release candidate, or when the
+accumulated behaviour changes are worth a regression — not a per-question tool. Everything that can be checked from
+files (tests, `--audit`, `--asset`, `--grep-assets`, the data-derived probes) has already been checked that way; this
+list is only what is left.
+
+Run, in order, from the repo root with `pwsh`:
+
+| check | command | last measured | expected |
+| --- | --- | --- | --- |
+| port gates | `cargo build --release` then `target/release/bevi-knight.exe --gates` | 65/65, 0 skipped | all pass |
+| walk trace | `powershell -NoProfile -File tools/parity/trace-gate.ps1` | 15 legs, 1 failure | 14 pass, `walk5_spawn` tracked |
+| parity draw | `tools/parity/retail-capture.ps1`, `port-capture.ps1`, then `compare.ps1 -Gate` | 6 thresholds, 0 failures | 0 failures |
+
+What the session settles, all of it already on the deviation ledger with its retire condition:
+
+- **`walk5_spawn`** — the floor-search scope on level 5's gutter; the gate leg is the fixture (14 of 15 pass).
+- **`opendoors`** — the port uses the 1.5-unit use reach and a look cone where the engine sweeps the actor's body
+  radius; walk an actor at a closed door and compare which door it opens.
+- **`blindfire`** — the chance is rolled per shot slot, not on the engine's own tick.
+- **`returnhome`** — the port gates on the instinct existing and distance > 0.5, not the engine's awake flag.
+- **`retreat`/`withdraw`** — the mode ends on the withdraw interval instead of on sight of the target, and the away
+  direction has no lateral jitter.
+- **`circlestrafe`** — the port replans every frame where the engine uses 300–500 ms.
+- **`hitandrun`** — break-off lands on the exact threshold instead of within the next AI update.
+- **`turretfire`** — the ±160° aim-head sweep is not modelled (turret fire is modelled as accurate).
+- **`listen`** — the facing test on the sound and the probability roll that acquires the shooter are unported.
+- **`AISetMode`** — only the `0x2000` off switch is honoured; the wake bit (`0x4`) needs the engine's own wake logic
+  first.
+- **AI engagement timing** — the level-3 same-pose pair: a port run and a retail capture at the recorded vantage, to
+  confirm the view-cone fix moved acquisition to where retail acquires.
+
+Safety and recovery: the retail harness never touches the real install — it copies it to `target/parity/retailcopy/`
+and records the desktop display modes to `target/parity/display-pre.json` before it starts. Keep hands off the mouse and
+keyboard while a capture runs; both harnesses drive synthetic input. The port side opens a window per shot and closes it
+itself.
 
 ### Phase 3 — Breadth, by shipped-content weight
 
