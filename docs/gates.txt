@@ -2041,3 +2041,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
   to settle, so it waits for the QA window.
 - AI instinct coverage now **4 of 24 used instincts**; remaining top gaps are `listen` (200), `talk` (198), `blindfire`
   (134). No game run and no port window this round.
+
+## Update — round 219
+
+- **`blindfire` implemented** (134 of 231 classes name it). Handler `0x509b30` fires at the AI's **remembered** position
+  (last seen) inside a fixed 10-unit reach and the class's cos limit, rolling the instinct's chance. Shipped line
+  `750.0, 0.80, 0, 0.8, 0.0, 0.30` = delay 750 ms, chance 0.80, unused, cos limit 0.8, min distance 0.0, spread 0.30.
+  The port re-enters its shared fire path with the remembered point and the `BlindFire` args, burst 1.
+- Headless check `an_actor_that_lost_sight_fires_at_the_remembered_position` + control class without `BlindFire`.
+  Measured before/after: blind branch disabled → fails with `the actor did not blind-fire at the remembered position`;
+  enabled → passes. Suite **153 tests, 0 failures**.
+- Deviations recorded: chance is rolled per shot slot (engine: its own tick + 1 s rearm); the remembered point is the
+  port's last-seen slot (engine keeps a separate `lookPos`). Both need a fixture to settle → QA window.
+- AI instinct coverage now **5 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198). No game run
+  and no port window this round.

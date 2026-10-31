@@ -3070,22 +3070,35 @@ impl Runtime {
             if let Some(thing) = self.things.get_mut(index) {
                 thing.yaw = turn_toward(yaw, want_yaw, turn_rate, dt);
             }
-            let shooting_at = aim.unwrap_or(target);
+            let mut shooting_at = aim.unwrap_or(target);
             let can_see = if aim.is_some() { true } else { sighted };
             // `BK_AI_TRACE=2`: name the gate that stops an in-sight actor from firing. The engine's
             // `sithAICmd_PrimaryFire` has exactly three besides readiness — the instinct itself, its
             // range, and its `minDot` facing test — so one line per refusal is enough to tell an AI
             // that is asleep from one that is merely still turning.
             let fire_trace = std::env::var("BK_AI_TRACE").is_ok_and(|v| v == "2");
-            if !can_see || !ready {
+            // `sithAICmd_BlindFire` (`0x509b30`): an actor that has lost sight but still remembers where
+            // the body was fires at **that** point — the engine tests the remembered spot against the
+            // class's cos limit and a fixed 10-unit reach, rolls the instinct's chance, and fires with
+            // its spread. The port reuses this same firing path with the remembered position as the
+            // target and the `BlindFire` arguments, so an actor that is out of sight is not silent.
+            let blind = !can_see
+                && ready
+                && ai.as_ref().is_some_and(|class| class.instinct("BlindFire").is_some())
+                && self.ai_last_seen.contains_key(&index);
+            if !ready || (!can_see && !blind) {
                 if fire_trace && can_see {
                     eprintln!("ai: {index} ready {ready} not firing yet");
                 }
                 continue;
             }
-            let Some(primary) = ai.as_ref().and_then(|ai| ai.instinct("PrimaryFire")).cloned() else {
+            if blind {
+                shooting_at = self.ai_last_seen.get(&index).copied().unwrap_or(shooting_at);
+            }
+            let instinct = if blind { "BlindFire" } else { "PrimaryFire" };
+            let Some(primary) = ai.as_ref().and_then(|ai| ai.instinct(instinct)).cloned() else {
                 if fire_trace {
-                    eprintln!("ai: {index} `{ai_template}` has no PrimaryFire instinct");
+                    eprintln!("ai: {index} `{ai_template}` has no {instinct} instinct");
                 }
                 continue;
             };
@@ -3098,15 +3111,24 @@ impl Runtime {
                     primary.args.get(k - 1).copied().unwrap_or(0.0) as f32
                 }
             };
-            let (delay_ms, min_dot, max_dist, error, min_dist) =
-                (arg(0), arg(1), arg(2), arg(3), arg(4));
-            let (burst, burst_ms) = (arg(8), arg(9));
+            let (delay_ms, min_dot, max_dist, error, min_dist) = if blind {
+                // Every shipped line is `750, 0.80, 0, 0.8, 0.0, 0.30`: delay, chance, unused, cos
+                // limit, minimum distance, spread. The reach is the engine's fixed 10 units.
+                (arg(0), arg(2), 10.0, arg(4), arg(3))
+            } else {
+                (arg(0), arg(1), arg(2), arg(3), arg(4))
+            };
+            let (burst, burst_ms) = if blind { (1.0, 0.0) } else { (arg(8), arg(9)) };
+            // The engine rolls the chance on its own tick; the port rolls it when the shot slot is up.
+            if blind && arg(1) > 0.0 && crate::cog::pseudo_random() > arg(1) as f64 {
+                continue;
+            }
             let (sx, sy) = (shooting_at[0] - from[0], shooting_at[1] - from[1]);
             let range = (sx * sx + sy * sy).sqrt();
             if range > max_dist.max(0.001) || range < min_dist {
                 if fire_trace {
                     eprintln!(
-                        "ai: {index} range {range:.2} outside PrimaryFire [{min_dist:.2}, {max_dist:.2}]"
+                        "ai: {index} range {range:.2} outside {instinct} [{min_dist:.2}, {max_dist:.2}]"
                     );
                 }
                 continue;
@@ -3129,7 +3151,7 @@ impl Runtime {
             };
             if dot < min_dot {
                 if fire_trace {
-                    eprintln!("ai: {index} facing dot {dot:.2} < PrimaryFire minDot {min_dot:.2}");
+                    eprintln!("ai: {index} facing dot {dot:.2} < {instinct} minDot {min_dot:.2}");
                 }
                 continue;
             }
@@ -7805,6 +7827,62 @@ mod tests {
         next.adopt(&carried);
         assert_eq!(next.things[0].health, 41.0, "the carried health was not restored");
         assert_eq!(next.player_shields, 73.0, "the carried shields were not restored");
+    }
+
+    /// `blindfire` (`0x509b30`) fires at the **remembered** position when the body is out of sight:
+    /// the engine tests that spot against the class's cos limit and a fixed 10-unit reach, rolls the
+    /// instinct's chance and fires with its spread. The shipped line is
+    /// `750, 0.80, 0, 0.8, 0.0, 0.30` — delay, chance, -, cos limit, minimum distance, spread.
+    #[test]
+    fn an_actor_that_lost_sight_fires_at_the_remembered_position() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        // Behind the actor and out of its 2-unit sight: it cannot see the body any more.
+        player.pos = [-5.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_weapon.insert("tuskan".into(), "blaster".into());
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, maxstep=0.3, sightdist=2.0, heardist=2.0, accuracy=0.15\n\n\
+                 PrimaryFire 1500.0, 0.8, 4.0, 0.20, 0.0, 500.0, 0.00, 0.20, 0.00, 0.00\n\
+                 BlindFire 750.0, 1.0, 0, 0.8, 0.0, 0.30\n",
+            ),
+        );
+        // It remembers the body three units ahead — out of sight, inside the blind reach.
+        rt.ai_last_seen.insert(1, [3.0, 0.0, 0.0]);
+
+        let fired = rt.ai_tick(0, 0.1);
+        assert_eq!(fired, 1, "the actor did not blind-fire at the remembered position");
+        assert!(rt.shots_fired >= 1, "no projectile was spawned for the blind shot");
+
+        // A control class without `BlindFire` stays silent with the same memory.
+        let mut quiet = door_runtime();
+        let base = quiet.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [-5.0, 0.0, 0.0];
+        quiet.things = vec![player, actor];
+        quiet.templates = vec!["walkplayer".into(), "tuskan".into()];
+        quiet.types = vec![10, 2];
+        quiet.template_weapon.insert("tuskan".into(), "blaster".into());
+        quiet.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, maxstep=0.3, sightdist=2.0, heardist=2.0, accuracy=0.15\n\n\
+                 PrimaryFire 1500.0, 0.8, 4.0, 0.20, 0.0, 500.0, 0.00, 0.20, 0.00, 0.00\n",
+            ),
+        );
+        quiet.ai_last_seen.insert(1, [3.0, 0.0, 0.0]);
+        assert_eq!(quiet.ai_tick(0, 0.1), 0, "an actor without `BlindFire` fired");
     }
 
     /// `opendoors` (handler 0x50abc0) runs the **player's activate action** on the actor's own body:

@@ -5805,7 +5805,7 @@ handler:
 | primaryfire | 166 | `0x509e40` | **yes** (fire cadence) |
 | follow | 159 | `0x5093f0` | **yes** (chase + standoff) |
 | opendoors | 142 | `0x50abc0` | **yes** (round 218: the use scans on the actor's own body) |
-| blindfire | 134 | `0x509b30` | no |
+| blindfire | 134 | `0x509b30` | **yes** (round 219: fires at the remembered position) |
 | returnhome | 97 | `0x50bd70` | no |
 | jump | 92 | `0x50abf0` | no |
 | circlestrafe | 70 | `0x509890` | no |
@@ -5825,10 +5825,30 @@ handler:
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **4 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
-the counts are how many classes depend on each: `listen` (200), `talk` (198) and `blindfire` (134) are the biggest
-remaining behavioural gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be
-trapped behind one — and it is now implemented (below). `sabermove` needs no work at all: nothing names it.
+So the port runs **5 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+the counts are how many classes depend on each: `listen` (200) and `talk` (198) are the biggest remaining behavioural
+gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
+it is now implemented (below), as is `blindfire` (below). `sabermove` needs no work at all: nothing names it.
+
+**`blindfire` is implemented (round 219).** Its handler (`0x509b30`) fires at the AI's **remembered** position — the
+last place it saw the body — rather than at the player: it tests that spot against the class's cos limit and a fixed
+10-unit reach, rolls the instinct's chance, and fires with its spread. Every shipped line is
+`blindfire 750.0, 0.80, 0, 0.8, 0.0, 0.30`, which maps to delay 750 ms, **chance 0.80**, an unused slot, cos limit
+0.8, minimum distance 0.0, spread 0.30. The port's fire path is shared, so the change is a branch at the gate: when the
+actor cannot see the body but has a last-seen position and a `BlindFire` instinct, it re-enters the same code with the
+remembered point as `shooting_at`, the `BlindFire` arguments, a 10-unit reach and a burst of one — so an actor that
+lost sight keeps shooting at where you were instead of going silent.
+
+Two deviations to keep honest. The engine rolls the chance on its own tick and rearms on a 1 s clock; the port rolls it
+each time the shot slot comes up (`ai_wait`), which is the same 0.80 probability but a slightly different rhythm. And
+the port's "remembered position" is its own last-seen slot, which is the same place the engine's `SetLookFrame`/look
+position puts it, but the port does not model the engine's separate `lookPos`. Both are the kind of difference a fixture
+would settle, so they wait with the other windowed checks.
+
+The headless check is `an_actor_that_lost_sight_fires_at_the_remembered_position`: an actor with a 2-unit sight, a
+remembered point 3 units ahead and the shipped `BlindFire` line must fire once, and a control class with only
+`PrimaryFire` must fire zero times. Measured before/after: with the blind branch disabled the test fails with
+`the actor did not blind-fire at the remembered position`; enabled it passes. Suite: **153 tests, 0 failures**.
 
 **`opendoors` is implemented (round 218).** Its handler (`0x50abc0`) does almost nothing itself: when the AI's flag bit
 0 is set it calls `sithPlayerActions_Activate` (`0x4fc0a0`) — **the player's own use action** — on the actor's body, and
