@@ -1332,3 +1332,9 @@ running app.--carry-check --start 01narshadda                        0   level 2
   Spot-checked: cantina 2.65/2.59, level 9 1.68/1.68 (0 sectors), level 12 5.03/3.95 (127 %, 0) — unchanged.
 - Level 18 still **fails its leg**: 0.28 / retail 0.88 travel, 5 of 6 sectors — it settles but barely walks
   (likely wedged by the sectors around the floorless sliver). Not gated. Tests **148 passed**.
+
+## Update — round 163 (cont.)
+
+- Adopting the landed floor's owning sector was tried and **reverted**: `walk18_spawn` 5.83/0.88 (663 %),
+  `walk17_spawn` 6.06/0.70 (862 %, fell again). The port does not **stop** where retail does — levels 17/18 are
+  the same class as level 8 (a blocking difference, not a floor one). Committed state keeps the fallback.

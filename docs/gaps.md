@@ -4364,3 +4364,17 @@ Level 18 still **fails its leg**: travel 0.28 / retail 0.88 and 5 of 6 sector mi
 settles but barely walks (it ends in sector 721, likely wedged by the sectors around the floorless sliver). It
 stays out of the gate; its fixture is committed and the remaining cause is "the room it should stand in is not
 the sector the point resolves to", the same class as level 17 but one layer further out.
+
+**Adopting the floor's owning sector was measured and reverted (round 163).** The natural next step after the
+floor-plane fallback was to set the body's sector to the one that owns the floor it lands on
+(`AttachThingToSurface` sets the sector from the surface). Measured:
+
+```
+walk18_spawn  port 5.83 / retail 0.88 units (663%), sectors off 0, ends sector 0
+walk17_spawn  port 6.06 / retail 0.70 units (862%), sectors off 4, ends z -10.98  [regressed: fell again]
+```
+
+Both went the wrong way, and the shape of the numbers is informative: the port does not *stop* where retail does.
+Levels 17 and 18 are the same class as level 8 (retail walks 0.96 and stops; the port keeps going) — a **blocking**
+difference, not a floor one. Reverted; the committed state keeps the fallback that fixed the fall (17: 117%,
+0 sectors; 18: settles at retail's rest height, 0.28 travel).
