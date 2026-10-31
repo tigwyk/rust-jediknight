@@ -5711,3 +5711,23 @@ capture — so it waits for the next QA window rather than a mid-round run.
 A workflow note for whoever repeats the before/after: restoring a file with `Copy-Item` preserves its old timestamp, so
 cargo can skip the rebuild and report the **previous** binary's result. Re-write the file (or touch it) before trusting
 a re-run; that produced one false "still failing" reading while measuring this test.
+
+**The acquisition cone's math is now exact, from the EXE's own constants (round 212).** Reading the shipped data at
+`0x523060` gives six floats: `0.0, -1.0, 1.0, 0.25, 0.5, 90.0`. With them the recovered chain reads plainly:
+
+- `sithAI_FirstThingInView(thing, eye, fov_h, fov_v, …)` stores **`sin(90° − 0.5 · fov)`** per axis — the `0.5` and
+  `90.0` are those constants — so an `.ai` file's `fov=` is a **total cone in degrees**, and the stored limit is
+  `sin(half-angle)`. The port's reading of `fov` as a total cone was right.
+- `sithAI_GetThingsInView` then walks the thing's sector chain and keeps a candidate whose **normalised direction from
+  the eye** passes three per-axis tests: `|dot(right)| ≤ sin(half_h)`, `|dot(up)| ≤ sin(half_v)`, and a forward
+  half-space test (`dot(forward) ≥ 0`), using the actor's orientation basis.
+- The two class fields those limits come from are the same ones `sithAI_CheckSightThing` uses: `class + 0x14` is the
+  **range limit** (compared with `distance`; the port's `sightdist`) and `class + 0x1c` the **angle limit** (the
+  port's `fov`). `CheckSightThing` then applies the target's own radius (`target + 0xc`) and the collision sweep.
+- The eye point is built in `sithAI_sub_4EAD60` from the thing's **model offset** (`rdMatrix_TransformVector34` over
+  `thing + 0x17c`) added to the thing position, not the thing origin.
+
+So the port's `Ai::sees` is equivalent to the engine's **horizontal** test for a same-height target (`|bearing −
+yaw| ≤ fov/2` ⟺ the dot test against `sin(half)`), and the named approximations are exactly the remaining ones: the
+separate vertical limit, the forward half-space nuance, the model-offset eye point, and the target radius. No code
+change was warranted this round — the flat test is not wrong, just narrower than the engine only in those listed ways.

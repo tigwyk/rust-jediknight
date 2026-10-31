@@ -1960,3 +1960,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - **Windowed checks deferred**: `--gates` / trace gate / parity captures were not run this round (game and port runs
   are QA-window only). Their last measured state stands: `--gates` 65/65, trace gate 15 legs/1 tracked failure,
   parity 6 thresholds/0 failures.
+
+## Update — round 212
+
+- **Acquisition math pinned from the EXE's own constants** (data at `0x523060` = `0.0, -1.0, 1.0, 0.25, 0.5, 90.0`):
+  `sithAI_FirstThingInView` stores `sin(90° − 0.5·fov)` per axis, so `.ai` `fov=` is a **total cone in degrees** and the
+  limit is `sin(half-angle)`; `sithAI_GetThingsInView` keeps a candidate on `|dot(right)| ≤ sin(half_h)`,
+  `|dot(up)| ≤ sin(half_v)` and `dot(forward) ≥ 0`, against the actor's orientation basis. Class `+0x14` is the range
+  limit (sightdist) and `+0x1c` the angle limit (fov); the eye is built from the thing's model offset (`+0x17c`).
+- The port's `Ai::sees` is equivalent to the engine's **horizontal** test for a same-height target, so no code change
+  was warranted; the remaining approximations stay ledgered (vertical limit, forward half-space nuance, model-offset
+  eye, target radius).
+- No game run and no port window; tests unchanged at **150 passed**.
