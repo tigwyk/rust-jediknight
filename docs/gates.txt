@@ -2114,3 +2114,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   to the exact threshold — a firing timing trace would settle it.
 - AI instinct coverage now **10 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198). No game run
   and no port window.
+
+## Update — round 224
+
+- **`randomturn` implemented** (9 classes). Idle behaviour: every class interval (1000–2000 ms shipped) an awake actor
+  picks a random direction and `SetLookFrame`s a point its argument's distance away (0.5 shipped). The port keeps the
+  chosen yaw in `Runtime::ai_randomturn` and turns toward it at the body's own rate in the idle branch — an idle guard
+  now sweeps its view instead of standing frozen.
+- **`sensedanger` is covered, not re-implemented** (14 classes): its handler (`0x50b9b0`) reads the sector awareness
+  record the port already keeps and turns/walks the actor to it — the same reaction `ai_tick` already performs from
+  `awareness_at`. Table row marked *partial*; the unported part is the handler's player-target acquisition and its
+  `0x4f`/`0x57` messages to the actor's cogs.
+- Headless check `an_idle_actor_with_randomturn_looks_around` + control class (yaw must stay 0). Measured before/after:
+  branch disabled → fails with `no randomturn state`; enabled → passes. Suite **158 tests, 0 failures**.
+- AI instinct coverage now **11 of 24 used instincts** (plus two partial); remaining top gaps `listen` (200) and `talk`
+  (198). No game run and no port window.

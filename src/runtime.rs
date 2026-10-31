@@ -1102,6 +1102,10 @@ pub struct Runtime {
     /// instinct's first argument (1000–10000 ms shipped) for its second (1500–3000 ms); the port
     /// records the first firing and arms the same withdraw mode `retreat` uses.
     pub ai_hitrun: BTreeMap<usize, f32>,
+    /// Each idle actor's next `randomturn` due time and the yaw it chose, for the `randomturn`
+    /// handler (`0x50b700`): every class interval (1000–2000 ms shipped) the actor picks a random
+    /// direction and turns to look at a point its own argument's distance away (`SetLookFrame`).
+    pub ai_randomturn: BTreeMap<usize, (f32, f32)>,
     /// `sithAIAwareness`: a position other actors of the same side were told about, and when. A
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
@@ -1684,6 +1688,7 @@ impl Runtime {
             ai_withdraw: BTreeMap::new(),
             ai_strafe: BTreeMap::new(),
             ai_hitrun: BTreeMap::new(),
+            ai_randomturn: BTreeMap::new(),
             sector_awareness: BTreeMap::new(),
             sector_adjoins: sector_adjoins.clone(),
             ai_fire_target: BTreeMap::new(),
@@ -2986,10 +2991,29 @@ impl Runtime {
                     }
                 }
                 // Out of sight and nothing remembered: the actor stands where it is, turning to a
-                // scripted look target.
+                // scripted look target — or, with `randomturn` (`0x50b700`), to a direction of its own
+                // choosing: every class interval (1000-2000 ms shipped) the handler picks a random
+                // direction and `SetLookFrame`s a point its argument's distance away (0.5 units in
+                // every shipped class). The port keeps the chosen yaw and turns at the body's own
+                // rate, which is what makes an idle guard sweep its view instead of snapping.
+                let mut idle_yaw = look_yaw;
+                if let Some(turn) = ai
+                    .as_ref()
+                    .and_then(|class| class.instinct("RandomTurn"))
+                    .cloned()
+                {
+                    let (mut due, mut target) =
+                        self.ai_randomturn.get(&index).copied().unwrap_or((0.0, yaw));
+                    if self.time >= due {
+                        due = self.time + (turn.weight / 1000.0).max(0.05);
+                        target = yaw + crate::cog::pseudo_random() as f32 * 360.0;
+                    }
+                    self.ai_randomturn.insert(index, (due, target));
+                    idle_yaw = Some(target);
+                }
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.ai_target = None;
-                    if let Some(yaw) = look_yaw {
+                    if let Some(yaw) = idle_yaw {
                         thing.yaw = turn_toward(thing.yaw, yaw, turn_rate, dt);
                     }
                 }
@@ -8026,6 +8050,66 @@ mod tests {
             !quiet.ai_withdraw.contains_key(&1),
             "an actor without `HitAndRun` broke off"
         );
+    }
+
+    /// `randomturn` (`0x50b700`): an idle actor picks a random direction at its class interval and
+    /// turns to look at a point its argument's distance away. Shipped: `randomturn 1000, 0.5`.
+    #[test]
+    fn an_idle_actor_with_randomturn_looks_around() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [-9.0, 0.0, 0.0]; // out of sight and out of mind
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0\n\nRandomTurn 1000.0, 0.5\n",
+            ),
+        );
+
+        for _ in 0..40 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        let chosen = rt.ai_randomturn.get(&1).copied().expect("no randomturn state");
+        assert!(
+            chosen.1.abs() > 1e-3,
+            "the actor never picked a direction: {chosen:?}"
+        );
+        assert!(
+            rt.things[1].yaw.abs() > 1e-3,
+            "the actor did not turn: yaw {:.2}",
+            rt.things[1].yaw
+        );
+
+        // A control class without the instinct keeps looking straight ahead.
+        let mut quiet = door_runtime();
+        let base = quiet.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [-9.0, 0.0, 0.0];
+        quiet.things = vec![player, actor];
+        quiet.templates = vec!["walkplayer".into(), "tuskan".into()];
+        quiet.types = vec![10, 2];
+        quiet.template_speed.insert("tuskan".into(), 1.0);
+        quiet.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=2.0\n\nJump\n"),
+        );
+        for _ in 0..40 {
+            quiet.time += 1.0 / 30.0;
+            quiet.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(quiet.things[1].yaw, 0.0, "an actor without `randomturn` turned");
     }
 
     /// `circlestrafe` (`0x509890`): within the instinct's engage distance (0.6–1.0 in the shipped

@@ -5818,18 +5818,36 @@ handler:
 | roam | 27 | `0x50b830` | partial: the walker wanders, not the instinct's schedule |
 | specialattack | 24 | `0x40fd00` | no |
 | hitandrun | 23 | `sithAICmd_HitAndRun` | **yes** (round 223: fires, then breaks off) |
-| sensedanger | 14 | `0x50b9b0` | no |
+| sensedanger | 14 | `0x50b9b0` | partial: the awareness reader already turns and walks an actor to the event; the player-target acquisition the handler also does is not ported |
 | turretfire | 12 | `0x50a0f0` | no |
-| randomturn | 9 | `0x50b700` | no |
+| randomturn | 9 | `0x50b700` | **yes** (round 224: idle actors sweep their view) |
 | lobfire | 7 | `0x509cd0` | no |
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **10 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+So the port runs **11 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
 the counts are how many classes depend on each: `listen` (200) and `talk` (198) are the biggest remaining behavioural
 gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
-it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair, `circlestrafe` and
-`hitandrun` (below). `sabermove` needs no work at all: nothing names it.
+it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair, `circlestrafe`,
+`hitandrun` and `randomturn` (below). `sabermove` needs no work at all: nothing names it.
+
+**`randomturn` is implemented, and `sensedanger` is covered rather than re-implemented (round 224).** `randomturn`
+(`0x50b700`, 9 classes) is idle behaviour, not combat: every class interval (1000–2000 ms shipped) an awake actor picks a
+random direction and calls `SetLookFrame` on a point its own argument's distance away (`0.5` in every shipped class). The
+port keeps the chosen yaw in `Runtime::ai_randomturn` and turns toward it at the body's own `maxrotthrust` rate in the
+idle branch — so an idle guard sweeps its view instead of standing frozen at its spawn facing, and it costs one map and
+one branch.
+
+`sensedanger` (`0x50b9b0`, 14 classes) turned out to be the **reader** of the awareness record the port already keeps:
+the handler looks up the sector's record, and if one exists it turns the actor on it and sends the alert messages. The
+port's `ai_tick` already reads that same record (`awareness_at`) and treats it exactly like a last-seen position — the
+actor turns and walks to it — so the table marks it *partial* rather than *no*: what is missing is the handler's
+player-target acquisition and its `0x4f`/`0x57` messages to the actor's own cogs, not the reaction itself.
+
+The headless check is `an_idle_actor_with_randomturn_looks_around`: an actor with the shipped line, out of sight of the
+body and with nothing remembered, must have picked a non-zero direction and turned away from its spawn facing after
+1.3 s; a control class without the instinct must keep yaw 0. Measured before/after: with the branch disabled the test
+fails (`no randomturn state`); enabled it passes. Suite: **158 tests, 0 failures**.
 
 **`hitandrun` is implemented (round 223, 23 classes).** The handler (`0x50bb90`) does not move anything itself: while the
 engine's just-fired flag is up it counts a timer, and when that timer passes the instinct's first argument it sets the
