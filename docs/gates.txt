@@ -1418,3 +1418,24 @@ running app.--carry-check --start 01narshadda                        0   level 2
   20, `Some(23)` for 21 — so the walker suppresses input by design, while retail's capture walks at 600 ms (its
   script has cleared the camera). That is a **cog/script state** difference (Phase 3), not movement.
 - The walk trace now prints the script-camera state so the clearing event can be watched. Tests **149 passed**.
+
+## Update — round 171
+
+- `script_camera` (a latch set by `SetCurrentCamera`, never cleared) is now derived from
+  `camera_focus_thing().is_some()`, and `SetCameraFocus(slot, 0)` is treated as the engine's "no focus" (thing 0 =
+  the player's view). Both are correctness fixes; neither moves levels 20/21, and every measured reference leg
+  (14, 17, 19) is unchanged.
+- Level 20's script sets `SetCameraFocus(0, 44)` + `SetCurrentCamera(0)` and runs a long opening sequence with **no
+  clear in the traced window**, while **retail's body walks 4.20 units from 600 ms** — so the round-152 premise "a
+  script camera takes the body over" does not hold for level 20 (it did for level 14's 0.00). Next probe: the retail
+  side of that asymmetry.
+
+## Update — round 171 (control)
+
+- The two camera-semantics fixes (`script_camera` derived from the focus; `SetCameraFocus(slot, 0)` = no focus)
+  were **reverted**: unproven, and the gate read them as regressing walk5/walk6. A control run with the changes
+  reverted gave the **identical** numbers (walk5 3.90/3.73, 5 sectors; walk6 1.35/1.08, 5 sectors), so those two
+  failures are the machine's ~2 fps on two dt-sensitive legs, not the changes.
+- The level-20 finding stands: its opening sets `SetCameraFocus(0, 44)` + `SetCurrentCamera(0)` and never clears it
+  in the traced window, while retail's body walks 4.20 units from 600 ms → the input-suppression premise must be
+  re-tested against the retail side.

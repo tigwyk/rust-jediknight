@@ -4571,3 +4571,40 @@ it (`SetCameraFocus(0, 0)` / `SetCurrentCamera(0)`) and the port's script has no
 **cog/script state** difference (Phase 3), not a movement one, and the fixtures are committed with that reason.
 The walk trace now prints the script-camera state (`script camera (flag, slot, focus thing)`) so the next probe can
 watch for the clearing event. Level 19 joins the gate (now 14 legs).
+
+**The walker's "script camera suppresses input" rule was wrong in general — and level 20's script keeps its camera
+(round 171).** Two engine-correctness fixes went in and neither moved levels 20/21, which itself is the finding:
+
+1. `script_camera` was a **latch** (`SetCurrentCamera` set it; nothing cleared it). It is now derived —
+   `camera_focus_thing().is_some()` — so a script that hands the view back returns the walker's input. Measured
+   unchanged on every reference leg (14, 17, 19), which is what a latch-free implementation should show when the
+   scripts involved never clear the focus either.
+2. `SetCameraFocus(slot, 0)` is the engine's "no focus" (thing 0 = the player's own view), but the port only
+   excluded the player's *template index*, so a cleared slot still read as a script camera. Fixed in
+   `camera_focus_thing`. Also unchanged on the measured legs.
+3. The verb stream shows **why**: level 20's opening runs `SetCameraFocus(0, 44)`, `SetCurrentCamera(0)`, then a
+   long script sequence (`GetKeyLen`, `jkSetWaggle`, `ActivateWeapon`, `SetActorFlags(player, 4)`,
+   `SetInvActivated`, `PlaySoundThing`, `HasLOS`, `GetLevelTime`, …) with **no `SetCameraFocus(0, 0)` anywhere in
+   the 40-frame window**.
+
+Retail's own body **walks 4.20 units from 600 ms** in the same opening, which falsifies the round-152 premise that a
+script camera takes the body over: in level 14 retail's body indeed moved 0.00 with a script camera current, but
+level 20's moves. The next probe is the retail side of that asymmetry — what the level-20 camera focus is at 600 ms
+(the reference frame is a cutscene view or the player's view) and whether the engine's 30 s hand-back
+(`sithControl_Update`) is what lets retail walk.
+
+**The camera-semantics fixes were reverted — but the gate failures they seemed to cause are frame-rate noise
+(round 171, control run).** With both changes reverted the same two legs read the same failing numbers:
+
+```
+with the changes:     walk5 3.90/3.73 (5 sectors)   walk6 1.35/1.08 (5 sectors)
+reverted (control):   walk5 3.90/3.73 (5 sectors)   walk6 1.35/1.08 (5 sectors)
+```
+
+So the failures are the machine's ~2 fps (these two legs are dt-sensitive; they read 3.09/3 and 1.06/2 when the
+frame rate is normal), *not* the changes. The changes themselves stay reverted regardless: they are
+engine-correctness fixes without a measured benefit, and the house rule is to ship only measured improvements or
+gated behaviour. The finding that motivated them is unaffected and stands: level 20's opening sets
+`SetCameraFocus(0, 44)` + `SetCurrentCamera(0)` and never clears it in the traced window, while retail's body walks
+4.20 units from 600 ms — so the input-suppression premise needs re-testing against the retail side, not against the
+port's own latch.
