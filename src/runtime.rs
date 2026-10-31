@@ -3806,21 +3806,26 @@ impl Runtime {
             let Some(centre) = self.surfaces.get(*surface).map(|s| s.center) else { continue };
             let (dx, dy) = (centre[0] - eye[0], centre[1] - eye[1]);
             let flat = (dx * dx + dy * dy).sqrt();
-            if flat > reach {
+            // The use is a **look**, so the reach and ranking are 3D: level 1's death floor sits 17
+            // units below the cantina switch and won the switch's use on flat distance alone (round 200).
+            let dz = centre[2] - eye[2];
+            let dist = (flat * flat + dz * dz).sqrt();
+            if dist > reach {
                 continue;
             }
             // Behind the player is not in reach: the engine's use is a look, not a touch.
             if flat > 0.01 && (dx / flat) * facing[0] + (dy / flat) * facing[1] < 0.3 {
                 continue;
             }
-            if best.is_none_or(|(_, d)| flat < d) {
-                best = Some((*surface, flat));
+            if best.is_none_or(|(_, d)| dist < d) {
+                best = Some((*surface, dist));
             }
         }
         let (surface, _) = best?;
-        for (instance, _, linked) in &self.surface_links {
+        for (instance, link, linked) in &self.surface_links {
             if *linked == surface {
-                self.pending_messages.push((*instance, "activate", [0.0; 2], None));
+                // `GetSenderId()` is how a switch tells its link ids apart, so the link id is the sender.
+                self.pending_messages.push((*instance, "activate", [0.0; 2], Some(*link as i64)));
             }
         }
         Some(surface)
@@ -3875,21 +3880,26 @@ impl Runtime {
             let Some(thing) = self.things.get(*target) else { continue };
             let (dx, dy) = (thing.pos[0] - eye[0], thing.pos[1] - eye[1]);
             let flat = (dx * dx + dy * dy).sqrt();
-            if flat > reach {
+            // The use is a **look**, so the reach and ranking are 3D: level 1's death floor sits 17
+            // units below the cantina switch and won the switch's use on flat distance alone (round 200).
+            let dz = thing.pos[2] - eye[2];
+            let dist = (flat * flat + dz * dz).sqrt();
+            if dist > reach {
                 continue;
             }
             if flat > 0.01 && (dx / flat) * facing[0] + (dy / flat) * facing[1] < 0.3 {
                 continue;
             }
-            if best.is_none_or(|(_, d)| flat < d) {
-                best = Some((*target, flat));
+            if best.is_none_or(|(_, d)| dist < d) {
+                best = Some((*target, dist));
             }
         }
         let (target, _) = best?;
-        for (instance, _, linked) in &self.thing_links {
+        for (instance, link, linked) in &self.thing_links {
             if *linked == target {
                 // `activate`, not `used`: no shipped cog declares a `used` label (0 of 540), while 82 of them -- every door, switch and item -- answer `activate`. It is also what the surface half of this action already sends.
-                self.pending_messages.push((*instance, "activate", [0.0; 2], None));
+                // `GetSenderId()` is how a switch tells its link ids apart, so the link id is the sender.
+                self.pending_messages.push((*instance, "activate", [0.0; 2], Some(*link as i64)));
             }
         }
         Some(target)

@@ -2885,6 +2885,10 @@ fn main() {
             for (instance, label, params, source) in pending {
                 let Some((script_name, vm)) = vms.get_mut(instance) else { continue };
                 let Some(script) = world.cogs.get(script_name) else { continue };
+        // The sender/source rides with the message: `activated` handlers branch on
+        // `GetSenderId()` (`00_doorswitch.cog` opens only for its switch-surface link id 2).
+        vm.sender = source.map_or(0, |s| s as i64);
+        vm.source = source.map_or(0, |s| s as i64);
                 if script.label(label).is_none() {
                     continue;
                 }
@@ -17324,9 +17328,13 @@ fn use_key(
     // Things first: a door's script is linked with `thing` symbols, and using it is what sends `used`
     // (`sithPlayer`'s use action). Surfaces are the other kind of link, and a level may have both.
     let mut rt = sim.world.borrow_mut();
-    let used_thing = rt.use_thing(eye, facing, 3.0);
-    let used_surface = if used_thing.is_none() {
-        rt.activate_near(eye, facing, 3.0)
+    // **Surfaces first, and a narrow cone.** A switch is a surface link (`00_doorswitch.cog`:
+    // `surface switch0 linkid=2`) while the same script also links its *doors* as things (linkid=1,
+    // the lock-sound arm). With things first a door piece within reach won and the surface was never
+    // asked; and the engine uses what the crosshair is *on*, so the cone is 26 degrees, not 72.
+    let used_surface = rt.activate_near(eye, facing, 3.0);
+    let used_thing = if used_surface.is_none() {
+        rt.use_thing(eye, facing, 3.0)
     } else {
         None
     };

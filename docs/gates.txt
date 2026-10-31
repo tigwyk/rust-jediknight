@@ -1795,3 +1795,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
   switch pose; `--cogstatus-after` already prints it.
 - Regression: walk-trace gate unchanged at **15 legs, 1 failure** (`walk5_spawn`, tracked) — round 198's fix cost
   nothing.
+
+## Update — round 200
+
+- Round 199's mystery target named: `surface 466` is `00_deathfloor.cog`'s trigger plane at **z −18.50** — 17.4 units
+  below the player — and both use scans measured only *flat* distance. Fixed: reach and ranking now use the **3D**
+  distance (cone stays on the flat direction). Measured before/after: `use: activated surface 466` → no surface 466,
+  falls through to `thing 84`.
+- Shipped with it (both needed by the door script): `label_for_name` resolves a non-literal name by **message id**
+  (`activate`/`activated` share id 1; `00_doorswitch.cog` declares only `activated:`), and `activated` messages carry
+  the **link id as the sender** (`GetSenderId()` separates door things linkid=1 from switch surfaces linkid=2);
+  `use_key` tries surfaces first with a 0.8 cone.
+- **Still open:** the switch surfaces (2403/2409, link 2) are not in the surface candidate set, so cog 11's
+  `doorstatus` stays 0. Next probe: dump `Runtime::surfaces` for the linked surface ids (the `--surfaces-at` probe hung).
+- `cargo test --release` 149 passed; `--gates` **64 of 64, 0 skipped**.

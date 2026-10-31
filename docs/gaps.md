@@ -5361,3 +5361,32 @@ after one use at the switch pose, which is a variable the port's `--cogstatus-af
 
 Regression check: the walk-trace gate is unchanged at **15 legs, 1 failure** (`walk5_spawn`, the tracked floor-search
 deviation), so round 198's sector-link fix cost nothing.
+
+**The use action's reach is 3D now — the death floor 17 units below can no longer win (round 200).** Round 199's
+finding was that the use picked `surface 466` over the cantina switch; this round named 466: `--links` puts it at
+**(-6.26,-2.01,-18.50)** — `00_deathfloor.cog`'s trigger plane, **17.4 units below the player**. Both use scans
+(`activate_near` and `use_thing`) measured only *flat* distance, so a floor far below was in "reach". The fix is one
+line of geometry in each: reach and ranking use the **3D** distance (`dist` from `dx, dy, dz`), while the facing cone
+stays on the flat direction. After it, the same run selects `thing 84` — something within reach — and `surface 466` is
+gone from the candidate set:
+
+```
+before:  use: activated surface 466
+after:   use: activated thing 84
+```
+
+Two more engine-faithful pieces shipped with it, because the door script depends on both:
+
+- `label_for_name` falls back to the **message-id** mapping when a name is not a literal label: `MESSAGE_IDS` gives
+  `activate` and `activated` the same id 1, and `00_doorswitch.cog` declares `message activated` with an `activated:`
+  label only, so the use action's `activate` was dropped for exactly the scripts it exists for.
+- `activated` messages carry the **link id as the sender** (`Some(*link as i64)` in both the thing and surface scans,
+  delivered into `vm.sender`/`vm.source`), because `00_doorswitch.cog` branches on `GetSenderId()`: door things
+  linkid=1 (lock sound), switch surfaces linkid=2 (open). `use_key` also tries surfaces before things, and its cone is
+  0.8 (≈37°) instead of 0.3 (≈72°).
+
+**Still open:** the switch's own surfaces (2403/2409, link 2, at (−4.29,−3.88/−3.62,−1.15)) are not among the
+surface candidates the scan sees — the run falls through to `use_thing` — so cog 11's `doorstatus` stays 0 and the door
+does not open yet. The next probe is that candidate set: whether `Runtime::surfaces` carries those two surface centres
+at all (the `--surfaces-at` probe hung on this run, so the check is a direct dump of the surface table for the linked
+ids). Verification: `cargo test --release` 149 passed; `--gates` **64 of 64, 0 skipped**.

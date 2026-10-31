@@ -268,7 +268,16 @@ impl Cog {
             Some(id) => self.label_for_message_id(id)?,
             None => name.to_string(),
         };
-        self.label(&label).is_some().then_some(label)
+        // A **message name** the script does not also declare as a label still resolves by id:
+        // `MESSAGE_IDS` gives `activate` and `activated` the same id (1), and `00_doorswitch.cog`
+        // declares `message activated` with an `activated:` label only — so the use action's
+        // `activate` never reached the door until this fallback. A script that *does* declare
+        // `activate` wins above, unchanged.
+        if self.label(&label).is_some() {
+            return Some(label);
+        }
+        let id = usize::try_from(message_id(&label)?).ok()?;
+        self.label_for_message_id(id)
     }
 
     /// Bind a placed instance's values to this script.
