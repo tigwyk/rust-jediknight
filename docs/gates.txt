@@ -2011,3 +2011,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   defaulted classes = 34 maxstep + 72 accuracy − 15 in both), and `wakeupdist` is **content-unused**, so the port's
   missing read is measured as harmless rather than an active acquisition gap.
 - No game run and no port window; tests unchanged at **151 passed**.
+
+## Update — round 217
+
+- **Complete instinct registry recovered and matched against content.** `--audit` now tallies the instinct names the
+  shipped `.ai` classes use: 24 names across 231 classes, mapped to their handlers in the two registries
+  (`sithAICmd_Startup` 21 entries + the JK-side `FUN_0040f9d0` 4). The unnamed entries were resolved from the EXE's
+  string data: `jump` (0x54e234), `roam` (0x54e248), `flee` (0x54e250), `talk` (0x54e2a8); JK side is
+  `saberfighting` 0x40fa40, `forcepowers` 0x40ff40, `sabermove` 0x4100e0, `specialattack` 0x40fd00.
+- Usage counts put the AI gap list in priority order: lookfortarget 215, listen 200, talk 198, primaryfire 166,
+  follow 159, opendoors 142, blindfire 134, returnhome 97, jump 92, circlestrafe 70, flee 49, forcepowers 45,
+  saberfighting 45, retreat 42, withdraw 30, dodge 27, roam 27, specialattack 24, hitandrun 23, sensedanger 14,
+  turretfire 12, randomturn 9, lobfire 7, crouch 3 — and `sabermove` is registered but named by **no** class.
+- The port runs **3 of the 24 used instincts** (follow, lookfortarget, primaryfire). Biggest gaps: `listen`, `talk`,
+  `opendoors` (an AI that cannot open a door can be trapped by one) and `blindfire`.
+- Audit prints the tally permanently; `--audit` still passes; tests **151 passed**. No game run and no port window.

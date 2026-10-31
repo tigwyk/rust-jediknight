@@ -5791,3 +5791,41 @@ the sparse class gets 20/10/0.5/0.5, and a file that carries the keys still wins
 The audit's wording follows: it now says "91 take loader defaults" and calls the samples `defaulted class:` rather than
 `odd class:` — a class that omits a key is not broken, it is defaulted. Suite: **151 tests, 0 failures**; the audit
 still passes and its counts are unchanged (this changed what those classes mean, not how many there are).
+
+**The complete instinct registry, and what shipped content asks of it (round 217).** The `--audit` pass now tallies the
+instinct names the 231 shipped `.ai` classes use, so the AI work list is measured rather than guessed. The registry is
+25 entries in two startups — `sithAICmd_Startup` (21) and the JK side `FUN_0040f9d0` (4) — and every used name maps to a
+handler:
+
+| instinct | classes using it | handler | port behaviour |
+| --- | --- | --- | --- |
+| lookfortarget | 215 | `0x50aa80` | **yes** (view-cone scan, round 211) |
+| listen | 200 | `0x50a6f0` | no |
+| talk | 198 | `0x50be20` | no |
+| primaryfire | 166 | `0x509e40` | **yes** (fire cadence) |
+| follow | 159 | `0x5093f0` | **yes** (chase + standoff) |
+| opendoors | 142 | `0x50abc0` | no — an actor never opens a door |
+| blindfire | 134 | `0x509b30` | no |
+| returnhome | 97 | `0x50bd70` | no |
+| jump | 92 | `0x50abf0` | no |
+| circlestrafe | 70 | `0x509890` | no |
+| flee | 49 | `0x50aeb0` | partial: scripts' `AIFlee` verb only, not the instinct |
+| forcepowers | 45 | `0x40ff40` | no |
+| saberfighting | 45 | `0x40fa40` | no |
+| retreat | 42 | `0x50bc60` | no |
+| withdraw | 30 | `0x50b150` | no |
+| dodge | 27 | `0x50b360` | no |
+| roam | 27 | `0x50b830` | partial: the walker wanders, not the instinct's schedule |
+| specialattack | 24 | `0x40fd00` | no |
+| hitandrun | 23 | `sithAICmd_HitAndRun` | no |
+| sensedanger | 14 | `0x50b9b0` | no |
+| turretfire | 12 | `0x50a0f0` | no |
+| randomturn | 9 | `0x50b700` | no |
+| lobfire | 7 | `0x509cd0` | no |
+| crouch | 3 | `0x509ad0` | no |
+| sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
+
+So the port runs **3 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+the counts are how many classes depend on each: `listen` (200), `talk` (198), `opendoors` (142) and `blindfire` (134)
+are the biggest behavioural gaps, and `opendoors` is the one with a visible consequence today (an AI that cannot open a
+door can be trapped behind one). `sabermove` needs no work at all — nothing names it.

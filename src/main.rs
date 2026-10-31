@@ -15577,6 +15577,10 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
     let mut bm_pixels = 0usize;
     let mut bm_incomplete = 0usize;
     let mut bm_samples: Vec<String> = Vec::new();
+    // Which instinct names the shipped classes actually use, and how many classes use each. This is
+    // the content side of the AI gap list: an instinct no class names needs no handler at all.
+    let mut ai_instinct_names: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     let mut sft_files = 0usize;
     let mut sft_glyphs = 0usize;
     let mut sft_incomplete = 0usize;
@@ -15708,6 +15712,11 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
                 ai_files += 1;
                 ai_params += class.params.len();
                 ai_instincts += class.instincts.len();
+                for instinct in &class.instincts {
+                    *ai_instinct_names
+                        .entry(instinct.name.to_ascii_lowercase())
+                        .or_default() += 1;
+                }
                 // A class that omits a key is **not** broken: `sithAIClass_LoadEntry` gives every
                 // field a default before it reads the line, and `ai::parse` applies those same
                 // defaults (`maxstep` 0.5, `sightdist` 20, `heardist` 10, `accuracy` 0.5). So this
@@ -15856,6 +15865,10 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
         );
         for s in &ai_samples {
             println!("  defaulted class: {s}");
+        }
+        // The content side of the AI gap list: a name no class uses needs no handler at all.
+        for (name, classes) in &ai_instinct_names {
+            println!("  instinct {name:<16} {classes} class(es)");
         }
     }
     if pup_files > 0 {
