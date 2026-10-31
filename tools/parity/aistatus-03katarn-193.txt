@@ -1,0 +1,126 @@
+> aistatus 0
+>aistatus 0
+AI Status dump for thing 24 (tuskan).
+Class 'tuproddefault.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x604, mode=0x0.
+Instinct 1: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x204.
+Instinct 2: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x7, mode=0x0.
+Instinct 3: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x100, mode=0x2.
+Instinct 4: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 5: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xe00, mode=0x2.
+Instinct 6: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 7: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x900, mode=0x0.
+Instinct 8: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 9: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 10: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0xffff.
+> wait 1200 ms
+> aistatus 0
+Instinct 7: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x900, mode=0x0.
+Instinct 8: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 9: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 10: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0xffff.
+> wait 1200 ms
+> aistatus 0
+0.001000 seconds to parse section templates.
+0.001000 seconds to parse section things.
+>coords
+Pos: (-0.76, -4.75, -0.20) PYR: (0.00, 0.00, 0.00) Sector: 370.
+>warp -0.76 -4.74 -0.23700000000000002 0 -53 0
+>aistatus 0
+AI Status dump for thing 24 (tuskan).
+Class 'tuproddefault.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x604, mode=0x0.
+Instinct 1: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x204.
+Instinct 2: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x7, mode=0x0.
+Instinct 3: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x100, mode=0x2.
+Instinct 4: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 5: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xe00, mode=0x2.
+Instinct 6: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 7: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x900, mode=0x0.
+Instinct 8: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 9: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 10: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0xffff.
+>aistatus 0
+AI Status dump for thing 24 (tuskan).
+Class 'tuproddefault.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x604, mode=0x0.
+Instinct 1: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x204.
+Instinct 2: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x7, mode=0x0.
+Instinct 3: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x100, mode=0x2.
+Instinct 4: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 5: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xe00, mode=0x2.
+Instinct 6: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 7: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x900, mode=0x0.
+Instinct 8: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 9: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 10: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0xffff.
+>aistatus 0
+AI Status dump for thing 24 (tuskan).
+Class 'tuproddefault.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x604, mode=0x0.
+Instinct 1: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x204.
+Instinct 2: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x7, mode=0x0.
+Instinct 3: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x100, mode=0x2.
+Instinct 4: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 5: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xe00, mode=0x2.
+Instinct 6: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 7: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x900, mode=0x0.
+Instinct 8: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 9: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 10: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0xffff.
+> wait 1200 ms
+> aistatus 0
+Instinct 6: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 7: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x900, mode=0x0.
+Instinct 8: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 9: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 10: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0xffff.
+>aistatus 0
+AI Status dump for thing 24 (tuskan).
+Class 'tuproddefault.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x604, mode=0x0.
+Instinct 1: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x204.
+Instinct 2: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x7, mode=0x0.
+Instinct 3: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x100, mode=0x2.
+Instinct 4: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 5: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xe00, mode=0x2.
+Instinct 6: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 7: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x900, mode=0x0.
+Instinct 8: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 9: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 10: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0xffff.
+>aistatus 0
+AI Status dump for thing 24 (tuskan).
+Class 'tuproddefault.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x604, mode=0x0.
+Instinct 1: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x204.
+Instinct 2: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x7, mode=0x0.
+Instinct 3: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x100, mode=0x2.
+Instinct 4: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 5: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xe00, mode=0x2.
+Instinct 6: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 7: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x900, mode=0x0.
+Instinct 8: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 9: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 10: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0xffff.
+>aistatus 0
+AI Status dump for thing 24 (tuskan).
+Class 'tuproddefault.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x604, mode=0x0.
+Instinct 1: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x204.
+Instinct 2: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x7, mode=0x0.
+Instinct 3: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x100, mode=0x2.
+Instinct 4: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 5: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xe00, mode=0x2.
+Instinct 6: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 7: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x900, mode=0x0.
+Instinct 8: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 9: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 10: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0xffff.

@@ -5,3 +5,8 @@
 # trace at this pose reports actors at (-0.61,-2.41) and (-1.43,-3.19), 2.3 and 1.7 units away). Same
 # coordinates as the level's own spawn, so the warp is accepted; only the facing changes.
 katarn_ai_face	03katarn	-0.76	-4.74	-0.20	0	-90
+# katarn_ai_193: the vantage computed from the map data (`--thing-list`): thing 193 (`tuskanbh`) stands
+# at (0.186,-3.491,-0.280), 1.6 units from the spawn, at retail yaw -53 from (-0.76,-4.74). The port's
+# frame from here shows the Tuskan by the fence, so this is the engagement pose: retail yaw -53 is
+# forward (cos,-sin) = (0.60,0.80), i.e. +x/+y toward the thing.
+katarn_ai_193	03katarn	-0.76	-4.74	-0.20	0	-53

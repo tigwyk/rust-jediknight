@@ -1898,3 +1898,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Next: stand-off from `--thing-list` (nearest actors: thing 245 at (−2.31,−5.22), 1.6 units; thing 30 at
   (−0.666,−0.618), 4.1 units) + a floor probe at the actor's height, then capture the engagement.
 - Tests **149 passed**.
+
+## Update — round 209 (continued)
+
+- Data-derived combat vantage implemented: row `katarn_ai_193` (spawn pose, retail yaw −53 facing thing 193 at
+  (0.186,−3.491,−0.280), 1.6 units), retail capture `tools/parity/aistatus-03katarn-193.txt`.
+- Same pose, 2.5 s in: **port** shows the Tuskan by the fence and its HUD shields drop to **97** (a hit landed);
+  **retail** shows no actor in view and HUD 100/50, with idle `aistatus` words.
+- The port's AI engagement is therefore real; the divergence to chase is **visibility from that standpoint** (retail's
+  near fence may occlude the actor, or the actor's walked-to position differs). Next: re-read the actor position at
+  capture time on both sides and check occlusion before comparing engagement timings.
+- Tests **149 passed**.

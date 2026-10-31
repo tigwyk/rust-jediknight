@@ -5576,3 +5576,22 @@ view is valid (fences, HUD 100/50) but faces away from the actors, and turned to
 data) the view is a grass slope with no Tuskan in sight — so no engagement is expected, and the static `aistatus`
 words agree. Next round picks the vantage from `--thing-list` + a floor probe at the actor's own height and captures the
 engagement from there.
+
+**The data-derived combat vantage works on the port — and diverges from retail's own frame (round 209 continued).** The
+vantage was computed, not guessed: `--thing-list` puts thing 193 (`tuskanbh`) at (0.186,−3.491,−0.280), **1.6 units**
+from the spawn (−0.76,−4.74); facing it means retail yaw −53 (forward `(cos,−sin)` = (0.60,0.80)). The new row is
+`katarn_ai_193` in `tools/parity/interaction-shots.tsv`, with the retail capture in
+`tools/parity/aistatus-03katarn-193.txt`.
+
+Two frames at that same pose, 2.5 s in:
+
+- **port** (150 frames): the Tuskan stands by the fence and is closing; the HUD shows **shields 97** — it has already
+  hit the player once. The port's AI trace at this pose reports several Tuskens seeing and shots fired.
+- **retail** (series frame 0, ~2.5 s): the fences are there, **no Tuskan in sight**, HUD 100/50 (no damage) — and its
+  `aistatus` words are the idle defaults, consistent with nothing engaging.
+
+So the engagement itself is not in doubt on the port side; what diverges is whether the actor is visible from that
+standpoint. The next probe is a controlled pair at the same frame time with the actor's **data position re-read at
+capture** (`--thing-list` gives the spawn; the runtime/`BK_AI_TRACE` gives where the actor has walked to), and a check
+of whether retail's near fence occludes it — i.e. a visibility question, not an AI-timing one. That is the shape Phase 1
+step 5's timing comparison needs: same vantage, same time, both sides' actor positions known.
