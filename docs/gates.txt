@@ -2069,3 +2069,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
   actor being more than 0.5 units from the anchor (it has no awake flag). Needs a windowed leg to settle → QA window.
 - AI instinct coverage now **6 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198). No game run
   and no port window this round.
+
+## Update — round 221
+
+- **`retreat` + `withdraw` implemented** (42 + 30 classes). retreat (`0x50bc60`) arms a withdraw when health falls under
+  `arg0 × max` (0.50 shipped) with `arg1` chance (0.25–0.50) and remembers the current target; withdraw (`0x50b150`)
+  walks the actor away from it. The port stores `(target, deadline)` in `Runtime::ai_withdraw` and reuses the flee walk.
+- Headless check `a_hurt_actor_with_retreat_backs_off` + healthy control (never arms, never moves). Measured
+  before/after: retreat trigger disabled → fails with ``a hurt actor with `Retreat` did not arm the withdraw mode``;
+  enabled → passes. Suite **155 tests, 0 failures**.
+- Deviations recorded: the mode ends on the withdraw interval (5000 ms) or the target's death, not on sight of the
+  target as the engine does; the away direction has no lateral jitter. Both need a windowed wounded-actor leg → QA
+  window.
+- AI instinct coverage now **8 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198). No game run
+  and no port window.

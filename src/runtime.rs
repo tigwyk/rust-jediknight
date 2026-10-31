@@ -1087,6 +1087,12 @@ pub struct Runtime {
     /// actor back to `ai + 0x93` (`SetMoveThing`) and then turns it there (`SetLookFrame`), so the
     /// anchor is the thing's spawn position. Set when the instincts are attached to the live runtime.
     pub ai_home: BTreeMap<usize, [f32; 3]>,
+    /// Actors in the `retreat`/`withdraw` mode: the thing they are backing away from, and when the
+    /// mode expires. `retreat` (`0x50bc60`) sets it when health falls under `arg0 × max` and its
+    /// `arg1` chance succeeds; `withdraw` (`0x50b150`) walks the actor away from that thing. The port
+    /// reuses the scripted flee walk and re-arms on the withdraw instinct's own interval (5000 ms in
+    /// the shipped classes).
+    pub ai_withdraw: BTreeMap<usize, (usize, f32)>,
     /// `sithAIAwareness`: a position other actors of the same side were told about, and when. A
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
@@ -1666,6 +1672,7 @@ impl Runtime {
             ai_scan: BTreeMap::new(),
             ai_opendoors: BTreeMap::new(),
             ai_home: BTreeMap::new(),
+            ai_withdraw: BTreeMap::new(),
             sector_awareness: BTreeMap::new(),
             sector_adjoins: sector_adjoins.clone(),
             ai_fire_target: BTreeMap::new(),
@@ -2856,10 +2863,46 @@ impl Runtime {
             // is a whole mode in the engine (`sithAI_Flee`). It is a script's order, so it does not
             // need sight or a memory — read before the "nothing to do" return below, or a fleeing
             // actor that has lost the player just stands there.
+            // `retreat` (`0x50bc60`) and `withdraw` (`0x50b150`): a hurt actor backs away from what
+            // hurt it. retreat sets the mode when its health falls under `arg0 × max` (0.50 in every
+            // shipped class) and its `arg1` chance (0.25-0.50) succeeds, remembering the current
+            // target; withdraw walks the actor away from that target. The port reuses the scripted
+            // flee walk for the step and clears the mode on the withdraw instinct's own interval
+            // (5000 ms shipped) — the engine instead ends it when the target comes back into sight.
+            if let Some((from, until)) = self.ai_withdraw.get(&index).copied()
+                && (self.time >= until || self.things.get(from).is_none())
+            {
+                self.ai_withdraw.remove(&index);
+            }
+            if !self.ai_withdraw.contains_key(&index)
+                && let Some(retreat) = ai.as_ref().and_then(|c| c.instinct("Retreat")).cloned()
+                && let Some(withdraw) = ai.as_ref().and_then(|c| c.instinct("Withdraw"))
+            {
+                let max_health = self
+                    .template_max_health
+                    .get(&ai_template)
+                    .copied()
+                    .unwrap_or(0.0);
+                let health = self.things.get(index).map(|t| t.health).unwrap_or(0.0);
+                let fraction = retreat.weight;
+                let chance = retreat.args.first().copied().unwrap_or(0.0) as f64;
+                if max_health > 0.0
+                    && health < fraction * max_health
+                    && crate::cog::pseudo_random() < chance
+                {
+                    let ms = withdraw.weight.max(1.0);
+                    self.ai_withdraw.insert(index, (player, self.time + ms / 1000.0));
+                }
+            }
             let fleeing = self
                 .ai_flee
                 .get(&index)
-                .and_then(|t| self.things.get(*t).map(|t| t.pos));
+                .and_then(|t| self.things.get(*t).map(|t| t.pos))
+                .or_else(|| {
+                    self.ai_withdraw
+                        .get(&index)
+                        .and_then(|(from, _)| self.things.get(*from).map(|t| t.pos))
+                });
             if scripted.is_none()
                 && !sighted
                 && aim.is_none()
@@ -7845,6 +7888,75 @@ mod tests {
         next.adopt(&carried);
         assert_eq!(next.things[0].health, 41.0, "the carried health was not restored");
         assert_eq!(next.player_shields, 73.0, "the carried shields were not restored");
+    }
+
+    /// `retreat` (`0x50bc60`) arms a withdraw when health falls under `arg0 × max` and its `arg1`
+    /// chance succeeds, and `withdraw` (`0x50b150`) walks the actor away from the thing that hurt it.
+    /// Shipped lines: `retreat 0.50, 0.50, 2000, 1.0` and `withdraw 5000, 1.0`.
+    #[test]
+    fn a_hurt_actor_with_retreat_backs_off() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.health = 10.0; // 10% of its 100 max
+        let mut player = base.clone();
+        player.pos = [2.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.template_max_health.insert("tuskan".into(), 100.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 Retreat 0.50, 1.0, 2000.0, 1.0\n\
+                 Withdraw 5000.0, 1.0\n",
+            ),
+        );
+
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert!(
+            rt.ai_withdraw.contains_key(&1),
+            "a hurt actor with `Retreat` did not arm the withdraw mode"
+        );
+        for _ in 0..30 {
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        let backed = rt.things[1].pos[0];
+        assert!(backed < -0.3, "the hurt actor did not back off: x {backed:.2}");
+
+        // A healthy actor with the same class never arms the mode — and with the body out of its
+        // 2-unit sight it has nothing else to walk to, so it stays put.
+        let mut healthy = door_runtime();
+        let base = healthy.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.health = 100.0;
+        let mut player = base.clone();
+        player.pos = [10.0, 0.0, 0.0];
+        healthy.things = vec![player, actor];
+        healthy.templates = vec!["walkplayer".into(), "tuskan".into()];
+        healthy.types = vec![10, 2];
+        healthy.template_speed.insert("tuskan".into(), 1.0);
+        healthy.template_max_health.insert("tuskan".into(), 100.0);
+        healthy.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=2.0\n\n\
+                 Retreat 0.50, 1.0, 2000.0, 1.0\n\
+                 Withdraw 5000.0, 1.0\n",
+            ),
+        );
+        for _ in 0..30 {
+            healthy.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            !healthy.ai_withdraw.contains_key(&1),
+            "a healthy actor armed the withdraw mode"
+        );
+        assert_eq!(healthy.things[1].pos[0], 0.0, "a healthy actor walked away");
     }
 
     /// `returnhome` (handler `0x50bd70`) walks an otherwise idle actor back to its home anchor — the

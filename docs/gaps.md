@@ -5812,8 +5812,8 @@ handler:
 | flee | 49 | `0x50aeb0` | partial: scripts' `AIFlee` verb only, not the instinct |
 | forcepowers | 45 | `0x40ff40` | no |
 | saberfighting | 45 | `0x40fa40` | no |
-| retreat | 42 | `0x50bc60` | no |
-| withdraw | 30 | `0x50b150` | no |
+| retreat | 42 | `0x50bc60` | **yes** (round 221: arms the withdraw mode when hurt) |
+| withdraw | 30 | `0x50b150` | **yes** (round 221: backs away from what hurt it) |
 | dodge | 27 | `0x50b360` | no |
 | roam | 27 | `0x50b830` | partial: the walker wanders, not the instinct's schedule |
 | specialattack | 24 | `0x40fd00` | no |
@@ -5825,11 +5825,29 @@ handler:
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **6 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+So the port runs **8 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
 the counts are how many classes depend on each: `listen` (200) and `talk` (198) are the biggest remaining behavioural
 gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
-it is now implemented (below), as are `blindfire` and `returnhome` (below). `sabermove` needs no work at all: nothing
-names it.
+it is now implemented (below), as are `blindfire`, `returnhome` and the `retreat`/`withdraw` pair (below). `sabermove`
+needs no work at all: nothing names it.
+
+**`retreat` + `withdraw` are implemented (round 221, 42 + 30 classes).** The two handlers are one behaviour split in
+two. `retreat` (`0x50bc60`) checks the actor's health against `arg0 × max` — 0.50 in every shipped class — and rolls
+`arg1` (0.25–0.50) before it sets the withdraw mode, remembering the current target as the thing to back away from.
+`withdraw` (`0x50b150`) then walks the actor away from that thing. The port arms the mode at the same threshold and
+chance (`thing.health` against `template_max_health`), stores `(target, deadline)` in `Runtime::ai_withdraw`, and feeds
+it through the existing **flee** walk, which already means "walk directly away from this position and do not shoot" —
+so a hurt actor now backs off instead of standing and trading shots.
+
+Deviations: the engine ends the mode when the target comes back into sight (`sithAI_CheckSightThing` from the actor to
+the withdrawal target); the port clears it on the `withdraw` instinct's own interval (5000 ms shipped) or when the
+target dies. The engine also adds a random lateral jitter to the away direction, which the port does not. Both are
+listed here rather than silently absorbed, and a windowed leg with a wounded actor would settle them.
+
+The headless check is `a_hurt_actor_with_retreat_backs_off`: an actor at 10% health with the shipped lines must arm the
+mode and be measurably further from the threat after a second, while a healthy actor with the same class must never arm
+it and must not move. Measured before/after: with the retreat trigger disabled the test fails with
+`a hurt actor with `Retreat` did not arm the withdraw mode`; enabled it passes. Suite: **155 tests, 0 failures**.
 
 **`returnhome` is implemented (round 220).** Its handler (`0x50bd70`) walks the actor back to its own anchor: in the
 start mode it calls `SetMoveThing` with `ai + 0x93` and then `SetLookFrame` at the same point, and in the later mode it
