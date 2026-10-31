@@ -2191,3 +2191,19 @@ running app.--carry-check --start 01narshadda                        0   level 2
   **162 tests, 0 failures**.
 - AI instinct coverage now **14 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198, audio). No game
   run and no port window.
+
+## Update — round 229
+
+- **The awareness reader now honours `heardist`** (the `listen` half of 200 classes). The handler (`0x50a6f0`) tests a
+  sound against the class's `heardist` (`class + 0x18`) before it reacts; the port had the record, the propagation and the
+  walk, but not the gate, so every actor in a room reacted to every gunshot in it. The reader is now gated the same way
+  (trace line `ai: N ignores a sound beyond its class's heardist` under `BK_AI_TRACE`).
+- Recorded as still unported on the table row: the engine's per-sector ring of three recent sounds (the port keeps one
+  strongest record per sector/side), its facing test on the sound, and its probability roll to take the shooter as a
+  target.
+- Headless check `the_awareness_record_is_heard_only_inside_the_classs_heardist`: a shot 5 units away with `heardist 2.0`
+  must not move the actor, the same actor with a shot 1.5 units away must walk toward it. Measured before/after: gate
+  widened → fails with `the actor reacted to a sound beyond its heardist`; gated → passes. Suite **163 tests, 0
+  failures**.
+- AI instinct coverage stays 14 of 24 used instincts (`listen` now *partial* rather than *no*); `talk` remains the
+  audio-layer gap. No game run and no port window.

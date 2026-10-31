@@ -5800,7 +5800,7 @@ handler:
 | instinct | classes using it | handler | port behaviour |
 | --- | --- | --- | --- |
 | lookfortarget | 215 | `0x50aa80` | **yes** (view-cone scan, round 211) |
-| listen | 200 | `0x50a6f0` | no |
+| listen | 200 | `0x50a6f0` | partial: the awareness reader turns and walks an actor toward a shot, now gated by the class's `heardist`; the engine's per-sector sound ring, ±60° facing test and probability-based target acquisition are not ported |
 | talk | 198 | `0x50be20` | no |
 | primaryfire | 166 | `0x509e40` | **yes** (fire cadence) |
 | follow | 159 | `0x5093f0` | **yes** (chase + standoff) |
@@ -5830,6 +5830,25 @@ the counts are how many classes depend on each: `listen` (200) and `talk` (198) 
 gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
 it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair, `circlestrafe`,
 `hitandrun`, `randomturn`, `roam`, `turretfire` and `flee` (below). `sabermove` needs no work at all: nothing names it.
+
+**The awareness reader now honours `heardist` (round 229, the `listen` half of 200 classes).** `listen`'s handler
+(`0x50a6f0`) is the engine's per-sector sound reader, and the port already had two thirds of it: a firing event is
+propagated through the sector adjoin graph per side, and an actor that reads the record turns and walks to it exactly as
+if it had been the last place it saw an enemy. What was missing is the gate the handler applies **before** reacting: it
+tests the sound against the class's **`heardist`** (`class + 0x18`; the loaded default is 10, and every shipped class
+sets its own) and ignores anything further away. Without that gate every actor in a room reacted to every gunshot in it,
+however deaf its class was.
+
+The reader is now gated the same way, with the trace line `ai: N ignores a sound beyond its class's heardist` under
+`BK_AI_TRACE`. Still unported from the handler, and recorded on the table row rather than implied: the engine keeps a
+**per-sector ring of three recent sounds** with their own positions (the port keeps one strongest record per sector and
+side), it applies a facing test on the sound, and it rolls a probability to take the shooter as a target once it reacts —
+the port always just walks toward the sound.
+
+The headless check is `the_awareness_record_is_heard_only_inside_the_classs_heardist`: an actor with `heardist 2.0` and a
+shot recorded five units away must not move, and the same actor with a shot recorded 1.5 units away must walk toward it.
+Measured before/after: with the gate widened the test fails on `the actor reacted to a sound beyond its heardist`; with it
+the test passes. Suite: **163 tests, 0 failures**.
 
 **`flee` is complete, and its duration now bounds the walk (round 228, 49 classes).** The row read *partial* because the
 port had the script's `AIFlee` verb but not the instinct; reading both settles that they are the same behaviour split at

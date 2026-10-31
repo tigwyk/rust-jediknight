@@ -2907,10 +2907,27 @@ impl Runtime {
                 let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
                 let side = ai.as_ref().map(|ai| ai.alignment as i32).unwrap_or(0);
                 let aware = self.awareness_at(sector, side);
-                if aware.is_some() && std::env::var_os("BK_AI_TRACE").is_some() {
+                // `listen` (`0x50a6f0`) checks the sound against the class's **heardist** before it
+                // reacts — a shot five units away does not wake a guard whose hearing reaches two —
+                // and only then turns, walks and (on its own roll) takes the shooter as a target. The
+                // port has the same record and the same walk; the gate was missing, so every actor in
+                // a room reacted to every shot in it however deaf its class was.
+                let Some(pos) = aware else { return None };
+                let here = self.things.get(index)?.pos;
+                let heard = ai.as_ref().is_none_or(|class| {
+                    let (dx, dy, dz) = (pos[0] - here[0], pos[1] - here[1], pos[2] - here[2]);
+                    (dx * dx + dy * dy + dz * dz).sqrt() <= class.heardist
+                });
+                if !heard {
+                    if std::env::var_os("BK_AI_TRACE").is_some() {
+                        eprintln!("ai: {index} ignores a sound beyond its class's heardist");
+                    }
+                    return None;
+                }
+                if std::env::var_os("BK_AI_TRACE").is_some() {
                     eprintln!("ai: {index} reads the awareness record of sector {sector} side {side}");
                 }
-                aware
+                Some(pos)
             }).or_else(|| {
                 // `returnhome` (handler `0x50bd70`): an awake actor with nothing else to do walks back
                 // to its home anchor (`SetMoveThing` to `ai + 0x93`, then `SetLookFrame` at it). The
@@ -8363,6 +8380,53 @@ mod tests {
         assert!(
             !rt.ai_flee.contains_key(&1),
             "the scripted flee never expired"
+        );
+    }
+
+    /// `listen` (`0x50a6f0`) reacts to a sound only within the class's **heardist**: the port had the
+    /// awareness record and the walk, but not the gate, so every actor in a room reacted to every shot
+    /// in it however deaf its class was.
+    #[test]
+    fn the_awareness_record_is_heard_only_inside_the_classs_heardist() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0]; // sector 7, alignment -1
+        let mut player = base.clone();
+        player.pos = [-9.0, 0.0, 0.0]; // out of sight, nothing remembered
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen\n",
+            ),
+        );
+        // A shot five units away: outside the two-unit hearing, so the guard must not react.
+        rt.sector_awareness
+            .insert((7, -1), (4.0, [5.0, 0.0, 0.0], 0.0));
+        for _ in 0..30 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(
+            rt.things[1].pos,
+            [0.0, 0.0, 0.0],
+            "the actor reacted to a sound beyond its heardist"
+        );
+        // A shot inside it: the same actor walks toward it.
+        rt.sector_awareness
+            .insert((7, -1), (4.0, [1.5, 0.0, 0.0], rt.time));
+        for _ in 0..30 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            rt.things[1].pos[0] > 0.2,
+            "the actor ignored a sound inside its heardist: {:?}",
+            rt.things[1].pos
         );
     }
 
