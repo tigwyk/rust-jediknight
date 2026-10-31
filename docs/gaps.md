@@ -4289,3 +4289,25 @@ budget for **599 s** and printed no verdict, and `--gates` therefore reports fra
 `aab23a0`), the display modes are at their saved baseline and no game process is stuck — so this is the machine's
 state (hours of retail captures, a large desktop session), not a port regression. `cargo test --release` is
 **147 passed**; the trace gate and parity runs are deferred to a round on a quieter machine.
+
+**The floor-patch seam is not the cause: the landing probe finds a two-patch floor fine (round 161).** Round 160's
+leading hypothesis — level 17's spawn standing exactly on the shared edge of two floor patches — was tested with a
+**unit test** instead of another game run (the machine still renders at ~2 fps, so the binary's probes now take
+over ten minutes; `cargo test` does not):
+
+```
+#[test] fn a_body_on_a_two_patch_floor_seam_finds_the_floor()
+// two patches meeting at x = 0, upward normals, only in the `faces` list (as `build()` files
+// `18Ascend`'s 0x80005 floors), body 0.063 above with radius 0.065 -> floor_under returns the plane
+```
+
+It **passes**, so `floor_under`'s sphere coverage at a seam is sound and the seam is refuted as the cause. The
+observation that stands is the other one: at the spawn, `floor_under` returns `None` with **no candidate face
+reaching `sphere_plane`** — a face list problem, not a coverage problem. The new `--faces-at x,y,z` probe (the
+collision faces `Solids.faces` near a point, with their normals — the list `floor_under` scans, as opposed to
+`--surfaces-at`'s level surfaces) is committed to answer that on the first run the machine can complete.
+
+Environment, unchanged and measured again this round: a 120-frame window run takes **60 s** (same work took 5 s
+earlier in the session), `--save-live` alone burned its 1200-frame budget for 599 s without a verdict, and the
+`--faces-at` probe did not complete in ten minutes. The code is unchanged from the verified round-158 tree apart
+from the probe and the test; `cargo test --release` is **148 passed** (147 + the seam test).

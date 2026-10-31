@@ -462,6 +462,10 @@ fn main() {
     // `--tex <model>`: a model's materials against their `.mat` headers and texvert ranges — the numbers
     // that decide whether a model's UVs are texel-space over the whole bitmap or over one cel.
     let mut tex_probe: Option<String> = None;
+    // `--faces-at x,y,z`: the **collision** faces (`Solids.faces`) within a level unit of the point, with
+    // the normal the landing probe would orient. `--surfaces-at` lists the level's own surfaces; a face
+    // missing here is a face the floor probe cannot see at all.
+    let mut faces_probe: Option<String> = None;
     let mut controls_check = false;
     let mut move_check = false;
     let mut winding_check = false;
@@ -776,6 +780,7 @@ fn main() {
         // `--key <name>`: consume the value so the shared loop does not read it as the level.
         "--key" => key_probe = arg_value(&args, &mut i).cloned(),
         "--tex" => tex_probe = arg_value(&args, &mut i).cloned(),
+        "--faces-at" => faces_probe = arg_value(&args, &mut i).cloned(),
         "--surfaces-at" => {
                 surfaces_at = arg_value(&args, &mut i).and_then(|s| {
                     let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
@@ -6498,7 +6503,38 @@ fn main() {
                 );
             }
         }
-        let missing: Vec<usize> = world
+        if let Some(text) = faces_probe.as_deref() {
+            let v: Vec<f32> = text.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+            if v.len() != 3 {
+                println!("faces-at: expected x,y,z");
+                return;
+            }
+            let at = [v[0], v[1], v[2]];
+            let solids = collide::build(&world.level);
+            println!(
+                "faces-at ({:.2}, {:.2}, {:.2}): {} collision face(s)",
+                at[0], at[1], at[2], solids.faces.len()
+            );
+            let mut found = 0;
+            for face in &solids.faces {
+                let dx = face.point[0] - at[0];
+                let dy = face.point[1] - at[1];
+                let dz = face.point[2] - at[2];
+                if dx * dx + dy * dy > 4.0 || dz.abs() > 2.0 {
+                    continue;
+                }
+                found += 1;
+                println!(
+                    "  face surface {} normal ({:>5.2},{:>5.2},{:>5.2}) point ({:.3},{:.3},{:.3}) verts {}",
+                    face.surface,
+                    face.normal[0], face.normal[1], face.normal[2],
+                    face.point[0], face.point[1], face.point[2],
+                    face.verts.len()
+                );
+            }
+            println!("faces-at: {found} within 2.0 plan / 2.0 vertical");
+            return;
+        }        let missing: Vec<usize> = world
             .level
             .surfaces
             .iter()

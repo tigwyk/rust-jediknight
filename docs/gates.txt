@@ -1294,3 +1294,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   Code is unchanged from the verified round-158 tree (`aab23a0`), display modes at baseline, no stuck game
   process — the machine's state, not a regression. Tests **147 passed**; trace gate/parity deferred to a quieter
   machine.
+
+## Update — round 161
+
+- The **floor-patch seam hypothesis is refuted by a unit test**: `a_body_on_a_two_patch_floor_seam_finds_the_floor`
+  builds the level-17 shape (two upward-normal patches in the `faces` list meeting at x = 0, body 0.063 above with
+  radius 0.065) and `floor_under` returns the plane. Tests now **148 passed**.
+- The surviving observation is a **face-list** problem: at the spawn `floor_under` returns `None` with no
+  candidate face reaching `sphere_plane`. New `--faces-at x,y,z` probe committed to list the collision faces near
+  a point (what `floor_under` scans) for the first run the machine can complete.
+- **Environment still degraded**: a 120-frame window run takes 60 s (5 s earlier), `--save-live` ran 599 s
+  without a verdict, `--faces-at` did not finish in ten minutes. Code unchanged from the verified round-158 tree
+  apart from the probe and test; trace gate/parity/`--gates` deferred.

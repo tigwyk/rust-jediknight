@@ -2004,6 +2004,50 @@ mod tests {
         }
     }
 
+    /// A floor made of two patches that meet at `x = 0`, with the **upward** normal the shipped
+    /// `18Ascend`/`19A` floors carry (surface flags 0x80005, `n (0,0,+1)`) and the patches only in the
+    /// `faces` list — `build()` files only `normal[2] < -0.7` faces as `floors`, so these are the
+    /// landing probe's `faces` alone. Level 17's spawn stands at exactly such a seam.
+    fn seam_floor() -> Solids {
+        let patch = |x0: f32, x1: f32, surface: usize| Face {
+            normal: [0.0, 0.0, 1.0],
+            point: [x0, -2.0, 0.0],
+            verts: vec![[x0, -2.0, 0.0], [x1, -2.0, 0.0], [x1, 2.0, 0.0], [x0, 2.0, 0.0]],
+            surface,
+        };
+        Solids {
+            things: Vec::new(),
+            boxes: Vec::new(),
+            hull: Vec::new(),
+            floor_of: std::collections::HashMap::new(),
+            sectors: vec![vec![Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surface: usize::MAX }]],
+            spheres: vec![([0.0, 0.0, 0.0], 8.0)],
+            portals: vec![Vec::new()],
+            floors: Vec::new(),
+            walls: Vec::new(),
+            wall_of: std::collections::HashMap::new(),
+            faces: vec![patch(0.0, 2.0, 5618), patch(-2.0, 0.0, 5619)],
+            face_of: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_body_on_a_two_patch_floor_seam_finds_the_floor() {
+        // Level 17: body centre 0.063 above the floor, radius 0.065, standing on the shared edge of
+        // two patches. The landing probe must find the floor; the 1e-3 "never lift" bound then keeps
+        // it from being placed on it (the resting height is 0.120114 above the floor).
+        let room = seam_floor();
+        let floor = room.floor_under(0, [0.0, 0.0, 0.063], 0.12, 0.065);
+        assert!(
+            floor.is_some(),
+            "the landing probe found no floor where two patches meet: {floor:?}"
+        );
+        let (height, _travelled, _owner) = floor.unwrap();
+        assert!(
+            (height - 0.0).abs() < 0.01,
+            "the floor under a seam body is {height}, not the patch plane"
+        );
+    }
     /// Two rooms joined by one opening, and a third room reachable only through the second.
     fn corridor() -> Solids {
         let quad = |z: f32| {
