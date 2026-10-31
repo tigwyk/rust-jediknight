@@ -1831,3 +1831,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   `failed`. Sleeping is delivery (the handler resumes), so it is counted and not reported as an error.
 - Regression verification of round 201's fixes: tests **149 passed**; walk-trace gate **15 legs, 1 failure** (only
   `walk5_spawn`); parity gate **6 thresholds, 0 failures** (cantina 0.7381); `--gates` **64 of 64, 0 skipped**.
+
+## Update — round 204
+
+- **Sighted→goal chain verified on the port**: level 1's `01_goal0.cog` (`thing 204` = 8t88) sets `done = 1` when the
+  body faces him from `-4.5,14.0,3.84` (sector 230) and stays 0 when facing away — a causal pair, driven by the
+  renderer's `TF_INCAMFOV` latch (`thing_sighted`).
+- Retail half: the poses beside 8t88 (`-4.5,14.0/13.0/13.5`, z 3.8–4.8) are **refused by retail's warp** ("Position
+  not in world"); the only accepted pose in the room, `(-4.5,15.0,4.1)` yaw −90, renders an **empty room** (committed
+  screenshot), so `done = 0` there is consistent.
+- Open: the port draws/latches 8t88 where retail's nearest vantage is an empty room — a visibility/culling difference
+  to probe next. Fixture rows `goal_sight`/`goal_sight_away` committed with the notes.
+- Tests **149 passed** (no code change this round).

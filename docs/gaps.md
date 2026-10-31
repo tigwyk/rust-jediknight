@@ -5440,3 +5440,24 @@ three delivery sites printed it as `failed`. Sleeping is delivery, not failure �
 floor-search deviation — identical numbers); parity gate **6 thresholds, 0 failures** (spawn 0.6602, spawn_pose
 0.6603, spawn_yaw30 0.6385, route_cantina 0.7381, route_lower 0.7119, route_street 0.7327); `--gates` **64 of 64, 0
 skipped**.
+
+**The sighted→goal chain works on the port; the retail side cannot be placed where 8t88 is seen (round 204).** Level 1's
+first objective is `01_goal0.cog` on thing 204 (8t88): its `sighted:` label sets the local **`done = 1`** and messages
+the master cog. Both halves were probed:
+
+| run | pose | `done` |
+| --- | --- | --- |
+| port, facing 8t88 | `--warp -4.5,14.0,3.84,0` (sector 230) | **1** |
+| port, facing away (control) | `--warp -4.5,14.0,3.84,180` | 0 |
+| retail, nearest warppable pose | `warp -4.5 15.0 4.1 0 -90 0` | 0 |
+| retail, the poses beside 8t88 | `-4.5,14.0,*`, `13.0`, `13.5` | warp refused ("Position not in world") |
+
+The port check is causal (facing/away pair) and the render latch is what drives it: `thing_sighted` only fires after the
+renderer draws the model. Retail's only accepted warp in that room, (−4.5,15.0,4.1) yaw −90 (+y), renders an **empty
+room** — the committed screenshot shows the upper walkway with no 8t88 — so its `done = 0` is *consistent*, not a
+contradiction. The poses nearer 8t88 at 14.0/13.0/13.5 are refused by retail's warp entirely.
+
+That leaves a genuine open question for the next probe: at (−4.5,14.0,3.84) the **port** draws 8t88 and fires `sighted`,
+while retail's nearest achievable vantage is an empty room. Either the port's visibility differs (a culling/flag
+divergence worth finding) or retail's camera at that height simply sees a different part of the level. The fixture rows
+(`goal_sight`, `goal_sight_away`) and the retail screenshot are kept for the comparison.

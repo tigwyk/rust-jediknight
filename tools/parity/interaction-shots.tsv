@@ -1,13 +1,4 @@
-# Interaction rows: a pose plus the keys/console commands that make the retail engine act.
-# Same format as shots.tsv; the harness applies `-Keys`/`-KeysAfter` and `-ConsoleCommands` to every row.
-#
-# load_control: read a cog with no warp, at the level's own spawn (round 197's sound-id control).
-load_control	01narshadda	-	-	-	-	-
-# walk_trigger: a pose inside level 1's bartender trigger slab (sector 353, z band -1.2..-1.0 at
-# (-9.0,-5.0)); NOT a state-change fixture (`entered` returns at `needsl == 0`).
-walk_trigger	01narshadda	-9.0	-5.0	-1.04	0	0
-# secret_enter: level 1's secret area, sector 306 -- cog 28's `00_SecretAreas` link 2. The collision
-# build's own sphere puts it at (4.45,-4.69,-1.16) radius 0.98 (`--sector-locate 28`), so an eye at
-# z -1.12 puts the body's centre inside it. Its `entered` label sets a flag bit and adds 1 to the
-# player's Secrets Found bin (70), which is a real state change.
-secret_enter	01narshadda	4.45	-4.69	-1.12	0	0
+# goal_sight (round 204): the one retail-warppable pose near 8t88 -- (-4.5,15.0,4.1), yaw -90 (+y).
+# Retail accepts this warp (coords confirm the pose) but `done` stays 0; the screenshot shows whether
+# 8t88 is drawn there at all.
+goal_sight	01narshadda	-4.5	15.0	4.1	0	-90
