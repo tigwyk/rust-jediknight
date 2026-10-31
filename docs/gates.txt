@@ -2506,3 +2506,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   friends) are not `.par` clouds** — they carry `material=`, `rate=`, `elementsize=`, `range=` and the engine generates
   their elements; nothing draws them yet. The `thingflags` cel-cycling/grow arms, `sithParticle_New`'s spawn path, the
   cloud's pitch/roll + `angvel` spin, and the texture-less material's effect state remain on the ledger.
+## Update — round 245
+
+- **Whole-install sweeps, run headless** (no code change; measured evidence for the QA-window accounting):
+  - `--soak-all` with `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5`: **35 of 35 levels ran**, summary
+    `0 with a non-finite position, 0 with bodies outside every sector: []`.
+  - `--gates` with `BK_SKIP_WINDOW=1 BK_MUTE=1`: **0 of 65 failed, 1 skipped** — the skip is `--live-check` (it needs the
+    camera entity the walker queries); 55 rows report `headless pass`, the 9 window-labelled rows run their
+    deterministic frame mode and pass.
+- Consequence for the roadmap's QA table: the **port gates row is no longer window-bound** (last windowed run remains
+  65/65, 0 skipped); the checks that still need the window are the walk-trace replay, the parity draw captures and the
+  per-behaviour fixtures. Logs of both sweeps are in `target/parity/` (build artefacts, not committed).
+- Suite **187 passed** (unchanged); docs **132/132**. No window opened and no retail run.

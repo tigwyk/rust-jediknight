@@ -6582,3 +6582,22 @@ all** — `+force_blind`/`+dustcloud`/`+sspks_saber` and friends carry `material
 `pitchrange=` and the engine's `sithParticle_Initialize` generates their elements; nothing draws those yet. The
 `THINGFLAGS` cel-cycling (`0x20`) and grow (`0x1`) arms, `sithParticle_New`'s spawn path, and the texture-less effect
 material's own effect state (blend/color) are also still open — all on the roadmap ledger.
+## Update — round 245 (the whole-install sweeps, run headless)
+
+Two all-content checks were re-run to see where the port actually stands across every shipped level, without a window:
+
+- **`--soak-all`** (`BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5`): **35 of 35 levels ran** and the summary is
+  `0 with a non-finite position, 0 with bodies outside every sector: []`. Every level's scripts ran, its sector links
+  fired, things spawned and no body left the world — the broadest runtime check the port has, and it is clean.
+- **`--gates`** (`BK_SKIP_WINDOW=1 BK_MUTE=1`): **0 of 65 failed, 1 skipped**. The skip is `--live-check`, which the
+  sweep itself refuses to run without a window (it needs the camera entity the walker queries); the other nine
+  window-labelled rows ran their deterministic frame mode and passed. So the gate sweep's standing statement becomes
+  "64 of 65 exercised headless, 0 failures, and `--live-check` is the one row the QA window still owns", where the
+  roadmap had "65/65 at a windowed run".
+- Two supporting logs are in `target/parity/`: `soak-all-244.log` and `gates-headless-244.log` (build artefacts, not
+  committed).
+
+No code changed this round; the point is measured evidence for the roadmap's QA-window section: the **port gates** row is
+no longer window-bound, and the all-levels soak is clean. The rows that still genuinely need the window are the walk
+trace (its port half records frames), the parity draw comparison, and the per-behaviour fixtures listed there. No window
+and no game run were performed: both sweeps skip or avoid the live checks.

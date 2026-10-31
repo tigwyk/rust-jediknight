@@ -373,6 +373,13 @@ condition; the other 14 legs pass. At the last windowed run `--gates` was **65/6
 **6 thresholds / 0 failures**. Everything still unmeasurable is listed in "The QA window" below — it is the single list
 of what a real-game session would settle, in the order a release candidate needs it.
 
+*Progress (round 245).* Both all-content checks were re-run **headless**: `--soak-all` is **35 of 35 levels clean**
+(`0 with a non-finite position, 0 with bodies outside every sector`), and `--gates` is **0 of 65 failed, 1 skipped**
+(`--live-check`, the one row that needs the camera entity; 55 rows print `headless pass` and 9 window-labelled rows run
+their deterministic frame mode). The gate sweep is therefore **not window-bound** any more: the checks that still
+genuinely need the QA window are the walk-trace replay (its port half records frames), the parity draw captures, and
+the per-behaviour fixtures listed below.
+
 *Progress (round 112).* The trace fixtures are in the repo and wired: `trace-gate.ps1` seeds a missing
 `target/parity/trace/<leg>-walk.tsv` from `tools/parity/walktrace/<leg>-walk.tsv`, so the four level-1
 legs gate from a clean checkout with no retail install (proved by deleting the live traces and passing
@@ -452,7 +459,7 @@ Run, in order, from the repo root with `pwsh`:
 
 | check | command | last measured | expected |
 | --- | --- | --- | --- |
-| port gates | `cargo build --release` then `target/release/bevi-knight.exe --gates` | 65/65, 0 skipped | all pass |
+| port gates | `cargo build --release` then `target/release/bevi-knight.exe --gates` | **0 of 65 failed, 1 skipped** in a `BK_SKIP_WINDOW=1` sweep (round 245: 55 rows `headless pass`, 9 `window pass`, `--live-check` skipped); last windowed run 65/65, 0 skipped | all pass |
 | walk trace | `powershell -NoProfile -File tools/parity/trace-gate.ps1` | 15 legs, 1 failure | 14 pass, `walk5_spawn` tracked |
 | parity draw | `tools/parity/retail-capture.ps1`, `port-capture.ps1`, then `compare.ps1 -Gate` | 6 thresholds, 0 failures | 0 failures |
 
