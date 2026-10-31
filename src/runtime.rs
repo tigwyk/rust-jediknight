@@ -978,11 +978,13 @@ pub struct Runtime {
     /// `SetAutoPickup`/`GetAutoPickup`: the same, for items.
     pub auto_pickup: u32,
     /// `SetWeaponMesh`/`jkSetPOVModel`/`jkSetWaggle`/`jkPlayPOVKey`: the first-person weapon's own
-    /// data. This build draws no viewmodel, so these are recorded for the pass that will.
+    /// data. The amplitudes are **degrees** and the rate is the degrees the sway phase advances per
+    /// unit of movement (`jkPlayer_SetWaggle(thing, velocities, rate)`); `jkPlayer_DrawPov` uses both.
     pub weapon_mesh: BTreeMap<usize, String>,
     pub pov_model: BTreeMap<usize, String>,
     pub pov_key: BTreeMap<usize, String>,
     pub waggle: BTreeMap<usize, [f32; 3]>,
+    pub waggle_rate: BTreeMap<usize, f32>,
     /// `.key` name -> frame count, for `GetKeyLen`. The loader fills it.
     pub key_lengths: BTreeMap<String, f32>,
     /// The level time each actor last fired, so the renderer can play its `fire` track. The engine
@@ -1463,6 +1465,7 @@ impl Runtime {
             pov_model: BTreeMap::new(),
             pov_key: BTreeMap::new(),
             waggle: BTreeMap::new(),
+            waggle_rate: BTreeMap::new(),
             key_lengths: BTreeMap::new(),
             last_shot: BTreeMap::new(),
             last_hit: BTreeMap::new(),
@@ -6545,7 +6548,12 @@ impl Runtime {
                 Value::Nil
             }
             "jksetwaggle" => {
+                // `jkPlayer_SetWaggle(thing, velocities, rate)`: three amplitudes (degrees) and the
+                // phase rate. The rate used to be dropped, which lost half of what the weapon cogs
+                // set (`weap_bryar.cog` fires with `10.0 7.0 0.0`, rate 350).
                 self.waggle.insert(ti(0), args.get(1).map(vec3).unwrap_or([0.0; 3]));
+                self.waggle_rate
+                    .insert(ti(0), args.get(2).map(|v| v.num() as f32).unwrap_or(0.0));
                 Value::Nil
             }
             // Armed state and selection, which the item scripts set when a weapon is drawn or holstered.

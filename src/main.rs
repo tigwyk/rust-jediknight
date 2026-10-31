@@ -12254,6 +12254,9 @@ struct Viewmodel {
     /// retail draws with (`jkPlayer_DrawPov`), so only the `BK_VIEW` capture override moves it.
     base: Vec3,
     frame: i32,
+    /// `jkPlayer_DrawPov`'s sway phase, in degrees: the engine keeps it in a file global beside the
+    /// waggle it is built from, so it outlives a weapon swap.
+    sway_phase: f32,
 }
 
 /// The viewmodel entity itself, spawned by [`draw_viewmodel`].
@@ -20019,6 +20022,29 @@ fn autosave(
 #[derive(Resource)]
 struct SaveDir(std::path::PathBuf);
 
+/// `jkPlayer_DrawPov`'s three sway angles, in **degrees** — the units the engine's `stdMath_SinCos`
+/// and `rdMatrix_BuildRotate34` work in (`stdMath_NormalizeAngle` normalises to [0, 360)). The handler
+/// takes `sin`/`cos` of the sway phase and drives the first angle with `cos` forced negative and the
+/// other two with `sin`, each scaled by its own waggle amplitude and by the body's speed over
+/// `maxvel`; the second and third angles share the `sin` term.
+fn pov_sway_deg(phase: f32, amp: [f32; 3], speed_norm: f32) -> [f32; 3] {
+    let (sin, cos) = phase.to_radians().sin_cos();
+    let cos = -cos.abs();
+    [
+        cos * amp[0] * speed_norm,
+        sin * amp[1] * speed_norm,
+        sin * amp[2] * speed_norm,
+    ]
+}
+
+/// The sway phase one frame later: `phase += clamp(moved, 0.02) * rate`, and back to zero as soon as
+/// that product is zero (a cog ends a recoil with `jkSetWaggle(thing, '0 0 0', 0)`). `moved` is the
+/// distance the body actually covered this frame (`thing + 0x264`), not the velocity.
+fn pov_sway_step(phase: f32, moved: f32, rate: f32) -> f32 {
+    let step = moved.abs().min(0.02) * rate;
+    if step == 0.0 { 0.0 } else { phase + step }
+}
+
 /// The first-person weapon model a weapon cog named with `jkSetPOVModel`.
 ///
 /// The engine draws the cog's `povModel` (the bryar's is `bryv.3do`) in front of the eye and plays
@@ -20034,6 +20060,7 @@ fn draw_viewmodel(
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    player: Option<Res<Player>>,
     mut drawn: Query<&mut Transform, With<ViewmodelMesh>>,
     // The weapon rides the viewmodel camera, so its transform is the local one the camera sees.
     cam: Query<(Entity, &GlobalTransform, &Projection), With<WorldCamera>>,
@@ -20057,12 +20084,45 @@ fn draw_viewmodel(
             .filter(|_| !crate::runtime::Runtime::is_saber(&weapon))
             .cloned()
     };
+    // `jkPlayer_DrawPov`: the weapon is swayed by a rotation about the eye, built from the waggle the
+    // current weapon cog set (`jkSetWaggle`: three amplitudes in degrees and a phase rate), the
+    // distance the body actually moved this frame (`thing + 0x264`) and its speed over `maxvel`
+    // (`thing + 0x21c`). The phase lives on the view model because the engine keeps it in a file
+    // global, so it survives a weapon swap. `thing + 0x168`'s eye offset is zero, so the eye is the
+    // rotation's centre.
+    let (amp, rate) = {
+        let rt = sim.world.borrow();
+        let player = rt.player_thing();
+        (
+            rt.waggle.get(&player).copied().unwrap_or([0.0; 3]),
+            rt.waggle_rate.get(&player).copied().unwrap_or(0.0),
+        )
+    };
+    let (moved, speed_norm) = player.as_deref().map_or((0.0, 0.0), |player| {
+        let speed = (player.vel[0] * player.vel[0]
+            + player.vel[1] * player.vel[1]
+            + player.vy * player.vy)
+            .sqrt();
+        (player.last_move, speed / player.rules.max_vel.max(0.001))
+    });
+    view.sway_phase = pov_sway_step(view.sway_phase, moved, rate);
+    let sway = {
+        let [pitch, yaw, roll] = pov_sway_deg(view.sway_phase, amp, speed_norm);
+        // `rdMatrix_BuildRotate34` composes the three angles in its own order. The sway is at most
+        // `amp` degrees (10 for the bryar), so a different order is a second-order difference here.
+        Quat::from_euler(
+            EulerRot::YXZ,
+            yaw.to_radians(),
+            pitch.to_radians(),
+            roll.to_radians(),
+        )
+    };
     if want == view.name && (want.is_none() || !view.parts.is_empty()) {
         // Same weapon: the sway moves, and a `jkPlayPOVKey` clip advances if the cog started one.
-        let (sway, key, clock) = {
+        let (key, clock) = {
             let rt = sim.world.borrow();
             let player = rt.player_thing();
-            (rt.waggle.get(&player).copied().unwrap_or([0.0; 3]), rt.pov_key.get(&player).cloned(), rt.time)
+            (rt.pov_key.get(&player).cloned(), rt.time)
         };
         // A new clip restarts from its first frame; the same clip keeps its cursor.
         if key != view.key {
@@ -20102,9 +20162,11 @@ fn draw_viewmodel(
         }
         for (entity, _, _) in view.parts.clone() {
             if let Ok(mut transform) = drawn.get_mut(entity) {
-                // Camera-local: right is +X, up is +Y, forward is -Z. The sway is the waggle the
-                // weapon cog sets, applied along the camera axis.
-                transform.translation = view.base + Vec3::X * sway[0] as f32;
+                // Camera-local: right is +X, up is +Y, forward is -Z. Retail pre-multiplies the sway
+                // rotation into the POV matrix, so it turns the weapon about the eye; a `BK_VIEW`
+                // offset rides that rotation rather than staying put.
+                transform.translation = sway * view.base;
+                transform.rotation = sway;
             }
         }
         return;
@@ -20157,11 +20219,12 @@ fn draw_viewmodel(
     // that size *because* it sits 0.06 units from the eye.
     view.base = view_override.unwrap_or(Vec3::ZERO);
     let local = Transform {
-        translation: view.base,
+        translation: sway * view.base,
         // `model_mesh` already converts the file's frame to the renderer's, and a POV model's own
-        // coordinates are the view frame: no extra turn and no scale.
+        // coordinates are the view frame: no extra turn and no scale. The rotation is the sway
+        // `jkPlayer_DrawPov` pre-multiplies into the POV matrix.
         scale: Vec3::ONE,
-        rotation: Quat::IDENTITY,
+        rotation: sway,
         ..default()
     };
     let mut parts = Vec::new();
@@ -22232,6 +22295,7 @@ fn setup(
         extra_speed: 0.0,
         vel: [0.0; 2],
         step_rollover: 0.0,
+        last_move: 0.0,
         fall_killed: false,
         fall_fade: 1.0,
         pos: Vec3::from(start),
@@ -22484,6 +22548,10 @@ struct Rules {
     /// what `sithControl` clamps against. Falls back to about 80 degrees either way.
     pitch_min: f32,
     pitch_max: f32,
+    /// `maxvel=` (`_actor` ships 1.0): the speed the body can reach, which is what
+    /// `jkPlayer_DrawPov` divides the current speed by when it sizes the first-person weapon's sway
+    /// (`thing + 0x21c`, the field `sithPhysics_ParseArg`'s `maxvel` keyword writes).
+    max_vel: f32,
 
 }
 
@@ -22538,6 +22606,13 @@ impl Rules {
                 .or_else(|| level.template_f32("_actor", "maxheadpitch"))
                 .map(f32::to_radians)
                 .unwrap_or(1.4),
+            // `_actor` carries `maxvel=1.000000` and `walkplayer` inherits it. The POV sway divides the
+            // body's speed by this (see `pov_sway_deg`).
+            max_vel: level
+                .template_f32(name, "maxvel")
+                .or_else(|| level.template_f32("_actor", "maxvel"))
+                .filter(|v| *v > 0.0)
+                .unwrap_or(1.0),
 
         }
     }
@@ -22637,6 +22712,10 @@ struct Player {
     vel: [f32; 2],
     /// Leftover time for the fixed 50 Hz physics step (`OLDSTEP_TARGET_FPS`).
     step_rollover: f32,
+    /// How far the body actually moved last frame, in level units: `jkPlayer_DrawPov` advances the
+    /// weapon's sway phase by this (the engine's `thing + 0x264`, the distance
+    /// `sithCollision_MoveThing` reports), so a body pressed against a wall does not sway.
+    last_move: f32,
     /// `SITH_AF_FALLKILLED`: the player fell too fast in a `SITH_SECTOR_FALLDEATH` sector and is dying.
     /// The palette fades at 0.7 a second and death follows (`sithPlayer.c:265`).
     fall_killed: bool,
@@ -23749,6 +23828,9 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     player.vy = vy;
     player.sector = sector;
     player.pos = Vec3::from(pos);
+    // The engine's `thing + 0x264` is what `sithCollision_MoveThing` reported for this step, which is
+    // what the POV sway phase advances by (`jkPlayer_DrawPov`) — the blocked distance is not moved.
+    player.last_move = achieved_len;
     // `derived from the landing event`, not from `vy == 0.0`: a body on a thrusting floor never has
     // zero vertical speed, and such a body could never jump. A landing this frame, or a resting body
     // (vy already zero), is on the ground.
@@ -24754,6 +24836,88 @@ mod viewmodel_framing_tests {
             max_x - min_x,
             max_y - min_y
         );
+    }
+
+    /// The sway is a **rotation about the eye**, not a translation: `jkPlayer_DrawPov` pre-multiplies it
+    /// into the POV matrix. At the bryar's full firing waggle (`jkSetWaggle(player, '10.0 7.0 0.0',
+    /// 350)`) with the body at `maxvel`, the authored box's corners move by at most a centimetre of
+    /// level units (≈ the 10-degree amplitude over the box's 0.06-unit reach), and the rotation itself
+    /// is in degrees, not radians. The old code passed `amp[0]` to a **translation** — 10 level units,
+    /// a thousand times further than any corner can be from the eye — which this bounds out.
+    #[test]
+    fn the_full_firing_waggle_rotates_the_box_about_the_eye_by_its_amplitude() {
+        let [pitch, yaw, roll] = super::pov_sway_deg(0.0, [10.0, 7.0, 0.0], 1.0);
+        assert!(
+            pitch.abs() <= 10.0 + 1e-3 && yaw.abs() <= 7.0 + 1e-3,
+            "the bryar's waggle is in degrees, not radians: {pitch} {yaw} {roll}"
+        );
+        let sway = bevy::math::Quat::from_euler(
+            bevy::math::EulerRot::YXZ,
+            yaw.to_radians(),
+            pitch.to_radians(),
+            roll.to_radians(),
+        );
+        let angle = sway.to_axis_angle().1.to_degrees();
+        assert!(angle <= 12.0 + 1e-3, "the sway turned the weapon {angle} degrees");
+        let (lo, hi) = BRYV;
+        let mut furthest = 0.0f32;
+        for x in [lo[0], hi[0]] {
+            for y in [lo[1], hi[1]] {
+                for z in [lo[2], hi[2]] {
+                    let p = bevy::math::Vec3::new(x, y, z);
+                    furthest = furthest.max((sway * p - p).length());
+                }
+            }
+        }
+        // A rotation of an 0.06-unit model by 12 degrees moves a corner at most 0.0126;
+        // the old translation moved it by the amplitude itself (10 units).
+        assert!(
+            furthest <= 0.02,
+            "the sway moved a corner {furthest:.3} units — that is a translation, not a rotation"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pov_sway_tests {
+    use super::{pov_sway_deg, pov_sway_step};
+
+    /// The bryar's firing waggle: `weap_bryar.cog` sets `jkSetWaggle(player, '10.0 7.0 0.0', 350)`,
+    /// i.e. amplitudes 10 and 7 **degrees** and a phase rate of 350. `jkPlayer_DrawPov` drives the
+    /// first angle from `cos` (forced negative) and the second and third from `sin`, each scaled by
+    /// the body's speed over `maxvel` (`_actor` ships 1.0).
+    #[test]
+    fn the_bryars_waggle_bends_the_weapon_by_amplitude_scaled_speed() {
+        let amp = [10.0, 7.0, 0.0];
+        // Phase 0: cos = 1, forced negative; sin = 0.
+        let at_start = pov_sway_deg(0.0, amp, 1.0);
+        assert!((at_start[0] + 10.0).abs() < 1e-4, "{at_start:?}");
+        assert!(at_start[1].abs() < 1e-4 && at_start[2].abs() < 1e-4, "{at_start:?}");
+        // A quarter turn: cos = 0, sin = 1, so the second angle takes the full 7 degrees.
+        let quarter = pov_sway_deg(90.0, amp, 1.0);
+        assert!(quarter[0].abs() < 1e-4, "{quarter:?}");
+        assert!((quarter[1] - 7.0).abs() < 1e-4, "{quarter:?}");
+        assert!(quarter[2].abs() < 1e-4, "{quarter:?}");
+        // Speed scales all three: half the body's top speed is half the angle.
+        let half = pov_sway_deg(0.0, amp, 0.5);
+        assert!((half[0] + 5.0).abs() < 1e-4, "{half:?}");
+        // Standing still leaves the weapon where it was authored.
+        assert_eq!(pov_sway_deg(12.0, amp, 0.0), [0.0; 3]);
+    }
+
+    /// The phase advances by the distance actually moved, capped at the engine's 0.02 units a frame,
+    /// times the rate, and drops back to zero when either is zero (the shake ends with
+    /// `jkSetWaggle(thing, '0 0 0', 0)`).
+    #[test]
+    fn the_phase_is_moved_distance_times_the_rate_capped_at_one_step() {
+        // A step of 0.01 units at 350 degrees per unit: 3.5 degrees.
+        assert!((pov_sway_step(0.0, 0.01, 350.0) - 3.5).abs() < 1e-4);
+        // Past the cap: one frame can advance the phase by at most 7 degrees.
+        assert!((pov_sway_step(10.0, 0.5, 350.0) - 17.0).abs() < 1e-4);
+        // Rate 0 (the cog's off state) resets the phase instead of freezing it off-centre.
+        assert_eq!(pov_sway_step(42.0, 0.02, 0.0), 0.0);
+        // A body pressed against a wall moves nothing, so the phase rests at zero too.
+        assert_eq!(pov_sway_step(42.0, 0.0, 350.0), 0.0);
     }
 }
 

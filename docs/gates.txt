@@ -2278,3 +2278,24 @@ running app.--carry-check --start 01narshadda                        0   level 2
   1.5-unit case is accepted and the check fails). Suite **166 passed**; headless `--ai` passes; docs **132/132**.
 - No window and no game run. Remaining `listen` deviations are on the row: the look-only path on a failed roll, the
   damage-event path, the already-moving/cooldown test, and the alert sound modes (no audio layer).
+
+## Update — round 234
+
+- **The first-person weapon's own sway is drawn, from `jkPlayer_DrawPov`.** The amplitudes `jkSetWaggle` sets are
+  **degrees** (`stdMath_SinCos` normalises through `stdMath_NormalizeAngle`, which wraps to [0, 360); the verb body at
+  `0x40ab50` passes the cog's numbers straight to `jkPlayer_SetWaggle`), and `thing + 0x21c` is **`maxvel`** (entry 19 of
+  `sithThing_Startup`'s keyword array at `0x549234`; `sithPhysics_ParseArg`'s `case 0x13` writes it; `_actor` ships
+  `maxvel=1.0`). `thing + 0x264` is the distance `sithCollision_MoveThing` reported (`sithThing_UpdateMove`).
+- `jksetwaggle` now keeps its **rate** (`Runtime::waggle_rate`); `Player::last_move` records the walker's actual per-frame
+  movement and `Rules::max_vel` reads `maxvel`. `pov_sway_deg`/`pov_sway_step` build the three angles (cos forced
+  negative on the first, sin on the other two, scaled by speed/`maxvel`) and advance the phase
+  `+= min(moved, 0.02) * rate` with a reset at zero; `draw_viewmodel` keeps the phase on the `Viewmodel` resource and
+  rotates every material part about the eye (`translation = sway * base`). That replaces the old `Vec3::X * sway[0]`
+  translation, which moved the weapon by the amplitude itself — `weap_bryar.cog` fires with `10.0 7.0 0.0` — i.e. ten
+  level units.
+- Checks: `pov_sway_tests` pin the bryar's angles (10°/7°, `sin`/`cos` split, speed scaling, zero at rest) and the phase
+  step (0.01 units at 350 is 3.5°, the 0.02 cap is 7° a frame, either zero resets). A framing check bounds the drawn
+  result: a full-waggle rotation moves a `bryv.3do` corner at most **0.011** units (the old translation moved it 10).
+  Suite **169 passed**; headless `--weapons` passes; docs **132/132**.
+- No window and no game run. Still open on the roadmap ledger: `rdMatrix_BuildRotate34`'s composition order and sign
+  (composed yaw-pitch-roll here), which needs a QA-window frame at a known phase.
