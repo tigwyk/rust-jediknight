@@ -1115,7 +1115,7 @@ impl Solids {
                     // place that knows which.
                     if std::env::var_os("BK_MOVE_TRACE").is_some() {
                         eprintln!(
-                            "move: blocked by surface {} at {:?} normal {:?} after {:.3} of {:.3} (from sector {here} at {:?})",
+                            "move: blocked by surface {} at {:?} normal {:?} after {:.6} of {:.6} (from sector {here} at {:?})",
                             hit.surface, hit.point, hit.normal, hit.distance, left, at
                         );
                     }

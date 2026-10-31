@@ -1376,3 +1376,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
   three different ways leaves the body at exactly (−0.4425, −1.8809). Next probe: the **harness's own child** with
   `BK_MOVE_TRACE`/`BK_SECTOR_TRACE` captured to a file (the harness currently swallows the child's stderr), so the
   real decision stream can be read instead of the manual warp's.
+
+## Update — round 167
+
+- The harness does **not** swallow the child's trace: `port-trace.ps1` writes stdout+stderr to
+  `target/parity/trace/<leg>-port.log`. That log shows level 18's contacts at six decimals: both the plate
+  (surface 7332) and a portal (`surface usize::MAX`) are at **exactly 0.000000**, with the blocked hit
+  alternating between them. The flush portal is already skipped by `t <= 0.0`, so the portal-as-wall comes from a
+  **second copy** of the doorway plane evaluated with `t > 0`; the depth rule then rejects it (0.1032 < 0.13).
+- Reverted: sub-epsilon `1e-4` portal skip (level 18 unchanged, `walk_cantina` 2.65 → 1.64, recovered on revert).
+  Next probe: log every portal evaluation per sweep (adjoin, t, depth, accepted/wall).

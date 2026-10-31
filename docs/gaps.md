@@ -4463,3 +4463,27 @@ permitted but the *advance* is not applied because the caller keeps the pre-cros
 run the **harness's own** child with `BK_MOVE_TRACE`/`BK_SECTOR_TRACE` visible (the harness's redirects swallow
 the child's stderr today, so the manual run has been the only window), which is a harness change: capture the
 child's stderr to a file next to the trace.
+
+**The blocked hit alternates between the plate and a *second* portal copy — and the flush portal is already skipped
+(round 167).** Round 166 guessed the harness swallowed the child's trace. It does not: `port-trace.ps1` already
+writes the child's **stdout and stderr** to `target/parity/trace/<leg>-port.log` (`*> …-port.log`). Reading that
+log for level 18 gives the same stream as the manual warp run, at six decimals now:
+
+```
+move: blocked by surface 7332 at [-0.4425058,-1.8808672,0.120114] normal [0.9807855,-0.19508936,0.0] after 0.000000 of 0.044919
+move: blocked by surface <MAX>  at [-0.4425058,-1.8808672,0.120114] normal [-0.19508825,-0.98078567,0.0] after 0.000000 of 0.044919
+move: blocked by surface 7332 … after 0.000000
+move: blocked by surface <MAX>  … after 0.000000
+```
+
+Both contacts are **exactly zero**: the body is flush against the plate *and* against a portal plane at the same
+point, and the reported hit alternates between them frame to frame. The `t <= 0.0` skip in `sweep_rooms` already
+ignores the flush portal (`t = 0`), so the `surface usize::MAX` wall must come from a **second copy of the portal**
+evaluated in the same sweep with `t > 0` — each room keeps its own copy of a doorway's plane, and this level's
+copies are apparently not coincident. The depth rule then rejects that copy (0.1032 against 0.13) and it becomes a
+wall.
+
+Experiments measured and **reverted** this round: treating sub-epsilon (`1e-4`) portal contacts as at-the-plane
+(level 18 unchanged; `walk_cantina` regressed 2.65 → 1.64, recovered on revert). Combined with round 166's three
+reverted attempts, the next probe is explicit: log **every** portal evaluation of a sweep (adjoin, t, depth,
+accepted/as-wall) rather than only the accepted ones, so the second copy can be named.
