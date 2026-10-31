@@ -1885,3 +1885,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Next probe: a valid combat vantage (a retail walk-trace pose, or three units from an actor as `--ai-live` does),
   verified by screenshot/HUD, then compare `aistatus` timelines against the port's AI trace.
 - Tests **149 passed** (no code change).
+
+## Update — round 209
+
+- New data-driven probe **`--thing-list [substring]`**: every placed thing's template, position, sector and flags
+  (`thing-list: 344 placed thing(s), filter "tuskan"`). The port's live AI trace positions match it exactly
+  (thing 24 at (2.935,2.497,0.470) vs trace `from [2.934984,2.496676,0.4695]`), so a combat vantage can be computed
+  from the map data instead of hunted through screenshots.
+- Retail captures confirm the remaining problem is the pose, not the AI: at the spawn the view is valid but faces away
+  from the actors; turned toward them (yaw −90) the view is a grass slope with no Tuskan in sight, so static
+  `aistatus` is expected there.
+- Next: stand-off from `--thing-list` (nearest actors: thing 245 at (−2.31,−5.22), 1.6 units; thing 30 at
+  (−0.666,−0.618), 4.1 units) + a floor probe at the actor's height, then capture the engagement.
+- Tests **149 passed**.

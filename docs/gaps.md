@@ -5550,3 +5550,29 @@ So the round's finding is a measurement caveat, not an AI divergence: the port's
 vantage**: take a pose from the retail walk trace (or the `--ai-live` gate's measured stand-off — three units from an
 actor), verify retail renders a real view there (screenshot + HUD), and only then compare `aistatus` timelines against
 the port's trace. The AI-status format itself is now banked, which is what Phase 1 step 5 was missing.
+
+**The map data is the oracle for spawns: `--thing-list` prints every placed thing with its template, position and
+sector — and it matches the port's live trace exactly (round 209).** Chasing a combat vantage through screenshots was
+the wrong method; the level file already says where every actor stands. The new probe dumps it:
+
+```
+thing-list: 344 placed thing(s), filter "tuskan"
+  thing   24 tuskan        at (   2.935,   2.497,   0.470) sector   292 flags 0x0
+  thing   25 tuskan        at (   2.361,   1.918,   0.470) sector   292 flags 0x0
+  thing   30 tuskan        at (  -0.666,  -0.618,   0.100) sector   150 flags 0x0
+  thing   31 tuskanbh      at (   1.145,   1.798,  -0.530) sector     9 flags 0x0
+  thing   33 tuskangun     at (  -1.794,   1.528,  -0.005) sector   495 flags 0x0
+  ...
+```
+
+The port's own AI trace at the level spawn reports the same positions to four decimals (`ai: sees 24 … from
+[2.934984, 2.496676, 0.4695]`), so the port's actors sit exactly where the data places them — the remaining problem is
+only choosing a standpoint with line of sight, which the data solves too: the nearest actor to the spawn is thing 245
+at (−2.31,−5.22) (1.6 units), then thing 30 at (−0.666,−0.618) (4.1 units), and a stand-off is a position probe plus the
+actor's coordinates, not a screenshot search.
+
+Two retail captures this round confirm the *other* half is a pose problem, not an AI one: at the spawn the rendered
+view is valid (fences, HUD 100/50) but faces away from the actors, and turned toward them (yaw −90, the pose from the
+data) the view is a grass slope with no Tuskan in sight — so no engagement is expected, and the static `aistatus`
+words agree. Next round picks the vantage from `--thing-list` + a floor probe at the actor's own height and captures the
+engagement from there.
