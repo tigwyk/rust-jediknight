@@ -1451,3 +1451,14 @@ running app.--carry-check --start 01narshadda                        0   level 2
   `HasLOS`/`GetLevelTime` polling loop. Without `--warp` the result is the same, and the body never reaches retail's
   teleport target ((−0.00005,−1.90,−0.18) → (0,0,−0.18)). That is a **cog/script execution** defect (Phase 3), not
   a walker one.
+
+## Update — round 173
+
+- **The script-camera input lock is a deviation, not an engine rule.** The decomp locks controls only for the
+  *video-cutscene* camera (`DAT_0055d5d4`); a `SetCameraFocus` + `SetCurrentCamera` focus does not. Retail walks
+  **4.20** units with a script camera current on level 20 and **0.33** on level 21, while level 14's 0.00 is a
+  **prone** body and level 7's 0.11 its own pin.
+- Removing the suppression was measured: `walk21` **passes** (0.34/0.33, 0 sectors), `walk20` reaches 68 % (3
+  sectors), but `walk14` (5.21/0.00) and `walk7` (2.54/0.11) break. Reverted so the gate stays green; the ledger row
+  now records the deviation with these numbers and the retire condition (port the player's immobility state).
+- Tests **149 passed**.

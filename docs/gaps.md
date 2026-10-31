@@ -4639,3 +4639,29 @@ So this is a **cog/script execution** defect (Phase 3), not a walker one: level 
 teleport and camera clear. Both fixtures stay committed with that reason; the next probe is the intro cog itself —
 which verb it is waiting on (the trace's last actions are a `HasLOS`/level-time poll, so the stall is upstream of
 that loop).
+
+**The script-camera input lock is a deviation, not an engine rule — measured and written to the ledger (round
+173).** The decomp says the engine skips `stdControl_ReadControls` only while `DAT_0055d5d4` is set — the camera
+object `jkCutscene` installs for **video** cutscenes. A `SetCameraFocus(slot, thing)` + `SetCurrentCamera(slot)`
+focus does not lock the controls. The walk measurements agree:
+
+| leg | script camera? | retail travel |
+| --- | --- | --- |
+| level 20 (`20aboc`) | yes, thing 44 | **4.20** units |
+| level 21 (`21ajerec`) | yes, thing 23 | **0.33** units |
+| level 14 (`15maw`) | yes, thing 45 | **0.00** (Kyle is prone after the knockdown cutscene) |
+| level 7 | yes | **0.11** (its own pin) |
+
+The port suppresses input whenever a script camera is current. Removing that suppression was measured:
+
+```
+walk21  port 0.34 / retail 0.33 (97%), sectors off 0   -> passes
+walk20  port 2.85 / retail 4.20 (68%), sectors off 3   -> travel would pass, sectors do not
+walk14  port 5.21 / retail 0.00                        -> breaks
+walk7   port 2.54 / retail 0.11                        -> breaks
+```
+
+So the suppression is a **deliberate deviation** that is right for 14/7 by accident and wrong for 20/21. The ledger
+row is rewritten with these numbers and the retire condition: port the **player's immobility state** (prone/knockdown
+after level 14's cutscene, and level 7's own pin), then drop the blanket suppression and let 20/21 into the gate.
+Reverted for now so the gate stays green; 149 tests pass.
