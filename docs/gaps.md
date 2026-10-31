@@ -5479,3 +5479,28 @@ sight-live: `01_goal0.cog` saw 8t88 (done = 1) -- the render latch fired the goa
 `--gates` now runs **65 checks, 0 failed, 0 skipped** with `--sight-live` among them (windowed). Together with
 `--use-live` (round 203) the suite covers both Phase 1 interaction paths: using a linked surface opens the shipped door
 chain, and the renderer's sight latch runs the level's first objective script.
+
+**The first objective's whole chain is a gate now: sight → goal → master `user0` → level end (round 206).** Phase 1's
+exit step gets its fixture: `--sight-live` walks level 1's first objective from the render latch to `jkEndLevel`, and
+each link is read from the running game:
+
+```
+sight-live: standing at (-4.5,14.0) facing 8t88
+sight-live: `01_goal0.cog` saw 8t88 (done = 1) -- the render latch fired the goal
+sight-live: waiting for the master cog's `user0` (goal flag) and `jkEndLevel`
+sight-live: the master cog ran `user0` (goal 0 completed, bin 100 = 3)
+sight-live: `jkEndLevel(1)` ran (complete true, left level 1 false);
+sight-live: the first objective ran the whole chain sight -> goal -> level end
+--- sight-live check passed ---
+```
+
+That covers four links the roadmap names separately: the shipped `01_goal0.cog` `sighted:` handler (its `done = 1`),
+the message to the master cog (`01_endlevel.cog`'s `user0:` writes goal 0 into `SITHBIN_GOAL00` — bin 100 = 3 after
+`startup` set bit 1), the **sleep/resume** of a message handler (`Sleep(3.0)` before the end), and `jkEndLevel(1)`
+setting `level_complete` (the level swap is the second witness, so a one-frame completion cannot be missed).
+
+One gate-engineering finding: the chain took **173 s** inside the suite before the fix, because the windowed VM clock
+advances slowly — `--gates` timed out with "(no verdict)". The gate now **fast-forwards the handler's sleep deadline**
+(`vm.resume`'s due time moves to `vm.now`, so `resume_sleeping_labels` resumes it next frame): the resume path is still
+exercised, and the gate runs in **1.7 s**. `--gates` is **65 of 65, 0 skipped** again, with `sight-live` passing.
+`cargo test --release` **149 passed**.

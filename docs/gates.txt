@@ -1853,3 +1853,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
   (`--- sight-live check passed ---`).
 - `--gates`: **65 of 65, 0 failed, 0 skipped**. With `--use-live` the suite now covers both Phase 1 interaction paths
   (linked-surface use → door chain; render sight latch → level objective). Tests **149 passed**.
+
+## Update — round 206
+
+- **First-objective exit chain is a gate**: `--sight-live` proves sight latch → `01_goal0.cog` `done = 1` → master cog
+  `01_endlevel.cog`'s `user0` (goal 0 in bin 100 = 3) → sleeping handler resumes → `jkEndLevel(1)` →
+  `level_complete` / level swap. Output quoted in gaps.md.
+- Gate-engineering: the real 3 s `Sleep(3.0)` made the gate take **173 s** under the suite's windowed clock, so
+  `--gates` reported "no verdict". The gate now **fast-forwards the sleep deadline** (`vm.resume`'s due time), which
+  still exercises the resume path and runs in **1.7 s**.
+- `--gates`: **65 of 65, 0 failed, 0 skipped** (`sight-live` passes). Tests **149 passed**.
