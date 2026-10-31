@@ -1,9 +1,9 @@
 # Interaction rows: a pose plus the keys/console commands that make the retail engine act.
-# Same format as shots.tsv; the harness applies `-Keys` and `-ConsoleCommands` to every row it runs.
+# Same format as shots.tsv; the harness applies `-Keys`/`-KeysAfter` and `-ConsoleCommands` to every row.
 # switch_use: the level-1 cantina door switch. Things 56/57 are linked to cog 11 (`00_doorswitch.cog`,
 # link 1) at (-4.75,-3.75,-1.10)/(-4.45,-3.75,-1.10). The warp at eye z -1.09 is coords-verified:
-# `warp -4 -3 -1.09 0 135 0` puts the body at (-4.00,-3.00,-1.18) PYR (1.12,135.02,1.12) sector 254,
-# facing the switch (yaw 135 = direction (-0.707,-0.707)). Round 192 swept the use bindings from this
-# pose -- `9`, ENTER, E, SPACE, U and MOUSEMIDDLE (the profile's ACTIVATE, DirectInput 0x102) -- and cog
-# 11 stayed `doorstatus 0` for every one, so the row is kept as the reproducible pose for the next probe.
+# `warp -4 -3 -1.09 0 135 0` gives body (-4.00,-3.00,-1.18) PYR (1.12,135.02,1.12) sector 254, facing
+# the switch. Round 192/193 pressed every use binding from poses 0.4 to 1.1 units away -- `9`, ENTER,
+# E, SPACE, U, MOUSEMIDDLE -- both before and after the console closed (13.5 s of re-acquired input),
+# and cog 11 stayed `doorstatus 0` every time. Kept as the reproducible pose for a trigger-based probe.
 switch_use	01narshadda	-4.0	-3.0	-1.09	0	135

@@ -960,10 +960,32 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     if ($KeysAfter.Count -gt 0) {
       foreach ($key in @($KeysAfter | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })) {
         Log "pressing $key after the console commands"
-        Send-JkKey -Name $key
+        if ($key -match '^MOUSE') {
+          # An action binding is a mouse button (JK default: use = middle); the cursor has to be
+          # inside the game window for the event to reach it, the same route `-Keys` takes.
+          $win = Get-JkWindow -ProcessId $process.Id
+          if ($win -ne [IntPtr]::Zero) {
+            $rect = [JkRetail]::WindowRectText($win)
+            if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
+              $mx = ([int]$Matches[1] + [int]$Matches[3]) / 2
+              $my = ([int]$Matches[2] + [int]$Matches[4]) / 2
+              [JkRetail]::MoveTo([int]$mx, [int]$my)
+              Start-Sleep -Milliseconds 120
+            }
+          }
+          Send-JkMouseButton -Button ($key -replace '^MOUSE', '')
+        } else {
+          Send-JkKey -Name $key
+        }
         Start-Sleep -Milliseconds 1500
       }
       Start-Sleep -Milliseconds 12000
+      # Phase 1 step 4: the trigger has fired (or not) by now, so read the cog state again under a
+      # distinct name. The console has been closed for 13.5 s, so the engine has re-acquired its input
+      # devices -- which is the point of pressing *after* the first read (round 192's finding).
+      if ($ConsoleCommands.Count -gt 0) {
+        $null = Invoke-JkConsoleCapture -ProcessId $process.Id -Name ("{0}-after" -f $name) -Commands $ConsoleCommands
+      }
     }
 
     # Time series: capture the first seconds after the level becomes visible. These are kept as

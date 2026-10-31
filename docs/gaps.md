@@ -5185,3 +5185,29 @@ opens and closes around the pose, and the engine releases/re-acquires its device
 or button tap 300 ms after the warp may land while the game's input is still being re-acquired. The next attempt
 should place the body **without the console** (walk it there with the existing walk-trace machinery, then press the
 binding) or add an activation wait to the harness; the row above is the reproducible pose either way.
+
+**The harness can now read a cog before and after a trigger press — and the retail use action still does not fire
+under synthetic input (round 193).** `retail-capture.ps1`'s `-KeysAfter` path gained two things: `MOUSE*` keys are
+routed through `Send-JkMouseButton` with the cursor moved into the game window (it previously threw "no scancode"),
+and when `-ConsoleCommands` are given the harness now captures the console **again** after the keys, as
+`<name>-after-console.txt`. That is Phase 1 step 4's "cog variable/state trace at each trigger" shape, and it works:
+the level-1 switch run reads `doorstatus 0` before and after.
+
+The measurement itself is negative and now well-bounded. Pressing after the console has been closed for 13.5 s (so the
+engine has re-acquired its devices), from poses 0.4, 0.87 and 1.07 units from the switch things, with yaw 105/135/180:
+
+| binding | before | after |
+| --- | --- | --- |
+| `MOUSEMIDDLE` (profile's ACTIVATE, DirectInput 0x102) | `doorstatus 0` | `doorstatus 0` |
+| `9` (profile's other ACTIVATE, VK 57) | `doorstatus 0` | `doorstatus 0` |
+| `ENTER`/`E`/`SPACE`/`U` (round 192, `-Keys` path) | `doorstatus 0` | — |
+
+Injection is hardware-level (`SendInput` with an `INPUT` record for keys, `mouse_event` for buttons), the pose is
+`coords`-verified, and the range sweep rules out the distance gate. What remains is the engine's own **action-binding
+delivery**: its movement path accepts the harness's synthetic keys (every walk leg moves), but its action bindings do
+not, which is the deviation's retire condition ("synthetic mouse input reaches the switch, or a keyboard-only trigger
+is found") still unmet.
+
+That points at a cheaper Phase 1 step 4 target: a **movement-triggered** interaction (`crossed`/`entered`), which the
+walk machinery already fires and the new post-walk console capture already reads — the switch's `use` action can wait
+until input delivery for action bindings is solved.

@@ -1702,3 +1702,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
   device acquisition — a tap 300 ms later may land before input is re-acquired. Next attempt: place the body by
   **walking** (existing walk machinery, no console), then press the binding; or add an activation wait to the harness.
 - Tests **149 passed**.
+
+## Update — round 193
+
+- Harness: `-KeysAfter` now routes `MOUSE*` through `Send-JkMouseButton` (cursor moved into the game window) and,
+  when `-ConsoleCommands` are given, captures the console **again** after the keys as `<name>-after-console.txt` —
+  Phase 1 step 4's before/after cog read shape, working on the level-1 switch run.
+- Measured (13.5 s after the console closes, poses 0.4/0.87/1.07 units away, yaw 105/135/180): `MOUSEMIDDLE` and `9`
+  both leave `doorstatus 0` before and after; round 192's `-Keys` sweep (`9`, ENTER, E, SPACE, U) likewise. Injection
+  is hardware-level and the pose is coords-verified, so the open item is the engine's **action-binding delivery**
+  under synthetic input (its movement path accepts the same injection).
+- Cheaper target for the same roadmap step: a **movement-triggered** interaction (`crossed`/`entered`), which the walk
+  machinery already fires and the post-walk console capture already reads.
+- Tests **149 passed**.
