@@ -2451,3 +2451,22 @@ running app.--carry-check --start 01narshadda                        0   level 2
   **132/132**.
 - No window and no game run. On the roadmap ledger: the `0x100` cascade (nothing in this build subscribes), the
   `0x400`/`0x800` track-target events (replaced by the port's own `ai_last_seen`/chase), and `SetMoveThing`'s speed.
+## Update — round 242
+
+- **AI detection is a probability now** (`sithAI_CanDetectSightThing`, `0x4ec140`), with the constants read out of the
+  retail `.rdata`: inside 2.0 units 1.0; beyond it 0.1-per-unit falloff capped at 0.6; a watcher without the awake bit
+  `0x200` starts at 0.5; a `move=physics` target that is still multiplies 0.5 and one crouched (`physflags & 0x10000`)
+  0.75; a `thingflags & 0x80` target (or `0x800` watcher) multiplies 0.05, which is also the floor; cap 1.0; compared
+  to `rand/32768`.
+- Port: `Runtime::detect_chance` (pure) + `can_detect` (one roll); `ai_tick` rolls it when an actor **first registers**
+  the player and keeps the deterministic line test afterwards, so an engaged target is never lost to a bad roll. `--ai`'s
+  one-tick firing probe marks its actor as engaged (it measures the firing gates, not the roll).
+- Checks: `detection_chance_falls_off_with_range_and_pose` (the whole curve: 1.0/0.4/0.2/0.3/0.15/0.2/0.05 and the
+  `0x8000` lift) and `a_ranged_actor_acquires_the_player_with_a_roll` (a 0.2 roll at 8 units; not detected before
+  ticking; acquired within 200 ticks; fires at point-blank once engaged). Measured before/after: with the gate disabled
+  the acquisition check fails ("the actor never acquired the player at 8 units"). Suite **185 passed**; level-1 and
+  level-3 soaks pass (0 outside bodies, 0 non-finite positions); `--ai`, `--hit`, `--weapons`, `--sound` and `--things`
+  pass; docs **132/132**.
+- No window and no game run. On the roadmap ledger: the engine's darkness term (needs the target's sector light, which
+  the port does not keep), its second falloff gate (`thing + 0x2a8`, unrecovered), and the engine re-rolling the chance
+  on every target refresh where the port rolls on acquisition.

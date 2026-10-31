@@ -717,6 +717,19 @@ pub const AI_AWARE_ALERT: f32 = 3.0;
 /// a sound in clear line of sight is heard at any bearing inside `heardist`.
 pub const AI_LISTEN_NEAR: f32 = 1.0;
 pub const AI_LISTEN_FRONT_DOT: f32 = 0.5;
+/// `sithAI_CanDetectSightThing`'s (`0x4ec140`) range model, read from the retail `JK.EXE`'s `.rdata`:
+/// `_DAT_00523078` = **2.0** units (inside it a target is always noticed), `_DAT_00523084` = **0.1**
+/// falloff per unit beyond that, capped at `_DAT_00523088` = **0.6**.
+pub const DETECT_NEAR: f32 = 2.0;
+pub const DETECT_FALLOFF: f32 = 0.1;
+pub const DETECT_MAX_FALLOFF: f32 = 0.6;
+/// `_DAT_00523070` 0.5: a physics target that is perfectly still is half as noticeable;
+/// `_DAT_00523090` 0.75: one that is crouched (`physflags & 0x10000`) three-quarters.
+pub const DETECT_STILL: f32 = 0.5;
+pub const DETECT_CROUCH: f32 = 0.75;
+/// `_DAT_00523094` 0.05 — the multiplier for a hidden target/watcher and the floor of the final clamp
+/// (the cap is `_DAT_00523068` 1.0).
+pub const DETECT_UNSEEN: f32 = 0.05;
 
 /// A `soundclass=` value reduced to the `.snd` class key the loader uses: the lowercase basename,
 /// because templates name `ky.snd` while the archive may carry it under a path.
@@ -1146,6 +1159,10 @@ pub struct Runtime {
     /// Where an actor last had the player in view (`sithAI`'s last known position). Losing sight
     /// means "walk there", and arriving clears it.
     pub ai_last_seen: BTreeMap<usize, [f32; 3]>,
+    /// Actors that have **registered** the player: `sithAI_CanDetectSightThing` (`0x4ec140`) is a
+    /// probability roll and the engine re-rolls it while refreshing a target; the port rolls it on
+    /// acquisition and then keeps the deterministic sight test (ledger).
+    pub ai_detected: std::collections::BTreeSet<usize>,
     /// When each actor may run its `LookForTarget` scan next. The instinct's first shipped argument
     /// is the interval (500 ms in every class), and a scan that finds a target hands it to the normal
     /// chase/aim logic rather than snapping the body round.
@@ -1821,6 +1838,7 @@ impl Runtime {
             ai_look: BTreeMap::new(),
             ai_route: BTreeMap::new(),
             ai_last_seen: BTreeMap::new(),
+            ai_detected: std::collections::BTreeSet::new(),
             ai_scan: BTreeMap::new(),
             ai_listen: BTreeMap::new(),
             ai_talk: BTreeMap::new(),
@@ -3185,6 +3203,73 @@ impl Runtime {
         true
     }
 
+    /// `sithAI_CanDetectSightThing` (`0x4ec140`): the **chance** that `actor` registers `target` on
+    /// one sight check, from distance, the watcher's awake bit and the target's motion, pose and flags.
+    /// Line of sight is a different question (`Ai::sees` plus the wall cast) — this one answers "did it
+    /// notice". The engine's constants are read out of the executable's `.rdata`:
+    ///
+    /// - beyond `2.0` units (`_DAT_00523078`), a watcher whose AI flags lack `0x200` (the awake bit
+    ///   `talk`/`sensedanger` gate on) starts at 0.5 instead of 1.0;
+    /// - the range falloff is `0.1` per unit (`_DAT_00523084`), capped at `0.6` (`_DAT_00523088`);
+    /// - a physics target (`move=physics`) that is perfectly still multiplies 0.5 (`_DAT_00523070`),
+    ///   and one that is crouched (`physflags & 0x10000`) multiplies 0.75 (`_DAT_00523090`);
+    /// - a target whose `thingflags` carry `0x80`, or a watcher whose `thingflags` carry `0x800`,
+    ///   multiplies 0.05 (`_DAT_00523094`), the same value the final clamp floors at (cap 1.0,
+    ///   `_DAT_00523068`).
+    ///
+    /// Not modelled: the engine's darkness term (`*(float *)(sector + 4) < 0.5` scales the chance by
+    /// the sector's light level, and this build keeps no sector light), and its second falloff gate
+    /// reads a byte at `thing + 0x2a8` whose meaning is unrecovered. Both are on the ledger.
+    pub fn detect_chance(&self, actor: usize, target: usize) -> f32 {
+        let (Some(watcher), Some(seen)) = (self.things.get(actor), self.things.get(target)) else {
+            return 1.0;
+        };
+        if !matches!(self.types.get(target).copied(), Some(2) | Some(10)) {
+            return 1.0;
+        }
+        let (dx, dy, dz) = (
+            seen.pos[0] - watcher.pos[0],
+            seen.pos[1] - watcher.pos[1],
+            seen.pos[2] - watcher.pos[2],
+        );
+        let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+        let mut chance = 1.0f32;
+        if distance >= DETECT_NEAR && seen.flags & 0x4 == 0 {
+            if self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x200 == 0 {
+                chance = 0.5;
+            }
+            let falloff =
+                ((distance - DETECT_NEAR) * DETECT_FALLOFF).clamp(0.0, DETECT_MAX_FALLOFF);
+            chance *= 1.0 - falloff;
+            let physics = self
+                .templates
+                .get(target)
+                .map(|template| template.to_ascii_lowercase())
+                .and_then(|template| self.template_move.get(&template))
+                .is_some_and(|m| m.eq_ignore_ascii_case("physics"));
+            if physics {
+                if seen.phys_flags & 0x10000 != 0 {
+                    chance *= DETECT_CROUCH;
+                }
+                if seen.vel == [0.0; 3] {
+                    chance *= DETECT_STILL;
+                }
+            }
+        }
+        if seen.flags & 0x80 != 0 && watcher.flags & 0x8000 == 0 {
+            chance *= DETECT_UNSEEN;
+        }
+        if watcher.flags & 0x800 != 0 {
+            chance *= DETECT_UNSEEN;
+        }
+        chance.clamp(DETECT_UNSEEN, 1.0)
+    }
+
+    /// One roll of [`Self::detect_chance`] — `sithAI_CanDetectSightThing`'s `rand/32768` test.
+    pub fn can_detect(&self, actor: usize, target: usize) -> bool {
+        crate::cog::pseudo_random() < self.detect_chance(actor, target) as f64
+    }
+
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
     /// The engine runs an instinct scheduler over the `.ai` file's weights; this build uses the
@@ -3352,6 +3437,19 @@ impl Runtime {
             // sight ray (`sithAI.c`); one segment test is the same rule here.
             let sighted = ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target))
                 && self.solids.as_ref().is_none_or(|s| !s.segment_blocked(from, target));
+            // `sithAI_CanDetectSightThing` (`0x4ec140`): a clear line is not the same as noticing. The
+            // engine rolls its detection chance whenever it refreshes a target; the port rolls it when
+            // the actor first registers the player and keeps the deterministic line test afterwards, so
+            // an actor cannot lose a target it has already engaged (ledger). A target inside two units
+            // (or one with `thingflags & 0x4`) passes at 1.0, so this only delays ranged acquisition.
+            let mut sighted = sighted;
+            if sighted && !self.ai_detected.contains(&index) {
+                if self.can_detect(index, player) {
+                    self.ai_detected.insert(index);
+                } else {
+                    sighted = false;
+                }
+            }
             if sighted && std::env::var_os("BK_AI_TRACE").is_some() {
                 let (sx, sy) = (target[0] - from[0], target[1] - from[1]);
                 let range = (sx * sx + sy * sy).sqrt().max(1e-4);
@@ -9651,6 +9749,117 @@ mod tests {
         });
         assert!(!moved, "the 0x1000 latch let an event through");
         assert_ne!(flags & 0x1000, 0, "the latch cleared without event 2");
+    }
+
+    /// `sithAI_CanDetectSightThing` (`0x4ec140`) is a probability, not a yes/no: inside two units a
+    /// target is always noticed, beyond it a 0.1-per-unit falloff (capped at 0.6) applies, an unawake
+    /// watcher starts at 0.5, and a physics target that is still or crouched is harder to notice. The
+    /// constants are the retail `.rdata` values.
+    #[test]
+    fn detection_chance_falls_off_with_range_and_pose() {
+        let chance = |distance: f32,
+                      player_vel: [f32; 3],
+                      player_physflags: u32,
+                      player_flags: u32,
+                      actor_flags: u32,
+                      actor_thing_flags: u32| {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let mut actor = base.clone();
+            actor.pos = [0.0, 0.0, 0.0];
+            actor.flags = actor_thing_flags;
+            let mut player = base.clone();
+            player.pos = [distance, 0.0, 0.0];
+            player.vel = player_vel;
+            player.phys_flags = player_physflags;
+            player.flags = player_flags;
+            rt.things = vec![player, actor];
+            rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+            rt.types = vec![10, 2];
+            rt.template_move.insert("walkplayer".into(), "physics".into());
+            rt.actor_flags.insert(1, actor_flags);
+            rt.detect_chance(1, 0)
+        };
+        let moving = [1.0, 0.0, 0.0];
+        assert_eq!(chance(1.0, moving, 0, 0, 0x200, 0), 1.0, "a target inside two units");
+        assert!((chance(8.0, moving, 0, 0, 0x200, 0) - 0.4).abs() < 1e-5, "8 units, moving");
+        assert!((chance(20.0, moving, 0, 0, 0x200, 0) - 0.4).abs() < 1e-5, "the falloff saturates at 0.6");
+        assert!(
+            (chance(8.0, [0.0; 3], 0, 0, 0x200, 0) - 0.2).abs() < 1e-5,
+            "a still target is half as noticeable"
+        );
+        assert!(
+            (chance(8.0, moving, 0x10000, 0, 0x200, 0) - 0.3).abs() < 1e-5,
+            "a crouched target is three-quarters as noticeable"
+        );
+        assert!(
+            (chance(8.0, [0.0; 3], 0x10000, 0, 0x200, 0) - 0.15).abs() < 1e-5,
+            "still and crouched together"
+        );
+        assert!(
+            (chance(8.0, moving, 0, 0, 0x0, 0) - 0.2).abs() < 1e-5,
+            "an unawake watcher starts at half"
+        );
+        assert!(
+            (chance(8.0, moving, 0, 0x80, 0x200, 0) - 0.05).abs() < 1e-5,
+            "a hidden target floors at 0.05"
+        );
+        assert!(
+            (chance(8.0, moving, 0, 0, 0x200, 0x800) - 0.05).abs() < 1e-5,
+            "a hidden watcher floors at 0.05"
+        );
+        assert!(
+            (chance(8.0, moving, 0, 0x80, 0x200, 0x8000) - 0.4).abs() < 1e-5,
+            "the watcher's 0x8000 lifts the target's 0x80"
+        );
+    }
+
+    /// The roll is on **acquisition**: an actor 8 units away with the player standing still has a 0.2
+    /// chance a check, so it does not snap to the player instantly — but it does acquire, and after
+    /// that the port keeps the deterministic line test (the engine re-rolls on refresh; ledger).
+    #[test]
+    fn a_ranged_actor_acquires_the_player_with_a_roll() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = base.clone();
+        player.pos = [8.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_move.insert("walkplayer".into(), "physics".into());
+        rt.template_weapon.insert("tuskan".into(), "blaster".into());
+        rt.template_vel.insert("blaster".into(), [0.0, 7.0, 0.0]);
+        rt.actor_flags.insert(1, 0x200);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=20.0\n\n\
+                 PrimaryFire 100.0, 0.0, 5.0, 0.0, 0.0, 500.0, 0.0, 0.0, 1.0, 0.0\n\
+                 Follow 0.0, 0.5\n",
+            ),
+        );
+        assert!((rt.detect_chance(1, 0) - 0.2).abs() < 1e-5, "the setup is not a 0.2 roll");
+        assert!(!rt.ai_detected.contains(&1), "the actor detected the player before ticking");
+        let mut acquired = false;
+        for _ in 0..200 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+            if rt.ai_detected.contains(&1) {
+                acquired = true;
+                break;
+            }
+        }
+        assert!(acquired, "the actor never acquired the player at 8 units");
+        // Once registered the port keeps the target: the actor fires at point-blank range without
+        // needing another roll.
+        rt.things[0].pos = [1.0, 0.0, 0.0];
+        for _ in 0..60 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(rt.shots_fired > 0, "a registered actor at point-blank range never fired");
     }
 
     /// `turretfire` (`0x50a0f0`): a turret's class (`turdefault.ai`) carries **no `PrimaryFire`**, so

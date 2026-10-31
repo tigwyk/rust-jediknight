@@ -5091,6 +5091,11 @@ fn main() {
         let raw = gobs.read(&format!("ai\\{class}")).expect("class file");
         let parsed = ai::parse(&String::from_utf8_lossy(&raw));
         rt.ai.insert(actor, parsed.clone());
+        // The probe measures the firing gates (sight range, cone, `PrimaryFire` cadence, aim), not the
+        // **detection roll**: `sithAI_CanDetectSightThing` is a probability (round 242) and has its own
+        // unit checks, so a one-tick, 3-unit probe would otherwise fail most of the time. Mark the
+        // actor as already engaged.
+        rt.ai_detected.insert(actor);
         // Face +X, then put the player at 3 units (inside sightdist 5), 8 units (outside) and
         // behind (outside the 200-degree cone).
         rt.things[actor].yaw = 0.0;

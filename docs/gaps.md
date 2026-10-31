@@ -6488,3 +6488,36 @@ disabled the order check fails with "the sense-first class dodged after sensing"
 Still open, on the ledger: the `0x100` flags-changed cascade (emitted after an instinct runs; no shipped instinct in this
 build subscribes to it), the `0x400`/`0x800` target events (they belong to the instinct scheduler / track-target code the
 port replaces with its own `ai_last_seen`/chase), and `SetMoveThing`'s speed parameter.
+## Update — round 242 (how an actor *notices*: `sithAI_CanDetectSightThing`)
+
+Line of sight was a yes/no in the port; in the engine it is a **probability**. `sithAI_CanDetectSightThing`
+(`0x4ec140`) is called from the two target-refresh helpers (`sithAI_sub_4EAD60`, `sithAI_sub_4EAF40`) and rolls a
+detection chance whose constants were read out of the retail `JK.EXE`'s `.rdata`:
+
+- inside **2.0** units (`_DAT_00523078`) a target is noticed at chance 1.0;
+- beyond it the chance falls **0.1** per unit (`_DAT_00523084`), capped at a **0.6** reduction (`_DAT_00523088`);
+- a watcher whose AI flags lack the awake bit `0x200` starts at **0.5** instead of 1.0;
+- a `move=physics` target that is perfectly still multiplies **0.5** (`_DAT_00523070`), one whose `physflags` carry
+  `0x10000` (crouched) multiplies **0.75** (`_DAT_00523090`);
+- a target with `thingflags & 0x80`, or a watcher with `thingflags & 0x800`, multiplies **0.05** (`_DAT_00523094`),
+  which is also the floor of the final clamp (cap 1.0, `_DAT_00523068`);
+- the result is compared to `rand/32768` (`_DAT_0052307c`).
+
+The port now has the model as `Runtime::detect_chance` (pure, so it is unit-checked exactly) and `can_detect` (one
+roll). The sight path in `ai_tick` rolls it when an actor **first registers** the player and then keeps the
+deterministic line test, so an engaged actor cannot lose its target to a bad roll. `--ai`'s one-tick firing probe marks
+its actor as engaged first, because it measures the firing gates, not the roll.
+
+Not modelled, on the ledger: the engine's darkness term (it reads the target's sector light — `*(float *)(sector + 4) <
+0.5` scales the chance by the sector's light level — and this build keeps no sector light), the engine's second
+falloff gate (a byte at `thing + 0x2a8` whose meaning is unrecovered), and the engine re-rolls the chance on every
+target refresh where the port rolls on acquisition only.
+
+Checks (185 tests): `detection_chance_falls_off_with_range_and_pose` pins the whole curve from the constants — inside
+2 units 1.0; 8 units moving 0.4 and saturating at 20 units; still 0.2; crouched 0.3; both 0.15; unawake watcher 0.2;
+hidden target/watcher 0.05; a watcher's `0x8000` lifting the target's `0x80`. `a_ranged_actor_acquires_the_player_with_a_roll`
+puts the player 8 units away (a 0.2 roll), asserts the actor is not detected before ticking, then that it acquires
+within 200 ticks and fires at point-blank range once engaged. Measured before/after: with the acquisition gate disabled
+the acquisition check fails ("the actor never acquired the player at 8 units"). The level-1 and level-3 soaks pass
+(0 outside bodies, 0 non-finite positions); `--ai`, `--hit`, `--weapons`, `--sound` and `--things` pass. No window and
+no game run.
