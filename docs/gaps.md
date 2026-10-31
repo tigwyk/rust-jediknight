@@ -5089,3 +5089,26 @@ effect otherwise); the rule does not.
 
 Next probe: with the body no longer on the slope, where does it stand (the trace's sector line beside the landing
 print), and why does it not reach the sector 33/34/24 floors retail walks on.
+
+**The `walk5_spawn` plateau is written to the deviation ledger with its measurements and a retire condition (round
+189).** Five rounds of negative results (186–189) established that the plateau is a **floor-search scope** deviation,
+not a normal-orientation one:
+
+- `sithPhysics_FindFloor` (`decomp/004f5550`) searches the body's sector and the sectors its adjoins lead to; the
+  port's `floor_under` scans the **world**, because this port's data does not tile.
+- That global scan finds the sector-above's down-facing slope (surface 342, owner 33) under level 5's body, below its
+  own sector 35 floor (0.1001) — the plateau at z 0.1703.
+- Four candidate fixes were measured and **all reverted**: excluding downward normals (walk5 3.70→3.39, **walk6
+  broken**, 2 tests failing), the same at −0.5 (identical), orienting faces from the sector's hull plane (identical),
+  rejecting landings below the own sector floor (walk5 3.39, walk6 kept), and preferring the engine's one-hop scope
+  with the global scan as fallback (walk5 3.43, all else unchanged).
+
+The ledger row now records the mechanism, the `BK_FLOOR_TRACE` evidence, the acceptance table (the four measurements)
+and the retire condition: retire when the non-tiling fallback can be removed — either by verifying the affected
+levels' sector tiling so the search can be scoped outright, or by distinguishing a *reachable* floor from a
+neighbouring room's slope by polygon/sector reach rather than by normal direction. `walk5_spawn` must pass with
+`walk6_spawn` still passing.
+
+That closes the open-ended search: the walk-trace gate stands at **14 of 15**, the one failure is a tracked deviation
+with a named mechanism and a testable acceptance table, and the next rounds can go to other roadmap items without
+losing this one.

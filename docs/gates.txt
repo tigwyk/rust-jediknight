@@ -1655,3 +1655,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   1.06/2, everything else unchanged, walk5 3.70→3.39 — no gain on the plateau's path (the body stops landing on the
   slope but still does not descend to the room retail crosses).
 - Tests **149 passed**; the probe is kept, the rule is not.
+
+## Update — round 189
+
+- The `walk5_spawn` plateau is now a **deviation-ledger row** (`floor search scope`): the engine's `FindFloor` is
+  sector-scoped (the body's sector and its adjoins), the port's `floor_under` scans the world because this data does
+  not tile, and that global scan finds the sector-above's down-facing slope below level 5's own floor.
+- Acceptance table recorded from the five measured candidates (all reverted): normal exclusion (walk5 3.39, **walk6
+  broken**), −0.5 exclusion (identical), `room_normals` orientation (identical), below-floor landing rejection (walk5
+  3.39, walk6 kept), one-hop scope precedence (walk5 3.43, all else unchanged).
+- Retire condition: remove the non-tiling fallback (verified tiling, or a reach-based floor distinction); acceptance is
+  `walk5_spawn` passing **with** `walk6_spawn` still passing. Gate stands at **14 of 15**.
+- Tests **149 passed**. The open-ended search is closed; next rounds move to other roadmap items.
