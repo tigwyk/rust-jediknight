@@ -13619,7 +13619,13 @@ fn walker_step(
                 .sectors_around(*pos)
                 .into_iter()
                 .filter_map(|other| solids.floor_below(other, *pos))
-                .filter(|floor| *floor <= pos[2] + 1e-3)
+                // The fallback may lift a body by at most `rest - radius` — the amount the engine's own
+                // first physics step lifts an authored pose (level 18's body sits `radius` above its
+                // floor and the engine places it at `rest`). Without that limit the ring's floor planes
+                // ratchet a body upward: level 5's body at 0.3186 over a 0.1001 floor was "landed" on a
+                // neighbouring plane at 0.420 (+0.10), then wedged 0.32 above its own floor against
+                // surface 422 while retail slid past at floor level.
+                .filter(|floor| floor + rest <= pos[2] + (rest - radius) + 1e-3)
                 .fold(None, |best: Option<f32>, floor| {
                     Some(best.map_or(floor, |b| b.max(floor)))
                 })

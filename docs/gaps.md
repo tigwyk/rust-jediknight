@@ -4888,3 +4888,35 @@ unchanged — the climb happens **across frames** (each frame's vertical settle 
 lift reached), so the in-call limit is not the mechanism. The next probe is the vertical settle: at the pose where
 the body sits 0.32 above `floor_under`'s answer it should fall back rather than stay, which points at the
 `support`/`floor` pair disagreeing with the landing surface.
+
+**Fixing the fallback's lift limit fixes `walk6_spawn` — gate 14/15 (round 182).** The floor fallback that serves a
+sector with no floor plane of its own (level 18's sector 723) had no *raise* limit: it filtered candidates only by
+`floor <= pos[2] + 1e-3`, so a body already raised above its floor could be "landed" onto a neighbouring sector's
+plane and lifted again. It now allows a lift of at most **`rest - radius`** — exactly the amount the engine's first
+physics step lifts an authored pose, which is the case the fallback exists for:
+
+```
+.filter(|floor| floor + rest <= pos[2] + (rest - radius) + 1e-3)
+```
+
+Measured:
+
+| leg | before | after |
+| --- | --- | --- |
+| `walk6_spawn` | 1.35 / 1.08, **5** sector mismatches — fail | **1.03 / 1.08 (95 %)**, **2** — **pass** |
+| `walk5_spawn` | 3.90 / 3.73, 5 | 3.90 / 3.73, 5 (unchanged: its climb is a step lift, not the fallback) |
+| `walk_cantina` | 2.65 / 2.59, 2, end z −1.0261 | 2.65 / 2.59, 2, end z −1.1799 (still passes) |
+| `walk18_spawn` (ungated, already failing) | port 0.28 / retail 0.88, 5 | port 0.15 / retail 0.88, 6 — **worse** |
+
+Every other gated leg is unchanged (`street45` 100 %/2, `street90` 100 %/1, `door0` stop-pose, `4` 100 %/1, `9`
+100 %/0, `12` 127 %/0, `13` 98 %/0, `7`/`14` stop-pose, `17` 117 %/0, `19` stop-pose, `26` 0.42/0), so the walk-trace
+gate reads **14 legs of 15** with only `walk5_spawn` failing.
+
+`walk18_spawn`'s regression is the honest cost: its floorless sector *is* the fallback's case, and the stricter limit
+puts less lift into it. That leg was already failing (0.28 / 5 sectors) and is not gated; the precise rule it needs
+(the ring plane that should be its floor, without the ratchet) is the next step there.
+
+Two other candidates were implemented and **measured with no effect, then reverted**: a one-lift-per-`move_body`
+limit and a step granted only to a body standing on its floor (`floor_under` at the raised position returns `None`,
+so the gate never fires — `walk5_spawn` byte-identical both times). Level 5's climb is a sequence of lateral step
+lifts, which is a different mechanism from this round's fallback fix.

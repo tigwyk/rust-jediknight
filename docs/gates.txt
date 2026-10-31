@@ -1564,3 +1564,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
   vertical settle keeps the reached height), not within one call.
 - Next probe: the vertical settle — a body 0.32 above `floor_under`'s answer should fall back instead of staying.
 - Tests **149 passed**.
+
+## Update — round 182
+
+- The floor **fallback** (a sector with no floor plane, level 18's case) now limits its lift to **`rest - radius`**
+  — the amount the engine's first physics step lifts an authored pose. Without a limit it could land a raised body on
+  a neighbouring sector's plane and lift again.
+- Measured: **`walk6_spawn` fixed** (1.35/1.08 & 5 sectors → **1.03/1.08 & 2, passes**); `walk5_spawn` unchanged
+  (its climb is a lateral step lift, not the fallback); `walk_cantina` still passes with end z −1.18 (was −1.03);
+  `walk18_spawn` (ungated, already failing) worsens 0.28→0.15 — the fallback's own case, recorded as the cost.
+- **Walk-trace gate: 14 of 15 legs**, only `walk5_spawn` failing. All other gated legs unchanged.
+- Two step-lift candidates were measured with **no effect** and reverted (one lift per `move_body`; step only when
+  `floor_under` at the raised position is the floor — it returns None, so the gate never fires).
+- Tests **149 passed**.
