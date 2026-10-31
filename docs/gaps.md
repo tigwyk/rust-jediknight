@@ -5280,3 +5280,33 @@ centre enters a slab without crossing a portal) never changes its sector and the
 That is the next probe: log the player's runtime sector across the warp and compare with `sector_for_body`, then decide
 whether the runtime should re-resolve the sector when the body's centre enters another sector's hull (the engine's
 `sithThing` does exactly that) — with this fixture as the acceptance check.
+
+**Correction: the round-195 "movement-trigger fixture" was a misreading — `trouble` is a sound id, and the
+trigger did not change any state (round 197).** The claim was that retail's `cogstatus 29` showed `trouble` go
+0 → 137 when the body was warped into the bartender trigger slab. Two facts from `01_bartender.cog` and a control
+capture show it is wrong:
+
+1. `trouble` is declared **`sound trouble = i00mn19z.wav`**. Retail's `cogstatus` prints a **sound symbol's
+   table id** (137), not a variable — the value is static.
+2. `entered` begins `if (needsl == 0) return;`, and `needsl` only becomes 1 in the `killed` label when a
+   bartender dies away from the bar. Entering the slab therefore does nothing.
+3. The control capture proves it: `cogstatus 29` **at load, with no warp**, already reads
+   `trouble = 137` (`tools/parity/interaction/load_control` row; retail console capture
+   `target/parity/trace/load_control-console.txt`).
+
+So there was no state change, and round 196's "the port never delivers the sector's `entered`" conclusion is also
+wrong. The opposite is true: the port **does** deliver it — `BK_TRIGGER_TRACE` on the same warped pose prints
+
+```
+trigger: 1 message(s) entering sector 353 (from None), music 0.00 -> 0.00
+```
+
+and the walker's own trace confirms the sector: `walk trace: sector 353 pos [-9.0,-5.0,-1.151]`. The
+`deliver_sector_triggers` path (`sithThing_EnterSector`/`LeaveSector`) works; what differed was the *symbol printing*
+of a sound symbol, which is a dev-console fidelity gap in the port's `--cogstatus` probe (it prints 0 for a sound
+symbol; retail prints the sound-table id). That gap is recorded here and does not affect game behaviour — the check
+that matters is the trigger-message delivery, which both the trace and the port's `--trigger` gate cover.
+
+The `--cogstatus-after` probe and the before/after harness reads from rounds 193/196 stay: they are how the mistake was
+caught, and they will show a real state change when a target is chosen whose label actually mutates a variable (e.g.
+cog 28's `00_SecretAreas` counters, or the level-1 door chain).

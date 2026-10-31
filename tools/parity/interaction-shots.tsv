@@ -1,8 +1,14 @@
 # Interaction rows: a pose plus the keys/console commands that make the retail engine act.
 # Same format as shots.tsv; the harness applies `-Keys`/`-KeysAfter` and `-ConsoleCommands` to every row.
-# walk_trigger: level 1's bartender trigger slab. Cog 29 (`01_bartender.cog`) is linked to sectors
-# 350 (`bar2`), 370 (`bar1`) and 353 (`bar3`); a `--faces-at` scan finds sector 353 only in a thin band
-# at (-9.0,-5.0), z -1.2..-1.0, while a walking body's centre sits at z -1.30 (floor -1.42 + rest
-# 0.1201). The warp below puts the retail body at z ~-1.077 (eye - 0.037), inside the band, so the
-# engine's sector for the player becomes 353 and the cog's `entered` label should run.
+#
+# load_control: read a cog with no warp, at the level's own spawn. Added round 197 to check a claimed
+# fixture: retail's `cogstatus 29` prints `trouble = 137` HERE, at load, before anything happens --
+# `trouble` is a `sound` symbol (`sound trouble = i00mn19z.wav`) and 137 is its retail sound-table id,
+# not a state change. The port prints 0 for a sound symbol (probe fidelity gap, docs/gaps.md).
+load_control	01narshadda	-	-	-	-	-
+# walk_trigger: a pose that puts the body inside level 1's bartender trigger slab (sector 353, band
+# z -1.2..-1.0 at (-9.0,-5.0); a walking body's centre sits at -1.30, so only a warp reaches it).
+# NOT a state-change fixture: the script's `entered` label returns at `needsl == 0`, so entering the
+# slab changes nothing by itself. Kept because it is the reproducible pose for `entered`/`exited`
+# delivery tests (the port's `BK_TRIGGER_TRACE` shows the sector message delivered from it).
 walk_trigger	01narshadda	-9.0	-5.0	-1.04	0	0

@@ -1752,3 +1752,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
   a body placed inside a trigger slab never changes sector. Next probe: log the runtime sector across the warp vs
   `sector_for_body`, then re-resolve on hull entry with this fixture as the acceptance check.
 - Tests **149 passed**.
+
+## Update — round 197 — CORRECTION
+
+- Round 195/196's "movement-trigger fixture" was a **misreading**: `trouble` is declared `sound trouble =
+  i00mn19z.wav`, so retail's `cogstatus 29` prints its **sound-table id 137** — a static value, present already **at
+  load with no warp** (control capture, `load_control` row). And `01_bartender.cog`'s `entered` label returns at
+  `needsl == 0`; entering the slab changes nothing.
+- Round 196's "the port never delivers `entered`" is therefore also wrong: `BK_TRIGGER_TRACE` shows
+  `1 message(s) entering sector 353 (from None)` on the same warped pose, and the walker trace reads
+  `sector 353`. `deliver_sector_triggers` works.
+- Real (minor) gap recorded: the port's `--cogstatus` prints **0 for a sound symbol**, where retail prints the
+  sound-table id. Dev-console fidelity only; game behaviour unaffected (trigger delivery has its own trace and gate).
+- `--cogstatus-after` and the before/after harness reads stay — they are what caught the error.
+- Tests **149 passed**.
