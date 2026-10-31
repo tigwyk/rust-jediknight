@@ -21,6 +21,7 @@ mod nav;
 mod key;
 mod level_mat;
 mod palette;
+mod par;
 mod ppm;
 mod pup;
 mod rows;
@@ -15724,6 +15725,25 @@ fn audit(gobs: &gob::GobSet) -> Result<(), String> {
 
     let undecoded = coverage_audit(gobs);
 
+    // `PAR 1.0` particle clouds. `sphere.par` and `sphere2.par` are the Force shield's, `test.par`
+    // the editor's sample; nothing draws them yet (no particle renderer), so this is the data-side
+    // check — the install's own files must parse through `par.rs`.
+    let mut clouds = 0usize;
+    let mut elements = 0usize;
+    for name in gobs.names() {
+        if !name.to_ascii_lowercase().ends_with(".par") {
+            continue;
+        }
+        let Some(data) = gobs.read(&name) else { continue };
+        let cloud = par::parse(&String::from_utf8_lossy(&data));
+        assert!(cloud.is_complete(), "{name} did not parse as a `PAR 1.0` cloud");
+        clouds += 1;
+        elements += cloud.vertices.len();
+    }
+    println!(
+        "particles: {clouds} `PAR 1.0` cloud(s), {elements} element(s) (the Force shield's sphere.par/sphere2.par)"
+    );
+
     if !detail.is_empty() {
         println!("\n--- detail (first {}) ---", detail.len().min(40));
         for d in detail.iter().take(40) {
@@ -15991,6 +16011,9 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
                 }
                 table.is_table() && table.complete()
             }
+            // `PAR 1.0` particle clouds (`rdParticle_LoadEntry`); the Force shield's are the shipped
+            // pair. The renderer comes later — this counts the decoder.
+            "par" => par::parse(&String::from_utf8_lossy(&data)).is_complete(),
             _ => false,
         };
         if decoded {
@@ -16005,7 +16028,7 @@ fn coverage_audit(gobs: &gob::GobSet) -> usize {
     let note = |ext: &str| -> &'static str {
         match ext {
             "jk" => "episode manifests — see --episodes",
-            "dat" | "par" => "saved game state — not read",
+            "dat" => "the loader reads `misc\\items.dat` directly; no generic decoder",
             _ => "not decoded",
         }
     };

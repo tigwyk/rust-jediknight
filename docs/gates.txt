@@ -2360,6 +2360,29 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Checks: `a_thrust_sector_lifts_bodies_except_the_ones_flagged_against_it` — a free body in a 5 u/s thrust sector rises
   over the step, an otherwise identical body with physflags `0x400000` does not move. Suite **174 passed**; headless
   `--soak` (level 1), `--things`, `--ai`, `--weapons` and `--sound` pass; docs **132/132**.
-- No window and no game run. On the roadmap ledger: the engine's `mass != 0` gate and the **player's** copy of the thrust
-  arm (`sithPhysics_UpdatePlayerPhysics`, `0x4f6860` — the port's `walk_player` applies neither; level 21's core tube is
-  the shipped case). The gravity arm stays deferred for the round-120 reason.
+- No window and no game run. On the roadmap ledger: the engine's `mass != 0` gate, and the `0x400000` exemption on the
+  player's copy of the thrust arm — `walk_player` does apply the arm (x/y through the walk direction, z through the
+  vertical velocity) but without that flag check; the shipped player templates do not carry it, so the difference shows
+  only if a script sets it. The gravity arm stays deferred for the round-120 reason.
+
+## Update — round 238
+
+- **`PAR 1.0` particle clouds decoded** (Phase 3's first breadth item, data half). The install has three
+  (`misc\par\sphere.par`, `sphere2.par` — both `MATERIAL 00teleport.mat`, the Force shield's — and the editor's
+  `test.par`), and nothing read them: `--audit` printed `.par` under the stale "saved game state — not read" note copied
+  from `.dat`.
+- `rdParticle_LoadEntry` (`0x46c230`) gives the format: `PAR 1.0`, `SIZE`, `MATERIAL`, `LIGHTINGMODE`, then `RADIUS`,
+  `INSERT OFFSET`, `VERTICES n` and `n` lines `<i>: <x> <y> <z> <cel>`. The cel column is `%d`, so `sphere.par`'s
+  `0.000000` and `test.par`'s `0` both read as the integer prefix; the loader bounds-checks it against the material's
+  cel count, and `sithParticle_Update` (`0x4f1c30`) walks it as the cloud ages (`thingFlags & 0x20`) and grows the cloud
+  from `RADIUS` (`thingFlags & 0x1`).
+- `par.rs` parses the format (lowercased material, both cel spellings, comments/banners skipped, `bounds()` over the
+  elements) with two unit checks; the audit's coverage table moves **`par 3 0` / "saved game state — not read" →
+  `par 3 3 complete`**, the undecoded-file count falls **57 → 54**, and a new line reports
+  `particles: 3 PAR 1.0 cloud(s), 294 element(s)` (100 + 94 + 100, the shipped counts). The `.dat` note is corrected to
+  what it is — the loader reads `misc\items.dat` directly.
+- Checks: `par::tests::a_par_cloud_parses_its_header_and_elements` (header fields, material lowercasing, float **and**
+  integer cel spellings, bounds), `par::tests::a_cloud_with_no_elements_is_incomplete`, and the `--audit` parse of the
+  install's own three files. Suite **176 passed**; `--audit` passes; docs **132/132**.
+- No window and no game run. On the roadmap ledger: the **renderer** (element quads of `SIZE` at the thing plus
+  `INSERT OFFSET`, camera-facing), `sithParticle_Update`'s two arms, and `sithParticle_New`'s spawn path.

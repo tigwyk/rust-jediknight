@@ -34,7 +34,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | --- | --- | --- | --- |
 | Networking and multiplayer | `sithDSS.c`, `sithDSSThing.c`, `sithDSSCog.c`, `sithMulti.c`, `sithComm.c`, `stdComm.c`, `jkGUIMultiplayer.c`, `jkGUINetHost.c`, `jkGUIMultiTally.c` | the whole thing: message streaming, thing replication, cog RPCs, host/join, tally screens. Zero socket code exists. | no `socket`/`UdpSocket`/`TcpStream` in `src/`. The single-player **answers** are now explicit (`ismulti`/`isserver` 0, no team, no score, `*multimodeflags` stored) and `sendtrigger` really broadcasts `trigger`, but only `sendmessageex` is left stubbed — it needs message *return values* |
 | Console and cvars | `sithConsole.c`, `sithCvar.c`, `sithCommand.c`, `jkQuakeConsole.c` | the `~` console, the cvar store, and the command dispatcher (`bind`, `set`, `map`, `quit`) | no matches for `cvar`, `sithCommand`, `sithConsole` |
-| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. **Sprites draw, with their real artwork and animation**: every template's `sprite=` is parsed (`spr.rs`), its `.mat` loads through the cel-table reader in `tex.rs` with palette entry 0 keyed transparent, `draw_created` spawns one billboarded quad per row and `billboard_sprites` faces it at the camera. The frames walk with the thing's life (`Runtime::sprite_cel`: `typeflags & 0x1` arms it, frame *k* holds for the *k*-th `life / cels` slice), which is what `sithExplosion_CreateThing` does through `sithSurface_sub_4F00A0`. | no particle type (`sithParticle`'s own things — smoke, embers and dust are separate things the engine spawns); `explosion` matches are class numbers and the damage path |
+| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. **Sprites draw, with their real artwork and animation**: every template's `sprite=` is parsed (`spr.rs`), its `.mat` loads through the cel-table reader in `tex.rs` with palette entry 0 keyed transparent, `draw_created` spawns one billboarded quad per row and `billboard_sprites` faces it at the camera. The frames walk with the thing's life (`Runtime::sprite_cel`: `typeflags & 0x1` arms it, frame *k* holds for the *k*-th `life / cels` slice), which is what `sithExplosion_CreateThing` does through `sithSurface_sub_4F00A0`. **The `PAR 1.0` particle clouds parse now (round 238)**: `par.rs` reads the engine's order (`rdParticle_LoadEntry`, `0x46c230` — size, material, lighting mode, radius, insert offset, and the vertex/`cel` list) and `--audit` checks the install's three files (`sphere.par`/`sphere2.par`, the Force shield's clouds, and `test.par`: **3 clouds, 294 elements**). | the **renderer**: a `particle=` thing has no cloud drawn yet, and `sithParticle_Update`'s two arms (per-vertex cel cycling over the material's cels; the grow/scale arm on `thingFlags & 0x1`) are not run; `explosion` matches are class numbers and the damage path |
 | In-engine cutscene cameras | `jkCutscene.c`, `sithCamera.c` focus modes | **The focus models work**: seven camera slots, `SetCameraFocus(slot, thing)` + `SetCurrentCamera(slot)` move the view onto that thing (aimed by its own own yaw/pitch), `GetCameraMode`/`GetPrimaryFocus`/`GetSecondaryFocus` read back, and `SetPOVShake` adds the recoil offset that decays at its own rate. Level 17b's `17b_Camera.cog` cutscene runs end to end: the view cuts to `ghostCam`, and after the script's `Sleep(6.0)` it hands the view back to the player. | `CycleCamera`, `SetCameraZoom`, path-driven camera dollies beyond `PlayKey` (a camera on a `.key` track follows its thing but has no path timing of its own), and the secondary-focus framing |
 | Saber | `jkSaber.c` | `jkSetSaberInfo` stores the blade the scripts describe (two materials, hilt and tip radii, length, three spark templates) with the argument order pinned by a gate (`--pickup`); **and the player can use it**: `saber_swing` traces the blade `length * 10` level units along the player's facing with the hilt radius, damages what it reaches with `DAMAGE_SABER` (0x10), has a 0.45 s cooldown, and spends no ammo — `--hit` proves a hit at 0.8 units, no hit at 4, and the cooldown. The blade is also drawn as an emissive rod from the eye (`saber_blade`), and `jkDisableSaber`/`jkEnableSaber` switch it off and on (`saber_shown`, asserted by `--hit`) | the **swing animation**: `jkSaber.c` runs arcs, parries and the saber lock through `JKFLAG_SABEREXTEND`/`SABERRETRACT` and `cog_weap_saber.cog`'s `SetPuppet` calls, and this build neither plays those keyframes nor draws a hand to hold the hilt. The blade length is read as model units (x10, the `.3do` node scale) because the scripts pass 0.100 for a blade that must reach a body |
 | Arch lighting | `sithArchLighting.c` | **not reachable from the text format, checked:** `.jkl`'s THINGS section has no archlight column and SECTORS carries only `AMBIENT LIGHT`/`EXTRA LIGHT`/`COLORMAP`/`TINT`. The engine *computes* arch lights at load from the geometry (`sithArchLighting.c`), so porting this means re-deriving them, not reading a field | the computation itself: per-surface colour contribution accumulated into each thing's `light`, which is what gives Jedi levels their coloured bounce. The sector ambient/extra light and the thing-light sum are already there to build on |
@@ -6352,9 +6352,33 @@ does not move.
 
 Two halves of the engine's arm are still owed, and are on the roadmap ledger as one row: the `mass != 0` gate (the port
 does not track per-thing mass on that path, so a massless body in a thrust sector is still accelerated) and the player's
-own copy of the arm — `sithPhysics_UpdatePlayerPhysics` (`0x4f6860`) has the same thrust and gravity blocks, while the
-port's `walk_player` owns the player body and applies neither (level 21's core tube is the shipped case that needs the
-thrust half). The gravity arm stays deferred for the reason the round-120 section gives.
+own copy of the arm — `sithPhysics_UpdatePlayerPhysics` (`0x4f6860`) has the same thrust and gravity blocks, and
+`walk_player` does apply the thrust arm (x/y through the walk direction, z through the vertical velocity) but without the
+engine's `physflags & 0x400000` exemption; the shipped player templates do not carry that flag, so the difference shows
+only if a script sets it. The gravity arm stays deferred for the reason the round-120 section gives.
 
 Suite **174 passed**; headless `--soak` (level 1), `--things`, `--ai`, `--weapons` and `--sound` pass; docs 132/132. No
 window and no game run.
+
+## Update — round 238 (`PAR 1.0` particle clouds decoded)
+
+Phase 3's first breadth item is particles and effects. The install carries three particle clouds — `misc\par\sphere.par`
+and `sphere2.par` (both `MATERIAL 00teleport.mat`, the Force shield's) and the editor's `test.par` — and nothing read
+them: `--audit` even printed `.par` as "saved game state — not read", a stale note that had been copied from `.dat`.
+
+`rdParticle_LoadEntry` (`0x46c230`) settles the format: sectioned text, `PAR 1.0`, `SIZE`, `MATERIAL`, `LIGHTINGMODE`,
+then the geometry section's `RADIUS`, `INSERT OFFSET` and `VERTICES n` followed by `n` lines
+`<i>: <x> <y> <z> <cel>`. The cel column is read with `%d`, which is why `sphere.par`'s `0.000000` and `test.par`'s `0`
+are both valid (the integer prefix is what `sscanf` takes); the loader bounds-checks it against the material's cel count,
+and `sithParticle_Update` (`0x4f1c30`) walks it as the cloud ages (`thingFlags & 0x20`) while `thingFlags & 0x1` grows the
+cloud's matrix from `RADIUS`.
+
+`par.rs` parses that format — lowercased material, both cel spellings, comments and section banners skipped, `bounds()`
+over the elements — with two unit checks. The audit now decodes the real files: the coverage table moves from
+**`par 3 0`** with the wrong note to **`par 3 3 complete`**, the undecoded-file count falls **57 → 54**, and a new audit
+line states the data: `particles: 3 PAR 1.0 cloud(s), 294 element(s)` (100 + 94 + 100, the shipped counts). The `.dat`
+note is corrected at the same time — the loader reads `misc\items.dat` directly, so "saved game state" was wrong.
+
+Remaining, on the roadmap ledger: draw a `particle=` thing's cloud (element quads of `SIZE` with the material's cel, at
+the thing plus `INSERT OFFSET`, camera-facing like the sprites), run the two update arms, and spawn the cloud thing
+`particle=` names (`sithParticle_New`). Suite **176 passed**; `--audit` passes; no window and no game run.
