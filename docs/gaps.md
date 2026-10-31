@@ -5817,7 +5817,7 @@ handler:
 | dodge | 27 | `0x50b360` | no |
 | roam | 27 | `0x50b830` | partial: the walker wanders, not the instinct's schedule |
 | specialattack | 24 | `0x40fd00` | no |
-| hitandrun | 23 | `sithAICmd_HitAndRun` | no |
+| hitandrun | 23 | `sithAICmd_HitAndRun` | **yes** (round 223: fires, then breaks off) |
 | sensedanger | 14 | `0x50b9b0` | no |
 | turretfire | 12 | `0x50a0f0` | no |
 | randomturn | 9 | `0x50b700` | no |
@@ -5825,11 +5825,29 @@ handler:
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **9 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+So the port runs **10 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
 the counts are how many classes depend on each: `listen` (200) and `talk` (198) are the biggest remaining behavioural
 gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
-it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair and `circlestrafe`
-(below). `sabermove` needs no work at all: nothing names it.
+it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair, `circlestrafe` and
+`hitandrun` (below). `sabermove` needs no work at all: nothing names it.
+
+**`hitandrun` is implemented (round 223, 23 classes).** The handler (`0x50bb90`) does not move anything itself: while the
+engine's just-fired flag is up it counts a timer, and when that timer passes the instinct's first argument it sets the
+**withdraw** flag for its second argument — so the firing actor breaks off and the existing withdraw walk carries it
+away. Shipped lines are `hitandrun 1000, 3000` (a second of fire, three of running) and `10000, 1500`. The port watches
+its own `last_shot` slot for the same signal, records the first shot in `Runtime::ai_hitrun`, and arms the same
+`ai_withdraw` mode `retreat` uses once the firing window is up. No new movement or firing code; the run-away and the
+return are the walks that already exist.
+
+Deviation: the engine's timer is a per-instinct update clock, so its break-off lands within one AI update (≈1000 ms)
+of the threshold; the port checks every frame against `last_shot` and so breaks off closer to the exact threshold. A
+firing fixture with a timing trace would settle it.
+
+The headless check is `an_actor_with_hitandrun_breaks_off_after_firing`: an actor that has just fired, with the shipped
+line, must have the withdraw mode armed after 1.3 s of ticks; a control class without the instinct must never arm it.
+Measured before/after: with the trigger disabled the test fails with
+`an actor with `HitAndRun` did not break off after its firing window`; enabled it passes. Suite: **157 tests, 0
+failures**.
 
 **`circlestrafe` is implemented (round 222, 70 classes).** The shipped lines are
 `circlestrafe 5000, 30, 0.6, 500, 0` (and `45, 1.0` for the second Jedi class), and the handler (`0x509890`) reads them

@@ -1097,6 +1097,11 @@ pub struct Runtime {
     /// (`0x509890`). The handler picks it at random the first time and flips it when the step is
     /// blocked; the port persists it the same way so the orbit does not jitter every frame.
     pub ai_strafe: BTreeMap<usize, f32>,
+    /// When each actor started its current `hitandrun` engagement — its first shot after it came back.
+    /// The handler (`0x50bb90`) watches the engine's just-fired flag and breaks off after the
+    /// instinct's first argument (1000–10000 ms shipped) for its second (1500–3000 ms); the port
+    /// records the first firing and arms the same withdraw mode `retreat` uses.
+    pub ai_hitrun: BTreeMap<usize, f32>,
     /// `sithAIAwareness`: a position other actors of the same side were told about, and when. A
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
@@ -1678,6 +1683,7 @@ impl Runtime {
             ai_home: BTreeMap::new(),
             ai_withdraw: BTreeMap::new(),
             ai_strafe: BTreeMap::new(),
+            ai_hitrun: BTreeMap::new(),
             sector_awareness: BTreeMap::new(),
             sector_adjoins: sector_adjoins.clone(),
             ai_fire_target: BTreeMap::new(),
@@ -2897,6 +2903,33 @@ impl Runtime {
                 {
                     let ms = withdraw.weight.max(1.0);
                     self.ai_withdraw.insert(index, (player, self.time + ms / 1000.0));
+                }
+            }
+            // `hitandrun` (`0x50bb90`): fire at the target for the instinct's first argument, then break
+            // off for its second and come back. The engine watches its just-fired flag; the port watches
+            // `last_shot` and arms the same withdraw mode `retreat` uses, so the run-away and the return
+            // are the walk that is already there. Shipped: `1000, 3000` (and `10000, 1500`).
+            if !self.ai_withdraw.contains_key(&index)
+                && let Some(run) = ai.as_ref().and_then(|class| class.instinct("HitAndRun")).cloned()
+            {
+                let hold = run.weight.max(1.0) / 1000.0;
+                let break_off = run.args.first().copied().unwrap_or(3000.0).max(1.0) as f32 / 1000.0;
+                if !sighted {
+                    self.ai_hitrun.remove(&index);
+                } else {
+                    let fired = self
+                        .last_shot
+                        .get(&index)
+                        .is_some_and(|at| self.time - at < 0.5);
+                    if fired && !self.ai_hitrun.contains_key(&index) {
+                        self.ai_hitrun.insert(index, self.time);
+                    }
+                    if let Some(start) = self.ai_hitrun.get(&index).copied()
+                        && self.time - start >= hold
+                    {
+                        self.ai_withdraw.insert(index, (player, self.time + break_off));
+                        self.ai_hitrun.remove(&index);
+                    }
                 }
             }
             let fleeing = self
@@ -7928,6 +7961,71 @@ mod tests {
         next.adopt(&carried);
         assert_eq!(next.things[0].health, 41.0, "the carried health was not restored");
         assert_eq!(next.player_shields, 73.0, "the carried shields were not restored");
+    }
+
+    /// `hitandrun` (`0x50bb90`): fire at the target for the instinct's first argument, then break off
+    /// for its second. Shipped line: `hitandrun 1000, 3000` — a second of fire, three seconds of run.
+    #[test]
+    fn an_actor_with_hitandrun_breaks_off_after_firing() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [1.5, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 HitAndRun 1000.0, 3000.0\n\
+                 Follow 0.0, 0.5\n",
+            ),
+        );
+        // A shot has just left the barrel: this is what `PrimaryFire` sets and what the handler reads.
+        rt.last_shot.insert(1, 0.0);
+
+        for _ in 0..40 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            rt.ai_withdraw.contains_key(&1),
+            "an actor with `HitAndRun` did not break off after its firing window"
+        );
+
+        // A control class without the instinct never arms the mode, even after the same shots.
+        let mut quiet = door_runtime();
+        let base = quiet.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [1.5, 0.0, 0.0];
+        quiet.things = vec![player, actor];
+        quiet.templates = vec!["walkplayer".into(), "tuskan".into()];
+        quiet.types = vec![10, 2];
+        quiet.template_speed.insert("tuskan".into(), 1.0);
+        quiet.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 Follow 0.0, 0.5\n",
+            ),
+        );
+        quiet.last_shot.insert(1, 0.0);
+        for _ in 0..40 {
+            quiet.time += 1.0 / 30.0;
+            quiet.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            !quiet.ai_withdraw.contains_key(&1),
+            "an actor without `HitAndRun` broke off"
+        );
     }
 
     /// `circlestrafe` (`0x509890`): within the instinct's engage distance (0.6–1.0 in the shipped

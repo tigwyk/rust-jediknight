@@ -2099,3 +2099,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   the orbit is smoother than retail's — needs a windowed Jedi-at-melee leg → QA window.
 - AI instinct coverage now **9 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198). No game run
   and no port window.
+
+## Update — round 223
+
+- **`hitandrun` implemented** (23 classes). Handler `0x50bb90` counts the engine's just-fired timer and, past the
+  instinct's first argument, sets the **withdraw** flag for its second — so the firing actor breaks off and the existing
+  withdraw walk carries it away. Shipped: `1000, 3000` and `10000, 1500`. The port watches `last_shot`, records the first
+  shot in `Runtime::ai_hitrun`, and arms the same `ai_withdraw` mode `retreat` uses. No new movement or firing code.
+- Headless check `an_actor_with_hitandrun_breaks_off_after_firing` + control class without the instinct (never arms).
+  Measured before/after: trigger disabled → fails with
+  ``an actor with `HitAndRun` did not break off after its firing window``; enabled → passes. Suite **157 tests, 0
+  failures**.
+- Deviation recorded: the engine breaks off within one AI update (≈1000 ms) of the threshold, the port per frame closer
+  to the exact threshold — a firing timing trace would settle it.
+- AI instinct coverage now **10 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198). No game run
+  and no port window.
