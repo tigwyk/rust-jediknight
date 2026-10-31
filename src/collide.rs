@@ -2292,6 +2292,27 @@ mod tests {
         assert_eq!(level.visible_sectors(&[1], gates, &mut all), vec![1, 0, 2]);
     }
 
+    /// A body already touching a wall must still slide along it. The sweep reports a touching face at
+    /// `distance: 0` for *any* direction that does not move away from it, so every loop iteration
+    /// re-reports the same plane with no travel and three bounces end the move with the body wedged —
+    /// level 18's body against surface 7332's plate at a doorway edge was exactly this (blocked true on
+    /// every move while retail slid past it). A grazing contact is a slide, not a stop.
+    #[test]
+    fn a_body_touching_a_wall_slides_along_it() {
+        let mut room = room();
+        // The sweep walks faces; `room()` keeps its polygons in `walls`/`floors`.
+        room.faces = room.walls.clone();
+        room.faces.extend(room.floors.iter().cloned());
+        let gates = Gates { sectors: &[], adjoins: &[] };
+        // The +x wall is x = 2 and the body is one radius (0.3) clear of it at x = 1.7.
+        let (pos, _sector, blocked) =
+            room.move_body(0, [1.7, 0.0, -0.5], [0.0, 1.0, 0.0], 0.3, 0.066, gates);
+        assert!(
+            pos[1] > 0.5,
+            "a body touching a wall did not slide along it: y {} (blocked {blocked})",
+            pos[1]
+        );
+    }
     #[test]
     fn pushes_out_of_walls_and_finds_the_floor() {
         let room = room();

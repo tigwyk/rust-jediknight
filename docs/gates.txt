@@ -1348,3 +1348,12 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - So the remaining level-18 difference is the **resolver's push direction at a doorway edge**, not floor,
   sector or landing — the same class as `collide.rs`'s slide work. `--faces-at` gained solid-thing, level-surface
   and `BK_SURFACE=<id>` diagnostics. Tests **148 passed**.
+
+## Update — round 165
+
+- Level 18's block is now pinned one layer deeper: `BK_MOVE_TRACE` shows bounce 0 sliding **correctly** east-north
+  off the plate (surface 7332), then bounce 1 meeting a **portal** (`surface usize::MAX`, normal
+  `(-0.195,-0.981)`) — the body heading into doorway surface 7 (`adjoin 0`) — which `sweep_rooms` turns into a
+  wall because `doorway_advance` returns `None` (its far-room depth test). The body stops at the threshold.
+- New regression test `a_body_touching_a_wall_slides_along_it` (a single wall contact slides correctly). Tests
+  **149 passed**. Next: `doorway_advance`'s rejection reason at this doorway, with numbers.

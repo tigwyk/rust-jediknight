@@ -4396,3 +4396,25 @@ exact:
 So the remaining difference is the **direction the resolver pushes a body that grazes a face at a doorway
 edge** — the same class as the slide work in `collide.rs` (round 150's near-head-on stop and the steep-face plan
 push). The floor, the sector and the landing are all correct on level 18 now; only this push is wrong.
+
+**The doorway itself is being reclassified as a wall — and that is level 18's block (round 165).** `BK_MOVE_TRACE`
+shows the solver's two bounces exactly:
+
+```
+loop 0 dir (0.0006, 1.0000) hit t 0.000 surface 7332    slide (0.1914, 0.9620) mag 0.981
+loop 1 dir (0.1951, 0.9808) hit t 0.000 surface <MAX>   slide (0.000001, -0.0000002) mag 0.000  -> break
+```
+
+The first bounce is **correct**: the body grazes the plate (surface 7332) and the slide carries it east-north, the
+direction retail takes. The second contact is a **portal**, `surface usize::MAX` with normal
+`(−0.195, −0.981)` — the body is now heading almost exactly *into* doorway surface 7 (`adjoin 0`), and
+`sweep_rooms` turns a doorway it cannot walk through into a wall: `lands_inside` is false because
+`doorway_advance` returns `None` ("nowhere the body can stand" — its far-room depth test). So the body stops dead
+at the threshold, and that is the whole of level 18's 0.28-of-0.88 shortfall.
+
+A single-wall slide now has a regression test (`a_body_touching_a_wall_slides_along_it`: a body one radius from a
+wall moving parallel to it must advance, and it does — the contact is not the problem). The open question is
+**`doorway_advance`'s far-room test on this threshold**: the far sector (0) has a floor at 0.0 and the octagonal
+room is far wider than the body, yet the function reports nowhere to stand. The next probe is its rejection
+reason at this doorway — the three constraints it lists (clear the plane, stay inside a shallow room, retry the
+3 mm-offset copies) with the actual numbers.
