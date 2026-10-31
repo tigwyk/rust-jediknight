@@ -1106,6 +1106,10 @@ pub struct Runtime {
     /// handler (`0x50b700`): every class interval (1000–2000 ms shipped) the actor picks a random
     /// direction and turns to look at a point its own argument's distance away (`SetLookFrame`).
     pub ai_randomturn: BTreeMap<usize, (f32, f32)>,
+    /// Each actor's current `roam` point and when it may pick a new one. The handler (`0x50b830`)
+    /// wanders around the **home anchor** (`ai + 0x93`): a random direction, a random distance inside
+    /// the instinct's first argument, every class interval, then `SetLookFrame` + `SetMovePos` there.
+    pub ai_roam: BTreeMap<usize, (f32, [f32; 3])>,
     /// `sithAIAwareness`: a position other actors of the same side were told about, and when. A
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
@@ -1689,6 +1693,7 @@ impl Runtime {
             ai_strafe: BTreeMap::new(),
             ai_hitrun: BTreeMap::new(),
             ai_randomturn: BTreeMap::new(),
+            ai_roam: BTreeMap::new(),
             sector_awareness: BTreeMap::new(),
             sector_adjoins: sector_adjoins.clone(),
             ai_fire_target: BTreeMap::new(),
@@ -2849,6 +2854,33 @@ impl Runtime {
             if sighted {
                 self.ai_last_seen.insert(index, target);
             }
+            // `roam` (`0x50b830`): an actor with nothing else to do wanders around its **home**
+            // anchor — a random direction, a random distance inside the instinct's first argument, at
+            // the class interval — then `SetLookFrame` + `SetMovePos` there. The port feeds that point
+            // through the same remembered-position slot, so the wandering walk is the one already
+            // tuned; it is the last fallback, after a remembered enemy, an awareness record and home.
+            let roam_point = if let Some(roam) = ai.as_ref().and_then(|class| class.instinct("Roam")).cloned()
+                && let Some(home) = self.ai_home.get(&index).copied()
+            {
+                let (mut due, mut point) = self.ai_roam.get(&index).copied().unwrap_or((0.0, home));
+                if self.time >= due {
+                    due = self.time + (roam.weight / 1000.0).max(0.5);
+                    let radius = roam.args.first().copied().unwrap_or(2.0).max(0.0) as f32;
+                    let angle = crate::cog::pseudo_random() as f32 * std::f32::consts::TAU;
+                    let reach = radius * (0.25 + 0.75 * crate::cog::pseudo_random() as f32);
+                    point = [
+                        home[0] + angle.cos() * reach,
+                        home[1] + angle.sin() * reach,
+                        home[2],
+                    ];
+                }
+                self.ai_roam.insert(index, (due, point));
+                let here = self.things.get(index).map(|t| t.pos).unwrap_or(home);
+                let d2 = (point[0] - here[0]).powi(2) + (point[1] - here[1]).powi(2);
+                (d2 > 0.25).then_some(point)
+            } else {
+                None
+            };
             // `sithAIAwareness`'s record is a *position*, which is used exactly like a last-seen
             // one: the actor turns and walks there, and the fight reaches it without it having seen
             // anything itself. The record lives per **sector and side**, so an actor reads the one
@@ -2874,7 +2906,7 @@ impl Runtime {
                 let here = self.things.get(index)?.pos;
                 let (dx, dy) = (home[0] - here[0], home[1] - here[1]);
                 ((dx * dx + dy * dy).sqrt() > 0.5).then_some(home)
-            });
+            }).or_else(|| roam_point);
             // `AIFlee(actor, from)`: the actor runs away from that thing and does not shoot, which
             // is a whole mode in the engine (`sithAI_Flee`). It is a script's order, so it does not
             // need sight or a memory — read before the "nothing to do" return below, or a fleeing
@@ -8110,6 +8142,60 @@ mod tests {
             quiet.ai_tick(0, 1.0 / 30.0);
         }
         assert_eq!(quiet.things[1].yaw, 0.0, "an actor without `randomturn` turned");
+    }
+
+    /// `roam` (`0x50b830`): an actor with nothing to chase wanders around its **home** anchor — a
+    /// random direction, a random distance inside the instinct's first argument, every class interval.
+    #[test]
+    fn an_idle_actor_with_roam_wanders_around_its_home() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = base.clone();
+        player.pos = [-9.0, 0.0, 0.0]; // out of sight and out of mind
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0\n\nRoam 5000.0, 2.0\n",
+            ),
+        );
+        rt.ai_home.insert(1, [0.0, 0.0, 0.0]);
+
+        for _ in 0..60 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        let p = rt.things[1].pos;
+        let moved = (p[0] * p[0] + p[1] * p[1]).sqrt();
+        assert!(moved > 0.2, "the actor did not wander: {p:?}");
+        assert!(moved < 2.5, "the actor left its roam radius: {p:?}");
+
+        // A control class without `Roam` stands at home.
+        let mut quiet = door_runtime();
+        let base = quiet.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = base.clone();
+        player.pos = [-9.0, 0.0, 0.0];
+        quiet.things = vec![player, actor];
+        quiet.templates = vec!["walkplayer".into(), "tuskan".into()];
+        quiet.types = vec![10, 2];
+        quiet.template_speed.insert("tuskan".into(), 1.0);
+        quiet.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=2.0\n\nJump\n"),
+        );
+        quiet.ai_home.insert(1, [0.0, 0.0, 0.0]);
+        for _ in 0..60 {
+            quiet.time += 1.0 / 30.0;
+            quiet.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(quiet.things[1].pos, [0.0, 0.0, 0.0], "an actor without `Roam` wandered");
     }
 
     /// `circlestrafe` (`0x509890`): within the instinct's engage distance (0.6–1.0 in the shipped

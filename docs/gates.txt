@@ -2129,3 +2129,21 @@ running app.--carry-check --start 01narshadda                        0   level 2
   branch disabled → fails with `no randomturn state`; enabled → passes. Suite **158 tests, 0 failures**.
 - AI instinct coverage now **11 of 24 used instincts** (plus two partial); remaining top gaps `listen` (200) and `talk`
   (198). No game run and no port window.
+
+## Update — round 225
+
+- **`roam` implemented** (27 classes), completing the wander half of the home pair. Handler `0x50b830`: a random
+  direction, a random distance inside the instinct's first argument, at the class interval, measured from the **home
+  anchor** (`ai + 0x93` — the same anchor `returnhome` uses), then `SetLookFrame` + `SetMovePos`. The port picks that
+  point into `Runtime::ai_roam` and feeds it through the **last** fallback of the remembered-position chain, so the
+  priority is: remembered enemy → awareness record → home → wander. No new movement code.
+- Headless check `an_idle_actor_with_roam_wanders_around_its_home` + control class (must not move). Measured
+  before/after: branch disabled → fails with `the actor did not wander: [0.0, 0.0, 0.0]`; enabled → passes. Suite
+  **159 tests, 0 failures**.
+- **`talk` reviewed, deliberately not implemented**: its handler (`0x50be20`) is audio — a chance roll per interval, then
+  `sithSoundClass_PlayModeRandom` (`0x4e6b70`) with a voice-bark id from the actor's state (0x51/0x55 aware
+  healthy/hurt, 0x50/0x4f after firing, 0x4e/0x4f while withdrawing). The port has no sound-class mode table/playback
+  path and a headless probe cannot assert on audio, so the id table is recorded in gaps.md for the audio layer instead of
+  shipped unverifiable.
+- AI instinct coverage now **12 of 24 used instincts** (plus `sensedanger` partial); remaining top gaps `listen` (200)
+  and `talk` (198). No game run and no port window.

@@ -5815,7 +5815,7 @@ handler:
 | retreat | 42 | `0x50bc60` | **yes** (round 221: arms the withdraw mode when hurt) |
 | withdraw | 30 | `0x50b150` | **yes** (round 221: backs away from what hurt it) |
 | dodge | 27 | `0x50b360` | no |
-| roam | 27 | `0x50b830` | partial: the walker wanders, not the instinct's schedule |
+| roam | 27 | `0x50b830` | **yes** (round 225: wanders around its home anchor) |
 | specialattack | 24 | `0x40fd00` | no |
 | hitandrun | 23 | `sithAICmd_HitAndRun` | **yes** (round 223: fires, then breaks off) |
 | sensedanger | 14 | `0x50b9b0` | partial: the awareness reader already turns and walks an actor to the event; the player-target acquisition the handler also does is not ported |
@@ -5825,11 +5825,37 @@ handler:
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **11 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+So the port runs **12 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
 the counts are how many classes depend on each: `listen` (200) and `talk` (198) are the biggest remaining behavioural
 gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
 it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair, `circlestrafe`,
-`hitandrun` and `randomturn` (below). `sabermove` needs no work at all: nothing names it.
+`hitandrun`, `randomturn` and `roam` (below). `sabermove` needs no work at all: nothing names it.
+
+**`roam` is implemented, completing the wander half of the home pair (round 225, 27 classes).** The handler (`0x50b830`)
+does exactly what its name says: a random direction, a random distance **inside the instinct's first argument**, at the
+class interval, measured from the **home anchor** (`ai + 0x93` — the same anchor `returnhome` uses), then
+`SetLookFrame` + `SetMovePos` there. The port picks that point into `Runtime::ai_roam` and feeds it through the last
+fallback of the remembered-position chain, so the walk is the one already tuned and the order is meaningful: a remembered
+enemy beats an awareness record, which beats walking home, which beats wandering. No new movement code.
+
+So the home anchor recorded for `returnhome` now drives two behaviours, and an actor whose template names both will go
+home when it is away from it and wander around home when it is there — which is what the shipped patrol classes
+(`tuprodroam.ai`, `turoam.ai`) are for.
+
+Deviation: the engine rolls the wander direction from its own update clock; the port rolls it when its own interval map
+is due, so the wander points are independent draws either way. Nothing else differs.
+
+The headless check is `an_idle_actor_with_roam_wanders_around_its_home`: an actor placed on its anchor, with the body out
+of sight, must move measurably but stay inside the wander radius; a control class without the instinct must not move.
+Measured before/after: with the branch disabled the test fails with `the actor did not wander: [0.0, 0.0, 0.0]`; enabled
+it passes. Suite: **159 tests, 0 failures**.
+
+**`talk` reviewed but not implemented (round 225).** Its handler (`0x50be20`) is not state, it is **audio**: it rolls the
+instinct's second argument as a chance each interval, then calls `sithSoundClass_PlayModeRandom` (`0x4e6b70`) with a
+voice-bark id chosen from the actor's state — 0x51/0x55 when aware and healthy/hurt, 0x50/0x4f after firing, 0x4e/0x4f
+while withdrawing. The port has no sound-class **mode table or playback** path (its `snd::Entry` parsing feeds template
+fire sounds, not `PlayModeRandom`), and a headless probe has no audio to assert on, so implementing it here would be
+unverifiable. It is recorded with the recovered id table so the audio layer can pick it up with a real fixture.
 
 **`randomturn` is implemented, and `sensedanger` is covered rather than re-implemented (round 224).** `randomturn`
 (`0x50b700`, 9 classes) is idle behaviour, not combat: every class interval (1000–2000 ms shipped) an awake actor picks a
