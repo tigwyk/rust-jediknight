@@ -5666,3 +5666,26 @@ the player outside its class's FOV where the engine's `FirstThingInView` would n
 origin as its eye rather than the model offset the engine transforms, and does not subtract the target's radius. The fix
 is small (call the class's own `sees`, which already implements sightdist + fov, in the scan), but it changes AI
 behaviour and so waits for the next full QA window rather than a mid-round run.
+
+**The `aistatus` format is pinned, and the shipped `.ai` classes are readable without the game (round 210).** Phase
+0.5's second exit criterion is met on the AI side. Two pieces made it possible:
+
+1. **`--asset <name>`** — a new headless pre-app probe (`--asset ai\tuproddefault.ai`, or `--asset ai\*` to list)
+   prints one archive entry as text, so a shipped data file can be read directly instead of through the game. The
+   `tuproddefault.ai` it returns carries `fov=180, sightdist=5.0`, the eleven instinct lines in file order, and their
+   class-default arguments.
+2. **The registry** from round 209 (`sithAICmd_Startup`) gives each instinct's two bit words, and the dump's
+   `mask`/`mode` are exactly those: row 1 of `tuproddefault.ai` is `LookForTarget` and shows `mode=0x204` — the word
+   `sithAICmd_Startup` registers for `lookfortarget`.
+
+So a dump row now reads as *class file line order*: **row i = the `.ai` file's i-th instinct**, verified twice (eleven
+lines ↔ eleven rows; and every row's mask/mode matching its registered instinct's words). The format, usage
+(`aistatus <index>`, the index being the level's AI actor list in thing-id order), header fields and the full row
+mapping for a brown Tusken are written into `docs/porting-roadmap.md`'s Phase 0.5 criterion 2. That makes the committed
+captures (`tools/parity/aistatus-03katarn-*.txt`) readable as named instinct states, which is what the level-3
+engagement comparison needs.
+
+One hygiene bug came out of it: `src/main.rs` carried **two literal NUL bytes** in comments, injected by an earlier
+PowerShell here-string whose `` `0 `` escape became NUL. Cargo accepted them, but the file stopped being readable as
+text by the tooling. Both are repaired (the intended backticked `` `01_goal0.cog` `` restored), and the source reads
+normally again.

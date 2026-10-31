@@ -157,16 +157,31 @@ partials is still to be written; these are the entries this round created or mea
 ### Phase 0.5 — Retail trace v0 (unblocks Phase 1 steps 3–6)
 
 T3 works today because a screenshot is a complete observation. T2/T4 do not: `coords` is a manual
-console poll, `cogstatus`/`aistatus` output formats are not pinned, and no movement replay exists, so
-"the same inputs produce the same position/sector/health" cannot be measured yet. Steps 3–6 all need
-this, so it is its own deliverable rather than a hidden dependency.
+console poll, no movement replay exists, and the `cogstatus`/`aistatus` output formats were not pinned
+under this round (both are now: `cogstatus` by the level-1 captures in `tools/parity/cogstatus-*.txt`,
+`aistatus` by criterion 2 below), so "the same inputs produce the same position/sector/health" could
+not be measured yet. Steps 3–6 all need this, so it is its own deliverable rather than a hidden
+dependency.
 
 Exit criteria:
 
 1. A scripted walk on retail yields a parseable position + sector trace (poll `coords` on a fixed
    cadence, with `slowmo` if the console cannot keep up), and the format is documented.
-2. The `cogstatus`/`aistatus` handlers are decompiled and their output formats pinned; one level's cog
-   variables are captured through them.
+2. **Done (v0).** The `cogstatus`/`aistatus` handlers are decompiled and their output formats pinned; one
+   level's cog variables are captured through them. The `aistatus` side: usage is `aistatus <index>`,
+   where the index is a position in the level's **AI actor list in thing-id order** (`0` is the first
+   actor; bare `aistatus` dumps level-load timings instead, and a thing id is rejected). The dump is
+   `AI Status dump for thing N (template)`, then `Class 'x.ai', Flags=0x…, Moods a/b/c, NextUpdate=n`,
+   then one row per instinct in the **class `.ai` file's own line order** — verified by count (eleven
+   lines in `ai\tuproddefault.ai` ↔ eleven rows for a `tuskan`) and by the registration defaults: mask and
+   mode are the two bit words `sithAI_RegisterInstinct` stored (`sithAICmd_Startup` registers
+   `lookfortarget` with 0x204, and row 1 — `LookForTarget` in that file — shows it). For a brown Tusken
+   (`tuproddefault.ai`, fov 180, sightdist 5.0) the rows read: Jump `mask 0x604`, LookForTarget
+   `mode 0x204`, Listen `mask 0x7`, PrimaryFire `mask 0x100 mode 2`, BlindFire `mode 2`, Follow
+   `mask 0xe00 mode 2`, OpenDoors `mode 2`, ReturnHome `mask 0x900`, Retreat `mode 2`, Flee
+   `mask 0xf05 mode 0x800`, Talk `mode 0xffff`. `Params` are the four per-instance numbers (the class
+   defaults are 0 on an idle actor). The shipped class files themselves are readable without the game:
+   `--asset ai\tuproddefault.ai` prints them (round 210).
 3. **Done (v0).** `port-trace.ps1` replays a leg with `--warp` + `BK_WALK_FORWARD=1` at a fixed
    1/60 s step (capture-mode `--shot` pins `dt`) and writes one line per frame
    (`tick t_s x y z sector vy health shields`); `trace-compare.ps1` interpolates the port path to the

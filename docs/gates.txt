@@ -1934,3 +1934,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
   changes AI behaviour, so it lands with the next QA window rather than a mid-round run.
 - No game runs this round: retail EXE was read statically (Ghidra headless) and the port was not launched.
 - Tests **149 passed** (headless `cargo test` only).
+
+## Update — round 210
+
+- New headless pre-app probe **`--asset <name>`** (`--asset ai\tuproddefault.ai`, or `ai\*` to list): prints one
+  archive entry as text, so shipped data is read without launching the game.
+- **Phase 0.5 criterion 2 met for `aistatus`**: dump rows are the class `.ai` file's instinct lines **in file order**
+  (verified: eleven lines in `tuproddefault.ai` ↔ eleven rows, and each row's mask/mode equals its registered
+  instinct's words, e.g. `LookForTarget` → `mode=0x204`). Usage, header fields and the full row map are documented in
+  `docs/porting-roadmap.md` Phase 0.5.
+- Fixed two literal NUL bytes in `src/main.rs` comments (PowerShell `` `0 `` escape from an earlier edit); cargo
+  accepted them but the file was unreadable as text by the tooling. The source reads normally again.
+- Tests **149 passed**; no game run and no port window this round.
