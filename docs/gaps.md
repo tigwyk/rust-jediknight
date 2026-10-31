@@ -5689,3 +5689,25 @@ One hygiene bug came out of it: `src/main.rs` carried **two literal NUL bytes** 
 PowerShell here-string whose `` `0 `` escape became NUL. Cargo accepted them, but the file stopped being readable as
 text by the tooling. Both are repaired (the intended backticked `` `01_goal0.cog` `` restored), and the source reads
 normally again.
+
+**The `LookForTarget` scan now uses the class's view cone, with a headless test (round 211).** Round 210's recovery
+said the engine scans through `sithAI_FirstThingInView` (class FOV limits) before `sithAI_CheckSightThing`, while the
+port's stand-in accepted a target on `range <= sightdist && clear` alone — so an actor could acquire the body *behind
+it*, which is exactly the level-3 divergence shape. The stand-in now asks the class's own `Ai::sees` (sightdist + fov),
+the same predicate the sight branch and the roster probe already use; the class's interval pacing is unchanged.
+
+The check is headless (`cargo test`, no window): `look_for_target_scans_the_class_view_cone` builds a two-thing
+runtime, puts an actor two units from the body with a 90° class cone, and requires **no** acquisition while the actor
+faces away and **an** acquisition once it turns onto the body. Measured before/after: with the old range-only condition
+the test fails on its first assertion (`the scan acquired a body outside the class's view cone`); with the cone it
+passes. Suite: **150 tests, 0 failures**.
+
+What is still approximated in acquisition (named on the roadmap's `AI turning` ledger row as its remaining retire
+condition): one `fov` number instead of the engine's separate horizontal and vertical limits, the thing origin instead
+of the model-insert eye point, no target-radius subtraction, and no `sithAI_CanDetectSightThing` re-detect for a lost
+target. Confirming that the level-3 engagement now matches retail needs a same-pose pair — a port run and a retail
+capture — so it waits for the next QA window rather than a mid-round run.
+
+A workflow note for whoever repeats the before/after: restoring a file with `Copy-Item` preserves its old timestamp, so
+cargo can skip the rebuild and report the **previous** binary's result. Re-write the file (or touch it) before trusting
+a re-run; that produced one false "still failing" reading while measuring this test.

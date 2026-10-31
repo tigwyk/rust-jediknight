@@ -2822,12 +2822,15 @@ impl Runtime {
                 && fleeing.is_none()
             {
                 // `LookForTarget`: an idle actor with nothing in sight periodically scans for one.
-                // The command itself (`sithAICmd_LookForTarget`) is not in the recovered source, so
-                // this reads its shipped arguments the way the other instincts are read — the first
-                // is the interval in milliseconds — and searches no further than the actor's own
-                // `sightdist`, i.e. "notices you when you are close enough to notice", never an
-                // omniscient sweep. A find goes into the last-seen slot, so the body turns and walks
-                // at the same `maxrotthrust / surfdrag` clamp as everything else instead of snapping.
+                // The command is recovered now (`sithAICmd_Startup` registers handler 0x50aa80, round
+                // 210): it paces by the class's interval in milliseconds, then scans through
+                // `sithAI_FirstThingInView` — which sets the class's horizontal **and** vertical FOV
+                // limits before `sithAI_GetThingsInView` walks the cone — and finishes with
+                // `sithAI_CheckSightThing`'s range/facing/collision test. The class's own `sees` is that
+                // cone plus `sightdist`; scanning on range alone let an actor notice a target **behind
+                // it**, which is what the level-3 engagement divergence measured. A find goes into the
+                // last-seen slot, so the body turns and walks at the usual `maxrotthrust / surfdrag`
+                // clamp instead of snapping. Vertical limits are still approximated by the one `fov`.
                 if std::env::var_os("BK_NO_SCAN").is_none()
                     && let Some(look) = ai.as_ref().and_then(|ai| ai.instinct("LookForTarget")).cloned()
                 {
@@ -2835,18 +2838,18 @@ impl Runtime {
                     let due = self.ai_scan.get(&index).copied().unwrap_or(0.0);
                     if self.time >= due {
                         self.ai_scan.insert(index, self.time + interval);
-                        let sight = ai.as_ref().map(|ai| ai.sightdist).unwrap_or(0.0);
-                        if let Some(thing) = self.things.get(index).map(|t| (t.pos, t.sector)) {
+                        if let Some(thing) = self.things.get(index).map(|t| (t.pos, t.sector, t.yaw)) {
                             let (dx, dy, dz) = (
                                 target[0] - thing.0[0],
                                 target[1] - thing.0[1],
                                 target[2] - thing.0[2],
                             );
                             let range = (dx * dx + dy * dy + dz * dz).sqrt();
+                            let in_cone = ai.as_ref().is_some_and(|ai| ai.sees(thing.0, thing.2, target));
                             let clear = self.solids.as_ref().is_none_or(|s| {
                                 !s.segment_blocked(thing.0, target)
                             });
-                            if range <= sight && clear {
+                            if in_cone && clear {
                                 self.ai_last_seen.insert(index, target);
                                 if std::env::var_os("BK_AI_TRACE").is_some() {
                                     eprintln!("ai: {index} `{ai_template}` LookForTarget finds the body at {range:.2}");
@@ -7775,5 +7778,48 @@ mod tests {
         next.adopt(&carried);
         assert_eq!(next.things[0].health, 41.0, "the carried health was not restored");
         assert_eq!(next.player_shields, 73.0, "the carried shields were not restored");
+    }
+
+    /// `LookForTarget` scans the class's **view cone**, not just its range. The engine's recovered
+    /// handler (round 210: `sithAICmd_Startup` registers 0x50aa80) scans through
+    /// `sithAI_FirstThingInView`, which sets the class's FOV limits, then runs
+    /// `sithAI_CheckSightThing`. The port's stand-in used `range <= sightdist` alone, so an actor
+    /// acquired the body **behind it** — which is how the level-3 engagement divergence could happen.
+    #[test]
+    fn look_for_target_scans_the_class_view_cone() {
+        let mut rt = door_runtime();
+        // The body at the origin, an actor two units along +x facing +x (i.e. away from the body).
+        let mut actor = rt.things[0].clone();
+        actor.pos = [2.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let player = rt.things[0].clone();
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=90, maxstep=0.3, sightdist=5.0, heardist=2.0, accuracy=0.15\n\n\
+                 LookForTarget 500.0, 30000.0\n",
+            ),
+        );
+
+        // Facing away: outside the 90-degree cone, so the scan must not find the body even though the
+        // range (2.0) is well inside `sightdist` (5.0).
+        rt.ai_tick(0, 0.1);
+        assert!(
+            !rt.ai_last_seen.contains_key(&1),
+            "the scan acquired a body outside the class's view cone"
+        );
+
+        // Turn the actor onto it: same range, now inside the cone, so the find lands.
+        rt.things[1].yaw = 180.0;
+        rt.ai_scan.clear();
+        rt.ai_last_seen.clear();
+        rt.ai_tick(0, 0.1);
+        assert!(
+            rt.ai_last_seen.contains_key(&1),
+            "the scan did not acquire a body inside the class's view cone"
+        );
     }
 }

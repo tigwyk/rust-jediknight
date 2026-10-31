@@ -1946,3 +1946,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Fixed two literal NUL bytes in `src/main.rs` comments (PowerShell `` `0 `` escape from an earlier edit); cargo
   accepted them but the file was unreadable as text by the tooling. The source reads normally again.
 - Tests **149 passed**; no game run and no port window this round.
+
+## Update — round 211
+
+- **`LookForTarget` now scans the class's view cone** (`Ai::sees`, sightdist + fov) instead of `range <= sightdist`
+  alone — the engine's recovered scan is `sithAI_FirstThingInView`'s FOV cone, and range-only let an actor acquire a
+  body behind it. Interval pacing unchanged.
+- Headless check added: `look_for_target_scans_the_class_view_cone` requires no acquisition while the actor faces away
+  and acquisition once it turns onto the body. Measured before/after: the old range-only condition **fails** the test
+  (`the scan acquired a body outside the class's view cone`); the cone passes. Suite **150 tests, 0 failures**.
+- Still approximated (ledgered): one fov instead of separate horizontal/vertical limits, thing origin instead of the
+  model-insert eye, no target-radius term, no `CanDetectSightThing` re-detect.
+- **Windowed checks deferred**: `--gates` / trace gate / parity captures were not run this round (game and port runs
+  are QA-window only). Their last measured state stands: `--gates` 65/65, trace gate 15 legs/1 tracked failure,
+  parity 6 thresholds/0 failures.
