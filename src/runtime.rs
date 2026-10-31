@@ -708,6 +708,9 @@ pub const AI_AWARE_SHOT: f32 = 4.0;
 /// How long a record stays fresh. The engine's own fade is not recovered; the flat value keeps the
 /// old stand-in's window.
 pub const AI_AWARE_SECONDS: f32 = 8.0;
+/// The strength `sensedanger` gives the awareness event it raises when an awake actor spots the player:
+/// the handler (`0x50b9b0`) passes `0x40400000` = 3.0, so the same side converges on the fight.
+pub const AI_AWARE_ALERT: f32 = 3.0;
 /// The `listen` handler's two distance/bearing constants, read from the retail `JK.EXE`:
 /// `_DAT_005232c8` = **1.0** unit and `_DAT_005232a0` = **0.5** (cos 60°). A sound heard through
 /// geometry is only heard when it is nearer than one unit **and** inside a 60° half-cone in front;
@@ -1148,6 +1151,9 @@ pub struct Runtime {
     /// instinct's first number (`talk 10000.0, 0.10` in most shipped classes), so it keeps no global
     /// interval.
     pub ai_talk: BTreeMap<usize, f32>,
+    /// When each not-yet-alerted actor may check for danger again (`sensedanger` retries once a second
+    /// while the player is out of sight).
+    pub ai_sense: BTreeMap<usize, f32>,
     /// When each actor may try the `opendoors` action next. Its handler (`0x50abc0`) calls
     /// `sithPlayerActions_Activate` — the **player's** use action — on the actor's own body, and that
     /// function throttles itself to 250 ms. An actor with the instinct opens the door it is walking
@@ -1775,6 +1781,7 @@ impl Runtime {
             ai_scan: BTreeMap::new(),
             ai_listen: BTreeMap::new(),
             ai_talk: BTreeMap::new(),
+            ai_sense: BTreeMap::new(),
             ai_opendoors: BTreeMap::new(),
             ai_home: BTreeMap::new(),
             ai_flee_until: BTreeMap::new(),
@@ -2844,6 +2851,24 @@ impl Runtime {
         rows.get(pick.min(rows.len().saturating_sub(1)))
             .map(|(wav, _)| wav.clone())
     }
+
+    /// Queue the random row of the actor's own class for a sound mode at `at` — what
+    /// `sithSoundClass_PlayModeRandom` plays, through the port's sound-request pipeline. Shared by
+    /// `talk` (its moods) and `sensedanger` (fear).
+    fn queue_mode_sound(&mut self, index: usize, mode: &str, at: [f32; 3]) {
+        let Some(wav) = self.chatter_wav(index, mode) else { return };
+        // `PlayModeEntry` plays at full volume; `play_requested_sounds` owns the fade and the rear pan.
+        let channel = self.sound_volume.len();
+        self.sound_volume.push(1.0);
+        self.sound_pitch.push(1.0);
+        self.sounds.push(SoundRequest {
+            name: wav,
+            volume: 1.0,
+            pos: Some(at),
+            channel,
+            pitch: 1.0,
+        });
+    }
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
     /// The engine runs an instinct scheduler over the `.ai` file's weights; this build uses the
@@ -2975,20 +3000,8 @@ impl Runtime {
                             self.actor_flags.get(&index).copied().unwrap_or(0),
                             health / max_health,
                         )
-                        && let Some(wav) = self.chatter_wav(index, mode)
                     {
-                        // `PlayModeEntry` plays at full volume; the mixer owns the fade and rear-pan,
-                        // which is what `play_requested_sounds` applies from the class's own radii.
-                        let channel = self.sound_volume.len();
-                        self.sound_volume.push(1.0);
-                        self.sound_pitch.push(1.0);
-                        self.sounds.push(SoundRequest {
-                            name: wav,
-                            volume: 1.0,
-                            pos: Some(from),
-                            channel,
-                            pitch: 1.0,
-                        });
+                        self.queue_mode_sound(index, mode, from);
                     }
                 }
             }
@@ -3045,6 +3058,42 @@ impl Runtime {
             // forgets an enemy the instant they round a corner.
             if sighted {
                 self.ai_last_seen.insert(index, target);
+            }
+            // `sensedanger` (`0x50b9b0`, 14 classes): an **awake** actor (`AISetMode(..., 0x4)` — what
+            // the scripts set for the droids and remotes) whose class enables the instinct (its second
+            // number is non-zero; most shipped lines are `sensedanger 0.10, 0.00` and never act) looks
+            // the player over once a second while it is not yet alerted. Seeing them clears the awake
+            // bit, sets the alert bit (`0x800`, also what `talk` reads for its `fear`/`gloat` moods),
+            // plays the class's `fear` sound, raises a strength-3.0 awareness event at its own position
+            // so the same side converges, and makes the player its target. The engine's own helper
+            // (`sithAI_sub_4EAD60`) refreshes the target through `CheckSightThing`; the port's `sighted`
+            // is that same range/cone/clear-line test.
+            let sense_flags = self.actor_flags.get(&index).copied().unwrap_or(0);
+            if sense_flags & 0x4 != 0
+                && sense_flags & 0x800 == 0
+                && !self.player_dead
+                && let Some(sense) = ai.as_ref().and_then(|c| c.instinct("SenseDanger")).cloned()
+                && sense.args.first().copied().unwrap_or(0.0) != 0.0
+            {
+                let due = self.ai_sense.get(&index).copied().unwrap_or(0.0);
+                if self.time >= due {
+                    if sighted {
+                        // `flags & ~0x4 | 0x800`, exactly the handler's two writes.
+                        self.actor_flags.insert(index, (sense_flags & !0x4) | 0x800);
+                        self.ai_last_seen.insert(index, target);
+                        self.queue_mode_sound(index, "fear", from);
+                        let side = ai.as_ref().map(|c| c.alignment as i32).unwrap_or(0);
+                        let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
+                        self.transmit_awareness(sector, side, from, AI_AWARE_ALERT);
+                        if std::env::var_os("BK_AI_TRACE").is_some() {
+                            eprintln!(
+                                "ai: {index} senses the danger and alerts sector {sector} side {side} from {from:?}"
+                            );
+                        }
+                    } else {
+                        self.ai_sense.insert(index, self.time + 1.0);
+                    }
+                }
             }
             // `roam` (`0x50b830`): an actor with nothing else to do wanders around its **home**
             // anchor — a random direction, a random distance inside the instinct's first argument, at
@@ -8805,6 +8854,110 @@ mod tests {
             rt.ai_tick(0, 1.0 / 30.0);
         }
         assert!(rt.sounds.is_empty(), "a 0.0 chance still talked");
+    }
+
+    /// `sensedanger` (`0x50b9b0`, 14 classes): an **awake** actor (`AISetMode(..., 0x4)`, which the
+    /// shipped scripts set on the droids and remotes) whose class enables the instinct (`sensedanger
+    /// 0.10, 1.00`; most lines ship `0.10, 0.00` and never act) looks the player over once a second
+    /// while it is not yet alerted (`0x800`). Seeing them clears the awake bit, sets `0x800`, plays the
+    /// class's `fear` sound, raises a strength-**3.0** awareness event at its own position (so its side
+    /// converges — the handler calls `sithAIAwareness_CreateTransmittingEvent` with `0x40400000`) and
+    /// takes the player as its target.
+    #[test]
+    fn an_awake_sensedanger_actor_alerts_when_it_sees_the_player() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [1.0, 0.0, 0.0]; // sector 7, alignment -1
+        let mut player = base.clone();
+        player.pos = [2.0, 0.0, 0.0]; // one unit ahead: inside sightdist 2.0 and the 90-degree cone
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "mousebot".into()];
+        rt.types = vec![10, 2];
+        rt.template_max_health.insert("mousebot".into(), 50.0);
+        rt.things[1].health = 50.0;
+        rt.template_soundclass.insert("mousebot".into(), "mouse.snd".into());
+        rt.sound_classes.insert(
+            "mouse.snd".into(),
+            std::collections::BTreeMap::from([(
+                "fear".to_string(),
+                vec![("fear1.wav".to_string(), 1.0)],
+            )]),
+        );
+        rt.actor_flags.insert(1, 0x4);
+        // `transmit_awareness` needs a sector-adjoin table long enough to hold the actor's sector;
+        // `door_runtime`'s default level has no adjoins, so give it empty lists.
+        rt.sector_adjoins = vec![Vec::new(); 8];
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\n\
+                 SenseDanger 0.10, 1.00\n",
+            ),
+        );
+        rt.ai_tick(0, 1.0 / 30.0);
+        let flags = rt.actor_flags.get(&1).copied().unwrap_or(0);
+        assert_ne!(flags & 0x800, 0, "the sighted awake actor did not alert");
+        assert_eq!(flags & 0x4, 0, "the handler clears the awake bit when it alerts");
+        assert_eq!(rt.sounds.len(), 1, "the alert played no fear sound");
+        assert_eq!(rt.sounds[0].name, "fear1.wav");
+        assert_eq!(rt.sounds[0].pos, Some([1.0, 0.0, 0.0]));
+        assert_eq!(
+            rt.ai_last_seen.get(&1).copied(),
+            Some([2.0, 0.0, 0.0]),
+            "the alert did not take the player as its target"
+        );
+        assert_eq!(
+            rt.awareness_at(7, -1),
+            Some([1.0, 0.0, 0.0]),
+            "the alert raised no awareness event"
+        );
+        let ring = rt.sector_awareness.get(&(7, -1)).expect("no ring");
+        assert_eq!(
+            ring[0].0, super::AI_AWARE_ALERT,
+            "the awareness event is not the handler's 3.0 strength"
+        );
+    }
+
+    /// Both of `sensedanger`'s gates, from the handler: the AI's **awake** bit (scripts set it on a
+    /// subset of actors with `AISetMode(..., 0x4)`) and the class's own second number (`0.00` disables
+    /// the instinct in most shipped classes). Neither alone alerts, and an already-alerted actor does
+    /// nothing.
+    #[test]
+    fn sensedanger_needs_the_awake_bit_and_an_enabled_class() {
+        let sample = |flags: u32, args: &str| {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let mut actor = base.clone();
+            actor.pos = [1.0, 0.0, 0.0];
+            let mut player = base.clone();
+            player.pos = [2.0, 0.0, 0.0];
+            rt.things = vec![player, actor];
+            rt.templates = vec!["walkplayer".into(), "mousebot".into()];
+            rt.types = vec![10, 2];
+            rt.ai.insert(
+                1,
+                crate::ai::parse(&format!(
+                    "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\n\
+                     SenseDanger {args}\n"
+                )),
+            );
+            rt.actor_flags.insert(1, flags);
+            rt.sector_adjoins = vec![Vec::new(); 8];
+            rt.ai_tick(0, 1.0 / 30.0);
+            (
+                rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x800,
+                rt.sounds.len(),
+                rt.sector_awareness.len(),
+            )
+        };
+        assert_ne!(sample(0x4, "0.10, 1.00").0, 0, "awake and enabled did not alert");
+        // The shipped default (`0.00`) disables the instinct: no alert, no sound, no event.
+        assert_eq!(sample(0x4, "0.10, 0.00"), (0, 0, 0), "a disabled class alerted");
+        // Enabled but not awake: the scripts never told this actor to look.
+        assert_eq!(sample(0, "0.10, 1.00"), (0, 0, 0), "a dormant actor alerted");
+        // Already alerted: the handler's gate stops it running again.
+        assert_eq!(sample(0x4 | 0x800, "0.10, 1.00"), (0x800, 0, 0), "an alerted actor re-alerted");
     }
 
     /// `turretfire` (`0x50a0f0`): a turret's class (`turdefault.ai`) carries **no `PrimaryFire`**, so

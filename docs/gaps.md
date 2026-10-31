@@ -5818,20 +5818,21 @@ handler:
 | roam | 27 | `0x50b830` | **yes** (round 225: wanders around its home anchor) |
 | specialattack | 24 | `0x40fd00` | no |
 | hitandrun | 23 | `sithAICmd_HitAndRun` | **yes** (round 223: fires, then breaks off) |
-| sensedanger | 14 | `0x50b9b0` | partial: the awareness reader already turns and walks an actor to the event; the player-target acquisition the handler also does is not ported |
+| sensedanger | 14 | `0x50b9b0` | **yes** (round 236: the awake gate, the alert bit `0x800`, the `fear` sound, the 3.0 awareness event and the player target; the handler's damage/surprise event paths are still the unported AI-event dispatch) |
 | turretfire | 12 | `0x50a0f0` | **yes** (round 227: fires, stands still; head sweep not modelled) |
 | randomturn | 9 | `0x50b700` | **yes** (round 224: idle actors sweep their view) |
 | lobfire | 7 | `0x509cd0` | no |
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **16 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+So the port runs **17 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
 the counts are how many classes depend on each: the remaining gameplay gap is the **Jedi set** (`forcepowers` and
 `saberfighting` 45 each, `specialattack` 24) plus the movement instincts (`jump` 92, `dodge` 27, `lobfire` 7, `crouch` 3);
-`listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and 235. `opendoors` was the one with a
-visible consequence — an AI that cannot open a door can be trapped behind one — and it is now implemented (below), as are
-`blindfire`, `returnhome`, the `retreat`/`withdraw` pair, `circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`,
-`flee`, `listen` and `talk` (below). `sabermove` needs no work at all: nothing names it.
+`listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and 235, and `sensedanger`, the last
+partial entry, in round 236. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be
+trapped behind one — and it is now implemented (below), as are `blindfire`, `returnhome`, the `retreat`/`withdraw` pair,
+`circlestrafe`, `hitandrun`, `randomturn`, `roam`, `turretfire`, `flee`, `listen`, `talk` and `sensedanger` (below).
+`sabermove` needs no work at all: nothing names it.
 
 **The sector's awareness record is a 3-slot sound ring now (round 230), which is what `listen` scans.** The handler
 (`0x50a6f0`) does not read one "strongest event": it scans the sector's ring of recent sounds **newest first**, up to
@@ -6293,3 +6294,38 @@ pass headless; no window and no game run.
 Still open, and on the roadmap ledger: the audio goes out through the port's one-shot 2D request pipeline with the
 actor's position for attenuation, not the engine's mixer channels/3D buffer (same ceiling every script sound already has),
 and the handler's one upstream gate — the AI's "already doing a one-shot" bit — is not modelled.
+
+## Update — round 236 (`sensedanger`, the last partial instinct, lands)
+
+The instinct table's last non-Jedi `partial` entry is closed. `sensedanger` (`0x50b9b0`, 14 classes) is an
+**event-shaped handler** with an instinct-update path the scheduler also calls; this round ports that path:
+
+- **Gates.** The AI flag word must have the **awake bit `0x4`** (`listen` gates on the same bit; the shipped scripts set
+  it with `AISetMode(..., 0x4)` on the droids and remotes) and must not yet have the **alert bit `0x800`**. The class's
+  *second* number must be non-zero: of the 14 shipped lines, ten are disabled (`0.10, 0.00` for six and `100.0, 0.00` for
+  `gonk`/`gonkroam`/`pednarsh`/`pedroamnarsh`) and four enable it — `jan`, `mouse`, `noweapon` (`0.10, 1.00`) and
+  `stpanic` (`0.10, 1.0`).
+- **The look.** Once a second the handler refreshes its target (`sithAI_sub_4EAD60`, which scans through
+  `CheckSightThing` and stores the last sighting at `ai+0x1d4..`); when the target is the local player and it is
+  visible (`ai[0x7d] == 0`), it writes `flags & ~0x4 | 0x800` — **clearing** the awake bit — plays sound mode `0x4f`
+  (`fear`), raises an awareness event of **3.0** strength (`sithAIAwareness_CreateTransmittingEvent`, `0x40400000`) at
+  its own position so the same side converges, sets the player as its target (`ai[0x70]`) and returns. Out of sight, it
+  retries in 1000 ms.
+- **Port.** `AI_AWARE_ALERT = 3.0`; an `ai_sense` deadline per actor; the reaction sits in `ai_tick` beside the sight
+  test (its `sighted` is the port's `CheckSightThing` equivalent: range, cone and a clear line), writes the same flag
+  transition, queues the class's `fear` row through the shared `queue_mode_sound`, raises the awareness burst with
+  `transmit_awareness`, and puts the player in the last-seen slot. It also gates on `player_dead`, which is the
+  handler's `player thingflags & 0x202` early return. The alert bit now feeds `talk` (round 235): an alerted actor
+  switches from `happy`/`search` to `fear` (`0x800` also reads `gloat` above half health).
+- **Checks** (173 tests, headless): `an_awake_sensedanger_actor_alerts_when_it_sees_the_player` asserts the flag
+  transition (`0x800` set, `0x4` cleared), the queued `fear` wav at the actor's position, the player as the last-seen
+  target, and the awareness ring entry's **3.0** strength at the actor's sector/side;
+  `sensedanger_needs_the_awake_bit_and_an_enabled_class` pins the handler's three gates — awake-but-disabled (the
+  shipped default), enabled-but-dormant, and already-alerted — as `(no alert, no sound, no event)`. Measured
+  before/after: with the reaction block removed both checks fail ("the sighted awake actor did not alert"). `--ai`
+  passes; no window and no game run.
+
+Still open, on the roadmap ledger: the handler's **event paths** (`param_4` 1/2/`0x400`/`0x1000` — the damage path plays
+`surprise` `0x57` and targets the attacker) need the engine's AI event dispatch (`sithAI_EmitEvent`), which this build
+does not have; and its target refresh is the port's `sighted` plus the last-seen slot rather than the engine's own
+`CheckSightThing` state.
