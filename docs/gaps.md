@@ -5211,3 +5211,26 @@ is found") still unmet.
 That points at a cheaper Phase 1 step 4 target: a **movement-triggered** interaction (`crossed`/`entered`), which the
 walk machinery already fires and the new post-walk console capture already reads — the switch's `use` action can wait
 until input delivery for action bindings is solved.
+
+**Level 1's movement triggers are mapped — and the bartender's sector is a thin volume the walker does not occupy
+(round 194).** The sector-linked cogs and their trigger sectors, from the port's `--links` plus each cog's variables
+from `--cogstatus`:
+
+| cog | script | trigger sectors | state variables |
+| --- | --- | --- | --- |
+| 8 | `00_1waydoor.cog` | 407 (link 0) | — |
+| 28 | `00_SecretAreas.cog` | 243, 306, 8, 417, 427, 281 (links 1,2,4,8,16,32) | — |
+| 29 | `01_bartender.cog` | 350 (`bar2`), 370 (`bar1`), 353 (`bar3`) | `deadsam`, `deadry`, `needsl`, `trouble` all 0 at load |
+
+A grid scan of the level at z −1.3 (a `--faces-at` per point) located **sector 353 at (−9,−5)**, close to the level's
+spawn (−10.44,−5.46). Port walks were then swept toward it (fast now: ~4 s per run) from poses around
+(−10.2,−5.2)/(−9.6,−5.0) at yaws −30…+10 over 150 frames: they reach sectors 339, 348, 349, 340, 345, 361 — **never
+353**. The sector is evidently a **thin trigger volume**: `sector_for_body` finds it at z −1.3, but the walking body
+(resting z ≈ −1.17) is assigned to its neighbours as it passes, so a straight walk from the spawn does not make it the
+player's sector.
+
+That is what a `crossed`/`entered` trigger needs, and it explains why the existing walk legs never hit one: they move
+through the room sectors, not through the trigger slabs. The next probe is to find the volume's extent (the same grid
+scan at the walking body's z −1.17, and at a few more z) and then choose an approach whose body genuinely enters it —
+the harness side is ready (post-walk console capture prints a cog's state after the walk, which is the fixture's other
+half).

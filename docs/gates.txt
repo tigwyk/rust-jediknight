@@ -1715,3 +1715,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Cheaper target for the same roadmap step: a **movement-triggered** interaction (`crossed`/`entered`), which the walk
   machinery already fires and the post-walk console capture already reads.
 - Tests **149 passed**.
+
+## Update — round 194
+
+- Mapped level 1's **movement triggers**: cog 8 `00_1waydoor` ← sector 407; cog 28 `00_SecretAreas` ← sectors
+  243/306/8/417/427/281; cog 29 `01_bartender` ← sectors 350 (`bar2`), 370 (`bar1`), 353 (`bar3`), with counters
+  `deadsam`/`deadry`/`needsl`/`trouble` at 0 (from `--links` + `--cogstatus`).
+- Sector 353 located at (−9,−5) by a `--faces-at` grid scan at z −1.3, but a port walk sweep from the spawn (poses
+  around (−10.2,−5.2)/(−9.6,−5.0), yaws −30…+10, 150 frames) reaches 339/348/349/340/345/361 and **never 353** — it is
+  a **thin trigger volume** that `sector_for_body` sees at z −1.3 while the walking body (resting z ≈ −1.17) is
+  assigned to its neighbours. That is why no existing walk leg crosses a trigger.
+- Next probe: grid-scan the volume at the walking body's z and pick an approach whose body truly enters it; the
+  harness's post-walk console capture already prints a cog's state after the walk.
+- Tests **149 passed**.
