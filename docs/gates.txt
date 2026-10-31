@@ -2055,3 +2055,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
   port's last-seen slot (engine keeps a separate `lookPos`). Both need a fixture to settle → QA window.
 - AI instinct coverage now **5 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198). No game run
   and no port window this round.
+
+## Update — round 220
+
+- **`returnhome` implemented** (97 of 231 classes name it). Handler `0x50bd70` walks the actor back to `ai + 0x93`
+  (`SetMoveThing`, then `SetLookFrame`), which is its **spawn position**. The live runtime records that anchor when
+  instinct classes are attached (`Runtime::ai_home`), and the idle path feeds it through the remembered-position slot —
+  reusing the walk-and-turn already tuned, with a 0.5-unit dead zone. No new movement code.
+- Headless check `an_actor_with_returnhome_walks_back_to_its_anchor` + control class without the instinct (must not
+  move). Measured before/after: fallback disabled → fails with `the actor did not walk home: x 2.00`; enabled →
+  passes. Suite **154 tests, 0 failures**.
+- Deviation recorded: engine gates on the AI awake flag + mode word; the port gates on the instinct existing and the
+  actor being more than 0.5 units from the anchor (it has no awake flag). Needs a windowed leg to settle → QA window.
+- AI instinct coverage now **6 of 24 used instincts**; remaining top gaps `listen` (200) and `talk` (198). No game run
+  and no port window this round.

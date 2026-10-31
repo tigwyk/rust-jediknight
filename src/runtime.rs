@@ -1083,6 +1083,10 @@ pub struct Runtime {
     /// function throttles itself to 250 ms. An actor with the instinct opens the door it is walking
     /// into instead of being trapped behind it.
     pub ai_opendoors: BTreeMap<usize, f32>,
+    /// Each actor's home anchor: where it was placed. `returnhome`'s handler (`0x50bd70`) walks the
+    /// actor back to `ai + 0x93` (`SetMoveThing`) and then turns it there (`SetLookFrame`), so the
+    /// anchor is the thing's spawn position. Set when the instincts are attached to the live runtime.
+    pub ai_home: BTreeMap<usize, [f32; 3]>,
     /// `sithAIAwareness`: a position other actors of the same side were told about, and when. A
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
@@ -1661,6 +1665,7 @@ impl Runtime {
             ai_last_seen: BTreeMap::new(),
             ai_scan: BTreeMap::new(),
             ai_opendoors: BTreeMap::new(),
+            ai_home: BTreeMap::new(),
             sector_awareness: BTreeMap::new(),
             sector_adjoins: sector_adjoins.clone(),
             ai_fire_target: BTreeMap::new(),
@@ -2833,6 +2838,19 @@ impl Runtime {
                     eprintln!("ai: {index} reads the awareness record of sector {sector} side {side}");
                 }
                 aware
+            }).or_else(|| {
+                // `returnhome` (handler `0x50bd70`): an awake actor with nothing else to do walks back
+                // to its home anchor (`SetMoveThing` to `ai + 0x93`, then `SetLookFrame` at it). The
+                // anchor is the spawn position, recorded when the instincts were attached. Feeding it
+                // through the remembered-position slot reuses the walk-and-turn that is already tuned,
+                // and the half-unit dead zone stops an actor shuffling on its own spot.
+                if !ai.as_ref().is_some_and(|class| class.instinct("ReturnHome").is_some()) {
+                    return None;
+                }
+                let home = self.ai_home.get(&index).copied()?;
+                let here = self.things.get(index)?.pos;
+                let (dx, dy) = (home[0] - here[0], home[1] - here[1]);
+                ((dx * dx + dy * dy).sqrt() > 0.5).then_some(home)
             });
             // `AIFlee(actor, from)`: the actor runs away from that thing and does not shoot, which
             // is a whole mode in the engine (`sithAI_Flee`). It is a script's order, so it does not
@@ -7827,6 +7845,53 @@ mod tests {
         next.adopt(&carried);
         assert_eq!(next.things[0].health, 41.0, "the carried health was not restored");
         assert_eq!(next.player_shields, 73.0, "the carried shields were not restored");
+    }
+
+    /// `returnhome` (handler `0x50bd70`) walks an otherwise idle actor back to its home anchor — the
+    /// engine's `SetMoveThing` to `ai + 0x93`, then `SetLookFrame` at it. The port feeds the anchor
+    /// through the remembered-position slot, so the walk and turn are the ones already tuned.
+    #[test]
+    fn an_actor_with_returnhome_walks_back_to_its_anchor() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [2.0, 0.0, 0.0];
+        let mut player = base.clone();
+        // Far and behind: the actor has nothing to chase and nothing to remember.
+        player.pos = [-9.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=2.0\n\nReturnHome\n"),
+        );
+        rt.ai_home.insert(1, [0.0, 0.0, 0.0]);
+
+        for _ in 0..30 {
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        let walked = rt.things[1].pos[0];
+        assert!(walked < 1.7, "the actor did not walk home: x {walked:.2}");
+
+        // A control class without `ReturnHome` stays where it was put.
+        let mut quiet = door_runtime();
+        let base = quiet.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [2.0, 0.0, 0.0];
+        let mut player = base.clone();
+        player.pos = [-9.0, 0.0, 0.0];
+        quiet.things = vec![player, actor];
+        quiet.templates = vec!["walkplayer".into(), "tuskan".into()];
+        quiet.types = vec![10, 2];
+        quiet.template_speed.insert("tuskan".into(), 1.0);
+        quiet.ai.insert(1, crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=2.0\n\nJump\n"));
+        quiet.ai_home.insert(1, [0.0, 0.0, 0.0]);
+        for _ in 0..30 {
+            quiet.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(quiet.things[1].pos[0], 2.0, "an actor without `ReturnHome` walked away");
     }
 
     /// `blindfire` (`0x509b30`) fires at the **remembered** position when the body is out of sight:

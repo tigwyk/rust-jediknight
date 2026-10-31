@@ -5806,7 +5806,7 @@ handler:
 | follow | 159 | `0x5093f0` | **yes** (chase + standoff) |
 | opendoors | 142 | `0x50abc0` | **yes** (round 218: the use scans on the actor's own body) |
 | blindfire | 134 | `0x509b30` | **yes** (round 219: fires at the remembered position) |
-| returnhome | 97 | `0x50bd70` | no |
+| returnhome | 97 | `0x50bd70` | **yes** (round 220: walks back to its anchor) |
 | jump | 92 | `0x50abf0` | no |
 | circlestrafe | 70 | `0x509890` | no |
 | flee | 49 | `0x50aeb0` | partial: scripts' `AIFlee` verb only, not the instinct |
@@ -5825,10 +5825,27 @@ handler:
 | crouch | 3 | `0x509ad0` | no |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **5 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
+So the port runs **6 of the 24 instincts that shipped content actually names**. The list is also a priority order, since
 the counts are how many classes depend on each: `listen` (200) and `talk` (198) are the biggest remaining behavioural
 gaps. `opendoors` was the one with a visible consequence — an AI that cannot open a door can be trapped behind one — and
-it is now implemented (below), as is `blindfire` (below). `sabermove` needs no work at all: nothing names it.
+it is now implemented (below), as are `blindfire` and `returnhome` (below). `sabermove` needs no work at all: nothing
+names it.
+
+**`returnhome` is implemented (round 220).** Its handler (`0x50bd70`) walks the actor back to its own anchor: in the
+start mode it calls `SetMoveThing` with `ai + 0x93` and then `SetLookFrame` at the same point, and in the later mode it
+only turns toward the anchor. `ai + 0x93` is the actor's spawn position, so the live runtime now records it when the
+instinct classes are attached (`Runtime::ai_home`), and the idle path feeds it through the **remembered-position** slot
+— the same walk-and-turn that already handles "the player went behind a corner", with a half-unit dead zone so an actor
+does not shuffle on its own spot. No new movement code.
+
+Deviation: the engine gates the instinct on the AI's awake flag and its own mode word; the port gates it on the instinct
+existing and the actor being more than 0.5 units from the anchor, because it has no awake flag to read. A windowed leg
+would settle whether the port's idle actors wander too much with this, so it waits with the other windowed checks.
+
+The headless check is `an_actor_with_returnhome_walks_back_to_its_anchor`: an actor placed 2 units from its anchor with
+nothing to chase must be measurably closer after a second, and a control class without the instinct must not move.
+Measured before/after: with the fallback disabled the test fails with `the actor did not walk home: x 2.00`; enabled it
+passes. Suite: **154 tests, 0 failures**.
 
 **`blindfire` is implemented (round 219).** Its handler (`0x509b30`) fires at the AI's **remembered** position — the
 last place it saw the body — rather than at the player: it tests that spot against the class's cos limit and a fixed

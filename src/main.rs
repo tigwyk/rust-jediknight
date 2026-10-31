@@ -21541,6 +21541,10 @@ fn setup(
                 && let Some(raw) = world.ai_classes.get(&class.to_ascii_lowercase())
             {
                 rt.ai.insert(index, ai::parse(raw));
+                // `returnhome` walks the actor back to its own anchor (`ai + 0x93`), which is the
+                // placed position: record it now, while the level's things are still where they spawned.
+                let home = rt.things[index].pos;
+                rt.ai_home.insert(index, home);
                 attached += 1;
             }
         }
