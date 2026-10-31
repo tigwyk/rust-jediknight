@@ -1920,3 +1920,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Next: compare the port's `aiclass` table class-for-class with this list; agreement there would make the level-3
   engagement divergence behavioural (acquisition), not data.
 - Tests **149 passed** (docs and fixture only).
+
+## Update — round 210
+
+- **Recovered the AI instinct registry and the handlers** from the retail EXE with a new reusable Ghidra script
+  (`tools/ghidra/ExportAt.java`): the twenty handlers named by `sithAICmd_Startup` are decompiled in `decomp/`
+  (`decomp/` is generated and untracked; the script is the durable artifact).
+- `lookfortarget` (0x50aa80) documents the engine's acquisition chain: class interval in ms, eye point from the model
+  offset, `sithAI_FirstThingInView` **horizontal + vertical FOV cone**, `sithAI_CheckSightThing` (range − target radius,
+  facing, collision sweep), awareness event strength 3.0 on acquisition, `sithAI_CanDetectSightThing` for a lost target.
+- **Level-3 engagement divergence located in data**: the port's stand-in scans `range <= sight && clear` with **no view
+  cone** (and uses the thing origin as the eye, no radius term). The fix is the class's own `sees` in the scan; it
+  changes AI behaviour, so it lands with the next QA window rather than a mid-round run.
+- No game runs this round: retail EXE was read statically (Ghidra headless) and the port was not launched.
+- Tests **149 passed** (headless `cargo test` only).

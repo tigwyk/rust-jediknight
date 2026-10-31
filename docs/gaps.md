@@ -5622,3 +5622,47 @@ That settles the earlier puzzle (0 → thing 24 but 3 → thing 29: the list is 
 `powerdroid` seen earlier was an actor between them). The classes also name the **port's** AI table directly: the port
 reads `aiclass` from the same templates, so the next check is a class-for-class comparison — if the port's table agrees
 with this list, the level-3 engagement divergence is behavioural (acquisition), not data.
+
+**The instinct registry and `lookfortarget` are recovered from the retail EXE (round 210).** The decomp had only
+two `sithAICmd_*` functions because the instinct handlers are registered **by pointer** and never called directly, so
+Ghidra's auto-analysis left them as raw bytes. A new `tools/ghidra/ExportAt.java` (same headless launcher as
+`ExportDecomp.java`) disassembles a requested address, creates the function and decompiles it; running it over the
+twenty handlers named by `sithAICmd_Startup` put them all in `decomp/`.
+
+The registry itself is the map of the AI (level, masks and modes now readable against the `aistatus` dumps):
+
+| instinct | handler | arg3 | arg4 | arg5 |
+| --- | --- | --- | --- | --- |
+| listen | 0x50a6f0 | 0 | 0 | 0x7 |
+| lookfortarget | **0x50aa80** | 0 | 0x204 | 0 |
+| primaryfire | 0x509e40 | 2 | 0 | 0x100 |
+| follow | 0x5093f0 | 2 | 0x800 | 0xe00 |
+| turretfire | 0x50a0f0 | 2 | 0x800 | 0x100 |
+| opendoors | 0x50abc0 | 2 | 0 | 0 |
+| randomturn | 0x50b700 | 4 | 0 | 0 |
+| sensedanger | 0x50b9b0 | 4 | 0x800 | 0x7 |
+| hitandrun | `sithAICmd_HitAndRun` | 0xc00 | 0 | 0 |
+| retreat | 0x50bc60 | 2 | 0x800 | 0 |
+| circlestrafe | 0x509890 | 2 | 0x800 | 0 |
+| blindfire | 0x509b30 | 2 | 0xc00 | 0 |
+| returnhome | 0x50bd70 | 0 | 0 | 0x900 |
+| lobfire | 0x509cd0 | 2 | 0 | 0x100 |
+| crouch | 0x509ad0 | 2 | 0 | 0x100 |
+| withdraw | 0x50b150 | 0x800 | 0 | 0xf05 |
+| dodge | 0x50b360 | 0 | 0 | 0x1003 |
+
+`lookfortarget` (0x50aa80) then gives the engine's acquisition chain: it is paced by the class's **interval in
+milliseconds** (`*(instinct + 0x4c)` plus the clock, the same reading the port uses), builds its eye point with
+`rdMatrix_TransformVector34` from the thing's model offset (not the thing origin), scans with **`sithAI_FirstThingInView`**
+— which sets up the class's **horizontal and vertical** FOV limits with `stdMath_SinCos` before `sithAI_GetThingsInView`
+walks the cone — then runs `sithAI_CheckSightThing` (range minus the target's radius, facing dot, collision sweep), and
+on a hit sends messages 0x4c/2, emits an awareness event with strength **3.0** (`0x40400000` via
+`sithAIAwareness_CreateTransmittingEvent`) and stores the target. A target it already holds and loses goes through
+`sithAI_CanDetectSightThing` before being dropped.
+
+**That locates the level-3 engagement divergence in the port's stand-in**: `Runtime`'s `LookForTarget` scan accepts a
+target on `sightdist` + clear line alone (`range <= sight && clear`), with **no view-cone test**, so an actor can acquire
+the player outside its class's FOV where the engine's `FirstThingInView` would not. The stand-in also uses the thing
+origin as its eye rather than the model offset the engine transforms, and does not subtract the target's radius. The fix
+is small (call the class's own `sees`, which already implements sightdist + fov, in the scan), but it changes AI
+behaviour and so waits for the next full QA window rather than a mid-round run.
