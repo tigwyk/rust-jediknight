@@ -13606,7 +13606,11 @@ fn walker_step(
             })
             .map(|(floor, _, _)| (floor + rest, 0usize));
         let mut land = land;
-        if land.is_none() {
+        // The fallback exists for a sector with **no floor plane of its own** (`19A`'s 723, level 18's
+        // spawn). It must not substitute for a sector that has one: level 5's body was lifted frame by
+        // frame onto a ledge plane (0.30/0.42) above its own 0.1001 floor while the strict probe, which
+        // forbids raising a body, correctly refused it, and the body wedged 0.32 above the floor.
+        if land.is_none() && solids.floor_below(*sector, *pos).is_none() {
             // A sector may carry **no floor plane at all** — `19A`'s sector 723 is the shipped case, and
             // level 18's spawn stands in it (its floors belong to sectors 0 and 717, whose hulls do not
             // contain the point). The engine's `FindFloor` reads the sector's own floor plane; when the

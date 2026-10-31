@@ -4920,3 +4920,31 @@ Two other candidates were implemented and **measured with no effect, then revert
 limit and a step granted only to a body standing on its floor (`floor_under` at the raised position returns `None`,
 so the gate never fires — `walk5_spawn` byte-identical both times). Level 5's climb is a sequence of lateral step
 lifts, which is a different mechanism from this round's fallback fix.
+
+**The floor fallback now applies only to a sector with no floor — `walk5_spawn`'s travel matches retail (round
+183).** The fallback exists for `19A`'s sector 723 (level 18's spawn sector carries no floor plane). It was also
+running for sectors that *do* have a floor, and there it substituted a neighbouring sector's plane for the body's own
+floor: level 5's body was lifted frame by frame onto a ledge plane above its 0.1001 floor while the strict probe
+(forbidden from raising a body) correctly refused it. The fallback is now gated on the body's own sector having no
+floor below it:
+
+```rust
+if land.is_none() && solids.floor_below(*sector, *pos).is_none() { /* fallback */ }
+```
+
+Measured, this gate alone:
+
+| leg | before | after |
+| --- | --- | --- |
+| `walk5_spawn` | 3.90 / 3.73 (**105 %**), 5 sector mismatches | **3.70 / 3.73 (99 %)**, 5 |
+| `walk6_spawn` | 1.35 / 1.08 (125 %), 5 — failing | **1.06 / 1.08 (98 %)**, 2 — **passes** |
+| `walk_cantina`, `walk4_spawn`, `walk9`, `walk17`, `walk19`, `walk26` | — | unchanged |
+| `walk18_spawn` (ungated) | 0.28 / 0.88, 5 | 0.15 / 0.88, 6 (the round-182 fallback limit's cost) |
+
+An additional candidate — extending the landing probe's reach by one `STEP_UP` — was measured **with the gate
+present** and made `walk5_spawn` *worse* (3.43), so it was reverted; the gate alone is the change.
+
+`walk5_spawn`'s residual is now a **path** difference, not a movement one: retail's body descends ~0.2 while its path
+bends (yaw stays 135° but the motion is ≈ (−0.91,−0.42), so the room's walls are constraining it), while the port
+holds z ≈ 0.17 and walks the straight 135° line — the port is in a different floor band in the same room, which is
+what the five sector mismatches measure.

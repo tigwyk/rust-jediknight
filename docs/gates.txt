@@ -1577,3 +1577,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Two step-lift candidates were measured with **no effect** and reverted (one lift per `move_body`; step only when
   `floor_under` at the raised position is the floor — it returns None, so the gate never fires).
 - Tests **149 passed**.
+
+## Update — round 183
+
+- The floor **fallback** now runs only when the body's own sector has no floor below it (`floor_below(sector, pos)
+  .is_none()`), instead of substituting a neighbouring sector's plane for a sector that has one. Measured alone:
+  `walk5_spawn` **3.90 → 3.70 vs retail 3.73 (99 %)**, and **`walk6_spawn` 1.35 → 1.06 (98 %), 2 sectors — still
+  passing**. All other measured legs unchanged; `walk18_spawn` (ungated) stays at 0.15.
+- An extra candidate (landing probe reach + `STEP_UP`) was measured **with the gate present** and made `walk5_spawn`
+  worse (3.43), so it was reverted — the gate alone is the shipped change.
+- `walk5_spawn` remains the only failing gated leg, and its residual is now a **path/floor-band** difference: retail
+  descends ~0.2 while bending through the room (yaw 135°, motion ≈ (−0.91,−0.42)); the port holds z ≈ 0.17 and walks a
+  straight 135° line. Gate: **14 of 15 legs**. Tests **149 passed**.
