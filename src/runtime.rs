@@ -823,6 +823,14 @@ fn saber_attack(
     Some((damage, mode, arg(3 + entry * 3)))
 }
 
+/// `jkPlayPOVKey`'s flags word, as `sithPuppet_PlayKey` turns it into a track status: `0x4` holds
+/// the last frame, `0x20` fades the track out at its end, `0x2` ends it through the callback. A clip
+/// that sets none of those loops. The shipped calls are mount `0x14` (hold), fire `0x38` (fade) and
+/// dismount `0x18` (neither bit, so the engine loops it until the weapon switch replaces it).
+fn pov_key_loops(flags: u32) -> bool {
+    flags & 0x26 == 0
+}
+
 /// Whether an actor at `from` facing `forward` **hears** the sound at `pos` — the `listen` handler's
 /// own test (`0x50a6f0`). Inside `heardist` always; a sound the path finds `blocked` (geometry
 /// between the two) only when it is nearer than [`AI_LISTEN_NEAR`] and the forward dot is above
@@ -1108,6 +1116,13 @@ pub struct Runtime {
     pub weapon_mesh: BTreeMap<usize, String>,
     pub pov_model: BTreeMap<usize, String>,
     pub pov_key: BTreeMap<usize, String>,
+    /// Whether the `jkPlayPOVKey` clip loops, from the verb's **fourth** argument (the flags word).
+    /// The third argument is the start frame (the mount passes 0, the fire clip 1). The mount flags
+    /// `0x14` and the fire flags `0x38` both clear `0x26`, so both play once -- `0x4` is the
+    /// hold-last "no loop" status, `0x20` the fade/callback status, `0x2` the end-callback status
+    /// (`sithPuppet_PlayKey`/`rdPuppet_AdvanceTrack`). This build used to loop every clip, so the
+    /// mount animation replayed from its first frame and the weapon flickered out and back.
+    pub pov_key_loop: BTreeMap<usize, bool>,
     pub waggle: BTreeMap<usize, [f32; 3]>,
     pub waggle_rate: BTreeMap<usize, f32>,
     /// `.key` name -> frame count, for `GetKeyLen`. The loader fills it.
@@ -1654,6 +1669,7 @@ impl Runtime {
             weapon_mesh: BTreeMap::new(),
             pov_model: BTreeMap::new(),
             pov_key: BTreeMap::new(),
+            pov_key_loop: BTreeMap::new(),
             waggle: BTreeMap::new(),
             waggle_rate: BTreeMap::new(),
             key_lengths: BTreeMap::new(),
@@ -7499,11 +7515,18 @@ impl Runtime {
             "jkplaypovkey" => {
                 if let Some(Value::Str(key)) = args.get(1) {
                     self.pov_key.insert(ti(0), key.clone());
+                    // `jkPlayer_PlayPOVKey(thing, key, startFrame, flags)`: the third number is the
+                    // start frame, the fourth the flags word `sithPuppet_PlayKey` turns into a track
+                    // status. `0x4` holds the last frame, `0x20` fades it out, `0x2` ends it; a clip
+                    // that sets none of them loops. Mount `0x14` and fire `0x38` are both one-shot.
+                    let flags = num(3) as u32;
+                    self.pov_key_loop.insert(ti(0), pov_key_loops(flags));
                 }
                 Value::Num(0.0)
             }
             "jkstoppovkey" => {
                 self.pov_key.remove(&ti(0));
+                self.pov_key_loop.remove(&ti(0));
                 Value::Nil
             }
             "jksetwaggle" => {
@@ -10079,6 +10102,15 @@ mod tests {
         rt.things[1].yaw = 180.0;
         assert!(rt.fire(1, "+bryarbolt").is_some(), "the actor's own shot did not spawn");
         assert!(!rt.ai_move.contains_key(&1), "an actor's own shot made somebody dodge");
+    }
+
+    /// The POV key flags: mount `0x14` and fire `0x38` both carry an end bit, so neither loops; the
+    /// old build wrapped every clip and the mount's raise replayed into a visible flicker.
+    #[test]
+    fn the_shipped_pov_clips_do_not_loop_unless_their_flags_say_so() {
+        assert!(!pov_key_loops(0x14), "the mount clip must hold its last frame");
+        assert!(!pov_key_loops(0x38), "the fire clip must not loop");
+        assert!(pov_key_loops(0x18), "the dismount flags have no end bit");
     }
 
     /// `forcepowers` (`0x40ff40`) reads the shipped line as three `(range, chance, cooldown)`

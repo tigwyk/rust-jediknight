@@ -2635,3 +2635,18 @@ running app.--carry-check --start 01narshadda                        0   level 2
   0 failures**.
 - Still open (ledger): `sithParticle_Update`'s cel-cycling (`0x20`) and grow (`0x1`) arms, the
   material's effect state, and a captured frame of a generated cloud.
+
+## Update — round 254 (the first-person weapon's flicker)
+
+- `jkPlayPOVKey`'s third number is the start frame; the fourth is the flags word. The engine's
+  `sithPuppet_PlayKey` (`0x4e48b0`) turns `0x4`/`0x20`/`0x2` into end statuses; mount `0x14` and fire
+  `0x38` both carry one, so both clips play once. `Runtime::pov_key_loop` now reads `flags & 0x26 == 0`
+  (`the_shipped_pov_clips_do_not_loop_unless_their_flags_say_so`), and `draw_viewmodel` advances the
+  clip by the frame delta, not the absolute clock, holding a non-loop clip at its last frame
+  (`a_one_shot_pov_clip_holds_its_last_frame`).
+- `BK_VIEWMODEL_TRACE=1`: the mount clip prints frames 0–12 once and then no change for the rest of a
+  600-frame run; captures at frames 130 and 140 are pixel-identical.
+- `cargo test --release`: **196 passed**, 0 failed. `--gates`: 0 of 65 failed, 1 skipped.
+- Still open: the framing. The drawn `bryv.3do` vertices project to NDC `x 0.65..3.0, y -3.26..-0.29`
+  under the port's camera, so most of the weapon is off the right/bottom edge; the POV thing offset is
+  unrecovered and `BK_VIEW` is the capture override.

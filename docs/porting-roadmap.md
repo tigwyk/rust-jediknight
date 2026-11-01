@@ -548,7 +548,7 @@ taken without driving the game is green, the three QA-window checks were run, an
 
 | check | command | last measured |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --release` | **194 passed**, 0 failed |
+| unit + integration suite | `cargo test --release` | **196 passed**, 0 failed |
 | port gates (headless sweep) | `BK_SKIP_WINDOW=1 BK_MUTE=1 bevi-knight --gates` | **0 of 65 failed, 1 skipped** (`--live-check`); the **windowed** sweep was **65 of 65, 0 skipped** this round |
 | every level's runtime | `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5 bevi-knight --soak-all` | **35 of 35 levels**, 0 non-finite positions, 0 bodies outside every sector |
 | drop-in asset coverage | `bevi-knight --audit` | **35/35 levels clean**, 0 non-drawable models, 10 unresolved asset references (retail data gaps), 54 undecoded files (cutscenes and sound; intentionally out of scope) |

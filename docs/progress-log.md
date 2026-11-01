@@ -969,3 +969,15 @@ the same: two uniform Euler angles (720° default spans), a radius in `[minsize,
 Level 1 loads 24 generated clouds where it used to load one `.par` cloud. Suite 194; `--audit`
 35/35 clean; `--gates` 0 of 65 failed / 1 skipped; `--soak-all` 35/35 clean. The update arms
 (cel cycling and grow) and a captured frame of a generated cloud stay on the ledger.
+
+## The first-person weapon's flicker (round 254)
+
+The mount animation replayed every 0.8 s, which read as the arms and weapon flickering. `jkPlayPOVKey`
+takes the start frame third and the flags word fourth; the port kept the third as a loop bool and
+ignored the flags. The engine's `sithPuppet_PlayKey` turns flags `0x4`/`0x20`/`0x2` into end statuses,
+and the shipped mount (`0x14`) and fire (`0x38`) words both carry one, so both clips are one-shot. The
+port now holds a non-loop clip at its last frame and advances the phase by the frame delta rather
+than the absolute level clock. `BK_VIEWMODEL_TRACE=1` shows the mount playing frames 0–12 once and
+changing no further; frames 130 and 140 are pixel-identical. Suite 196; gates 0 of 65 failed /
+1 skipped. The framing gap is measured separately: the drawn weapon vertices project mostly outside
+the right/bottom of the frame, and the POV thing offset is still unrecovered.

@@ -20469,6 +20469,18 @@ fn pov_sway_deg(phase: f32, amp: [f32; 3], speed_norm: f32) -> [f32; 3] {
     ]
 }
 
+/// The frame a POV clip shows at `phase`, in frames. A one-shot clip (`looping == false`) holds its
+/// last frame; a looping clip wraps. `bryvmnt.key` is a mount the cog plays with loop 0, so wrapping
+/// it replayed the weapon's raise from frame 0 and made the viewmodel flicker.
+fn pov_clip_frame(phase: f32, frames: usize, looping: bool) -> i32 {
+    let last = frames.max(1) as f32 - 1.0;
+    if looping {
+        (phase % (last + 1.0)).floor() as i32
+    } else {
+        phase.floor().min(last) as i32
+    }
+}
+
 /// The sway phase one frame later: `phase += clamp(moved, 0.02) * rate`, and back to zero as soon as
 /// that product is zero (a cog ends a recoil with `jkSetWaggle(thing, '0 0 0', 0)`). `moved` is the
 /// distance the body actually covered this frame (`thing + 0x264`), not the velocity.
@@ -20495,7 +20507,9 @@ fn draw_viewmodel(
     player: Option<Res<Player>>,
     mut drawn: Query<&mut Transform, With<ViewmodelMesh>>,
     // The weapon rides the viewmodel camera, so its transform is the local one the camera sees.
-    cam: Query<(Entity, &GlobalTransform, &Projection), With<WorldCamera>>,
+    cam: Query<(Entity, &GlobalTransform, &Projection, &Camera), With<WorldCamera>>,
+    mut tick: Local<u32>,
+    mut last_clock: Local<f32>,
 ) {
     let (Some(gobs), Some(sim), Some(view)) = (archives, sim, view.as_mut()) else { return };
     // `BK_VIEW=x,y,z`: an explicit placement for framing a capture. Without it the weapon is
@@ -20549,12 +20563,31 @@ fn draw_viewmodel(
             roll.to_radians(),
         )
     };
+    *tick += 1;
+    if std::env::var_os("BK_VIEWMODEL_TRACE").is_some() && (*tick % 60 == 0 || *tick < 4) {
+        eprintln!(
+            "viewmodel-trace: frame {} want {want:?} name {:?} parts {} key {:?}",
+            *tick, view.name,
+            view.parts.len(),
+            view.key
+        );
+    }
     if want == view.name && (want.is_none() || !view.parts.is_empty()) {
         // Same weapon: the sway moves, and a `jkPlayPOVKey` clip advances if the cog started one.
-        let (key, clock) = {
+        let (key, looping, clock) = {
             let rt = sim.world.borrow();
             let player = rt.player_thing();
-            (rt.pov_key.get(&player).cloned(), rt.time)
+            // The clip cursor advances by the **frame delta**. It used to advance by the absolute
+            // world clock, so a mount animation (which is meant to play once) replayed faster and
+            // faster as the level clock grew — the viewmodel visibly flickered.
+            let now = rt.time;
+            let dt = (now - *last_clock).clamp(0.0, 0.1);
+            *last_clock = now;
+            (
+                rt.pov_key.get(&player).cloned(),
+                rt.pov_key_loop.get(&player).copied().unwrap_or(false),
+                dt,
+            )
         };
         // A new clip restarts from its first frame; the same clip keeps its cursor.
         if key != view.key {
@@ -20569,9 +20602,12 @@ fn draw_viewmodel(
                 .map(|raw| key::parse(&String::from_utf8_lossy(&raw)))
         {
             let last = keyfile.frames.max(1) as f32 - 1.0;
-            let frame = (view.phase % (last + 1.0)).floor() as i32;
+            let frame = pov_clip_frame(view.phase, keyfile.frames, looping);
             if frame != view.frame {
                 view.frame = frame;
+                if std::env::var_os("BK_VIEWMODEL_TRACE").is_some() {
+                    eprintln!("viewmodel-trace: clip {name} frame {frame} phase {:.2} loop {looping}", view.phase);
+                }
                 if let Some(raw) = gobs.0.read(&name.replace(".key", ".3do")).or_else(|| {
                     // The model is the weapon's, not the clip's: reuse the one already drawn.
                     view.name.as_ref().and_then(|n| gobs.0.read(n))
@@ -20590,7 +20626,9 @@ fn draw_viewmodel(
                     }
                 }
             }
-            view.phase += keyfile.fps * clock.max(0.0).min(0.1);
+            if looping || view.phase < last {
+                view.phase += keyfile.fps * clock;
+            }
         }
         for (entity, _, _) in view.parts.clone() {
             if let Ok(mut transform) = drawn.get_mut(entity) {
@@ -20602,6 +20640,13 @@ fn draw_viewmodel(
             }
         }
         return;
+    }
+    if std::env::var_os("BK_VIEWMODEL_TRACE").is_some() {
+        eprintln!(
+            "viewmodel-trace: respawn at frame {}: old {:?} ({} part(s)) -> {want:?}",
+            *tick, view.name,
+            view.parts.len()
+        );
     }
     for (entity, _, _) in std::mem::take(&mut view.parts) {
         commands.entity(entity).despawn();
@@ -20637,7 +20682,7 @@ fn draw_viewmodel(
     // whose colour *is* the sector light gives the same result without a per-camera light.
     let light = world.as_ref().map(|w| sector_light(&sim, &w.level)).unwrap_or(1.0);
     let palette = world.as_ref().map(|world| world.palette.to_vec());
-    let Some((camera, _camera_rot, _projection)) = cam.iter().next() else {
+    let Some((camera, camera_rot, _projection, camera_component)) = cam.iter().next() else {
         return;
     };
     // The weapon is drawn **exactly as authored**, in camera space — which is what retail does:
@@ -20674,7 +20719,30 @@ fn draw_viewmodel(
             .as_ref()
             .map(|bitmap| (bitmap.width as f32, bitmap.height as f32))
             .unwrap_or((1.0, 1.0));
-        let mesh = meshes.add(model_mesh(&model, index, tex_size));
+        let mesh_data = model_mesh(&model, index, tex_size);
+        if std::env::var_os("BK_VIEWMODEL_TRACE").is_some()
+            && let Some(bevy::mesh::VertexAttributeValues::Float32x3(points)) =
+                mesh_data.attribute(Mesh::ATTRIBUTE_POSITION)
+        {
+            let mut lo = [f32::MAX; 2];
+            let mut hi = [f32::MIN; 2];
+            let mut seen = 0usize;
+            for p in points {
+                let world = camera_rot.transform_point(local.transform_point(Vec3::from(*p)));
+                if let Some(ndc) = camera_component.world_to_ndc(camera_rot, world) {
+                    lo[0] = lo[0].min(ndc.x);
+                    lo[1] = lo[1].min(ndc.y);
+                    hi[0] = hi[0].max(ndc.x);
+                    hi[1] = hi[1].max(ndc.y);
+                    seen += 1;
+                }
+            }
+            eprintln!(
+                "viewmodel-trace: part {index} ndc x {:.2}..{:.2} y {:.2}..{:.2} ({seen} vertex(es))",
+                lo[0], hi[0], lo[1], hi[1]
+            );
+        }
+        let mesh = meshes.add(mesh_data);
         let texture = match (&bitmap, &palette) {
             (Some(bitmap), Some(palette)) => {
                 Some(images.add(to_image(bitmap, &tex::Palette(palette.clone()))))
@@ -25371,6 +25439,22 @@ mod viewmodel_framing_tests {
             max_x - min_x,
             max_y - min_y
         );
+    }
+
+    /// `bryvmnt.key` has 13 frames (0..12) and the cog plays it with loop 0
+    /// (`jkPlayPOVKey(player, mountAnim, 0, 0x14)`), so the clip must hold frame 12 rather than wrap to
+    /// 0. Wrapping replayed the weapon's raise every 0.8 s and made the viewmodel flicker; this is the
+    /// rule the draw system uses now.
+    #[test]
+    fn a_one_shot_pov_clip_holds_its_last_frame() {
+        assert_eq!(super::pov_clip_frame(0.0, 13, false), 0);
+        assert_eq!(super::pov_clip_frame(1.9, 13, false), 1);
+        assert_eq!(super::pov_clip_frame(12.9, 13, false), 12);
+        assert_eq!(super::pov_clip_frame(13.0, 13, false), 12);
+        assert_eq!(super::pov_clip_frame(30.0, 13, false), 12);
+        // A looping clip still wraps; the old code applied this to every clip.
+        assert_eq!(super::pov_clip_frame(13.0, 13, true), 0);
+        assert_eq!(super::pov_clip_frame(12.5, 13, true), 12);
     }
 
     /// The sway is a **rotation about the eye**, not a translation: `jkPlayer_DrawPov` pre-multiplies it

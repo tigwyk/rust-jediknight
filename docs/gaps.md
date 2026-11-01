@@ -1200,7 +1200,7 @@ Two things are honestly not done. The model is **not framed like retail yet**: `
 - **The mesh renders; the separate pass does not.** A probe quad on the weapon's own render layer never appeared, so a `ViewmodelCamera` at order 1 or 4 draws nothing in this build (order 4 also blacked the frame). The weapon is therefore parented to the **world** camera — camera-relative placement, rendered by the pass that is known to work — with `NoFrustumCulling`, because its Aabb comes from vertices offset from the entity origin.
 - **The orientation was the invisible-weapon bug.** The old placement composed `from_rotation_arc(Vec3::Z, forward)`, which in the camera's own frame turns the pistol sideways and, at the placement the model's radius asks for, points it behind the eye. `bryv.3do`'s geometry is x[-0.007,0.005] y[-0.007,0.015] z[-0.035,0.015] with `RADIUS 0.066`, so the placement is 1.6 radii forward, half a radius right and 0.6 down, and the transform needs **no** extra rotation: `model_mesh` already converts the file's frame.
 
-Still open on this item, and why: the weapon reads **small** and sits low-right against the HUD — the framing needs the POV thing's real offset, which is the piece the decompilation does not hand over; and the pass is still `unlit` where retail uses `rdCamera_SetAmbientLight` from the sector. Capture aids: `BK_ARM=<bin>`, `BK_POV=<model>`, `BK_VIEW=x,y,z`. 123 tests, 59 gates, 0 failed.
+Still open on this item, and why: the weapon reads **small** and sits off the right edge — the framing needs the POV thing's real offset, which the decompilation does not hand over (round 254 measured the drawn vertices projecting to x 0.65–3.0 NDC, i.e. mostly outside the frame); and the pass is still `unlit` where retail uses `rdCamera_SetAmbientLight` from the sector. **The flicker is fixed (round 254)**: `jkPlayPOVKey`'s third number is the start frame and the fourth is the flags word; mount `0x14` and fire `0x38` both set an end bit, so the clip holds its last frame instead of wrapping, and the phase advances by the frame delta rather than the absolute level clock. Capture aids: `BK_ARM=<bin>`, `BK_POV=<model>`, `BK_VIEW=x,y,z`, `BK_VIEWMODEL_TRACE=1` (respawn/clip/NDC trace). 196 tests, 65 gates, 0 failed.
 
 **Round 191 (goal round 2, item 1 continued):** the weapon is now lit by the room, and the reason it was black was a real data gap.
 
@@ -6826,3 +6826,33 @@ which advances each element's cel over the material's cels with the cloud's `max
 and grow arm (`typeflags & 0x1`, which scales the cloud's matrix from the element rate), the material's
 own effect state beyond a keyed bitmap, and a captured frame of a generated cloud (the draw arm is
 shared with the already-verified `.par` path, but no generated cloud has been photographed yet).
+
+## Update — round 254 (the first-person weapon's flicker: the clip looped)
+
+The mount animation was replayed every 0.8 s, which reads as the arms and weapon flickering out and
+back. Two causes, both in the POV key path:
+
+1. **The loop flag was read from the wrong argument.** `jkPlayPOVKey(player, key, startFrame, flags)`
+   takes the start frame in the third number and the flags word in the fourth; the port kept the third
+   and ignored the fourth. The engine's `sithPuppet_PlayKey` (`0x4e48b0`) turns the flags into a track
+   status: `0x4` holds the last frame (`rdPuppet_AdvanceTrack` status `0x40`), `0x20` fades the track
+   out at its end (`0x80`), `0x2` ends it through the callback (`0x20`). The shipped mount
+   `jkPlayPOVKey(player, mountAnim, 0, 0x14)` and fire `(..., povfireAnim, 1, 0x38)` both carry an end
+   bit; only a clip with none of `0x26` loops (the dismount `0x18`). `Runtime::pov_key_loop` now reads
+   `flags & 0x26 == 0` (`the_shipped_pov_clips_do_not_loop_unless_their_flags_say_so`).
+2. **The phase advanced by the absolute clock.** `draw_viewmodel` did
+   `view.phase += keyfile.fps * rt.time`, so the phase grew quadratically with level time and the
+   animation ran faster the longer the level was open. It now advances by the frame delta, clamped to
+   `0.1 s`, and a non-loop clip stops at its last frame (`pov_clip_frame`, pinned by
+   `a_one_shot_pov_clip_holds_its_last_frame`).
+
+Measured: `BK_VIEWMODEL_TRACE=1` on level 1 with `BK_ARM=2 BK_POV=bryv.3do` now prints the mount clip
+frames 0–12 once and then no clip change for the rest of a 600-frame run (before, it replayed from 0);
+captures at frames 130 and 140 are **pixel-identical**; suite **194 → 196**; `--gates` 0 of 65 failed,
+1 skipped.
+
+Still open, and now measured: the **framing**. The drawn `bryv.3do` vertices project to NDC
+`x 0.65..3.0, y -3.26..-0.29` under the port's 90°-horizontal camera, so most of the weapon is off the
+right/bottom edge — the authored coordinates alone do not frame it, and the engine's POV thing offset is
+still unrecovered. `BK_VIEW=x,y,z` is the capture override; `BK_VIEWMODEL_TRACE=1` prints each part's
+projected bounds, which is the measurement the framing fix can be fitted against.
