@@ -5841,16 +5841,16 @@ handler:
 | sensedanger | 14 | `0x50b9b0` | **yes** (round 236: the scheduler path — awake gate, alert bit `0x800`, `fear` sound, 3.0 awareness event, player target; round 241: the **damage path** through the engine's event dispatcher — `surprise` sound, attacker (or its parent) as the target, `flags & !0x4 \| 0x800`; the handler's event-2/event-4 branches are unreachable in retail content because nothing emits those events) |
 | turretfire | 12 | `0x50a0f0` | **yes** (round 227: fires, stands still; head sweep not modelled) |
 | randomturn | 9 | `0x50b700` | **yes** (round 224: idle actors sweep their view) — but its 9 class files name only themselves: no shipped template or script references them (round 243), so the behaviour never runs in retail content |
-| lobfire | 7 | `0x509cd0` | no — 6 of its 7 classes are loadable; it fires on AI event `0x100` and needs the projectile gravity arm |
+| lobfire | 7 | `0x509cd0` | **yes** (round 247: its live path is the event-`0x100` armed-mode toggle from the AI flag word's awake bit `0x200`, every 1000 ms; its `sithAI_FireWeapon` branch is **dead content** — the mask is `0x100` and nothing emits event 0). 6 of its 7 classes are loadable |
 | crouch | 3 | `0x509ad0` | no — and its three classes (`stcrouch.ai/.ai0/.ai2`) are named by no shipped template or script: dead content (round 243). The handler is event-`0x100`-driven and only flips the crouch physflag `0x10000` |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **17 of the 22 instincts that shipped content can actually load**. The list is also a priority order,
+So the port runs **18 of the 22 instincts that shipped content can actually load**. The list is also a priority order,
 since the counts are how many classes depend on each: the remaining gameplay gap is the **Jedi set** (`forcepowers` and
-`saberfighting` 45 each, `specialattack` 24, all 45 loadable) plus `jump` (85 of its 92 loadable, and its handler only
-runs on the track-target event) and `lobfire` (6 of 7, needs projectile gravity). `listen` (200) and `talk` (198), the
-two largest used names, closed in rounds 233 and 235, `sensedanger`, the last partial entry, in round 236, and `dodge`
-in round 239. **`crouch` and `randomturn` are named by classes nobody loads** (round 243: `stcrouch.ai` and
+`saberfighting` 45 each, `specialattack` 24, all loadable) plus `jump` (85 of its 92 loadable, and its handler only
+runs on the track-target event). `listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and
+235, `sensedanger`, the last partial entry, in round 236, `dodge` in round 239 and `lobfire` in round 247 (which also
+showed its firing branch is dead content).  **`crouch` and `randomturn` are named by classes nobody loads** (round 243: `stcrouch.ai` and
 `strandom`/`turandom`/`tuprodrandom` appear in no level template and no script), so the 24 named instincts are 22 that
 can reach the game; `randomturn`'s 224 implementation is filed as dead-content behaviour rather than shipped usage. `opendoors` was the one with a visible consequence — an AI that
 cannot open a door can be trapped behind one — and it is now implemented (below), as are `blindfire`, `returnhome`, the
@@ -6639,3 +6639,25 @@ resting plane, velocity 0, a sector still around it. With the gravity arm disabl
 the check fails (`the debris chip did not fall: z 6.299998 -> 6.299998`). `--soak-all` stays 35/35 clean (0 bodies
 outside), the gate sweep is 0 of 65 failed, and the suite/`--things`/`--ai`/`--hit`/`--weapons`/`--sound`/`--audit` pass.
 Still on the ledger: actor gravity, the swept `SearchForSurfaceCollisions` sweep, and the `GetThingHeight` resting rule.
+## Update — round 247 (`lobfire` is shipped, and its firing branch is dead content)
+
+`LobFire`'s handler (`0x509cd0`) reads like a lobbed shot, and the instinct table said so. The body settles it:
+
+- Its dispatch mask is **`0x100`**, and the only branch for that event does **not fire**: it calls
+  `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in **1000 ms**. `0x200` is the awake bit
+  `00_aisleep.cog` writes (`aisetmode(enemy, 0x200)`), so a wakeable ryther draws its weapon when it wakes and holsters
+  when it sleeps.
+- The branch that calls `sithAI_FireWeapon` with the class's lobbed chance is the `param_4 == 0` arm, and **nothing
+  emits event 0** — the emit inventory (round 241) raises only `1`, `0x100`, `0x400`, `0x800` and `0x1000`. It is dead
+  content, the same finding as `dodge`'s event-2 branch; the class arguments (`lobfire 2000.0, 0.8, 0.5, 4.0, 0.20, 0`)
+  feed only that dead arm.
+
+The port now runs the live path as `Runtime::ai_lobfire`: on the instinct's own 1000 ms clock it sets
+`armed_mode[actor] = u32::from(actor_flags & 0x200 != 0)`. `lobfire` therefore joins the implemented set, and the
+remaining shipped-usage gap is the **Jedi set plus `jump`** (18 of the 22 loadable instinct names are now ported).
+
+Checks (188 tests): `lobfire_follows_the_awake_bit_instead_of_lobbing_a_shot` — an awake actor's armed mode becomes 1,
+clearing the bit does not change it before the 1000 ms interval, it becomes 0 after it, and `shots_fired` stays 0 (the
+dead branch never fires). Measured before/after: with the block disabled the test fails at the first assertion
+(`an awake actor with \`LobFire\` did not draw its weapon`). `--ai`, `--things`, `--hit`, `--weapons`, `--audit` pass;
+`--soak-all` 35/35 clean; `--gates` 0 of 65 failed / 1 skipped. No window and no retail run.

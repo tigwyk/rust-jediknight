@@ -1178,6 +1178,10 @@ pub struct Runtime {
     /// instinct's first number (`talk 10000.0, 0.10` in most shipped classes), so it keeps no global
     /// interval.
     pub ai_talk: BTreeMap<usize, f32>,
+    /// When each actor's `lobfire` may re-arm the puppet's armed mode. Its handler (`0x509cd0`) only
+    /// has the event-`0x100` branch in its mask, and that branch sets
+    /// `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in 1000 ms.
+    pub ai_lobfire: BTreeMap<usize, f32>,
     /// When each not-yet-alerted actor may check for danger again (`sensedanger` retries once a second
     /// while the player is out of sight).
     pub ai_sense: BTreeMap<usize, f32>,
@@ -1846,6 +1850,7 @@ impl Runtime {
             ai_scan: BTreeMap::new(),
             ai_listen: BTreeMap::new(),
             ai_talk: BTreeMap::new(),
+            ai_lobfire: BTreeMap::new(),
             ai_sense: BTreeMap::new(),
             ai_dodge: BTreeMap::new(),
             ai_opendoors: BTreeMap::new(),
@@ -3458,6 +3463,25 @@ impl Runtime {
                     {
                         self.queue_mode_sound(index, mode, from);
                     }
+                }
+            }
+            // `LobFire` (`0x509cd0`) — the name promises a lobbed shot, but its handler's mask is
+            // `0x100` and that branch does not fire: it calls
+            // `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in 1000 ms. `0x200`
+            // is the awake bit `00_aisleep.cog` writes (`aisetmode(enemy, 0x200)`), so a wakeable ryther
+            // draws its weapon when it wakes and holsters when it sleeps. The `param_4 == 0` branch —
+            // the one that calls `sithAI_FireWeapon` with a lobbed chance — is **dead content**: the
+            // engine's emit inventory raises only 1, `0x100`, `0x400`, `0x800` and `0x1000`, so no
+            // event-0 reaches it (the same finding as `dodge`'s event 2).
+            if ai
+                .as_ref()
+                .is_some_and(|class| class.instinct("LobFire").is_some())
+            {
+                let due = self.ai_lobfire.get(&index).copied().unwrap_or(self.time);
+                if self.time >= due {
+                    self.ai_lobfire.insert(index, self.time + 1.0);
+                    let flags = self.actor_flags.get(&index).copied().unwrap_or(0);
+                    self.armed_mode.insert(index, u32::from(flags & 0x200 != 0));
                 }
             }
             // `maxrotthrust=` is the angular rate the body can turn at (50-85 degrees a second for
@@ -9276,6 +9300,60 @@ mod tests {
         };
         assert!(hearable(from, ahead, bearing(45.0, 0.5), 3.0, true), "inside the 60-degree cone");
         assert!(!hearable(from, ahead, bearing(75.0, 0.5), 3.0, true), "outside the 60-degree cone");
+    }
+
+    /// `LobFire`'s **live** path (`0x509cd0`): its mask is `0x100` and that branch does not fire — it
+    /// sets `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in 1000 ms. `0x200` is
+    /// the awake bit `00_aisleep.cog` writes, so a wakeable ryther draws its weapon when it wakes and
+    /// holsters when it sleeps. The `param_4 == 0` branch, the one that calls `sithAI_FireWeapon` with a
+    /// lobbed chance, is dead content: the emit inventory raises only 1, `0x100`, `0x400`, `0x800` and
+    /// `0x1000`, so nothing ever delivers event 0 to it (the same finding as `dodge`'s event 2).
+    #[test]
+    fn lobfire_follows_the_awake_bit_instead_of_lobbing_a_shot() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = base.clone();
+        player.pos = [1.5, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "ryther".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("ryther".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\nLobFire 2000.0, 0.8, 0.5, 4.0, 0.20, 0\n",
+            ),
+        );
+        rt.actor_flags.insert(1, 0x200);
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert_eq!(
+            rt.armed_mode.get(&1).copied(),
+            Some(1),
+            "an awake actor with `LobFire` did not draw its weapon"
+        );
+        // The handler's own 1000 ms interval: the bit clearing does not holster until it expires.
+        rt.actor_flags.insert(1, 0);
+        for _ in 0..20 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(
+            rt.armed_mode.get(&1).copied(),
+            Some(1),
+            "the armed mode changed before the 1000 ms interval"
+        );
+        for _ in 0..20 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(
+            rt.armed_mode.get(&1).copied(),
+            Some(0),
+            "a sleeping actor with `LobFire` kept its weapon drawn"
+        );
+        assert_eq!(rt.shots_fired, 0, "the dead `sithAI_FireWeapon` branch lobbed a shot");
     }
 
     /// `talk`'s mood table (`0x50be20`): the AI flag word's `0x200` is the gate, `0x800` and `0x400`

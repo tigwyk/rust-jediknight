@@ -2531,3 +2531,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Sweeps: `--soak-all` 35/35 levels clean (0 non-finite, 0 bodies outside), `--gates` 0 of 65 failed / 1 skipped,
   suite **187 passed**, `--things`/`--ai`/`--hit`/`--weapons`/`--sound`/`--audit` pass, docs **132/132**. No window and
   no retail run. Ledger: actor gravity, the swept `SearchForSurfaceCollisions`, `GetThingHeight`'s resting height.
+## Update — round 247
+
+- **`lobfire` is implemented, and its firing branch is dead content.** Its handler (`0x509cd0`) only has the
+  event-`0x100` branch in its mask, and that branch does not fire: it calls
+  `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in 1000 ms (`0x200` is the awake bit
+  `00_aisleep.cog` writes). The `sithAI_FireWeapon` arm needs event 0, which nothing emits (the emit inventory is
+  1/`0x100`/`0x400`/`0x800`/`0x1000`). The port runs the live path as `Runtime::ai_lobfire`.
+- Check: `lobfire_follows_the_awake_bit_instead_of_lobbing_a_shot` (armed mode 1 when awake, unchanged before the
+  1000 ms interval after clearing the bit, 0 after it, `shots_fired == 0`). Measured before/after: with the block
+  disabled it fails at `an awake actor with \`LobFire\` did not draw its weapon`.
+- Instinct count: **18 of the 22 loadable names ported**; the remaining shipped-usage gap is the Jedi set plus `jump`.
+  Suite **188 passed**; `--soak-all` 35/35 clean; `--gates` 0 of 65 failed / 1 skipped; `--ai`, `--things`, `--hit`,
+  `--weapons`, `--audit` pass; docs **132/132**. No window and no retail run.
