@@ -42,6 +42,10 @@ param(
   # Hold for an action key in `-KeysAfter`. The retail capture runs under software rendering at a
   # few frames per second; a 40 ms tap can fall between frames and the game never sees the use.
   [int]$ActionHoldMs = 600,
+  # How long to leave the game running after `-KeysAfter` before the second console read. The
+  # default is the level-settle time; a combat level can kill the player inside it, so a trigger
+  # probe can shorten it.
+  [int]$AfterWaitMs = 12000,
   # Stop on the Single Player submenu and save a screenshot, so Load Game's coordinates can be read
   # off it (the harness otherwise clicks New Game and never shows the submenu).
   [switch]$StopAtMenu,
@@ -1012,6 +1016,15 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     }
 
     if ($KeysAfter.Count -gt 0) {
+      # The console dialog holds focus after the last `cogstatus`. DirectInput reads the keyboard
+      # only while the game window is foreground (the walk trace already forces this), so put it
+      # back before any action key; otherwise the press goes to the dialog and the player stands.
+      $gameWindow = Get-JkWindow -ProcessId $process.Id
+      if ($gameWindow -ne [IntPtr]::Zero) {
+        [void][JkRetail]::SetForegroundWindow($gameWindow)
+        Start-Sleep -Milliseconds 150
+        Log ("action focus: foreground='" + [JkRetail]::ForegroundTitle() + "'")
+      }
       foreach ($key in @($KeysAfter | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })) {
         Log "pressing $key after the console commands"
         if ($key -match '^MOUSE') {
@@ -1033,7 +1046,7 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
         }
         Start-Sleep -Milliseconds 1500
       }
-      Start-Sleep -Milliseconds 12000
+      Start-Sleep -Milliseconds $AfterWaitMs
       # Phase 1 step 4: the trigger has fired (or not) by now, so read the cog state again under a
       # distinct name. The console has been closed for 13.5 s, so the engine has re-acquired its input
       # devices -- which is the point of pressing *after* the first read (round 192's finding).

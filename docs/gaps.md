@@ -7078,3 +7078,25 @@ keys both use it. Retried the cantina switch row at yaw -153.8 with `cogstatus 1
 
 The long-hold change is kept: it is correct for any retail action capture under software rendering.
 README/probe counts unchanged (tooling only).
+
+## Update — round 267 (retail capture is user-invoked only)
+
+The retail capture is invasive: it takes over the display, runs the software renderer at a few
+frames per second, and a combat level can kill the player while the harness waits. It is now
+**deprioritized**: do not run `retail-capture.ps1` for basic analysis or as a routine gate. Use it only
+when a claim can be checked **only** with a live copy of the game and the user has asked for that run.
+
+The harness work is kept for those deliberate runs:
+
+- `-ActionHoldMs` (default 600 ms) and `Send-JkKeyHold` — a 40 ms tap can fall between software-render
+  frames.
+- `-KeysAfter` restores the game window's foreground before action keys; the earlier runs logged
+  `foreground='Jedi Knight'` but still left `doorstatus 0`.
+- `-AfterWaitMs` (default 12000) lets a trigger probe shorten the post-action wait so enemies do not
+  kill the player first.
+- `game_uberjedi` is a **chat cheat**, not a dev-console command (`Console command game_uberjedi not
+  recognized`), so the harness cannot make the player invincible that way.
+
+The port-side trigger remains verified headless (`use: activated surface 2403`, `doorstatus 2`). The
+retail comparison is **not** to be automated; walk traces and draw parity remain the only windowed
+checks, and even those should be run deliberately.

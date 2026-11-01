@@ -480,6 +480,12 @@ accumulated behaviour changes are worth a regression — not a per-question tool
 files (tests, `--audit`, `--asset`, `--grep-assets`, `--model`, the data-derived probes) has already been checked that way; this
 list is only what is left.
 
+**Retail runs are user-invoked only.** The retail harness is the most invasive part (software renderer,
+a few frames per second, combat can kill the player while it waits). Do **not** run
+`retail-capture.ps1` for basic analysis or as a routine gate; use it only when a claim cannot be
+checked from the shipped files, decomp and headless probes, and the user has asked for that live run.
+The walk-trace and parity-draw checks are still windowed and should also be run deliberately.
+
 Run, in order, from the repo root with `pwsh`:
 
 | check | command | last measured | expected |
