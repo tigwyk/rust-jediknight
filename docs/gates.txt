@@ -2650,3 +2650,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Still open: the framing. The drawn `bryv.3do` vertices project to NDC `x 0.65..3.0, y -3.26..-0.29`
   under the port's camera, so most of the weapon is off the right/bottom edge; the POV thing offset is
   unrecovered and `BK_VIEW` is the capture override.
+
+## Update — round 255 (first-person weapon framing)
+
+- Retail fist-vs-bryar capture pair (`retail-capture.ps1 -Only spawn -Keys 1 -Out
+  target/parity/retail-fists`) isolates the weapon at x 480–660, y 337–730 (1170x731), with the same
+  pose as the bryar row.
+- The port's rest-pose `bryv.3do` fits that block at camera-local (-0.026, 0.009, 0); the mask moves
+  from x 794–1169/y 436–730 at the eye origin to x 473–714/y 336–730.
+- The POV key clips are skeleton tracks (`K_Rshouldr`/`K_Rhand`) and the `.3do` parser keeps only mesh
+  names, so the clip pose is not applied; the rest pose is drawn.
+- `cargo test --release`: **196 passed**; `--gates`: 0 of 65 failed, 1 skipped.
+- A per-material near-plane cull drops `HND-WRT` (its vertices do not clear the eye plane; 13 of 14
+  parts draw); the remaining right-edge pixel is the hand's silhouette at the frame edge.

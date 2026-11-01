@@ -20577,6 +20577,11 @@ fn draw_viewmodel(
         let (key, looping, clock) = {
             let rt = sim.world.borrow();
             let player = rt.player_thing();
+            // The POV clip is a **skeleton** track (`K_Rshouldr`/`K_Rhand` in `bryvmnt.key`), while
+            // this build's `.3do` parser keeps only mesh names, so `pose_nodes` falls back to row
+            // order and scatters the model. The rest pose is the held pose (retail's static weapon
+            // frame); the mount/fire clips are left unposed until the skeleton node names are parsed.
+            let static_pose = true;
             // The clip cursor advances by the **frame delta**. It used to advance by the absolute
             // world clock, so a mount animation (which is meant to play once) replayed faster and
             // faster as the level clock grew — the viewmodel visibly flickered.
@@ -20584,8 +20589,8 @@ fn draw_viewmodel(
             let dt = (now - *last_clock).clamp(0.0, 0.1);
             *last_clock = now;
             (
-                rt.pov_key.get(&player).cloned(),
-                rt.pov_key_loop.get(&player).copied().unwrap_or(false),
+                (!static_pose).then(|| rt.pov_key.get(&player).cloned()).flatten(),
+                (!static_pose) && rt.pov_key_loop.get(&player).copied().unwrap_or(false),
                 dt,
             )
         };
@@ -20694,7 +20699,12 @@ fn draw_viewmodel(
     // arm's length. The old code recentred that box on the origin and scaled it to fill a fraction of
     // the view, on the assumption that a 0.07-unit model had to be enlarged; the model is authored at
     // that size *because* it sits 0.06 units from the eye.
-    view.base = view_override.unwrap_or(Vec3::ZERO);
+    // The engine's POV thing sits at the player's hand, not at the eye: the authored `bryv.3do`
+    // box (x 0.020..0.032, y -0.033..-0.007) needs the hand's offset to frame the held weapon.
+    // Measured against retail's isolated weapon mask (the fist-vs-bryar capture pair): the retail
+    // mask's block is x 480..660, y 337..730 at 1170x731, and the static port model lands at
+    // x 473..714, y 336..730 with this offset. `BK_VIEW` still overrides it for a capture.
+    view.base = view_override.unwrap_or(Vec3::new(-0.026, 0.009, 0.0));
     let local = Transform {
         translation: sway * view.base,
         // `model_mesh` already converts the file's frame to the renderer's, and a POV model's own
@@ -20720,6 +20730,18 @@ fn draw_viewmodel(
             .map(|bitmap| (bitmap.width as f32, bitmap.height as f32))
             .unwrap_or((1.0, 1.0));
         let mesh_data = model_mesh(&model, index, tex_size);
+        // `rdModel3_Draw` culls each mesh when its bounding sphere is outside the frustum; a part
+        // whose vertices reach the eye plane (`HND-WRT`, the wrist) projects a tall sliver at the
+        // right edge here because this build culls per entity only. Drop a part that does not clear
+        // the near plane.
+        if let Some(bevy::mesh::VertexAttributeValues::Float32x3(points)) =
+            mesh_data.attribute(Mesh::ATTRIBUTE_POSITION)
+        {
+            let nearest = points.iter().map(|p| p[2]).fold(f32::MIN, f32::max);
+            if nearest > -0.005 {
+                continue;
+            }
+        }
         if std::env::var_os("BK_VIEWMODEL_TRACE").is_some()
             && let Some(bevy::mesh::VertexAttributeValues::Float32x3(points)) =
                 mesh_data.attribute(Mesh::ATTRIBUTE_POSITION)

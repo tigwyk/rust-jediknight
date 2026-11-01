@@ -137,6 +137,8 @@ partials is still to be written; these are the entries this round created or mea
 | AI events 2/4/0x200 | **not produced (round 252 correction)**: the executable emits `2` (`0x4f2c05`), `4` (`0x4ed24d`/`0x4ed269`, the thing-collision callback) and `0x200` (`0x4ed203`); this build's dispatcher raises only `1`, `0x100`, `0x400`, `0x800`, `0x1000`, so `specialattack`'s attack branch and the handlers' event-2/event-4 arms cannot run | the emit sites are in the disassembly; no port event is raised by actor movement or awareness | the actor-collision sweep emits event 4 (and awareness emits 2) at the engine's sites |
 | generated `type=particle` clouds | **ported (round 253)**: `sithParticle_Initalize` (`0x4f1da0`) generates `count` elements from two uniform Euler angles (720° default spans) and a radius in `[minsize, range]`, with a random material cel when `typeflags & 4`; the port feeds them through the same `template_particle` draw path a `.par` cloud uses. What differs: `sithParticle_Update`'s cel-cycling (`0x20`) and grow (`0x1`) arms do not run, so a cloud is static; the per-element material effect state beyond a keyed bitmap is not modelled; and the element RNG is a local LCG rather than the engine's global stream | `par::tests::a_generated_cloud_fills_its_authored_radius`; level 1's loader now reports **24** generated clouds, and `--audit`/`--soak-all` stay clean | the update arms land (`sithParticle_Update`) and a frame at a known explosion age pins the drawn cels/scale |
 
+| first-person viewmodel framing | **fitted (round 255)**: retail's isolated weapon (fist-vs-bryar capture pair, same pose) sits at x 480–660/y 337–730 at 1170x731; the port's rest-pose `bryv.3do` lands at x 473–714/y 336–730 with the default offset `(-0.026, 0.009, 0)`. The offset is **measured against retail's frame**, not recovered from the engine's POV thing matrix. The key clips (`bryvmnt.key`/`bryvpst1.key`) are skeleton tracks (`K_Rshouldr`/`K_Rhand`) and the `.3do` parser keeps only mesh names, so the clip pose is not applied; the rest pose (retail's held pose) is drawn. `HND-WRT` straddles the eye plane and is dropped by the port's per-material near-plane cull (13 of 14 parts draw) | the retail capture pair, the port masks before/after the offset, and `BK_VIEWMODEL_TRACE` part projections | the POV thing offset is recovered from `jkPlayer_DrawPov`/the rdThing matrix, the `.3do` node names are parsed so the mount/fire clips pose correctly, and a per-material near-plane cull drops the wrist sliver |
+
 ## Phases
 
 ### Phase 0 — Reset the definition (do first, small)
@@ -507,8 +509,10 @@ What the session settles, all of it already on the deviation ledger with its ret
   retail's now (round 242, unit-checked against the `.rdata` constants) and acquisition is a roll; what a window can
   add is the *timing* of acquisition against retail's at the same pose.
 - **viewmodel materials** — the data side is measured headless (`--model bryv.3do`: 14 materials over 76 faces, all
-  present), but whether the bryar's body and hand both draw correctly can only be judged in a frame; round 231 drew
-  material 0 alone (`HDBACK`, the hand's back).
+  present). Round 255 isolated retail's weapon with a fist-vs-bryar capture pair and fitted the port's rest-pose model
+  to it (offset `(-0.026, 0.009, 0)`; retail block x 480–660/y 337–730, port x 473–714/y 336–730 at 1170x731). The
+  POV key clips are skeleton tracks the `.3do` parser cannot map, so the rest pose is drawn; a per-material near-plane
+  cull for the wrist (`HND-WRT`) is the remaining polish.
 - **POV sway** — the amplitudes, phase rate and speed scaling are retail's now (round 234, unit-checked), but
   `rdMatrix_BuildRotate34`'s composition order and sign are not recovered; a frame at a known phase would settle it.
 

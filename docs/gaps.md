@@ -6856,3 +6856,34 @@ Still open, and now measured: the **framing**. The drawn `bryv.3do` vertices pro
 right/bottom edge — the authored coordinates alone do not frame it, and the engine's POV thing offset is
 still unrecovered. `BK_VIEW=x,y,z` is the capture override; `BK_VIEWMODEL_TRACE=1` prints each part's
 projected bounds, which is the measurement the framing fix can be fitted against.
+
+## Update — round 255 (the first-person weapon's framing: rest pose + hand offset)
+
+The weapon was drawn from the authored model frame at the eye. Retail's reference frames it at the
+player's hand. Two measurements fixed it:
+
+1. **A retail isolation fixture.** `retail-capture.ps1 -Only spawn -Keys 1 -Out
+   target/parity/retail-fists` captures the level-1 spawn with the other weapon selected; its pose
+   (`-10.44,-5.46,-1.13`, sector 339) is identical to the bryar `spawn` row, so the pixel difference is
+   the first-person weapon (plus the hand). At 1170x731 the retail weapon's block spans
+   **x 480–660, y 337–730**, inside a diff bbox of x 0..769, y 337..730.
+2. **The port's own rest pose, fitted to it.** The port's static `bryv.3do` (14 material parts) lands
+   at **x 473–714, y 336–730** with a camera-local offset of **(-0.026, 0.009, 0)**; that is the new
+   `Viewmodel::base` default (`BK_VIEW` still overrides it). Captured with
+   `BK_ARM=2 BK_POV=bryv.3do BK_WINDOW=1170x731`, the isolated port weapon mask moves from
+   x 794–1169/y 436–730 at the eye origin to the retail block.
+
+The **clip pose is not applied** for now: `bryvmnt.key`/`bryvpst1.key` are **skeleton** tracks
+(`K_Rshouldr`, `K_Rhand`), while this build's `.3do` parser keeps only mesh names, so `pose_nodes`
+falls back to row order and scatters the model across the view. The rest pose is the held pose retail
+shows at the settled frame, so the model is drawn unposed and the sway still applies. `ponytail:` the
+POV clip lands when the `.3do` hierarchy's node names are parsed; the loop-flag/phase fixes from round
+254 stay in place for that.
+
+The per-material near-plane cull is in: a part whose vertices do not clear the eye plane is not
+spawned (`HND-WRT`, the wrist, was the culprit -- its `y` reached NDC 6.82), so **13 of 14** material
+parts draw. The remaining right-edge pixel is the hand's own silhouette at the frame edge, not a
+projection artifact. The fitted offset is on the deviation ledger with its retire condition.
+
+Measured: suite **196**, `--gates` **0 of 65 failed, 1 skipped**; the new retail capture is under
+`target/parity/retail-fists/` (not committed: retail frames stay out of the repo).

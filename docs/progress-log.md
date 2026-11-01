@@ -981,3 +981,12 @@ than the absolute level clock. `BK_VIEWMODEL_TRACE=1` shows the mount playing fr
 changing no further; frames 130 and 140 are pixel-identical. Suite 196; gates 0 of 65 failed /
 1 skipped. The framing gap is measured separately: the drawn weapon vertices project mostly outside
 the right/bottom of the frame, and the POV thing offset is still unrecovered.
+
+## First-person weapon framing (round 255)
+
+Isolated retail's first-person weapon with a fist-vs-bryar capture pair at the same level-1 spawn
+pose (retail block x 480–660, y 337–730 at 1170x731) and fitted the port's rest-pose model to it with
+a camera-local offset of (-0.026, 0.009, 0). The POV key clips are skeleton tracks (`K_Rshouldr`,
+`K_Rhand`) while the `.3do` parser keeps only mesh names, so the clip pose is skipped and the rest
+(held) pose is drawn; the sway still applies. Suite 196; gates 0 of 65 failed / 1 skipped. A per-material near-plane cull drops the wrist
+(`HND-WRT`), which straddled the eye plane; 13 of 14 parts draw.
