@@ -6686,3 +6686,23 @@ cleared the check fails at `a moving blocked actor did not take the jump event`.
 soak report no `BK_AI_TRACE` nudge (the soak's player stands still, so no actor is blocked mid-chase), so content-level
 occurrence is the unit check plus the wired blocked-steering site; `--soak-all` is 35/35 clean and `--gates` 0 of 65
 failed / 1 skipped. No window and no retail run.
+## Update — round 250 (measured negative: the walk trace cannot be recorded without the capture mode)
+
+The walk-trace gate is the one Phase 2 check with committed retail fixtures, so it is the obvious candidate for running
+with no QA window: `port-trace.ps1` already replays each leg with `--warp`, `BK_WALK_FORWARD=1` and `--trace-out`. The
+port half was tried headless this round and **fails, for a measured reason**:
+
+- A `--trace-out` run **without** `--shot` (the flag that puts the app in capture mode) does not hold a fixed step. The
+  recorded trace's `t_s` deltas are 0.067–0.30 s and non-monotonic by the end of the leg, and the body walks off the
+  map (`z` −11 by the end of a level-1 leg). Re-running the gate with those traces gives **15 legs, 5 failures** with
+  nonsense numbers (`walk6_spawn` 3.12 units against retail's 1.08, `walk17_spawn` 0.03 against 0.70) — a measurement of
+  the frame loop, not of movement.
+- With `--shot` (capture mode, the step pinned at 1/60 s) the same leg records the known-good trace again: final
+  x 3.265 against retail's 3.27, 2.21 units in 2.4 s, `walk_street45` matching. Capture mode is what pins `dt`; that is
+  why `port-trace.ps1` passes `--shot` and why the gate belongs to the QA window. `BK_SKIP_WINDOW=1` does not change
+  this — in the gate sweep it only skips `--live-check`/`--live-play`, it does not make a capture mode.
+
+So the walk-trace gate **stays a windowed capture**; the tooling change that offered a headless mode was reverted rather
+than shipped misleading numbers. The finding is the useful part: the QA-window list's walk-trace row is not a missing
+convenience — it is the only way the comparison is a movement measurement. No code or tool change remains from this
+experiment; `target/parity/trace/` was cleaned of the probe files.

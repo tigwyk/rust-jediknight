@@ -2572,3 +2572,13 @@ running app.--carry-check --start 01narshadda                        0   level 2
   also lists the Phase 3 breadth remainder (Jedi set, generated `type=particle` systems, track timings, scope, ending
   screens) and states plainly that no release candidate is warranted yet.
 - No code change; no window opened and no retail run. Tree committed and clean at the round-248 commit.
+## Update — round 250
+
+- **Measured negative: the walk trace cannot be recorded without capture mode.** A `--trace-out` replay **without**
+  `--shot` does not hold a fixed step (trace `t_s` deltas 0.067–0.30 s, non-monotonic; the body leaves the map), and
+  running the gate on those traces reports **15 legs / 5 failures** with nonsense numbers (`walk6_spawn` 3.12 vs retail
+  1.08). With `--shot` the same leg reproduces the known-good trace (final x 3.265 vs retail 3.27, 2.21 units, 2.4 s).
+  `BK_SKIP_WINDOW=1` only skips `--live-check`/`--live-play` in the gate sweep; it does not pin `dt`.
+- The headless-mode attempt was reverted rather than shipped; the walk-trace gate stays a windowed capture and its
+  QA-window row stands. Probe traces/screenshots were cleaned from `target/parity/trace/`. Suite **189 passed**, docs
+  **132/132**; no window opened and no retail run.
