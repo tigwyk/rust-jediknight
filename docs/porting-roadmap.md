@@ -541,7 +541,7 @@ unit + live-runtime evidence (`docs/gaps.md` round 252). **The generated `type=p
 (round 253): `sithParticle_Initalize`'s `count`/`elementsize`/`range`/`minsize`/`pitchrange`/`yawrange`
 generation draws through the existing particle path — level 1 loads **24** generated clouds (was one
 `.par`). The remaining breadth list, in weight order: aim joints, track things' per-frame timings, the
-scope overlay, the ending screens, the particle update arms (cel cycling/grow), and the actor-collision
+scope overlay, the ending screens, the particle **cel-cycling** arm (grow is in), and the actor-collision
 event that unblocks `specialattack` and the event-2/event-4 handler arms. None is an exit criterion for
 Phase 1/2.
 
@@ -555,7 +555,7 @@ taken without driving the game is green, the three QA-window checks were run, an
 
 | check | command | last measured |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --release` | **197 passed**, 0 failed |
+| unit + integration suite | `cargo test --release` | **198 passed**, 0 failed |
 | port gates (headless sweep) | `BK_SKIP_WINDOW=1 BK_MUTE=1 bevi-knight --gates` | **0 of 65 failed, 1 skipped** (`--live-check`); the **windowed** sweep was **65 of 65, 0 skipped** this round |
 | every level's runtime | `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5 bevi-knight --soak-all` | **35 of 35 levels**, 0 non-finite positions, 0 bodies outside every sector |
 | drop-in asset coverage | `bevi-knight --audit` | **35/35 levels clean**, 0 non-drawable models, 10 unresolved asset references (retail data gaps), 54 undecoded files (cutscenes and sound; intentionally out of scope) |

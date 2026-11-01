@@ -6956,3 +6956,17 @@ engine transform replaces the fitted offset.
 Tooling: OMP's per-server MCP `timeout` for `rea` is now **600000 ms** in
 `C:\Users\Lee\.omp\agent\mcp.json`, and REA's `ghidra.decompile_timeout_seconds` is **600**; after that
 the Ghidra pseudocode requests that used to die at 30 s complete.
+
+## Update — round 259 (the particle grow arm)
+
+`sithParticle_Update`'s first arm (`typeflags & 1`) is ported: a generated cloud's scale advances by
+`maxthrust * dt` (the engine's `+0x158` starts at 1.0, `+0x140` is `maxthrust`, floored at 0.001), and
+every element's offset scales with it about the owning thing. The draw path attaches a `ParticleGrow`
+component only when `particle_grows(typeflags, maxthrust)` is true; the shipped lines show the useful
+cases: `+whitecloud` `0x3f`/30, `+sparks` `0x3d`/20, `+force_heal` `0x3f`/0.01, while `+smoke` has
+`0x3e` but no `maxthrust` and therefore does not grow. `a_growing_cloud_scales_by_its_maxthrust` pins
+the gate and the arithmetic.
+
+Still open in this area: the **cel-cycling** arm (`typeflags & 0x20`), which advances each element's
+material cel probabilistically from `(cels - cel - 1) * rate / life`; the port keeps the spawn cel for
+the element's life. Measured: suite **197 → 198**; `--gates` and `--soak-all` re-run below.

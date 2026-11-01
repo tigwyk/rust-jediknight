@@ -2672,3 +2672,12 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - The POV mount clip with names mapped still ends off the right edge (669 pixels at x 1059..1084 vs the
   fitted rest pose's x 473..714), so the viewmodel keeps the rest pose.
 - `cargo test --release`: **197 passed**; `--soak-all` 35/35 clean; `--gates`: 0 of 65 failed, 1 skipped.
+
+## Update — round 259 (particle grow arm)
+
+- `typeflags & 1` + nonzero `maxthrust`: `ParticleGrow` advances scale by `maxthrust * dt` and scales
+  the element offset about the thing; `+whitecloud` (0x3f/30), `+sparks` (0x3d/20), `+force_heal`
+  (0x3f/0.01) grow, `+smoke` (0x3e, no maxthrust) does not.
+- `cargo test --release`: **198 passed** (new `a_growing_cloud_scales_by_its_maxthrust`).
+- `--gates`: 0 of 65 failed, 1 skipped; `--soak-all`: 35/35 clean.
+- Still open: the cel-cycling arm (`typeflags & 0x20`).

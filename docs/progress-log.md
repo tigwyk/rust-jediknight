@@ -998,3 +998,10 @@ key tracks by that skeleton name before falling back to mesh names. The mapping 
 the prerequisite for the viewmodel mount/fire clips, but the mount's last frame still leaves the weapon
 off the right edge, so the viewmodel continues to draw the rest pose. Suite 197; soak-all 35/35;
 gates 0 of 65 failed / 1 skipped.
+
+## Particle grow arm (round 259)
+
+Ported `sithParticle_Update`'s grow arm: scale advances by `maxthrust * dt` for `typeflags & 1`, and
+element offsets scale with it about the cloud origin. The shipped templates distinguish the cases
+(`+whitecloud` 30, `+sparks` 20, `+force_heal` 0.01, `+smoke` none). Suite 198. The cel-cycling arm
+stays open.

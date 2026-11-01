@@ -11353,7 +11353,7 @@ fn main() {
                     advance_sim,
                 )
                     .run_if(no_screen_open),
-                (demo_aim, sync_player_thing, health_follows_damage, infrared_follows_force, fire_player, sprite_demo, draw_created, projectile_hits, respawn_on_death)
+                (demo_aim, sync_player_thing, health_follows_damage, infrared_follows_force, fire_player, sprite_demo, draw_created, grow_particles, projectile_hits, respawn_on_death)
                     .chain()
                     .run_if(no_screen_open),
                 (
@@ -21047,10 +21047,48 @@ fn saber_blade(
     }
 }
 
+/// A generated particle cloud whose `typeflags & 1` grows every frame (`sithParticle_Update`'s
+/// grow arm: `scale += maxthrust * dt`, with the element offsets scaled about the cloud origin).
+/// `sithParticle_Update`'s grow gate: `typeflags & 1` and a nonzero `maxthrust`.
+fn particle_grows(typeflags: u32, rate: f32) -> bool {
+    typeflags & 1 != 0 && rate > 0.0
+}
+
+/// One update of the grow arm: `scale + maxthrust * dt`, floored at the engine's 0.001.
+fn particle_grow_scale(scale: f32, rate: f32, dt: f32) -> f32 {
+    (scale + rate * dt).max(0.001)
+}
+
+#[derive(Component)]
+struct ParticleGrow {
+    thing: usize,
+    offset: Vec3,
+    rate: f32,
+    scale: f32,
+}
+
 /// Draw whatever the scripts created after load, and move it as the runtime moves it.
 ///
 /// Projectiles are `SITH_THING_WEAPON` templates with their own `.3do`; the level's own
 /// thing list never contains them, which is why nothing appeared when one was fired.
+/// `sithParticle_Update`'s grow arm (`typeflags & 1`): each frame the cloud's scale advances by
+/// `maxthrust * dt`, and every element's offset scales with it about the owning thing.
+fn grow_particles(
+    sim: Option<Res<Sim>>,
+    time: Res<Time>,
+    mut elements: Query<(&mut Transform, &ParticleGrow)>,
+) {
+    let Some(sim) = sim else { return };
+    let dt = time.delta_secs().clamp(0.0, 0.1);
+    let rt = sim.world.borrow();
+    for (mut transform, grow) in &mut elements {
+        let Some(thing) = rt.things.get(grow.thing) else { continue };
+        let scale = particle_grow_scale(grow.scale, grow.rate, dt);
+        transform.translation = Vec3::from(thing.pos) + grow.offset * scale;
+        transform.scale = Vec3::splat(scale);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_created(
     mut commands: Commands,
@@ -21173,6 +21211,22 @@ fn draw_created(
             if let Some((cloud, cels)) = world.template_particle.get(&template_key) {
                 let mut spawned = Vec::new();
                 let last_cel = cels.saturating_sub(1);
+                // `sithParticle_Update`'s grow arm (`typeflags & 1`) uses the template's
+                // `maxthrust` as the scale rate; the element offsets scale about the cloud origin.
+                let typeflags = world
+                    .level
+                    .template_param(&template_key, "typeflags")
+                    .and_then(|raw| {
+                        let raw = raw.trim();
+                        u32::from_str_radix(
+                            raw.trim_start_matches("0x").trim_start_matches("0X"),
+                            16,
+                        )
+                        .ok()
+                    })
+                    .unwrap_or(0);
+                let grow_rate = world.level.template_f32(&template_key, "maxthrust").unwrap_or(0.0);
+                let grows = particle_grows(typeflags, grow_rate);
                 for element in &cloud.vertices {
                     let cel = element.cel.clamp(0, last_cel as i32) as u32;
                     let key = (template_key.clone(), cloud.material.clone(), cel);
@@ -21193,15 +21247,21 @@ fn draw_created(
                     material.base_color_texture =
                         world.model_images.get(&cloud.material).map(|image| images.add(image.clone()));
                     let offset = particle_element_offset(cloud, thing.yaw, element);
-                    let entity = commands
-                        .spawn((
-                            Mesh3d(mesh),
-                            MeshMaterial3d(materials.add(material)),
-                            Transform::from_translation(Vec3::from(thing.pos) + Vec3::from(offset)),
-                            Sprite3d,
-                        ))
-                        .id();
-                    spawned.push(entity);
+                    let mut entity = commands.spawn((
+                        Mesh3d(mesh),
+                        MeshMaterial3d(materials.add(material)),
+                        Transform::from_translation(Vec3::from(thing.pos) + Vec3::from(offset)),
+                        Sprite3d,
+                    ));
+                    if grows {
+                        entity.insert(ParticleGrow {
+                            thing: index,
+                            offset: Vec3::from(offset),
+                            rate: grow_rate,
+                            scale: 1.0,
+                        });
+                    }
+                    spawned.push(entity.id());
                 }
                 created.drawn.insert(index, spawned);
                 println!(
@@ -25539,6 +25599,19 @@ mod viewmodel_framing_tests {
         // A looping clip still wraps; the old code applied this to every clip.
         assert_eq!(super::pov_clip_frame(13.0, 13, true), 0);
         assert_eq!(super::pov_clip_frame(12.5, 13, true), 12);
+    }
+
+    /// The generated-cloud grow arm: `typeflags & 1` plus a nonzero `maxthrust`; the shipped
+    /// `+whitecloud` line is `0x3f`/30, `+smoke` has `0x3e` but no `maxthrust`, `+force_heal` is
+    /// `0x3f`/0.01. The scale advances by `maxthrust * dt`, not multiplicatively.
+    #[test]
+    fn a_growing_cloud_scales_by_its_maxthrust() {
+        assert!(super::particle_grows(0x3f, 30.0));
+        assert!(super::particle_grows(0x3f, 0.01));
+        assert!(!super::particle_grows(0x3e, 0.0), "no maxthrust means no growth");
+        assert!(!super::particle_grows(0x20, 30.0), "bit 1 is the grow arm");
+        assert!((super::particle_grow_scale(1.0, 30.0, 0.1) - 4.0).abs() < 1e-5);
+        assert!((super::particle_grow_scale(1.0, 0.01, 0.1) - 1.001).abs() < 1e-5);
     }
 
     /// The sway is a **rotation about the eye**, not a translation: `jkPlayer_DrawPov` pre-multiplies it
