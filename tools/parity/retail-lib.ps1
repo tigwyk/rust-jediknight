@@ -185,6 +185,17 @@ function Send-JkKey {
 # Press / release without the tap's delay, for a key that has to stay down across console work.
 # The game drops key state when its window loses focus (the dev console dialog takes it), so a
 # caller holding a movement key re-presses it after each poll.
+function Send-JkKeyHold {
+  param([Parameter(Mandatory)][string]$Name, [int]$HoldMs = 600)
+  $key = $Name.ToUpperInvariant()
+  if (-not $script:JkScan.ContainsKey($key)) { throw "no scancode for key '$Name'" }
+  [JkRetail]::KeyHold(
+    [ushort]$script:JkScan[$key],
+    ($script:JkExtended -contains $key),
+    $HoldMs
+  )
+}
+
 function Send-JkKeyDown {
   param([Parameter(Mandatory)][string]$Name)
   $key = $Name.ToUpperInvariant()

@@ -39,6 +39,9 @@ param(
   # Keys pressed after the console commands (e.g. to dismiss the end-of-level tally and let
   # the next level load, which is how a genuine level-2 save can come out of retail).
   [string[]]$KeysAfter = @(),
+  # Hold for an action key in `-KeysAfter`. The retail capture runs under software rendering at a
+  # few frames per second; a 40 ms tap can fall between frames and the game never sees the use.
+  [int]$ActionHoldMs = 600,
   # Stop on the Single Player submenu and save a screenshot, so Load Game's coordinates can be read
   # off it (the harness otherwise clicks New Game and never shows the submenu).
   [switch]$StopAtMenu,
@@ -1024,9 +1027,9 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
               Start-Sleep -Milliseconds 120
             }
           }
-          Send-JkMouseButton -Button ($key -replace '^MOUSE', '')
+          Send-JkMouseButton -Button ($key -replace '^MOUSE', '') -HoldMs $ActionHoldMs
         } else {
-          Send-JkKey -Name $key
+          Send-JkKeyHold -Name $key -HoldMs $ActionHoldMs
         }
         Start-Sleep -Milliseconds 1500
       }

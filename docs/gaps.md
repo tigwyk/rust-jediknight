@@ -7062,3 +7062,19 @@ shipped-level difference; the probe that would show it is `--things` plus a scri
 `SetThingTrack`/`PathMove`.
 
 No behavior change; suite 202, gates/soak unchanged.
+
+## Update — round 266 (retail use-action hold: still no trigger)
+
+The retail capture's post-console action keys were 40 ms taps (`JkRetail.Key`), while the software-
+rendered capture runs at a few frames per second — a press can fall entirely between frames. Added
+`-ActionHoldMs` (default **600 ms**) and a `Send-JkKeyHold` wrapper; `-KeysAfter` mouse buttons and
+keys both use it. Retried the cantina switch row at yaw -153.8 with `cogstatus 11` before/after:
+
+- `MOUSEMIDDLE,9` at 800 ms: `doorstatus` stays 0, and the player yaw drifts to **-145.91**
+  (the held middle button turns the view).
+- `9` alone at 800 ms: still 0, yaw **-158.42**.
+- The port's own use at the same pose fires (`use: activated surface 2403`, `doorstatus 2`), so the
+  remaining gap is retail input delivery/aim, not the port trigger path.
+
+The long-hold change is kept: it is correct for any retail action capture under software rendering.
+README/probe counts unchanged (tooling only).
