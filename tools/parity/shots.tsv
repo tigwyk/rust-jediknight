@@ -29,8 +29,10 @@ route_catwalk	01narshadda	7.749950	-1.175000	2.857114	0	0
 route_door	01narshadda	1.400084	9.700065	6.357114	0	105.000092
 
 # switch_cantina: warp beside the cantina door switch (thing 56 -> cog 11 00_doorswitch.cog,
-# -4.75,-3.75,-1.10) facing south, then press the use key. Phase 1 step 4's interaction probe.
-switch_cantina	01narshadda	-4.75	-2.95	-1.143	0	180.000000
+# surface switch0 at -4.29,-3.88). The port's forward axis is (-sin yaw, cos yaw), so the
+# -153.8 yaw points at the switch; the old 180 faced -y, 26 degrees off the use cone. Phase 1
+# step 4's interaction probe.
+switch_cantina	01narshadda	-4.75	-2.95	-1.143	0	-153.800000
 
 # switch_cantina2: stand north of the switch plate (surface 2409 centre -4.29,-3.88,-1.15) and face it
 # with the camera level, then middle-click (ACTIVATE). This is the aim pose the --links centroids give.

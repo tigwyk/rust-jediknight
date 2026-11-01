@@ -6891,6 +6891,64 @@ fn main() {
         } else {
             println!("  the drawn geoset has no vertices");
         }
+        // `BK_MODEL_KEY=<file.key> BK_MODEL_FRAME=<n>`: the same geometry posed by a keyframe, and
+        // the model/key node names side by side. The POV viewmodel's clip is a skeleton track, so the
+        // mapping and the posed box are what say whether a key can be applied.
+        if let Ok(key_name) = std::env::var("BK_MODEL_KEY") {
+            let Some(raw) = gobs.read(&key_name) else {
+                println!("  key `{key_name}` is not in the archives");
+                return;
+            };
+            let k = key::parse(&String::from_utf8_lossy(&raw));
+            let frame = std::env::var("BK_MODEL_FRAME")
+                .ok()
+                .and_then(|value| value.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            println!(
+                "  key `{key_name}`: {} node(s), {} frame(s), {:.1} fps; posing at frame {frame}",
+                k.nodes.len(),
+                k.frames,
+                k.fps
+            );
+            for (i, node) in model.nodes.iter().enumerate() {
+                println!("    model node {i}: hnodename `{}`, mesh {}", node.name, node.mesh);
+            }
+            for (i, node) in k.nodes.iter().enumerate() {
+                println!("    key node {i}: mesh `{}`", node.mesh);
+            }
+            let posed = tdo::pose_nodes(&model, Some(&k), frame);
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            let mut verts = 0usize;
+            for (mesh_index, mesh) in model.meshes.iter().enumerate() {
+                if mesh.geoset != geoset {
+                    continue;
+                }
+                let owner = owners
+                    .get(mesh_index)
+                    .copied()
+                    .filter(|i| *i != usize::MAX)
+                    .and_then(|i| posed.get(i));
+                for p in &mesh.vertices {
+                    let p = match owner {
+                        Some(x) => x.apply(*p),
+                        None => *p,
+                    };
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                    verts += 1;
+                }
+            }
+            if verts > 0 {
+                println!(
+                    "  posed bbox min {:?}  max {:?} ({} vertex(es))",
+                    round(lo),
+                    round(hi),
+                    verts
+                );
+            }
+        }
         return;
     }
 

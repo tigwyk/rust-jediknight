@@ -6906,3 +6906,25 @@ The next check is the clip's frame/rest-pose relation (the `.key` absolute `pos`
 `rdPuppet_AdvanceTrack` delta path), not another name table.
 
 Measured: suite **196 → 197**; `--soak-all` 35/35 clean; `--gates` 0 of 65 failed, 1 skipped.
+
+## Update — round 257 (the cantina door switch fires in the port; retail's use action still not)
+
+Phase 1 step 4's first trigger now has a port-side measurement. The switch row's yaw was **180**, which
+the port's forward axis `(-sin yaw, cos yaw)` turns into `(0,-1)`; the switch at (-4.29,-3.88) from
+the body at (-4.75,-2.95) is `(0.46,-0.93)`, 26° off that axis -- right at the edge of the use cone.
+Yaw **-153.8** points at it. With `BK_USE=1 --warp "-4.77,-2.95,-1.18,-153.79" --cogstatus-after 11`:
+
+```
+use: activated surface 2403
+  Symbol 14: 'doorstatus'  = 2
+```
+
+so the port's use action reaches the linked surface and `00_doorswitch.cog` answers. The **retail** half
+is still open: the same row, at the corrected facing, with `-KeysAfter MOUSEMIDDLE` (and `9`) and
+`cogstatus 11` before/after, still reads `doorstatus 0`. The harness sends the click with the cursor at
+the game window centre; the switch may need the crosshair on its plate, or the click is reaching the
+dev-console dialog rather than the world. This is now a harness/retail-input question, not a port
+trigger path.
+
+The `--model` probe also accepts `BK_MODEL_KEY=<key> BK_MODEL_FRAME=<n>`: it prints the model/key node
+names and the posed bounding box, which is how the POV clip's skeleton-name mapping is checked.

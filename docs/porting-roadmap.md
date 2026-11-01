@@ -268,7 +268,10 @@ tier, not a checkbox.
    resting rule, the *walking* settle (`top + radius`, 0.08 below retail's idle pose on the catwalk), and
    the recorded trace itself.
 4. **Interaction.** Doors, lifts, switches, pickups through cogs; thing parenting; timing (`Sleep`,
-   pulses) at engine granularity. Exit: cog variable/state trace matches at each trigger.
+   pulses) at engine granularity. Exit: cog variable/state trace matches at each trigger. *Port side
+   measured (round 257):* the cantina switch row at yaw -153.8, `BK_USE=1 --cogstatus-after 11` prints
+   `use: activated surface 2403` and `doorstatus 2`; retail's own use action at the same pose still
+   reads `doorstatus 0`, so the remaining half is a retail-input/harness question.
 5. **Combat.** Weapon fire, hit detection, damage, AI sight and routing, puppet states. Exit: the same
    encounter plays out with matching health and kill order from the same script. *Partly done:* shots
    leave the shooter's own `fireoffset=` in level units (the port scaled it by ten, which put a
