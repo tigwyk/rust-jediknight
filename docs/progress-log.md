@@ -1018,3 +1018,10 @@ Fixed the rendering half of the actor chase: the parts followed the runtime posi
 spawn yaw, so a chasing actor shot from a facing its mesh no longer had. The body-yaw delta is now
 applied about the thing origin (`thing_quat(0, yaw, 0)`; pitch/roll stay out because the port's pitch
 is the aim elevation). Suite 200. The head joint remains open.
+
+## Head aim (round 263)
+
+Actors now aim their head, not just their torso: the AI elevation is clamped by the template's
+`minheadpitch`/`maxheadpitch`, stored as `ThingState::head_pitch`, and applied to `k_neck` (0.5×) and
+`k_head` (0.3×) in `model_mesh_posed_aim` — the engine's joint-angle scales. The body keeps the
+yaw-only transform from round 262. Suite 201.

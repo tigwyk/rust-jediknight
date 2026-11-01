@@ -232,6 +232,20 @@ fn local_matrix(pos: [f32; 3], rot: [f32; 3]) -> Xform {
     Xform { rot: rotate(rot[0], rot[1], rot[2]), pos }
 }
 
+/// Add a local pitch to an already-composed node (`sithActor_SetHeadPYR` writes joint angles, not
+/// world rotations). Post-multiplying by `Rx(degrees)` turns the node and its own mesh about the
+/// node's local X; child nodes keep their composed positions until the caller poses them.
+pub fn add_local_pitch(xform: &mut Xform, degrees: f32) {
+    let r = rotate(degrees, 0.0, 0.0);
+    let mut m = [[0.0f32; 3]; 3];
+    for row in 0..3 {
+        for col in 0..3 {
+            m[row][col] = (0..3).map(|k| xform.rot[row][k] * r[k][col]).sum();
+        }
+    }
+    xform.rot = m;
+}
+
 /// The world transform of every node, from a keyframe (or from the model's rest pose when
 /// `key` is `None`), at a (fractional) frame number.
 ///
@@ -513,6 +527,17 @@ fn parse_face(line: &str) -> Option<Face> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The head-joint pitch is a post-multiplied local rotation: a 90-degree pitch about the
+    /// node's local X takes the node's +Y to +Z (the engine applies `SetHeadPYR` as a joint angle).
+    #[test]
+    fn a_head_pitch_turns_the_node_about_its_local_x() {
+        let mut x = Xform { rot: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], pos: [0.0; 3] };
+        add_local_pitch(&mut x, 90.0);
+        let p = x.apply([0.0, 1.0, 0.0]);
+        assert!(p[0].abs() < 1e-5, "{p:?}");
+        assert!((p[2].abs() - 1.0).abs() < 1e-5 && p[1].abs() < 1e-5, "{p:?}");
+    }
 
     /// A viewmodel key names its tracks by **skeleton** name (`K_Rshouldr`), not by mesh name.
     /// The `.3do` hierarchy carries that name in its last column; `pose_nodes` must use it, or a

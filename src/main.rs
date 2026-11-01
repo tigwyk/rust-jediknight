@@ -16979,7 +16979,32 @@ fn model_mesh_posed(
     tex_size: (f32, f32),
     key: Option<(&key::Key, f32)>,
 ) -> Mesh {
-    let world = tdo::pose_nodes(model, key.map(|(k, _)| k), key.map(|(_, f)| f).unwrap_or(0.0));
+    model_mesh_posed_aim(model, material, tex_size, key, 0.0)
+}
+
+/// `model_mesh_posed` plus the head aim: `head_pitch` is degrees and is applied to the `k_neck` and
+/// `k_head` nodes (0.5x and 0.3x, the engine's two joint-angle scales).
+fn model_mesh_posed_aim(
+    model: &tdo::Model,
+    material: i32,
+    tex_size: (f32, f32),
+    key: Option<(&key::Key, f32)>,
+    head_pitch: f32,
+) -> Mesh {
+    let mut world = tdo::pose_nodes(model, key.map(|(k, _)| k), key.map(|(_, f)| f).unwrap_or(0.0));
+    if head_pitch != 0.0 {
+        for (i, node) in world.iter_mut().enumerate() {
+            let Some(name) = model.node_name(i) else { continue };
+            let factor = if name.eq_ignore_ascii_case("k_neck") {
+                0.5
+            } else if name.eq_ignore_ascii_case("k_head") {
+                0.3
+            } else {
+                continue;
+            };
+            tdo::add_local_pitch(node, head_pitch * factor);
+        }
+    }
     let owners = model.mesh_nodes();
     // One detail level only: the geosets are the same puppet at several resolutions.
     let geoset = model.pick_geoset();
@@ -17642,7 +17667,7 @@ fn animate_actors(mut capture: Option<Res<CaptureDt>>,
         // first sees it. The velocity is the one `ai_tick` walked at — the port's stand-in for
         // `physicsParams.vel`, which `sithPuppet_UpdateThingMove` transforms into the thing's own
         // frame to choose a state.
-        let (scripted, pose, walk) = sim
+        let (scripted, pose, walk, head_pitch) = sim
             .as_deref()
             .map(|sim| {
                 let rt = sim.world.borrow();
@@ -17650,9 +17675,10 @@ fn animate_actors(mut capture: Option<Res<CaptureDt>>,
                     rt.play_key.get(&actor.thing).cloned(),
                     rt.things.get(actor.thing).map(|t| t.yaw),
                     rt.walk_vel.get(&actor.thing).copied(),
+                    rt.things.get(actor.thing).map(|t| t.head_pitch).unwrap_or(0.0),
                 )
             })
-            .unwrap_or((None, None, None));
+            .unwrap_or((None, None, None, 0.0));
         let vel = walk.map_or(Vec3::ZERO, |[x, y]| Vec3::new(x, y, 0.0));
         if dead.contains(&actor.thing) {
             actor.dying = true;
@@ -17799,7 +17825,13 @@ fn animate_actors(mut capture: Option<Res<CaptureDt>>,
         actor.drawn = frame;
         for (handle, material, tex_size) in &actor.parts {
             if let Some(mut slot) = meshes.get_mut(handle) {
-                *slot = model_mesh_posed(model, *material, *tex_size, Some((key, frame as f32)));
+                *slot = model_mesh_posed_aim(
+                    model,
+                    *material,
+                    *tex_size,
+                    Some((key, frame as f32)),
+                    head_pitch,
+                );
             }
         }
     }

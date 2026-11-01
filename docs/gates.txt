@@ -2697,3 +2697,11 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - `cargo test --release`: **200 passed** (new `an_actor_turn_rotates_its_parts_about_the_thing_origin`).
 - `--gates`: 0 of 65 failed, 1 skipped; `--soak-all`: 35/35 clean.
 - Still open: the head joint (`SetHeadPYR` evidence), so aim is still torso-only.
+
+## Update — round 263 (head aim)
+
+- `ThingState::head_pitch` set from the AI elevation, clamped by `minheadpitch`/`maxheadpitch`;
+  `model_mesh_posed_aim` applies 0.5× to `k_neck` and 0.3× to `k_head`.
+- `cargo test --release`: **201 passed** (new `a_head_pitch_turns_the_node_about_its_local_x`).
+- `--gates`: 0 of 65 failed, 1 skipped; `--soak-all`: 35/35 clean.
+- The body mesh stays yaw-only; only the head joints take pitch.

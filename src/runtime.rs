@@ -135,6 +135,9 @@ pub struct ThingState {
     pub yaw: f32,
     pub pitch: f32,
     pub roll: f32,
+    /// Visual head pitch in degrees: `sithActor_SetHeadPYR`'s `thing+0x15c`, clamped by the
+    /// template's `minheadpitch`/`maxheadpitch`. `pitch` stays the body/aim angle.
+    pub head_pitch: f32,
     pub sector: i32,
     pub flags: u32,
     pub health: f32,
@@ -901,6 +904,9 @@ pub struct Runtime {
     /// `timer=`: how long a created thing lives, in seconds, before `sithThing_Update` destroys it.
     /// An impact effect's whole lifetime is this field.
     pub template_timer: BTreeMap<String, f32>,
+    /// `minheadpitch`/`maxheadpitch` in degrees (the shipped `_actor` says -80/80).
+    pub template_minheadpitch: BTreeMap<String, f32>,
+    pub template_maxheadpitch: BTreeMap<String, f32>,
     /// `SetThingTimer`'s deadline per thing, on the world clock: the engine's `pThing->timer` plus
     /// `SITH_TF_TIMERSET`. When it passes, the thing's own scripts get the `timer` message.
     pub thing_timer: BTreeMap<usize, f32>,
@@ -1590,6 +1596,26 @@ impl Runtime {
                     .map(|secs| (t.name.to_ascii_lowercase(), secs))
             })
             .collect();
+        let template_minheadpitch: BTreeMap<String, f32> = level
+            .templates
+            .iter()
+            .filter_map(|t| {
+                level
+                    .template_f32(&t.name, "minheadpitch")
+                    .or_else(|| level.template_f32("_actor", "minheadpitch"))
+                    .map(|v| (t.name.to_ascii_lowercase(), v))
+            })
+            .collect();
+        let template_maxheadpitch: BTreeMap<String, f32> = level
+            .templates
+            .iter()
+            .filter_map(|t| {
+                level
+                    .template_f32(&t.name, "maxheadpitch")
+                    .or_else(|| level.template_f32("_actor", "maxheadpitch"))
+                    .map(|v| (t.name.to_ascii_lowercase(), v))
+            })
+            .collect();
         Self {
             things: level
                 .things
@@ -1600,6 +1626,7 @@ impl Runtime {
                     yaw: t.yaw,
                     pitch: t.pitch,
                     roll: t.roll,
+                    head_pitch: 0.0,
                     sector: t.sector,
                     flags: t.flags,
                     health: template_health
@@ -1733,6 +1760,8 @@ impl Runtime {
             template_explode,
             template_fire_offset,
             template_timer,
+            template_minheadpitch,
+            template_maxheadpitch,
             template_thingflags,
             template_typeflags,
             template_soundclass: level
@@ -2137,6 +2166,7 @@ impl Runtime {
             pitch: angles[0],
             yaw: angles[1],
             roll: angles[2],
+            head_pitch: 0.0,
             sector,
             flags: 0,
             health,
@@ -4438,7 +4468,23 @@ impl Runtime {
                 // bolt passes underneath — the bug the player had until round 109.
                 let dz = shooting_at[2] - from[2];
                 let flat = (sx * sx + sy * sy).sqrt().max(1e-4);
-                thing.pitch = dz.atan2(flat).to_degrees().clamp(-60.0, 60.0);
+                let elevation = dz.atan2(flat).to_degrees();
+                thing.pitch = elevation.clamp(-60.0, 60.0);
+                // `sithAI_SetLookFrame`: the head pitch is clamped by the actor's own
+                // `minheadpitch`/`maxheadpitch` (degrees in the shipped templates).
+                let min = self
+                    .templates
+                    .get(index)
+                    .and_then(|name| self.template_minheadpitch.get(name))
+                    .copied()
+                    .unwrap_or(-80.0);
+                let max = self
+                    .templates
+                    .get(index)
+                    .and_then(|name| self.template_maxheadpitch.get(name))
+                    .copied()
+                    .unwrap_or(80.0);
+                thing.head_pitch = elevation.clamp(min, max);
                 // `sithAICmd_PrimaryFire`: a burst of `fltArg[8]` shots `intArg[9]` apart, then the
                 // shot delay jittered by ±20% (`(1.2 - 0.2 * frand) * fltArg[0]`).
                 if thing.ai_burst > 0.0 {
@@ -4619,6 +4665,7 @@ impl Runtime {
             yaw,
             pitch: 0.0,
             roll: 0.0,
+            head_pitch: 0.0,
             sector,
             // A shot carries its template's `thingflags=`; the pre-sweep above read the same word.
             flags: self.template_thingflags.get(&key).copied().unwrap_or(0),
@@ -5482,6 +5529,7 @@ impl Runtime {
             yaw: 0.0,
             pitch: 0.0,
             roll: 0.0,
+            head_pitch: 0.0,
             sector,
             flags: 0,
             health,
@@ -8224,6 +8272,7 @@ mod tests {
                 yaw: 0.0,
                 pitch: 0.0,
                 roll: 0.0,
+                head_pitch: 0.0,
                 sector: 7,
                 flags: 0,
                 health: 100.0,

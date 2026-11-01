@@ -7020,3 +7020,17 @@ drawn body, so an aiming actor still aims with its torso. The live head rotation
 field and `k_neck`/`k_head` rotation in `model_mesh_posed`.
 
 Measured: suite **199 → 200**; `--gates` and `--soak-all` re-run below.
+
+## Update — round 263 (head aim)
+
+`ThingState` now carries `head_pitch` (degrees). When an actor fires, `ai_tick` computes the elevation
+to the target and clamps it by the template's `minheadpitch`/`maxheadpitch` (the shipped `_actor`
+says -80/80; the port parses them into `template_minheadpitch`/`template_maxheadpitch`), storing it
+separately from the body/aim `pitch`. `animate_actors` passes it to `model_mesh_posed_aim`, which
+post-multiplies the composed `k_neck` node by 0.5× and `k_head` by 0.3× of the pitch — the engine's
+two joint-angle scales from `sithActor_SetHeadPYR` (`0x4ed280`) — so the head turns while the body
+mesh keeps its yaw-only transform (round 262). `a_head_pitch_turns_the_node_about_its_local_x` pins
+the local rotation. The head yaw/roll fields are stored by the engine but unused for AI (the engine's
+`SetLookFrame` keeps the current yaw/roll), so only pitch is applied.
+
+Measured: suite **200 → 201**; `--gates` and `--soak-all` re-run below.
