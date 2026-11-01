@@ -20640,7 +20640,9 @@ fn draw_viewmodel(
             // still leaves the weapon off the right edge (measured: 669 pixels at x 1059..1084,
             // against the fitted rest pose's x 473..714), so the rest pose stays until the clip's
             // frame direction/rest-pose relation is settled.
-            let static_pose = true;
+            // `BK_POV_CLIP=1` re-enables the POV mount/fire clip for measurement; the shipped
+            // view keeps the rest pose until the model frame is reconciled.
+            let static_pose = std::env::var_os("BK_POV_CLIP").is_none();
             // The clip cursor advances by the **frame delta**. It used to advance by the absolute
             // world clock, so a mount animation (which is meant to play once) replayed faster and
             // faster as the level clock grew — the viewmodel visibly flickered.
