@@ -15020,28 +15020,49 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         // (196 bytes, `num_textures == 0`), so there is nothing to texture the element quads with —
         // `rdParticle_Draw` draws them through the material's own effect state. The cel count still
         // comes from the header (`rdParticle_LoadEntry` bounds-checks against it).
-        let material = gobs.read(&cloud.material);
-        let cels = match material.as_deref() {
-            Some(data) => {
-                let header_cels = tex::material_header(data).map(|(_, cels, _)| cels).unwrap_or(1);
-                if let Some(bitmap) = tex::parse_mat(data) {
-                    if !model_images.contains_key(&cloud.material) {
-                        // Effect artwork: keyed on the palette's entry 0, like a sprite's.
-                        let keyed = keyed_rgba(&bitmap, &palette);
-                        model_images.insert(
-                            cloud.material.clone(),
-                            image_from_rgba(bitmap.width, bitmap.height, keyed),
-                        );
-                    }
-                    sprite_cels.insert(cloud.material.clone(), bitmap.cels);
-                    bitmap.cels
-                } else {
-                    sprite_cels.insert(cloud.material.clone(), header_cels);
-                    header_cels
-                }
-            }
-            None => 1,
-        };
+        let cels = effect_material_cels(gobs, &palette, &cloud.material, &mut model_images);
+        sprite_cels.insert(cloud.material.clone(), cels);
+        template_particle.insert(template.name.to_ascii_lowercase(), (cloud, cels));
+    }
+    // A `type=particle` template is the **generated** half (`+sparks`, `+whitecloud`, `+smoke`, …):
+    // `sithParticle_Initalize` (`0x4f1da0`) builds its elements from the template's own `count`,
+    // `elementsize`, `range`, `minsize`, `pitchrange`, `yawrange` and `typeflags`, not from a `.par`.
+    // The bulk of the shipped effect content is these, not the three `.par` files.
+    for template in &level.templates {
+        if level.template_param(&template.name, "particle").is_some() {
+            continue;
+        }
+        if !level
+            .template_param(&template.name, "type")
+            .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("particle"))
+        {
+            continue;
+        }
+        let Some(material) = level.template_param(&template.name, "material") else { continue };
+        let material = material.trim().to_ascii_lowercase();
+        let count = level.template_f32(&template.name, "count").unwrap_or(0.0).max(0.0) as u32;
+        if count == 0 {
+            continue;
+        }
+        let typeflags = level
+            .template_param(&template.name, "typeflags")
+            .and_then(|raw| {
+                let raw = raw.trim();
+                u32::from_str_radix(raw.trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+            })
+            .unwrap_or(0);
+        let cels = effect_material_cels(gobs, &palette, &material, &mut model_images);
+        let cloud = par::generate(
+            &material,
+            count,
+            level.template_f32(&template.name, "elementsize").unwrap_or(0.0),
+            level.template_f32(&template.name, "range").unwrap_or(0.0),
+            level.template_f32(&template.name, "minsize").unwrap_or(0.0),
+            level.template_f32(&template.name, "pitchrange").unwrap_or(0.0),
+            level.template_f32(&template.name, "yawrange").unwrap_or(0.0),
+            typeflags,
+            cels,
+        );
         template_particle.insert(template.name.to_ascii_lowercase(), (cloud, cels));
     }
     if !template_particle.is_empty() {
@@ -15356,6 +15377,26 @@ fn to_image(mat: &tex::Material, palette: &tex::Palette) -> Image {
         rgba.extend_from_slice(&[r, g, b, 255]);
     }
     image_from_rgba(mat.width, mat.height, rgba)
+}
+
+/// Load an effect material (a sprite or particle) the way the sprite path does: key palette entry 0
+/// transparent, insert the keyed image, and report the material's own cel count. The count comes from
+/// the `.mat` header when the bitmap is missing or texture-less (`00teleport.mat`), because
+/// `rdParticle_Draw` bounds the element's cel against the header count.
+fn effect_material_cels(
+    gobs: &gob::GobSet,
+    palette: &tex::Palette,
+    material: &str,
+    model_images: &mut HashMap<String, Image>,
+) -> u32 {
+    let Some(data) = gobs.read(material) else { return 1 };
+    let header_cels = tex::material_header(&data).map(|(_, cels, _)| cels).unwrap_or(1);
+    let Some(bitmap) = tex::parse_mat(&data) else { return header_cels };
+    if !model_images.contains_key(material) {
+        let keyed = keyed_rgba(&bitmap, palette);
+        model_images.insert(material.to_string(), image_from_rgba(bitmap.width, bitmap.height, keyed));
+    }
+    bitmap.cels
 }
 
 fn image_from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Image {

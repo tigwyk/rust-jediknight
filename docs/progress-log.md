@@ -959,3 +959,13 @@ measured producer rather than on the handler: its damage branch runs on AI event
 executable does emit event 4 from the thing-collision callback, this build's actor walk raises no
 thing-vs-thing event. The same round corrected the old "nothing emits 2 or 4" inventory: events 2,
 4 and 0x200 all have emit sites in the executable, and this build produces none of them yet.
+
+## Generated particle clouds (round 253)
+
+The bulk of the shipped effect content is `type=particle` templates, not `.par` files, and
+`sithParticle_Initalize` generates their elements from the template's own numbers. The port now does
+the same: two uniform Euler angles (720° default spans), a radius in `[minsize, range]`, the
+`(0,1,0)` rotation, and the `typeflags & 4` cel choice, all through the existing particle draw path.
+Level 1 loads 24 generated clouds where it used to load one `.par` cloud. Suite 194; `--audit`
+35/35 clean; `--gates` 0 of 65 failed / 1 skipped; `--soak-all` 35/35 clean. The update arms
+(cel cycling and grow) and a captured frame of a generated cloud stay on the ledger.

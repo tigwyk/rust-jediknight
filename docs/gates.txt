@@ -2619,3 +2619,19 @@ running app.--carry-check --start 01narshadda                        0   level 2
   event-`4`-driven and event 4 is emitted by the thing-collision callback (`0x4ed24d`) this build
   does not raise. The round also corrected the event inventory: `2` (`0x4f2c05`) and `0x200`
   (`0x4ed203`) are emitted too, and only `1`/`0x100`/`0x400`/`0x800`/`0x1000` have producers here.
+
+## Update — round 253 (generated `type=particle` clouds)
+
+- `par::generate` implements `sithParticle_Initalize` (`0x4f1da0`): two uniform Euler angles (720°
+  default spans), a radius in `[minsize, range]`, the `(0,1,0)` rotation, and the `typeflags & 4`
+  random cel. A deterministic local LCG keeps the AI's random stream untouched.
+- The level loader's second pass turns every `type=particle` template into a cloud; level 1 now
+  reports **24 generated clouds** for 24 templates (was one `.par` cloud).
+- `cargo test --release`: **194 passed**, 0 failed (the new check is
+  `par::tests::a_generated_cloud_fills_its_authored_radius`).
+- `--gates` (headless): 0 of 65 failed, 1 skipped (`--live-check`); `--soak-all`: 35/35 clean;
+  `--audit`: 35/35 levels clean, 0 non-drawable models.
+- The port's 13 parity frames were re-captured and `compare.ps1 -Gate` still reads **6 thresholds,
+  0 failures**.
+- Still open (ledger): `sithParticle_Update`'s cel-cycling (`0x20`) and grow (`0x1`) arms, the
+  material's effect state, and a captured frame of a generated cloud.

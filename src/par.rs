@@ -114,9 +114,77 @@ pub fn parse(text: &str) -> Par {
     par
 }
 
+/// Build the cloud a `type=particle` template's own arguments describe.
+///
+/// `sithParticle_Initalize` (`0x4f1da0`) never reads a `.par` for these: it calls `rdParticle_New`
+/// with the template's `count`, `elementsize` and `material`, then fills `count` elements. Each gets
+/// three uniform numbers: two **Euler angles** (degrees) and a radius. The angle spans default to
+/// 720° when the template omits `pitchrange=`/`yawrange=` (the shipped templates omit both, so their
+/// clouds are spherical), and the radius is `minsize + rand * (range - minsize)`. The engine rotates
+/// the unit vector `(0,1,0)` by `(pitch, yaw, 0)` and scales it by that radius; with that input the
+/// rotation's second column is exactly `(-sin(yaw)cos(pitch), cos(yaw)cos(pitch), sin(pitch))`.
+///
+/// `typeflags & 4` gives every element a random material cel instead of `-1` (the engine's "use the
+/// material's own current cel"). The port's `-1` is clamped to cel 0 at draw, which is the same
+/// visible result for the single-cel effect materials shipped here.
+///
+/// The per-cloud RNG is local and seeded from the element count, not the shared `cog::pseudo_random`:
+/// loading a level must not consume the AI's random stream.
+#[allow(clippy::too_many_arguments)]
+pub fn generate(
+    material: &str,
+    count: u32,
+    elementsize: f32,
+    range: f32,
+    minsize: f32,
+    pitchrange: f32,
+    yawrange: f32,
+    typeflags: u32,
+    cels: u32,
+) -> Par {
+    let span = |value: f32| if value == 0.0 { 720.0 } else { value * 2.0 };
+    let pitch_span = span(pitchrange);
+    let yaw_span = span(yawrange);
+    let radial_span = (range - minsize).max(0.0);
+    let mut seed = 0x1234_5678u32 ^ count;
+    let mut next = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 8) as f32 / 16_777_216.0
+    };
+    let mut vertices = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let pitch = (next() - 0.5) * pitch_span;
+        let yaw = (next() - 0.5) * yaw_span;
+        let radius = minsize + next() * radial_span;
+        let (sp, cp) = pitch.to_radians().sin_cos();
+        let (sy, cy) = yaw.to_radians().sin_cos();
+        let cel = if typeflags & 4 != 0 && cels > 1 {
+            ((next() * cels as f32) as u32).min(cels - 1) as i32
+        } else {
+            -1
+        };
+        vertices.push(Vertex {
+            pos: [
+                -sy * cp * radius,
+                cy * cp * radius,
+                sp * radius,
+            ],
+            cel,
+        });
+    }
+    Par {
+        size: elementsize,
+        material: material.to_ascii_lowercase(),
+        lighting: 0,
+        radius: range,
+        insert: [0.0; 3],
+        vertices,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{generate, parse};
 
     /// The shipped `test.par` shape (`--asset test.par`): the header fields, comments, both vertex
     /// integer styles (`0` here, `0.000000` in `sphere.par`), and the tab-separated last column.
@@ -160,5 +228,38 @@ mod tests {
     fn a_cloud_with_no_elements_is_incomplete() {
         let par = parse("PAR 1.0\nSIZE .01\nMATERIAL test.mat\nRADIUS 1.0\nVERTICES 0\n");
         assert!(!par.is_complete());
+    }
+
+    /// `sithParticle_Initalize`'s generation: every element lies inside the authored `range` and
+    /// outside `minsize`, the default 720° angle spans reach both hemispheres, and `typeflags & 4`
+    /// picks a material cel (the shipped `+rpt_sparks` line: `range=0.04`, `elementsize=0.005`,
+    /// `count=24`, `typeflags=0x27`).
+    #[test]
+    fn a_generated_cloud_fills_its_authored_radius() {
+        let par = generate("Sparky.mat", 64, 0.005, 0.04, 0.0, 0.0, 0.0, 0x27, 1);
+        assert_eq!(par.vertices.len(), 64);
+        assert_eq!(par.material, "sparky.mat");
+        assert!((par.size - 0.005).abs() < 1e-6);
+        assert!((par.radius - 0.04).abs() < 1e-6);
+        let mut high = false;
+        let mut low = false;
+        for v in &par.vertices {
+            let r = (v.pos[0].powi(2) + v.pos[1].powi(2) + v.pos[2].powi(2)).sqrt();
+            assert!(r <= 0.04 + 1e-4, "element outside range: {r}");
+            high |= v.pos[2] > 0.01;
+            low |= v.pos[2] < -0.01;
+        }
+        assert!(high && low, "the default angle span did not reach both hemispheres");
+
+        let inner = generate("sparky.mat", 32, 0.005, 0.04, 0.02, 0.0, 0.0, 0x27, 1);
+        for v in &inner.vertices {
+            let r = (v.pos[0].powi(2) + v.pos[1].powi(2) + v.pos[2].powi(2)).sqrt();
+            assert!(r >= 0.02 - 1e-4, "element inside minsize: {r}");
+        }
+
+        let cels = generate("sparky.mat", 32, 0.005, 0.04, 0.0, 0.0, 0.0, 0x27, 4);
+        assert!(cels.vertices.iter().all(|v| (0..4).contains(&v.cel)));
+        let single = generate("sparky.mat", 8, 0.005, 0.04, 0.0, 0.0, 0.0, 0x20, 4);
+        assert!(single.vertices.iter().all(|v| v.cel == -1), "a cloud without bit 4 picked a cel");
     }
 }

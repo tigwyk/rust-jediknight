@@ -34,7 +34,7 @@ Nothing in `src/` answers these. Ordered by how much shipped content they gate.
 | --- | --- | --- | --- |
 | Networking and multiplayer | `sithDSS.c`, `sithDSSThing.c`, `sithDSSCog.c`, `sithMulti.c`, `sithComm.c`, `stdComm.c`, `jkGUIMultiplayer.c`, `jkGUINetHost.c`, `jkGUIMultiTally.c` | the whole thing: message streaming, thing replication, cog RPCs, host/join, tally screens. Zero socket code exists. | no `socket`/`UdpSocket`/`TcpStream` in `src/`. The single-player **answers** are now explicit (`ismulti`/`isserver` 0, no team, no score, `*multimodeflags` stored) and `sendtrigger` really broadcasts `trigger`, but only `sendmessageex` is left stubbed — it needs message *return values* |
 | Console and cvars | `sithConsole.c`, `sithCvar.c`, `sithCommand.c`, `jkQuakeConsole.c` | the `~` console, the cvar store, and the command dispatcher (`bind`, `set`, `map`, `quit`) | no matches for `cvar`, `sithCommand`, `sithConsole` |
-| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. **Sprites draw, with their real artwork and animation**: every template's `sprite=` is parsed (`spr.rs`), its `.mat` loads through the cel-table reader in `tex.rs` with palette entry 0 keyed transparent, `draw_created` spawns one billboarded quad per row and `billboard_sprites` faces it at the camera. The frames walk with the thing's life (`Runtime::sprite_cel`: `typeflags & 0x1` arms it, frame *k* holds for the *k*-th `life / cels` slice), which is what `sithExplosion_CreateThing` does through `sithSurface_sub_4F00A0`. **The `PAR 1.0` particle clouds parse now (round 238)**: `par.rs` reads the engine's order (`rdParticle_LoadEntry`, `0x46c230` — size, material, lighting mode, radius, insert offset, and the vertex/`cel` list) and `--audit` checks the install's three files (`sphere.par`/`sphere2.par`, the Force shield's clouds, and `test.par`: **3 clouds, 294 elements**). | the **renderer**: a `particle=` thing has no cloud drawn yet, and `sithParticle_Update`'s two arms (per-vertex cel cycling over the material's cels; the grow/scale arm on `thingFlags & 0x1`) are not run; `explosion` matches are class numbers and the damage path |
+| Particles and effects | `sithParticle.c`, `rdParticle.c`, `sithExplosion.c` (visual half) | effect and particle spawning. **Sprites draw, with their real artwork and animation**: every template's `sprite=` is parsed (`spr.rs`), its `.mat` loads through the cel-table reader in `tex.rs` with palette entry 0 keyed transparent, `draw_created` spawns one billboarded quad per row and `billboard_sprites` faces it at the camera. The frames walk with the thing's life (`Runtime::sprite_cel`: `typeflags & 0x1` arms it, frame *k* holds for the *k*-th `life / cels` slice), which is what `sithExplosion_CreateThing` does through `sithSurface_sub_4F00A0`. **The `PAR 1.0` particle clouds parse now (round 238)**: `par.rs` reads the engine's order (`rdParticle_LoadEntry`, `0x46c230` — size, material, lighting mode, radius, insert offset, and the vertex/`cel` list) and `--audit` checks the install's three files (`sphere.par`/`sphere2.par`, the Force shield's clouds, and `test.par`: **3 clouds, 294 elements**). | the **generated clouds are in (round 253)**: a `type=particle` template's `count`/`elementsize`/`range`/`minsize`/`pitchrange`/`yawrange`/`typeflags` are turned into vertices by `par::generate` (the engine's `sithParticle_Initalize`, `0x4f1da0`: two uniform Euler angles and a radius) and draw through the same `rdParticle_Draw` path a `.par` cloud does — level 1 now loads **24 generated clouds** (was 1 `.par`). What is still open: `sithParticle_Update`'s two arms (per-vertex cel cycling on `thingFlags & 0x20`; the grow/scale arm on `0x1`), the material's effect state beyond a keyed bitmap, and per-element velocity (the shipped `move=physics vel=` moves the owning thing, not its elements); `explosion` matches are class numbers and the damage path |
 | In-engine cutscene cameras | `jkCutscene.c`, `sithCamera.c` focus modes | **The focus models work**: seven camera slots, `SetCameraFocus(slot, thing)` + `SetCurrentCamera(slot)` move the view onto that thing (aimed by its own own yaw/pitch), `GetCameraMode`/`GetPrimaryFocus`/`GetSecondaryFocus` read back, and `SetPOVShake` adds the recoil offset that decays at its own rate. Level 17b's `17b_Camera.cog` cutscene runs end to end: the view cuts to `ghostCam`, and after the script's `Sleep(6.0)` it hands the view back to the player. | `CycleCamera`, `SetCameraZoom`, path-driven camera dollies beyond `PlayKey` (a camera on a `.key` track follows its thing but has no path timing of its own), and the secondary-focus framing |
 | Saber | `jkSaber.c` | `jkSetSaberInfo` stores the blade the scripts describe (two materials, hilt and tip radii, length, three spark templates) with the argument order pinned by a gate (`--pickup`); **and the player can use it**: `saber_swing` traces the blade `length * 10` level units along the player's facing with the hilt radius, damages what it reaches with `DAMAGE_SABER` (0x10), has a 0.45 s cooldown, and spends no ammo — `--hit` proves a hit at 0.8 units, no hit at 4, and the cooldown. The blade is also drawn as an emissive rod from the eye (`saber_blade`), and `jkDisableSaber`/`jkEnableSaber` switch it off and on (`saber_shown`, asserted by `--hit`) | the **swing animation**: `jkSaber.c` runs arcs, parries and the saber lock through `JKFLAG_SABEREXTEND`/`SABERRETRACT` and `cog_weap_saber.cog`'s `SetPuppet` calls, and this build neither plays those keyframes nor draws a hand to hold the hilt. The blade length is read as model units (x10, the `.3do` node scale) because the scripts pass 0.100 for a blade that must reach a body |
 | Arch lighting | `sithArchLighting.c` | **not reachable from the text format, checked:** `.jkl`'s THINGS section has no archlight column and SECTORS carries only `AMBIENT LIGHT`/`EXTRA LIGHT`/`COLORMAP`/`TINT`. The engine *computes* arch lights at load from the geometry (`sithArchLighting.c`), so porting this means re-deriving them, not reading a field | the computation itself: per-surface colour contribution accumulated into each thing's `light`, which is what gives Jedi levels their coloured bounce. The sector ambient/extra light and the thing-light sum are already there to build on |
@@ -6789,3 +6789,40 @@ checks were also re-run this round: `compare.ps1 -Gate` **6 thresholds, 0 failur
 reference was re-captured correctly (the previous fixture had been taken with `-StartLevel 3`, so it
 held level 3's pose and scored 0.18; the real level-1 frame scores 0.66), and `trace-gate.ps1` **12
 legs, 1 tracked failure** (`walk5_spawn`, the floor-search-scope ledger row).
+
+## Update — round 253 (the generated `type=particle` clouds)
+
+The shipped effect content is mostly **generated** clouds, not `.par` files: `+sparks`, `+whitecloud`,
+`+smoke`, `+force_heal`, `+sspks_*` and the rest carry `type=particle` plus `material=`, `count=`,
+`elementsize=`, `range=` and `rate=`. `sithParticle_ParseArg` (`0x4f1a60`) maps the template tokens —
+`typeflags` 0x16, `maxthrust` 0x18 (the grow rate), `range` 0x27, `material` 0x2c, `rate` 0x2d,
+`count` 0x2e, `elementsize` 0x2f, `minsize` 0x41, `pitchrange` 0x42, `yawrange` 0x43 — and
+`sithParticle_Initalize` (`0x4f1da0`) fills `count` elements. The generation, recovered from that
+function and its constants:
+
+- two uniform angles from `±pitchrange` and `±yawrange`, **720° when the template omits them** (every
+  shipped template does, so the clouds are spherical), and a radius from `minsize + rand*(range -
+  minsize)`;
+- the engine rotates the unit vector `(0,1,0)` by `(pitch, yaw, 0)` and scales it by that radius; for
+  that input the rotation's second column is `(-sin(yaw)cos(pitch), cos(yaw)cos(pitch), sin(pitch))`,
+  which is what `par::generate` emits;
+- `typeflags & 4` gives each element a random cel in the material, otherwise `-1` (the draw path clamps
+  it to cel 0, which is the same picture for the single-cel effect materials here);
+- `elementsize` is the drawn quad's edge, and `count` is the element count.
+
+`par::generate` is a deterministic local LCG (seeded from the count), not `cog::pseudo_random`, so
+loading a level cannot shift the AI's random stream. The loader now runs a second pass for
+`type=particle` templates and feeds the generated cloud through the same `template_particle` map and
+`rdParticle_Draw`-shaped draw path the three `.par` files already used. Measured: level 1 loads **24
+generated clouds** for 24 templates (was one `.par` cloud); `--audit` stays **35/35 clean, 0
+non-drawable models**, `--soak-all` **35/35** with 0 non-finite/0 outside, and `--gates` **0 of 65
+failed, 1 skipped**. The port's 13 parity frames were re-captured after the change and `compare.ps1
+-Gate` still reads **6 thresholds, 0 failures**. The new check is `par::tests::a_generated_cloud_fills_its_authored_radius`: every
+element inside `range` and outside `minsize`, both hemispheres reached, and the cel bit honoured;
+suite **193 → 194**.
+
+Still open in this area, and on the ledger: `sithParticle_Update`'s cel-cycling (`typeflags & 0x20`,
+which advances each element's cel over the material's cels with the cloud's `maxthrust`-driven clock)
+and grow arm (`typeflags & 0x1`, which scales the cloud's matrix from the element rate), the material's
+own effect state beyond a keyed bitmap, and a captured frame of a generated cloud (the draw arm is
+shared with the already-verified `.par` path, but no generated cloud has been photographed yet).

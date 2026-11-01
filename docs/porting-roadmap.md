@@ -135,6 +135,7 @@ partials is still to be written; these are the entries this round created or mea
 | `forcepowers` on non-player actors | **ported (round 252)**: the class line's three `(range, chance, cooldown)` triples select ability 1–3 from one `rand/32768` draw, and the actor's own scripts get `user0` with `(victim id, ability)` through the same thing-message path `sithCog_ThingSendMessageEx` uses. What still differs: the message is queued on every instance bound to the thing (the engine's two slots plus mask subscribers), and whether a power actually happens depends on the shipped `darkjedi_*.cog`'s own `okay`/health gates — `yun`'s `user0` returns until `07_Rahnlines.cog` sends `user1` | `forcepowers_queues_user0_on_the_actors_script` and the class-line rule test; a live level-7 run still needs the level's own script hand-off | a level-7 capture at the arena where Yun's `user0` visibly fires, or the AI-side gate when `--level` can be driven through a probe |
 | `saberfighting` on non-player actors | **ported (round 252)**: the 500 ms clock, `fltArg[0]` chance, the four `(range, damage, cooldown)` entries walked in order, AI flag `0x400`, puppet mode and `DAMAGE_SABER` damage. Unrecovered: `jkSaber_Enable`'s argument order (the port does not call it), the `PlayModeFirst` sound id (`entry + 0x47`) and track fade, and the target-typeflag `0x202` saber-lock branch; the port also skips the puppet mode's visual clip | `saberfighting_hurts_the_target_and_honours_the_cooldown`; the handler's disassembly pins the ranges/damage/cooldowns against `yun.ai`/`sariss.ai` | the saber engine (`jkSaber.c` swing arcs) lands, or a retail frame at a dark Jedi duel pins the animation/sound |
 | AI events 2/4/0x200 | **not produced (round 252 correction)**: the executable emits `2` (`0x4f2c05`), `4` (`0x4ed24d`/`0x4ed269`, the thing-collision callback) and `0x200` (`0x4ed203`); this build's dispatcher raises only `1`, `0x100`, `0x400`, `0x800`, `0x1000`, so `specialattack`'s attack branch and the handlers' event-2/event-4 arms cannot run | the emit sites are in the disassembly; no port event is raised by actor movement or awareness | the actor-collision sweep emits event 4 (and awareness emits 2) at the engine's sites |
+| generated `type=particle` clouds | **ported (round 253)**: `sithParticle_Initalize` (`0x4f1da0`) generates `count` elements from two uniform Euler angles (720° default spans) and a radius in `[minsize, range]`, with a random material cel when `typeflags & 4`; the port feeds them through the same `template_particle` draw path a `.par` cloud uses. What differs: `sithParticle_Update`'s cel-cycling (`0x20`) and grow (`0x1`) arms do not run, so a cloud is static; the per-element material effect state beyond a keyed bitmap is not modelled; and the element RNG is a local LCG rather than the engine's global stream | `par::tests::a_generated_cloud_fills_its_authored_radius`; level 1's loader now reports **24** generated clouds, and `--audit`/`--soak-all` stay clean | the update arms land (`sithParticle_Update`) and a frame at a known explosion age pins the drawn cels/scale |
 
 ## Phases
 
@@ -527,13 +528,15 @@ Only now take the remaining units from `gaps.md`, ordered by how many shipped le
 them (its §5 already ranks them): particles and effects, saber and force-power fidelity, aim joints,
 track things, scope, ending screens. Each follows the porting loop above and enters at a tier.
 
-*Progress (round 252).* **Saber and force-power fidelity on non-player actors is in**: `forcepowers` and
-`saberfighting` (45 loadable classes each) are ported from `0x40ff40`/`0x40fa40` and enter at T1 with
-unit + live-runtime evidence (`docs/gaps.md` round 252). The remaining breadth list, in weight order:
-the generated `type=particle` systems (the shipped `material=`/`rate=`/`elementsize=` families — the bulk
-of effect content; the `PAR 1.0` clouds' data and draw path are already in), aim joints, track things'
-per-frame timings, the scope overlay, the ending screens, and the actor-collision event that unblocks
-`specialattack` and the event-2/event-4 handler arms. None is an exit criterion for Phase 1/2.
+*Progress (rounds 252–253).* **Saber and force-power fidelity on non-player actors is in**: `forcepowers`
+and `saberfighting` (45 loadable classes each) are ported from `0x40ff40`/`0x40fa40` and enter at T1 with
+unit + live-runtime evidence (`docs/gaps.md` round 252). **The generated `type=particle` clouds are in**
+(round 253): `sithParticle_Initalize`'s `count`/`elementsize`/`range`/`minsize`/`pitchrange`/`yawrange`
+generation draws through the existing particle path — level 1 loads **24** generated clouds (was one
+`.par`). The remaining breadth list, in weight order: aim joints, track things' per-frame timings, the
+scope overlay, the ending screens, the particle update arms (cel cycling/grow), and the actor-collision
+event that unblocks `specialattack` and the event-2/event-4 handler arms. None is an exit criterion for
+Phase 1/2.
 
 ### Phase 4 — Ship
 
@@ -545,7 +548,7 @@ taken without driving the game is green, the three QA-window checks were run, an
 
 | check | command | last measured |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --release` | **193 passed**, 0 failed |
+| unit + integration suite | `cargo test --release` | **194 passed**, 0 failed |
 | port gates (headless sweep) | `BK_SKIP_WINDOW=1 BK_MUTE=1 bevi-knight --gates` | **0 of 65 failed, 1 skipped** (`--live-check`); the **windowed** sweep was **65 of 65, 0 skipped** this round |
 | every level's runtime | `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5 bevi-knight --soak-all` | **35 of 35 levels**, 0 non-finite positions, 0 bodies outside every sector |
 | drop-in asset coverage | `bevi-knight --audit` | **35/35 levels clean**, 0 non-drawable models, 10 unresolved asset references (retail data gaps), 54 undecoded files (cutscenes and sound; intentionally out of scope) |
@@ -558,7 +561,7 @@ taken without driving the game is green, the three QA-window checks were run, an
 What the windowless method has closed: Phase 0 and **0.5 (trace v0, done)**, Phase 1's **step 1** (body, attachments,
 camera) and **step 6** (level start, tally, transition carry, retail's autosaves as the fixture), the **whole AI event
 dispatcher and 21 of the 22 loadable instinct names** (`forcepowers` and `saberfighting` landed in round 252; the
-last, `specialattack`, waits on the thing-collision event), the gravity family for shipped physics goods, the `PAR 1.0` clouds' data **and** draw path, both
+last, `specialattack`, waits on the thing-collision event), the gravity family for shipped physics goods, the `PAR 1.0` clouds' data **and** draw path and the generated `type=particle` clouds, both
 `--soak`/`--soak-all` and `--gates` as headless nets, and the retail-derived constants for detection, `dodge`, `talk`,
 `jump`, `lobfire` and the movement code.
 
@@ -570,10 +573,9 @@ What still blocks Phase 4, in the roadmap's own order:
    Phase 2's per-level trace generalisation.
 2. **Phase 1 step 4's exit** (a cog state trace at each trigger) — same window: it needs a retail capture to compare
    against; the port-side trigger paths are all headless-tested, but "matches retail" is a retail measurement.
-3. **Phase 3 breadth remainder** (shipped-content order, all ledgered): the generated `type=particle` systems
-   (`material=`/`rate=`/`elementsize=` families — the bulk of shipped effect content); aim joints; track things' own
-   per-frame timings; scope; ending screens; and the actor-collision event that unblocks `specialattack` and the
-   event-2/event-4 arms. None of these is an exit criterion for the phases before it.
+3. **Phase 3 breadth remainder** (shipped-content order, all ledgered): the particle update arms (cel cycling and
+   grow), aim joints, track things' own per-frame timings, scope, ending screens, and the actor-collision event that
+   unblocks `specialattack` and the event-2/event-4 arms. None of these is an exit criterion for the phases before it.
 4. **`walk5_spawn`** — the one tracked walk-trace failure, a floor-search scope deviation with its retire condition on
    the ledger; it is part of (1).
 
