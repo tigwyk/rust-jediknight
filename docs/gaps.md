@@ -7048,3 +7048,17 @@ handler's return. **22 of 22 loadable instincts are now implemented.** The devia
 source, not the handler: proximity instead of `SearchForCollisions` (ledgered).
 
 Measured: suite **201 → 202**; `--gates` and `--soak-all` re-run below.
+
+## Update — round 265 (free-path track things at load: none moving)
+
+`sithTrackThing_Tick` (`0x4faf00`) has two motion branches on `thing->flags`: bit `2` is the free path
+(speed `[0x89]`, angular velocity `[0x8d..0x8f]`, `MoveThing` with collision), bit `1` is the
+frame-list path, and `0x80` is `PathMovePause`. The port's `ThingState::step` implements the frame
+list and pause. The free path is **not started by any shipped level at load**: `--things` over all 25
+single-player `.jkl` files reports **0 moving** in every one (level 1: 22 on a keyframe path, 105 with
+flags, 0 moving). So the missing `trackParams` interpolation is latent content — a script could start a
+free path, but none does before the first tick. The gap row stays as a latent branch rather than a
+shipped-level difference; the probe that would show it is `--things` plus a script starting
+`SetThingTrack`/`PathMove`.
+
+No behavior change; suite 202, gates/soak unchanged.
