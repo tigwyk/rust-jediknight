@@ -17,6 +17,9 @@ param(
   # input, so a leg that starts after the opening settles for this window first. The trace's `held_ms`
   # starts at 0 after it, and `port-trace.ps1` takes the same value from the row's optional 8th column.
   [int]$WalkTraceSettleMs = 0,
+  # Capture a walk leg even when the headless preflight says the body cannot advance from the pose
+  # (`tools/parity/walk-preflight.ps1`). Not recommended: a blocked leg parks the game against a wall.
+  [switch]$ForceWalk,
   # Row names to run (default: every row of the shots file). A trace run uses one row.
   [string[]]$Only = @(),
   # Retained raw frame(s) to run the world-box detector on instead of capturing anything, e.g.
@@ -222,8 +225,40 @@ $plr = Join-Path $Destination 'player\Lee\Lee.plr'
 }
 
 function Assert-NoConflictingEngine {
-  if (Get-Process -Name 'JK' -ErrorAction SilentlyContinue) {
-    throw 'JK.EXE is already running. Close it before running the retail capture harness (only one engine at a time).'
+  # A previous run of **this harness** can be interrupted (operator Ctrl+C, a tool timeout, a crashed
+  # shell) and leave its scratch-copy JK.EXE running — the operator then has to close it by hand, which is
+  # exactly what happened in round 250. The scratch copy is disposable, so a leftover process whose
+  # executable lives under `$WorkCopy` is ours to close; anything else is a foreground game session and the
+  # harness still refuses to fight it.
+  $jk = @(Get-Process -Name 'JK' -ErrorAction SilentlyContinue)
+  if ($jk.Count -gt 0) {
+    $ours = @()
+    $foreign = @()
+    foreach ($p in $jk) {
+      $path = $null
+      try { $path = $p.Path } catch { $path = $null }
+      if ($path -and $path.StartsWith($WorkCopy, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $ours += $p
+      } else {
+        $foreign += $p
+      }
+    }
+    if ($ours.Count -gt 0) {
+      Log ("leftover scratch-copy JK.EXE from an interrupted run: pid={0}; closing it now (the install copy is disposable)" -f (($ours | ForEach-Object { $_.Id }) -join ','))
+      foreach ($p in $ours) {
+        try {
+          $null = $p.CloseMainWindow()
+          if (-not $p.WaitForExit(5000)) { $p.Kill(); $null = $p.WaitForExit(5000) }
+          Log ("leftover JK.EXE pid={0} closed" -f $p.Id)
+        } catch {
+          Log ("could not close leftover JK.EXE pid={0}: {1}" -f $p.Id, $_.Exception.Message)
+        }
+      }
+      Start-Sleep -Milliseconds 500
+    }
+    if ($foreign.Count -gt 0) {
+      throw ("JK.EXE is already running (pid={0}) and is not this harness's scratch copy. Close it before running the retail capture harness (only one engine at a time)." -f (($foreign | ForEach-Object { $_.Id }) -join ','))
+    }
   }
   $port = Get-Process -Name 'bevi-knight' -ErrorAction SilentlyContinue
   if ($port) {
@@ -463,6 +498,13 @@ function Invoke-JkWalkTrace {
   # segment let the body coast down between segments and read as if it had stopped. The poll itself
   # pauses the game (the console is a dialog), so holding through it costs nothing.
   Send-JkKeyDown -Name $Key
+  # **Stuck detection.** A walk leg whose forward route runs into geometry does not error: the body
+  # stops, the harness keeps holding the key for the rest of the segments, and the operator is left
+  # watching a game parked against a wall (round 250: this happened repeatedly and had to be closed by
+  # hand). Two consecutive segments with under 0.02 units of horizontal movement is a wall, not a walk —
+  # throw so the row's `finally` closes the game and the run stops.
+  $previous = @([double]$start.Pos[0], [double]$start.Pos[1])
+  $still = 0
   try {
     for ($i = 1; $i -le $segments; $i++) {
       # Foreground matters: DirectInput reads the keyboard only while the game window is active, and
@@ -488,6 +530,15 @@ function Invoke-JkWalkTrace {
       $samples++
       $lines.Add((@($held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $sample.Pyr[1]) -join ([char]9)))
       Log ("walk trace: {0} ms held at ({1:N3}, {2:N3}, {3:N3}) sector {4}" -f $held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector)
+      # Stuck detection (see the comment above the hold loop): a body against a wall has not moved.
+      $dx = [double]$sample.Pos[0] - $previous[0]
+      $dy = [double]$sample.Pos[1] - $previous[1]
+      $previous = @([double]$sample.Pos[0], [double]$sample.Pos[1])
+      if ([math]::Sqrt($dx * $dx + $dy * $dy) -lt 0.02) { $still++ } else { $still = 0 }
+      if ($still -ge 2) {
+        Log ("walk trace: STUCK at ({0:N3}, {1:N3}, {2:N3}) sector {3} after {4} ms of held forward" -f $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $held)
+        throw ("walk leg '$Name' is stuck: two segments of held forward moved it less than 0.02 units, so the route walks into geometry. Aborting this leg and closing the game; run tools/parity/walk-preflight.ps1 before capturing it again.")
+      }
       # Do **not** re-press here: the next iteration activates the window (sleeping up to a second
       # while the engine runs), and a key left down over that sleep moves the body outside the measured
       # segments - which is what made the first traces read 1.5 u/s against a 0.875 u/s rule.
@@ -1279,6 +1330,29 @@ $selected = if ($Only.Count -gt 0) {
 } else { $rows }
 if ($selected.Count -eq 0) { throw ("-Only matched no row; the shots file has: " + (($rows | ForEach-Object { $_.Name }) -join ', ')) }
 Log ("selected rows: " + (($selected | ForEach-Object { $_.Name }) -join ', '))
+
+# Walk legs are preflighted first (round 251): a leg whose forward route walks into geometry parks the
+# game at the wall and leaves the operator to close it, which is what made the round-250 QA runs useless.
+# The preflight is the port's own **headless** walk (`--walk --warp`): no window and no retail launch.
+if ($WalkTraceMs -gt 0) {
+  $legNames = @($selected | ForEach-Object { $_.Name })
+  $onlyList = ($legNames | ForEach-Object { "'$_'" }) -join ','
+  Log ("walk preflight for {0} leg(s): {1}" -f $legNames.Count, ($legNames -join ', '))
+  $pre = & pwsh -NoProfile -Command "& 'tools/parity/walk-preflight.ps1' -Only @($onlyList)" *>&1
+  $blockedLegs = @()
+  foreach ($line in $pre) {
+    if ("$line" -match '^walk-preflight\t(\S+)\tFAIL') { $blockedLegs += $Matches[1] }
+  }
+  if ($blockedLegs.Count -gt 0) {
+    Log ("walk preflight: blocked leg(s) — the body cannot advance from the pose: {0}" -f ($blockedLegs -join ', '))
+    if (-not $ForceWalk) {
+      throw ("refusing to capture walk leg(s) {0}: the port's own walk cannot advance from the pose (see tools/parity/walk-preflight.ps1). Fix the pose/heading in walk-shots.tsv, drop the leg, or pass -ForceWalk." -f ($blockedLegs -join ', '))
+    }
+    Log 'walk preflight: -ForceWalk set; capturing the blocked leg(s) anyway'
+  } else {
+    Log 'walk preflight: every selected leg moves in the port'
+  }
+}
 
 foreach ($row in $selected) {
   try {

@@ -41,6 +41,36 @@ Set-Location (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $TraceDir = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'target/parity/trace'
 New-Item -ItemType Directory -Force -Path $TraceDir | Out-Null
 $FixtureDir = Join-Path $PSScriptRoot 'walktrace'
+
+# **Walkability preflight, before any capture or comparison.** A leg whose route walks straight into
+# geometry measures nothing: the retail game holds forward into a wall, the operator has to watch it, and
+# the trace is noise. `walk-preflight.ps1` walks each leg through the port's own collision (headless
+# `--walk --warp`) and fails the ones whose body cannot advance; those are excluded here, loudly, and are
+# never sent to the retail harness. This is what stops the QA window being spent on unusable legs (round
+# 251 — three of the default 15 do not move in the port).
+$failed = 0
+# `-File` binds a list as one string, so the array goes through `-Command` (the same reason the other
+# harness scripts use it for `-Only`).
+$onlyList = ($Only | ForEach-Object { "'$_'" }) -join ','
+$preflight = & pwsh -NoProfile -Command "& 'tools/parity/walk-preflight.ps1' -Only @($onlyList)" *>&1
+$walkable = New-Object System.Collections.Generic.List[string]
+$blocked = New-Object System.Collections.Generic.List[string]
+foreach ($line in $preflight) {
+  $text = "$line"
+  if ($text -match '^walk-preflight\t(\S+)\t(PASS|FAIL)') {
+    if ($Matches[2] -eq 'PASS') { $walkable.Add($Matches[1]) } else { $blocked.Add($Matches[1]) }
+  }
+}
+if ($blocked.Count -gt 0) {
+  Write-Host ("preflight: excluding {0} leg(s) whose route walks into geometry: {1}" -f $blocked.Count, ($blocked -join ', '))
+  Write-Host 'preflight: fix the pose/heading in walk-shots.tsv (or drop the leg) before capturing it again.'
+}
+if ($walkable.Count -eq 0) {
+  Write-Host 'FAIL  every requested walk leg is blocked in the port; nothing to capture or compare'
+  exit 1
+}
+$Only = @($walkable)
+
 foreach ($leg in $Only) {
   $live = Join-Path $TraceDir ("{0}-walk.tsv" -f $leg)
   $fixture = Join-Path $FixtureDir ("{0}-walk.tsv" -f $leg)
@@ -55,9 +85,8 @@ foreach ($leg in $Only) {
 }
 
 Write-Host 'recording port traces...'
-& pwsh -NoProfile -File tools/parity/port-trace.ps1 2>&1 | Out-Null
+& pwsh -NoProfile -Command "& 'tools/parity/port-trace.ps1' -Only @($onlyList)" 2>&1 | Out-Null
 
-$failed = 0
 foreach ($leg in $Only) {
   $output = & pwsh -NoProfile -File tools/parity/trace-compare.ps1 -Name $leg 2>&1
   $travel = $output | Select-String -Pattern 'travel over .*: retail ([0-9.]+) units \([0-9.]+ u/s\), port ([0-9.]+) units'

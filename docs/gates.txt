@@ -2582,3 +2582,17 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - The headless-mode attempt was reverted rather than shipped; the walk-trace gate stays a windowed capture and its
   QA-window row stands. Probe traces/screenshots were cleaned from `target/parity/trace/`. Suite **189 passed**, docs
   **132/132**; no window opened and no retail run.
+## Update — round 251
+
+- **The walk-trace QA workflow was fixed at the root.** Its last captures were useless (the operator had to close
+  `JK.EXE` ~20 times): three causes, each now handled.
+  - New `tools/parity/walk-preflight.ps1`: headless `--walk --warp` per leg (the `--walk` probe now takes the warp pose).
+    Measured: **22 of 32 legs walk**, 10 do not; in the gate's default 15, `walk_door0` (0.14 units), `walk19_spawn`
+    (0.00) and `walk26_spawn` (0.42) are walls. `trace-gate.ps1` runs the preflight first and excludes blocked legs from
+    capture and comparison; `retail-capture.ps1` refuses a blocked leg unless `-ForceWalk`.
+  - `Invoke-JkWalkTrace` now detects a stuck body: two consecutive segments with under 0.02 units of horizontal movement
+    throw with the position, so the row's `finally` closes the game instead of leaving it held against a wall.
+  - `Assert-NoConflictingEngine` closes a leftover scratch-copy `JK.EXE` from an interrupted run automatically (a foreign
+    JK.EXE is still refused), and new `tools/parity/retail-cleanup.ps1` does the same by hand.
+- No window opened and no retail run this round; both port runs used the headless walk probe. Suite **189 passed**
+  (unchanged), docs **132/132**.

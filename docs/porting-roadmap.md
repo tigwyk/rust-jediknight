@@ -378,7 +378,10 @@ repo so regressions are caught without a retail run.
 *Progress (rounds 153–231).* The walk-trace gate stands at **15 legs, 1 tracked failure**: `walk5_spawn` at 3.43 of
 retail's 3.73 units (92 %, 5 sector mismatches), the "floor-search scope" deviation the ledger names with its retire
 condition; the other 14 legs pass. At the last windowed run `--gates` was **65/65, 0 skipped** and the parity draw gate
-**6 thresholds / 0 failures**. Everything still unmeasurable is listed in "The QA window" below — it is the single list
+**6 thresholds / 0 failures**. `walk-preflight.ps1` (round 251) then walked every leg through the port's own collision:
+**10 of 32 legs cannot advance at all**, including three of that 15-leg set (`walk_door0`, `walk19_spawn`,
+`walk26_spawn`) — their captures were noise, and they are now excluded before a capture runs. Everything still
+unmeasurable is listed in "The QA window" below — it is the single list
 of what a real-game session would settle, in the order a release candidate needs it.
 
 *Progress (round 245).* Both all-content checks were re-run **headless**: `--soak-all` is **35 of 35 levels clean**
@@ -468,12 +471,16 @@ Run, in order, from the repo root with `pwsh`:
 | check | command | last measured | expected |
 | --- | --- | --- | --- |
 | port gates | `cargo build --release` then `target/release/bevi-knight.exe --gates` | **0 of 65 failed, 1 skipped** in a `BK_SKIP_WINDOW=1` sweep (round 245: 55 rows `headless pass`, 9 `window pass`, `--live-check` skipped); last windowed run 65/65, 0 skipped | all pass |
-| walk trace | `powershell -NoProfile -File tools/parity/trace-gate.ps1` | 15 legs, 1 failure | 14 pass, `walk5_spawn` tracked |
+| walk trace | `pwsh -NoProfile -File tools/parity/walk-preflight.ps1` first, then `pwsh -NoProfile -File tools/parity/trace-gate.ps1` | **preflight: 22 of 32 legs walkable, 10 blocked** (round 251); of the gate's default 15, three are blocked (`walk_door0`, `walk19_spawn`, `walk26_spawn`) and the gate now **excludes them automatically**. The last windowed comparison (15 legs, 1 failure) included those unusable legs | preflight passes for every captured leg; the comparison then runs on **12 legs** with only `walk5_spawn` tracked |
 | parity draw | `tools/parity/retail-capture.ps1`, `port-capture.ps1`, then `compare.ps1 -Gate` | 6 thresholds, 0 failures | 0 failures |
 
 What the session settles, all of it already on the deviation ledger with its retire condition:
 
 - **`walk5_spawn`** — the floor-search scope on level 5's gutter; the gate leg is the fixture (14 of 15 pass).
+  **Round 251 correction: three of the gate's default legs (`walk_door0`, `walk19_spawn`, `walk26_spawn`) do not
+  move in the port at all — their poses walk into geometry — so their captures were never measuring a walk. The
+  gate now preflights every leg with `walk-preflight.ps1` (headless `--walk --warp`) and excludes the blocked ones;
+  a stuck leg aborts with a clear error instead of being held against the wall.**
 - **`opendoors`** — the port uses the 1.5-unit use reach and a look cone where the engine sweeps the actor's body
   radius; walk an actor at a closed door and compare which door it opens.
 - **`blindfire`** — the chance is rolled per shot slot, not on the engine's own tick.
@@ -500,7 +507,12 @@ What the session settles, all of it already on the deviation ledger with its ret
 Safety and recovery: the retail harness never touches the real install — it copies it to `target/parity/retailcopy/`
 and records the desktop display modes to `target/parity/display-pre.json` before it starts. Keep hands off the mouse and
 keyboard while a capture runs; both harnesses drive synthetic input. The port side opens a window per shot and closes it
-itself.
+itself. **Recovery rules (round 251):** a walk leg that stops moving aborts the harness after two segments with under
+0.02 units of travel (so it can never sit against a wall), the walk legs are preflighted headlessly before any capture,
+and `retail-capture.ps1` now closes a leftover scratch-copy `JK.EXE` from an interrupted run automatically at startup
+instead of refusing to continue; `pwsh -NoProfile -File tools/parity/retail-cleanup.ps1` does the same by hand and
+leaves a real, foreground game alone. If the desktop is left in 640×480, `tools/parity/restore-display.ps1` restores
+the saved baseline.
 
 ### Phase 3 — Breadth, by shipped-content weight
 

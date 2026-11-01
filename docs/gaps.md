@@ -6706,3 +6706,31 @@ So the walk-trace gate **stays a windowed capture**; the tooling change that off
 than shipped misleading numbers. The finding is the useful part: the QA-window list's walk-trace row is not a missing
 convenience — it is the only way the comparison is a movement measurement. No code or tool change remains from this
 experiment; `target/parity/trace/` was cleaned of the probe files.
+## Update — round 251 (the QA window's walk trace was wasted: blocked legs, a hung harness, and a stuck game)
+
+The QA session's walk-trace captures were useless and left the operator closing `JK.EXE` by hand about twenty times. Three
+separate causes, all measured and fixed:
+
+1. **The legs were never walkable.** `walk-preflight.ps1` (new) runs the port's own headless walk probe
+   (`--start <level> --walk 90 --warp x,y,z,yaw`, which resolves against the level's collision and opens no window) for
+   every leg. Result: **22 of 32 legs walk; 10 do not** — their body advances under 0.5 units in 3 s with 80–90 blocked
+   frames. In the gate's default 15-leg set, **`walk_door0` (0.14 units), `walk19_spawn` (0.00) and `walk26_spawn`
+   (0.42)** are walls, not walks; their retail fixtures also recorded ~0 units, so comparing them measured nothing. The
+   gate now runs the preflight first and **excludes blocked legs, loudly**, so the retail harness is never asked to walk
+   them.
+2. **The harness had no stuck detection.** Holding forward into a wall never errored: the loop kept stepping segments and
+   polled `coords` between them, so the game sat against geometry until the operator closed it. `Invoke-JkWalkTrace` now
+   tracks horizontal movement per segment and **throws after two consecutive segments under 0.02 units**, with the
+   position and a message pointing at the preflight; the row's `finally` closes the game, so a bad leg cannot hang the
+   run. `retail-capture.ps1` also refuses a selected walk leg that the preflight marks blocked unless `-ForceWalk` is
+   passed.
+3. **An interrupted run left the scratch copy running.** The harness could be interrupted from outside (Ctrl+C, a tool
+   timeout, a dead shell), and its `finally` then never ran — the operator had to close `JK.EXE` by hand. Now
+   `Assert-NoConflictingEngine` recognises a leftover `JK.EXE` whose executable lives under the disposable work copy
+   (`target/parity/retailcopy`) and **closes it automatically** at the next start; a JK.EXE from anywhere else is still
+   refused as before. `tools/parity/retail-cleanup.ps1` is the same cleanup as a one-liner, and
+   `tools/parity/restore-display.ps1` remains the display recovery.
+
+No window was opened and no retail run happened in this round: the preflight is headless, the fixes are harness logic, and
+the walk-trace row in the QA table now states the preflight requirement and the 12-leg comparison instead of the
+meaningless 15. The gate's `-Only` array is also passed with the `-Command` form now (a `-File` list binds as one string).

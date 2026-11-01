@@ -10237,7 +10237,7 @@ fn main() {
             let (mut best, mut any_fall, mut sum, mut runs, mut undone) = (0.0f32, false, 0.0f32, 0usize, 0usize);
             for heading in 0..HEADINGS {
                 let turn = heading as f32 * std::f32::consts::TAU / HEADINGS as f32;
-                let Some(r) = walk_level(&level, 180, true, turn) else { continue };
+                let Some(r) = walk_level(&level, 180, true, turn, None) else { continue };
                 runs += 1;
                 sum += r.travelled;
                 best = best.max(r.travelled);
@@ -10283,7 +10283,20 @@ fn main() {
     if let Some(walk) = walk {
         match walk {
             Walk::Frames(frames) => {
-                walk_level(&world.level, frames, false, 0.0);
+                // `--warp` with `--walk` preflights one walk-trace leg: does the body actually move
+                // forward from that pose, or is the route a wall? (The QA window's walk capture is only
+                // worth running on a leg that passes this.)
+                match walk_level(&world.level, frames, false, 0.0, warp) {
+                    Some(result) => println!(
+                        "walk: travelled {:.2} units, {} blocked frame(s), {} sector transition(s), contained {}, hull {}",
+                        result.travelled,
+                        result.blocked,
+                        result.transitions,
+                        result.contained,
+                        result.in_hull
+                    ),
+                    None => println!("walk: the start pose is outside every sector"),
+                }
             }
             // Twenty seconds a level, not two: at the body's real size a two-second walk stays inside
             // the room it started in, so it never crossed a portal and the sweep stopped exercising
@@ -14291,7 +14304,13 @@ fn attaches_to_floor(solids: &collide::Solids, pos: [f32; 3], radius: f32) -> bo
 /// "forward" for the requested number of frames, resolving against the sector's solid
 /// surfaces each step. A level whose geometry and sector table disagree shows up here
 /// as a walker that leaves its sector, or one that never stops against a wall.
-fn walk_level(level: &jkl::Level, frames: u32, quiet: bool, turn: f32) -> Option<WalkResult> {
+fn walk_level(
+    level: &jkl::Level,
+    frames: u32,
+    quiet: bool,
+    turn: f32,
+    start_at: Option<([f32; 3], f32)>,
+) -> Option<WalkResult> {
     // Same rules as the window: the sweep is only meaningful if it walks the same way.
     let rules = Rules::from_level(level);
     let (radius, speed) = (rules.radius, rules.walk);
@@ -14309,19 +14328,28 @@ fn walk_level(level: &jkl::Level, frames: u32, quiet: bool, turn: f32) -> Option
         );
     }
 
+    // `--warp` on `--walk`: start from the given pose instead of the level's own walkplayer start, so
+    // the walk-trace legs can be preflighted headlessly. The warp pose replaces the spawn, so the
+    // recorded sector field (the spawn's) does not apply and the hull supplies it.
     let player = level.things.iter().find(|t| t.template.eq_ignore_ascii_case("walkplayer"))?;
-    let mut pos = [player.pos[0], player.pos[1], player.pos[2] + EYE];
-    // The level's own record of which sector the player starts in is the engine's answer, and the
-    // engine trusts it verbatim: `sithThing_SetSector` is called with it at load. Re-deriving it from
-    // the hull picks a trigger sliver, so the file's field wins and the hull is only the fallback.
-    let recorded = usize::try_from(player.sector).ok().filter(|s| *s < solids.sectors.len());
+    let (base, yaw_deg, recorded) = match start_at {
+        Some((p, yaw)) => (p, yaw, None),
+        None => (
+            player.pos,
+            player.yaw,
+            usize::try_from(player.sector)
+                .ok()
+                .filter(|s| *s < solids.sectors.len()),
+        ),
+    };
+    let mut pos = [base[0], base[1], base[2] + EYE];
     let Some(mut sector) = recorded.or_else(|| solids.sector_for_body(pos)) else {
         if !quiet {
-            println!("walkplayer start {:?} is outside every sector", player.pos);
+            println!("walkplayer start {base:?} is outside every sector");
         }
         return None;
     };
-    let yaw = player.yaw.to_radians() + turn;
+    let yaw = yaw_deg.to_radians() + turn;
     // The walker faces the way the level's start faces, in the engine's own basis (`yaw_axes`), with
     // `turn` radians added so one level can be walked from several headings.
     let (b, _) = yaw_axes(yaw);
@@ -14596,7 +14624,7 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     for name in &levels {
         let Some(raw) = gobs.read(name) else { continue };
         let level = jkl::parse(&String::from_utf8_lossy(&raw));
-        match walk_level(&level, frames, true, 0.0) {
+        match walk_level(&level, frames, true, 0.0, None) {
             Some(r) => {
                 transitions += r.transitions;
                 kept += r.contained as usize;
