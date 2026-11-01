@@ -304,9 +304,9 @@ Of those, **19 of the 22 instincts shipped content can actually load** are imple
 `primaryfire`, `opendoors`, `blindfire`, `returnhome`, `retreat`, `withdraw`, `circlestrafe`, `hitandrun`,
 `randomturn`, `roam`, `turretfire`, `flee`, `listen`, `talk`, `sensedanger`, `dodge`, `lobfire`, `jump` (20 handlers, but
 `randomturn`'s nine class files are named by no shipped content — round 243) — with `sabermove` unused by any class and
-`crouch` likewise dead content. The remaining gameplay gap is the **Jedi set** (`forcepowers` and `saberfighting` 45
-class-uses each, `specialattack` 24 — all loadable) plus `jump` (85 of 92 loadable, and its handler only runs on the
-track-target event); 18 of 22 closed in rounds 209–247. Each instinct landed with a
+`crouch` likewise dead content. The remaining gameplay gap is only the **Jedi set** (`forcepowers` and `saberfighting`
+45 class-uses each, `specialattack` 24 — all loadable), which needs the force-cast and saber systems on non-player
+actors; 19 of 22 closed in rounds 209–248. Each instinct landed with a
 headless test and a measured before/after (suite 149 → 189). Reading the handlers also corrected behaviour underneath
 them: the view cone of `LookForTarget`, the engine's class defaults for omitted `.ai` keys, the script-set AI bits from
 `AISetMode` (`0x2000` switches an actor off and `0x4` is the awake bit `listen`/`sensedanger` gate on), turrets firing
