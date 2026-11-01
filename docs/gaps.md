@@ -6874,9 +6874,11 @@ player's hand. Two measurements fixed it:
    x 794–1169/y 436–730 at the eye origin to the retail block.
 
 The **clip pose is not applied** for now: `bryvmnt.key`/`bryvpst1.key` are **skeleton** tracks
-(`K_Rshouldr`, `K_Rhand`), while this build's `.3do` parser keeps only mesh names, so `pose_nodes`
-falls back to row order and scatters the model across the view. The rest pose is the held pose retail
-shows at the settled frame, so the model is drawn unposed and the sway still applies. `ponytail:` the
+(`K_Rshouldr`, `K_Rhand`). Round 256 taught the `.3do` parser to keep each hierarchy node's
+`hnodename` and map the key by it (`a_key_track_maps_to_a_hierarchy_node_by_hnodename`), but applying
+the mount's last frame still leaves the weapon at the right edge (669 drawn pixels at x 1059..1084
+against the fitted rest pose's x 473..714), so the rest pose -- the held pose retail shows at the
+settled frame -- is drawn and the sway still applies. `ponytail:` the
 POV clip lands when the `.3do` hierarchy's node names are parsed; the loop-flag/phase fixes from round
 254 stay in place for that.
 
@@ -6887,3 +6889,20 @@ projection artifact. The fitted offset is on the deviation ledger with its retir
 
 Measured: suite **196**, `--gates` **0 of 65 failed, 1 skipped**; the new retail capture is under
 `target/parity/retail-fists/` (not committed: retail frames stay out of the repo).
+
+## Update — round 256 (`hnodename`, the skeleton name a POV clip addresses)
+
+A `.3do` hierarchy row ends with its **`hnodename`** (`K_Rshouldr`, `K_Rhand`, `K_Forearm`, or
+`$$$DUMMY`), and a viewmodel `.key` names its tracks by that skeleton name, not by the mesh name the
+old parser kept. `tdo::Node` now stores the name, `Model::node_name` exposes it, and `pose_nodes`
+matches a key track by `hnodename` first and mesh name second (so body puppets that use mesh names are
+unchanged). The mapping is pinned by `a_key_track_maps_to_a_hierarchy_node_by_hnodename`: two nodes
+whose key rows are in the opposite order take the named rows, not row order.
+
+This is the prerequisite for the POV mount/fire clips, but **not yet enough**: with the names mapped,
+playing `bryvmnt.key` to its last frame still leaves the weapon at the right edge (669 drawn pixels at
+x 1059..1084, against the fitted rest pose's x 473..714), so the rest pose remains the drawn pose.
+The next check is the clip's frame/rest-pose relation (the `.key` absolute `pos` vs the engine's
+`rdPuppet_AdvanceTrack` delta path), not another name table.
+
+Measured: suite **196 → 197**; `--soak-all` 35/35 clean; `--gates` 0 of 65 failed, 1 skipped.

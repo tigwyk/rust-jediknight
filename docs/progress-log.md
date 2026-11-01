@@ -990,3 +990,11 @@ a camera-local offset of (-0.026, 0.009, 0). The POV key clips are skeleton trac
 `K_Rhand`) while the `.3do` parser keeps only mesh names, so the clip pose is skipped and the rest
 (held) pose is drawn; the sway still applies. Suite 196; gates 0 of 65 failed / 1 skipped. A per-material near-plane cull drops the wrist
 (`HND-WRT`), which straddled the eye plane; 13 of 14 parts draw.
+
+## Skeleton node names for POV clips (round 256)
+
+Parsed the `.3do` hierarchy's `hnodename` (`K_Rshouldr`, `K_Rhand`, ...) and made `pose_nodes` match
+key tracks by that skeleton name before falling back to mesh names. The mapping is unit-tested. It is
+the prerequisite for the viewmodel mount/fire clips, but the mount's last frame still leaves the weapon
+off the right edge, so the viewmodel continues to draw the rest pose. Suite 197; soak-all 35/35;
+gates 0 of 65 failed / 1 skipped.

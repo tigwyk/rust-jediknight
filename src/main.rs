@@ -20577,10 +20577,11 @@ fn draw_viewmodel(
         let (key, looping, clock) = {
             let rt = sim.world.borrow();
             let player = rt.player_thing();
-            // The POV clip is a **skeleton** track (`K_Rshouldr`/`K_Rhand` in `bryvmnt.key`), while
-            // this build's `.3do` parser keeps only mesh names, so `pose_nodes` falls back to row
-            // order and scatters the model. The rest pose is the held pose (retail's static weapon
-            // frame); the mount/fire clips are left unposed until the skeleton node names are parsed.
+            // The POV clip is a **skeleton** track (`K_Rshouldr`/`K_Rhand` in `bryvmnt.key`). The
+            // `.3do` parser now keeps each node's `hnodename`, but applying the mount's last frame
+            // still leaves the weapon off the right edge (measured: 669 pixels at x 1059..1084,
+            // against the fitted rest pose's x 473..714), so the rest pose stays until the clip's
+            // frame direction/rest-pose relation is settled.
             let static_pose = true;
             // The clip cursor advances by the **frame delta**. It used to advance by the absolute
             // world clock, so a mount animation (which is meant to play once) replayed faster and

@@ -54,7 +54,7 @@ pub struct Mesh {
 /// One row of `SECTION: HIERARCHYDEF`: the rigid segments a puppet is built from.
 ///
 /// `num: flags: type: mesh: parent: child: sibling: numChildren: x y z pitch yaw roll`
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 pub struct Node {
     /// Index into `Model::meshes`, or `-1` for a node with no geometry of its own.
     pub mesh: i32,
@@ -68,6 +68,10 @@ pub struct Node {
     /// The point the node rotates about, relative to `pos`. Vertices are stored relative
     /// to it, so a pose rotates them about the pivot and only then translates by `pos`.
     pub pivot: [f32; 3],
+    /// `hnodename`: the skeleton name a `.key` track addresses (`K_Rshouldr`, `K_Rhand`, …).
+    /// A viewmodel's key is a skeleton track, not a mesh-name track; without this the pose
+    /// falls back to row order and scatters the model.
+    pub name: String,
 }
 
 #[derive(Default)]
@@ -94,6 +98,15 @@ pub struct Model {
 impl Model {
     /// The name of the mesh a node owns, in the geoset that is drawn: how a `.key` names
     /// the node it poses. `None` for a `$$$DUMMY` node, which owns no mesh.
+    /// The hierarchy node's own skeleton name (`hnodename`), when it has one. `$$$DUMMY`
+    /// marks a node with no skeleton identity and is not a usable key name.
+    pub fn node_name(&self, node: usize) -> Option<&str> {
+        self.nodes
+            .get(node)
+            .map(|n| n.name.as_str())
+            .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("$$$DUMMY"))
+    }
+
     pub fn node_mesh_name(&self, node: usize) -> Option<&str> {
         let n = self.nodes.get(node)?;
         let m = usize::try_from(n.mesh).ok()?;
@@ -259,11 +272,16 @@ pub fn pose_nodes(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> V
         if let Some(done) = out[i] {
             return done;
         }
-        let node = model.nodes[i];
+        let node = model.nodes[i].clone();
         let entry = key.and_then(|k| {
             let by_name = model
-                .node_mesh_name(i)
+                .node_name(i)
                 .and_then(|name| k.nodes.iter().find(|n| n.mesh.eq_ignore_ascii_case(name)))
+                .or_else(|| {
+                    model
+                        .node_mesh_name(i)
+                        .and_then(|name| k.nodes.iter().find(|n| n.mesh.eq_ignore_ascii_case(name)))
+                })
                 .and_then(|n| n.at(frame));
             by_name.or_else(|| {
                 // No name to match (a `$$$DUMMY` node): fall back to row order, which is
@@ -426,6 +444,7 @@ pub fn parse(text: &str) -> Model {
                         } else {
                             [0.0; 3]
                         },
+                        name: f.get(17).copied().unwrap_or("").to_string(),
                     });
                 }
             }
@@ -495,6 +514,58 @@ fn parse_face(line: &str) -> Option<Face> {
 mod tests {
     use super::*;
 
+    /// A viewmodel key names its tracks by **skeleton** name (`K_Rshouldr`), not by mesh name.
+    /// The `.3do` hierarchy carries that name in its last column; `pose_nodes` must use it, or a
+    /// two-node model whose key rows are in the other order gets row-order poses.
+    #[test]
+    fn a_key_track_maps_to_a_hierarchy_node_by_hnodename() {
+        let mut model = Model::default();
+        model.nodes.push(Node {
+            mesh: -1,
+            parent: -1,
+            pos: [0.0; 3],
+            rot: [0.0; 3],
+            pivot: [0.0; 3],
+            name: "K_A".into(),
+        });
+        model.nodes.push(Node {
+            mesh: -1,
+            parent: -1,
+            pos: [0.0; 3],
+            rot: [0.0; 3],
+            pivot: [0.0; 3],
+            name: "K_B".into(),
+        });
+        let entry = |x: f32| crate::key::Frame {
+            frame: 0,
+            flags: 0,
+            pos: [x, 0.0, 0.0],
+            rot: [0.0; 3],
+            delta: [0.0; 3],
+        };
+        let key = crate::key::Key {
+            frames: 1,
+            fps: 15.0,
+            joints: 2,
+            declared_nodes: 2,
+            nodes: vec![
+                crate::key::Node {
+                    mesh: "K_B".into(),
+                    frames: vec![entry(2.0)],
+                    declared_entries: 1,
+                },
+                crate::key::Node {
+                    mesh: "K_A".into(),
+                    frames: vec![entry(3.0)],
+                    declared_entries: 1,
+                },
+            ],
+        };
+        let posed = pose_nodes(&model, Some(&key), 0.0);
+        assert_eq!(posed[0].pos, [3.0, 0.0, 0.0], "K_A's row did not reach node 0");
+        assert_eq!(posed[1].pos, [2.0, 0.0, 0.0], "K_B's row did not reach node 1");
+    }
+
     /// A two-node puppet whose parent is stored *after* its child, both with pivots —
     /// the case that has to resolve by index and compose the parent's pivot.
     fn puppet() -> Model {
@@ -504,8 +575,8 @@ mod tests {
             geosets: 1,
             meshes_per_geoset: 0,
             nodes: vec![
-                Node { mesh: -1, parent: 1, pos: [0.0, 0.0, 0.0], rot: [0.0; 3], pivot: [0.0, 0.0, 0.5] },
-                Node { mesh: -1, parent: -1, pos: [1.0, 0.0, 0.0], rot: [0.0; 3], pivot: [0.0, 0.0, 2.0] },
+                Node { mesh: -1, parent: 1, pos: [0.0, 0.0, 0.0], rot: [0.0; 3], pivot: [0.0, 0.0, 0.5], ..Default::default() },
+                Node { mesh: -1, parent: -1, pos: [1.0, 0.0, 0.0], rot: [0.0; 3], pivot: [0.0, 0.0, 2.0], ..Default::default() },
             ],
             radius: 0.0,
             insert_offset: [0.0; 3],

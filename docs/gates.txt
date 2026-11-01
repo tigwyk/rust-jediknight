@@ -2663,3 +2663,12 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - `cargo test --release`: **196 passed**; `--gates`: 0 of 65 failed, 1 skipped.
 - A per-material near-plane cull drops `HND-WRT` (its vertices do not clear the eye plane; 13 of 14
   parts draw); the remaining right-edge pixel is the hand's silhouette at the frame edge.
+
+## Update — round 256 (`hnodename` mapping for POV clips)
+
+- `tdo::Node` stores the hierarchy row's `hnodename`; `pose_nodes` maps key tracks by skeleton name
+  first (`a_key_track_maps_to_a_hierarchy_node_by_hnodename`). Body tracks that name meshes still work
+  through the second lookup.
+- The POV mount clip with names mapped still ends off the right edge (669 pixels at x 1059..1084 vs the
+  fitted rest pose's x 473..714), so the viewmodel keeps the rest pose.
+- `cargo test --release`: **197 passed**; `--soak-all` 35/35 clean; `--gates`: 0 of 65 failed, 1 skipped.
