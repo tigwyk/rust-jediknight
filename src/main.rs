@@ -20760,9 +20760,10 @@ fn draw_viewmodel(
     // that size *because* it sits 0.06 units from the eye.
     // The engine's POV thing sits at the player's hand, not at the eye: the authored `bryv.3do`
     // box (x 0.020..0.032, y -0.033..-0.007) needs the hand's offset to frame the held weapon.
-    // Measured against retail's isolated weapon mask (the fist-vs-bryar capture pair): the retail
-    // mask's block is x 480..660, y 337..730 at 1170x731, and the static port model lands at
-    // x 473..714, y 336..730 with this offset. `BK_VIEW` still overrides it for a capture.
+    // Measured against retail's isolated weapon mask (the fist-vs-bryar capture pair). The
+    // authoritative `jkPlayer_DrawPov` transform is `view * pretranslate(-eye) * sway`; applying it
+    // alone still leaves this model's rest frame off the right edge (4,172 edge pixels in the
+    // measurement), so the fitted hand offset remains until the POV model frame is reconciled.
     view.base = view_override.unwrap_or(Vec3::new(-0.026, 0.009, 0.0));
     let local = Transform {
         translation: sway * view.base,

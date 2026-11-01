@@ -6928,3 +6928,31 @@ trigger path.
 
 The `--model` probe also accepts `BK_MODEL_KEY=<key> BK_MODEL_FRAME=<n>`: it prints the model/key node
 names and the posed bounding box, which is how the POV clip's skeleton-name mapping is checked.
+
+## Update — round 258 (REA/Ghidra confirms the POV transform; the fitted offset stays)
+
+The retail POV path is now observed from the open Ghidra session (`JK.EXE` SHA-256
+`12e8c8c3…7efe44`), not just the exported decomp:
+
+- `jkPlayer_DrawPov` (`0x4051e0`) copies `rdCamera+0x34` into a 12-word matrix, pre-translates it by
+  `-thing[0x168..0x170]` (the player's eye offset), pre-multiplies `&DAT_0085fa80` (the sway), sets
+  z-buffer 0 / sorting 2 / occlusion 0 and ambient = sector `ambient + extraLight`, then calls
+  `rdThing_Draw(POV rdThing, matrix)`.
+- `rdThing_Draw` (`0x43e4e0`) model case -> `rdModel3_Draw` (`0x445e10`), which calls
+  `rdPuppet_BuildJointMatrices` once per pose. That function (`0x43eeb0`) copies the model's rest node
+  matrices when no active key applies, otherwise samples each key track at the thing time, interpolates
+  position/rotation when the frame's flags say so, subtracts and re-adds the node rest pose, and applies
+  the rdThing's **per-joint** pose-offset array.
+- `rdThing_SetModel3` (`0x43e350`) allocates and **zeroes** that per-joint offset array; `rdThing_NewEntry`
+  (`0x43e200`) does not initialize it. So there is no hidden whole-model offset in the POV thing.
+
+Applying the authoritative `-eye` pre-translate alone to the port's rest model still leaves it at the
+right edge (4,172 pixels at x 0/1084, y 454–554, versus the fitted offset's x 473–714/y 336–730), so
+the fitted hand offset `(-0.026, 0.009, 0)` remains the rendered framing. The remaining discrepancy is
+the **POV model's frame/rest composition**, not the camera path: the port's rest node matrices and the
+engine's `rdPuppet_BuildJointMatrices` rest branch need to be compared node by node before the
+engine transform replaces the fitted offset.
+
+Tooling: OMP's per-server MCP `timeout` for `rea` is now **600000 ms** in
+`C:\Users\Lee\.omp\agent\mcp.json`, and REA's `ghidra.decompile_timeout_seconds` is **600**; after that
+the Ghidra pseudocode requests that used to die at 30 s complete.
