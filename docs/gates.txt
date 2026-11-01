@@ -2705,3 +2705,11 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - `cargo test --release`: **201 passed** (new `a_head_pitch_turns_the_node_about_its_local_x`).
 - `--gates`: 0 of 65 failed, 1 skipped; `--soak-all`: 35/35 clean.
 - The body mesh stays yaw-only; only the head joints take pitch.
+
+## Update — round 264 (specialattack)
+
+- Event-4 branch: `DAMAGE_SABER` at `fltArg[8]` (Maw 10000/Pic 2000), one-second rearm; the mask is 4.
+- The port raises event 4 from an actor/player contact test (no physics solver); 22/22 loadable
+  instincts are implemented.
+- `cargo test --release`: **202 passed** (new `specialattack_event_four_damages_the_collided_player`).
+- `--gates`: 0 of 65 failed, 1 skipped; `--soak-all`: 35/35 clean.

@@ -1025,3 +1025,10 @@ Actors now aim their head, not just their torso: the AI elevation is clamped by 
 `minheadpitch`/`maxheadpitch`, stored as `ThingState::head_pitch`, and applied to `k_neck` (0.5×) and
 `k_head` (0.3×) in `model_mesh_posed_aim` — the engine's joint-angle scales. The body keeps the
 yaw-only transform from round 262. Suite 201.
+
+## The last live instinct (round 264)
+
+Ported `specialattack`'s event-4 branch: the collided player takes `DAMAGE_SABER` at `fltArg[8]` (Maw
+10000, Pic 2000), then the actor rearms for one second. The port raises event 4 from an actor/player
+contact test because its actor walk has no physics solver. That closes all 22 loadable instincts.
+Suite 202.

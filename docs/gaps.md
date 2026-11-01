@@ -5836,7 +5836,7 @@ handler:
 | withdraw | 30 | `0x50b150` | **yes** (round 221: backs away from what hurt it) |
 | dodge | 27 | `0x50b360` | **yes** (rounds 239–240: both mechanical paths are in — the **damage** path (AI event 1, raised before health is subtracted: step away from the attacker, walking-flag gate, 1000 ms cooldown) and the **shot-passing** path (the player's `typeflags & 0x200000` projectile pre-sweep of five units, the actor's own sight test of the shot, and the random 45–90° sideways step); its event-2 branch is unreachable in retail content — no emit site in the executable raises event 2) |
 | roam | 27 | `0x50b830` | **yes** (round 225: wanders around its home anchor) |
-| specialattack | 24 | `0x40fd00` | **no, and its live branch needs a collision event** (round 252: the handler is event-`4` driven, and event 4 **is** emitted — by the thing-collision callback at `0x4ed24d`/`0x4ed269` — but this build's actor walk raises no thing-vs-thing event; the event-0 scheduler path only stops the puppet track, disables the saber and rearms the cooldown. So the attack path cannot fire until actor movement emits the collision event) |
+| specialattack | 24 | `0x40fd00` | **yes** (round 264: the event-4 branch damages the collided player with `DAMAGE_SABER` at `fltArg[8]` — Maw 10000, Pic 2000 — then rearms; the port's actor walk raises event 4 from an actor/player contact test, since it has no physics solver) |
 | hitandrun | 23 | `sithAICmd_HitAndRun` | **yes** (round 223: fires, then breaks off) |
 | sensedanger | 14 | `0x50b9b0` | **yes** (round 236: the scheduler path — awake gate, alert bit `0x800`, `fear` sound, 3.0 awareness event, player target; round 241: the **damage path** through the engine's event dispatcher — `surprise` sound, attacker (or its parent) as the target, `flags & !0x4 \| 0x800`; the handler's event-2 branch is not reached because this build never raises event 2; the event-4 branch belongs to the thing-collision callback, which this build's actor walk does not raise — round 252 corrected the earlier "nothing emits 2 or 4" claim: both are emitted by the executable (`0x4f2c05` and `0x4ed24d`), the port just does not generate them) |
 | turretfire | 12 | `0x50a0f0` | **yes** (round 227: fires, stands still; head sweep not modelled) |
@@ -5845,10 +5845,9 @@ handler:
 | crouch | 3 | `0x509ad0` | no — and its three classes (`stcrouch.ai/.ai0/.ai2`) are named by no shipped template or script: dead content (round 243). The handler is event-`0x100`-driven and only flips the crouch physflag `0x10000` |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **21 of the 22 instincts that shipped content can actually load**. The last name is `specialattack`
-(24 classes), and its handler is not a parsing gap: its attack branch is event-`4`-driven, event 4 is raised by the
-engine's thing-collision callback (`0x4ed24d`), and this build's actor walk raises no thing-vs-thing event, so the
-attack cannot be reached until that emission exists. `forcepowers` and `saberfighting` (45 loadable classes each)
+So the port runs **22 of the 22 instincts that shipped content can actually load**. `specialattack` closed in round
+264: its event-4 branch damages the collided player with `DAMAGE_SABER` at `fltArg[8]` and the actor walk raises
+event 4 from a contact test (the port has no physics solver, so contact is proximity, not a solved collision). `forcepowers` and `saberfighting` (45 loadable classes each)
 closed in round 252. The list is also a priority order, since the counts are how many classes depend on each.
 `listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and
 235, `sensedanger`, the last partial entry, in round 236, `dodge` in round 239 and `lobfire` in round 247 (which also
@@ -7034,3 +7033,18 @@ the local rotation. The head yaw/roll fields are stored by the engine but unused
 `SetLookFrame` keeps the current yaw/roll), so only pitch is applied.
 
 Measured: suite **200 → 201**; `--gates` and `--soak-all` re-run below.
+
+## Update — round 264 (`specialattack`: the last live instinct)
+
+The event-4 branch is ported. `sithAICmd_SpecialAttack`'s live path is the thing-collision event: it
+damages the collided player with `sithThing_DamageThing(..., DAMAGE_SABER)` at `fltArg[8]` — the shipped
+lines read Maw `10000`, Pic `2000` — then rearms. This build's actor walk has no physics solver to
+raise event 4, so `ai_tick` tests the contact directly: an actor whose class has `SpecialAttack` and
+whose body sphere overlaps the player's emits `emit_ai_event(index, 4, Some(player))`, with a one-
+second `ai_special` rearm. The registry mask is `4`, matching `sithAI_RegisterInstinct`'s word.
+
+`specialattack_event_four_damages_the_collided_player` pins the damage (40 in the test line) and the
+handler's return. **22 of 22 loadable instincts are now implemented.** The deviation is the collision
+source, not the handler: proximity instead of `SearchForCollisions` (ledgered).
+
+Measured: suite **201 → 202**; `--gates` and `--soak-all` re-run below.

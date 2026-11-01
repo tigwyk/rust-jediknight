@@ -1278,6 +1278,8 @@ pub struct Runtime {
     pub ai_saber: BTreeMap<usize, f32>,
     /// The selected saber attack's own cooldown (`ai + 0x288`), `fltArg[3]/[6]/[9]/[12]`.
     pub ai_saber_cool: BTreeMap<usize, f32>,
+    /// When each actor may fire `specialattack`'s contact event again (event 4).
+    pub ai_special: BTreeMap<usize, f32>,
     /// When each not-yet-alerted actor may check for danger again (`sensedanger` retries once a second
     /// while the player is out of sight).
     pub ai_sense: BTreeMap<usize, f32>,
@@ -1978,6 +1980,7 @@ impl Runtime {
             ai_force_cool: BTreeMap::new(),
             ai_saber: BTreeMap::new(),
             ai_saber_cool: BTreeMap::new(),
+            ai_special: BTreeMap::new(),
             ai_sense: BTreeMap::new(),
             ai_dodge: BTreeMap::new(),
             ai_jump: BTreeMap::new(),
@@ -3217,6 +3220,9 @@ impl Runtime {
             // the way ahead of a moving actor is not walkable — so the handler's `4`/`0x200` arms are dead
             // content, like `dodge`'s event 2.
             "jump" => 0x604,
+            // `specialattack`'s registry word is `4`: the handler's damage branch runs on the
+            // thing-collision event and only against the player thing.
+            "specialattack" => 4,
             _ => 0,
         }
     }
@@ -3269,6 +3275,17 @@ impl Runtime {
                     source.is_some_and(|attacker| self.sensedanger_from_damage(actor, attacker))
                 }
                 ("jump", 0x400) => self.jump_from_obstacle(actor, instinct.weight),
+                ("specialattack", 4) => source.is_some_and(|target| {
+                    // `sithAICmd_SpecialAttack` event 4: damage the collided player with
+                    // `DAMAGE_SABER` at `fltArg[8]` (Maw 10000, Pic 2000), then rearm.
+                    let damage = instinct.args.get(7).copied().unwrap_or(0.0);
+                    if damage <= 0.0 || target == actor {
+                        return false;
+                    }
+                    self.damage_typed(target as i64, damage, DAMAGE_SABER);
+                    self.ai_special.insert(actor, self.time + 1.0);
+                    true
+                }),
                 _ => false,
             };
             if acted {
@@ -4516,6 +4533,41 @@ impl Runtime {
             let Some(thing) = self.things.get(shooter) else { continue };
             let (sector, pos) = (thing.sector, thing.pos);
             self.transmit_awareness(sector, side, pos, AI_AWARE_SHOT);
+        }
+        // `sithThing`'s thing-collision callback (`0x4ed24d`) raises AI event 4 when an actor's
+        // body touches another thing. This build's actor walk has no solver, so the contact is
+        // tested directly: an actor carrying `specialattack` that overlaps the player emits 4.
+        let player = self.player_thing();
+        let mut contacts: Vec<usize> = Vec::new();
+        for (index, class) in &self.ai {
+            if *index == player
+                || class.instinct("SpecialAttack").is_none()
+                || self.time < self.ai_special.get(index).copied().unwrap_or(0.0)
+            {
+                continue;
+            }
+            let (Some(actor_thing), Some(player_thing)) =
+                (self.things.get(*index), self.things.get(player))
+            else {
+                continue;
+            };
+            let radius = |i: usize| {
+                self.templates
+                    .get(i)
+                    .and_then(|name| self.template_hit.get(name))
+                    .map(|(r, _)| *r)
+                    .unwrap_or(0.065)
+            };
+            let dx = actor_thing.pos[0] - player_thing.pos[0];
+            let dy = actor_thing.pos[1] - player_thing.pos[1];
+            let dz = actor_thing.pos[2] - player_thing.pos[2];
+            let reach = radius(*index) + radius(player) + 0.05;
+            if dx * dx + dy * dy + dz * dz <= reach * reach {
+                contacts.push(*index);
+            }
+        }
+        for index in contacts {
+            self.emit_ai_event(index, 4, Some(player));
         }
         let _ = walked;
         fired
@@ -10290,6 +10342,40 @@ mod tests {
         let after = rt.things[0].health;
         rt.ai_tick(0, 1.0 / 30.0);
         assert_eq!(rt.things[0].health, after, "the saber ignored its cooldown");
+    }
+
+    /// `specialattack`'s event-4 branch (`0x40fd00`): the thing-collision callback passes the
+    /// collided player and the handler damages it with `DAMAGE_SABER` at `fltArg[8]` (Maw 10000,
+    /// Pic 2000). This build emits event 4 from the actor/player contact test.
+    #[test]
+    fn specialattack_event_four_damages_the_collided_player() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        rt.things = vec![base.clone(), base];
+        rt.types = vec![10, 2];
+        rt.templates = vec!["walkplayer".into(), "maw".into()];
+        rt.template_hit.insert("walkplayer".into(), (0.065, 0.18));
+        rt.template_hit.insert("maw".into(), (0.12, 0.3));
+        rt.ai.insert(
+            1,
+            crate::ai::Ai {
+                instincts: vec![crate::ai::Instinct {
+                    name: "SpecialAttack".into(),
+                    weight: 3000.0,
+                    // engine fltArg 1..8; fltArg 8 = 40.0 is the damage
+                    args: vec![0.75, 0.5, 1.0, 3000.0, 9.0, 0.0, 0.0, 40.0],
+                }],
+                ..Default::default()
+            },
+        );
+        let before = rt.things[0].health;
+        assert!(rt.emit_ai_event(1, 4, Some(0)), "the contact event did not act");
+        assert!(
+            rt.things[0].health <= before - 40.0,
+            "the event did not damage the player: {} -> {}",
+            before,
+            rt.things[0].health
+        );
     }
 
     /// `sensedanger`'s damage path (`0x50b9b0`, event 1): an aware, not-yet-alerted actor that is hit
