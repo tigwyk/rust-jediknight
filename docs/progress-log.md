@@ -1011,3 +1011,10 @@ stays open.
 Ported the second `sithParticle_Update` arm: per-element cel advance with probability
 `(cels - cel - 1) * (age/life) * dt`, a local LCG, and a mesh swap when the cel changes. Both particle
 update arms are now in. Suite 199.
+
+## The chase turns the drawn actor (round 262)
+
+Fixed the rendering half of the actor chase: the parts followed the runtime position but kept their
+spawn yaw, so a chasing actor shot from a facing its mesh no longer had. The body-yaw delta is now
+applied about the thing origin (`thing_quat(0, yaw, 0)`; pitch/roll stay out because the port's pitch
+is the aim elevation). Suite 200. The head joint remains open.

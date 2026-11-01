@@ -7004,3 +7004,19 @@ the distance is the thing's `movesize`/sector floor with the engine's step-scale
 walk5 deviation is the port's **global** face scan reaching a floor in a sector the body is not in;
 the remaining question is the engine's **traversal** (how `SearchForCollisions` finds the level-6
 off-sector slab without finding level 5's upper slope), not the direction or distance rule.
+
+## Update — round 262 (the chase turns the drawn actor)
+
+`actors_follow_runtime` moved an actor's parts by the runtime's position delta but never applied its
+yaw, so an actor could shoot from a facing its mesh no longer had. The parts now take the body-yaw
+delta about the thing origin: `vis = thing_quat(0, yaw, 0)` (the port's body pitch is the aim
+elevation, not the engine's torso pitch, so pitch/roll stay out), then `translation = target + turn *
+(old - oldTarget)` and `rotation = turn * rotation`. The turn delta is kept on the actor
+(`drawn_vis`) and skipped when both position and yaw are unchanged.
+`an_actor_turn_rotates_its_parts_about_the_thing_origin` pins the 90° case (model +X → Bevy +Y).
+
+Not yet: the **head** joint itself (round 261's `SetHeadPYR` evidence); the port turns the whole
+drawn body, so an aiming actor still aims with its torso. The live head rotation needs a head-pitch
+field and `k_neck`/`k_head` rotation in `model_mesh_posed`.
+
+Measured: suite **199 → 200**; `--gates` and `--soak-all` re-run below.

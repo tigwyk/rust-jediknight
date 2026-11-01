@@ -16610,6 +16610,9 @@ struct Actor {
     /// The yaw drawn last frame, so a body turning in place can play its `turnleft`/`turnright`
     /// track — `sithPuppet_UpdateThingMove` picks those from the body's angular velocity.
     drawn_yaw: Option<f32>,
+    /// The body yaw applied to the parts last frame. The chase moved actors but never turned
+    /// them, so an actor could shoot from a facing it no longer had.
+    drawn_vis: Quat,
     /// The armed mode drawn last frame, so a change plays the puppet's own draw or holster row
     /// (`drawgun`/`holster` — 24 actors ship each, and `SetArmedMode` is what flips them).
     drawn_mode: usize,
@@ -16833,6 +16836,7 @@ fn spawn_models(
                 dying: false,
                 drawn_at: Vec3::from(thing.pos),
                 drawn_yaw: None,
+                drawn_vis: thing_quat(0.0, thing.yaw, 0.0),
                 drawn_mode: 0,
                 drawing: None,
             });
@@ -17567,20 +17571,32 @@ fn actors_follow_runtime(
         let Some(thing) = runtime.things.get(actor.thing) else { continue };
         let target = Vec3::from(thing.pos);
         let delta = target - actor.drawn_at;
-        if delta.length_squared() == 0.0 {
+        // The port's body pitch is the aim elevation, not the engine's body pitch; apply the body
+        // yaw only (`SetLookFrame` aims the head, not the torso).
+        let vis = thing_quat(0.0, thing.yaw, 0.0);
+        let turn = vis * actor.drawn_vis.inverse();
+        if delta.length_squared() == 0.0 && turn.dot(Quat::IDENTITY).abs() > 1.0 - 1e-9 {
             continue;
         }
         if let Some(entities) = sim.entities.get(&actor.thing) {
             for entity in entities {
                 if let Ok(mut part) = transforms.get_mut(*entity) {
-                    part.translation += delta;
+                    let rel = part.translation - actor.drawn_at;
+                    part.translation = target + turn * rel;
+                    part.rotation = turn * part.rotation;
                 }
             }
         }
         if std::env::var_os("BK_ACTOR_TRACE").is_some() {
-            println!("actor: thing {} moved {:.2} units to {target}", actor.thing, delta.length());
+            println!(
+                "actor: thing {} moved {:.2} units to {target}, turned {:.1} deg",
+                actor.thing,
+                delta.length(),
+                thing.yaw - actor.drawn_yaw.unwrap_or(thing.yaw)
+            );
         }
         actor.drawn_at = target;
+        actor.drawn_vis = vis;
     }
 }
 
@@ -25346,6 +25362,7 @@ mod rules_tests {
             drawn_key: String::new(),
             dying: false,
             drawn_at: Vec3::ZERO,
+            drawn_vis: Quat::IDENTITY,
             drawn_yaw: None,
             drawn_mode: 0,
             drawing: None,
@@ -25671,6 +25688,16 @@ mod viewmodel_framing_tests {
         // A looping clip still wraps; the old code applied this to every clip.
         assert_eq!(super::pov_clip_frame(13.0, 13, true), 0);
         assert_eq!(super::pov_clip_frame(12.5, 13, true), 12);
+    }
+
+    /// The chase now applies the body yaw to the actor's parts. `thing_quat(0, 90, 0)` maps the
+    /// model's +X to Bevy +Y, so a part one unit to the right of the origin swings one unit up when
+    /// the thing turns 90 degrees; the delta is what `actors_follow_runtime` applies.
+    #[test]
+    fn an_actor_turn_rotates_its_parts_about_the_thing_origin() {
+        let turn = super::thing_quat(0.0, 90.0, 0.0) * super::thing_quat(0.0, 0.0, 0.0).inverse();
+        let p = turn * bevy::math::Vec3::new(1.0, 0.0, 0.0);
+        assert!((p.x).abs() < 1e-5 && (p.y - 1.0).abs() < 1e-5);
     }
 
     /// The cel-cycling arm: probability is `(cels - cel - 1) * (age/life) * dt`; it starts at zero,

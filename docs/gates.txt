@@ -2689,3 +2689,11 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - `cargo test --release`: **199 passed** (new `a_particle_cel_cycles_toward_the_last_cel`).
 - `--gates`: 0 of 65 failed, 1 skipped; `--soak-all`: 35/35 clean.
 - Both `sithParticle_Update` arms (grow, cel cycling) are now ported.
+
+## Update — round 262 (actor yaw follows the runtime)
+
+- `actors_follow_runtime` now applies the body-yaw delta about the thing origin, not just the
+  position delta; parts rotate and translate together.
+- `cargo test --release`: **200 passed** (new `an_actor_turn_rotates_its_parts_about_the_thing_origin`).
+- `--gates`: 0 of 65 failed, 1 skipped; `--soak-all`: 35/35 clean.
+- Still open: the head joint (`SetHeadPYR` evidence), so aim is still torso-only.
