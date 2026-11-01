@@ -2518,3 +2518,16 @@ running app.--carry-check --start 01narshadda                        0   level 2
   65/65, 0 skipped); the checks that still need the window are the walk-trace replay, the parity draw captures and the
   per-behaviour fixtures. Logs of both sweeps are in `target/parity/` (build artefacts, not committed).
 - Suite **187 passed** (unchanged); docs **132/132**. No window opened and no retail run.
+## Update — round 246
+
+- **The shipped gravity goods fall and land.** `_debris` (`type=weapon physflags=0x201`, level 1's `shrapnel_1..4`)
+  used to fly straight: created things started at `physflags=0` and the generic mover had no gravity. Now
+  `Runtime::template_phys_flags` is stored and read by `spawn_at`/`fire_with_spread`/`explode`, the mover applies the
+  level's gravity to `0x1`-bit `type=weapon` bodies (`0x40000` halves it; attached bodies and actors excluded), and the
+  fall stops on the highest floor plane under the body (`sectors_around`, only planes at or below the step's start).
+- `--things` gained the check: a created `shrapnel_1` chip dropped over a real sector centre **falls 0.10 to a resting
+  plane, velocity 0, a sector still around it**. Measured before/after: with the gravity arm disabled the same run prints
+  `falls 0.00` and the assertion fails (`the debris chip did not fall: z 6.299998 -> 6.299998`).
+- Sweeps: `--soak-all` 35/35 levels clean (0 non-finite, 0 bodies outside), `--gates` 0 of 65 failed / 1 skipped,
+  suite **187 passed**, `--things`/`--ai`/`--hit`/`--weapons`/`--sound`/`--audit` pass, docs **132/132**. No window and
+  no retail run. Ledger: actor gravity, the swept `SearchForSurfaceCollisions`, `GetThingHeight`'s resting height.

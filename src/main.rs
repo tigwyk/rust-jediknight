@@ -8704,6 +8704,71 @@ fn main() {
             assert!(after > before + 1.0, "the body did not rise in the updraft: {after}");
             assert_eq!(cleared, [0.0; 3], "a zero vector did not clear the thrust");
         }
+        // `_debris` falls now: the family ships `type=weapon physflags=0x201` (`gravity` bit `0x1`),
+        // and a created chip used to fly its spawn velocity straight through the level. It needs the
+        // level's collider for the vertical stop, so the gate gives the runtime one — the same way
+        // `--triggers` does for `blocked`.
+        {
+            let solids = collide::build(&world.level);
+            // A real spot in the level: a sector's own centre is inside its hull, and the first
+            // sector with a floor is enough. (The gate moves things to arbitrary coordinates earlier,
+            // and a fall at one of those is not a fall in the world.)
+            let Some((sector, floor, centre)) = (0..world.level.sectors.len()).find_map(|sector| {
+                let centre = world.level.sectors[sector].center;
+                let (floor, _) = solids.floor_surface(sector, centre)?;
+                Some((sector, floor, centre))
+            }) else {
+                println!("things: this level has no sector with a floor");
+                return;
+            };
+            rt.solids = Some(std::sync::Arc::new(solids));
+            let player_index = rt.player_thing();
+            let created = rt.call(
+                "CreateThing",
+                &[
+                    cog::Value::Str("shrapnel_1".to_string()),
+                    cog::Value::Num(player_index as f64),
+                ],
+            );
+            let cog::Value::Num(index) = created else {
+                panic!("CreateThing did not answer a thing index")
+            };
+            let index = index as usize;
+            let start = [centre[0], centre[1], floor + 1.0];
+            rt.things[index].pos = start;
+            rt.things[index].sector = i32::try_from(sector).unwrap();
+            rt.things[index].vel = [0.0; 3];
+            for _ in 0..30 {
+                rt.step(1.0 / 30.0);
+            }
+            let chip = &rt.things[index];
+            println!(
+                "things: a created `_debris` chip (physflags {:#x}) dropped 1.0 unit falls {:.2} and rests at z {:.2} over the floor at {floor:.2}",
+                chip.phys_flags,
+                start[2] - chip.pos[2],
+                chip.pos[2]
+            );
+            assert_ne!(
+                chip.phys_flags & 0x1,
+                0,
+                "a created debris thing did not keep its template's gravity bit"
+            );
+            assert!(
+                start[2] - chip.pos[2] > 0.05,
+                "the debris chip did not fall: z {} -> {}",
+                start[2],
+                chip.pos[2]
+            );
+            assert_eq!(chip.vel[2], 0.0, "a landed debris chip kept falling");
+            assert!(
+                rt.solids
+                    .as_ref()
+                    .and_then(|s| s.sector_at(chip.pos, 0.1))
+                    .is_some(),
+                "the debris chip left the world when it fell: {:?}",
+                chip.pos
+            );
+        }
         println!("--- things check passed ---");
         return;
     }

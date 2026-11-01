@@ -56,7 +56,7 @@ both multiplayer-only screens.
 | subsystem | what works | what is missing |
 | --- | --- | --- |
 | Thing attachment | the impact half of `sithThing_AttachThingToSurface`: `(v-2.5)^2*45` above a 2.5 threshold, applied to the runtime's player (`--fall`) | the *record*: `attach_flags`, `attachedSurface`, the surface-info snapshot, scroll-velocity transfer on a scrolling surface, and the `entered`/`exited` cog messages on a `COG_LINKED` surface |
-| Physics | velocity integration with `ApplyDrag`, gravity, jump, fall, step, spawn clearance — for the player | `physicsRolloverFrames`/`OLDSTEP_DELTA_50FPS` accumulation (the port uses the frame's `dt`), angular velocity, `SITH_PF_USEANGULARTHRUST`, rotation of things (`sithCollision_RotateThing`), scripted movement of things, and every non-player thing: placed props are static |
+| Physics | velocity integration with `ApplyDrag`, gravity, jump, fall, step, spawn clearance — for the player | `physicsRolloverFrames`/`OLDSTEP_DELTA_50FPS` accumulation (the port uses the frame's `dt`), angular velocity, `SITH_PF_USEANGULARTHRUST`, rotation of things (`sithCollision_RotateThing`), scripted movement of things, and non-player thing physics beyond the round-246 gravity/substrate pair (an actor walking off a ledge still does not fall; placed props are static) |
 | Walk sweep | the walker runs the window's own `walker_step` on all 34 levels (`--walk all`), 20 s each: **34/34 stayed inside the tracked sector** over 639 doorway crossings, and on 14 levels the level's own hull test agreed | the tracked sector can still lag where sector hulls overlap, so `inside_sector` is the arbiter rather than the file's own hull |
 | Puppets and animation | `stand`, `death`, and the locomotion set — `walk`, `run`, `walkback`, `strafeleft`, `straferight` chosen from the velocity the AI walked at, by the rule in `sithPuppet_UpdateThingMove` (dominant axis, 0.5 u/s walk/run threshold), with the clip advancing on distance moved rather than the clock. Plus `.key` interpolation with parent chains and pivots, `frame=` paths for doors and lifts, and `PlayKey`/`StopAnim`/`JumpToFrame` — a script can replace the puppet's state track with one of its own `keyframe` symbols (level 1's TIE bomber plays `01VTieB.key` from frame 0x14 when the player sees it) | an actor that just **fired** plays its `fire` track (the engine prefers the action track to the stride, and `--ai`'s shooter now animates the shot instead of sliding), and the armed/unarmed **mode** axis (**done**: the state key is `(name, mode)`, `SetArmedMode` selects it, and 113 of level 1's 128 actors ship a mode-1 set), a **hit** flinch (`just_hit`, below death and above `fire`; 127 of 128 actors ship the track), the **turn** states (a body pivoting in place plays `turnleft`/`turnright`, 226 actors ship them, with locomotion winning while moving), and the rest: the airborne set (`rising`/`jump`/`fall`/`land`/`drop`, ~220 actors), `death2`, `choke`, alt-fire `fire2`, `toss`/`windup`/`magic*`, and the **draw/holster** rows — **done** for `drawgun`/`holster` (`draw_row` plays the puppet's own row for its clip length when `SetArmedMode` flips; 24 actors ship each). `drawsaber`/`drawfists` are not selected yet, and `mount`/`dismount` — the *cog* symbol names, which animate the viewmodel — are a separate path, `turnleft`/`turnright`, `victim`, plus `sithAnimClass` layering. A scripted clip has no own epoch and its `flags` are not interpreted |
 | AI | the `.ai` parser (instincts, flags, moves), actor spawning, `sightdist`/`fov` deciding whether an armed actor fires its own `weapon=`, `PrimaryFire`'s own arguments from the `.ai` (shot delay, range, aim cone, aim error, burst), scripted destinations, three-dimensional aim (an actor's pitch follows the elevation to its target, so it can shoot at a ledge; `--ai` checks it) over a 3D sight ray — `sightdist` is measured over the whole vector like `sithAI_CheckSightThing`, and the segment to the target must be clear, `AISetMovePos`/`AISetMoveThing`/`AISetLookPos`/`AISetMoveSpeed` make a placed actor patrol or follow, and a blocked destination is **routed** through the adjoin graph with the waypoints popped on arrival (`ai_route`; `--ai` walks one order to the end and asserts the list drains) — and the **frame list** verbs (`AISetMoveFrame`/`AISetLookFrame` index the thing's own `numframes=`/`frame=` entries, which class-less actors like level 1's 8t88 use). `--ai` fires a level-1 actor at 3 units, not at 8, not from behind, then walks one onto a scripted point and turns it; `--endlevel` shows 8t88 walking to his frame | the runtime: instinct **scheduler** (weights, priority, interruption), **awareness** (no hearing, no alert propagation), **pathfinding is in place**: `Collision::route` searches the adjoin graph breadth-first and `ai_tick` follows the doorway centres it answers, popping each on arrival (`ai_route`), so an actor told to reach a thing across a wall walks through the doorway instead of into the wall. Sight now needs a cleared line too, so an actor no longer sees — or shoots — through a wall. Losing sight now means walking to the last place the target was seen (`ai_last_seen`), and standing there forgets it. What is still missing is the retail *scheduler* below that: no hearing, no alert propagation, no instinct weights or interruption, `accuracy=` spread, aim-joint tracking |
@@ -789,6 +789,24 @@ Measured, twice:
 So the prerequisite is not 'add gravity' but 'give goods a ground test that works for their radius and their sectors'. support depends on face coverage (over_face) at the body's radius; items are 0.05-0.10 units, and the coverage test is calibrated for the player. Naming that is the deliverable; the m5 defect stays reported.
 
 **Round 237:** the m5 half of the defect turned out not to be gravity at all — those four pickups were being blown **up** by the thrust arm, which skipped the engine's `physflags & 0x400000` exemption (`_powerup` ships that flag). With the exemption the m5 soak's `outside` count is 4 → 0, and the gravity prerequisite above is unchanged and still owed.
+
+**Round 246 — the ground test the round-120 note asked for.** The note names the right prerequisite, and it is now met for the
+shipped gravity goods, the **`_debris` family** (`type=weapon physflags=0x201`: level 1's `shrapnel_1..4`, spawned by
+`00_explodebris.cog`): a created thing now starts with its template's `physflags=` (the engine copies the word, and
+`spawn_at`/`fire_with_spread`/`explode` all set `0` before), the generic mover applies the level's gravity to a body whose
+`0x1` bit is set (`0x40000` halves it, attached bodies excluded), and the fall gets the vertical stop the x/y resolver
+cannot make: the highest floor plane under the body across `sectors_around`, accepting only planes at or below where the
+step started (so a lip it fell past is not a floor), snapping the body to it and zeroing downward velocity. The
+`--things` gate drops a `CreateThing`'d chip over a real sector centre and measures the fall: **0.10 units to a resting
+plane with velocity 0 and a sector still around it**, where with the gravity arm disabled the chip's own output is
+`falls 0.00` and the check fails (`the debris chip did not fall: z 6.299998 -> 6.299998`). `--soak-all` stays clean
+(35/35 levels, 0 bodies outside) and the gate sweep is 0 of 65 failed.
+
+Still owed, and narrower than the round-120 note: **actor gravity**. Actors' vertical integration belongs to
+`ai_tick`'s walker (`walk_player` owns the player's), so an actor walking off a ledge still does not fall; the engine
+gives every `physflags & 0x1` body the same fall. The resting rule is also approximated: the port puts the body's
+**origin** on the plane, not `GetThingHeight` (the model's insert offset) above it — zero for the shipped shrapnel
+(`shrp_1.3do` insert `[0,0,0]`), so this is on the ledger only for models whose insert is not zero.
 
 
 ### Objectives text is not a string-table lookup (round 124)
@@ -6601,3 +6619,23 @@ No code changed this round; the point is measured evidence for the roadmap's QA-
 no longer window-bound, and the all-levels soak is clean. The rows that still genuinely need the window are the walk
 trace (its port half records frames), the parity draw comparison, and the per-behaviour fixtures listed there. No window
 and no game run were performed: both sweeps skip or avoid the live checks.
+## Update — round 246 (the shipped gravity goods fall and land: `_debris`)
+
+`_debris` is the shipped gravity family: `type=weapon physflags=0x201` (level 1's `shrapnel_1..4`, spawned by
+`00_explodebris.cog`), and the port used to fly it straight. Three pieces landed:
+
+- **Created things inherit their template's `physflags=`** (the engine copies the word): `spawn_at`,
+  `fire_with_spread` and `explode` all started their things at `0`, so even a spawned chip had no gravity bit and
+  `ClearPhysicsFlags`-style scripts could only ever clear zero. `Runtime::template_phys_flags` is now a stored map and
+  all three constructors read it; a shot still flies straight because `_weapon` is `0x200`.
+- **The gravity arm**: `vel.z -= gravity * dt` for a physics body whose `0x1` bit is set (`0x40000` halves it, attached
+  bodies and actors excluded — actors belong to `ai_tick`'s walker).
+- **The vertical stop** the round-120 note measured as missing: the highest floor plane under the body across
+  `sectors_around`, accepting only planes at or below where the step started (a lip the body fell past is not a floor),
+  snapping the origin to it and zeroing downward velocity.
+
+Measured: `--things` now drops a `CreateThing`'d `shrapnel_1` chip over a real sector centre — it falls **0.10** to a
+resting plane, velocity 0, a sector still around it. With the gravity arm disabled the same run prints `falls 0.00` and
+the check fails (`the debris chip did not fall: z 6.299998 -> 6.299998`). `--soak-all` stays 35/35 clean (0 bodies
+outside), the gate sweep is 0 of 65 failed, and the suite/`--things`/`--ai`/`--hit`/`--weapons`/`--sound`/`--audit` pass.
+Still on the ledger: actor gravity, the swept `SearchForSurfaceCollisions` sweep, and the `GetThingHeight` resting rule.

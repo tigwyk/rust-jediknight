@@ -789,6 +789,9 @@ pub struct Runtime {
     /// A template's `move=`: `physics` goods fall and slide, `path` things follow keyframes, and a
     /// projectile flies its own `vel=`. Gravity applies only to the first kind.
     pub template_move: BTreeMap<String, String>,
+    /// A template's `physflags=`: a created thing starts with it (the engine copies the template word),
+    /// and the generic mover reads bit `0x1` (gravity) and its thruster exemption `0x400000`.
+    pub template_phys_flags: BTreeMap<String, u32>,
     /// World gravity, from the level's own `World Gravity` line: what pulls a physics thing down.
     pub gravity: f32,
     /// Every shot the runtime spawned, so a check can ask "did the trigger work" without sampling
@@ -1554,6 +1557,7 @@ impl Runtime {
                         .map(|m| (t.name.to_ascii_lowercase(), m.to_string()))
                 })
                 .collect(),
+            template_phys_flags,
             gravity: level.gravity,
             shots_fired: 0,
             prints: Vec::new(),
@@ -2038,7 +2042,9 @@ impl Runtime {
             destroyed: false,
             vel: self.template_vel.get(&template).copied().unwrap_or([0.0; 3]),
             damage: self.template_damage.get(&template).copied().unwrap_or(0.0),
-            phys_flags: 0,
+            // A created thing starts with its template's `physflags=`: the engine copies the word, so a
+            // spawned `_debris` chip keeps its gravity bit `0x1` (round 246).
+            phys_flags: self.template_phys_flags.get(&template).copied().unwrap_or(0),
             jk_flags: 0,
             attach: None,
             attach_offset: [0.0; 3],
@@ -2383,10 +2389,12 @@ impl Runtime {
         // `sithPhysics.c`: a body in a `SITH_SECTOR_USETHRUST` sector gets `thrust * dt` added to its
         // velocity each step, exactly like gravity. Level 21's core tube lifts what stands in it.
         let thrust: Vec<[f32; 3]> = self.sectors.iter().map(|s| s.thrust).collect();
-        // `ponytail:` gravity for the physics goods is **not** a line: the collision resolve below
-        // corrects only x and y, so a settling item sinks straight through the floor — tried this
-        // round, and 231 of level 1's bodies left the world. `sithPhysics` resolves the vertical axis
-        // against the sector's surfaces first; that is the prerequisite, not gravity itself.
+        // Gravity now runs for the shipped gravity goods (`physflags & 0x1` `type=weapon` bodies — the
+        // `_debris` family), with the vertical stop below; actors are left to `ai_tick`'s walker, whose
+        // floor integration owns their vertical axis (round 246, roadmap ledger). `ponytail:` the stop
+        // uses the sector's floor planes at the body's origin, not the engine's swept
+        // `SearchForSurfaceCollisions` and `GetThingHeight` resting rule; the shipped shrapnel's insert
+        // offset is zero, so the two agree there, and a non-zero-insert model would rest that much low.
         // The player is **not** a generic mover: `walk_player` integrates the body and consumes a
         // scripted velocity (`force_jump.cog`'s `SetThingVel`) into `player.vy`. Letting both loops run
         // meant the generic one moved the *thing*, hit the level, zeroed the velocity and rewound the
@@ -2401,6 +2409,24 @@ impl Runtime {
                 // velocity is the walker's to integrate, and `t.vel` is left for it to consume.
                 let _ = t.step(dt);
                 continue;
+            }
+            // `sithPhysics_UpdateThingPhysics`'s gravity arm (`0x4f6270`): a physics body whose
+            // physflags carry `0x1` falls at the level's gravity (`0x40000` halves it), unless it is
+            // attached to something that carries it. Actors are excluded because `ai_tick`'s walker
+            // owns their vertical integration (roadmap ledger). The shipped gravity goods are the
+            // `_debris` family (`type=weapon physflags=0x201`) — spawned chips that used to fly
+            // straight through the floor and out of the level.
+            let gravity_body = t.phys_flags & 0x1 != 0
+                && self.types.get(i).copied() == Some(3)
+                && t.attach.is_none()
+                && !t.destroyed;
+            if gravity_body {
+                let g = if t.phys_flags & 0x40000 != 0 {
+                    self.gravity * 0.5
+                } else {
+                    self.gravity
+                };
+                t.vel[2] -= g * dt;
             }
             if let Some(drive) = usize::try_from(t.sector).ok().and_then(|s| thrust.get(s)).copied()
                 && drive != [0.0; 3]
@@ -2472,6 +2498,34 @@ impl Runtime {
             }
             if path_moved || flying {
                 moved.push(i);
+            }
+            // The vertical stop the x/y resolver above cannot make. `sithCollision_MoveThing` resolves
+            // the fall against the sector's surfaces; the port's generic path only corrected x and y,
+            // which is why gravity was off (a settling body sank out of the world). A face above where
+            // the step started is a lip the body passed, not a floor it landed on, so it is ignored.
+            if gravity_body
+                && let Some(solids) = &self.solids
+            {
+                let mut floor: Option<f32> = None;
+                for sector in solids.sectors_around(t.pos) {
+                    if let Some((z, _)) =
+                        solids.floor_surface(sector, [t.pos[0], t.pos[1], t.pos[2] + 0.6])
+                        && z <= previous[2] + 0.05
+                    {
+                        floor = Some(floor.map_or(z, |near: f32| near.max(z)));
+                    }
+                }
+                if let Some(floor) = floor
+                    && t.pos[2] <= floor
+                {
+                    t.pos[2] = floor;
+                    if t.vel[2] < 0.0 {
+                        t.vel[2] = 0.0;
+                    }
+                    if let Some(sector) = solids.sector_at(t.pos, 0.1) {
+                        t.sector = i32::try_from(sector).unwrap_or(t.sector);
+                    }
+                }
             }
         }
         for index in blocked {
@@ -4273,7 +4327,9 @@ impl Runtime {
             destroyed: false,
             vel: forward,
             damage,
-            phys_flags: 0,
+            // A shot carries its template's `physflags=` too: `_weapon`'s `0x200` has no gravity bit,
+            // so a bolt still flies straight, while a `_debris`-style thrown thing falls.
+            phys_flags: self.template_phys_flags.get(&key).copied().unwrap_or(0),
             jk_flags: 0,
             attach: None,
             attach_offset: [0.0; 3],
@@ -5113,7 +5169,8 @@ impl Runtime {
             damage,
             min_damage: damage,
             decay: 0.0,
-            phys_flags: 0,
+            // An explosion thing starts with its template's `physflags=` like any created thing.
+            phys_flags: self.template_phys_flags.get(&explode).copied().unwrap_or(0),
             jk_flags: 0,
             attach: None,
             attach_offset: [0.0; 3],
