@@ -2544,3 +2544,15 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - Instinct count: **18 of the 22 loadable names ported**; the remaining shipped-usage gap is the Jedi set plus `jump`.
   Suite **188 passed**; `--soak-all` 35/35 clean; `--gates` 0 of 65 failed / 1 skipped; `--ai`, `--things`, `--hit`,
   `--weapons`, `--audit` pass; docs **132/132**. No window and no retail run.
+## Update — round 248
+
+- **`jump` ported — the last non-Jedi instinct.** Its registry mask is `0x604` (events 4/`0x200`/`0x400`); only `0x400`
+  is emitted, by `sithAI_idk_msgarrived_target` when a moving actor's way ahead is not walkable, so the other two arms
+  are dead content. The handler adds `dir * 0.1` (`_DAT_005232e4`) to the velocity toward the target and looks at it,
+  gated on attached/standing/already-moving and its own 2000 ms clock (`_DAT_005232e8` = 0.02 for the moving gate).
+  The port emits `0x400` where its steering is blocked with no route and runs `Runtime::jump_from_obstacle`.
+- Check: `a_blocked_actor_nudges_toward_its_target_with_jump` (nudge, turn, 2000 ms clock, standing refused). Measured
+  before/after: with the mask cleared it fails at `a moving blocked actor did not take the jump event`.
+- Instinct state: **19 of the 22 loadable names ported**; only the Jedi set remains. Suite **189 passed**; `--soak-all`
+  35/35 clean; `--gates` 0 of 65 failed / 1 skipped; `--ai`, `--things`, `--hit` pass; docs **132/132**. No window and
+  no retail run; a 8 s level-1 and 10 s level-9 soak show no content-level jump nudge (the soak player stands still).

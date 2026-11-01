@@ -1188,6 +1188,9 @@ pub struct Runtime {
     /// When each actor may dodge again. `dodge`'s damage path (`0x50b360` event 1) sets its own
     /// cooldown to `now + 1000` ms (`ai + 0xa3`), and the shot-passing path has none of its own.
     pub ai_dodge: BTreeMap<usize, f32>,
+    /// When each actor's `jump` may nudge again: the handler (`0x50abf0`, event `0x400`) sets its own
+    /// next check to `now + the class line's first number` (`jump 2000.0, 3.0, 3.0`).
+    pub ai_jump: BTreeMap<usize, f32>,
     /// When each actor may try the `opendoors` action next. Its handler (`0x50abc0`) calls
     /// `sithPlayerActions_Activate` — the **player's** use action — on the actor's own body, and that
     /// function throttles itself to 250 ms. An actor with the instinct opens the door it is walking
@@ -1853,6 +1856,7 @@ impl Runtime {
             ai_lobfire: BTreeMap::new(),
             ai_sense: BTreeMap::new(),
             ai_dodge: BTreeMap::new(),
+            ai_jump: BTreeMap::new(),
             ai_opendoors: BTreeMap::new(),
             ai_home: BTreeMap::new(),
             ai_flee_until: BTreeMap::new(),
@@ -3083,6 +3087,11 @@ impl Runtime {
         match name.to_ascii_lowercase().as_str() {
             "dodge" => 0x1003,
             "sensedanger" => 0x7,
+            // The registry word the `aistatus` dump reads (`jump` row: `mask 0x604`). Only `0x400` is
+            // ever emitted — the engine's steering helper (`sithAI_idk_msgarrived_target`) raises it when
+            // the way ahead of a moving actor is not walkable — so the handler's `4`/`0x200` arms are dead
+            // content, like `dodge`'s event 2.
+            "jump" => 0x604,
             _ => 0,
         }
     }
@@ -3134,6 +3143,7 @@ impl Runtime {
                 ("sensedanger", 1) => {
                     source.is_some_and(|attacker| self.sensedanger_from_damage(actor, attacker))
                 }
+                ("jump", 0x400) => self.jump_from_obstacle(actor, instinct.weight),
                 _ => false,
             };
             if acted {
@@ -3258,6 +3268,77 @@ impl Runtime {
         self.ai_move.insert(actor, point);
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} dodges the shot from {shot:?} sideways to {point:?}");
+        }
+        true
+    }
+
+    /// `jump` (`0x50abf0`), the event-`0x400` arm — the only arm content can reach. The engine's
+    /// steering helper `sithAI_idk_msgarrived_target` raises `0x400` when a **moving** actor's way ahead
+    /// is not walkable (it clears the steering first), and the registry word from the `aistatus` dump is
+    /// `mask 0x604`: events `4` and `0x200` are registered but never emitted, so those arms are dead
+    /// content like `dodge`'s event 2.
+    ///
+    /// The handler's gates, read from the decomp: a non-null `thing + 0x34` (the port reads that as
+    /// "attached"), the AI's moving bit `0x1`, and "already travelling toward the target" (`0.02 <
+    /// dot(dir, vel)`, `_DAT_005232e8`). Then it adds `dir * 0.1` (`_DAT_005232e4`) to the velocity along
+    /// the **direction to the target** and sets the look frame at the target
+    /// (`sithAI_SetLookFrame(ai, target, 1.0)`). The two class numbers are the leap distance (`3.0` in
+    /// every shipped line, `args[1]`) and the handler's own next-check delay (the line's first number).
+    ///
+    /// The engine also tests its walkability helper at the leap point (`FUN_004eb4b0(ai, point, 0)`,
+    /// body not recovered, on the ledger); the port refuses when the level blocks that line, which is the
+    /// same question a step would ask.
+    fn jump_from_obstacle(&mut self, actor: usize, weight: f32) -> bool {
+        let Some(t) = self.things.get(actor) else {
+            return false;
+        };
+        if t.attach.is_some() || self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x1 == 0 {
+            return false;
+        }
+        let Some(dist) = self
+            .ai
+            .get(&actor)
+            .and_then(|class| class.instinct("Jump"))
+            .and_then(|jump| jump.args.get(1).copied())
+        else {
+            return false;
+        };
+        let due = self.ai_jump.get(&actor).copied().unwrap_or(0.0);
+        if self.time < due {
+            return false;
+        }
+        let (from, vel, goal) = (t.pos, t.vel, t.ai_target);
+        let Some(goal) = goal else {
+            return false;
+        };
+        let (dx, dy) = (goal[0] - from[0], goal[1] - from[1]);
+        let flat = (dx * dx + dy * dy).sqrt();
+        if flat < 1e-4 {
+            return false;
+        }
+        let dir = [dx / flat, dy / flat];
+        if dir[0] * vel[0] + dir[1] * vel[1] > 0.02 {
+            return false;
+        }
+        let point = [from[0] + dir[0] * dist as f32, from[1] + dir[1] * dist as f32, from[2]];
+        if self
+            .solids
+            .as_ref()
+            .is_some_and(|solids| solids.segment_blocked(from, point))
+        {
+            return false;
+        }
+        self.ai_jump
+            .insert(actor, self.time + (weight / 1000.0).max(0.05));
+        if let Some(t) = self.things.get_mut(actor) {
+            // `_DAT_005232e4` = 0.1: the engine's velocities are level units a second (`thing + 0x234`
+            // is `vel * dt`), so this is a real but small unstick toward the target.
+            t.vel[0] += dir[0] * 0.1;
+            t.vel[1] += dir[1] * 0.1;
+            t.yaw = dir[1].atan2(dir[0]).to_degrees();
+        }
+        if std::env::var_os("BK_AI_TRACE").is_some() {
+            eprintln!("ai: {actor} is blocked and nudges toward {goal:?} (jump)");
         }
         true
     }
@@ -3930,6 +4011,12 @@ impl Runtime {
                 && !route.is_empty()
             {
                 self.ai_route.insert(index, route);
+            }
+            // `sithAI_idk_msgarrived_target`: a moving actor whose way ahead is not walkable clears its
+            // steering and emits `0x400`, the only event `jump` can receive. The port routes first, so
+            // "cannot walk ahead" is "blocked and no route answered".
+            if blocked && self.ai_route.get(&index).is_none() {
+                let _ = self.emit_ai_event(index, 0x400, None);
             }
             let route_goal = self.ai_route.get(&index).and_then(|r| r.first().copied());
             let goal = route_goal.unwrap_or(want);
@@ -9354,6 +9441,59 @@ mod tests {
             "a sleeping actor with `LobFire` kept its weapon drawn"
         );
         assert_eq!(rt.shots_fired, 0, "the dead `sithAI_FireWeapon` branch lobbed a shot");
+    }
+
+    /// `jump` (`0x50abf0`): the only arm content can reach is event `0x400`, raised by the steering
+    /// helper when a moving actor's way ahead is not walkable. A moving, unattached actor gets
+    /// `dir * 0.1` added to its velocity toward the target (`_DAT_005232e4`) and turns to it, on the
+    /// class line's own 2000 ms clock; a standing actor is refused by the AI moving bit `0x1`.
+    #[test]
+    fn a_blocked_actor_nudges_toward_its_target_with_jump() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 180.0;
+        let mut player = base.clone();
+        player.pos = [3.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\nJump 2000.0, 3.0, 3.0\n",
+            ),
+        );
+        rt.actor_flags.insert(1, 0x1);
+        rt.things[1].ai_target = Some([3.0, 0.0, 0.0]);
+        assert!(
+            rt.emit_ai_event(1, 0x400, None),
+            "a moving blocked actor did not take the jump event"
+        );
+        assert!(
+            (rt.things[1].vel[0] - 0.1).abs() < 1e-5,
+            "the nudge was {:?}",
+            rt.things[1].vel
+        );
+        assert!(
+            rt.things[1].yaw.abs() < 1e-3,
+            "the actor did not face its target: yaw {}",
+            rt.things[1].yaw
+        );
+        // The handler's own 2000 ms clock: an immediate second event does nothing.
+        assert!(
+            !rt.emit_ai_event(1, 0x400, None),
+            "the jump ignored its class interval"
+        );
+        // A standing actor is refused by the engine's moving bit.
+        rt.ai_jump.clear();
+        rt.actor_flags.insert(1, 0);
+        assert!(
+            !rt.emit_ai_event(1, 0x400, None),
+            "a standing actor took the jump event"
+        );
     }
 
     /// `talk`'s mood table (`0x50be20`): the AI flag word's `0x200` is the gate, `0x800` and `0x400`

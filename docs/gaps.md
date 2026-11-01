@@ -5827,7 +5827,7 @@ handler:
 | opendoors | 142 | `0x50abc0` | **yes** (round 218: the use scans on the actor's own body) |
 | blindfire | 134 | `0x509b30` | **yes** (round 219: fires at the remembered position) |
 | returnhome | 97 | `0x50bd70` | **yes** (round 220: walks back to its anchor) |
-| jump | 92 | `0x50abf0` | no — and it is not ordinary foot combat: the handler only acts on AI event `0x400` (a track-target arrival; `sithAI_idk_msgarrived_target` emits it), so it needs the track-thing system rather than a physics jump |
+| jump | 92 | `0x50abf0` | **yes** (round 248: the live event-`0x400` arm — a moving, unattached actor whose way ahead is blocked gets `dir * 0.1` toward its target, on the class line's own clock; the `4`/`0x200` arms are dead content). 85 of its 92 class files are loadable |
 | circlestrafe | 70 | `0x509890` | **yes** (round 222: orbits at close range) |
 | flee | 49 | `0x50aeb0` | **yes** (round 228: `AIFlee` sets the mode the handler walks, now with the instinct's duration) |
 | forcepowers | 45 | `0x40ff40` | no |
@@ -5845,10 +5845,10 @@ handler:
 | crouch | 3 | `0x509ad0` | no — and its three classes (`stcrouch.ai/.ai0/.ai2`) are named by no shipped template or script: dead content (round 243). The handler is event-`0x100`-driven and only flips the crouch physflag `0x10000` |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **18 of the 22 instincts that shipped content can actually load**. The list is also a priority order,
-since the counts are how many classes depend on each: the remaining gameplay gap is the **Jedi set** (`forcepowers` and
-`saberfighting` 45 each, `specialattack` 24, all loadable) plus `jump` (85 of its 92 loadable, and its handler only
-runs on the track-target event). `listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and
+So the port runs **19 of the 22 instincts that shipped content can actually load**. The list is also a priority order,
+since the counts are how many classes depend on each: the remaining gameplay gap is only the **Jedi set**
+(`forcepowers` and `saberfighting` 45 loadable classes each, `specialattack` 24), which needs the force-cast and saber
+systems on non-player actors rather than new handler parsing. `listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and
 235, `sensedanger`, the last partial entry, in round 236, `dodge` in round 239 and `lobfire` in round 247 (which also
 showed its firing branch is dead content).  **`crouch` and `randomturn` are named by classes nobody loads** (round 243: `stcrouch.ai` and
 `strandom`/`turandom`/`tuprodrandom` appear in no level template and no script), so the 24 named instincts are 22 that
@@ -6661,3 +6661,28 @@ clearing the bit does not change it before the 1000 ms interval, it becomes 0 af
 dead branch never fires). Measured before/after: with the block disabled the test fails at the first assertion
 (`an awake actor with \`LobFire\` did not draw its weapon`). `--ai`, `--things`, `--hit`, `--weapons`, `--audit` pass;
 `--soak-all` 35/35 clean; `--gates` 0 of 65 failed / 1 skipped. No window and no retail run.
+## Update — round 248 (`jump`: the blocked-steering nudge, and the last non-Jedi instinct)
+
+`jump`'s mask from the `aistatus` dump is **`0x604`** — events `4`, `0x200` and `0x400`. Only `0x400` is ever
+emitted: the engine's steering helper `sithAI_idk_msgarrived_target` clears a moving actor's steering and raises it
+when the way ahead is not walkable (`sithAI_CanWalk` fails), so the `4`/`0x200` arms are **dead content** — the same
+finding as `dodge`'s event 2 and `lobfire`'s firing branch. The handler (`0x50abf0`) gates on a non-null
+`thing + 0x34` (read as attached), the AI moving bit `0x1`, and "already travelling toward the target"
+(`0.02 < dot(dir, vel)`, `_DAT_005232e8`); then it adds **`dir * 0.1`** (`_DAT_005232e4`) to the velocity toward the
+target and looks at it (`sithAI_SetLookFrame(ai, target, 1.0)`). The class line's numbers are the 2000 ms clock and a
+3.0-unit leap point, which the engine checks with a walkability helper (`FUN_004eb4b0`, body not recovered — ledgered;
+the port refuses when the level blocks that line instead).
+
+The port emits `0x400` where its own steering is blocked and no route answered, and `Runtime::jump_from_obstacle`
+applies the nudge and the turn on `ai_jump`'s class clock. That closes the **last non-Jedi instance**: 19 of the 22
+loadable instinct names are now ported, and the only remaining gameplay instinct gap is the **Jedi set**
+(`forcepowers`/`saberfighting` 45 loadable classes each, `specialattack` 24), which needs force casting and saber
+combat on non-player actors.
+
+Checks (189 tests): `a_blocked_actor_nudges_toward_its_target_with_jump` — the event is taken by a moving unattached
+actor, the velocity gains `0.1` toward the target, the body turns to it, an immediate second event is refused by the
+class's 2000 ms clock, and a standing actor is refused by the moving bit. Measured before/after: with `jump`'s mask
+cleared the check fails at `a moving blocked actor did not take the jump event`. A 8 s level-1 soak and a 10 s level-9
+soak report no `BK_AI_TRACE` nudge (the soak's player stands still, so no actor is blocked mid-chase), so content-level
+occurrence is the unit check plus the wired blocked-steering site; `--soak-all` is 35/35 clean and `--gates` 0 of 65
+failed / 1 skipped. No window and no retail run.
