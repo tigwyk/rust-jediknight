@@ -513,6 +513,45 @@ track things, scope, ending screens. Each follows the porting loop above and ent
 Cut a release when: the exit criteria of every phase so far hold, the release note lists the tier per
 level, and a clean-machine install plays level 1 to completion. Multiplayer stays out of scope, as now.
 
+**State at round 249 (measured, so the next session starts from evidence, not narration).** Every check that can be
+taken without driving the game is green, and the tree is committed and clean:
+
+| check | command | last measured |
+| --- | --- | --- |
+| unit + integration suite | `cargo test --release` | **189 passed**, 0 failed |
+| port gates (headless sweep) | `BK_SKIP_WINDOW=1 BK_MUTE=1 bevi-knight --gates` | **0 of 65 failed, 1 skipped** (`--live-check`, the one row that needs the camera) |
+| every level's runtime | `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5 bevi-knight --soak-all` | **35 of 35 levels**, 0 non-finite positions, 0 bodies outside every sector |
+| drop-in asset coverage | `bevi-knight --audit` | **35/35 levels clean**, 0 non-drawable models, 10 unresolved asset references (retail data gaps), 54 undecoded files (cutscenes and sound; intentionally out of scope) |
+| every cog verb | `bevi-knight --cog-check` | **34 levels, 0 stubbed verb calls** |
+| data probes | `--things`, `--ai`, `--hit`, `--weapons`, `--sound`, `--par`, `--model`, `--asset` | all pass |
+| docs | `pwsh scripts/check-docs-links.ps1` | **132/132** links resolve |
+
+What the windowless method has closed: Phase 0 and **0.5 (trace v0, done)**, Phase 1's **step 1** (body, attachments,
+camera) and **step 6** (level start, tally, transition carry, retail's autosaves as the fixture), the **whole AI event
+dispatcher and 19 of the 22 loadable instinct names** (the three left are the Jedi set, which needs force/saber systems
+on non-player actors), the gravity family for shipped physics goods, the `PAR 1.0` clouds' data **and** draw path, both
+`--soak`/`--soak-all` and `--gates` as headless nets, and the retail-derived constants for detection, `dodge`, `talk`,
+`jump`, `lobfire` and the movement code.
+
+What still blocks Phase 4, in the roadmap's own order:
+
+1. **The QA window's three gated checks** — walk trace (`trace-gate.ps1`; 15 legs, `walk5_spawn` tracked), parity draw
+   (`retail-capture.ps1` + `port-capture.ps1` + `compare.ps1 -Gate`; 6 thresholds, 0 failures at the last windowed run),
+   and the port-gate sweep's `--live-check`. These are the only remaining measurement for **Phase 1 steps 2, 3 and 5's
+   exits** (draw parity on the route set, the recorded movement trace, the combat encounter) and **Phase 2's per-level
+   trace generalisation**. Until they run, those exits cannot be claimed.
+2. **Phase 1 step 4's exit** (a cog state trace at each trigger) — same window: it needs a retail capture to compare
+   against; the port-side trigger paths are all headless-tested, but "matches retail" is a retail measurement.
+3. **Phase 3 breadth remainder** (shipped-content order, all ledgered): the Jedi set's three handlers; the generated
+   `type=particle` systems (`material=`/`rate=`/`elementsize=` families — the bulk of shipped effect content); track
+   things' own per-frame timings; scope; ending screens. None of these is an exit criterion for the phases before it.
+4. **`walk5_spawn`** — the one tracked walk-trace failure, a floor-search scope deviation with its retire condition on
+   the ledger; it is part of (1).
+
+So: **no release candidate is warranted yet.** Phase 1 steps 2–5 and Phase 2's trace comparison need one deliberate QA
+window (the session this document already describes); Phase 3's breadth list is the post-window work order. Everything
+achievable from the shipped artifacts, the decomp and the file probes has been measured and committed.
+
 ## Rules for the next agent or contributor
 
 - Do not mark a row done without a tier and the fixture that earns it.
