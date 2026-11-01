@@ -938,3 +938,24 @@ A static landing page in site/ (HTML + one CSS file + optimised screenshots) is 
 GitHub Pages by .github/workflows/pages.yml. It covers the pitch, version 0.1.1 status, screens,
 the three-step install, requirements, source build, docs links and the licence/game-rights
 footer. The README links it and the repository homepage was set to the Pages URL.
+
+## The Jedi set, and the QA window's real numbers (round 252)
+
+Ported `forcepowers` (`0x40ff40`) and `saberfighting` (`0x40fa40`), the last two live instinct
+handlers shipped content loads, from the retail disassembly and the class lines themselves — the
+force side is the engine's `user0` dispatch to the actor's own `darkjedi_*.cog`, the saber side is
+the 500 ms clock, swing chance, four `(range, damage, cooldown)` entries and `DAMAGE_SABER`. Suite
+189 → 193; `--soak-all` 35/35 clean.
+
+The QA window's three checks were run for the first time this round and the numbers are now
+current rather than inherited: port gates **65/65, 0 skipped** windowed; parity draw **6/0**; walk
+trace **12 legs, 1 tracked failure** (`walk5_spawn`). The draw gate's only failure was a fixture
+bug — the level-1 `spawn` reference had been captured with `-StartLevel 3`, so it held level 3's
+pose and scored 0.18. Re-captured correctly it scores 0.66 and the gate passes; the harness now
+warns when a spawn row's pose is nowhere near the level's own walkplayer pose.
+
+`specialattack` (24 classes) is the one loaded instinct still unported, and it is blocked on a
+measured producer rather than on the handler: its damage branch runs on AI event 4, and while the
+executable does emit event 4 from the thing-collision callback, this build's actor walk raises no
+thing-vs-thing event. The same round corrected the old "nothing emits 2 or 4" inventory: events 2,
+4 and 0x200 all have emit sites in the executable, and this build produces none of them yet.

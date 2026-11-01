@@ -1106,6 +1106,23 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       }
     }
 
+    # A level-spawn row must show **that level's** own pose. Round 252 found the level-1 `spawn`
+    # reference had been captured with `-StartLevel 3`, so the row named 01narshadda but held level
+    # 3's pose and scored 0.18 against the port — a fixture bug, not a port regression. Warn loudly
+    # (never fatal: a level's opening script can legitimately move the body after load).
+    if ($null -eq $requestedPose -and $coordsA -and $coordsSource -eq 'coords' `
+        -and $script:WalkplayerPoses.ContainsKey($level)) {
+      $known = $script:WalkplayerPoses[$level]
+      $delta = [math]::Sqrt(
+        [math]::Pow($coordsA.Pos[0] - $known.Pos[0], 2) +
+        [math]::Pow($coordsA.Pos[1] - $known.Pos[1], 2) +
+        [math]::Pow($coordsA.Pos[2] - $known.Pos[2], 2))
+      if ($delta -gt 2.0) {
+        Log ("WARNING: row '{0}' is the {1} spawn, but coords read ({2}, {3}, {4}) — {5:N2} units from the level's walkplayer pose. Did -StartLevel boot another level?" -f `
+            $name, $level, $coordsA.Pos[0], $coordsA.Pos[1], $coordsA.Pos[2], $delta)
+      }
+    }
+
     # Warp verification is advisory only: a mismatched pose must not abort the harvest.
     # `shots.tsv` gives the camera eye and the body was warped to `z - JkEyeOffset`, so the position
     # check puts the eye offset back. `warp` sets position and yaw only: pitch/roll keep the level's

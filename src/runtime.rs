@@ -760,6 +760,69 @@ fn talk_mode(flags: u32, health_fraction: f32) -> Option<&'static str> {
     Some(if health_fraction >= 0.5 { "happy" } else { "search" })
 }
 
+/// `sithAICmd_ForcePowers` (`0x40ff40`): which of the class's three force abilities fires, if any.
+///
+/// The handler reads the shipped line in pairs — `fltArg[1..2]`, `[3..4]`, `[5..6]` are the three
+/// abilities' distance ranges, `fltArg[7..9]` their chances, and `fltArg[10..12]` their cooldowns
+/// (milliseconds). One random draw is compared with all three chances (`__ftol` of
+/// `rand / 32768`), and the first ability whose chance passes **and** whose range contains the
+/// target is the one cast. The caller holds the line's first number as the instinct `weight`, so
+/// these are the port's `args[0..]`: `args[0]` is engine `fltArg[1]`.
+///
+/// Returns `(1..=3, cooldown_ms)`.
+fn force_power(args: &[f32], distance: f32, roll: f64) -> Option<(u8, f32)> {
+    let arg = |index: usize| args.get(index).copied().unwrap_or(0.0);
+    for power in 0..3 {
+        let (near, far) = (arg(power * 2), arg(power * 2 + 1));
+        let chance = arg(6 + power) as f64;
+        if roll < chance && distance >= near && distance <= far {
+            return Some(((power + 1) as u8, arg(9 + power)));
+        }
+    }
+    None
+}
+
+/// `sithAICmd_SaberFighting` (`0x40fa40`): which saber swing an actor takes, if any.
+///
+/// The class line is four `(range, damage, cooldown)` triples after the opening chance:
+/// `fltArg[1..3]`, `[4..6]`, `[7..9]`, `[10..12]`. The handler rearms every 500 ms, rolls
+/// `fltArg[0]` for a swing, then walks the four entries **in order** and stops at the first whose
+/// range is below the target distance. The number of entries that survived picks the swing with
+/// one uniform draw; the shipped dark Jedi fill the first two, so their line offers 20/30 damage at
+/// 1600/925 ms. Returns `(damage, puppet mode, cooldown_ms)`.
+fn saber_attack(
+    args: &[f32],
+    distance: f32,
+    chance_roll: f64,
+    pick: f64,
+) -> Option<(f32, i32, f32)> {
+    let arg = |index: usize| args.get(index).copied().unwrap_or(0.0);
+    if chance_roll >= arg(0) as f64 {
+        return None;
+    }
+    let mut count = 0usize;
+    for entry in 0..4 {
+        let range = arg(1 + entry * 3);
+        if range > 0.0 && range >= distance {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let entry = ((pick * count as f64) as usize).min(count - 1);
+    let damage = arg(2 + entry * 3);
+    if damage <= 0.0 {
+        return None;
+    }
+    // The modes are the handler's own four immediates (`sithPuppet_PlayMode` ids 8, 0x12, 9, 0xa),
+    // and the sound it plays is the same index + 0x47.
+    let mode = [8, 0x12, 9, 0xa][entry];
+    Some((damage, mode, arg(3 + entry * 3)))
+}
+
 /// Whether an actor at `from` facing `forward` **hears** the sound at `pos` — the `listen` handler's
 /// own test (`0x50a6f0`). Inside `heardist` always; a sound the path finds `blocked` (geometry
 /// between the two) only when it is nearer than [`AI_LISTEN_NEAR`] and the forward dot is above
@@ -1182,6 +1245,18 @@ pub struct Runtime {
     /// has the event-`0x100` branch in its mask, and that branch sets
     /// `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in 1000 ms.
     pub ai_lobfire: BTreeMap<usize, f32>,
+    /// When each actor may run its `forcepowers` handler next (`0x40ff40`). The handler starts by
+    /// setting its own next run to `now + fltArg[0]` (the class line's first number), so the
+    /// interval is per class and not global.
+    pub ai_force: BTreeMap<usize, f32>,
+    /// Each actor's force-power cooldown (`ai + 0x288` in the handler): the selected ability's own
+    /// timer, `fltArg[10..12]`. The handler returns without casting while it is in the future.
+    pub ai_force_cool: BTreeMap<usize, f32>,
+    /// When each actor may run `saberfighting` again: the handler rearms its scheduler slot at a
+    /// fixed 500 ms before it decides anything.
+    pub ai_saber: BTreeMap<usize, f32>,
+    /// The selected saber attack's own cooldown (`ai + 0x288`), `fltArg[3]/[6]/[9]/[12]`.
+    pub ai_saber_cool: BTreeMap<usize, f32>,
     /// When each not-yet-alerted actor may check for danger again (`sensedanger` retries once a second
     /// while the player is out of sight).
     pub ai_sense: BTreeMap<usize, f32>,
@@ -1854,6 +1929,10 @@ impl Runtime {
             ai_listen: BTreeMap::new(),
             ai_talk: BTreeMap::new(),
             ai_lobfire: BTreeMap::new(),
+            ai_force: BTreeMap::new(),
+            ai_force_cool: BTreeMap::new(),
+            ai_saber: BTreeMap::new(),
+            ai_saber_cool: BTreeMap::new(),
             ai_sense: BTreeMap::new(),
             ai_dodge: BTreeMap::new(),
             ai_jump: BTreeMap::new(),
@@ -3609,6 +3688,102 @@ impl Runtime {
                     sighted = false;
                 }
             }
+            // `forcepowers` (`0x40ff40`): the handler's own clock is `fltArg[0]`; while the target is
+            // visible (`ai + 0x1f4 == 0`) and the ability cooldown (`ai + 0x288`) has passed, it
+            // rolls one number against the class line's three chances and sends `user0` (id 27) to
+            // the actor's **own** scripts with `(target thing id, ability 1..3)`. The shipped
+            // `darkjedi_*.cog` handlers do the rest — force persuasion, blinding, grip — so this is
+            // the engine-side half only, exactly as `ThingSendMessageEx` (`0x4dfaf0`) is.
+            if let Some(force) = ai.as_ref().and_then(|class| class.instinct("ForcePowers")).cloned() {
+                let due = self.ai_force.get(&index).copied().unwrap_or(self.time);
+                if self.time >= due {
+                    self.ai_force
+                        .insert(index, self.time + (force.weight / 1000.0).max(0.0));
+                    let cooling = self.ai_force_cool.get(&index).copied().unwrap_or(0.0);
+                    if sighted && self.time >= cooling {
+                        let reach = ((target[0] - from[0]).powi(2)
+                            + (target[1] - from[1]).powi(2)
+                            + (target[2] - from[2]).powi(2))
+                        .sqrt();
+                        // `sithAI_CheckSightThing` reports the gap after the target's own body
+                        // radius, clamped at zero (`param_3[0xc]`).
+                        let radius = self
+                            .templates
+                            .get(player)
+                            .and_then(|name| self.template_hit.get(&name.to_ascii_lowercase()))
+                            .map(|(radius, _)| *radius)
+                            .unwrap_or(0.065);
+                        let distance = (reach - radius).max(0.0);
+                        if let Some((power, cooldown)) = force_power(
+                            &force.args,
+                            distance,
+                            crate::cog::pseudo_random(),
+                        ) {
+                            // `ThingSendMessageEx(thing, 0, user0, target_id, power, 0, 0)`: the
+                            // receiver's `GetParam(0)` is the victim, `GetParam(1)` the power.
+                            self.send_thing_message(
+                                index,
+                                "user0",
+                                [player as f64, f64::from(power)],
+                            );
+                            self.ai_force_cool
+                                .insert(index, self.time + (cooldown / 1000.0).max(0.0));
+                            if std::env::var_os("BK_AI_TRACE").is_some() {
+                                eprintln!(
+                                    "ai: {index} forcepowers ability {power} at {distance:.2} (cooldown {cooldown:.0} ms)"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            // `saberfighting` (`0x40fa40`): a dark Jedi whose blade the class's own cog installed
+            // (`jkSetSaberInfo`) swings when the target is inside the class line's first range.
+            // The handler rearms every 500 ms, rolls `fltArg[0]` for a swing, and picks one of the
+            // four `(range, damage, cooldown)` entries; the shipped classes fill the first two. The
+            // blade's damage is `sithThing_DamageThing` with `DAMAGE_SABER` (0x10), so it rides the
+            // same path a player swing does. What is not modelled: the target-typeflag saber-lock
+            // branch, `jkSaber_Enable`'s unrecovered arguments, and the puppet track/sound ids (see
+            // the ledger).
+            if let Some(saber) = ai.as_ref().and_then(|class| class.instinct("SaberFighting")).cloned() {
+                let due = self.ai_saber.get(&index).copied().unwrap_or(self.time);
+                if self.time >= due {
+                    self.ai_saber.insert(index, self.time + 0.5);
+                    let cooling = self.ai_saber_cool.get(&index).copied().unwrap_or(0.0);
+                    if sighted && self.time >= cooling && self.saber.contains_key(&index) {
+                        let reach = ((target[0] - from[0]).powi(2)
+                            + (target[1] - from[1]).powi(2)
+                            + (target[2] - from[2]).powi(2))
+                        .sqrt();
+                        let radius = self
+                            .templates
+                            .get(player)
+                            .and_then(|name| self.template_hit.get(&name.to_ascii_lowercase()))
+                            .map(|(radius, _)| *radius)
+                            .unwrap_or(0.065);
+                        let distance = (reach - radius).max(0.0);
+                        if let Some((damage, mode, cooldown)) = saber_attack(
+                            &saber.args,
+                            distance,
+                            crate::cog::pseudo_random(),
+                            crate::cog::pseudo_random(),
+                        ) {
+                            self.damage_typed(player as i64, damage, DAMAGE_SABER);
+                            *self.actor_flags.entry(index).or_insert(0) |= 0x400;
+                            self.play_mode.insert(index, mode);
+                            self.ai_saber_cool
+                                .insert(index, self.time + (cooldown / 1000.0).max(0.0));
+                            if std::env::var_os("BK_AI_TRACE").is_some() {
+                                eprintln!(
+                                    "ai: {index} saberfighting {damage:.0} damage at {distance:.2} (cooldown {cooldown:.0} ms)"
+                                );
+                            }
+                        } else {
+                            *self.actor_flags.entry(index).or_insert(0) &= !0x400;
+                        }
+                    }
+                }
+            }
             if sighted && std::env::var_os("BK_AI_TRACE").is_some() {
                 let (sx, sy) = (target[0] - from[0], target[1] - from[1]);
                 let range = (sx * sx + sy * sy).sqrt().max(1e-4);
@@ -5136,6 +5311,28 @@ impl Runtime {
             .filter(|(_, _, target)| *target == thing)
             .map(|(instance, _, _)| *instance)
             .collect()
+    }
+
+    /// `sithCog_ThingSendMessageEx` addressed at a thing's own scripts (`0x4dfaf0`). The engine
+    /// messages `thing + 0x29c` and `thing + 0x2a0` (the thing's two script slots) plus every
+    /// subscriber whose mask matches; for a placed `thing x` symbol that is the instance the cog
+    /// section binds to it, which is what `thing_instances` resolves here. The sender id is the
+    /// thing's own id (`thing + 4` in the engine), and both message parameters ride along for the
+    /// receiver's `GetParam(0)`/`GetParam(1)`.
+    ///
+    /// Returns how many instances were queued.
+    pub fn send_thing_message(
+        &mut self,
+        thing: usize,
+        label: &'static str,
+        params: [f64; 2],
+    ) -> usize {
+        let instances = self.thing_instances(thing);
+        for instance in &instances {
+            self.pending_messages
+                .push((*instance, label, params, Some(thing as i64)));
+        }
+        instances.len()
     }
 
     /// Which cog instances a move from one sector to another messages.
@@ -9882,6 +10079,136 @@ mod tests {
         rt.things[1].yaw = 180.0;
         assert!(rt.fire(1, "+bryarbolt").is_some(), "the actor's own shot did not spawn");
         assert!(!rt.ai_move.contains_key(&1), "an actor's own shot made somebody dodge");
+    }
+
+    /// `forcepowers` (`0x40ff40`) reads the shipped line as three `(range, chance, cooldown)`
+    /// triples and compares **one** random draw with all three chances. The classes pin it:
+    /// `yun.ai` rolls 20% persuasion (0–5 units) and 60% blinding (0–4); `sariss.ai` rolls 63%
+    /// persuasion only at 1–3 units and 99% blinding otherwise.
+    #[test]
+    fn forcepowers_picks_the_first_rolled_ability_inside_its_range() {
+        let yun = [0.0, 5.0, 0.0, 4.0, 0.0, 0.0, 0.20, 0.60, 0.0, 12000.0, 15000.0, 0.0];
+        assert_eq!(force_power(&yun, 2.0, 0.19), Some((1, 12000.0)));
+        assert_eq!(force_power(&yun, 2.0, 0.21), Some((2, 15000.0)));
+        // 4.5 units is outside both ranges and 0.61 fails both chances.
+        assert_eq!(force_power(&yun, 4.5, 0.21), None);
+        assert_eq!(force_power(&yun, 2.0, 0.61), None);
+        assert_eq!(force_power(&yun, 5.0, 0.19), Some((1, 12000.0)));
+
+        let sariss = [1.0, 3.0, 0.0, 5.0, 0.0, 0.0, 0.63, 0.99, 0.0, 15000.0, 1000.0, 0.0];
+        assert_eq!(force_power(&sariss, 2.0, 0.5), Some((1, 15000.0)));
+        assert_eq!(force_power(&sariss, 4.0, 0.5), Some((2, 1000.0)));
+        assert_eq!(force_power(&sariss, 4.0, 0.995), None);
+    }
+
+    /// The handler's engine side is a `user0` message to the actor's **own** scripts with the victim
+    /// and the ability, exactly `ThingSendMessageEx(thing, 0, 27, target, power, 0, 0)`. It must
+    /// reach the instance the level binds to the actor, and only once per cooldown.
+    #[test]
+    fn forcepowers_queues_user0_on_the_actors_script() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        rt.things = vec![base, actor];
+        rt.templates = vec!["walkplayer".into(), "yun".into()];
+        rt.types = vec![10, 2];
+        rt.template_hit.insert("walkplayer".into(), (0.065, 0.18));
+        rt.template_hit.insert("yun".into(), (0.06, 0.17));
+        rt.things[0].pos = [2.0, 0.0, 0.0];
+        rt.things[1].yaw = 0.0;
+        rt.thing_links.push((7, 0, 1));
+        rt.ai.insert(
+            1,
+            crate::ai::Ai {
+                sightdist: 10.0,
+                fov: 180.0,
+                instincts: vec![crate::ai::Instinct {
+                    name: "ForcePowers".into(),
+                    // The handler's scheduler interval is zero here so the second tick is gated
+                    // only by the selected ability's own cooldown.
+                    weight: 0.0,
+                    args: vec![
+                        0.0, 5.0, 0.0, 5.0, 0.0, 0.0, 1.0, 1.0, 1.0, 12000.0, 15000.0, 9000.0,
+                    ],
+                }],
+                ..Default::default()
+            },
+        );
+        rt.ai_detected.insert(1);
+        rt.ai_tick(0, 1.0 / 30.0);
+        let queued: Vec<_> = rt
+            .pending_messages
+            .iter()
+            .filter(|(instance, label, _, _)| *instance == 7 && *label == "user0")
+            .collect();
+        assert_eq!(queued.len(), 1, "the force power did not reach the actor's script");
+        assert_eq!(queued[0].2, [0.0, 1.0], "the message did not carry (victim, ability)");
+        // The ability's own cooldown is `fltArg[10]` (12 s), so a second tick queues nothing.
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert_eq!(
+            rt.pending_messages.iter().filter(|(_, label, _, _)| *label == "user0").count(),
+            1,
+            "the force power ignored its own cooldown"
+        );
+    }
+
+    /// `saberfighting` (`0x40fa40`) walks its four `(range, damage, cooldown)` entries in order and
+    /// stops at the first range below the target gap. `yun.ai` (0.25/20/1600 then 0.25/30/925) and
+    /// `sariss.ai` (0.225/40/950 then 0.25/30/1400) are the two shipped shapes.
+    #[test]
+    fn saberfighting_picks_the_class_swing_inside_its_range() {
+        let yun = [0.40, 0.25, 20.0, 1600.0, 0.25, 30.0, 925.0];
+        assert_eq!(saber_attack(&yun, 0.2, 0.3, 0.0), Some((20.0, 8, 1600.0)));
+        assert_eq!(saber_attack(&yun, 0.2, 0.3, 0.9), Some((30.0, 0x12, 925.0)));
+        // The chance gate, then the first range's ceiling.
+        assert_eq!(saber_attack(&yun, 0.2, 0.5, 0.0), None);
+        assert_eq!(saber_attack(&yun, 0.3, 0.3, 0.0), None);
+
+        let sariss = [0.50, 0.225, 40.0, 950.0, 0.25, 30.0, 1400.0];
+        assert_eq!(saber_attack(&sariss, 0.2, 0.4, 0.0), Some((40.0, 8, 950.0)));
+        assert_eq!(saber_attack(&sariss, 0.2, 0.4, 0.6), Some((30.0, 0x12, 1400.0)));
+        // 0.24 is past the first entry's 0.225, and the walk stops there.
+        assert_eq!(saber_attack(&sariss, 0.24, 0.4, 0.0), None);
+    }
+
+    /// The live half: a saber-armed dark Jedi inside range damages the player with `DAMAGE_SABER`,
+    /// raises the handler's `0x400` flag and cannot swing again until the entry's cooldown.
+    #[test]
+    fn saberfighting_hurts_the_target_and_honours_the_cooldown() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        rt.things = vec![base, actor.clone()];
+        rt.templates = vec!["walkplayer".into(), "yun".into()];
+        rt.types = vec![10, 2];
+        rt.template_hit.insert("walkplayer".into(), (0.065, 0.18));
+        rt.template_hit.insert("yun".into(), (0.06, 0.17));
+        rt.things[0].pos = [0.2, 0.0, 0.0];
+        actor.pos = [0.0, 0.0, 0.0];
+        rt.things[1] = actor;
+        rt.saber.insert(1, SaberInfo::default());
+        rt.ai.insert(
+            1,
+            crate::ai::Ai {
+                sightdist: 10.0,
+                fov: 180.0,
+                instincts: vec![crate::ai::Instinct {
+                    name: "SaberFighting".into(),
+                    weight: 0.0,
+                    args: vec![1.0, 0.25, 20.0, 1600.0, 0.25, 30.0, 925.0],
+                }],
+                ..Default::default()
+            },
+        );
+        rt.ai_detected.insert(1);
+        let before = rt.things[0].health;
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert!(rt.things[0].health < before, "the saber did not hit the target");
+        assert_eq!(rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x400, 0x400);
+        let after = rt.things[0].health;
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert_eq!(rt.things[0].health, after, "the saber ignored its cooldown");
     }
 
     /// `sensedanger`'s damage path (`0x50b9b0`, event 1): an aware, not-yet-alerted actor that is hit

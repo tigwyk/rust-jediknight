@@ -707,12 +707,12 @@ is why it was recoverable.
 ## Verification
 
 Every check in one page: [docs/gates.txt](gates.txt) records each flag and what it printed
-against this install; the sweep now is **64 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
-`0 of 61 failed, 9 skipped`), plus 143 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
+against this install; the sweep now is **65 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
+`0 of 65 failed, 1 skipped`), plus **193** tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
 
 [CI](../.github/workflows/ci.yml) runs on Windows: it installs the MSRV from `Cargo.toml`, builds
-with `--locked`, runs the 143 unit tests, builds the i686 film helper, produces the native
-`setup.exe` as an artifact, and checks every relative documentation link. The 64 gates are not
+with `--locked`, runs the 193 unit tests, builds the i686 film helper, produces the native
+`setup.exe` as an artifact, and checks every relative documentation link. The 65 gates are not
 in CI on purpose — they require a retail game install, which the repository does not ship and
 CI does not download.
 

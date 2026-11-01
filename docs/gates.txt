@@ -2596,3 +2596,26 @@ running app.--carry-check --start 01narshadda                        0   level 2
     JK.EXE is still refused), and new `tools/parity/retail-cleanup.ps1` does the same by hand.
 - No window opened and no retail run this round; both port runs used the headless walk probe. Suite **189 passed**
   (unchanged), docs **132/132**.
+
+## Update — round 252 (the Jedi set, and the QA window's three checks)
+
+- `cargo test --release`: **193 passed**, 0 failed (189 before the round; the four new checks are
+  `forcepowers_picks_the_first_rolled_ability_inside_its_range`,
+  `forcepowers_queues_user0_on_the_actors_script`,
+  `saberfighting_picks_the_class_swing_inside_its_range`, and
+  `saberfighting_hurts_the_target_and_honours_the_cooldown`).
+- `--gates` windowed: **65 of 65, 0 skipped**. `BK_SKIP_WINDOW=1`: 0 of 65 failed, 1 skipped
+  (`--live-check`).
+- `--soak-all` (5 s, headless): **35 of 35** levels, 0 non-finite positions, 0 bodies outside every
+  sector.
+- Walk-trace gate: **12 legs, 1 tracked failure** (`walk5_spawn`; preflight excludes the three
+  blocked default legs).
+- Parity draw gate: **6 thresholds, 0 failures**. The `spawn` row's retail reference had been
+  captured with `-StartLevel 3` (level 3's pose in a level-1 row, 0.1839 SSIM); re-capturing it
+  without `-StartLevel` restored the real spawn pair (0.6603) and the gate passed. The harness now
+  warns when a spawn row's `coords` is more than 2 units from the level's known walkplayer pose.
+- Instinct state: **21 of the 22 loadable names ported**. `forcepowers` (45 classes) and
+  `saberfighting` (45) landed from `0x40ff40`/`0x40fa40`; the last, `specialattack` (24), is
+  event-`4`-driven and event 4 is emitted by the thing-collision callback (`0x4ed24d`) this build
+  does not raise. The round also corrected the event inventory: `2` (`0x4f2c05`) and `0x200`
+  (`0x4ed203`) are emitted too, and only `1`/`0x100`/`0x400`/`0x800`/`0x1000` have producers here.

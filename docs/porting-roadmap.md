@@ -132,6 +132,10 @@ partials is still to be written; these are the entries this round created or mea
 | thing activation | **retired (round 107)**: a thing's class cog is sent `created` when its sector is first drawn, which is what retail's two autosaves prove — the level-1 load-time save carries no population bin (73 = 0), the level-2 save carries 10.5 after the level was played. `Runtime::awaken_sector` tracks the woken set (idempotent) and `cull_sectors` calls it for each visible sector; the `--activation` gate holds the load state to 0 and requires the first wake to credit the bin and the second to do nothing | the port's load state now matches retail's load-time fixture; the after-play number is route-dependent on both sides | — |
 | AI engagement at a data-derived vantage | **open (round 209)**: at the level-3 spawn pose turned to face thing 193 (`katarn_ai_193`: eye (-0.76,-4.74,-0.20), retail yaw −53, `--thing-list` puts the `tuskanbh` at (0.186,-3.491,-0.280), 1.6 units away), the port's AI sees the actor and **lands a hit** (HUD shields 100 → 97 within 2.5 s; `BK_AI_TRACE`: `sees 193 … ready true`, thing 193 walking to (−0.27,−4.09)), while retail's HUD reads **100/50 with no damage** across its 8-frame series and its rendered frame at that pose shows no actor in the fence gap. Retail's `aistatus` index is **not a thing id** (0 → thing 24, 1 → thing 25, 3 → thing 29), so the nearby actor's instinct words were not yet read | the pose row, both HUD readings and both frames are committed (`tools/parity/interaction-shots.tsv`, `tools/parity/aistatus-03katarn-193.txt`); the port's live actor positions come from `BK_AI_TRACE` each tick | **retired when a same-pose, same-time pair agrees** — either the port stops hitting where retail's HUD is untouched (the divergence is the port's acquisition, e.g. a `sithAICmd_LookForTarget`/`sightdist` condition — **round 211: the engine's scan is a view cone and the port's was range-only; the port's scan now uses the class's `sees` with a headless test, so this half is addressed and only the same-pose re-measurement remains, which needs a QA window**), or retail's actor turns out to be elsewhere/occluded (the divergence is the vantage) — and the comparison then moves to the engagement-timing measurement Phase 1 step 5 wants |
 
+| `forcepowers` on non-player actors | **ported (round 252)**: the class line's three `(range, chance, cooldown)` triples select ability 1–3 from one `rand/32768` draw, and the actor's own scripts get `user0` with `(victim id, ability)` through the same thing-message path `sithCog_ThingSendMessageEx` uses. What still differs: the message is queued on every instance bound to the thing (the engine's two slots plus mask subscribers), and whether a power actually happens depends on the shipped `darkjedi_*.cog`'s own `okay`/health gates — `yun`'s `user0` returns until `07_Rahnlines.cog` sends `user1` | `forcepowers_queues_user0_on_the_actors_script` and the class-line rule test; a live level-7 run still needs the level's own script hand-off | a level-7 capture at the arena where Yun's `user0` visibly fires, or the AI-side gate when `--level` can be driven through a probe |
+| `saberfighting` on non-player actors | **ported (round 252)**: the 500 ms clock, `fltArg[0]` chance, the four `(range, damage, cooldown)` entries walked in order, AI flag `0x400`, puppet mode and `DAMAGE_SABER` damage. Unrecovered: `jkSaber_Enable`'s argument order (the port does not call it), the `PlayModeFirst` sound id (`entry + 0x47`) and track fade, and the target-typeflag `0x202` saber-lock branch; the port also skips the puppet mode's visual clip | `saberfighting_hurts_the_target_and_honours_the_cooldown`; the handler's disassembly pins the ranges/damage/cooldowns against `yun.ai`/`sariss.ai` | the saber engine (`jkSaber.c` swing arcs) lands, or a retail frame at a dark Jedi duel pins the animation/sound |
+| AI events 2/4/0x200 | **not produced (round 252 correction)**: the executable emits `2` (`0x4f2c05`), `4` (`0x4ed24d`/`0x4ed269`, the thing-collision callback) and `0x200` (`0x4ed203`); this build's dispatcher raises only `1`, `0x100`, `0x400`, `0x800`, `0x1000`, so `specialattack`'s attack branch and the handlers' event-2/event-4 arms cannot run | the emit sites are in the disassembly; no port event is raised by actor movement or awareness | the actor-collision sweep emits event 4 (and awareness emits 2) at the engine's sites |
+
 ## Phases
 
 ### Phase 0 — Reset the definition (do first, small)
@@ -300,14 +304,16 @@ tier, not a checkbox.
 *Progress (rounds 209–239).* Combat's AI side is now measured off the shipped `.ai` files rather than guessed. The
 instinct registry is complete (25 registrations across `sithAICmd_Startup` and the JK-side startup; the four unnamed
 entries resolved from the EXE's string data), and `--audit` tallies which names shipped content actually uses: **24**.
-Of those, **19 of the 22 instincts shipped content can actually load** are implemented — `follow`, `lookfortarget`,
+Of those, **21 of the 22 instincts shipped content can actually load** are implemented — `follow`, `lookfortarget`,
 `primaryfire`, `opendoors`, `blindfire`, `returnhome`, `retreat`, `withdraw`, `circlestrafe`, `hitandrun`,
-`randomturn`, `roam`, `turretfire`, `flee`, `listen`, `talk`, `sensedanger`, `dodge`, `lobfire`, `jump` (20 handlers, but
-`randomturn`'s nine class files are named by no shipped content — round 243) — with `sabermove` unused by any class and
-`crouch` likewise dead content. The remaining gameplay gap is only the **Jedi set** (`forcepowers` and `saberfighting`
-45 class-uses each, `specialattack` 24 — all loadable), which needs the force-cast and saber systems on non-player
-actors; 19 of 22 closed in rounds 209–248. Each instinct landed with a
-headless test and a measured before/after (suite 149 → 189). Reading the handlers also corrected behaviour underneath
+`randomturn`, `roam`, `turretfire`, `flee`, `listen`, `talk`, `sensedanger`, `dodge`, `lobfire`, `jump`, `forcepowers`
+and `saberfighting` (22 handlers, but `randomturn`'s nine class files are named by no shipped content — round 243) —
+with `sabermove` unused by any class and `crouch` likewise dead content. The last name is `specialattack` (24 classes),
+whose damage branch is event-`4`-driven: event 4 **is** emitted by the engine's thing-collision callback
+(`0x4ed24d`), but this build's actor walk emits no thing-vs-thing event, so the branch is filed with the
+actor-collision work rather than as a missing handler. `forcepowers` and `saberfighting` closed in round 252 (the
+force-cast is the engine's `user0` dispatch; the shipped `darkjedi_*.cog` owns the power itself). Each instinct landed
+with a headless test and a measured before/after (suite 149 → **193**). Reading the handlers also corrected behaviour underneath
 them: the view cone of `LookForTarget`, the engine's class defaults for omitted `.ai` keys, the script-set AI bits from
 `AISetMode` (`0x2000` switches an actor off and `0x4` is the awake bit `listen`/`sensedanger` gate on), turrets firing
 from `TurretFire` (a turret class has no `PrimaryFire`), `listen`'s `heardist` gate, its 3-slot sound ring, its
@@ -315,7 +321,8 @@ line-of-sight/1.0-unit/60° hearing gates and its per-sound reaction chance, `ta
 flag/health mood selection, `sensedanger`'s alert bit `0x800` (which `talk` reads for `fear`/`gloat`) and its
 strength-3.0 awareness burst, `dodge`'s damage event and 1000 ms cooldown plus its player-side shot pre-sweep (which also
 put the `typeflags=` word on the runtime and showed it is not the `thingflags=` word the sweep tests), the engine's **AI
-event dispatcher** with its complete emit-site inventory (round 241 — which proved two handler branches dead), the
+event dispatcher** with its emit-site inventory (round 241; round 252 corrected it — `2`, `4` and `0x200` are emitted
+by the executable, but this build produces none of them), the
 **detection chance** that sits under every sight test (`sithAI_CanDetectSightThing`, round 242, constants from the
 `.rdata`), and the **loadable-class accounting** that retired `crouch`/`randomturn` from the work list (round 243), plus
 most of the movement constants from the EXE's `.rdata`. The per-instinct class counts and the port's status are the table
@@ -470,9 +477,9 @@ Run, in order, from the repo root with `pwsh`:
 
 | check | command | last measured | expected |
 | --- | --- | --- | --- |
-| port gates | `cargo build --release` then `target/release/bevi-knight.exe --gates` | **0 of 65 failed, 1 skipped** in a `BK_SKIP_WINDOW=1` sweep (round 245: 55 rows `headless pass`, 9 `window pass`, `--live-check` skipped); last windowed run 65/65, 0 skipped | all pass |
-| walk trace | `pwsh -NoProfile -File tools/parity/walk-preflight.ps1` first, then `pwsh -NoProfile -File tools/parity/trace-gate.ps1` | **preflight: 22 of 32 legs walkable, 10 blocked** (round 251); of the gate's default 15, three are blocked (`walk_door0`, `walk19_spawn`, `walk26_spawn`) and the gate now **excludes them automatically**. The last windowed comparison (15 legs, 1 failure) included those unusable legs | preflight passes for every captured leg; the comparison then runs on **12 legs** with only `walk5_spawn` tracked |
-| parity draw | `tools/parity/retail-capture.ps1`, `port-capture.ps1`, then `compare.ps1 -Gate` | 6 thresholds, 0 failures | 0 failures |
+| port gates | `cargo build --release` then `target/release/bevi-knight.exe --gates` | **65 of 65, 0 skipped** windowed (round 252); the headless sweep reads **0 of 65 failed, 1 skipped** (`--live-check`) | all pass |
+| walk trace | `pwsh -NoProfile -File tools/parity/walk-preflight.ps1` first, then `pwsh -NoProfile -File tools/parity/trace-gate.ps1` | **12 legs, 1 tracked failure** (`walk5_spawn`) in round 252; preflight still reports **10 of 32 blocked** (round 251), and the gate excludes the three blocked default legs before capturing | the comparison runs on the walkable legs with only `walk5_spawn` tracked |
+| parity draw | `tools/parity/retail-capture.ps1`, `port-capture.ps1`, then `compare.ps1 -Gate` | **6 thresholds, 0 failures** in round 252; the `spawn` reference had been re-captured after a `-StartLevel 3` run left level 3's pose in the row (score 0.18 → 0.66) | 0 failures |
 
 What the session settles, all of it already on the deviation ledger with its retire condition:
 
@@ -520,43 +527,53 @@ Only now take the remaining units from `gaps.md`, ordered by how many shipped le
 them (its §5 already ranks them): particles and effects, saber and force-power fidelity, aim joints,
 track things, scope, ending screens. Each follows the porting loop above and enters at a tier.
 
+*Progress (round 252).* **Saber and force-power fidelity on non-player actors is in**: `forcepowers` and
+`saberfighting` (45 loadable classes each) are ported from `0x40ff40`/`0x40fa40` and enter at T1 with
+unit + live-runtime evidence (`docs/gaps.md` round 252). The remaining breadth list, in weight order:
+the generated `type=particle` systems (the shipped `material=`/`rate=`/`elementsize=` families — the bulk
+of effect content; the `PAR 1.0` clouds' data and draw path are already in), aim joints, track things'
+per-frame timings, the scope overlay, the ending screens, and the actor-collision event that unblocks
+`specialattack` and the event-2/event-4 handler arms. None is an exit criterion for Phase 1/2.
+
 ### Phase 4 — Ship
 
 Cut a release when: the exit criteria of every phase so far hold, the release note lists the tier per
 level, and a clean-machine install plays level 1 to completion. Multiplayer stays out of scope, as now.
 
-**State at round 249 (measured, so the next session starts from evidence, not narration).** Every check that can be
-taken without driving the game is green, and the tree is committed and clean:
+**State at round 252 (measured, so the next session starts from evidence, not narration).** Every check that can be
+taken without driving the game is green, the three QA-window checks were run, and the tree is committed and clean:
 
 | check | command | last measured |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --release` | **189 passed**, 0 failed |
-| port gates (headless sweep) | `BK_SKIP_WINDOW=1 BK_MUTE=1 bevi-knight --gates` | **0 of 65 failed, 1 skipped** (`--live-check`, the one row that needs the camera) |
+| unit + integration suite | `cargo test --release` | **193 passed**, 0 failed |
+| port gates (headless sweep) | `BK_SKIP_WINDOW=1 BK_MUTE=1 bevi-knight --gates` | **0 of 65 failed, 1 skipped** (`--live-check`); the **windowed** sweep was **65 of 65, 0 skipped** this round |
 | every level's runtime | `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5 bevi-knight --soak-all` | **35 of 35 levels**, 0 non-finite positions, 0 bodies outside every sector |
 | drop-in asset coverage | `bevi-knight --audit` | **35/35 levels clean**, 0 non-drawable models, 10 unresolved asset references (retail data gaps), 54 undecoded files (cutscenes and sound; intentionally out of scope) |
 | every cog verb | `bevi-knight --cog-check` | **34 levels, 0 stubbed verb calls** |
 | data probes | `--things`, `--ai`, `--hit`, `--weapons`, `--sound`, `--par`, `--model`, `--asset` | all pass |
-| docs | `pwsh scripts/check-docs-links.ps1` | **132/132** links resolve |
+| walk trace (window) | `pwsh -File tools/parity/trace-gate.ps1` | **12 legs, 1 tracked failure** (`walk5_spawn`); three default legs are preflight-blocked and excluded |
+| parity draw (window) | `retail-capture.ps1`, `port-capture.ps1`, `compare.ps1 -Gate` | **6 thresholds, 0 failures** (spawn 0.66 after the stale level-3 fixture was replaced) |
+| docs | `pwsh scripts/check-docs-links.ps1` | 132/132 links resolve |
 
 What the windowless method has closed: Phase 0 and **0.5 (trace v0, done)**, Phase 1's **step 1** (body, attachments,
 camera) and **step 6** (level start, tally, transition carry, retail's autosaves as the fixture), the **whole AI event
-dispatcher and 19 of the 22 loadable instinct names** (the three left are the Jedi set, which needs force/saber systems
-on non-player actors), the gravity family for shipped physics goods, the `PAR 1.0` clouds' data **and** draw path, both
+dispatcher and 21 of the 22 loadable instinct names** (`forcepowers` and `saberfighting` landed in round 252; the
+last, `specialattack`, waits on the thing-collision event), the gravity family for shipped physics goods, the `PAR 1.0` clouds' data **and** draw path, both
 `--soak`/`--soak-all` and `--gates` as headless nets, and the retail-derived constants for detection, `dodge`, `talk`,
 `jump`, `lobfire` and the movement code.
 
 What still blocks Phase 4, in the roadmap's own order:
 
-1. **The QA window's three gated checks** — walk trace (`trace-gate.ps1`; 15 legs, `walk5_spawn` tracked), parity draw
-   (`retail-capture.ps1` + `port-capture.ps1` + `compare.ps1 -Gate`; 6 thresholds, 0 failures at the last windowed run),
-   and the port-gate sweep's `--live-check`. These are the only remaining measurement for **Phase 1 steps 2, 3 and 5's
-   exits** (draw parity on the route set, the recorded movement trace, the combat encounter) and **Phase 2's per-level
-   trace generalisation**. Until they run, those exits cannot be claimed.
+1. **The QA window's remaining measurements** — the port-gate sweep (`65/65, 0 skipped`) and the draw gate (`6/0`) now
+   pass, and the walk trace is **12 legs, 1 tracked failure**. That leaves `walk5_spawn` (the floor-search-scope
+   deviation) and the live combat/trigger captures as the only unclosed measurements for Phase 1 steps 2, 3 and 5 and
+   Phase 2's per-level trace generalisation.
 2. **Phase 1 step 4's exit** (a cog state trace at each trigger) — same window: it needs a retail capture to compare
    against; the port-side trigger paths are all headless-tested, but "matches retail" is a retail measurement.
-3. **Phase 3 breadth remainder** (shipped-content order, all ledgered): the Jedi set's three handlers; the generated
-   `type=particle` systems (`material=`/`rate=`/`elementsize=` families — the bulk of shipped effect content); track
-   things' own per-frame timings; scope; ending screens. None of these is an exit criterion for the phases before it.
+3. **Phase 3 breadth remainder** (shipped-content order, all ledgered): the generated `type=particle` systems
+   (`material=`/`rate=`/`elementsize=` families — the bulk of shipped effect content); aim joints; track things' own
+   per-frame timings; scope; ending screens; and the actor-collision event that unblocks `specialattack` and the
+   event-2/event-4 arms. None of these is an exit criterion for the phases before it.
 4. **`walk5_spawn`** — the one tracked walk-trace failure, a floor-search scope deviation with its retire condition on
    the ledger; it is part of (1).
 

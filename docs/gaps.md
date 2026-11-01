@@ -5830,25 +5830,27 @@ handler:
 | jump | 92 | `0x50abf0` | **yes** (round 248: the live event-`0x400` arm — a moving, unattached actor whose way ahead is blocked gets `dir * 0.1` toward its target, on the class line's own clock; the `4`/`0x200` arms are dead content). 85 of its 92 class files are loadable |
 | circlestrafe | 70 | `0x509890` | **yes** (round 222: orbits at close range) |
 | flee | 49 | `0x50aeb0` | **yes** (round 228: `AIFlee` sets the mode the handler walks, now with the instinct's duration) |
-| forcepowers | 45 | `0x40ff40` | no |
-| saberfighting | 45 | `0x40fa40` | no |
+| forcepowers | 45 | `0x40ff40` | **yes** (round 252: the class line's three `(range, chance, cooldown)` triples, one random draw against all three chances, and `ThingSendMessageEx` of `user0` to the actor's own scripts with `(victim thing id, ability 1..3)`; the shipped `darkjedi_*.cog` `user0:` handlers do the power itself) |
+| saberfighting | 45 | `0x40fa40` | **yes** (round 252: the 500 ms handler clock, the `fltArg[0]` swing chance, the four `(range, damage, cooldown)` entries walked in order, and `DAMAGE_SABER` through `sithThing_DamageThing`; target-typeflag saber-lock branch and `jkSaber_Enable`'s arguments are ledgered) |
 | retreat | 42 | `0x50bc60` | **yes** (round 221: arms the withdraw mode when hurt) |
 | withdraw | 30 | `0x50b150` | **yes** (round 221: backs away from what hurt it) |
 | dodge | 27 | `0x50b360` | **yes** (rounds 239–240: both mechanical paths are in — the **damage** path (AI event 1, raised before health is subtracted: step away from the attacker, walking-flag gate, 1000 ms cooldown) and the **shot-passing** path (the player's `typeflags & 0x200000` projectile pre-sweep of five units, the actor's own sight test of the shot, and the random 45–90° sideways step); its event-2 branch is unreachable in retail content — no emit site in the executable raises event 2) |
 | roam | 27 | `0x50b830` | **yes** (round 225: wanders around its home anchor) |
-| specialattack | 24 | `0x40fd00` | no |
+| specialattack | 24 | `0x40fd00` | **no, and its live branch needs a collision event** (round 252: the handler is event-`4` driven, and event 4 **is** emitted — by the thing-collision callback at `0x4ed24d`/`0x4ed269` — but this build's actor walk raises no thing-vs-thing event; the event-0 scheduler path only stops the puppet track, disables the saber and rearms the cooldown. So the attack path cannot fire until actor movement emits the collision event) |
 | hitandrun | 23 | `sithAICmd_HitAndRun` | **yes** (round 223: fires, then breaks off) |
-| sensedanger | 14 | `0x50b9b0` | **yes** (round 236: the scheduler path — awake gate, alert bit `0x800`, `fear` sound, 3.0 awareness event, player target; round 241: the **damage path** through the engine's event dispatcher — `surprise` sound, attacker (or its parent) as the target, `flags & !0x4 \| 0x800`; the handler's event-2/event-4 branches are unreachable in retail content because nothing emits those events) |
+| sensedanger | 14 | `0x50b9b0` | **yes** (round 236: the scheduler path — awake gate, alert bit `0x800`, `fear` sound, 3.0 awareness event, player target; round 241: the **damage path** through the engine's event dispatcher — `surprise` sound, attacker (or its parent) as the target, `flags & !0x4 \| 0x800`; the handler's event-2 branch is not reached because this build never raises event 2; the event-4 branch belongs to the thing-collision callback, which this build's actor walk does not raise — round 252 corrected the earlier "nothing emits 2 or 4" claim: both are emitted by the executable (`0x4f2c05` and `0x4ed24d`), the port just does not generate them) |
 | turretfire | 12 | `0x50a0f0` | **yes** (round 227: fires, stands still; head sweep not modelled) |
 | randomturn | 9 | `0x50b700` | **yes** (round 224: idle actors sweep their view) — but its 9 class files name only themselves: no shipped template or script references them (round 243), so the behaviour never runs in retail content |
 | lobfire | 7 | `0x509cd0` | **yes** (round 247: its live path is the event-`0x100` armed-mode toggle from the AI flag word's awake bit `0x200`, every 1000 ms; its `sithAI_FireWeapon` branch is **dead content** — the mask is `0x100` and nothing emits event 0). 6 of its 7 classes are loadable |
 | crouch | 3 | `0x509ad0` | no — and its three classes (`stcrouch.ai/.ai0/.ai2`) are named by no shipped template or script: dead content (round 243). The handler is event-`0x100`-driven and only flips the crouch physflag `0x10000` |
 | sabermove | **0** | `0x4100e0` | registered but no shipped class names it |
 
-So the port runs **19 of the 22 instincts that shipped content can actually load**. The list is also a priority order,
-since the counts are how many classes depend on each: the remaining gameplay gap is only the **Jedi set**
-(`forcepowers` and `saberfighting` 45 loadable classes each, `specialattack` 24), which needs the force-cast and saber
-systems on non-player actors rather than new handler parsing. `listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and
+So the port runs **21 of the 22 instincts that shipped content can actually load**. The last name is `specialattack`
+(24 classes), and its handler is not a parsing gap: its attack branch is event-`4`-driven, event 4 is raised by the
+engine's thing-collision callback (`0x4ed24d`), and this build's actor walk raises no thing-vs-thing event, so the
+attack cannot be reached until that emission exists. `forcepowers` and `saberfighting` (45 loadable classes each)
+closed in round 252. The list is also a priority order, since the counts are how many classes depend on each.
+`listen` (200) and `talk` (198), the two largest used names, closed in rounds 233 and
 235, `sensedanger`, the last partial entry, in round 236, `dodge` in round 239 and `lobfire` in round 247 (which also
 showed its firing branch is dead content).  **`crouch` and `randomturn` are named by classes nobody loads** (round 243: `stcrouch.ai` and
 `strandom`/`turandom`/`tuprodrandom` appear in no level template and no script), so the 24 named instincts are 22 that
@@ -6485,12 +6487,15 @@ dispatch** — so one event is at most one reaction, and the class file's line o
 engine's: a thing whose `flags` carry `0x202` has no AI, a dead body takes no events, the AI's `0x2000` bit switches it
 off, and the `0x1000` latch lets only event 2 through (clearing itself in the process).
 
-**The inventory is the finding.** The emit sites raise `1` (damage, `sithActor_DamageActor`), `0x100` (the
-`sithAI_InstinctUpdate` flags-changed cascade and the two AI-flag helpers), `0x400`/`0x800` (track target arrived/lost,
-`sithAI_idk_msgarrived_target`) and `0x1000` (the player's shot pre-sweep). **Nothing emits event 2 or event 4** — so
-`dodge`'s event-2 branch and `sensedanger`'s event-2/event-4 branches are dead code in the shipped game, and both ledger
-rows lose their "needs the AI event dispatch" item on evidence rather than on an approximation. The mask table in the port
-lists them anyway, because the handlers do.
+**The inventory is the finding, and round 252 corrected it.** The emit sites raise `1` (damage,
+`sithActor_DamageActor`), `2` (`0x4f2c05`, the awareness/heard path), `4` (`0x4ed24d`/`0x4ed269`, the thing-collision
+callback that reports the other thing), `0x100` (the `sithAI_InstinctUpdate` flags-changed cascade and the two AI-flag
+helpers), `0x200` (`0x4ed203`, the companion callback), `0x400`/`0x800` (track target arrived/lost,
+`sithAI_idk_msgarrived_target`) and `0x1000` (the player's shot pre-sweep). The port's dispatcher generates only
+`1`/`0x100`/`0x400`/`0x800`/`0x1000`, so the handlers that subscribe to `2` (the `listen`-style awareness event),
+`4` (specialattack and the collision reactions) and `0x200` have no producer here yet. That is a *port* gap, not dead
+retail code: the mask table keeps all of them because the handlers do, and `specialattack`'s attack branch is filed as
+waiting on the actor-collision event rather than as unreachable content.
 
 `sensedanger`'s **damage path** (`0x50b9b0`, event 1) is implemented through the dispatcher: an aware (`0x4`), not yet
 alerted (`0x800` clear) actor that is hit plays its **`surprise`** row (mode `0x57` — the seventh of the mood range
@@ -6734,3 +6739,53 @@ separate causes, all measured and fixed:
 No window was opened and no retail run happened in this round: the preflight is headless, the fixes are harness logic, and
 the walk-trace row in the QA table now states the preflight requirement and the 12-leg comparison instead of the
 meaningless 15. The gate's `-Only` array is also passed with the `-Command` form now (a `-File` list binds as one string).
+
+## Update — round 252 (the Jedi set: `forcepowers` and `saberfighting`)
+
+The two remaining loadable instincts are ported from the retail handlers' own disassembly
+(`target/parity/exp/dump-text.txt`, `0x40ff40` and `0x40fa40`), not from a re-derived behaviour. The
+finding that shaped both is the `.ai` class record layout: `sithAIClass_LoadEntry` (`0x4f15c0`) stores
+an instinct line's numbers twice — as floats at `record + 0x38 + 4i` and as rounded ints at
+`record + 0x78 + 4i` — and the handler receives `record + 0x2c`, so the port's `Instinct::args[0]` is
+the handler's `fltArg[1]` and `Instinct::weight` is `fltArg[0]`. The scheduler re-arms each instinct
+from `weight`; the handlers read the rest.
+
+**`forcepowers` (`0x40ff40`).** The class line is three `(range, chance, cooldown)` triples. The handler
+re-arms at `weight`, gates on the target being visible (`ai + 0x1f4 == 0`) and on its own cooldown
+(`ai + 0x288`), draws **one** random number (`rand / 32768`) and compares it with all three chances in
+order; the first ability whose chance passes and whose range contains the target wins. It then calls
+`sithCog_ThingSendMessageEx(thing, 0, 0x1b, target_thing_id, ability, 0, 0)` — message `user0` (27) to
+the actor's **own** scripts. That is the whole engine side: the shipped `darkjedi_*.cog` files carry a
+`user0:` handler that reads `GetParam(0)` as the victim and `GetParam(1)` as the power and performs
+persuasion/blinding/grip. The port queues `user0` on every instance bound to the actor's thing
+(`thing_instances`, the `thing x` symbol the level's cog section fills). `yun.ai` (20%/60%) and
+`sariss.ai` (63%/99%, persuasion only at 1–3 units) pin the rule in
+`forcepowers_picks_the_first_rolled_ability_inside_its_range`; the message, victim and cooldown are
+pinned by `forcepowers_queues_user0_on_the_actors_script`.
+
+**`saberfighting` (`0x40fa40`).** Four `(range, damage, cooldown)` triples after a swing chance. The
+handler re-arms every 500 ms, requires the actor's `jkSetSaberInfo` blade, rolls `fltArg[0]`, walks the
+four entries **in order** and stops at the first range below the target gap; the surviving count picks
+the swing uniformly. The shipped dark Jedi fill the first two (`yun`: 0.25/20/1600 and 0.25/30/925;
+`sariss`: 0.225/40/950 and 0.25/30/1400). The port raises AI flag `0x400`, sets the puppet mode
+(8/0x12/9/0xa) and damages the target with `sithThing_DamageThing(..., DAMAGE_SABER)` through the
+existing typed-damage path. `saberfighting_picks_the_class_swing_inside_its_range` pins the walk and
+`saberfighting_hurts_the_target_and_honours_the_cooldown` pins the live damage/cooldown. What is still
+approximated is on the deviation ledger: `jkSaber_Enable`'s unrecovered argument order, the puppet
+track/sound ids (the port sets `play_mode` and the flag but plays no `PlayModeFirst` sound), and the
+target-typeflag `0x202` saber-lock branch (a dark Jedi-vs-dark Jedi reaction).
+
+**`specialattack` (`0x40fd00`) is measured, not guessed.** Its event-0 scheduler path only stops the
+puppet track, disables the saber and re-arms; the damage branch is event 4, and event 4 **is** emitted
+by the engine's thing-collision callback at `0x4ed24d`/`0x4ed269` (round 252 corrected the earlier
+"nothing emits 2 or 4" inventory: events `2` at `0x4f2c05` and `0x200` at `0x4ed203` are emitted too).
+This build's actor walk raises no thing-vs-thing event, so the branch cannot be reached yet; it is
+filed with the actor-collision work, not as dead content.
+
+**Measured.** Suite **189 → 193** (four tests above, all passing); `BK_SKIP_WINDOW=1 --gates` **0 of
+65 failed, 1 skipped** (`--live-check`); the windowed sweep **65 of 65, 0 skipped**; `--soak-all`
+**35 of 35** with 0 non-finite positions and 0 bodies outside every sector. The QA window's other two
+checks were also re-run this round: `compare.ps1 -Gate` **6 thresholds, 0 failures** after the `spawn`
+reference was re-captured correctly (the previous fixture had been taken with `-StartLevel 3`, so it
+held level 3's pose and scored 0.18; the real level-1 frame scores 0.66), and `trace-gate.ps1` **12
+legs, 1 tracked failure** (`walk5_spawn`, the floor-search-scope ledger row).
