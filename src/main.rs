@@ -11353,7 +11353,7 @@ fn main() {
                     advance_sim,
                 )
                     .run_if(no_screen_open),
-                (demo_aim, sync_player_thing, health_follows_damage, infrared_follows_force, fire_player, sprite_demo, draw_created, grow_particles, projectile_hits, respawn_on_death)
+                (demo_aim, sync_player_thing, health_follows_damage, infrared_follows_force, fire_player, sprite_demo, draw_created, grow_particles, cycle_particle_cels, projectile_hits, respawn_on_death)
                     .chain()
                     .run_if(no_screen_open),
                 (
@@ -21059,6 +21059,38 @@ fn particle_grow_scale(scale: f32, rate: f32, dt: f32) -> f32 {
     (scale + rate * dt).max(0.001)
 }
 
+/// `sithParticle_Update`'s cel-cycling arm (`typeflags & 0x20`): each element advances its material
+/// cel with probability `(cels - cel - 1) * (age / life) * dt`, independently.
+#[derive(Component)]
+struct ParticleCel {
+    template: String,
+    material: String,
+    size: f32,
+    cels: u32,
+    cel: u32,
+    age: f32,
+    life: f32,
+    rng: u32,
+}
+
+/// One draw from the element's local LCG, so cycling does not perturb `cog::pseudo_random` (the AI
+/// stream).
+fn particle_cel_roll(rng: &mut u32) -> f32 {
+    *rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    (*rng >> 8) as f32 / 16_777_216.0
+}
+
+/// The probability one element advances its cel this frame. The engine uses
+/// `(cels - cel - 1) * (age * 1000 / life) * dt`, with `life` in the same time base as `age`;
+/// the two `1000`s cancel.
+fn particle_cel_chance(cels: u32, cel: u32, age: f32, life: f32, dt: f32) -> f32 {
+    if life <= 0.0 || cel + 1 >= cels {
+        return 0.0;
+    }
+    let left = (cels - cel - 1) as f32;
+    (left * (age / life) * dt).max(0.0)
+}
+
 #[derive(Component)]
 struct ParticleGrow {
     thing: usize,
@@ -21071,6 +21103,32 @@ struct ParticleGrow {
 ///
 /// Projectiles are `SITH_THING_WEAPON` templates with their own `.3do`; the level's own
 /// thing list never contains them, which is why nothing appeared when one was fired.
+/// `sithParticle_Update`'s cel-cycling arm: advance each element's cel and swap its sprite mesh.
+fn cycle_particle_cels(
+    time: Res<Time>,
+    mut created: Option<ResMut<Created>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut elements: Query<(&mut Mesh3d, &mut ParticleCel)>,
+) {
+    let Some(created) = created.as_mut() else { return };
+    let dt = time.delta_secs().clamp(0.0, 0.1);
+    for (mut mesh3d, mut cel) in &mut elements {
+        cel.age += dt;
+        let chance = particle_cel_chance(cel.cels, cel.cel, cel.age, cel.life, dt);
+        if chance <= 0.0 || particle_cel_roll(&mut cel.rng) >= chance {
+            continue;
+        }
+        cel.cel += 1;
+        let key = (cel.template.clone(), cel.material.clone(), cel.cel);
+        let handle = created
+            .sprite_meshes
+            .entry(key)
+            .or_insert_with(|| meshes.add(sprite_quad(cel.size, cel.size, cel.cels as f32, cel.cel)))
+            .clone();
+        mesh3d.0 = handle;
+    }
+}
+
 /// `sithParticle_Update`'s grow arm (`typeflags & 1`): each frame the cloud's scale advances by
 /// `maxthrust * dt`, and every element's offset scales with it about the owning thing.
 fn grow_particles(
@@ -21227,6 +21285,8 @@ fn draw_created(
                     .unwrap_or(0);
                 let grow_rate = world.level.template_f32(&template_key, "maxthrust").unwrap_or(0.0);
                 let grows = particle_grows(typeflags, grow_rate);
+                let cycles = typeflags & 0x20 != 0 && *cels > 1;
+                let life = world.level.template_f32(&template_key, "timer").unwrap_or(0.0);
                 for element in &cloud.vertices {
                     let cel = element.cel.clamp(0, last_cel as i32) as u32;
                     let key = (template_key.clone(), cloud.material.clone(), cel);
@@ -21259,6 +21319,18 @@ fn draw_created(
                             offset: Vec3::from(offset),
                             rate: grow_rate,
                             scale: 1.0,
+                        });
+                    }
+                    if cycles {
+                        entity.insert(ParticleCel {
+                            template: template_key.clone(),
+                            material: cloud.material.clone(),
+                            size: cloud.size,
+                            cels: *cels,
+                            cel,
+                            age: 0.0,
+                            life,
+                            rng: 0x9e37_79b9 ^ (index as u32).wrapping_mul(31) ^ cel,
                         });
                     }
                     spawned.push(entity.id());
@@ -25599,6 +25671,17 @@ mod viewmodel_framing_tests {
         // A looping clip still wraps; the old code applied this to every clip.
         assert_eq!(super::pov_clip_frame(13.0, 13, true), 0);
         assert_eq!(super::pov_clip_frame(12.5, 13, true), 12);
+    }
+
+    /// The cel-cycling arm: probability is `(cels - cel - 1) * (age/life) * dt`; it starts at zero,
+    /// grows with age, and is zero on the last cel. `+whitecloud` (0x3f) has the arm.
+    #[test]
+    fn a_particle_cel_cycles_toward_the_last_cel() {
+        assert_eq!(super::particle_cel_chance(8, 0, 0.0, 0.2, 1.0 / 60.0), 0.0);
+        let mid = super::particle_cel_chance(8, 0, 0.1, 0.2, 1.0 / 60.0);
+        assert!(mid > 0.0 && mid < 1.0);
+        assert_eq!(super::particle_cel_chance(8, 7, 1.0, 0.2, 1.0), 0.0);
+        assert_eq!(super::particle_cel_chance(1, 0, 1.0, 0.2, 1.0), 0.0);
     }
 
     /// The generated-cloud grow arm: `typeflags & 1` plus a nonzero `maxthrust`; the shipped

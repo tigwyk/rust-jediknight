@@ -1005,3 +1005,9 @@ Ported `sithParticle_Update`'s grow arm: scale advances by `maxthrust * dt` for 
 element offsets scale with it about the cloud origin. The shipped templates distinguish the cases
 (`+whitecloud` 30, `+sparks` 20, `+force_heal` 0.01, `+smoke` none). Suite 198. The cel-cycling arm
 stays open.
+
+## Particle cel cycling (round 260)
+
+Ported the second `sithParticle_Update` arm: per-element cel advance with probability
+`(cels - cel - 1) * (age/life) * dt`, a local LCG, and a mesh swap when the cel changes. Both particle
+update arms are now in. Suite 199.

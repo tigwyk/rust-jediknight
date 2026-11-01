@@ -6970,3 +6970,15 @@ the gate and the arithmetic.
 Still open in this area: the **cel-cycling** arm (`typeflags & 0x20`), which advances each element's
 material cel probabilistically from `(cels - cel - 1) * rate / life`; the port keeps the spawn cel for
 the element's life. Measured: suite **197 → 198**; `--gates` and `--soak-all` re-run below.
+
+## Update — round 260 (the particle cel-cycling arm)
+
+`sithParticle_Update`'s second arm (`typeflags & 0x20`) is ported. Each element advances its material
+cel with probability `(cels - cel - 1) * (age / life) * dt`, using the thing's age and the template's
+`timer` as life; when it advances, the sprite mesh swaps to that cel. The roll is a per-element LCG
+(seeded from the thing and initial cel), not `cog::pseudo_random`, so particle animation cannot shift
+the AI stream. `a_particle_cel_cycles_toward_the_last_cel` pins the probability (zero at age 0, zero
+on the last cel). Both particle update arms are now in; the port still does not carry the cloud's
+`angvel` spin or the per-element `material` effect state beyond a keyed bitmap (ledgered).
+
+Measured: suite **198 → 199**; `--gates` and `--soak-all` re-run below.

@@ -2681,3 +2681,11 @@ running app.--carry-check --start 01narshadda                        0   level 2
 - `cargo test --release`: **198 passed** (new `a_growing_cloud_scales_by_its_maxthrust`).
 - `--gates`: 0 of 65 failed, 1 skipped; `--soak-all`: 35/35 clean.
 - Still open: the cel-cycling arm (`typeflags & 0x20`).
+
+## Update — round 260 (particle cel cycling)
+
+- `typeflags & 0x20`: probability `(cels - cel - 1) * (age/life) * dt`, per-element LCG, mesh swap on
+  advance; `+whitecloud`/`+sparks`/`+force_heal` all carry the arm.
+- `cargo test --release`: **199 passed** (new `a_particle_cel_cycles_toward_the_last_cel`).
+- `--gates`: 0 of 65 failed, 1 skipped; `--soak-all`: 35/35 clean.
+- Both `sithParticle_Update` arms (grow, cel cycling) are now ported.
