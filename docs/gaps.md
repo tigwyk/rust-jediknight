@@ -6982,3 +6982,25 @@ on the last cel). Both particle update arms are now in; the port still does not 
 `angvel` spin or the per-element `material` effect state beyond a keyed bitmap (ledgered).
 
 Measured: suite **198 → 199**; `--gates` and `--soak-all` re-run below.
+
+## Update — round 261 (head-aim joints and the engine floor probe, from Ghidra)
+
+**Head aim.** `sithActor_SetHeadPYR` (`0x4ed280`) writes the actor's head pitch/yaw/roll at
+`thing+0x15c..0x164` and, when the actor has a puppet (`thing+0x128`) and joint-angle array
+(`thing+0xe8`), applies the pitch to **four** precomputed joint indices (`+0x1044`, `+0x1048` at
+**0.5×**, `+0x1054`, `+0x1058` at **0.3×**). `sithAI_SetLookFrame` (`0x4eab80`) computes the elevation
+with `asin`, clamps it to `minheadpitch`/`maxheadpitch` (`thing+0x174`/`+0x178`), and calls
+`SetHeadPYR` with the current head yaw/roll. The shipped actor models name those joints `k_neck` and
+`k_head` (e.g. `ky.3do` nodes 16/15). The port's live actor posing (`animate_actors` /
+`model_mesh_posed`) can apply the pitch to those two node names; it does not yet store a head pitch
+or emit the per-node rotation, and its body already pitches to the target, so the split
+(body-yaw/head-pitch vs body-pitch) has to be settled first.
+
+**Floor search.** `sithPhysics_FindFloor` (`0x4f5550`) is **sector-scoped**: it calls
+`sithCollision_SearchForCollisions(thing->sector, 0, &thing->pos, &down, distance, 0, 0x2802)`,
+then walks the collision stack for a surface (`flag 2`) or another thing's face, attaching to the
+first. The direction is `(0,0,-1)` (or the thing's reversed up vector when physics flag `0x80`), and
+the distance is the thing's `movesize`/sector floor with the engine's step-scale. That confirms the
+walk5 deviation is the port's **global** face scan reaching a floor in a sector the body is not in;
+the remaining question is the engine's **traversal** (how `SearchForCollisions` finds the level-6
+off-sector slab without finding level 5's upper slope), not the direction or distance rule.
