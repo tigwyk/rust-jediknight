@@ -9,6 +9,10 @@ not in this roadmap; say so rather than half-build it.
 
 What already works is in the README status table. This is the remainder, in dependency order.
 
+**The tiered status of all ten stages (T0 parsed, T1 implemented, T2 state parity, T3 visual
+parity, T4 play parity) is the single table in `porting-roadmap.md` §"Where the ten stages stand";
+the paragraphs below are the evidence behind each cell, not a second status list.**
+
 | # | stage | missing today | gate |
 |---|---|---|---|
 | 1 sector/portal visibility | **done**: the `.cmp` colormap material is the default at measured parity (0.00% pixel difference vs `StandardMaterial`), and **portal occlusion is on** — the portal graph is symmetric (a shared surface was only linked in one direction), the cull picks the sector seed that agrees with the frustum (level 1 offers 339/218/102), and the culled frame is **0.000%** different from `--no-cull` over 230,400 pixels (§16.1, §16.13) | `ponytail`: the seed choice is a heuristic — a level where every candidate disagrees loses occlusion; a true point-in-sector test is the upgrade | a room, its portals and its neighbours render |

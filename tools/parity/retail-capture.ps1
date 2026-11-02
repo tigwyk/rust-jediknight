@@ -202,9 +202,12 @@ Get-ChildItem -Path (Join-Path $Destination 'player') -Recurse -Filter '_JKAUTO_
     if (Test-Path -LiteralPath $savePath) {
       $bytes = [System.IO.File]::ReadAllBytes($savePath)
       $name = $script:BootSaveLevel.ToLowerInvariant()
-      if ($name.Length -ne 15) { throw "BootSaveLevel must be 15 characters like 02narshadda.jkl (got $name)" }
+      # The field is 15 bytes wide. A name shorter than that (`15maw.jkl` is 9) is padded with NULs,
+      # which is how a C string ends; padding with spaces instead would leave `15maw.jkl      ` for the
+      # engine to parse. Longer names cannot fit and are refused.
+      if ($name.Length -gt 15) { throw "BootSaveLevel must fit 15 bytes like 02narshadda.jkl (got $name)" }
       $number = [int]$name.Substring(0, 2)
-      $encoded = [System.Text.Encoding]::ASCII.GetBytes($name)
+      $encoded = [System.Text.Encoding]::ASCII.GetBytes($name.PadRight(15, [char]0))
       [Array]::Copy($encoded, 0, $bytes, 132, 15)
       [Array]::Copy($encoded, 0, $bytes, 1616, 15)
       [BitConverter]::GetBytes([int]$number).CopyTo($bytes, 1612)
@@ -368,8 +371,8 @@ function Invoke-JkConsoleCapture {
       the wrapper's 16-bit renderer works and F12 writes JSHOT##.BMP (24-bit) instead of the
       palettised 8-bit PCX. `-Software` forces the old software path (b3DAccel=0),
     * launches JK.EXE -devMode from the scratch copy and skips the intro movies,
-    * mouse-navigates Players -> Ok -> Single Player -> New Game (640x480 fullscreen,
-      screen coords == game coords for the menus),
+    * mouse-navigates Players -> Ok -> Single Player, then boots the numbered row's Debug level
+      (New Game only for level 1 or an explicit menu/save route),
     * waits for the level-parse line in the dev-console ListBox (id 1037),
     * writes the pose with `warp` when a row has an explicit pose,
     * captures a time series of F12 screenshots plus the settled reference screenshot,
@@ -468,6 +471,14 @@ function Read-JkCoords {
   return $null
 }
 
+# The engine's game clock in ms: `sithTime_Advance` (`0x4dd640`) adds each frame's delta, clamped to
+# [10, 500] ms and paused time excluded, to `DAT_00836c14`. Retail renders a few frames a second here, so
+# this, not the injected hold length, is how long the body actually walked. -1 when it cannot be read.
+function Read-JkGameMs {
+  param([Parameter(Mandatory)][int]$ProcessId)
+  return [JkRetail]::ReadU32([uint32]$ProcessId, 0x00836c14)
+}
+
 # `-WalkTraceMs`: hold the forward key in undisturbed segments and read `coords` between them.
 #
 # This is Phase 0.5 trace v0's retail half. The dev console is a **dialog**: while it has focus the
@@ -491,19 +502,22 @@ function Invoke-JkWalkTrace {
   $path = Join-Path $script:TraceOut ("{0}-walk.tsv" -f $Name)
   $segments = [math]::Max(1, [int][math]::Floor($Milliseconds / $HoldMs))
   $lines = New-Object System.Collections.Generic.List[string]
-  $lines.Add((@("held_ms", "x", "y", "z", "sector", "yaw") -join ([char]9)))
+  # `game_ms` is appended (not replacing `held_ms`) so older fixtures and readers keep their columns.
+  $lines.Add((@("held_ms", "x", "y", "z", "sector", "yaw", "game_ms") -join ([char]9)))
   $start = Read-JkCoords -ProcessId $ProcessId
   if (-not $start) { throw 'walk trace: the start pose could not be read from coords' }
   Log ("walk trace: start " + $start.Raw)
-  $lines.Add((@(0, $start.Pos[0], $start.Pos[1], $start.Pos[2], $start.Sector, $start.Pyr[1]) -join ([char]9)))
+  $clock0 = Read-JkGameMs -ProcessId $ProcessId
+  if ($clock0 -lt 0) { throw 'walk trace: the game clock (0x00836c14) could not be read' }
+  $lines.Add((@(0, $start.Pos[0], $start.Pos[1], $start.Pos[2], $start.Sector, $start.Pyr[1], 0) -join ([char]9)))
   $samples = 0
   if ($SettleMs -gt 0) {
     Log ("walk trace: settling {0} ms before the hold" -f $SettleMs)
     Start-Sleep -Milliseconds $SettleMs
   }
-  # Held down across the whole trace and re-asserted after each poll: pressing and releasing per
-  # segment let the body coast down between segments and read as if it had stopped. The poll itself
-  # pauses the game (the console is a dialog), so holding through it costs nothing.
+  # The key is pressed and released once per segment (below), so the body coasts between the release
+  # and the console's pause and each segment restarts from rest; the port's replay holds forward
+  # continuously. `game_ms` makes that visible: it counts the coast and the foreground wait too.
   Send-JkKeyDown -Name $Key
   # **Stuck detection.** A walk leg whose forward route runs into geometry does not error: the body
   # stops, the harness keeps holding the key for the rest of the segments, and the operator is left
@@ -534,9 +548,12 @@ function Invoke-JkWalkTrace {
         Log ("walk trace: segment $i produced no parseable coords line")
         continue
       }
+      $clock = Read-JkGameMs -ProcessId $ProcessId
+      if ($clock -lt 0) { throw "walk trace: the game clock could not be read after segment $i" }
+      $gameMs = $clock - $clock0
       $samples++
-      $lines.Add((@($held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $sample.Pyr[1]) -join ([char]9)))
-      Log ("walk trace: {0} ms held at ({1:N3}, {2:N3}, {3:N3}) sector {4}" -f $held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector)
+      $lines.Add((@($held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $sample.Pyr[1], $gameMs) -join ([char]9)))
+      Log ("walk trace: {0} ms held ({5} ms game) at ({1:N3}, {2:N3}, {3:N3}) sector {4}" -f $held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $gameMs)
       # Stuck detection (see the comment above the hold loop): a body against a wall has not moved.
       $dx = [double]$sample.Pos[0] - $previous[0]
       $dy = [double]$sample.Pos[1] - $previous[1]
@@ -762,8 +779,18 @@ function Invoke-JkCaptureRow {
   $name = $Row.Name
   $level = $Row.Level
   $requestedPose = $Row.Pose
+  # Numbered spawn rows name their Debug entry (`walk17_spawn` -> 17). An explicit -StartLevel wins;
+  # an unnumbered non-first-level row fails closed instead of silently capturing New Game.
+  $startLevel = $StartLevel
+  $otherBootRoute = $StartEpisode -or $LoadSave -or $StopAtMenu -or $DebugShot -or $LoadShot
+  if (-not $startLevel -and -not $otherBootRoute) {
+    if ($name -match '^(?:walk|level)(\d+)_spawn$') { $startLevel = $Matches[1] }
+    if (-not $startLevel -and $level -notlike '01narshadda*') {
+      throw "row '$name' needs a Debug level index: use -StartLevel or name it walkN_spawn/levelN_spawn"
+    }
+  }
   $poseText = if ($null -eq $requestedPose) { 'spawn (-)' } else { ($requestedPose -join ',') }
-  Log "=== capture '$name' level=$level requested pose=$poseText (shots line $($Row.Line)) ==="
+  Log "=== capture '$name' level=$level debugEntry=$startLevel requested pose=$poseText (shots line $($Row.Line)) ==="
   Assert-NoConflictingEngine
 
   $process = $null
@@ -826,7 +853,7 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     Send-JkClick -X 320 -Y 195
     Start-Sleep -Milliseconds 1500
     Log 'clicked Single Player (320,195)'
-    if ($StartLevel) {
+    if ($startLevel) {
       Send-JkClick -X 105 -Y 102
       Start-Sleep -Milliseconds 1500
       Send-JkClick -X 330 -Y 220
@@ -837,14 +864,14 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       # list for levels past the visible nine, which a y-coordinate click cannot reach.
       Send-JkClick -X 330 -Y 238
       Start-Sleep -Milliseconds 600
-      for ($k = 1; $k -lt [int]$StartLevel; $k++) {
+      for ($k = 1; $k -lt [int]$startLevel; $k++) {
         Send-JkKey -Name 'DOWN'
         Start-Sleep -Milliseconds 220
       }
       Start-Sleep -Milliseconds 400
       Send-JkClick -X 505 -Y 443
       Start-Sleep -Milliseconds 1000
-      Log "chose level $StartLevel through the [Debug] level select"
+      Log "chose level $startLevel through the [Debug] level select"
       # `-SettleMs` was documented for exactly this and never used: a level that opens with a scripted
       # sequence moves the body after the load, so read `coords` only once it has settled. This is the
       # pose retail itself puts the body at -- what Phase 2's walk legs need, with no warp.
@@ -949,9 +976,11 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       Log "stopped on the Single Player submenu; wrote $menuPng"
       return
     }
-    if (-not $StartLevel) { Send-JkClick -X 304 -Y 115 }
+    if (-not $startLevel) {
+      Send-JkClick -X 304 -Y 115
+      Log 'clicked New Game (304,115)'
+    }
     Start-Sleep -Milliseconds 1000
-    Log 'clicked New Game (304,115)'
 
     # Level-load detection: the dev console ListBox logs the parse lines.
     $parseLine = Wait-JkConsoleLine -ProcessId $process.Id -Pattern 'parse section things' -TimeoutSec $LevelTimeoutSec
@@ -972,7 +1001,10 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       $bodyZ = $requestedPose[2] - $script:JkEyeOffset
       $warp = 'warp {0} {1} {2} {3} {4} 0' -f $requestedPose[0], $requestedPose[1], $bodyZ, $requestedPose[3], $requestedPose[4]
       Log "warp command: $warp"
-      $null = Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command $warp
+      $warpReply = @(Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command $warp)
+      if ($warpReply -match 'Position not in world') {
+        throw "warp failed for row '$name' in level '$level': Position not in world"
+      }
       Start-Sleep -Milliseconds 900
     }
 
@@ -1006,6 +1038,15 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     # Phase 0.5 trace v0: a trace run replaces this row's screenshot captures (the `finally` below
     # still closes the game and restores the desktop).
     if ($WalkTraceMs -gt 0) {
+      if ($null -ne $requestedPose) {
+        $beforeTrace = Read-JkCoords -ProcessId $process.Id
+        if (-not $beforeTrace) { throw "walk trace '$name': coords unavailable after warp" }
+        $traceDelta = [math]::Max([math]::Abs($beforeTrace.Pos[0] - $requestedPose[0]), [math]::Abs($beforeTrace.Pos[1] - $requestedPose[1]))
+        $traceDelta = [math]::Max($traceDelta, [math]::Abs($beforeTrace.Pos[2] + $script:JkEyeOffset - $requestedPose[2]))
+        if ($traceDelta -gt 0.25) {
+          throw ("walk trace '{0}' is {1:N2} units from its requested pose in level '{2}'; refusing to write a wrong-level fixture" -f $name, $traceDelta, $level)
+        }
+      }
       $tracePath = Invoke-JkWalkTrace -ProcessId $process.Id -Name $name -Milliseconds $WalkTraceMs -Key $WalkTraceKey -SettleMs $(if ($WalkTraceSettleMs -gt 0) { $WalkTraceSettleMs } else { $Row.Settle })
       Log "walk trace mode: skipped the screenshot series/reference for '$name' (wrote $tracePath)"
       if ($ConsoleCommands.Count -gt 0) {
@@ -1058,6 +1099,12 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     # Time series: capture the first seconds after the level becomes visible. These are kept as
     # full raw frames (the -devMode overlay in the top corners is harmless for the motion analysis).
     $series = New-Object System.Collections.Generic.List[object]
+    # The wall clock inside the series. `series_ssim_first_last` alone cannot be aligned with a port run
+    # because it says nothing about *when* each frame was taken: retail's renderer runs at a few frames a
+    # second under the dgVoodoo path, so the 1 s spacing is a floor, not the real interval. The offsets
+    # below let `series-gate.ps1` capture the port over the same **measured** span (and, for a level whose
+    # opening is a cutscene, say exactly how far into the level the series starts).
+    $seriesClock = [Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $SeriesFrames; $i++) {
       $frameStart = Get-Date
       $pngPath = Join-Path $Out ("{0}-series-{1}.png" -f $name, $i)
@@ -1068,6 +1115,7 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
           Index = $i; File = (Split-Path -Leaf $pngPath); Md5 = $md5
           Yavg = if ($null -eq $stats.Yavg) { $null } else { [math]::Round($stats.Yavg, 2) }
           Bytes = $stats.Bytes; Raw = $shot.RawName
+          Ms = [int][math]::Round($seriesClock.Elapsed.TotalMilliseconds)
         })
       Log ("series[{0}] {1} bytes yavg={2} md5={3}" -f $i, $stats.Bytes, $stats.Yavg, $md5.Substring(0, 8))
       $elapsedMs = ((Get-Date) - $frameStart).TotalMilliseconds
@@ -1153,7 +1201,18 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
         if ($yawDelta -gt 180.0) { $yawDelta = 360.0 - $yawDelta }
         $warpVerified = ($maxDelta -le 0.05 -and $yawDelta -le 0.1)
         Log ("warp verification: max position delta={0:N3} yaw delta={1:N3} verified={2}; pitch delta={3:N2} (warp keeps the level's own pitch)" -f $maxDelta, $yawDelta, $warpVerified, $pitchDelta)
-        if (-not $warpVerified) { Log 'warp verification FAILED (unverified pose) — continuing' }
+        if (-not $warpVerified) {
+          # Round 284: a *large* mismatch is not "the level's opening moved the body" — it is the
+          # wrong level or a warp that never happened, and writing the fixture anyway poisons every
+          # later comparison (a row named 15maw that photographed level 1's spawn scored as level 14).
+          # Retail cannot load an arbitrary level from the console or the command line (`docs/gaps.md`,
+          # rounds 60-61), so this will fire whenever a non-first-level row is captured without a
+          # savegame route. Fail closed above 5 units; keep the advisory behaviour below it.
+          if ([math]::Abs($maxDelta) -gt 5.0) {
+            throw ("warp verification failed by {0:N2} units for row '{1}': the pose is not the requested one, so no fixture was written. A non-first-level row needs a savegame (docs/gaps.md, rounds 60-61)." -f $maxDelta, $name)
+          }
+          Log 'warp verification FAILED (unverified pose) — continuing'
+        }
       } else {
         Log 'unverified pose (coords unavailable) — continuing'
       }
@@ -1208,6 +1267,7 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       name = $name
       level = $level
       requested_pose = $requestedJson
+      pose_verified = $warpVerified
       source = 'retail GOG Star Wars Jedi Knight: Dark Forces II (JK.EXE -devMode, 16-bit 3D path via the dgVoodoo wrapper)'
       renderer = $renderer
       display_mode = (Get-JkEffectiveDisplayMode)
@@ -1236,7 +1296,11 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       coords_available = ($null -ne $coordsA)
       coords_source = $coordsSource
       warp_verified = $warpVerified
-      series = @($series | ForEach-Object { [ordered]@{ index = $_.Index; file = $_.File; md5 = $_.Md5; yavg = $_.Yavg; bytes = $_.Bytes } })
+      series = @($series | ForEach-Object { [ordered]@{ index = $_.Index; file = $_.File; md5 = $_.Md5; yavg = $_.Yavg; bytes = $_.Bytes; ms = $_.Ms } })
+      # Per-frame offsets from the first series capture, and the span they cover. `series-gate.ps1` reads
+      # these to capture the port over the same real interval instead of assuming 1 frame a second.
+      series_times_ms = @($series | ForEach-Object { $_.Ms })
+      series_span_ms = if ($series.Count -ge 2) { $series[$series.Count - 1].Ms - $series[0].Ms } else { 0 }
       series_static = $seriesStatic
       first_frame_is_player_camera = $seriesStatic
       series_ssim_first_last = $ssim
@@ -1362,6 +1426,13 @@ $selected = if ($Only.Count -gt 0) {
   @($rows | Where-Object { $Only -contains $_.Name })
 } else { $rows }
 if ($selected.Count -eq 0) { throw ("-Only matched no row; the shots file has: " + (($rows | ForEach-Object { $_.Name }) -join ', ')) }
+# One-launch probes. `-DebugShot`, `-LoadShot` and `-StartEpisode` photograph a **menu**, not a level,
+# and their branch returns from the row — not from the run — so without this guard they relaunched JK.EXE
+# once per row (thirteen launches to read one menu, round 284). A probe is one row by definition.
+if (($DebugShot -or $LoadShot -or $StartEpisode) -and $selected.Count -gt 1) {
+  Log ("one-launch probe: running 1 of {0} selected row(s), '{1}'" -f $selected.Count, $selected[0].Name)
+  $selected = @($selected[0])
+}
 Log ("selected rows: " + (($selected | ForEach-Object { $_.Name }) -join ', '))
 
 # Walk legs are preflighted first (round 251): a leg whose forward route walks into geometry parks the

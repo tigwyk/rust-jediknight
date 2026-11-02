@@ -14,16 +14,15 @@
 # Retail crosses 271 -> 157 -> 155; the port keeps going and steps
 # off a ledge there, so the leg also measures that collision difference (thing collision is absent).
 walk_cantina	01narshadda	-2.200043	-2.900013	-1.142886	0	105.000092	1000
-walk_street	01narshadda	5.474939	-1.899975	0.657119	0	45.000000	1000
 walk_street45	01narshadda	5.474939	-1.899975	0.657119	0	45.000000	1000
 #
-# walk_street90 / walk_street0 are the yaw-mapping probes (round 30). Retail at yaw 90 walks pure -x
+# walk_street90 is the yaw-mapping probe (round 30; the yaw-0 half served its purpose and
+# had no fixture, so it is not a capture leg). Retail at yaw 90 walks pure -x
 # (5.47 -> 4.20 -> 3.56 -> 3.27 over 1.8 s, y fixed at -1.90, sectors 271/157/155) and at yaw 0 it
 # nudges +0.04 in y and stops: that is exactly the decompiled basis `forward = (-sin a, cos a)`, so
 # the port and retail share a movement basis. walk_street90 is the cleanest straight leg yet - no
 # blocking, no drift, three sectors.
 walk_street90	01narshadda	5.474939	-1.899975	0.657119	0	90.000000	1000
-walk_street0	01narshadda	5.474939	-1.899975	0.657119	0	0.000000	1000
 
 # walk_switch: from the switch-side warp, walk south into the cantina door switch thing (cog 11).
 # Phase 1 step 4's positional trigger probe: the use key did nothing from 0.8 units, so the switch
@@ -58,7 +57,7 @@ walk6_spawn	06bbarons	22.46	38.21	1.057	0	-45.01	1000
 walk7_spawn	07yun	-2.00	-0.80	-0.043	0	0	1000
 #
 # walk8_spawn: level 8 (the debug list's eighth entry, 'Palace Escape'), which is 08escape88.
-walk8_spawn	08escape88	52.56	62.82	34.457	0	90	1000
+walk8_spawn	08escape88	52.83	62.86	34.457	0	90	1000
 #
 # walk9_spawn: level 9 (the debug list's ninth entry, 'Fuel Station Launch'), which is 09fuelstation.
 walk9_spawn	09fuelstation	1.07	5.46	0.107	0	54.99	1000
@@ -80,9 +79,11 @@ walk14_spawn	15maw	39.47	-7.28	28.255	0	0	1000
 #
 # walk15_spawn: debug entry 15.
 #
-# walk16_spawn: debug entry 16.
-walk15_spawn	16aEscapeShip	0.00	4.73	-2.47	0	0	1000
-walk16_spawn	17asarris	0	0	0	0	0	1000
+walk15_spawn	16aEscapeShip	0.00	4.19	-3.047	0	0	1000
+# walk16_spawn: dropped. Retail itself is stuck at this pose — `retail-capture.ps1 -WalkTraceMs`
+# aborts it ("two segments of held forward moved it less than 0.02 units"), so no retail trace can
+# exist and the port's 0.65 units over 3 s (0.22 u/s) is a slide, not a walk. 17asarris has no
+# usable spawn-walk leg; walk23_spawn covers the map family.
 #
 # walk17_spawn: debug entry 17.
 walk17_spawn	18Ascend	3.24	-9.21	-8.137	0	0	1000

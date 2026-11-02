@@ -42,6 +42,21 @@ public static class JkRetail {
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int n, out IntPtr read);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+
+  // One u32 from the game's memory (PROCESS_VM_READ), or -1. JK.EXE has a fixed 0x400000 base and no
+  // relocations, so a decompiled global's address is its runtime address.
+  public static long ReadU32(uint pid, long addr) {
+    IntPtr h = OpenProcess(0x0010, false, pid);
+    if (h == IntPtr.Zero) { return -1; }
+    try {
+      var buf = new byte[4]; IntPtr read;
+      if (!ReadProcessMemory(h, new IntPtr(addr), buf, 4, out read) || read.ToInt64() != 4) { return -1; }
+      return BitConverter.ToUInt32(buf, 0);
+    } finally { CloseHandle(h); }
+  }
 
   // WM_CLOSE on the game window runs the engine's own shutdown: it stops the level, shuts DirectDraw
   // down and restores the desktop display mode. Killing the process skips all of that (the monitor

@@ -16,7 +16,9 @@
 # eye by 0.03 units drops the pair to ~0.24), while renderer/HUD noise is not.
 #
 # Raising a floor is the right move when a renderer change improves a pair; lowering one needs
-# a reason in the commit message. A pair captured without a row here is reported as UNGRADED.
+# a reason in the commit message. Round 280 raised all five after the first-person weapon stopped
+# being drawn from inside the eye (VIEW_BASE z -0.03): measured 0.6607/0.6048/0.7394/0.7170/0.7335,
+# the floors now sit ~0.05 under each measured value instead of ~0.07-0.10. A pair captured without a row here is reported as UNGRADED.
 #
 # The numbers are tied to the capture policy in tools/parity/port-capture.ps1: 600 frames
 # (`--frames 600`), the window sized from the retail sidecar, and whatever renderer
@@ -36,9 +38,11 @@
 # by only +0.04 when the HUD band is removed, because retail's reference is a *saturated* tint at
 # ~10 s while the port's capture is still at a different point in the fight (AI engagement, step 5).
 name	min_ssim	max_mean_abs_diff
-spawn	0.55	28.0
-spawn_pose	0.55	28.0
-spawn_yaw30	0.55	28.0
-route_cantina	0.65	30.0
-route_lower	0.65	30.0
-route_street	0.65	30.0
+# `spawn` is not scored here: the room is full of NPCs, and a single frame of two ~10 s simulations measures
+# *which* patron is where (phase), not fidelity. It is gated by `tools/parity/series-gate.ps1` instead, which
+# compares the port's scene change over retail's own 7 s series span: port 0.9256 vs retail 0.9238.
+spawn_pose	0.61	26.0
+spawn_yaw30	0.56	27.0
+route_cantina	0.69	27.0
+route_lower	0.67	20.0
+route_street	0.68	23.0

@@ -267,6 +267,23 @@ pub fn add_local_pitch(xform: &mut Xform, degrees: f32) {
 /// `x y z` — and replaces the rest values for that frame (`rdPuppet_BuildJointMatrices`
 /// subtracts the rest pose, blends, and adds it back).
 pub fn pose_nodes(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> Vec<Xform> {
+    pose_nodes_with(model, key, frame, false)
+}
+
+/// The keyframe's **rotations** with the model's own rest positions. The first-person mount's key
+/// moves the hand (`pos`), but its held frame also carries the wrist orientation; the port draws
+/// the rest pose because the full key frame lands off the fitted framing. This isolates which half
+/// is the pose and which is the translation.
+pub fn pose_nodes_rot_only(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> Vec<Xform> {
+    pose_nodes_with(model, key, frame, true)
+}
+
+fn pose_nodes_with(
+    model: &Model,
+    key: Option<&crate::key::Key>,
+    frame: f32,
+    rot_only: bool,
+) -> Vec<Xform> {
     // The key lists its nodes **alphabetically by mesh name** (`K_Hip`, `K_Lcalf`, …)
     // while the model lists its meshes in authoring order (`k_torso`, `k_neck`, …), so
     // the names are the mapping. Index order only agrees by luck (`3do/at.3do` happens
@@ -281,6 +298,7 @@ pub fn pose_nodes(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> V
         key: Option<&crate::key::Key>,
         frame: f32,
         by_index: bool,
+        rot_only: bool,
         out: &mut Vec<Option<Xform>>,
     ) -> Xform {
         if let Some(done) = out[i] {
@@ -309,7 +327,7 @@ pub fn pose_nodes(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> V
         });
         // The node's local pose: the keyframe for this frame, or its own rest pose.
         let (pos, rot) = match entry {
-            Some(f) => (f.pos, f.rot),
+            Some(f) => (if rot_only { node.pos } else { f.pos }, f.rot),
             None => (node.pos, node.rot),
         };
         let local = local_matrix(pos, rot);
@@ -331,7 +349,7 @@ pub fn pose_nodes(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> V
             Some(p) => {
                 let pp = model.nodes[p].pivot;
                 place = [place[0] - pp[0], place[1] - pp[1], place[2] - pp[2]];
-                resolve(p, model, key, frame, by_index, out).then(&Xform { rot: local.rot, pos: place })
+                resolve(p, model, key, frame, by_index, rot_only, out).then(&Xform { rot: local.rot, pos: place })
             }
             None => Xform { rot: local.rot, pos: place },
         };
@@ -340,7 +358,7 @@ pub fn pose_nodes(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> V
     }
 
     for i in 0..model.nodes.len() {
-        resolve(i, model, key, frame, by_index, &mut out);
+        resolve(i, model, key, frame, by_index, rot_only, &mut out);
     }
     out.into_iter().map(Option::unwrap_or_default).collect()
 }

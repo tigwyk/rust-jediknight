@@ -292,6 +292,129 @@ impl Save {
 /// payload the player's record carries, which is what confirms the shifted variant.
 pub const THING_PAYLOAD: usize = 0x50;
 
+/// One entry of a retail save's `BKSV` thing list (`sections` kind `0x1001`).
+///
+/// The entry is `u16 kind`, the ASCII template name, then seven floats — position, angles and one
+/// more value (100.0 for the player's health) — followed by a 17-byte type-specific tail. Both
+/// shipped saves walk on that rule: the tail measured 17 bytes for hundreds of entries across every
+/// kind 1..14, and the handful of 14/15/16 readings are names whose last character also parses as a
+/// float byte, not a second layout.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetailThing {
+    pub kind: u16,
+    pub template: String,
+    pub pos: [f32; 3],
+    pub angles: [f32; 3],
+    /// The seventh float: the player's health, `1.0` on statics.
+    pub value: f32,
+}
+
+/// The length of every entry's tail after the seven floats.
+pub const RETAIL_TAIL: usize = 17;
+
+/// Decode a retail `0x1001` payload. Returns an empty list when the payload is not a `BKSV` list, and
+/// stops at the first entry whose shape does not hold rather than inventing a boundary — the caller can
+/// compare the count against the payload length to see how far the walk got.
+pub fn retail_things(payload: &[u8]) -> (Vec<RetailThing>, usize) {
+    let mut out = Vec::new();
+    if !payload.starts_with(b"BKSV") {
+        return (out, 0);
+    }
+    let float = |at: usize| -> Option<f32> {
+        let b = payload.get(at..at + 4)?;
+        let v = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        (v.is_finite() && v.abs() < 1e4).then_some(v)
+    };
+    let mut at = 12;
+    while at + 4 <= payload.len() {
+        let kind = u16::from_le_bytes([payload[at], payload[at + 1]]);
+        if !(1..=14).contains(&kind) {
+            break;
+        }
+        let mut end = at + 2;
+        while end < payload.len()
+            && (payload[end].is_ascii_alphanumeric() || b"_+-.".contains(&payload[end]))
+        {
+            end += 1;
+        }
+        // The name ends where seven plausible floats begin — but a trailing letter can also read as a
+        // float byte (`0x59` 'Y' in `walkplayerY`, `0x66` 'f' in `cargoshipf`), which shifts the entry by
+        // one and derails the walk. So a candidate is only accepted when the entry it implies is followed
+        // by another entry's shape (or by the end of the list).
+        let names_end = end;
+        let starts_entry = |at: usize| -> bool {
+            if at == payload.len() {
+                return true;
+            }
+            let Some(word) = payload.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]])) else {
+                return false;
+            };
+            (1..=14).contains(&word)
+                && payload
+                    .get(at + 2)
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || b"_+-.".contains(b))
+        };
+        let mut parsed = None;
+        for split in (at + 3..=names_end).rev() {
+            let Some(floats) = (0..7)
+                .map(|i| float(split + 4 * i))
+                .collect::<Option<Vec<f32>>>()
+            else {
+                continue;
+            };
+            // The tail is 17 bytes for the overwhelming majority of entries, but a few kinds carry 14,
+            // 15 or 16 (measured across both shipped saves). Accept the first tail whose following entry
+            // has a plausible shape, 17 first so the common case never pays for the scan.
+            if let Some(tail) = [RETAIL_TAIL, 16, 15, 14, 18, 19]
+                .into_iter()
+                .find(|tail| starts_entry(split + 28 + tail))
+            {
+                parsed = Some((split, floats, tail));
+                break;
+            }
+        }
+        // No tail made the *following* entry plausible: this is either the last entry of the list or the
+        // point where the container changes shape. Accept the entry with the canonical tail and stop, so
+        // the walk never loses the record it already read.
+        let terminal = parsed.is_none();
+        let (split, floats, tail) = match parsed {
+            Some(found) => found,
+            None => {
+                let mut fallback = None;
+                for split in (at + 3..=names_end).rev() {
+                    if let Some(floats) = (0..7)
+                        .map(|i| float(split + 4 * i))
+                        .collect::<Option<Vec<f32>>>()
+                    {
+                        fallback = Some((split, floats, RETAIL_TAIL));
+                        break;
+                    }
+                }
+                let Some(found) = fallback else { break };
+                found
+            }
+        };
+        let next = split + 28 + tail;
+        if next > payload.len() {
+            break;
+        }
+        out.push(RetailThing {
+            kind,
+            template: String::from_utf8_lossy(&payload[at + 2..split]).to_string(),
+            pos: [floats[0], floats[1], floats[2]],
+            angles: [floats[3], floats[4], floats[5]],
+            value: floats[6],
+        });
+        at = next;
+        if terminal {
+            break;
+        }
+    }
+    // The bytes the walk consumed: a caller compares it with the payload's length to see whether the
+    // list ended cleanly or hit a shape this decoder does not follow.
+    (out, at)
+}
+
 /// The thing type that means "player" (`GetThingHealth` accepts 2 and 10; the player is 10).
 pub const PLAYER_KIND: u16 = 10;
 /// Where the player record's health word is (`thing + 0x134`).
@@ -367,6 +490,43 @@ fn fixture(name: &str) -> Option<Vec<u8>> {
         .join("parity")
         .join(name);
     std::fs::read(path).ok()
+}
+
+
+#[test]
+fn retail_list_decodes_entries_and_stops_on_a_bad_shape() {
+    // Two entries with a 17-byte tail each, the second one a player, plus a trailing byte that cannot
+    // start an entry: the walk must return both and stop rather than inventing a third.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"BKSV");
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    payload.extend_from_slice(&73u32.to_le_bytes());
+    for (kind, name, pos) in [(7u16, "4x4door", [1.0f32, 2.0, 3.0]), (10, "walkplayer", [4.0, 5.0, 6.0])] {
+        payload.extend_from_slice(&kind.to_le_bytes());
+        payload.extend_from_slice(name.as_bytes());
+        for v in pos {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [0.0f32, 0.0, 0.0, 100.0] {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        // A distinctive tail: an all-zero one makes many split points look like valid entries, which
+        // is a property of the fixture rather than of the decoder.
+        payload.extend((0..RETAIL_TAIL).map(|i| 0x40 + i as u8));
+    }
+    // A kind word the walk cannot follow (`0` is not a shipped thing type): four bytes so it is read as
+    // an entry header rather than being folded into the previous entry's tail.
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    payload.extend_from_slice(&0u16.to_le_bytes());
+    let (got, consumed) = retail_things(&payload);
+    assert_eq!(got.len(), 2);
+    assert_eq!(consumed + 4, payload.len(), "the walk must stop before the malformed kind word");
+    assert_eq!(got[0].template, "4x4door");
+    assert_eq!(got[1].kind, PLAYER_KIND);
+    assert_eq!(got[1].pos, [4.0, 5.0, 6.0]);
+    assert_eq!(got[1].value, 100.0);
+    // A payload without the magic decodes nothing.
+    assert!(retail_things(b"nope").0.is_empty());
 }
 
 #[cfg(test)]

@@ -37,6 +37,12 @@ param(
   [string[]]$Only = @()
 )
 
+# `-Only a,b,c` arrives as **one** element from `pwsh -File`, so the leg that exists is never matched and the
+# caller gets "every requested walk leg is blocked" (round 288). Split every element, then drop blanks.
+function Split-CommaList([string[]]$Values) {
+  @($Values | Where-Object { $_ } | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
@@ -48,6 +54,16 @@ if (-not (Test-Path -LiteralPath $Exe)) { throw "missing $Exe; run cargo build -
 $FixtureDir = Join-Path $Root 'tools/parity/walktrace'
 
 # Total xy distance of a retail walk fixture: the file's own x/y columns, consecutive deltas summed.
+function Get-FixtureStart {
+  param([string]$Path)
+  if (-not (Test-Path -LiteralPath $Path)) { return $null }
+  $first = Get-Content -LiteralPath $Path | Select-Object -Skip 1 -First 1
+  if ($null -eq $first) { return $null }
+  $c = "$first" -split "`t"
+  if ($c.Count -lt 3) { return $null }
+  return ,@([double]$c[1], [double]$c[2])
+}
+
 function Get-FixtureTravel {
   param([string]$Path)
   if (-not (Test-Path -LiteralPath $Path)) { return $null }
@@ -82,6 +98,7 @@ foreach ($line in Get-Content -LiteralPath $LegsPath) {
       Yaw = [double]$f[6].Trim()
     })
 }
+$Only = @(Split-CommaList $Only)
 if ($Only) { $legRows = @($legRows | Where-Object { $Only -contains $_.Name }) }
 if ($legRows.Count -eq 0) { throw "no legs to preflight in $LegsPath" }
 
@@ -90,6 +107,8 @@ Write-Host ("{0,-16} {1,-15} {2,9} {3,8} {4,9} {5,7}  {6}" -f 'leg', 'level', 't
 
 $failed = 0
 $failedNames = New-Object System.Collections.Generic.List[string]
+$shortNames = New-Object System.Collections.Generic.List[string]
+$passed = 0
 foreach ($leg in $legRows) {
   $pose = '{0},{1},{2},{3}' -f $leg.X, $leg.Y, $leg.Z, $leg.Yaw
   $out = & $Exe --start $leg.Level --walk $Frames --warp $pose --mute 2>&1
@@ -105,7 +124,42 @@ foreach ($leg in $legRows) {
   $blocked = [int]$walkLine.Matches[0].Groups[2].Value
   $retail = Get-FixtureTravel (Join-Path $FixtureDir ("{0}-walk.tsv" -f $leg.Name))
   $retailText = if ($null -eq $retail) { '-' } else { '{0:N2}' -f $retail }
+  # The trace comparison is only valid when both sides start at the same pose: the row must be the
+  # retail trace's own start (round 129's rule). Two rows had drifted (`walk15_spawn` 0.54 units off,
+  # `walk8_spawn` 0.27), so this is checked here rather than trusted.
+  $start = Get-FixtureStart (Join-Path $FixtureDir ("{0}-walk.tsv" -f $leg.Name))
+  if ($null -ne $start) {
+    $ox = $leg.X - $start[0]
+    $oy = $leg.Y - $start[1]
+    $off = [math]::Sqrt($ox * $ox + $oy * $oy)
+    if ($off -gt 0.25) {
+      $failed++
+      $failedNames.Add($leg.Name)
+      Write-Host ("{0,-16} {1,-15} {2,9:N2} {3,8} {4,9} {5,7}  {6}" -f $leg.Name, $leg.Level, $travel, $blocked, $retailText, 'POSE', ("the row pose is {0:N2} units from the retail trace start" -f $off))
+      Write-Output ("walk-preflight`t{0}`tFAIL`t{1:N2}" -f $leg.Name, $travel)
+      continue
+    }
+  }
+  # A leg whose **retail** trace itself travels less than the walk threshold is not a walk: the body is
+  # under script control (a hold, a cutscene, a lift) and a capture measures that script, not movement.
+  # The fixture already says so, so it is reported apart from a pose that walks into geometry.
+  if ($null -ne $retail -and $retail -lt $MinTravel) {
+    # Retail's own capture measured no walk. If the port stands still too the two agree; if the port walks,
+    # the two *disagree* on the same pose — but the trace alone cannot say whether retail was script-held,
+    # blocked by geometry or the capture itself failed, so the verdict stays descriptive.
+    $verdict = if ($travel -lt $MinTravel) { 'HOLD' } else { 'DIVERGE' }
+    $detail = if ($verdict -eq 'HOLD') {
+        "retail's own trace travels {0:N2} units and the port stands still too: a script hold" -f $retail
+    } else {
+        "retail's capture measured a {0:N2}-unit walk; the port walks {1:N2} from the same pose" -f $retail, $travel
+    }
+    Write-Host ("{0,-16} {1,-15} {2,9:N2} {3,8} {4,9} {5,7}  {6}" -f $leg.Name, $leg.Level, $travel, $blocked, $retailText, $verdict, $detail)
+    $shortNames.Add($leg.Name)
+    Write-Output ("walk-preflight`t{0}`tSHORT`t{1:N2}" -f $leg.Name, $travel)
+    continue
+  }
   if ($travel -ge $MinTravel) {
+    $passed++
     Write-Host ("{0,-16} {1,-15} {2,9:N2} {3,8} {4,9} {5,7}  {6}" -f $leg.Name, $leg.Level, $travel, $blocked, $retailText, 'PASS', '')
     Write-Output ("walk-preflight`t{0}`tPASS`t{1:N2}" -f $leg.Name, $travel)
   } else {
@@ -122,4 +176,4 @@ if ($failed -gt 0) {
   Write-Host 'walk preflight: not worth a QA window on these; fix the pose/heading in walk-shots.tsv or drop the leg.'
   exit 1
 }
-Write-Host ("walk preflight: all {0} leg(s) walk in the port; a retail capture is worth running" -f $legRows.Count)
+Write-Host ("walk preflight: {0} leg(s) walk in the port, {1} have retail captures that measured no walk (HOLD/DIVERGE); a retail capture is worth running on the walkers" -f $passed, $shortNames.Count)

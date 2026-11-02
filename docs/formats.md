@@ -2168,7 +2168,7 @@ Measured from the recovered source and the shipped data, not guessed:
 | quantity | engine | where | port today |
 | --- | --- | --- | --- |
 | lateral sphere radius | **0.065** (`walkplayer` template `size=0.065`, `movesize=0.065`) | `sithThing.c` `THINGPARAM_SIZE` → `moveSize`; swept in `sithCollision_MoveThing` | `PLAYER_RADIUS = 0.065` |
-| body height | `physicsParams.height`, else `renderData.model3->insertOffset.z`; `ky.3do` = **0.120114** | `sithPhysics_GetThingHeight` | none: the body is a sphere |
+| body height | `physicsParams.height`, else `renderData.model3->insertOffset.z`, floored at `moveSize + 0.005`; `ky.3do` = **0.120114**. A **search reach** for `FindFloor`, not a resting height — an unattached body's probe is only `moveSize + 0.005`, and nothing attaches the player, so its authored 0.120114 gap falls to the sphere contact | `sithPhysics_GetThingHeight` (`0x4f6210`), `sithPhysics_FindFloor` (`0x4f5550`), `sithPlayer_NewPlayer` (`0x4c8ec0`) | no idle attach; landings use `floor + radius` |
 | floor probe | a **ray** (`radius 0.0`) straight down, `RAYCAST_10` so only `SITH_SURFACE_FLOOR` surfaces count, range `height * 1.1` (`* 2` when floor- or wall-stuck, `moveSize + 0.005` otherwise) | `sithPhysics_FindFloor` | a sphere sweep of radius `PLAYER_RADIUS` against every face |
 | ledge/step | no step allowance at all; `FindFloor` re-runs within that range | `sithPhysics_FindFloor` | `STEP_UP = 0.066` (`moveSize + 0.01`) |
 | camera | the camera is the thing's position (`+0xb8`) plus the eye offset it carries at `thing + 0x168` (a field, not `position + eyeoffset` computed at draw time); the POV weapon's frame is built from the camera's matrix by `jkPlayer_DrawPov` (`0x4051e0` — negated `+0x168`, sway from `+0x1d4`/`+0x21c`, no depth test, sector ambient), and the camera has no velocity pitch | `0x4c56b0`, `0x4051e0`, see §24 | no decompiled writer sets `0x168`; the port calibrates it as `PLAYER_EYE` |
@@ -3956,6 +3956,56 @@ and the record stream is 4-byte aligned. The payload starts with the thing's own
 `thing+0x88`, …). `FUN_004da770` @ `0x4da770` is the driver that walks the world's arrays — things at
 stride `0x2B0`, sectors at `0xA7` dwords, surfaces at `0x14C4` — and calls a per-object serializer
 for each with the section type mask.
+
+**A GOG-shipped save's `0x1001` record is a `BKSV` list, and its entries carry the template NAME (round 286).**
+Measured on `saves/autosave.jks` from the install (level 15maw, written by retail), the record after the prefix is
+`kind 0x1001, length 5196`, and its payload opens
+
+```text
+payload+0x00  42 4b 53 56   "BKSV"
+payload+0x04  8e 69 78 41
+payload+0x08  49 00 00 00
+payload+0x0C  0a 00  77 61 6c 6b 70 6c 61 79 65 72   type 10, "walkplayer"
+payload+0x18  59 e6 1d 42   f32  39.475      position x
+payload+0x1C  cd cc e8 c0   f32  -7.275      position y
+payload+0x20  80 6a e2 41   f32  28.302      position z   ← level 14's own spawn
+payload+0x24  00 00 00 00   pitch
+payload+0x28  00 00 00 00   yaw
+payload+0x2C  00 00 00 00   roll
+payload+0x30  00 00 c8 42   f32  100.0        ← the player's health
+```
+
+so an entry is `u16 type`, the ASCII template name, then position, angles and one float **plus a 17-byte tail** — not
+the message payload order, and **no** `thing + 0x144` word anywhere in it. The tail is 17 bytes for the overwhelming
+majority of entries; kinds 4, 5, 7, 9, 10, 11, 12, 13 and 14 also showed 14, 15, 16, 18 or 19, so a decoder tries that
+bounded set and accepts the first tail whose *following* entry has a plausible shape. Two traps, both measured: a name
+whose last character is also a float byte (`walkplayerY`, `cargoshipf`) shifts the entry by one, and the last entry
+before a malformed region must be accepted with the canonical tail rather than dropped.
+
+`jks::retail_things` implements this. On the two shipped saves it decodes **357 of the quicksave's 24 692 bytes** (last
+`+dbattery`, 4 385 unread) and **73 of the autosave's 5 196** (last `ghost`, 1 147 unread), and the player entry in
+both carries that level's own spawn pose and `health 100`. The unread remainder needs a per-kind tail table from the
+engine's restore switch. Two corrections follow, both measured rather than
+argued: the port's `ThingRecord` reader cannot decode this (it reports `0 thing record(s)` for a retail file because it
+expects a `u16` template index at payload `+0x00`), and row 141's note that the thrust word "is serialized in the
+player's save tail beside health" is wrong — health is the last field this record carries.
+
+**The writer gap matters beyond reading.** The port writes one thing per `0x1001` record; retail writes one `0x1001`
+record holding a `BKSV` list. A save written by the port is therefore not the shape retail's reader walks, which is one
+more reason a patched file cannot be used to boot a level (`retail-capture.ps1 -LoadSave`).
+
+```text
+0000069a  78 41 49 00 00 00 0a 00  77 61 6c 6b 70 6c 61 79   xAI.....walkplay
+000006aa  65 72 00 ...                                            er.
+```
+
+i.e. a `u16` **10** (the thing type) followed immediately by the NUL-terminated template name
+`walkplayer`, where `jks.rs` reads `u16 template index` then `u16 type` per the staging header above. That
+mismatch is why `--save` reports **`0 thing record(s)`** for a retail file while it round-trips the port's own
+records: the port writes one thing per `0x1001` record, and retail's `0x1001` is a *list* whose per-thing
+layout begins with the type and the template name. Decoding that list is what a retail thing record (and the
+`thing + 0x144` thrust word inside it) needs, and it is not a spot-guess job — the string/length interleaving
+after the name has to be walked field by field.
 
 
 **The type table.** `FUN_004e1700` @ `0x4e1700` zeroes `DAT_00847d68[0x41]` and then installs

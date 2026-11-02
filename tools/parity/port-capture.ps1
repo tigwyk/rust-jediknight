@@ -31,17 +31,21 @@
 param(
     [string]$Game = 'G:\Games\Star Wars Jedi Knight - Dark Forces 2',
     [int]$TimeoutSec = 120,
-    [string[]]$Only = @()
+    [string[]]$Only = @(),
+    # A survey list (the gated pairs live in shots.tsv; a per-level sweep uses its own file).
+    [string]$Shots = '',
+    [int]$Frames = 600
 )
 
 $ErrorActionPreference = 'Stop'
 
 $Root     = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # tools\parity -> repo root
-$Shots    = Join-Path $Root 'tools\parity\shots.tsv'
+if (-not $Shots) { $Shots = Join-Path $Root 'tools\parity\shots.tsv' }
 $Exe      = Join-Path $Root 'target\release\bevi-knight.exe'
 $OutDir   = Join-Path $Root 'target\parity\port'
 $LogPath  = Join-Path $OutDir 'port.log'
-$Frames   = 600   # ~10 s of 60 Hz sim: long enough for scripted `PlayKey` clips at level start (THout.key is 61 frames at 15 fps) to finish, which is where the retail capture takes its frame
+# `--frames` default 600 = ~10 s of 60 Hz sim: long enough for scripted `PlayKey` clips at level start
+# (THout.key is 61 frames at 15 fps) to finish, which is where the retail capture takes its frame.
 
 . (Join-Path $PSScriptRoot 'display.ps1')
 

@@ -231,13 +231,21 @@ The retail clock is **held-key time, not wall time**. Reading `coords` goes thro
 dialog, and that dialog pauses the game - a "hold W and poll" walk moves only in the gaps between
 polls, which is why the trace is built from hold segments: activate the game window (verify it is
 foreground), hold the key for exactly `HoldMs`, release, then read the pose while the game is frozen.
-`held_ms` is the sum of those segments. The port is deterministic by construction: capture-mode
+`held_ms` is the sum of those segments - the *injected* hold, which is **not** game time: the engine
+advances its clock per frame (`sithTime_Advance`, clamped to [10, 500] ms) and retail renders a few
+frames a second here, so a 600 ms hold is 2-4 frames. Since 2026-11-01 the capture also writes
+`game_ms`, the engine's own clock (`DAT_00836c14`, read with `ReadProcessMemory`; JK.EXE has a fixed
+base) since the start pose, and `trace-compare.ps1` uses it as the time axis when present. It counts
+the coast after each per-segment key release too, and is read just after `coords`, so a sample can
+run up to one frame long if closing the console resumes the game first. Replay the port for at least
+the last `game_ms` (`port-trace.ps1`'s length is `HoldMs x Segments`); past its end the compare clamps
+to the port's final frame. The port is deterministic by construction: capture-mode
 `--shot` pins `dt` at 1/60 s and `BK_WALK_FORWARD` replaces the keyboard, so a rerun is identical.
 
 Formats (tab separated, `#` comments allowed):
 
 ```text
-<name>-walk.tsv    held_ms  x  y  z  sector  yaw        (retail; one row per hold segment)
+<name>-walk.tsv    held_ms  x  y  z  sector  yaw  [game_ms]   (retail; one row per hold segment)
 <name>.tsv         tick  t_s  x  y  z  sector  vy  health  shields   (port; one row per frame)
 ```
 

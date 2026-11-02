@@ -866,6 +866,10 @@ pub struct Runtime {
     /// A template's `physflags=`: a created thing starts with it (the engine copies the template word),
     /// and the generic mover reads bit `0x1` (gravity) and its thruster exemption `0x400000`.
     pub template_phys_flags: BTreeMap<String, u32>,
+    /// A template's `mass=`. `sithPhysics_UpdateThingPhysics` (`0x4f6270`) gates its gravity arm on the
+    /// thing's mass (`+0x204`) being non-zero as well as on `physflags & 0x1`, so a massless body with
+    /// the gravity bit still floats. `_actor` ships `mass=150`, `_debris` `mass=0.1`.
+    pub template_mass: BTreeMap<String, f32>,
     /// World gravity, from the level's own `World Gravity` line: what pulls a physics thing down.
     pub gravity: f32,
     /// Every shot the runtime spawned, so a check can ask "did the trigger work" without sampling
@@ -1554,6 +1558,35 @@ impl Runtime {
                     .map(|flags| (t.name.to_ascii_lowercase(), flags))
             })
             .collect();
+        // `mass=` is the other half of the gravity gate (`0x4f6270` reads `+0x204`): a thing's mass is
+        // copied from the template, and a zero mass means the gravity arm never runs. The shipped
+        // `_debris` template (`type=weapon physflags=0x201`) declares **no** `mass=` in any level, yet
+        // its shrapnel falls in retail, so the engine's parse default is non-zero (`1.0`); reading
+        // "absent" as zero is what left a created chip floating (`--things`).
+        let template_mass: BTreeMap<String, f32> = level
+            .templates
+            .iter()
+            .map(|t| {
+                let mass = level
+                    .template_param(&t.name, "mass")
+                    .and_then(|raw| raw.trim().parse::<f32>().ok())
+                    .unwrap_or(1.0);
+                (t.name.to_ascii_lowercase(), mass)
+            })
+            .collect();
+        // A thing's mass comes from its template (`sithThing_ParseArg`'s `mass=`, `+0x204`), which is
+        // also the gravity arm's gate. Built here because the struct literal moves `template_mass`.
+        let placed_mass: BTreeMap<usize, f32> = level
+            .things
+            .iter()
+            .enumerate()
+            .filter_map(|(index, thing)| {
+                template_mass
+                    .get(&thing.template.to_ascii_lowercase())
+                    .copied()
+                    .map(|mass| (index, mass))
+            })
+            .collect();
         // `thingflags=` (`sithThing_ParseArg`'s `typeflags` is the other word): a shot inherits it, and
         // `sithWeapon_WeaponFireProjectile`'s player pre-sweep tests `thingflags & 0x200000` on the
         // projectile before it emits `dodge`'s event — `+bryarbolt` ships `0x20000001`.
@@ -1684,6 +1717,7 @@ impl Runtime {
                 })
                 .collect(),
             template_phys_flags,
+            template_mass,
             gravity: level.gravity,
             shots_fired: 0,
             prints: Vec::new(),
@@ -1792,7 +1826,9 @@ impl Runtime {
             item_flags: Default::default(),
             life_left: Default::default(),
             life_total: Default::default(),
-            mass: Default::default(),
+            // A thing's mass comes from its template (`sithThing_ParseArg`'s `mass=`, `+0x204`), which is
+            // also the gravity arm's gate. Scripts can still overwrite it with `SetThingMass`.
+            mass: placed_mass,
             user_data: Default::default(),
             force: Default::default(),
             actor_weapon: Default::default(),
@@ -2211,6 +2247,15 @@ impl Runtime {
         self.templates.push(template);
         self.types.push(kind);
         let index = self.things.len() - 1;
+        // A created thing inherits its template's mass, exactly like `physflags` (`sithThing_CreateThing`
+        // copies both), and the gravity arm is gated on it.
+        let mass = self
+            .template_mass
+            .get(&self.templates[index].to_ascii_lowercase())
+            .copied();
+        if let Some(mass) = mass {
+            self.mass.insert(index, mass);
+        }
         self.arm_life(index);
         index
     }
@@ -2379,6 +2424,14 @@ impl Runtime {
                 }
                 let Some(base) = self.key_base.get(&thing).copied() else { continue };
                 let Some(pose) = node.at(start as f32 + self.time * key.fps) else { continue };
+                if std::env::var_os("BK_KEY_TRACE").is_some() {
+                    println!(
+                        "key: thing {thing} {name} start {start} time {:.3} fps {} frame {:.2}",
+                        self.time,
+                        key.fps,
+                        start as f32 + self.time * key.fps
+                    );
+                }
                 let Some(t) = self.things.get_mut(thing) else { continue };
                 let (sin, cos) = base.1.to_radians().sin_cos();
                 t.pos = [
@@ -2389,6 +2442,9 @@ impl Runtime {
                 t.yaw = base.1 + pose.rot[1];
                 t.pitch = base.2 + pose.rot[0];
                 t.roll = base.3 + pose.rot[2];
+                if std::env::var_os("BK_KEY_TRACE").is_some() {
+                    println!("key: thing {thing} pos now {:?}", t.pos);
+                }
                 moved.push(thing);
             }
         }
@@ -2540,6 +2596,69 @@ impl Runtime {
             .templates
             .iter()
             .position(|t| t.eq_ignore_ascii_case("walkplayer"));
+        // Per-body radius and actor grounding, sampled **before** the mutable iteration:
+        // `Runtime::thing_floor` borrows all of `self`, which the loop below forbids.
+        let body_radius: Vec<f32> = (0..self.things.len())
+            .map(|index| {
+                let Some(name) = self.templates.get(index) else {
+                    return 0.065;
+                };
+                // Template names in the shipped data are already lowercase, so the common path is a
+                // borrowed lookup; only a mixed-case name pays for the lowercased key.
+                self.template_hit
+                    .get(name)
+                    .or_else(|| self.template_hit.get(&name.to_ascii_lowercase()))
+                    .map(|(radius, _)| *radius)
+                    .unwrap_or(0.065)
+            })
+            .collect();
+        // `sithPhysics_GetThingHeight`: the thing's model `insertOffset.z` (the field the engine reads
+        // off `renderData.model3`), floored at `moveSize + 0.005`, then `× 1.1` for the creation attach
+        // reach `sithThing_Initialize`'s `FindFloor(thing, 1)` uses.
+        let actor_reach: Vec<f32> = (0..self.things.len())
+            .map(|index| {
+                if self.types.get(index).copied() != Some(2) {
+                    return 0.0;
+                }
+                self.things[index].insert[2].max(body_radius[index] + 0.005) * 1.1
+            })
+            .collect();
+        // The floor each actor stands over: the highest level plane or solid-thing top under it. A body
+        // within `actor_reach` of that floor is standing and keeps the authored height; one that has
+        // walked off a ledge is not, and the gravity arm below takes it. `_actor` ships
+        // `physflags=0x4a4f` and `mass=150`, so actors are gravity bodies like the `_debris` goods.
+        // Sampled before the mutable iteration because `thing_floor` borrows all of `self`.
+        let actor_floor: Vec<Option<f32>> = (0..self.things.len())
+            .map(|index| {
+                if self.types.get(index).copied() != Some(2) {
+                    return None;
+                }
+                let pos = self.things[index].pos;
+                let plane = self.solids.as_ref().and_then(|solids| {
+                    solids
+                        .sectors_around(pos)
+                        .into_iter()
+                        .filter_map(|sector| {
+                            solids
+                                .floor_surface(sector, [pos[0], pos[1], pos[2] + 0.05])
+                                .map(|(z, _)| z)
+                        })
+                        .fold(None, |best: Option<f32>, z| {
+                            Some(best.map_or(z, |near| near.max(z)))
+                        })
+                });
+                // Standing on level geometry is the common case and ends the query; only a body whose
+                // plane is out of reach needs the solid-thing scan, for a fall onto a crate or lift.
+                if plane.is_some_and(|floor| pos[2] - floor <= actor_reach[index]) {
+                    return plane;
+                }
+                let top = self.thing_floor(pos, body_radius[index]);
+                match (plane, top) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                }
+            })
+            .collect();
         for (i, t) in self.things.iter_mut().enumerate() {
             if Some(i) == player_at {
                 // Path moves still run — a script can walk the player along frames — but the body's
@@ -2547,23 +2666,36 @@ impl Runtime {
                 let _ = t.step(dt);
                 continue;
             }
-            // `sithPhysics_UpdateThingPhysics`'s gravity arm (`0x4f6270`): a physics body whose
-            // physflags carry `0x1` falls at the level's gravity (`0x40000` halves it), unless it is
-            // attached to something that carries it. Actors are excluded because `ai_tick`'s walker
-            // owns their vertical integration (roadmap ledger). The shipped gravity goods are the
-            // `_debris` family (`type=weapon physflags=0x201`) — spawned chips that used to fly
-            // straight through the floor and out of the level.
+            // `sithPhysics_UpdateThingPhysics`'s gravity arm (`0x4f6270`): a body whose **mass** is not
+            // zero (`+0x204`) and whose physflags carry `0x1` falls at the level's gravity (`0x40000`
+            // halves it), unless it is attached. `_actor` ships `physflags=0x4a4f, mass=150`, so actors
+            // are these bodies too — the old type==3 test excluded them, which is why an actor walking
+            // off a ledge never fell.
+            let actor_body = self.types.get(i).copied() == Some(2);
             let gravity_body = t.phys_flags & 0x1 != 0
-                && self.types.get(i).copied() == Some(3)
+                && (self.types.get(i).copied() == Some(3) || actor_body)
+                && self.mass.get(&i).copied().unwrap_or(0.0) != 0.0
                 && t.attach.is_none()
                 && !t.destroyed;
+            // An actor within its creation reach of the floor it stands over is attached and keeps the
+            // level's authored height; one that has walked off a ledge is not, and gravity takes it.
+            let grounded =
+                actor_body && actor_floor[i].is_some_and(|floor| t.pos[2] - floor <= actor_reach[i]);
             if gravity_body {
-                let g = if t.phys_flags & 0x40000 != 0 {
-                    self.gravity * 0.5
+                if grounded {
+                    // A standing body keeps the offset it attached with; a stale downward velocity
+                    // would otherwise re-enter it through the stop below.
+                    if t.vel[2] < 0.0 {
+                        t.vel[2] = 0.0;
+                    }
                 } else {
-                    self.gravity
-                };
-                t.vel[2] -= g * dt;
+                    let g = if t.phys_flags & 0x40000 != 0 {
+                        self.gravity * 0.5
+                    } else {
+                        self.gravity
+                    };
+                    t.vel[2] -= g * dt;
+                }
             }
             if let Some(drive) = usize::try_from(t.sector).ok().and_then(|s| thrust.get(s)).copied()
                 && drive != [0.0; 3]
@@ -2643,7 +2775,7 @@ impl Runtime {
             if gravity_body
                 && let Some(solids) = &self.solids
             {
-                let mut floor: Option<f32> = None;
+                let mut floor: Option<f32> = actor_floor[i].filter(|top| *top <= previous[2] + 0.05);
                 for sector in solids.sectors_around(t.pos) {
                     if let Some((z, _)) =
                         solids.floor_surface(sector, [t.pos[0], t.pos[1], t.pos[2] + 0.6])
@@ -2652,10 +2784,14 @@ impl Runtime {
                         floor = Some(floor.map_or(z, |near: f32| near.max(z)));
                     }
                 }
-                if let Some(floor) = floor
-                    && t.pos[2] <= floor
+                // `sithCollision_MoveThing` stops the swept sphere at the surface, so an actor's centre
+                // comes to rest one radius above it. The `_debris` goods keep the origin-on-plane rule
+                // they were ported with (their inserts are zero, so the two agree).
+                let land = floor.map(|floor| if actor_body { floor + body_radius[i] } else { floor });
+                if let Some(land) = land
+                    && t.pos[2] <= land
                 {
-                    t.pos[2] = floor;
+                    t.pos[2] = land;
                     if t.vel[2] < 0.0 {
                         t.vel[2] = 0.0;
                     }
@@ -3239,6 +3375,60 @@ impl Runtime {
     /// `0x100` cascade, and the track-target helper raises `0x400`/`0x800`. **Nothing emits event 2 or
     /// event 4**, so those branches of `dodge` and `sensedanger` are dead in retail content too — the
     /// dispatcher's mask table lists them because the handlers do, not because content reaches them.
+    /// `sithAI_CanWalk` (`0x4eb4b0`): is there ground under the step's destination?
+    ///
+    /// The engine sweeps a sphere downward from the next position for `GetThingHeight + maxstep` and
+    /// treats **any** surface hit as walkable — a floor, or a wall the body is beside (the physics
+    /// step-up owns a raised edge) — and no hit at all as a ledge. Its caller
+    /// (`sithAI_idk_msgarrived_target`) then zeroes the AI's velocity and emits `0x400`, so an actor
+    /// stops at the edge instead of walking off it. The port's floor search knows the level's faces but
+    /// not the catwalks and lifts the engine's collision treats as solid, so a **solid thing's model
+    /// top** also counts as ground. Not modelled: the engine's walkable categories (its surface-flag
+    /// bits decide 1 vs 2 vs 0), which this build does not use for steering.
+    fn ai_can_walk(&self, index: usize, point: [f32; 3]) -> bool {
+        let Some(solids) = self.solids.as_deref() else { return true };
+        let radius = self
+            .templates
+            .get(index)
+            .map(|name| name.to_ascii_lowercase())
+            .and_then(|name| self.template_hit.get(&name).map(|(radius, _)| *radius))
+            .unwrap_or(0.065);
+        let height = self
+            .things
+            .get(index)
+            .map(|thing| thing.insert[2])
+            .unwrap_or(0.0)
+            .max(radius + 0.005);
+        let maxstep = self
+            .ai
+            .get(&index)
+            .map(|class| class.maxstep)
+            .unwrap_or(0.5)
+            .max(0.0);
+        let ground = |at: [f32; 3]| {
+            let Some(sector) = solids.sector_at(at, radius) else {
+                return false;
+            };
+            solids
+                .sweep(sector, at, [0.0, 0.0, -1.0], height + maxstep, radius, self.gates())
+                .is_some()
+                || self.thing_floor(at, radius).is_some()
+        };
+        if ground(point) {
+            return true;
+        }
+        // The engine gates only a body that is **attached** to a surface (`thing+0xc != 0`); an
+        // airborne body keeps its horizontal motion. The port has no floor-attach state, so "attached"
+        // is approximated by "there is ground under where the body stands now": attached and no ground
+        // ahead is a ledge (blocked), airborne is not gated.
+        let attached = self
+            .things
+            .get(index)
+            .map(|thing| thing.pos)
+            .is_some_and(|here| ground(here));
+        !attached
+    }
+
     pub fn emit_ai_event(&mut self, actor: usize, event: u32, source: Option<usize>) -> bool {
         let Some(thing) = self.things.get(actor) else {
             return false;
@@ -3427,9 +3617,9 @@ impl Runtime {
     /// (`sithAI_SetLookFrame(ai, target, 1.0)`). The two class numbers are the leap distance (`3.0` in
     /// every shipped line, `args[1]`) and the handler's own next-check delay (the line's first number).
     ///
-    /// The engine also tests its walkability helper at the leap point (`FUN_004eb4b0(ai, point, 0)`,
-    /// body not recovered, on the ledger); the port refuses when the level blocks that line, which is the
-    /// same question a step would ask.
+    /// The engine also tests its walkability helper at the leap point (`FUN_004eb4b0(ai, point, 0)`);
+    /// the port now calls the same helper (`Runtime::ai_can_walk`, round 276) instead of asking whether
+    /// the line is clear — a leap must land on ground.
     fn jump_from_obstacle(&mut self, actor: usize, weight: f32) -> bool {
         let Some(t) = self.things.get(actor) else {
             return false;
@@ -3463,11 +3653,10 @@ impl Runtime {
             return false;
         }
         let point = [from[0] + dir[0] * dist as f32, from[1] + dir[1] * dist as f32, from[2]];
-        if self
-            .solids
-            .as_ref()
-            .is_some_and(|solids| solids.segment_blocked(from, point))
-        {
+        // `FUN_004eb4b0(ai, point, 0)`: the engine tests its **walkability helper** at the leap point,
+        // so the leap is taken only onto ground the body can stand on — a clear line is not the
+        // question a leap asks.
+        if !self.ai_can_walk(actor, point) {
             return false;
         }
         self.ai_jump
@@ -3654,6 +3843,11 @@ impl Runtime {
             if thing.destroyed || self.types.get(index).copied() != Some(2) {
                 continue;
             }
+            // The AI's **moving** bit (`0x1`): `jump` refuses without it and `dodge` refuses with it.
+            // Cleared here and set by the step below, so it means "moved this tick" — the engine sets
+            // it while the AI has a move, and the port never wrote it, which left `jump` unreachable
+            // from a real walk and let `dodge` fire mid-stride.
+            *self.actor_flags.entry(index).or_insert(0) &= !0x1;
             // The firing cadence gates the *shot*, not the legs: an actor that has just
             // fired keeps walking, which is what makes it close the distance instead of
             // stopping for a second every shot.
@@ -3961,6 +4155,10 @@ impl Runtime {
                 {
                     return answered.then_some(heard);
                 }
+                // The default 1.0 covers a class without the instinct: the port's hearing path stands in
+                // for both the engine's `Listen` roll and the `Follow` handler's awareness move, and a
+                // gated version (Listen-or-Follow) was measured to perturb the walk-trace legs without a
+                // parity gain, so the standing behaviour is kept.
                 let chance = ai
                     .as_ref()
                     .and_then(|class| class.instinct("Listen"))
@@ -4158,6 +4356,10 @@ impl Runtime {
                         from[1] + away[1] / len * step,
                         from[2],
                     ];
+                    if !self.ai_can_walk(index, next) {
+                        let _ = self.emit_ai_event(index, 0x400, None);
+                        continue;
+                    }
                     if let Some(thing) = self.things.get_mut(index) {
                         thing.pos = next;
                         thing.ai_target = Some(goal);
@@ -4239,6 +4441,18 @@ impl Runtime {
                     .unwrap_or(self.ai_standoff)
             };
 
+            // A class with `TurretFire` never moves its body: its handler (`0x50a0f0`) only turns the
+            // articulated head and fires the weapon, so the port leaves a turret where it was placed
+            // instead of walking it at the player.
+            let turret = ai.as_ref().is_some_and(|class| class.instinct("TurretFire").is_some());
+            // The AI's **moving** bit (`0x1`): `jump` requires it and `dodge` refuses with it. The
+            // engine sets it while the AI has a move, and a blocked step (a ledge) still counts; the
+            // port never wrote it, which left `jump` unreachable from a real walk and let `dodge`
+            // fire mid-stride. It is cleared at the top of the tick and when the destination is met.
+            if !turret && speed > 0.0 && reach > standoff {
+                *self.actor_flags.entry(index).or_insert(0) |= 0x1;
+            }
+
             // The line to the *destination* is what decides whether a route is needed: testing the
             // next step instead was a bug, because a step is a centimetre and an actor in the middle
             // of a room never saw the wall it was about to press into.
@@ -4266,10 +4480,6 @@ impl Runtime {
             let destination_reach =
                 ((want[0] - from[0]).powi(2) + (want[1] - from[1]).powi(2)).sqrt();
 
-            // A class with `TurretFire` never moves its body: its handler (`0x50a0f0`) only turns the
-            // articulated head and fires the weapon, so the port leaves a turret where it was placed
-            // instead of walking it at the player.
-            let turret = ai.as_ref().is_some_and(|class| class.instinct("TurretFire").is_some());
             if reach > standoff && speed > 0.0 && !turret {
                 let step = (speed * dt).min(reach - standoff);
                 let next = [
@@ -4283,6 +4493,12 @@ impl Runtime {
                 // the view cone, and never fire — which is why level 1's door room stayed quiet.
                 let face = if sighted { target } else { goal };
                 let facing = (face[0] - from[0], face[1] - from[1]);
+                if !self.ai_can_walk(index, next) {
+                    // A ledge under the next step: zero it and emit `0x400`, as the engine's caller
+                    // does, instead of walking the body off the floor.
+                    let _ = self.emit_ai_event(index, 0x400, None);
+                    continue;
+                }
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.pos = next;
                     thing.ai_target = Some(goal);
@@ -4343,6 +4559,9 @@ impl Runtime {
             if scripted.is_some() && destination_reach <= self.ai_standoff {
                 self.ai_move.remove(&index);
                 self.ai_chase.remove(&index);
+                // Arrived: the AI's moving bit clears with the destination, even for a class-less
+                // scripted actor that is no longer ticked from here on.
+                *self.actor_flags.entry(index).or_insert(0) &= !0x1;
             }
             // The instinct that fires. An actor whose class has no `PrimaryFire` never
             // shoots, however close the player is, and a scripted walk does not shoot at what it
@@ -4950,10 +5169,9 @@ impl Runtime {
 
     /// Which projectile template a bin arms, if the level has one this build can recognise.
     ///
-    /// The engine keeps this in `weaponData[bin]` (a template path per bin); that table is
-    /// not in the level, so the name is matched against the level's own weapon templates
-    /// instead. A `ponytail:` heuristic — good enough to arm the bryar and the stormtrooper
-    /// rifle on level 1, replaced by the real table when it is recovered.
+    /// The engine keeps this in `weaponData[bin]` (a template path per bin). That table is not in the
+    /// level, so the faithful mapping is each weapon template's own `inv=` (tried first, below); a
+    /// `ponytail:` name-hint list is the **fallback** for a level whose templates omit `inv=`.
     pub fn weapon_for_bin(&self, bin: i32) -> Option<String> {
         // The faithful rule first: a weapon is a template the engine types as `SITH_THING_WEAPON`
         // (3) that names this bin in its own `inv=`. That is the engine's own mapping — `weaponData`
@@ -5004,10 +5222,12 @@ impl Runtime {
     /// `AutoSelectWeapon(player, kind)`: pick the weapon bin the player should be holding and arm it.
     ///
     /// `sithWeapon_AutoSelect` asks **each weapon cog** for a score (`SITH_MESSAGE_AUTOSELECT`) and
-    /// takes the highest; this build instantiates no item cogs, so the score is the weapon's own
-    /// `damage=` — the one engine-side number that ranks the shipped weapons the way the cogs'
-    /// hand-tuned constants do. `kind` (0..2 in the engine) is accepted and ignored: the cogs use it
-    /// to answer differently per slot, and there is nothing to ask.
+    /// takes the highest. The item cogs are instantiated now (`load_item_cogs`, `items.dat`), but the
+    /// cog VMs are owned by the message-delivery systems (`deliver_*_messages`), not by this runtime,
+    /// so the query cannot be made from here — the score is the weapon's own `damage=`, the one
+    /// engine-side number that ranks the shipped weapons roughly the way the cogs' hand-tuned
+    /// constants do. `kind` (0..2 in the engine) is accepted and ignored: the cogs use it to answer
+    /// differently per slot, and the port asks nothing.
     ///
     /// ponytail: a damage ranking, not `pow_*.cog`'s `autoselect:` scores. Clearing an enemy with a
     /// rifle equipped and then a concussion rifle is the shipped difference; a per-cog score is what
@@ -5281,8 +5501,9 @@ impl Runtime {
     /// tables declared, initialised empty and read, with nothing ever writing to them, so no message
     /// from the world reached a script. Fills them once, in table order.
     ///
-    /// `ponytail:` the link id and mask are carried but not filtered on, which is the same simplification
-    /// `sector_messages` documents — every link to that target hears the message.
+    /// `ponytail:` the link **id** is carried (it is what `GetSenderId` returns) but the engine's message
+    /// mask is not, so every link to that target hears the message — the same simplification
+    /// `sector_messages` documents.
     pub fn wire_links(
         &mut self,
         cogs: &[crate::jkl::CogInstance],
@@ -5313,11 +5534,18 @@ impl Runtime {
 
     /// The player's use action on a *thing*: the nearest thing a script links, in front of the eye.
     ///
-    /// The engine's use is a look, not a touch (`sithPlayer`'s `use`), so the same cone the surface path
-    /// uses applies. It answers with the thing it used, if any.
+    /// `sithPlayerActions_Activate` (`0x4fc0a0`) sweeps a 0.1-radius sphere from the eye along the view for
+    /// `moveSize + 0.1`, so the reach is `moveSize + 0.2` (**0.265** units for the player) and the
+    /// direction, not a FOV, decides. It answers with the thing it used, if any.
     pub fn use_thing(&mut self, eye: [f32; 3], facing: [f32; 2], reach: f32) -> Option<usize> {
         let mut best: Option<(usize, f32)> = None;
         for (_, _, target) in &self.thing_links {
+            // The engine's activate **skips a weapon (type 3) and an item (type 5)** hit:
+            // `sithPlayerActions_Activate` (`0x4fc0a0`) only takes a thing whose type is neither and
+            // which carries `flags & 0x400` (COG_LINKED). Those two are fired or picked up, not used.
+            if matches!(self.types.get(*target).copied(), Some(3) | Some(5)) {
+                continue;
+            }
             let Some(thing) = self.things.get(*target) else { continue };
             let (dx, dy) = (thing.pos[0] - eye[0], thing.pos[1] - eye[1]);
             let flat = (dx * dx + dy * dy).sqrt();
@@ -5346,15 +5574,11 @@ impl Runtime {
         Some(target)
     }
 
-    /// The portal that best shortcuts the way from `from` to `target`, by the sum of the two legs.
-    ///
-    /// `ponytail:` greedy, not a search: it picks the doorway that looks closest on both legs and
-    /// does not look past it. An actor in a room with two doors may pick the wrong one; the engine's
-    /// `sithAI` runs a real path over sector adjoins. This is the "walks through the door instead of
-    /// into the wall" step, which is what the level geometry actually needs.
     /// The doorway centres from `from`'s room to the room `want` stands in, for an actor whose straight
-    /// line is walled off. The sector of a point comes from the collision build's own hull tests,
-    /// which is the same answer a body standing there gets.
+    /// line is walled off: `Collide::route`, the breadth-first walk over portal links the engine's
+    /// `sithAI` path is equivalent to. The sector of a point comes from the collision build's own hull
+    /// tests, which is the same answer a body standing there gets. (The old note described a greedy
+    /// one-hop pick; that is `best_portal`, the probe's helper, not this route.)
     fn sector_route(&self, index: usize, from: [f32; 3], want: [f32; 3]) -> Option<Vec<[f32; 3]>> {
         let solids = self.solids.as_deref()?;
         // A point can sit in more than one hull (doorway space belongs to both rooms), so every
@@ -6122,9 +6346,10 @@ impl Runtime {
     /// the bin's own cog gets `activated` with the player as the source, and *it* decides what the
     /// item does (`cog_item_bacta.cog` heals 30 and spends one). Returns whether a message went out.
     ///
-    /// `ponytail:` this is the mechanism, not the input. Retail reaches it through the inventory
-    /// screen, which the port does not draw yet, so nothing calls this from a key — `--use-item`
-    /// drives it.
+    /// The inventory strip calls this on Enter (`main.rs`'s inventory input), the way retail reaches
+    /// it through `jkHudInv`'s screen, and `--use-item` drives it headlessly. (The old marker said
+    /// nothing called it from a key; the strip has been selectable since it was added — the round-268
+    /// debt sweep caught the stale note.)
     pub fn use_bin(&mut self, bin: i32) -> bool {
         let Some(cog) = self.bin_cog_index.get(&bin).copied() else {
             return false;
@@ -8109,10 +8334,11 @@ impl Runtime {
                 }
                 Value::Nil
             }
-            // `Sleep` parks the script until a clock fires; the world records the wait
-            // but there is no scheduler to resume it, so the script runs straight on.
-            // ponytail: no timer queue — a level that only works across resumed sleeps
-            // will run its later statements early.
+            // `sleep`/`waitformessage`/`settimer`/`settimerex`/`setpulse` are handled by the **cog VM
+            // first** (`cog::Vm::call_verb`), which suspends the label and resumes it across frames
+            // (`Vm::resume`, `resume_sleeping_labels`, gated by `--sleep`). This arm is only reached by
+            // a *direct* runtime call for those names — a script call never gets here — so it records
+            // the wait without scheduling it, and that is why it is not the script's clock.
             "sleep" | "settimer" | "setpulse" | "settimerx" => {
                 self.timers += num(0).max(0.0) as f32;
                 Value::Nil
@@ -8363,6 +8589,77 @@ mod tests {
         rt.adjoin_flags = vec![0x7];
         rt.surface_adjoin = vec![0];
         rt
+    }
+
+    /// `sithPhysics_UpdateThingPhysics`'s gravity arm is not a weapons-only rule: the shipped `_actor`
+    /// carries `physflags=0x4a4f` and `mass=150`, so an actor that walks off its floor falls like the
+    /// `_debris` goods. The gate is the thing's mass (`+0x204`) as well as the `0x1` bit, and a body
+    /// still within `GetThingHeight * 1.1` of a floor is standing (the attach `sithThing_Initialize`
+    /// makes with `FindFloor(thing, 1)`), so a placed actor keeps the height the level gave it.
+    #[test]
+    fn an_actor_off_its_floor_falls_to_the_contact_and_stops() {
+        fn runtime(pos: [f32; 3], mass: f32) -> Runtime {
+            let mut rt = door_runtime();
+            rt.things[0].pos = pos;
+            rt.things[0].vel = [0.0; 3];
+            // `_actor`'s shipped word: gravity bit, no thruster exemption.
+            rt.things[0].phys_flags = 0x4a4f;
+            rt.templates = vec!["mousebot".into()];
+            rt.types = vec![2];
+            rt.mass.insert(0, mass);
+            let plane = || crate::collide::Plane {
+                normal: [0.0, 0.0, -1.0],
+                point: [0.0; 3],
+                surface: 1,
+            };
+            rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+                sectors: vec![vec![plane()]],
+                hull: vec![vec![plane()]],
+                boxes: vec![None],
+                portals: vec![Vec::new()],
+                spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+                things: Vec::new(),
+                floors: Vec::new(),
+                walls: Vec::new(),
+                wall_of: Default::default(),
+                floor_of: Default::default(),
+                faces: Vec::new(),
+                face_of: Default::default(),
+                portal_faces: Vec::new(),
+                surface_owner: Vec::new(),
+                adjoin_flags: Vec::new(),
+            }));
+            rt
+        }
+
+        // Half a unit over its floor and out of the creation reach: the body falls.
+        let mut falling = runtime([0.0, 0.0, 0.5], 150.0);
+        falling.step(1.0 / 30.0);
+        assert!(falling.things[0].vel[2] < 0.0, "an actor with the gravity bit did not start to fall");
+        for _ in 0..90 {
+            falling.step(1.0 / 30.0);
+        }
+        assert!(
+            (falling.things[0].pos[2] - 0.065).abs() < 1e-3,
+            "the actor did not settle on the sphere contact: z {}",
+            falling.things[0].pos[2]
+        );
+        assert_eq!(falling.things[0].vel[2], 0.0, "the landed actor kept a downward velocity");
+
+        // The mass gate (`0x4f6270` reads `+0x204`): the same body with no mass floats.
+        let mut floating = runtime([0.0, 0.0, 0.5], 0.0);
+        for _ in 0..30 {
+            floating.step(1.0 / 30.0);
+        }
+        assert_eq!(floating.things[0].pos[2], 0.5, "a massless body fell anyway");
+
+        // Inside the creation reach (`moveSize + 0.005`, × 1.1) and above the contact: standing.
+        let mut standing = runtime([0.0, 0.0, 0.07], 150.0);
+        for _ in 0..30 {
+            standing.step(1.0 / 30.0);
+        }
+        assert_eq!(standing.things[0].pos[2], 0.07, "a standing actor sank onto its floor");
+        assert_eq!(standing.things[0].vel[2], 0.0, "a standing actor kept a vertical velocity");
     }
 
     /// The projectile body is the template's `movesize` — the engine's collision radius and what
@@ -9767,6 +10064,76 @@ mod tests {
     /// `jump` (`0x50abf0`): the only arm content can reach is event `0x400`, raised by the steering
     /// helper when a moving actor's way ahead is not walkable. A moving, unattached actor gets
     /// `dir * 0.1` added to its velocity toward the target (`_DAT_005232e4`) and turns to it, on the
+    /// The full chain with nothing set by hand: `ai_tick` walks the actor to a pit, its `0x400`
+    /// reaches the `Jump` handler, and the handler's leap point (3 units ahead, over the far floor)
+    /// lands the 0.1 nudge. Both the event and the handler gate on the AI's own moving bit.
+    #[test]
+    fn a_walking_actor_at_a_pit_leaps_with_its_jump_instinct() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.2, 0.0, 0.065];
+        actor.sector = 0;
+        rt.things = vec![base, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 0.5);
+        rt.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\nJump 2000.0, 3.0, 3.0\n"),
+        );
+        rt.ai_move.insert(1, [4.0, 0.0, 0.065]);
+        let face = |surface: usize, z: f32, x0: f32, x1: f32| crate::collide::Face {
+            normal: [0.0, 0.0, -1.0],
+            point: [0.0, 0.0, z],
+            verts: vec![[x0, -2.0, z], [x1, -2.0, z], [x1, 2.0, z], [x0, 2.0, z]],
+            surface,
+        };
+        let plane =
+            |normal: [f32; 3], point: [f32; 3], surface: usize| crate::collide::Plane { normal, point, surface };
+        let near = face(1, 0.0, -1.0, 0.5);
+        let far = face(3, 0.0, 2.0, 5.0);
+        let mut planes = vec![
+            plane([0.0, 0.0, -1.0], [0.0, 0.0, 0.0], 1),
+            plane([0.0, 0.0, 1.0], [0.0, 0.0, 2.0], 1),
+            plane([-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], 1),
+            plane([1.0, 0.0, 0.0], [5.5, 0.0, 0.0], 1),
+            plane([0.0, -1.0, 0.0], [0.0, -2.0, 0.0], 1),
+            plane([0.0, 1.0, 0.0], [0.0, 2.0, 0.0], 1),
+        ];
+        planes.push(plane([0.0, 0.0, -1.0], [2.0, 0.0, 0.0], 3));
+        rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+            sectors: vec![planes.clone()],
+            hull: vec![planes],
+            boxes: vec![None],
+            portals: vec![Vec::new()],
+            spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+            things: Vec::new(),
+            floors: vec![near.clone(), far.clone()],
+            walls: Vec::new(),
+            wall_of: Default::default(),
+            floor_of: [(0usize, 0usize), (1usize, 1usize)].into_iter().collect(),
+            faces: vec![near, far],
+            face_of: [(1usize, 0usize), (3usize, 1usize)].into_iter().collect(),
+            portal_faces: Vec::new(),
+            surface_owner: vec![0, 0, 0, 0],
+            adjoin_flags: Vec::new(),
+        }));
+        for _ in 0..40 {
+            rt.ai_tick(0, 0.05);
+        }
+        assert!(
+            rt.things[1].pos[0] < 0.7,
+            "the actor walked into the pit: {:?}",
+            rt.things[1].pos
+        );
+        assert!(
+            (rt.things[1].vel[0] - 0.1).abs() < 1e-4,
+            "the pit did not trigger the jump nudge: {:?}",
+            rt.things[1].vel
+        );
+    }
+
     /// class line's own 2000 ms clock; a standing actor is refused by the AI moving bit `0x1`.
     #[test]
     fn a_blocked_actor_nudges_toward_its_target_with_jump() {
@@ -9814,6 +10181,134 @@ mod tests {
         assert!(
             !rt.emit_ai_event(1, 0x400, None),
             "a standing actor took the jump event"
+        );
+    }
+
+    /// The leap point is tested with the engine's walkability helper (`FUN_004eb4b0`), not with a
+    /// clear line: a point three units ahead over a void is refused even though nothing blocks the
+    /// segment, and the same event lands the nudge when there is ground under it.
+    #[test]
+    fn a_blocked_actor_does_not_leap_onto_a_void() {
+        fn jump_rt(floor_to_x: f32) -> Runtime {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let mut actor = base.clone();
+            actor.pos = [0.0, 0.0, 0.065];
+            actor.sector = 0;
+            actor.yaw = 180.0;
+            let mut player = base.clone();
+            // Away from the leap point: a body standing *on* it would count as a solid thing's top
+            // (`thing_floor`), which is the port's stand-in for the engine's walkable-thing bit.
+            player.pos = [0.0, 5.0, 0.065];
+            rt.things = vec![player, actor];
+            rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+            rt.types = vec![10, 2];
+            rt.template_speed.insert("tuskan".into(), 1.0);
+            rt.ai.insert(
+                1,
+                crate::ai::parse(
+                    "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\nJump 2000.0, 3.0, 3.0\n",
+                ),
+            );
+            rt.actor_flags.insert(1, 0x1);
+            rt.things[1].ai_target = Some([3.0, 0.0, 0.065]);
+            let floor = crate::collide::Face {
+                normal: [0.0, 0.0, -1.0],
+                point: [0.0, 0.0, 0.0],
+                verts: vec![
+                    [-2.0, -2.0, 0.0],
+                    [floor_to_x, -2.0, 0.0],
+                    [floor_to_x, 2.0, 0.0],
+                    [-2.0, 2.0, 0.0],
+                ],
+                surface: 1,
+            };
+            let plane = |normal: [f32; 3], point: [f32; 3]| crate::collide::Plane {
+                normal,
+                point,
+                surface: 1,
+            };
+            let hull = vec![
+                plane([0.0, 0.0, -1.0], [0.0, 0.0, 0.0]),
+                plane([0.0, 0.0, 1.0], [0.0, 0.0, 2.0]),
+                plane([-1.0, 0.0, 0.0], [-2.0, 0.0, 0.0]),
+                plane([1.0, 0.0, 0.0], [6.0, 0.0, 0.0]),
+                plane([0.0, -1.0, 0.0], [0.0, -2.0, 0.0]),
+                plane([0.0, 1.0, 0.0], [0.0, 2.0, 0.0]),
+            ];
+            rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+                sectors: vec![hull.clone()],
+                hull: vec![hull],
+                boxes: vec![None],
+                portals: vec![Vec::new()],
+                spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+                things: Vec::new(),
+                floors: vec![floor.clone()],
+                walls: Vec::new(),
+                wall_of: Default::default(),
+                floor_of: [(0usize, 0usize)].into_iter().collect(),
+                faces: vec![floor],
+                face_of: [(1usize, 0usize)].into_iter().collect(),
+                portal_faces: Vec::new(),
+                surface_owner: vec![0, 0],
+                adjoin_flags: Vec::new(),
+            }));
+            rt
+        }
+
+        let mut void = jump_rt(1.0);
+        assert!(
+            !void.emit_ai_event(1, 0x400, None),
+            "the actor leapt onto a void three units ahead"
+        );
+        assert_eq!(void.things[1].vel, [0.0; 3], "the refused leap moved the body");
+
+        let mut ground = jump_rt(4.0);
+        assert!(
+            ground.emit_ai_event(1, 0x400, None),
+            "the actor refused a leap with ground under the point"
+        );
+        assert!(
+            (ground.things[1].vel[0] - 0.1).abs() < 1e-5,
+            "the leap's nudge was {:?}",
+            ground.things[1].vel
+        );
+    }
+
+    /// The AI's moving bit (`0x1`): `jump` refuses without it and `dodge` refuses with it. The port
+    /// never wrote it, so a real walk could not trigger `jump` and `dodge` fired mid-stride.
+    #[test]
+    fn a_walking_actor_sets_the_ai_moving_bit_and_an_idle_one_clears_it() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        rt.things = vec![base, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 0.5);
+        // A class keeps the actor in the tick list once the destination is gone.
+        rt.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\nLookForTarget 500.0, 40000.0\n"),
+        );
+        rt.ai_move.insert(1, [2.0, 0.0, 0.0]);
+        rt.ai_tick(0, 0.05);
+        assert!(rt.things[1].pos[0] > 0.0, "the actor did not walk");
+        assert_ne!(
+            rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x1,
+            0,
+            "a walking actor did not set the moving bit"
+        );
+
+        // Standing on the target: no step, so the bit is cleared.
+        rt.things[1].pos = [0.0, 0.0, 0.0];
+        rt.ai_move.remove(&1);
+        rt.ai_tick(0, 0.05);
+        assert_eq!(
+            rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x1,
+            0,
+            "an idle actor kept the moving bit"
         );
     }
 
@@ -10901,6 +11396,258 @@ mod tests {
         );
         quiet.ai_last_seen.insert(1, [3.0, 0.0, 0.0]);
         assert_eq!(quiet.ai_tick(0, 0.1), 0, "an actor without `BlindFire` fired");
+    }
+
+    /// `sithPlayerActions_Activate` (`0x4fc0a0`): the use sweep takes a linked thing unless it is a
+    /// **weapon (type 3) or an item (type 5)** — those are fired or picked up, not used — and its
+    /// reach is `moveSize + 0.2` (the `−(−0.1)` sweep distance plus the 0.1 sphere), **0.265** units
+    /// for the player. The old port used 3.0, which is why its cantina switch fired from 0.8 units
+    /// where retail's own use action does nothing.
+    #[test]
+    fn the_use_action_skips_weapons_and_stops_at_the_engine_reach() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut bolt = base.clone();
+        bolt.pos = [-0.1, 0.0, 0.0]; // nearer, but a weapon: fired, not used
+        let mut door = base.clone();
+        door.pos = [-0.2, 0.0, 0.0]; // inside the 0.265 sweep
+        rt.things = vec![base.clone(), bolt, door];
+        rt.templates = vec!["walkplayer".into(), "+bryarbolt".into(), "door".into()];
+        rt.types = vec![10, 3, 0];
+        rt.thing_links.push((0, 1, 1));
+        rt.thing_links.push((0, 2, 2));
+        let used = rt.use_thing([0.0, 0.0, 0.0], [-1.0, 0.0], 0.265);
+        assert_eq!(used, Some(2), "the use action took a weapon instead of the door: {used:?}");
+        assert!(
+            rt.pending_messages
+                .iter()
+                .any(|(_, label, _, sender)| *label == "activate" && *sender == Some(2)),
+            "the door's script was not messaged: {:?}",
+            rt.pending_messages
+        );
+
+        // The same door one step further out is beyond the sweep and is not used.
+        let mut far = door_runtime();
+        let mut door = far.things[0].clone();
+        door.pos = [-0.5, 0.0, 0.0];
+        far.things = vec![far.things[0].clone(), door];
+        far.templates = vec!["walkplayer".into(), "door".into()];
+        far.types = vec![10, 0];
+        far.thing_links.push((0, 2, 1));
+        assert_eq!(
+            far.use_thing([0.0, 0.0, 0.0], [-1.0, 0.0], 0.265),
+            None,
+            "a door half a unit away was used past the engine's 0.265 sweep"
+        );
+    }
+
+    /// The surface half of the same sweep: a linked surface is used when its centre is inside the
+    /// engine's 0.265-unit reach and not when it is outside — the switch case the port over-reached
+    /// from 0.8 units before round 271.
+    #[test]
+    fn the_surface_use_stops_at_the_engine_reach() {
+        let surface = |center: [f32; 3]| SurfaceState {
+            center,
+            cel: 0.0,
+            anim: 0.0,
+            slide: [0.0; 2],
+            next: 0.0,
+            light: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
+        };
+        let mut near = door_runtime();
+        near.surfaces = vec![surface([-0.2, 0.0, 0.0]), surface([-0.5, 0.0, 0.0])];
+        near.surface_links = vec![(0, 2, 0), (0, 3, 1)];
+        assert_eq!(
+            near.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.265),
+            Some(0),
+            "the plate inside the sweep was not used"
+        );
+        assert!(
+            near.pending_messages
+                .iter()
+                .any(|(instance, label, _, sender)| *instance == 0 && *label == "activate" && *sender == Some(2)),
+            "the plate's script was not messaged: {:?}",
+            near.pending_messages
+        );
+
+        let mut far = door_runtime();
+        far.surfaces = vec![surface([-0.5, 0.0, 0.0])];
+        far.surface_links = vec![(0, 3, 0)];
+        assert_eq!(
+            far.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.265),
+            None,
+            "a plate half a unit away was used past the engine's 0.265 sweep"
+        );
+    }
+
+    /// `sithAI_CanWalk` (`0x4eb4b0`): the engine probes the step's destination and, finding nothing,
+    /// zeroes the AI's velocity and emits `0x400` — an actor stops at a ledge. The control (no
+    /// collider) walks on, which is what the port did before the probe existed.
+    #[test]
+    fn an_actor_stops_at_a_ledge_instead_of_walking_off_it() {
+        fn ledge_runtime(with_solids: bool) -> Runtime {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let mut actor = base.clone();
+            actor.pos = [0.2, 0.0, 0.065];
+            actor.sector = 0;
+            rt.things = vec![base, actor];
+            rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+            rt.types = vec![10, 2];
+            rt.template_speed.insert("tuskan".into(), 0.5);
+            // Walk toward the far side of the floor's edge at x = 0.5.
+            rt.ai_move.insert(1, [2.0, 0.0, 0.065]);
+            if with_solids {
+                let floor = || crate::collide::Face {
+                    normal: [0.0, 0.0, -1.0],
+                    point: [0.0; 3],
+                    verts: vec![
+                        [-1.0, -1.0, 0.0],
+                        [0.5, -1.0, 0.0],
+                        [0.5, 1.0, 0.0],
+                        [-1.0, 1.0, 0.0],
+                    ],
+                    surface: 1,
+                };
+                let plane = |normal: [f32; 3], point: [f32; 3]| crate::collide::Plane {
+                    normal,
+                    point,
+                    surface: 1,
+                };
+                let hull = vec![
+                    plane([0.0, 0.0, -1.0], [0.0, 0.0, 0.0]),
+                    plane([0.0, 0.0, 1.0], [0.0, 0.0, 2.0]),
+                    plane([-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]),
+                    plane([1.0, 0.0, 0.0], [2.0, 0.0, 0.0]),
+                    plane([0.0, -1.0, 0.0], [0.0, -2.0, 0.0]),
+                    plane([0.0, 1.0, 0.0], [0.0, 2.0, 0.0]),
+                ];
+                rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+                    sectors: vec![hull.clone()],
+                    hull: vec![hull],
+                    boxes: vec![None],
+                    portals: vec![Vec::new()],
+                    spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+                    things: Vec::new(),
+                    floors: vec![floor()],
+                    walls: Vec::new(),
+                    wall_of: Default::default(),
+                    floor_of: [(1usize, 0usize)].into_iter().collect(),
+                    faces: vec![floor()],
+                    face_of: [(1usize, 0usize)].into_iter().collect(),
+                    portal_faces: Vec::new(),
+                    surface_owner: vec![0, 0],
+                    adjoin_flags: Vec::new(),
+                }));
+            }
+            rt
+        }
+
+        let mut gated = ledge_runtime(true);
+        for _ in 0..120 {
+            gated.ai_tick(0, 0.05);
+        }
+        assert!(
+            gated.things[1].pos[0] < 0.62,
+            "the actor walked off the ledge: {:?}",
+            gated.things[1].pos
+        );
+        // "Moving" is an intent, not a frame: the blocked actor still carries the bit, which is what
+        // lets the `0x400` it emitted reach the `jump` handler.
+        assert_ne!(
+            gated.actor_flags.get(&1).copied().unwrap_or(0) & 0x1,
+            0,
+            "a blocked-but-walking actor lost the moving bit"
+        );
+
+        let mut control = ledge_runtime(false);
+        for _ in 0..120 {
+            control.ai_tick(0, 0.05);
+        }
+        assert!(
+            control.things[1].pos[0] > 1.0,
+            "the control (no collider) did not walk: {:?}",
+            control.things[1].pos
+        );
+    }
+
+    /// The reach is `GetThingHeight + maxstep` (`0x4eb4b0`): a drop **inside** it is a step the AI takes
+    /// (the body walks over the edge and the physics settles it), a deeper one is a ledge. This pins the
+    /// port's use of the class's `maxstep` for the `<+0x10>` field the engine adds.
+    #[test]
+    fn the_ledge_reach_is_the_body_height_plus_maxstep() {
+        fn two_levels(drop: f32) -> Runtime {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let mut actor = base.clone();
+            actor.pos = [0.2, 0.0, 0.065];
+            actor.sector = 0;
+            rt.things = vec![base, actor];
+            rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+            rt.types = vec![10, 2];
+            rt.template_speed.insert("tuskan".into(), 0.5);
+            rt.ai_move.insert(1, [2.0, 0.0, 0.065]);
+            let face = |surface: usize, z: f32, x0: f32, x1: f32| crate::collide::Face {
+                normal: [0.0, 0.0, -1.0],
+                point: [0.0, 0.0, z],
+                verts: vec![[x0, -2.0, z], [x1, -2.0, z], [x1, 2.0, z], [x0, 2.0, z]],
+                surface,
+            };
+            let plane = |normal: [f32; 3], point: [f32; 3], surface: usize| crate::collide::Plane { normal, point, surface };
+            let upper = face(1, 0.0, -1.0, 0.5);
+            let lower = face(3, -drop, 0.5, 3.0);
+            let mut planes = vec![
+                plane([0.0, 0.0, -1.0], [0.0, 0.0, 0.0], 1),
+                plane([0.0, 0.0, 1.0], [0.0, 0.0, 2.0], 1),
+                plane([-1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], 1),
+                plane([1.0, 0.0, 0.0], [3.0, 0.0, 0.0], 1),
+                plane([0.0, -1.0, 0.0], [0.0, -2.0, 0.0], 1),
+                plane([0.0, 1.0, 0.0], [0.0, 2.0, 0.0], 1),
+            ];
+            planes.push(plane([0.0, 0.0, -1.0], [0.5, 0.0, -drop], 3));
+            rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+                sectors: vec![planes.clone()],
+                hull: vec![planes],
+                boxes: vec![None],
+                portals: vec![Vec::new()],
+                spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+                things: Vec::new(),
+                floors: vec![upper.clone(), lower.clone()],
+                walls: Vec::new(),
+                wall_of: Default::default(),
+                floor_of: [(0usize, 0usize), (1usize, 1usize)].into_iter().collect(),
+                faces: vec![upper, lower],
+                face_of: [(1usize, 0usize), (3usize, 1usize)].into_iter().collect(),
+                portal_faces: Vec::new(),
+            surface_owner: vec![0, 0, 0, 0],
+            adjoin_flags: Vec::new(),
+            }));
+            rt
+        }
+
+        // A 0.4-unit drop is inside the ~0.57 reach (0.07 height + 0.5 maxstep): the AI steps over it.
+        let mut step = two_levels(0.4);
+        for _ in 0..120 {
+            step.ai_tick(0, 0.05);
+        }
+        assert!(
+            step.things[1].pos[0] > 1.0,
+            "a 0.4-unit drop was treated as a ledge: {:?}",
+            step.things[1].pos
+        );
+
+        // A 1.0-unit drop is past the reach: it is a ledge, and the actor stops.
+        let mut ledge = two_levels(1.0);
+        for _ in 0..120 {
+            ledge.ai_tick(0, 0.05);
+        }
+        assert!(
+            ledge.things[1].pos[0] < 0.62,
+            "a 1.0-unit drop was walked off: {:?}",
+            ledge.things[1].pos
+        );
     }
 
     /// `opendoors` (handler 0x50abc0) runs the **player's activate action** on the actor's own body:

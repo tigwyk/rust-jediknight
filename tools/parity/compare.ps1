@@ -31,13 +31,15 @@
 param(
     # Score every pair that names a threshold in tools/parity/thresholds.tsv and exit non-zero if
     # one is missing or below its floor. Without it the script is the triage report it always was.
-    [switch]$Gate
+    [switch]$Gate,
+    # A survey list; the gated pairs stay in `tools/parity/shots.tsv`.
+    [string]$Shots = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
 $Root        = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # tools\parity -> repo root
-$ShotsPath   = Join-Path $Root 'tools\parity\shots.tsv'
+$ShotsPath   = if ($Shots) { $Shots } else { Join-Path $Root 'tools\parity\shots.tsv' }
 $ThresholdsPath = Join-Path $Root 'tools\parity\thresholds.tsv'
 $RetailDir   = Join-Path $Root 'target\parity\retail'
 $PortDir     = Join-Path $Root 'target\parity\port'

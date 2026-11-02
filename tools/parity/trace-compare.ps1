@@ -61,6 +61,15 @@ function Read-Tsv([string]$Path, [int]$TimeColumn, [string]$First) {
 }
 
 $retail = Read-Tsv $RetailPath 0 'held_ms'
+# A trace with a `game_ms` column (7th) carries the engine's own clock: use it as the time axis, since
+# the injected hold length is not game time at retail's few frames a second. Older fixtures keep held_ms.
+$retailRows = @(Get-Content -LiteralPath $RetailPath | Where-Object { $_ -notmatch '^\s*(#|$)' -and $_ -notmatch 'held_ms' })
+$clock = 'held_ms'
+if ($retailRows.Count -eq $retail.Count -and @($retailRows | Where-Object { ($_ -split "`t").Length -ge 7 }).Count -eq $retailRows.Count) {
+  for ($i = 0; $i -lt $retail.Count; $i++) { $retail[$i].T = [double](($retailRows[$i] -split "`t")[6]) }
+  $clock = 'game_ms'
+}
+Write-Host ("  retail time axis: {0}" -f $clock)
 $port = Read-Tsv $PortPath 1 'tick'
 if ($retail.Count -eq 0 -or $port.Count -lt 2) { throw "empty trace ($($retail.Count) retail samples, $($port.Count) port frames)" }
 
@@ -86,10 +95,10 @@ function Port-At([double]$seconds) {
 }
 
 Write-Host ("trace: {0}" -f $Name)
-Write-Host ("  retail {0}: {1} sample(s) over {2:N0} ms held" -f (Split-Path -Leaf $RetailPath), $retail.Count, $retail[-1].T)
+Write-Host ("  retail {0}: {1} sample(s) over {2:N0} ms ({3})" -f (Split-Path -Leaf $RetailPath), $retail.Count, $retail[-1].T, $clock)
 Write-Host ("  port   {0}: {1} frame(s) over {2:N3} s at 1/60 s" -f (Split-Path -Leaf $PortPath), $port.Count, $port[-1].T)
 Write-Host ""
-Write-Host ("  {0,8}  {1,24}  {2,24}  {3,8}  {4,8}  {5,6}  {6,6}" -f 'held_ms', 'retail (x, y, z)', 'port (x, y, z)', 'd_xy', 'd_z', 'sect', 'sect')
+Write-Host ("  {0,8}  {1,24}  {2,24}  {3,8}  {4,8}  {5,6}  {6,6}" -f $clock, 'retail (x, y, z)', 'port (x, y, z)', 'd_xy', 'd_z', 'sect', 'sect')
 Write-Host ("  " + ('-' * 100))
 
 $maxXy = 0.0

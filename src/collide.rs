@@ -39,10 +39,10 @@ pub struct Solids {
     /// `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`) asks.
     pub hull: Vec<Vec<Plane>>,
     /// Per sector, its `HASCOLLIDEBOX` bounds (`SITH_SECTOR_HASCOLLIDEBOX`, sector flag `0x1000`),
-    /// from the same vertices. `IsSphereInSector` answers "inside" immediately when the sphere is
-    /// within this box, without looking at a single surface — which is why the engine's containment
-    /// check almost never fires, and why a port that skips the box and tests every plane sees bodies
-    /// "outside" their sector all the time.
+    /// from the file's `COLLIDEBOX` row (not the enclosing `BOUNDBOX`). `IsSphereInSector`
+    /// answers "inside" immediately when the sphere is within this box, without looking at a
+    /// single surface — which is why the engine's containment check almost never fires, and
+    /// why a port that skips the box and tests every plane sees bodies "outside" their sector.
     pub boxes: Vec<Option<([f32; 3], [f32; 3])>>,
     /// Per sector, the openings in its hull: a portal surface names the sector on the
     /// other side in its `adjoin` field, which is what makes a doorway a doorway.
@@ -79,6 +79,14 @@ pub struct Solids {
     /// which is why a downward sweep from its floor plane found nothing and the body fell.
     pub faces: Vec<Face>,
     pub face_of: std::collections::HashMap<usize, usize>,
+    /// The surface id -> its owning sector. The floor probe needs this to stay inside the body's room
+    /// graph; it is not a draw ownership claim (several sectors can share a surface).
+    /// A portal that owns no solid polygon (level 1's ceiling doorway 3300/3301 is an
+    /// adjoin on both sides) still needs containment geometry for floor reachability.
+    pub portal_faces: Vec<(usize, Face)>,
+    pub surface_owner: Vec<usize>,
+    /// `World adjoins` flags by link id. Fixtures that do not provide them default to passable.
+    pub adjoin_flags: Vec<u16>,
 }
 
 /// A surface with its polygon, for the queries that need coverage rather than a plane.
@@ -572,6 +580,37 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         floors.iter().enumerate().map(|(i, face)| (face.surface, i)).collect();
     let face_of: std::collections::HashMap<usize, usize> =
         faces.iter().enumerate().map(|(i, face)| (face.surface, i)).collect();
+    // Which room a polygon belongs to. A level can list one surface from several sectors (a trigger
+    // volume shares the room's floor), so the first claimant is enough for reachability; it is not a
+    // statement about who draws it. The old floor probe repeated this scan for every candidate face.
+    let mut surface_owner = vec![usize::MAX; level.surfaces.len()];
+    for (room, planes) in sectors.iter().enumerate() {
+        for plane in planes {
+            if plane.surface != usize::MAX && surface_owner[plane.surface] == usize::MAX {
+                surface_owner[plane.surface] = room;
+            }
+        }
+    }
+    // A portal is an opening, not a solid face, so `faces` deliberately excludes it. Keep one
+    // polygon per opening separately: a downward sweep may use it to decide which room actually
+    // contains the probe, without turning the opening into a collision surface.
+    let portal_faces = portal_sets
+        .iter()
+        .enumerate()
+        .flat_map(|(room, portals)| {
+            portals.iter().map(move |portal| {
+                (
+                    room,
+                    Face {
+                        normal: portal.normal,
+                        point: portal.point,
+                        verts: portal.verts.clone(),
+                        surface: usize::MAX,
+                    },
+                )
+            })
+        })
+        .collect();
     // The solid things are filled by the caller, which has the models: see `solid_things` in `main`.
     Solids {
         sectors,
@@ -585,6 +624,9 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         floor_of,
         faces,
         face_of,
+        portal_faces,
+        surface_owner,
+        adjoin_flags: level.adjoins.iter().map(|a| a.flags).collect(),
         things: Vec::new(),
     }
 }
@@ -961,6 +1003,13 @@ impl Solids {
         // A room shallower than the body cannot hold it, however legal its origin's position looks: a
         // closed door's slab is exactly that (level 1's `337` is 0.05 deep against a 0.13 body). Such an
         // opening is a wall — otherwise the body stands *inside the door*.
+        //
+        // Relaxing this to the engine's rule (adopt the far sector and re-search from the contact) was
+        // measured: `--walk all` containment went 27 -> 29 of 34 and crossings 59 -> 78, but `walk18_spawn`
+        // wedged — its 0.103-deep doorway 721 let the body 0.023 short of the far plane, where the sweep
+        // stops it (0.27 units against retail's 0.88). The engine's crossing sets the sector **at the
+        // contact** and re-searches; this path advances the body a radius past the plane, so a slab needs
+        // that through-move before the depth test can be relaxed.
         if std::env::var_os("BK_SECTOR_TRACE").is_some() {
             eprintln!(
                 "sector trace: doorway {adjoin} depth {depth:.4} (needs {:.4}) radius {radius:.3}",
@@ -1063,6 +1112,21 @@ impl Solids {
         }
         best
     }
+    /// The component of `dir` that runs **along** the surface, kept in 3D.
+    ///
+    /// `sithCollision_MoveThing` slides the body along the plane it hit, so a walk into a ramp is
+    /// carried *up* the ramp. Dropping the vertical part made every 45° ramp a wall: the body stayed
+    /// flush with the plane and re-hit it at distance 0 every bounce (`16aEscapeShip`'s spawn ramp
+    /// wedged after 0.09 units while retail walked 1.56).
+    fn slide_along(dir: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
+        let into = dir[0] * normal[0] + dir[1] * normal[1] + dir[2] * normal[2];
+        [
+            dir[0] - normal[0] * into,
+            dir[1] - normal[1] * into,
+            dir[2] - normal[2] * into,
+        ]
+    }
+
     pub fn move_body(
         &self,
         sector: usize,
@@ -1107,13 +1171,12 @@ impl Solids {
                 if left < 1e-4 {
                     break;
                 }
-                let into = dir[0] * normal[0] + dir[1] * normal[1];
-                let slide = [dir[0] - normal[0] * into, dir[1] - normal[1] * into];
-                let mag = (slide[0] * slide[0] + slide[1] * slide[1]).sqrt();
+                let slide = Self::slide_along(dir, normal);
+                let mag = (slide[0] * slide[0] + slide[1] * slide[1] + slide[2] * slide[2]).sqrt();
                 if mag < 1e-4 || bounce == 2 {
                     break;
                 }
-                dir = [slide[0] / mag, slide[1] / mag, 0.0];
+                dir = [slide[0] / mag, slide[1] / mag, slide[2] / mag];
                 continue;
             }
             match room {
@@ -1209,7 +1272,19 @@ impl Solids {
     };
     let clear = [[1.0f32, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]]
         .iter()
-        .all(|d| clears(self.sweep(here, raised, *d, radius * 2.0, radius, gates)));
+        .all(|d| {
+            let hit = self.sweep(here, raised, *d, radius * 2.0, radius, gates);
+            if std::env::var_os("BK_WALK_TRACE").is_some()
+                && let Some(h) = hit
+                && !clears(Some(h))
+            {
+                eprintln!(
+                    "walk trace:   step blocked by surface {} normal {:?} top {:.3} distance {:.3} point {:?}",
+                    h.surface, h.normal, h.top, h.distance, h.point
+                );
+            }
+            clears(hit)
+        });
                         // A step must land *somewhere*: lifting the body at a spot where nothing is below it
                         // is how it walked off the walkway's seam and fell. Eight units is generous, so a
                         // step down into a room still works while a step over a void does not.
@@ -1234,13 +1309,12 @@ impl Solids {
                             continue;
                         }
                     }                    // Slide: drop the velocity component that ran into the surface.
-                    let into = dir[0] * hit.normal[0] + dir[1] * hit.normal[1];
-                    let slide = [dir[0] - hit.normal[0] * into, dir[1] - hit.normal[1] * into];
-                    let mag = (slide[0] * slide[0] + slide[1] * slide[1]).sqrt();
+                    let slide = Self::slide_along(dir, hit.normal);
+                    let mag = (slide[0] * slide[0] + slide[1] * slide[1] + slide[2] * slide[2]).sqrt();
                     if std::env::var_os("BK_MOVE_TRACE").is_some() {
                         eprintln!(
                             "move: bounce {bounce} hit t {travelled:.5} left {left:.5} dir {:?} slide {:?} mag {mag:.3} at {:?}",
-                            [dir[0], dir[1]], [slide[0], slide[1]], at
+                            [dir[0], dir[1], dir[2]], [slide[0], slide[1], slide[2]], at
                         );
                     }
                     // A **near-head-on** hit has almost no tangential component, and creeping along it is
@@ -1252,10 +1326,13 @@ impl Solids {
                     if mag < 0.2 || bounce == 2 {
                         break;
                     }
-                    dir = [slide[0] / mag, slide[1] / mag, 0.0];
+                    dir = [slide[0] / mag, slide[1] / mag, slide[2] / mag];
                 }
                 (None, far, end) => {
-                    at = end;
+                    // `sweep_rooms` reports its end point in plan and drops the vertical part; a slide
+                    // along a ramp carries the body up, so the height is restored here — only on this
+                    // path, because the vertical probes rely on the plan-only end.
+                    at = [end[0], end[1], at[2] + dir[2] * left];
                     // Nothing was hit, but the sweep may have crossed a doorway and `far` is the room the
                     // body is standing in. This was rejected earlier and is right now: with the crossing
                     // advance uncapped, a body only reaches here after its origin has cleared the far
@@ -1423,6 +1500,39 @@ impl Solids {
             })
     }
 
+    /// Does `pos` lie inside this room's actual geometry, rather than merely behind its
+    /// infinite hull planes?
+    ///
+    /// Level 1's sector 340 is the shared sliver between the cantina floor and ceiling. Its
+    /// planes contain the whole recorded spawn, but its solid polygons cover only the strips
+    /// beside the tables. The hull therefore admits a body through a wall. Portals are openings,
+    /// so their polygons count as room coverage without becoming solid obstacles.
+    pub fn room_contains(&self, room: usize, pos: [f32; 3], radius: f32) -> bool {
+        // `sithIntersect_IsSphereInSector` accepts a sphere wholly inside the sector's
+        // collide box without testing a face. Level 5's stacked water/air volumes rely on
+        // exactly this: their infinite hulls overlap, but the collide boxes separate them.
+        if let Some(Some((lo, hi))) = self.boxes.get(room)
+            && (0..3).all(|axis| pos[axis] - radius >= lo[axis] && pos[axis] + radius <= hi[axis])
+        {
+            return true;
+        }
+        let Some(planes) = self.sectors.get(room) else { return false };
+        let hull = self.hull.get(room).filter(|p| !p.is_empty()).unwrap_or(planes);
+        if !hull.iter().all(|plane| -dot(sub(pos, plane.point), plane.normal) >= -radius) {
+            return false;
+        }
+        // A fixture or a sector with no polygon inventory has only its hull to answer with.
+        // The real level build supplies every solid face and every portal polygon.
+        if self.faces.is_empty() && self.portal_faces.is_empty() {
+            return true;
+        }
+        self.faces
+            .iter()
+            .filter(|face| self.surface_owner.get(face.surface).copied().unwrap_or(room) == room)
+            .chain(self.portal_faces.iter().filter(move |(owner, _)| *owner == room).map(|(_, face)| face))
+            .any(|face| sphere_face(pos, radius, face))
+    }
+
     /// `sithPhysics_FindFloor`: the floor under a body, found by sweeping a sphere straight down.
     ///
     /// The engine's range is `height * 1.1` (and `moveSize + 0.005` for a body that is not attached yet),
@@ -1436,66 +1546,136 @@ impl Solids {
         height: f32,
         radius: f32,
     ) -> Option<(f32, f32, usize)> {
-        // Every face with a polygon, not only the body's sector. `sithPhysics_FindFloor` searches the start
-        // sector and the sectors its adjoins lead to, which works because the engine's sectors tile the
-        // world; this port's data does not tile — a walkway slab can sit in a sector that nothing below it
-        // links to — so a floor search that stays inside one sector drops the body through that seam. The
-        // *lateral* answer stays sector-scoped, because a wall in another room must not block a corridor.
-        let range = (height * 1.1).max(radius + 0.005);
+        // `floor_candidates` is the one loop; this picks the highest landing, which is the surface the
+        // sphere meets first falling from `pos`. Both callers share it so a probe cannot drift from
+        // the walker's own answer.
         let mut best: Option<(f32, f32, usize)> = None;
-        let mut best_face: Option<Face> = None;
-        for face in &self.faces {
-            // A vertical face is not a floor, and a downward one is a ceiling.
-            if face.normal[2].abs() < 0.2 {
-                continue;
-            }
-            let normal = if dot(sub(pos, face.point), face.normal) < 0.0 {
-                [-face.normal[0], -face.normal[1], -face.normal[2]]
-            } else {
-                face.normal
-            };
-            if normal[2] < 0.2 {
-                continue;
-            }
-            let Some(t) = sphere_plane(pos, [0.0, 0.0, -1.0], range, radius, normal, face.point) else {
-                continue;
-            };
-            let at = [pos[0], pos[1], pos[2] - t];
-            if !sphere_face(at, radius, face) {
-                continue;
-            }
-            let floor = at[2] - radius;
-            let owner = self
-                .sectors
-                .iter()
-                .position(|planes| planes.iter().any(|p| p.surface == face.surface))
-                .unwrap_or(sector);
+        for (floor, travelled, owner, _, _) in self.floor_candidates(sector, pos, height, radius) {
             if best.is_none_or(|(near, _, _)| floor > near) {
-                best = Some((floor, pos[2] - at[2], owner));
-                best_face = Some(face.clone());
+                best = Some((floor, travelled, owner));
             }
         }
         // `BK_FLOOR_TRACE`: a landing *below the body's own sector floor* is how a body ends up standing on
-        // something its room does not call a floor (level 5's plateau: the landing was 0.0502 against a
-        // sector floor of 0.1001). Naming the face and both normals there is the only way to tell a
-        // legitimate off-sector landing (level 6, whose own sector's floor is elsewhere) from the plateau.
+        // something its room does not call a floor (level 5's plateau). Naming the face and both normals
+        // there is the only way to tell a legitimate off-sector landing from the plateau.
         if std::env::var_os("BK_FLOOR_TRACE").is_some()
-            && let (Some((floor, _, owner)), Some(face)) = (best, best_face)
+            && let Some((floor, _, owner)) = best
         {
             let here = self.floor_below(sector, pos);
-            if here.is_none_or(|h| floor < h - 0.03) {
+            if here.is_none_or(|h| floor < h - 0.03)
+                && let Some(&(_, _, fowner, normal, surface)) = self
+                    .floor_candidates(sector, pos, height, radius)
+                    .iter()
+                    .find(|(f, _, _, _, _)| (*f - floor).abs() < 1e-6)
+            {
                 eprintln!(
-                    "floor: landing {floor:.4} on surface {} owner {owner} (sector {sector} floor {here:?}) file normal {:?} room {:?} pos {pos:?}",
-                    face.surface,
-                    face.normal,
+                    "floor: landing {floor:.4} on surface {surface} owner {fowner} (body sector {sector} floor {here:?}) file normal {normal:?} room normal {:?} pos {pos:?}",
                     self.sectors
-                        .get(owner)
-                        .and_then(|planes| planes.iter().find(|p| p.surface == face.surface))
+                        .get(fowner)
+                        .and_then(|planes| planes.iter().find(|p| p.surface == surface))
                         .map(|p| p.normal),
                 );
+                let _ = owner;
             }
         }
         best
+    }
+
+    /// Every face a downward sphere sweep from `pos` lands on, as `(floor height, distance travelled,
+    /// owning sector, the face's own normal, surface id)`. The walker's answer is the highest of these; the
+    /// `--floor-at` probe prints them all, which is what makes a floor disagreement a table instead of
+    /// an argument.
+    pub fn floor_candidates(
+        &self,
+        sector: usize,
+        pos: [f32; 3],
+        height: f32,
+        radius: f32,
+    ) -> Vec<(f32, f32, usize, [f32; 3], usize)> {
+        // The engine searches the body's room and its adjoins, not every face in the world. A global
+        // scan lets a body land on an unrelated tabletop or ledge: level 1's start (sector 339) is the
+        // table-top volume, whose correct downward contact is the room floor at -1.25, not the table
+        // top at -0.95. Choosing the latter put the body on the tables, where their cylinders blocked
+        // every walk direction.
+        //
+        // Start in the recorded room and expand through the level's portals. The build mirrors each
+        // link so a one-sided claim still lets a body out of a trigger volume. Do not cross a portal
+        // whose movement bit is shut: that is the same reachability rule `sweep_rooms` uses.
+        let range = (height * 1.1).max(radius + 0.005);
+        let mut reachable = vec![false; self.sectors.len()];
+        let mut pending = Vec::new();
+        if sector < self.sectors.len() {
+            reachable[sector] = true;
+            pending.push(sector);
+        }
+        while let Some(room) = pending.pop() {
+            for portal in self.portals.get(room).into_iter().flatten() {
+                let next = portal.adjoin;
+                if next >= self.sectors.len() || reachable[next] {
+                    continue;
+                }
+                if self.adjoin_flags.get(portal.link).is_some_and(|f| f & ADJOIN_MOVE == 0) {
+                    continue;
+                }
+                // A link is a wall opening, not a floor connection: only the room the probe
+                // actually lies in may supply a floor. Hull planes alone are not containment:
+                // level 1's shared sliver 340 spans the tables but its polygons do not, so it
+                // used to lend a floor to the tabletop volume through a solid wall.
+                if !self.room_contains(next, pos, radius) {
+                    continue;
+                }
+                reachable[next] = true;
+                pending.push(next);
+            }
+        }
+        let mut out = Vec::new();
+        let scan = |scope: &[bool], out: &mut Vec<(f32, f32, usize, [f32; 3], usize)>| {
+            for face in &self.faces {
+                let owner = self.surface_owner.get(face.surface).copied().unwrap_or(sector);
+                // An unowned face (a hand-built test fixture, or a surface no sector claims) is in
+                // scope only when it belongs to the seed room, never to a neighbouring room.
+                if !scope.get(owner).copied().unwrap_or(owner == sector) {
+                    continue;
+                }
+                // A vertical face is not a floor, and a downward one is a ceiling.
+                if face.normal[2].abs() < 0.2 {
+                    continue;
+                }
+                // `.jkl` plane normals point **out of the room**, while
+                // `sithCollision_SearchForSurfaceCollisions` tests into-room normals
+                // (`dot(search_dir, normal) < 0` accepts a floor for a downward sweep). Flipping the
+                // face toward the body is that normalisation, not a deviation.
+                let normal = if dot(sub(pos, face.point), face.normal) < 0.0 {
+                    [-face.normal[0], -face.normal[1], -face.normal[2]]
+                } else {
+                    face.normal
+                };
+                if normal[2] < 0.2 {
+                    continue;
+                }
+                let Some(t) = sphere_plane(pos, [0.0, 0.0, -1.0], range, radius, normal, face.point)
+                else {
+                    continue;
+                };
+                let at = [pos[0], pos[1], pos[2] - t];
+                if !sphere_face(at, radius, face) {
+                    continue;
+                }
+                let floor = at[2] - radius;
+                out.push((floor, pos[2] - at[2], owner, face.normal, face.surface));
+            }
+        };
+        scan(&reachable, &mut out);
+        if out.is_empty() {
+            // The shipped data does not always tile: a walkway slab or a trigger sliver can sit in a
+            // sector with no portal to the room below it. Only then fall back to the global scan; it
+            // is a rescue for a disconnected room, never a preferred landing while a reachable face
+            // exists. The body's vertical pass still refuses a contact above its current height.
+            out.clear();
+            let all = vec![true; self.sectors.len()];
+            scan(&all, &mut out);
+        }
+        out
     }
 }
 
@@ -1734,7 +1914,7 @@ impl Solids {
     }
 
     /// Every sector whose planes all have `pos` on their inside.
-    fn sectors_at_exact(&self, pos: [f32; 3]) -> Vec<usize> {
+    pub fn sectors_at_exact(&self, pos: [f32; 3]) -> Vec<usize> {
         (0..self.sectors.len())
             .filter(|&i| self.clearance(i, pos).is_some_and(|c| c >= 0.0))
             .collect()
@@ -1978,6 +2158,53 @@ impl Solids {
             .min_by(f32::total_cmp)
     }
 
+    /// Where a rising body's centre stops under a ceiling: the mirror of the floor contact
+    /// (`ceiling - radius`), and never below where the body already is (a body above its own ceiling keeps
+    /// its height). `None` when the rise fits, or when there is no ceiling to hit.
+    pub fn rise_stop(ceiling: Option<f32>, start: f32, rise: f32, radius: f32) -> Option<f32> {
+        let ceiling = ceiling?;
+        (start + rise + radius > ceiling + 1e-4).then(|| (ceiling - radius).max(start))
+    }
+
+    /// The lowest upward-facing polygon above `pos`, within `height`. The mirror of
+    /// `floor_under`, and polygon-precise on purpose: `ceiling_above` answers for the sector's planes as
+    /// infinite surfaces, so a step beside the body reports a "ceiling" at its own height and stops a jump.
+    pub fn ceiling_over(&self, pos: [f32; 3], height: f32, radius: f32) -> Option<f32> {
+        let range = (height * 1.1).max(radius + 0.005);
+        let mut best: Option<f32> = None;
+        for face in &self.faces {
+            if face.normal[2].abs() < 0.2 {
+                continue;
+            }
+            let normal = if dot(sub(pos, face.point), face.normal) < 0.0 {
+                [-face.normal[0], -face.normal[1], -face.normal[2]]
+            } else {
+                face.normal
+            };
+            if normal[2] > -0.2 {
+                continue;
+            }
+            let Some(t) = sphere_plane(pos, [0.0, 0.0, 1.0], range, radius, normal, face.point) else {
+                continue;
+            };
+            let at = [pos[0], pos[1], pos[2] + t];
+            if !sphere_face(at, radius, face) {
+                continue;
+            }
+            let ceiling = at[2] + radius;
+            if std::env::var_os("BK_CEIL_TRACE").is_some() {
+                eprintln!(
+                    "ceiling: surface {} at z {ceiling:.3} (pos {:.3}) verts {:?} normal {:?}",
+                    face.surface, pos[2], face.verts.first(), face.normal
+                );
+            }
+            if best.is_none_or(|near| ceiling < near) {
+                best = Some(ceiling);
+            }
+        }
+        best
+    }
+
     /// The floor under `pos` in `sector`: the highest downward-facing plane the point is
     /// above. A floor's outward normal points down, away from the room, and "down" is
     /// `-Z` because the world is Z-up (`CEILING SKY Z`, and 144 of `04escapehouse`'s 164
@@ -1998,55 +2225,67 @@ impl Solids {
     }
 }
 
+/// An 8 x 4 x 8 room, for tests: floor at z = -1, ceiling at z = 1, walls at |x|, |y| = 2.
+/// Normals point out of the room, which is the convention `.jkl` data gives. Shared so a test outside this
+/// module (main.rs's `walker_step`) can exercise the same geometry.
+#[cfg(test)]
+pub(crate) fn test_room() -> Solids {
+    Solids {
+        things: Vec::new(),
+        boxes: Vec::new(),
+        hull: Vec::new(),
+        floor_of: std::collections::HashMap::new(),
+        sectors: vec![vec![
+            Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.0], surface: usize::MAX },
+            Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 1.0], surface: usize::MAX },
+            Plane { normal: [1.0, 0.0, 0.0], point: [2.0, 0.0, 0.0], surface: usize::MAX },
+            Plane { normal: [-1.0, 0.0, 0.0], point: [-2.0, 0.0, 0.0], surface: usize::MAX },
+            Plane { normal: [0.0, 1.0, 0.0], point: [0.0, 2.0, 0.0], surface: usize::MAX },
+            Plane { normal: [0.0, -1.0, 0.0], point: [0.0, -2.0, 0.0], surface: usize::MAX },
+        ]],
+        spheres: vec![([0.0, 0.0, 0.0], 3.0)],
+        portals: vec![Vec::new()],
+        // The floor face, 4 x 4 at z = -1, so the polygon queries have something to cover.
+        floors: vec![Face {
+            normal: [0.0, 0.0, -1.0],
+            point: [0.0, 0.0, -1.0],
+            verts: vec![[-2.0, -2.0, -1.0], [2.0, -2.0, -1.0], [2.0, 2.0, -1.0], [-2.0, 2.0, -1.0]],
+            surface: 0,
+        }],
+        // The four vertical faces, so `resolve` has polygons to push against.
+        walls: vec![
+            Face {
+                normal: [1.0, 0.0, 0.0],
+                point: [2.0, 0.0, 0.0],
+                verts: vec![[2.0, -2.0, -1.0], [2.0, 2.0, -1.0], [2.0, 2.0, 1.0], [2.0, -2.0, 1.0]],
+                surface: 1,
+            },
+            Face {
+                normal: [-1.0, 0.0, 0.0],
+                point: [-2.0, 0.0, 0.0],
+                verts: vec![[-2.0, 2.0, -1.0], [-2.0, -2.0, -1.0], [-2.0, -2.0, 1.0], [-2.0, 2.0, 1.0]],
+                surface: 2,
+            },
+        ],
+        wall_of: [(1usize, 0usize), (2, 1)].into_iter().collect(),
+        // The ceiling as a **face**, because the body step's ceiling test is polygon-precise.
+        faces: vec![Face {
+            normal: [0.0, 0.0, 1.0],
+            point: [0.0, 0.0, 1.0],
+            verts: vec![[-2.0, -2.0, 1.0], [2.0, -2.0, 1.0], [2.0, 2.0, 1.0], [-2.0, 2.0, 1.0]],
+            surface: 3,
+        }],
+        face_of: std::collections::HashMap::new(),
+        portal_faces: Vec::new(),
+        surface_owner: Vec::new(),
+        adjoin_flags: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// An 8 x 4 x 8 room: floor at z = -1, ceiling at z = 1, walls at |x|, |y| = 2.
-    /// Normals point out of the room, which is the convention `.jkl` data gives.
-    fn room() -> Solids {
-        Solids {
-        things: Vec::new(),
-            boxes: Vec::new(),
-            hull: Vec::new(),
-            floor_of: std::collections::HashMap::new(),
-            sectors: vec![vec![
-                Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.0], surface: usize::MAX },
-                Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 1.0], surface: usize::MAX },
-                Plane { normal: [1.0, 0.0, 0.0], point: [2.0, 0.0, 0.0], surface: usize::MAX },
-                Plane { normal: [-1.0, 0.0, 0.0], point: [-2.0, 0.0, 0.0], surface: usize::MAX },
-                Plane { normal: [0.0, 1.0, 0.0], point: [0.0, 2.0, 0.0], surface: usize::MAX },
-                Plane { normal: [0.0, -1.0, 0.0], point: [0.0, -2.0, 0.0], surface: usize::MAX },
-            ]],
-            spheres: vec![([0.0, 0.0, 0.0], 3.0)],
-            portals: vec![Vec::new()],
-            // The floor face, 4 x 4 at z = -1, so the polygon queries have something to cover.
-            floors: vec![Face {
-                normal: [0.0, 0.0, -1.0],
-                point: [0.0, 0.0, -1.0],
-                verts: vec![[-2.0, -2.0, -1.0], [2.0, -2.0, -1.0], [2.0, 2.0, -1.0], [-2.0, 2.0, -1.0]],
-                surface: 0,
-            }],
-            // The four vertical faces, so `resolve` has polygons to push against.
-            walls: vec![
-                Face {
-                    normal: [1.0, 0.0, 0.0],
-                    point: [2.0, 0.0, 0.0],
-                    verts: vec![[2.0, -2.0, -1.0], [2.0, 2.0, -1.0], [2.0, 2.0, 1.0], [2.0, -2.0, 1.0]],
-                    surface: 1,
-                },
-                Face {
-                    normal: [-1.0, 0.0, 0.0],
-                    point: [-2.0, 0.0, 0.0],
-                    verts: vec![[-2.0, 2.0, -1.0], [-2.0, -2.0, -1.0], [-2.0, -2.0, 1.0], [-2.0, 2.0, 1.0]],
-                    surface: 2,
-                },
-            ],
-            wall_of: [(1usize, 0usize), (2, 1)].into_iter().collect(),
-            faces: Vec::new(),
-            face_of: std::collections::HashMap::new(),
-        }
-    }
+    use super::test_room as room;
 
     /// A floor made of two patches that meet at `x = 0`, with the **upward** normal the shipped
     /// `18Ascend`/`19A` floors carry (surface flags 0x80005, `n (0,0,+1)`) and the patches only in the
@@ -2072,6 +2311,9 @@ mod tests {
             wall_of: std::collections::HashMap::new(),
             faces: vec![patch(0.0, 2.0, 5618), patch(-2.0, 0.0, 5619)],
             face_of: std::collections::HashMap::new(),
+        portal_faces: Vec::new(),
+        surface_owner: Vec::new(),
+        adjoin_flags: Vec::new(),
         }
     }
 
@@ -2106,8 +2348,11 @@ mod tests {
             floors: Vec::new(),
             walls: Vec::new(),
             wall_of: std::collections::HashMap::new(),
-            faces: Vec::new(),
-            face_of: std::collections::HashMap::new(),
+        faces: Vec::new(),
+        face_of: std::collections::HashMap::new(),
+        portal_faces: Vec::new(),
+        surface_owner: Vec::new(),
+        adjoin_flags: Vec::new(),
             floor_of: std::collections::HashMap::new(),
             portals: vec![
                 vec![Portal { adjoin: 1, link: 0, verts: quad(0.0), normal: [0.0, 1.0, 0.0], point: [0.0, 0.0, 0.0] }],
@@ -2195,6 +2440,9 @@ mod tests {
             walls,
             faces,
             face_of,
+            portal_faces: Vec::new(),
+            surface_owner: Vec::new(),
+            adjoin_flags: Vec::new(),
             wall_of: [(1usize, 0usize), (2, 1)].into_iter().collect(),
             floor_of: [(0usize, 0usize)].into_iter().collect(),
         }
@@ -2221,6 +2469,68 @@ mod tests {
     }
 
     #[test]
+    fn an_infinite_hull_does_not_import_a_floor_through_a_wall() {
+        // The upper room's hull extends past its one solid wall. A lower room's hull also
+        // contains that outside point, but none of its polygons does: this is level 1's
+        // tabletop sliver, not a walkable connection to the cantina floor.
+        let mut solids = boxed();
+        solids.faces = solids.floors.clone();
+        solids.faces.extend(solids.walls.iter().cloned());
+        solids.surface_owner = vec![0, 0, 0];
+        // No solid floor in the seed room: its only downward connection is the portal.
+        solids.sectors[0].retain(|plane| plane.normal[2] > -0.7);
+        solids.faces.retain(|face| face.normal[2].abs() < 0.7);
+        solids.floors.clear();
+        solids.sectors.push(vec![Plane {
+            normal: [0.0, 0.0, -1.0],
+            point: [0.0, 0.0, -1.5],
+            surface: 3,
+        }]);
+        solids.spheres.push(([0.0, 0.0, -1.5], 4.0));
+        let lower = Face {
+            normal: [0.0, 0.0, -1.0],
+            point: [0.0, 0.0, -1.5],
+            verts: vec![[-2.0, -2.0, -1.5], [2.0, -2.0, -1.5], [2.0, 2.0, -1.5], [-2.0, 2.0, -1.5]],
+            surface: 3,
+        };
+        solids.faces.push(lower);
+        solids.surface_owner.push(1);
+        let portal = Face {
+            normal: [0.0, 1.0, 0.0],
+            point: [0.0, -2.0, 0.0],
+            verts: vec![[-1.0, -2.0, -1.0], [1.0, -2.0, -1.0], [1.0, -2.0, 1.0], [-1.0, -2.0, 1.0]],
+            surface: usize::MAX,
+        };
+        solids.portals[0].push(Portal {
+            adjoin: 1,
+            link: 0,
+            verts: portal.verts.clone(),
+            normal: portal.normal,
+            point: portal.point,
+        });
+        solids.portals.push(vec![Portal {
+            adjoin: 0,
+            link: 1,
+            verts: portal.verts.clone(),
+            normal: [-portal.normal[0], -portal.normal[1], -portal.normal[2]],
+            point: portal.point,
+        }]);
+        solids.portal_faces = vec![(0, portal.clone()), (1, portal)];
+
+        let outside = [3.0, 0.0, 0.0];
+        assert!(
+            solids.floor_under(0, outside, 1.0, 0.065).is_none(),
+            "a neighbouring hull imported its floor outside the room's polygons"
+        );
+        let inside = [0.0, -2.0, 0.0];
+        let (floor, _, owner) = solids
+            .floor_under(0, inside, 2.0, 0.065)
+            .expect("the actual portal polygon connects the two rooms");
+        assert_eq!(owner, 1);
+        assert!((floor + 1.5).abs() < 1e-3, "floor {floor}");
+    }
+
+    #[test]
     fn the_floor_is_found_through_a_portal() {
         // Two sectors: the upper one's floor is a *portal*, so it owns no downward plane. The slab a
         // body stands on belongs to the sector below — the case that made the old walker fall out of
@@ -2234,6 +2544,8 @@ mod tests {
             .map(|v| [v[0], v[1], -1.5])
             .collect();
         solids.sectors.push(vec![Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.5], surface: 0 }]);
+        // Ownership follows the face's move, or the scoped probe correctly refuses to look in room 1.
+        solids.surface_owner = vec![1];
         solids.spheres.push(([0.0, 0.0, -1.5], 4.0));
         solids.sectors[0].retain(|p| p.normal[2] > -0.7);
         // `faces` is what the floor probe scans and it was cloned before the slab moved: keep it in step,
@@ -2357,6 +2669,31 @@ mod tests {
             pos[1]
         );
     }
+    /// A walk into a 45° ramp is carried **up** it: the slide has to keep the direction's vertical
+    /// component, and the sweep end its height. Dropping them left the body flush with the plane,
+    /// re-hitting it at distance 0 every bounce — `16aEscapeShip`'s spawn ramp wedged after 0.09
+    /// units while retail walked 1.56.
+    #[test]
+    fn a_body_walks_up_a_45_degree_ramp() {
+        let mut room = room();
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // The sweep resolves each hull plane's `surface` through `face_of`/`floor_of`/`wall_of`, so the
+        // ramp needs both its plane and its polygon, the way the loader registers a level face.
+        room.sectors[0].push(Plane { normal: [0.0, -h, h], point: [0.0, 1.0, 0.0], surface: 9 });
+        room.faces.push(Face {
+            normal: [0.0, -h, h],
+            point: [0.0, 1.0, 0.0],
+            verts: vec![[-1.0, 0.2, -0.8], [1.0, 0.2, -0.8], [1.0, 1.4, 0.4], [-1.0, 1.4, 0.4]],
+            surface: 9,
+        });
+        room.face_of.insert(9, room.faces.len() - 1);
+        let gates = Gates { sectors: &[], adjoins: &[] };
+        let (pos, _sector, _blocked) =
+            room.move_body(0, [0.0, 0.3, 0.0], [0.0, 1.0, 0.0], 0.1, 0.066, gates);
+        assert!(pos[1] > 0.9, "the body did not advance up the ramp: {pos:?}");
+        assert!(pos[2] > 0.05, "the body did not climb the ramp: {pos:?}");
+    }
+
     #[test]
     fn pushes_out_of_walls_and_finds_the_floor() {
         let room = room();
@@ -2388,6 +2725,36 @@ mod tests {
 
         // The ceiling is the mirror image, at z = +1, and it is what the eye must fit under.
         let ceiling = room.ceiling_above(0, [0.0, 0.0, -0.5]).unwrap();
+        // A rise stops at the sphere's ceiling contact, never pushes a body down, and no ceiling means
+        // no clamp. This is the jump-through-the-ceiling bug in predicate form.
+        let radius = 0.065;
+        assert_eq!(ceiling, 1.0);
+        assert_eq!(Solids::rise_stop(Some(ceiling), 0.0, 0.5, radius), None, "a rise that fits under it");
+        assert_eq!(
+            Solids::rise_stop(Some(ceiling), 0.9, 0.2, radius),
+            Some(1.0 - radius),
+            "a bonk stops at the sphere contact"
+        );
+        assert_eq!(Solids::rise_stop(Some(ceiling), 1.5, 0.2, radius), Some(1.5), "a body above it keeps its height");
+        assert_eq!(Solids::rise_stop(None, 0.0, 5.0, radius), None, "no ceiling, no clamp");
+        // The ceiling query is polygon-precise: a step *beside* the body is not a ceiling over it.
+        let mut with_step = test_room();
+        with_step.faces.push(Face {
+            normal: [0.0, 0.0, 1.0],
+            point: [0.0, 0.0, 0.2],
+            verts: vec![[1.5, -2.0, 0.2], [2.0, -2.0, 0.2], [2.0, 2.0, 0.2], [1.5, 2.0, 0.2]],
+            surface: 4,
+        });
+        assert_eq!(
+            with_step.ceiling_over([0.0, 0.0, 0.0], 1.2, radius),
+            Some(1.0),
+            "a step beside the body was taken for a ceiling"
+        );
+        assert_eq!(
+            with_step.ceiling_over([1.75, 0.0, 0.0], 1.2, radius),
+            Some(0.2),
+            "under the step it is the ceiling"
+        );
         assert!((ceiling - 1.0).abs() < 1e-4, "ceiling = {ceiling}");
         // A point above the ceiling has nothing above it.
         assert!(room.ceiling_above(0, [0.0, 0.0, 2.0]).is_none());

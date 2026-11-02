@@ -411,15 +411,25 @@ fn draw_carried(
             r as u32 + g as u32 + b as u32
         })
         .unwrap_or(0) as u8;
-    for (n, (item, count)) in hud.carried.iter().enumerate() {
-        let y = 8 + n as i32 * 28 * HUD_SCALE;
-        let cell = load(gobs, &icon_for(&defs, item)).and_then(|f| f.cells.first().cloned());
-        if open && selected == Some(n) {
+    // `jkHudInv_Draw`'s carried loop needs the type's own inventory art (`type + 0x98 != 0`) and draws
+    // nothing for a type without it — unlike the selected item's row, which falls back to a default
+    // art. A bin with no icon is therefore *absent* from the strip, not a placeholder, and the strip's
+    // step follows the entries that actually drew.
+    let mut shown = 0i32;
+    for (index, (item, _count)) in hud.carried.iter().enumerate() {
+        let Some(cell) = load(gobs, &icon_for(&defs, item)).and_then(|f| f.cells.first().cloned())
+        else {
+            continue;
+        };
+        let n = shown;
+        shown += 1;
+        let y = 8 + n * 28 * HUD_SCALE;
+        if open && selected == Some(index) {
             // The box sits one scaled pixel outside the icon, so a highlight never covers the art.
-            let (w, h) = cell
-                .as_ref()
-                .map(|c| (c.width as i32 * HUD_SCALE, c.height as i32 * HUD_SCALE))
-                .unwrap_or((24 * HUD_SCALE, 24 * HUD_SCALE));
+            let (w, h) = (
+                cell.width as i32 * HUD_SCALE,
+                cell.height as i32 * HUD_SCALE,
+            );
             let (l, t) = (x - HUD_SCALE, y - HUD_SCALE);
             for i in l..=l + w {
                 canvas.put(i, t, palette, lit);
@@ -430,14 +440,9 @@ fn draw_carried(
                 canvas.put(l + w, j, palette, lit);
             }
         }
-        if let Some(cell) = cell {
-            canvas.blit_indexed([x, y], cell.width, cell.height, &cell.pixels, palette, HUD_SCALE);
-        }
-        if *count > 1 && let Some(font) = load_font(gobs, "ui\\sft\\helthnum.sft") {
-            let text = format!("{count}");
-            let tx = x + 24 * HUD_SCALE - font.text_width(&text) as i32;
-            canvas.draw_text_palette(&font, tx, y + 2, &text, palette, HUD_SCALE);
-        }
+        canvas.blit_indexed([x, y], cell.width, cell.height, &cell.pixels, palette, HUD_SCALE);
+        // `jkHudInv_Draw`'s carried-list loop copies only the icon (`stdDisplay_VBufferCopy`); the
+        // count is drawn beside the *selected* item's row further down, which `draw_item` does.
     }
 }
 

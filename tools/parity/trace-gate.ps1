@@ -29,7 +29,16 @@ powershell -NoProfile -File tools/parity/trace-gate.ps1
 #  * walk5_spawn: joined in round 125 (81 % with 2 of 6 sectors) once the model footprint replaced the
 #    template cylinder; the slab-ramp sector difference is within the gate's allowance.
 # Both legs stay runnable with -Only.
-param([string[]]$Only = @('walk_street45', 'walk_street90', 'walk_cantina', 'walk_door0', 'walk4_spawn', 'walk5_spawn', 'walk6_spawn', 'walk9_spawn', 'walk12_spawn', 'walk13_spawn', 'walk7_spawn', 'walk14_spawn', 'walk17_spawn', 'walk19_spawn', 'walk26_spawn'))
+# The default set is every leg the preflight **walks** among those with a committed retail trace. `walk_door0`,
+# `walk7_spawn`, `walk14_spawn`, `walk19_spawn` and `walk26_spawn` are retail script holds (their own capture
+# measured no walk), so they are runnable with `-Only` but not part of the default comparison.
+param([string[]]$Only = @('walk_street45', 'walk_street90', 'walk_cantina', 'walk4_spawn', 'walk5_spawn', 'walk6_spawn', 'walk9_spawn', 'walk12_spawn', 'walk13_spawn', 'walk17_spawn'))
+
+# `-Only a,b,c` arrives as **one** element from `pwsh -File`, so the leg that exists is never matched and the
+# caller gets "every requested walk leg is blocked" (round 288). Split every element, then drop blanks.
+function Split-CommaList([string[]]$Values) {
+  @($Values | Where-Object { $_ } | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
 
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
@@ -51,13 +60,15 @@ $FixtureDir = Join-Path $PSScriptRoot 'walktrace'
 $failed = 0
 # `-File` binds a list as one string, so the array goes through `-Command` (the same reason the other
 # harness scripts use it for `-Only`).
+$Only = @(Split-CommaList $Only)
 $onlyList = ($Only | ForEach-Object { "'$_'" }) -join ','
 $preflight = & pwsh -NoProfile -Command "& 'tools/parity/walk-preflight.ps1' -Only @($onlyList)" *>&1
 $walkable = New-Object System.Collections.Generic.List[string]
 $blocked = New-Object System.Collections.Generic.List[string]
 foreach ($line in $preflight) {
   $text = "$line"
-  if ($text -match '^walk-preflight\t(\S+)\t(PASS|FAIL)') {
+  if ($text -match '^walk-preflight\t(\S+)\t(PASS|SHORT|FAIL)') {
+    # SHORT: retail's own trace does not walk this leg (a script hold), so there is nothing to compare.
     if ($Matches[2] -eq 'PASS') { $walkable.Add($Matches[1]) } else { $blocked.Add($Matches[1]) }
   }
 }
@@ -85,7 +96,8 @@ foreach ($leg in $Only) {
 }
 
 Write-Host 'recording port traces...'
-& pwsh -NoProfile -Command "& 'tools/parity/port-trace.ps1' -Only @($onlyList)" 2>&1 | Out-Null
+$walkList = ($Only | ForEach-Object { "'$_'" }) -join ','
+& pwsh -NoProfile -Command "& 'tools/parity/port-trace.ps1' -Only @($walkList)" 2>&1 | Out-Null
 
 foreach ($leg in $Only) {
   $output = & pwsh -NoProfile -File tools/parity/trace-compare.ps1 -Name $leg 2>&1
