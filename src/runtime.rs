@@ -1191,6 +1191,11 @@ pub struct Runtime {
     /// `SetSectorAdjoins` change it. `0x2` underwater, `0x80` adjoins hidden — the two the
     /// shipped scripts switch, and the two collision reads (`collide::Gates`).
     pub sector_flags: Vec<u32>,
+    /// Per sector, the level's baked `AMBIENT LIGHT + EXTRA LIGHT`, clamped to `0..1` — the value the
+    /// engine hands `rdCamera_SetAmbientLight` for that sector (`sithRender_RenderSectors`,
+    /// `0x4c6c40`). The world draw used a base of `1.0`, which is why a level with a mean sector
+    /// ambient of 0.52 (`02narshadda`: 641 sectors) came out ~2x the retail brightness.
+    pub sector_light_baked: Vec<f32>,
     /// Each `World adjoins` row's `SITH_SURFACE_ADJOIN_*` word: `SetAdjoinFlags`/
     /// `ClearAdjoinFlags` switch these, which is how a force field opens and closes.
     pub adjoin_flags: Vec<u16>,
@@ -1203,6 +1208,11 @@ pub struct Runtime {
     pub surface_geomode: Vec<i32>,
     /// Per-surface state, indexed the way `.jkl` surfaces are: cels, animation, slides.
     pub surfaces: Vec<SurfaceState>,
+    /// Which sector claims each world surface (`SURFACES <first> <count>` per room), `-1` when no room
+    /// does. `sithPlayerActions_Activate` searches the **body's own sector** for a switch, so a surface an
+    /// adjoining room owns is not reachable from here: the cantina plate is sector 31's, the player stands
+    /// in 260, and retail's `doorstatus` stays 0 at every pose measured (round 302/303).
+    pub surface_sector: Vec<i32>,
     /// Sounds a script asked for, in order: the wav, its volume, and where it came from.
     ///
     /// `PlaySoundThing` names a thing and `PlaySoundPos` a position; a request with no place
@@ -1254,6 +1264,16 @@ pub struct Runtime {
     /// probability roll and the engine re-rolls it while refreshing a target; the port rolls it on
     /// acquisition and then keeps the deterministic sight test (ledger).
     pub ai_detected: std::collections::BTreeSet<usize>,
+    /// Actors a script switched the AI **off** for: `AIClearMode(actor, 0x606)` at level 1's
+    /// intro — the shot below shows `01_initialry.cog` calling it on the first enemy before
+    /// `AISetMovePos` walks it into the bar. An off actor still follows its scripted moves; it
+    /// does not look, acquire, chase or shoot.
+    pub ai_cleared: std::collections::BTreeSet<usize>,
+    /// When each actor may next roll its sight detection. The engine rolls once per **instinct pass**
+    /// (`sithAI_InstinctUpdate` sets the instinct's own `next` to `now + 1000` before calling it), so a
+    /// 50 % chance at 2 units takes seconds to latch there. Rolling every frame latched it in one or
+    /// two frames and made every gunner see the player the instant the level loaded.
+    pub ai_detect_at: std::collections::BTreeMap<usize, f32>,
     /// When each actor may run its `LookForTarget` scan next. The instinct's first shipped argument
     /// is the interval (500 ms in every class), and a scan that finds a target hands it to the normal
     /// chase/aim logic rather than snapping the body round.
@@ -1302,6 +1322,8 @@ pub struct Runtime {
     /// actor back to `ai + 0x93` (`SetMoveThing`) and then turns it there (`SetLookFrame`), so the
     /// anchor is the thing's spawn position. Set when the instincts are attached to the live runtime.
     pub ai_home: BTreeMap<usize, [f32; 3]>,
+    /// `BK_AI_TRACE`: the last walk-target source printed per actor, so the trace is a change log.
+    pub ai_trace_source: BTreeMap<usize, &'static str>,
     /// When each scripted `AIFlee` ends. The verb (`0x501420`) only sets the fleeing mode; the class's
     /// `Flee` instinct is what walks, and its third argument is the duration in seconds (1–2 s in the
     /// shipped classes), after which the handler clears the mode. The port records the same deadline.
@@ -1919,8 +1941,25 @@ impl Runtime {
                 .map(|_| SectorState { thrust: [0.0; 3], light: 0.0, light_from: 0.0, light_end: 0.0, light_rate: 0.0, tint: [0.0; 3], colormap: 0 })
                 .collect(),
             sector_flags: level.sectors.iter().map(|s| s.flags).collect(),
+            sector_light_baked: level
+                .sectors
+                .iter()
+                .map(|s| (s.ambient_light + s.extra_light).clamp(0.0, 1.0))
+                .collect(),
             adjoin_flags: level.adjoins.iter().map(|a| a.flags).collect(),
             surface_adjoin: level.surfaces.iter().map(|s| s.adjoin).collect(),
+            surface_sector: {
+                // A surface's sector: the level groups surfaces per room (`SECTOR` rows carry
+                // `(first, count)` over the surface list).
+                let mut table = vec![-1i32; level.surfaces.len()];
+                for (sector, room) in level.sectors.iter().enumerate() {
+                    let (first, count) = room.surfaces;
+                    for index in first..(first + count).min(level.surfaces.len()) {
+                        table[index] = sector as i32;
+                    }
+                }
+                table
+            },
             surface_geomode: level
                 .surfaces
                 .iter()
@@ -2008,6 +2047,8 @@ impl Runtime {
             ai_route: BTreeMap::new(),
             ai_last_seen: BTreeMap::new(),
             ai_detected: std::collections::BTreeSet::new(),
+            ai_cleared: std::collections::BTreeSet::new(),
+            ai_detect_at: std::collections::BTreeMap::new(),
             ai_scan: BTreeMap::new(),
             ai_listen: BTreeMap::new(),
             ai_talk: BTreeMap::new(),
@@ -2022,6 +2063,7 @@ impl Runtime {
             ai_jump: BTreeMap::new(),
             ai_opendoors: BTreeMap::new(),
             ai_home: BTreeMap::new(),
+            ai_trace_source: BTreeMap::new(),
             ai_flee_until: BTreeMap::new(),
             ai_withdraw: BTreeMap::new(),
             ai_strafe: BTreeMap::new(),
@@ -2751,12 +2793,25 @@ impl Runtime {
                 // test a position-only resolver cannot make.
                 let escaped = solids.sector_at(t.pos, 0.1).is_none();
                 if hit && (resolved[0] - t.pos[0]).abs() + (resolved[1] - t.pos[1]).abs() > 0.01 {
+                    if std::env::var_os("BK_AI_TRACE").is_some() && self.types.get(i).copied() == Some(3) {
+                        eprintln!("ai: shot {i} pushed out at {:?} -> {:?} (sector {sector})", t.pos, resolved);
+                    }
                     t.pos[0] = resolved[0];
                     t.pos[1] = resolved[1];
                     t.vel = [0.0; 3];
                     t.target = None;
                     blocked.push(i);
                 } else if escaped || solids.segment_blocked(previous, t.pos) {
+                    if std::env::var_os("BK_AI_TRACE").is_some() && self.types.get(i).copied() == Some(3) {
+                        // Which face stopped it: a muzzle inside a jamb and a bolt aimed into a wall
+                        // look identical in the position alone.
+                        eprintln!(
+                            "ai: shot {i} stopped from {:?} to {:?} (escaped {escaped}, blocker {:?})",
+                            previous,
+                            t.pos,
+                            solids.segment_blocked_at(previous, t.pos)
+                        );
+                    }
                     // Put it back where it last made sense and stop it: the segment test is what
                     // catches a mover that stepped clean over a wall between two frames.
                     t.pos = previous;
@@ -3335,7 +3390,7 @@ impl Runtime {
         };
         self.actor_flags.insert(actor, (flags & !0x4) | 0x800);
         // `ai[0x70]` is the target thing; the port's chase reads the target's last-seen position.
-        self.ai_last_seen.insert(actor, target_pos);
+        self.remember(actor, target_pos, "surprise");
         self.queue_mode_sound(actor, "surprise", at);
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} is surprised by thing {attacker} (target {target})");
@@ -3386,13 +3441,32 @@ impl Runtime {
     /// top** also counts as ground. Not modelled: the engine's walkable categories (its surface-flag
     /// bits decide 1 vs 2 vs 0), which this build does not use for steering.
     fn ai_can_walk(&self, index: usize, point: [f32; 3]) -> bool {
+        // `sithCollision_SearchForThingCollisions` also collides the moving **body** against other
+        // bodies: an actor may not walk into the player or a comrade. Without it level 1's intro Ry
+        // stood 0.27 units from the eye, filling the spawn view with its own model (round 307). This
+        // needs no world geometry, so it runs before the solids guard below.
+        let hit_radius = |thing: usize| {
+            self.templates
+                .get(thing)
+                .map(|name| name.to_ascii_lowercase())
+                .and_then(|name| self.template_hit.get(&name).map(|(radius, _)| *radius))
+                .unwrap_or(0.065)
+        };
+        let radius = hit_radius(index);
+        for other in 0..self.things.len() {
+            if other == index || !matches!(self.types.get(other).copied(), Some(2) | Some(10)) {
+                continue;
+            }
+            let Some(their) = self.things.get(other).filter(|thing| thing.health > 0.0) else {
+                continue;
+            };
+            let (dx, dy) = (point[0] - their.pos[0], point[1] - their.pos[1]);
+            let span = radius + hit_radius(other);
+            if dx * dx + dy * dy < span * span {
+                return false;
+            }
+        }
         let Some(solids) = self.solids.as_deref() else { return true };
-        let radius = self
-            .templates
-            .get(index)
-            .map(|name| name.to_ascii_lowercase())
-            .and_then(|name| self.template_hit.get(&name).map(|(radius, _)| *radius))
-            .unwrap_or(0.065);
         let height = self
             .things
             .get(index)
@@ -3737,6 +3811,16 @@ impl Runtime {
     }
 
     /// One roll of [`Self::detect_chance`] — `sithAI_CanDetectSightThing`'s `rand/32768` test.
+    /// Record that `actor` last had `target` in view, naming the handler that did it under
+    /// `BK_AI_TRACE`. The remembered point is what `BlindFire` and the chase walk to, so an insert
+    /// from an unexpected handler is visible instead of inferred from the shots that follow it.
+    fn remember(&mut self, actor: usize, target: [f32; 3], why: &str) {
+        if std::env::var_os("BK_AI_TRACE").is_some() {
+            eprintln!("ai: {actor} remembers the body at {target:?} ({why})");
+        }
+        self.ai_last_seen.insert(actor, target);
+    }
+
     pub fn can_detect(&self, actor: usize, target: usize) -> bool {
         crate::cog::pseudo_random() < self.detect_chance(actor, target) as f64
     }
@@ -3835,8 +3919,11 @@ impl Runtime {
                 if self.time >= due {
                     self.ai_opendoors.insert(index, self.time + 0.25);
                     let facing = [-yaw.to_radians().sin(), yaw.to_radians().cos()];
-                    self.activate_near(pos, facing, 1.5);
-                    self.use_thing(pos, facing, 1.5);
+                    // `OpenDoors` runs the same action the player's use does, so it is scoped to the
+                    // actor's own sector too.
+                    let sector = body.sector;
+                    self.activate_near(pos, facing, 1.5, sector);
+                    self.use_thing(pos, facing, 1.5, sector);
                 }
             }
             let Some(thing) = self.things.get_mut(index) else { continue };
@@ -3930,8 +4017,12 @@ impl Runtime {
             // Sight needs a **clear line**. `Ai::sees` is distance and cone only, so without
             // this an actor sees — and shoots — straight through walls. The engine casts its own
             // sight ray (`sithAI.c`); one segment test is the same rule here.
-            let sighted = ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target))
-                && self.solids.as_ref().is_none_or(|s| !s.segment_blocked(from, target));
+            let ai_on = !self.ai_cleared.contains(&index);
+            let sighted = ai_on
+                && ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target))
+                && self.solids.as_ref().is_none_or(|s| {
+                    !s.segment_blocked(from, target) && !s.segment_thing(from, target)
+                });
             // `sithAI_CanDetectSightThing` (`0x4ec140`): a clear line is not the same as noticing. The
             // engine rolls its detection chance whenever it refreshes a target; the port rolls it when
             // the actor first registers the player and keeps the deterministic line test afterwards, so
@@ -3939,8 +4030,24 @@ impl Runtime {
             // (or one with `thingflags & 0x4`) passes at 1.0, so this only delays ranged acquisition.
             let mut sighted = sighted;
             if sighted && !self.ai_detected.contains(&index) {
-                if self.can_detect(index, player) {
-                    self.ai_detected.insert(index);
+                // One roll per instinct pass, not per frame: the engine's `sithAI_InstinctUpdate`
+                // (`0x4e9e90`) arms each instinct's own clock at `now + 1000` before calling it, and
+                // the sight refresh lives inside an instinct. A per-frame roll turned a 50 % chance
+                // into "sees you immediately", which is what made level 3's tuskens fire inside a
+                // second while retail's series records no damage at all.
+                let due = self
+                    .ai_detect_at
+                    .get(&index)
+                    .copied()
+                    .unwrap_or(f32::NEG_INFINITY);
+                if self.time >= due {
+                    self.ai_detect_at.insert(index, self.time + 1.0);
+                    if self.can_detect(index, player) {
+                        self.ai_detected.insert(index);
+                        self.remember(index, target, "sight");
+                    } else {
+                        sighted = false;
+                    }
                 } else {
                     sighted = false;
                 }
@@ -4061,9 +4168,11 @@ impl Runtime {
             // Where the actor last had the player in view: `sithAI` keeps the last seen position
             // and walks to it once the target disappears behind something. Without that an actor
             // forgets an enemy the instant they round a corner.
-            if sighted {
-                self.ai_last_seen.insert(index, target);
-            }
+            // The memory is written **after** the detection roll below: a clear line is not a
+            // registered target (`sithAI_CheckSightThing`, `0x4eb090`, gates the memory on
+            // `sithAI_CanDetectSightThing`). Writing it on the bare line test seeded every actor within
+            // `sightdist` with the player's spawn point on the first frame, which is what walked level
+            // 1's cantina patrons at a player they had not noticed (round 307).
             // `sensedanger` (`0x50b9b0`, 14 classes): an **awake** actor (`AISetMode(..., 0x4)` — what
             // the scripts set for the droids and remotes) whose class enables the instinct (its second
             // number is non-zero; most shipped lines are `sensedanger 0.10, 0.00` and never act) looks
@@ -4081,11 +4190,16 @@ impl Runtime {
                 && sense.args.first().copied().unwrap_or(0.0) != 0.0
             {
                 let due = self.ai_sense.get(&index).copied().unwrap_or(0.0);
+                let chance = sense.args.first().copied().unwrap_or(0.0);
                 if self.time >= due {
-                    if sighted {
+                    // The instinct's first number is the **chance** the handler rolls once per second
+                    // (0.10 in most shipped classes); the port used it only as an on/off switch, so
+                    // every awake actor that could see the player alerted on its first tick - level
+                    // 1's bartender and `nman1` then walked through the player's own view (round 307).
+                    if sighted && crate::cog::pseudo_random() < chance as f64 {
                         // `flags & ~0x4 | 0x800`, exactly the handler's two writes.
                         self.actor_flags.insert(index, (sense_flags & !0x4) | 0x800);
-                        self.ai_last_seen.insert(index, target);
+                        self.remember(index, target, "sensedanger");
                         self.queue_mode_sound(index, "fear", from);
                         let side = ai.as_ref().map(|c| c.alignment as i32).unwrap_or(0);
                         let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
@@ -4266,8 +4380,14 @@ impl Runtime {
                         .get(&index)
                         .and_then(|(from, _)| self.things.get(*from).map(|t| t.pos))
                 });
+            // A clear line is **not** a move order: `sithAI_CheckSightThing` (`0x4eb090`) first has to
+            // register the target through the detection roll, and the class's `Follow` then walks an
+            // *engaged* target. The port walked on the bare line test, so level 1's cantina patrons
+            // left their placement in the first seconds (39 of 352 bodies moved in 8 s while retail's
+            // own series is static, round 305).
+            let engaged = self.ai_detected.contains(&index);
             if scripted.is_none()
-                && !sighted
+                && !(sighted && engaged)
                 && aim.is_none()
                 && remembered.is_none()
                 && fleeing.is_none()
@@ -4300,8 +4420,15 @@ impl Runtime {
                             let clear = self.solids.as_ref().is_none_or(|s| {
                                 !s.segment_blocked(thing.0, target)
                             });
-                            if in_cone && clear {
-                                self.ai_last_seen.insert(index, target);
+                            // The scan is the **acquisition** path: the handler runs
+                            // `sithAI_CheckSightThing`, whose detection roll is
+                            // `sithAI_CanDetectSightThing` (`0x4ec140`). Writing the memory from the
+                            // cone test alone made an in-cone body a last-seen point on the first
+                            // frame, and `BlindFire` then shot at it at 0.02 s without the actor having
+                            // detected it at all.
+                            if in_cone && clear && self.can_detect(index, player) {
+                                self.ai_detected.insert(index);
+                                self.remember(index, target, "lookfortarget");
                                 if std::env::var_os("BK_AI_TRACE").is_some() {
                                     eprintln!("ai: {index} `{ai_template}` LookForTarget finds the body at {range:.2}");
                                 }
@@ -4378,8 +4505,17 @@ impl Runtime {
             // needed, but of *that* thing — `00_AITurnCoat.cog` turns an actor on a victim it can see.
             // A script's destination wins; otherwise the chase is the player while in sight and the
             // last place they were seen once they are not.
-            let chase = if sighted { target } else { remembered.unwrap_or(target) };
-            let mut want = scripted.unwrap_or(chase);
+            // Following needs the alert bit as well as the detection: an engine actor's instinct is
+            // only ticked in the modes the AI handlers set, and level 1's patrons are awake but not
+            // alerted at spawn - retail's own series stands still there for the whole 7 s.
+            let chase = if sighted && engaged {
+                Some(target)
+            } else {
+                remembered
+            };
+            // No source **and** no chase leaves the actor where it is: `target` is the player, and
+            // falling back to it walked every awake patron at a player it was not allowed to follow.
+            let mut want = scripted.or(chase).unwrap_or(from);
             let mut pace = 1.0f32;
             let mut strafing = false;
             // `circlestrafe` (`0x509890`): while it has a target **within the instinct's own engage
@@ -4419,6 +4555,38 @@ impl Runtime {
             // again, which is what makes the last leg (doorway -> target) a straight walk.
             let route_goal = self.ai_route.get(&index).and_then(|r| r.first().copied());
             let goal = route_goal.unwrap_or(want);
+            if std::env::var_os("BK_AI_TRACE").is_some() {
+                // Which source gave this actor its walk target, once per (actor, source) change: the
+                // spawn scene's patrons move while retail's stand still, and the order's origin is the
+                // question (rounds 305-307).
+                let source = if route_goal.is_some() {
+                    "route"
+                } else if scripted.is_some() {
+                    "scripted"
+                } else if fleeing.is_some() {
+                    "flee"
+                } else if strafing {
+                    "strafe"
+                } else if aim.is_some() {
+                    "aim"
+                } else if remembered.is_some() {
+                    if self.ai_last_seen.contains_key(&index) {
+                        "remembered"
+                    } else {
+                        "awareness"
+                    }
+                } else if sighted && engaged {
+                    "chase"
+                } else {
+                    "none"
+                };
+                let key = (index, source);
+                if self.ai_trace_source.get(&index).copied() != Some(source) {
+                    self.ai_trace_source.insert(index, source);
+                    println!("ai-goal: t={:.2} {index} `{ai_template}` walks on {source} to {goal:?} from {from:?}", self.time);
+                }
+                let _ = key;
+            }
             let dx = goal[0] - from[0];
             let dy = goal[1] - from[1];
             let reach = (dx * dx + dy * dy).sqrt();
@@ -4427,6 +4595,19 @@ impl Runtime {
             let speed = self.template_speed.get(&ai_template).copied().unwrap_or(0.0)
                 * self.actor_speed.get(&index).copied().unwrap_or(1.0)
                 * pace;
+            // A scripted destination that never progresses: the template carries no `maxthrust`, so
+            // the walk speed is zero and the actor stands on its order forever (round 307 found the
+            // intro Ry stalled this way). One line per actor names the template at fault.
+            if speed <= 0.0
+                && scripted.is_some()
+                && std::env::var_os("BK_AI_TRACE").is_some()
+                && self.ai_trace_source.get(&index).copied() != Some("nospeed")
+            {
+                self.ai_trace_source.insert(index, "nospeed");
+                eprintln!(
+                    "ai: {index} `{ai_template}` has no walk speed (maxthrust missing) and cannot walk its order"
+                );
+            }
             // A scripted destination is walked all the way onto; the chase stops at its standoff, and
             // so does each doorway on a route. The standoff is the class's own `Follow` instinct: its
             // second argument is the distance the chase keeps from the target (`rydefault` 0.75,
@@ -4496,6 +4677,16 @@ impl Runtime {
                 if !self.ai_can_walk(index, next) {
                     // A ledge under the next step: zero it and emit `0x400`, as the engine's caller
                     // does, instead of walking the body off the floor.
+                    if std::env::var_os("BK_AI_TRACE").is_some()
+                        && self.ai_trace_source.get(&index).copied() != Some("blocked")
+                        && let Some(solids) = self.solids.as_deref()
+                    {
+                        self.ai_trace_source.insert(index, "blocked");
+                        eprintln!(
+                            "ai: {index} cannot step to {next:?}: sector {:?}",
+                            solids.sector_at(next, 0.065)
+                        );
+                    }
                     let _ = self.emit_ai_event(index, 0x400, None);
                     continue;
                 }
@@ -4535,13 +4726,14 @@ impl Runtime {
                 );
             } else if let Some(thing) = self.things.get_mut(index) {
                 thing.ai_target = None;
-                // The same aim rule while standing: a target in sight wins over a scripted look.
-                if sighted {
+                // The same aim rule while standing: a registered target wins over a scripted look.
+                // A bare line of sight is not a target - turning on it swung every idle patron to
+                // face the player at level 1's spawn, which is the whole frame's change in the spawn
+                // series (round 307). Without a target the authored facing stands.
+                if sighted && engaged {
                     want_yaw = (target[1] - from[1]).atan2(target[0] - from[0]).to_degrees();
                 } else if let Some(yaw) = look_yaw {
                     want_yaw = yaw;
-                } else if reach > 0.001 {
-                    want_yaw = dy.atan2(dx).to_degrees();
                 }
             }
             // Standing on the remembered spot and finding nobody there forgets the target — the
@@ -4580,7 +4772,12 @@ impl Runtime {
                 thing.yaw = turn_toward(yaw, want_yaw, turn_rate, dt);
             }
             let mut shooting_at = aim.unwrap_or(target);
-            let can_see = if aim.is_some() { true } else { sighted };
+            // An engine actor has a *target* only once the detection roll registered it
+            // (`sithAI_CheckSightThing` -> `sithAI_CanDetectSightThing`), and `PrimaryFire` fires at
+            // that target. Firing on the bare line test made level 1's `reeyeesbhgun` shoot the player
+            // inside the first second from a view where retail's own series shows no shot at all
+            // (round 307); the shot's awareness event then walked the whole cantina.
+            let can_see = if aim.is_some() { true } else { sighted && engaged };
             // `BK_AI_TRACE=2`: name the gate that stops an in-sight actor from firing. The engine's
             // `sithAICmd_PrimaryFire` has exactly three besides readiness — the instinct itself, its
             // range, and its `minDot` facing test — so one line per refusal is enough to tell an AI
@@ -4696,6 +4893,15 @@ impl Runtime {
             else {
                 continue;
             };
+            // `BK_AI_TRACE=2`: when the shot actually leaves, so an acquisition delay can be measured
+            // against a level's spawn (the ledger's spawn-combat row).
+            if fire_trace {
+                let damage = self.template_damage.get(&weapon.to_ascii_lowercase()).copied().unwrap_or(-1.0);
+                eprintln!(
+                    "ai: {index} fires {instinct} `{weapon}` at {range:.2} damage {damage} (time {:.2} s)",
+                    self.time
+                );
+            }
             shots.push((index, weapon, error));
             if let Some(thing) = self.things.get_mut(index) {
                 thing.yaw = sy.atan2(sx).to_degrees();
@@ -4922,6 +5128,12 @@ impl Runtime {
                     pos[1] + ahead[1] * y - ahead[0] * x,
                     pos[2] + z,
                 ],
+                // `sithWeapon_FireProjectile` (`0x4d5f20`) spawns at the **weapon thing's** position,
+                // adding the offset only when it is not the sentinel — and a shipper's weapon thing sits
+                // in the actor's hand. This build has no separate weapon thing, so the fallback is a
+                // stand-in: one unit ahead of the body at `z + 0.1`. It is what `--hit` is calibrated on
+                // and it is wrong on a stair (level 3's tuskens fire into the next riser); the ledger's
+                // *AI projectile spawn* row carries the engine rule and this measurement.
                 _ => [
                     pos[0] + ahead[0] * 1.0,
                     pos[1] + ahead[1] * 1.0,
@@ -4929,8 +5141,23 @@ impl Runtime {
                 ],
             }
         };
+        // `sithWeapon_WeaponFireProjectile` (`0x4d45a0`) creates the projectile at the shooter's own
+        // position and then **sweeps** it to the muzzle point: `MoveThing(dir = muzzle - pos,
+        // len = |muzzle - pos|)` collides on the way, so a wall between the body and the muzzle stops
+        // the bolt on the shooter's side instead of placing it beyond the wall. The port jumped
+        // straight to the muzzle, which let a bolt begin inside a wall (round 308 measured ten of the
+        // door capture's shots dying 0.07 units out on `HAS_COLLISION` faces).
+        let mut spawn = muzzle;
+        if let Some(solids) = self.solids.as_ref()
+            && let Some((_, at)) = solids.segment_blocked_at(pos, muzzle)
+        {
+            spawn = at;
+            if std::env::var_os("BK_AI_TRACE").is_some() {
+                eprintln!("ai: the muzzle of `{template}` is behind a wall; the shot starts at {at:?}");
+            }
+        }
         self.things.push(ThingState {
-            pos: muzzle,
+            pos: spawn,
             insert: [0.0; 3],
             owner: usize::try_from(shooter).ok(),
             yaw,
@@ -5365,7 +5592,7 @@ impl Runtime {
     /// without running the app: `--hit` drives it directly. Placed things are targets too — the
     /// old version skipped everything below `first_created`, which made every actor the level
     /// placed immune and left only run-time `CreateThing` actors killable.
-    pub fn impacts(&self, first_created: usize) -> Vec<(usize, usize, f32)> {
+    pub fn impacts(&self, first_created: usize, dt: f32) -> Vec<(usize, usize, f32)> {
         let mut impacts = Vec::new();
         let player_thing = self
             .templates
@@ -5389,7 +5616,7 @@ impl Runtime {
                     continue;
                 }
 
-                if self.shot_hits(index, other) {
+                if self.shot_hits_swept(index, other, dt) {
                     impacts.push((index, other, shot.damage));
                     break;
                 }
@@ -5458,9 +5685,37 @@ impl Runtime {
     /// the facing cone here are calibrated rather than recovered, because the use action lives in
     /// `jkPlayer.c`, which this source tree does not carry. What is data-driven is the target: only
     /// surfaces a script actually linked are candidates.
-    pub fn activate_near(&mut self, eye: [f32; 3], facing: [f32; 2], reach: f32) -> Option<usize> {
+    /// Whether sector `other` is in the use action's collision search from `sector`: the engine sweeps
+    /// a 0.025 sphere (`0x3ccccccd`) `reach` along the facing (`sithPlayerActions_Activate`).
+    fn in_use_search(&self, sector: i32, other: i32, eye: [f32; 3], facing: [f32; 2], reach: f32) -> bool {
+        if other == sector {
+            return true;
+        }
+        let (Ok(sector), Ok(other)) = (usize::try_from(sector), usize::try_from(other)) else {
+            return false;
+        };
+        self.solids.as_deref().is_some_and(|solids| {
+            solids.in_search(sector, other, eye, [facing[0], facing[1], 0.0], reach, 0.025)
+        })
+    }
+
+    pub fn activate_near(
+        &mut self,
+        eye: [f32; 3],
+        facing: [f32; 2],
+        reach: f32,
+        sector: i32,
+    ) -> Option<usize> {
         let mut best: Option<(usize, f32)> = None;
         for (_, _, surface) in &self.surface_links {
+            // The engine searches **the body's sector's** surfaces (`sithPlayerActions_Activate`,
+            // `0x4fc0a0`: `FindSectorInRadius` then `SearchForCollisions`), plus a neighbour only when
+            // the short use sweep reaches the opening into it. A linked plate deeper in an adjoining
+            // room is not there, which is why retail's cantina switch stays closed.
+            let owner = self.surface_sector.get(*surface).copied().unwrap_or(-1);
+            if !self.in_use_search(sector, owner, eye, facing, reach) {
+                continue;
+            }
             let Some(centre) = self.surfaces.get(*surface).map(|s| s.center) else { continue };
             let (dx, dy) = (centre[0] - eye[0], centre[1] - eye[1]);
             let flat = (dx * dx + dy * dy).sqrt();
@@ -5469,7 +5724,7 @@ impl Runtime {
             let dz = centre[2] - eye[2];
             let dist = (flat * flat + dz * dz).sqrt();
             if std::env::var_os("BK_USE_TRACE").is_some() {
-                println!("use-candidate: surface {} centre {:?} dist {:.2} dz {:.2} dot {:.2}", surface, centre, dist, dz, if flat > 0.01 { (dx / flat) * facing[0] + (dy / flat) * facing[1] } else { 1.0 });
+                println!("use-candidate: surface {} sector {} centre {:?} dist {:.2} dz {:.2} dot {:.2}", surface, self.surface_sector.get(*surface).copied().unwrap_or(-1), centre, dist, dz, if flat > 0.01 { (dx / flat) * facing[0] + (dy / flat) * facing[1] } else { 1.0 });
             }
             if dist > reach {
                 continue;
@@ -5535,9 +5790,15 @@ impl Runtime {
     /// The player's use action on a *thing*: the nearest thing a script links, in front of the eye.
     ///
     /// `sithPlayerActions_Activate` (`0x4fc0a0`) sweeps a 0.1-radius sphere from the eye along the view for
-    /// `moveSize + 0.1`, so the reach is `moveSize + 0.2` (**0.265** units for the player) and the
+    /// `moveSize - (-0.1)`, so the reach is `moveSize + 0.1` (**0.16** units for the player) and the
     /// direction, not a FOV, decides. It answers with the thing it used, if any.
-    pub fn use_thing(&mut self, eye: [f32; 3], facing: [f32; 2], reach: f32) -> Option<usize> {
+    pub fn use_thing(
+        &mut self,
+        eye: [f32; 3],
+        facing: [f32; 2],
+        reach: f32,
+        sector: i32,
+    ) -> Option<usize> {
         let mut best: Option<(usize, f32)> = None;
         for (_, _, target) in &self.thing_links {
             // The engine's activate **skips a weapon (type 3) and an item (type 5)** hit:
@@ -5547,6 +5808,14 @@ impl Runtime {
                 continue;
             }
             let Some(thing) = self.things.get(*target) else { continue };
+            // The same sector scope the surface half has: a thing in another room is not in the search
+            // unless the use sweep reaches the opening into that room.
+            if !self.in_use_search(sector, thing.sector, eye, facing, reach) {
+                continue;
+            }
+            if std::env::var_os("BK_USE_TRACE").is_some() {
+                println!("use-thing: thing {} sector {} (want {}) pos {:?}", target, thing.sector, sector, thing.pos);
+            }
             let (dx, dy) = (thing.pos[0] - eye[0], thing.pos[1] - eye[1]);
             let flat = (dx * dx + dy * dy).sqrt();
             // The use is a **look**, so the reach and ranking are 3D: level 1's death floor sits 17
@@ -5679,9 +5948,29 @@ impl Runtime {
     /// `sithThing_EnterSector` sends `entered` to the sector's links and `sithThing_LeaveSector`
     /// sends `exited` (§16.10). The link id and mask are carried but not filtered on, which is a
     /// documented simplification: every link to that sector hears the message.
-    pub fn sector_messages(&self, old: Option<usize>, new: Option<usize>) -> Vec<(usize, &'static str, i32)> {
+    pub fn sector_messages(
+        &self,
+        old: Option<usize>,
+        new: Option<usize>,
+        thing: Option<usize>,
+    ) -> Vec<(usize, &'static str, i32)> {
+        // `sithThing_EnterSector` (`0x4cd2c0`) is narrower than "every link hears it": it messages the
+        // sector only when the sector's byte at `+0x34` carries bit `4` (`SITH_SECTOR_COGLINKED`) and
+        // the thing's flags carry none of `0x80100` — a sector the level's scripts watch, entered by a
+        // body they care about. Sending to every linked sector ran `06_endpart1.cog`'s goal sequence
+        // from a walk leg whose spawn merely *sat* in the sector, and the sequence's own `sleep`s
+        // ended the level mid-capture.
+        if thing.is_some_and(|t| self.things.get(t).is_some_and(|s| s.flags & 0x80100 != 0)) {
+            return Vec::new();
+        }
+        let watched = |sector: usize| {
+            self.sector_flags.get(sector).is_some_and(|flags| flags & 0x04 != 0)
+        };
         let mut out = Vec::new();
         for (instance, link, sector) in &self.sector_links {
+            if !watched(*sector) {
+                continue;
+            }
             if Some(*sector) == new {
                 // `sithThing_EnterSector` sends `entered` with the **link id as the sender id**:
                 // `00_SecretAreas.cog`'s handler is `flags = flags | GetSenderId()`, so a message
@@ -5931,6 +6220,46 @@ impl Runtime {
     /// floor, so a 0.5-unit point test never landed on anything that was placed in the level.
     /// The body comes from the template's `size=x/y/z` (half-extents) or `radius=`, so the test is
     /// "inside the cylinder the level's own template describes".
+    /// `sithCollision_SearchForCollisions` on a projectile: the shot's own **move** is what is
+    /// tested, so a fast bolt cannot step over a body between frames. `dt` is the frame it moved in;
+    /// zero keeps the sample-at-the-end behaviour the callers of [`Self::shot_hits`] rely on.
+    pub fn shot_hits_swept(&self, shot: usize, target: usize, dt: f32) -> bool {
+        let (Some(a), Some(b)) = (self.things.get(shot), self.things.get(target)) else {
+            return false;
+        };
+        if dt <= 0.0 {
+            return self.shot_hits(shot, target);
+        }
+        let name = self.templates.get(target).cloned().unwrap_or_default().to_ascii_lowercase();
+        let (radius, height) = self.template_hit.get(&name).copied().unwrap_or((0.065, 0.18));
+        let from = [
+            a.pos[0] - a.vel[0] * dt,
+            a.pos[1] - a.vel[1] * dt,
+            a.pos[2] - a.vel[2] * dt,
+        ];
+        let (sx, sy, sz) = (a.pos[0] - from[0], a.pos[1] - from[1], a.pos[2] - from[2]);
+        // Closest approach of the segment to the target's vertical axis, in plan.
+        let len2 = sx * sx + sy * sy;
+        let closest = if len2 > 1e-12 {
+            ((b.pos[0] - from[0]) * sx + (b.pos[1] - from[1]) * sy) / len2
+        } else {
+            1.0
+        }
+        .clamp(0.0, 1.0);
+        let (cx, cy, cz) = (
+            from[0] + sx * closest,
+            from[1] + sy * closest,
+            from[2] + sz * closest,
+        );
+        let flat = ((cx - b.pos[0]).powi(2) + (cy - b.pos[1]).powi(2)).sqrt();
+        if flat > radius + 0.15 {
+            return false;
+        }
+        let low = b.pos[2];
+        let high = b.pos[2] + height;
+        cz >= low - 0.15 && cz <= high + 0.15
+    }
+
     pub fn shot_hits(&self, shot: usize, target: usize) -> bool {
         let (Some(a), Some(b)) = (self.things.get(shot), self.things.get(target)) else {
             return false;
@@ -5991,6 +6320,12 @@ impl Runtime {
         // The player's palette flashes red on every hit that lands, whichever path applied it.
         if index == self.player_thing() {
             add_dynamic_tint(&mut self.tint, [amount * DAMAGE_TINT, 0.0, 0.0]);
+            // `BK_AI_TRACE`: the HUD comparison (retail's series reads 100/50 undamaged) needs a
+            // timestamped record of what actually landed, not just shots spawned.
+            if std::env::var_os("BK_AI_TRACE").is_some() {
+                let left = self.things.get(index).map(|t| t.health).unwrap_or(0.0);
+                eprintln!("ai: player takes {amount:.1} from {source} (time {:.2} s, {left:.0} left)", self.time);
+            }
         }
         let mut died = false;
         // A hit flinches: `sithPuppet_SetMode` plays the puppet's `hit` track off a damage message,
@@ -6760,6 +7095,11 @@ impl Runtime {
             // end-of-level screen; this build only records that the level is done, so a
             // caller can resolve the next one through the episode graph.
             "jkendlevel" | "endlevel" => {
+                // `BK_LEVEL_TRACE`: name the script that ended the level, so a capture that walks a
+                // level meant to be played does not silently swap worlds midway.
+                if std::env::var_os("BK_LEVEL_TRACE").is_some() {
+                    eprintln!("level: `jkEndLevel` from cog {}", self.caller_cog);
+                }
                 self.level_complete = idx(0) != 0 || num(0) != 0.0;
                 Value::Nil
             }
@@ -7359,11 +7699,31 @@ impl Runtime {
             // `sithCogFunctionAI_AISetMode` is `actor->flags |= mode` and `AIClearMode` is
             // `actor->flags &= ~mode` (`sithCogFunctionAI.c:237`), which is exactly the actor-flag arm below.
             "setactorflags" | "aisetmode" => {
-                *self.actor_flags.entry(ti(0)).or_insert(0) |= idx(1) as u32;
+                let actor = ti(0);
+                let mode = idx(1) as u32;
+                *self.actor_flags.entry(actor).or_insert(0) |= mode;
+                // `aisetmode(enemy, 0x200)` is how `00_aisleep.cog` wakes an actor; the same write
+                // puts a script-disabled actor back into the AI (`sithCogFunctionAI.c`).
+                if mode & 0x200 != 0 {
+                    self.ai_cleared.remove(&actor);
+                }
                 Value::Nil
             }
             "clearactorflags" | "aiclearmode" => {
-                *self.actor_flags.entry(ti(0)).or_insert(0) &= !(idx(1) as u32);
+                let actor = ti(0);
+                let mode = idx(1) as u32;
+                *self.actor_flags.entry(actor).or_insert(0) &= !mode;
+                // `01_initialry.cog` starts with `AIClearMode(joery, 0x606)`: the level's first
+                // enemy is walked in by its script and must not acquire or shoot on the way. The
+                // engine's tick is switched off by these bits; the port runs the AI regardless,
+                // which is why level 1's intro Ry fired at 0.13 s where retail's series shows no
+                // shot for its whole 7.4 s (round 307).
+                if mode & 0x606 == 0x606 {
+                    self.ai_cleared.insert(actor);
+                    if std::env::var_os("BK_AI_TRACE").is_some() {
+                        eprintln!("ai: AIClearMode switched thing {actor} off (mask {mode:#x})");
+                    }
+                }
                 Value::Nil
             }
             "getactorflags" => Value::Num(self.actor_flags.get(&ti(0)).copied().unwrap_or(0) as f64),
@@ -7417,6 +7777,12 @@ impl Runtime {
                     &mut self.ai_look
                 };
                 table.insert(ti(0), pos);
+                if std::env::var_os("BK_AI_TRACE").is_some() {
+                    // Which script sent which actor where: the series gate's spawn scene moves 39 of
+                    // the level's 352 placed things in 8 s while retail's view barely changes, so the
+                    // order's origin is the question (round 305).
+                    println!("ai: {verb} sets thing {} to {pos:?}", ti(0));
+                }
                 Value::Nil
             }
             // `AISetMoveFrame`/`AISetLookFrame` (`sithCogFunctionAI.c:73`) index the actor's own frame
@@ -8541,6 +8907,27 @@ fn vector(args: &[Value], op: fn(f64, f64) -> f64) -> Value {
 mod tests {
     use super::*;
 
+    /// `sithThing_EnterSector` (`0x4cd2c0`) messages a sector only when the sector carries
+    /// `SITH_SECTOR_COGLINKED` (0x04) and the thing's flags carry none of `0x80100`. Sending to every
+    /// linked sector ran `06_endpart1.cog`'s goal sequence from a walk spawn that merely stood in the
+    /// room, which is what ended level `06abarons` in the middle of a capture.
+    #[test]
+    fn sector_messages_only_reach_a_cog_linked_sector_and_a_watched_body() {
+        let mut rt = door_runtime();
+        rt.sector_flags = vec![0x04, 0x00];
+        rt.sector_links = vec![(0, 1, 0), (1, 1, 1)];
+        // The player's own flags are clear: the watched sector's link fires, the plain one does not.
+        assert_eq!(rt.sector_messages(None, Some(0), Some(0)), vec![(0, "entered", 1)]);
+        assert!(rt.sector_messages(None, Some(1), Some(0)).is_empty());
+        // Leaving it sends the other label.
+        assert_eq!(rt.sector_messages(Some(0), Some(1), Some(0)), vec![(0, "exited", 1)]);
+        // A body the scripts ignore (`0x80100`) is not messaged either way, and neither is a caller
+        // that names no body (the pure-data checks ask about the table itself).
+        rt.things[0].flags = 0x80000;
+        assert!(rt.sector_messages(None, Some(0), Some(0)).is_empty());
+        assert_eq!(rt.sector_messages(None, Some(0), None), vec![(0, "entered", 1)]);
+    }
+
     fn door_runtime() -> Runtime {
         let mut rt = Runtime::new(&Level::default());
         rt.things = vec![ThingState {
@@ -8713,6 +9100,23 @@ mod tests {
         // Off the footprint is open air, and a surface above the feet is something the body is beside.
         assert_eq!(rt.thing_floor([2.0, 0.0, 1.2], 0.065), None);
         assert_eq!(rt.thing_floor([0.0, 0.0, 0.8], 0.065), None);
+    }
+
+    /// A projectile's own move is what the engine tests (`sithCollision_SearchForCollisions`), not
+    /// one sample per frame: a 30 u/s bolt travels 0.5 units at 60 fps, twice the 0.215 contact
+    /// radius, so the end sample can be outside the body while the move passed through it.
+    #[test]
+    fn a_fast_bolt_is_swept_between_frames() {
+        let mut rt = door_runtime();
+        rt.templates = vec!["walkplayer".into(), "+bryarbolt".into()];
+        rt.types = vec![2, 0];
+        let mut shot = rt.things[0].clone();
+        // Post-move position: half a unit past the body, having started exactly on it.
+        shot.pos = [0.5, 0.0, 0.0];
+        shot.vel = [30.0, 0.0, 0.0];
+        rt.things.push(shot);
+        assert!(!rt.shot_hits(1, 0), "the end sample alone is outside the body");
+        assert!(rt.shot_hits_swept(1, 0, 1.0 / 60.0), "the frame's move crosses it");
     }
 
     #[test]
@@ -10143,7 +10547,9 @@ mod tests {
         actor.pos = [0.0, 0.0, 0.0];
         actor.yaw = 180.0;
         let mut player = base.clone();
-        player.pos = [3.0, 0.0, 0.0];
+        // The target stands clear of the leap point: a body may not step into another body's
+        // cylinder, so a target *on* the leap point would be refused before the jump is read.
+        player.pos = [6.0, 0.0, 0.0];
         rt.things = vec![player, actor];
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
         rt.types = vec![10, 2];
@@ -10283,7 +10689,10 @@ mod tests {
         let base = rt.things[0].clone();
         let mut actor = base.clone();
         actor.pos = [0.0, 0.0, 0.0];
-        rt.things = vec![base, actor];
+        let mut player = base.clone();
+        // Away from the walked lane: the body rule keeps the actor out of the player's cylinder.
+        player.pos = [-5.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
         rt.types = vec![10, 2];
         rt.template_speed.insert("tuskan".into(), 0.5);
@@ -11126,6 +11535,50 @@ mod tests {
         assert!(rt.shots_fired > 0, "a registered actor at point-blank range never fired");
     }
 
+    /// The sight roll runs once per **instinct pass**, not once per frame: `sithAI_InstinctUpdate`
+    /// (`0x4e9e90`) sets each instinct's own clock to `now + 1000` before calling it. Rolling every
+    /// frame latched a 50 % chance in one or two frames, which is why the port's tuskens fired inside
+    /// the first second on level 3 while retail's series recorded no damage at all.
+    #[test]
+    fn sight_detection_rolls_once_a_second_not_once_a_frame() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        rt.things = vec![base, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_move.insert("walkplayer".into(), "physics".into());
+        rt.actor_flags.insert(1, 0x200);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=20.0\n\n\
+                 PrimaryFire 100.0, 0.0, 5.0, 0.0, 0.0, 500.0, 0.0, 0.0, 1.0, 0.0\n\
+                 Follow 0.0, 0.5\n",
+            ),
+        );
+        rt.things[0].pos = [8.0, 0.0, 0.0];
+        assert!((rt.detect_chance(1, 0) - 0.2).abs() < 1e-5, "the setup is not a 0.2 roll");
+        rt.time += 1.0 / 30.0;
+        rt.ai_tick(0, 1.0 / 30.0);
+        if rt.ai_detected.contains(&1) {
+            // The first attempt is immediate — the engine's instincts start at `next = 0` — and it may
+            // succeed. Then there is nothing left to schedule.
+            assert!(rt.ai_detect_at.contains_key(&1));
+            return;
+        }
+        let first = rt.ai_detect_at.get(&1).copied().expect("no attempt was scheduled");
+        assert!((first - (rt.time + 1.0)).abs() < 1e-4, "the first attempt was not armed 1 s out");
+        // Half a second of frames must not roll again; the next attempt is a whole second away.
+        for _ in 0..15 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(rt.ai_detect_at.get(&1).copied(), Some(first), "the roll ran again mid-second");
+        assert!(!rt.ai_detected.contains(&1), "a failed roll still latched the target");
+    }
+
     /// `turretfire` (`0x50a0f0`): a turret's class (`turdefault.ai`) carries **no `PrimaryFire`**, so
     /// the port used to leave every turret silent; and the handler never calls `SetMovePos`, so a
     /// turret must not walk either.
@@ -11151,6 +11604,9 @@ mod tests {
                  TurretFire 750.0, 75.0, 160.0, 160.0, 5.0, 0.20, 500.0, 10000.0, 0.0\n",
             ),
         );
+        // Acquisition is a separate roll (`sithAI_CanDetectSightThing`) with the engine's one-per-second
+        // cadence; this test is about the TurretFire path, so start it already engaged.
+        rt.ai_detected.insert(1);
         let emplaced = rt.things[1].pos;
         for _ in 0..30 {
             rt.time += 1.0 / 30.0;
@@ -11298,6 +11754,79 @@ mod tests {
     /// `returnhome` (handler `0x50bd70`) walks an otherwise idle actor back to its home anchor — the
     /// engine's `SetMoveThing` to `ai + 0x93`, then `SetLookFrame` at it. The port feeds the anchor
     /// through the remembered-position slot, so the walk and turn are the ones already tuned.
+    /// A script's `AIClearMode(actor, 0x606)` switches the actor's instincts **off**: no sight,
+    /// no acquisition, no shot, even with a clear line inside `sightdist` - exactly level 1's intro
+    /// Ry, whose `01_initialry.cog` starts with that call before it walks the body into the bar.
+    /// `AISetMode(actor, 0x200)` (the bit `00_aisleep.cog` wakes with) turns them back on.
+    #[test]
+    fn a_script_that_clears_the_ai_modes_stops_acquiring_and_the_wake_mode_restores_it() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = base.clone();
+        player.pos = [8.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_move.insert("walkplayer".into(), "physics".into());
+        rt.actor_flags.insert(1, 0x1004);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=20.0\n\n\
+                 PrimaryFire 100.0, 0.0, 5.0, 0.0, 0.0, 500.0, 0.0, 0.0, 1.0, 0.0\n\
+                 Follow 0.0, 0.5\n",
+            ),
+        );
+        rt.ai_home.insert(1, [0.0, 0.0, 0.0]);
+        rt.call("AIClearMode", &[Value::Num(1.0), Value::Num(0x606 as f64)]);
+        let mut acquired = false;
+        for _ in 0..200 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+            acquired |= rt.ai_detected.contains(&1);
+        }
+        assert!(!acquired, "a script-disabled actor acquired the player");
+        assert_eq!(rt.shots_fired, 0, "a script-disabled actor fired");
+        rt.call("AISetMode", &[Value::Num(1.0), Value::Num(0x200 as f64)]);
+        for _ in 0..200 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+            if rt.ai_detected.contains(&1) {
+                acquired = true;
+                break;
+            }
+        }
+        assert!(acquired, "the wake mode did not re-enable the AI");
+    }
+
+    /// `sithCollision_SearchForThingCollisions` keeps one body out of another: an actor's next step
+    /// may not share the player's (or a comrade's) cylinder, which is what stops the intro Ry from
+    /// standing 0.27 units from the eye and filling the spawn view (round 307).
+    #[test]
+    fn an_actor_may_not_step_into_another_bodys_cylinder() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut player = base.clone();
+        player.pos = [2.0, 0.0, 0.0];
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_hit.insert("walkplayer".into(), (0.065, 0.9));
+        rt.template_hit.insert("tuskan".into(), (0.073, 0.9));
+        assert!(
+            !rt.ai_can_walk(1, [1.95, 0.0, 0.0]),
+            "the actor stepped into the player's body"
+        );
+        assert!(
+            rt.ai_can_walk(1, [6.0, 0.0, 0.0]),
+            "an actor refused a step onto clear floor"
+        );
+    }
+
     #[test]
     fn an_actor_with_returnhome_walks_back_to_its_anchor() {
         let mut rt = door_runtime();
@@ -11400,7 +11929,7 @@ mod tests {
 
     /// `sithPlayerActions_Activate` (`0x4fc0a0`): the use sweep takes a linked thing unless it is a
     /// **weapon (type 3) or an item (type 5)** — those are fired or picked up, not used — and its
-    /// reach is `moveSize + 0.2` (the `−(−0.1)` sweep distance plus the 0.1 sphere), **0.265** units
+    /// reach is `moveSize + 0.1` (the `-0.1` at `0x523200` subtracted, not a second 0.1 sphere), **0.16** units
     /// for the player. The old port used 3.0, which is why its cantina switch fired from 0.8 units
     /// where retail's own use action does nothing.
     #[test]
@@ -11410,13 +11939,13 @@ mod tests {
         let mut bolt = base.clone();
         bolt.pos = [-0.1, 0.0, 0.0]; // nearer, but a weapon: fired, not used
         let mut door = base.clone();
-        door.pos = [-0.2, 0.0, 0.0]; // inside the 0.265 sweep
+        door.pos = [-0.1, 0.0, 0.0]; // inside the 0.16 sweep
         rt.things = vec![base.clone(), bolt, door];
         rt.templates = vec!["walkplayer".into(), "+bryarbolt".into(), "door".into()];
         rt.types = vec![10, 3, 0];
         rt.thing_links.push((0, 1, 1));
         rt.thing_links.push((0, 2, 2));
-        let used = rt.use_thing([0.0, 0.0, 0.0], [-1.0, 0.0], 0.265);
+        let used = rt.use_thing([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 7);
         assert_eq!(used, Some(2), "the use action took a weapon instead of the door: {used:?}");
         assert!(
             rt.pending_messages
@@ -11435,14 +11964,14 @@ mod tests {
         far.types = vec![10, 0];
         far.thing_links.push((0, 2, 1));
         assert_eq!(
-            far.use_thing([0.0, 0.0, 0.0], [-1.0, 0.0], 0.265),
+            far.use_thing([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 7),
             None,
-            "a door half a unit away was used past the engine's 0.265 sweep"
+            "a door half a unit away was used past the engine's 0.16 sweep"
         );
     }
 
     /// The surface half of the same sweep: a linked surface is used when its centre is inside the
-    /// engine's 0.265-unit reach and not when it is outside — the switch case the port over-reached
+    /// engine's 0.16-unit reach and not when it is outside — the switch case the port over-reached
     /// from 0.8 units before round 271.
     #[test]
     fn the_surface_use_stops_at_the_engine_reach() {
@@ -11457,10 +11986,11 @@ mod tests {
             light_rate: 0.0,
         };
         let mut near = door_runtime();
-        near.surfaces = vec![surface([-0.2, 0.0, 0.0]), surface([-0.5, 0.0, 0.0])];
+        near.surfaces = vec![surface([-0.1, 0.0, 0.0]), surface([-0.5, 0.0, 0.0])];
+        near.surface_sector = vec![0, 0];
         near.surface_links = vec![(0, 2, 0), (0, 3, 1)];
         assert_eq!(
-            near.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.265),
+            near.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 0),
             Some(0),
             "the plate inside the sweep was not used"
         );
@@ -11474,11 +12004,43 @@ mod tests {
 
         let mut far = door_runtime();
         far.surfaces = vec![surface([-0.5, 0.0, 0.0])];
+        far.surface_sector = vec![0];
         far.surface_links = vec![(0, 3, 0)];
         assert_eq!(
-            far.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.265),
+            far.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 0),
             None,
-            "a plate half a unit away was used past the engine's 0.265 sweep"
+            "a plate half a unit away was used past the engine's 0.16 sweep"
+        );
+    }
+
+    /// The engine searches **the body's sector** for a switch (`sithPlayerActions_Activate`,
+    /// `0x4fc0a0`): the cantina plate belongs to sector 7's surface slice while the player stands in 260,
+    /// which is why retail's `doorstatus` stays 0 at every measured pose (rounds 302-303). A linked plate
+    /// in another room must not be searched.
+    #[test]
+    fn the_use_scan_ignores_a_plate_an_adjoining_room_owns() {
+        let mut rt = door_runtime();
+        rt.surfaces = vec![SurfaceState {
+            center: [-0.1, 0.0, 0.0],
+            cel: 0.0,
+            anim: 0.0,
+            slide: [0.0; 2],
+            next: 0.0,
+            light: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
+        }];
+        rt.surface_links = vec![(0, 2, 0)];
+        rt.surface_sector = vec![7];
+        assert_eq!(
+            rt.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 260),
+            None,
+            "a plate in sector 7 was used from sector 260"
+        );
+        assert_eq!(
+            rt.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 7),
+            Some(0),
+            "the plate's own sector did not reach it"
         );
     }
 
@@ -11739,7 +12301,10 @@ mod tests {
             "the scan acquired a body outside the class's view cone"
         );
 
-        // Turn the actor onto it: same range, now inside the cone, so the find lands.
+        // Turn the actor onto it: same range, now inside the cone, so the find lands. The target's
+        // `thingflags & 0x4` is the engine's "plainly visible" bit, which makes the detection roll
+        // certain and keeps this a test of the cone, not of the random draw.
+        rt.things[0].flags = 0x4;
         rt.things[1].yaw = 180.0;
         rt.ai_scan.clear();
         rt.ai_last_seen.clear();

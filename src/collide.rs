@@ -59,10 +59,14 @@ pub struct Solids {
     /// not the model's box — a *structure* whose model is much taller or offset from its origin is
     /// approximated. The `.3do` bounds are the upgrade path, and the radius is the engine's own
     /// number (`sithThing` collision), so the width is right even where the height is a guess.
-    /// Each solid thing: its centre, its collision radius (`size=` from the template chain) and the
-    /// vertical span of its own model. The cylinder used to be eight radii tall in both directions,
-    /// which is a guess: a table is short and a column is tall, and the `.3do` knows which.
-    pub things: Vec<([f32; 3], f32, f32, f32)>,
+    /// Each solid thing: its centre, its collision radius (`size=` from the template chain), the
+    /// vertical span of its own model, and the sector the thing belongs to. The cylinder used to be
+    /// eight radii tall in both directions, which is a guess: a table is short and a column is tall,
+    /// and the `.3do` knows which. The sector is part of the record because
+    /// `sithCollision_SearchForThingCollisions` walks the **moving body's** sector thing list: a thing
+    /// standing in another room cannot touch it. `18Ascend`'s spawn sits over an elevator whose leaves
+    /// belong to the shaft below (sector 504), and colliding with them from 485 pinned the body.
+    pub things: Vec<([f32; 3], f32, f32, f32, usize)>,
     /// Every downward-facing solid surface with its polygon: the floors a body can stand on.
     pub floors: Vec<Face>,
     /// Every vertical solid surface with its polygon: the walls. A wall only pushes while the
@@ -1076,15 +1080,105 @@ impl Solids {
     /// cylinder sized from the model's own plan footprint (see `solid_things`), so the equivalent test
     /// is a swept circle against a circle: solve `|P + d t - C| = R + r`. The normal is radial, which is
     /// the right slide frame for a round obstacle and is what makes a body round it instead of stopping.
+    /// Whether a segment crosses a **solid thing's** cylinder — the bar counter, a crate, a column.
+    ///
+    /// The engine's sight and shot rays go through the collision search, so a table between two
+    /// bodies blocks both; `segment_blocked` alone tests world surfaces, which let level 1's cantina
+    /// patron see the player across the bar counter (round 307). A segment that *starts* inside a
+    /// cylinder is not blocked by it: that is the actor's own body.
+    pub fn segment_thing(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len < 1e-4 {
+            return false;
+        }
+        let dir = [d[0] / len, d[1] / len, d[2] / len];
+        // The circle test runs in the floor plane, so its quadratic's `a` is the ray's horizontal
+        // speed squared, not 1: a sloped ray crosses a cylinder over a longer stretch of `t`.
+        let a = dir[0] * dir[0] + dir[1] * dir[1];
+        if a < 1e-8 {
+            return false;
+        }
+        for &(centre, radius, z_min, z_max, _sector) in &self.things {
+            let (dx, dy) = (from[0] - centre[0], from[1] - centre[1]);
+            let b = 2.0 * (dir[0] * dx + dir[1] * dy);
+            let c = dx * dx + dy * dy - radius * radius;
+            // The ray starts inside this cylinder: it is the actor's own body, not an obstacle.
+            if c <= 0.0 {
+                continue;
+            }
+            // The ray **ends** inside it: that is the target's own body, which never blocks the
+            // sight of itself.
+            let (tx, ty) = (to[0] - centre[0], to[1] - centre[1]);
+            if tx * tx + ty * ty <= radius * radius && to[2] >= z_min && to[2] <= z_max {
+                continue;
+            }
+            let disc = b * b - 4.0 * a * c;
+            if disc < 0.0 {
+                continue;
+            }
+            // Entry and exit of the infinite cylinder, clipped to the segment: the ray is inside the
+            // circle for that whole stretch, so it is blocked when its height there meets the span —
+            // including a ray that comes in over the top and dips into the counter.
+            let enter = (-b - disc.sqrt()) / (2.0 * a);
+            let leave = ((-b + disc.sqrt()) / (2.0 * a)).min(len);
+            if enter <= 0.0 || enter > len {
+                continue;
+            }
+            let (z0, z1) = (from[2] + dir[2] * enter, from[2] + dir[2] * leave);
+            if z0.min(z1) <= z_max && z0.max(z1) >= z_min {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether `other` is in the collision search of a sphere of `radius` swept `left` along `dir` from
+    /// `at` in `sector`. `sithCollision_SearchForCollisions` (`0x4e8160`) adds a sector only when the
+    /// sweep **reaches one of its adjoins**, so a crate in the next room (or in a trigger sliver inside
+    /// this one) collides once the body gets to the opening — while a body resting on a floor opening
+    /// and walking level (`18Ascend`'s spawn over its shaft) never reaches the leaves below it.
+    pub fn in_search(
+        &self,
+        sector: usize,
+        other: usize,
+        at: [f32; 3],
+        dir: [f32; 3],
+        left: f32,
+        radius: f32,
+    ) -> bool {
+        if other == sector {
+            return true;
+        }
+        self.portals.get(sector).is_some_and(|portals| {
+            portals.iter().any(|portal| {
+                if portal.adjoin != other {
+                    return false;
+                }
+                let now = dot(sub(at, portal.point), portal.normal);
+                let then = now + dot(dir, portal.normal) * left;
+                // Crossing the plane, or overlapping it by more than float dust on the way. A sphere
+                // that only touches it (a body standing on it) is not a contact.
+                now.signum() != then.signum() || now.abs().min(then.abs()) < radius - 1e-4
+            })
+        })
+    }
+
     fn sweep_things(
         &self,
         at: [f32; 3],
         dir: [f32; 3],
         left: f32,
         radius: f32,
+        sector: usize,
     ) -> Option<(f32, [f32; 3])> {
         let mut best: Option<(f32, [f32; 3])> = None;
-        for &(centre, thing_radius, z_min, z_max) in &self.things {
+        for &(centre, thing_radius, z_min, z_max, thing_sector) in &self.things {
+            // `SearchForThingCollisions` walks the sector lists of the sectors the sweep reaches: a
+            // crate in the room next door is not a contact until the body gets to the opening.
+            if !self.in_search(sector, thing_sector, at, dir, left, radius) {
+                continue;
+            }
             if at[2] + radius < z_min || at[2] - radius > z_max {
                 continue;
             }
@@ -1154,7 +1248,7 @@ impl Solids {
             // A solid model is a contact like a wall: whichever comes first stops the move. A body that
             // walks into a crate stops against it (retail does: `walk3_spawn` and `walk6_spawn` both
             // halt at props), and the radial normal makes the slide round it.
-            let body = self.sweep_things(at, dir, left, radius);
+            let body = self.sweep_things(at, dir, left, radius, here);
             if let Some((travel, normal)) = body
                 && room.0.is_none_or(|hit| travel < hit.distance)
             {
@@ -1360,7 +1454,7 @@ impl Solids {
         let at = if std::env::var_os("BK_NO_THINGS").is_some() {
             at
         } else {
-            let pushed = self.push_out_of_things(at, radius);
+            let pushed = self.push_out_of_things(at, radius, here);
             if pushed == at {
                 at
             } else {
@@ -1401,8 +1495,11 @@ impl Solids {
     /// `sithPhysics` treats a collidable thing as a cylinder; the radius is the template`s own
     /// `size=` (the engine`s number, `sithThing` collision), and the height is the eight radii the
     /// `Solids::things` comment names as the known approximation.
-    fn push_out_of_things(&self, mut at: [f32; 3], radius: f32) -> [f32; 3] {
-        for &(centre, thing_radius, z_min, z_max) in &self.things {
+    fn push_out_of_things(&self, mut at: [f32; 3], radius: f32, sector: usize) -> [f32; 3] {
+        for &(centre, thing_radius, z_min, z_max, thing_sector) in &self.things {
+            if !self.in_search(sector, thing_sector, at, [0.0; 3], 0.0, radius) {
+                continue;
+            }
             // The body's own radius against the thing's model span: a table blocks a walking body, a
             // lamp above head height does not.
             if at[2] + radius < z_min || at[2] - radius > z_max {
@@ -1771,6 +1868,12 @@ impl Solids {
 /// of movers that is nothing; a level with hundreds of projectiles would want the sector's own faces
 /// instead of the whole list.
 pub fn segment_blocked(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+    self.segment_blocked_at(from, to).is_some()
+}
+
+/// The face that stops `from -> to`, if one does: the same test as [`Self::segment_blocked`], with
+/// the surface and the crossing point so a trace can name the wall instead of guessing.
+pub fn segment_blocked_at(&self, from: [f32; 3], to: [f32; 3]) -> Option<(usize, [f32; 3])> {
     for face in &self.walls {
         if face.verts.len() < 3 {
             continue;
@@ -1790,10 +1893,10 @@ pub fn segment_blocked(&self, from: [f32; 3], to: [f32; 3]) -> bool {
             from[2] + (to[2] - from[2]) * t,
         ];
         if in_polygon(&face.verts, face.normal, p) {
-            return true;
+            return Some((face.surface, p));
         }
     }
-    false
+    None
 }
 }
 
@@ -1890,7 +1993,15 @@ impl Solids {
                 return true;
             }
         }
-        self.clearance(sector, pos).is_none_or(|c| c >= radius)
+        self.clearance(sector, pos).is_none_or(|c| {
+            // `sithIntersect_IsSphereInSector` snaps a plane distance within `1e-5` of zero to zero
+            // (`_DAT_00523288` is 1e-5, `_DAT_00523284` is 0) before the radius test, so a body
+            // resting exactly on its own floor is inside it. Without the band, `floor + radius` as
+            // f32 lands a ten-millionth below the plane and the containment check rejects a body
+            // standing on solid ground (`18Ascend`'s spawn did exactly that, every frame).
+            let c = if c.abs() <= 1e-5 { 0.0 } else { c };
+            c >= radius
+        })
     }
 
     /// The sector a *body* of `radius` should start in.
@@ -2214,6 +2325,7 @@ impl Solids {
         planes
             .iter()
             .filter(|p| p.normal[2] < -0.7)
+
             // The plane's height directly under `pos`: exact for a sloped floor too,
             // unlike the plane's own point, which can be a corner far away.
             .map(|p| {
@@ -2315,6 +2427,28 @@ mod tests {
         surface_owner: Vec::new(),
         adjoin_flags: Vec::new(),
         }
+    }
+
+    /// `sithIntersect_IsSphereInSector` snaps a plane distance within `1e-5` of zero to zero before
+    /// comparing it with the radius (`_DAT_00523288` is 1e-5, `_DAT_00523284` is 0). A body resting on
+    /// its own floor computes `floor + radius` in f32, which lands a ten-millionth outside the plane:
+    /// the engine calls that inside, and so must the port (`18Ascend`'s spawn rejected every frame
+    /// before this band existed, which flipped its sector into the shaft below).
+    #[test]
+    fn float_dust_outside_a_plane_is_still_inside_the_sector() {
+        let room = seam_floor();
+        assert!(
+            room.inside_sector(0, [0.5, 0.0, 1e-7], 0.0),
+            "a point a ten-millionth inside the plane is outside"
+        );
+        assert!(
+            room.inside_sector(0, [0.5, 0.0, -1e-6], 0.0),
+            "a point inside the engine's 1e-5 band was rejected"
+        );
+        assert!(
+            !room.inside_sector(0, [0.5, 0.0, -2e-5], 0.0),
+            "the band is not a licence to stand 2e-5 outside the room"
+        );
     }
 
     #[test]
@@ -2761,6 +2895,79 @@ mod tests {
         // Headroom is the difference, which is the number the camera uses.
         let headroom = ceiling - (-0.5);
         assert!((headroom - 1.5).abs() < 1e-4, "headroom = {headroom}");
+    }
+
+    /// A neighbour sector joins the collision search only when the sweep reaches the opening into it:
+    /// a body resting on a floor opening and walking level stays out of the room below (`18Ascend`'s
+    /// spawn), while a body dropping through it, or walking into a wall opening, is searched there.
+    #[test]
+    fn a_neighbour_is_searched_only_when_the_sweep_reaches_its_opening() {
+        let mut room = seam_floor();
+        let opening = |normal: [f32; 3], adjoin: usize| Portal {
+            adjoin,
+            link: 0,
+            verts: Vec::new(),
+            normal,
+            point: [0.0; 3],
+        };
+        // Sector 0's floor opens onto sector 1 below; its wall at x = 0 opens onto sector 2.
+        room.portals = vec![vec![opening([0.0, 0.0, 1.0], 1), opening([1.0, 0.0, 0.0], 2)]];
+        let r = 0.065;
+        let level = [1.0, 0.0, 0.0];
+        assert!(room.in_search(0, 0, [5.0, 0.0, 5.0], level, 0.1, r), "a body's own sector");
+        assert!(
+            !room.in_search(0, 1, [5.0, 0.0, r], level, 0.1, r),
+            "a body standing on the floor opening searched the room below it"
+        );
+        assert!(
+            room.in_search(0, 1, [5.0, 0.0, r], [0.0, 0.0, -1.0], 0.1, r),
+            "a body dropping through the opening did not search the room below"
+        );
+        assert!(
+            room.in_search(0, 2, [0.1, 0.0, 1.0], [-1.0, 0.0, 0.0], 0.1, r),
+            "a body walking into the wall opening did not search the next room"
+        );
+        assert!(
+            !room.in_search(0, 2, [3.0, 0.0, 1.0], [-1.0, 0.0, 0.0], 0.1, r),
+            "a body far from the wall opening searched the next room"
+        );
+    }
+
+    /// A solid thing's cylinder stops a sight ray: a bar counter between two bodies blocks the
+    /// view the way the engine's collision ray does, while a ray that *starts* inside a cylinder
+    /// (the actor's own body) is not blocked by it.
+    #[test]
+    fn a_solid_thing_blocks_the_sight_segment_but_not_from_inside_it() {
+        let mut room = seam_floor();
+        room.things = vec![([1.0, 0.0, -0.5], 0.5, -1.0, 0.0, 0)];
+        assert!(
+            room.segment_thing([0.0, 0.0, -0.5], [2.0, 0.0, -0.5]),
+            "a counter between the bodies did not block sight"
+        );
+        assert!(
+            !room.segment_thing([1.0, 0.0, -0.5], [2.0, 0.0, -0.5]),
+            "the ray started inside the cylinder and was called blocked"
+        );
+        assert!(
+            !room.segment_thing([0.0, 0.0, 1.5], [2.0, 0.0, 1.5]),
+            "a ray above the counter was blocked"
+        );
+        // A segment that ends inside a cylinder is aimed at that body: it is not an obstacle to it.
+        assert!(
+            !room.segment_thing([0.0, 0.0, -0.5], [1.0, 0.0, -0.5]),
+            "the target's own body blocked the sight of itself"
+        );
+        // A sloped ray (an actor on a ledge looking down) is blocked too: the circle test must use
+        // the ray's horizontal speed, not assume it is level.
+        assert!(
+            room.segment_thing([0.0, 0.0, 0.5], [2.0, 0.0, -1.5]),
+            "a downward ray through the counter was not blocked"
+        );
+        // A ray that enters the circle above the counter's top and dips into it before leaving.
+        assert!(
+            room.segment_thing([0.4, 0.0, 0.1], [1.6, 0.0, -0.3]),
+            "a ray dipping into the counter from above was not blocked"
+        );
     }
 
     /// `support` answers the question a plane list cannot: is the body *over* this face?

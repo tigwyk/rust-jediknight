@@ -61,13 +61,18 @@ function Read-Tsv([string]$Path, [int]$TimeColumn, [string]$First) {
 }
 
 $retail = Read-Tsv $RetailPath 0 'held_ms'
-# A trace with a `game_ms` column (7th) carries the engine's own clock: use it as the time axis, since
-# the injected hold length is not game time at retail's few frames a second. Older fixtures keep held_ms.
+# A trace with a `game_ms` column (7th) carries the engine's own clock. It is **not** the movement axis:
+# measured on the first re-capture (round 294), a 3 000 ms hold produced 17 019 ms of game clock in 19 s
+# of wall time — the engine's clock keeps accumulating through the console dialog and the foreground
+# waits, so it measures wall time, not the time the body was pushed. `held_ms` is the walking time (the
+# key is down for exactly that span, at 1.2 u/s ⇒ the 0.5-0.9 units per 600 ms segment the samples show),
+# so it stays the axis; the engine clock is reported beside it as the drift measurement it is.
 $retailRows = @(Get-Content -LiteralPath $RetailPath | Where-Object { $_ -notmatch '^\s*(#|$)' -and $_ -notmatch 'held_ms' })
 $clock = 'held_ms'
 if ($retailRows.Count -eq $retail.Count -and @($retailRows | Where-Object { ($_ -split "`t").Length -ge 7 }).Count -eq $retailRows.Count) {
-  for ($i = 0; $i -lt $retail.Count; $i++) { $retail[$i].T = [double](($retailRows[$i] -split "`t")[6]) }
-  $clock = 'game_ms'
+  $engineClock = [double](($retailRows[-1] -split "`t")[6])
+  $walked = [double](($retailRows[-1] -split "`t")[0])
+  Write-Host ("  engine clock: {0:N0} ms over {1:N0} ms of held forward ({2:N2}x; counts the console and foreground waits)" -f $engineClock, $walked, ($engineClock / [math]::Max($walked, 1)))
 }
 Write-Host ("  retail time axis: {0}" -f $clock)
 $port = Read-Tsv $PortPath 1 'tick'

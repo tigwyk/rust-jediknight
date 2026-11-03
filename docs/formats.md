@@ -539,6 +539,11 @@ table shifts every colour index up or down the palette. So a table is a **light 
 and distance is only one of the things that selects one (the engine also uses the sector's
 ambient and the surface's extra light).
 
+The **base** of the product is the sector's own `AMBIENT LIGHT + EXTRA LIGHT`: the renderer hands that
+value to `rdCamera_SetAmbientLight` per sector (`sithRender_RenderSectors`, `0x4c6c40`), so a room that
+bakes 0.5 ambient draws at roughly half brightness before the ramp. Level 2's 641 sectors average 0.523;
+the world draw used a base of 1.0 until round 301 and came out 1.99x the retail brightness there.
+
 This build applies them through `tex::Palette::set_light_ramp` and `light_scale`: the ramp
 is installed once per level, normalised so its own midpoint is unity, and a surface's baked
 per-vertex intensity walks it instead of scaling the texture linearly. Level 1's spawn view

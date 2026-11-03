@@ -10,3 +10,9 @@ katarn_ai_face	03katarn	-0.76	-4.74	-0.20	0	-90
 # frame from here shows the Tuskan by the fence, so this is the engagement pose: retail yaw -53 is
 # forward (cos,-sin) = (0.60,0.80), i.e. +x/+y toward the thing.
 katarn_ai_193	03katarn	-0.76	-4.74	-0.20	0	-53
+# secret_enter: level 1's first secret sector (243, link 1 of `00_SecretAreas.cog` at placed cog index
+# 28, centre from `--sector-locate 28`). The cog's `entered:` handler ORs the sender id into `flags`,
+# so a warp into the sector is a **movement** trigger with no input to synthesise: retail's console
+# `cogstatus 28` after the warp reads the same variable the port's `--cogstatus-after 28` prints.
+# Round 198 already measured retail flags 0 -> 2 here; this row makes it a repeatable fixture.
+secret_enter	01narshadda	-6.40	-4.22	-0.72	0	0

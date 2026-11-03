@@ -235,11 +235,12 @@ foreground), hold the key for exactly `HoldMs`, release, then read the pose whil
 advances its clock per frame (`sithTime_Advance`, clamped to [10, 500] ms) and retail renders a few
 frames a second here, so a 600 ms hold is 2-4 frames. Since 2026-11-01 the capture also writes
 `game_ms`, the engine's own clock (`DAT_00836c14`, read with `ReadProcessMemory`; JK.EXE has a fixed
-base) since the start pose, and `trace-compare.ps1` uses it as the time axis when present. It counts
-the coast after each per-segment key release too, and is read just after `coords`, so a sample can
-run up to one frame long if closing the console resumes the game first. Replay the port for at least
-the last `game_ms` (`port-trace.ps1`'s length is `HoldMs x Segments`); past its end the compare clamps
-to the port's final frame. The port is deterministic by construction: capture-mode
+base) since the start pose. It is **not** the time axis: the first re-capture (round 294) measured
+17 019 ms of engine clock for a 3 000 ms hold, because the clock keeps running through the console
+dialog and the foreground waits. `held_ms` stays the axis (the key is down for exactly that span), and
+`trace-compare.ps1` prints the engine clock beside it as drift. Replay the port for the walk's
+`held_ms` (`port-trace.ps1`'s length is `HoldMs x Segments`); past its end the compare clamps to the
+port's final frame. The port is deterministic by construction: capture-mode
 `--shot` pins `dt` at 1/60 s and `BK_WALK_FORWARD` replaces the keyboard, so a rerun is identical.
 
 Formats (tab separated, `#` comments allowed):

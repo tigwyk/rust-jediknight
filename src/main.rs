@@ -219,6 +219,10 @@ const GATES: &[&str] = &[
     "--quicksave",
     "--sleep",
     "--triggers",
+    // A movement-triggered interaction end to end: `00_SecretAreas.cog`'s `entered` handler flips its
+    // `flags` bit from the link id, which retail's own `cogstatus 28` reads as `flags 1`,
+    // `maxsecrets 6` (round 308's fixture).
+    "--secret",
     "--transition",
     // Every campaign level loads, its own scripts act on a live world without an error, and
     // finishing it lands on the graph's film and the level that follows — the whole spine.
@@ -287,7 +291,16 @@ fn print_cog_status_after(world: Option<&World>, sim: Option<&Sim>, index: usize
     let (Some(world), Some(sim)) = (world, sim) else { return };
     let Some(inst) = world.level.cogs.get(index) else { return };
     let Some(script) = world.cogs.get(&inst.script) else { return };
-    let Some((_, vm)) = sim.instances.get(index) else { return };
+    // `sim.instances` is the list of **started** VMs in start order, not the level's cog table: the
+    // two indices only coincide when a level starts every cog in file order. `Vm::cog_index` is the
+    // engine's own link back to the placed cog, so a trigger probe reads the script it asked for.
+    let Some((_, vm)) = sim
+        .instances
+        .iter()
+        .find(|(_, vm)| vm.cog_index == index as i32)
+    else {
+        return;
+    };
     println!("Cog #{index} (after the run): Name:{}  Script {}", inst.script, inst.script);
     print_symbol_table(script, vm);
 }
@@ -295,9 +308,64 @@ fn print_cog_status_after(world: Option<&World>, sim: Option<&Sim>, index: usize
 #[derive(Resource)]
 struct CogStatusAfter(Option<usize>);
 
+/// `--actor-moves`: report placed things whose body left its authored pose.
+#[derive(Resource)]
+struct ActorMoves(bool);
+
+fn print_actor_moves(world: Option<&World>, sim: Option<&Sim>) {
+    let (Some(world), Some(sim)) = (world, sim) else { return };
+    let rt = sim.world.borrow();
+    let mut moved = 0usize;
+    let mut shown = 0usize;
+    for (index, placed) in world.level.things.iter().enumerate() {
+        let Some(thing) = rt.things.get(index) else { continue };
+        let d = ((thing.pos[0] - placed.pos[0]).powi(2)
+            + (thing.pos[1] - placed.pos[1]).powi(2)
+            + (thing.pos[2] - placed.pos[2]).powi(2))
+        .sqrt();
+        if d > 0.05 {
+            moved += 1;
+            if shown < 12 {
+                println!(
+                    "actor-moves: thing {index} ({}) moved {d:.2} units from its placement, ai flags {:#x}",
+                    placed.template,
+                    rt.actor_flags.get(&index).copied().unwrap_or(0)
+                );
+                shown += 1;
+            }
+        }
+    }
+    println!("actor-moves: {moved} of {} placed thing(s) left their authored pose", world.level.things.len());
+    // Who is **walking right now**: the pose delta above is cumulative, so at a late sample it
+    // cannot tell an actor that settled ten seconds ago from one that keeps pacing the camera. The
+    // per-frame walk velocity can (`walk_vel` is only written on a frame the body actually moved).
+    let mut walking: Vec<(usize, f32)> = rt
+        .walk_vel
+        .iter()
+        .filter_map(|(index, v)| {
+            let speed = (v[0] * v[0] + v[1] * v[1]).sqrt();
+            (speed > 0.01).then_some((*index, speed))
+        })
+        .collect();
+    walking.sort_by(|a, b| b.1.total_cmp(&a.1));
+    for (index, speed) in walking.iter().take(12) {
+        let template = world
+            .level
+            .things
+            .get(*index)
+            .map(|t| t.template.as_str())
+            .unwrap_or("?");
+        println!(
+            "actor-moves: thing {index} ({template}) is walking {speed:.2} u/s, ai flags {:#x}",
+            rt.actor_flags.get(index).copied().unwrap_or(0)
+        );
+    }
+}
+
 fn exit_after_frames(
     after: Option<Res<ExitAfter>>,
     after_status: Option<Res<CogStatusAfter>>,
+    moves: Option<Res<ActorMoves>>,
     world: Option<Res<World>>,
     sim: Option<Res<Sim>>,
     mut frames: Local<u64>,
@@ -310,6 +378,9 @@ fn exit_after_frames(
         // exactly what a load-time probe cannot show.
         if let Some(index) = after_status.and_then(|a| a.0) {
             print_cog_status_after(world.as_deref(), sim.as_deref(), index);
+        }
+        if moves.as_ref().is_some_and(|m| m.0) {
+            print_actor_moves(world.as_deref(), sim.as_deref());
         }
         exit.write(AppExit::Success);
     }
@@ -627,6 +698,7 @@ fn main() {
     // ends. Phase 1 step 4's movement-trigger fixture needs exactly this: `--cogstatus` prints at load
     // (before a trigger can fire), while retail's capture reads whatever the walk/trigger left behind.
     let mut cogstatus_after: Option<usize> = None;
+    let mut actor_moves = false;
     // `--surfaces-at "x,y,z"`: with `--collide`, print the level surfaces near a point - the geometry
     // probe behind the `walk_street45` stop (retail stops at x 3.27 where the port walks off).
     let mut surfaces_at: Option<[f32; 3]> = None;
@@ -655,6 +727,7 @@ fn main() {
     let mut pull_check = false;
     let mut ammo_check = false;
     let mut triggers_check = false;
+    let mut secret_check = false;
     let mut load_percent: f32 = 50.0;
     let mut load_check = false;
     let mut die_check = false;
@@ -975,6 +1048,9 @@ fn main() {
                     i += 1;
                 }
             }
+            // `--actor-moves`: at the frame budget, report the placed things whose body is no longer
+            // where the level placed it — the scene-motion half of the series gate's diagnosis.
+            "--actor-moves" => actor_moves = true,
             "--cogstatus-after" => {
                 cogstatus_after = args.get(i + 1).and_then(|v| v.parse().ok());
                 if cogstatus_after.is_some() {
@@ -1006,6 +1082,7 @@ fn main() {
             "--ammo" => ammo_check = true,
             // `--triggers`: the sector links a level declares, and which of them can hear a message.
             "--triggers" => triggers_check = true,
+            "--secret" => secret_check = true,
             // `--load-bar <percent> <out.png>`: the loading screen`s own bar, drawn and measured.
             "--load-bar" => {
                 i += 1;
@@ -2215,12 +2292,22 @@ fn main() {
             if !near {
                 continue;
             }
+            // The **extent**, not just the first vertex: a wall whose quad does or does not reach the
+            // body's x is the difference between a real block and an over-broad face.
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for p in &pts {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
             println!(
-                "  level surface {i}: adjoin {} surfflags {:#x} verts {} first ({:.2},{:.2},{:.2})",
-                s.adjoin, s.surfflags, pts.len(), pts[0][0], pts[0][1], pts[0][2]
+                "  level surface {i}: adjoin {} surfflags {:#x} verts {} first ({:.2},{:.2},{:.2}) x[{:.2}..{:.2}] y[{:.2}..{:.2}] z[{:.2}..{:.2}]",
+                s.adjoin, s.surfflags, pts.len(), pts[0][0], pts[0][1], pts[0][2],
+                lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]
             );
         }
-        for (centre, radius, _height, top) in &solids.things {
+        for (centre, radius, _height, top, _sector) in &solids.things {
             let d = ((centre[0] - at[0]).powi(2) + (centre[1] - at[1]).powi(2)).sqrt();
             if d > 3.0 || (centre[2] - at[2]).abs() > 3.0 {
                 continue;
@@ -2231,8 +2318,17 @@ fn main() {
             );
         }
         for sector in solids.sectors_around(at) {
+            // The **adjoins** matter as much as the floor: a sector the body is in whose adjoin set
+            // does not reach the floor below is a floor-search dead end (level 2's 22/23/39 seam).
+            let adjoins: Vec<usize> = solids
+                .portals
+                .get(sector)
+                .into_iter()
+                .flatten()
+                .map(|portal| portal.adjoin)
+                .collect();
             println!(
-                "  sector {sector}: clearance {:?} floor_below {:?}",
+                "  sector {sector}: clearance {:?} floor_below {:?} adjoins {adjoins:?}",
                 solids.clearance(sector, at),
                 solids.floor_below(sector, at)
             );
@@ -4309,13 +4405,13 @@ fn main() {
                             "soak: sector {} -> {sector} at {:?}, {} link message(s)",
                             before.map_or(-1, |s| s as i32),
                             rt.things[player].pos,
-                            rt.sector_messages(before, after).len()
+                            rt.sector_messages(before, after, Some(player)).len()
                         );
                     }
                     rt.things[player].sector = sector as i32;
                 }
                 let mut queued: Vec<(String, Option<usize>, Option<i32>, [f64; 2])> = rt
-                    .sector_messages(before, after)
+                    .sector_messages(before, after, Some(player))
                     .into_iter()
                     .map(|(instance, label, link)| {
                         (label.to_string(), Some(link as usize), Some(instance as i32), [0.0; 2])
@@ -4365,7 +4461,7 @@ fn main() {
             // itself, and holding a read guard across `run_label` deadlocks (the fail-fast panic).
             let links = {
                 let rt = sim_world.borrow();
-                rt.sector_messages(Some(before.max(0) as usize), Some(watched))
+                rt.sector_messages(Some(before.max(0) as usize), Some(watched), Some(player))
             };
             for (instance, label, link) in links {
                 if let Some((_, vm)) = vms.iter_mut().find(|(_, vm)| vm.cog_index == instance as i32)
@@ -6131,7 +6227,7 @@ fn main() {
                 vm.source = own;
         // `::sleeping` is the sleep unwind, not a failure: the handler is suspended and resumes later.
         if let Err(error) = ran
-            && error != "::sleeping"
+            && error != cog::SLEEPING
         {
                     continue;
                 }
@@ -7650,11 +7746,11 @@ fn main() {
         {
             let things = &solids.things;
             assert!(!things.is_empty(), "no solid things at all in this level");
-            for (_, radius, lo, hi) in things {
+            for (_, radius, lo, hi, _sector) in things {
                 assert!(*radius > 0.0, "a solid thing with radius {radius}");
                 assert!(hi > lo, "a solid thing whose model spans {lo}..{hi}");
             }
-            let heights: Vec<f32> = things.iter().map(|(_, _, lo, hi)| hi - lo).collect();
+            let heights: Vec<f32> = things.iter().map(|(_, _, lo, hi, _)| hi - lo).collect();
             let low = heights.iter().cloned().fold(f32::MAX, f32::min);
             let tall = heights.iter().cloned().fold(0.0f32, f32::max);
             assert!(tall > low * 1.5, "every solid thing is the same height ({low}..{tall})");
@@ -8060,6 +8156,77 @@ fn main() {
         return;
     }
 
+    if secret_check {
+        // Retail's own numbers for this pose are the fixture: `cogstatus 28` after a warp into sector
+        // 243 reads `maxsecrets 6`, `flags 1` (round 308), so the gate asserts the script's own count
+        // and the bit its `entered` handler sets from the message's link id.
+        let sim_world = runtime::Runtime::handle(&world.level);
+        let mut rt = sim_world.borrow_mut();
+        rt.wire_links(&world.level.cogs, &world.cogs);
+        let index = world
+            .level
+            .cogs
+            .iter()
+            .position(|inst| {
+                world.cogs.get(&inst.script).is_some_and(|s| {
+                    s.label("entered").is_some()
+                        && s.symbols
+                            .iter()
+                            .any(|sym| sym.name.eq_ignore_ascii_case("maxsecrets"))
+                })
+            })
+            .expect("the level places no secret-area script");
+        let script = world
+            .cogs
+            .get(&world.level.cogs[index].script)
+            .expect("the placed secret-area script is in the archive");
+        let bound: Vec<(u32, usize)> = rt
+            .sector_links
+            .iter()
+            .filter(|(inst, _, _)| *inst == index)
+            .map(|(_, link, sector)| (*link as u32, *sector))
+            .collect();
+        // The engine binds each `sector` symbol from its `linkid=`; an unbound one is -1, which is
+        // what `maxSecrets`' `>= 0` test counts.
+        let mut vm = cog::Vm::new();
+        vm.cog_index = index as i32;
+        for symbol in &script.symbols {
+            if symbol.kind != cog::SymKind::Sector {
+                continue;
+            }
+            let Some(link) = symbol.linkid else { continue };
+            let sector = bound
+                .iter()
+                .find(|(mask, _)| *mask == link)
+                .map(|(_, sector)| *sector as f64)
+                .unwrap_or(-1.0);
+            vm.set_var(&symbol.name, cog::Value::Num(sector));
+        }
+        let _ = vm.run_label(script, "startup");
+        let max = vm.var("maxsecrets").num();
+        let (link, sector) = *bound
+            .iter()
+            .find(|(mask, _)| *mask == 1)
+            .expect("the level links no secret sector at link 1");
+        let player = rt.player_thing();
+        let messages = rt.sector_messages(None, Some(sector), Some(player));
+        assert!(
+            messages.contains(&(index, "entered", link as i32)),
+            "entering sector {sector} did not message the secret script: {messages:?}"
+        );
+        vm.sender = link as i64;
+        if let Err(error) = vm.run_label(script, "entered") {
+            panic!("the secret script's `entered` failed: {error}");
+        }
+        let flags = vm.var("flags").num();
+        println!(
+            "secret: sector {sector} (link {link}) -> flags {flags} after `entered`, maxsecrets {max}"
+        );
+        assert_eq!(max, 6.0, "maxsecrets should be the level's six linked sectors (retail 6)");
+        assert_eq!(flags, 1.0, "`entered` should set the link-1 bit (retail 1)");
+        println!("--- secret: maxsecrets {max}, flags {flags} ---");
+        return;
+    }
     if triggers_check {
         // `sithCog_LinkCogToSector` in tabular form: a script's `sector` symbol links it to that
         // sector, and the sector messages it on `entered`/`exited`. A link whose script has no such
@@ -8124,7 +8291,7 @@ fn main() {
                     .is_some_and(|s| s.label("entered").is_some());
                 (name, entered)
             };
-            let messages = rt.sector_messages(None, Some(*sector));
+            let messages = rt.sector_messages(None, Some(*sector), None);
             // The sender id must ride with every sector message: `00_SecretAreas.cog` does
             // `flags = flags | GetSenderId()`, so a message without its link id silently loses the bit
             // (round 198: retail `flags` 0 -> 2, the port stayed 0 until this was asserted).
@@ -8189,15 +8356,17 @@ fn main() {
         if let Some((_, _, surface)) = rt.surface_links.first().copied() {
             if let Some(centre) = rt.surfaces.get(surface).map(|s| s.center) {
                 // Stand a unit short of the surface, facing it. The reach is passed **explicitly**:
-                // the live use action uses the engine's `moveSize + 0.2` (0.265), and this check is
+                // the live use action uses the engine's `moveSize + 0.1` (0.16), and this check is
                 // about which surface the scan picks, not how far it reaches.
                 let eye = [centre[0] - 1.0, centre[1], centre[2] + 1.0];
-                let hit = rt.activate_near(eye, [1.0, 0.0], 3.0);
+                // The engine searches the body's sector: stand in the surface's own room.
+                let sector = rt.surface_sector.get(surface).copied().unwrap_or(-1);
+                let hit = rt.activate_near(eye, [1.0, 0.0], 3.0, sector);
                 println!("  use at {eye:?} facing +X reached surface {hit:?} (wanted {surface})");
                 assert_eq!(hit, Some(surface), "the use action missed the linked surface");
                 // Facing away must not reach *that* surface. Another linked surface may legitimately
                 // be behind the player, so the assertion is about this one, not about emptiness.
-                let behind = rt.activate_near(eye, [-1.0, 0.0], 3.0);
+                let behind = rt.activate_near(eye, [-1.0, 0.0], 3.0, sector);
                 assert_ne!(
                     behind,
                     Some(surface),
@@ -8393,7 +8562,7 @@ fn main() {
         let mut landed = None;
         for _ in 0..60 {
             rt.step(dt);
-            if let Some(hit) = rt.impacts(first_created).into_iter().next() {
+            if let Some(hit) = rt.impacts(first_created, dt).into_iter().next() {
                 landed = Some(hit);
                 break;
             }
@@ -8485,7 +8654,7 @@ fn main() {
         let mut landed = None;
         for _ in 0..60 {
             rt.step(dt);
-            if let Some(hit) = rt.impacts(first_created).into_iter().find(|(_, t, _)| *t == player) {
+            if let Some(hit) = rt.impacts(first_created, dt).into_iter().find(|(_, t, _)| *t == player) {
                 landed = Some(hit);
                 break;
             }
@@ -11072,13 +11241,15 @@ fn main() {
                 [t.pos[0] + 1.0, t.pos[1], t.pos[2]]
             };
             // Look straight at it from one unit away: the use action is a look, not a touch. The reach
-            // here is explicit (the live path uses the engine's 0.265 sweep); this check is about the
+            // here is explicit (the live path uses the engine's 0.16 sweep); this check is about the
             // link chain, not the radius.
             let facing = [-1.0f32, 0.0];
             let (_used, before) = {
                 let mut rt = handle.borrow_mut();
                 let before = (rt.sector_flags.clone(), rt.adjoin_flags.clone());
-                let used = rt.use_thing(eye, facing, 3.0);
+                // Same sector scope the engine's search has: this thing's own room.
+                let sector = rt.things.get(*thing).map(|t| t.sector).unwrap_or(-1);
+                let used = rt.use_thing(eye, facing, 3.0, sector);
                 (used, before)
             };
             // Another linked thing can be nearer than the one this candidate names; what matters is that
@@ -11549,12 +11720,22 @@ fn main() {
         })
         .filter(|(width, height)| *width > 0 && *height > 0)
         .unwrap_or((1024, 768));
+    // A headless run with a frame budget must *reach* that frame: Bevy's default exit condition is
+    // "all windows closed", so a windowless app quits on its first update and `--cogstatus-after`
+    // never prints (round 308's secret-trigger probe). Keep the default everywhere else, including the
+    // gate sweep, whose headless skip detection relies on that early exit.
+    let exit_condition = if headless && exit_after.is_some() {
+        bevy::window::ExitCondition::DontExit
+    } else {
+        bevy::window::ExitCondition::OnAllClosed
+    };
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: (!headless).then(|| Window {
                 title: format!("bevi-knight — {level_name}"),
                 resolution: WindowResolution::new(window_width, window_height),
                 ..default()
             }),
+            exit_condition,
             ..default()
         }))
         .add_plugins((level_mat::LevelMaterialPlugin, palette::PalettePlugin))
@@ -11618,6 +11799,7 @@ fn main() {
         .insert_resource(CompleteAfter(complete_after))
         .insert_resource(ExitAfter(exit_after.unwrap_or(u64::MAX)))
         .insert_resource(CogStatusAfter(cogstatus_after))
+        .insert_resource(ActorMoves(actor_moves))
         .add_systems(Startup, setup)
         .add_systems(PostStartup, setup_overlay)
         // Always on: the collider hand-off, the gate that samples the running game, the mute, the
@@ -11707,7 +11889,7 @@ fn main() {
         .add_systems(Update, save_slots_probe)
         .add_systems(Update, play_intro_films.after(swap_level))
         .add_systems(Update, tour_live_exit)
-        .add_systems(Update, use_probe.before(use_key).run_if(no_screen_open))
+        .add_systems(Update, use_live_probe.before(use_key).run_if(no_screen_open))
         .add_systems(Update, sight_probe.run_if(no_screen_open))
         .add_systems(Update, ai_probe.run_if(no_screen_open))
         .add_systems(Update, force_probe.run_if(no_screen_open))
@@ -11896,10 +12078,23 @@ fn watch_level_complete(
     tour: Option<Res<TourLive>>,
     mut overlay: Option<ResMut<Overlay>>,
     capture: Option<Res<CaptureMode>>,
+    capture_dt: Option<Res<CaptureDt>>,
     mut announced: Local<bool>,
     mut tallied: Local<bool>,
 ) {
     let (Some(sim), Some(mut plan)) = (sim, plan) else { return };
+    // A capture measures the level it booted. `06abarons` ships a script that ends the level when the
+    // body reaches its rubble area, and a walk leg's spawn sits in the sector that posts the message:
+    // the sequence's own `sleep`s then completed and swapped the world out mid-trace, leaving the
+    // comparison with one sample. Staying put keeps the measurement; the swap is not the thing being
+    // measured, and a play session (no capture) still ends its level.
+    if capture_dt.as_deref().and_then(|c| c.0).is_some() && sim.world.borrow().level_complete {
+        sim.world.borrow_mut().level_complete = false;
+        if std::env::var_os("BK_LEVEL_TRACE").is_some() {
+            println!("capture: a script ended the level; staying in it for the measurement");
+        }
+        return;
+    }
     if !sim.world.borrow().level_complete {
         // These locals belong to one completion, not to the process. A fresh level starts with the
         // flags clear, so reset here or a campaign's second level would skip its rank credit, its
@@ -12944,11 +13139,8 @@ fn setup_overlay(
     // camera instead only worked while both were 45 degrees, and `--overview`'s long lens then shrank
     // the whole HUD into a thumbnail in the middle of the screen.
     let Ok((cam, _)) = cams.single() else { return };
-    let fov = std::f32::consts::FRAC_PI_4;
-    // The overlay quad lives on its own render layer, drawn by a second camera that sees
-    // nothing else, so no wall can ever draw over the UI. Half a unit out is plenty.
-    let distance = 0.5;
-    let height = 2.0 * distance * (fov * 0.5).tan();
+    let distance = OVERLAY_DISTANCE;
+    let height = overlay_quad_height();
     // Keep the canvas' own 4:3 proportions: the HUD and the menus are authored for a
     // 640x480 screen, so stretching them to a widescreen window would shear the art.
     let quad = meshes.add(Rectangle::new(height * (overlay.canvas.width as f32 / overlay.canvas.height as f32), height));
@@ -13015,6 +13207,15 @@ fn setup_overlay(
     });
 }
 
+/// The overlay quad lives on its own render layer, drawn by a second camera that sees nothing else,
+/// so no wall can ever draw over the UI. Half a unit out is plenty.
+const OVERLAY_DISTANCE: f32 = 0.5;
+
+/// The overlay quad's height in world units: it fills the overlay camera's default 45 degree view.
+fn overlay_quad_height() -> f32 {
+    2.0 * OVERLAY_DISTANCE * (std::f32::consts::FRAC_PI_4 * 0.5).tan()
+}
+
 /// The overlay-quad scale that puts a cutscene's picture on the window's edges.
 ///
 /// The film is 640x300 on the HUD's 640x480 canvas, so at the HUD's own 4:3 the picture covers the
@@ -13059,9 +13260,21 @@ fn cutscene_fills_screen(
     } else {
         1.0
     };
+    // `cutscene::blit` lands the film in retail's 640x400 view, `STATUS_BAR / 2` rows above the
+    // canvas' centre. At scale 1 (a 4:3 window) that is retail's own placement; a zoomed quad grows
+    // about its centre, so it is moved down by the same offset, scaled, to keep the picture centred
+    // instead of pushing its top edge off the window.
+    let lift = if film && scale > 1.0 {
+        scale * (cutscene::STATUS_BAR as f32 / 2.0) / ui::CANVAS[1] as f32 * overlay_quad_height()
+    } else {
+        0.0
+    };
     for mut transform in &mut quads {
         if transform.scale.x != scale {
             transform.scale = Vec3::splat(scale);
+        }
+        if transform.translation.y != -lift {
+            transform.translation.y = -lift;
         }
     }
 }
@@ -14040,14 +14253,30 @@ fn run_level_cogs(gobs: &gob::GobSet, level: &jkl::Level, filter: &str) {
                 continue;
             }
             let mut vm = cog::Vm::new();
-            match vm.run_label(&script, &label) {
-                Ok(_) => ran += 1,
-                Err(e) if e == cog::WAITING => waiting += 1,
-                Err(e) => {
-                    errors += 1;
-                    if run_errors.len() < 8 {
-                        run_errors.push(format!("{name} {label}: {e}"));
+            // A label that `sleep`s is **resumed** here: the check has no game clock, so it steps one
+            // past each wait and runs the continuation, which is the code past every `Sleep`. Without
+            // this the check reported "waiting" and never reached it - the same blind spot that hid
+            // `01_initialry.cog`'s dropped `startup` continuation (round 307).
+            for _ in 0..32 {
+                match vm.run_label(&script, &label) {
+                    Ok(_) => ran += 1,
+                    // `::sleeping` is the suspend unwind: the label is waiting, not broken.
+                    Err(e) if e == cog::WAITING || e == cog::SLEEPING => waiting += 1,
+                    Err(e) => {
+                        errors += 1;
+                        if run_errors.len() < 8 {
+                            run_errors.push(format!("{name} {label}: {e}"));
+                        }
+                        break;
                     }
+                }
+                if !vm.sleeping() {
+                    break;
+                }
+                // Expire the wait: the sleep was taken above, so moving the clock past its due
+                // makes the next `run_label` resume at the statement after the `Sleep`.
+                while vm.sleeping() {
+                    vm.now += 0.5;
                 }
             }
             for line in &vm.trace.prints {
@@ -14202,7 +14431,10 @@ fn run_level(
             let before_sounds = world.borrow().sounds.len();
             match vm.run_label(&script, "startup") {
                 Ok(_) => started += 1,
-                Err(e) if e == cog::WAITING => waiting += 1,
+                // A `sleep` in `startup` is a suspension, not an error: the label resumes when its
+                // wait expires (round 307 fixed the resume itself; this harness counted the unwind
+                // as a failure).
+                Err(e) if e == cog::WAITING || e == cog::SLEEPING => waiting += 1,
                 Err(e) => errors.push(format!("{} startup: {e}", inst.script)),
             }
             for line in &vm.trace.prints {
@@ -14241,7 +14473,7 @@ fn run_level(
             let before_sounds = world.borrow().sounds.len();
             match vm.run_label(script, &label) {
                 Ok(_) => delivered += 1,
-                Err(e) if e == cog::WAITING => msg_waiting += 1,
+                Err(e) if e == cog::WAITING || e == cog::SLEEPING => msg_waiting += 1,
                 Err(e) => errors.push(format!("{name} {label}: {e}")),
             }
             if !quiet {
@@ -14347,7 +14579,8 @@ fn run_level(
                 let before_sounds = world.borrow().sounds.len();
                 match vm.run_label(script, &label) {
                     Ok(_) => delivered_messages += 1,
-                    Err(e) if e == cog::WAITING => msg_waiting += 1,
+                    // A label that `sleep`s is suspended until its wait expires, not broken.
+                    Err(e) if e == cog::WAITING || e == cog::SLEEPING => msg_waiting += 1,
                     Err(e) => errors.push(format!("{script_name} {name}: {e}")),
                 }
                 if !quiet {
@@ -14507,9 +14740,6 @@ fn walker_step(
     // Where the frame started, so a move that would leave the world can be undone.
     let frame_start = *pos;
     let mut landed = false;
-    // `MoveThing` restores the sector as well as the position (see the containment check below), so
-    // the sector the frame began in is kept alongside the position.
-    let sector_start = *sector;
 
     // Vertical: the fall is a *sweep*, the way `sithCollision_MoveThing` moves any body — so it stops at
     // the first floor it meets and crosses doorways on the way down. That is what makes a walkway whose
@@ -14536,7 +14766,7 @@ fn walker_step(
                 // the contact must not be above where the body already is.
                 *travelled <= -drop + 1e-3 && *floor + radius <= pos[2] + 1e-3
             })
-            .map(|(floor, _, owner)| (floor + radius, owner));
+            .map(|(floor, _, owner)| (floor + radius, Some(owner)));
         let mut land = land;
         // The fallback exists for a sector with **no floor plane of its own** (`19A`'s 723, level 18's
         // spawn). It must not substitute for a sector that has one: level 5's body was lifted frame by
@@ -14545,10 +14775,12 @@ fn walker_step(
         if land.is_none() && solids.floor_below(*sector, *pos).is_none() {
             // A sector may carry **no floor plane at all** — `19A`'s sector 723 is the shipped case, and
             // level 18's spawn stands in it (its floors belong to sectors 0 and 717, whose hulls do not
-            // contain the point). The engine's `FindFloor` reads the sector's own floor plane; when the
-            // body's sector has none, the floor under a falling body is the highest floor plane of a
-            // sector around it that is below the body. The contact is the sphere, the same as the faces
-            // path, and it may not lift the body.
+            // contain the point). `sithPhysics_FindFloor` (`0x4f5550`) itself sweeps *surfaces*
+            // (`sithCollision_SearchForCollisions` along the body's own axis, range `moveSize + 0.005`),
+            // so where the face list has nothing either, the port falls back to the nearest sector
+            // plane: the floor under a falling body is the highest floor plane of a sector around it
+            // that is below the body. The contact is the sphere, the same as the faces path, and it may
+            // not lift the body.
             land = solids
                 .sectors_around(*pos)
                 .into_iter()
@@ -14558,7 +14790,23 @@ fn walker_step(
                 .fold(None, |best: Option<f32>, floor| {
                     Some(best.map_or(floor, |b| b.max(floor)))
                 })
-                .map(|floor| (floor + radius, 0usize));
+                .map(|floor| (floor + radius, None));
+        }
+        // A sector whose face list has **no floor at all** under the body still supports it on its own
+        // plane: 18Ascend's spawn stands over a shaft opening (`adjoin 1150`) and the level has no
+        // polygon within a unit of it, so the swept surfaces cannot hold the body and the plane is the
+        // only floor there is. Retail rests there. A floor merely *farther away* is not this case —
+        // level 5's walk crosses onto a room whose slab lies half a unit down, and holding the body on
+        // the plane above it kept it from ever descending (the leg walked 105 % at z 0.175 and never
+        // changed sector). The reach is the one `--floor-at` uses for the same question (`height * 1.1`).
+        if land.is_none()
+            && solids.floor_under(*sector, *pos, 1.0, radius).is_none()
+            && let Some(plane) = solids.floor_below(*sector, *pos)
+        {
+            let contact = plane + radius;
+            if contact <= pos[2] + 1e-3 && contact >= pos[2] + drop - 1e-3 {
+                land = Some((contact, None));
+            }
         }
         match land {
             Some((z, owner)) => {
@@ -14634,33 +14882,27 @@ fn walker_step(
     // The position, the direction and the sector all come back. `Solids::inside_sector` is that
     // function, box short-circuit included, and `hull` is the surface set it walks.
     //
-    // `MoveThing` queries `thing + 0xb8` directly and restores the saved pose on rejection.
-    // Apply that exactly to vertical-only movement: 18Ascend's floor probe otherwise carries
-    // the body from sector 485 through the thin floor into 502 before the ground clamp.
-    // shortcut: lateral containment retains the legacy feet resolver; the body-position query
-    // plus restore regressed walk5, walk4 and walk13 until portal transitions are corrected.
-    if delta[0].abs() < 1e-6 && delta[1].abs() < 1e-6 {
-        if !solids.inside_sector(*sector, *pos, 0.0) {
-            if std::env::var_os("BK_CONTAIN_TRACE").is_some() {
-                eprintln!("contain: vertical restore to sector {sector_start} position {frame_start:?}");
-            }
-            *pos = frame_start;
-            *sector = sector_start;
-        }
+    // `MoveThing` queries `thing + 0xb8` directly; do the same while the body only settles
+    // vertically, so a fall that leaves its sector is re-resolved from its centre rather than
+    // from a feet point. Lateral movement keeps the feet probe: it is what every walk leg was
+    // measured against, and the centre query regressed walk5, walk4 and walk13.
+    // shortcut: lateral containment uses feet; use the centre once portal transitions are corrected.
+    let origin = if delta[0].abs() < 1e-6 && delta[1].abs() < 1e-6 {
+        *pos
     } else {
-        let origin = [pos[0], pos[1], pos[2] - radius];
-        if !solids.inside_sector(*sector, origin, 0.0) {
-            let found = solids.sector_at(origin, 0.05);
-            if std::env::var_os("BK_CONTAIN_TRACE").is_some() {
-                eprintln!(
-                    "contain: sector {} rejected origin {origin:?}; resolver {found:?}; crossed_to {crossed_to}",
-                    *sector
-                );
-            }
-            match found {
-                Some(found) => *sector = found,
-                None => {}
-            }
+        [pos[0], pos[1], pos[2] - radius]
+    };
+    if !solids.inside_sector(*sector, origin, 0.0) {
+        let found = solids.sector_at(origin, 0.05);
+        if std::env::var_os("BK_CONTAIN_TRACE").is_some() {
+            eprintln!(
+                "contain: sector {} rejected origin {origin:?}; resolver {found:?}; crossed_to {crossed_to}",
+                *sector
+            );
+        }
+        match found {
+            Some(found) => *sector = found,
+            None => {}
         }
     }
     let moved = ((pos[0] - before[0]).powi(2) + (pos[1] - before[1]).powi(2)).sqrt();
@@ -15871,6 +16113,9 @@ struct SurfaceLook {
     /// Each surface's material cel count, so `(own cel + material cel)` wraps where the shader expects.
     counts: Vec<f32>,
     lights: Vec<f32>,
+    /// Per sector, `AMBIENT LIGHT + EXTRA LIGHT`: the engine's per-sector camera ambient. It is the
+    /// **base** of a world vertex's light product, not an addition on top of full brightness.
+    ambient: Vec<f32>,
     sectors: Vec<f32>,
     /// `MaterialAnim`'s per-material cel (`rdMaterial.curCelNum`).
     materials: HashMap<i32, f32>,
@@ -15895,6 +16140,7 @@ impl SurfaceLook {
             cels: rt.surfaces.iter().map(|s| s.cel).collect(),
             counts: rt.surface_cels.iter().map(|&c| c as f32).collect(),
             lights: rt.surfaces.iter().map(|s| s.light).collect(),
+            ambient: rt.sector_light_baked.clone(),
             sectors: rt.sectors.iter().map(|s| s.light).collect(),
             materials: rt.material_cel.iter().map(|(&k, &v)| (k, v)).collect(),
             scrolls: rt
@@ -15966,7 +16212,36 @@ impl SurfaceLook {
         let sector_own = self.sectors.get(index).copied().unwrap_or(0.0);
         // `ThingLight`: the lamps standing in this sector, summed (see `thing_light_by_sector`).
         let things = self.thing_light.get(index).copied().unwrap_or(0.0);
-        (1.0 + surface + sector_own + things).clamp(0.0, 4.0)
+        // The sector's baked ambient is the base: `rdCamera_SetAmbientLight` takes
+        // `ambient + extraLight` per sector, so a dark room is a low base, not `1.0 + deltas`.
+        let base = self.ambient.get(index).copied().unwrap_or(1.0);
+        (base + surface + sector_own + things).clamp(0.0, 4.0)
+    }
+}
+
+#[cfg(test)]
+mod surface_light_tests {
+    use super::*;
+
+    /// The sector's baked `AMBIENT LIGHT + EXTRA LIGHT` is the **base** of a world vertex's light, not
+    /// an addition to `1.0`: level 2's 641 sectors average 0.523 and its spawn frame came out 1.99x the
+    /// retail brightness until this base was restored (`sithRender_RenderSectors` hands it to
+    /// `rdCamera_SetAmbientLight` per sector).
+    #[test]
+    fn a_sector_ambient_is_the_base_of_the_world_light() {
+        let look = SurfaceLook {
+            ambient: vec![0.5, 1.0],
+            lights: vec![0.0],
+            sectors: vec![0.0, 0.25],
+            thing_light: vec![0.0],
+            ..Default::default()
+        };
+        let dark = look.light(0, 0);
+        assert!((dark - 0.5).abs() < 1e-6, "a 0.5 ambient sector drew at {dark}");
+        assert!((look.light(0, 1) - 1.25).abs() < 1e-6, "a script's light did not add on top");
+        // A level whose sectors bake a full 1.0 stays exactly as it was.
+        let bright = SurfaceLook { ambient: vec![1.0], ..Default::default() };
+        assert_eq!(bright.light(0, 0), 1.0);
     }
 }
 
@@ -18483,10 +18758,30 @@ mod use_tests {
 
 /// The use key: the engine's activate action (`sithPlayerActions_Activate`, `0x4fc0a0`).
 ///
-/// The sweep is `moveSize + 0.1` with a 0.1 radius from the **eye** — 0.265 units for the player —
+/// The sweep starts at the **eye** and reaches `moveSize + 0.1` — 0.16 units for the player —
 /// throttled to one activate per 250 ms, and it takes a linked surface, or a linked thing that is not
 /// a weapon or item. `activate` is the third most common label level 1 declares (x14); the *candidates*
 /// are the surfaces and things a script linked, so a room with nothing wired stays silent.
+/// `sithPlayerActions_Activate`'s reach: `moveSize - _DAT_00523200`, and the constant at `0x523200`
+/// is **-0.1** (`0x4fc0a0`). The player's body is 0.06, so the use action reaches 0.16 units from the
+/// eye — the cantina plate is used at 0.12 and not at 0.93, which retail's own `doorstatus 0` confirms.
+fn use_reach(move_size: f32) -> f32 {
+    move_size + 0.1
+}
+
+#[cfg(test)]
+mod use_reach_tests {
+    use super::*;
+
+    #[test]
+    fn the_use_action_reaches_move_size_plus_the_negated_constant() {
+        assert!((use_reach(0.06) - 0.16).abs() < 1e-6);
+        // The plate's two measured poses: 0.12 inside, 0.93 outside.
+        assert!((use_reach(0.06) - 0.12).abs() < 0.05);
+        assert!(use_reach(0.06) < 0.93);
+    }
+}
+
 fn use_key(
     keys: Res<ButtonInput<KeyCode>>,
     sim: Option<Res<Sim>>,
@@ -18506,13 +18801,16 @@ fn use_key(
     if !use_allowed(player.last_use, now) {
         return;
     }
+    // The body's own thing, for the sector the engine scopes the sweep to.
+    let player_thing = sim.world.borrow().player_thing();
     player.last_use = now;
-    // `sithPlayerActions_Activate` (`0x4fc0a0`) sweeps from the **eye** along the view for
-    // `moveSize − (−0.1)` with a 0.1 radius, i.e. 0.265 units of reach for the player's 0.065 body,
-    // and throttle 250 ms. The old 3.0-unit reach let the port activate the cantina switch from
-    // 0.8 units, where retail's own use action does nothing (round 257's measurement); the reach is
-    // not a harness question, it was the port's over-reach.
-    let use_reach = player.rules.radius + 0.2;
+    // `sithPlayerActions_Activate` (`0x4fc0a0`) starts the sweep at the **eye** and passes
+    // `*(float *)(thing + 0x2c) - _DAT_00523200` as the radius. The constant at `0x523200` is
+    // **-0.1**, so the reach is `moveSize + 0.1` — 0.16 units for the player's 0.06 body, not the
+    // 0.265 the -0.1 was first read as. Throttle 250 ms (`0xfa`). The old 3.0-unit reach let the
+    // port activate the cantina switch from 0.8 units, where retail's own use action does nothing
+    // (round 257's measurement); the reach is not a harness question, it was the port's over-reach.
+    let use_reach = use_reach(player.rules.radius);
     let eye = [player.pos.x, player.pos.y, player.pos.z + player.eye];
     // The port's forward axis is `yaw_axes`' `(-sin, cos)` (`sithCamera`'s own frame), not `(cos, sin)`:
 
@@ -18525,14 +18823,18 @@ fn use_key(
     // things first a door piece within reach won and the surface was never asked. The engine has no
     // cone — it sweeps a sphere along the view — so the `dot` test in the scans stands in for the
     // sweep's direction, not for a FOV.
-    let used_surface = rt.activate_near(eye, facing, use_reach);
+    let sector = rt.things.get(player_thing).map(|t| t.sector).unwrap_or(-1);
+    let used_surface = rt.activate_near(eye, facing, use_reach, sector);
     let used_thing = if used_surface.is_none() {
-        rt.use_thing(eye, facing, use_reach)
+        rt.use_thing(eye, facing, use_reach, sector)
     } else {
         None
     };
     drop(rt);
     *said += 1;
+    if used_thing.is_some() || used_surface.is_some() {
+        player.use_hits += 1;
+    }
     match (used_thing, used_surface) {
         (Some(thing), _) => println!("use: activated thing {thing}"),
         (None, Some(surface)) => println!("use: activated surface {surface}"),
@@ -18630,7 +18932,7 @@ fn deliver_thing_messages(
         vm.source = own_source;
         // `::sleeping` is the sleep unwind, not a failure: the handler is suspended and resumes later.
         if let Err(error) = ran
-            && error != "::sleeping"
+            && error != cog::SLEEPING
         {
             continue;
         }
@@ -18708,7 +19010,7 @@ fn deliver_cog_messages(
             }
                 // `::sleeping` is the sleep unwind, not a failure: the handler is suspended and
                 // resumes on its own clock (`00_doorswitch.cog`'s `arrived` sleeps 2 s before closing).
-                Err(error) if error == "::sleeping" => {
+                Err(error) if error == cog::SLEEPING => {
                     fired += 1;
                 }
                 Err(error) => println!("sighted: `{script_name}`'s `{label}` failed: {error}"),
@@ -18774,9 +19076,10 @@ fn deliver_sector_triggers(
         return;
     }
     *last = Some(sector);
+    let thing = sim.world.borrow().player_thing();
     let (messages, volume_before) = {
         let rt = sim.world.borrow();
-        (rt.sector_messages(previous, Some(sector)), rt.music_volume)
+        (rt.sector_messages(previous, Some(sector), Some(thing)), rt.music_volume)
     };
     let mut fired = 0usize;
     for (instance, label, link) in messages {
@@ -18854,7 +19157,15 @@ fn resume_sleeping_labels(capture: Option<Res<CaptureDt>>,
         if script.label(&label).is_none() {
             continue;
         }
-        let _ = vm.run_label(script, &label);
+        if std::env::var_os("BK_PULSE_TRACE").is_some() {
+            println!("pulse: `{script_name}` resumes `{label}` (now {:.2})", vm.now);
+        }
+        let result = vm.run_label(script, &label);
+        if std::env::var_os("BK_PULSE_TRACE").is_some()
+            && let Err(error) = &result
+        {
+            println!("pulse: `{script_name}` `{label}` stopped: {error}");
+        }
         resumed += 1;
     }
     if let Some(count) = count.as_mut() {
@@ -19035,7 +19346,9 @@ fn ai_probe(
             ];
             player.pos = Vec3::from(stand);
             player.sector = pos.1.max(0) as usize;
-            player.yaw = std::f32::consts::FRAC_PI_2;
+            // The port's forward is `(-sin yaw, cos yaw)`, so yaw 0 faces **+Y**: the old
+            // FRAC_PI_2 faced -X and the press only "passed" on a message count the teleport tainted.
+            player.yaw = 0.0;
             player.vy = 0.0;
             state.3 = stand;
             state.2 = sim.world.borrow().shots_fired;
@@ -19074,14 +19387,122 @@ fn ai_probe(
     }
 }
 
-/// `--use-live`: stand in front of a linked thing and press **E**, the way a player opens a door.
+/// `--use-live`: press **E** at the cantina door switch and read the door's own cog back.
 ///
-/// The door gate drives the same chain from code; this one presses the key. The witness is
-/// `TriggerCount`: `use_thing` queues `activate` into `pending_messages`, `deliver_cog_messages`
-/// drains it, and a script that answered is a door that opened.
+/// The chain is the engine's: the key -> `use_key`'s sector-scoped sweep (`sithPlayerActions_Activate`,
+/// `0x4fc0a0`) -> the linked surface's `activate` message -> `00_doorswitch.cog` -> `doorstatus ==
+/// numdoors`. Two earlier versions of this gate passed on side effects: it counted *all* script
+/// messages, which a teleport also raises, and it stood two units away on the port's old 3.0 reach.
+/// The stance is 0.06 from the plate, in the plate's own room: the engine searches only the body's
+/// sector, and a warp cannot legally stand there (retail answers "Position not in world"), so the
+/// gate places the body itself and says so.
 #[derive(Resource, Default)]
 struct UseProbe {
     enabled: bool,
+}
+
+fn use_live_probe(
+    probe: Res<UseProbe>,
+    sim: Option<Res<Sim>>,
+    mut player: Option<ResMut<Player>>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    world: Option<Res<World>>,
+    mut state: Local<(u32, u8, u32, u32)>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !probe.enabled {
+        return;
+    }
+    let Some(sim) = sim.as_deref() else { return };
+    let Some(player) = player.as_deref_mut() else { return };
+    state.0 += 1;
+    match state.1 {
+        0 => {
+            let switch = world.as_ref().and_then(|w| {
+                w.level
+                    .cogs
+                    .iter()
+                    .position(|c| c.script.eq_ignore_ascii_case("00_doorswitch.cog"))
+            });
+            let Some(instance) = switch else {
+                println!("use-live: no door-switch cog in this level");
+                exit.write(AppExit::Success);
+                return;
+            };
+            let (sector, pose) = {
+                let rt = sim.world.borrow();
+                let sector = rt
+                    .surface_links
+                    .iter()
+                    .filter(|(cog, _, _)| *cog == instance)
+                    .find_map(|(_, _, surface)| rt.surface_sector.get(*surface).copied())
+                    .filter(|sector| *sector >= 0)
+                    .unwrap_or(0);
+                (sector, [-4.29f32, -3.82, -1.18])
+            };
+            {
+                let mut rt = sim.world.borrow_mut();
+                let body = rt.player_thing();
+                if let Some(thing) = rt.things.get_mut(body) {
+                    thing.pos = pose;
+                    thing.sector = sector;
+                }
+            }
+            player.pos = Vec3::new(pose[0], pose[1], pose[2]);
+            player.sector = sector.max(0) as usize;
+            player.yaw = 180.0f32.to_radians();
+            player.vy = 0.0;
+            state.2 = instance as u32;
+            state.3 = player.use_hits;
+            keys.press(KeyCode::KeyE);
+            state.1 = 1;
+            state.0 = 0;
+            println!("use-live: E at the cantina switch (cog instance {instance}, sector {sector})");
+        }
+        1 => {
+            keys.release(KeyCode::KeyE);
+            if state.0 < 20 {
+                return;
+            }
+            println!(
+                "use-live: the key reached a target {} time(s) (was {})",
+                player.use_hits, state.3
+            );
+            if player.use_hits <= state.3 {
+                println!("use-live: FAIL the key reached nothing");
+                exit.write(AppExit::Success);
+                return;
+            }
+            state.1 = 2;
+            state.0 = 0;
+        }
+        _ => {
+            keys.release(KeyCode::KeyE);
+            let index = state.2 as usize;
+            let (open, total) = {
+                let Some((_, vm)) = sim
+                    .instances
+                    .iter()
+                    .find(|(_, vm)| vm.cog_index == index as i32)
+                else {
+                    if state.0 > 240 {
+                        println!("use-live: FAIL the door-switch cog has no running instance");
+                        exit.write(AppExit::Success);
+                    }
+                    return;
+                };
+                (vm.var("doorstatus").num(), vm.var("numdoors").num())
+            };
+            if open > 0.0 {
+                println!("use-live: doorstatus {open:.0} of numdoors {total:.0} -- the switch opened the door");
+                println!("--- use-live check passed ---");
+                exit.write(AppExit::Success);
+            } else if state.0 > 240 {
+                println!("use-live: FAIL doorstatus {open:.0} of numdoors {total:.0} after 240 frames");
+                exit.write(AppExit::Success);
+            }
+        }
+    }
 }
 
 /// `--sight-live`: the renderer's sight latch, end to end. `sithRender` latches a drawn thing's
@@ -19208,109 +19629,6 @@ fn sight_probe(
     }
 }
 
-
-fn use_probe(
-    probe: Res<UseProbe>,
-    sim: Option<Res<Sim>>,
-    mut player: Option<ResMut<Player>>,
-    mut keys: ResMut<ButtonInput<KeyCode>>,
-    count: Option<Res<TriggerCount>>,
-    world: Option<Res<World>>,
-    mut state: Local<(u32, u8, usize)>,
-    mut exit: MessageWriter<AppExit>,
-) {
-    if !probe.enabled {
-        return;
-    }
-    let Some(sim) = sim.as_deref() else { return };
-    let Some(player) = player.as_deref_mut() else { return };
-    state.0 += 1;
-    match state.1 {
-        0 => {
-            // The first thing a script linked: every door, switch and lever in the level is one.
-            let target = sim
-                .world
-                .borrow()
-                .thing_links
-                .first()
-                .map(|(_, _, thing)| *thing);
-            let Some(target) = target else {
-                println!("use-live: this level links no thing to a script");
-                exit.write(AppExit::Success);
-                return;
-            };
-            let Some(pos) = sim.world.borrow().things.get(target).map(|t| (t.pos, t.sector)) else {
-                return;
-            };
-            // Two units away on -Y, facing +Y: inside the reach and the facing cone.
-            player.pos = Vec3::new(pos.0[0], pos.0[1] - 2.0, pos.0[2]);
-            player.sector = pos.1.max(0) as usize;
-            player.yaw = std::f32::consts::FRAC_PI_2;
-            player.vy = 0.0;
-            state.2 = count.as_deref().map(|c| c.0).unwrap_or(0);
-            keys.press(KeyCode::KeyE);
-            state.1 = 1;
-            state.0 = 0;
-            println!("use-live: E in front of thing {target} (sector {})", pos.1);
-        }
-        1 => {
-            keys.release(KeyCode::KeyE);
-            if state.0 < 20 {
-                return;
-            }
-            let now = count.as_deref().map(|c| c.0).unwrap_or(0);
-            println!(
-                "use-live: {} script message(s) answered the key (was {})",
-                now.saturating_sub(state.2),
-                state.2
-            );
-            if now <= state.2 {
-                println!("use-live: FAIL the key reached no script");
-                exit.write(AppExit::Success);
-                return;
-            }
-            // The **same key press** must also end with the shipped door chain open: level 1's
-            // cantina switch, at the coords-verified pose from the retail capture (rounds 191/201).
-            // The witness is the script's own `doorstatus == numdoors`, read from the live VM.
-            let switch = world.as_ref().and_then(|w| {
-                w.level
-                    .cogs
-                    .iter()
-                    .position(|c| c.script.eq_ignore_ascii_case("00_doorswitch.cog"))
-            });
-            let Some(instance) = switch else {
-                println!("use-live: no door-switch cog in this level; the key test stands alone");
-                println!("--- use-live check passed ---");
-                exit.write(AppExit::Success);
-                return;
-            };
-            player.pos = Vec3::new(-4.0, -3.0, -1.18);
-            player.sector = 254;
-            player.yaw = 135.0f32.to_radians();
-            player.vy = 0.0;
-            state.2 = instance;
-            keys.press(KeyCode::KeyE);
-            state.1 = 2;
-            state.0 = 0;
-            println!("use-live: E at the cantina switch (cog instance {instance}); waiting for the door");
-        }
-        _ => {
-            keys.release(KeyCode::KeyE);
-            let (open, total) = {
-                let Some((_, vm)) = sim.instances.get(state.2) else { return };
-                (vm.var("doorstatus").num(), vm.var("numdoors").num())
-            };
-            if open > 0.0 && (open - total).abs() < 0.5 {
-                println!("use-live: doorstatus {open:.0} of numdoors {total:.0} -- the switch opened the door");
-                println!("--- use-live check passed ---");
-                exit.write(AppExit::Success);
-            } else if state.0 > 240 {
-                println!("use-live: FAIL doorstatus {open:.0} of numdoors {total:.0} after 240 frames");
-                exit.write(AppExit::Success);
-            }
-        }
-    }
-}
 
 /// `--save-live`: press F5, disturb the world, press F9, and read the clock back.
 ///
@@ -20898,7 +21216,11 @@ fn write_snapshot(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, &bytes)?;
+    // Write beside it and rename over it: a crash mid-write then leaves the old save whole, not a
+    // truncated file `jks::Save::read` refuses.
+    let tmp = path.with_extension("jks.tmp");
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, path)?;
     Ok(bytes.len())
 }
 
@@ -21168,10 +21490,12 @@ fn draw_viewmodel(
     *tick += 1;
     if std::env::var_os("BK_VIEWMODEL_TRACE").is_some() && (*tick % 60 == 0 || *tick < 4) {
         eprintln!(
-            "viewmodel-trace: frame {} want {want:?} name {:?} parts {} key {:?}",
+            "viewmodel-trace: frame {} want {want:?} name {:?} parts {} key {:?} sway-phase {:.4} moved {moved:.4} speed {speed_norm:.3} base {:?}",
             *tick, view.name,
             view.parts.len(),
-            view.key
+            view.key,
+            view.sway_phase,
+            view.base
         );
     }
     if want == view.name && (want.is_none() || !view.parts.is_empty()) {
@@ -21490,61 +21814,116 @@ fn draw_player_body(
 /// The radius is the engine's `size=` (see [`runtime::solid_radius`]); the span is the model's own
 /// bounding box, which is what `sithThing` collides against. A template whose model is not loaded keeps a
 /// body-sized span rather than disappearing from the list.
-fn solid_things(world: &World, solids: &collide::Solids) -> Vec<([f32; 3], f32, f32, f32)> {
+fn solid_things(world: &World, solids: &collide::Solids) -> Vec<([f32; 3], f32, f32, f32, usize)> {
     let _ = solids;
-    let mut out = Vec::new();
-    for thing in &world.level.things {
-        // Player starts are not obstacles. The first is the local player (a body does not collide
-        // with itself) and the rest are the level's multiplayer spawn markers, which single-player
-        // retail neither draws nor places in the world.
-        if is_local_player(&thing.template) {
-            continue;
+    solid_things_at(
+        &SolidShapes::build(world).0,
+        world
+            .level
+            .things
+            .iter()
+            .map(|thing| (thing.pos, thing.sector.max(0) as usize)),
+    )
+}
+
+/// Every level thing the walker collides with, placed at the positions and sectors given.
+fn solid_things_at(
+    shapes: &[Option<(f32, f32, f32)>],
+    placed: impl Iterator<Item = ([f32; 3], usize)>,
+) -> Vec<([f32; 3], f32, f32, f32, usize)> {
+    shapes
+        .iter()
+        .zip(placed)
+        .filter_map(|(shape, (pos, sector))| {
+            shape.map(|(radius, lo, hi)| (pos, radius, pos[2] + lo, pos[2] + hi, sector))
+        })
+        .collect()
+}
+
+/// Per level thing, the cylinder the walker collides with as `(radius, lo, hi)`, the vertical span
+/// being offsets from the thing's own origin. `None` means the walker ignores that thing.
+///
+/// The geometry is cached because it walks every model's bounds, while a thing's *position* changes:
+/// `4x4door` and `4x4elev` follow their frame paths from load (`18Ascend` spawns the player between
+/// two elevator leaves, and a frozen copy of their closed pose pinned the body there for the whole
+/// leg). `None` is also what keeps a thing out of the list when its template has no `size=` or is an
+/// actor — see the reasons on the filters below.
+#[derive(Resource)]
+struct SolidShapes(Vec<Option<(f32, f32, f32)>>);
+
+impl SolidShapes {
+    fn build(world: &World) -> Self {
+        let mut out = Vec::with_capacity(world.level.things.len());
+        for thing in &world.level.things {
+            // Player starts are not obstacles. The first is the local player (a body does not collide
+            // with itself) and the rest are the level's multiplayer spawn markers, which single-player
+            // retail neither draws nor places in the world.
+            if is_local_player(&thing.template) {
+                out.push(None);
+                continue;
+            }
+            // An **actor** is not a fixed obstacle for a walking body. The engine's actor collision is soft:
+            // the player walks through an NPC and the NPC gives way, where the port's cylinder list made every
+            // actor a solid post. Level 11 shows it plainly -- the body walked into `gorc` standing in the
+            // doorway and was shoved around him 67 times in 90 frames (each push carried the body -x), ending
+            // at (-0.54, 13.27), where retail's body walks straight to the closed door and stops at
+            // (0.01, 13.20). Actors keep their own collision and AI; they are simply not in the *walker*'s list.
+            if crate::runtime::thing_type_of(&world.level, &thing.template) == 2 {
+                out.push(None);
+                continue;
+            }
+            let Some(radius) = crate::runtime::solid_radius(&world.level, &thing.template) else {
+                out.push(None);
+                continue;
+            };
+            // The model's own bounds give both the vertical span `sithThing` collides against **and** a plan
+            // footprint far tighter than the template's `size=` (which is a body-sized radius, not the
+            // furniture's): `table4`'s is 0.154 while its model is ~0.1 wide. Blocking with the template
+            // radius sealed the cantina leg (102 % -> 12 %) and level 4 (100 % -> 50 %), so the tighter
+            // footprint is what a blocking contact has to use.
+            let model = world
+                .template_model
+                .get(&thing.template.to_ascii_lowercase())
+                .and_then(|name| world.models.get(name))
+                .map(|model| {
+                    let pose = tdo::pose_nodes(model, None, 0.0);
+                    let (lo, hi) = bounds(model, &pose);
+                    (lo, hi)
+                });
+            let span = model
+                .map(|(lo, hi)| (lo[2], hi[2]))
+                .filter(|(lo, hi)| hi > lo)
+                .unwrap_or((-radius, radius));
+            let radius = model
+                .map(|(lo, hi)| {
+                    let plan = lo[0].abs().max(hi[0].abs()).max(lo[1].abs()).max(hi[1].abs());
+                    radius.min(plan).max(0.02)
+                })
+                .unwrap_or(radius);
+            if std::env::var_os("BK_THINGS_TRACE").is_some() {
+                eprintln!(
+                    "solid: `{}` at {:?} radius {radius:.3} z {:.3}..{:.3}",
+                    thing.template,
+                    thing.pos,
+                    thing.pos[2] + span.0,
+                    thing.pos[2] + span.1
+                );
+            }
+            out.push(Some((radius, span.0, span.1)));
         }
-        // An **actor** is not a fixed obstacle for a walking body. The engine's actor collision is soft:
-        // the player walks through an NPC and the NPC gives way, where the port's cylinder list made every
-        // actor a solid post. Level 11 shows it plainly -- the body walked into `gorc` standing in the
-        // doorway and was shoved around him 67 times in 90 frames (each push carried the body -x), ending
-        // at (-0.54, 13.27), where retail's body walks straight to the closed door and stops at
-        // (0.01, 13.20). Actors keep their own collision and AI; they are simply not in the *walker*'s list.
-        if crate::runtime::thing_type_of(&world.level, &thing.template) == 2 {
-            continue;
-        }
-        let Some(radius) = crate::runtime::solid_radius(&world.level, &thing.template) else {
-            continue;
-        };
-        // The model's own bounds give both the vertical span `sithThing` collides against **and** a plan
-        // footprint far tighter than the template's `size=` (which is a body-sized radius, not the
-        // furniture's): `table4`'s is 0.154 while its model is ~0.1 wide. Blocking with the template
-        // radius sealed the cantina leg (102 % -> 12 %) and level 4 (100 % -> 50 %), so the tighter
-        // footprint is what a blocking contact has to use.
-        let model = world
-            .template_model
-            .get(&thing.template.to_ascii_lowercase())
-            .and_then(|name| world.models.get(name))
-            .map(|model| {
-                let pose = tdo::pose_nodes(model, None, 0.0);
-                let (lo, hi) = bounds(model, &pose);
-                (lo, hi)
-            });
-        let span = model
-            .map(|(lo, hi)| (thing.pos[2] + lo[2], thing.pos[2] + hi[2]))
-            .filter(|(lo, hi)| hi > lo)
-            .unwrap_or((thing.pos[2] - radius, thing.pos[2] + radius));
-        let radius = model
-            .map(|(lo, hi)| {
-                let plan = lo[0].abs().max(hi[0].abs()).max(lo[1].abs()).max(hi[1].abs());
-                radius.min(plan).max(0.02)
-            })
-            .unwrap_or(radius);
-        if std::env::var_os("BK_THINGS_TRACE").is_some() {
-            eprintln!(
-                "solid: `{}` at {:?} radius {radius:.3} z {:.3}..{:.3}",
-                thing.template, thing.pos, span.0, span.1
-            );
-        }
-        out.push((thing.pos, radius, span.0, span.1));
+        Self(out)
     }
-    out
+
+    /// The cylinders for a runtime, whose things carry the moved positions and their own sectors.
+    fn place(&self, things: &[crate::runtime::ThingState]) -> Vec<([f32; 3], f32, f32, f32, usize)> {
+        solid_things_at(
+            &self.0,
+            things
+                .iter()
+                .take(self.0.len())
+                .map(|thing| (thing.pos, thing.sector.max(0) as usize)),
+        )
+    }
 }
 /// The player's sector light — what retail hands the POV pass as ambient
 /// (`rdCamera_SetAmbientLight` takes `sector->ambient + sector->extraLight`, clamped to 0..1).
@@ -22014,6 +22393,7 @@ fn draw_created(
 fn projectile_hits(
     sim: Option<Res<Sim>>,
     world: Option<Res<World>>,
+    time: Res<Time>,
     mut created: Option<ResMut<Created>>,
     mut commands: Commands,
 ) {
@@ -22022,7 +22402,34 @@ fn projectile_hits(
     let first_created = world.level.things.len();
     // The scan itself lives in `Runtime::impacts`, so `--hit` drives the same code the game
     // does instead of a copy of it.
-    let impacts = rt.impacts(first_created);
+    // `BK_AI_TRACE`: why a bolt that was fired at the player misses it. Prints every live shot
+    // within two units of the body, with the hit test's own numbers.
+    if std::env::var_os("BK_AI_TRACE").is_some()
+        && let Some(player) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer"))
+        && let Some(body) = rt.things.get(player).map(|t| (t.pos, t.sector))
+    {
+        for shot in first_created..rt.things.len() {
+            let thing = &rt.things[shot];
+            if thing.destroyed || thing.damage <= 0.0 {
+                continue;
+            }
+            let (dx, dy, dz) = (
+                thing.pos[0] - body.0[0],
+                thing.pos[1] - body.0[1],
+                thing.pos[2] - body.0[2],
+            );
+            let flat = (dx * dx + dy * dy).sqrt();
+            if flat < 2.0 {
+                let name = rt.templates.get(shot).cloned().unwrap_or_default();
+                eprintln!(
+                    "ai: shot {shot} `{name}` flat {flat:.2} dz {dz:.2} vel {:?} pos {:?} body {:?}",
+                    thing.vel, thing.pos, body.0
+                );
+            }
+        }
+    }
+    // The shot's own move is swept (a fast bolt crosses a body between frames).
+    let impacts = rt.impacts(first_created, time.delta_secs());
     let player_index = rt
         .templates
         .iter()
@@ -23037,6 +23444,12 @@ fn setup(
         sim.instances.len(),
         kinds.join(", ")
     );
+    // `BK_LEVEL_TRACE`: the cog index the runtime's verb trace prints, mapped back to its script.
+    if std::env::var_os("BK_LEVEL_TRACE").is_some() {
+        for (index, (script, _)) in sim.instances.iter().enumerate() {
+            println!("level trace: cog {index} = `{script}`");
+        }
+    }
     // Actors' instinct classes: `aiclass=` resolves through the template chain, and the file arrives
     // from the archives in `World::ai_classes`. This is the runtime the game runs, so this is the one
     // the instincts belong to.
@@ -23051,6 +23464,13 @@ fn setup(
                 && let Some(raw) = world.ai_classes.get(&class.to_ascii_lowercase())
             {
                 rt.ai.insert(index, ai::parse(raw));
+                // Retail's own `aistatus` at load prints `Flags=0x1004` for every placed class actor
+                // (`tools/parity/aistatus-01narshadda.txt`: `gonkroam.ai` and `rydefault.ai` alike) —
+                // the awake bit `0x4` `sensedanger` requires, plus `0x1000`. The port left these at
+                // zero, so no placed actor was awake and the instinct that alerts on sight could never
+                // run (round 307).
+                let prior = rt.actor_flags.get(&index).copied().unwrap_or(0);
+                rt.actor_flags.insert(index, prior | 0x1004);
                 // `returnhome` walks the actor back to its own anchor (`ai + 0x93`), which is the
                 // placed position: record it now, while the level's things are still where they spawned.
                 let home = rt.things[index].pos;
@@ -23672,8 +24092,17 @@ fn setup(
     // used to be eight radii tall in either direction, which is a guess: a table is short, a column is
     // tall, and `--walk all` measured the guess.
     let mut solids = solids;
-    solids.things = solid_things(&world, &solids);
+    let shapes = SolidShapes::build(&world);
+    solids.things = solid_things_at(
+        &shapes.0,
+        world
+            .level
+            .things
+            .iter()
+            .map(|thing| (thing.pos, thing.sector.max(0) as usize)),
+    );
     commands.insert_resource(Collision(solids));
+    commands.insert_resource(shapes);
     // The ammo bin the player's weapon spends, resolved once from the weapon's own powerup cog.
     let ammo_bin = ammo_bin_for(&world);
     println!("ammo: the player's weapon spends bin {ammo_bin:?}");
@@ -23698,6 +24127,7 @@ fn setup(
         pitch: 0.0,
         sector,
         last_use: f32::NEG_INFINITY,
+        use_hits: 0,
         // `sithPlayer_NewPlayer` (`0x4c8ec0`) sets the position and enters the sector; it never
         // attaches and never runs a floor search, so the body starts at the level's authored height
         // (0.120114 above the floor at level 1) and the first gravity sweep lands it at the sphere
@@ -24098,6 +24528,9 @@ struct Player {
     /// within 250 ms (`DAT_008554bc + 0xfa <= clock`), stamped before the sweep even when it finds
     /// nothing. Seconds on the world clock; `−inf` means "never used".
     last_use: f32,
+    /// How many times a use reached a script-visible target. The `--use-live` gate's own witness:
+    /// counting script messages is tainted by the teleport firing sector triggers (round 304).
+    use_hits: u32,
     /// How high the eye sits above the body. `PLAYER_EYE` is the calibrated height, but a
     /// sector with a low ceiling cannot hold it: level 1's spawn puts 1.45 inside the ceiling
     /// and the view renders from inside the geometry, so it is fitted to the room.
@@ -24559,6 +24992,9 @@ fn sim_dt(time: &Time, capture: Option<&CaptureDt>) -> f32 {
         std::env::var_os("BK_FIXED_DT")
             .map(|_| env_f32("BK_FIXED_DT", 1.0 / 60.0).clamp(1.0 / 240.0, 0.1))
     });
+    // The engine's own clamp (`sithTime_Advance`, `0x4dd640`): each frame advances the game by its
+    // delta limited to [10, 500] ms. The floor matters as much as the cap — above 100 fps retail's
+    // clock runs faster than wall time, and a port that kept the raw delta would run slower there.
     fixed.unwrap_or_else(|| time.delta_secs().min(0.1))
 }
 
@@ -24815,7 +25251,8 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     world: Option<Res<World>>,
-    solids: Option<Res<Collision>>,
+    solids: Option<ResMut<Collision>>,
+    shapes: Option<Res<SolidShapes>>,
     sim: Option<Res<Sim>>,
     mut player: Option<ResMut<Player>>,
     overview: Res<Overview>,
@@ -24829,7 +25266,14 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // `--trace-out`: the frame counter for the written trace (Phase 0.5 trace v0).
     mut trace_tick: Local<u32>,
 ) {
-    let (Some(solids), Some(player)) = (solids, player.as_mut()) else { return };
+    let (Some(mut solids), Some(player)) = (solids, player.as_mut()) else { return };
+    // A door or lift follows its frame path, and the engine collides a body against the thing where
+    // it is now. The cylinders were built from the level file's own placements, so a leaf that had
+    // already slid aside still blocked: `18Ascend` spawns the player between two elevator leaves and
+    // the frozen closed pair pinned the body for the whole leg.
+    if let (Some(sim), Some(shapes)) = (sim.as_deref(), shapes.as_deref()) {
+        solids.0.things = shapes.place(&sim.world.borrow().things);
+    }
     // `--overview` and `--near` exist to frame a fixed shot; a walker would fight them.
     if overview.overview || near.0.is_some() {
         return;
@@ -25056,7 +25500,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     ) && player.pos.z - player.rules.radius < floor - 0.01
         && player.vy <= 0.0
     {
-        player.pos.z = floor + player.rules.radius + 0.01;
+        player.pos.z = floor + player.rules.radius;
         player.vy = 0.0;
         player.grounded = true;
     }

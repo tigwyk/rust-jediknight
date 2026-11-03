@@ -147,13 +147,17 @@ fn main() {
         }
         let path = format!("{prefix}{decoded:03}.raw");
         std::fs::write(&path, &buffer).expect("write frame");
-        if std::env::var_os("SMKDEC_TRACE").is_some() && decoded < 3 {
+        let trace = std::env::var_os("SMKDEC_TRACE").is_some();
+        if trace && decoded < 3 {
             eprintln!("wrote {path} ({} bytes)", buffer.len());
         }
         if buffer.iter().any(|b| *b != 0) && first_ink.is_none() {
             first_ink = Some(decoded);
         }
         hashes.push(hash);
+        // The game reads only the `.raw` frames and deletes them; the PPM and palette dumps are
+        // debugging output (~560 KB a frame) that nothing cleans up, so only a trace run writes them.
+        if trace {
         // The frame as a PPM, so it can be looked at. The palette is NOT here: the DLL keeps
         // one only for `SmackBufferOpen` buffers, and that API refuses a 640-wide frame
         // (`_SmackBufferOpen@24` @ 0x4020e0 only takes `param_3 < 0x141`), so what is written
@@ -175,6 +179,7 @@ fn main() {
             let palette = unsafe { std::slice::from_raw_parts(base as *const u8, 1024) };
             std::fs::write(format!("{prefix}palette{decoded:03}.bin"), palette)
                 .expect("write palette");
+        }
         }
         println!("frame {decoded}: {hash:016x}");
         decoded += 1;

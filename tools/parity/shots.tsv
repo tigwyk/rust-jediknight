@@ -37,6 +37,7 @@ switch_cantina	01narshadda	-4.75	-2.95	-1.143	0	-153.800000
 # switch_cantina2: stand north of the switch plate (surface 2409 centre -4.29,-3.88,-1.15) and face it
 # with the camera level, then middle-click (ACTIVATE). This is the aim pose the --links centroids give.
 switch_cantina2	01narshadda	-4.29	-2.95	-1.143	0	180.000000
+
 level2_spawn	02narshadda	10.80	-11.98	3.02	0.66	-99.98
 level5_spawn	06abarons	10.58	14.91	0.22	1.12	134.99
 level14_spawn	15maw	39.47	-7.28	28.255	0	0

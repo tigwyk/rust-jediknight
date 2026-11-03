@@ -49,6 +49,13 @@ param(
   # Stop on the Single Player submenu and save a screenshot, so Load Game's coordinates can be read
   # off it (the harness otherwise clicks New Game and never shows the submenu).
   [switch]$StopAtMenu,
+  # Capture the opening cutscene instead of skipping it: wait this many ms from the window
+  # appearing, grab `intro-cutscene.png`, and return. Step 8's exit is a retail frame pair of a
+  # cutscene frame; the port renders the same `.smk` with `--cutscene <file> <frame>`.
+  [int]$IntroShotMs = 0,
+  # The **main** menu (Players / Cutscenes / Credits / Setup), one screen above `-StopAtMenu`: step
+  # 10's UI fixture needs this screen's frame, and the submenu shot cannot stand in for it.
+  [switch]$MainMenuShot,
   # Click Load on the submenu and photograph the save list (retail's only remaining route to a
   # level other than the campaign's first, which Phase 2''s spawn audits need).
   [switch]$LoadShot,
@@ -190,6 +197,29 @@ function Invoke-JkStaging([string]$Source, [string]$Destination) {
     Install-Jk3DWrapper -Destination $Destination -LogPath $script:LogPath
   }
 
+  # The Load screen lists `player\<profile>\*.jks` and **skips names starting `_JKAUTO`**
+  # (`jkGuiSaveLoad_PopulateList`, 0x41ddd0: `sithGamesave_GetProfilePath`, a find in the profile
+  # directory, an `__strnicmp` against `_JKAUTO`, then a header read whose first dword must be 6).
+  # Retail's own play therefore leaves only autosaves in that folder, which the list hides — so a save
+  # to load has to exist under a normal name. Seed it from the freshest autosave *before* the cleanup
+  # below deletes them; a fresh install with no autosave falls back to the shipped `saves\autosave.jks`.
+  if ($script:BootSaveLevel) {
+    $seed = Join-Path $Destination 'player\Lee\save0000.jks'
+    if (-not (Test-Path -LiteralPath $seed)) {
+      $auto = Get-ChildItem -Path (Join-Path $Destination 'player') -Recurse -Filter '_JKAUTO_*.jks' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+      if ($auto) {
+        Copy-Item -LiteralPath $auto.FullName -Destination $seed -Force
+        Log "seeded save0000.jks from the autosave $($auto.Name) so the Load screen can list it"
+      } else {
+        $fallback = Join-Path $Destination 'saves\autosave.jks'
+        if (Test-Path -LiteralPath $fallback) {
+          Copy-Item -LiteralPath $fallback -Destination $seed -Force
+          Log 'seeded save0000.jks from the shipped saves\autosave.jks'
+        } else { Log 'no savegame to seed: no autosave and no shipped saves\autosave.jks' }
+      }
+    }
+  }
   # The scratch profile (never the real install) gets cutscenes disabled.
   # Stale autosaves are a trap: JK writes `_JKAUTO_<level>.jks` during play, and the next run resumes that
 # state instead of the level's spawn pose - a warp then arrives at the wrong body and the trace measures
@@ -522,8 +552,10 @@ function Invoke-JkWalkTrace {
   # **Stuck detection.** A walk leg whose forward route runs into geometry does not error: the body
   # stops, the harness keeps holding the key for the rest of the segments, and the operator is left
   # watching a game parked against a wall (round 250: this happened repeatedly and had to be closed by
-  # hand). Two consecutive segments with under 0.02 units of horizontal movement is a wall, not a walk —
-  # throw so the row's `finally` closes the game and the run stops.
+  # hand). Two consecutive segments with under 0.02 units of horizontal movement is the end of the walk:
+  # if the body never moved at all, that is a route into geometry and the leg throws; if it walked and
+  # then stopped, the samples are kept (round 293 — the short legs stop against a prop by design, and
+  # discarding them lost their whole capture).
   $previous = @([double]$start.Pos[0], [double]$start.Pos[1])
   $still = 0
   try {
@@ -560,8 +592,17 @@ function Invoke-JkWalkTrace {
       $previous = @([double]$sample.Pos[0], [double]$sample.Pos[1])
       if ([math]::Sqrt($dx * $dx + $dy * $dy) -lt 0.02) { $still++ } else { $still = 0 }
       if ($still -ge 2) {
-        Log ("walk trace: STUCK at ({0:N3}, {1:N3}, {2:N3}) sector {3} after {4} ms of held forward" -f $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $held)
-        throw ("walk leg '$Name' is stuck: two segments of held forward moved it less than 0.02 units, so the route walks into geometry. Aborting this leg and closing the game; run tools/parity/walk-preflight.ps1 before capturing it again.")
+        # A leg that **never** moves is a route into geometry (the case the guard exists for). A leg
+        # that walks and then stops is a measurement: several shipped legs are short walks that end
+        # against a prop or a wall (walk4_spawn walks 0.30 units, walk6_spawn 0.2), and their retail
+        # reference is exactly that. Record what was taken instead of discarding the run.
+        $walkedFromStart = [math]::Sqrt(($sample.Pos[0] - $start.Pos[0]) * ($sample.Pos[0] - $start.Pos[0]) + ($sample.Pos[1] - $start.Pos[1]) * ($sample.Pos[1] - $start.Pos[1]))
+        if ($walkedFromStart -lt 0.02) {
+          Log ("walk trace: STUCK at ({0:N3}, {1:N3}, {2:N3}) sector {3} after {4} ms of held forward" -f $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $held)
+          throw ("walk leg '$Name' is stuck: two segments of held forward moved it less than 0.02 units, so the route walks into geometry. Aborting this leg and closing the game; run tools/parity/walk-preflight.ps1 before capturing it again.")
+        }
+        Log ("walk trace: the leg stopped at ({0:N3}, {1:N3}, {2:N3}) sector {3} after {4} ms - it walked {5:N2} units from the start; recording the {6} sample(s) taken" -f $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $held, $walkedFromStart, $samples)
+        break
       }
       # Do **not** re-press here: the next iteration activates the window (sleeping up to a second
       # while the engine runs), and a key left down over that sleep moves the body outside the measured
@@ -782,7 +823,7 @@ function Invoke-JkCaptureRow {
   # Numbered spawn rows name their Debug entry (`walk17_spawn` -> 17). An explicit -StartLevel wins;
   # an unnumbered non-first-level row fails closed instead of silently capturing New Game.
   $startLevel = $StartLevel
-  $otherBootRoute = $StartEpisode -or $LoadSave -or $StopAtMenu -or $DebugShot -or $LoadShot
+  $otherBootRoute = $StartEpisode -or $LoadSave -or $StopAtMenu -or $DebugShot -or $LoadShot -or $MainMenuShot -or $IntroShotMs
   if (-not $startLevel -and -not $otherBootRoute) {
     if ($name -match '^(?:walk|level)(\d+)_spawn$') { $startLevel = $Matches[1] }
     if (-not $startLevel -and $level -notlike '01narshadda*') {
@@ -826,6 +867,23 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     # Skip the intro movies: activate the window, ESC, retry until the bright Players screen.
     Start-Sleep -Seconds 2
     Send-JkClick -X 50 -Y 50
+    if ($IntroShotMs -gt 0) {
+      # The (50,50) click dismissed the dev console, so the movie has just started: wait on it.
+      Start-Sleep -Milliseconds $IntroShotMs
+      $introPng = Join-Path $Out 'intro-cutscene.png'
+      Add-Type -AssemblyName System.Drawing
+      $rect = [JkRetail]::WindowRectText((Get-JkWindow -ProcessId $process.Id))
+      if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
+        $w = [int]$Matches[3] - [int]$Matches[1]; $h = [int]$Matches[4] - [int]$Matches[2]
+        $bmp = New-Object System.Drawing.Bitmap($w, $h)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen([int]$Matches[1], [int]$Matches[2], 0, 0, (New-Object System.Drawing.Size($w, $h)))
+        $bmp.Save($introPng, [System.Drawing.Imaging.ImageFormat]::Png)
+        $g.Dispose(); $bmp.Dispose()
+      }
+      Log "captured the opening cutscene after $IntroShotMs ms; wrote $introPng"
+      return
+    }
     Start-Sleep -Milliseconds 400
     Send-JkKey 'ESC'
     Start-Sleep -Milliseconds 2000
@@ -850,6 +908,21 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     Start-Sleep -Milliseconds 1800
     $menuYavg = Get-JkWindowYavg -ScratchDir $Out -LogPath $script:LogPath
     Log "clicked Players Ok (573,442); window yavg=$menuYavg (main menu expected)"
+    if ($MainMenuShot) {
+      $mainPng = Join-Path $Out 'main-menu.png'
+      Add-Type -AssemblyName System.Drawing
+      $rect = [JkRetail]::WindowRectText((Get-JkWindow -ProcessId $process.Id))
+      if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
+        $w = [int]$Matches[3] - [int]$Matches[1]; $h = [int]$Matches[4] - [int]$Matches[2]
+        $bmp = New-Object System.Drawing.Bitmap($w, $h)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen([int]$Matches[1], [int]$Matches[2], 0, 0, (New-Object System.Drawing.Size($w, $h)))
+        $bmp.Save($mainPng, [System.Drawing.Imaging.ImageFormat]::Png)
+        $g.Dispose(); $bmp.Dispose()
+      }
+      Log "stopped on the main menu; wrote $mainPng"
+      return
+    }
     Send-JkClick -X 320 -Y 195
     Start-Sleep -Milliseconds 1500
     Log 'clicked Single Player (320,195)'
@@ -991,6 +1064,10 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       throw "level did not load within $LevelTimeoutSec s (no 'parse section things' line in the dev-console ListBox)"
     }
     Log "level loaded: $parseLine"
+    # How long the level has been running when the series starts. The series clock alone only says how
+    # far apart its frames are; the port must be sampled at the same **game** time, and the engine's
+    # clock starts here. Round 308 adds it so `series-gate.ps1` can offset the port's first frame.
+    $levelReadyClock = [Diagnostics.Stopwatch]::StartNew()
 
     # Let the load fade finish, then optionally warp to the requested pose (best effort).
     Start-Sleep -Milliseconds 1200
@@ -1011,6 +1088,14 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     if ($Keys.Count -gt 0) {
       foreach ($key in @($Keys | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })) {
         if ($key -like 'MOUSE*') {
+          # The warp's console dialog took focus and DirectInput reads the mouse only while the
+          # game is foreground, so put it back before the press (round 302: a `switch_use` click
+          # at 0.12 units from the plate was lost this way and the door still read `doorstatus 0`).
+          $keyWindow = Get-JkWindow -ProcessId $process.Id
+          if ($keyWindow -ne [IntPtr]::Zero) {
+            [void][JkRetail]::SetForegroundWindow($keyWindow)
+            Start-Sleep -Milliseconds 150
+          }
           # Put the cursor in the game window first: mouse events land on whatever is under it.
           $rect = [JkRetail]::WindowRectText((Get-JkWindow -ProcessId $process.Id))
           if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
@@ -1020,9 +1105,12 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
             Start-Sleep -Milliseconds 120
           }
           Log "pressing $key after the warp (cursor $cx,$cy)"
-          Send-JkMouseButton -Button ($key -replace '^MOUSE', '')
+          # A tap can fall between the software renderer's frames; an action needs a hold.
+          Send-JkMouseButton -Button ($key -replace '^MOUSE', '') -HoldMs $ActionHoldMs
         } else {
           Log "pressing $key after the warp"
+          # Keyboard keys stay a tap here: the cutscene-skip rows pass `SPACE,ENTER,SPACE` and a
+          # 600 ms hold would change what they do. A held action key belongs in `-KeysAfter`.
           Send-JkKey -Name $key
         }
         Start-Sleep -Milliseconds 300
@@ -1104,6 +1192,8 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     # second under the dgVoodoo path, so the 1 s spacing is a floor, not the real interval. The offsets
     # below let `series-gate.ps1` capture the port over the same **measured** span (and, for a level whose
     # opening is a cutscene, say exactly how far into the level the series starts).
+    $seriesSettleMs = [int][math]::Round($levelReadyClock.Elapsed.TotalMilliseconds)
+    Log "series settle: $seriesSettleMs ms after the level loaded"
     $seriesClock = [Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $SeriesFrames; $i++) {
       $frameStart = Get-Date
@@ -1300,6 +1390,9 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       # Per-frame offsets from the first series capture, and the span they cover. `series-gate.ps1` reads
       # these to capture the port over the same real interval instead of assuming 1 frame a second.
       series_times_ms = @($series | ForEach-Object { $_.Ms })
+      # Wall time from "level loaded" to the first series frame: the port's series must start at the
+      # same game time, not at the same frame index (round 308).
+      series_settle_ms = $seriesSettleMs
       series_span_ms = if ($series.Count -ge 2) { $series[$series.Count - 1].Ms - $series[0].Ms } else { 0 }
       series_static = $seriesStatic
       first_frame_is_player_camera = $seriesStatic

@@ -43,6 +43,13 @@ pub struct Cutscene {
     pub finished: bool,
     /// The last frame that could be read, kept so a slow decode never blanks the screen.
     last: Vec<u8>,
+    /// `BK_FILM_HOLD=<frame>`: pin playback to one frame. A scripted screenshot of a particular
+    /// film frame needs this - wall-clock playback had advanced a `140` start to frame 147 by the
+    /// time the shot fired, so the two sides of a retail pair were different frames (round 309).
+    hold: Option<usize>,
+    /// The decoding helper. Every film shares one frame prefix, so a helper left running after a skip
+    /// would keep writing frames past `clean_up` and over the next film's.
+    helper: Option<std::process::Child>,
 }
 
 impl Cutscene {
@@ -67,18 +74,22 @@ impl Cutscene {
             .arg("0")
             .stdout(std::process::Stdio::null())
             .spawn();
-        match spawned {
-            Ok(child) => println!(
-                "cutscene: {} ({total} frames) decoding, pid {}, prefix {}",
-                file.display(),
-                child.id(),
-                prefix.display()
-            ),
+        let helper = match spawned {
+            Ok(child) => {
+                println!(
+                    "cutscene: {} ({total} frames) decoding, pid {}, prefix {}",
+                    file.display(),
+                    child.id(),
+                    prefix.display()
+                );
+                child
+            }
             Err(e) => {
                 println!("cutscene: could not start the decoder: {e}");
                 return None;
             }
-        }
+        };
+        let hold = std::env::var("BK_FILM_HOLD").ok().and_then(|v| v.parse::<usize>().ok());
         Some(Cutscene {
             film,
             prefix,
@@ -89,6 +100,8 @@ impl Cutscene {
             frame_seconds: 0.066,
             finished: false,
             last: vec![0u8; (FRAME_WIDTH * FRAME_HEIGHT * 4) as usize],
+            hold,
+            helper: Some(helper),
         })
     }
 
@@ -121,6 +134,16 @@ impl Cutscene {
     /// holds the current frame instead of skipping ahead of the picture.
     pub fn advance(&mut self, dt: f32) {
         if self.total == 0 || self.finished {
+            return;
+        }
+        if let Some(hold) = self.hold {
+            // Hold on, but only on a frame the decoder has actually produced: a slow decode never
+            // shows a blank instead of the pinned frame.
+            if hold >= self.total {
+                self.finished = true;
+            } else if self.frame_path(hold).exists() {
+                self.at = hold;
+            }
             return;
         }
         self.elapsed += dt;
@@ -169,11 +192,20 @@ impl Drop for Cutscene {
         if std::env::var_os("BK_FILM_TRACE").is_some() {
             println!("film: dropping the film at frame {} of {}", self.at, self.total);
         }
+        // Stop the helper first, or it writes frames after the clean-up removes them.
+        if let Some(mut helper) = self.helper.take() {
+            let _ = helper.kill();
+            let _ = helper.wait();
+        }
         self.clean_up();
     }
 }
 
 /// Letterbox one frame into the middle of the canvas. Both are RGBA.
+/// The status bar at the foot of retail's 640x480 screen; the 3D view (and a cutscene) is
+/// 640x400.
+pub const STATUS_BAR: u32 = 80;
+
 pub fn blit(canvas: &mut [u8], width: u32, height: u32, frame: &[u8]) {
     let need = (width * height * 4) as usize;
     if canvas.len() < need || frame.len() < (FRAME_WIDTH * FRAME_HEIGHT * 4) as usize {
@@ -184,7 +216,12 @@ pub fn blit(canvas: &mut [u8], width: u32, height: u32, frame: &[u8]) {
     for pixel in canvas[..need].chunks_exact_mut(4) {
         pixel.copy_from_slice(&[0, 0, 0, 255]);
     }
-    let top = height.saturating_sub(FRAME_HEIGHT) / 2;
+    // Retail plays a cutscene in the game's own 3D view, which is 640x400: the bottom 80 rows of
+    // a 640x480 screen belong to the status bar. Measured round 309 - retail's crawl text sits at
+    // y 160..244 in two independent captures, the film's own text is 110 rows into the frame, so
+    // the film's top edge is y 50, not the 90 that centring in the whole canvas would give.
+    let view_height = height.saturating_sub(STATUS_BAR);
+    let top = view_height.saturating_sub(FRAME_HEIGHT) / 2;
     let row_bytes = (FRAME_WIDTH * 4) as usize;
     for row in 0..FRAME_HEIGHT.min(height) {
         let at = ((top + row) * width * 4) as usize;
@@ -239,6 +276,8 @@ mod tests {
             frame_seconds: 0.066,
             finished: false,
             last: vec![0u8; (FRAME_WIDTH * FRAME_HEIGHT * 4) as usize],
+            hold: None,
+            helper: None,
         }
     }
 
@@ -257,6 +296,27 @@ mod tests {
     }
 
     #[test]
+    fn a_hold_pins_playback_and_waits_for_the_decoder() {
+        let mut cutscene = synthetic(10);
+        cutscene.hold = Some(4);
+        // No file for frame 4 yet: playback must not advance anywhere else.
+        cutscene.advance(0.5);
+        assert_eq!(cutscene.at, 0, "a missing held frame waits instead of advancing");
+        // Once the decoder has written it, playback sits on it however much time passes.
+        std::fs::write(cutscene.frame_path(4), [0u8; 8]).expect("write a frame");
+        cutscene.advance(0.5);
+        assert_eq!(cutscene.at, 4);
+        cutscene.advance(5.0);
+        assert_eq!(cutscene.at, 4, "a held frame never advances");
+        assert!(!cutscene.finished);
+        let _ = std::fs::remove_file(cutscene.frame_path(4));
+        // A hold past the end ends the film rather than spinning.
+        cutscene.hold = Some(99);
+        cutscene.advance(0.1);
+        assert!(cutscene.finished);
+    }
+
+    #[test]
     fn a_frame_lands_letterboxed_in_the_canvas() {
         let mut frame = vec![0u8; (FRAME_WIDTH * FRAME_HEIGHT * 4) as usize];
         for pixel in frame.chunks_exact_mut(4).take(FRAME_WIDTH as usize) {
@@ -266,8 +326,8 @@ mod tests {
         let canvas_height = 480;
         let mut canvas = vec![7u8; (FRAME_WIDTH * canvas_height * 4) as usize];
         blit(&mut canvas, FRAME_WIDTH, canvas_height, &frame);
-        let top = (canvas_height - FRAME_HEIGHT) / 2;
-        assert_eq!(top, 90);
+        let top = (canvas_height - STATUS_BAR - FRAME_HEIGHT) / 2;
+        assert_eq!(top, 50, "retail's film top: centred in the 640x400 view, above the status bar");
         assert_eq!(
             &canvas[0..4],
             &[0, 0, 0, 255],

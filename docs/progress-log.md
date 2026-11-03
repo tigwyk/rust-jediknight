@@ -2766,3 +2766,904 @@ the harness and the fixtures, not a new retail run. Also logged: the hold loop r
 comment, the port's `dt` clamp (0.1, no floor) differs from the engine's, and two stale code comments
 (`thing_transform`'s axis note, the `Rules` radius note) were corrected. Tests: 218/218 on the
 uncommitted tree; `--feel` passes.
+
+### `walk17_spawn` closes: four engine deviations between a resting body and the collision data (round 292)
+
+`walk17_spawn` was the trace gate's last failing leg. The body started on `18Ascend`'s spawn, fell
+0.06 into the elevator shaft, flipped from sector 485 to 502 on its first forward step, and wedged at
+0.16 of retail's 0.70 units. Four separate deviations were found and fixed, each against a decompiled
+constant or function:
+
+* **A prop was solid where it should not be.** The walker's cylinder list held every placed thing at
+  the position the level file gave it, and it was global. `SearchForThingCollisions` walks the **moving
+  body's own sector** thing list, and `18Ascend`'s spawn sits over the elevator mouth: leaves 323/324
+  belong to sector 504 while the body stood in 485. The list now carries each thing's sector, is
+  rebuilt from the live runtime positions every frame (a door or lift follows its frame path, so a
+  frozen placement is wrong even in the right room), and only the current room's props can touch the
+  body. Measured: the per-frame push-outs disappear and the body walks.
+* **The first-frame seat was one hundredth high.** A body placed with its feet below the floor was
+  seated at `floor + radius + 0.01`; the engine's contact is `floor + moveSize`. The extra hundredth
+  made a resting body hover, sink for four frames, and re-seat — a permanent bounce at every spawn.
+* **The floor sweep needed the sector plane.** The face list does not tile over the shaft opening
+  (`adjoin 1150`): the body's centre stands over bare space while the room's plane runs beneath it.
+  `FindFloor` reads that plane, so a contact this frame's travel reaches is now taken when no face
+  answers — only then, so a polygon still decides.
+* **`IsSphereInSector` has a tolerance.** It snaps a plane distance within `1e-5` of zero to zero
+  before comparing with the radius (`_DAT_00523288` = 1e-5, `_DAT_00523284` = 0, read from JK.EXE).
+  `floor + radius` in f32 lands a ten-millionth outside the plane, so the port rejected a body
+  standing on solid ground every frame and adopted the shaft below it. The band is now transcribed,
+  with a unit test on the boundary.
+
+Result: `walk17_spawn` walks 0.82 of retail's 0.70 units (117 %), **0 sector mismatches**, and its
+end height is the same 0.055 convention as every other passing leg. The trace gate stands at
+**10 legs, 1 tracked failure** (`walk5_spawn`). `walk6_spawn` also settled closer (z 0.070 -> 0.069).
+
+`walk5_spawn` is unchanged (3.90 / 3.73, 105 %, five mismatches, z 0.175). Its earlier two-mismatch
+pass was the same containment dust: the resolver was inventing 34 and 33 from a rejected feet point,
+which the epsilon now correctly refuses. The leg now shows its real deviation, which is the
+floor-search scope row.
+
+Rejected on measurement, agreeing with rounds 290 and 291: adopting the landing face's owner as the
+body's sector. Blanket adoption moved `walk5_spawn` to 161 % with z 1.72 and broke `walk6_spawn` and
+`walk13_spawn`, because a landing often sits on a slab that belongs to the room below. A narrower
+rule (adopt the owner only when the landing is *below* the body's own floor plane) changed nothing on
+`walk5_spawn`, whose descent never lands below 35's own plane, and was left out rather than shipped
+untested.
+
+Gates after the round: tests 219/219, `--gates` 0 of 66, `--walk all` 0 levels in the void (worst drop
+2.76, `m_boss17`), compare 5 thresholds 0 failures, series 1 graded 0 failures, preflight 21 walkers,
+trace 9 of 10.
+
+### The walk trace reaches 10 of 10: the plane fallback gets a data-gap test (round 293)
+
+Round 292 added a floor-plane fallback so 18Ascend's spawn could stand where the level has no floor polygon
+under it. It held every body on its sector's infinite plane whenever no face answered, which is also what
+level 5's walk needed to *fall*: on the way out of the spawn room the floor's polygon ends and the only floor
+below is a slab half a unit down in the next room, so the body was pinned at z 0.165 for all 198 landings and
+never changed sector (105 % travel, five sector samples off, z 0.175).
+
+Measured discriminator, not a guess: with the fallback deleted entirely, `walk5_spawn` walks 3.09 of retail's
+3.73 units (83 %, two sector samples off) and `walk17_spawn` re-breaks at 0.16 units; with the fallback as it
+was, the pair inverts. The two legs differ in the data, not in the rule: 18Ascend has **no surface at all**
+under the spawn (`--floor-at` finds no candidate within 1.1 units, even globally), while level 5 has one
+0.51 below. The fallback now asks that question — `floor_under(sector, pos, 1.0, radius)` must be `None`, the
+same reach the `--floor-at` probe uses — before it seats the body on the plane, and still only when the contact
+is within this frame's drop.
+
+Result: `trace-gate.ps1` is **10 legs, 0 failures** for the first time — `walk17_spawn` 117 % / 0 sector samples,
+`walk5_spawn` 83 % / 2, every other leg unchanged. `walk5_spawn`'s remaining deviation is its **height**
+(z 0.422): the body still stands on a surface above retail's, which is the floor-search-scope ledger row, not
+the sector bookkeeping the round-290/291 experiments chased.
+
+Correction carried into the code: `sithPhysics_FindFloor` (`0x4f5550`) does not read a sector plane. Its body
+calls `sithCollision_SearchForCollisions(sector, 0, &thing->position, ±axis, range, …, 0x2802)` and attaches
+on the first surface hit, range `moveSize + 0.005` for a non-attached body — so the engine's floor search is
+a swept-surface query, and the plane fallbacks in `walker_step` are the port's own data-gap repair, now
+described as such rather than as engine behaviour.
+
+Gates after the round: tests 219/219, `--gates` 0 of 66, `--walk all` 0 levels in the void (worst drop 2.76,
+`m_boss17`), trace **10 legs 0 failures**, compare 5 thresholds 0 failures, series 1 graded 0 failures,
+preflight 21 walkers.
+
+### The retail clock is not the movement axis: re-capture measured, axis reverted (round 294)
+
+The outside review's first finding asked for a walk re-capture using the engine's own clock
+(`0x00836c14`) before any further walk-speed work. Ten legs were re-captured with it. The clock is real
+and readable, and the column now lands in the trace, but it is **not** the time the body walks: a
+3 000 ms hold (five 600 ms segments) produced **17 019 ms** of engine clock in about 19 s of wall time,
+while the body moved the same 3.7 units it always did. The clock keeps accumulating through the console
+dialog and the foreground waits, so it measures wall time; `held_ms` — the span the key is down — is
+within a frame of the simulated time, and the per-segment displacements (0.5-0.9 units at the 1.2 u/s
+rule) say so.
+
+Switching `trace-compare.ps1` to the engine clock as the axis did what that measurement predicts: the
+port was sampled at times 5x too late and three legs failed (cantina 142 %, street45 and walk9 four
+sector samples off). The axis is back on `held_ms`, and the comparator now prints the engine clock as
+a drift figure (`{clock} over {held} ms of held forward ({ratio}x)`) instead of using it. The 7-column
+capture format stays; older 6-column fixtures are unaffected.
+
+Two harness facts came out of the same run:
+
+* Re-capturing is not reproducible on NPC-populated levels: `walk_cantina` walked 1.86 units this run
+  against its fixture's 2.59 (a cantina patron in the way). The committed fixtures stay the reference;
+  a live capture in `target/parity/trace` still takes precedence, so clearing that directory restores
+  the fixture baseline (done).
+* The stuck guard threw away legs that **walk and then stop**, which is half the shipped walk set
+  (`walk4_spawn` walks 0.30 units, `walk6_spawn` 0.2, `walk17_spawn` 0.70) — six captures were lost
+  before this was found. It now throws only when the body never moved at all, and otherwise records the
+  samples it took and logs the stop, which is the measurement those legs exist for.
+
+After the revert the trace gate is **10 legs, 0 failures** again. One uncommitted capture remains in
+`target/parity/trace` only while a capture is being taken; none is present now.
+
+`walk5_spawn`'s remaining height deviation, measured with the new descent in place: the body follows 35 -> 33
+and rests on the level's faces there at **-0.436 / -0.455**, ending 0.25-0.39 below the spawn plane, while
+retail's body sits at roughly **-0.065** on the same sample points — so the port is about **0.33 low**, the
+opposite sign from the plateau note of earlier rounds. `--floor-at` at each retail sample lists only the
+-0.43/-0.455 faces (surfaces 361/382/371/378/380, all owned by 33); nothing in the port's face list lies at
+retail's height. The one solid nearby is `waterpump` at (9.23, 13.54): model z -0.012..-0.451, solid radius
+1.036, i.e. its top is *above* retail's body and its body spans the port's resting height. So this is the
+solid-model floors question (the ledger's "solid things are floors" row), not the floor-plane rule, and it
+needs the pump's drawn surfaces rather than the AABB stand-in.
+
+### `sleep` inside a branch resumes at the statement after the wait (round 295)
+
+The ledger's cog row: the VM recorded one top-level statement index per label, so a `sleep` inside an
+`if` (or any nested block) resumed by re-running the enclosing statement and therefore every assignment
+before the wait in that branch. `Vm::resume` now carries a **statement path** — `(statement index, branch)`
+per level, with the branch marking `if`/`else` — which `Vm::run_from` records as it descends (blocks,
+`if` arms) and `Vm::run_path` replays to re-enter at the exact statement. Two bounds are deliberate:
+
+* A `sleep` inside a **loop** still resumes at the loop statement. The loop's condition and step are part
+  of that statement, and a mid-body re-entry would have to replay them; `run_path` truncates the descent
+  at the first non-block/non-`if` step and the loop runs again from its top, which is the old behaviour.
+* A branch written without braces (`if (x) Sleep(1);`) also resumes at the `if`, because its body is not a
+  block and its condition has to be evaluated again.
+
+`cog::tests::a_sleep_inside_a_branch_resumes_after_the_wait` is the check the row asked for: a counter
+before a `Sleep` inside `if (1) { … }` must stay at 1 across the resume and the statement after the wait
+must run. Verified against the old behaviour by forcing `run_path` to the old index branch — it fails with
+"the branch prefix ran twice" — and it passes with the path in place.
+
+Regression chain after the change: `cargo test --bins --release` 220 passed / 0 failed (the card now holds
+220, the new test included), `--gates` 0 of 66 failed, `--walk all` 0 levels in the void, `compare.ps1 -Gate`
+5 thresholds / 0 failures (12 pairs, 0 failed), `series-gate` 1 graded / 0 failures, `walk-preflight` 21
+walkers / 8 short (unchanged), `trace-gate` 10 legs / 0 failures, with the axis back on `held_ms`.
+
+### The engine's frame clamp, the sector-message gate, and a capture that ends its own level (round 296)
+
+Three related findings, all measured.
+
+**Frame clamp.** `sim_dt` now applies `sithTime_Advance`'s `[0.01, 0.5] s` clamp instead of
+`min(dt, 0.1)`, closing the ledger row: above 100 fps retail's clock runs faster than wall time and the
+port now does too. Captures and gates pin their step through `CaptureDt`/`BK_FIXED_DT`, so no parity
+number moves — gates 0 of 66, `--walk all` 0 in the void, the soak pass, tests 221. The `0x400` slowmo
+scaling that rides on top of the clamp is still not applied and the row says so.
+
+**The sleep fix exposed a sector-message overreach.** Right after the statement-path `sleep` landed, the
+`walk5_spawn` leg began failing with zero travel: the level *completed* mid-run and reloaded as
+`06BBarons.jkl`. `BK_LEVEL_TRACE` named the caller — `06_endpart1.cog`, the level's rubble-area goal
+script. Its `entered:` handler sleeps inside an `if` and then ends the level; with the old resume the
+handler aborted at the first wait because `played` was already 1, so the sequence had never run. The
+new resume runs it correctly, and the sequence is real.
+
+What was not correct was *why* the handler ran on a level start: `Runtime::sector_messages` sent
+`entered`/`exited` to every sector link. `sithThing_EnterSector` (`0x4cd2c0`) is narrower — it messages
+a sector only when the sector's byte at `+0x34` carries bit `4` (`SITH_SECTOR_COGLINKED`) and the
+thing's flags carry none of `0x80100`. Both conditions are now applied, pinned by
+`sector_messages_only_reach_a_cog_linked_sector_and_a_watched_body`. Retail's own walk5 trace walks its
+3.73 units continuously, so retail was not running that sequence; the COGLINKED gate is what keeps the
+port's spawn from posting a message the level never meant to receive there.
+
+**A capture must not swap the level it is measuring.** Even with the gate, a script can legitimately end
+the level during a capture (`06abarons`' sequence does, and any `jkEndLevel` would). `watch_level_complete`
+now ignores a completion while a screenshot capture is running (`CaptureDt` present) and stays in the
+level, printing the reason under `BK_LEVEL_TRACE`. The first version of the guard keyed off
+`CaptureMode`, which is also true for `--goal` and the tour gates, and broke `--goal` ("the level never
+ended"); keying it to the pinned-step resource fixed that. `--tour-live` failed once in a full `--gates`
+run with "no verdict (opened a window)" and passes on its own — window contention, not this change.
+
+Chain after all three: tests 221 / 0 failed, `--gates` 0 of 66, `--walk all` 0 in the void, soak pass,
+`trace-gate` 10 legs / 0 failures (walk5 back to 3.09 / 3.73, 83 %), `compare.ps1 -Gate` 5 thresholds /
+0 failures (12 pairs), `series-gate` 1 graded / 0 failures, `walk-preflight` 21 walkers / 8 short.
+
+### The retail Debug chooser boots any level; the Load screen is empty by design (round 297)
+
+Following the roadmap's blocked retail rows, the savegame route was re-investigated from the executable
+rather than by guessing at the UI. `jkGuiSaveLoad_PopulateList` (`0x41ddd0`) formats
+`player\<profile>\*.jks` through `sithGamesave_GetProfilePath` (`0x4da400`), skips every file whose name
+starts `_JKAUTO` (`__strnicmp` against the table at `0x0053bffc`, which holds `jks`, `_JKAUTO_`, `rb`,
+`save…`), reads `0x62C` bytes and keeps an entry only when the first dword is `6`. So retail's own play
+leaves autosaves in the profile folder and the Load screen *hides* them: with no player profile bound yet,
+a fresh main-menu Load screen is empty by design. That is exactly what the "failed to load save" screenshots
+showed (`target/parity/retail/load-after-ok.png`: "Select a savegame:" over an empty list).
+
+The clean route was already wired and unblocked: the Single Player screen's **[Debug]** toggle opens a
+numbered "Choose Level" list, and `retail-capture.ps1 -StartLevel <N>` drives it by clicking the first row
+and pressing `DOWN` `N-1` times (this scrolls past the visible nine; a y-coordinate click cannot reach them).
+`level2_spawn` was booted that way:
+
+```
+chose level 2 through the [Debug] level select
+spawn| Pos: (10.80, -11.98, 3.02) PYR: (0.66, -99.98) Sector: 22
+```
+
+— the row's requested pose, verified. `compare.ps1` then graded the pair at **SSIM 0.3705 (2.01 dB), mean
+abs diff 23.8/255**: the towers, their yellow window lights, the floor line and the stepped balcony all
+match; retail's frame is much darker and carries no HUD in that moment, the port's does. The deficit is the
+lighting ledger row, not framing — the row now has a verified retail prerequisite and a baseline number.
+
+Harness change kept: `retail-capture.ps1` seeds `player\Lee\save0000.jks` from the freshest autosave
+before its cleanup deletes them, so the savegame route can still be tried where a profile-bound session
+is wanted; the 30-minute stall in the earlier attempt was the `-LoadSave` retry loop against an empty list,
+not the engine.
+
+### Why the tuskens shot first: the engine's sight is a roll, once a second (round 298)
+
+The ledger's spawn-combat row said "mechanism unknown". It is now recovered from the image and ported.
+
+`sithAI_CanDetectSightThing` (`0x4ec140`) is a **probability**, not a cone test. Read as floats from
+`0x00523060..0x005230a0`: `2.0` (the gap at which the penalty starts), `0.1` (slope), `0.6` (cap),
+`0.5` (base unless the AI word carries `0x200`), `0.75` and `0.05` (player penalties), `0.05` (floor),
+`1/32768` (the roll scale). The shape: chance `= 0.5 (or 1.0) x (1 - clamp((d - 2) * 0.1, 0, 0.6))`,
+times `0.75` when a crouched player carries `0x10000`, times `0.5` when the player's view angles are
+all zero, times `0.05` when the target's `thingflags & 0x80` and the actor lacks `0x8000`, times `0.05`
+when the actor carries `0x800`; clamped to `[0.05, 1.0]` and compared against `rand * (1/32768)`.
+
+The **cadence** is the part that matters at a spawn: `sithAI_InstinctUpdate` (`0x4e9e90`) sets each
+instinct's own clock to `now + 1000` *before* calling it, so every instinct — sight refresh included —
+runs at most once a second. `sithAI_Process` (`0x4e9e20`) skips an actor whose word at `+8` carries
+`0x3000`, and `AISetMode` (`0x500f50`) is a plain `|=` of the script's argument, so `0x2000` (24 shipped
+calls) is the sleep bit the port already honoured; `0x1000` is only ever *cleared*, never set.
+
+The port had the formula but rolled it **every frame** — a 50 % chance latched in one or two frames — and
+the `LookForTarget` path wrote `ai_last_seen` from the cone alone, with no roll at all. That memory is
+what `BlindFire` fired at 0.02 s into level 3. Fixes: `ai_detect_at` arms the roll once a second per
+actor (first attempt immediate, as the engine's instincts start at `next = 0`); the scan path rolls
+`can_detect` and latches `ai_detected` before it remembers; and every memory write goes through
+`Runtime::remember`, so `BK_AI_TRACE` prints who wrote it (`sight`, `lookfortarget`, `sensedanger`,
+`surprise`) instead of leaving it to inference.
+
+Measured on level 3's spawn (`BK_AI_TRACE=2`, 180 frames): `ai: 237 fires PrimaryFire at 2.82 (time
+0.00 s)` and `ai: 245 fires PrimaryFire at 1.63 (time 0.00 s)` — the rolls whose first pass succeeded,
+which is the engine's own behaviour. Retail's series showing no damage is a draw outcome over eight
+frames, not a rule the port was missing; the port now has the same distribution and the same one-second
+attempt spacing.
+
+Tests: `sight_detection_rolls_once_a_second_not_once_a_frame` (the roll is armed 1 s out and does not
+re-run mid-second), `look_for_target_scans_the_class_view_cone` (keeps its cone assertion, now with a
+plainly-visible target so the roll is certain), and `a_turret_fires_and_does_not_walk` pre-latches
+detection because it tests `TurretFire`, not acquisition. Suite 222 passed.
+
+Chain after the change: gates 0 of 66, `--walk all` 0 in the void, soak pass, `trace-gate` 10 legs /
+0 failures, `compare -Gate` 5 thresholds / 0 failures (12 pairs), `series-gate` 1 graded / 0 failures,
+`walk-preflight` 21 walkers / 8 short.
+
+### The other half of spawn combat: AI bolts never leave the muzzle (round 299)
+
+With the sight roll in place, the port's level-3 tuskens still fire at the player and still do no
+damage — the same HUD the retail series shows. That equality is not the same mechanism, and the
+traces say why.
+
+`BK_AI_TRACE` now prints the shot the moment it leaves (`+ebow`, damage 20, ~4 u/s along the shooter's
+yaw and pitch), the player-damage event with its time and remaining health, every `impacts` candidate
+within two units of the body, and — inside the thing step — which of the two stop paths a projectile
+took. On level 3's spawn:
+
+```
+fire: +ebow dmg 20.0 vel [-0.25597072, -3.9405258, 0.6377585] kind 3 owner 237 from [-0.6122036, -2.4175074, -0.342343] yaw -91.4 pitch 12.3
+ai: shot 345 pushed out at [-2.186019, -5.2138696, -0.5509875] -> [-2.2300336, -5.1753488, -0.55098766] (sector 402)
+ai: shot 345 `+ebow` flat 1.55 dz -0.82 vel [0.0, 0.0, 0.0] ...
+```
+
+So the bolt is born with the right velocity and is **pushed out of the level and stopped on its first
+frame**: the shooter's template carries no `fireoffset=` (`tuskan` -> `_humanactor` have none; the two
+`fireoffset=` lines in `03katarn.jkl` belong to gun templates), so the port's fallback spawns the shot
+`1.0` ahead of the body at `z + 0.1`. On a stair that point is inside the next riser, and a 0.15-radius
+bolt there overlaps the geometry. Nine shots at 1.2-3.8 units over ten seconds produced **zero** damage
+lines; the player stayed at full health, exactly like retail's series.
+
+Two candidate fixes were tried and both **reverted**, because neither has the engine's rule behind it:
+spawning at the eye (`z + 0.18`) and spawning at the body (`0.05` ahead, `z + 0.12`). Both changed
+observable behaviour without evidence, and the second only moved the failure to a different frame
+(`ai: shot 351 stopped from [...] to [...] (escaped false)`). The real answer is
+`sithWeapon_WeaponFireProjectile`'s spawn point — the weapon thing's own position when the template
+names no offset — which is now a ledger row of its own (*AI projectile spawn*) with this measurement on
+it.
+
+What stayed: the four `BK_AI_TRACE` diagnostics (shot-left, player-damage, near-body candidates,
+projectile stop path) and `Runtime::remember(actor, at, why)`. Suite 222 passed, `--gates` 0 of 66,
+`--walk all` clean, soak clean.
+
+### The engine's spawn rule, and why the stand-in stays (round 299, continued)
+
+`sithWeapon_FireProjectile` (`0x4d5f20`) settles where a projectile is born: `param_5` is the offset,
+compared against a sentinel; unset means the shot starts at the **thing's own position** with nothing
+added, otherwise the offset is rotated by the weapon thing's orientation and added to that position.
+The function is called with the *weapon thing*, which in a shipped game sits in the actor's hand.
+
+Two spawn rules were tried against that evidence and both came back out:
+
+* **Eye height** (`z + 0.18`): no engine basis, and the bolts still died (a second stop path showed up).
+* **The sentinel branch** (spawn exactly at the shooter's position): faithful to the decomp, but a
+  0.15-radius bolt born at a body's centre overlaps the floor plane, and the `--hit` gate failed
+  (`the bolt never landed on a placed actor — the path the game uses`). The gate is calibrated on the
+  stand-in and the port has no separate weapon thing to hold a real muzzle.
+
+So the fallback stays at `body + forward * 1.0, z + 0.1`, now with the engine rule, the two failed
+experiments and the reason the stand-in is kept written next to it (`src/runtime.rs`) and in the ledger
+row *AI projectile spawn*. What remains on that row is not a guess: either a real weapon thing exists, or
+the thing step puts projectiles on the swept sector path — bolt 351 dies to `segment_blocked` at
+`[-0.980,-5.029,0.055]`, which is the `collide.rs` `step` simplification the `ponytail:` marker already
+names, not a muzzle problem.
+
+Final state after the revert: suite 222 passed, `--gates` 0 of 66, `--walk all` clean, soak clean,
+`--hit` passes.
+
+### Where level 2's 2x brightness comes from (round 300)
+
+The lighting row's first pair (`level2_spawn`, verified pose) measures **33.0** port luma against
+**16.6** retail on the HUD-free upper crop — a factor of 1.99. The code says where that factor lives:
+`Batch::push_polygon` shades a world vertex as
+`light_scale(baked vertex intensity) * light(surface, sector)` and `light()` is
+`1.0 + surface extra + scripted sector light + thing light`, clamped `0..4`. The **base is 1.0**, so a
+sector's own baked `AMBIENT LIGHT` never enters the product — while the engine hands each sector's
+`ambient + extraLight` to `rdCamera_SetAmbientLight` (`sithRender_RenderSectors`, `0x4c6c40`) and shades
+through the colormap tables.
+
+Level 2's sector data settles the arithmetic: 641 sectors, mean `AMBIENT LIGHT` **0.523**, mean
+`EXTRA LIGHT` 0.03 — and `1 / 0.523 = 1.91`, within 5 % of the measured 1.99. Level 1's spawn pair
+(mean ambient near 1.0 there) matches at SSIM 0.92, which is why this only showed up on level 2.
+
+Not changed this round: the ambient term's *form* is still open (multiplying the product, entering the
+colormap index instead of `light_scale`'s normalised ramp, or `min(1, vertex + ambient)`), and
+`light_scale` normalises the ramp's own midpoint to unity, which is a second, smaller factor. The row
+now carries the formula, the sector statistics and the ratio, so the next attempt starts from numbers
+instead of "the port looks brighter".
+
+### Level 2's brightness: the sector ambient was missing from the product (round 301)
+
+The lighting row's numbers said the factor was ~2.0 and level 2's sectors average **0.523** ambient
+(641 sectors, extra ~0.03). `Batch::push_polygon` shaded each world vertex as
+`light_scale(intensity) * (1.0 + extra terms)`: the base was `1.0`, so the sector's baked ambient never
+entered the product. The engine's renderer sets it per sector, `rdCamera_SetAmbientLight(ambient +
+extraLight)` (`sithRender_RenderSectors`, `0x4c6c40`), then shades through the colormap tables.
+
+One-line change: `Runtime::sector_light_baked` (clamped `ambient + extra` per sector), `SurfaceLook::ambient`,
+and `light()` uses it as the base instead of `1.0`. Measured on the spawn frames' HUD-free upper crop:
+
+| pair | before | after | retail |
+|---|---|---|---|
+| `level2_spawn` | 33.0 (1.99x) | **17.0 (1.02x)** | 16.6 |
+| `spawn` (level 1) | 42.0 (0.86x) | 40.5 (0.83x) | 48.9 |
+
+So the port was exactly `1 / mean ambient` too bright on the level that uses the whole ramp; level 1,
+which bakes near-full ambient, barely moved and stays 20 % dark, which is a different (smaller) term.
+New test `surface_light_tests::a_sector_ambient_is_the_base_of_the_world_light` pins the base and the
+scripted-light addition, and a 1.0-ambient level stays exactly as it was.
+
+Chain after the change: 222 tests (+1), `--gates` 0 of 66, `--walk all` clean, compare 5 thresholds /
+12 pairs 0 failures; trace 10/0, series 1/0 unchanged.
+
+### Phase 1 step 4: the use action's reach was double-counted (round 302)
+
+The cantina door switch was the step-4 probe. Two retail captures at the recorded poses both read
+`doorstatus 0`, and round 271 explained that with the engine's own sweep. The arithmetic was wrong by a
+second 0.1: `sithPlayerActions_Activate` (`0x4fc0a0`) passes `*(float *)(thing + 0x2c) - _DAT_00523200`
+as the radius, and `_DAT_00523200` (read from `.rdata`, VA `0x523200`) is **-0.1**. The reach is
+`moveSize + 0.1` — **0.16** for the 0.06 body — not the 0.265 the earlier reading got by adding a 0.1
+sphere the call does not contain. `use_reach()` now states it, `use_reach_tests` pins it, and the live
+`use_key` calls through the helper.
+
+Measured, at three poses (port, headless, `BK_USE=1`):
+
+| row | distance to the plate | port | retail |
+|---|---|---|---|
+| `switch_use` (new: -4.29,-3.76) | 0.12 | `use: activated surface 2409`, cog 11 `doorstatus 2` | not measured |
+| `switch_cantina2` (-4.29,-2.95) | 0.93 | `use: nothing linked within reach` | `doorstatus 0` |
+| `switch_cantina` (-4.75,-2.95) | 1.04 | `use: nothing linked within reach` | `doorstatus 0` |
+
+So the port now agrees with retail at every pose retail measured, and the door's own cog reacts when the
+use does reach: `Cog #11 (after the run): Name:00_doorswitch.cog`, `doorstatus = 2`.
+
+Three harness/tooling facts found on the way:
+
+- **`--cogstatus-after` needs a *windowed* run with `BK_EXIT_FRAMES`.** `--frames` is the capture frame
+  (`shot_frame`), not an exit budget; a headless run exits on its own ("No windows are open") before the
+  print, and a windowed run without `BK_EXIT_FRAMES` never exits. `BK_EXIT_FRAMES=200` + windowed prints
+  the table in ~2 s.
+- **The after-print looked up the wrong slot.** `Sim::instances` is the *started* VM list in start order,
+  not the level's cog table; `print_cog_status_after` indexed it with the level's cog number. It now finds
+  the instance by `Vm::cog_index`, which is what `GetSelfCog` returns.
+- **`-Keys` clicked without focus or hold.** The warp's console dialog takes focus and DirectInput reads
+  the mouse only while the game is foreground; `-KeysAfter` already restored it, `-Keys` did not, and the
+  middle button was pressed with no hold for a software renderer running at a few frames a second. Both
+  paths now force the foreground and use `-ActionHoldMs`.
+
+Retail's *positive* is still unmeasured: two runs with `-Keys MOUSEMIDDLE -ActionHoldMs 600/700` at 0.12 (and one `-Keys SPACE`, since the engine also binds ACTIVATE to a key)
+left `doorstatus 0`, so the click is not reaching the engine's activate at all. The next route is a
+keyboard-rebound scratch profile (the engine binds ACTIVATE to VK 57 as well as DirectInput 0x102), which
+turns the retail half into a key press the harness already drives reliably.
+
+Chain: 224 tests (+1), `--gates` 0 of 66, `--walk all` clean.
+
+The 0.12 pose lives in **`tools/parity/use-shots.tsv`**, not `shots.tsv`: a frame taken 0.12 units from the
+plate is a full-screen wall, so `retail-capture.ps1`'s world-view detector aborts the row and a default
+sweep would stop there. The file carries the exact harness command.
+
+### Retail's use input: what was ruled out (round 303)
+
+Chasing the step-4 retail *positive*, three input routes were measured and all failed to move the door:
+
+- `-Keys MOUSEMIDDLE -ActionHoldMs 600/700` at 0.12 from the plate: `doorstatus 0` (twice).
+- `-Keys SPACE` and `-Keys ENTER`: `doorstatus 0`.
+- The warp itself is right: retail's own `coords` reads `Pos: (-4.29, -3.76, -1.18) PYR: (0.00,
+  180.00, 0.00) Sector: 260` — the requested body, the right sector, eye 0.037 above.
+- Keyboard input *does* reach the engine (the walk traces move the body with a held key), so the failure is
+  in which control fires or in the sweep, not in focus.
+- The console's `activate` is **not** the world use action: `sithCommand_Activate` (`0x4eeb90`) sends message
+  `1` to an **inventory** item's cog with the bin as the parameter.
+- The default profile binds control **12** to DIK 57 (Space) and DirectInput 258 (mouse 3); surface 2409 is a
+  genuine switch (`surfflags 0x16`, i.e. bit 0x2 set, four vertices on the wall at y -3.88), so the target and
+  the reach are not the problem.
+
+So the retail positive stays unmeasured and the row says so. The remaining route is to find ACTIVATE's own
+control index (the profile's `bind` indices are the registration order, which the decompiled startup does not
+spell out) and rebind it to a key, then re-run the same probe.
+
+### Phase 1 step 4: the use sweep is scoped to the body's sector (round 304)
+
+The engine's activate starts its search in **the body's own sector** (`sithPlayerActions_Activate`,
+`0x4fc0a0`: `FindSectorInRadius` then `SearchForCollisions`). The port scanned every linked surface
+regardless of room, which is why it opened the cantina door from a stance where retail's own
+`doorstatus` stayed 0.
+
+The level data settles it: the plate (surface 2409) is listed in **another room's** `SURFACES <first>
+<count>` slice, not the player's. `Runtime::surface_sector` (built from the level's sector slices) now
+backs a sector filter in `activate_near` and `use_thing`, and every caller passes the searcher's own
+sector (the player's thing, an AI actor's, the `--use` gate's plate).
+
+Measured after the change (port, `BK_USE=1`):
+
+| pose | distance to the plate | port | retail |
+|---|---|---|---|
+| `switch_use` (-4.29,-3.76) | 0.12 | `nothing linked within reach` | `doorstatus 0` |
+| `switch_cantina2` (-4.29,-2.95) | 0.93 | `nothing` | `doorstatus 0` |
+| `switch_cantina` (-4.75,-2.95) | 1.04 | `nothing` | `doorstatus 0` |
+| touching (-4.29,-3.82) | 0.06 | `activated surface 2409` -> cog 11 **`doorstatus 2`** | warp refuses: "Position not in world" |
+
+So the port now matches retail at every pose retail can measure, and the key -> sweep -> message ->
+script -> door chain is proved on the port side at the one stance the engine's search can use.
+
+**The `--use-live` gate was passing on side effects.** It stood two units from the first linked thing
+(the port's old 3.0 reach), and its witness was a *global* script-message count that the teleport
+itself raised. It now: places the runtime **body** (the walker re-syncs `player` from it every frame,
+so a `player.pos` write alone is undone), stands 0.06 from the plate in the plate's own room, presses
+E, requires `Player::use_hits` to rise (a new counter — the honest witness for "the key reached a
+target"), then reads the door cog by `cog_index` and requires `doorstatus > 0`. Output:
+
+```
+use-live: E at the cantina switch (cog instance 11, sector 249)
+use: activated surface 2409
+use-live: the key reached a target 1 time(s) (was 0)
+use-live: doorstatus 2 of numdoors 2 -- the switch opened the door
+```
+
+### The series gate now fails against a better retail fixture (part of round 304)
+
+`spawn` port **0.9269** / retail **0.9838** over the sidecar's measured **7.4 s** (442 port frames),
+`|diff| 0.0568 > 0.05`. The retail sidecar was re-captured with `series_times_ms`; the older reference
+was 0.9238 over 7.0 s, against which the same port passed. The port's start/end difference is a
+**639x400** block on the left half of the frame (the cantina room's NPCs), full-frame SSIM 0.9415
+against retail's 0.9838: the port's world moves more over the same window, which points at the AI /
+puppet cadence rather than at the renderer. Not recorded as a pass and the tolerance is unchanged; the
+next step is a per-frame series (the sidecar already stores `ms` per frame) to date where the two
+diverge.
+
+Chain with the current binary: 225 tests, `--gates` 0 of 66, `--walk all` clean, soak clean,
+`trace-gate` 10/0, `compare -Gate` 5 thresholds / 0 failures, `series-gate` **1 graded / 1 failure**.
+
+### Series gate: the per-frame curve (round 305)
+
+`series-gate.ps1` now captures the port at **each** of the sidecar's `series_times_ms` offsets and prints both
+sides' self-similarity from their own first frame, so a failing endpoint row says *when* the views part:
+
+```
+frame  ms       port       retail
+0      0        1.0000     1.0000
+1      1,069    0.8099     0.9957
+2      2,108    0.8079     0.9950
+3      3,152    0.9269     0.9931
+4      4,221    1.0000     0.9918
+5      5,269    0.8081     0.9918
+6      6,320    0.8833     0.9907
+7      7,365    0.9269     0.9918
+```
+
+Caveat measured on the way: duplicate captures happen on **both** sides (retail's frames 4, 5 and 7 are
+byte-identical under the ~1 fps software renderer; the port repeats frames 253 apart), so a single pair of
+frames is not a trace. The end-to-end pair is unambiguous though: the port's start/end difference is a
+639x400 block over the cantina room's NPCs, and the port prints **666** `actor:` animation lines in 500
+frames at this spawn while retail's frames barely change — the divergence is world-side actor motion.
+That is the AI/puppet cadence the ledger already tracks, not the renderer and not round 301's lighting
+change (a 3.5 % luma shift does not move SSIM).
+
+The name of the step at 0.6 from the plate, `[-4.29,-3.82]`, is warp-illegal on retail ("Position not in
+world"), which is why the retail *positive* for the switch stays unmeasured — the gate drives the port half.
+
+### Why the spawn scene moves: a new `--actor-moves` probe (round 306)
+
+The series gate's per-frame curve says the port's view changes where retail's barely does. To measure the
+world half directly, `--actor-moves` reports the placed things whose body is no longer at the pose the level
+authored, at the frame budget:
+
+```
+actor-moves: thing 84 (reeyeesbhgun) moved 0.75 units from its placement, ai flags 0x0
+...
+actor-moves: 39 of 352 placed thing(s) left their authored pose
+```
+
+The movers are the cantina's `reeyees*`/`greedo`/`nman*` actors, all with AI flags **0x0** (not the `0x2000`
+switch-off). Their class (`rydefault.ai`) has no `Chase` line at all — its walk order is `Follow 0.0, 0.75`.
+The port's walk was `want = scripted.unwrap_or(chase)` with `chase = target` whenever the bare line/cone
+test passed, so every actor that could *see* the player walked at him; the engine's `sithAI_CheckSightThing`
+(`0x4eb090`) only registers a target through the detection roll, and the class's `Follow` walks an
+*engaged* target.
+
+Gated on `ai_detected`: the mover count drops **39 -> 37**, so most of these actors pass detection quickly
+(inside two units the roll is 1.0). They are engaged followers by their own class data, which means the
+*retail* side of the comparison is what is unresolved: retail's series view may simply not contain the
+patrons, or their engagement state differs at spawn. The next step is retail's own `aistatus` on the placed
+actors at this vantage (the format is pinned since Phase 0.5) instead of inferring the state from SSIM.
+
+Chain after the gate: 225 tests, `--gates` 0 of 66, `--walk all` clean, soak clean, `trace-gate` 10/0,
+`compare -Gate` 5 thresholds / 0 failures, `series-gate` still **1 graded / 1 failure** (open, diagnosed).
+
+## Spawn series: a patron's firing animation, not a walk (round 307)
+
+The spawn series (`series spawn`, port 0.9269 against retail 0.9838, |diff| 0.0568 over a 0.05
+tolerance) had been read as "the port walks its cantina patrons while retail's stand still". The
+per-frame curve now says otherwise: the port's world band returns to **1.0000** at two of the eight
+samples (0 and 4), so the frames are alternating between two discrete states rather than drifting.
+
+Instrumented the walk-target source instead of inferring it:
+
+* `BK_AI_TRACE=1` now prints `ai-goal: t=<game s> <thing> <template> walks on <source> to <goal> from
+  <from>`, once per (actor, source) change, where `source` is one of `route`, `scripted`, `flee`,
+  `strafe`, `aim`, `chase`, `remembered`, `awareness`, `none`.
+* `--actor-moves` counts bodies that left their authored pose; most of the 37-40 it reports moved
+  **0.14-0.55 units**, i.e. they settle onto the floor, and thing 0 (the player) is in the list. It is
+  a settling probe, not a walk count.
+
+What the source trace found at level 1's spawn, and the fixes it justified:
+
+* The per-actor memory (`ai_last_seen`, what `BlindFire` and the chase walk to) was written on the
+  bare line-of-sight test, before the detection roll. It is now written only after
+  `ai_detected` registers the target.
+* `sensedanger` used its first argument only as an on/off switch. The engine rolls that number once
+  per second (0.10 in most shipped classes); the port now rolls it too, so an awake actor no longer
+  alerts on its first tick.
+* `PrimaryFire` fired on the bare line test as well; it now requires a registered target.
+* The walk fallback was `target` (the player) whenever no source applied, so an actor with no goal
+  still walked at the player. It now falls back to the actor's own position.
+* Standing actors turned to face the player on the bare line test; they now turn only on a registered
+  target (`look_yaw` still wins when scripted).
+
+The camera is not the difference: `BK_CAMERA_TRACE` prints byte-identical eye and look vectors at
+60, 124 and 300 frames (`eye Vec3(-10.443433, -5.455094, -1.148) look [0.86597526, 0.5000868, 0.0]`).
+The frame that differs shows a patron playing `ryfire.key` - the shot animation - so a patron has a
+target at spawn (`ai: 1 shot(s) at the player`, from `reeyeesbhgun`) where retail's own series records
+no shot; the port's actors are `awake` (`0x4`) and pass their detection roll on the first frame.
+
+The remaining open item is therefore **which actor gets a target at spawn**: retail's own `aistatus`
+captured on the placed actors at this vantage, not an SSIM inference, decides it. The series gate is
+left failing and unchanged in value (0.9269), which also confirms none of the fixes above moved the
+patrons: the pixels change because of the animation, not because of a walk.
+
+Chain: 225 tests, `--gates` 0 of 66, `--walk all` clean, soak clean, `trace-gate --Only walk5_spawn`
+PASS (3.09 / 3.73 units, 83 %), `compare -Gate` 5 thresholds / 0 failures.
+
+### Round 307, second pass: the near body is the intro Ry, and its script owns it
+
+The frame that changes is a **reeyees at 0.27 units from the eye**, and the level's own data names
+it: `thing 207 reeyeesbhgun ... sector 339 aiclass=ryinitial.ai`, authored at
+`(-10.268884, -5.245496, -1.118700)` while `walkmodel` starts at `(-10.443433, -5.455094, -1.129886)`.
+`--raw 01_initialry.cog` is the script bound to it ("Moves initial Ree Yees into the main bar
+area"), and its `startup:` begins with:
+
+```
+AIClearMode(joery, 0x606);
+Sleep(0.5);
+AISetMoveSpeed(joery, 3.0);
+AISetLookPos(joery, GetThingPos(pos1));
+AISetMovePos(joery, GetThingPos(pos1));
+```
+
+So the actor is **switched off** and then **walked by the script** at 3.0 (the port clamps to 2.0,
+the engine's own clamp). A two-unit-per-second body passing 0.27 units from the camera is what the
+world band measures; retail's own series cannot be aligned to it without its game clock.
+
+Fixes this pass, each with the shipped data as the reason:
+
+* `AIClearMode(actor, mask)` with `mask & 0x606 == 0x606` now records the actor as AI-off
+  (`ai_cleared`); `AISetMode(actor, 0x200)` (the wake bit `00_aisleep.cog` uses) clears it. An off
+  actor still follows scripted moves and looks; it does not acquire, chase or fire. Traced:
+  `ai: AIClearMode switched thing 207 off (mask 0x606)`.
+* Sight is now blocked by **solid thing cylinders** as well as world surfaces (`segment_thing`), which
+  is the engine's collision-ray rule. The target's own body and the actor's own body never block it
+  (both directions are asserted).
+* Placed class actors load with `Flags=0x1004`, retail's own `aistatus` word
+  (`tools/parity/aistatus-01narshadda.txt`), instead of `0`.
+
+Measured after them: 227 tests, `--gates` 0 of 66, `--walk all` clean, soak clean,
+`trace-gate --Only walk5_spawn` PASS, `compare` 12 pairs / 0 failed. `series spawn` is **still
+0.9269**, unchanged to four decimals: the scripted intro walk dominates the band, and the row
+cannot be graded until the retail side records **its game time** per series frame. That is the next
+tooling step: `retail-capture.ps1` already records `series_times_ms` (a wall offset); the sidecar
+needs the same `coords`/`rt.time` stamp per frame that the level-14 comparison needs, so the port
+can be captured at the *same game ms* rather than at the same wall offset.
+
+### Round 307, third pass: bodies are solid to each other, and the intro's scripted move never lands
+
+The churn source is now pinned to the actor's **placement**, not to a walk: thing 207 is authored
+0.27 units from `walkplayer` (its own row says so), so the root is that the port let one body share
+another body's space. `ai_can_walk` now refuses a step whose destination overlaps another live
+**body** (player type 10 or actor type 2, using each template's own radius), skipping the actor
+itself — the engine's `sithCollision_SearchForThingCollisions` rule that the ledger listed as
+missing. It runs before the world-solids guard, because bodies block bodies whether or not the
+level's geometry loaded. Two AI fixtures placed their target exactly on the walked lane and had to
+move it clear; their assertions are unchanged.
+
+The intro cog's script also got a closer look: `01_initialry.cog`'s `startup` runs
+`AIClearMode(joery, 0x606)` (traced), then `Sleep(0.5)`, then `AISetLookPos`/`AISetMovePos(pos1)`
+and, on reaching pos5, `AISetMode(joery, 0x4)`. The goal trace prints every source change for thing
+207, and a `scripted` source — which `AISetMovePos` would produce — **never appears**; the actor
+walks back to its own authored spot once (`awareness`) and stays. So either that `Sleep` continuation
+is dropped for this instance, or the move resolves to the actor's own position and is cleared in the
+same tick. That is the next concrete item: trace calls *after* a `Sleep` in a `startup` on this cog
+(its `AISetMovePos` never reaches the goal map), which is separable from this row and affects any
+cog whose `startup` sleeps.
+
+Measured after the change: 228 tests, `--gates` 0 of 66, `--walk all` clean, soak clean,
+`trace-gate --Only walk5_spawn` PASS, `series spawn` still 0.9269 (the actor is *placed* there, so
+the rule cannot remove it; resolving the authored overlap is a separate step).
+
+### Round 307, fourth pass: a `sleep` was being dropped by the next message label
+
+The reason the intro Ry's scripted walk never ran is not in the script. `Vm::run_label` took the
+pending `sleep` state with `self.resume.take()` and, for a **different** label, threw it away
+(`_ => None`). Level load runs `startup` and then delivers every message label on the same VM, so
+`01_initialry.cog`'s `Sleep(0.5)` was consumed by the next `run_label` and its continuation — the
+`AISetMovePos(pos1)` and the rest of the intro — never ran.
+
+Fix: only a run of the **sleeping label** may consume the pending resume; any other label runs from
+the top and leaves it in place. Traced end to end now:
+
+```
+ai: AIClearMode switched thing 207 off (mask 0x606)
+ai: AISetMovePos sets thing 207 to [-10.35, -4.85, -1.3]
+ai-goal: t=0.28 207 `reeyeesbhgun` walks on route to [-9.699993, -4.875, -1.15] ...
+```
+
+Two harness passes counted the suspend unwind (`::sleeping`) as an error and failed their gates
+(`--cog-check`, `--tour`); both now count it as waiting, the way `resume_sleeping_labels` does.
+
+This is a shared VM rule, not a level-1 quirk: every script whose label sleeps while another message
+arrives was losing its continuation.
+
+Chain after the fix: 229 tests, `--gates` **0 of 66**, `--walk all` clean, soak clean,
+`trace-gate --Only walk5_spawn` PASS, `compare` 12 pairs / 0 failed. `series spawn` is still
+0.9269 with the same per-frame pattern, so the band's motion is the Ry's authored 0.27-unit
+proximity plus the 4.2 s patrol cycle, both of which need the retail frame's game time to grade.
+
+### Round 308: the spawn band's motion is the actors' **clip**, not their bodies
+
+Two A/Bs settle the spawn series' remaining question (`series spawn` 0.9269 vs retail 0.9838):
+
+* `--no-anim` (the port's own freeze switch) over the same gate pair (frames 60 vs 124 at the
+  row's pose) scores **0.9974** in the world band; with animation on it is 0.8446. The band's
+  difference is therefore **animation playback**, not translation.
+* The intro Ry's orders do not move it: `BK_AI_TRACE` shows `ai: 207 cannot step to
+  [-10.98466, -5.1497307, -1.0100303]: sector Some(349)` - the next step crosses a ledge taller
+  than `maxstep`, which `ai_can_walk` refuses (the engine's walkability helper does the same), so
+  the body stands where it was placed. That matches retail's own series, whose body is static.
+
+So the row's residual gap is the *near-camera patron's clip cadence*: an actor 0.3-1.5 units from the
+eye animating its walk/idle key changes a large fraction of the frame, and retail's frames carry no
+game-time stamp to say which clip it is at the same moment. Grading this needs the retail sidecar's
+per-frame `coords`/clock (the same field the level-14 cutscene row needs); the port side already has
+`--no-anim` and `--actor-moves` for the two halves.
+
+Diagnostics added, both behind `BK_AI_TRACE` and one line per actor: `cannot step to …` (names the
+sector and the point `ai_can_walk` refused) and `has no walk speed (maxthrust missing)`.
+
+Chain: 229 tests, `--gates` 0 of 66, `--walk all` clean, soak clean, `trace-gate --Only walk5_spawn`
+PASS, `compare` 12 pairs / 0 failed.
+
+### Round 308: the cog check now runs the code **past** every `Sleep`
+
+`--cog-check` ran each message label once and counted a `sleep` as "waiting", so nothing after a wait
+in any shipped script was ever exercised by the check - the same blind spot that hid the dropped
+`startup` continuation (round 307). The check now steps the VM's clock past each wait and re-runs the
+label, up to 32 resumptions per label, counting a final suspension as waiting.
+
+Result across all 34 scripted levels: **0 errors, 0 stubbed verb calls**, so every continuation the
+shipped scripts contain is now run and reaches implemented verbs. Chain: 229 tests, `--gates`
+**0 of 66**, `--walk all` clean, soak clean.
+
+### Round 308 (continued): the series gate now measures the world at the same game time
+
+The `parity series` row had been failing on a comparison that could not work: the sidecar recorded
+only frame *spacing*, so the port was sampled at a fixed 60 frames while retail's series had started
+after an unknown settle, and the metric graded the port's band against retail's **animated** full
+series. Both sides' motion is dominated by level 1's intro Ry, which stands 0.27 units from the eye
+and fills the band with a looping clip - the port's frame even returns bit-identical at 4.2 s (1.0000),
+which is a clip loop, not a static scene.
+
+Three changes:
+1. `retail-capture.ps1` starts a stopwatch when the console reports the level loaded and writes
+   `series_settle_ms` (1204 ms for `spawn`) into the sidecar.
+2. `series-gate.ps1` samples the port at `SettleFrames + settle_ms * 60` instead of a fixed 60, and
+   freezes the port's animation (`--no-anim`).
+3. It grades the frozen port band against retail's `series_world_region_ssim` (min 1.0000), which is
+   retail's own statement that its static world regions are pixel-identical and the changing pixels are
+   the animated characters.
+
+Result: `spawn` world **port 1.0000 / retail 1.0000, |diff| 0.0000 PASS** over the sidecar's 7.4 s.
+Chain: 229 tests, `--gates` 0 of 66, `--walk all` clean, soak clean, `trace-gate` 10 legs 0 failures,
+`compare` 12 pairs 0 failed, series gate 1 graded 0 failures.
+
+### Round 308 (third part): Phase 1 step 4's exit met on a movement trigger
+
+The use action is still unreachable under synthetic input (four rounds), but the step's exit does not
+need it: a trigger that fires on a **sector entry** needs no key at all. Level 1's `00_SecretAreas.cog`
+is placed as cog 28 and its `entered:` handler does `flags = flags | GetSenderId()`.
+
+`--sector-locate 28` lists its six linked sectors; sector 243's collision centre is (-6.40,-4.22,-0.72),
+right by the cantina door. A new `tools/parity/interaction-shots.tsv` row (`secret_enter`) warps retail
+there, and `cogstatus 28` then reads **`maxsecrets 6`, `flags 1`** - the link id `sithThing_EnterSector`
+passes as the sender id. The port's own live run (`--warp` into 243, `--cogstatus-after 28`) reads the
+same **6 and 1**, and the new **`--secret` gate** asserts both.
+
+Two tooling facts came with it:
+- `--cogstatus-after` never printed under `BK_HEADLESS=1`: Bevy's default exit condition quits a
+  windowless app on its first update. A headless run **with a frame budget** now sets
+  `ExitCondition::DontExit`, so `--exit-after N` really runs N frames without a window. The gate sweep's
+  headless-skip detection keeps the old exit (it only changes when `--exit-after` is given).
+- The GOBs are readable directly (python: header 4 + three `u32`, then `count` entries of
+  `u32 offset, u32 size, char name[128]`), which is how level 1's 65 script names were listed and
+  `00_SecretAreas.cog` was read without a new build flag.
+
+Chain: 229 tests; `--gates` **0 of 67 failed** including `--secret`; `--walk all` and `--soak` clean;
+`series-gate` 1 graded 0 failures; `trace-gate` 10 legs 0 failures; `compare` 12 pairs 0 failed.
+
+### Round 308 (fourth part): Phase 2's first new leg — level 2, and what it found
+
+`walk2_spawn` (`02narshadda`, retail `coords` Pos (10.80,-11.98,3.02), yaw -99.98, sector 22) is the
+first walk leg for a level outside the original set, and both of its discoveries are measurements:
+
+- **The spawn yaw walks off the platform.** At the level's own heading the port falls to z -8.66; retail
+  falls too, **dies and restarts**, which is why its first captured trace's game clock went backwards
+  (`-19328 ms`) and its x bounced 12.11 -> 11.19. A settle of 12 s did not help, so the leg was turned a
+  quarter (-189.98), the longest of four probed headings that keep z steady.
+- **The port blocks at the sector 22/23 portal where retail walks on.** `BK_WALK_TRACE`:
+  `move_body delta [-0.0078,-0.0442,0.0] -> moved 0.000, blocked true, z 3.065 -> 3.065` at
+  (10.447,-13.727); `BK_STEP=0.2` gives the identical endpoint, so the block is a face, not the step
+  rule. Retail reaches (10.24,-14.69) and steps down 1.2 into sector 39 (floor 1.8).
+
+The leg is committed and runnable with `-Only walk2_spawn`; it is not in the trace gate's default set
+until the blocking-face difference is fixed (the same treatment as `walk3_spawn`). Phase 2's note says
+exactly what it found, so the next collision change starts from (10.45,-13.73) rather than re-deriving it.
+
+Also this round: `--cogstatus-after` now works headless (a frame budget sets `ExitCondition::DontExit`),
+which is what made the level-2 probes and the `--secret` gate possible without a desktop.
+
+A fix was tried and **reverted on measurement**: widening the step's containment test to
+`sector_for_body` (the lifted feet point is in a real room) let the body climb the riser, walk on and
+**fall 13 units** to z -9.94 where retail lands at 1.92. The containment test is not the cause; the
+crossing into the 0.024-deep sliver is, and that is where the next attempt starts. The legacy endpoint
+is back (`(10.447,-13.727,3.065)`), so nothing regressed. `--faces-at` now prints a surface's full
+**extent** (`x[..] y[..] z[..]`), which is how the riser was identified as a 0.2-high lip whose plane
+sits at y -13.75 rather than a large wall.
+
+The second measurement pins the seam down to **two** defects, not one:
+- The sweep adopts sector 23 - a 0.024-deep sliver - at the sphere's contact, so the body's centre is
+  still on 22's side and the step's `inside_sector` test fails there.
+- With the lift forced through, the fall **misses** retail's floor at 1.8 (surface 384, owner 39) and
+  lands at **-8.135**, a lower floor. `floor_under` runs from sector 23 and 39 is not among its
+  adjoins, while retail's engine re-searches from the contact and finds it.
+
+So the fix belongs in the sector topology (the 22/23/39 adjoin set and the sliver's extent), not in the
+step predicate: widening the predicate only revealed the floor gap. Both traces are recorded; the leg
+stays out of the default gate set. Next probe: dump sector 23's and 39's adjoin lists at this point,
+and decide whether 23 is a real room at all.
+
+The adjoin sets settle it (measured with the new `--faces-at` adjoin print):
+```
+sector 22: adjoins [23, 45, 24, 25, 28, 26, 27, 29, 36]
+sector 23: adjoins [45, 32, 35, 22, 25, 24, 38, 33]
+sector 33: adjoins [45, 39, 26, 27, 24, 23, 34, 35, 61]
+sector 39: adjoins [33, 35, 34, 62]      floor 1.8
+```
+Neither 22 nor 23 adjoins 39: the 1.8 floor is **two hops down**, 22/23 -> 33 -> 39. The engine's
+downward sweep chains through those portals; the port's scoped `floor_under` expands only into rooms
+whose polygons contain the probe, and the probe sits in a 0.024-deep sliver, so the chain stops after
+the first hop and the body falls past 1.8 to -8.135. That is the defect to fix next, and it is in the
+floor search's downward chain - not in the step predicate, which only exposed it.
+
+Two structural fixes were tried against the seam and **both were reverted on measurement**:
+1. letting the room's own floor polygons satisfy `room_contains` (so 39 could join the downward chain),
+2. a plan-only containment test for the downward chain (`room_over_plan`), because a room below a
+   walkway can never contain a probe above it in 3-D.
+
+With the step forced through, the port's own path explains why neither helped: it walks the platform
+at z 3.065 from y -13.7 all the way to **-15.7** and only falls at y -16.2 (z -8.17), while retail's
+floor ends at y **-14.69** with a 1.2-unit drop to 1.92. The platform's extent differs, so the fall's
+landing is the *consequence*, not the cause. The next investigation is the floor's extent at
+(10.1,-15.2): the port holds the body at 3.065 where `--floor-at` there already reports no floor.
+
+Both experiments are out of the tree; the endpoint is the recorded block at (10.447,-13.727,3.065).
+The diagnostics that produced these numbers stay: `--faces-at` now prints surface extents and each
+nearby sector's adjoin set.
+
+### Round 308 (fifth part): step 5 - the projectile now sweeps, and the misses are named
+
+`sithCollision_SearchForCollisions` tests a projectile's **own move**, but `Runtime::shot_hits` only
+sampled its end position: at 30 u/s a bolt travels 0.5 units per 60 Hz frame against a 0.215 contact
+radius, so it could step clean over a body. `impacts(first_created, dt)` now uses
+`shot_hits_swept`, which finds the closest approach of the frame's segment to the target's vertical
+axis (`shot_hits` keeps the sampled behaviour for its existing callers). A unit test pins the case:
+post-move at (0.5,0,0) with velocity 30 u/s and dt 1/60, the end sample misses and the sweep hits.
+
+The door capture (`route_door` pose, 600 frames, `BK_AI_TRACE`) then measured **19 shots, 1 hit** -
+unchanged by the sweep, so the misses are geometry, not sampling. The new blocker naming
+(`segment_blocked_at`, printed by the trace) shows why: ten shots die **0.07 units from the muzzle**
+against solid faces 3118, 1996 and 693 (all `surfflags 0x4`, `SITH_SURFACE_HAS_COLLISION`). The
+muzzle of a cantina actor standing close to a wall lands on the wall's far side, so the first frame's
+segment crosses it. That is muzzle/aim geometry and actor positioning - not the hit test, and not the
+damage path.
+
+Chain with the change: **230 tests**, `--gates` 0 of 67, `--walk all` clean, soak clean, trace gate
+10 legs 0 failures, series gate 1 graded 0 failures, compare 12 pairs 0 failed.
+
+The engine's spawn was read (`sithWeapon_WeaponFireProjectile`, `0x4d45a0`): it creates the projectile
+at the **shooter's own position** and then `MoveThing`s it along `muzzle - pos` for that full length,
+i.e. a swept move *to* the muzzle. The port jumped straight to the muzzle. It now starts at the body
+and clamps at the first wall on the way (`segment_blocked_at`, trace line when it fires).
+
+Re-measured the door capture with the rule in: **20 shots, 1 hit**, and the guard fired **zero** times -
+so the ten bolts that die 0.07 units out are *not* starting behind a wall. The wall sits just beyond
+the muzzle, the bolt's first flight segment crosses it, and the engine's own `MoveThing` would stop it
+at the same place. The muzzle finding therefore is not a spawn bug: the port now matches the engine's
+spawn rule, and the remaining hit-rate gap is the AI's aim and positioning, not the projectile's birth.
+
+### Round 309: the port's menu renders, and the level-2 support hypothesis is falsified
+
+**Step 10's port side is capturable.** `--menu singleplayer --shot <png>` renders the shipped main
+menu (title art, Single Player / Multiplayer / Quit, Players / Cutscenes / Credits / Setup) in a 1.3 s
+windowed run, so a UI screen pair is now a capture away on this side. The retail side still needs the
+**main** menu: the harness's `-StopAtMenu` stops on the Single Player *submenu*, and no main-menu
+capture exists in `target/parity/retail/`.
+
+**The level-2 mid-air support is not the sector plane.** The body holds z 3.065 from y -13.7 to
+-15.7 while `--floor-at` at (10.24,-14.69) already answers `floor_under None`. Hypothesis: a 0.024-deep
+sliver's own hull plane was supporting it, so `floor_below` was taught to require the plane's **surface
+polygon** to cover the point (a plane with no local polygon, level 18's shaft, keeps the old rule).
+Measured with the step forced through: the endpoint and the fall are **unchanged** (z 3.065 to
+-15.7, landing -8.135). So the support comes from a real platform face that the port's data extends
+past retail's edge - a level-data/polygon question, not the sector fallback. Both the coverage rule and
+the step relaxation are reverted; the legacy endpoint is back.
+
+### Round 309, continued: the menu pair, the film's placement, and its colour
+
+**Step 10 is measured.** `retail-capture.ps1 -MainMenuShot` writes the retail main menu (640x480 - the
+game's own display mode). The port renders the same screen at the same size with
+`BK_WINDOW=640x480 --menu singleplayer --shot`, and the new `tools/parity/menu-gate.ps1` scores them
+**SSIM 0.9521** against a 0.90 floor: menus draw the shipped art, so this number measures the
+renderer, not the content. The gate captures either side on demand.
+
+**Step 8's frame pair found a real placement bug.** `-IntroShotMs <ms>` captures retail's opening film
+after the dev console closes (before that click the console owns the screen, and a screenshot shows
+only the dialog). Retail's crawl text sits at y 160..244 in two independent captures (7 s and 9 s); the
+film's own text is 110 rows into the frame, so **retail's film top is y 50** - centred in the 640x400
+view above an 80-row status bar - while `cutscene::blit` centred it in the whole 480 and drew it at
+y 90. `blit` now centres in `height - STATUS_BAR`, the test pins y 50, and the port's text bbox is
+**identical** to retail's: (44,160,595,244) on both sides.
+
+What still differs is the frame's colour: retail's text is `(0,89,255)`, the port's renders as about
+`(30,94,215)` at the frame it shows. The film's palette records carry `(0,89,255)` only at frame 90, and
+the port's capture was traced at frame 147 (`film: dropping the film at frame 147` for a `140` start):
+the shot follows wall-clock playback, so the two sides are not the same film frame yet. The port's
+colour is likely that frame's own palette (the text fades between frames), not a decoder defect - the
+logo frame's colours were checked against ffmpeg's decode and agree. A deterministic film-frame hold
+is the next instrument.
+
+**A deterministic film frame exists now.** `BK_FILM_HOLD=<frame>` pins playback to one frame (waiting
+for the decoder rather than showing a blank), with a unit test covering the wait, the pin, and a hold
+past the end. It closed one ambiguity and opened a precise one: with the hold, frame 150 renders a
+bright full-frame (bbox 1,50..639,349) where the playback path at a traced frame 147 renders the crawl
+text, so the film's index-to-content mapping is not settled - the SMK2 header's ring frame is counted
+by `Layout` (`count = frames + ring`), and the helper writes frames in decode order, so the file index
+and the chunk index may be one apart. Retail's capture frame is unknown too (its clock starts at
+launch, before the console click the harness uses). The next instrument is a `--film-dump <frame>` that
+writes the coloured frame straight out, so alignment can be done on content alone.

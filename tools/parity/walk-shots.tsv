@@ -114,3 +114,12 @@ walk27_spawn	20bboc.jkl	-0.31	-0	-0.217	0	0	1000
 #
 # walk28_spawn: alternate branch, chapter 21b (`21bjerec`).
 walk28_spawn	21bjerec.jkl	0	0	-0.717	0	0	1000
+# walk2_spawn: level 2 (02narshadda) at its own recorded spawn, the Phase 2 widening's first new leg
+# (levels 2-5 on the Phase 1 harness). Round 308.
+# walk2_spawn: level 2 (02narshadda) at its own recorded spawn, the Phase 2 widening's first new leg
+# (levels 2-5 on the Phase 1 harness). Retail's own `coords` there: Pos (10.80,-11.98,3.02), yaw
+# -99.98, sector 22. **Not** the spawn yaw: forward at -99.98 walks off the platform (the port falls
+# to z -8.66; retail falls, dies and restarts, which is what made its first trace's clock run
+# backwards). A quarter turn faces along the ledge - port probe at -189.98 walks 1.8 units at a
+# steady z, the longest of the four headings tried - so the leg measures a walk, not a death.
+walk2_spawn	02narshadda	10.800000	-11.980000	3.020000	0	-189.980000	1000
