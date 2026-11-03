@@ -1,0 +1,5 @@
+# Retail spawn on c1 (JK1CTF "Jedi Capture the Flag" level 1), reached through the devMode episode
+# chooser: [Debug] -> row 2 -> Ok -> Ok. Console `coords`, after the level came up:
+# Pos: (4.20, -0.00, 0.12) PYR: (0.00, 90.00, 0.00) Sector: 36.
+# The port agrees: `--sim --start c1` prints "spawn sector center [4.2, -0.00005, 0.157114]
+# radius 1.9 (walkplayer sector 36)".

@@ -1,0 +1,22 @@
+> cogstatus 0
+Cog #0: Name:00_door.cog  Script 00_door.cog
+  Symbol 0: 'startup'  = 3
+  Symbol 1: 'activate'  = 1
+  Symbol 2: 'arrived'  = 11
+  Symbol 3: 'timer'  = 4
+  Symbol 4: 'blocked'  = 5
+  Symbol 5: 'door0'  = 4
+  Symbol 6: 'door1'  = -1
+  Symbol 7: 'door2'  = -1
+  Symbol 8: 'door3'  = -1
+  Symbol 9: 'movespeed'  = 8.000000
+  Symbol 10: 'sleeptime'  = 2.000000
+  Symbol 11: 'lightvalue'  = 0.500000
+  Symbol 12: 'doorsector'  = 74
+  Symbol 13: 'numdoors'  = 1.000000
+  Symbol 14: 'doorstatus'  = 0
+  Symbol 15: 'movestatus'  = 0
+  Symbol 16: 'i'  = 4.000000
+  Symbol 17: 'checkstatus'  = 0.000000
+  Symbol 18: 'opendoors'  = 0.000000
+  Symbol 19: 'closedoors'  = 0.000000

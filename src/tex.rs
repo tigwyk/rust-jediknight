@@ -66,6 +66,21 @@ pub fn tex_type(data: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes(data[8..0xc].try_into().ok()?))
 }
 
+/// A material's header counts — `(type, cels, bitmaps)` — even when it carries **no bitmap**, which
+/// `parse_mat` reports as `None`. Effect materials (`00teleport.mat`, `00red.mat`) are bitmap-less by
+/// design but still name their cel count, which is what a particle element's cel has to fit inside
+/// (`rdParticle_LoadEntry`'s `if (cels <= cel) fail`).
+pub fn material_header(data: &[u8]) -> Option<(u32, u32, u32)> {
+    if data.len() < MAT_HEADER || !is_material(data) {
+        return None;
+    }
+    let word = |at: usize| -> Option<u32> {
+        data.get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    Some((word(8)?, word(12)?, word(16)?))
+}
+
 pub fn parse_mat(data: &[u8]) -> Option<Material> {
     if data.len() < MAT_HEADER || &data[0..4] != b"MAT " {
         return None;

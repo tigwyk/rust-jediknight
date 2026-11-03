@@ -539,6 +539,11 @@ table shifts every colour index up or down the palette. So a table is a **light 
 and distance is only one of the things that selects one (the engine also uses the sector's
 ambient and the surface's extra light).
 
+The **base** of the product is the sector's own `AMBIENT LIGHT + EXTRA LIGHT`: the renderer hands that
+value to `rdCamera_SetAmbientLight` per sector (`sithRender_RenderSectors`, `0x4c6c40`), so a room that
+bakes 0.5 ambient draws at roughly half brightness before the ramp. Level 2's 641 sectors average 0.523;
+the world draw used a base of 1.0 until round 301 and came out 1.99x the retail brightness there.
+
 This build applies them through `tex::Palette::set_light_ramp` and `light_scale`: the ramp
 is installed once per level, normalised so its own midpoint is unity, and a surface's baked
 per-vertex intensity walks it instead of scaling the texture linearly. Level 1's spawn view
@@ -1623,6 +1628,16 @@ end
 `message` symbols are entry points: the engine calls the label of the same name
 when the script's thing receives that message. `local` marks per-instance state.
 
+**Which script a thing runs comes from its template, not from the placement table.** A template
+carries `cog=<file>` in the TEMPLATES section (`walkplayer` in every shipped level carries
+`cog=kyle.cog`), and the level's `cogs` section supplies that instance's symbol values
+(`0:.00_door.cog.4 -1 -1 -1 8.000000 …` — the number after the script is a thing index). The two
+lists are not the same length: level 1 has 65 entries in `cogscripts`, 42 rows in `cogs`, and the
+player's own instance has **no row** — it is created when the player thing is, from its template.
+`kyle.cog`'s `init_kyle` is where the single-player start inventory comes from (`SetInv(player, 60,
+100)` shields, `13` battery, `63` power boost, `42` field light, fists and bryar), so a build that
+binds only the placement rows starts the body without it.
+
 The language is **C-like and case-insensitive** (`For`/`for`, `Print`/`print`,
 `thinglight`/`ThingLight` all appear). It has `if`/`else`, `while`, `do…while`,
 `for (init; cond; step)`, `call <label>`, `return`, `break`, assignments,
@@ -2158,7 +2173,7 @@ Measured from the recovered source and the shipped data, not guessed:
 | quantity | engine | where | port today |
 | --- | --- | --- | --- |
 | lateral sphere radius | **0.065** (`walkplayer` template `size=0.065`, `movesize=0.065`) | `sithThing.c` `THINGPARAM_SIZE` → `moveSize`; swept in `sithCollision_MoveThing` | `PLAYER_RADIUS = 0.065` |
-| body height | `physicsParams.height`, else `renderData.model3->insertOffset.z`; `ky.3do` = **0.120114** | `sithPhysics_GetThingHeight` | none: the body is a sphere |
+| body height | `physicsParams.height`, else `renderData.model3->insertOffset.z`, floored at `moveSize + 0.005`; `ky.3do` = **0.120114**. A **search reach** for `FindFloor`, not a resting height — an unattached body's probe is only `moveSize + 0.005`, and nothing attaches the player, so its authored 0.120114 gap falls to the sphere contact | `sithPhysics_GetThingHeight` (`0x4f6210`), `sithPhysics_FindFloor` (`0x4f5550`), `sithPlayer_NewPlayer` (`0x4c8ec0`) | no idle attach; landings use `floor + radius` |
 | floor probe | a **ray** (`radius 0.0`) straight down, `RAYCAST_10` so only `SITH_SURFACE_FLOOR` surfaces count, range `height * 1.1` (`* 2` when floor- or wall-stuck, `moveSize + 0.005` otherwise) | `sithPhysics_FindFloor` | a sphere sweep of radius `PLAYER_RADIUS` against every face |
 | ledge/step | no step allowance at all; `FindFloor` re-runs within that range | `sithPhysics_FindFloor` | `STEP_UP = 0.066` (`moveSize + 0.01`) |
 | camera | the camera is the thing's position (`+0xb8`) plus the eye offset it carries at `thing + 0x168` (a field, not `position + eyeoffset` computed at draw time); the POV weapon's frame is built from the camera's matrix by `jkPlayer_DrawPov` (`0x4051e0` — negated `+0x168`, sway from `+0x1d4`/`+0x21c`, no depth test, sector ambient), and the camera has no velocity pitch | `0x4c56b0`, `0x4051e0`, see §24 | no decompiled writer sets `0x168`; the port calibrates it as `PLAYER_EYE` |
@@ -3614,6 +3629,24 @@ So a force power is an inventory bin whose *value* is the power's level, and for
 bin 14 — there is no separate force resource to model. `pow_shields.cog` landing `bin 60` in
 §16.6 is the same mechanism on the powerup side.
 
+The **score/ending** group is bins 70–75, and the shipped data names all of it:
+
+```text
+18  jkGetChoice        the ending choice: 1 = light, 2 = dark (jkPlayer_CalcAlignment answers ±100 for it)
+70  secrets found      `00_secretareas.cog` `entered:` -> ChangeInv(player, 70, 1.0)
+71  secrets in level   `00_secretareas.cog` `startup:` -> SetInv(player, 71, maxSecrets)
+72  civilians killed   `actor_<class>.cog` `killed:` when the player was the killer (1.0 civilian, 0.5 droid)
+73  civilians present  the same files' `created:` arms SetTimerEx(1.0, 1, …) and the `timer:` handler
+                       credits it — it is the ratio's *denominator*, not a kill count
+75  alignment          written by jkPlayer_CalcAlignment itself (sithPlayer_SetInvItemAmount(0x4b, …))
+```
+
+`jkPlayer_CalcAlignment` turns 72/73 into the ratio term: `alignment = powers − (72/73)*100 + 20`,
+clamped to ±100 (and short-circuited to ±100 by bin 18). That is why retail's level-2 autosave
+carries `72=0, 73=10.5, 75=20`: ten and a half "population units" woke up during level 1, none of
+them killed through a script that credits a pedestrian, so the ratio term is zero and the tally's
+stored alignment is the neutral 20.
+
 `SetCurInvWeapon(thing, bin)` and `SelectWeapon(thing, bin)` both arm a weapon by that number
 (the port's `sithCogFunction_SelectWeapon` and `sithCogFunctionThing_SetCurInvWeapon` do the
 same `sithWeapon_SelectWeapon`), and `GetCurInvWeapon` reads it back. All three were stubbed —
@@ -3873,11 +3906,19 @@ so the file layout is:
 
 | offset | size | what |
 |---|---|---|
-| `0x000` | `0x62C` (1580) | save header; **`int32` at +0 must be 6** — the reader rejects anything else (`local_62c[0] != 6`) |
-| `0x62C` | `0x20` (32) | level name, compared against the running level's name |
-| `0x64C` | 4 | one field, `DAT_00836c14` |
-| `0x650` | `0x18` (24) | player block, `DAT_008ee660` |
-| `0x668` | … | sections: `int32 type`, `int32 length`, payload |
+| `0x000` | `0x62C` (1580) | save header; **`int32` at +0 must be 6** — the reader rejects anything else (`local_62c[0] != 6`); the level name also sits at `+0x84` |
+| `0x62C` | `0x24` (36) | the game-side header block: episode tag `JK1` then one `u32` (1 in level 1's autosave, 3 in level 2's) |
+| `0x650` | `0x20` (32) | level name (`02narshadda.jkl`), compared against the running level's name |
+| `0x670` | 4 | game time, `DAT_00836c14` — the reader passes it to `sithTime_SetGameTime` |
+| `0x674` | `0x18` (24) | player block, `DAT_008ee660` (the game-state block) |
+| `0x68C` | … | records: `int32 type`, `int32 length`, payload |
+
+The `0x24`-byte episode block and the 24-byte player block are read and written by **game-side
+callbacks** (`(*DAT_00835f44)()` after the header write, `(*DAT_0083590c)()` after the header read),
+which is why a pure `sithMain` reading of the writer's four `stdConffile_Write` calls puts the level
+name at `0x62C`: the callback consumes `0x24` bytes that do not appear in its own listing. Both
+engine-written autosaves in `tools/parity/` show the block, and with it the record walk from `0x68C`
+lands exactly on EOF (5856 records for level 1, 7704 for level 2).
 
 `FUN_004e1dd0` @ `0x4e1dd0` dispatches a loaded section on **the `uint16` at +0x24**, through
 the jump table `DAT_00847d68` which has **0x41 (65) entries**. So the section payload is a
@@ -3888,35 +3929,89 @@ Names and messages, all observed strings: `save%04d.jks` (0x53C010, 0x53C020), `
 `GAME_SAVED` (0x54A66C, the "game saved" message id), and the save/load menu is
 `FUN_0041e010` @ `0x41e010` (it builds the slot list and calls the writer/reader).
 
-Still unknown: the **internal field layout of the 1580-byte header** (only its size and the
-version word are pinned), the meaning of the 4-byte field at `0x64C`, the 24-byte player block's
-fields, and the 65 section types. Those need field-by-field work with a real savegame in hand.
+Still unknown: the **internal field layout of the 1580-byte header** (only its size, the version
+word and the level name are pinned), the meaning of the `u32` inside the episode block, the 24-byte
+player block's fields (it is six u32s — `{1, 0, 0, 0, 1, 0}` in every shipped save — so it is flags,
+not the health and shield values: those live in the player's thing record below and in inventory
+bin 60), and 63 of the 65 section types.
 
 **The record framing is now known.** `FUN_004f4210` @ `0x4f4210` is the thing serializer, and its
-tail writes the record header exactly:
+tail stages the in-memory message header exactly:
 
 ```asm
 0x4f4693: SUB ECX, 0x8b4c28          ; payload bytes = end - payload start (0x8b4c28)
 0x4f4699: MOV [0x008b4c20], ECX      ; length at header + 0x20
 0x4f46ac: MOV [0x008b4c04], 0        ; header field at + 0x04 = 0
 0x4f46b6: MOV word [0x008b4c24], 0xc ; record type 0x0C (a thing) at + 0x24
-0x4f46bf: CALL 0x004e1910            ; write the header, then the payload
+0x4f46bf: CALL 0x004e1910            ; send the message
 ```
 
-So a record is a **0x28-byte header** followed by `length` payload bytes:
+That header is **delivery staging, not the file format**: the reader writes only three of its words
+to disk, in this order (`FUN_004dab70`, loop above):
 
-| offset | size | what |
-|---|---|---|
-| `+0x04` | 4 | zero for this record type |
-| `+0x20` | 4 | payload length |
-| `+0x24` | 2 | record type (`0x0C` for a thing) |
-| `+0x28` | `length` | payload |
+```text
++0x000  u32  record type      (the word at header +0x24; 0x0C is a thing)
++0x004  u32  payload length   (the word at header +0x20)
++0x008  ...  payload          (the message body, which begins at header +0x28)
+```
 
-and the payload starts with the thing's own fields in order (`+0x00` = `thing+0x04`,
-`+0x02` = `thing+0x0C`, then position floats from `thing+0xB8`, angles from `thing+0x88`, …).
-`FUN_004da770` @ `0x4da770` is the driver that walks the world's arrays — things at stride
-`0x2B0`, sectors at `0xA7` dwords, surfaces at `0x14C4` — and calls a per-object serializer for
-each with the section type mask.
+so a record is **8 bytes of framing plus the payload** — the 0x28-byte header never reaches the file
+and the record stream is 4-byte aligned. The payload starts with the thing's own fields in order
+(`+0x00` = `thing+0x04`, `+0x02` = `thing+0x0C`, then position floats from `thing+0xB8`, angles from
+`thing+0x88`, …). `FUN_004da770` @ `0x4da770` is the driver that walks the world's arrays — things at
+stride `0x2B0`, sectors at `0xA7` dwords, surfaces at `0x14C4` — and calls a per-object serializer
+for each with the section type mask.
+
+**A GOG-shipped save's `0x1001` record is a `BKSV` list, and its entries carry the template NAME (round 286).**
+Measured on `saves/autosave.jks` from the install (level 15maw, written by retail), the record after the prefix is
+`kind 0x1001, length 5196`, and its payload opens
+
+```text
+payload+0x00  42 4b 53 56   "BKSV"
+payload+0x04  8e 69 78 41
+payload+0x08  49 00 00 00
+payload+0x0C  0a 00  77 61 6c 6b 70 6c 61 79 65 72   type 10, "walkplayer"
+payload+0x18  59 e6 1d 42   f32  39.475      position x
+payload+0x1C  cd cc e8 c0   f32  -7.275      position y
+payload+0x20  80 6a e2 41   f32  28.302      position z   ← level 14's own spawn
+payload+0x24  00 00 00 00   pitch
+payload+0x28  00 00 00 00   yaw
+payload+0x2C  00 00 00 00   roll
+payload+0x30  00 00 c8 42   f32  100.0        ← the player's health
+```
+
+so an entry is `u16 type`, the ASCII template name, then position, angles and one float **plus a 17-byte tail** — not
+the message payload order, and **no** `thing + 0x144` word anywhere in it. The tail is 17 bytes for the overwhelming
+majority of entries; kinds 4, 5, 7, 9, 10, 11, 12, 13 and 14 also showed 14, 15, 16, 18 or 19, so a decoder tries that
+bounded set and accepts the first tail whose *following* entry has a plausible shape. Two traps, both measured: a name
+whose last character is also a float byte (`walkplayerY`, `cargoshipf`) shifts the entry by one, and the last entry
+before a malformed region must be accepted with the canonical tail rather than dropped.
+
+`jks::retail_things` implements this. On the two shipped saves it decodes **357 of the quicksave's 24 692 bytes** (last
+`+dbattery`, 4 385 unread) and **73 of the autosave's 5 196** (last `ghost`, 1 147 unread), and the player entry in
+both carries that level's own spawn pose and `health 100`. The unread remainder needs a per-kind tail table from the
+engine's restore switch. Two corrections follow, both measured rather than
+argued: the port's `ThingRecord` reader cannot decode this (it reports `0 thing record(s)` for a retail file because it
+expects a `u16` template index at payload `+0x00`), and row 141's note that the thrust word "is serialized in the
+player's save tail beside health" is wrong — health is the last field this record carries.
+
+**The writer gap matters beyond reading.** The port writes one thing per `0x1001` record; retail writes one `0x1001`
+record holding a `BKSV` list. A save written by the port is therefore not the shape retail's reader walks, which is one
+more reason a patched file cannot be used to boot a level (`retail-capture.ps1 -LoadSave`).
+
+```text
+0000069a  78 41 49 00 00 00 0a 00  77 61 6c 6b 70 6c 61 79   xAI.....walkplay
+000006aa  65 72 00 ...                                            er.
+```
+
+i.e. a `u16` **10** (the thing type) followed immediately by the NUL-terminated template name
+`walkplayer`, where `jks.rs` reads `u16 template index` then `u16 type` per the staging header above. That
+mismatch is why `--save` reports **`0 thing record(s)`** for a retail file while it round-trips the port's own
+records: the port writes one thing per `0x1001` record, and retail's `0x1001` is a *list* whose per-thing
+layout begins with the type and the template name. Decoding that list is what a retail thing record (and the
+`thing + 0x144` thrust word inside it) needs, and it is not a spot-guess job — the string/length interleaving
+after the name has to be walked field by field.
+
 
 **The type table.** `FUN_004e1700` @ `0x4e1700` zeroes `DAT_00847d68[0x41]` and then installs
 one handler per record type, which is why the table reads as zeros in the file image:
@@ -3944,6 +4039,27 @@ _DAT_00847da0 = &LAB_004f9050;   // 0x0E
 | `+0x26` | f32 ×3 | `+0x94` | |
 | `+0x32` | f32 ×3 | `+0xA0` | |
 | `+0x3E` | u16 | `*(thing+0x5C)` | |
+
+**The type-specific tail, and the player's health.** After that common block the same function
+switches on the thing *type* (`+0x02` / `thing+0x0C`) and appends the type's own fields. For types
+**2, 9 and 10** it writes, from `puVar3 = &DAT_008b4c8f` (payload `0x67`, plus four bytes when
+`*(thing+0x2A8) & 0x400` is set — the shipped player sets it):
+
+```text
+puVar3[0] = thing + 0x130      puVar3[1] = thing + 0x134      puVar3[2] = thing + 0x144
+puVar3[3] = thing + 0x15C      puVar3[4] = thing + 0x160      puVar3[5] = thing + 0x164
+puVar3[6] = thing + 0x1A4      puVar3[7] = thing + 0x194      puVar3[8] = thing + 0x1BC
+```
+
+`thing + 0x134` is the **health**: `0x5014e0` registers `GetThingHealth`/`GetHealth` on
+`0x502570`, and that handler answers `*(f32 *)(thing + 0x134)` for exactly those two types, while
+`SetThingHealth`/`SetHealth` (`0x5025c0`) writes it. So the player's health is the f32 at
+**payload `0x6F`**, and the record's 183-byte payload confirms the shifted block: the common block
+ends at `0x67`, the four-byte shift puts the type block at `0x6B`..`0x96`, the AI tail follows to
+`0x9B`, and the physics tail (`thing+0x1D0 …`, `+0x9B`..`+0xB7`, 28 bytes) lands exactly on `183`.
+Both engine-written autosaves in `tools/parity/` hold `100.0` there — a full bar at spawn — and
+`--save` prints it (`player: 100 health`). Shields need no tail field: they are inventory bin 60,
+which the `0x10` bin records already carry.
 
 ### The campaign is a graph, and it branches
 
@@ -4008,25 +4124,40 @@ the chain exists in the archives. What it does **not** do is swap the loaded lev
 running window: the app still loads one level per process, so a real transition needs the
 world torn down and rebuilt, which is the remaining work for this stage.
 
-**What this build implements** (`src/jks.rs`): the prefix with the engine's own version check,
-records with the real 0x28-byte header (length at +0x20 filled on write, type at +0x24, +0x04
-zeroed), and a `ThingRecord` over the payload offsets above — template index, type, position and
-angles. `--save` writes one record per placed thing and reads every one back:
+**What this build implements** (`src/jks.rs`): the prefix with the engine's own version check, the
+episode block, the level name, the game time, the player block, and records with the on-disk
+framing above. `--save` writes one record per placed thing and reads every one back, and it reads
+**both engine-written autosaves** in `tools/parity/` end to end:
 
 ```text
-jks: wrote 9320 bytes to `...\things.jks` (version 6, level `01narshadda.jkl`, 64 record(s)), read back health 100, 64 things
-jks: 9320 bytes, version 6, level `01narshadda.jkl`, field 0, 64 record(s), 64 thing record(s)
-  first thing: template 0, type 10, at [-10.443433, -5.455094, -1.129886] facing -60.0 deg
+jks: wrote 7308 bytes to `...\new-save.jks` (version 6, level `01narshadda.jkl`, 64 record(s)), read back health 100, 64 things
+jks: 452495 bytes, version 6, episode `JK1`, level `02narshadda.jkl`, game time 500, 7704 record(s), 330 thing record(s)
+  first thing: template 0, type 10, at [10.798077, -11.982778, 3.020114] facing -1.0 deg
+jks: 360232 bytes, version 6, episode `JK1`, level `01narshadda.jkl`, game time 500, 5856 record(s), 321 thing record(s)
+  first thing: template 0, type 10, at [-10.443433, -5.455094, -1.129886] facing -0.9 deg
 ```
 
-That first record is level 1's `walkplayer`: type **10** is a player thing, and the position and
--60° facing are the level's own spawn, so the record round-trips real world data rather than
-synthetic bytes. Not modelled yet: the remaining payload fields (`+0x04`, `+0x06`, `+0x0A`,
-`+0x26`, `+0x32`, `+0x3E` and everything after), the reader's field order (its entry is a bare
-`LAB_004f46f0` block, not a Ghidra function), and the 1580-byte header's internals.
+Those first records are the **player things** (type **10**) at each level's own spawn — level 1's
+`walkplayer` pose and level 2's shipped start — so the payload offsets above are checked against
+real engine output, not just against each other. The unit test
+`jks::tests::a_real_autosave_walks_to_eof` is that check: both fixtures must parse to EOF, name
+their own level, and open with the player at the level's spawn.
+
+The record types in the two autosaves are **0x0A** (8/1), **0x0C** things (330/321), **0x0D**
+(145/131), **0x0E** (6235/4595 — sector status), **0x0F**, **0x10** (82/82 — AI status), **0x11**,
+**0x12** (641/462 — cog state), **0x15**, **0x16**, **0x17**, **0x18**, **0x1E**, **0x1F** (one —
+`sithDSS_SyncGameState`'s 189-byte game-state record), **0x31**, **0x32**, **0x35**, **0x36**,
+**0x3A**. The game-state record is mostly zeros and -1 sentinels in both files, and neither it nor
+the thing payload exposes health or shields in a form this build decodes: the recovered sync
+writers stage things, attachments, AI, cogs, surfaces and sectors, while the player's health and
+inventory are not yet located in a real save.
+
+Not modelled yet: the remaining payload fields (`+0x04`, `+0x06`, `+0x0A`, `+0x26`, `+0x32`,
+`+0x3E` and everything after), the per-type variable tail, the reader's field order (its entry is a
+bare `LAB_004f46f0` block, not a Ghidra function), and the 1580-byte header's internals.
 
 `--save <path>` writes a save for the selected level and reads it back (version 6, level name,
-24-byte player block, one section), and on an existing file it **inspects** it instead:
+game time, 24-byte player block, one section), and on an existing file it **inspects** it instead:
 
 ```text
 jks: `...\bad.jks` did not parse: version 5, the engine only loads 6

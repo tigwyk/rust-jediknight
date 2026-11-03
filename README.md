@@ -169,15 +169,15 @@ Run the unit tests and the install-wide checks (the latter need the retail data)
 cargo test --bins --release
 cargo run --release -- --check          # level 1: parse and assert
 cargo run --release -- --audit          # every level and every referenced asset
-cargo run --release -- --gates          # 61 behaviour gates, one process each
+cargo run --release -- --gates          # 65 behaviour gates, one process each
 ```
 
 ## Verification
 
 [docs/gates.txt](docs/gates.txt) records what every check printed against the retail install:
-**61 gates, 0 failures** (windowed; `BK_HEADLESS=1` skips 9 that need a window), plus **133 unit
-tests**. CI builds, tests and packages on Windows with the MSRV pinned in `Cargo.toml` and uploads
-the setup artifact. The 61 gates are not in CI on purpose — they require the game data, which the
+**65 gates, 0 failures** (windowed; `BK_HEADLESS=1` skips 9 that need a window) as of the last
+windowed run, plus **210 unit tests** (re-run on the current tree). CI builds, tests and packages on Windows with the MSRV pinned in `Cargo.toml` and uploads
+the setup artifact. The 65 gates are not in CI on purpose — they require the game data, which the
 repository does not ship and CI does not download.
 
 ## Documentation

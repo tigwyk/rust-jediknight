@@ -216,15 +216,21 @@ are the unit-by-unit account behind them.
 | AI | actors carry their shipped `.ai`: sight distance and cone decide whether an armed actor fires its own `weapon=`, and `--ai` checks that an actor fires at 3 units, holds at 8 and stays silent from behind (§16.8). Pathfinding is a breadth-first route over the adjoin graph (`Collide::route`) and `PrimaryFire`'s aim-error fraction is applied; the instinct scheduler's weights and reactions are not done |
 | items | pickups work through the item's **own script**: touching a powerup runs its cog's `touched` then `taken`, so `pow_shields.cog` lands `bin 60 +20` from its own `bin=60`/`ChangeInv` (§16.6); `--pickup` asserts it on level 1's `shieldrecharge`. Also fixed the inventory verbs' argument order (thing first) and `TakeItem` double-counting. Taking a weapon changes what the player fires (runtime weapon: `+bryarbolt` 30 damage -> `+elaser` 12, checked by --weapon), and a taken powerup comes back after its 
 espawn= seconds (checked in --pickup). Not yet: pickup sounds, real inventory maxima |
+| combat: projectiles | a projectile flies its template's `vel=`, collides by its own `movesize` radius (the 0.4 the resolver used stopped bolts on doorway jambs) and hits a body of the target's `movesize` radius with the model height (0.6 was making the crowd absorb shots aimed at the player; `movesize` is what `getthingmovesize` returns and `walkplayer`'s 0.065 matches `PLAYER_RADIUS`) | `--hit`, `--muzzle`, the door/catwalk captures, `BK_HIT_TRACE` |
 | combat: firing | working in the window: **left mouse** fires the level's own weapon template, the bolt is drawn and flown with the template's `vel=`, stops at the sector graph and applies its `damage=`; `--fire +bryarbolt` checks flight and the 30 points of damage headlessly, and `--fire-demo` shows the bolt on screen (§16.5). a projectile damages what it reaches and a killed actor plays the puppet's own `death` keyframe (`kyftdeth.key`, 45 frames at 15 fps) and holds its last frame; --fire asserts the kill. Damage decays in flight the way the engine does it (SITH_WF_DAMAGE_DECAY 0x4000, 
 ate= per second floored at mindamage=): level 1''s bolt is 30 damage dropping to 10 over 1.33 s (§16.5). Not yet: explosions, ammo, force power effects, a body that falls |
 | actors animate | working: each placed actor plays its puppet's `stand` keyframe at the keyfile's own 15 fps on its own mesh, rebuilt only when the frame number changes; `--animate` checks the rendered vertices across every material — **1684 of 1697** actors move over the loop (§16.3), and `actor_state` picks `walk`/`run`/`walkback`/`strafe` from the velocity the actor walked at, plus `fire`/`hit`/`turn` |
 | cutscenes (`.smk`) | **it plays**: 25 files, 483 MB, 29,493 frames, all 640×300 at 15.2 fps (`--smk`); the decoder is `SMACKW32.DLL` (71 KB, named exports recovered), not JK.EXE. The VFS finds them through the `Resource/VIDEO` mount, `--cutscene` plays them once in the window in colour, and the known limit is 29 of 768 palette bytes against libsmacker (§16.9) — stage 8 |
-| level collision + adjoin (portal) traversal | working: a walker stays inside the level's own sectors, and a passage a script shut (a force field, a closed door's sector) is a wall |
+| movement trace (Phase 0.5 v0) | `tools/parity/walk-shots.tsv` + `port-trace.ps1` (port, fixed 1/60 s, `--trace-out`) and `retail-capture.ps1 -WalkTraceMs` (retail, hold-segments + `coords`), compared by `trace-compare.ps1` on the held-key clock; first leg measures start pose 0.000, z 0.055 low, retail 0.9 u/s vs port 0.44 u/s | `port-trace.ps1`, `retail-capture.ps1`, `trace-compare.ps1` |
+| level collision + adjoin (portal) traversal | working: a walker stays inside the level's own sectors, and a passage a script shut (a force field, a closed door's sector) is a wall. A **solid thing's model is a floor**: the loader registers each solid template's model top and footprint (`set_template_floors`, `collide=` through the template chain) and a body falls onto and attaches to it within `GetThingHeight * 1.1` (`thing_floor`, `--warp`, `BK_WARP_TRACE`), which is how level 1's catwalk pose stops dropping the body out of the level |
 | player motion | working: walk/run/back/strafe/crouch, jump and water derived from the level's own `walkplayer` template chain, gravity scaled from the level, and water halving movement from the floor's surface flags (§16.2); level 1 walks at 0.667 u/s (`maxthrust/surfdrag`), jumps to a 0.28-unit apex in 0.75 s. `--rules` prints the table, the level's flagged-surface counts, and checks the integrated jump against the closed form. Step-up is implemented: `move_body` retries a blocked move from one step up (`moveSize + 0.01` = 0.066 units) and keeps the raised result only when `support` finds a floor there, so a riser is climbed and a wall three times the allowance blocks (§16.2) |
 | sector visibility | working: one batch per (sector, material) + a per-frame clip-plane test, with **portal occlusion on** — the portal graph is symmetric and the seed is the candidate whose walk best covers the frustum, and the culled frame is 0.000% different from `--no-cull` over 230,400 sampled pixels (level 1's spawn: 21 of 462 sectors in the frustum, 11 hidden) (§16.1) |
 
 ### Where the roadmap stands
+
+The **tier** each stage has reached is the single table in `porting-roadmap.md` §"Where the ten
+stages stand" (T0–T4, with the retail evidence that earns it). The table below is the per-stage
+*check* inventory behind it.
 
 Stage-by-stage, against `docs/roadmap.md`, with the check that holds each one:
 
@@ -235,10 +241,10 @@ Stage-by-stage, against `docs/roadmap.md`, with the check that holds each one:
 | 2 player parity | **done except lateral coverage**: walk/run/back/strafe/crouch/jump/water from the template's own numbers, step-up onto a low ledge (one `moveSize + 0.01` allowance), the body standing on faces that belong to other sectors, and the view following the walker at the sweep's eye height (§16.2). Still open: a body beside a face but outside its plan projection is still pushed by an infinite plane | `--rules`, `--walk all` |
 | 4 COG verbs | every label level 1 declares is fed, each `run_label` has a fresh bounded budget, and **`sleep`/`waitformessage` suspend and resume** across frames (`Vm::resume` + `resume_sleeping_labels`; `--sleep` pins both halves and is verified to fail when suspension is removed). A nested `sleep` re-runs its enclosing block | `--cog-check`, `--sleep`, `--triggers`, `--live-check` |
 | 5 combat | **complete for single-player**: damage two-way, shields, death/respawn, pickups, explosions, force jump/speed/healing/seeing, mana regeneration, ammo, and **force pull exactly as the shipped script does it** — highlight with `jkSetTarget`, then `ApplyForce` at 30 u/s toward the player with gravity cleared (`--pull`). Grip damages over time while holding the victim | `--hit`, `--fire`, `--pickup`, `--weapon`, `--force`, `--mana`, `--ammo`, `--pull` |
-| 6 AI | instincts reach the live runtime (117 actors), and the chase **searches the level** — `Collide::route` walks the adjoin graph breadth-first (1206 doorways on level 1, built from the `adjoin`/`mirror` pairs) and the actor follows the doorway centres it answers, popping each on arrival; `PrimaryFire`'s whole argument list — delay, facing cone, ranges, aim error, bursts — is honoured. Only `PrimaryFire` runs: the instinct scheduler's weights, the other instincts and reaction times are still missing | `--ai`, `--live-check` |
+| 6 AI | instincts reach the live runtime (117 actors), and the chase **searches the level** — `Collide::route` walks the adjoin graph breadth-first (1206 doorways on level 1, built from the `adjoin`/`mirror` pairs) and the actor follows the doorway centres it answers, popping each on arrival; `PrimaryFire`'s whole argument list — delay, facing cone, ranges, aim error, bursts — is honoured, and the chase keeps the class's own `Follow` standoff (`rydefault` 0.75, `grdefault` 2.0) while an actor with a target keeps its aim on it (`sithActor_UpdateAimJoints`). A body turns at `maxrotthrust / surfdrag` (23°/s for a Ree-Yees gunner) instead of snapping, and `sithAIAwareness` is modelled: a side-mate's shot tells the others where the target is (flat radius/lifetime — ledger). Only `PrimaryFire` runs: the instinct scheduler's weights, the other instincts (`LookForTarget`, `Listen`) and reaction times are still missing | `--ai`, `--live-check`, `BK_AI_ROSTER` |
 | 7 audio | attenuation over 375 clips, the song range, the pulse/timer queue, the **music fade** verified end to end (`--fade`: 0.00 → 1.00 → 0.00 through the script's own chain), and the **menus' own wavs** parsed from `jkGuiMenu` and played on hover/click (39 of 41 screens, both names present) | `--sound`, `--music`, `--fade`, `--ui-sounds` |
 | 8 `.smk` cutscenes | **it decodes and it plays in the window**: the DLL is 32-bit (`machine 0x014C`), so a 64-bit process cannot load it (error 193) — the decode runs in `tools/smkdec`, a dependency-free i686 helper driven by JK's own `SmackOpen(file, 0xfe000, -1)`. `--smk-decode` proves frames come out and differ (`01-02A.SMK`: 40 decoded, 10 distinct, first non-blank frame 16), and `--cutscene 01-02A.SMK 30` plays them over level 1 at 15 fps, **scaled out to the window's edges**: the 640×300 picture is scaled by `min(aspect·480/640, 480/300)` — 4:3 → 1, 16:9 → 4/3, and a window wider than the film's 2.13:1 → 1.6 with a pillarbox — while the HUD camera clears opaque black and the canvas' padding is opaque black ([image](cutscene-playing.png)). **Frames are in colour, from the film's own palette**: the header layout is proved (chunk sizes + tables + huffman block fill all 25 films exactly, `Layout::covers` in `--smk`), and palette records decode per frame — `skip`, `colour-shift`, and literal "set one colour" chunks, the last of which was the bug that made the first attempt look like coloured static ([images](cutscene-colour-window.png)). Palettes are verified against libsmacker as a reference decoder (740 of 768 bytes wrong before the fix, 29 after, §16.9). **The whole film plays once, streamed**: 90 decoded frames used to loop, which is what a 992-frame film playing the same six seconds looks like; the helper now decodes the entire film to disk as it plays (about 5× real time, so it stays ahead) and frames are read, coloured and blitted as they appear, stopping on the last one ([image](cutscene-late-frame.png)). Known limit: 29 of 768 palette bytes still differ from libsmacker (§16.9). Data: the VFS falls back to loose files through the `Resource/VIDEO` mount, so `--campaign` resolves every cutscene row and `--smk` verifies all 25 files (483 MB, 29,493 frames, 640×300 at 15.2 fps) | `--smk`, `--smk-decode`, `--cutscene`, `--campaign` |
-| 9 campaign flow | **savegame container + thing records implemented** (`src/jks.rs`): version 6, the 1580-byte header, 32-byte level name, 4-byte field, 24-byte player block, then records with the engine's **0x28-byte header** (length +0x20, type +0x24) and a `ThingRecord` over the payload offsets `FUN_004f4210` stages — template index, type, position, angles. `--save` writes one record per placed thing (level 1: 64) and reads every position and angle back, including the player's own spawn. The campaign **graph** is verified too: `--campaign` walks both `gotoA`/`gotoB` edges and proves all 28 single-player levels are reachable from level 1 through the one `DECIDE` row, while the MP/CTF manifests loop as map rotations (§16.9). The **transition** is wired to the engine's own verb: `jkendlevel` (`jkCog.c`) marks `Runtime::level_complete`, and `--transition` resolves the successor through the graph — `01narshadda.jkl -> 02narshadda.jkl`, 21 levels on the `gotoA` spine (§16.9). Not done: the rest of the payload fields and the header internals. **The transition runs end to end up to the film**: `--complete-after <s>` calls the engine's own `jkEndLevel`, `Episode::flow_after` resolves the graph's next rows, the `CUT` row plays in the window and the next level is named (`level 01narshadda.jkl complete -> cutscene 06a.smk, then 02narshadda.jkl`, [image](cutscene-on-complete.png)); `--flow` asserts every hop, with each film checked as `SMK2` and each level present in the archives. **The swap works, and it is the default**: `swap_level` is an exclusive system that despawns the old level's `LevelEntity`-tagged entities, swaps `World` and re-runs `setup`, so level 2 (391 things, 641 sectors) is built and rendered with its own music after the film (`--no-swap-levels` stops at the film). Three bugs made it work: the camera is only spawned when none exists, the transition's film queue gates the change via `FlowPlan::films_done`, which can hold two films at the campaign's decision, and the overlay is marked dirty so the HUD returns ([image](level2-after-transition.png)). Remaining for the stage: the rest of the `.jks` payload and the header internals | `--save`, `--campaign`, `--transition`, `--flow`, `--complete-after`, `--tour`, `--tour-live`, `--no-swap-levels` |
+| 9 campaign flow | **savegame container + thing records implemented** (`src/jks.rs`): version 6, the 1580-byte header, a 0x24-byte game-side block (episode `JK1` + one u32), the 32-byte level name, the game time and the 24-byte player block, then records framed on disk as `u32 type, u32 length, payload` (the 0x28-byte message header is in-memory only; both engine-written autosaves in `tools/parity/` now parse to EOF — 5856 and 7704 records) and a `ThingRecord` over the payload offsets `FUN_004f4210` stages — template index, type, position, angles. `--save` writes one record per placed thing (level 1: 64) and reads every position and angle back, including the player's own spawn. The campaign **graph** is verified too: `--campaign` walks both `gotoA`/`gotoB` edges and proves all 28 single-player levels are reachable from level 1 through the one `DECIDE` row, while the MP/CTF manifests loop as map rotations (§16.9). The **transition** is wired to the engine's own verb: `jkendlevel` (`jkCog.c`) marks `Runtime::level_complete`, and `--transition` resolves the successor through the graph — `01narshadda.jkl -> 02narshadda.jkl`, 21 levels on the `gotoA` spine (§16.9). Not done: the rest of the payload fields and the header internals. **The transition runs end to end up to the film**: `--complete-after <s>` calls the engine's own `jkEndLevel`, `Episode::flow_after` resolves the graph's next rows, the `CUT` row plays in the window and the next level is named (`level 01narshadda.jkl complete -> cutscene 06a.smk, then 02narshadda.jkl`, [image](cutscene-on-complete.png)); `--flow` asserts every hop, with each film checked as `SMK2` and each level present in the archives. **The swap works, and it is the default**: `swap_level` is an exclusive system that despawns the old level's `LevelEntity`-tagged entities, swaps `World` and re-runs `setup`, so level 2 (391 things, 641 sectors) is built and rendered with its own music after the film (`--no-swap-levels` stops at the film). Three bugs made it work: the camera is only spawned when none exists, the transition's film queue gates the change via `FlowPlan::films_done`, which can hold two films at the campaign's decision, and the overlay is marked dirty so the HUD returns ([image](level2-after-transition.png)). Remaining for the stage: the rest of the `.jks` payload and the header internals | `--save`, `--campaign`, `--transition`, `--flow`, `--complete-after`, `--tour`, `--tour-live`, `--no-swap-levels` |
 | 10 UI panels | **every single-player custom element draws**: map, objectives, force stars, load bar, title text, plus the menus' own wavs. The two holes the docs used to name — the model window and the power grid — are both on `edit_character`, a **multiplayer** screen, so they are out of scope rather than pending | `--map-shot`, `--ui-visible`, `--load-bar`, `--force-screen`, `--ui-tables` |
 
 Every stage's recovered constants and code addresses are in `docs/formats.md`; the
@@ -269,8 +275,11 @@ is the player-facing version of this.
   and the ending choice.
 - **Force powers beyond jump/speed/heal/seeing/pull/grip are unverified**, and animation states for
   crouch, alt-fire, saber swing and layered upper/lower body are not selected.
-- **Level 1's first frame starts inside cantina furniture** (a table 0.16 units from the eye);
-  whether retail opens the same way is unsettled and needs a retail reference frame.
+- **Only level 1's spawn frame is gated against retail.** The first frame there is fixed: the player
+  starts at the level's recorded `walkplayer` pose plus the template's 0.037 eye offset, and an idle
+  body stays attached to its floor instead of settling the 0.055 authored gap. The `spawn` pair went
+  0.23 → 0.63 SSIM and `tools/parity/compare.ps1 -Gate` fails on the pre-fix frame. No other level has
+  been captured or gated yet.
 - **The save-slot picker is keys only** (`,`/`.` choose a slot, `F5`/`F9` save/load); retail's
   slot-list screen is not drawn.
 - **Cutscene palette**: 29 of 768 palette bytes still differ from libsmacker's decode.
@@ -299,16 +308,24 @@ is the player-facing version of this.
 - **"Characters stuffed inside each other" was the camera standing inside an NPC, not the model scale.**
   The spawn only demanded `radius * 2` = 0.7 units from other things, exactly an NPC's body width; `--shot`
   showed a head and shoulders filling the frame. The spawn now wants 2.0 units (`BK_THING_CLEARANCE`), so
-  no NPC sits in the lens; level 1's start is still the cantina booth, with its own furniture at arm's
-  length (see the open items above — that one needs a retail reference frame). `MODEL_SCALE` stays 10:
+  no NPC sits in the lens; level 1's start is the level's own recorded pose, with its own furniture at
+  arm's length — retail opens there too, verified against `coords` and the `spawn` parity pair, so that
+  is the level's design rather than a spawn error. `MODEL_SCALE` stays 10:
   `ky.3do` is 0.18 model units and 0.17 posed, so a character is 1.8 world units — a person in a 2.5-unit
   storey. A round was spent at 1.0 on a misread measurement (`bounds()` already scales), which made every
   character ten times too small.
-- **The player body is back to the calibrated values, because the model scale was the real fault.** Radius
-  `0.35`, eye `1.45`, step `0.66` -- these pair with a 1.81-unit character in a 2.5-unit storey. The detour
-  through `size=0.065`/`eyeoffset=0.037` assumed those were world units; they are offsets within a puppet,
-  and taking them literally put the camera 0.1 above the floor. Frames and the reasoning are in
-  `docs/formats.md` (player body and drawing scale sections).
+- **The player body uses the engine's own size and eye offset, measured from retail.** Radius `0.065`
+  and eye `0.037` (`size=`/`eyeoffset=` in level units — `MODEL_SCALE` is 1.0 for template params, not
+  10), which is what the level-1 player camera is built from: `sithCamera_Update` is `thing + 0x168`
+  and `sithPlayer_NewPlayer` copies the recorded pose. An earlier round calibrated radius `0.35`/eye
+  `1.45` against the render scale; the pose-verified retail capture (gaps §5.9, `tools/parity/`)
+  superseded it — at eye 1.45 the camera renders the inside of the model at the spawn.
+- **Multiplayer spawn markers were drawn as actors.** Every `walkplayer` row after the first is a
+  multiplayer start (`01narshadda` has 12, `03katarn` 4); the port spawned all of them as animated Kyle
+  actors and made them solid obstacles. Retail's single-player draws only the local player. The
+  `route_cantina` parity pair exposed it — retail's frame there is clean, the port's had a Kyle model in
+  the camera. `spawn_models` now skips every non-first `walkplayer`, and `solid_things` excludes player
+  starts (the local player is not an obstacle; the markers are not bodies).
 - **Audio is on by default at the engine's own master scale.** A play session is audible; captures
   and probes are silent, and `--sound-on`/`BK_SOUND=1` forces sound in a capture. `--mute`/`BK_MUTE=1`
   and `BK_VOLUME` still override. This used to be muted by default at 5% gain — a release build that
@@ -478,6 +495,23 @@ that disagrees where sectors overlap (level 1 has 462 sectors for 352 things, ma
 trigger slivers). The window runs the same `walker_step` the sweep measures, so walking
 into a wall stops at the wall and walking through a doorway changes sector.
 
+### …and its palette effects land on the finished picture
+
+The engine's `stdPalEffects_UpdatePalette` scales the palette **bytes** after the renderer has drawn
+(`byte += round(byte * tint * 0.5)`), which is what reddens the screen when the player is shot
+(`sithActor_DamageActor` -> `AddDynamicTint(damage * 0.04, 0, 0)`, decaying 0.4/s). A fixed-function
+blend cannot express that: on a non-HDR camera Bevy tone maps **each fragment in-shader**
+(`TONEMAP_IN_SHADER` in `pbr_functions.wesl`), so an overlay quad's own colour is tone mapped first —
+an identity multiply reads as `tonemap(1.0) ≈ 0.78` and a factor above 1 saturates back to 1.
+
+`src/palette.rs` therefore draws it as a `FullscreenMaterial` pass attached to the **world camera**
+only while `Runtime::tint` is non-zero: it runs after that camera's main pass, samples the finished
+picture and scales it by `(1 + tint/2)^2.2` in linear light, so the stored bytes change by exactly
+`1 + tint/2` and the sRGB target clamps a channel the way the palette does. An identity tint removes
+the component again, so an untouched run's frame is byte-identical (the parity capture gate depends on
+that). Measured at the door pose: a 1.0 red tint moves the red crop mean ×1.52 against the engine's
+1.5, green and blue untouched. `BK_TINT=r,g,b` paints a fixed tint for measuring it.
+
 ### …and its models assemble from their joint hierarchies
 
 A `.3do` puppet stores each mesh's vertices around its own *pivot*, so the parts only
@@ -555,6 +589,10 @@ cargo run --release -- --near crate4_3   # frame the first thing of a template
 cargo run --release -- --look 35         # pitch the default view up at the sky
 cargo run --release -- --shot out.png    # render, save a PNG, exit
 cargo run --release -- --shot out.png --frames 400 --sim   # …after 400 frames of script time
+cargo run --release -- --shot at.png --shot-at "7.749950,-1.175000,2.857114,0,0"   # camera at a pose
+cargo run --release -- --shot at.png --shot-at "7.749950,-1.175000,2.857114,0,0" --warp "7.749950,-1.175000,2.857114,0"
+                                         # …and the *player* there too (parity rows; --warp takes the
+                                         # camera eye, body one eye offset below, yaw only)
 cargo run --release -- --cogs              # parse + run the level's scripts
 cargo run --release -- --cogs all          # the same for all 540 scripts in the install
 cargo run --release -- --run               # start the level's scripts against a live world
@@ -673,12 +711,12 @@ is why it was recoverable.
 ## Verification
 
 Every check in one page: [docs/gates.txt](gates.txt) records each flag and what it printed
-against this install; the sweep now is **61 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
-`0 of 61 failed, 9 skipped`), plus 133 tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
+against this install; the sweep now is **65 gates, 0 failures** (windowed; `BK_HEADLESS=1` reads
+`0 of 65 failed, 1 skipped`), plus **210** tests. What is not ported, unit by unit, is [docs/gaps.md](gaps.md).
 
 [CI](../.github/workflows/ci.yml) runs on Windows: it installs the MSRV from `Cargo.toml`, builds
-with `--locked`, runs the 133 unit tests, builds the i686 film helper, produces the native
-`setup.exe` as an artifact, and checks every relative documentation link. The 61 gates are not
+with `--locked`, runs the 210 unit tests, builds the i686 film helper, produces the native
+`setup.exe` as an artifact, and checks every relative documentation link. The 65 gates are not
 in CI on purpose — they require a retail game install, which the repository does not ship and
 CI does not download.
 
@@ -757,7 +795,8 @@ the summary, is what each check prints:
   `Collide::route` for a breadth-first doorway route over the adjoin graph (refusing a link its
   own gates close) and keeps it per actor, popping a waypoint on arrival; `PrimaryFire`'s whole
   argument list — delay, facing cone, ranges, aim error, bursts — is honoured. Still missing: the
-  instinct scheduler (weights, `LookForTarget`/`Listen`/`Follow`/`OpenDoors`), reaction time
+  instinct scheduler (weights, `LookForTarget`/`Listen`/`OpenDoors`, the awareness events it feeds),
+reaction time
   before the first shot, hearing/alert propagation, and a route that refreshes before the
   straight line is walled off.
 - **Cutscene palette**: 29 of 768 palette bytes still differ from libsmacker's decode.

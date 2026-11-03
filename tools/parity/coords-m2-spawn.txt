@@ -1,0 +1,5 @@
+# Retail spawn on m2 (Jedi Training category's first level), reached through the devMode category
+# chooser: [Debug] -> row 3 -> Ok -> Ok. Console coords after the level came up:
+# Pos: (-0.02, -0.50, 0.12) PYR: (0.00, 180.00, 0.00) Sector: 61.
+# The port agrees: --sim --start m2 prints "spawn sector center [-0.01995, -0.5, 0.157114]
+# radius 2.5 (walkplayer sector 61)".

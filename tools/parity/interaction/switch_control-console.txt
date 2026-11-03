@@ -1,0 +1,22 @@
+> cogstatus 11
+  Symbol 4: 'switch0'  = 2409
+  Symbol 5: 'switch1'  = 2403
+  Symbol 6: 'movespeed'  = 4.000000
+  Symbol 7: 'sleeptime'  = 2.000000
+  Symbol 8: 'lightvalue'  = 1.500000
+  Symbol 9: 'onsound'  = 129
+  Symbol 10: 'offsound'  = 133
+  Symbol 11: 'locksound'  = 32
+  Symbol 12: 'doorsector'  = 260
+  Symbol 13: 'numdoors'  = 2.000000
+  Symbol 14: 'doorstatus'  = 0
+  Symbol 15: 'movestatus'  = 0
+  Symbol 16: 'garbage'  = -1
+  Symbol 17: 'dummy'  = 0
+  Symbol 18: 'startup'  = 3
+  Symbol 19: 'activated'  = 1
+  Symbol 20: 'arrived'  = 11
+  Symbol 21: 'blocked'  = 5
+  Symbol 22: 'checkstatus'  = 0.000000
+  Symbol 23: 'open_doors'  = 0.000000
+  Symbol 24: 'close_doors'  = 0.000000

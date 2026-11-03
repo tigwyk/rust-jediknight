@@ -1,0 +1,697 @@
+#requires -Version 7
+<#
+.SYNOPSIS
+  Retail-vs-port parity comparison: side-by-side images, contact sheet, report.md.
+
+.DESCRIPTION
+  Pairs target/parity/retail/<name>.png with target/parity/port/<name>.png for
+  every row of tools/parity/shots.tsv (rows missing a side are reported as
+  "not captured yet").
+
+  For each pair it:
+    - reads the PNG sizes with .NET (no extra tools beyond ffmpeg),
+    - detects and crops the retail black letterbox with ffmpeg bbox,
+    - computes SSIM and mean absolute difference on a common grayscale canvas,
+    - writes target/parity/compare/<name>-side.png (retail world | port),
+  then writes target/parity/compare/contact.png and report.md.
+
+  Retail and port are different renderers with different framing: the numbers
+  are a triage signal, not a pixel-equality claim.
+
+  -Gate scores the pairs named in tools/parity/thresholds.tsv against each
+  shot's SSIM/MAD floors and exits non-zero if one is missing or outside them.
+
+.EXAMPLE
+  pwsh -File tools/parity/compare.ps1
+
+.EXAMPLE
+  pwsh -File tools/parity/compare.ps1 -Gate
+#>
+[CmdletBinding()]
+param(
+    # Score every pair that names a threshold in tools/parity/thresholds.tsv and exit non-zero if
+    # one is missing or below its floor. Without it the script is the triage report it always was.
+    [switch]$Gate,
+    # A survey list; the gated pairs stay in `tools/parity/shots.tsv`.
+    [string]$Shots = ''
+)
+
+$ErrorActionPreference = 'Stop'
+
+$Root        = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # tools\parity -> repo root
+$ShotsPath   = if ($Shots) { $Shots } else { Join-Path $Root 'tools\parity\shots.tsv' }
+$ThresholdsPath = Join-Path $Root 'tools\parity\thresholds.tsv'
+$RetailDir   = Join-Path $Root 'target\parity\retail'
+$PortDir     = Join-Path $Root 'target\parity\port'
+$CompareDir  = Join-Path $Root 'target\parity\compare'
+$ReportPath  = Join-Path $CompareDir 'report.md'
+$ContactPath = Join-Path $CompareDir 'contact.png'
+
+# Metric normalization: each frame is stretched onto one common grayscale canvas.
+$NormalizedWidth  = 640
+$NormalizedHeight = 360
+$SideHeight       = 480
+$ContactWidth     = 960
+# The retail pal8 letterbox bars are ~16 luma; bbox treats <= this value as border.
+# (This is also ffmpeg cropdetect's default limit=24.)
+$BorderThreshold  = 24
+# How much of the world crop's height the port's HUD band covers, for `Measure-WorldSsim`: the
+# health and shield panels and the viewmodel sit in the bottom fifth of the port's frame, and the
+# retail crop drops them from the raw frame's letterbox corners. 0.22 of 731 px is 161 px.
+$HudBandFraction  = 0.22
+
+$Ffmpeg = $null
+
+function Get-ShotRows {
+    $rows = @()
+    foreach ($line in Get-Content -LiteralPath $ShotsPath) {
+        if ($line -match '^\s*(#|$)') { continue }
+        $f = $line -split "`t"
+        if ($f.Count -lt 7 -or $f[0].Trim() -eq 'name') { continue }
+        $rows += [pscustomobject]@{
+            Name  = $f[0].Trim()
+            Level = $f[1].Trim()
+            X     = $f[2].Trim()
+            Y     = $f[3].Trim()
+            Z     = $f[4].Trim()
+            Pitch = $f[5].Trim()
+            Yaw   = $f[6].Trim()
+        }
+    }
+    return $rows
+}
+
+# Threshold rows: name <TAB> min_ssim <TAB> max_mean_abs_diff.
+function Get-ThresholdRows {
+    $rows = @()
+    foreach ($line in Get-Content -LiteralPath $ThresholdsPath) {
+        if ($line -match '^\s*(#|$)') { continue }
+        $f = $line -split "`t"
+        if ($f.Count -lt 3 -or $f[0].Trim() -eq 'name') { continue }
+        # The fourth column is optional: the world-band (HUD-masked) SSIM floor. Rows that carry it
+        # are parity-checked on that number and use the full-frame floor as a gross-breakage check;
+        # rows without it (the level-1 pairs, whose HUD difference is small against their content)
+        # gate on the full-frame number alone.
+        $world = $null
+        if ($f.Count -ge 4 -and $f[3].Trim() -ne '' -and $f[3].Trim() -ne '-') {
+            $world = [double]::Parse($f[3].Trim(), [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+        $rows += [pscustomobject]@{
+            Name      = $f[0].Trim()
+            MinSsim   = [double]::Parse($f[1].Trim(), [System.Globalization.CultureInfo]::InvariantCulture)
+            MaxMad    = [double]::Parse($f[2].Trim(), [System.Globalization.CultureInfo]::InvariantCulture)
+            MinWorld  = $world
+        }
+    }
+    return $rows
+}
+
+# PNG size straight from the IHDR chunk, so ffprobe is not needed.
+function Get-PngSize {
+    param([string]$Path)
+    $fs = [System.IO.File]::OpenRead($Path)
+    try {
+        $buf = [byte[]]::new(24)
+        $read = $fs.Read($buf, 0, 24)
+        if ($read -lt 24) { throw "short PNG header: $Path" }
+        $signature = [byte[]](0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+        for ($i = 0; $i -lt 8; $i++) {
+            if ($buf[$i] -ne $signature[$i]) { throw "not a PNG: $Path" }
+        }
+        return [pscustomobject]@{
+            Width  = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($buf, 16))
+            Height = [System.Net.IPAddress]::NetworkToHostOrder([BitConverter]::ToInt32($buf, 20))
+        }
+    } finally { $fs.Dispose() }
+}
+
+function Invoke-Ffmpeg {
+    param([string[]]$Arguments)
+    $errFile = [System.IO.Path]::GetTempFileName()
+    try {
+        $stdout = & $Ffmpeg @Arguments 2> $errFile
+        $code = $LASTEXITCODE
+        $stdoutText = if ($null -eq $stdout) { '' } else { ($stdout | Out-String) }
+        $stderrText = if (Test-Path -LiteralPath $errFile) { [System.IO.File]::ReadAllText($errFile) } else { '' }
+        return [pscustomobject]@{ ExitCode = $code; Stdout = $stdoutText; Stderr = $stderrText }
+    } finally {
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-CropSane {
+    param($Crop, [int]$Width, [int]$Height)
+    if ($null -eq $Crop) { return $false }
+    if ($Crop.Width -le 0 -or $Crop.Height -le 0) { return $false }
+    if ($Crop.X -lt 0 -or $Crop.Y -lt 0) { return $false }
+    if (($Crop.X + $Crop.Width) -gt $Width) { return $false }
+    if (($Crop.Y + $Crop.Height) -gt $Height) { return $false }
+    return $true
+}
+
+# One ffmpeg bbox pass over an explicit filter chain; returns W/H/X/Y or $null.
+function Get-BboxCrop {
+    param([string]$Path, [string]$FilterChain)
+    $res = Invoke-Ffmpeg @('-hide_banner', '-loglevel', 'info', '-i', $Path,
+        '-vf', $FilterChain, '-f', 'null', '-')
+    $found = [regex]::Matches($res.Stderr, 'crop=(\d+):(\d+):(\d+):(\d+)')
+    if ($found.Count -eq 0) { return $null }
+    $g = $found[$found.Count - 1].Groups
+    return [pscustomobject]@{
+        Width  = [int]$g[1].Value
+        Height = [int]$g[2].Value
+        X      = [int]$g[3].Value
+        Y      = [int]$g[4].Value
+    }
+}
+
+# Parse the retail coords sidecar's `world_crop`. It is expressed in RAW-frame pixels:
+# accepts {x,y,w,h} / {width,height,x,y}, "WxH+X+Y", or a 4-element array tried as
+# [x,y,w,h] then [w,h,x,y] (whichever satisfies the raw frame bounds).
+function ConvertTo-WorldCrop {
+    param($Value, [int]$Width, [int]$Height)
+    $candidates = @()
+    if ($Value -is [string]) {
+        if ($Value -match '^\s*(\d+)x(\d+)\+(\d+)\+(\d+)\s*$') {
+            $candidates += [pscustomobject]@{
+                Width = [int]$Matches[1]; Height = [int]$Matches[2]; X = [int]$Matches[3]; Y = [int]$Matches[4]
+            }
+        }
+    } elseif ($Value -is [System.Array]) {
+        $v = @($Value | ForEach-Object { [int]$_ })
+        if ($v.Count -eq 4) {
+            $candidates += [pscustomobject]@{ Width = $v[2]; Height = $v[3]; X = $v[0]; Y = $v[1] }   # [x,y,w,h]
+            $candidates += [pscustomobject]@{ Width = $v[0]; Height = $v[1]; X = $v[2]; Y = $v[3] }   # [w,h,x,y]
+        }
+    } else {
+        $w = $Value.width
+        $h = $Value.height
+        if ($null -ne $w -and $null -ne $h) {
+            $x = if ($null -ne $Value.x) { [int]$Value.x } else { 0 }
+            $y = if ($null -ne $Value.y) { [int]$Value.y } else { 0 }
+            $candidates += [pscustomobject]@{ Width = [int]$w; Height = [int]$h; X = $x; Y = $y }
+        }
+    }
+    foreach ($c in $candidates) {
+        if (Test-CropSane -Crop $c -Width $Width -Height $Height) { return $c }
+    }
+    return $null
+}
+
+# Retail coords sidecar: world_crop in raw-frame coordinates plus the raw/png sizes.
+function Get-SidecarInfo {
+    param([string]$RetailPng, [int]$Width, [int]$Height)
+    $json = [System.IO.Path]::ChangeExtension($RetailPng, '.json')
+    if (-not (Test-Path -LiteralPath $json)) { return $null }
+    try { $j = Get-Content -LiteralPath $json -Raw | ConvertFrom-Json } catch { return $null }
+    $rawW = if ($null -ne $j.raw_width) { [int]$j.raw_width } else { $null }
+    $rawH = if ($null -ne $j.raw_height) { [int]$j.raw_height } else { $null }
+    $refW = if ($null -ne $rawW) { $rawW } else { $Width }
+    $refH = if ($null -ne $rawH) { $rawH } else { $Height }
+    $wc = $null
+    if ($null -ne $j.world_crop) {
+        $wc = ConvertTo-WorldCrop -Value $j.world_crop -Width $refW -Height $refH
+    }
+    return [pscustomobject]@{ WorldCrop = $wc; RawWidth = $rawW; RawHeight = $rawH }
+}
+
+# Detect the retail world box without being fooled by the -devMode dev-log text
+# boxes in the top corners: bbox runs on a middle horizontal band (which excludes
+# them), then the detected x-range is applied to the full image height.
+# Returns an object with Source/Detected/NoBars/WorldBox/AlreadyCropped describing
+# which rule was used; Width/Height/X/Y is the crop to apply to the current PNG.
+function Get-RetailCrop {
+    param([string]$Path, [int]$Width, [int]$Height)
+
+    $sidecar = Get-SidecarInfo -RetailPng $Path -Width $Width -Height $Height
+    $wc = if ($null -ne $sidecar) { $sidecar.WorldCrop } else { $null }
+    if ($null -ne $wc) {
+        $worldBox = "$($wc.Width)x$($wc.Height)+$($wc.X)+$($wc.Y)"
+        $rawSize = if ($null -ne $sidecar.RawWidth -and $null -ne $sidecar.RawHeight) {
+            "$($sidecar.RawWidth)x$($sidecar.RawHeight)"
+        } else { 'raw' }
+        # The PNG is the raw frame: world_crop is a crop inside it.
+        if (Test-CropSane -Crop $wc -Width $Width -Height $Height) {
+            $noBars = ($wc.X -eq 0 -and $wc.Y -eq 0 -and $wc.Width -eq $Width -and $wc.Height -eq $Height)
+            return [pscustomobject]@{
+                Width = $wc.Width; Height = $wc.Height; X = $wc.X; Y = $wc.Y
+                Source = "sidecar JSON world_crop ($worldBox of $rawSize raw frame)"
+                Detected = (-not $noBars); NoBars = $noBars
+                WorldBox = $worldBox; AlreadyCropped = $false
+            }
+        }
+        # The PNG is already cropped to the world box (its size matches world_crop while
+        # world_crop is in raw-frame coordinates): use it as-is.
+        if ($wc.Width -eq $Width -and $wc.Height -eq $Height) {
+            return [pscustomobject]@{
+                Width = $Width; Height = $Height; X = 0; Y = 0
+                Source = "sidecar JSON world_crop (retail PNG already cropped: $worldBox of $rawSize raw frame)"
+                Detected = $false; NoBars = $true
+                WorldBox = $worldBox; AlreadyCropped = $true
+            }
+        }
+        # Otherwise the sidecar crop is not usable for this image; fall back to bbox.
+    }
+
+    # Middle horizontal band: skips the top-corner dev text entirely.
+    $bandHeight = [Math]::Min(300, $Height)
+    $bandY = [Math]::Min(300, $Height - $bandHeight)
+    $band = Get-BboxCrop -Path $Path -FilterChain "crop=iw:${bandHeight}:0:${bandY},bbox=min_val=$BorderThreshold"
+    if ($null -eq $band -or $band.Width -le 0 -or $band.Width -ge $Width) {
+        # No vertical bars (or detection failed): leave the frame uncropped.
+        return [pscustomobject]@{
+            Width = $Width; Height = $Height; X = 0; Y = 0
+            Source = 'none (full frame: no bars detected)'; Detected = $false; NoBars = $true
+            WorldBox = "$($Width)x$($Height)+0+0"; AlreadyCropped = $false
+        }
+    }
+
+    $crop = [pscustomobject]@{
+        Width = $band.Width; Height = $Height; X = $band.X; Y = 0
+        Source = "ffmpeg bbox band (y=${bandY}..$($bandY + $bandHeight - 1); top corners excluded)"
+        Detected = $true; NoBars = $false
+        WorldBox = ''; AlreadyCropped = $false
+    }
+
+    # Refine the y-range inside the detected world columns. Accept it only when it
+    # spans essentially the full height: retail letterboxes the world horizontally.
+    $vertical = Get-BboxCrop -Path $Path -FilterChain "crop=$($crop.Width):ih:$($crop.X):0,bbox=min_val=$BorderThreshold"
+    if ($null -ne $vertical -and $vertical.Y -le 16 -and
+        ($vertical.Y + $vertical.Height) -ge ($Height - 16)) {
+        $crop.Height = $vertical.Height
+        $crop.Y = $vertical.Y
+    }
+    $crop.WorldBox = "$($crop.Width)x$($crop.Height)+$($crop.X)+$($crop.Y)"
+    return $crop
+}
+
+function Measure-Ssim {
+    param([string]$Retail, $Crop, [string]$Port)
+    $chain = "[0:v]crop=$($Crop.Width):$($Crop.Height):$($Crop.X):$($Crop.Y)," +
+        "scale=${NormalizedWidth}:${NormalizedHeight}:flags=bilinear,setsar=1,format=gray[a];" +
+        "[1:v]scale=${NormalizedWidth}:${NormalizedHeight}:flags=bilinear,setsar=1,format=gray[b];[a][b]ssim"
+    $res = Invoke-Ffmpeg @('-hide_banner', '-loglevel', 'info', '-i', $Retail, '-i', $Port,
+        '-filter_complex', $chain, '-f', 'null', '-')
+    if ($res.ExitCode -ne 0) { throw "ffmpeg ssim failed: $($res.Stderr)" }
+    $m = [regex]::Match($res.Stderr, 'SSIM Y:([0-9.]+) \(([^)]+)\) All:([0-9.]+)')
+    if (-not $m.Success) { throw "ffmpeg reported no SSIM line: $($res.Stderr)" }
+    return [pscustomobject]@{
+        All = [double]$m.Groups[3].Value
+        Db  = $m.Groups[2].Value.Trim()
+    }
+}
+
+function Measure-Mad {
+    param([string]$Retail, $Crop, [string]$Port)
+    $chain = "[0:v]crop=$($Crop.Width):$($Crop.Height):$($Crop.X):$($Crop.Y)," +
+        "scale=${NormalizedWidth}:${NormalizedHeight}:flags=bilinear,setsar=1,format=gray[a];" +
+        "[1:v]scale=${NormalizedWidth}:${NormalizedHeight}:flags=bilinear,setsar=1,format=gray[b];" +
+        "[a][b]blend=all_mode=difference,signalstats,metadata=print:file=-[d]"
+    $res = Invoke-Ffmpeg @('-hide_banner', '-loglevel', 'info', '-i', $Retail, '-i', $Port,
+        '-filter_complex', $chain, '-map', '[d]', '-f', 'null', '-')
+    if ($res.ExitCode -ne 0) { throw "ffmpeg difference failed: $($res.Stderr)" }
+    $m = [regex]::Match($res.Stdout, 'lavfi\.signalstats\.YAVG=([0-9.]+)')
+    if (-not $m.Success) { throw "ffmpeg reported no mean difference: $($res.Stdout) $($res.Stderr)" }
+    return [double]$m.Groups[1].Value
+}
+
+# The port draws its HUD (health/shield panels, weapon) **inside** its frame, while the retail
+# reference is the world crop of a frame whose HUD sits out in the letterbox corners — so every pair
+# carries a fixed HUD term that has nothing to do with the drawing. The deviation ledger's retire
+# condition for that asymmetry is "HUD-free capture or a HUD-masked metric", and this is the metric:
+# the same SSIM over the **world band** above the HUD, dropping the bottom `HudBandPixels` from both
+# sides. Retail's own weapon (and its HUD corners) are inside the raw frame, so the band drops the
+# weapon from both sides; what is compared is the world. The gate's floors stay on the full-frame
+# numbers; rows that carry a world-band floor use this number as the parity check and the full-frame
+# floor as a gross-breakage check.
+function Measure-WorldSsim {
+    param([string]$Retail, $Crop, [string]$Port)
+    $band = [int][math]::Round($Crop.Height * $HudBandFraction)
+    $height = $Crop.Height - $band
+    if ($height -lt 32) {
+        throw "world band is ${height}px tall from a $($Crop.Height)px crop: the frame is too short for the HUD mask"
+    }
+    $scaled = [int][math]::Round($NormalizedWidth * $height / $Crop.Width)
+    $chain = "[0:v]crop=$($Crop.Width):${height}:$($Crop.X):$($Crop.Y)," +
+        "scale=${NormalizedWidth}:${scaled}:flags=bilinear,setsar=1,format=gray[a];" +
+        "[1:v]crop=iw:${height}:0:0," +
+        "scale=${NormalizedWidth}:${scaled}:flags=bilinear,setsar=1,format=gray[b];[a][b]ssim"
+    $res = Invoke-Ffmpeg @('-hide_banner', '-loglevel', 'info', '-i', $Retail, '-i', $Port,
+        '-filter_complex', $chain, '-f', 'null', '-')
+    if ($res.ExitCode -ne 0) { throw "ffmpeg world-band ssim failed: $($res.Stderr)" }
+    $m = [regex]::Match($res.Stderr, 'SSIM Y:([0-9.]+) \(([^)]+)\) All:([0-9.]+)')
+    if (-not $m.Success) { throw "ffmpeg reported no world-band SSIM line: $($res.Stderr)" }
+    return [double]$m.Groups[3].Value
+}
+
+function New-SideBySide {
+    param([string]$Retail, $Crop, [string]$Port, [string]$Out)
+    $chain = "[0:v]crop=$($Crop.Width):$($Crop.Height):$($Crop.X):$($Crop.Y),setsar=1," +
+        "scale=-2:${SideHeight},pad=iw+4:ih:0:0:color=0x505050[r];" +
+        "[1:v]setsar=1,scale=-2:${SideHeight}[p];[r][p]hstack=inputs=2"
+    $res = Invoke-Ffmpeg @('-hide_banner', '-loglevel', 'error', '-y', '-i', $Retail, '-i', $Port,
+        '-filter_complex', $chain, '-frames:v', '1', $Out)
+    if ($res.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $Out)) {
+        throw "ffmpeg side-by-side failed (exit $($res.ExitCode)): $($res.Stderr)"
+    }
+}
+
+function New-ContactSheet {
+    param([string[]]$Sides, [string]$Out)
+    if ($Sides.Count -eq 1) {
+        $res = Invoke-Ffmpeg @('-hide_banner', '-loglevel', 'error', '-y', '-i', $Sides[0],
+            '-vf', "scale=${ContactWidth}:-2", '-frames:v', '1', $Out)
+    } else {
+        $ff = @('-hide_banner', '-loglevel', 'error', '-y')
+        foreach ($side in $Sides) { $ff += @('-i', $side) }
+        $chains = @()
+        $labels = ''
+        for ($i = 0; $i -lt $Sides.Count; $i++) {
+            $chains += "[${i}:v]scale=${ContactWidth}:-2[s${i}]"
+            $labels += "[s${i}]"
+        }
+        $chains += "${labels}vstack=inputs=$($Sides.Count)"
+        $ff += @('-filter_complex', ($chains -join ';'), '-frames:v', '1', $Out)
+        $res = Invoke-Ffmpeg $ff
+    }
+    if ($res.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $Out)) {
+        throw "ffmpeg contact sheet failed (exit $($res.ExitCode)): $($res.Stderr)"
+    }
+}
+
+function Format-Pose {
+    param($Row)
+    if ($Row.X -eq '' -or $Row.X -eq '-') {
+        return 'level spawn (no --shot-at; port run uses plain --start)'
+    }
+    $note = ''
+    if ($Row.Pitch -ne '-' -and [double]$Row.Pitch -ne 0) {
+        $note = " (pitch $($Row.Pitch), which the retail warp cannot set)"
+    }
+    return "x=$($Row.X) y=$($Row.Y) z=$($Row.Z) yaw=$($Row.Yaw)$note"
+}
+
+# Best-effort read of a retail coords sidecar written by the retail-capture side.
+function Get-RetailMeta {
+    param([string]$RetailPng)
+    $json = [System.IO.Path]::ChangeExtension($RetailPng, '.json')
+    if (-not (Test-Path -LiteralPath $json)) { return $null }
+    try {
+        $j = Get-Content -LiteralPath $json -Raw | ConvertFrom-Json
+        if ($null -eq $j.pos -or $null -eq $j.pyr) { return $null }
+        $pos = (@($j.pos) | ForEach-Object { '{0:F2}' -f [double]$_ }) -join ', '
+        $pyr = (@($j.pyr) | ForEach-Object { '{0:F2}' -f [double]$_ }) -join ', '
+        return "Pos ($pos), PYR ($pyr), sector $($j.sector)"
+    } catch { return $null }
+}
+
+# ---------------------------------------------------------------- setup
+
+if (-not (Test-Path -LiteralPath $ShotsPath)) { throw "missing shots list: $ShotsPath" }
+$ffmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
+if (-not $ffmpegCmd) { throw 'ffmpeg not found on PATH (needed for crop detection and metrics)' }
+$Ffmpeg = $ffmpegCmd.Source
+New-Item -ItemType Directory -Force -Path $CompareDir | Out-Null
+
+# ---------------------------------------------------------------- compare
+
+$rows = @(Get-ShotRows)
+$pairs = @()
+$missing = @()
+$errors = @()
+
+foreach ($row in $rows) {
+    $retailPath = Join-Path $RetailDir "$($row.Name).png"
+    $portPath   = Join-Path $PortDir "$($row.Name).png"
+    $haveRetail = Test-Path -LiteralPath $retailPath
+    $havePort   = Test-Path -LiteralPath $portPath
+    if (-not ($haveRetail -and $havePort)) {
+        $missing += [pscustomobject]@{ Name = $row.Name; Retail = $haveRetail; Port = $havePort }
+        continue
+    }
+    try {
+        $retailInfo = Get-PngSize $retailPath
+        $portInfo   = Get-PngSize $portPath
+        $crop = Get-RetailCrop -Path $retailPath -Width $retailInfo.Width -Height $retailInfo.Height
+        $borders = [pscustomobject]@{
+            Left   = $crop.X
+            Top    = $crop.Y
+            Right  = $retailInfo.Width - ($crop.X + $crop.Width)
+            Bottom = $retailInfo.Height - ($crop.Y + $crop.Height)
+        }
+        $ssim = Measure-Ssim -Retail $retailPath -Crop $crop -Port $portPath
+        $mad  = Measure-Mad  -Retail $retailPath -Crop $crop -Port $portPath
+        $worldSsim = Measure-WorldSsim -Retail $retailPath -Crop $crop -Port $portPath
+        $sidePath = Join-Path $CompareDir "$($row.Name)-side.png"
+        New-SideBySide -Retail $retailPath -Crop $crop -Port $portPath -Out $sidePath
+
+        $pairs += [pscustomobject]@{
+            Row        = $row
+            RetailInfo = $retailInfo
+            PortInfo   = $portInfo
+            Crop       = $crop
+            Borders    = $borders
+            Ssim       = $ssim
+            Mad        = $mad
+            WorldSsim  = $worldSsim
+            Side       = $sidePath
+            Pose       = (Format-Pose $row)
+            RetailMeta = (Get-RetailMeta $retailPath)
+        }
+        Write-Host ("{0}: SSIM {1:F4} ({2} dB), mean abs diff {3:F1}/255, world-band SSIM {4:F4}" -f
+            $row.Name, $ssim.All, $ssim.Db, $mad, $worldSsim)
+    } catch {
+        $errors += [pscustomobject]@{ Name = $row.Name; Message = $_.Exception.Message }
+        Write-Host ("{0}: FAILED - {1}" -f $row.Name, $_.Exception.Message)
+    }
+}
+
+# Worst first: lowest SSIM = most different.
+$ordered = @($pairs | Sort-Object { $_.Ssim.All })
+
+if ($ordered.Count -gt 0) {
+    New-ContactSheet -Sides @($ordered | ForEach-Object { $_.Side }) -Out $ContactPath
+} else {
+    Remove-Item -LiteralPath $ContactPath -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------- gate
+
+# `-Gate`: score the pairs named in tools/parity/thresholds.tsv. A missing capture, a failed metric
+# or a score under its floor fails; a pair with no threshold row is UNGRADED, so adding a shot does
+# not break the gate before its threshold is chosen.
+$gateFailures = 0
+$gateResults = @()
+$ungraded = @()
+if ($Gate) {
+    if (-not (Test-Path -LiteralPath $ThresholdsPath)) { throw "missing threshold file: $ThresholdsPath" }
+    $thresholds = @(Get-ThresholdRows)
+    if ($thresholds.Count -eq 0) { throw "no threshold rows in $ThresholdsPath" }
+    $byName = @{}
+    foreach ($p in $pairs) { $byName[$p.Row.Name] = $p }
+    $failedNames = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($e in $errors) { $null = $failedNames.Add($e.Name) }
+    foreach ($t in $thresholds) {
+        $result = [pscustomobject]@{
+            Name = $t.Name; MinSsim = $t.MinSsim; MaxMad = $t.MaxMad; MinWorld = $t.MinWorld
+            Ssim = $null; Mad = $null; World = $null; Verdict = 'PASS'; Detail = ''
+        }
+        if ($failedNames.Contains($t.Name)) {
+            $result.Verdict = 'FAIL'; $result.Detail = 'capture or metric failed'
+        } elseif (-not $byName.ContainsKey($t.Name)) {
+            $result.Verdict = 'FAIL'; $result.Detail = 'not captured'
+        } else {
+            $pair = $byName[$t.Name]
+            $result.Ssim = $pair.Ssim.All
+            $result.Mad = $pair.Mad
+            $result.World = $pair.WorldSsim
+            if ($pair.Ssim.All -lt $t.MinSsim) {
+                $result.Verdict = 'FAIL'
+                $result.Detail = 'SSIM {0:F4} < {1:F2}' -f $pair.Ssim.All, $t.MinSsim
+            } elseif ($pair.Mad -gt $t.MaxMad) {
+                $result.Verdict = 'FAIL'
+                $result.Detail = 'MAD {0:F1} > {1:F1}' -f $pair.Mad, $t.MaxMad
+            } elseif ($null -ne $t.MinWorld -and $pair.WorldSsim -lt $t.MinWorld) {
+                $result.Verdict = 'FAIL'
+                $result.Detail = 'world-band SSIM {0:F4} < {1:F2}' -f $pair.WorldSsim, $t.MinWorld
+            }
+        }
+        $gateResults += $result
+        if ($result.Verdict -eq 'PASS') {
+            $worldText = if ($null -ne $result.MinWorld) {
+                '  world-band SSIM {0:F4} >= {1:F2}' -f $result.World, $result.MinWorld
+            } else { '' }
+            Write-Host ("gate: PASS  {0}  SSIM {1:F4} >= {2:F2}  MAD {3:F1} <= {4:F1}{5}" -f
+                $result.Name, $result.Ssim, $result.MinSsim, $result.Mad, $result.MaxMad, $worldText)
+        } else {
+            $gateFailures++
+            Write-Host ("gate: FAIL  {0}  {1}" -f $result.Name, $result.Detail)
+        }
+    }
+    $thresholdNames = @($thresholds | ForEach-Object { $_.Name })
+    foreach ($p in $pairs) {
+        if ($thresholdNames -notcontains $p.Row.Name) {
+            $ungraded += $p.Row.Name
+            Write-Host ("gate: UNGRADED  {0}  (no row in thresholds.tsv)" -f $p.Row.Name)
+        }
+    }
+}
+
+# ---------------------------------------------------------------- report
+
+$lines = [System.Collections.Generic.List[string]]::new()
+$generated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+$lines.Add('# Parity comparison: retail vs port')
+$lines.Add('')
+$lines.Add("Generated: $generated")
+$lines.Add('Shot list: `tools/parity/shots.tsv`')
+$lines.Add("Pairs compared: $($ordered.Count); not captured yet: $($missing.Count); failed: $($errors.Count)")
+$lines.Add('')
+$lines.Add('**Triage, not equality.** Retail and port use different renderers and framing;')
+$lines.Add('SSIM and mean absolute difference are direction-finding signals, not a claim that')
+$lines.Add('the two images should match pixel for pixel. See "Framing and method" below.')
+$lines.Add('')
+
+if ($ordered.Count -eq 0) {
+    $lines.Add('No complete pairs yet: need both `target/parity/retail/<name>.png` and')
+    $lines.Add('`target/parity/port/<name>.png` for a row of `tools/parity/shots.tsv`.')
+    $lines.Add('')
+} else {
+    $lines.Add('## Summary (worst first)')
+    $lines.Add('')
+    $lines.Add('| # | shot | level | SSIM (All) | SSIM (dB) | mean abs diff | world-band SSIM | retail world crop | port frame |')
+    $lines.Add('|--:|------|-------|-----------:|----------:|--------------:|----------------:|-------------------|------------|')
+    $n = 0
+    foreach ($p in $ordered) {
+        $n++
+        $cropText = if ($p.Crop.WorldBox) { $p.Crop.WorldBox } else { "$($p.Crop.Width)x$($p.Crop.Height)+$($p.Crop.X)+$($p.Crop.Y)" }
+        $portText = "$($p.PortInfo.Width)x$($p.PortInfo.Height)"
+        $lines.Add(("| {0} | {1} | {2} | {3:F4} | {4} | {5:F1} | {6:F4} | {7} | {8} |" -f
+            $n, $p.Row.Name, $p.Row.Level, $p.Ssim.All, $p.Ssim.Db, $p.Mad, $p.WorldSsim, $cropText, $portText))
+    }
+    $lines.Add('')
+    $lines.Add('Contact sheet (worst first, top to bottom): `target/parity/compare/contact.png`')
+    $lines.Add('')
+
+    foreach ($p in $ordered) {
+        $name = $p.Row.Name
+        $retailRel = "target/parity/retail/$name.png"
+        $portRel   = "target/parity/port/$name.png"
+        $sideRel   = "target/parity/compare/$name-side.png"
+        $lines.Add("## $name")
+        $lines.Add('')
+        $lines.Add('- pose: ' + $p.Pose)
+        if ($p.RetailMeta) { $lines.Add('- retail coords metadata: ' + $p.RetailMeta) }
+        if ($p.Crop.AlreadyCropped) {
+            $lines.Add('- retail: `' + $retailRel + '` ' + "$($p.RetailInfo.Width)x$($p.RetailInfo.Height)" +
+                '; the PNG is already cropped to the world box (sidecar world_crop ' +
+                $p.Crop.WorldBox + '); used as-is, no further crop')
+        } elseif ($p.Crop.NoBars) {
+            $lines.Add('- retail: `' + $retailRel + '` ' + "$($p.RetailInfo.Width)x$($p.RetailInfo.Height)" +
+                '; no black border detected, full frame used')
+        } else {
+            $b = $p.Borders
+            $lines.Add('- retail: `' + $retailRel + '` ' + "$($p.RetailInfo.Width)x$($p.RetailInfo.Height)" +
+                '; detected world crop **' + "$($p.Crop.Width)x$($p.Crop.Height)+$($p.Crop.X)+$($p.Crop.Y)" +
+                "** (border removed left $($b.Left), right $($b.Right), top $($b.Top), bottom $($b.Bottom) px)")
+        }
+        $lines.Add('- crop source: ' + $p.Crop.Source)
+        $lines.Add('- port: `' + $portRel + '` ' + "$($p.PortInfo.Width)x$($p.PortInfo.Height)" +
+            ' rgb24; the port HUD is drawn into the image (the retail world crop excludes its HUD)')
+        $lines.Add('- side-by-side (left: retail world, right: port): `' + $sideRel + '`')
+        $lines.Add(("- SSIM (All, grayscale ${NormalizedWidth}x${NormalizedHeight}): **{0:F4}** ({1} dB)" -f $p.Ssim.All, $p.Ssim.Db))
+        $lines.Add(("- mean absolute difference (grayscale ${NormalizedWidth}x${NormalizedHeight}): **{0:F1} / 255**" -f $p.Mad))
+        $lines.Add('')
+    }
+}
+
+if ($Gate) {
+    $lines.Add('## Gate')
+    $lines.Add('')
+    $lines.Add('Thresholds: `tools/parity/thresholds.tsv`. A shot fails when it is not captured or its')
+    $lines.Add('SSIM is below the row minimum or its mean absolute difference is above the maximum.')
+    $lines.Add('')
+    $lines.Add('| shot | SSIM | min | MAD | max | verdict |')
+    $lines.Add('|---|---:|---:|---:|---:|---|')
+    foreach ($g in $gateResults) {
+        $ssimText = if ($null -ne $g.Ssim) { '{0:F4}' -f $g.Ssim } else { '-' }
+        $madText  = if ($null -ne $g.Mad) { '{0:F1}' -f $g.Mad } else { '-' }
+        $verdict  = if ($g.Verdict -eq 'PASS') { 'PASS' } else { "**FAIL** ($($g.Detail))" }
+        $lines.Add(("| {0} | {1} | {2:F2} | {3} | {4:F1} | {5} |" -f
+            $g.Name, $ssimText, $g.MinSsim, $madText, $g.MaxMad, $verdict))
+    }
+    if ($ungraded.Count -gt 0) {
+        $lines.Add('')
+        $lines.Add("Ungraded pairs (no threshold row): " + ($ungraded -join ', '))
+    }
+    $lines.Add('')
+}
+
+$lines.Add('## Framing and method')
+$lines.Add('')
+$lines.Add('- Retail side: the GOG game, captured from the staged scratch copy. By default it runs')
+$lines.Add('  the 16-bit Direct3D path through dgVoodoo2, whose F12 writes a 24-bit `JSHOT###.BMP`;')
+$lines.Add('  `retail-capture.ps1 -Software` uses the 8-bit path and writes a palettised `PCX`. The')
+$lines.Add('  game''s `viewSize`/display mode letterbox the world inside the raw frame, and the')
+$lines.Add('  `-devMode` console boxes sit in the top corners. The sidecar JSON''s `world_crop` is')
+$lines.Add('  the authoritative world box when present; otherwise a full-frame `ffmpeg bbox` is')
+$lines.Add('  fooled by the corner boxes, so the box is detected on a middle horizontal band')
+$lines.Add('  (`crop=iw:<band>:0:<y>`, bbox threshold ' + $BorderThreshold + ') and its x-range is applied to the')
+$lines.Add('  full image height. If the PNG is already cropped to the sidecar box it is used as-is;')
+$lines.Add('  if the box equals the full frame the image is treated as having no bars. The crop')
+$lines.Add('  actually used, and its source, are printed above for every pair. Retail captures')
+$lines.Add('  have no HUD in the world crop.')
+$lines.Add('- Port side: `bevi-knight.exe --game <install> --start <level> --frames 600 --shot <png> --mute`')
+$lines.Add('  via `tools/parity/port-capture.ps1` (600 frames = 10 s of fixed-step sim, so scripted')
+$lines.Add('  clips have settled the way the retail reference has). The port window is rendered at the')
+$lines.Add('  retail view size read from the sidecar (`BK_WINDOW`), so both frames have one shape;')
+$lines.Add('  without a sidecar it stays at 1024x768. Captures are rgb24 and the port draws its HUD')
+$lines.Add('  and notification text into the frame.')
+$lines.Add('- Different renderers, palettes and FOVs. Both images are stretched onto one common')
+$lines.Add(('  {0}x{1} grayscale canvas (`scale`, `setsar=1`, `format=gray`) before' -f $NormalizedWidth, $NormalizedHeight))
+$lines.Add('  SSIM and mean absolute difference. This deliberately ignores each side aspect and FOV')
+$lines.Add('  and the extra port HUD, so the number ranks pairs for triage; the side-by-side and')
+$lines.Add('  contact sheet are the real evidence. The retail PNG also carries a 4:3 pixel')
+$lines.Add('  sample-aspect tag (ffmpeg reports DAR 16:9); the normalization uses square pixels.')
+$lines.Add('- Pose: shots.tsv `-` means the level spawn (plain `--start`, no fixed pose). A')
+$lines.Add('  numeric row is passed to the port as `--shot-at "x,y,z,yaw,pitch"` (camera) and')
+$lines.Add('  `--warp "x,y,z,yaw"` (the player, one eye offset below the recorded eye, as retail''s')
+$lines.Add('  `warp` leaves its body). The retail `warp` keeps the level''s own pitch (1.04 degrees')
+$lines.Add('  at level 1), so rows request pitch 0 and a pair tolerates about a degree of pitch.')
+$lines.Add('- Port captures never run while JK.EXE is running; `port-capture.ps1` waits or aborts.')
+$lines.Add('- Reproduce: `pwsh -File tools/parity/port-capture.ps1` then')
+$lines.Add('  `pwsh -File tools/parity/compare.ps1`; the regression check is')
+$lines.Add('  `pwsh -File tools/parity/compare.ps1 -Gate`.')
+$lines.Add('')
+
+if ($missing.Count -gt 0) {
+    $lines.Add('## Not captured yet')
+    $lines.Add('')
+    foreach ($m in $missing) {
+        $what = @()
+        if (-not $m.Retail) { $what += 'retail PNG missing' }
+        if (-not $m.Port) { $what += 'port PNG missing' }
+        $lines.Add("- $($m.Name): " + ($what -join '; '))
+    }
+    $lines.Add('')
+}
+
+if ($errors.Count -gt 0) {
+    $lines.Add('## Failed')
+    $lines.Add('')
+    foreach ($e in $errors) {
+        $lines.Add("- $($e.Name): " + $e.Message)
+    }
+    $lines.Add('')
+}
+
+Set-Content -LiteralPath $ReportPath -Value ($lines -join "`n") -Encoding utf8
+
+Write-Host ''
+Write-Host "compared: $($ordered.Count) pair(s); not captured yet: $($missing.Count); failed: $($errors.Count)"
+if ($Gate) { Write-Host "gate: $($gateResults.Count) threshold(s), $gateFailures failure(s)" }
+Write-Host "report: $ReportPath"
+if ($ordered.Count -gt 0) { Write-Host "contact sheet: $ContactPath" }
+if ($Gate -and $gateFailures -gt 0) { exit 1 }
+if ($errors.Count -gt 0) { exit 1 }
+exit 0

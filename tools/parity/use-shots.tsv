@@ -1,0 +1,16 @@
+# The use-action probe rows. **Not** part of `shots.tsv`: the pose stands 0.12 units from the switch
+# plate, so the frame is a full-screen wall and `retail-capture.ps1`'s world-view detector rejects it —
+# a default sweep would abort on this row. Run it explicitly:
+#
+#   pwsh -File tools/parity/retail-capture.ps1 -Shots tools/parity/use-shots.tsv -Only switch_use `
+#        -KeysAfter MOUSEMIDDLE -ActionHoldMs 600 -AfterWaitMs 3000 -ConsoleCommands 'cogstatus 11'
+#
+# `sithPlayerActions_Activate` (`0x4fc0a0`) reaches `moveSize + 0.1` (constant `0x523200` = -0.1), i.e.
+# 0.16 units from the eye, so the row-2409 plate at y -3.88 is out of reach at 0.93 and inside it at 0.12.
+# The port now reaches **nothing** here too: the plate belongs to another room's surface slice and
+# `sithPlayerActions_Activate` searches the body's sector (round 304). The positive stance is 0.06 from
+# the plate (`[-4.29,-3.82]`), where the body's resolved sector is the plate's; retail's `warp` refuses
+# that point as "Position not in world", so the retail positive stays unmeasured. `--use-live` drives the
+# same chain from the port side.
+name	level	x	y	z	pitch	yaw
+switch_use	01narshadda	-4.29	-3.76	-1.143	0	180.000000

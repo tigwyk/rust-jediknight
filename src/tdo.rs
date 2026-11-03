@@ -54,7 +54,7 @@ pub struct Mesh {
 /// One row of `SECTION: HIERARCHYDEF`: the rigid segments a puppet is built from.
 ///
 /// `num: flags: type: mesh: parent: child: sibling: numChildren: x y z pitch yaw roll`
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 pub struct Node {
     /// Index into `Model::meshes`, or `-1` for a node with no geometry of its own.
     pub mesh: i32,
@@ -68,6 +68,10 @@ pub struct Node {
     /// The point the node rotates about, relative to `pos`. Vertices are stored relative
     /// to it, so a pose rotates them about the pivot and only then translates by `pos`.
     pub pivot: [f32; 3],
+    /// `hnodename`: the skeleton name a `.key` track addresses (`K_Rshouldr`, `K_Rhand`, …).
+    /// A viewmodel's key is a skeleton track, not a mesh-name track; without this the pose
+    /// falls back to row order and scatters the model.
+    pub name: String,
 }
 
 #[derive(Default)]
@@ -94,6 +98,15 @@ pub struct Model {
 impl Model {
     /// The name of the mesh a node owns, in the geoset that is drawn: how a `.key` names
     /// the node it poses. `None` for a `$$$DUMMY` node, which owns no mesh.
+    /// The hierarchy node's own skeleton name (`hnodename`), when it has one. `$$$DUMMY`
+    /// marks a node with no skeleton identity and is not a usable key name.
+    pub fn node_name(&self, node: usize) -> Option<&str> {
+        self.nodes
+            .get(node)
+            .map(|n| n.name.as_str())
+            .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case("$$$DUMMY"))
+    }
+
     pub fn node_mesh_name(&self, node: usize) -> Option<&str> {
         let n = self.nodes.get(node)?;
         let m = usize::try_from(n.mesh).ok()?;
@@ -219,6 +232,20 @@ fn local_matrix(pos: [f32; 3], rot: [f32; 3]) -> Xform {
     Xform { rot: rotate(rot[0], rot[1], rot[2]), pos }
 }
 
+/// Add a local pitch to an already-composed node (`sithActor_SetHeadPYR` writes joint angles, not
+/// world rotations). Post-multiplying by `Rx(degrees)` turns the node and its own mesh about the
+/// node's local X; child nodes keep their composed positions until the caller poses them.
+pub fn add_local_pitch(xform: &mut Xform, degrees: f32) {
+    let r = rotate(degrees, 0.0, 0.0);
+    let mut m = [[0.0f32; 3]; 3];
+    for row in 0..3 {
+        for col in 0..3 {
+            m[row][col] = (0..3).map(|k| xform.rot[row][k] * r[k][col]).sum();
+        }
+    }
+    xform.rot = m;
+}
+
 /// The world transform of every node, from a keyframe (or from the model's rest pose when
 /// `key` is `None`), at a (fractional) frame number.
 ///
@@ -240,6 +267,23 @@ fn local_matrix(pos: [f32; 3], rot: [f32; 3]) -> Xform {
 /// `x y z` — and replaces the rest values for that frame (`rdPuppet_BuildJointMatrices`
 /// subtracts the rest pose, blends, and adds it back).
 pub fn pose_nodes(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> Vec<Xform> {
+    pose_nodes_with(model, key, frame, false)
+}
+
+/// The keyframe's **rotations** with the model's own rest positions. The first-person mount's key
+/// moves the hand (`pos`), but its held frame also carries the wrist orientation; the port draws
+/// the rest pose because the full key frame lands off the fitted framing. This isolates which half
+/// is the pose and which is the translation.
+pub fn pose_nodes_rot_only(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> Vec<Xform> {
+    pose_nodes_with(model, key, frame, true)
+}
+
+fn pose_nodes_with(
+    model: &Model,
+    key: Option<&crate::key::Key>,
+    frame: f32,
+    rot_only: bool,
+) -> Vec<Xform> {
     // The key lists its nodes **alphabetically by mesh name** (`K_Hip`, `K_Lcalf`, …)
     // while the model lists its meshes in authoring order (`k_torso`, `k_neck`, …), so
     // the names are the mapping. Index order only agrees by luck (`3do/at.3do` happens
@@ -254,16 +298,22 @@ pub fn pose_nodes(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> V
         key: Option<&crate::key::Key>,
         frame: f32,
         by_index: bool,
+        rot_only: bool,
         out: &mut Vec<Option<Xform>>,
     ) -> Xform {
         if let Some(done) = out[i] {
             return done;
         }
-        let node = model.nodes[i];
+        let node = model.nodes[i].clone();
         let entry = key.and_then(|k| {
             let by_name = model
-                .node_mesh_name(i)
+                .node_name(i)
                 .and_then(|name| k.nodes.iter().find(|n| n.mesh.eq_ignore_ascii_case(name)))
+                .or_else(|| {
+                    model
+                        .node_mesh_name(i)
+                        .and_then(|name| k.nodes.iter().find(|n| n.mesh.eq_ignore_ascii_case(name)))
+                })
                 .and_then(|n| n.at(frame));
             by_name.or_else(|| {
                 // No name to match (a `$$$DUMMY` node): fall back to row order, which is
@@ -277,7 +327,7 @@ pub fn pose_nodes(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> V
         });
         // The node's local pose: the keyframe for this frame, or its own rest pose.
         let (pos, rot) = match entry {
-            Some(f) => (f.pos, f.rot),
+            Some(f) => (if rot_only { node.pos } else { f.pos }, f.rot),
             None => (node.pos, node.rot),
         };
         let local = local_matrix(pos, rot);
@@ -299,7 +349,7 @@ pub fn pose_nodes(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> V
             Some(p) => {
                 let pp = model.nodes[p].pivot;
                 place = [place[0] - pp[0], place[1] - pp[1], place[2] - pp[2]];
-                resolve(p, model, key, frame, by_index, out).then(&Xform { rot: local.rot, pos: place })
+                resolve(p, model, key, frame, by_index, rot_only, out).then(&Xform { rot: local.rot, pos: place })
             }
             None => Xform { rot: local.rot, pos: place },
         };
@@ -308,7 +358,7 @@ pub fn pose_nodes(model: &Model, key: Option<&crate::key::Key>, frame: f32) -> V
     }
 
     for i in 0..model.nodes.len() {
-        resolve(i, model, key, frame, by_index, &mut out);
+        resolve(i, model, key, frame, by_index, rot_only, &mut out);
     }
     out.into_iter().map(Option::unwrap_or_default).collect()
 }
@@ -426,6 +476,7 @@ pub fn parse(text: &str) -> Model {
                         } else {
                             [0.0; 3]
                         },
+                        name: f.get(17).copied().unwrap_or("").to_string(),
                     });
                 }
             }
@@ -495,6 +546,69 @@ fn parse_face(line: &str) -> Option<Face> {
 mod tests {
     use super::*;
 
+    /// The head-joint pitch is a post-multiplied local rotation: a 90-degree pitch about the
+    /// node's local X takes the node's +Y to +Z (the engine applies `SetHeadPYR` as a joint angle).
+    #[test]
+    fn a_head_pitch_turns_the_node_about_its_local_x() {
+        let mut x = Xform { rot: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], pos: [0.0; 3] };
+        add_local_pitch(&mut x, 90.0);
+        let p = x.apply([0.0, 1.0, 0.0]);
+        assert!(p[0].abs() < 1e-5, "{p:?}");
+        assert!((p[2].abs() - 1.0).abs() < 1e-5 && p[1].abs() < 1e-5, "{p:?}");
+    }
+
+    /// A viewmodel key names its tracks by **skeleton** name (`K_Rshouldr`), not by mesh name.
+    /// The `.3do` hierarchy carries that name in its last column; `pose_nodes` must use it, or a
+    /// two-node model whose key rows are in the other order gets row-order poses.
+    #[test]
+    fn a_key_track_maps_to_a_hierarchy_node_by_hnodename() {
+        let mut model = Model::default();
+        model.nodes.push(Node {
+            mesh: -1,
+            parent: -1,
+            pos: [0.0; 3],
+            rot: [0.0; 3],
+            pivot: [0.0; 3],
+            name: "K_A".into(),
+        });
+        model.nodes.push(Node {
+            mesh: -1,
+            parent: -1,
+            pos: [0.0; 3],
+            rot: [0.0; 3],
+            pivot: [0.0; 3],
+            name: "K_B".into(),
+        });
+        let entry = |x: f32| crate::key::Frame {
+            frame: 0,
+            flags: 0,
+            pos: [x, 0.0, 0.0],
+            rot: [0.0; 3],
+            delta: [0.0; 3],
+        };
+        let key = crate::key::Key {
+            frames: 1,
+            fps: 15.0,
+            joints: 2,
+            declared_nodes: 2,
+            nodes: vec![
+                crate::key::Node {
+                    mesh: "K_B".into(),
+                    frames: vec![entry(2.0)],
+                    declared_entries: 1,
+                },
+                crate::key::Node {
+                    mesh: "K_A".into(),
+                    frames: vec![entry(3.0)],
+                    declared_entries: 1,
+                },
+            ],
+        };
+        let posed = pose_nodes(&model, Some(&key), 0.0);
+        assert_eq!(posed[0].pos, [3.0, 0.0, 0.0], "K_A's row did not reach node 0");
+        assert_eq!(posed[1].pos, [2.0, 0.0, 0.0], "K_B's row did not reach node 1");
+    }
+
     /// A two-node puppet whose parent is stored *after* its child, both with pivots —
     /// the case that has to resolve by index and compose the parent's pivot.
     fn puppet() -> Model {
@@ -504,8 +618,8 @@ mod tests {
             geosets: 1,
             meshes_per_geoset: 0,
             nodes: vec![
-                Node { mesh: -1, parent: 1, pos: [0.0, 0.0, 0.0], rot: [0.0; 3], pivot: [0.0, 0.0, 0.5] },
-                Node { mesh: -1, parent: -1, pos: [1.0, 0.0, 0.0], rot: [0.0; 3], pivot: [0.0, 0.0, 2.0] },
+                Node { mesh: -1, parent: 1, pos: [0.0, 0.0, 0.0], rot: [0.0; 3], pivot: [0.0, 0.0, 0.5], ..Default::default() },
+                Node { mesh: -1, parent: -1, pos: [1.0, 0.0, 0.0], rot: [0.0; 3], pivot: [0.0, 0.0, 2.0], ..Default::default() },
             ],
             radius: 0.0,
             insert_offset: [0.0; 3],

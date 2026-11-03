@@ -268,7 +268,16 @@ impl Cog {
             Some(id) => self.label_for_message_id(id)?,
             None => name.to_string(),
         };
-        self.label(&label).is_some().then_some(label)
+        // A **message name** the script does not also declare as a label still resolves by id:
+        // `MESSAGE_IDS` gives `activate` and `activated` the same id (1), and `00_doorswitch.cog`
+        // declares `message activated` with an `activated:` label only — so the use action's
+        // `activate` never reached the door until this fallback. A script that *does* declare
+        // `activate` wins above, unchanged.
+        if self.label(&label).is_some() {
+            return Some(label);
+        }
+        let id = usize::try_from(message_id(&label)?).ok()?;
+        self.label_for_message_id(id)
     }
 
     /// Bind a placed instance's values to this script.
@@ -329,19 +338,32 @@ impl Cog {
         }
     }
 
-    /// `door0` + index 2 → `door2`: the engine resolves an indexed symbol by link id.
+    /// `door0` + index 2 → `door2`: the array element is the symbol whose **name** is the base plus
+    /// the index. `linkid` is not an ordinal — it is the *bit* that identifies the symbol in a
+    /// linked message (`GetSenderId()` returns it: `00_secretareas.cog` declares `secret1 linkid=1`,
+    /// `secret2 linkid=2`, `secret3 linkid=4`, …, and its `entered:` handler does
+    /// `flags = flags | GetSenderId()`), so resolving by it put `secret0[4]` on `secret3` and made
+    /// the level's secret count 8 instead of 6. It stays as a last resort for an index that is a
+    /// bit rather than an element number.
     fn indexed_name(&self, name: &str, index: i64) -> Option<String> {
         let base = name.trim_end_matches(|c: char| c.is_ascii_digit());
         let want = index as u32;
-        // Prefer an explicit `linkid=`; fall back to `<base><index>`.
-        self.symbols
+        let candidate = format!("{base}{index}");
+        let found = self
+            .symbols
             .iter()
-            .find(|s| s.linkid == Some(want) && s.name.starts_with(base))
-            .map(|s| s.name.clone())
+            .any(|s| s.name == candidate)
+            .then_some(candidate)
             .or_else(|| {
-                let candidate = format!("{base}{index}");
-                self.symbols.iter().any(|s| s.name == candidate).then_some(candidate)
-            })
+                self.symbols
+                    .iter()
+                    .find(|s| s.linkid == Some(want) && s.name.starts_with(base))
+                    .map(|s| s.name.clone())
+            });
+        if std::env::var_os("BK_INDEX_TRACE").is_some() {
+            eprintln!("index: {name}[{index}] base `{base}` -> {found:?}");
+        }
+        found
     }
 }
 
@@ -951,14 +973,24 @@ pub struct Vm {
     /// the interval and the next due time, and every cog tick that is due sends the `pulse` message.
     pub pulse: Option<(f32, f32)>,
     /// This cog's one-shot timer (`SITH_COG_TIMER_SET`): the `timer` message fires once when due.
-    pub timer: Option<f32>,
+    /// `SetTimerEx(seconds, id, val, val2)` also stores the id the handler reads back through
+    /// `GetSenderId()` and the two parameter words — the shipped actor scripts branch on exactly
+    /// that id (`timer:` in `actor_<class>.cog`: id 0 resets a count, id 1 credits the level's
+    /// population bin), so a timer that arrived with sender 0 would take the wrong arm.
+    pub timer: Option<(f32, i64, [f64; 2])>,
     /// Seconds this cog has been running, which is what pulse and timer deadlines are measured against.
     pub now: f32,
     /// When a `sleep` in the interrupted label may continue.
     pub sleep_until: f32,
-    /// `(label, statement index, due)`: what a `sleep` interrupted. The engine keeps the same thing as
-    /// `script_running == 2` plus a saved instruction pointer (§16.10).
-    pub resume: Option<(String, usize, f32)>,
+    /// `(label, statement path, due)`: what a `sleep` interrupted. The engine keeps the same thing as
+    /// `script_running == 2` plus a saved instruction pointer (§16.10), and the saved pointer is the
+    /// statement that slept, not the statement containing it — so the path records the descent through
+    /// `if`/`else` and plain blocks (`[i]` = statement `i` of the label, `[i, j]` = statement `j` inside
+    /// statement `i`'s block) and a resume re-enters at the exact statement.
+    pub resume: Option<(String, Vec<(u32, u8)>, f32)>,
+    /// The descent from the label body to the statement being run: `(statement index, branch)`, where
+    /// the branch is 0 for a block body and 1/2 for an `if` then/else. `sleep` records it.
+    path: Vec<(u32, u8)>,
     /// Set by `sleep`; the call sites turn it into the `SLEEPING` unwind.
     suspended: bool,
     /// Set when a resume re-enters the label: the next `sleep` was already waited out.
@@ -966,7 +998,25 @@ pub struct Vm {
 }
 
 /// The sentinel a `sleep` unwinds with, so `run_label` can tell "waiting" from a script error.
-const SLEEPING: &str = "::sleeping";
+pub const SLEEPING: &str = "::sleeping";
+
+/// The statements a resume descends into: the `then` arm (1), the `else` arm (2), or a plain block (0).
+fn descent(stmt: &Stmt, branch: u8) -> Option<&[Stmt]> {
+    match (stmt, branch) {
+        (Stmt::Block(body), 0) => Some(body),
+        (Stmt::If(_, then, _), 1) => block_of(then),
+        (Stmt::If(_, _, Some(els)), 2) => block_of(els),
+        _ => None,
+    }
+}
+
+/// The statements of a block body; a branch written without braces (`if (x) Sleep(1);`) is not one.
+fn block_of(stmt: &Stmt) -> Option<&[Stmt]> {
+    match stmt {
+        Stmt::Block(body) => Some(body),
+        _ => None,
+    }
+}
 
 
 
@@ -996,6 +1046,7 @@ impl Vm {
             now: 0.0,
             sleep_until: 0.0,
             resume: None,
+            path: Vec::new(),
             suspended: false,
             sleep_skip: false,
 
@@ -1059,42 +1110,45 @@ impl Vm {
         }
         // Resume where a `sleep` stopped this label, or start at the top.
         let want = label.to_ascii_lowercase();
-        let start = match self.resume.take() {
-            Some((name, at, due)) if name == want => {
+        // Only a run of the **sleeping label** may consume the pending resume. Taking it for a
+        // different label dropped it for good, so a `sleep` in `startup` never resumed once the
+        // level's other messages were delivered - which is why `01_initialry.cog`'s
+        // `Sleep(0.5)` never reached its `AISetMovePos` (round 307).
+        let resume_path = match self.resume.as_ref() {
+            Some((name, ..)) if *name == want => {
+                let (name, path, due) = self.resume.take().expect("checked above");
                 if self.now < due {
-                    self.resume = Some((name, at, due));
+                    self.resume = Some((name, path, due));
                     return Err(SLEEPING.into());
                 }
                 self.sleep_skip = true;
-                at
+                Some(path)
             }
-            _ => 0,
+            _ => None,
         };
         self.depth += 1;
         let started = std::time::Instant::now();
         let mut result = Ok(Value::Nil);
-        for i in start..body.len() {
-            match self.exec(cog, &body[i]) {
-                Ok(Flow::Next) => {}
-                Ok(Flow::Break) => break,
-                Ok(Flow::Return(v)) => {
-                    result = Ok(v);
-                    break;
-                }
-                Err(e) => {
-                    if e == SLEEPING {
-                        // Resume at the statement that slept; its `sleep` is transparent the first
-                        // time back, so a top-level wait continues past it and a `while` loop's
-                        // next iteration still runs its body.
-                        self.resume = Some((want.clone(), i, self.sleep_until));
-                        result = Ok(Value::Nil);
-                    } else {
-                        result = Err(e);
-                    }
-                    break;
-                }
+        // A `call` runs this label inside the caller's statement: the path is per label, or the
+        // caller's descent would prefix the callee's resume point and send it to the wrong statement.
+        let outer = std::mem::take(&mut self.path);
+        let run = match resume_path {
+            Some(path) => self.run_path(cog, body, &path),
+            None => self.run_from(cog, body, 0),
+        };
+        match run {
+            Ok(Flow::Return(v)) => result = Ok(v),
+            Ok(_) => {}
+            Err(e) if e == SLEEPING => {
+                // Resume at the statement that slept; its `sleep` is transparent the first time back.
+                // A `sleep` inside a loop records only the loop statement (`run_path` stops there),
+                // because the loop's condition and step have to run before the body again.
+                let path = std::mem::take(&mut self.path);
+                self.resume = Some((want.clone(), path, self.sleep_until));
             }
+            Err(e) => result = Err(e),
         }
+        self.path = outer;
         self.depth -= 1;
         // `ReturnEx` is the handler's answer even though the script ends with a bare `Return`: the
         // engine's caller reads the cog's stored value, so a label that stored one returns it.
@@ -1114,15 +1168,49 @@ impl Vm {
         result
     }
 
-    fn exec_block(&mut self, cog: &Cog, body: &[Stmt]) -> Result<Value, String> {
-        for stmt in body {
-            match self.exec(cog, stmt)? {
+    /// Run `body` from `start`, recording the descent so a `sleep` inside can resume in place.
+    ///
+    /// The recording is what makes `sleep` faithful: the engine saves the statement pointer, so a
+    /// wait inside an `if` continues with the statement after it, while recording only the enclosing
+    /// top-level statement used to re-run everything before the wait. Statements that are not blocks
+    /// (`if (x) Sleep(1);`) still resume at the enclosing statement — its condition has to run.
+    fn run_from(&mut self, cog: &Cog, body: &[Stmt], start: usize) -> Result<Flow, String> {
+        for i in start..body.len() {
+            self.path.push((i as u32, 0));
+            let run = self.exec(cog, &body[i]);
+            // A sleeping statement keeps its place; every other outcome leaves the descent.
+            if !matches!(&run, Err(e) if e == SLEEPING) {
+                self.path.pop();
+            }
+            match run? {
                 Flow::Next => {}
-                Flow::Return(v) => return Ok(v),
-                Flow::Break => return Ok(Value::Nil),
+                done => return Ok(done),
             }
         }
-        Ok(Value::Nil)
+        Ok(Flow::Next)
+    }
+
+    /// Resume a label at the statement `path` names, descending through `if`/`else` bodies and plain
+    /// blocks. A path that points into a loop restarts at the loop statement: the loop's own condition
+    /// and step are part of the statement, so the walker cannot skip them.
+    fn run_path(&mut self, cog: &Cog, body: &[Stmt], path: &[(u32, u8)]) -> Result<Flow, String> {
+        let Some(&(index, branch)) = path.first() else { return self.run_from(cog, body, 0) };
+        let index = index as usize;
+        if index >= body.len() {
+            return self.run_from(cog, body, 0);
+        }
+        if path.len() == 1 {
+            return self.run_from(cog, body, index);
+        }
+        let Some(inner) = descent(&body[index], branch) else {
+            return self.run_from(cog, body, index);
+        };
+        self.path.push((index as u32, branch));
+        let run = self.run_path(cog, inner, &path[1..]);
+        if !matches!(&run, Err(e) if e == SLEEPING) {
+            self.path.pop();
+        }
+        run
     }
 
     fn exec(&mut self, cog: &Cog, stmt: &Stmt) -> Result<Flow, String> {
@@ -1137,15 +1225,7 @@ impl Vm {
             STMTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         match stmt {
-            Stmt::Block(body) => {
-                for s in body {
-                    match self.exec(cog, s)? {
-                        Flow::Next => {}
-                        done => return Ok(done),
-                    }
-                }
-                Ok(Flow::Next)
-            }
+            Stmt::Block(body) => self.run_from(cog, body, 0),
             Stmt::Assign(name, index, value) => {
                 let v = self.eval(cog, value)?;
                 let v = match index {
@@ -1175,8 +1255,14 @@ impl Vm {
             Stmt::If(cond, then, els) => {
                 let c = self.eval(cog, cond)?;
                 if c.truthy() {
+                    if let Some(last) = self.path.last_mut() {
+                        last.1 = 1;
+                    }
                     self.exec(cog, then)
                 } else if let Some(e) = els {
+                    if let Some(last) = self.path.last_mut() {
+                        last.1 = 2;
+                    }
                     self.exec(cog, e)
                 } else {
                     Ok(Flow::Next)
@@ -1357,7 +1443,12 @@ impl Vm {
             }
             "settimer" | "settimerex" => {
                 let value = args.first().map(|v| v.num()).unwrap_or(0.0) as f32;
-                self.timer = (value > 0.0).then_some(self.now + value);
+                let id = args.get(1).map(|v| v.num() as i64).unwrap_or(0);
+                let params = [
+                    args.get(2).map(|v| v.num()).unwrap_or(0.0),
+                    args.get(3).map(|v| v.num()).unwrap_or(0.0),
+                ];
+                self.timer = (value > 0.0).then_some((self.now + value, id, params));
                 return Value::Nil;
             }
             _ => {}
@@ -1511,6 +1602,64 @@ end
         assert_eq!(locked.init.as_deref(), Some("0"));
     }
 
+    /// The engine saves the *statement* pointer, so a `sleep` inside a branch continues with the
+    /// statement after the wait. Recording only the enclosing top-level statement re-ran the branch's
+    /// prefix, which double-counted every assignment before the wait.
+    #[test]
+    fn a_sleep_inside_a_branch_resumes_after_the_wait() {
+        let cog = parse(
+            "symbols\nfloat n=0\nfloat flag=0\nend\ncode\nstartup:\n\tif (1)\n\t{\n\t\tn = n + 1;\n\t\tSleep(0.5);\n\t\tflag = 1;\n\t}\n\treturn;\nend\n",
+        )
+        .expect("parses");
+        let mut vm = Vm::new();
+        vm.run_label(&cog, "startup").expect("reaches the sleep");
+        assert!(vm.sleeping(), "`sleep` did not suspend the label");
+        assert_eq!(vm.var("n"), Value::Num(1.0));
+        vm.now += 1.0;
+        vm.run_label(&cog, "startup").expect("resumes");
+        assert_eq!(vm.var("n"), Value::Num(1.0), "the branch prefix ran twice");
+        assert_eq!(vm.var("flag"), Value::Num(1.0), "the wait resumed at the wrong statement");
+    }
+
+    /// A `sleep` inside a `call`ed label resumes inside that label: the caller's own position must not
+    /// leak into the callee's resume point.
+    #[test]
+    fn a_sleep_inside_a_called_label_resumes_after_its_wait() {
+        let cog = parse(
+            "symbols\nfloat x=0\nend\ncode\nstartup:\n\tx = 0;\n\tx = 0;\n\tcall wait_a_bit;\n\treturn;\nwait_a_bit:\n\tSleep(0.5);\n\tx = 1;\n\treturn;\nend\n",
+        )
+        .expect("parses");
+        let mut vm = Vm::new();
+        vm.run_label(&cog, "startup").expect("reaches the sleep");
+        assert_eq!(vm.sleeping_label(), Some("wait_a_bit"));
+        vm.now += 1.0;
+        vm.run_label(&cog, "wait_a_bit").expect("resumes");
+        assert_eq!(vm.var("x"), Value::Num(1.0), "the callee resumed past its own continuation");
+    }
+
+    /// A pending `sleep` belongs to its own label: running a **different** message label while the
+    /// cog sleeps must not consume it. The load path delivers every message right after `startup`,
+    /// so this is what dropped `01_initialry.cog`'s `Sleep(0.5)` continuation (round 307).
+    #[test]
+    fn another_label_running_while_a_sleep_is_pending_does_not_drop_the_resume() {
+        let cog = parse(
+            "symbols\nfloat n=0\nend\ncode\nstartup:\n\tn = 1;\n\tSleep(0.5);\n\tn = 2;\n\treturn;\npulse:\n\treturn;\nend\n",
+        )
+        .expect("parses");
+        let mut vm = Vm::new();
+        vm.run_label(&cog, "startup").expect("reaches the sleep");
+        assert!(vm.sleeping(), "`sleep` did not suspend the label");
+        vm.run_label(&cog, "pulse").expect("runs a different label");
+        assert_eq!(
+            vm.sleeping_label(),
+            Some("startup"),
+            "running another label consumed the pending sleep"
+        );
+        vm.now += 1.0;
+        vm.run_label(&cog, "startup").expect("resumes");
+        assert_eq!(vm.var("n"), Value::Num(2.0), "the sleep never finished");
+    }
+
     #[test]
     fn runs_a_label_and_calls_subroutines() {
         let cog = parse(DOOR).expect("parses");
@@ -1568,5 +1717,24 @@ end
         let mut vm = Vm::new();
         vm.run_label(&cog, "startup").expect("runs");
         assert_eq!(vm.trace.prints, vec!["door shut".to_string()]);
+    }
+
+    /// `array[index]` is the symbol the base name plus the index names. The shipped scripts declare
+    /// their array elements with **bit** link ids (`secret1 linkid=1`, `secret2 linkid=2`,
+    /// `secret3 linkid=4`, …) because the link id is what `entered:` tests against `GetSenderId()`,
+    /// so resolving by link id put `secret0[4]` on `secret3` and made level 1 count 8 secret areas
+    /// instead of 6.
+    #[test]
+    fn an_array_index_is_the_symbols_name_not_its_link_id() {
+        let cog = parse(
+            "symbols\nsector secret0 nolink local\nsector secret1 linkid=1\nsector secret2 linkid=2\n\
+             sector secret3 linkid=4\nsector secret4 linkid=8\nend\ncode\nstartup:\n\treturn;\nend\n",
+        )
+        .expect("parses");
+        assert_eq!(cog.indexed_name("secret0", 3).as_deref(), Some("secret3"));
+        assert_eq!(cog.indexed_name("secret0", 4).as_deref(), Some("secret4"));
+        assert_eq!(cog.indexed_name("secret0", 5), None, "no element 5 exists");
+        // A bit, rather than an element number, still finds the symbol that carries it.
+        assert_eq!(cog.indexed_name("secret0", 8).as_deref(), Some("secret4"));
     }
 }

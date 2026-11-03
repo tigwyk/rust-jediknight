@@ -112,10 +112,10 @@ pub struct Sector {
     pub colormap: u32,
     /// `(first, count)` into `Level::surfaces`, from the sector's own `SURFACES` row.
     pub surfaces: (usize, usize),
-    /// `BOUNDBOX minx miny minz maxx maxy maxz` — the box the level ships, and the one
+    /// `COLLIDEBOX minx miny minz maxx maxy maxz` — the box the level ships, and the one
     /// `sithIntersect_IsSphereInSector` tests first: a sphere inside it is *inside* the sector with
-    /// no surface test at all (`sithIntersect.c:58`). `collide::Solids::inside_sector` needs it to be
-    /// the engine's test rather than an approximation from the sector's vertices.
+    /// no surface test at all (`sithIntersect.c:58`). The enclosing `BOUNDBOX` is only the fallback
+    /// when no collide box is present; `COLLIDEBOX` must not be overwritten by that substring match.
     pub boundbox: Option<([f32; 3], [f32; 3])>,
     /// `AMBIENT LIGHT <v>` and `EXTRA LIGHT <v>`: what the editor baked into this room. Retail sums
     /// them into the POV pass's ambient (`jkPlayer_DrawPov`), which is why the weapon is as bright as
@@ -394,14 +394,30 @@ pub fn parse(text: &str) -> Level {
             // `-1` leaves a thing or sector unbound.
             let n = nth_f32(line, 2).unwrap_or(0.0) as usize;
             i += 1;
+            // The row's own index **is** the cog's id in the engine, and ids start at **0**: retail's
+            // `cogstatus 0` names the row numbered 0 (`00_door.cog`) and `cogstatus 1` the row numbered 1
+            // (`00_std_elev.cog`). Pushing in file order gave every script the wrong id - message
+            // routing, `getselfcog` and `setmastercog` all ride on it. Place by index instead; a level
+            // whose section is contiguous (all observed so far) gets no empty slots.
+            let mut rows_found: Vec<(usize, CogInstance)> = Vec::new();
             for row in read_rows(&lines, &mut i, n) {
-                let Some((_, rest)) = row.split_once(':') else { continue };
+                let Some((head, rest)) = row.split_once(':') else { continue };
+                let index = head.trim().parse::<usize>().unwrap_or(0);
                 let mut it = rest.split_whitespace();
                 let Some(script) = it.next() else { continue };
-                level.cogs.push(CogInstance {
-                    script: script.to_string(),
-                    values: it.map(|v| v.to_string()).collect(),
-                });
+                rows_found.push((
+                    index,
+                    CogInstance {
+                        script: script.to_string(),
+                        values: it.map(|v| v.to_string()).collect(),
+                    },
+                ));
+            }
+            if let Some(last) = rows_found.iter().map(|(index, _)| *index).max() {
+                level.cogs.resize(last + 1, CogInstance { script: String::new(), values: Vec::new() });
+                for (index, instance) in rows_found {
+                    level.cogs[index] = instance;
+                }
             }
             continue;
         }
@@ -494,12 +510,18 @@ pub fn parse(text: &str) -> Level {
             if let Some(s) = level.sectors.last_mut() {
                 s.colormap = nth_f32(line, 1).unwrap_or(0.0) as u32;
             }
-        } else if lower.starts_with("boundbox") {
+        } else if lower.starts_with("boundbox") || lower.starts_with("collidebox") {
             if let Some(s) = level.sectors.last_mut() {
                 let f = fields(line);
                 let v: Vec<f32> = (1..7).filter_map(|k| f.get(k).and_then(|x| x.parse().ok())).collect();
                 if v.len() == 6 {
-                    s.boundbox = Some(([v[0], v[1], v[2]], [v[3], v[4], v[5]]));
+                    let bounds = ([v[0], v[1], v[2]], [v[3], v[4], v[5]]);
+                    // `COLLIDEBOX` contains `BOUNDBOX` as a substring, and follows it in
+                    // the shipped sectors. The engine's `IsSphereInSector` short-circuit
+                    // reads the collide box, so it must win over the enclosing bounds.
+                    if lower.starts_with("collidebox") || s.boundbox.is_none() {
+                        s.boundbox = Some(bounds);
+                    }
                 }
             }
         } else if lower.starts_with("surfaces") {
@@ -605,6 +627,11 @@ fn parse_surface_normal(line: &str) -> Option<(usize, [f32; 3])> {
 
 /// `num: template name X Y Z Pitch Yaw Roll Sector [extra...]`
 fn parse_thing(line: &str) -> Option<Thing> {
+    // `BK_THING_ROW=1`: the raw row, so the keys the engine writes after the sector column can be
+    // read without guessing which ones this parser keeps (`thingflags=`, `frame=`, `vel=`).
+    if std::env::var_os("BK_THING_ROW").is_some() {
+        eprintln!("thing row: {line}");
+    }
     let f = fields(line);
     if f.len() < 10 {
         return None;
@@ -659,6 +686,13 @@ mod tests {
         assert!((level.sectors[0].ambient_light - 0.75).abs() < 1e-5, "ambient light not read");
         assert!((level.sectors[0].extra_light - 0.13).abs() < 1e-5, "extra light not read");
     }
+    #[test]
+    fn collidebox_is_not_overwritten_by_boundbox() {
+        let text = "\nSECTOR 0\nBOUNDBOX 0 0 0 10 10 10\nCOLLIDEBOX 1 2 3 4 5 6\n";
+        let level = parse(text);
+        assert_eq!(level.sectors[0].boundbox, Some(([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])));
+    }
+
     #[test]
     fn both_frame_spellings_parse() {
         let path = Thing::parse_frame("frame=(1.2/9.65/6.35:0.0/90.0/0.02)").expect("path frame");

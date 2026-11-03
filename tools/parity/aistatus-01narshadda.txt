@@ -1,0 +1,79 @@
+> aistatus 3
+>aistatus 3
+AI Status dump for thing 29 (powerdroid).
+Class 'gonkroam.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x7, mode=0x4.
+Instinct 1: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 2: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x4.
+> wait 1500 ms
+> aistatus 207
+>aistatus 207
+cannot process AIStatus command.
+> wait 1500 ms
+> aistatus 0
+Class 'rydefault.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x604, mode=0x0.
+Instinct 1: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x204.
+Instinct 2: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x7, mode=0x0.
+Instinct 3: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x100, mode=0x2.
+Instinct 4: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 5: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xe00, mode=0x2.
+Instinct 6: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 7: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x900, mode=0x0.
+Instinct 8: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 9: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 10: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0xffff.
+> wait 1500 ms
+> aistatus
+0.004000 seconds to parse section soundclass.
+0.026000 seconds to parse section models.
+0.003000 seconds to parse section sprites.
+0.000000 seconds to parse section keyframes.
+0.036000 seconds to parse section animclass.
+0.001000 seconds to parse section cogscripts.
+0.000000 seconds to parse section cogs.
+0.000000 seconds to parse section jk.
+0.000000 seconds to parse section copyright.
+0.000000 seconds to parse section header.
+0.008000 seconds to parse section sounds.
+0.046000 seconds to parse section materials.
+0.050000 seconds to parse section georesource.
+0.005000 seconds to parse section sectors.
+0.001000 seconds to parse section aiclass.
+0.061000 seconds to parse section models.
+0.005000 seconds to parse section sprites.
+0.048000 seconds to parse section keyframes.
+0.002000 seconds to parse section animclass.
+0.002000 seconds to parse section soundclass.
+0.006000 seconds to parse section cogscripts.
+0.000000 seconds to parse section cogs.
+0.000000 seconds to parse section templates.
+0.001000 seconds to parse section things.
+>aistatus 3
+AI Status dump for thing 29 (powerdroid).
+Class 'gonkroam.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x7, mode=0x4.
+Instinct 1: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 2: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x4.
+>aistatus 207
+cannot process AIStatus command.
+>aistatus 0
+AI Status dump for thing 3 (reeyeesgun).
+Class 'rydefault.ai', Flags=0x1004, Moods 0/0/0, NextUpdate=0
+Current instincts:
+Instinct 0: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x604, mode=0x0.
+Instinct 1: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x204.
+Instinct 2: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x7, mode=0x0.
+Instinct 3: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x100, mode=0x2.
+Instinct 4: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 5: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xe00, mode=0x2.
+Instinct 6: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 7: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x900, mode=0x0.
+Instinct 8: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0x2.
+Instinct 9: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0xf05, mode=0x800.
+Instinct 10: Params: 0.000000/0.000000/0.000000/0.000000, nextUpdate=0, mask=0x0, mode=0xffff.
+>aistatus
+cannot process AIStatus command.
