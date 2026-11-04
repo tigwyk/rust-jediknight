@@ -1494,6 +1494,12 @@ impl Vm {
                 self.trace.prints.push(text.join(" "));
                 Value::Nil
             }
+            // `PrintInt(value)`: the integer form of `Print`. `00_simple_elev` is the only script that
+            // calls it, and a missing verb was an unanswered call rather than a printed number.
+            "printint" => {
+                self.trace.prints.push(format!("{}", args.first().map(|v| v.num() as i64).unwrap_or(0)));
+                Value::Nil
+            }
             "rand" => Value::Num(pseudo_random()),
             "getparam" => args.first().cloned().unwrap_or(Value::Nil),
             "floor" => Value::Num(args.first().map(|v| v.num().floor()).unwrap_or(0.0)),

@@ -4619,3 +4619,9 @@ behind `jkGet/SuperFlags`/`jkClearSuperFlags` is now a runtime field: the light 
 (`pow_keyyellow`, `pow_crossbow`) toggle bit `4` and "power" (`pow_power`) bit `1`, each reading it back to know
 whether the surge is already on. And `SetThingLook` (`sithPhysics_SetThingLook`, `0x4f5a80`) aims a thing's forward
 axis along a direction — snap at blend 0, a partial turn otherwise — and sets jkFlag `0x100`.
+
+**Two more answered:** `AiGetMode(thing)` reads the same script word `GetActorFlags` answers (`actor_*.cog` tests
+`BitTest(AiGetMode(me), 0x800)` before butting into a fight), and `PrintInt` joins `Print` in the interpreter. That
+leaves the static list of cog-called verbs absent from `src/` at 22, of which four are ledgered above
+(`GetAutoReload`, `GetWeaponPriority`) or have no shipped single-player weight (`aigetmode`'s remaining callers are the
+multiplayer actor bots).

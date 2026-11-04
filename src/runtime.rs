@@ -3140,6 +3140,7 @@ impl Runtime {
                 | "setactorflags"
                 | "clearactorflags"
                 | "getactorflags"
+                | "aigetmode"
                 | "getthingsignature"
                 | "bittest"
                 | "skilltarget"
@@ -8160,6 +8161,9 @@ impl Runtime {
                 Value::Nil
             }
             "getactorflags" => Value::Num(self.actor_flags.get(&ti(0)).copied().unwrap_or(0) as f64),
+            // `AiGetMode(thing)` reads the AI's own flag word — the same value `GetActorFlags` answers,
+            // which is what `actor_*.cog` tests with `BitTest(AiGetMode(me), 0x800)`.
+            "aigetmode" => Value::Num(self.actor_flags.get(&ti(0)).copied().unwrap_or(0) as f64),
             // `sithCogFunction_GetMasterCog` pushes the master's cog index, or -1 when none is set;
             // `SetMasterCog` stores one and clears it when the index resolves to no cog, which is
             // what `sithCog_GetCogByIndex(-1)` returning NULL does. `GetSelfCog` is the VM's own.
@@ -9461,6 +9465,16 @@ mod tests {
         rt.things[0].flags = 0x80000;
         assert!(rt.sector_messages(None, Some(0), Some(0)).is_empty());
         assert_eq!(rt.sector_messages(None, Some(0), None), vec![(0, "entered", 1)]);
+    }
+
+    /// `AiGetMode` is the AI's own flag word — the same value `GetActorFlags` answers, which is what
+    /// `actor_*.cog`'s `BitTest(AiGetMode(me), 0x800)` reads to stay out of the way of a fight.
+    #[test]
+    fn ai_get_mode_reads_the_script_word() {
+        let mut rt = door_runtime();
+        rt.call("aisetmode", &[Value::Num(1.0), Value::Num(0x800 as f64)]);
+        assert_eq!(rt.call("aigetmode", &[Value::Num(1.0)]).num(), 0x800 as f64);
+        assert_eq!(rt.call("getactorflags", &[Value::Num(1.0)]).num(), 0x800 as f64);
     }
 
     /// `SetThingLook` aims a thing along a direction (`sithPhysics_SetThingLook`, `0x4f5a80`) and
