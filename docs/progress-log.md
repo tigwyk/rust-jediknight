@@ -4224,7 +4224,31 @@ the zoom steps. The full chain is therefore `camera(0,-2,0.3, panned) x (transla
 rotate(pitch, yaw, roll))`, angles in degrees (`stdMath_SinCos` scales by `0x522970`), with
 `rdClip_Line3Project` and the near plane at 0.2, far 10.
 
-The port's panel is top-down and passes its own check, so the projection is **specified, not shipped**:
-there is no retail map frame to grade it against, and replacing a checked drawing blind is a worse trade.
-The roadmap's row now carries the constants, so the next run implements against numbers rather than
-guesses.
+Round 334 shipped it: the panel projects through that camera (see the round below), so the row above is
+history, not a standing plan.
+
+## Round 334: the map panel draws through the engine's own camera
+
+`ui::Canvas::map` was a top-down wireframe. It is now the engine's map view: every edge goes through the
+recovered transform (`translate(-body) . rotate(euler)` under the camera's own `translate(0,-2,0.3)`), the
+view's axes are (right, forward, up) because `rdClip_Line3Project` divides the point's **second** float,
+the fov is 90 degrees horizontal over the panel's width, near 0.2, far 10, and a segment is clipped at the
+near plane and again at the panel rect (Liang-Barsky) so nothing is drawn over the frame art. The facing
+cull now uses the camera's eye, as `sithMap_Draw` does.
+
+```
+map panel: 11765 ink pixel(s), 11765 marker pixel(s)
+map panel: 489 edge(s) drawn, 2109 surface(s) culled as facing away, 2447 edge(s) hidden as coplanar seams
+map panel: the start pose draws 11765 pixel(s), three units away 18549
+--- map panel check passed ---
+```
+
+The marker is asserted at the **projected** body (`300, 239` for the panel at `40,40,520,320`: 0.3 / 2 *
+260 px below the centre), not at the centre the top-down panel used. Level 1's cantina reads as a room
+receding from the player.
+
+Fixed on the way: `--save-live` sampled its restored clock **ten frames** after F9, so on this machine a
+slow frame pushed 2.5 s past the 2.0 s tolerance and the gate failed ("the load did not restore the
+snapshot", clock 8.27 vs saved 5.77). It now samples on the first frame the load has taken effect (the
+disturbance holds it 100 s ahead until then) and fails loudly if F9 never lands; two runs pass with a
+0.25 s delta, and the gate is stricter than before.

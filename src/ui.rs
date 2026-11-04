@@ -521,17 +521,97 @@ pub fn map(
         let mut stats = MapStats::default();
         let [x, y, w, h] = rect;
         let (cx, cy) = (x + w / 2, y + h / 2);
-        let scale = (w.min(h) as f32 / 2.0) / radius.max(1e-3);
-        let (sin, cos) = (-yaw.to_radians()).sin_cos();
-        // Player-relative, rotated so the facing direction is up the screen, and y flipped:
-        // the canvas counts down, the world counts up.
+        let _ = h;
+        // The panel's camera, read out of the engine (`jkGuiMap_Show` `0x415c50`, the arrow handler
+        // `0x4157f9`.., `rdClip_Line3Project` `0x46db10`): a **90-degree horizontal** field of view,
+        // near **0.2**, far **10**, the view axes **(right, forward, up)** — the clip divides the
+        // point's *second* float, which is what fixes that order — and the eye **2 units behind and
+        // 0.3 above** the body (the inverse of the camera's own `translate(0, -2, 0.3)`). The orbit
+        // is the euler block the arrows step by 5 degrees (`0x5565a0`), so `yaw` turns the *level*
+        // about the body.
+        let (sin, cos) = yaw.to_radians().sin_cos();
+        // The engine's composition is `translate(-player) . rotate(euler)`, *then* the camera's own
+        // `translate(0, -2, 0.3)`: the body always lands at the same spot (2 ahead, 0.3 below) and
+        // the arrows turn the level about it.
+        let off = [0.0f32, 2.0, -0.3];
+        let eye = [
+            player[0] + off[0] * cos + off[1] * sin,
+            player[1] - off[0] * sin + off[1] * cos,
+            player[2] + off[2],
+        ];
+        let near = 0.2f32;
+        // `rdCamera_New(90, 1, 0.2, 10, 1)`: the far plane is the engine's own 10 units.
+        let far = 10.0f32.max(near + 1.0);
+        let _ = radius;
+        let view = |p: [f32; 3]| -> [f32; 3] {
+            let (dx, dy, dz) = (p[0] - player[0], p[1] - player[1], p[2] - player[2]);
+            [dx * cos - dy * sin + off[0], dx * sin + dy * cos + off[1], dz + off[2]]
+        };
+        // `fov 90` over the panel's width: `tan(45) = 1`, so the focal length is half the width and
+        // the vertical scale is the same (square pixels). The canvas counts down, the world up.
+        let f = w as f32 * 0.5;
         let project = |v: [f32; 3]| -> [i32; 2] {
-            let (dx, dy) = (v[0] - player[0], v[1] - player[1]);
-            let (rx, ry) = (dx * cos - dy * sin, dx * sin + dy * cos);
-            let r = (rx * rx + ry * ry).sqrt();
-            // The retail view is a circle: clip to it.
-            let k = if r > radius { radius / r } else { 1.0 };
-            [cx + (rx * k * scale) as i32, cy - (ry * k * scale) as i32]
+            let p = view(v);
+            let d = p[1].max(near);
+            [cx + (p[0] / d * f) as i32, cy - (p[2] / d * f) as i32]
+        };
+        // `rdClip_Line3Project`: a segment with one end behind the near plane is cut at it, and one
+        // with both ends behind draws nothing.
+        let clipped = |a: [f32; 3], b: [f32; 3]| -> Option<([f32; 3], [f32; 3])> {
+            let (va, vb) = (view(a), view(b));
+            let (da, db) = (va[1], vb[1]);
+            match (da >= near, db >= near) {
+                (false, false) => None,
+                (true, true) => Some((va, vb)),
+                _ => {
+                    let (near_v, far_v, d0, d1) = if da >= near { (va, vb, da, db) } else { (vb, va, db, da) };
+                    let t = (near - d0) / (d1 - d0);
+                    let cut = [
+                        far_v[0] + (near_v[0] - far_v[0]) * t,
+                        near,
+                        far_v[2] + (near_v[2] - far_v[2]) * t,
+                    ];
+                    Some(if da >= near { (near_v, cut) } else { (cut, near_v) })
+                }
+            }
+        };
+        let screen_of = |v: [f32; 3]| -> [i32; 2] {
+            let d = v[1].max(near);
+            [cx + (v[0] / d * f) as i32, cy - (v[2] / d * f) as i32]
+        };
+        // The panel is a viewport: the engine draws the map into its own canvas, so a line that
+        // leaves the rect is cut at the border rather than drawn over the frame art (Liang-Barsky).
+        let clip_rect = |a: [i32; 2], b: [i32; 2]| -> Option<([i32; 2], [i32; 2])> {
+            let (x0, y0, x1, y1) = (x as f32, y as f32, (x + w - 1) as f32, (y + h - 1) as f32);
+            let (ax, ay) = (a[0] as f32, a[1] as f32);
+            let (dx, dy) = ((b[0] - a[0]) as f32, (b[1] - a[1]) as f32);
+            let (mut t0, mut t1) = (0.0f32, 1.0f32);
+            for (pp, qq) in [
+                (-dx, ax - x0),
+                (dx, x1 - ax),
+                (-dy, ay - y0),
+                (dy, y1 - ay),
+            ] {
+                if pp.abs() < 1e-6 {
+                    if qq < 0.0 {
+                        return None;
+                    }
+                } else {
+                    let r = qq / pp;
+                    if pp < 0.0 {
+                        t0 = t0.max(r);
+                    } else {
+                        t1 = t1.min(r);
+                    }
+                }
+            }
+            if t0 > t1 {
+                return None;
+            }
+            Some((
+                [(ax + dx * t0).round() as i32, (ay + dy * t0).round() as i32],
+                [(ax + dx * t1).round() as i32, (ay + dy * t1).round() as i32],
+            ))
         };
         // Each surface's own normal, from its first three vertices, in the model's units.
         let surface_normal = |surface: &crate::jkl::Surface| -> Option<[f32; 3]> {
@@ -581,9 +661,9 @@ pub fn map(
             // is on its **positive normal** side — `(eye - vertex) . normal > 0`. Without it the panel
             // draws the far side of every room as well as the near one.
             if normal != [0.0, 0.0, 0.0]
-                && (player[0] - verts[0][0]) * normal[0]
-                    + (player[1] - verts[0][1]) * normal[1]
-                    + (player[2] - verts[0][2]) * normal[2]
+                && (eye[0] - verts[0][0]) * normal[0]
+                    + (eye[1] - verts[0][1]) * normal[1]
+                    + (eye[2] - verts[0][2]) * normal[2]
                     <= 0.0
             {
                 stats.culled_facing += 1;
@@ -593,10 +673,9 @@ pub fn map(
             if horizontal && nz > 0.7 {
                 continue;
             }
-            if verts.iter().all(|v| {
-                let (dx, dy) = (v[0] - player[0], v[1] - player[1]);
-                dx * dx + dy * dy > radius * radius
-            }) {
+            // The far plane is what bounds the panel (`sithMap_Draw` clips each edge at it), so a
+            // surface wholly past it is skipped and nothing else is.
+            if verts.iter().all(|v| view(*v)[1] > far) {
                 continue;
             }
             let ids: Vec<u32> = surface.verts.iter().map(|(v, _)| *v).collect();
@@ -607,8 +686,12 @@ pub fn map(
                 if hidden {
                     stats.hidden_seams += 1;
                 } else {
-                    stats.drawn += 1;
-                    self.line(project(pair[0]), project(pair[1]), palette, ink);
+                    if let Some((a, b)) = clipped(pair[0], pair[1])
+                        && let Some((a, b)) = clip_rect(screen_of(a), screen_of(b))
+                    {
+                        stats.drawn += 1;
+                        self.line(a, b, palette, ink);
+                    }
                 }
             }
             if verts.len() > 2 {
@@ -618,18 +701,25 @@ pub fn map(
                 if hidden {
                     stats.hidden_seams += 1;
                 } else {
-                    stats.drawn += 1;
-                    self.line(project(verts[verts.len() - 1]), project(verts[0]), palette, ink);
+                    if let Some((a, b)) = clipped(verts[verts.len() - 1], verts[0])
+                        && let Some((a, b)) = clip_rect(screen_of(a), screen_of(b))
+                    {
+                        stats.drawn += 1;
+                        self.line(a, b, palette, ink);
+                    }
                 }
             }
         }
-        // The player: a cross at the centre with a nose pointing up, in the same ink as the
-        // line work so it reads against the panel's dark background.
+        // The player, at its **projected** position (2 units ahead of the eye, 0.3 below its
+        // level): a cross with a nose pointing up, in the same ink as the line work so it reads
+        // against the panel's dark background.
+        let [mx, my] = project(player);
         for d in -4..=4 {
-            self.put(cx + d, cy, palette, ink);
-            self.put(cx, cy + d, palette, ink);
+            self.put(mx + d, my, palette, ink);
+            self.put(mx, my + d, palette, ink);
         }
-        self.put(cx, cy - 7, palette, ink);
+        self.put(mx, my - 7, palette, ink);
+        let _ = (cx, cy);
         stats
     }
 

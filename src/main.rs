@@ -1866,7 +1866,8 @@ fn main() {
                 }
             }
         }
-        let map = map_level.as_ref().map(|(level, pos, yaw)| (level, *pos, *yaw));
+        // The panel's own view starts at the engine's zero orbit (see `live_map_for`).
+        let map = map_level.as_ref().map(|(level, pos, _yaw)| (level, *pos, 0.0));
         let look = ui::Look { fonts: &fonts, art: &art, checkbox, palette: &palette, stars, text: &none, map, load_percent, ..ui::Look::default() };
         // The canvas is the UI's authored size, not the artwork's: a dialog's panel is
         // smaller than the screen it sits on.
@@ -1953,8 +1954,10 @@ fn main() {
             }
             println!("map panel: {drawn} ink pixel(s), {marker} marker pixel(s)");
             assert!(drawn > 500, "the map drew only {drawn} pixels");
-            // The marker is drawn in the same ink: the panel's centre must carry it.
-            let (cx, cy) = (40 + 520 / 2, 40 + 320 / 2);
+            // The marker is drawn in the same ink, at the player's **projected** position: the eye
+            // sits 2 units behind and 0.3 above the body with a 90-degree field of view, so the
+            // player lands `0.3 / 2 * (520 / 2)` = 39 px below the panel's centre.
+            let (cx, cy) = (40 + 520 / 2, 40 + 320 / 2 + 39);
             let at = ((cy as u32 * canvas.width + cx as u32) * 4) as usize;
             assert_eq!(
                 [canvas.rgba[at], canvas.rgba[at + 1], canvas.rgba[at + 2]],
@@ -13635,7 +13638,10 @@ fn live_map_for<'a>(
     if !screen.items.iter().any(|i| i.panel() == Some(menus::Panel::Map)) {
         return None;
     }
-    Some((level, [pos.x, pos.y, pos.z + PLAYER_RADIUS], yaw.to_degrees()))
+    // The engine opens the map at its own zero orbit (`jkGuiMap_Show` zeroes the euler block) and
+    // the arrows are not wired yet, so the map is world-aligned rather than following the facing.
+    let _ = yaw;
+    Some((level, [pos.x, pos.y, pos.z + PLAYER_RADIUS], 0.0))
 }
 
 /// Redraw the canvas when something changed and upload it.
@@ -20049,7 +20055,16 @@ fn save_probe(
         }
         _ => {
             keys.release(KeyCode::F9);
-            if state.0 < 10 {
+            // Read the clock on the first frame the load has taken effect, not ten frames later: the
+            // disturbance pushes it 100 s ahead, so "back under the saved time + 50" *is* the load,
+            // and the frames after it only add render steps the tolerance would have to absorb.
+            let time_now = sim.world.borrow().time;
+            if time_now > state.2 + 50.0 {
+                if state.0 < 120 {
+                    return;
+                }
+                println!("save-live: FAIL F9 never restored the clock (still {time_now:.2})");
+                exit.write(AppExit::Success);
                 return;
             }
             let (time, bin) = {
