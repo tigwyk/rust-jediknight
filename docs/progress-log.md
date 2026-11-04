@@ -4560,3 +4560,11 @@ at `+1/+2/+3`, position at `+4..+6`, source at `+0x16`) and `FUN_0050a6f0` scans
 port's `sector_awareness` shape. The scheduler itself is now recorded in the roadmap ledger from its own decomp instead
 of being approximated again: file-order scan, mask/mode gate, per-slot 1 s arm, and the flag-change restart with event
 `0x100`. Header counts refreshed to 67 gates / 251 tests.
+
+**The map row was stale in both directions.** `--ui-tables` shows the map screen's hidden controls are six `type 1`
+elements, ids **100..105**, all with `{click 0x415b60}` — not the "13 hidden arrow controls" the row claimed, and the
+3D wireframe camera is not open either: `ui::map_view`/`map_point` already carry `jkGuiMap_Show`'s camera (90° FOV,
+aspect 1, near 0.2, far 10, eye 2 behind and 0.3 above the body), the near-plane 3D line clip, the facing cull and
+`sithMap_IsSurfaceDrawable`'s 0.98 coplanar-seam rule, with `MapCamera::arrow` stepping yaw/pitch and panning. What
+*is* open is narrower and recorded: the click handler `0x415b60` is not in the decomp set, so ids 100/101 have no
+assigned action (102..105 coincide with the port's pan ids).
