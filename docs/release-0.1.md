@@ -191,7 +191,7 @@ order and continues on the light-side arm.
   finished intro is retired.
 - **The campaign decision's transition plays both films.** `Episode::flow_after` now walks
   through the `DECIDE` row and keeps every film in order (level 15: `38a.smk` then
-  `39a.smk`), takes the neutral arm (light), and only swaps the level when the queue is
+  `39a.smk`), takes the arm the choice item names (light unless bin `0x12` is `2`), and only swaps the level when the queue is
   empty; a two-film transition can no longer be cut short.
 - **`--tour` checks both arms by row**, not by file name: 28 campaign rows for 25 distinct
   level files, every film and successor against the archives, both finale rows, and the

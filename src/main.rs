@@ -3016,6 +3016,19 @@ fn main() {
             Some("16aEscapeShip.jkl"),
             "the neutral arm of the decision is not the light one"
         );
+        // The arm the choice item selects (`GetChoice` = bin 0x12, 2 = dark): its own film and the
+        // dark branch's level 16. Both arms are in the shipped manifest, so both are checked.
+        let dark_decide = episode.flow_after_row_with(maw.id, true);
+        assert_eq!(
+            dark_decide.films.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(),
+            ["38a.smk", "54a.smk"],
+            "the decision's dark arm does not play its own film"
+        );
+        assert_eq!(
+            dark_decide.next.map(|n| n.file.as_str()),
+            Some("16bEscapeShip.jkl"),
+            "the decision's dark arm does not lead into the dark branch"
+        );
         // The scripts, once per distinct level file, and the geometry each one parses to.
         let mut total_things = 0usize;
         let mut script_errors = 0usize;
@@ -12543,6 +12556,11 @@ fn swap_level(world: &mut bevy::prelude::World) {
     let carried = world
         .get_resource::<Sim>()
         .map(|sim| sim.world.borrow().carry());
+    // The endgame fork's arm is the player's own choice (`jkPlayer_GetChoice`: bin `0x12`, `2` dark),
+    // read before the old runtime goes away — it is what `jkMain_EndLevel` passes down as the arm.
+    let dark_arm = world
+        .get_resource::<Sim>()
+        .is_some_and(|sim| sim.world.borrow().choice() == 2);
     // Everything the old level spawned, and nothing else: the cameras, lights and overlay are
     // not tagged `LevelEntity`.
     let stale: Vec<Entity> = world
@@ -12561,7 +12579,7 @@ fn swap_level(world: &mut bevy::prelude::World) {
         plan.level = name.clone();
         let (cuts, after) = episode
             .map(|e| {
-                let flow = e.flow_after(&name);
+                let flow = e.flow_after_with(&name, dark_arm);
                 (
                     flow.films.iter().map(|s| s.file.clone()).collect::<Vec<_>>(),
                     flow.next.map(|s| s.file.clone()),

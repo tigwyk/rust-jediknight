@@ -126,14 +126,27 @@ impl Episode {
     /// (`18Ascend`, `19A`, `19B`), so a caller that knows which arm it is on should use
     /// [`flow_after_row`](Self::flow_after_row) with that row's id.
     pub fn flow_after(&self, level_file: &str) -> FlowAfter<'_> {
+        self.flow_after_with(level_file, false)
+    }
+
+    /// [`flow_after`](Self::flow_after) with the endgame fork's arm: `dark` picks the `gotoB` side of
+    /// a `DECIDE` row (`jkEpisode_GetNextEntryInDecisionPath`'s `arm != 0`), and the light arm is
+    /// `gotoA`. Retail's arm is the choice screen's button; the engine's own choice value is
+    /// `jkPlayer_GetChoice` — the amount of inventory bin `0x12` — which every level end carries.
+    pub fn flow_after_with(&self, level_file: &str, dark: bool) -> FlowAfter<'_> {
         let Some(row) = self.row_for(level_file) else { return FlowAfter::default() };
-        self.flow_after_row(row.id)
+        self.flow_after_row_with(row.id, dark)
     }
 
     /// What finishing the level **row `id`** leads to. The dark arm's shared level rows point into
     /// the dark branch (`19A` row 631 reaches `20bboc`), and resolving them by file name would follow
     /// the light branch's first matching row instead.
     pub fn flow_after_row(&self, id: i32) -> FlowAfter<'_> {
+        self.flow_after_row_with(id, false)
+    }
+
+    /// [`flow_after_row`](Self::flow_after_row) with the fork's arm.
+    pub fn flow_after_row_with(&self, id: i32, dark: bool) -> FlowAfter<'_> {
         let mut flow = FlowAfter::default();
         let Some(row) = self.sequences.iter().find(|s| s.id == id) else { return flow };
         if row.kind != Kind::Level {
@@ -149,9 +162,9 @@ impl Episode {
                     flow.films.push(next);
                     at = next.goto_a;
                 }
-                // The campaign's own fork after the Maw. This build has no choice screen, so the
-                // neutral arm is the light one (`gotoA`); the dark arm is `gotoB`.
-                Kind::Decide => at = next.goto_a,
+                // The campaign's own fork after the Maw: `gotoA` is the light arm and `gotoB` the
+                // dark one (`jkEpisode_GetNextEntryInDecisionPath`, `arm != 0` selects `+0x38`).
+                Kind::Decide => at = if dark { next.goto_b } else { next.goto_a },
                 Kind::Level => {
                     flow.next = Some(next);
                     break;
@@ -306,8 +319,9 @@ mod tests {
     }
 
     /// The campaign's mid-game decision: two films and a `DECIDE` row sit between level 15 and the
-    /// next level, and the decision's two arms are the light and dark paths. The port has no choice
-    /// screen, so `flow_after` takes the neutral arm (`gotoA`, light) — and still keeps both films so
+    /// next level, and the decision's two arms are the light and dark paths. The arm is the choice
+    /// item's (`jkPlayer_GetChoice`, bin `0x12`: `2` is dark) and defaults to the light one, since the
+    /// endgame screen that grants it is not implemented — and both films are kept so
     /// the app plays the whole transition. This is the shipped manifest's own shape (row 143).
     #[test]
     fn a_decision_row_is_crossed_and_its_films_are_kept_in_order() {
@@ -335,6 +349,18 @@ mod tests {
             flow.next.map(|s| s.file.as_str()),
             Some("16aEscapeShip.jkl"),
             "the neutral arm is the light one"
+        );
+        // The decision's own dark arm: `gotoB`, its own film, and the dark branch's level 16.
+        let dark_arm = e.flow_after_with("15maw.jkl", true);
+        assert_eq!(
+            dark_arm.films.iter().map(|s| s.file.as_str()).collect::<Vec<_>>(),
+            ["38a.smk", "54a.smk"],
+            "the dark arm plays its own second film"
+        );
+        assert_eq!(
+            dark_arm.next.map(|s| s.file.as_str()),
+            Some("16bEscapeShip.jkl"),
+            "the dark arm is the dark branch's level 16"
         );
         // The dark arm is still walkable once its own level is the one being finished.
         let dark = e.flow_after("16bEscapeShip.jkl");

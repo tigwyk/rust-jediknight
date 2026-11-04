@@ -6912,6 +6912,14 @@ impl Runtime {
     /// selected weapon, the saber, the `jkFlags` the force scripts set, and the health and shield
     /// bars. This build rebuilds the whole runtime from the incoming `.jkl`, so those pieces have
     /// to be handed over explicitly instead of coming out of the thing list.
+    /// `jkPlayer_GetChoice` (`0x405ce0`): the amount of inventory bin `0x12`, which *is* the
+    /// light/dark choice — `1` light, `2` dark (`jkMain_EndLevel` compares the value against both).
+    /// Retail's endgame screen grants it; `carry` takes it to the next level, and the `DECIDE` fork
+    /// reads it through `jkMain_EndLevel`'s carries rule and its arm.
+    pub fn choice(&self) -> i32 {
+        self.inv.get(&0x12).copied().unwrap_or(0.0).floor() as i32
+    }
+
     pub fn carry(&self) -> CarryOver {
         let player = self.player_thing();
         CarryOver {

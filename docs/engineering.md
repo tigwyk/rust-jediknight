@@ -257,7 +257,8 @@ essentially complete. The **play** half is now a real single-player game on the 
 campaign: `New Game` plays the opening film, the levels' own scripts run against the live world,
 finishing a level plays its film (two, at the campaign's mid-game decision) and loads the next,
 and the chain reaches the finale film. It is **not a finished remake and not yet human-played
-end to end**: the dark-side arm has no choice screen, the ending screen is absent, and the gaps
+end to end**: the fork's arm is the choice item's (`GetChoice`, bin `0x12`), the screen that grants
+  it and the ending screen are absent, and the gaps
 listed below are visible in play. The release note ([docs/release-0.1.md](release-0.1.md))
 is the player-facing version of this.
 

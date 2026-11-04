@@ -1339,7 +1339,8 @@ and the campaign chain is now a gate of its own.
   only looked one row ahead, so finishing `15maw.jkl` named the **`DECIDE` row's file (`38a.smk`) as
   the next level** — the app would have tried to load a film and stalled there. It now walks the
   rows: it collects every film in order (level 15: `38a.smk` then `39a.smk`), crosses the `DECIDE`
-  row on its neutral arm (`gotoA`, the light path — there is no choice screen), and stops at the
+  row on the arm the choice item names (`jkPlayer_GetChoice`, bin `0x12`: `2` is dark; the endgame
+  screen that grants it is not implemented, so the light arm is the default), and stops at the
   next level. The app's film queue plays both and only sets `films_done` when the queue and the
   running film are both finished, so the level swap cannot cut a two-film transition short;
   `film_step` is unit-tested, and a live run (`--start 15maw --complete-after 0.1`) was watched

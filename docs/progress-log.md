@@ -4175,3 +4175,28 @@ gates: 0 of 67 failed, 0 skipped
 | `--soak-all` | 35 levels, 0 non-finite, 0 outside, 0 failed |
 | `--cog-check` | 34 levels, 0 stubbed verb calls, 0 errors |
 | `--audit` | 35/35 levels clean, 10 unresolved asset references, 54 undecoded files |
+## Round 332: the endgame fork takes the arm the choice item names
+
+`jkMain_EndLevel` hands `jkMain_StartNextLevelInEpisode` an arm, and
+`jkEpisode_GetNextEntryInDecisionPath` turns `arm != 0` into the `DECIDE` row's `gotoB` (`+0x38`)
+instead of `gotoA` (`+0x3c`). The engine's own choice value is `jkPlayer_GetChoice` (`0x405ce0`) — the
+amount of **inventory bin `0x12`**, which `jkMain_EndLevel` compares against `1` and `2` for its
+carries rule. The port always took the light arm; it now takes the arm the choice item names, read off
+the runtime that is being replaced (`Runtime::choice`), and both arms are checked against the shipped
+manifest:
+
+```
+tour: 28 level row(s) on both arms (25 distinct files), 5543 thing(s), 23 film(s), 2 terminal row(s),
+      0 script errors, 1 sound(s) missing from retail data
+--tour: 15maw -> 38a.smk + 54a.smk -> 16bEscapeShip.jkl (dark arm) asserted beside the light one
+```
+
+| what | result |
+| --- | --- |
+| `cargo test` | **244 passed**, 0 failed |
+| `--gates` (windowed) | 0 of 67 failed, 0 skipped |
+| `--tour` | passed: both arms' films and successors resolve in the archives |
+| dark arm | `38a.smk` + `54a.smk` -> `16bEscapeShip.jkl`; light stays `16aEscapeShip.jkl` |
+
+What remains for the fork is the screen that *grants* bin `0x12` — its two labels are assigned at run
+time and are not in `jkstrings.uni`, which is why the light arm stays the default (bin `0x12` is empty).
