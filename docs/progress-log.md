@@ -3854,4 +3854,6 @@ The same round found the other half unported and fixed it: `angvel=(pitch/yaw/ro
 every spinning prop and every generated cloud stood still. `Runtime` now keeps `template_angvel`, a placed or
 created thing seeds `rot_vel` from it, `ThingState::step` integrates the angles, and `advance_sim` applies a
 spinning thing's whole pose each frame (a pure spin does not translate, so the `moved` list never named it).
-`a_placed_thing_spins_at_its_templates_angular_velocity` pins the seed and a quarter turn a second.
+`a_placed_thing_spins_at_its_templates_angular_velocity` pins the seed and a quarter turn a second, and
+`--things` now asserts it on the level's own data: level 1's thing 38 spins at `[0, 90, 0]` deg/s and its yaw
+goes 315 -> 0 in half a second.

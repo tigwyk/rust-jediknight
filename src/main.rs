@@ -9322,6 +9322,25 @@ fn main() {
                 chip.pos
             );
         }
+        // A template's `angvel=` seeds the instance's angular velocity: level 1 ships twelve, `fan1`
+        // among them, and before round 315 nothing read the key, so the prop never turned.
+        let spinning = rt
+            .things
+            .iter()
+            .enumerate()
+            .find(|(_, t)| t.rot_vel != [0.0; 3] && t.target.is_none())
+            .map(|(i, t)| (i, t.yaw, t.rot_vel));
+        if let Some((index, before, rot_vel)) = spinning {
+            rt.step(0.5);
+            let after = rt.things[index].yaw;
+            let turned = (after - before).abs() > 1e-3;
+            assert!(turned, "thing {index} did not spin at {rot_vel:?}: yaw {before} -> {after}");
+            println!(
+                "things: thing {index} spins at {rot_vel:?} deg/s: yaw {before:.2} -> {after:.2} in 0.5 s"
+            );
+        } else {
+            println!("things: no placed thing on this level carries an `angvel=`");
+        }
         println!("--- things check passed ---");
         return;
     }
