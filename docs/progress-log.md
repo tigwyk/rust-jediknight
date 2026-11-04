@@ -3691,6 +3691,8 @@ its tonemap; only the UI layer changed, and an A/B on the gated level-1 pairs mo
 retail's opening-film capture: **SSIM 1.0000, floor 0.99**. The crawl is static for film frames
 91..178, so the gate pins 147 and no wall-clock alignment is needed.
 
+**The moving frame is pinned too.** The crawl hold is static for ~90 frames, so on its own it cannot separate "decoded in file order" from "decoded one chunk late". `film-gate.ps1` now also holds frame **210** (starfield/title, different every frame) and compares it with **ffmpeg's** Smacker decode of the same index, padded into the port's 640x480 placement: **SSIM 1.0000**. Frame 210 vs 211 differs (ink 15 543 vs 12 953 pixels), so an off-by-one index would fail the check.
+
 **Three film-path bugs found while making the pair deterministic:**
 - `smack::decode` passed the frame count into the helper's *flags* slot (its `start` argument became
   `SmackOpen`'s flags), so every decode opened the film with flags `0` and never sought. Both call

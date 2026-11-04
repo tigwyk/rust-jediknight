@@ -30,7 +30,12 @@ param(
   # A frame inside the crawl's static hold (film frames 91..178).
   [int]$FilmFrame = 147,
   [string]$RetailPng = 'target/parity/retail/intro-cutscene.png',
-  [string]$PortPng = 'target/parity/port-intro-640.png'
+  [string]$PortPng = 'target/parity/port-intro-640.png',
+  # A frame whose content changes every frame: the port's hold is compared against **ffmpeg's**
+  # Smacker decode of the same index (an independent decoder, not retail), which pins the film's
+  # decode order and palette where the static crawl cannot. `0` turns the check off.
+  [int]$MovingFrame = 210,
+  [string]$Film = '01-02A.SMK'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -89,3 +94,50 @@ $ssim = [double]$m.Groups[3].Value
 $verdict = if ($ssim -ge $Floor) { 'PASS' } else { 'FAIL' }
 Write-Host ("film gate: opening film ssim {0:N4} (floor {1:N2})  {2}" -f $ssim, $Floor, $verdict)
 if ($verdict -eq 'FAIL') { exit 1 }
+
+# The moving frame: the same index from the port and from ffmpeg's own Smacker decoder. The film is
+# 640x300 and the port blits it at y 50 in its 640x480 canvas (retail's own placement), so ffmpeg's
+# frame is padded the same way before the comparison.
+if ($MovingFrame -gt 0) {
+  $filmPath = Join-Path $Game (Join-Path 'Resource\VIDEO' $Film)
+  $rawPng = "target/parity/ffmpeg-film-$MovingFrame.png"
+  $paddedPng = "target/parity/ffmpeg-film-$MovingFrame-padded.png"
+  $portMoving = "target/parity/port-film-$MovingFrame.png"
+  $d = Invoke-Cmd 'ffmpeg' @('-hide_banner', '-loglevel', 'error', '-i', $filmPath,
+    '-vf', "select=eq(n\,$MovingFrame)", '-vsync', '0', '-frames:v', '1', $rawPng, '-y')
+  if ($d.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $rawPng)) {
+    Write-Host 'FAIL  ffmpeg could not decode the film frame'
+    exit 1
+  }
+  $pad = Invoke-Cmd 'ffmpeg' @('-hide_banner', '-loglevel', 'error', '-i', $rawPng,
+    '-vf', 'pad=640:480:0:50:black', '-frames:v', '1', $paddedPng, '-y')
+  if ($pad.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $paddedPng)) {
+    Write-Host 'FAIL  ffmpeg could not pad the film frame'
+    exit 1
+  }
+  $env:BK_WINDOW = '640x480'
+  $env:BK_FILM_HOLD = "$MovingFrame"
+  try {
+    $p2 = Invoke-Cmd 'target/release/bevi-knight.exe' @('--game', $Game, '--cutscene', $Film,
+      '0', '--shot', $portMoving)
+  } finally {
+    Remove-Item Env:BK_WINDOW -ErrorAction SilentlyContinue
+    Remove-Item Env:BK_FILM_HOLD -ErrorAction SilentlyContinue
+  }
+  if ($p2.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $portMoving)) {
+    Write-Host 'FAIL  the port film capture failed (moving frame)'
+    exit 1
+  }
+  $ff2 = Invoke-Cmd 'ffmpeg' @('-hide_banner', '-loglevel', 'info', '-i', $paddedPng, '-i', $portMoving,
+    '-filter_complex', $chain, '-f', 'null', '-')
+  $m2 = [regex]::Match($ff2.Text, 'SSIM Y:([0-9.]+) \(([^)]+)\) All:([0-9.]+)')
+  if (-not $m2.Success) {
+    Write-Host 'FAIL  ffmpeg printed no SSIM line (moving frame)'
+    exit 1
+  }
+  $moving = [double]$m2.Groups[3].Value
+  $v2 = if ($moving -ge $Floor) { 'PASS' } else { 'FAIL' }
+  Write-Host ("film gate: moving frame {0} vs ffmpeg ssim {1:N4} (floor {2:N2})  {3}" -f
+    $MovingFrame, $moving, $Floor, $v2)
+  if ($v2 -eq 'FAIL') { exit 1 }
+}

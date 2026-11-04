@@ -17,7 +17,7 @@ comparable even if the mouse moves between them.
 | 2 | `port-capture.ps1` | Runs `bevi-knight.exe` once per shot with `--start`, `--shot`, and (for numeric poses) `--shot-at` plus `--warp`: the camera at the recorded eye, the **player** at the recorded pose, as retail's `warp` leaves it. |
 | 3 | `compare.ps1` | Pairs `retail/<name>.png` with `port/<name>.png`, writes a side-by-side, a contact sheet, and `report.md` with framing facts and a triage score (SSIM / mean absolute difference). |
 | 4 | `compare.ps1 -Gate` | Scores every row of `thresholds.tsv` against its SSIM/MAD floors and exits non-zero if one is missing or failed. This is the regression check. |
-| 5 | `menu-gate.ps1` / `film-gate.ps1` | The two screens that are *not* the world: the retail main menu against the port's render of it, and retail's opening-film crawl against the port's `BK_FILM_HOLD` frame. Both capture their own sides on demand and score with ffmpeg SSIM. |
+| 5 | `menu-gate.ps1` / `film-gate.ps1` | The two screens that are *not* the world: the retail main menu against the port's render of it, and retail's opening-film crawl against the port's `BK_FILM_HOLD` frame. `film-gate.ps1` also holds a frame whose content changes every frame (210) and scores it against **ffmpeg's** Smacker decode of that index, which pins the decode order and palette where the static crawl cannot. Both capture their own sides on demand and score with ffmpeg SSIM. |
 
 The retail side never touches your real installation: it works on a copy under
 `target/parity/retailcopy/`. By default it stages dgVoodoo2 and runs the game's 16-bit 3D path;
