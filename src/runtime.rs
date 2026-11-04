@@ -4437,6 +4437,13 @@ impl Runtime {
                 if !ai.as_ref().is_some_and(|class| class.instinct("ReturnHome").is_some()) {
                     return None;
                 }
+                // `FUN_0050bd70` gates on the AI's **awake** bit: `if ((ai flags & 4) != 0)`. The bit is
+                // set by the handlers that act (`LookForTarget`'s find, the fire handlers, `AISetMode`)
+                // and cleared when an actor goes back to sleep (`sensedanger`'s `& ~0x4 | 0x800`), so an
+                // actor that has never engaged does not walk home, and one that has done its fight does.
+                if self.actor_flags.get(&index).copied().unwrap_or(0) & 0x4 == 0 {
+                    return None;
+                }
                 let home = self.ai_home.get(&index).copied()?;
                 let here = self.things.get(index)?.pos;
                 let (dx, dy) = (home[0] - here[0], home[1] - here[1]);
@@ -4587,6 +4594,11 @@ impl Runtime {
                             if in_cone && clear && self.can_detect(index, player) {
                                 self.ai_detected.insert(index);
                                 self.remember(index, target, "lookfortarget");
+                                // `FUN_0050aa80`'s write when the scan finds something:
+                                // `ai flags = (ai flags & 0xfffff9dd) | 0x4` — the found target wakes
+                                // the actor and clears the search/one-shot bits.
+                                let flags = self.actor_flags.entry(index).or_insert(0);
+                                *flags = (*flags & 0xffff_f9dd) | 0x4;
                                 if std::env::var_os("BK_AI_TRACE").is_some() {
                                     eprintln!("ai: {index} `{ai_template}` LookForTarget finds the body at {range:.2}");
                                 }
@@ -12497,12 +12509,22 @@ mod tests {
             crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=2.0\n\nReturnHome\n"),
         );
         rt.ai_home.insert(1, [0.0, 0.0, 0.0]);
-
+        // `FUN_0050bd70` gates on the AI's **awake** bit (`ai flags & 4`), which `AISetMode` and the
+        // finding/firing handlers set. Without it the same actor stands where it is.
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert_eq!(
+            rt.things[1].pos[0], 2.0,
+            "an actor whose awake bit was never set walked home anyway"
+        );
+        rt.call(
+            "AISetMode",
+            &[crate::cog::Value::Num(1.0), crate::cog::Value::Num(0x4 as f64)],
+        );
         for _ in 0..30 {
             rt.ai_tick(0, 1.0 / 30.0);
         }
         let walked = rt.things[1].pos[0];
-        assert!(walked < 1.7, "the actor did not walk home: x {walked:.2}");
+        assert!(walked < 1.7, "the awake actor did not walk home: x {walked:.2}");
 
         // A control class without `ReturnHome` stays where it was put.
         let mut quiet = door_runtime();

@@ -4489,3 +4489,9 @@ test runtime::tests::an_actor_with_hitandrun_breaks_off_after_firing ... ok
 --- sound check passed ---
 gates: 0 of 67 failed, 0 skipped
 ```
+
+**`returnhome` gates on the awake bit.** `FUN_0050bd70` starts with `ai flags & 4`; the hand-edited port walked an
+idle actor home off the instinct alone. `AISetMode` already ORs its argument into that word (so scripts'
+`aisetmode(enemy, 0x4)` works), and `LookForTarget`'s find now writes the handler's own expression
+`(flags & 0xfffff9dd) | 4` — a found target wakes the actor. The test proves the two halves: without the bit the
+actor stays put, and after `AISetMode(actor, 0x4)` it walks home.

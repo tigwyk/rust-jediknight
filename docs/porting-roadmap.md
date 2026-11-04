@@ -688,7 +688,11 @@ What the session settles, all of it already on the deviation ledger with its ret
   call and, on a **miss, sets its next call to `now + 1000`** (a hit schedules its own 750 ms, `class+0x4c`).
   The port re-rolled at the shot cadence and skipped the roll entirely when the chance was 0; both are the
   engine's now, and the unit test proves a zero-chance class never fires and leaves a 1 s wait behind.
-- **`returnhome`** — the port gates on the instinct existing and distance > 0.5, not the engine's awake flag.
+- **`returnhome`** — **closed (round 339)**: `FUN_0050bd70` gates on the AI's **awake** bit (`ai flags & 4`), which
+  `AISetMode` sets and `LookForTarget`'s find writes (`(flags & 0xfffff9dd) | 4`); `sensedanger` clears it again
+  when an actor's fear wins. The port walked home off the instinct alone; the unit test now proves an actor whose
+  bit was never set stands still and one woken by `AISetMode` walks. (The fire handlers also set the bit in the
+  engine — `LobFire`, `TurretFire`, withdraw — and the port sets it only on a find, which is the common path.)
 - **`retreat`/`withdraw`** — **the lifetime is the engine's now (round 339)**: `FUN_0050b150` clears the mode on
   `ai[0x70] == 0` (the remembered target gone), while the instinct's 5000 ms is only how often the handler runs.
   The port stopped withdrawing when the interval expired; the mode now lasts until the target is destroyed or
@@ -723,8 +727,10 @@ What the session settles, all of it already on the deviation ledger with its ret
   `FireProjectile`) kind 1 at **2.0**, an explosion (`MakeBlast`) kind 1 at **3.0**, a death (`KillActor`) kind 0 at
   **5.0**, and a sound played on a thing (`PlaySoundThing`) kind 0 at **volume × 0.6** (`_DAT_00522f80`, read out
   of the EXE's `.rdata`). The row is closed: nothing on the awareness path is unmodelled.
-- **`AISetMode`** — only the `0x2000` off switch is honoured; the wake bit (`0x4`) needs the engine's own wake logic
-  first.
+- **`AISetMode`** — `sithCogFunctionAI_AISetMode`/`AIClearMode` OR and AND-NOT the whole argument into the AI's flag
+  word and emit event `0x100` on a change; the port's two verbs already do the OR/AND-NOT and keep the `0x2000`
+  switch-off, and the awake bit `0x4` now drives `returnhome`. The event `0x100` is not emitted (no port handler
+  reads it).
 - **AI engagement timing** — the level-3 same-pose pair: a port run and a retail capture at the recorded vantage, to
   confirm the view-cone fix moved acquisition to where retail acquires. The detection **chance** underneath it is
   retail's now (round 242, unit-checked against the `.rdata` constants) and acquisition is a roll; what a window can
