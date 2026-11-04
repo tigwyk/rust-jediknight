@@ -6639,17 +6639,17 @@ data-side probe:
   `test.par` names `test.mat`, which the install does not ship: a retail data gap the probe now reports instead of
   failing on.
 - **Draw arm** (`draw_created`): a `particle=` template now spawns one camera-facing quad per element —
-  `SIZE` across, that element's material cel, at the element offset plus `INSERT OFFSET`, rotated by the thing's yaw
-  (`particle_element_offset`) — and billboards them with the same `Sprite3d` path sprites use. The engine also carries
-  the body's pitch/roll and its `angvel` spin (the shield ships `angvel=(60/60/60)`); the port's cloud is built from
-  yaw at spawn (ledger).
+  `SIZE` across, that element's material cel, at the element offset plus `INSERT OFFSET`, turned by the body's whole
+  orientation (`particle_element_offset`; round 315 — it used the yaw alone, with the opposite sign, so pitch and roll
+  never reached the cloud) — and billboards them with the same `Sprite3d` path sprites use. The body's `angvel` spin
+  (the shield ships `angvel=(60/60/60)`) is still not applied (ledger).
 - **Probe** `--par <name>`: prints the cloud's header, element bounds, cel histogram, and the material's cell/bitmap
   counts, and asserts what `rdParticle_LoadEntry` asserts (the cloud is complete, every element cel is inside the
   material's cel count). All three shipped files pass: `sphere.par` (100 elements, cel 0 only, 0.002 each),
   `sphere2.par` (100, 0.005 each), `test.par` (94, `test.mat` missing from the install).
 
-Checks (187 tests): `particle_tests::a_particle_element_is_offset_from_the_cloud_origin_and_rotated_with_the_body`
-pins the element offset and its yaw rotation; `--par` passes on all three shipped files; `--audit`, `--things` and
+Checks (235 tests): `particle_tests::a_particle_element_is_offset_from_the_cloud_origin_and_turned_with_the_body`
+pins the element offset and the yaw and pitch rotations; `--par` passes on all three shipped files; `--audit`, `--things` and
 `--ai` pass. No window and no game run — the visual is the QA-window item this ledger row already carries.
 
 What is still missing in this area, and now measured: the shipped **`type=particle` templates are not `.par` clouds at

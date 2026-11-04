@@ -3827,3 +3827,22 @@ plane and stay in the near room, then cross once reopened.
 | `--adjoins` | pass, including the shut-sector sweep |
 | `--soak-all` | 35 levels, 0 non-finite, 0 failed |
 | docs links | all resolve |
+
+## Round 315: particle offsets turn with the body's whole orientation
+
+`rdParticle_Draw` builds each element in the thing's own frame, so the cloud's offsets turn by
+`rdMatrix_Build34(pitch, yaw, roll)`. The draw path rotated by the yaw alone, with the opposite sign
+(`cos(-yaw)`), so a tilted cloud drew flat and a turned one mirrored. `particle_element_offset` now
+takes the three angles and uses `runtime::rotate_by_angles`, the same basis the create-thing and
+projectile paths already use; the cloud's own `angvel` spin is still not applied.
+
+The change is pinned by the unit test only - no gate draws a `particle=` cloud (`+force_shield` is the
+only shipped user and it is spawned by a script), so the visual stays with the QA window.
+
+| check | result |
+| --- | --- |
+| `cargo test` | 235 passed (the particle test now covers yaw and pitch) |
+| `--par sphere.par` family | data-side probe unchanged |
+| `--gates` | 0 of 67 failed, 2 skipped |
+| `--soak-all` | 35 levels, 0 non-finite, 0 failed |
+| docs links | all resolve |

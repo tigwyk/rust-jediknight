@@ -22299,8 +22299,8 @@ fn draw_created(
             // is the only shipped user): `rdParticle_Draw` builds one camera-facing quad per element,
             // `SIZE` units across, showing that element's material cel, at the element position plus
             // the cloud's `INSERT OFFSET`, in the thing's own frame. `Sprite3d` billboards each quad;
-            // the thing's yaw rotates the offsets at spawn (the engine also carries pitch/roll and an
-            // `angvel` spin — ledger).
+            // the offsets turn by the thing's whole orientation (round 315); the cloud's own `angvel`
+            // spin is still not applied (ledger).
             if let Some((cloud, cels)) = world.template_particle.get(&template_key) {
                 let mut spawned = Vec::new();
                 let last_cel = cels.saturating_sub(1);
@@ -22341,7 +22341,7 @@ fn draw_created(
                     };
                     material.base_color_texture =
                         world.model_images.get(&cloud.material).map(|image| images.add(image.clone()));
-                    let offset = particle_element_offset(cloud, thing.yaw, element);
+                    let offset = particle_element_offset(cloud, [thing.pitch, thing.yaw, thing.roll], element);
                     let mut entity = commands.spawn((
                         Mesh3d(mesh),
                         MeshMaterial3d(materials.add(material)),
@@ -22997,11 +22997,15 @@ fn play_requested_sounds(
 ///
 /// `rdParticle_Draw` (`0x46c750`) places each quad at `element + insert` inside that matrix and makes
 /// it camera-facing — the quad orientation, not this offset, is the billboard.
-fn particle_element_offset(cloud: &par::Par, yaw: f32, element: &par::Vertex) -> [f32; 3] {
-    let x = element.pos[0] + cloud.insert[0];
-    let y = element.pos[1] + cloud.insert[1];
-    let (sin, cos) = (-yaw.to_radians()).sin_cos();
-    [x * cos - y * sin, x * sin + y * cos, element.pos[2] + cloud.insert[2]]
+fn particle_element_offset(cloud: &par::Par, angles: [f32; 3], element: &par::Vertex) -> [f32; 3] {
+    let local = [
+        element.pos[0] + cloud.insert[0],
+        element.pos[1] + cloud.insert[1],
+        element.pos[2] + cloud.insert[2],
+    ];
+    // `rdParticle_Draw` builds the element in the thing's own frame, so the offset turns by all
+    // three angles, not the yaw alone (the thing's `rdMatrix_Build34(pyr)`).
+    runtime::rotate_by_angles(local, angles[0], angles[1], angles[2])
 }
 
 /// One sprite rectangle, with the UVs of a single animation cel.
@@ -26255,19 +26259,26 @@ mod particle_tests {
     use super::{par, particle_element_offset};
 
     /// The element offset the cloud's draw path uses: the cloud's `INSERT OFFSET` plus the element
-    /// position, rotated about Z by the owning body's yaw — and the z component untouched by the turn.
+    /// position, turned by the owning body's whole orientation (`rdParticle_Draw` builds in the
+    /// thing's frame, so a +90 yaw sends +X to +Y as `rdMatrix_Build34` does).
     #[test]
-    fn a_particle_element_is_offset_from_the_cloud_origin_and_rotated_with_the_body() {
+    fn a_particle_element_is_offset_from_the_cloud_origin_and_turned_with_the_body() {
         let cloud = par::parse(
             "PAR 1.0\nSIZE .01\nMATERIAL 00teleport.mat\nRADIUS 1.0\n\
              INSERT OFFSET 0.0 0.0 0.108216\nVERTICES 1\n 0: 0.5 0.0 0.0 0\n",
         );
         let element = &cloud.vertices[0];
-        assert_eq!(particle_element_offset(&cloud, 0.0, element), [0.5, 0.0, 0.108216]);
-        let [x, y, z] = particle_element_offset(&cloud, 90.0, element);
+        assert_eq!(particle_element_offset(&cloud, [0.0; 3], element), [0.5, 0.0, 0.108216]);
+        let [x, y, z] = particle_element_offset(&cloud, [0.0, 90.0, 0.0], element);
         assert!(x.abs() < 1e-5, "x {x}");
-        assert!((y + 0.5).abs() < 1e-5, "y {y}");
+        assert!((y - 0.5).abs() < 1e-5, "y {y}");
         assert!((z - 0.108216).abs() < 1e-5, "z {z}");
+        // A +90 pitch turns the offset out of the horizontal plane (the basis' up axis becomes -Y),
+        // which the yaw-only version could not do at all.
+        let [x, y, z] = particle_element_offset(&cloud, [90.0, 0.0, 0.0], element);
+        assert!((x - 0.5).abs() < 1e-5, "x {x}");
+        assert!((y + 0.108216).abs() < 1e-5, "y {y}");
+        assert!(z.abs() < 1e-5, "z {z}");
     }
 }
 
