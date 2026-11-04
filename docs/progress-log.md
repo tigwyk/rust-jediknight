@@ -4353,3 +4353,14 @@ level's load and shader compile, so the budget ended mid-tour and read as "(time
 is 2400 s now (about two minutes a level), still bounded. The tour's own escape prints during that run
 come from bodies that fall out of the world at large frame deltas; the walk-off is the documented defect
 named in gaps.md, and it stays a real item rather than being hidden by the budget.
+
+The sweep that followed went 67 rows green (`--tour-live` excluded, below), including `--force-live` under
+the new witness and every inventory gate (`--items`, `--bins`, `--mana`, `--ammo`, `--pickup`,
+`--use-item`, `--save-live` with its start-inventory comparison).
+
+**`--tour-live` left the sweep.** It re-runs the campaign through real level swaps, which is worth watching —
+once. Here each swap pays a level's shader compile (~2 minutes), so the 21-level tour ran past every sweep
+budget (900 s timed out mid-tour; 2400 s, with the sweep's one retry, outlived a 45-minute wrapper) and
+read as a timeout rather than a measurement. The spine is already gated headlessly by `--tour`; the live
+swap path is run by hand (`--tour-live`) and its budget stays at 2400 s. Its escape prints during a long
+tour are the documented walk-offs (gaps.md), not a new defect.
