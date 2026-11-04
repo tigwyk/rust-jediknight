@@ -4200,3 +4200,24 @@ tour: 28 level row(s) on both arms (25 distinct files), 5543 thing(s), 23 film(s
 
 What remains for the fork is the screen that *grants* bin `0x12` — its two labels are assigned at run
 time and are not in `jkstrings.uni`, which is why the light arm stays the default (bin `0x12` is empty).
+## Round 333: the map panel's camera, read out of the executable
+
+The map's "eight transform rows" were never in the decompiled set: `jkGuiMap_Show`, `sithMap_Draw` and
+`sithMap_IsSurfaceDrawable` are, but the arrow handler and the per-frame update are not. They are
+disassembled now (`llvm-objcopy -I binary` → `llvm-objdump -D --triple=i386`), and every number is read:
+
+| what | where | value |
+| --- | --- | --- |
+| buffer / camera | `jkGuiMap_Show` (`0x415c50`) | 520x320; fov **90**, near **0.2**, far **10**, scale 1 |
+| base translate | `jkGuiMap_Show` | `0x5565b0 = translate(0, -2, 0.3)` |
+| player translate | `jkGuiMap_Show` | `0x5565e0 = translate(-player)` |
+| pitch step / clamp | arrow handler `0x4157f9`..`0x41589a` | `0x5565a0 += ±5`, clamped to `[-90, +90]` (`0x522108`/`0x52210c`/`0x522110`/`0x522114`) |
+| yaw step | same | `0x5565a4 += ±5`, no clamp |
+| pan | D-pad `0x415957`..`0x4159d1` | `rdMatrix_BuildTranslate34(&0x5565b0, (±0.1, 0, 0) / (0, 0, ±0.1))` |
+| per-frame compose | update `0x4ec380` | camera × `0x5565e0`, inverted into `0x84de80`, camera stored at `0x84df18`, `0x84df20 = 1` |
+| draw | `sithMap_Draw` (`0x4ec550`) | vertices × `0x84dee8`, facing cull `(cam - centre)·normal > 1e-4`, `IsSurfaceDrawable`, `rdClip_Line3Project`, near-plane test `0x84deb0/deb4` |
+
+The port's panel is top-down and passes its own check, so the projection is **specified, not shipped**:
+there is no retail map frame to grade it against, and replacing a checked drawing blind is a worse trade.
+The roadmap's row now carries the constants, so the next run implements against numbers rather than
+guesses.
