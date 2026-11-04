@@ -22255,7 +22255,7 @@ fn draw_created(
             continue;
         }
         let transform = Transform::from_translation(Vec3::from(thing.pos))
-            .with_rotation(Quat::from_rotation_z(-thing.yaw.to_radians()));
+            .with_rotation(thing_quat(thing.pitch, thing.yaw, thing.roll));
         // `SetThingModel` swaps the mesh a script wants drawn in place of the template's
         // (`ctf_main`'s team bodies). A thing the level itself placed keeps the mesh built at load —
         // replacing that means despawning and rebuilding its entities.
@@ -25142,43 +25142,38 @@ struct Deliver(bool);
 fn advance_sim(capture: Option<Res<CaptureDt>>, time: Res<Time>, sim: Option<ResMut<Sim>>, mut drawn: Query<&mut Transform>) {
     let Some(mut sim) = sim else { return };
     let moved = sim.world.borrow_mut().step(sim_dt(&time, capture.as_deref()));
-    for &i in &moved {
-        let pose = {
-            let w = sim.world.borrow();
-            let Some(t) = w.things.get(i) else { continue };
-            (Vec3::from(t.pos), t.yaw)
-        };
-        if escaped(pose.0.to_array()) && sim.escaped.insert(i) {
+    // The thing's **whole** pose, in the engine's own basis: `thing_quat` is what `spawn` uses, and
+    // `from_rotation_z(-yaw)` (this path's original form) is that basis with the yaw negated, so a
+    // moved door or lift was drawn mirrored about its facing. A placed thing that spins (`angvel=`
+    // from its template) turns without translating, so `step`'s `moved` list never names it; the
+    // angular-velocity scan below picks those up. Actors are `actors_follow_runtime`'s, and the local
+    // player's pose is the walker's.
+    let poses: Vec<(usize, Transform)> = {
+        let w = sim.world.borrow();
+        w.things
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| moved.contains(i) || t.rot_vel != [0.0; 3])
+            .map(|(i, t)| {
+                (
+                    i,
+                    Transform::from_translation(Vec3::from(t.pos))
+                        .with_rotation(thing_quat(t.pitch, t.yaw, t.roll)),
+                )
+            })
+            .collect()
+    };
+    for (i, transform) in poses {
+        if escaped(transform.translation.to_array()) && sim.escaped.insert(i) {
             println!(
                 "FAIL: thing {i} escaped the world at ({:.2} {:.2} {:.2}) after {:.1}s",
-                pose.0.x, pose.0.y, pose.0.z, sim.elapsed
+                transform.translation.x, transform.translation.y, transform.translation.z, sim.elapsed
             );
         }
-        let transform = Transform::from_translation(pose.0)
-            .with_rotation(Quat::from_rotation_z(-pose.1.to_radians()));
         let Some(entities) = sim.entities.get(&i) else { continue };
         for &e in entities {
             if let Ok(mut tf) = drawn.get_mut(e) {
                 *tf = transform;
-            }
-        }
-    }
-    // A placed thing that spins (`angvel=` from its template) turns without translating, so `step`'s
-    // `moved` list never names it: give it its whole pose here or it is drawn at the angles the level
-    // placed it at. Actors are `actors_follow_runtime`'s, and the local player's is the walker's.
-    {
-        let w = sim.world.borrow();
-        for (i, t) in w.things.iter().enumerate() {
-            if t.rot_vel == [0.0; 3] || moved.contains(&i) {
-                continue;
-            }
-            let Some(entities) = sim.entities.get(&i) else { continue };
-            let pose = Transform::from_translation(Vec3::from(t.pos))
-                .with_rotation(thing_quat(t.pitch, t.yaw, t.roll));
-            for &e in entities {
-                if let Ok(mut tf) = drawn.get_mut(e) {
-                    *tf = pose;
-                }
             }
         }
     }
@@ -26945,6 +26940,22 @@ mod viewmodel_framing_tests {
         // A looping clip still wraps; the old code applied this to every clip.
         assert_eq!(super::pov_clip_frame(13.0, 13, true), 0);
         assert_eq!(super::pov_clip_frame(12.5, 13, true), 12);
+    }
+
+    /// The engine basis with pitch and roll at zero is a **positive** rotation about Z: a drawn
+    /// thing's pose must use `thing_quat` (or `from_rotation_z(+yaw)`), never `(-yaw)`, which mirrors
+    /// the model about its facing — the form the runtime pose paths used until round 316.
+    #[test]
+    fn the_yaw_basis_is_a_positive_rotation_about_z() {
+        for yaw in [0.0f32, 30.0, 90.0, 180.0, 275.0] {
+            let basis = super::thing_quat(0.0, yaw, 0.0);
+            let plain = bevy::math::Quat::from_rotation_z(yaw.to_radians());
+            // The two forms may carry opposite quaternion signs for the same rotation.
+            assert!(
+                (basis.dot(plain).abs() - 1.0).abs() < 1e-5,
+                "thing_quat(0, {yaw}, 0) is not a positive Z rotation"
+            );
+        }
     }
 
     /// The chase now applies the body yaw to the actor's parts. `thing_quat(0, 90, 0)` maps the

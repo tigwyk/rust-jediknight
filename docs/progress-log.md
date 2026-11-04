@@ -3857,3 +3857,21 @@ spinning thing's whole pose each frame (a pure spin does not translate, so the `
 `a_placed_thing_spins_at_its_templates_angular_velocity` pins the seed and a quarter turn a second, and
 `--things` now asserts it on the level's own data: level 1's thing 38 spins at `[0, 90, 0]` deg/s and its yaw
 goes 315 -> 0 in half a second.
+
+## Round 316: one pose basis for every drawn thing
+
+The runtime pose paths — the per-frame sync for moved things and the transform a created thing is
+spawned with — rotated by `Quat::from_rotation_z(-yaw)`, while `spawn` used `thing_quat`, which is the
+engine's `rdMatrix_Build34(pyr)` basis. The two are mirror images about the facing: `thing_quat(0, yaw, 0)`
+equals `from_rotation_z(+yaw)`, so a door, lift or projectile drawn after it moved was yaw-mirrored. Both
+paths now use `thing_quat(pitch, yaw, roll)`, and the spin pass added in round 315 folded into the same
+loop: one scan over the things, filtered to those `step` moved or whose template gives them an `angvel`.
+
+`the_yaw_basis_is_a_positive_rotation_about_z` pins the equivalence at five angles, so the negated form
+cannot come back; the visual itself stays a QA-window item (no gate draws a moved door).
+
+| check | result |
+| --- | --- |
+| `cargo test` | 237 passed |
+| `--gates` | 0 of 67 failed, 2 skipped |
+| `--soak-all` | 35 levels, 0 non-finite, 0 failed |
