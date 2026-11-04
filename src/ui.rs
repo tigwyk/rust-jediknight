@@ -344,6 +344,18 @@ fn edge_is_seam(
     })
 }
 
+/// What the map panel's culls removed, so a check can assert the rules are live rather than seeing
+/// only "some ink appeared".
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MapStats {
+    /// Surfaces skipped because their normal faces away from the player (`sithMap_Draw`).
+    pub culled_facing: usize,
+    /// Edges skipped because a near-coplanar neighbour shares them (`sithMap_IsSurfaceDrawable`).
+    pub hidden_seams: usize,
+    /// Edges drawn.
+    pub drawn: usize,
+}
+
 impl Canvas {
     pub fn new(width: u32, height: u32) -> Self {
         Self { width, height, rgba: vec![0; (width * height * 4) as usize] }
@@ -505,7 +517,8 @@ pub fn map(
         radius: f32,
         palette: &[[u8; 3]; 256],
         ink: u8,
-    ) {
+    ) -> MapStats {
+        let mut stats = MapStats::default();
         let [x, y, w, h] = rect;
         let (cx, cy) = (x + w / 2, y + h / 2);
         let scale = (w.min(h) as f32 / 2.0) / radius.max(1e-3);
@@ -573,6 +586,7 @@ pub fn map(
                     + (player[2] - verts[0][2]) * normal[2]
                     <= 0.0
             {
+                stats.culled_facing += 1;
                 continue;
             }
             // Walls only: a floor or a ceiling seen from above is a slab, not line work.
@@ -590,7 +604,10 @@ pub fn map(
                 let (a, b) = (ids[i], ids[i + 1]);
                 let key = if a <= b { (a, b) } else { (b, a) };
                 let hidden = edge_is_seam(&shared, key, index, normal);
-                if !hidden {
+                if hidden {
+                    stats.hidden_seams += 1;
+                } else {
+                    stats.drawn += 1;
                     self.line(project(pair[0]), project(pair[1]), palette, ink);
                 }
             }
@@ -598,7 +615,10 @@ pub fn map(
                 let (a, b) = (ids[ids.len() - 1], ids[0]);
                 let key = if a <= b { (a, b) } else { (b, a) };
                 let hidden = edge_is_seam(&shared, key, index, normal);
-                if !hidden {
+                if hidden {
+                    stats.hidden_seams += 1;
+                } else {
+                    stats.drawn += 1;
                     self.line(project(verts[verts.len() - 1]), project(verts[0]), palette, ink);
                 }
             }
@@ -610,6 +630,7 @@ pub fn map(
             self.put(cx, cy + d, palette, ink);
         }
         self.put(cx, cy - 7, palette, ink);
+        stats
     }
 
     /// Draw one line of text with palette-indexed glyph pixels: a glyph's byte is an index

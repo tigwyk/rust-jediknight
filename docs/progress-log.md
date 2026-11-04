@@ -4127,3 +4127,11 @@ now builds an edge -> `(surface, normal)` table per redraw and hides an edge who
 test; the surface's own normal is excluded (the engine compares `iVar5 != param_1`), which matters: an
 inclusive version hid **every** edge (2,420 ink pixels, self dot 1.0) instead of the seams (4,108).
 `ui::map_tests` pins the three cases — coplanar hides, perpendicular keeps, self never hides.
+### The map check counts what the culls removed
+
+`--map-shot` proved only that ink appeared and moved. `ui::Canvas::map` now returns `MapStats`
+(`drawn`, `culled_facing`, `hidden_seams`) and the check draws the panel once more on a throwaway
+canvas, prints the three numbers and asserts each is non-zero, so "the rules exist in the code" and
+"the rules act on this level" can no longer be confused. At level 1's walkplayer spawn: 5,243 edges
+drawn, 2,054 surfaces culled by `sithMap_Draw`'s facing test, 1,958 edges hidden by
+`sithMap_IsSurfaceDrawable`'s coplanar-seam test.

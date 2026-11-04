@@ -1965,6 +1965,27 @@ fn main() {
             // from the player's own pose, which the shot above does not (it uses the level's
             // `walkplayer` start). Move the player and the drawing has to change, or the panel is
             // showing a fixed picture of the level instead of the player's surroundings.
+            // Both culls have to be doing work on this level's own geometry, not just exist in the
+            // code: `sithMap_Draw`'s facing test and `sithMap_IsSurfaceDrawable`'s seam test.
+            if let Some((level, pos, yaw)) = map_level.as_ref() {
+                let mut probe = ui::Canvas::new(640, 480);
+                let stats = probe.map(
+                    [40, 40, 520, 320],
+                    level,
+                    [pos[0], pos[1], pos[2]],
+                    *yaw,
+                    look.map_radius,
+                    &ui::palette_of(&base, &palette),
+                    look.map_ink,
+                );
+                println!(
+                    "map panel: {} edge(s) drawn, {} surface(s) culled as facing away, {} edge(s) hidden as coplanar seams",
+                    stats.drawn, stats.culled_facing, stats.hidden_seams
+                );
+                assert!(stats.drawn > 0, "the panel drew no edges at all");
+                assert!(stats.culled_facing > 0, "the facing cull removed nothing");
+                assert!(stats.hidden_seams > 0, "the seam rule removed nothing");
+            }
             if let Some((start_pos, start_yaw)) =
                 map_level.as_ref().map(|(_, pos, yaw)| (*pos, *yaw))
             {
