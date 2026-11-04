@@ -3719,3 +3719,25 @@ constant.
 
 Checks with the change: **233 tests**, `film-gate` 1.0000 PASS, `menu-gate` 0.9661 PASS,
 `compare.ps1 -Gate` **5 thresholds, 0 failures** (12 pairs compared), `--smk-decode` passes.
+
+### Round 311: a sector's plane is only a floor where the body is over the room
+
+**The walker's plane fallback held a body past the level's floor polygons.** `walker_step` falls back to the
+sector's own plane when the swept faces find nothing (18Ascend's spawn over its shaft opening needs that).
+At level 2's spawn drop, the same branch fired at a ledge: `--floor-at "10.2548,-14.685,3.065"` reads
+`plane floor Some(3.0)`, `floor_under -> None`, `standable -> None  (0 candidate face(s))` - the floor
+polygons end at the edge while the hull plane runs on - so the body was held at z 3.065 and the wall at
+y -14.75 stopped the walk. The fallback now requires `room_contains` (a solid or portal polygon of that
+room under the body, the same test the spawn resolver uses); 18Ascend's case is its own **portal**, so it
+still holds.
+
+Measured: headless `walk2_spawn` now covers **2.75** units (retail 2.82) where it stopped at the portal
+before; `walk-preflight` **22 walkers** (8 holds), `trace-gate` **10 legs, 0 failures**, `--walk all` and
+`--move` pass. The **live** replay still ends at (10.447,-13.727) sector 23 - `BK_CONTAIN_TRACE` shows the
+containment rule rejecting sector 23 and then the resolver answering 23 again, so the body stays in a room
+it is not inside, and that room's copy of the 0.2-high riser (surface 214) blocks the move. The next
+transcription is the engine's own restore (`sithCollision_MoveThing`: position, direction and sector come
+back from the saved state) instead of re-resolving.
+
+Also: `--move-at` printed its table and then carried on into the level (a window and sound); it now returns
+after the probe, as `--floor-at` already did.

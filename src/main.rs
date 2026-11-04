@@ -7362,6 +7362,9 @@ fn main() {
             sector = now;
         }
         println!("  end {pos:?} sector {sector}");
+        // A probe, not a session: without this the app carries on into the level (window, sound and
+        // all) after the table it was asked for has printed.
+        return;
     }
 
     if let Some(spec) = floor_at.clone() {
@@ -14807,7 +14810,15 @@ fn walker_step(
         // level 5's walk crosses onto a room whose slab lies half a unit down, and holding the body on
         // the plane above it kept it from ever descending (the leg walked 105 % at z 0.175 and never
         // changed sector). The reach is the one `--floor-at` uses for the same question (`height * 1.1`).
+        // ...but only where the body is actually **over** the room. A sector's hull plane runs to
+        // the walls, while its floor polygons stop at a ledge: level 2's spawn walks to a drop where
+        // the downward sweep finds no face and the plane is 3.0 under a 3.065 body, and the plane
+        // alone held it at the edge (the wall on the far side then stopped the walk). 18Ascend's
+        // case is the opposite: the body stands over the sector's own shaft **portal**, so
+        // `room_contains` is true there and the plane still holds it. Measured with
+        // `--floor-at` at level 2 (10.2548,-14.685,3.065): plane 3.0, 0 candidate faces.
         if land.is_none()
+            && solids.room_contains(*sector, *pos, radius)
             && solids.floor_under(*sector, *pos, 1.0, radius).is_none()
             && let Some(plane) = solids.floor_below(*sector, *pos)
         {
