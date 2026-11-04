@@ -307,6 +307,13 @@ is the player-facing version of this.
   `--pull` measures the result: rank 4 grip takes the victim 50 -> **30** (`10*4/2`), where before the
   rate was the victim's template `damage=0` and nothing was dealt. The pull still throws items rather
   than the weapon out of an actor's hand (`SkillTarget`'s disarm branch).
+- **Ghidra 12.1.4 does not create functions in the AI/awareness region, so those reads come from `llvm-objdump`.**
+  Round 357 opened `JK.EXE` with REA's Ghidra provider (12.1.4, image base `0x400000`, default analyzers, 31 s) to get
+  decompiler output for `0x4f2b60`/`0x4e9f80`: `resolve_containing_procedure` answers `not_in_procedure` for both and
+  `analyze_function`/`procedure_pseudo_code` refuse the address (also through `file-offset:`). The analyzer's
+  `Create Function` phase ran for 0.38 s over 1.39 MB, so the function inventory is sparse, not this region's only gap.
+  Every such read here is `llvm-objdump -d --start-address=... --stop-address=... --x86-asm-syntax=intel`, as the
+  event-2 and skill-answer rounds did. This is a tool fact to check first, not a claim that the code is missing.
 - ~~`--rules`' jump calibration failed~~ — **fixed**: the lateral resolver was pushing along a floor plane's infinite normal and pinning the body, so `walker_step` now keeps the height its vertical step produced and lets the resolver own X and Y. `--rules` measures `apex 0.26 / 0.28` closed form (inside the gate's 15% band) and exits clean (§16.2).
 - **The movement basis is JK's own now, and strafing was backwards until it was.** `walk_target`
   builds motion from `lvec = (cos yaw, sin yaw)` and `rvec = lvec × uvec = (sin yaw, -cos yaw)`; the port

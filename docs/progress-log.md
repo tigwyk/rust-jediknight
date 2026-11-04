@@ -4902,3 +4902,15 @@ if anything ever set it. Recorded on the emitter's own doc comment so the next r
 
 Verified: `grep -aoiE "jkset(actor)?flags"` over both GOBs (24 hits, contexts read), and the object scan for an
 `ai+8` store carrying `0x1000`.
+
+**A tool fact worth recording: Ghidra 12.1.4 has no functions in this binary's AI/awareness region.** Round 357 opened
+`JK.EXE` through REA's Ghidra provider (12.1.4, image base `0x400000`, default analyzers) to see whether the decompiler
+could read `0x4f2b60` and `0x4e9f80` more quickly than hand-reading assembly. It cannot: `resolve_containing_procedure`
+answers `not_in_procedure` for both and `analyze_function`/`procedure_pseudo_code` refuse the address, including through
+a `file-offset:` selector. The analyzer's own timings show why — `Create Function` spent 0.38 s on a 1.39 MB image, so
+the function inventory is sparse rather than this one region being unlucky. The project's reads of that region stay on
+`llvm-objdump`, which is what every recent round used anyway.
+
+Verified: `binary_session` (Ghidra 12.1.4 available), `resolve_containing_procedure` at `0x4f2b60` (`not_in_procedure`),
+`analyze_function` (`No procedure exists at the requested address`) and `procedure_pseudo_code` with
+`file-offset:0xf2b60` (`maps to 0x4f3760 ... no procedure`).
