@@ -10444,6 +10444,32 @@ fn main() {
             "adjoins: sector {sector} <-> {across} (row {row}): ClearAdjoinFlags 2 stops the sweep at the opening, Set 2 crosses, Set 16 blocks the walker"
         );
 
+        // The other shut rule, with a body rather than a predicate: `SITH_SECTOR_ADJOINSOFF` hides
+        // every opening of a sector, which is how a door's own script closes it. The ledger's fixture
+        // is "a shut door's sector entered from its open side", so the same sweep runs again with the
+        // far room's adjoins hidden: the body must stop at the opening and stay in the near room.
+        rt.call("SetSectorAdjoins", &[cog::Value::Num(across as f64), cog::Value::Num(0.0)]);
+        let shut_sector = solids
+            .sweep(sector, at, dir, span, radius, rt.gates())
+            .unwrap_or_else(|| panic!("a shut sector {across} did not stop the body at all"));
+        assert_eq!(shut_sector.sector, sector, "the body entered the shut sector {across}");
+        assert!(
+            shut_sector.distance <= plane + 1e-3,
+            "the shut sector stopped the body at {} but the opening is at {plane}",
+            shut_sector.distance
+        );
+        assert!(!rt.gates().passable(sector, across, row), "a shut sector still reads passable");
+        rt.call("SetSectorAdjoins", &[cog::Value::Num(across as f64), cog::Value::Num(1.0)]);
+        assert!(
+            solids
+                .sweep(sector, at, dir, span, radius, rt.gates())
+                .is_none_or(|h| h.sector != sector),
+            "reopening the shut sector {across} still blocks the walker"
+        );
+        println!(
+            "adjoins: SetSectorAdjoins({across}, 0) shuts the far room's openings too - the body stops at the same plane and cannot enter"
+        );
+
         // `sithAIAwareness_ProcessEvent` (`0x004f2c30`) against the level's own adjoin graph: the
         // event is recorded per sector and side, its strength decays by the adjoin's `dist`, and the
         // walk stops under the engine's floor (`0x52315c` = 0.00277).
