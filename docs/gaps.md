@@ -6587,13 +6587,16 @@ under 0.5 scales the chance by `light + 0.2` (`_DAT_0052308c` is -0.2) unless th
 pass's addition. It matters: **8,341 of the install's 12,415 sectors (67%)** bake below 0.5, so most of the game's
 rooms now make a target harder to notice.
 
-Still not modelled, on the ledger: the engine's second falloff gate (a byte at `thing + 0x2a8` whose meaning is
-unrecovered), and the engine re-rolls the chance on every target refresh where the port rolls on acquisition only.
+The block's own gate is ported too (round 317): a target whose `thingflags` carry `0x4`, or whose saber is on
+(`thing + 0x2a8` bit 1 — the bit `jkSaber_Draw` and `jkPlayer_DrawPov` read), skips the falloff, the darkness term
+and the pose terms; the blade's glow is what gives the body away. Still not modelled, on the ledger: the engine
+re-rolls the chance on every target refresh where the port rolls on acquisition only.
 
-Checks (236 tests): `detection_chance_falls_off_with_range_and_pose` pins the whole curve from the constants — inside
+Checks (238 tests): `detection_chance_falls_off_with_range_and_pose` pins the whole curve from the constants — inside
 2 units 1.0; 8 units moving 0.4 and saturating at 20 units; still 0.2; crouched 0.3; both 0.15; unawake watcher 0.2;
 hidden target/watcher 0.05; a watcher's `0x8000` lifting the target's `0x80`; and
-`a_dark_sector_makes_a_target_harder_to_notice` pins the darkness term at 0.1/0.4/0.5 light and with night vision. `a_ranged_actor_acquires_the_player_with_a_roll`
+`a_dark_sector_makes_a_target_harder_to_notice` pins the darkness term at 0.1/0.4/0.5 light and with night vision;
+`a_lit_saber_makes_the_body_obvious` pins the saber gate (0.05 in the dark -> 1.0 with the blade on). `a_ranged_actor_acquires_the_player_with_a_roll`
 puts the player 8 units away (a 0.2 roll), asserts the actor is not detected before ticking, then that it acquires
 within 200 ticks and fires at point-blank range once engaged. Measured before/after: with the acquisition gate disabled
 the acquisition check fails ("the actor never acquired the player at 8 units"). The level-1 and level-3 soaks pass

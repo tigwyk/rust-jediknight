@@ -3875,3 +3875,17 @@ cannot come back; the visual itself stays a QA-window item (no gate draws a move
 | `cargo test` | 237 passed |
 | `--gates` | 0 of 67 failed, 2 skipped |
 | `--soak-all` | 35 levels, 0 non-finite, 0 failed |
+
+## Round 317: the detection block's own gate (the saber bit)
+
+`sithAI_CanDetectSightThing`'s range falloff sits behind `(seen->flags & 4) == 0 && (seen->flags2a8 & 1) == 0`. The
+second byte was the last unrecovered term in that function: `jkSaber_Draw` and `jkPlayer_DrawPov` read the same bit
+as the player's **saber on**, so a lit blade skips the falloff, the darkness and the pose terms - the glow gives the
+body away. The port now skips them for a saber-lit player and for a target whose `thingflags` carry `0x4`, and the
+unawake 0.5 moved out of that block to where the decomp puts it (distance only, not the target's flag).
+
+| check | result |
+| --- | --- |
+| `cargo test` | 238 passed (`a_lit_saber_makes_the_body_obvious` new) |
+| `--gates` | 0 of 67 failed, 2 skipped |
+| `--soak-all` | 35 levels, 0 non-finite, 0 failed |

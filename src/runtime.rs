@@ -3789,8 +3789,9 @@ impl Runtime {
     ///   -0.2) unless the watcher's thingflags carry `0x2000000`. That field is the level's
     ///   `AMBIENT LIGHT` (`Runtime::sector_ambient_light`); `EXTRA LIGHT` belongs to the POV pass instead.
     ///
-    /// Not modelled: the second falloff gate reads a byte at `thing + 0x2a8` whose meaning is
-    /// unrecovered (on the ledger).
+    /// - the block's own gate (round 317): a target whose `thingflags` carry `0x4`, or whose saber is
+    ///   **on** (`thing + 0x2a8` bit 1 — the bit `jkSaber_Draw` and `jkPlayer_DrawPov` read), skips the
+    ///   falloff, darkness and pose terms; the blade's glow is what gives the body away.
     pub fn detect_chance(&self, actor: usize, target: usize) -> f32 {
         let (Some(watcher), Some(seen)) = (self.things.get(actor), self.things.get(target)) else {
             return 1.0;
@@ -3805,37 +3806,45 @@ impl Runtime {
         );
         let distance = (dx * dx + dy * dy + dz * dz).sqrt();
         let mut chance = 1.0f32;
-        if distance >= DETECT_NEAR && seen.flags & 0x4 == 0 {
+        if distance >= DETECT_NEAR {
             if self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x200 == 0 {
                 chance = 0.5;
             }
-            let falloff =
-                ((distance - DETECT_NEAR) * DETECT_FALLOFF).clamp(0.0, DETECT_MAX_FALLOFF);
-            chance *= 1.0 - falloff;
-            // The darkness term: the engine reads the *target's sector* (`thing + 0x5c`) light at
-            // `+4` and, under 0.5, scales the chance by `light + 0.2` (`_DAT_0052308c` is -0.2) -
-            // unless the watcher's thingflags carry `0x2000000`. A missing sector (a fixture with no
-            // level) reads as lit.
-            let dark = self
-                .sector_ambient_light
-                .get(seen.sector.max(0) as usize)
-                .copied()
-                .unwrap_or(1.0);
-            if watcher.flags & 0x2000000 == 0 && dark < 0.5 {
-                chance *= dark + 0.2;
-            }
-            let physics = self
-                .templates
-                .get(target)
-                .map(|template| template.to_ascii_lowercase())
-                .and_then(|template| self.template_move.get(&template))
-                .is_some_and(|m| m.eq_ignore_ascii_case("physics"));
-            if physics {
-                if seen.phys_flags & 0x10000 != 0 {
-                    chance *= DETECT_CROUCH;
+            // The decomp's inner gate: `seen->flags & 4` (the target's own invisibility bit) and
+            // `seen->flags2a8 & 1`, which `jkSaber_Draw`/`jkPlayer_DrawPov` read as the player's
+            // **saber on**. A lit blade skips the range falloff, the darkness term and the pose
+            // terms: the glowing blade is what gives the body away. The hidden/flag terms below run
+            // either way, exactly as they sit outside that block in the decomp.
+            let sabre_lit = self.saber_shown(target);
+            if seen.flags & 0x4 == 0 && !sabre_lit {
+                let falloff =
+                    ((distance - DETECT_NEAR) * DETECT_FALLOFF).clamp(0.0, DETECT_MAX_FALLOFF);
+                chance *= 1.0 - falloff;
+                // The darkness term: the engine reads the *target's sector* (`thing + 0x5c`) light at
+                // `+4` and, under 0.5, scales the chance by `light + 0.2` (`_DAT_0052308c` is -0.2) -
+                // unless the watcher's thingflags carry `0x2000000`. A missing sector (a fixture with
+                // no level) reads as lit.
+                let dark = self
+                    .sector_ambient_light
+                    .get(seen.sector.max(0) as usize)
+                    .copied()
+                    .unwrap_or(1.0);
+                if watcher.flags & 0x2000000 == 0 && dark < 0.5 {
+                    chance *= dark + 0.2;
                 }
-                if seen.vel == [0.0; 3] {
-                    chance *= DETECT_STILL;
+                let physics = self
+                    .templates
+                    .get(target)
+                    .map(|template| template.to_ascii_lowercase())
+                    .and_then(|template| self.template_move.get(&template))
+                    .is_some_and(|m| m.eq_ignore_ascii_case("physics"));
+                if physics {
+                    if seen.phys_flags & 0x10000 != 0 {
+                        chance *= DETECT_CROUCH;
+                    }
+                    if seen.vel == [0.0; 3] {
+                        chance *= DETECT_STILL;
+                    }
                 }
             }
         }
@@ -11585,6 +11594,50 @@ mod tests {
         // collision sweep, and a prop that only turns must not run it.
         let _ = rt.things[0].step(1.0);
         assert!((rt.things[0].yaw - 90.0).abs() < 1e-4, "yaw {} after one second", rt.things[0].yaw);
+    }
+
+    /// A lit saber is the block's own gate: with the blade on, the range falloff, the darkness term
+    /// and the pose terms are skipped, so a still, crouched body 20 units away in a dark room is as
+    /// noticeable as one at arm's length.
+    #[test]
+    fn a_lit_saber_makes_the_body_obvious() {
+        let chance = |saber: bool| {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let mut actor = base.clone();
+            actor.pos = [0.0, 0.0, 0.0];
+            let mut player = base.clone();
+            player.pos = [20.0, 0.0, 0.0];
+            player.vel = [0.0; 3];
+            player.phys_flags = 0x10000;
+            player.sector = 0;
+            rt.things = vec![player, actor];
+            rt.things[1].sector = 0;
+            rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+            rt.types = vec![10, 2];
+            rt.template_move.insert("walkplayer".into(), "physics".into());
+            rt.actor_flags.insert(1, 0x200);
+            rt.sector_ambient_light = vec![0.1];
+            if saber {
+                rt.saber.insert(
+                    0,
+                    SaberInfo {
+                        side: String::new(),
+                        tip: String::new(),
+                        base_rad: 0.0,
+                        tip_rad: 0.0,
+                        length: 1.0,
+                        wall_sparks: String::new(),
+                        blood_sparks: String::new(),
+                        saber_sparks: String::new(),
+                    },
+                );
+            }
+            rt.detect_chance(1, 0)
+        };
+        // Dark, still and crouched at 20 units: 0.4 * 0.3 * 0.75 * 0.5 = 0.045, floored at 0.05.
+        assert!((chance(false) - 0.05).abs() < 1e-5, "the dark/pose terms are not applied");
+        assert!((chance(true) - 1.0).abs() < 1e-5, "a lit saber did not make the body obvious");
     }
 
     /// The roll is on **acquisition**: an actor 8 units away with the player standing still has a 0.2
