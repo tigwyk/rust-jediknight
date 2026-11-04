@@ -751,6 +751,9 @@ fn main() {
     let mut force_check: Option<String> = None;
     let mut ai_check = false;
     let mut save_check: Option<String> = None;
+    // `--save` with no path is the round trip; a stale file from an older build otherwise made the
+    // probe read it, fail its own record sizes, and still print "passed (prefix only)".
+    let mut save_round_trip = false;
     let mut quicksave_check = false;
     let mut items_check = false;
     let mut weapons_check = false;
@@ -1151,7 +1154,8 @@ fn main() {
                 // `--save` on its own used to fail with `NotFound` when the writer reached it. A
                 // following flag is not a path either: `--save --level 01narshadda` used to write a
                 // file literally named `--level` in the working directory.
-                save_check = Some(if arg.is_empty() || arg.starts_with("--") {
+                save_round_trip = arg.is_empty() || arg.starts_with("--");
+                save_check = Some(if save_round_trip {
                     i -= 1;
                     std::env::temp_dir().join("bevi-knight-save.jks").display().to_string()
                 } else {
@@ -3929,6 +3933,11 @@ fn main() {
         // read. A real `.jks` from the game can be inspected here too — its prefix is
         // checked exactly as the engine checks it.
         let path = std::path::Path::new(&target);
+        if save_round_trip {
+            // Write one fresh save every run: reading whatever an older build left behind tests the
+            // old format, not this one.
+            let _ = std::fs::remove_file(path);
+        }
         if path.exists() {
             let bytes = std::fs::read(path).expect("read savegame");
             match jks::Save::read(&bytes) {
@@ -4134,6 +4143,11 @@ fn main() {
                 .find(|s| s.kind() == runtime::SAVE_SECTION)
                 .expect("the state section is missing");
             let state = runtime::Snapshot::from_bytes(&payload.data).expect("the state payload");
+            // The runtime handle is shared per level, so the live borrow must end before the fresh
+            // one starts. This never ran before: a stale temp save sent the probe down the
+            // "prefix only" path.
+            let live_x = live.things[player].pos[0];
+            drop(live);
             let fresh_world = runtime::Runtime::handle(&world.level);
             let mut fresh = fresh_world.borrow_mut();
             fresh.restore(&state);
@@ -4147,16 +4161,18 @@ fn main() {
             );
             assert_eq!(fresh.things[player].health, 37.0, "the health did not restore");
             assert!(
-                (fresh.things[player].pos[0] - live.things[player].pos[0]).abs() < 1e-4,
+                (fresh.things[player].pos[0] - live_x).abs() < 1e-4,
                 "the position did not restore"
             );
             assert_eq!(fresh.inv.get(&2).copied(), Some(3.0), "the inventory did not restore");
             assert_eq!(fresh.time, 128.5, "the clock did not restore");
+            drop(fresh);
             let _ = std::fs::remove_file(&path);
 
             // `AutosaveGame()`: what the story levels call at their own beats. The verb only raises a
             // flag — the app writes — so the check is the flag, the file, and that the file carries
             // the world the script asked to keep.
+            let mut live = sim_world.borrow_mut();
             live.call("AutosaveGame", &[]);
             assert!(live.autosave, "`AutosaveGame` did not raise the checkpoint flag");
             let path = std::env::temp_dir().join("bevi-knight-autosave.jks");

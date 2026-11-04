@@ -4752,3 +4752,17 @@ sector's floor when the centre is under it.
 
 Verified: `cargo test --release` 260 passed; `--gates` 0 of 67 failed, 2 skipped; `--soak-all` 35/35 levels; 43 probes
 clean on `02narshadda`, `03katarn`, `05test`, `06abarons`.
+
+**The `--save` gate had been passing on a file it could not read.** With no path, the probe reads
+`%TEMP%\bevi-knight-save.jks` — and an older build's file was still there, so every run printed `jks: ... did not
+parse: record of type 0x0C claims 655360 bytes` and then `--- save check passed (prefix only) ---`. The round trip was
+never exercised. Removing the stale file first made the probe reach its own state half, which then panicked on a
+**double borrow**: `Runtime::handle` is shared per level, so the live runtime and the "fresh" runtime it restores into
+were the same borrow. Both halves are fixed (the live guard is released and re-taken after the restore).
+
+What the gate proves now, every run:
+`jks: wrote 7308 bytes ... read back health 100, 64 things`; `the saved state restores -- health 37 (was 37), 1.25 along
+x, inventory bin 2 = 3, clock 128.50 s, 352 thing(s)`; `AutosaveGame raised the flag and 25990 bytes ... restore 352/352
+things at 128.50 s`; `--- save check passed ---`.
+
+Verified: `cargo test --release` 260 passed; `--gates` 0 of 67 failed, 2 skipped; `--soak-all` 35/35 levels.
