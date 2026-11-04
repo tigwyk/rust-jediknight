@@ -4551,3 +4551,12 @@ class with `Withdraw` and no `Retreat` still backs away from a surprise, and the
 for either — never let those six act. The surprise paths now store the target, `Retreat` gates on itself only, and the
 flee walk still requires `Withdraw` (a `Retreat`-only class arms a mode nobody acts on). New unit test: an awake
 `SenseDanger`+`Withdraw` actor with no `Retreat` sets `0x800`, stores the player and walks away.
+
+**Round 344 ledger pass.** Three `gaps.md` claims the code had outgrown are corrected with their evidence:
+`loadtemplate` is answered (`runtime.rs` returns the template name or -1), the per-type hurt sounds and the 0.1
+parent-actor scaling are both in `damage_typed_from`/`hurt_mode`, and the `listen` note's "ring of three recent sounds"
+was a misreading — `ProcessEvent` (`0x4f2c30`) keeps three **kind** slots per sector (`0x8553a8 + sector * 100`, strength
+at `+1/+2/+3`, position at `+4..+6`, source at `+0x16`) and `FUN_0050a6f0` scans them 2 → 1 → 0, which is exactly the
+port's `sector_awareness` shape. The scheduler itself is now recorded in the roadmap ledger from its own decomp instead
+of being approximated again: file-order scan, mask/mode gate, per-slot 1 s arm, and the flag-change restart with event
+`0x100`. Header counts refreshed to 67 gates / 251 tests.

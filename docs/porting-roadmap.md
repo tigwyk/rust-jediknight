@@ -745,6 +745,16 @@ What the session settles, all of it already on the deviation ledger with its ret
   word and emit event `0x100` on a change; the port's two verbs already do the OR/AND-NOT and keep the `0x2000`
   switch-off, and the awake bit `0x4` now drives `returnhome`. The event `0x100` is not emitted (no port handler
   reads it).
+- **instinct scheduler** — the engine's loop is now read line by line (`sithAI_InstinctUpdate`, `0x4e9e90`, 55
+  lines): it walks the class's instinct slots in file order, runs one only when its registered **mask/mode** pair
+  accepts the AI flag word (`mask & flags != 0 && mode & flags == 0`) and its own 1 s slot clock is due, then arms
+  that slot to `now + 1000`; a handler that returns non-zero **and changed the flags** makes it emit event `0x100`
+  with the old word and restart the scan; finally it stores `ai+400 = min(slot.next)`. The port keeps the 1 s arms
+  per instinct (`ai_detect_at`, `ai_scan`, `ai_talk`, …) but does **not** gate on the mask/mode words, and its
+  `mask 0x100`-style values exist only in the `aistatus` dump. Porting the gate needs the engine's own registration
+  table (`sithAICmd_Startup`) and a decision on where the port writes the bits it tests (e.g. `PrimaryFire mask
+  0x100`), which the retail-sourced AI timing has no fixture to grade yet — so the scheduler stays the last
+  unmodelled piece, with its rules recorded here instead of approximated again.
 - **acquisition broadcast** — `FUN_0050aa80`'s find also calls `CreateTransmittingEvent(player->sector, actor->pos,
   0, 3.0, player)`: a spotter **calls its neighbours in** through the awareness graph. The port acquired silently, so a
   room never converged on one pair of eyes. The acquisition path now writes the engine's engaged word once per
@@ -797,7 +807,7 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 
 | check | command | measured round 340 |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --bins --release` | **250 passed**, 0 failed (round 340) |
+| unit + integration suite | `cargo test --bins --release` | **251 passed**, 0 failed (round 344) |
 | every level's runtime | `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5 bevi-knight --soak-all` | **35 of 35 levels**, 0 non-finite positions, **0** bodies outside every sector (round 331's soak-count fix) |
 | every cog verb | `bevi-knight --cog-check` | **34 levels, 0 stubbed verb calls, 0 errors** |
 | drop-in asset coverage | `bevi-knight --audit` | **35/35 levels clean**, 0 non-drawable models, 10 unresolved asset references, 54 undecoded files |
