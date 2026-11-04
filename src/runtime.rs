@@ -8990,7 +8990,8 @@ impl Runtime {
                 Value::Num(self.spawn_at(template, pos, sector, [0.0, 0.0, 0.0]) as f64)
             }
             // `sithInventory_CreateBackpack` (`0x4d2740`): a `+backpack` thing at the player's own pose
-            // carrying the inventory, at most `0x10` bins, each kept when its amount is above 0.5.
+            // carrying the inventory, at most `0x10` bins, each kept when its amount is above
+            // `_DAT_00522ea8`, which the executable spells **0.0** — so any amount at all.
             // shortcut: the engine also requires the `items.dat` record's `0x1`/`0x80` flag bits, which
             // the runtime does not keep; a bin with an amount is carried in every shipped script.
             "createbackpack" => {
@@ -9001,7 +9002,7 @@ impl Runtime {
                 let items: Vec<(i32, f32)> = self
                     .inv
                     .iter()
-                    .filter(|(_, amount)| **amount > 0.5)
+                    .filter(|(_, amount)| **amount > 0.0)
                     .take(16)
                     .map(|(bin, amount)| (*bin, *amount))
                     .collect();
@@ -9067,10 +9068,11 @@ impl Runtime {
                     let mixed = if blend == 0.0 {
                         dir
                     } else {
+                        // `blend * _DAT_005231a0`: the executable's scale for that partial turn is **10.0**.
                         let m = [
-                            cur[0] + dir[0] * blend,
-                            cur[1] + dir[1] * blend,
-                            cur[2] + dir[2] * blend,
+                            cur[0] + dir[0] * blend * 10.0,
+                            cur[1] + dir[1] * blend * 10.0,
+                            cur[2] + dir[2] * blend * 10.0,
                         ];
                         let l = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
                         if l < 1e-6 { dir } else { [m[0] / l, m[1] / l, m[2] / l] }

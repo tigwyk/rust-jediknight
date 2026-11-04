@@ -4658,3 +4658,23 @@ That leaves **12** of the 221 live verbs unanswered (recounted), all recorded wi
 `GetWeaponPriority`, `SetCollideType`, `SetParticleGrowthSpeed`, `AddDynamicAdd`, `GetThingLight`, `SetWeaponFlags`,
 `SetThingCollideSize`, and the four `00_breakingbottle` surface queries (`GetSurfaceNormal`, `GetSurfaceSector`,
 `GetNumSurfaceVertices`, `GetSurfaceVertexPos`).
+
+**Constants read straight out of `JK.EXE`'s `.rdata`** (VA → file offset through the section table, f32), which settles
+two of the port's stand-ins and gives the puppet row its numbers:
+
+| VA | value | what it is |
+|---|---|---|
+| `0x522fb8` | **0.0** | the zero sentinel every `_DAT_00522fb8` comparison uses |
+| `0x522fbc` | **280.0** | the stride's units-to-frames scale: `sithPuppet_UpdatePuppet` advances the locomotion track by `UpdateThingMove() * dt * 280` |
+| `0x522fc0` | −30000.0 | the clip-hold timer's "never" value |
+| `0x522fc8` / `0x522fcc` | 0.3 / 0.6 | the random draw that picks between the two idle-clip tables (`+0x230`/`+0x240`) |
+| `0x522fd8` | 0.02 | the standing-still dead zone `locomotion_state` already uses |
+| `0x522fdc` | −3.0 | the backward threshold |
+| `0x522ea8` | **0.0** | `CreateBackpack`'s "carry this bin" floor — **not** 0.5 |
+| `0x5231a0` | **10.0** | `sithPhysics_SetThingLook`'s partial-turn scale — **not** 1.0 |
+| `0x523194/0x523180/0x52319c` | 1.0 / 0.0 / 1e-5 | the look's dot sentinel, zero, and the near-parallel epsilon |
+
+Two fixes follow from the table: `CreateBackpack` now keeps any bin whose amount is above **0.0** (the port used 0.5),
+and `SetThingLook`'s blend is scaled by **10** (the port used 1). The puppet stride keeps its clamp for now: the advance
+is `speed * dt * 280` in `rdPuppet_AdvanceTrack`'s own unit, and whether that argument is milliseconds of clip time or
+frames is not established, so the row keeps its "constant not recovered" caveat only for that unit.
