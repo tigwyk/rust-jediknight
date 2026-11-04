@@ -3846,3 +3846,12 @@ only shipped user and it is spawned by a script), so the visual stays with the Q
 | `--gates` | 0 of 67 failed, 2 skipped |
 | `--soak-all` | 35 levels, 0 non-finite, 0 failed |
 | docs links | all resolve |
+
+### The spin behind the clouds: a template's `angvel=`
+
+The same round found the other half unported and fixed it: `angvel=(pitch/yaw/roll)` is a **template** key
+(level 1's `fan1` and eleven others carry one; the force shield ships `angvel=(60/60/60)`), and nothing read it, so
+every spinning prop and every generated cloud stood still. `Runtime` now keeps `template_angvel`, a placed or
+created thing seeds `rot_vel` from it, `ThingState::step` integrates the angles, and `advance_sim` applies a
+spinning thing's whole pose each frame (a pure spin does not translate, so the `moved` list never named it).
+`a_placed_thing_spins_at_its_templates_angular_velocity` pins the seed and a quarter turn a second.

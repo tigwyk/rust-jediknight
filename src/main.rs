@@ -25144,6 +25144,25 @@ fn advance_sim(capture: Option<Res<CaptureDt>>, time: Res<Time>, sim: Option<Res
             }
         }
     }
+    // A placed thing that spins (`angvel=` from its template) turns without translating, so `step`'s
+    // `moved` list never names it: give it its whole pose here or it is drawn at the angles the level
+    // placed it at. Actors are `actors_follow_runtime`'s, and the local player's is the walker's.
+    {
+        let w = sim.world.borrow();
+        for (i, t) in w.things.iter().enumerate() {
+            if t.rot_vel == [0.0; 3] || moved.contains(&i) {
+                continue;
+            }
+            let Some(entities) = sim.entities.get(&i) else { continue };
+            let pose = Transform::from_translation(Vec3::from(t.pos))
+                .with_rotation(thing_quat(t.pitch, t.yaw, t.roll));
+            for &e in entities {
+                if let Ok(mut tf) = drawn.get_mut(e) {
+                    *tf = pose;
+                }
+            }
+        }
+    }
     // Once a second, say what the renderer is actually showing for one moving thing:
     // the entity's own transform, not the runtime's copy of the position.
     sim.elapsed += sim_dt(&time, capture.as_deref());

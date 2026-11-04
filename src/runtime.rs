@@ -879,6 +879,9 @@ pub struct Runtime {
     pub template_health: BTreeMap<String, f32>,
     /// A template's `vel=` — a projectile's launch speed — and its `damage=`.
     pub template_vel: BTreeMap<String, [f32; 3]>,
+    /// A template's `angvel=(pitch/yaw/roll)`: the initial angular velocity, degrees per second
+    /// (fans, spinning debris, the force shield's cloud). `ThingState::step` integrates it.
+    pub template_angvel: BTreeMap<String, [f32; 3]>,
     pub template_damage: BTreeMap<String, f32>,
     /// A projectile's `explode=` template: the thing the engine spawns where it lands.
     pub template_explode: BTreeMap<String, String>,
@@ -1584,6 +1587,14 @@ impl Runtime {
                     .map(|flags| (t.name.to_ascii_lowercase(), flags))
             })
             .collect();
+        let template_angvel: BTreeMap<String, [f32; 3]> = level
+            .templates
+            .iter()
+            .filter_map(|t| {
+                vec_param(level.template_param(&t.name, "angvel"))
+                    .map(|v| (t.name.to_ascii_lowercase(), v))
+            })
+            .collect();
         // `mass=` is the other half of the gravity gate (`0x4f6270` reads `+0x204`): a thing's mass is
         // copied from the template, and a zero mass means the gravity arm never runs. The shipped
         // `_debris` template (`type=weapon physflags=0x201`) declares **no** `mass=` in any level, yet
@@ -1719,8 +1730,13 @@ impl Runtime {
                     attach_offset: [0.0; 3],
                     attach_flags: 0,
                     spin: None,
-            rot_vel: [0.0; 3],
-            paused: false,
+                    // The template's `angvel=` seeds the angular velocity; `ThingState::step`
+                    // integrates it and the angles wrap.
+                    rot_vel: template_angvel
+                        .get(&t.template.to_ascii_lowercase())
+                        .copied()
+                        .unwrap_or([0.0; 3]),
+                    paused: false,
                     light: 0.0,
                     light_end: 0.0,
                     light_rate: 0.0,
@@ -1779,6 +1795,7 @@ impl Runtime {
             messages: Vec::new(),
             caller_cog: -1,
             messages_sent: 0,
+            template_angvel,
             template_vel: level
                 .templates
                 .iter()
@@ -2270,7 +2287,7 @@ impl Runtime {
             attach_offset: [0.0; 3],
             attach_flags: 0,
             spin: None,
-            rot_vel: [0.0; 3],
+            rot_vel: self.template_angvel.get(&template).copied().unwrap_or([0.0; 3]),
             paused: false,
             light: 0.0,
             light_end: 0.0,
@@ -11536,6 +11553,38 @@ mod tests {
         assert!((chance(0.4, 0) - 0.24).abs() < 1e-5, "0.4 light should scale by 0.6");
         assert!((chance(0.5, 0) - 0.4).abs() < 1e-5, "0.5 light is not dark");
         assert!((chance(0.1, 0x2000000) - 0.4).abs() < 1e-5, "night vision ignored the darkness");
+    }
+
+    /// `angvel=(pitch/yaw/roll)` is a **template** key (level 1's `fan1` carries one; 13 rows in its
+    /// TEMPLATES section do) and it seeds every instance's angular velocity, which
+    /// `ThingState::step` integrates: a 90 deg/s yaw is a quarter turn a second.
+    #[test]
+    fn a_placed_thing_spins_at_its_templates_angular_velocity() {
+        let mut level = Level::default();
+        level.templates.push(crate::jkl::Template {
+            name: "fan1".into(),
+            base: None,
+            params: vec![("angvel".into(), "(0.000000/90.000000/0.000000)".into())],
+            model3d: Some("fan1.3do".into()),
+            sprite: None,
+        });
+        level.things.push(crate::jkl::Thing {
+            template: "fan1".into(),
+            pos: [0.0; 3],
+            pitch: 0.0,
+            yaw: 0.0,
+            roll: 0.0,
+            sector: 0,
+            flags: 0,
+            frames: Vec::new(),
+            vel: [0.0; 3],
+        });
+        let mut rt = Runtime::new(&level);
+        assert_eq!(rt.things[0].rot_vel, [0.0, 90.0, 0.0], "the template's angvel did not seed rot_vel");
+        // `step`'s return says whether the thing *moved*, which a pure spin does not: it feeds the
+        // collision sweep, and a prop that only turns must not run it.
+        let _ = rt.things[0].step(1.0);
+        assert!((rt.things[0].yaw - 90.0).abs() < 1e-4, "yaw {} after one second", rt.things[0].yaw);
     }
 
     /// The roll is on **acquisition**: an actor 8 units away with the player standing still has a 0.2
