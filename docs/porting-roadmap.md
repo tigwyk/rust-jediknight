@@ -875,8 +875,13 @@ What still blocks Phase 4, in the roadmap's own order:
 2. **Phase 1 step 4's exit** (a cog state trace at each trigger) — same window: it needs a retail capture to compare
    against; the port-side trigger paths are all headless-tested, but "matches retail" is a retail measurement.
 3. **Phase 3 breadth remainder** (shipped-content order, all ledgered): the latent free-path `track` branch (no
-   shipped level starts one), the scope overlay, the ending screens, and the event-2/`0x200` producers. The particle
-   arms, head/aim joints and `specialattack` are in. None of these is an exit criterion for the phases before it.
+   shipped level starts one), the scope overlay (`jkHudScope.c` is not decompiled and no shipped archive names a scope
+   bitmap — the only hits are `TTRNSCOP.MAT`, a transition material), and the ending screens/choice menu (the UI
+   resources define `GUID_ENDING`/`GUID_CREDITS` but no label strings, so retail itself would draw placeholders).
+   **The AI event family is closed as far as this build can reach**: event 2 is produced by the awareness sweep and
+   `sensedanger`'s event-2 arm is ported (round 357), `dodge`'s arm is dead content (it demands a weapon-thing source),
+   and `0x200` has no reachable producer (`0x4ed1d0` is installed at `0x848600` and never read). The particle arms,
+   head/aim joints and `specialattack` are in. None of these is an exit criterion for the phases before it.
 4. **`walk5_spawn`** — **passes as of round 293** (83 % travel, 2 sector samples) after the floor sweep's plane
    fallback was narrowed to the data-gap case; its remaining deviation is its slower travel over the same 3 s (83 %), so
    the port stops short of retail's sector-24 end point and its `z 0.422` is that end-position delta, not a standing height
