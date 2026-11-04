@@ -4415,3 +4415,13 @@ guessed at.
 test runtime::tests::a_hurt_actor_with_retreat_backs_off ... ok
 --- ai check passed ---
 ```
+
+**`blindfire` rolls like the handler does.** `FUN_00509b30` rolls the instinct's chance once per call; a miss
+sets its next call to **now + 1000 ms**, a hit to the instinct's own 750 ms. The port re-rolled at the shot
+cadence (more often than the engine) and skipped the roll when the chance was 0 — but the engine's test is
+`chance < rand`, so a zero-chance class never fires at all. Both are the handler's now, and the test's
+zero-chance control asserts no shot plus the 1 s wait.
+
+```
+test runtime::tests::an_actor_that_lost_sight_fires_at_the_remembered_position ... ok
+```

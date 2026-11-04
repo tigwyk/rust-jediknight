@@ -4963,8 +4963,17 @@ impl Runtime {
             } else {
                 (arg(8), arg(9))
             };
-            // The engine rolls the chance on its own tick; the port rolls it when the shot slot is up.
-            if blind && arg(1) > 0.0 && crate::cog::pseudo_random() > arg(1) as f64 {
+            // `BlindFire`'s own cadence: the handler rolls the chance **once per call**, and a failed
+            // roll sets its next call to now + **1000 ms** (a success schedules its own interval,
+            // `class+0x4c` = 750 ms shipped). The port re-rolled at the shot slot's cadence, which
+            // rolls more often than the engine does; the wait is written here so the retry is the
+            // engine's.
+            // A chance of 0 never fires (the engine's `chance < rand` test), so the roll is not
+            // skipped for it; a chance of 1 always does.
+            if blind && crate::cog::pseudo_random() > arg(1) as f64 {
+                if let Some(thing) = self.things.get_mut(index) {
+                    thing.ai_wait = 1.0;
+                }
                 continue;
             }
             let (sx, sy) = (shooting_at[0] - from[0], shooting_at[1] - from[1]);
@@ -12390,6 +12399,34 @@ mod tests {
         let fired = rt.ai_tick(0, 0.1);
         assert_eq!(fired, 1, "the actor did not blind-fire at the remembered position");
         assert!(rt.shots_fired >= 1, "no projectile was spawned for the blind shot");
+
+        // A failed roll is the engine's **1 s** retry, not a re-roll at the shot cadence: the handler
+        // sets its next call to `now + 1000` when the chance misses.
+        let mut miss = door_runtime();
+        let base = miss.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [-5.0, 0.0, 0.0];
+        miss.things = vec![player, actor];
+        miss.templates = vec!["walkplayer".into(), "tuskan".into()];
+        miss.types = vec![10, 2];
+        miss.template_weapon.insert("tuskan".into(), "blaster".into());
+        miss.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, maxstep=0.3, sightdist=2.0, heardist=2.0, accuracy=0.15\n\n\
+                 BlindFire 750.0, 0.0, 0, 0.8, 0.0, 0.30\n",
+            ),
+        );
+        miss.ai_last_seen.insert(1, [3.0, 0.0, 0.0]);
+        assert_eq!(miss.ai_tick(0, 0.1), 0, "a zero-chance blind fire still fired");
+        assert!(
+            (miss.things[1].ai_wait - 1.0).abs() < 1e-4,
+            "a failed blind-fire roll did not schedule the engine's 1 s retry: {}",
+            miss.things[1].ai_wait
+        );
 
         // A control class without `BlindFire` stays silent with the same memory.
         let mut quiet = door_runtime();

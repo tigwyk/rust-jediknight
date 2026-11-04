@@ -684,7 +684,10 @@ What the session settles, all of it already on the deviation ledger with its ret
   refused. What remains is the **cone**: the engine sphere-casts from the eye (`sithIntersect_CheckSphereIntersection`
   with the thing's radius expanded by `0.4`), and the port's two scans stand in for that sweep. Walk an actor at a
   closed door and compare which door it opens — that is the window half.
-- **`blindfire`** — the chance is rolled per shot slot, not on the engine's own tick.
+- **`blindfire`** — **the roll is the handler's now (round 339)**: `FUN_00509b30` rolls the chance once per
+  call and, on a **miss, sets its next call to `now + 1000`** (a hit schedules its own 750 ms, `class+0x4c`).
+  The port re-rolled at the shot cadence and skipped the roll entirely when the chance was 0; both are the
+  engine's now, and the unit test proves a zero-chance class never fires and leaves a 1 s wait behind.
 - **`returnhome`** — the port gates on the instinct existing and distance > 0.5, not the engine's awake flag.
 - **`retreat`/`withdraw`** — **the lifetime is the engine's now (round 339)**: `FUN_0050b150` clears the mode on
   `ai[0x70] == 0` (the remembered target gone), while the instinct's 5000 ms is only how often the handler runs.
