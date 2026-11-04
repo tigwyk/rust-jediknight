@@ -4849,3 +4849,9 @@ Verified: `cargo test --release` **261 passed** (new: the sweep clears the latch
 `--tour` 28 rows on both arms; `--audit` 35/35 clean; `--cog-check` 34 levels, 0 stubbed; the parity gates re-run at
 round 356's tree — draw 5/0 (`spawn_pose` 0.6393), menu 0.9661, film 1.0000, series 1 graded/0 failures, walk trace
 10 legs/0 failures; `scripts/check-docs-links.ps1` 132/132.
+
+**The two windowed gates re-run green at round 356.** `--live-check` (window) delivered 163 pulse/timer messages to
+14 armed cogs over its 30 s and wire_links reported 10 sector and 286 thing links; `--live-play --start 01narshadda`
+drove the level and its scripted jump, stopping the leap at the ceiling above the body as the key script intends. Both
+are skipped in the headless sweep (`BK_SKIP_WINDOW`), so the sweep's `0 of 67 failed, 2 skipped` is unchanged; the two
+rows are now measured rather than assumed for this round.
