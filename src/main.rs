@@ -9728,10 +9728,13 @@ fn main() {
         let rate = rt.surfaces[index].slide;
         assert_eq!(rate, [0.0, -1.0], "SlideWall did not scale and negate its vector");
         let epoch = rt.surface_epoch;
+        let scrolls = rt.scroll_epoch;
         // A second of clock must both move the texture and carry a body: the offset from the clock is
-        // `rate * time`, and the walker adds `rate * dt` a frame.
+        // `rate * time`, and the walker adds `rate * dt` a frame. The scroll has its **own** epoch, so
+        // the renderer re-lays the scrolling faces and leaves the static batches alone.
         rt.step(1.0);
-        assert!(rt.surface_epoch > epoch, "a scrolling surface did not ask for a rebuild");
+        assert!(rt.scroll_epoch > scrolls, "a scrolling surface did not ask for a rebuild");
+        assert_eq!(rt.surface_epoch, epoch, "a scroll re-batched the whole level");
         let time = rt.time;
         drop(rt);
         let mut look = SurfaceLook::default();
@@ -9739,7 +9742,7 @@ fn main() {
         look.scrolls[index] = [rate[0] * time, rate[1] * time];
         // The digest of every UV in the batches, sorted first because `batches` is a `HashMap`.
         let uv_hash = |look: &SurfaceLook| -> u64 {
-            let (batches, _) = build_world(level, &world.images, &Default::default(), look);
+            let (batches, _, _) = build_world(level, &world.images, &Default::default(), look, false);
             let mut h = 0xcbf2_9ce4_8422_2325u64;
             let mut words: Vec<u64> = Vec::new();
             for batch in batches.values() {
@@ -9770,9 +9773,9 @@ fn main() {
         let mut rt = state.borrow_mut();
         rt.call("SlideCeilingSky", &[cog::Value::Num(0.5), cog::Value::Num(0.0)]);
         assert_eq!(rt.sky_scroll[1], [0.5, 0.0], "SlideCeilingSky did not record the speed pair");
-        let epoch = rt.surface_epoch;
+        let epoch = rt.scroll_epoch;
         rt.step(1.0);
-        assert!(rt.surface_epoch > epoch, "a scrolling sky did not ask for a rebuild");
+        assert!(rt.scroll_epoch > epoch, "a scrolling sky did not ask for a rebuild");
         let sky_time = rt.time;
         // What the rebuild reads: the header's starting offset plus the script's speed. `SlideHorizonSky`
         // and `SlideCeilingSky` move the plane the header placed, they do not replace it.
@@ -9986,7 +9989,7 @@ fn main() {
         // and the rgb is the light. The words are sorted first because `batches` is a `HashMap`, and
         // its iteration order is not stable between two builds of the same world.
         let hash = |look: &SurfaceLook| -> u64 {
-            let (batches, _) = build_world(level, &world.images, &Default::default(), look);
+            let (batches, _, _) = build_world(level, &world.images, &Default::default(), look, false);
             let mut words: Vec<u64> = Vec::new();
             for batch in batches.values() {
                 for color in &batch.colors {
@@ -10028,7 +10031,7 @@ fn main() {
         // `fps` times a second, which is the number that decides whether the animation can ride the
         // rebuild path at all.
         let started = std::time::Instant::now();
-        let _ = build_world(level, &world.images, &Default::default(), &look);
+        let _ = build_world(level, &world.images, &Default::default(), &look, false);
         let rebuild_ms = started.elapsed().as_secs_f64() * 1000.0;
         let centre = {
             let (mut cx, mut cy, mut cz, mut n) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
@@ -10369,7 +10372,7 @@ fn main() {
             .map(|(i, s)| (i, s.verts.len(), claims[i][0]))
             .expect("no drawn surface with a single claiming sector");
         let triangles = |hidden: &std::collections::BTreeSet<usize>| -> usize {
-            build_world(level, &Default::default(), hidden, &SurfaceLook::default())
+            build_world(level, &Default::default(), hidden, &SurfaceLook::default(), false)
                 .0
                 .values()
                 .map(|batch| batch.indices.len() / 3)
@@ -16530,9 +16533,16 @@ fn mip_chain(top: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
 /// play area, and their baked per-vertex intensity is zero.
 const SURFFLAG_SKY: u32 = 0x200;
 
+/// Whether a surface's **texture** moves without its geometry changing — it has a `SlideWall` rate or
+/// the world-wide sky offset applies to it. Only such faces are re-laid by a scroll-only rebuild.
+fn surface_scrolls(look: &SurfaceLook, index: usize, surface: &jkl::Surface) -> bool {
+    is_sky_surface(surface) || look.scroll(index, surface.surfflags) != [0.0; 2]
+}
+
 fn is_sky_surface(surface: &jkl::Surface) -> bool {
     surface.surfflags & (SURFFLAG_SKY | SURFFLAG_CEILING_SKY) != 0
 }
+
 
 /// `SITH_SURFACE_CEILINGSKY` — the other half of the engine sky test. The port only knew the horizon bit.
 const SURFFLAG_CEILING_SKY: u32 = 0x400;
@@ -16692,7 +16702,7 @@ struct Batch {
 /// `SetFaceGeoMode` has to stop drawing polygons, so the rebuild patches these meshes in place
 /// rather than respawning the sector's entities.
 #[derive(Resource, Default)]
-struct SurfaceBatches(Vec<((usize, i32), Handle<Mesh>)>);
+struct SurfaceBatches(Vec<((usize, i32), Handle<Mesh>)>, HashMap<(usize, i32), Vec<usize>>);
 
 impl Batch {
     fn push_polygon(
@@ -16974,7 +16984,7 @@ fn audit(gobs: &gob::GobSet) -> Result<(), String> {
         // Build the actual draw geometry, headless: a level whose surfaces pass the
         // index checks can still produce no triangles (degenerate or collinear
         // polygons), and that would render as an empty world with no error.
-        let (batches, _) = build_world(&level, &Default::default(), &Default::default(), &SurfaceLook::default());
+        let (batches, _, _) = build_world(&level, &Default::default(), &Default::default(), &SurfaceLook::default(), false);
         let world_tris: usize = batches.values().map(|b| b.indices.len() / 3).sum();
         let empty_batches = batches.values().filter(|b| b.indices.is_empty()).count();
         if textured > 0 && world_tris == 0 {
@@ -18186,11 +18196,16 @@ fn build_world(
     images: &HashMap<i32, Image>,
     hidden: &std::collections::BTreeSet<usize>,
     look: &SurfaceLook,
-) -> (HashMap<(usize, i32), Batch>, usize) {
+    only_scrolling: bool,
+) -> (HashMap<(usize, i32), Batch>, usize, HashMap<(usize, i32), Vec<usize>>) {
     let claims = collide::surface_claims(level);
     let mut batches: HashMap<(usize, i32), Batch> = HashMap::new();
+    let mut keys: HashMap<(usize, i32), Vec<usize>> = HashMap::new();
     let mut skipped = 0usize;
     for (index, surface) in level.surfaces.iter().enumerate() {
+        if only_scrolling && !surface_scrolls(look, index, surface) {
+            continue;
+        }
         // Not drawn: no material, not a polygon, or a script set its geomode to `GEOMETRY_NONE`.
         if surface.material < 0 || surface.verts.len() < 3 || hidden.contains(&index) {
             skipped += 1;
@@ -18215,6 +18230,7 @@ fn build_world(
         let owners = claims.get(index).map(Vec::as_slice).unwrap_or(&[]);
         if owners.is_empty() {
             let light = look.light(index, -1);
+            keys.entry((usize::MAX, surface.material)).or_default().push(index);
             batches
                 .entry((usize::MAX, surface.material))
                 .or_default()
@@ -18222,13 +18238,14 @@ fn build_world(
         }
         for &sector in owners {
             let light = look.light(index, sector as i32);
+            keys.entry((sector, surface.material)).or_default().push(index);
             batches
                 .entry((sector, surface.material))
                 .or_default()
                 .push_polygon(level, surface, tex_size, cel, light, scroll, look.fullbright(index));
         }
     }
-    (batches, skipped)
+    (batches, skipped, keys)
 }
 
 /// Rebuild the world's surface batches when a script hides or restores a surface.
@@ -18244,7 +18261,7 @@ fn rebuild_surfaces(
     world: Option<Res<World>>,
     batches: Option<Res<SurfaceBatches>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut seen: Local<(u32, u32)>,
+    mut seen: Local<(u32, u32, u32)>,
 ) {
     let _span = Span::new("rebuild_surfaces");
     let (Some(sim), Some(world), Some(batches)) = (sim, world, batches) else { return };
@@ -18252,8 +18269,9 @@ fn rebuild_surfaces(
         let rt = sim.world.borrow();
         (
             // The geomode, the cel and the light all end up baked into the mesh; the pair of epochs is
-            // what the rebuild watches, and only a geomode change is worth a line of log.
-            (rt.geomode_epoch, rt.surface_epoch),
+            // what the rebuild watches, and only a geomode change is worth a line of log. The scroll
+            // epoch is separate: a scroll only re-lays the scrolling faces, so it rides the frame.
+            (rt.geomode_epoch, rt.surface_epoch, rt.scroll_epoch),
             rt.face_geomode
                 .iter()
                 .filter(|(_, mode)| **mode == 0)
@@ -18266,10 +18284,20 @@ fn rebuild_surfaces(
         return;
     }
     let geomode_moved = epoch.0 != seen.0;
+    // Only the scroll moved: re-lay the faces whose texture drifts (`SlideWall`, sky) and leave every
+    // static batch alone. A batch that mixes both kinds stays as it is — patching it from the filtered
+    // build would drop its static polygons.
+    let scroll_only = !geomode_moved && epoch.1 == seen.1;
     *seen = epoch;
-    let (built, _) = build_world(&world.level, &world.images, &hidden, &look);
+    let (built, _, built_keys) = build_world(&world.level, &world.images, &hidden, &look, scroll_only);
     let mut patched = 0usize;
     for (key, handle) in &batches.0 {
+        if scroll_only
+            && built_keys.get(key).map(Vec::len).unwrap_or(0)
+                < batches.1.get(key).map(Vec::len).unwrap_or(0)
+        {
+            continue;
+        }
         let Some(batch) = built.get(key).cloned() else { continue };
         if let Some(mut mesh) = meshes.get_mut(handle) {
             *mesh = to_mesh(batch);
@@ -23602,7 +23630,7 @@ fn setup(
     // Surfaces a script has hidden before the world was built (`GEOMETRY_NONE`). Scripts start before
     // the meshes are built, so a level that hides glass in `startup` is already accounted for here;
     // anything later goes through `rebuild_surfaces`.
-    let (batches, skipped) = build_world(level, &world.images, &Default::default(), &SurfaceLook::default());
+    let (batches, skipped, keys) = build_world(level, &world.images, &Default::default(), &SurfaceLook::default(), false);
     let no_mat = level.surfaces.iter().filter(|s| s.material < 0).count();
     let few_verts = level.surfaces.iter().filter(|s| s.verts.len() < 3).count();
     println!(
@@ -23637,6 +23665,7 @@ fn setup(
     };
     let mut by_sector: Vec<Vec<Entity>> = vec![Vec::new(); level.sectors.len()];
     let mut surface_batches = SurfaceBatches::default();
+    surface_batches.1 = keys;
     for ((sector, mat_idx), batch) in batches {
         if batch.indices.is_empty() {
             continue;

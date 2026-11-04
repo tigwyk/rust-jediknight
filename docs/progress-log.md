@@ -4520,3 +4520,11 @@ agreements, 46 crossings, 6 recorded walk-offs (worst drop 3.35)**, `--audit` **
 references, 54 undecoded files**, `--ai` and `--ai-live` pass. The remaining roadmap work is blocked on resources the
 port cannot supply headless: retail captures (`trace/parity/live` gates drive the window and the installed game), a
 clean machine, and the design-sized renderer items (portal graph, 3D map viewport).
+
+**Scrolling surfaces re-lay only what moves.** The scroll offset is a pure function of the clock (`slide * time`),
+so its 15 Hz epoch only existed because a rebuild re-batched the whole level. The scroll now has its own
+`Runtime::scroll_epoch` (bumped per frame while anything scrolls), `build_world` can be asked for the moving faces
+only, and `rebuild_surfaces` patches the batches those faces own — skipping any batch it cannot rebuild completely
+(`keys` records every key's surface list, and a mixed static/scrolling batch is left as it is rather than
+half-patched). The stale offset drops from 66 ms to one frame, static batches are untouched, and `--scroll` now
+asserts the split: the scroll epoch moved and `surface_epoch` did not.

@@ -1018,6 +1018,11 @@ pub struct Runtime {
     /// renderer bakes into the mesh the same way. Separate from `geomode_epoch` so a per-frame
     /// animation does not look like a stream of geometry changes.
     pub surface_epoch: u32,
+    /// Bumped **every frame** while anything on the level scrolls. The scroll offset is a pure
+    /// function of the clock (`slide * time`), and the renderer only has to re-lay the scrolling
+    /// batches, so this rides the frame rate instead of sharing `surface_epoch`'s 15 Hz bucket:
+    /// the stale offset was up to 66 ms, it is at most one frame now.
+    pub scroll_epoch: u32,
     /// Per surface, how many cels its material holds (`num_texinfo`), where an animation wraps. The
     /// runtime cannot read a `.mat`, so the loader hands this over; absent means 1, i.e. nothing to
     /// animate.
@@ -1051,7 +1056,6 @@ pub struct Runtime {
     /// with a smaller number can be honoured after the fact (`amend_damage`).
     pub damage_applied: BTreeMap<usize, f32>,
     /// The last 15 Hz bucket a scrolling surface asked the renderer to re-lay its texture in.
-    pub scroll_bucket: i32,
     /// `SlideHorizonSky(x, y)` / `SlideCeilingSky(x, y)`: the rate the sky backdrop moves at, in
     /// texels a second, for `[horizon, ceiling]`. The engine keeps one world-wide offset per kind
     /// (`sithWorld.horizonSkyOffset`) and moves it by this vector; the offsets are `rate * time`.
@@ -2084,6 +2088,7 @@ impl Runtime {
             shake_angle_rate: 0.0,
             geomode_epoch: 0,
             surface_epoch: 0,
+            scroll_epoch: 0,
             surface_cels: Vec::new(),
             material_cels: BTreeMap::new(),
             material_names: BTreeMap::new(),
@@ -2097,7 +2102,6 @@ impl Runtime {
             sector_ambient: BTreeMap::new(),
             player_respawn_mask: 0,
             damage_applied: BTreeMap::new(),
-            scroll_bucket: 0,
             sky_scroll: [[0.0; 2]; 2],
             mount_wait_until: 0.0,
             ai: BTreeMap::new(),
@@ -2289,21 +2293,16 @@ impl Runtime {
         }
     }
 
-    /// A scrolling surface (`SlideWall`) needs its texture re-laid, and the mesh is rebuilt whole, so
-    /// the epoch moves at a fixed **15 Hz** rather than every frame: the offset itself is computed
-    /// from the clock (`slide * time`), so the only cost of the slower epoch is that the mesh shows an
-    /// offset up to 66 ms old. `ponytail:` the real fix is a per-vertex scroll channel in the shader.
+    /// A scrolling surface (`SlideWall`) needs its texture re-laid, and only the scrolling batches
+    /// have to be rebuilt for it: the offset is a pure function of the clock (`slide * time`), so
+    /// [`Self::scroll_epoch`] moves with the frame and the renderer re-lays that subset.
     fn bump_scroll_epoch(&mut self) {
         if !self.surfaces.iter().any(|s| s.slide != [0.0; 2])
             && self.sky_scroll.iter().all(|rate| *rate == [0.0; 2])
         {
             return;
         }
-        let bucket = (self.time * 15.0) as i32;
-        if bucket != self.scroll_bucket {
-            self.scroll_bucket = bucket;
-            self.surface_epoch += 1;
-        }
+        self.scroll_epoch += 1;
     }
 
     /// Create a thing from a template at a pose: the one constructor `CreateThing` (marker-relative)
