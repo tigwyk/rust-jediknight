@@ -4156,3 +4156,22 @@ soak --level 19a (BK_SOAK_TRACE=1): 1 body outside -- thing 169 `stormtroop3` at
 | `--soak --level 19a` | 1 message, 1 outside body (`stormtroop3`), 0 non-finite; the player no longer counted |
 | `cargo test` | **244 passed**, 0 failed |
 | `--gates` | 0 of 67 failed, 2 skipped |
+## Round 331: all 67 gates, none skipped
+
+The documented headless recipe (`BK_SKIP_WINDOW=1`) skips `--live-check` and `--live-play --start
+01narshadda`. Run with a window, the sweep is complete:
+
+```
+gates: 0 of 67 failed, 0 skipped
+--live-check            462 collision sector(s), 1206 adjoin rows, 462 sector flags, 7 doorways shut
+--live-play --start 01  left click added 1 thing, Space lifted the body 0.11 units, scripts answered 3291
+```
+
+| what | result |
+| --- | --- |
+| `--gates` (windowed) | **0 of 67 failed, 0 skipped** |
+| `--live-check` | passed: 462 sectors, 1206 adjoin rows, 7 doorways shut by 7 scripts |
+| `--live-play --start 01narshadda` | passed: input, jump and the level's scripts all act |
+| `--soak-all` | 35 levels, 0 non-finite, 0 outside, 0 failed |
+| `--cog-check` | 34 levels, 0 stubbed verb calls, 0 errors |
+| `--audit` | 35/35 levels clean, 10 unresolved asset references, 54 undecoded files |
