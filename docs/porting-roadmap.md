@@ -878,8 +878,9 @@ What still blocks Phase 4, in the roadmap's own order:
    shipped level starts one), the scope overlay, the ending screens, and the event-2/`0x200` producers. The particle
    arms, head/aim joints and `specialattack` are in. None of these is an exit criterion for the phases before it.
 4. **`walk5_spawn`** — **passes as of round 293** (83 % travel, 2 sector samples) after the floor sweep's plane
-   fallback was narrowed to the data-gap case; its remaining deviation is the walking height (z 0.422), which is the
-   floor-search-scope ledger row, not the trace gate.
+   fallback was narrowed to the data-gap case; its remaining deviation is its slower travel over the same 3 s (83 %), so
+   the port stops short of retail's sector-24 end point and its `z 0.422` is that end-position delta, not a standing height
+   (round 356 corrected the earlier floor-search-scope reading: at retail's own point the port's floor is 0.07 below).
 
 So: **no release candidate is warranted yet.** Phase 1 steps 2–5 and Phase 2's trace comparison need one deliberate QA
 window (the session this document already describes); Phase 3's breadth list is the post-window work order. Everything
@@ -1068,8 +1069,13 @@ searched, not read end to end, so this is a targeted review rather than a line-b
   descends onto the lower room's slab. The fix was narrowing the floor sweep's plane fallback: it now fires only
   when **no surface exists** under the body within `height * 1.1` (18Ascend's data gap), not when a real floor merely
   lies below this frame's drop — the wider rule held the body on sector 35's infinite plane and the leg never moved
-  a room. Remaining deviation, on the floor-search-scope ledger row: the port stands 0.422 above retail, i.e. the
-  walking height is still the old plateau. Next step there is the floor-surface choice, not the sector bookkeeping.
+  a room. Remaining deviation, **re-attributed at round 356**: the leg's `z 0.422` is the *end-position* delta, and it is
+  travel length, not standing height. Both sides walk the same direction (about 225 degrees; retail's `yaw` column is the
+  stale 135.01, the motion is not) and the port is simply slower over the same 3 s (3.09 vs 3.73 units, 1.03 vs 1.24
+  u/s, the gate's own acceleration ramp). At retail's own end point (7.19, 13.36, sector 24) `--floor-at` gives the port
+  `floor_under -> -0.0724` against retail's -0.00, i.e. **0.07**, not 0.42; the port never reaches sector 24 because it
+  covers less ground. So the floor-surface choice is not the row's cause and this leg's remaining deviation is the
+  walker's speed on loose floor, not the floor's scope.
 - **Spawn combat: mechanism recovered and ported (round 298).** The engine's sight is **probabilistic**, not a
   cone test: `sithAI_CanDetectSightThing` (`0x4ec140`) builds a chance from the gap (`base 0.5` unless the AI word
   carries `0x200`; a `(distance - 2) * 0.1` falloff capped at `0.6`; `x 0.75` / `x 0.5` for a player's crouch and a

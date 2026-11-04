@@ -4855,3 +4855,15 @@ round 356's tree — draw 5/0 (`spawn_pose` 0.6393), menu 0.9661, film 1.0000, s
 drove the level and its scripted jump, stopping the leap at the ceiling above the body as the key script intends. Both
 are skipped in the headless sweep (`BK_SKIP_WINDOW`), so the sweep's `0 of 67 failed, 2 skipped` is unchanged; the two
 rows are now measured rather than assumed for this round.
+
+**`walk5_spawn`'s `z 0.422` re-attributed: it is travel length, not the floor** (round 356). The ledger read the deviation
+as the body standing 0.422 above retail on a plateau, "the floor-search-scope row". The traces disagree. Both sides walk
+the same direction — retail's motion is about 225 degrees even though its `yaw` column reads a stale 135.01 — and the port
+covers 3.09 units against retail's 3.73 in the same 3 s (1.03 vs 1.24 u/s, which is the port's acceleration ramp on that
+floor). The port therefore stops short of retail's sector-24 point, and the `z` delta is the difference between where the
+two traces *end*, not where the body stands: `--floor-at "7.19,13.36,-0.0"` on `06abarons` gives `floor_under ->
+Some((-0.0724, 0.0074, 24))` against retail's -0.00, i.e. 0.07. The floor surface and the room search are not this row's
+cause; the leg's remaining gap is walking speed, and the trace gate still passes it at 83 %.
+
+Verified: `trace-gate.ps1 -Only walk5_spawn` PASS 3.09 / 3.73 units (83 %), sectors off 2, `xy 1.205 z 0.422`;
+`--floor-at` at both end points as quoted.
