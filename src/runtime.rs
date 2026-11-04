@@ -3652,8 +3652,13 @@ impl Runtime {
             // stricter than the level: level 6's first doorway has its floor under the neighbouring
             // room, so the sweep found nothing and the follower stopped on the threshold for ever.
             // The reach is unchanged (`height + maxstep`), so a ledge is still a ledge.
+            // Probe a hair above the point: a body whose origin sits a millimetre inside a floor
+            // (level 2's actor stands 0.0011 under it, and the walk keeps its own z) has no floor
+            // *below* it, so every step was refused and the actor never walked. The reach is
+            // unchanged, so this cannot turn a ledge into ground.
+            let lifted = [at[0], at[1], at[2] + 0.01];
             solids
-                .standable(sector, at, height + maxstep, radius)
+                .standable(sector, lifted, height + maxstep, radius)
                 .is_some()
                 || self.thing_floor(at, radius).is_some()
         };
@@ -4992,11 +4997,15 @@ impl Runtime {
                         && let Some(solids) = self.solids.as_deref()
                     {
                         self.ai_trace_source.insert(index, "blocked");
-                        let sector = solids.sector_at(next, 0.065);
-                        let floor = sector
-                            .and_then(|s| solids.sweep(s, next, [0.0, 0.0, -1.0], 3.0, 0.065, self.gates()));
+                        let r = 0.065;
+                        let h = self.things.get(index).map(|t| t.insert[2]).unwrap_or(0.0).max(r + 0.005);
+                        let m = self.ai.get(&index).map(|c| c.maxstep).unwrap_or(0.5).max(0.0);
+                        let sector = solids.sector_at(next, r);
+                        let lifted = [next[0], next[1], next[2] + 0.01];
+                        let stand = sector.and_then(|s| solids.standable(s, lifted, h + m, r));
                         eprintln!(
-                            "ai: {index} cannot step to {next:?}: sector {sector:?}, floor {floor:?}, from {:?}",
+                            "ai: {index} cannot step to {next:?}: sector {sector:?}, standable {stand:?} (reach {:.2}), from {:?}",
+                            h + m,
                             self.things.get(index).map(|t| t.pos)
                         );
                     }

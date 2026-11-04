@@ -5718,9 +5718,23 @@ fn main() {
                 assert!(rt.solids.as_ref().and_then(|s| s.route(a, a, rt.gates())).is_some());
                 // And the *tick* takes it: a follower told to walk to a thing it cannot see is the
                 // shipped case this exists for (`AISetMoveThing` for a sidekick who fell behind).
+                // Stand the bodies **on their sector's floor**, not on the sphere centre: level 2's
+                // sector-0 centre sits 1 mm *inside* its floor, where every floor search correctly
+                // refuses a body. The probe teleports; the game's spawn and walker place bodies on the
+                // surface.
                 let (a_pos, b_pos) = {
                     let solids = rt.solids.as_deref().expect("solids");
-                    (solids.spheres[a].0, solids.spheres[b].0)
+                    let on_floor = |sector: usize| {
+                        let at = solids.spheres[sector].0;
+                        let floor = solids
+                            .floor_under(sector, at, 1.0, 0.065)
+                            .map(|(f, _, _)| f)
+                            .unwrap_or(at[2]);
+                        // Only lift a centre that sits *inside* the floor: level 2's sector-0 centre is
+                        // 1 mm under it. Lowering a body onto a floor is not the probe's business.
+                        [at[0], at[1], at[2].max(floor)]
+                    };
+                    (on_floor(a), on_floor(b))
                 };
                 let saved = (
                     rt.things[actor].pos,

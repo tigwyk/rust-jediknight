@@ -4740,3 +4740,15 @@ named note; the four-level audit is clean.
 
 Verified: `cargo test --release` 260 passed; `--gates` 0 of 67 failed, 2 skipped; `--soak-all` 35/35 levels, 0 non-finite
 positions, 0 bodies outside every sector; the 43-probe audit clean on `02narshadda`, `03katarn`, `05test`, `06abarons`.
+
+**Level 2's route stall is the probe's arena, not a locomotion bug.** With the walk test fixed, `02narshadda` still could
+not drain a short walled pair, and `BK_AI_TRACE` named the reason: the follower stands on a **prop** and the next step has
+no floor at all — `standable None (reach 0.53)` at a point where `--floor-at` reports `plane floor Some(-3.3561)` with
+**0 candidate faces**. Sector 0's polygons do not cover its own sphere centre, so the pair is artificially unwalkable; a
+plain 10 s soak of the level traces no refused step from any placed actor (0 hits). Two tolerances came out of it anyway:
+the walk test now probes 1 cm above the step, so a body whose origin sits a millimetre inside a floor (level 2's actor
+stands 0.0011 under it and the walk keeps its own z) can still step, and the probe stands its teleported bodies on their
+sector's floor when the centre is under it.
+
+Verified: `cargo test --release` 260 passed; `--gates` 0 of 67 failed, 2 skipped; `--soak-all` 35/35 levels; 43 probes
+clean on `02narshadda`, `03katarn`, `05test`, `06abarons`.
