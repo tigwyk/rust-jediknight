@@ -4466,3 +4466,26 @@ gates: 0 of 67 failed, 0 skipped
 `--walk all` is unchanged (24/34 contained, six recorded walk-offs), `--soak-all` 35/35, `--ai` and `--ai-live`
 pass, and the suite is 248 tests. What is still missing on the row is `PlaySoundThing`'s noise event: it uses
 kind 0 with a volume times `_DAT_00522f80`, and that constant did not read out of this copy of `JK.EXE`.
+
+**The last two awareness gaps closed with the EXE's own numbers.** The `.rdata` constants were read through the
+PE section table this time (`RVA = VA - 0x400000`, then the section's raw pointer): `_DAT_005232a0` = 0.5 (the
+known value, used as the mapping check), `_DAT_0052329c` = 1/32768 (the rand normaliser), `_DAT_00522f80` =
+**0.6**, `_DAT_005232f4` = **-1000.0**, `_DAT_005232d4` = **180**, `_DAT_005232a4` = **90**, `_DAT_005232b4` =
+-45, `_DAT_005232c8` = 1.0.
+
+- **`PlaySoundThing`'s noise event** is in: a sound played on a thing raises kind 0 at `volume × 0.6` with the
+  thing as its source, which is how a shout or a hurt cry carries through the rooms.
+- **`hitandrun` accumulates firing time**: the handler's `state[8] -= _DAT_005232f4` adds 1000 ms per firing
+  tick and resets to zero on a tick that is not firing, so the break-off needs a *sustained* window. The port's
+  wall clock armed the run-away after a single shot; the test now proves continuous fire arms it and one shot
+  does not.
+
+`_DAT_005232d4`/`_DAT_005232a4` also say the withdraw's lateral jitter is ±90° (and ±45° when the attacker's
+thing flags carry `0x2000`), but the rotate call's argument order does not say which roll is the angle, so that
+half stays open rather than guessed.
+
+```
+test runtime::tests::an_actor_with_hitandrun_breaks_off_after_firing ... ok
+--- sound check passed ---
+gates: 0 of 67 failed, 0 skipped
+```

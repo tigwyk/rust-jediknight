@@ -725,6 +725,9 @@ pub const AI_AWARE_SHOT: f32 = 2.0;
 pub const AI_AWARE_KILL: f32 = 5.0;
 /// `sithExplosion_MakeBlast`'s strength (`0x40400000`), kind 1.
 pub const AI_AWARE_BLAST: f32 = 3.0;
+/// `sithSoundMixer_PlaySoundThing`'s scale (`_DAT_00522f80` = 0.6, `.rdata`): a sound's awareness
+/// strength is its volume times this.
+pub const AI_AWARE_SOUND_SCALE: f32 = 0.6;
 /// How long a record stays fresh. The engine's own fade is not recovered; the flat value keeps the
 /// old stand-in's window.
 pub const AI_AWARE_SECONDS: f32 = 8.0;
@@ -3383,6 +3386,19 @@ impl Runtime {
     /// volume is the sound's base, and `play_requested_sounds` still owns the fade and the rear pan.
     fn queue_mode_sound_at(&mut self, index: usize, mode: &str, at: [f32; 3], volume: f32) {
         let Some(wav) = self.chatter_wav(index, mode) else { return };
+        // `sithSoundMixer_PlaySoundThing` (`0x4dba60`) ends with
+        // `CreateTransmittingEvent(sector, pos, 0, volume * _DAT_00522f80, thing)`: a sound played on a
+        // thing is a **kind-0** awareness event at `volume * 0.6` (the constant read out of the EXE's
+        // `.rdata`). That is how a shout or a hurt cry carries through a room.
+        if let Some(sector) = self.things.get(index).map(|t| t.sector) {
+            self.transmit_awareness(
+                sector,
+                0,
+                at,
+                (volume * AI_AWARE_SOUND_SCALE).max(0.0),
+                Some(index),
+            );
+        }
         let channel = self.sound_volume.len();
         self.sound_volume.push(volume);
         self.sound_pitch.push(1.0);
@@ -4473,27 +4489,30 @@ impl Runtime {
                 }
             }
             // `hitandrun` (`0x50bb90`): fire at the target for the instinct's first argument, then break
-            // off for its second and come back. The engine watches its just-fired flag; the port watches
-            // `last_shot` and arms the same withdraw mode `retreat` uses, so the run-away and the return
-            // are the walk that is already there. Shipped: `1000, 3000` (and `10000, 1500`).
+            // off for its second and come back. The engine accumulates **firing time**, not wall time:
+            // on every call where the just-fired bit (`0x400`) is set it does
+            // `state[8] = state[8] - _DAT_005232f4` — that constant is **-1000.0** (read out of the
+            // `.rdata`), so each firing tick adds a second — and breaks off when `first number <
+            // state[8]`; on a tick without the bit it resets the accumulator to zero. A body that fires
+            // once and then stops never accumulates at all, which a wall clock got wrong.
             if !self.ai_withdraw.contains_key(&index)
                 && let Some(run) = ai.as_ref().and_then(|class| class.instinct("HitAndRun")).cloned()
             {
                 let hold = run.weight.max(1.0) / 1000.0;
                 let break_off = run.args.first().copied().unwrap_or(3000.0).max(1.0) as f32 / 1000.0;
-                if !sighted {
-                    self.ai_hitrun.remove(&index);
-                } else {
-                    let fired = self
+                let fired = sighted
+                    && self
                         .last_shot
                         .get(&index)
                         .is_some_and(|at| self.time - at < 0.5);
-                    if fired && !self.ai_hitrun.contains_key(&index) {
-                        self.ai_hitrun.insert(index, self.time);
-                    }
-                    if let Some(start) = self.ai_hitrun.get(&index).copied()
-                        && self.time - start >= hold
-                    {
+                if !fired {
+                    // The handler's own `state[8] = 0` on a tick that is not firing.
+                    self.ai_hitrun.remove(&index);
+                } else {
+                    // Firing **seconds**, the engine's "one second per 1000 ms call" measured as time.
+                    let acc = self.ai_hitrun.entry(index).or_insert(0.0);
+                    *acc += dt;
+                    if *acc >= hold {
                         self.ai_withdraw.insert(index, (player, Some(self.time + break_off)));
                         self.ai_hitrun.remove(&index);
                     }
@@ -10310,16 +10329,49 @@ mod tests {
                  Follow 0.0, 0.5\n",
             ),
         );
-        // A shot has just left the barrel: this is what `PrimaryFire` sets and what the handler reads.
-        rt.last_shot.insert(1, 0.0);
-
+        // It is firing: `last_shot` is what `PrimaryFire` sets and what the handler reads, and it is
+        // refreshed each frame of the window.
         for _ in 0..40 {
             rt.time += 1.0 / 30.0;
+            rt.last_shot.insert(1, rt.time);
             rt.ai_tick(0, 1.0 / 30.0);
         }
         assert!(
             rt.ai_withdraw.contains_key(&1),
-            "an actor with `HitAndRun` did not break off after its firing window"
+            "an actor firing through its window did not break off"
+        );
+
+        // One shot and then silence is **not** a firing window: the engine's accumulator resets on
+        // every call without the just-fired bit, and only the ticks that are firing add a second. The
+        // old wall-clock model broke off after `hold` seconds regardless of whether the actor fired.
+        let mut once = door_runtime();
+        let base = once.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [1.5, 0.0, 0.0];
+        once.things = vec![player, actor];
+        once.templates = vec!["walkplayer".into(), "tuskan".into()];
+        once.types = vec![10, 2];
+        once.template_speed.insert("tuskan".into(), 1.0);
+        once.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 HitAndRun 1000.0, 3000.0\n\
+                 Follow 0.0, 0.5\n",
+            ),
+        );
+        // No `PrimaryFire` in the class, so nothing refreshes the shot: one shot at t = 0.
+        once.last_shot.insert(1, 0.0);
+        for _ in 0..40 {
+            once.time += 1.0 / 30.0;
+            once.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            !once.ai_withdraw.contains_key(&1),
+            "a single shot armed the break-off: firing time must accumulate, not wall time"
         );
 
         // A control class without the instinct never arms the mode, even after the same shots.
