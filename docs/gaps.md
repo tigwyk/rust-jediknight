@@ -119,7 +119,7 @@ resumes them, `--sleep`).
 
 | where | the shortcut | the ceiling |
 | --- | --- | --- |
-| `main.rs` | model back-face culling (`cull_mode: Back`) plus the `.3do` face flag word's bit 0 as the two-sided bit: a two-sided face is emitted with both windings (121 shipped models carry them, 3,508 faces; `rdModel3_DrawMesh` keeps a back-facing face when `(flags & 1) != 0` and negates its normal, and the model material is unlit, so the reversed winding is the whole of it) | per-face `.mat` two-sided **modes** (the `.mat` texinfo flags) are still not read; the `.3do` face flag is |
+| `main.rs` | model back-face culling (`cull_mode: Back`) plus the `.3do` face flag word's bit 0 as the two-sided bit: a two-sided face is emitted with both windings (121 shipped models carry them, 3,508 faces; `rdModel3_DrawMesh` keeps a back-facing face when `(flags & 1) != 0` and negates its normal, and the model material is unlit, so the reversed winding is the whole of it) | the `.3do` face flag is the only two-sided input: `rdModel3_DrawMesh` tests `face->flags & 1` and nothing else, so the `.mat` carries no two-sided per-face mode for this build to read |
 | `main.rs` | a changed animation frame rebuilds the mesh asset | a 60 fps puppet rebuilds its mesh sixty times a second |
 | `main.rs` | the cancel-row test is a unit test, not data | parsing `hoverId` would make it real data |
 | `collide.rs` | the sweep's depth limit and "already searched" rule | a chain of more than 24 adjoins in a line reports no hit; no shipped level has one |
