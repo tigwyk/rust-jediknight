@@ -638,6 +638,8 @@ fn main() {
     let mut ui_out: Option<(String, String)> = None;
     let mut force_found: Vec<i32> = Vec::new();
     let mut map_check = false;
+    let mut map_pitch = 0.0f32;
+    let mut map_yaw = 0.0f32;
     let mut cmp_check: Option<String> = None;
     let mut ui_tables = false;
     let mut ui_audit = false;
@@ -1204,6 +1206,21 @@ fn main() {
                 if let Some(out) = args.get(i).cloned() {
                     ui_out = Some(("fieldlog".to_string(), out));
                     map_check = true;
+                }
+            }
+            // `--map-orbit <pitch>,<yaw>`: the map panel's euler, in degrees, the way the arrows
+            // step it (5 a press, pitch clamped to +/-90 — `0x5565a0`). The camera is the engine's;
+            // this is how the orbit gets looked at before the arrow elements are wired.
+            "--map-orbit" => {
+                i += 1;
+                if let Some(pair) = args.get(i) {
+                    let mut it = pair.split(',');
+                    if let Some(pitch) = it.next().and_then(|v| v.trim().parse::<f32>().ok()) {
+                        map_pitch = pitch;
+                    }
+                    if let Some(yaw) = it.next().and_then(|v| v.trim().parse::<f32>().ok()) {
+                        map_yaw = yaw;
+                    }
                 }
             }
             // `--force-found 29,33`: which force bins the player carries, for the panel.
@@ -1867,7 +1884,7 @@ fn main() {
             }
         }
         // The panel's own view starts at the engine's zero orbit (see `live_map_for`).
-        let map = map_level.as_ref().map(|(level, pos, _yaw)| (level, *pos, 0.0));
+        let map = map_level.as_ref().map(|(level, pos, _yaw)| (level, *pos, map_yaw));
         let look = ui::Look { fonts: &fonts, art: &art, checkbox, palette: &palette, stars, text: &none, map, load_percent, ..ui::Look::default() };
         // The canvas is the UI's authored size, not the artwork's: a dialog's panel is
         // smaller than the screen it sits on.
@@ -1976,7 +1993,11 @@ fn main() {
                     [40, 40, 520, 320],
                     level,
                     [pos[0], pos[1], pos[2]],
-                    ui::MapCamera { yaw: *yaw, ..ui::MapCamera::default() },
+                    ui::MapCamera {
+                        pitch: map_pitch,
+                        yaw: if map_yaw == 0.0 { *yaw } else { map_yaw },
+                        ..ui::MapCamera::default()
+                    },
                     &ui::palette_of(&base, &palette),
                     look.map_ink,
                 );

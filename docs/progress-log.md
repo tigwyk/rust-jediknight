@@ -4271,3 +4271,15 @@ cargo test: 245 passed, 0 failed
 
 The dead `radius` parameter went with it: the perspective camera made the radius cull obsolete and the
 panel's far plane is the engine's 10 units.
+
+## Round 336: the map's orbit driven headlessly, and the arrow ids read off the handlers
+
+`--map-orbit <pitch>,<yaw>` sets the panel's euler, so the projection can be exercised at any angle
+without a window: level 1 at `-40,30` draws 16 968 in-panel pixels (1 776 edges, 2 104 facing-culled,
+999 seams) against the default pose's 11 765, and the PNG reads as the cantina from above and behind.
+
+The arrow handlers' two switches give the whole wiring as a table: ids **`0x9a`..`0x9d`** are yaw +5,
+yaw -5, pitch -5 (skipped at -90) and pitch +5 (skipped at +90); ids **`0x66`..`0x69`** are the D-pad's
+`rdMatrix_PostTranslate34(&0x5565b0, ...)` with `(0.1,0,0)`, `(-0.1,0,0)`, `(0,0,-0.1)`, `(0,0,0.1)`.
+The button elements themselves are on the field-log screen (`jkGuiMap_aElements`), so the last step is
+`activate`'s special case beside the force screen's.
