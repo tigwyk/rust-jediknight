@@ -736,7 +736,7 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 
 | check | command | measured round 292 |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --bins --release` | **238 passed**, 0 failed (round 322) |
+| unit + integration suite | `cargo test --bins --release` | **241 passed**, 0 failed (round 324) |
 | port gates | `bevi-knight --gates` | **0 of 66 failed, 0 skipped** |
 | every level's walk | `bevi-knight --walk all` | **24/34 contained**, 25 hull-agreeing, 46 crossings, **6 recorded walk-offs** (`02narshadda`, `07yun`, `09fuelstation`, `11gorc`, `17asarris`, `m_boss17`), no other body in the void; the sweep now runs the level's **gravity** (round 322) |
 | walk trace | `pwsh -File tools/parity/trace-gate.ps1` | **10 legs, 0 failures** — `walk17_spawn` 117 % / sectors off 0, `walk5_spawn` 83 % / sectors off 2, `walk6_spawn` 94 % / sectors off 2; `walk3_spawn` stays out of the set at 209 % (the floor slide) |
