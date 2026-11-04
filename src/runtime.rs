@@ -8116,9 +8116,13 @@ impl Runtime {
                 let mode = idx(1) as u32;
                 *self.actor_flags.entry(actor).or_insert(0) |= mode;
                 // `aisetmode(enemy, 0x200)` is how `00_aisleep.cog` wakes an actor; the same write
-                // puts a script-disabled actor back into the AI (`sithCogFunctionAI.c`).
+                // puts a script-disabled actor back into the AI (`sithCogFunctionAI.c`). The bit is
+                // the engine's *engaged* word (`sithAI_CheckSightThing` writes the same `0x200`), so a
+                // script that starts an enemy engaged must latch the target for it. Four sites in the
+                // 215 shipped cogs use it (`0x202`: `00_aipatrol` x2, `00_aisleep`; `0x200`: `00_aisleep`).
                 if mode & 0x200 != 0 {
                     self.ai_cleared.remove(&actor);
+                    self.ai_detected.insert(actor);
                 }
                 Value::Nil
             }
@@ -10700,6 +10704,45 @@ mod tests {
         assert!(
             rt.shots_fired > 0,
             "the actor did not come back after its mode was cleared"
+        );
+    }
+
+    /// `aisetmode(actor, 0x200)` is the shipped way to place an actor "engaged" (839 call sites in the
+    /// 215 cogs: 209 `0x200`, 630 `0x202`). The bit is the same word `sithAI_CheckSightThing` writes,
+    /// so it must latch the target — otherwise a script-started enemy stands until it rolls sight.
+    #[test]
+    fn a_script_engaging_an_actor_latches_the_target() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        let mut player = base.clone();
+        player.pos = [1.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.template_weapon.insert("tuskan".into(), "blaster".into());
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 PrimaryFire 100.0, 0.0, 5.0, 0.0, 0.0, 500.0, 0.0, 0.0, 1.0, 0.0\n\
+                 Follow 0.0, 0.5\n",
+            ),
+        );
+        assert!(!rt.ai_detected.contains(&1), "the actor was engaged before the script said so");
+        rt.call("aisetmode", &[Value::Num(1.0), Value::Num(0x200 as f64)]);
+        assert_eq!(rt.actor_flags.get(&1).copied(), Some(0x200));
+        assert!(rt.ai_detected.contains(&1), "aisetmode(0x200) did not engage the actor");
+        for _ in 0..30 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            rt.shots_fired > 0,
+            "a script-engaged actor did not fire at a target in sight"
         );
     }
 

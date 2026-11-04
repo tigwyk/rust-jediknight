@@ -4568,3 +4568,18 @@ aspect 1, near 0.2, far 10, eye 2 behind and 0.3 above the body), the near-plane
 `sithMap_IsSurfaceDrawable`'s 0.98 coplanar-seam rule, with `MapCamera::arrow` stepping yaw/pitch and panning. What
 *is* open is narrower and recorded: the click handler `0x415b60` is not in the decomp set, so ids 100/101 have no
 assigned action (102..105 coincide with the port's pan ids).
+
+**`aisetmode(x, 0x200)` now latches the target.** The bit is the engine's *engaged* word — the same one
+`sithAI_CheckSightThing` writes (`(flags & 0xfffffffb) | 0x232`) — and the shipped cogs use it to place an actor
+"enemy" without waiting for a sight roll (`00_aipatrol` x2 and `00_aisleep` set `0x202`; `00_aisleep` also sets bare
+`0x200`). The verb arm wrote `actor_flags` and cleared the port's switched-off set but never touched `ai_detected`, so a
+script-engaged actor stood until it rolled sight. `Runtime::setactorflags|aisetmode` now inserts the actor into
+`ai_detected` on that bit; the suite grows to 252 tests (`a_script_engaging_an_actor_latches_the_target`), `--gates` reads
+0 of 67 failed (2 skipped) and `--soak-all` 35 of 35 levels with 0 non-finite positions and 0 bodies outside every sector.
+
+**Also transcribed, for the record:** `sithAI_InstinctUpdate` (`0x4e9e90`) runs each registered instinct by
+`(mask & ai.flags) != 0 && (mode & ai.flags) == 0`, calls its handler no more than once a second (`next_call = now +
+1000`), and when a handler both returns non-zero and changes the flag word it emits event `0x100` with the new word and
+restarts the whole loop. The port's per-instinct state gates implement the same conditions in its own terms; the
+`0x100` emission has no consumer in any handler. And `FUN_0050b9b0` (`sensedanger`) confirms the port's polarity: it
+gates on `0x800` clear **and `0x4` set**, then writes `(flags & !4) | 0x800`.
