@@ -55,21 +55,24 @@ pub struct Decoded {
     pub first_ink: Option<usize>,
 }
 
-/// Decode `frames` frames of `file` through `dll`, starting at `start`, using the 32-bit helper.
-pub fn decode(
-    dll: &Path,
-    file: &Path,
-    frames: usize,
-    start: usize,
-    out_prefix: &Path,
-) -> Option<Decoded> {
+/// Decode `frames` frames of `file` through `dll`, using the 32-bit helper.
+///
+/// There is no start frame: the helper's `SmackGoto` reports success but the decoder then repeats
+/// one buffer for every frame (measured on `01-02A.SMK`: a run from frame 100 wrote 20 identical
+/// frames), so a seek buys a wrong picture rather than a short decode. Everything decodes from 0.
+pub fn decode(dll: &Path, file: &Path, frames: usize, out_prefix: &Path) -> Option<Decoded> {
     let shim = shim_path()?;
+    // `smkdec <dll> <file> <prefix> <frames> <flags> <extra> <start>`: JK.EXE's own arguments
+    // (`FUN_00426730`: flags 0xfe000, `SmackAUTOEXTRA` = -1). Passing fewer arguments used to put
+    // the frame count into the flags slot, so every decode opened the film with flags 0.
     let output = std::process::Command::new(&shim)
         .arg(dll)
         .arg(file)
         .arg(out_prefix)
         .arg(frames.to_string())
-        .arg(start.to_string())
+        .arg("0xfe000")
+        .arg("-1")
+        .arg("0")
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&output.stdout);

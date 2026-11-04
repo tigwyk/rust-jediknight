@@ -45,6 +45,7 @@ use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowResolution};
 use bevy::camera::visibility::RenderLayers;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
 use std::collections::HashMap;
@@ -2556,7 +2557,7 @@ fn main() {
         assert!(dll.exists(), "{} is not in the install", dll.display());
         assert!(file.exists(), "{} is not in the install", file.display());
         let prefix = std::env::temp_dir().join("bk-smk-frame");
-        let decoded = match smack::decode(&dll, &file, 40, 0, &prefix) {
+        let decoded = match smack::decode(&dll, &file, 40, &prefix) {
             Some(decoded) => decoded,
             None => {
                 println!(
@@ -13173,6 +13174,12 @@ fn setup_overlay(
         // A camera that sees only layer 1: the world camera keeps layer 0, so the UI is
         // never depth-tested against the scene and never clipped by it. Order 3, so the screen
         // effects below draw under the HUD rather than over it.
+        //
+        // `Tonemapping::None`: the HUD, menus and cutscenes are the install's own 8-bit palette
+        // art, so their bytes must reach the window unchanged. Bevy's default display transform
+        // (TonyMcMapface) shifted them - the opening film's crawl text came out (30,94,215) where
+        // the film's palette and retail both say (0,89,255) - and no engine path tone-maps a
+        // palettised screen.
         parent.spawn((
             Camera3d::default(),
             Camera {
@@ -13180,6 +13187,7 @@ fn setup_overlay(
                 clear_color: ClearColorConfig::None,
                 ..default()
             },
+            Tonemapping::None,
             RenderLayers::layer(1),
             OverlayQuad,
         ));

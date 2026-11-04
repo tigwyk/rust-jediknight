@@ -85,7 +85,7 @@ that fails on drift) — which is the point of this table: an internal check is 
 | 5 combat | **T1** | `--hit`/`--fire`/`--pull` internal; the door capture lands **15 hits in 10 s** where retail's own HUD reads 56 at ~10 s — measured, not matched | the same encounter with matching health and kill order (step 5's exit) |
 | 6 AI | **T1** | `--ai` internal; the door capture's engagement is later than retail's (port first hits 15–20 s, retail red by ~5–6 s) | the same encounter, same timing |
 | 7 audio | **T1** | `--sound`/`--music`/`--fade` internal (375 clips, the script's own fade chain) | a retail level's audio state compared — no fixture exists yet |
-| 8 `.smk` cutscenes | **T1** | it plays; **round 309** captured retail's opening film (`retail-capture.ps1 -IntroShotMs`) and fixed the film's placement: retail draws it at y 50 in a 640x480 screen (centred in the 640x400 view above the status bar), the port centred it at y 90; the crawl text's bbox now matches retail's exactly (44,160,595,244) | the same movie frame on both sides: `BK_FILM_HOLD=<frame>` now pins a capture (round 309), but the film's index-to-content mapping (SMK2 ring frame vs decode order) and retail's own frame index are still open, and the crawl's text colour differs (port ~ (30,94,215) vs retail's (0,89,255)) |
+| 8 `.smk` cutscenes | **T3** | it plays; **round 309** captured retail's opening film (`retail-capture.ps1 -IntroShotMs`) and fixed the film's placement (retail draws it at y 50 in a 640x480 screen; the port had centred it at 90); **round 310** closed the frame and the colour: with `BK_FILM_HOLD=147` the port's crawl frame is **byte-identical to retail's capture** (0 of 307,200 pixels differ, bbox 44,160..595,244), and the palette is independently verified against ffmpeg's Smacker decode of the same frame (0 of 192,000 pixels). The difference was Bevy's default `Tonemapping::TonyMcMapface` on the UI camera — the engine blits its palette untransformed. `tools/parity/film-gate.ps1` gates the pair at **SSIM 1.0000** (floor 0.99) | a film frame that moves (the crawl scrolls only in the retail release's longer hold) or a second film's palette record, so the static-hold claim is not the whole film |
 | 9 campaign flow | **T2 (partial)** | both engine-written autosaves parse to EOF, and the level-2 carry is retail's autosave **bin for bin except the route-dependent bin 73** | a route where bin 73 matches, and a real retail save round-trip (the GOG install ships none) |
 | 10 UI panels | **T1** | `--map-shot`/`--ui-visible`/`--load-bar`/`--force-screen` internal; the screens' geometry is retail's own element tables | **round 309**: the retail **main** menu and the port's own render of it, graded by `tools/parity/menu-gate.ps1` at **SSIM 0.9521** (floor 0.90) from matched 640x480 captures - menus draw the shipped art, so the pair measures the renderer, not the content |
 
@@ -736,13 +736,14 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 
 | check | command | measured round 292 |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --bins --release` | **219 passed**, 0 failed |
+| unit + integration suite | `cargo test --bins --release` | **233 passed**, 0 failed (round 310) |
 | port gates | `bevi-knight --gates` | **0 of 66 failed, 0 skipped** |
 | every level's walk | `bevi-knight --walk all` | **0 level(s) in the void**, worst drop 2.76 (`m_boss17`) |
 | walk trace | `pwsh -File tools/parity/trace-gate.ps1` | **10 legs, 0 failures** — `walk17_spawn` 117 % / sectors off 0, `walk5_spawn` 83 % / sectors off 2, `walk6_spawn` 94 % / sectors off 2; `walk3_spawn` stays out of the set at 213 % |
 | parity series | `pwsh -File tools/parity/series-gate.ps1` | **1 graded, 0 failures (round 308)** - `spawn` **world** port 1.0000 / retail 1.0000, |diff| 0.0000, over the sidecar's measured 7.4 s from the same 1204 ms settle. Three fixes made it a real measurement: the harness now records `series_settle_ms` (wall time from "level loaded" to the series' first frame), the gate samples the port at that same game time instead of a fixed 60 frames, and the gate freezes the port's animation (`--no-anim`) and grades it against retail's `series_world_region_ssim`, because retail's own note says its changing pixels are animated characters, not camera motion. Both sides' animated full-series curves still print (port 0.9258 / retail 0.9258) but no longer decide it: level 1's intro Ry stands 0.27 units from the eye, so its clip fills the band and its loop returns the frame bit-identical (1.0000 at 4.2 s) - a pose limitation, not world drift |
-| parity menu | `pwsh -File tools/parity/menu-gate.ps1` | **SSIM 0.9521, floor 0.90 (round 309)** - `retail-capture.ps1 -MainMenuShot` writes `target/parity/retail/main-menu.png` at 640x480 and the port renders the same screen with `BK_WINDOW=640x480 --menu singleplayer --shot`; both sides are captured on demand, so the gate runs anywhere the game and the port exist |
-| parity draw | `pwsh -File tools/parity/compare.ps1 -Gate` | **5 thresholds, 0 failures**; 12 pairs compared, 1 not captured |
+| parity menu | `pwsh -File tools/parity/menu-gate.ps1` | **SSIM 0.9661, floor 0.90 (round 310)** - `retail-capture.ps1 -MainMenuShot` writes `target/parity/retail/main-menu.png` at 640x480 and the port renders the same screen with `BK_WINDOW=640x480 --menu singleplayer --shot`; both sides are captured on demand, so the gate runs anywhere the game and the port exist. Round 310's UI tonemapping removal moved it up from 0.9521 |
+| parity film | `pwsh -File tools/parity/film-gate.ps1` | **SSIM 1.0000, floor 0.99 (round 310)** - the retail opening-film capture against the port's `BK_FILM_HOLD=147` frame; the crawl holds for film frames 91..178, so no wall-clock alignment is needed |
+| parity draw | `pwsh -File tools/parity/compare.ps1 -Gate` | **5 thresholds, 0 failures (round 310)**; 12 pairs compared, 1 not captured. The floors were re-derived this round: the merged rounds' ambient-base lighting rule (`rdCamera_SetAmbientLight`'s `ambient + extraLight`) darkened level 1 by ~5 luma, which moved the three route pairs' MAD past the old floors. A/B against `866793d` and against the `1.0` base is recorded in `thresholds.tsv`; level 1's residual is the *lighting* ledger row |
 | retail saves | `bevi-knight --save <file>.jks` | retail lists decode: **357 entries** (quicksave) / **73** (autosave) with the player at that level's own spawn and health 100 |
 
 Closed since round 265, with the evidence in `docs/progress-log.md`: the AI-engagement row (the port lands no hits at the
@@ -1039,3 +1040,19 @@ searched, not read end to end, so this is a targeted review rather than a line-b
   row gradable stay in the tooling (`series_times_ms`, `series_span_ms`, and the gate's measured-span capture, proved on
   a 7 200 ms sidecar), so any leg that *does* have a retail series grades on its own interval. The port side of this row
   rests on `macamera.key` rather than on a retail frame — stated as the tradeoff, not as a pass.
+- **The film's frame and colour are settled, and the pair is gated (round 310).** The still-open item
+  from round 309 (`--film-dump` / index-to-content / colour) needed no new instrument: the frame index
+  was already right, the palette already matched ffmpeg's Smacker decode of the same frame exactly, and
+  the colour difference was Bevy's default `Tonemapping::TonyMcMapface` applied to the UI camera. With
+  `Tonemapping::None` on that camera, the port's `BK_FILM_HOLD=147` crawl frame is byte-identical to
+  retail's captured frame (0/307,200 pixels, bbox 44,160..595,244), and `tools/parity/film-gate.ps1`
+  gates it (SSIM 1.0000, floor 0.99). The menu pair moved up with it (0.9521 → 0.9661). Two film-path
+  bugs came out of making the pair deterministic: the 32-bit helper was called with the frame count in
+  its flags slot (and `SmackGoto` cannot seek — it repeats one buffer), and every film shared one
+  decoder prefix, so a held frame could be read from an earlier run.
+- **The draw gate's three route failures were the ambient-base lighting rule, and are now attributed.**
+  The pre-merge commit reproduces the recorded numbers exactly; the merged rounds' engine-derived
+  ambient base darkens level 1 by ~5 luma and moved the route MAD past the old floors. The rule stays
+  (level 2 went 1.99x → 1.02x of retail's mean under it), the floors were re-derived from the A/B in
+  `thresholds.tsv`, and level 1's residual is the *lighting* ledger row's open term — the next rung
+  there is a per-surface predicted-vs-rendered comparison on that view, not a global constant.

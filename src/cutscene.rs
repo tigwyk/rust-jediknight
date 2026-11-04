@@ -63,14 +63,28 @@ impl Cutscene {
             return None;
         }
         let total = layout.count;
-        let prefix = std::env::temp_dir().join("bk-cutscene");
-        // One helper run for the whole film; it writes frames in order as it decodes them.
+        // A prefix per load, not one shared name. The frames are read by index while the helper
+        // writes them, so a name left behind by a killed run (or by an earlier, longer film in the
+        // same process) can be read as this film's frame: `BK_FILM_HOLD` then pins the wrong
+        // picture, and nothing on disk says so. The counter keeps two loads in one process apart;
+        // the process id keeps two runs apart.
+        static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let prefix = std::env::temp_dir().join(format!("bk-cutscene-{}-{run}", std::process::id()));
+        // One helper run for the whole film; it writes frames in order as it decodes them. The
+        // arguments are the helper's own: `smkdec <dll> <file> <prefix> <frames> <flags> <extra>
+        // <start>`, with JK.EXE's flags (`FUN_00426730`: 0xfe000, `SmackAUTOEXTRA` = -1) and no
+        // seek. A start frame is not usable: `SmackGoto` reports success but `SmackDoFrame` then
+        // returns the same buffer for every frame after it (measured on `01-02A.SMK`, frames
+        // 100..119 all identical), so playback always decodes from the film's first frame.
         let shim = smack::shim_path()?;
         let spawned = std::process::Command::new(shim)
             .arg(dll)
             .arg(file)
             .arg(&prefix)
             .arg(total.to_string())
+            .arg("0xfe000")
+            .arg("-1")
             .arg("0")
             .stdout(std::process::Stdio::null())
             .spawn();
@@ -179,11 +193,12 @@ impl Cutscene {
         &self.last
     }
 
-    /// Remove the decoded frames from disk.
+    /// Remove the decoded frames and the helper's metadata from disk.
     pub fn clean_up(&self) {
         for index in 0..self.total {
             let _ = std::fs::remove_file(self.frame_path(index));
         }
+        let _ = std::fs::remove_file(format!("{}meta.txt", self.prefix.display()));
     }
 }
 

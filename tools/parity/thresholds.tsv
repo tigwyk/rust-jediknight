@@ -37,12 +37,22 @@
 # draw), and the world-band score confirms the residual is content, not the HUD: the two rows move
 # by only +0.04 when the HUD band is removed, because retail's reference is a *saturated* tint at
 # ~10 s while the port's capture is still at a different point in the fight (AI engagement, step 5).
+# Round 310 re-derived the five floors after the lighting base landed in the merged rounds
+# (297: a world vertex is lit by the sector's own `AMBIENT LIGHT + EXTRA LIGHT`, the value
+# `rdCamera_SetAmbientLight` is handed, not by `1.0 + deltas`). The engine-derived rule darkened
+# level 1 — measured A/B on `route_cantina` with everything else equal: SSIM 0.7381 / MAD 25.2
+# with the old `1.0` base, 0.7051 / 28.8 with the engine's ambient base, against retail's brighter
+# frame (mean luma 78.6 vs the port's 55.6). Level 2 moved the other way (1.99x -> 1.02x of
+# retail's mean), which is why the rule stays; level 1's remaining deficit is the *lighting*
+# ledger row's open term (the missing room/sky light, not a constant). The floors below therefore
+# sit ~0.05 SSIM under the measured pairs and 1.5-2.0 MAD over them, as before, and a renderer
+# regression is still caught: the same A/B moved every row by 0.02-0.03 SSIM.
 name	min_ssim	max_mean_abs_diff
 # `spawn` is not scored here: the room is full of NPCs, and a single frame of two ~10 s simulations measures
 # *which* patron is where (phase), not fidelity. It is gated by `tools/parity/series-gate.ps1` instead, which
 # compares the port's scene change over retail's own 7 s series span: port 0.9256 vs retail 0.9238.
-spawn_pose	0.61	26.0
-spawn_yaw30	0.56	27.0
-route_cantina	0.69	27.0
-route_lower	0.67	20.0
-route_street	0.68	23.0
+spawn_pose	0.59	26.5
+spawn_yaw30	0.57	27.0
+route_cantina	0.66	30.0
+route_lower	0.64	24.0
+route_street	0.66	25.0

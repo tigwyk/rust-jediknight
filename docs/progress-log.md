@@ -3667,3 +3667,55 @@ by `Layout` (`count = frames + ring`), and the helper writes frames in decode or
 and the chunk index may be one apart. Retail's capture frame is unknown too (its clock starts at
 launch, before the console click the harness uses). The next instrument is a `--film-dump <frame>` that
 writes the coloured frame straight out, so alignment can be done on content alone.
+
+### Round 310: the UI is presented, not tone-mapped — the opening film is now byte-identical
+
+**The film's colour was the display transform, not the palette.** Round 309 compared a port capture
+of the crawl (`(30,94,215)` text on a `(1,1,1)` background) with retail's `(0,89,255)` on pure black
+and left the frame index as the suspect. The index is fine: decoding `01-02A.SMK` through
+`SMACKW32.DLL` and colouring with the file's own palette records reproduces **ffmpeg's** Smacker
+decode of the same frame with **0 of 192,000 pixels** differing, so `smk::palette_at` is right.
+What shifted the picture was Bevy: the overlay camera (`Camera3d::default()`, order 3) carries the
+default `Tonemapping::TonyMcMapface`, and it was applied to the HUD, the menus and the film — the
+install's own 8-bit palette art — after upload. `sithRender` has no display transform; it blits the
+game's palette.
+
+**Fix:** `Tonemapping::None` on the UI camera. Measured on the crawl hold (`BK_FILM_HOLD=150`,
+`--cutscene 01-02A.SMK 0 --shot`, `BK_WINDOW=640x480`): the port's frame is **byte-identical to
+retail's captured frame**, 0 of 307,200 pixels differing, same text bbox (44,160 .. 595,244). The
+menu pair moved with it: `menu-gate.ps1` **0.9521 -> 0.9661** (floor 0.90). The world camera keeps
+its tonemap; only the UI layer changed, and an A/B on the gated level-1 pairs moved their SSIM by
+0.0004 — the change is confined to the UI layer.
+
+**New gate.** `tools/parity/film-gate.ps1` captures the film frame on demand and scores it against
+retail's opening-film capture: **SSIM 1.0000, floor 0.99**. The crawl is static for film frames
+91..178, so the gate pins 147 and no wall-clock alignment is needed.
+
+**Three film-path bugs found while making the pair deterministic:**
+- `smack::decode` passed the frame count into the helper's *flags* slot (its `start` argument became
+  `SmackOpen`'s flags), so every decode opened the film with flags `0` and never sought. Both call
+  sites now pass JK.EXE's own `0xfe000` / `SmackAUTOEXTRA (-1)` / start `0` explicitly.
+- `--film-dump`'s intended seek half (`SmackGoto`) is **not usable**: from frame 100 it reports
+  success and then writes 20 identical frames, and from 140 the same frame-0 blank. Playback always
+  decodes from 0; the `start` parameter is gone from `smack::decode`, with the measurement in its
+  doc comment.
+- Every `Cutscene` wrote frames to one `bk-cutscene` prefix, and a hold reads `frame_path(N)` as
+  soon as it exists — a frame left by an earlier, longer film (or a killed run) is read as this
+  film's. Each load now gets `bk-cutscene-<pid>-<run>` and `clean_up` also removes the helper's
+  `meta.txt`.
+
+**The draw gate's three failures are the lighting rule, measured.** After the merge, `compare.ps1
+-Gate` fails `route_cantina`/`route_lower`/`route_street` on **MAD** (SSIM passes all five). A/B on
+the same references: the pre-merge commit `866793d` reproduces the recorded numbers exactly —
+0.7394 / 0.7170 / 0.7335 for the three routes, 0.6607 spawn_pose, MAD 25.0 / 17.8 / 20.4 / 23.0 —
+while HEAD measures 0.7055 / 0.6852 / 0.7146 and 0.6398, MAD 28.6 / 22.0 / 23.1 / 24.6. Reverting
+**only** round 297's ambient base (`SurfaceLook::light`'s `base = ambient`) restored `route_cantina`
+to **0.7381 / 25.2**, so the engine-derived rule is the whole movement: level 1 got darker (mean luma
+55.6 against retail's 78.6) while level 2's pair moved from 1.99x to 1.02x of retail's mean. The
+rule is right (`rdCamera_SetAmbientLight` takes `ambient + extraLight`), so it stays, and the floors
+are re-derived from the measurement (~0.05 SSIM under, 1.5-2 MAD over) with the A/B written into
+`thresholds.tsv`; level 1's remaining deficit is the *lighting* ledger row's open term, not a
+constant.
+
+Checks with the change: **233 tests**, `film-gate` 1.0000 PASS, `menu-gate` 0.9661 PASS,
+`compare.ps1 -Gate` **5 thresholds, 0 failures** (12 pairs compared), `--smk-decode` passes.
