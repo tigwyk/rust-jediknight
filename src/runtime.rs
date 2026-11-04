@@ -1156,6 +1156,10 @@ pub struct Runtime {
     pub auto_switch: u32,
     /// `SetAutoPickup`/`GetAutoPickup`: the same, for items.
     pub auto_pickup: u32,
+    /// `jkGetSuperFlags`/`jkSetSuperFlags`/`jkClearSuperFlags`: the player's surge word. The light and
+    /// dark powerups set bit `4` (`pow_keyyellow`/`pow_crossbow`) and "power" sets bit `1`
+    /// (`pow_power`), and every one of them also reads it back with `& 4`/`& 1` to toggle off.
+    pub super_flags: u32,
     /// `SetWeaponMesh`/`jkSetPOVModel`/`jkSetWaggle`/`jkPlayPOVKey`: the first-person weapon's own
     /// data. The amplitudes are **degrees** and the rate is the degrees the sway phase advances per
     /// unit of movement (`jkPlayer_SetWaggle(thing, velocities, rate)`); `jkPlayer_DrawPov` uses both.
@@ -1824,6 +1828,7 @@ impl Runtime {
             weapon_ready: 0.0,
             auto_switch: 1,
             auto_pickup: 1,
+            super_flags: 0,
             weapon_mesh: BTreeMap::new(),
             pov_model: BTreeMap::new(),
             pov_key: BTreeMap::new(),
@@ -3019,7 +3024,9 @@ impl Runtime {
             "getthingpos"
                 | "setthingpos"
                 | "getthingrot"
+                | "getthinglvec"
                 | "setthingrot"
+                | "setthinglook"
                 | "getthingsector"
                 | "setthingsector"
                 | "getthingflags"
@@ -3209,6 +3216,9 @@ impl Runtime {
                 | "getautoswitch"
                 | "setautopickup"
                 | "getautopickup"
+                | "jksetsuperflags"
+                | "jkclearsuperflags"
+                | "jkgetsuperflags"
                 | "getkeylen"
                 | "jksetweaponmesh"
                 | "setweaponmesh"
@@ -8605,6 +8615,15 @@ impl Runtime {
                 Value::Nil
             }
             "getautopickup" => Value::Num(self.auto_pickup as f64),
+            "jksetsuperflags" => {
+                self.super_flags |= idx(0) as u32;
+                Value::Nil
+            }
+            "jkclearsuperflags" => {
+                self.super_flags &= !(idx(0) as u32);
+                Value::Nil
+            }
+            "jkgetsuperflags" => Value::Num(self.super_flags as f64),
             // A `.key`'s length in frames, for a script that schedules an animation.
             "getkeylen" => {
                 let key = match args.first() {
@@ -8934,6 +8953,17 @@ impl Runtime {
                 Some(t) => Value::Vec([t.pos[0] as f64, t.pos[1] as f64, t.pos[2] as f64]),
                 None => Value::Vec([0.0; 3]),
             },
+            // `GetThingLVec(thing)`: the thing's look vector, the local `+Y` through its own pitch,
+            // yaw and roll. `weap_bryar`/`weap_fists` kick the shooter back with
+            // `ApplyForce(player, VectorScale(GetThingLVec(player), -80))`, so a missing answer is a
+            // firearm with no recoil at all.
+            "getthinglvec" => match self.thing(idx(0)) {
+                Some(t) => {
+                    let v = rotate_by_angles([0.0, 1.0, 0.0], t.pitch, t.yaw, t.roll);
+                    Value::Vec([v[0] as f64, v[1] as f64, v[2] as f64])
+                }
+                None => Value::Vec([0.0; 3]),
+            },
             "setthingpos" => {
                 let p = args.get(1).map(vec3).unwrap_or([0.0; 3]);
                 if let Some(t) = self.thing_mut(idx(0)) {
@@ -8951,6 +8981,37 @@ impl Runtime {
                     t.pitch = r[0];
                     t.yaw = r[1];
                     t.roll = r[2];
+                }
+                Value::Nil
+            }
+            // `SetThingLook(thing, dir, blend)` — `sithPhysics_SetThingLook` (`0x4f5a80`): aim the
+            // thing's forward axis along `dir`, re-orthogonalising the basis and setting the jkFlag
+            // `0x100`. A zero blend snaps (`*forward = *dir`); anything else turns the forward part of
+            // the way there (`forward += dir * blend * K`, normalised). The port keeps pitch/yaw/roll,
+            // so the same thing is a direction-to-angles conversion, blended on the vector.
+            "setthinglook" => {
+                let dir = args.get(1).map(vec3).unwrap_or([0.0, 1.0, 0.0]);
+                let blend = num(2) as f32;
+                let Some(t) = self.thing_mut(idx(0)) else { return Value::Nil };
+                let cur = rotate_by_angles([0.0, 1.0, 0.0], t.pitch, t.yaw, t.roll);
+                let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+                if len > 1e-6 {
+                    let dir = [dir[0] / len, dir[1] / len, dir[2] / len];
+                    let mixed = if blend == 0.0 {
+                        dir
+                    } else {
+                        let m = [
+                            cur[0] + dir[0] * blend,
+                            cur[1] + dir[1] * blend,
+                            cur[2] + dir[2] * blend,
+                        ];
+                        let l = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt();
+                        if l < 1e-6 { dir } else { [m[0] / l, m[1] / l, m[2] / l] }
+                    };
+                    // The port's forward is the `l` row of `rotate_by_angles`: `[-sy*cx, cy*cx, sx]`.
+                    t.pitch = mixed[2].clamp(-1.0, 1.0).asin().to_degrees();
+                    t.yaw = (-mixed[0]).atan2(mixed[1]).to_degrees();
+                    t.jk_flags |= 0x100;
                 }
                 Value::Nil
             }
@@ -9400,6 +9461,73 @@ mod tests {
         rt.things[0].flags = 0x80000;
         assert!(rt.sector_messages(None, Some(0), Some(0)).is_empty());
         assert_eq!(rt.sector_messages(None, Some(0), None), vec![(0, "entered", 1)]);
+    }
+
+    /// `SetThingLook` aims a thing along a direction (`sithPhysics_SetThingLook`, `0x4f5a80`) and
+    /// sets the jkFlag `0x100`; a zero blend snaps, a positive one turns part of the way.
+    #[test]
+    fn setting_a_look_direction_turns_the_thing_to_it() {
+        let mut rt = door_runtime();
+        rt.things[0].pitch = 0.0;
+        rt.things[0].yaw = 0.0;
+        rt.things[0].roll = 0.0;
+        rt.call("setthinglook", &[Value::Num(0.0), Value::Vec([1.0, 0.0, 0.0]), Value::Num(0.0)]);
+        let t = &rt.things[0];
+        let fwd = rotate_by_angles([0.0, 1.0, 0.0], t.pitch, t.yaw, t.roll);
+        for k in 0..3 {
+            let want = [1.0, 0.0, 0.0][k];
+            assert!((fwd[k] - want).abs() < 1e-4, "look direction {fwd:?} is not +X");
+        }
+        assert_ne!(rt.things[0].jk_flags & 0x100, 0, "the look flag was not set");
+        // A half blend points between the old and new forward, and still lands normalised.
+        rt.call("setthinglook", &[Value::Num(0.0), Value::Vec([0.0, -1.0, 0.0]), Value::Num(0.5)]);
+        let t = &rt.things[0];
+        let fwd = rotate_by_angles([0.0, 1.0, 0.0], t.pitch, t.yaw, t.roll);
+        assert!(fwd[0] > 0.0 && fwd[1] < 0.0, "the blend did not land between +X and -Y: {fwd:?}");
+    }
+
+    /// The surge word the light and dark powerups toggle: `pow_keyyellow`/`pow_crossbow` set and clear
+    /// bit `4`, `pow_power` bit `1`, and each reads it back to know whether the surge is already on.
+    #[test]
+    fn the_super_flag_word_round_trips() {
+        let mut rt = door_runtime();
+        assert_eq!(rt.call("jkgetsuperflags", &[]).num(), 0.0);
+        rt.call("jksetsuperflags", &[Value::Num(4.0)]);
+        assert_eq!(rt.call("jkgetsuperflags", &[]).num(), 4.0);
+        rt.call("jksetsuperflags", &[Value::Num(1.0)]);
+        assert_eq!(rt.call("jkgetsuperflags", &[]).num(), 5.0, "a second surge must not clear the first");
+        rt.call("jkclearsuperflags", &[Value::Num(4.0)]);
+        assert_eq!(rt.call("jkgetsuperflags", &[]).num(), 1.0);
+        rt.call("jkclearsuperflags", &[Value::Num(1.0)]);
+        assert_eq!(rt.call("jkgetsuperflags", &[]).num(), 0.0);
+    }
+
+    /// `GetThingLVec` is the thing's own look vector, and the weapon scripts turn it into recoil:
+    /// `weap_bryar`/`weap_fists` run `ApplyForce(player, VectorScale(GetThingLVec(player), -80))`.
+    #[test]
+    fn the_look_vector_drives_the_weapons_recoil() {
+        let mut rt = door_runtime();
+        rt.things[0].pitch = 0.0;
+        rt.things[0].yaw = 90.0;
+        rt.things[0].roll = 0.0;
+        let answer = rt.call("getthinglvec", &[Value::Num(0.0)]);
+        let lvec = vec3(&answer);
+        let want = rotate_by_angles([0.0, 1.0, 0.0], 0.0, 90.0, 0.0);
+        for k in 0..3 {
+            assert!(
+                (lvec[k] - want[k]).abs() < 1e-5,
+                "the look vector disagrees with the thing's own rotation: {lvec:?} vs {want:?}"
+            );
+        }
+        assert!(lvec[1].abs() < 1e-5, "a right-facing player still looks along +Y");
+        // The script's own expression: the kick goes backwards, against the look vector.
+        let kick = vec3(&rt.call("vectorscale", &[answer, Value::Num(-80.0)]));
+        rt.call("applyforce", &[Value::Num(0.0), Value::Vec([kick[0] as f64, kick[1] as f64, kick[2] as f64])]);
+        let stored = rt.force.get(&0).copied().unwrap_or([0.0; 3]);
+        for k in 0..3 {
+            assert!((stored[k] - kick[k]).abs() < 1e-4, "the recoil did not land as an impulse");
+        }
+        assert!(stored[0] > 0.0, "the kick does not oppose a -X look vector");
     }
 
     /// `sithInventory_CreateBackpack` (`0x4d2740`) snapshots the carried bins onto a `+backpack`

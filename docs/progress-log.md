@@ -4611,3 +4611,11 @@ cross-checked against it: `primaryfire` `(2, 0)`, `follow`/`turretfire` `(2, 0x8
 from `AISetMode`/`AIFlee`, `0x400`/`0x800` from the target-message path, and `1` from `DamageActor`. `sensedanger`'s
 event mask is `7`, so its `param_4 == 2` arm is reachable by the dispatcher and *never* raised — the port's "dead
 content" note now rests on the whole call-site list rather than one handler's inventory.
+
+**Three more shipped verbs have behaviour.** `GetThingLVec` answers the thing's own look vector (local `+Y`
+through its pitch/yaw/roll) — `weap_bryar` and `weap_fists` turn it into the shooter's recoil with
+`ApplyForce(player, VectorScale(GetThingLVec(player), -80))`, which landed as a zero impulse before. The surge word
+behind `jkGet/SuperFlags`/`jkClearSuperFlags` is now a runtime field: the light and dark powerups
+(`pow_keyyellow`, `pow_crossbow`) toggle bit `4` and "power" (`pow_power`) bit `1`, each reading it back to know
+whether the surge is already on. And `SetThingLook` (`sithPhysics_SetThingLook`, `0x4f5a80`) aims a thing's forward
+axis along a direction — snap at blend 0, a partial turn otherwise — and sets jkFlag `0x100`.
