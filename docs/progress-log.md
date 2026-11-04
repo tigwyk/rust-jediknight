@@ -4118,3 +4118,12 @@ same signed normal the panel already computes for its floor/ceiling skip.
 Still open on the map: the retail wireframe's own camera (each edge projected as a clipped 3D line
 through a 45-degree camera), the hidden-edge rule (`sithMap_IsSurfaceDrawable`, threshold 0.98), and
 the arrow-button zoom/orbit view state.
+### The map's hidden-edge rule
+
+`sithMap_IsSurfaceDrawable` (`0x4ec9c0`) walks the sector's surfaces (and its adjoin chain) and refuses
+to draw an edge when another surface sharing it is **nearly parallel**: `0.98 < n1 . n2`
+(`0x5230a0` is 0.98). That is what removes the seams between coplanar pieces of one wall. The panel
+now builds an edge -> `(surface, normal)` table per redraw and hides an edge whose neighbour passes the
+test; the surface's own normal is excluded (the engine compares `iVar5 != param_1`), which matters: an
+inclusive version hid **every** edge (2,420 ink pixels, self dot 1.0) instead of the seams (4,108).
+`ui::map_tests` pins the three cases — coplanar hides, perpendicular keeps, self never hides.

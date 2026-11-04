@@ -325,6 +325,25 @@ pub struct Canvas {
     pub rgba: Vec<u8>,
 }
 
+/// `sithMap_IsSurfaceDrawable` (`0x4ec9c0`): an edge is not drawn when **another** surface sharing it
+/// nearly faces the same way (`0.98 < n . n`, the constant at `0x5230a0`) — the seams between
+/// coplanar pieces of one wall disappear, while a true corner keeps both.
+const MAP_SEAM_DOT: f32 = 0.98;
+
+/// The map's hidden-edge test, split out so it can be checked without a whole level.
+fn edge_is_seam(
+    shared: &std::collections::HashMap<(u32, u32), Vec<(usize, [f32; 3])>>,
+    key: (u32, u32),
+    surface: usize,
+    normal: [f32; 3],
+) -> bool {
+    shared.get(&key).is_some_and(|normals| {
+        normals.iter().any(|(index, n)| {
+            *index != surface && n[0] * normal[0] + n[1] * normal[1] + n[2] * normal[2] > MAP_SEAM_DOT
+        })
+    })
+}
+
 impl Canvas {
     pub fn new(width: u32, height: u32) -> Self {
         Self { width, height, rgba: vec![0; (width * height * 4) as usize] }
@@ -501,7 +520,37 @@ pub fn map(
             let k = if r > radius { radius / r } else { 1.0 };
             [cx + (rx * k * scale) as i32, cy - (ry * k * scale) as i32]
         };
-        for surface in &level.surfaces {
+        // Each surface's own normal, from its first three vertices, in the model's units.
+        let surface_normal = |surface: &crate::jkl::Surface| -> Option<[f32; 3]> {
+            let p: Vec<[f32; 3]> = surface
+                .verts
+                .iter()
+                .filter_map(|(v, _)| level.vertices.get(*v as usize).copied())
+                .collect();
+            if p.len() < 3 {
+                return None;
+            }
+            let u = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+            let v = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+            let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+            Some([n[0] / len, n[1] / len, n[2] / len])
+        };
+        // Every surface that shares an edge, by vertex pair. `sithMap_IsSurfaceDrawable` (`0x4ec9c0`)
+        // drops an edge whose neighbour surface nearly faces the same way (`0.98 < n1 . n2`), which is
+        // what removes the seams between coplanar pieces of one wall.
+        let mut shared: std::collections::HashMap<(u32, u32), Vec<(usize, [f32; 3])>> =
+            std::collections::HashMap::new();
+        for (index, surface) in level.surfaces.iter().enumerate() {
+            let Some(n) = surface_normal(surface) else { continue };
+            let ids: Vec<u32> = surface.verts.iter().map(|(v, _)| *v).collect();
+            for i in 0..ids.len() {
+                let (a, b) = (ids[i], ids[(i + 1) % ids.len()]);
+                let key = if a <= b { (a, b) } else { (b, a) };
+                shared.entry(key).or_default().push((index, n));
+            }
+        }
+        for (index, surface) in level.surfaces.iter().enumerate() {
             let verts: Vec<[f32; 3]> = surface
                 .verts
                 .iter()
@@ -511,17 +560,9 @@ pub fn map(
                 continue;
             }
             let u = [verts[1][0] - verts[0][0], verts[1][1] - verts[0][1], verts[1][2] - verts[0][2]];
-            let (nz, horizontal, normal) = if verts.len() >= 3 {
-                let v = [verts[2][0] - verts[0][0], verts[2][1] - verts[0][1], verts[2][2] - verts[0][2]];
-                let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
-                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
-                (
-                    (n[2] / len).abs(),
-                    true,
-                    [n[0] / len, n[1] / len, n[2] / len],
-                )
-            } else {
-                (0.0, false, [0.0, 0.0, 0.0])
+            let (nz, horizontal, normal) = match surface_normal(surface) {
+                Some(n) => (n[2].abs(), true, n),
+                None => (0.0, false, [0.0, 0.0, 0.0]),
             };
             // `sithMap_Draw`'s facing test (`0x52309c` is 0.0): a surface is drawn only when the eye
             // is on its **positive normal** side — `(eye - vertex) . normal > 0`. Without it the panel
@@ -544,11 +585,22 @@ pub fn map(
             }) {
                 continue;
             }
-            for pair in verts.windows(2) {
-                self.line(project(pair[0]), project(pair[1]), palette, ink);
+            let ids: Vec<u32> = surface.verts.iter().map(|(v, _)| *v).collect();
+            for (i, pair) in verts.windows(2).enumerate() {
+                let (a, b) = (ids[i], ids[i + 1]);
+                let key = if a <= b { (a, b) } else { (b, a) };
+                let hidden = edge_is_seam(&shared, key, index, normal);
+                if !hidden {
+                    self.line(project(pair[0]), project(pair[1]), palette, ink);
+                }
             }
             if verts.len() > 2 {
-                self.line(project(verts[verts.len() - 1]), project(verts[0]), palette, ink);
+                let (a, b) = (ids[ids.len() - 1], ids[0]);
+                let key = if a <= b { (a, b) } else { (b, a) };
+                let hidden = edge_is_seam(&shared, key, index, normal);
+                if !hidden {
+                    self.line(project(verts[verts.len() - 1]), project(verts[0]), palette, ink);
+                }
             }
         }
         // The player: a cross at the centre with a nose pointing up, in the same ink as the
@@ -599,6 +651,27 @@ pub fn map(
             pen += font.advance(ch) * s;
         }
         (pen - x).max(0) as u32
+    }
+}
+
+#[cfg(test)]
+mod map_tests {
+    use super::{edge_is_seam, MAP_SEAM_DOT};
+    use std::collections::HashMap;
+
+    /// `sithMap_IsSurfaceDrawable`: a near-parallel neighbour hides the edge, a corner keeps it, and
+    /// the surface's own normal never hides its own edges.
+    #[test]
+    fn a_coplanar_neighbour_hides_the_seam_but_a_corner_does_not() {
+        let mut shared: HashMap<(u32, u32), Vec<(usize, [f32; 3])>> = HashMap::new();
+        shared.insert((3, 7), vec![(0, [0.0, 1.0, 0.0]), (1, [0.0, 1.0, 0.0])]);
+        shared.insert((7, 9), vec![(0, [0.0, 1.0, 0.0]), (2, [1.0, 0.0, 0.0])]);
+        shared.insert((9, 11), vec![(0, [0.0, 1.0, 0.0])]);
+        let n = [0.0, 1.0, 0.0];
+        assert!(edge_is_seam(&shared, (3, 7), 0, n), "a coplanar neighbour must hide the seam");
+        assert!(!edge_is_seam(&shared, (7, 9), 0, n), "a perpendicular neighbour must keep the edge");
+        assert!(!edge_is_seam(&shared, (9, 11), 0, n), "a surface's own normal must not hide its edge");
+        assert!((MAP_SEAM_DOT - 0.98).abs() < 1e-6, "the engine's threshold is 0.98");
     }
 }
 
