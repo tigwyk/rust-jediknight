@@ -4425,3 +4425,9 @@ zero-chance control asserts no shot plus the 1 s wait.
 ```
 test runtime::tests::an_actor_that_lost_sight_fires_at_the_remembered_position ... ok
 ```
+
+**A failed `Listen` roll still turns the actor.** `FUN_0050a6f0` finishes every path with `SetLookPos` — at the
+event's remembered spot (or its source thing) — and calls `SetMovePos` only when the chance roll passes. The
+port did nothing on a failure, so the `Listen 0.0` sentries (five shipped classes) never turned toward a shot;
+`ai_look` now takes the heard point on a failed roll, and the zero-chance test asserts the stand-still *and*
+the turn. What remains on that row is the damage-event path and its source-thing look, named in the roadmap.

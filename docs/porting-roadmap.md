@@ -703,8 +703,11 @@ What the session settles, all of it already on the deviation ledger with its ret
   replaced after five.
 - **`hitandrun`** — break-off lands on the exact threshold instead of within the next AI update.
 - **`turretfire`** — the ±160° aim-head sweep is not modelled (turret fire is modelled as accurate).
-- **`listen`** — the hearing gates and the class's reaction chance are ported (round 233, measured headless); the
-  look-only turn on a failed roll and the damage-event path are still one remembered position.
+- **`listen`** — the hearing gates and the class's reaction chance are ported (round 233, measured headless), and
+  **the look-only turn on a failed roll is in (round 339)**: `FUN_0050a6f0` ends with `SetLookPos` on every path
+  and only a success also calls `SetMovePos`, so a `Listen 0.0` sentry now turns toward a shot it does not react
+  to (the test asserts both halves). Still open: the **damage-event path**, where the look goes at the event's own
+  source thing rather than the remembered point, and events are one remembered position per sector and side.
 - **`AISetMode`** — only the `0x2000` off switch is honoured; the wake bit (`0x4`) needs the engine's own wake logic
   first.
 - **AI engagement timing** — the level-3 same-pose pair: a port run and a retail capture at the recorded vantage, to

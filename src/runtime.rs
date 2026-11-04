@@ -4371,6 +4371,13 @@ impl Runtime {
                     .unwrap_or(1.0);
                 let answered = crate::cog::pseudo_random() < f64::from(chance);
                 self.ai_listen.insert(index, (at, heard, answered));
+                // The handler's **other** half: a roll that fails still turns the actor. `FUN_0050a6f0`
+                // ends with `SetLookPos` at the remembered point (or at the event's own source thing),
+                // and only a *success* also calls `SetMovePos`. The port's failed roll did nothing at
+                // all, so a `Listen 0.0` sentry never turned toward a shot.
+                if !answered {
+                    self.ai_look.insert(index, heard);
+                }
                 if answered && std::env::var_os("BK_AI_TRACE").is_some() {
                     eprintln!("ai: {index} hears an event in sector {sector} side {side}");
                 }
@@ -10621,6 +10628,12 @@ mod tests {
             rt.things[1].pos,
             [0.0, 0.0, 0.0],
             "a Listen 0.0 class walked at a sound it should only hear"
+        );
+        // …but it does **turn** toward it: `FUN_0050a6f0` finishes with `SetLookPos` on every path.
+        assert_eq!(
+            rt.ai_look.get(&1).copied(),
+            Some([1.5, 0.0, 0.0]),
+            "a failed `Listen` roll did not turn the actor toward the sound"
         );
         // The same chance 1.0 reacts to a *new* event; the same event would not be re-rolled.
         rt.ai.insert(1, class("1.0"));
