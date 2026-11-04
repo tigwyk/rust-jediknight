@@ -4431,3 +4431,12 @@ event's remembered spot (or its source thing) — and calls `SetMovePos` only wh
 port did nothing on a failure, so the `Listen 0.0` sentries (five shipped classes) never turned toward a shot;
 `ai_look` now takes the heard point on a failed roll, and the zero-chance test asserts the stand-still *and*
 the turn. What remains on that row is the damage-event path and its source-thing look, named in the roadmap.
+
+Two ledger rows were read to their handler and rewritten with the finding rather than a guess:
+
+- **`hitandrun`** (`0x50bb90`) accumulates **firing** time (`state[8] -= const` only while the just-fired bit
+  `0x400` is set, on a 1 s call cadence), not wall time from the first shot; that is the shape of the gap, and
+  closing it means modelling the accumulation, not moving a threshold.
+- **`turretfire`**'s ±160° head sweep is the **damaged** arm (`health < max × arg5`, `0.20` shipped): the
+  handler randomises the head inside ±160° and fires on its own cooldown only then. A healthy turret fires
+  along its body exactly as the port does, so the row was over-stated before.

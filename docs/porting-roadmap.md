@@ -701,8 +701,15 @@ What the session settles, all of it already on the deviation ledger with its ret
   **5000 ms**. The port recomputed the rotation every frame (a smoother orbit than retail's); the ring point
   is now chosen once and held for the interval, and the unit test proves it is untouched after a second and
   replaced after five.
-- **`hitandrun`** — break-off lands on the exact threshold instead of within the next AI update.
-- **`turretfire`** — the ±160° aim-head sweep is not modelled (turret fire is modelled as accurate).
+- **`hitandrun`** — the handler accumulates *firing* time, not wall time: `sithAICmd_HitAndRun` (`0x50bb90`)
+  subtracts a constant from `state[8]` only on the ticks where the just-fired bit (`0x400`) is set, and its
+  1000 ms call cadence quantises the break-off; the port starts a wall clock at the first shot. Closing this
+  needs the handler's per-tick accumulation modelled, not a threshold tweak.
+- **`turretfire`** — the ±160° random aim-head sweep is **not** how a healthy turret fires: `FUN_0050a0f0`
+  takes that branch only when the turret is damaged (`health < max × arg5`, `0.20` in the shipped
+  `turretfire 750, 75, 160, 160, 5.0, 0.20, 500, 10000, 0`), where it randomises the head pitch/yaw inside
+  ±arg3/±arg2 and fires on its own cooldown. The port has no articulated head, so that damaged path is
+  absent and a turret fires accurately at any health; healthy turret fire matches the handler's other arm.
 - **`listen`** — the hearing gates and the class's reaction chance are ported (round 233, measured headless), and
   **the look-only turn on a failed roll is in (round 339)**: `FUN_0050a6f0` ends with `SetLookPos` on every path
   and only a success also calls `SetMovePos`, so a `Listen 0.0` sentry now turns toward a shot it does not react
