@@ -4078,3 +4078,26 @@ mode 0 in every puppet, so the existing `(row, 0)` fallback in the draw lookup i
 A scan of every `.cog` in the three archives (540 of them) is what settles the modes: six cogs send
 `1`, four send `0`, `weap_saber.cog` alone sends `2`, and none sends `3` — so `drawfists` (24
 puppets) is deliberately left unwired rather than guessed at.
+## Round 327: two-sided model faces are drawn from both sides
+
+`rdModel3_DrawMesh` (`0x446110`) projects each face's normal against the camera and, when the face
+points away, still draws it if `(face->flags & 1) != 0` (`rdModel3_DrawFace` then negates the normal
+for lighting). The `.3do` face row carries that word — `num: material flags geo light tex extralight
+nverts <v,tv>...` — and the port dropped it, so every model wore `cull_mode: Back` and the back side
+of 3,508 faces across 121 models was invisible.
+
+The flag is now parsed (`tdo::Face::flags`) and `model_mesh_posed_with` emits a two-sided face's
+triangle a second time with reversed winding. The model material is `unlit`, so the second winding is
+the whole of the engine's back-side draw: no extra material and no geometry split, at the cost of one
+triangle per two-sided face.
+
+| what | result |
+| --- | --- |
+| shipped faces | 3,508 of 42,210 carry bit 0: `pb.3do` 128, `tk.3do`/`th.3do` 111, `ry`/`rh` and their `str` pairs 102 each |
+| `model_face_tests` | a `0x0` face builds 3 indices, a `0x1` face 6 |
+| `cargo test` | **243 passed**, 0 failed |
+| `--gates` | 0 of 67 failed, 2 skipped |
+| parity gates | draw 5 thresholds/0 failures, series 1/1, menu 0.9661, film 1.0000 |
+
+Left alone: the word's other bits (`0x2` on 12 faces, `0x4` on 129) are not identified yet, and the
+`.mat` texinfo flags — the `main.rs` row's other half — are still unread.

@@ -31,6 +31,9 @@ use crate::rows::{fields, floats_in, ints, read_rows};
 
 pub struct Face {
     pub material: i32,
+    /// The face flag word. Bit 0 is the one the draw reads: `rdModel3_DrawMesh` still draws a face
+    /// whose normal points away when `(face->flags & 1) != 0`, so it is the model's two-sided bit.
+    pub flags: u32,
     pub verts: Vec<(u32, i32)>,
 }
 
@@ -530,6 +533,14 @@ fn parse_face(line: &str) -> Option<Face> {
         return None;
     }
     let material: i32 = f[1].parse().ok()?;
+    // Shipped spellings are `0x0000`/`0x0001`; a bare decimal is accepted too.
+    let flags = f[2]
+        .trim_start_matches("0x")
+        .trim_start_matches("0X")
+        .parse::<u32>()
+        .ok()
+        .or_else(|| u32::from_str_radix(f[2].trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
+        .unwrap_or(0);
     let nverts: usize = f[7].parse().ok()?;
     let nums = ints(&f[8..]);
     if nums.len() < nverts * 2 {
@@ -539,7 +550,7 @@ fn parse_face(line: &str) -> Option<Face> {
         .chunks_exact(2)
         .map(|p| (p[0].max(0) as u32, p[1]))
         .collect();
-    Some(Face { material, verts })
+    Some(Face { material, flags, verts })
 }
 
 #[cfg(test)]

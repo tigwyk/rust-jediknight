@@ -292,7 +292,14 @@ rendering the retail geometry rather than by reading the header:
    shipped models contain more than one `VERTICES` block — the player model has
    64 — and each mesh's faces index only that mesh's pool. Concatenating the pools
    into one silently corrupts every face index after the first mesh.
-2. **`INSERT OFFSET` is not a vertex translation.** It is the model's *height above its
+2. **The face flag word's bit 0 is the two-sided bit.** A `FACE` row is
+   `num: material flags geo light tex extralight nverts <v,tv>...`; `rdModel3_DrawMesh`
+   skips a face whose normal points away only when `(flags & 1) == 0`, and draws the
+   back side with the normal negated. 121 of the 477 shipped models carry such faces
+   (3,508 of 42,210): `pb.3do` 128, `tk.3do`/`th.3do` 111, the `ry`/`rh` actor pairs
+   102 each. The rest of the word is `0x2`/`0x4` on a handful of faces and not yet
+   identified.
+3. **`INSERT OFFSET` is not a vertex translation.** It is the model's *height above its
    placement point*: the engine reads `insertOffset.z` as a thing's height
    (`sithPhysics`), and `sithThing_CreateThing` uses the vector to align a created thing
    to a marker's origin. `rdModel3_Draw` never adds it to a vertex, and the numbers agree:

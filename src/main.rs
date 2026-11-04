@@ -18007,6 +18007,13 @@ fn model_mesh_posed_with(
             }
             for k in 1..points.len() - 1 {
                 batch.indices.extend_from_slice(&[base, base + k as u32, base + k as u32 + 1]);
+                // Bit 0 of the face's flag word is two-sided (`rdModel3_DrawMesh` draws a face whose
+                // normal points away when it is set, with the normal negated for lighting). The model
+                // material is unlit, so the second winding is the whole of it — one extra triangle,
+                // no second material and no geometry split.
+                if face.flags & 1 != 0 {
+                    batch.indices.extend_from_slice(&[base, base + k as u32 + 1, base + k as u32]);
+                }
             }
         }
     }
@@ -26488,6 +26495,41 @@ mod transition_tests {
         assert_eq!(film_step(&rest, None), FilmStep::Play("39a.smk".into()));
         assert_eq!(film_step(&rest, Some(true)), FilmStep::DropFinished);
         assert_eq!(film_step(&[], None), FilmStep::Done);
+    }
+}
+
+#[cfg(test)]
+mod model_face_tests {
+    use super::model_mesh;
+    use crate::tdo;
+
+    /// A one-triangle model whose single face carries `flags`.
+    fn model_text(flags: &str) -> String {
+        format!(
+            "SECTION: MODELRESOURCE\nMATERIALS 1\n    0: 00red.mat\n\
+             SECTION: GEOMETRYDEF\nGEOSETS 1 / MESHES 1\nMESH 0\n\
+             VERTICES 3\n    0: 0 0 0\n    1: 1 0 0\n    2: 0 1 0\n\
+             TEXTURE VERTICES 3\n    0: 0 0\n    1: 1 0\n    2: 0 1\n\
+             FACES 1\n    0: 0 {flags} 4 3 1 0.0 3   0, 0   1, 1   2, 2\n"
+        )
+    }
+
+    /// Bit 0 of the face flag word is the model's two-sided bit: `rdModel3_DrawMesh` draws a
+    /// back-facing face when it is set. The unlit model material makes the reversed winding the
+    /// whole of it, so the triangle is emitted twice and the mesh has six indices.
+    #[test]
+    fn a_two_sided_face_is_built_with_both_windings() {
+        let plain = tdo::parse(&model_text("0x0"));
+        assert_eq!(plain.meshes.len(), 1);
+        assert_eq!(plain.meshes[0].faces.len(), 1);
+        assert_eq!(plain.meshes[0].faces[0].flags, 0);
+        let one = model_mesh(&plain, 0, (1.0, 1.0));
+        assert_eq!(one.indices().map(|i| i.len()).unwrap_or(0), 3, "a plain face is one triangle");
+
+        let sided = tdo::parse(&model_text("0x1"));
+        assert_eq!(sided.meshes[0].faces[0].flags, 1);
+        let two = model_mesh(&sided, 0, (1.0, 1.0));
+        assert_eq!(two.indices().map(|i| i.len()).unwrap_or(0), 6, "a two-sided face is both windings");
     }
 }
 
