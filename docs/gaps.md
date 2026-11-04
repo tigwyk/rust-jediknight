@@ -5583,6 +5583,41 @@ advances slowly — `--gates` timed out with "(no verdict)". The gate now **fast
 exercised, and the gate runs in **1.7 s**. `--gates` is **65 of 65, 0 skipped** again, with `sight-live` passing.
 `cargo test --release` **149 passed**.
 
+**The instinct registry is recovered in full (round 331).** `sithAI_InstinctUpdate` (`0x4e9e90`) scans an
+actor's instinct slots in file order and runs one when the slot is unflagged, its `next` is due, and
+`(instinct[+0x2c] & actor[+8]) != 0 && (instinct[+0x30] & actor[+8]) == 0` — a required and a forbidden mask
+against the actor's own order word — then sets that slot's `next` to `now + 1000`, keeps the earliest due
+time as the pass's next (`actor + 400`, default `now + 5000`), and, when a handler returns non-zero and the
+order word changed, emits event `0x100` on the old order and restarts the scan. The two registries
+(`jkAI_Startup` `0x40f9d0`, `sithAICmd_Startup` `0x5091b0`) give every field:
+
+| instinct | require | forbid | event mask |
+|---|---|---|---|
+| saberfighting / forcepowers / sabermove | 2 | 0 | 0 |
+| specialattack / opendoors / crouch / lobfire | 2 | 0 | 4 / 0 / 0x100 / 0x100 |
+| listen | 0 | 0 | 7 |
+| lookfortarget | 0x204 | 0 | 0 |
+| primaryfire | 2 | 0 | 0x100 |
+| follow | 2 | 0x800 | 0xe00 |
+| turretfire | 2 | 0x800 | 0x100 |
+| jump | 0 | 0 | 0x604 |
+| randomturn / roam | 4 | 0 | 0 |
+| flee / withdraw | 0x800 | 0 | 0xf05 |
+| sensedanger | 4 | 0x800 | 7 |
+| hitandrun | 0xc00 | 0 | 0 |
+| retreat / circlestrafe | 2 | 0x800 | 0 |
+| blindfire | 2 | 0xc00 | 0 |
+| returnhome | 0 | 0 | 0x900 |
+| talk | 0xffff | 0 | 0 |
+| dodge | 0 | 0 | 0x1003 |
+
+The four `&DAT_` name pointers are the strings `jump`, `roam`, `flee` and `talk` (read out of `JK.EXE` at
+`0x54e234`/`0x54e248`/`0x54e250`/`0x54e2a8`); the port's `instinct_event_mask` already carries the event
+column. The **require/forbid** columns are what the port still cannot use: they gate on the actor's *order
+word* (`actor + 8`), and every writer of that word is a `LAB_`-only handler, so its bit meanings are not
+recovered. Until they are, the scheduler's timing arms are modelled per instinct (`ai_detect_at`, `ai_scan`,
+`ai_talk`, …) and its mask gate is not.
+
 **Retail's AI instrument is found: `aistatus <index>` dumps class, flags, moods and instincts (round 207).** Phase 1
 step 5 needs a way to read the engine's AI state, and the dev console has one — the syntax is an index into the
 **AI list**, not a thing:
