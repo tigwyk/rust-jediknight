@@ -6672,6 +6672,10 @@ all** — `+force_blind`/`+dustcloud`/`+sspks_saber` and friends carry `material
 `pitchrange=` and the engine's `sithParticle_Initialize` generates their elements; nothing draws those yet. The
 `THINGFLAGS` cel-cycling (`0x20`) and grow (`0x1`) arms, `sithParticle_New`'s spawn path, and the texture-less effect
 material's own effect state (blend/color) are also still open — all on the roadmap ledger.
+
+*Superseded by round 253 and 330:* the generated `type=particle` clouds **do** draw now (`par::generate` plus the
+`rdParticle_Draw` path), and both `sithParticle_Update` arms are in (`cycle_particle_cels`, `grow_particles`). What is
+left from this paragraph is the effect material's own blend/colour state.
 ## Update — round 245 (the whole-install sweeps, run headless)
 
 Two all-content checks were re-run to see where the port actually stands across every shipped level, without a window:
