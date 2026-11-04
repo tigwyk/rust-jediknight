@@ -4101,3 +4101,20 @@ triangle per two-sided face.
 
 Left alone: the word's other bits (`0x2` on 12 faces, `0x4` on 129) are not identified yet, and the
 `.mat` texinfo flags — the `main.rs` row's other half — are still unread.
+## Round 328: the map panel culls surfaces behind the player
+
+`sithMap_Draw` draws a surface only when the eye is on its **positive normal** side
+(`(eye - vertex) . normal > 0`, the threshold at `0x52309c` is 0.0); the port's panel drew every
+non-horizontal surface, near side and far side alike. The test is now in `ui::Canvas::map`, using the
+same signed normal the panel already computes for its floor/ceiling skip.
+
+| what | result |
+| --- | --- |
+| `--map-shot` | level 1's spawn draws **4,185** ink pixels (was 5,058); the panel still reacts to a moved player (4,762) and the check passes |
+| `cargo test` | **243 passed**, 0 failed |
+| `--gates` | 0 of 67 failed, 2 skipped |
+| image | `target/parity/tmp/map-cull.png` against the pre-change `map-precull.png` |
+
+Still open on the map: the retail wireframe's own camera (each edge projected as a clipped 3D line
+through a 45-degree camera), the hidden-edge rule (`sithMap_IsSurfaceDrawable`, threshold 0.98), and
+the arrow-button zoom/orbit view state.

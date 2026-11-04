@@ -511,14 +511,29 @@ pub fn map(
                 continue;
             }
             let u = [verts[1][0] - verts[0][0], verts[1][1] - verts[0][1], verts[1][2] - verts[0][2]];
-            let (nz, horizontal) = if verts.len() >= 3 {
+            let (nz, horizontal, normal) = if verts.len() >= 3 {
                 let v = [verts[2][0] - verts[0][0], verts[2][1] - verts[0][1], verts[2][2] - verts[0][2]];
                 let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
                 let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
-                ((n[2] / len).abs(), true)
+                (
+                    (n[2] / len).abs(),
+                    true,
+                    [n[0] / len, n[1] / len, n[2] / len],
+                )
             } else {
-                (0.0, false)
+                (0.0, false, [0.0, 0.0, 0.0])
             };
+            // `sithMap_Draw`'s facing test (`0x52309c` is 0.0): a surface is drawn only when the eye
+            // is on its **positive normal** side — `(eye - vertex) . normal > 0`. Without it the panel
+            // draws the far side of every room as well as the near one.
+            if normal != [0.0, 0.0, 0.0]
+                && (player[0] - verts[0][0]) * normal[0]
+                    + (player[1] - verts[0][1]) * normal[1]
+                    + (player[2] - verts[0][2]) * normal[2]
+                    <= 0.0
+            {
+                continue;
+            }
             // Walls only: a floor or a ceiling seen from above is a slab, not line work.
             if horizontal && nz > 0.7 {
                 continue;
