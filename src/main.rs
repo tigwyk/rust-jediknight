@@ -14490,6 +14490,32 @@ struct RunReport {
     missing_sounds: usize,
 }
 
+/// Run one label, then resume it past every wait it takes — 32 times at most, which is the bound
+/// the roadmap note describes. A shipped run reaches the statements after a `Sleep` once its wait
+/// expires; the check has no clock of its own, so it jumps the VM's time past each wait.
+fn run_label_through_waits(
+    vm: &mut cog::Vm,
+    script: &cog::Cog,
+    label: &str,
+) -> (usize, Option<String>) {
+    let mut waits = 0usize;
+    match vm.run_label(script, label) {
+        Ok(_) => {}
+        Err(e) if e == cog::WAITING || e == cog::SLEEPING => waits += 1,
+        Err(e) => return (waits, Some(e)),
+    }
+    while vm.sleeping() && waits < 32 {
+        // Any authored wait is seconds; the jump is past all of them.
+        vm.now = 1.0e6;
+        match vm.run_label(script, label) {
+            Ok(_) => waits += 1,
+            Err(e) if e == cog::WAITING || e == cog::SLEEPING => waits += 1,
+            Err(e) => return (waits, Some(e)),
+        }
+    }
+    (waits, None)
+}
+
 fn run_level(
     gobs: &gob::GobSet,
     level: &jkl::Level,
@@ -14497,6 +14523,12 @@ fn run_level(
 ) -> RunReport {
 
     let world = runtime::Runtime::handle(level);
+    // `BK_SABER_CAM=1`: the third-person flag on. Shipped play reaches the camera scripts'
+    // `if (jkGetSaberCam() == 1) CycleCamera();` branch by holding the saber camera; the sweep turns
+    // it on for every level so that path is run, not merely parsed.
+    if std::env::var_os("BK_SABER_CAM").is_some() {
+        world.borrow_mut().saber_cam = 1;
+    }
     if !quiet {
         println!("=== {} placed script instances ===", level.cogs.len());
     }
@@ -14539,13 +14571,15 @@ fn run_level(
         // the engine simply has nothing to call at level load.
         if script.label("startup").is_some() {
             let before_sounds = world.borrow().sounds.len();
-            match vm.run_label(&script, "startup") {
-                Ok(_) => started += 1,
-                // A `sleep` in `startup` is a suspension, not an error: the label resumes when its
-                // wait expires (round 307 fixed the resume itself; this harness counted the unwind
-                // as a failure).
-                Err(e) if e == cog::WAITING || e == cog::SLEEPING => waiting += 1,
-                Err(e) => errors.push(format!("{} startup: {e}", inst.script)),
+            // Run `startup` through its waits: the statements after a `Sleep` are part of what the
+            // level reaches later, and a check that stops at the first wait never sees them.
+            let (waits, error) = run_label_through_waits(&mut vm, script, "startup");
+            if waits > 0 {
+                waiting += 1;
+            }
+            match error {
+                None => started += 1,
+                Some(e) => errors.push(format!("{} startup: {e}", inst.script)),
             }
             for line in &vm.trace.prints {
                 printed += 1;
@@ -14630,10 +14664,10 @@ fn run_level(
             .filter(|label| !skip.contains(label) && !label.starts_with("message:"))
             .collect();
         for label in labels {
-            match vm.run_label(script, &label) {
-                Ok(_) => deep_ran += 1,
-                Err(e) if e == cog::WAITING => deep_waiting += 1,
-                Err(e) => {
+            let (_, error) = run_label_through_waits(vm, script, &label);
+            match error {
+                None => deep_ran += 1,
+                Some(e) => {
                     deep_errors += 1;
                     // Keep the first few, the way the message-pump errors are kept: a failing label
                     // is a defect to read, not only a count.
@@ -14687,11 +14721,12 @@ fn run_level(
                 // `SendMessageEx`'s two parameters: what this handler's `GetParam` reads.
                 world.borrow_mut().last_params = params.to_vec();
                 let before_sounds = world.borrow().sounds.len();
-                match vm.run_label(script, &label) {
-                    Ok(_) => delivered_messages += 1,
-                    // A label that `sleep`s is suspended until its wait expires, not broken.
-                    Err(e) if e == cog::WAITING || e == cog::SLEEPING => msg_waiting += 1,
-                    Err(e) => errors.push(format!("{script_name} {name}: {e}")),
+                // Through the label's waits, so what a handler does after its `Sleep(3.0)` is
+                // reached here the way a live run reaches it.
+                let (_, error) = run_label_through_waits(vm, script, &label);
+                match error {
+                    None => delivered_messages += 1,
+                    Some(e) => errors.push(format!("{script_name} {name}: {e}")),
                 }
                 if !quiet {
                     let w = world.borrow();

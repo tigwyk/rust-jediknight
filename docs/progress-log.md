@@ -3906,3 +3906,21 @@ cutscene in third person handed the view back to first person where retail did n
 | `--camera` | pass, with the new assertions |
 | `--gates` | 0 of 67 failed, 2 skipped |
 | `--soak-all` | 35 levels, 0 non-finite, 0 failed |
+
+## Round 319: the cog sweep actually resumes its waits, and proves the camera branch
+
+The roadmap said `--cog-check` "resumes every wait"; the tree did not - `run_level` ran each label once and counted a
+`Sleep` as waiting, so every statement after a wait was never reached by the sweep. `run_label_through_waits` now
+re-runs a label past up to 32 waits (the VM's own `sleeping()` tells it when to), and `--cog-check`, its message pump
+and its deep pass all use it. Still **0 stubbed verbs, 0 errors** across 34 levels, now with the label tails included.
+
+That reach is what made round 318's camera work visible: with `BK_SABER_CAM=1` (the sweep sets the third-person flag
+so the camera scripts' `if (jkGetSaberCam() == 1) CycleCamera();` branch is taken) and `BK_CAMERA_TRACE=1`, the sweep
+prints `camera: CycleCamera -> slot 1` from `17b_camera.cog` - the shipped path, end to end.
+
+| check | result |
+| --- | --- |
+| `cargo test` | 238 passed |
+| `--cog-check` | 34 levels, 0 stubbed, 0 errors (with and without `BK_SABER_CAM=1`) |
+| `--gates` | 0 of 67 failed, 2 skipped |
+| `--soak-all` | 35 levels, 0 non-finite, 0 failed |

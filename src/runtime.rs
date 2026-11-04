@@ -8308,6 +8308,9 @@ impl Runtime {
             "cyclecamera" => {
                 self.camera_cycle = (self.camera_cycle + 1) % 2;
                 self.current_camera = self.camera_cycle;
+                if std::env::var_os("BK_CAMERA_TRACE").is_some() {
+                    eprintln!("camera: CycleCamera -> slot {}", self.current_camera);
+                }
                 Value::Nil
             }
             "getcurrentcamera" => Value::Num(self.current_camera as f64),
