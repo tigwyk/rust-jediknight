@@ -1307,6 +1307,9 @@ pub struct Runtime {
     /// probability roll and the engine re-rolls it while refreshing a target; the port rolls it on
     /// acquisition and then keeps the deterministic sight test (ledger).
     pub ai_detected: std::collections::BTreeSet<usize>,
+    /// The inventory a created `+backpack` thing carries (`sithInventory_CreateBackpack`,
+    /// `0x4d2740`), keyed by that thing.
+    pub backpack: BTreeMap<usize, Vec<(i32, f32)>>,
     /// Actors a script switched the AI **off** for: `AIClearMode(actor, 0x606)` at level 1's
     /// intro — the shot below shows `01_initialry.cog` calling it on the first enemy before
     /// `AISetMovePos` walks it into the bar. An off actor still follows its scripted moves; it
@@ -2121,6 +2124,7 @@ impl Runtime {
             ai_route: BTreeMap::new(),
             ai_last_seen: BTreeMap::new(),
             ai_detected: std::collections::BTreeSet::new(),
+            backpack: BTreeMap::new(),
             ai_cleared: std::collections::BTreeSet::new(),
             ai_detect_at: std::collections::BTreeMap::new(),
             ai_scan: BTreeMap::new(),
@@ -3101,6 +3105,8 @@ impl Runtime {
                 | "getinv"
                 | "setinv"
                 | "changeinv"
+                | "createbackpack"
+                | "pickupbackpack"
                 | "clearinv"
                 | "vectoradd"
                 | "vectoradd2"
@@ -8897,6 +8903,25 @@ impl Runtime {
                 let sector = src_sector;
                 Value::Num(self.spawn_at(template, pos, sector, [src_pitch, src_yaw, src_roll]) as f64)
             }
+            // `sithInventory_CreateBackpack` (`0x4d2740`): a `+backpack` thing at the player's own pose
+            // carrying the inventory, at most `0x10` bins, each kept when its amount is above 0.5.
+            // shortcut: the engine also requires the `items.dat` record's `0x1`/`0x80` flag bits, which
+            // the runtime does not keep; a bin with an amount is carried in every shipped script.
+            "createbackpack" => {
+                let player = idx(0);
+                let Some(p) = self.thing(player) else { return Value::Num(0.0) };
+                let (pos, sector) = (p.pos, p.sector);
+                let thing = self.spawn_at("+backpack".into(), pos, sector, [0.0, 0.0, 0.0]);
+                let items: Vec<(i32, f32)> = self
+                    .inv
+                    .iter()
+                    .filter(|(_, amount)| **amount > 0.5)
+                    .take(16)
+                    .map(|(bin, amount)| (*bin, *amount))
+                    .collect();
+                self.backpack.insert(thing, items);
+                Value::Num(thing as f64)
+            }
             // `DamageThing(thing, damage)`: the health bookkeeping only. Death, the
             // killer's credit and the `killed` messages belong to combat (stage 5).
             "damagething" => {
@@ -9227,6 +9252,20 @@ impl Runtime {
                 self.set_bin(idx(1) as i32, num(2) as f32);
                 Value::Nil
             }
+            // `sithInventory_PickupBackpack` (`0x4d2860`): add the backpack's bins back to the player.
+            // The caller destroys the thing (`item_wrenchyellow.cog` does), so the record goes with it.
+            "pickupbackpack" => {
+                // The inventory is the player's own here, so the first argument only names it.
+                let thing = ti(1);
+                let carried = self.backpack.get(&thing).cloned().unwrap_or_default();
+                for (bin, amount) in carried {
+                    let now = self.inv.get(&bin).copied().unwrap_or(0.0) + amount;
+                    let now = self.clamp_bin(bin, now);
+                    self.inv.insert(bin, now);
+                }
+                self.backpack.remove(&thing);
+                Value::Nil
+            }
             "changeinv" => {
                 // `sithInventory_ChangeInventory` (`0x4d1ef0`) adds, then clamps to the item's own
                 // `min`/`max`.
@@ -9361,6 +9400,29 @@ mod tests {
         rt.things[0].flags = 0x80000;
         assert!(rt.sector_messages(None, Some(0), Some(0)).is_empty());
         assert_eq!(rt.sector_messages(None, Some(0), None), vec![(0, "entered", 1)]);
+    }
+
+    /// `sithInventory_CreateBackpack` (`0x4d2740`) snapshots the carried bins onto a `+backpack`
+    /// thing, and `sithInventory_PickupBackpack` (`0x4d2860`) adds them back — the pair
+    /// `item_wrenchyellow.cog` and `levelsong.cog` drive.
+    #[test]
+    fn a_backpack_carries_the_inventory_and_gives_it_back() {
+        let mut rt = door_runtime();
+        rt.set_bin(60, 25.0);
+        rt.set_bin(14, 300.0);
+        rt.set_bin(71, 0.0);
+        assert!(Runtime::handles("CreateBackpack") && Runtime::handles("PickupBackpack"));
+        let thing = rt.call("createbackpack", &[Value::Num(0.0)]).num() as usize;
+        assert_eq!(
+            rt.backpack.get(&thing).map(|b| b.len()),
+            Some(2),
+            "the backpack did not carry the two filled bins"
+        );
+        rt.inv.clear();
+        rt.call("pickupbackpack", &[Value::Num(0.0), Value::Num(thing as f64)]);
+        assert_eq!(rt.inv.get(&60).copied(), Some(25.0));
+        assert_eq!(rt.inv.get(&14).copied(), Some(300.0));
+        assert!(!rt.backpack.contains_key(&thing), "the picked-up record survived");
     }
 
     /// `sithInventory_ChangeInventory` (`0x4d1ef0`) and `sithInventory_SetInventory` (`0x4d2000`)

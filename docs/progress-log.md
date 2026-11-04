@@ -4583,3 +4583,18 @@ script-engaged actor stood until it rolled sight. `Runtime::setactorflags|aisetm
 restarts the whole loop. The port's per-instinct state gates implement the same conditions in its own terms; the
 `0x100` emission has no consumer in any handler. And `FUN_0050b9b0` (`sensedanger`) confirms the port's polarity: it
 gates on `0x800` clear **and `0x4` set**, then writes `(flags & !4) | 0x800`.
+
+**Backpacks.** `Res2.gob`'s 215 cogs were extracted with a throwaway reader to settle a verb question, and the
+inventory a dropped backpack carries turns out to be two recovered units: `sithInventory_CreateBackpack` (`0x4d2740`)
+and `sithInventory_PickupBackpack` (`0x4d2860`). `CreateBackpack(player)` spawns the `+backpack` template at the
+player's own pose and stores up to `0x10` bins of the inventory (the engine keeps only `items.dat` rows with the
+`0x1`/`0x80` carry bits and amounts above 0.5); `PickupBackpack(player, thing)` adds them back through the same
+`min`/`max` clamp `ChangeInventory` uses. Both arms are live in `Runtime::call` and in `handles`, since
+`item_wrenchyellow.cog` (`CreateBackpack`) and `levelsong.cog` (`PickupBackpack`) drive them. Test:
+`a_backpack_carries_the_inventory_and_gives_it_back`.
+
+**Two verbs stay ledgered rather than invented:** `GetAutoReload()` (58 call sites across `pow_*`/`levelsong`) reads
+the setup screen's "Automatic reload weapon" slider, whose retail default is unrecovered (bit 1 reloads, bit 2
+restricts to the current weapon's kind); `GetWeaponPriority(player, bin, 0)` (17 sites) is not a table column at all —
+`sithWeapon_AutoSelect` (`0x4d57a0`) asks the bin's own cog with message `0x13` (`autoselect`) and keeps the largest
+reply, which the port's damage ranking stands in for.
