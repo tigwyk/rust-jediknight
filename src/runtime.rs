@@ -734,6 +734,9 @@ pub const AI_AWARE_SECONDS: f32 = 8.0;
 /// The strength `sensedanger` gives the awareness event it raises when an awake actor spots the player:
 /// the handler (`0x50b9b0`) passes `0x40400000` = 3.0, so the same side converges on the fight.
 pub const AI_AWARE_ALERT: f32 = 3.0;
+/// `FUN_0050aa80`'s strength when `LookForTarget`'s scan finds the player (`0x40400000`), kind 0:
+/// a spotter calls its neighbours in. The same branch clears the actor's awake bit.
+pub const AI_AWARE_SIGHT: f32 = 3.0;
 /// The `listen` handler's two distance/bearing constants, read from the retail `JK.EXE`:
 /// `_DAT_005232c8` = **1.0** unit and `_DAT_005232a0` = **0.5** (cos 60°). A sound heard through
 /// geometry is only heard when it is nearer than one unit **and** inside a 60° half-cone in front;
@@ -4168,6 +4171,28 @@ impl Runtime {
                     if self.can_detect(index, player) {
                         self.ai_detected.insert(index);
                         self.remember(index, target, "sight");
+                        // `FUN_0050aa80`'s branch A — the engine's acquisition path — writes
+                        // `(flags & 0xffff_fffb) | 0x232` (clear awake, set engaged/searching) and
+                        // broadcasts `CreateTransmittingEvent(player->sector, actor->pos, kind 0,
+                        // 3.0, player)`. The engaged bit makes it once per acquisition, not per frame.
+                        let flags = self.actor_flags.entry(index).or_insert(0);
+                        // Only a class that owns the instinct runs its handler, so only those alert
+                        // the neighbourhood; the sight refresh for everyone else stays silent.
+                        let broadcasts = ai
+                            .as_ref()
+                            .is_some_and(|class| class.instinct("LookForTarget").is_some());
+                        if broadcasts && *flags & 0x200 == 0 {
+                            *flags = (*flags & 0xffff_fffb) | 0x232;
+                            if let Some(sector) = self.things.get(player).map(|t| t.sector) {
+                                self.transmit_awareness(
+                                    sector,
+                                    0,
+                                    from,
+                                    AI_AWARE_SIGHT,
+                                    Some(player),
+                                );
+                            }
+                        }
                     } else {
                         sighted = false;
                     }
@@ -4572,7 +4597,14 @@ impl Runtime {
                 {
                     let interval = (look.weight / 1000.0).max(0.05);
                     let due = self.ai_scan.get(&index).copied().unwrap_or(0.0);
-                    if self.time >= due {
+                    // `FUN_0050aa80`'s branch B: once the class interval passes on an actor that is
+                    // engaged (`0x200`), it clears that word and sets the awake bit again — the scan
+                    // itself (branch A) only runs while `0x4` is set.
+                    let flags = self.actor_flags.entry(index).or_insert(0);
+                    if self.time >= due && *flags & 0x4 == 0 && *flags & 0x200 != 0 {
+                        *flags = (*flags & 0xffff_f9dd) | 0x4;
+                    }
+                    if self.time >= due && *flags & 0x4 != 0 {
                         self.ai_scan.insert(index, self.time + interval);
                         if let Some(thing) = self.things.get(index).map(|t| (t.pos, t.sector, t.yaw)) {
                             let (dx, dy, dz) = (
@@ -4595,10 +4627,23 @@ impl Runtime {
                                 self.ai_detected.insert(index);
                                 self.remember(index, target, "lookfortarget");
                                 // `FUN_0050aa80`'s write when the scan finds something:
-                                // `ai flags = (ai flags & 0xfffff9dd) | 0x4` — the found target wakes
-                                // the actor and clears the search/one-shot bits.
+                                // `ai flags = (ai flags & 0xffff_fffb) | 0x232` — the find **clears**
+                                // the awake bit and sets the engaged/searching word, so `returnhome`
+                                // (`& 4`) stops until the class's interval wakes the actor again.
                                 let flags = self.actor_flags.entry(index).or_insert(0);
-                                *flags = (*flags & 0xffff_f9dd) | 0x4;
+                                *flags = (*flags & 0xffff_fffb) | 0x232;
+                                // …and the same branch broadcasts the find: `CreateTransmittingEvent(
+                                // player->sector, actor->pos, kind 0, 3.0, player)` — the spotter puts
+                                // the player on the record at its own position, so neighbours converge.
+                                if let Some(sector) = self.things.get(player).map(|t| t.sector) {
+                                    self.transmit_awareness(
+                                        sector,
+                                        0,
+                                        thing.0,
+                                        AI_AWARE_SIGHT,
+                                        Some(player),
+                                    );
+                                }
                                 if std::env::var_os("BK_AI_TRACE").is_some() {
                                     eprintln!("ai: {index} `{ai_template}` LookForTarget finds the body at {range:.2}");
                                 }
@@ -10702,6 +10747,49 @@ mod tests {
         );
     }
 
+    /// `FUN_0050aa80`'s find is a **broadcast**: the branch clears the actor's awake bit, sets the
+    /// engaged/searching word and raises a kind-0 event of strength 3.0 in the *player's* sector at the
+    /// spotter's position, sourced to the player. The port set the awake bit instead and told nobody.
+    #[test]
+    fn a_spotter_broadcasts_the_find_and_leaves_the_awake_state() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0]; // sector 7, facing +x
+        let mut player = base.clone();
+        player.pos = [1.0, 0.0, 0.0]; // one unit ahead: inside the 2.0 always-noticed radius
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=2.0\n\nLookForTarget 1000\n"),
+        );
+        // Awake, the way `AISetMode` leaves an actor before it scans.
+        rt.actor_flags.insert(1, 0x4);
+        rt.sector_adjoins = vec![Vec::new(); 8];
+        for _ in 0..10 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        let flags = rt.actor_flags.get(&1).copied().unwrap_or(0);
+        assert_eq!(flags & 0x4, 0, "the find kept the awake bit: flags {flags:#x}");
+        assert_eq!(flags & 0x200, 0x200, "the find did not set the searching bit: {flags:#x}");
+        let sector = rt.things[0].sector;
+        let (strength, pos, _, source) = rt
+            .sector_awareness
+            .get(&(sector, 0))
+            .copied()
+            .expect("the find raised no awareness event");
+        assert_eq!((strength, source), (super::AI_AWARE_SIGHT, Some(0)));
+        assert_eq!(pos, [0.0, 0.0, 0.0], "the event belongs at the spotter's position");
+        assert!(
+            rt.awareness_at(sector).is_some(),
+            "a listener in the player's sector reads no record"
+        );
+    }
+
     /// `listen` (`0x50a6f0`) reacts to a sound only within the class's **heardist**: the port had the
     /// awareness record and the walk, but not the gate, so every actor in a room reacted to every shot
     /// in it however deaf its class was.
@@ -13020,6 +13108,10 @@ mod tests {
             ),
         );
 
+        // The scan runs only while the AI's awake bit is set (`FUN_0050aa80`'s branch A); a class
+        // launched with `aisetmode(actor, 0x200)` — the shipped wake — is re-woken by branch B on its
+        // first interval, which is what puts `0x4` back.
+        rt.actor_flags.insert(1, 0x200);
         // Facing away: outside the 90-degree cone, so the scan must not find the body even though the
         // range (2.0) is well inside `sightdist` (5.0).
         rt.ai_tick(0, 0.1);

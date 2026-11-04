@@ -4495,3 +4495,11 @@ idle actor home off the instinct alone. `AISetMode` already ORs its argument int
 `aisetmode(enemy, 0x4)` works), and `LookForTarget`'s find now writes the handler's own expression
 `(flags & 0xfffff9dd) | 4` — a found target wakes the actor. The test proves the two halves: without the bit the
 actor stays put, and after `AISetMode(actor, 0x4)` it walks home.
+
+**A find is a shout, and the awake bit has two halves.** `FUN_0050aa80` (the `LookForTarget` handler) runs its scan
+only while `ai flags & 4` is set; a find writes `(flags & 0xffff_fffb) | 0x232` (**clears** the bit, marks the actor
+engaged) and raises a kind-0 awareness event of strength 3.0 from the spotter's position in the **player's** sector,
+sourced to the player; once the class interval passes, branch B writes `(flags & 0xffff_f9dd) | 4` and the scan runs
+again. The port had read the write backwards (set `0x4` on a find) and never broadcast, so a room's guards each
+acquired on their own eyes and never converged. Both branches are modelled, the acquisition path raises the event,
+and `assets`-free unit tests cover the flags, the record's strength/position/source and a listener reading it.
