@@ -141,7 +141,10 @@ pub fn draw_screen(
                 // around the player. `look.map` carries the level and the player's pose.
                 Some(menus::Panel::Map) => {
                     if let Some((level, player, yaw)) = look.map {
-                        canvas.map([x, y, w, h], level, player, yaw, &palette, look.map_ink);
+                        // `look.map`'s yaw is the screen's opening orbit; the arrows are not wired
+                        // yet, so it is the engine's own zero.
+                        let camera = MapCamera { yaw, ..MapCamera::default() };
+                        canvas.map([x, y, w, h], level, player, camera, &palette, look.map_ink);
                     }
                 }
                 // `jkGuiTitle_LoadBarDraw` (0x418b90): a frame over the element's own rect, then
@@ -355,6 +358,45 @@ pub struct MapStats {
     pub drawn: usize,
 }
 
+/// The map panel's view state: `sithMap`'s euler block (`0x5565a0`, degrees — the arrows step it by
+/// 5 and the pitch is clamped to +/-90) and the D-pad's pan of the camera's own `translate(0,-2,0.3)`
+/// (`0x5565b0`, 0.1 a press). Defaults are the engine's own open state: zero orbit, no pan.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MapCamera {
+    pub pitch: f32,
+    pub yaw: f32,
+    pub roll: f32,
+    pub pan: [f32; 3],
+}
+
+/// `sithMap_Update`'s transform: `translate(-body) . rotate(euler)` under the camera's
+/// `translate(0,-2,0.3)`, panned. The view's axes are (right, forward, up) — `rdClip_Line3Project`
+/// divides the point's *second* float — so the body lands 2 units ahead and 0.3 below the eye.
+pub fn map_view(camera: MapCamera, player: [f32; 3], p: [f32; 3]) -> [f32; 3] {
+    let local = crate::runtime::rotate_by_angles(
+        [p[0] - player[0], p[1] - player[1], p[2] - player[2]],
+        camera.pitch,
+        camera.yaw,
+        camera.roll,
+    );
+    [
+        local[0] + 0.0 - camera.pan[0],
+        local[1] + 2.0 - camera.pan[1],
+        local[2] - 0.3 - camera.pan[2],
+    ]
+}
+
+/// One view-space point to panel pixels: a 90-degree horizontal field of view over the panel's
+/// width (`tan 45 = 1`, so the focal length is half the width and the vertical scale matches), with
+/// the canvas counting down and the world up.
+pub fn map_point(view: [f32; 3], rect: [i32; 4]) -> [i32; 2] {
+    let [x, y, w, _h] = rect;
+    let (cx, cy) = (x + w / 2, y + 320 / 2);
+    let f = w as f32 * 0.5;
+    let d = view[1].max(0.2);
+    [cx + (view[0] / d * f) as i32, cy - (view[2] / d * f) as i32]
+}
+
 impl Canvas {
     pub fn new(width: u32, height: u32) -> Self {
         Self { width, height, rgba: vec![0; (width * height * 4) as usize] }
@@ -512,46 +554,34 @@ pub fn map(
         rect: [i32; 4],
         level: &crate::jkl::Level,
         player: [f32; 3],
-        yaw: f32,
+        camera: MapCamera,
         palette: &[[u8; 3]; 256],
         ink: u8,
     ) -> MapStats {
         let mut stats = MapStats::default();
         let [x, y, w, h] = rect;
         let (cx, cy) = (x + w / 2, y + h / 2);
-        let _ = h;
         // The panel's camera, read out of the engine (`jkGuiMap_Show` `0x415c50`, the arrow handler
         // `0x4157f9`.., `rdClip_Line3Project` `0x46db10`): a **90-degree horizontal** field of view,
         // near **0.2**, far **10**, the view axes **(right, forward, up)** — the clip divides the
         // point's *second* float, which is what fixes that order — and the eye **2 units behind and
         // 0.3 above** the body (the inverse of the camera's own `translate(0, -2, 0.3)`). The orbit
-        // is the euler block the arrows step by 5 degrees (`0x5565a0`), so `yaw` turns the *level*
-        // about the body.
-        let (sin, cos) = yaw.to_radians().sin_cos();
+        // is the euler block the arrows step by 5 degrees (`0x5565a0`), so the camera's yaw turns
+        // the *level* about the body.
         // The engine's composition is `translate(-player) . rotate(euler)`, *then* the camera's own
         // `translate(0, -2, 0.3)`: the body always lands at the same spot (2 ahead, 0.3 below) and
-        // the arrows turn the level about it.
+        // the arrows turn the level about it. `map_view` is that chain.
         let off = [0.0f32, 2.0, -0.3];
         let eye = [
-            player[0] + off[0] * cos + off[1] * sin,
-            player[1] - off[0] * sin + off[1] * cos,
+            player[0] + off[0] * camera.yaw.to_radians().cos() + off[1] * camera.yaw.to_radians().sin(),
+            player[1] - off[0] * camera.yaw.to_radians().sin() + off[1] * camera.yaw.to_radians().cos(),
             player[2] + off[2],
         ];
         let near = 0.2f32;
         // `rdCamera_New(90, 1, 0.2, 10, 1)`: the far plane is the engine's own 10 units.
         let far = 10.0f32.max(near + 1.0);
-        let view = |p: [f32; 3]| -> [f32; 3] {
-            let (dx, dy, dz) = (p[0] - player[0], p[1] - player[1], p[2] - player[2]);
-            [dx * cos - dy * sin + off[0], dx * sin + dy * cos + off[1], dz + off[2]]
-        };
-        // `fov 90` over the panel's width: `tan(45) = 1`, so the focal length is half the width and
-        // the vertical scale is the same (square pixels). The canvas counts down, the world up.
-        let f = w as f32 * 0.5;
-        let project = |v: [f32; 3]| -> [i32; 2] {
-            let p = view(v);
-            let d = p[1].max(near);
-            [cx + (p[0] / d * f) as i32, cy - (p[2] / d * f) as i32]
-        };
+        let view = |p: [f32; 3]| -> [f32; 3] { map_view(camera, player, p) };
+        let screen_of = |v: [f32; 3]| -> [i32; 2] { map_point(v, [x, y, w, h]) };
         // `rdClip_Line3Project`: a segment with one end behind the near plane is cut at it, and one
         // with both ends behind draws nothing.
         let clipped = |a: [f32; 3], b: [f32; 3]| -> Option<([f32; 3], [f32; 3])> {
@@ -571,10 +601,6 @@ pub fn map(
                     Some(if da >= near { (near_v, cut) } else { (cut, near_v) })
                 }
             }
-        };
-        let screen_of = |v: [f32; 3]| -> [i32; 2] {
-            let d = v[1].max(near);
-            [cx + (v[0] / d * f) as i32, cy - (v[2] / d * f) as i32]
         };
         // The panel is a viewport: the engine draws the map into its own canvas, so a line that
         // leaves the rect is cut at the border rather than drawn over the frame art (Liang-Barsky).
@@ -710,7 +736,7 @@ pub fn map(
         // The player, at its **projected** position (2 units ahead of the eye, 0.3 below its
         // level): a cross with a nose pointing up, in the same ink as the line work so it reads
         // against the panel's dark background.
-        let [mx, my] = project(player);
+        let [mx, my] = screen_of(view(player));
         for d in -4..=4 {
             self.put(mx + d, my, palette, ink);
             self.put(mx, my + d, palette, ink);
@@ -764,8 +790,37 @@ pub fn map(
 
 #[cfg(test)]
 mod map_tests {
-    use super::{edge_is_seam, MAP_SEAM_DOT};
+    use super::{edge_is_seam, map_point, map_view, MapCamera, MAP_SEAM_DOT};
     use std::collections::HashMap;
+
+    /// `sithMap_Update`'s chain, checked against the engine's own numbers: the body sits 2 units
+    /// ahead and 0.3 below the eye (the inverse of the shot's `translate(0,-2,0.3)`) at every orbit,
+    /// the projection puts it 39 px below the panel's centre (0.3/2 * 260), +x is to the right on
+    /// screen, a -90 pitch looks straight down, and the D-pad's pan moves the camera, not the level.
+    #[test]
+    fn the_map_camera_matches_the_engine() {
+        let rect = [40, 40, 520, 320];
+        let body = [0.0f32, 0.0, 0.0];
+        for yaw in [0.0, 37.0, -90.0, 180.0] {
+            let camera = MapCamera { yaw, ..MapCamera::default() };
+            let v = map_view(camera, body, body);
+            assert!((v[1] - 2.0).abs() < 1e-4, "yaw {yaw}: the body is at {v:?}");
+            assert!((v[2] + 0.3).abs() < 1e-4, "yaw {yaw}: the body is at {v:?}");
+            assert_eq!(map_point(v, rect), [300, 239], "yaw {yaw}");
+        }
+        let right = map_view(MapCamera::default(), body, [1.0, 0.0, 0.0]);
+        assert_eq!(map_point(right, rect), [430, 239], "the body's +x is not screen-right");
+        let down = map_view(MapCamera { pitch: -90.0, ..MapCamera::default() }, body, [0.0, 2.0, 0.0]);
+        // The point 2 units ahead is 2 units *below* the eye after a -90 pitch, so it projects below
+        // the panel, not across it.
+        assert!(
+            map_point(down, rect)[1] > 400,
+            "a -90 pitch does not look down: {down:?} -> {:?}",
+            map_point(down, rect)
+        );
+        let panned = map_view(MapCamera { pan: [0.1, 0.0, 0.0], ..MapCamera::default() }, body, body);
+        assert!((panned[0] + 0.1).abs() < 1e-5, "the pan did not move the camera: {panned:?}");
+    }
 
     /// `sithMap_IsSurfaceDrawable`: a near-parallel neighbour hides the edge, a corner keeps it, and
     /// the surface's own normal never hides its own edges.

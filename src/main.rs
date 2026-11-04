@@ -1976,7 +1976,7 @@ fn main() {
                     [40, 40, 520, 320],
                     level,
                     [pos[0], pos[1], pos[2]],
-                    *yaw,
+                    ui::MapCamera { yaw: *yaw, ..ui::MapCamera::default() },
                     &ui::palette_of(&base, &palette),
                     look.map_ink,
                 );

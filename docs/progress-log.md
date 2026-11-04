@@ -4252,3 +4252,22 @@ slow frame pushed 2.5 s past the 2.0 s tolerance and the gate failed ("the load 
 snapshot", clock 8.27 vs saved 5.77). It now samples on the first frame the load has taken effect (the
 disturbance holds it 100 s ahead until then) and fails loudly if F9 never lands; two runs pass with a
 0.25 s delta, and the gate is stricter than before.
+
+## Round 335: the map camera as data, with its arithmetic checked
+
+The panel's view state is a struct now — `MapCamera { pitch, yaw, roll, pan }`, defaulting to the
+engine's own open state — and the two pure pieces are functions: `map_view` (the
+`translate(-body) . rotate(euler)`-under-`translate(0,-2,0.3)` chain) and `map_point` (90-degree
+horizontal field of view over the panel's width, near 0.2). That makes the arithmetic testable without
+a window, which is what the arrow handler will need:
+
+```
+the_map_camera_matches_the_engine: the body is 2 ahead / 0.3 below the eye at yaw 0, 37, -90 and 180
+  and projects to (300, 239); the body's +x is screen-right (430); a -90 pitch looks straight down; the
+  pan moves the camera, not the level
+cargo test: 245 passed, 0 failed
+--map-shot: unchanged (11765 ink px, 489 edges, 2109 facing-culled, 2447 seams hidden)
+```
+
+The dead `radius` parameter went with it: the perspective camera made the radius cull obsolete and the
+panel's far plane is the engine's 10 units.
