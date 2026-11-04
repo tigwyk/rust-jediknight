@@ -693,18 +693,20 @@ What the session settles, all of it already on the deviation ledger with its ret
   `ai[0x70] == 0` (the remembered target gone), while the instinct's 5000 ms is only how often the handler runs.
   The port stopped withdrawing when the interval expired; the mode now lasts until the target is destroyed or
   removed, and a retreat with no live target no longer arms at all. The unit test holds the mode through a run
-  of frames past the interval and clears it when the target is destroyed. Still open: the **lateral jitter** —
-  the handler rotates the away vector by `(rand - 0.5) × _DAT_005232d4`, plus a second component when the
-  attacker's flags carry `0x2000`; those two constants did not read out of this EXE copy, so they are not guessed.
+  of frames past the interval and clears it when the target is destroyed. Still open: the **lateral jitter** — the
+  constants are known now (`_DAT_005232d4` = **180**, `_DAT_005232a4` = **90**, `.rdata`, so ±90° and ±45°), but
+  the rotate call (`FUN_0044a09e`) does not say which of the two rolls is the angle, and the attacker-side
+  condition is a thing flag (`thing + 0x1d0 & 0x2000`) not yet identified; the jitter is not guessed at.
 - **`circlestrafe`** — **replans on the instinct's own clock now (round 339)**: the handler sets its next
   call to `class+0x4c + now`, the same slot `talk` reads its interval from, and the shipped first number is
   **5000 ms**. The port recomputed the rotation every frame (a smoother orbit than retail's); the ring point
   is now chosen once and held for the interval, and the unit test proves it is untouched after a second and
   replaced after five.
-- **`hitandrun`** — the handler accumulates *firing* time, not wall time: `sithAICmd_HitAndRun` (`0x50bb90`)
-  subtracts a constant from `state[8]` only on the ticks where the just-fired bit (`0x400`) is set, and its
-  1000 ms call cadence quantises the break-off; the port starts a wall clock at the first shot. Closing this
-  needs the handler's per-tick accumulation modelled, not a threshold tweak.
+- **`hitandrun`** — **closed (round 339)**: `sithAICmd_HitAndRun` (`0x50bb90`) does `state[8] -= _DAT_005232f4`
+  only on the ticks where the just-fired bit (`0x400`) is set, and that constant is **-1000.0** (`.rdata`), so each
+  firing tick adds a second of *firing* time; a tick without the bit resets the accumulator, and the break-off
+  happens when it passes the instinct's first number. The port ran a wall clock from the first shot, which armed
+  the run-away after a single shot. The test proves both halves: continuous fire arms it, one shot does not.
 - **`turretfire`** — the ±160° random aim-head sweep is **not** how a healthy turret fires: `FUN_0050a0f0`
   takes that branch only when the turret is damaged (`health < max × arg5`, `0.20` in the shipped
   `turretfire 750, 75, 160, 160, 5.0, 0.20, 500, 10000, 0`), where it randomises the head pitch/yaw inside
@@ -719,8 +721,8 @@ What the session settles, all of it already on the deviation ledger with its ret
   listener scans kind 2 then 1 then 0 (`heard_event`), a failed roll turns at the event's **source thing** when it
   still exists, and the engine's own sources are wired with their measured strengths: a shot (`WeaponFire`,
   `FireProjectile`) kind 1 at **2.0**, an explosion (`MakeBlast`) kind 1 at **3.0**, a death (`KillActor`) kind 0 at
-  **5.0**. Still open: `sithSoundMixer_PlaySoundThing`'s noisemaker events (kind 0, strength = volume ×
-  `_DAT_00522f80`), whose scale constant did not read out of this copy of `JK.EXE`.
+  **5.0**, and a sound played on a thing (`PlaySoundThing`) kind 0 at **volume × 0.6** (`_DAT_00522f80`, read out
+  of the EXE's `.rdata`). The row is closed: nothing on the awareness path is unmodelled.
 - **`AISetMode`** — only the `0x2000` off switch is honoured; the wake bit (`0x4`) needs the engine's own wake logic
   first.
 - **AI engagement timing** — the level-3 same-pose pair: a port run and a retail capture at the recorded vantage, to
@@ -769,7 +771,7 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 
 | check | command | measured round 332 |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --bins --release` | **247 passed**, 0 failed (round 339) |
+| unit + integration suite | `cargo test --bins --release` | **248 passed**, 0 failed (round 339) |
 | every level's runtime | `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5 bevi-knight --soak-all` | **35 of 35 levels**, 0 non-finite positions, **0** bodies outside every sector (round 331's soak-count fix) |
 | every cog verb | `bevi-knight --cog-check` | **34 levels, 0 stubbed verb calls, 0 errors** |
 | drop-in asset coverage | `bevi-knight --audit` | **35/35 levels clean**, 0 non-drawable models, 10 unresolved asset references, 54 undecoded files |
