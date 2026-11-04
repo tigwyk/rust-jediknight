@@ -732,12 +732,12 @@ criterion for Phase 1/2.
 Cut a release when: the exit criteria of every phase so far hold, the release note lists the tier per
 level, and a clean-machine install plays level 1 to completion. Multiplayer stays out of scope, as now.
 
-**State at round 292 (re-measured this round; the round-289 block below is history, not the current numbers).**
+**State at round 327 (re-measured each round; the round-292 and round-265 blocks below are history, not the current numbers).**
 
 | check | command | measured round 292 |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --bins --release` | **241 passed**, 0 failed (round 324) |
-| port gates | `bevi-knight --gates` | **0 of 66 failed, 0 skipped** |
+| unit + integration suite | `cargo test --bins --release` | **243 passed**, 0 failed (round 327) |
+| port gates | `bevi-knight --gates` | **0 of 67 failed, 2 skipped** (round 327) |
 | every level's walk | `bevi-knight --walk all` | **24/34 contained**, 25 hull-agreeing, 46 crossings, **6 recorded walk-offs** (`02narshadda`, `07yun`, `09fuelstation`, `11gorc`, `17asarris`, `m_boss17`), no other body in the void; the sweep now runs the level's **gravity** (round 322) |
 | walk trace | `pwsh -File tools/parity/trace-gate.ps1` | **10 legs, 0 failures** — `walk17_spawn` 117 % / sectors off 0, `walk5_spawn` 83 % / sectors off 2, `walk6_spawn` 94 % / sectors off 2; `walk3_spawn` stays out of the set at 209 % (the floor slide) |
 | parity series | `pwsh -File tools/parity/series-gate.ps1` | **1 graded, 0 failures (round 308)** - `spawn` **world** port 1.0000 / retail 1.0000, |diff| 0.0000, over the sidecar's measured 7.4 s from the same 1204 ms settle. Three fixes made it a real measurement: the harness now records `series_settle_ms` (wall time from "level loaded" to the series' first frame), the gate samples the port at that same game time instead of a fixed 60 frames, and the gate freezes the port's animation (`--no-anim`) and grades it against retail's `series_world_region_ssim`, because retail's own note says its changing pixels are animated characters, not camera motion. Both sides' animated full-series curves still print (port 0.9258 / retail 0.9258) but no longer decide it: level 1's intro Ry stands 0.27 units from the eye, so its clip fills the band and its loop returns the frame bit-identical (1.0000 at 4.2 s) - a pose limitation, not world drift |
@@ -747,8 +747,12 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 | retail saves | `bevi-knight --save <file>.jks` | retail lists decode: **357 entries** (quicksave) / **73** (autosave) with the player at that level's own spawn and health 100 |
 
 Closed since round 265, with the evidence in `docs/progress-log.md`: the AI-engagement row (the port lands no hits at the
-row's own pose), the cutscene row (retail cannot be booted into a non-first level — three routes proved closed), and the
-weapon-capture claim (`BK_ARM=11 BK_POV=bryv.3do` draws it: 8 843 changed pixels, bottom-centre box). Corrected:
+row's own pose), the cutscene row (retail cannot be booted into a non-first level — three routes proved closed), the
+weapon-capture claim (`BK_ARM=11 BK_POV=bryv.3do` draws it: 8 843 changed pixels, bottom-centre box), and in rounds
+325–327 the sky planes' header starting offsets (25 levels checked; `03katarn`/`10cargo` start the horizon at `y = -16`
+texels), the saber's `drawsaber` row (`weap_saber.cog` is the only script that selects armed mode 2; Kyle's puppet
+answers with `kydrawsb.key`), and the `.3do` face flag word's two-sided bit (3,508 faces across 121 models now build
+their reversed winding). Corrected:
 the floor rule's normal convention, the canopy/thing-solidity lead, and row 141's premise that `thing + 0x144` is in a
 save (it is not — a save entry carries type, name, position, angles and one float).
 
