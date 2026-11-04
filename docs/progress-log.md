@@ -4877,3 +4877,18 @@ awareness sweep.
 
 Verified: disassembly of `0x4e6f05`/`0x4e6f40`/`0x4ed1d0`, and `grep` over the whole-object disassembly for
 `[0x848600]` (one write) and `0x847f3x` (writes only).
+
+**`sensedanger`'s event-2 arm is ported; `dodge`'s is dead content** (round 357). With event 2 now produced, the two
+handler arms were the last AI breadth item. `dodge`'s (`0x50b5c1`) is unportable because it is unreachable: it demands
+the awareness record's source be a **weapon thing** — `[source+0xc] == 3`, i.e. `SITH_THING_WEAPON`, with
+`[source+0x10] == 1` — while every shipped producer records the thing that made the noise (actor, player), never the
+bolt. `sensedanger`'s (`0x50b9ff`) is live and is now `sensedanger_from_awareness`: the class's `0x4` word set (hurt) and
+`0x800` clear (not alert), the sector's **kind-1** record naming a source inside the class's `heardist` (`class + 0x18`,
+passed to `0x4eb090` with a `-1.0` cone, so a range plus a clear line, not a view cone), and the instinct's own weight
+beating the record's strength (`msg+0xc > row+8` — why a gunshot's awareness usually silences this arm). It then targets
+the source, sets `(flags & !0x4) | 0x800`, and re-broadcasts `0x4f2a90(sector, pos, 1, 8.0, thing)`. Two named
+substitutions: the arm's sound (mode `0x4f`) has no name in the port's table so it is silent, and the cloak rules
+`0x4eb090` also applies are not modelled.
+
+Verified: `cargo test --release` **262 passed** (new: the arm alerts to a weak heard record, re-broadcasts 8.0, and a
+0.3 weight loses to a 1.0 record); `--ai` passes on `01narshadda`; `--gates --all` 0 of 67 failed, 2 skipped.

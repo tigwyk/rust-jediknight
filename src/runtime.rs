@@ -3555,6 +3555,76 @@ impl Runtime {
     /// range 75–87), takes `sithThing_GetThingParent(attacker)` as its target — the shooter, for a
     /// projectile — and swaps the awake bit for the alert bit (`flags & !0x4 | 0x800`). Unlike the
     /// scheduler path it raises **no** awareness event: that is the on-sight branch's.
+    /// `sensedanger`'s event-2 arm (`0x50b9ff`): an actor that has been hurt but is not alert yet
+    /// (`0x4` set, `0x800` clear) hears something in its own sector and, if the record's source is a
+    /// visible thing within its `heardist`, takes that thing as its target, raises the alert word and
+    /// re-broadcasts the event at **8.0**.
+    ///
+    /// The gates, read off the disassembly: the instinct's own weight must beat the record's strength
+    /// (that is why a gunshot usually silences this arm — its awareness is stronger than a 0.3 weight),
+    /// the sector's **kind-1** slot must name a source, and `sithAI_CheckSightThing` (`0x4eb090`) must
+    /// not answer 1 or 3. That call passes the class's `heardist` (`class + 0x18`) with a `-1.0`
+    /// cone, so the check is a range plus a clear line, not a view cone. Two substitutions:
+    /// the cloak rules the helper also applies are not modelled, and the arm's sound (mode `0x4f`) has
+    /// no name in the port's table, so it is not played.
+    fn sensedanger_from_awareness(&mut self, actor: usize, weight: f32) -> bool {
+        let flags = self.actor_flags.get(&actor).copied().unwrap_or(0);
+        if flags & 0x4 == 0 || flags & 0x800 != 0 {
+            return false;
+        }
+        let Some(sector) = self.things.get(actor).map(|t| t.sector) else {
+            return false;
+        };
+        let Some(&(strength, _, _, source)) = self.sector_awareness.get(&(sector, 1)) else {
+            return false;
+        };
+        if weight <= strength {
+            return false;
+        }
+        let Some(source) = source.filter(|s| *s != actor) else {
+            return false;
+        };
+        let (Some(from), Some(source_pos), Some(heardist)) = (
+            self.things.get(actor).map(|t| t.pos),
+            self.things.get(source).map(|t| (t.pos, t.destroyed)).filter(|(_, gone)| !gone).map(|(p, _)| p),
+            self.ai.get(&actor).map(|class| class.heardist),
+        ) else {
+            return false;
+        };
+        let (dx, dy, dz) = (
+            source_pos[0] - from[0],
+            source_pos[1] - from[1],
+            source_pos[2] - from[2],
+        );
+        let reach = (dx * dx + dy * dy + dz * dz).sqrt();
+        if reach > heardist.max(0.0) {
+            return false;
+        }
+        if self
+            .solids
+            .as_ref()
+            .is_some_and(|solids| solids.segment_blocked(from, source_pos))
+        {
+            return false;
+        }
+        self.actor_flags.insert(actor, (flags & !0x4) | 0x800);
+        self.remember(actor, source_pos, "surprise");
+        if self
+            .ai
+            .get(&actor)
+            .is_some_and(|c| c.instinct("Withdraw").is_some())
+        {
+            self.ai_withdraw.entry(actor).or_insert((source, None));
+        }
+        // `0x4f2a90(ai->sector, thing.pos, 1, 8.0f, thing)`: the arm shouts the event on at twice the
+        // distance of a whisper, which is what pulls the rest of the room out of `sleep`.
+        self.transmit_awareness(sector, 1, from, 8.0, Some(source));
+        if std::env::var_os("BK_AI_TRACE").is_some() {
+            eprintln!("ai: {actor} heard thing {source} in sector {sector} and alerts");
+        }
+        true
+    }
+
     fn sensedanger_from_damage(&mut self, actor: usize, attacker: usize) -> bool {
         let flags = self.actor_flags.get(&actor).copied().unwrap_or(0);
         if flags & 0x4 == 0 || flags & 0x800 != 0 {
@@ -3748,6 +3818,12 @@ impl Runtime {
                 ("sensedanger", 1) => {
                     source.is_some_and(|attacker| self.sensedanger_from_damage(actor, attacker))
                 }
+                ("sensedanger", 2) => self.sensedanger_from_awareness(actor, instinct.weight),
+                // `dodge`'s event-2 arm (`0x50b5c1`) is dead content, not unported: it demands the
+                // awareness source be a **weapon thing** (`[source+0xc] == 3`, `SITH_THING_WEAPON`)
+                // whose `[source+0x10]` is 1, and every shipped event records the thing that made the
+                // noise (an actor or the player), not the projectile.
+                ("dodge", 2) => false,
                 ("jump", 0x400) => self.jump_from_obstacle(actor, instinct.weight),
                 ("specialattack", 4) => source.is_some_and(|target| {
                     // `sithAICmd_SpecialAttack` event 4: damage the collided player with
@@ -12418,6 +12494,73 @@ mod tests {
             Some([3.0, 0.0, 0.0]),
             "the surprise did not make the attacker the target"
         );
+    }
+
+    /// `sensedanger`'s **event-2** arm (`0x50b9ff`): a hurt, unalerted actor whose sector holds a
+    /// kind-1 record names that record's source as its target, sets the alert word and re-broadcasts
+    /// the event at 8.0 — but only when the instinct's own weight beats the record's strength and the
+    /// source is inside `heardist` through a clear line (the engine's `0x4eb090` with a `-1.0` cone).
+    #[test]
+    fn sensedanger_alerts_to_a_heard_source_the_event_two_arm_names() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [1.0, 0.0, 0.0];
+        let mut heard = base.clone();
+        heard.pos = [2.0, 0.0, 0.0];
+        rt.things = vec![base, actor, heard];
+        rt.templates = vec!["walkplayer".into(), "grunt".into(), "grunt".into()];
+        rt.types = vec![10, 2, 2];
+        rt.things[1].health = 100.0;
+        rt.things[2].health = 100.0;
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=5.0, heardist=2.0\n\n\
+                 SenseDanger 3.00, 1.00\n",
+            ),
+        );
+        rt.sector_adjoins = vec![Vec::new(); 8]; // the arm re-broadcasts into sector 7
+        rt.actor_flags.insert(1, 0x4);
+        // A whisper of an event (`strength 1.0`) against the line's 3.0 weight: the arm runs.
+        rt.sector_awareness
+            .insert((7, 1), (1.0, [2.0, 0.0, 0.0], rt.time, Some(2)));
+        assert!(rt.emit_ai_event(1, 2, None), "the heard source did not alert the actor");
+        let flags = rt.actor_flags.get(&1).copied().unwrap_or(0);
+        assert_eq!(flags & 0x4, 0, "the arm did not clear the hurt word");
+        assert_ne!(flags & 0x800, 0, "the arm did not set the alert bit");
+        assert_eq!(
+            rt.ai_last_seen.get(&1).copied(),
+            Some([2.0, 0.0, 0.0]),
+            "the heard thing did not become the target"
+        );
+        assert_eq!(
+            rt.sector_awareness.get(&(7, 1)).map(|(s, _, _, _)| *s),
+            Some(8.0),
+            "the arm did not re-broadcast the event at 8.0"
+        );
+        // The engine's own order is weight > strength: a louder record silences the arm.
+        let mut quiet = door_runtime();
+        let base = quiet.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [1.0, 0.0, 0.0];
+        let mut heard = base.clone();
+        heard.pos = [2.0, 0.0, 0.0];
+        quiet.things = vec![base, actor, heard];
+        quiet.templates = vec!["walkplayer".into(), "grunt".into(), "grunt".into()];
+        quiet.types = vec![10, 2, 2];
+        quiet.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=5.0, heardist=2.0\n\n\
+                 SenseDanger 0.30, 1.00\n",
+            ),
+        );
+        quiet.actor_flags.insert(1, 0x4);
+        quiet
+            .sector_awareness
+            .insert((7, 1), (1.0, [2.0, 0.0, 0.0], quiet.time, Some(2)));
+        assert!(!quiet.emit_ai_event(1, 2, None), "a 0.3 weight beat a 1.0 record");
     }
 
     /// `sithActor_PlayDamageSoundFx` (`0x4ece90`): the hurt row for the damage kind, at
