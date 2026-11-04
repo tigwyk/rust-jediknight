@@ -3283,10 +3283,13 @@ impl Runtime {
         )
     }
 
-    /// `sithAIAwareness_ProcessEvent` (`0x004f2c30`): record the event in its own sector for its
-    /// side, then walk the adjoin graph, subtracting each adjoin's attenuation and stopping under the
-    /// engine's floor. Each sector keeps a **ring of the three most recent events** with their own
-    /// positions — that is what `sithAICmd_Listen` scans (newest first), so three are kept here too.
+    /// `sithAIAwareness_ProcessEvent` (`0x004f2c30`): record the event in its own sector's slot, then
+    /// walk the adjoin graph, subtracting each adjoin's attenuation and stopping under the engine's
+    /// floor. Each sector block (`0x8553a8 + sector * 100`) has **three slots** — strength at `+1/+2/+3`,
+    /// position at `+4..+6` and source at `+0x16` — indexed by the event's third argument (the kind:
+    /// `ProcessEvent`'s `ai[0x14]`), and a slot is replaced only when the new event is stronger. That is
+    /// exactly what `sithAICmd_Listen` scans, in slot order 2 → 1 → 0 (`iVar9` from 2 down), so the
+    /// records here are keyed by sector and kind.
     pub fn transmit_awareness(
         &mut self,
         sector: i32,
@@ -3339,8 +3342,9 @@ impl Runtime {
         })
     }
 
-    /// `listen` (`0x50a6f0`, the `sithAICmd_Listen` handler): the newest sound in `sector`'s ring
-    /// that a body at `from`, facing `forward`, can actually **hear**, with the sound's event time.
+    /// `listen` (`0x50a6f0`, the `sithAICmd_Listen` handler): the first of the sector's three kind
+    /// slots (2, then 1, then 0) that a body at `from`, facing `forward`, can actually **hear**, with
+    /// the sound's event time.
     ///
     /// The handler's own conditions, and the constants it reads from the retail EXE
     /// ([`AI_LISTEN_NEAR`], [`AI_LISTEN_FRONT_DOT`]): the sound must be inside the class's

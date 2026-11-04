@@ -147,7 +147,8 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    world's one global master (`-1` unset), which is what `01_endlevel.cog` registers at startup
    (`SetMasterCOG(GetSelfCOG())`). `getgoalframe` answers the destination a piece is moving to and 0 once
    it has arrived — the engine zeroes `goalframe` on arrival, and that is what a reversing lift reads.
-   Still open: `loadtemplate` (1). (Also done earlier: `getleveltime`, `gethealth`, `isthingvisible`,
+   `loadtemplate` is answered too (`Runtime`'s verb returns the template's own name, which is the handle
+   `CreateThing` takes here, or -1). (Also done earlier: `getleveltime`, `gethealth`, `isthingvisible`,
    `get/setthingmass`, `setthinguserdata`, `setthingtimer`.)
    **Level-end chain: closed.** A level's `goal*.cog` reports a finished objective with
    `SendMessage(GetMasterCOG(), user0)`, and `SendMessage` now takes the engine's two arguments — a
@@ -179,8 +180,9 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    (`sithActor_DamageActor`), **and a `damaged` handler's `ReturnEx` replaces the amount**: the message
    now carries its params (`GetParam(0)` = amount, `GetParam(1)` = kind), the label's answer comes back
    as its return value, and `Runtime::amend_damage` gives the difference back — which is what
-   `force_absorb.cog` (turn part of a hit into mana) and the dark Jedi handlers need. What is still
-   unported from the same function: the per-type hurt sounds and the 0.1 limb-hit scaling.
+   `force_absorb.cog` (turn part of a hit into mana) and the dark Jedi handlers need. The
+   per-type hurt sounds are in (`Runtime::hurt_mode` + the engine's `damage / currentHealth * scale` volume in
+   `damage_typed_from`), and the 0.1 scaling is the parent-actor arm of the same function.
 5. **AI verbs.** 240 calls across 11 verbs. **Mostly done:** `aisetmode`/`aiclearmode` are the actor-flag
    arms, `aisetmovespeed` stores a clamped 0..2 multiplier the AI step applies to the template's walking
    speed, `aisetmovepos`/`aisetmovething`/`aisetlookpos` are the scripted destination, follower and
@@ -5961,9 +5963,10 @@ fresh shot across a room could hide a nearer sound in the same room. `Runtime::s
 carry the propagation) and read by `heard_at`, which scans newest-first and returns the first event inside the actor's
 `heardist`. `awareness_at` keeps its old meaning for the tree's own awareness gate: the freshest event in the ring.
 
-What remains unported from the handler is unchanged and still on the table row: the engine's facing test on the sound
-and the probability roll that takes the shooter as a target once it reacts (the port always just walks toward the sound).
-Both landed in round 233 — see below.
+Both halves that note used to call unported — the handler's facing test on the sound (`forward · direction > 0.5` for a
+sound behind geometry) and the probability roll that takes the shooter as a target once it reacts — landed in round 233;
+round 339 wired the engine's own sources (shot 2.0, blast 3.0, death 5.0, `PlaySoundThing` volume × 0.6) and the
+handler's record shape.
 
 The headless check is `a_short_ranged_guard_hears_the_nearer_of_two_sounds_in_the_ring`: a guard with `heardist 2.0` and
 a ring holding a fresh shot 5 units along +x and an older one 1.5 units along +y must walk toward +y. Measured
@@ -5978,11 +5981,12 @@ tests the sound against the class's **`heardist`** (`class + 0x18`; the loaded d
 sets its own) and ignores anything further away. Without that gate every actor in a room reacted to every gunshot in it,
 however deaf its class was.
 
-The reader is now gated the same way, with the trace line `ai: N ignores a sound beyond its class's heardist` under
-`BK_AI_TRACE`. Still unported from the handler, and recorded on the table row rather than implied: the engine keeps a
-**per-sector ring of three recent sounds** with their own positions (the port keeps one strongest record per sector and
-side), it applies a facing test on the sound, and it rolls a probability to take the shooter as a target once it reacts —
-the port always just walks toward the sound.
+The reader is now gated the same way. **Corrected (round 344):** the "ring of three recent sounds" this note used to
+call unported is not a recency ring — `sithAIAwareness_ProcessEvent` (`0x4f2c30`) writes `0x8553a8 + sector * 100`
+with three slots (strength at `+1/+2/+3`, position at `+4..+6`, source at `+0x16`) indexed by the event's **kind**, and
+`FUN_0050a6f0` scans them in slot order 2 → 1 → 0. The port keeps exactly that shape (`sector_awareness` keyed by
+sector and kind, replaced only when stronger), applies the handler's facing test (`AI_LISTEN_FRONT_DOT` = 0.5 for a
+blocked path) and makes its one roll per heard sound (`ai_listen`). Nothing on the `listen` path is unmodelled.
 
 The headless check is `the_awareness_record_is_heard_only_inside_the_classs_heardist`: an actor with `heardist 2.0` and a
 shot recorded five units away must not move, and the same actor with a shot recorded 1.5 units away must walk toward it.
