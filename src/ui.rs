@@ -20,7 +20,7 @@ use crate::uni;
 pub struct Look<'a> {
     /// The level and the player's pose, for the map panel: `jkGuiMap_DrawMapScreen` draws the
     /// level around `GetLocalPlayerThing`.
-    pub map: Option<(&'a crate::jkl::Level, [f32; 3], f32)>,
+    pub map: Option<(&'a crate::jkl::Level, [f32; 3], MapCamera)>,
     /// How many world units the map panel shows across its radius.
 
     /// Palette index for the map's line work and the player's marker.
@@ -140,10 +140,7 @@ pub fn draw_screen(
                 // `jkGuiMap_DrawMapScreen` (0x4156a0) with `sithMap_DrawCircle`: the level
                 // around the player. `look.map` carries the level and the player's pose.
                 Some(menus::Panel::Map) => {
-                    if let Some((level, player, yaw)) = look.map {
-                        // `look.map`'s yaw is the screen's opening orbit; the arrows are not wired
-                        // yet, so it is the engine's own zero.
-                        let camera = MapCamera { yaw, ..MapCamera::default() };
+                    if let Some((level, player, camera)) = look.map {
                         canvas.map([x, y, w, h], level, player, camera, &palette, look.map_ink);
                     }
                 }
@@ -367,6 +364,39 @@ pub struct MapCamera {
     pub yaw: f32,
     pub roll: f32,
     pub pan: [f32; 3],
+}
+
+impl MapCamera {
+    /// One arrow press's effect, by the element id the handler switches on: `0x9a`..`0x9d` step the
+    /// euler by 5 degrees (yaw either way; pitch down with a floor at -90, up with a ceiling at +90 —
+    /// `0x522108`/`0x52210c`/`0x522110`/`0x522114`), and `0x66`..`0x69` pan the camera by 0.1
+    /// (`rdMatrix_PostTranslate34` on `0x5565b0`). Anything else is not an arrow.
+    pub fn arrow(&mut self, id: i32) -> bool {
+        match id {
+            0x9a => self.yaw += 5.0,
+            0x9b => self.yaw -= 5.0,
+            0x9c => {
+                if self.pitch > -90.0 {
+                    self.pitch -= 5.0;
+                } else {
+                    return true;
+                }
+            }
+            0x9d => {
+                if self.pitch < 90.0 {
+                    self.pitch += 5.0;
+                } else {
+                    return true;
+                }
+            }
+            0x66 => self.pan[0] += 0.1,
+            0x67 => self.pan[0] -= 0.1,
+            0x68 => self.pan[2] -= 0.1,
+            0x69 => self.pan[2] += 0.1,
+            _ => return false,
+        }
+        true
+    }
 }
 
 /// `sithMap_Update`'s transform: `translate(-body) . rotate(euler)` under the camera's
@@ -820,6 +850,29 @@ mod map_tests {
         );
         let panned = map_view(MapCamera { pan: [0.1, 0.0, 0.0], ..MapCamera::default() }, body, body);
         assert!((panned[0] + 0.1).abs() < 1e-5, "the pan did not move the camera: {panned:?}");
+    }
+
+    /// The arrow table the two handlers switch on: ids `0x9a`..`0x9d` turn 5 degrees a press with
+    /// the pitch held inside +/-90, ids `0x66`..`0x69` pan 0.1, and anything else is not an arrow.
+    #[test]
+    fn the_arrow_ids_step_the_camera_the_way_the_handlers_do() {
+        let mut camera = MapCamera::default();
+        assert!(camera.arrow(0x9a) && camera.yaw == 5.0);
+        assert!(camera.arrow(0x9b) && camera.yaw == 0.0);
+        for _ in 0..30 {
+            camera.arrow(0x9c);
+        }
+        assert_eq!(camera.pitch, -90.0, "the pitch floor is -90 degrees");
+        for _ in 0..40 {
+            camera.arrow(0x9d);
+        }
+        assert_eq!(camera.pitch, 90.0, "the pitch ceiling is +90 degrees");
+        let mut camera = MapCamera::default();
+        for (id, want) in [(0x66, [0.1, 0.0, 0.0]), (0x67, [0.0, 0.0, 0.0]), (0x68, [0.0, 0.0, -0.1]), (0x69, [0.0, 0.0, 0.0])] {
+            assert!(camera.arrow(id), "{id:#x} is not an arrow");
+            assert_eq!(camera.pan, want, "{id:#x}");
+        }
+        assert!(!MapCamera::default().arrow(0x9e), "0x9e is not an arrow");
     }
 
     /// `sithMap_IsSurfaceDrawable`: a near-parallel neighbour hides the edge, a corner keeps it, and

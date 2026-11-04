@@ -4283,3 +4283,20 @@ yaw -5, pitch -5 (skipped at -90) and pitch +5 (skipped at +90); ids **`0x66`..`
 `rdMatrix_PostTranslate34(&0x5565b0, ...)` with `(0.1,0,0)`, `(-0.1,0,0)`, `(0,0,-0.1)`, `(0,0,0.1)`.
 The button elements themselves are on the field-log screen (`jkGuiMap_aElements`), so the last step is
 `activate`'s special case beside the force screen's.
+
+## Round 337: the map's arrows wired
+
+`Overlay` carries the panel's `MapCamera` now, `activate` sends the map screen's arrow elements through
+`MapCamera::arrow`, and `Overlay::show` zeroes the camera when the map opens — `jkGuiMap_Show`'s own
+reset. The table is the recovered one: `0x9a`..`0x9d` step yaw/pitch by 5 degrees with the pitch held
+inside +/-90, `0x66`..`0x69` pan the camera by 0.1, and any other id falls through to the normal menu
+routing (a no-op on this screen).
+
+```
+cargo test: 246 passed (the arrow table is one of them)
+--map-shot: 11765 ink px, 489 edges; --map-orbit -40,30: 18237 ink px, 1776 edges
+```
+
+What is not done here: a **window click** on the arrow art. This machine cannot run the interactive path
+reliably right now, so the wiring is proven by the unit-tested table and the same `MapCamera` driving the
+render at a non-zero orbit, not by a click.

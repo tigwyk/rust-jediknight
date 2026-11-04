@@ -1884,7 +1884,8 @@ fn main() {
             }
         }
         // The panel's own view starts at the engine's zero orbit (see `live_map_for`).
-        let map = map_level.as_ref().map(|(level, pos, _yaw)| (level, *pos, map_yaw));
+        let shot_camera = ui::MapCamera { pitch: map_pitch, yaw: map_yaw, ..ui::MapCamera::default() };
+        let map = map_level.as_ref().map(|(level, pos, _yaw)| (level, *pos, shot_camera));
         let look = ui::Look { fonts: &fonts, art: &art, checkbox, palette: &palette, stars, text: &none, map, load_percent, ..ui::Look::default() };
         // The canvas is the UI's authored size, not the artwork's: a dialog's panel is
         // smaller than the screen it sits on.
@@ -2016,7 +2017,9 @@ fn main() {
                 let mut canvas = ui::Canvas::new(640, 480);
                 let map = map_level
                     .as_ref()
-                    .and_then(|(level, _, _)| live_map_for(screen, level, moved_pos, start_yaw.to_radians()));
+                    .and_then(|(level, _, _)| {
+                        live_map_for(screen, level, moved_pos, ui::MapCamera::default())
+                    });
                 let look2 = ui::Look {
                     fonts: &fonts,
                     art: &art,
@@ -13241,6 +13244,9 @@ struct Overlay {
     hud: hud::Hud,
     canvas: ui::Canvas,
     image: Handle<Image>,
+    /// The map panel's own view: the euler the arrow elements step and the D-pad pans
+    /// (`MapCamera::arrow`). Zeroed when the screen opens, as `jkGuiMap_Show` zeroes it.
+    map: ui::MapCamera,
     /// Redraw the canvas on the next frame.
     dirty: bool,
 }
@@ -13254,6 +13260,10 @@ impl Overlay {
 
     /// Switch to a screen, resetting the cursor and the canvas.
     fn show(&mut self, menu: Option<String>, selected: usize) {
+        // The map's arrows start from the engine's own zero orbit every time it opens.
+        if menu.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("fieldlog")) {
+            self.map = ui::MapCamera::default();
+        }
         self.menu = menu;
         self.selected = selected;
         self.hover = None;
@@ -13280,6 +13290,7 @@ impl Overlay {
             hud: hud::Hud::default(),
             canvas: ui::Canvas::new(ui::CANVAS[0] as u32, ui::CANVAS[1] as u32),
             image: Handle::default(),
+            map: ui::MapCamera::default(),
             dirty: true,
         }
     }
@@ -13653,15 +13664,12 @@ fn live_map_for<'a>(
     screen: &menus::Screen,
     level: &'a jkl::Level,
     pos: Vec3,
-    yaw: f32,
-) -> Option<(&'a jkl::Level, [f32; 3], f32)> {
+    camera: ui::MapCamera,
+) -> Option<(&'a jkl::Level, [f32; 3], ui::MapCamera)> {
     if !screen.items.iter().any(|i| i.panel() == Some(menus::Panel::Map)) {
         return None;
     }
-    // The engine opens the map at its own zero orbit (`jkGuiMap_Show` zeroes the euler block) and
-    // the arrows are not wired yet, so the map is world-aligned rather than following the facing.
-    let _ = yaw;
-    Some((level, [pos.x, pos.y, pos.z + PLAYER_RADIUS], 0.0))
+    Some((level, [pos.x, pos.y, pos.z + PLAYER_RADIUS], camera))
 }
 
 /// Redraw the canvas when something changed and upload it.
@@ -13710,7 +13718,7 @@ fn refresh_overlay(
             // The field-log map panel needs the **live** level and pose: without them the panel
             // draws its frame and nothing inside, which is what a player opening the map saw.
             let live_map = match (world.as_deref(), player.as_deref()) {
-                (Some(world), Some(player)) => live_map_for(&screen, &world.level, player.pos, player.yaw),
+                (Some(world), Some(player)) => live_map_for(&screen, &world.level, player.pos, overlay.map),
                 _ => None,
             };
             let art = |index: i32| -> Option<bm::Bm> {
@@ -14034,6 +14042,12 @@ fn activate(
     commands: &mut Commands,
 ) {
     let item = &screen.items[index];
+    // The map's own controls: its arrow elements step the euler and pan the camera, and are not
+    // navigation. Ids and steps are `MapCamera::arrow`.
+    if screen.name.eq_ignore_ascii_case("fieldlog") && overlay.map.arrow(item.id) {
+        overlay.dirty = true;
+        return;
+    }
     // The force screen's power rows are not navigation: clicking one spends a point on that power
     // (`jkGuiForce_ButtonClick`, the one function the dump cannot supply — see `force::can_spend`).
     // The name is resolved to its bin against `items.dat` by a system that holds the runtime.
