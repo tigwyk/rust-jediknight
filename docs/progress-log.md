@@ -4135,3 +4135,24 @@ canvas, prints the three numbers and asserts each is non-zero, so "the rules exi
 "the rules act on this level" can no longer be confused. At level 1's walkplayer spawn: 5,243 edges
 drawn, 2,054 surfaces culled by `sithMap_Draw`'s facing test, 1,958 edges hidden by
 `sithMap_IsSurfaceDrawable`'s coplanar-seam test.
+## Round 330: the soak no longer counts its own teleport as a body pushed out
+
+`--soak-all` reported `19a` with **2** bodies outside every sector. `BK_SOAK_TRACE=1` named them: the
+`walkplayer` — which the soak itself had just teleported to the watched sector, a point that lies in
+`19a`'s documented hull gap — and `stormtroop3`, which the teleport's script moved 0.43 units down out
+of a sector the file's hulls do not cover. The player is the check's own probe, so it is excluded now
+(the walk gate and `--live-play` own the player's containment); the actor is a real observation, left
+in place.
+
+```
+soak-all: 35 level(s) ran, 0 with a non-finite position, 0 with bodies outside every sector: [], 0 failed
+soak --level 19a (BK_SOAK_TRACE=1): 1 body outside -- thing 169 `stormtroop3` at [2.849, -2.700, -11.137],
+  placed at [2.764, -2.270, -11.428], sector 495
+```
+
+| what | result |
+| --- | --- |
+| `--soak-all` | 35 of 35 levels, 0 non-finite, **0** outside, 0 failed |
+| `--soak --level 19a` | 1 message, 1 outside body (`stormtroop3`), 0 non-finite; the player no longer counted |
+| `cargo test` | **244 passed**, 0 failed |
+| `--gates` | 0 of 67 failed, 2 skipped |

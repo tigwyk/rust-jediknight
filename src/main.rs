@@ -4531,7 +4531,11 @@ fn main() {
             // particles. The level parks its markers outside the geometry on purpose — 21ajerec's
             // `ghost` (`type=ghost`) and `light0.7` (`_ghostdecor`) both sit there — and a marker
             // that never moves cannot fall out of anything.
-            if !matches!(rt.types.get(index).copied(), Some(2 | 4 | 5 | 10 | 11)) {
+            // The **player** is excluded: the soak itself teleports it to the watched sector (see
+            // "placed the body in watched sector" above), and on `19a` that spot lies in the level's
+            // documented hull gap, so the check would count its own deliberate placement as a body
+            // pushed out. The walk gate and `--live-play` own the player's containment.
+            if !matches!(rt.types.get(index).copied(), Some(2 | 4 | 5 | 11)) {
                 continue;
             }
             // Only things the simulation **moved**: a pickup the level placed two units above a
