@@ -17116,7 +17116,7 @@ fn coverage_audit(gobs: &gob::GobSet, referenced_ai_stems: &std::collections::BT
     println!("{:<6} {files:>6} {decoded:>8}", "all");
     if files > 0 {
         println!(
-            "{:.0}% of the install's files decode; {no_decoder} files are in formats this build does not read",
+            "{:.0}% of the install's files decode; {no_decoder} are read by purpose-built loaders rather than a generic decoder",
             decoded as f64 * 100.0 / files as f64
         );
     }
