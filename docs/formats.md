@@ -2493,8 +2493,28 @@ endlevel: player invulnerable while the handler sleeps: true
 endlevel: 1 message(s) delivered, goal bin 100 = 3, level_complete true
 ```
 
-Still unported from the same function: the hurt sound per type (`SITH_SC_HURTENERGY`, `HURTFIRE`,
-`HURTMAGIC`, `HURTSPECIAL`) and the 0.1 damage multiplier for a limb hit.
+The hurt sound per type is ported too (round 323). `sithActor_PlayDamageSoundFx` (`0x4ece90`) is
+called at the end of `sithActor_DamageActor` for a body that survived the blow, and needs three of the
+engine's constants (`_DAT_005230c4` 3.0, `_DAT_005230c8` 1.5, `_DAT_005230cc` 0.01 in `.rdata`):
+
+```c
+if (health > 0 && damage >= 3.0) {
+    float v = (damage / health) * 1.5;   /* health is thing + 0x134, read after the subtraction */
+    if (v >= 0.01) {
+        if (v < 0.0) v = 0.0; else if (1.0 < v) v = 1.0;
+        sithSoundClass_PlayMode(thing, mode, v);   /* 0x38 default, 0x39..0x3d per kind */
+    }
+}
+```
+
+The modes are the `.snd` event names of the engine's canonical table: `sithSoundClass_Startup`
+(`0x4e63e0`) fills its hashtable from the pointer array at `0x54b40c`, entry *n* = mode *n*. Read out of
+the image that is `0x38 hurtimpact`, `0x39 hurtenergy`, `0x3a hurtfire`, `0x3b hurtmagic`,
+`0x3c hurtspecial`, `0x3d drowning` — and entry `0x57` is `surprise`, which the AI path already used,
+so the table's base is confirmed. `sithActor_DamageActor` switches on the kind word itself, so a
+combined word takes the default arm.
+
+Still unported from the same function: the 0.1 damage multiplier for a limb hit.
 
 ### A message carries params, and `damaged` can answer
 

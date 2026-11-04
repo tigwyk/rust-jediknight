@@ -1095,8 +1095,7 @@ fn main() {
             // `--hit`: the impact scan the game actually uses (`Runtime::impacts`), which no check
             // covered before — `--fire` simulated its own hit test and missed this path entirely.
             "--hit" => hit_check = true,
-        "--camera-pull" => camera_pull_flag = true,
-            "--hit" => hit_check = true,
+            "--camera-pull" => camera_pull_flag = true,
         "--ends" => ends_check_flag = true,
             // `--die`: shields absorb first, health reaches 0, and the level's start brings the
             // player back with a full bar.
@@ -8605,12 +8604,34 @@ fn main() {
             panic!("the bolt never landed on a placed actor — the path the game uses");
         };
         assert_eq!(target, actor_index, "the bolt hit thing {target}, not the actor");
+        // The hurt sound is part of the same hit: `sithActor_DamageActor`'s tail asks the actor's own
+        // class for the damage kind's row (`sithActor_PlayDamageSoundFx`, 0x4ece90).
+        let sounds_before = rt.sounds.len();
         let left = rt.damage(target as i64, carried);
         rt.things[index].destroyed = true;
         println!(
             "hit: bolt {index} landed on thing {target} for {carried:.0}, {left:.0} health left"
         );
         assert!(left < health_before, "the actor took no damage");
+        match rt.hurt_sound_wav(target, runtime::DAMAGE_IMPACT) {
+            Some(wav) => {
+                assert_eq!(
+                    rt.sounds.len(),
+                    sounds_before + 1,
+                    "the hit landed but asked for no hurt sound"
+                );
+                let played = &rt.sounds[rt.sounds.len() - 1];
+                assert_eq!(played.name, wav, "the hurt sound is not the class's own row");
+                println!(
+                    "hit: the actor cries out with `{wav}` at volume {:.3} (damage / health * 1.5, clamped)",
+                    played.volume
+                );
+            }
+            None => println!(
+                "hit: `{}` ships no `hurtimpact` row, so a hit is silent",
+                rt.templates[target]
+            ),
+        }
         // The flinch the renderer plays: `just_hit` on the actor that took the bolt.
         println!("  flinch: just_hit(thing {target}) = {}", rt.just_hit(target));
         assert!(rt.just_hit(target), "a hit actor was not marked as hit");

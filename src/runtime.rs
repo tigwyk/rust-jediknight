@@ -288,6 +288,13 @@ pub const DAMAGE_IMPACT: u32 = 0x01;
 pub const DAMAGE_ENERGY: u32 = 0x02;
 pub const DAMAGE_SABER: u32 = 0x10;
 pub const DAMAGE_FALL: u32 = 0x40;
+/// `sithActor_PlayDamageSoundFx` (`0x4ece90`) only cries out for a blow of at least **3** points
+/// (`_DAT_005230c4`), at a volume of `damage / health * 1.5` (`_DAT_005230c8`) clamped to 1.0, and
+/// stays silent under `0.01` (`_DAT_005230cc`). The health in that ratio is `thing + 0x134`, read
+/// *after* the subtraction, so a bigger share of what is left is a louder cry.
+pub const DAMAGE_SOUND_MIN: f32 = 3.0;
+pub const DAMAGE_SOUND_SCALE: f32 = 1.5;
+pub const DAMAGE_SOUND_FLOOR: f32 = 0.01;
 /// `SITH_AF_INVULNERABLE`: `actor->flags` bit 3. `sithActor_DamageActor` checks it before anything
 /// else, so `SetActorFlags(player, 0x8)` is how a script makes someone untouchable.
 pub const AF_INVULNERABLE: u32 = 0x8;
@@ -3327,18 +3334,29 @@ impl Runtime {
             .map(|(wav, _)| wav.clone())
     }
 
+    /// The row a hurt of `kind` would play for this actor, so a check can name it without queueing
+    /// anything: the actor's own `soundclass=` row for the damage kind's mode.
+    pub fn hurt_sound_wav(&self, index: usize, kind: u32) -> Option<String> {
+        self.chatter_wav(index, Self::hurt_mode(kind))
+    }
+
     /// Queue the random row of the actor's own class for a sound mode at `at` — what
     /// `sithSoundClass_PlayModeRandom` plays, through the port's sound-request pipeline. Shared by
-    /// `talk` (its moods) and `sensedanger` (fear).
+    /// `talk` (its moods), `sensedanger` (fear) and the hurt sound.
     fn queue_mode_sound(&mut self, index: usize, mode: &str, at: [f32; 3]) {
+        self.queue_mode_sound_at(index, mode, at, 1.0);
+    }
+
+    /// The same, with the volume `sithSoundClass_PlayMode(thing, mode, volume)` takes: the caller's
+    /// volume is the sound's base, and `play_requested_sounds` still owns the fade and the rear pan.
+    fn queue_mode_sound_at(&mut self, index: usize, mode: &str, at: [f32; 3], volume: f32) {
         let Some(wav) = self.chatter_wav(index, mode) else { return };
-        // `PlayModeEntry` plays at full volume; `play_requested_sounds` owns the fade and the rear pan.
         let channel = self.sound_volume.len();
-        self.sound_volume.push(1.0);
+        self.sound_volume.push(volume);
         self.sound_pitch.push(1.0);
         self.sounds.push(SoundRequest {
             name: wav,
-            volume: 1.0,
+            volume,
             pos: Some(at),
             channel,
             pitch: 1.0,
@@ -6408,6 +6426,20 @@ impl Runtime {
         // What a handler's answer has to amend: the engine applies the amount the `damaged` handler
         // returns, not the one it was handed.
         self.damage_applied.insert(index, amount);
+        // `sithActor_PlayDamageSoundFx` (`0x4ece90`), the same function's tail: a body that survived the
+        // blow plays its own class's row for the damage kind. A lethal blow returns from
+        // `sithActor_DamageActor` through `sithActor_KillActor` before this, so no hurt sound.
+        if left > 0.0
+            && !died
+            && amount >= DAMAGE_SOUND_MIN
+            && let Some(t) = self.things.get(index)
+        {
+            let volume = (amount / left * DAMAGE_SOUND_SCALE).clamp(0.0, 1.0);
+            if volume >= DAMAGE_SOUND_FLOOR {
+                let at = t.pos;
+                self.queue_mode_sound_at(index, Self::hurt_mode(kind), at, volume);
+            }
+        }
         left
     }
 
@@ -6453,6 +6485,22 @@ impl Runtime {
             .get(&surface)
             .copied()
             .unwrap_or_else(|| self.surface_geomode.get(surface).copied().unwrap_or(0))
+    }
+
+    /// The `.snd` event a damage kind cries out with, from the engine's canonical mode table: the
+    /// pointer array at `0x54b40c` that `sithSoundClass_Startup` fills into its hashtable, entry *n*
+    /// = mode `n` (entry `0x57` is `surprise`, which the AI path already used).
+    /// `sithActor_PlayDamageSoundFx` switches on the kind word itself, so a combined word (`0x3`)
+    /// takes the default `hurtimpact`.
+    fn hurt_mode(kind: u32) -> &'static str {
+        match kind {
+            DAMAGE_ENERGY => "hurtenergy", // mode 0x39
+            0x04 => "hurtfire",            // 0x3a, `DAMAGE_FIRE`
+            0x08 => "hurtmagic",           // 0x3b, `DAMAGE_FORCE`
+            DAMAGE_SABER => "hurtspecial", // 0x3c
+            0x20 => "drowning",            // 0x3d, `DAMAGE_DROWN`
+            _ => "hurtimpact",             // 0x38, the default arm (impact, fall, combined)
+        }
     }
 
     /// `actor->flags & SITH_AF_INVULNERABLE` with the engine's fall exception.
@@ -11391,6 +11439,70 @@ mod tests {
             Some([3.0, 0.0, 0.0]),
             "the surprise did not make the attacker the target"
         );
+    }
+
+    /// `sithActor_PlayDamageSoundFx` (`0x4ece90`): the hurt row for the damage kind, at
+    /// `clamp(damage / health_after * 1.5, 0, 1)`, only for a blow of 3 or more that leaves the body
+    /// alive. The mode names come from the engine's own mode table (`0x38` impact, `0x39` energy,
+    /// `0x3a` fire, `0x3b` force, `0x3c` saber, `0x3d` drown).
+    #[test]
+    fn a_hit_that_leaves_the_body_alive_plays_its_hurt_sound() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [1.0, 0.0, 0.0];
+        rt.things = vec![base, actor];
+        rt.templates = vec!["walkplayer".into(), "grunt".into()];
+        rt.types = vec![10, 2];
+        rt.things[1].health = 100.0;
+        rt.template_soundclass.insert("grunt".into(), "grunt.snd".into());
+        rt.sound_classes.insert(
+            "grunt.snd".into(),
+            std::collections::BTreeMap::from([
+                ("hurtenergy".to_string(), vec![("hurtenergy1.wav".to_string(), 1.0)]),
+                ("hurtimpact".to_string(), vec![("hurtimpact1.wav".to_string(), 1.0)]),
+            ]),
+        );
+
+        // Under the engine's 3-point threshold: silent.
+        rt.damage_typed(1, 2.0, DAMAGE_ENERGY);
+        assert!(rt.sounds.is_empty(), "a 2-point hit played a hurt sound");
+
+        // The 2-point hit still lands (health 98), so 6 energy leaves 92 and the volume is 6 / 92 * 1.5.
+        rt.damage_typed(1, 6.0, DAMAGE_ENERGY);
+        assert_eq!(rt.sounds.len(), 1, "the energy hit played no sound");
+        assert_eq!(rt.sounds[0].name, "hurtenergy1.wav");
+        let want = 6.0 / 92.0 * 1.5;
+        assert!(
+            (rt.sounds[0].volume - want).abs() < 1e-4,
+            "volume {} is not {want}",
+            rt.sounds[0].volume
+        );
+
+        // A fall is the default arm; 86 on the 92 left leaves 6, and 86 / 6 * 1.5 clamps to 1.0.
+        rt.damage_typed(1, 86.0, DAMAGE_FALL);
+        assert_eq!(rt.sounds.len(), 2, "the fall hit played no sound");
+        assert_eq!(rt.sounds[1].name, "hurtimpact1.wav");
+        assert_eq!(rt.sounds[1].volume, 1.0, "the volume was not clamped to 1.0");
+
+        // The lethal blow returns through the kill path, never the hurt sound.
+        rt.damage_typed(1, 6.0, DAMAGE_IMPACT);
+        assert_eq!(rt.sounds.len(), 2, "a lethal hit played a hurt sound");
+    }
+
+    /// The engine's mode ids are the canonical `.snd` event names, recovered from the pointer array
+    /// `sithSoundClass_Startup` fills its hashtable from (`0x54b40c`); `0x57` being `surprise` is the
+    /// check that the table's base is right, since the AI path already used that name.
+    #[test]
+    fn the_damage_kinds_map_to_the_engines_sound_modes() {
+        assert_eq!(Runtime::hurt_mode(DAMAGE_IMPACT), "hurtimpact");   // 0x38
+        assert_eq!(Runtime::hurt_mode(DAMAGE_ENERGY), "hurtenergy");   // 0x39
+        assert_eq!(Runtime::hurt_mode(0x04), "hurtfire");              // 0x3a
+        assert_eq!(Runtime::hurt_mode(0x08), "hurtmagic");             // 0x3b
+        assert_eq!(Runtime::hurt_mode(DAMAGE_SABER), "hurtspecial");   // 0x3c
+        assert_eq!(Runtime::hurt_mode(0x20), "drowning");              // 0x3d
+        assert_eq!(Runtime::hurt_mode(DAMAGE_FALL), "hurtimpact");     // the switch's default arm
+        assert_eq!(Runtime::hurt_mode(0x03), "hurtimpact", "a combined word is not an arm");
     }
 
     /// The dispatcher calls the class's instincts **in file order** and stops at the first handler that

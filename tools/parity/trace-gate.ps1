@@ -21,14 +21,18 @@ basis, collision) while tolerating the harness's timing noise.
 .EXAMPLE
 powershell -NoProfile -File tools/parity/trace-gate.ps1
 #>
-# `walk3_spawn` and `walk5_spawn` are kept out of the default set for one measured reason each, and both
-# are the **thing-collision** deviation (the port's solid models push a body, they do not block it):
+# `walk3_spawn` and `walk5_spawn` are kept out of the default set, each for a measured reason:
 #  * walk3_spawn: retail's own trace (`walk3_spawn-walk.tsv`) walks the katarn ramp down and *left* —
 #    (-0.72,-4.73,-0.21) -> (-1.11,-3.06,-0.29) over 3 s, z descending with the floor and x drifting -0.39
-#    — while the port runs the same line straight down +y (212 % / 5 sectors, and it stops at y -1.17).
-#    That is the slanted-floor/ramp slide, not a model: no `solid:` thing lies near (-0.77,-3.60) in the
-#    level. The earlier "stops against a model" reading came from the port's push running against the
-#    motion (fixed in round 123); the leg now needs the floor slide before it can pass.
+#    while the yaw column stays 0.00 — and its first 600 ms segment reads 0.00 because the capture loses
+#    it to the window-focus wait (`Invoke-JkWalkTrace` holds the key once per segment). The port runs
+#    straight down +y at x -0.67 and stops at (-0.668,-1.165,-0.342) in sector 412, blocked by surface
+#    3435 (a 0.2-high wall at y -1.10, flags 0x4, `adjoin -1`) and 3430 (a down-facing 0.1-high band);
+#    travel is 3.57 against retail's 1.71 (209 %). Neither half is a model, and the leftward veer is not
+#    nearby geometry either: `--faces-at "-0.80,-3.30,-0.25"` finds **no collision face within 1.11
+#    units** of retail's turn point, and the port's own sweeps from that point are open
+#    (`--move-at "-0.86,-3.32,-0.29,0,1"` walks 1.07 into sector 412). The round-123 "stops against a
+#    model at (-0.77,-3.60)" reading was wrong for the same reason; both halves stay open.
 #  * walk5_spawn: joined in round 125 (81 % with 2 of 6 sectors) once the model footprint replaced the
 #    template cylinder; the slab-ramp sector difference is within the gate's allowance.
 # Both legs stay runnable with -Only.

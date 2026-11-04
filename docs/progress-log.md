@@ -3965,3 +3965,35 @@ near that point in level 3. The note now names the real cause (the floor slide) 
 | `--walk all` | 24/34 contained, 25 hull-agreeing, 46 crossings, 6 recorded walk-offs, 0 other |
 | `trace-gate.ps1` | 10 legs, 0 failures |
 | `trace-gate.ps1 -Only walk3_spawn` | still excluded: 209 %, 4 sectors (floor slide) |
+
+## Round 323: the hurt sound per damage kind
+
+`docs/formats.md` listed the hurt sound as "still unported from the same function" (`sithActor_DamageActor`,
+`0x4ecc90`). Its tail, `sithActor_PlayDamageSoundFx` (`0x4ece90`), is small and fully recoverable:
+
+- `clamp(damage / health * 1.5, 0, 1)` (retail's own arithmetic is `(damage / health) * 1.5`, clamped), only for a blow of at least **3** and a volume of at least
+  **0.01**; `thing + 0x134` is read *after* the subtraction, so the ratio is against the health that is left.
+  The constants are `_DAT_005230c4` 3.0, `_DAT_005230c8` 1.5, `_DAT_005230cc` 0.01 in `.rdata`.
+- the mode is the damage kind: `0x38` default, `0x39` energy, `0x3a` fire, `0x3b` force, `0x3c` saber,
+  `0x3d` drown. The names come from the engine's canonical table, not a guess: `sithSoundClass_Startup`
+  (`0x4e63e0`) fills its hashtable from the pointer array at `0x54b40c`, entry *n* = mode *n*, and entry
+  `0x57` reads `surprise` — the name the AI path already used, which confirms the base.
+- a lethal blow never reaches it: `sithActor_DamageActor` returns through `sithActor_KillActor` first.
+
+The port now queues that row through the existing mode-sound pipeline (`queue_mode_sound_at`, with the
+retail volume as the base; `play_requested_sounds` still owns the fade and the rear pan), and the
+availability is real: across the install's 102 `.snd` classes, **75 ship `hurtimpact`, 84 `hurtenergy`,
+67 `hurtfire`, 60 `hurtmagic`, 89 `hurtspecial` and 14 `drowning`** rows (extracted with `--raw` and
+counted). `--hit` now names the row the actor it shot cries out with, or says the class ships none
+(level 1's `reeyeesgun` and the bosses `boc`/`jerec` are in the silent set).
+
+| check | result |
+| --- | --- |
+| `cargo test` | **240 passed** (2 new: the kind→mode table, and the volume/silence/lethal cases) |
+| `--gates` | 0 of 67 failed, 2 skipped |
+| `--hit` | passes; prints the hurt row or the class's silence |
+
+Still open in the same function: the **0.1 limb multiplier** (it needs a hit location the port's bolts do
+not carry). `--hit` also stays broken on some levels for an unrelated reason: the bolt lands on a
+neighbouring thing (`02narshadda`: thing 268 instead of 267), which is the check's nearest-target
+assumption, not the damage path.
