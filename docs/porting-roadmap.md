@@ -694,6 +694,14 @@ What the session settles, all of it already on the deviation ledger with its ret
   the class interval passes on an engaged actor, writes `(flags & 0xffff_f9dd) | 4` and the scan runs again. The
   port walked home off the instinct alone (and had read the find's write backwards). Both branches are modelled
   now, and the unit test proves a wake bit that was never set stands still while `AISetMode(actor, 0x4)` walks.
+- **`retreat`/`withdraw`** — **decoupled (round 343)**: `retreat` (`0x50bc60`) only writes the mode and the
+  target into `ai[0x70]`; the **`withdraw` handler** (`0x50b150`) is what walks the body, and it gates on
+  `flags & 0x800` alone. The port demanded both instincts for either, so the **six classes that ship `Withdraw`
+  without `Retreat`** never backed off, even though `sensedanger` (`0x50b9b0`) writes the player into `ai[0x70]`
+  on a surprise. `SenseDanger` now stores that target, `Retreat` needs only itself, and the flee walk still
+  requires the `Withdraw` instinct (a `Retreat`-only class arms a mode nobody acts on, as in the engine). Unit
+  tests cover both: the surprise-only path (flags `0x800`, target stored, the body backs off) and the hurt-actor
+  `Retreat` path.
 - **`retreat`/`withdraw`** — **the lifetime is the engine's now (round 339)**: `FUN_0050b150` clears the mode on
   `ai[0x70] == 0` (the remembered target gone), while the instinct's 5000 ms is only how often the handler runs.
   The port stopped withdrawing when the interval expired; the mode now lasts until the target is destroyed or

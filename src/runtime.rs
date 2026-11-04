@@ -3492,8 +3492,16 @@ impl Runtime {
             return false;
         };
         self.actor_flags.insert(actor, (flags & !0x4) | 0x800);
-        // `ai[0x70]` is the target thing; the port's chase reads the target's last-seen position.
+        // `ai[0x70]` is the target thing (`withdraw`'s slot); the port's chase reads the target's
+        // last-seen position.
         self.remember(actor, target_pos, "surprise");
+        if self
+            .ai
+            .get(&actor)
+            .is_some_and(|c| c.instinct("Withdraw").is_some())
+        {
+            self.ai_withdraw.entry(actor).or_insert((target, None));
+        }
         self.queue_mode_sound(actor, "surprise", at);
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} is surprised by thing {attacker} (target {target})");
@@ -4355,6 +4363,12 @@ impl Runtime {
                         // `flags & ~0x4 | 0x800`, exactly the handler's two writes.
                         self.actor_flags.insert(index, (sense_flags & !0x4) | 0x800);
                         self.remember(index, target, "sensedanger");
+                        // The handler also writes its target into `ai[0x70]` (`param_1[0x70] = player`),
+                        // which is the slot `withdraw` reads — so a class with `Withdraw` but **no**
+                        // `Retreat` (six of the thirty shipped) still backs away from a surprise.
+                        if ai.as_ref().is_some_and(|c| c.instinct("Withdraw").is_some()) {
+                            self.ai_withdraw.entry(index).or_insert((player, None));
+                        }
                         self.queue_mode_sound(index, "fear", from);
                         let side = ai.as_ref().map(|c| c.alignment as i32).unwrap_or(0);
                         let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
@@ -4506,7 +4520,6 @@ impl Runtime {
             }
             if !self.ai_withdraw.contains_key(&index)
                 && let Some(retreat) = ai.as_ref().and_then(|c| c.instinct("Retreat")).cloned()
-                && let Some(withdraw) = ai.as_ref().and_then(|c| c.instinct("Withdraw"))
             {
                 let max_health = self
                     .template_max_health
@@ -4523,7 +4536,6 @@ impl Runtime {
                     && self.things.get(player).is_some_and(|t| !t.destroyed)
                     && crate::cog::pseudo_random() < chance
                 {
-                    let _ = withdraw;
                     self.ai_withdraw.insert(index, (player, None));
                 }
             }
@@ -4573,6 +4585,13 @@ impl Runtime {
                 .get(&index)
                 .and_then(|t| self.things.get(*t).map(|t| t.pos))
                 .or_else(|| {
+                    // Only the **`Withdraw` handler** walks the body away: `Retreat` merely writes the
+                    // mode and the target into `ai[0x70]`, so a class that ships `Retreat` alone arms a
+                    // withdrawal nobody acts on — exactly as in the engine, where the instinct list is
+                    // what schedules the handler.
+                    if !ai.as_ref().is_some_and(|c| c.instinct("Withdraw").is_some()) {
+                        return None;
+                    }
                     self.ai_withdraw
                         .get(&index)
                         .and_then(|(from, _)| self.things.get(*from).map(|t| t.pos))
@@ -12556,6 +12575,46 @@ mod tests {
             "an actor without `CircleStrafe` stepped sideways: {:?}",
             straight.things[1].pos
         );
+    }
+
+    /// `withdraw` reads `ai[0x70]`, and `sensedanger` (`0x50b9b0`) is what writes the player into it
+    /// when a surprise succeeds (`param_1[0x70] = player`, alongside `flags & ~0x4 | 0x800`). So a class
+    /// that ships **`Withdraw` without `Retreat`** — six of the thirty in the install — still backs away
+    /// from a surprise. The port required both instincts for either, so those six never withdrew.
+    #[test]
+    fn a_surprised_actor_with_only_withdraw_backs_off() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = base.clone();
+        player.pos = [1.0, 0.0, 0.0]; // inside the two-unit always-noticed radius
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 SenseDanger 0.0, 1.0\n\
+                 Withdraw 5000.0, 1.0\n",
+            ),
+        );
+        // Awake (`AISetMode(..., 0x4)`) and not yet alerted: what `sensedanger` acts on.
+        rt.actor_flags.insert(1, 0x4);
+        rt.ai_tick(0, 1.0 / 30.0);
+        let flags = rt.actor_flags.get(&1).copied().unwrap_or(0);
+        assert_eq!(flags & 0x800, 0x800, "the surprise did not set the alert bit: {flags:#x}");
+        assert!(
+            rt.ai_withdraw.contains_key(&1),
+            "`sensedanger` did not store the player as the withdraw target"
+        );
+        for _ in 0..30 {
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        let backed = rt.things[1].pos[0];
+        assert!(backed < -0.3, "the surprised actor did not back off: x {backed:.2}");
     }
 
     /// `retreat` (`0x50bc60`) arms a withdraw when health falls under `arg0 × max` and its `arg1`

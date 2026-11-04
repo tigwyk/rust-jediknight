@@ -4543,3 +4543,11 @@ drew every room in view, which fired the level-1 goal's `sighted` and left `--ai
 verdict into the cutscene (`--live-play` timed out the same way). The filtered walk is now adopted only when it is
 usable and otherwise falls back to the *unfiltered* set, so the cull is monotone: level 1's spawn draws 84 rooms where
 it drew 90, the captures are byte-identical, and `--ai-live` passes again (118 shots, 218 s).
+
+**`Withdraw` no longer needs `Retreat`.** The audit's instinct table showed `withdraw` on 30 classes but only 24
+referenced. `retreat` (`0x50bc60`) writes the mode and the target (`ai[0x70]`); `withdraw` (`0x50b150`) reads
+`flags & 0x800` and walks. `sensedanger` (`0x50b9b0`) also writes the player into `ai[0x70]` and sets `0x800`. So a
+class with `Withdraw` and no `Retreat` still backs away from a surprise, and the port — which required both instincts
+for either — never let those six act. The surprise paths now store the target, `Retreat` gates on itself only, and the
+flee walk still requires `Withdraw` (a `Retreat`-only class arms a mode nobody acts on). New unit test: an awake
+`SenseDanger`+`Withdraw` actor with no `Retreat` sets `0x800`, stores the player and walks away.
