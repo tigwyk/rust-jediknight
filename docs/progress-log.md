@@ -4512,3 +4512,11 @@ to the shot's direction (no articulated head), and the unit test covers the cade
 self-destruct and a healthy control that never arms it. Also settled: withdraw's jitter call is
 `rdVector_Rotate3Acc(vec, angle)` with the **±45°** roll, applied only when the target's `thing + 0x1d0 & 0x2000`
 jkFlag is set (the ±90° roll is a dead store), leaving only that flag's name as the open question.
+
+**Round 340 audit.** Re-measured the roadmap's own state table after the AI work: suite **250 passed**, `--gates`
+**0 of 67 failed, 0 skipped**, `--soak-all` **35 of 35 levels, 0 bodies outside**, `--cog-check` **0 stubbed calls,
+0 errors**, `--tour` **28 rows / 25 files / 23 films, 0 script errors**, `--walk all` **24/34 contained, 25 hull
+agreements, 46 crossings, 6 recorded walk-offs (worst drop 3.35)**, `--audit` **35/35 clean, 10 unresolved asset
+references, 54 undecoded files**, `--ai` and `--ai-live` pass. The remaining roadmap work is blocked on resources the
+port cannot supply headless: retail captures (`trace/parity/live` gates drive the window and the installed game), a
+clean machine, and the design-sized renderer items (portal graph, 3D map viewport).
