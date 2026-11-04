@@ -6641,8 +6641,10 @@ data-side probe:
 - **Draw arm** (`draw_created`): a `particle=` template now spawns one camera-facing quad per element —
   `SIZE` across, that element's material cel, at the element offset plus `INSERT OFFSET`, turned by the body's whole
   orientation (`particle_element_offset`; round 315 — it used the yaw alone, with the opposite sign, so pitch and roll
-  never reached the cloud) — and billboards them with the same `Sprite3d` path sprites use. The body's `angvel` spin
-  (the shield ships `angvel=(60/60/60)`) is still not applied (ledger).
+  never reached the cloud) — and billboards them with the same `Sprite3d` path sprites use. The `angvel` spin the
+  shield ships (`angvel=(60/60/60)`) is the **thing's** angular velocity, not a cloud effect: `rdParticle_Draw`
+  transforms the element list by the thing's own matrix, so it turns when the thing turns, and thing angular
+  integration is the open item (gaps §2 Physics).
 - **Probe** `--par <name>`: prints the cloud's header, element bounds, cel histogram, and the material's cell/bitmap
   counts, and asserts what `rdParticle_LoadEntry` asserts (the cloud is complete, every element cel is inside the
   material's cel count). All three shipped files pass: `sphere.par` (100 elements, cel 0 only, 0.002 each),
