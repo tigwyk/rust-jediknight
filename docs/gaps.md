@@ -6892,7 +6892,9 @@ target-typeflag `0x202` saber-lock branch (a dark Jedi-vs-dark Jedi reaction).
 **`specialattack` (`0x40fd00`) is measured, not guessed.** Its event-0 scheduler path only stops the
 puppet track, disables the saber and re-arms; the damage branch is event 4, and event 4 **is** emitted
 by the engine's thing-collision callback at `0x4ed24d`/`0x4ed269` (round 252 corrected the earlier
-"nothing emits 2 or 4" inventory: events `2` at `0x4f2c05` and `0x200` at `0x4ed203` are emitted too).
+"nothing emits 2 or 4" inventory: events `2` at `0x4f2c05` and `0x200` at `0x4ed203` are emitted too; round 356
+traced both: `0x4f2c05` is the per-frame awareness sweep and is now produced, while `0x4ed203` sits in a function
+installed only at `0x848600` (`0x4e6f05`) with no reader, so `0x200` has no reachable producer here).
 This build's actor walk raises no thing-vs-thing event, so the branch cannot be reached yet; it is
 filed with the actor-collision work, not as dead content.
 

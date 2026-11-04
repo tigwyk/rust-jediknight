@@ -4867,3 +4867,13 @@ cause; the leg's remaining gap is walking speed, and the trace gate still passes
 
 Verified: `trace-gate.ps1 -Only walk5_spawn` PASS 3.09 / 3.73 units (83 %), sectors off 2, `xy 1.205 z 0.422`;
 `--floor-at` at both end points as quoted.
+
+**`0x200` has no reachable producer in this build.** The inventory said the executable emits it at `0x4ed203`; the site
+is real but the function holding it (`0x4ed1d0`) is only ever **installed** as a callback — `0x4e6f05` stores its address
+into `0x848600`, beside the per-thing-type registrations `0x4e6f40` writes into the table at `0x847f38` — and a full
+`llvm-objdump` scan finds no instruction reading `0x848600` (only the two stores). So `jump`'s `0x200` arm is dead
+content after all, and the "no producer" reading of round 252 stands for `0x200` while event 2 is now produced by the
+awareness sweep.
+
+Verified: disassembly of `0x4e6f05`/`0x4e6f40`/`0x4ed1d0`, and `grep` over the whole-object disassembly for
+`[0x848600]` (one write) and `0x847f3x` (writes only).
