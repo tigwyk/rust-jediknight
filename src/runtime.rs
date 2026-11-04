@@ -1183,6 +1183,9 @@ pub struct Runtime {
     /// keeps it in the bin record (`sithInventory_GetInventoryMaximum`); the loader fills it here,
     /// because the runtime has no file access.
     pub item_max: BTreeMap<i32, f32>,
+    /// The same table's `min` column. `sithInventory_ChangeInventory` and `SetInventory` clamp a bin to
+    /// `[min, max]`, which is why retail's mana never reads above 100 however often a powerup lands.
+    pub item_min: BTreeMap<i32, f32>,
     /// Inventory bin -> the `cog_index` of the VM running that bin's script, filled by the loader when
     /// it starts one. `UseBin` needs it: the engine sends the bin's message to *its own cog*, and the
     /// runtime cannot see the app's instance list.
@@ -1804,6 +1807,7 @@ impl Runtime {
             saber_cam: 0,
             item_cog: BTreeMap::new(),
             item_max: BTreeMap::new(),
+            item_min: BTreeMap::new(),
             bin_cog_index: BTreeMap::new(),
             pending_cogs: Vec::new(),
             spawned_cogs: std::collections::BTreeSet::new(),
@@ -6832,7 +6836,18 @@ impl Runtime {
     /// the player acquires the item — the script then owns the weapon's own messages (`autoselect:`,
     /// `selected:`, `activated:`). The runtime cannot build a VM, so it names the script and the app
     /// starts it; `spawned_cogs` keeps a bin that drops to zero and comes back from starting twice.
+    /// `sithInventory_SetInventory`'s clamp: the item's own `min`/`max` columns, when the bin has a
+    /// row in `misc\items.dat`.
+    fn clamp_bin(&self, bin: i32, amount: f32) -> f32 {
+        let Some(max) = self.item_max.get(&bin).copied() else { return amount };
+        let min = self.item_min.get(&bin).copied().unwrap_or(0.0);
+        amount.clamp(min, max)
+    }
+
     pub fn set_bin(&mut self, bin: i32, amount: f32) {
+        // `sithInventory_SetInventory` (`0x4d2000`) clamps to the item's own `min`/`max` before it
+        // reports the change; a bin the table does not list is left as the script set it.
+        let amount = self.clamp_bin(bin, amount);
         let was = self.inv.insert(bin, amount).unwrap_or(0.0);
         if was <= 0.0
             && amount > 0.0
@@ -8940,7 +8955,12 @@ impl Runtime {
                 Value::Nil
             }
             "changeinv" => {
-                *self.inv.entry(idx(1) as i32).or_default() += num(2) as f32;
+                // `sithInventory_ChangeInventory` (`0x4d1ef0`) adds, then clamps to the item's own
+                // `min`/`max`.
+                let bin = idx(1) as i32;
+                let now = self.inv.get(&bin).copied().unwrap_or(0.0) + num(2) as f32;
+                let now = self.clamp_bin(bin, now);
+                self.inv.insert(bin, now);
                 Value::Nil
             }
             // `SetGoalFlags(player, bin, flags)` ORs flags into a goal counter: the engine keeps them
@@ -9068,6 +9088,33 @@ mod tests {
         rt.things[0].flags = 0x80000;
         assert!(rt.sector_messages(None, Some(0), Some(0)).is_empty());
         assert_eq!(rt.sector_messages(None, Some(0), None), vec![(0, "entered", 1)]);
+    }
+
+    /// `sithInventory_ChangeInventory` (`0x4d1ef0`) and `sithInventory_SetInventory` (`0x4d2000`)
+    /// clamp a bin to its own `items.dat` `min`/`max` **before** the change is reported, which is why
+    /// retail's mana never reads above 100 however many powerups land. A bin the table does not list
+    /// is left as the script set it: the engine only stores registered types (`(flags & 1)`), and the
+    /// port's own bins (mana 14, secrets 71) have no row.
+    #[test]
+    fn inventory_writes_clamp_to_the_items_own_ceiling() {
+        let mut rt = Runtime::new(&Level::default());
+        rt.item_max.insert(60, 200.0);
+        rt.item_min.insert(60, 0.0);
+        rt.set_bin(60, 500.0);
+        assert_eq!(rt.inv.get(&60).copied(), Some(200.0));
+        rt.set_bin(60, -20.0);
+        assert_eq!(rt.inv.get(&60).copied(), Some(0.0));
+        rt.set_bin(60, 20.0);
+        let change = |rt: &mut Runtime, delta: f32| {
+            rt.call("changeinv", &[Value::Num(1.0), Value::Num(60.0), Value::Num(delta as f64)])
+        };
+        change(&mut rt, 20.0);
+        assert_eq!(rt.inv.get(&60).copied(), Some(40.0));
+        change(&mut rt, 400.0);
+        assert_eq!(rt.inv.get(&60).copied(), Some(200.0), "above max clamps");
+        // Unlisted bins keep whatever the script wrote (the port's modelling, not the engine's table).
+        rt.call("changeinv", &[Value::Num(1.0), Value::Num(14.0), Value::Num(300.0)]);
+        assert_eq!(rt.inv.get(&14).copied(), Some(300.0));
     }
 
     fn door_runtime() -> Runtime {

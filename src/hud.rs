@@ -73,6 +73,8 @@ impl Default for Hud {
 pub struct ItemDef {
     pub name: String,
     pub id: i32,
+    /// The `min` column: `sithInventory_ChangeInventory`/`SetInventory` clamp to it.
+    pub min: i32,
     pub max: i32,
     /// The flags column, as the file spells it (`weapon`, `force`, …). `jkHudInv_ItemDatLoad` parses
     /// it through a keyword table into the bit word `sithInventory_RegisterType` stores, so keeping
@@ -118,6 +120,7 @@ pub fn items(text: &str) -> Vec<ItemDef> {
         let (Some(name), Some(id), Some(max)) = (rest.first(), rest.get(1), rest.get(3)) else {
             continue;
         };
+        let min = rest.get(2).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
         // `max` is an integer in most rows but a decimal in the force ones (`f_jump … 4.0 0x108
         // cog=force_jump.cog`), and an integer-only parse silently dropped every force power: 41 rows
         // name a cog, only 24 reached the map, and bin 21 was among the missing.
@@ -130,7 +133,7 @@ pub fn items(text: &str) -> Vec<ItemDef> {
             let (key, value) = word.split_once('=')?;
             key.eq_ignore_ascii_case("cog").then(|| value.to_string())
         });
-        out.push(ItemDef { name: name.to_string(), id, max, flags, cog });
+        out.push(ItemDef { name: name.to_string(), id, min: min.round() as i32, max, flags, cog });
     }
     out
 }
@@ -549,11 +552,11 @@ mod tests {
     fn item_icons_follow_the_engines_name_rule() {
         // `sprintf("ui\\bm\\ic%.5s%d.bm", name, bpp)`: the first five characters of the
         // item name, which is why the files are `icbacta8.bm` and `ickeyre8.bm`.
-        let bacta = ItemDef { name: "bactatank".into(), id: 34, max: 5, flags: String::new(), cog: None };
+        let bacta = ItemDef { name: "bactatank".into(), id: 34, min: 0, max: 5, flags: String::new(), cog: None };
         assert_eq!(bacta.icon(8), "ui\\bm\\icbacta8.bm");
-        let key = ItemDef { name: "keyred".into(), id: 39, max: 1, flags: String::new(), cog: None };
+        let key = ItemDef { name: "keyred".into(), id: 39, min: 0, max: 1, flags: String::new(), cog: None };
         assert_eq!(key.icon(8), "ui\\bm\\ickeyre8.bm");
-        let jump = ItemDef { name: "f_jump".into(), id: 20, max: 4, flags: String::new(), cog: None };
+        let jump = ItemDef { name: "f_jump".into(), id: 20, min: 0, max: 4, flags: String::new(), cog: None };
         assert_eq!(jump.icon(16), "ui\\bm\\icf_jum16.bm");
     }
 

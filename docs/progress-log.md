@@ -4321,3 +4321,35 @@ both are engine-built records — the `.cog` text carries `message <name>` and `
 rows with no mask, and `sithCog_ParseSymbolRef` (`0x4df410`) writes only the kind and the target index.
 Without the message record's `+0xc` assignment the mask's source is not established, so it is not guessed
 at.
+
+## Round 339: inventory writes clamp to the item table, and force-live has a frame-proof witness
+
+The full sweep came back at 66 of 68, and both reds were gate defects rather than port defects.
+
+`--force-live` failed once with "the body rose +0.08" and passed standalone with "+0.11", because the
+gate's fallback witness was a **ceiling contact** found through a razor-thin 0.02 tolerance: level 1's
+spawn stands under an overhang, and whether a marginal rise reaches it depends on frame timing. The
+script's own effect is a velocity, so the gate now also records the body's peak upward speed during the
+measurement window and passes on that — the unit gate already asserts the same 3.00 u/s.
+
+```
+force-live: the body rose +0.11 (took off at -1.13, peak -1.02), mana 400 of 100
+force-live: the lift stopped at the ceiling above the body (the power acted)
+force-live: the power set the body's lift (2.85 u/s upward)
+--- force-live check passed ---
+```
+
+The "mana 400 of 100" line in that output is the gate's own doing (it seeds bin 14 at 100), and it
+surfaced a real gap: the port's inventory verb accepted any value. `sithInventory_ChangeInventory`
+(`0x4d1ef0`) and `sithInventory_SetInventory` (`0x4d2000`) both clamp the new value to the item's own
+`items.dat` `min`/`max` columns **before** reporting the change, and `jkHudInv_ItemDatLoad` is the only
+caller of `sithInventory_RegisterType` — so a bin with no `items.dat` row is not even stored by retail.
+The port now carries that `min` column next to `max` and clamps `SetInv`/`ChangeInv` the same way, with
+a unit test. Bins outside the table (the port's own modelling of mana, secrets and goals) are left alone,
+which is the honest reading: they have no retail ceiling to clamp to.
+
+`--tour-live` timed out at 900 s: the tour swaps 21 levels and this machine spends ~30-50 s on each
+level's load and shader compile, so the budget ended mid-tour and read as "(timed out)". Its wall clock
+is 2400 s now (about two minutes a level), still bounded. The tour's own escape prints during that run
+come from bodies that fall out of the world at large frame deltas; the walk-off is the documented defect
+named in gaps.md, and it stays a real item rather than being hidden by the budget.

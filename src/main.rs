@@ -434,10 +434,13 @@ fn run_gates(game: &std::path::Path) -> i32 {
         // A frame budget cannot catch a child that stalls *before* its frames; a windowed cold start can
         // take two minutes of shader compilation and then sit in presentation. This wall clock ends such a
         // child instead of hanging the sweep, and the gate is reported as slow rather than silent.
+        // `--tour-live` swaps 21 levels and pays each one's load and shader compile: on this machine a
+        // level costs ~30-50 s, so 900 s ended mid-tour and read as "(timed out)". 2400 s is ~2 min a
+        // level — headroom for a slow box, still bounded.
         let seconds: u64 = std::env::var("BK_GATE_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(if *flag == "--tour-live" { 900 } else { 240 });
+            .unwrap_or(if *flag == "--tour-live" { 2400 } else { 240 });
         let launch = |flag: &str| -> (bool, String, String, bool, String) {
             use std::io::Read;
             let mut child = match std::process::Command::new(&exe)
@@ -20543,7 +20546,7 @@ fn force_probe(
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
     solids: Option<Res<Collision>>,
-    mut state: Local<(u32, u8, f32, f32, f32, f32)>,
+    mut state: Local<(u32, u8, f32, f32, f32, f32, f32)>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if !probe.enabled {
@@ -20603,10 +20606,17 @@ fn force_probe(
             state.1 = 3;
             state.0 = 0;
             state.2 = player.pos.z;
+            state.6 = 0.0;
         }
         // 3: the first jump is done — measure its peak, then train the power and jump again.
         3 => {
             state.2 = state.2.max(player.pos.z);
+            // The script's own lift is a **velocity** (`duration + 2.5` u/s, asserted at 3.00 in the
+            // unit gate); the rise it produces is small and can be stopped by the spawn's overhang, so
+            // the velocity is the witness that survives both frame timing and geometry.
+            if let Some(thing) = sim.world.borrow().things.get(body) {
+                state.6 = state.6.max(thing.vel[2]);
+            }
             if state.0 < 40 {
                 return;
             }
@@ -20630,11 +20640,18 @@ fn force_probe(
                     )
                 })
                 .is_some_and(|ceiling| state.2 + player.rules.radius >= ceiling - 0.02);
+            let lifted = state.6 > 1.0;
             if blocked {
                 println!("force-live: the lift stopped at the ceiling above the body (the power acted)");
             }
-            if rose <= 0.2 && !blocked {
-                println!("force-live: FAIL the power did not lift the body");
+            if lifted {
+                println!("force-live: the power set the body's lift ({:.2} u/s upward)", state.6);
+            }
+            if rose <= 0.2 && !blocked && !lifted {
+                println!(
+                    "force-live: FAIL the power did not lift the body (rose {rose:+.2}, peak velocity {:+.2} u/s)",
+                    state.6
+                );
                 exit.write(AppExit::Success);
                 return;
             }
@@ -23734,6 +23751,8 @@ fn setup(
     // against nothing and `pow_shields.cog` keeps taking (its +20 landed every frame).
     sim.world.borrow_mut().item_max =
         world.item_defs.iter().map(|def| (def.id, def.max as f32)).collect();
+    sim.world.borrow_mut().item_min =
+        world.item_defs.iter().map(|def| (def.id, def.min as f32)).collect();
     // `talk` picks a mood sound from the actor's own `.snd` class. The runtime has no file access, so
     // the loader's parsed classes come over the same way the inventory tables do.
     sim.world.borrow_mut().sound_classes = world.sound_classes.clone();
