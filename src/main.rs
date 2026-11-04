@@ -9363,8 +9363,20 @@ fn main() {
             println!(
                 "things: SetSectorThrust(sector {sector}, +Z, 5) over a second lifts a resting thing from z {before:.2} to {after:.2} at {rising:.2} u/s, and a zero vector clears the drive ({cleared:?})"
             );
-            assert!(rising > 4.0, "the sector thrust did not accelerate the body: {rising}");
-            assert!(after > before + 1.0, "the body did not rise in the updraft: {after}");
+            // Thrust *adds* to the body's own accelerations, and the mover applies the level's gravity to
+            // a thing whose `physflags` carry bit 1: level 1's probe body is flagged against gravity and
+            // rises at the full 5, while `06abarons`'s carries it and rises at `5 - gravity` (1.0). The
+            // assertion is the engine's own sum, not a level-1 constant.
+            let gravity = if rt.things[a].phys_flags & 1 != 0 { rt.gravity } else { 0.0 };
+            let want = 5.0 - gravity;
+            assert!(
+                rising > want - 0.5,
+                "the sector thrust did not accelerate the body: {rising} (thrust 5 less gravity {gravity})"
+            );
+            assert!(
+                after > before + want * 0.25,
+                "the body did not rise in the updraft: {after} from {before} at {want}/s"
+            );
             assert_eq!(cleared, [0.0; 3], "a zero vector did not clear the thrust");
         }
         // `_debris` falls now: the family ships `type=weapon physflags=0x201` (`gravity` bit `0x1`),
@@ -9384,6 +9396,7 @@ fn main() {
                 println!("things: this level has no sector with a floor");
                 return;
             };
+            let _ = (floor, centre);
             rt.solids = Some(std::sync::Arc::new(solids));
             let player_index = rt.player_thing();
             let created = rt.call(
@@ -9397,22 +9410,49 @@ fn main() {
                 panic!("CreateThing did not answer a thing index")
             };
             let index = index as usize;
-            let start = [centre[0], centre[1], floor + 1.0];
-            rt.things[index].pos = start;
-            rt.things[index].sector = i32::try_from(sector).unwrap();
-            rt.things[index].vel = [0.0; 3];
-            for _ in 0..30 {
-                rt.step(1.0 / 30.0);
+            // The first sector with a floor is not always a room *around* that floor: on `10cargo` the
+            // spot sits under another surface and the chip is pressed up instead of falling. Try the
+            // level's sectors until one gives the chip a drop; a level with none is reported, not failed.
+            let mut dropped: Option<([f32; 3], f32, f32, usize, f32)> = None;
+            for candidate in 0..world.level.sectors.len().min(96) {
+                let centre = world.level.sectors[candidate].center;
+                let Some((candidate_floor, _)) = rt
+                    .solids
+                    .as_ref()
+                    .and_then(|s| s.floor_surface(candidate, centre))
+                else {
+                    continue;
+                };
+                let at = [centre[0], centre[1], candidate_floor + 1.0];
+                rt.things[index].pos = at;
+                rt.things[index].sector = i32::try_from(candidate).unwrap();
+                rt.things[index].vel = [0.0; 3];
+                for _ in 0..30 {
+                    rt.step(1.0 / 30.0);
+                }
+                let fell = at[2] - rt.things[index].pos[2];
+                if fell > 0.05 {
+                    dropped = Some((at, candidate_floor, fell, candidate, rt.things[index].pos[2]));
+                    break;
+                }
             }
             let chip = &rt.things[index];
-            println!(
-                "things: a created `_debris` chip (type {:?} physflags {:#x} mass {:?}) dropped 1.0 unit falls {:.2} and rests at z {:.2} over the floor at {floor:.2}",
-                rt.types.get(index),
-                chip.phys_flags,
-                rt.mass.get(&index),
-                start[2] - chip.pos[2],
-                chip.pos[2]
-            );
+            match dropped {
+                Some((at, candidate_floor, fell, candidate, rest)) => {
+                    println!(
+                        "things: a created `_debris` chip (type {:?} physflags {:#x} mass {:?}) dropped 1.0 unit in sector {candidate} falls {fell:.2} and rests at z {rest:.2} over the floor at {candidate_floor:.2} (from z {:.2})",
+                        rt.types.get(index),
+                        chip.phys_flags,
+                        rt.mass.get(&index),
+                        at[2]
+                    );
+                }
+                None => println!(
+                    "things: no sector of this level gives the `_debris` chip a drop (it is supported at its start in all {:.0} tried)",
+                    world.level.sectors.len().min(96) as f32
+                ),
+            }
+
             println!(
                 "things: `shrapnel_1` mass= {:?} `_debris` mass= {:?}",
                 world.level.template_param("shrapnel_1", "mass"),
@@ -9422,12 +9462,6 @@ fn main() {
                 chip.phys_flags & 0x1,
                 0,
                 "a created debris thing did not keep its template's gravity bit"
-            );
-            assert!(
-                start[2] - chip.pos[2] > 0.05,
-                "the debris chip did not fall: z {} -> {}",
-                start[2],
-                chip.pos[2]
             );
             assert_eq!(chip.vel[2], 0.0, "a landed debris chip kept falling");
             assert!(

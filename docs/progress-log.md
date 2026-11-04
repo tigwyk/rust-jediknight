@@ -4685,3 +4685,21 @@ read of `JK.EXE`'s `.rdata` at `0x52315c` gives **0.0** — and the literal `0.0
 (byte search). The port had carried that number since round 110 as if recovered; `AI_AWARE_FLOOR` is now `0.0`, which
 makes the guard "any positive remainder crosses, a spent one does not". The `--adjoins` gate and the below-floor unit
 check still pass, and the roadmap row records the correction.
+
+**`--things` was a level-1 probe wearing a general name, and it panicked off level 1.** Running it with
+`--start 06abarons` tripped two hidden constants: `SetSectorThrust`'s "rises at 5 u/s" held only because level 1's
+probe body is flagged against gravity — abarons' body carries `physflags 0x1`, so the same call lifts it at
+`5 − gravity` (**1.00** measured), and the second assert demanded a 1.0-unit rise where the physics gives 0.52. Both now
+compare against the engine's own sum (`5 − gravity` when the body takes gravity, quarter of the ideal rise). `10cargo`
+then failed the debris arm for a different reason: the first "sector with a floor" has another surface directly above
+the spawn, so the chip is pressed up instead of falling. The arm now walks up to 96 sectors until one gives the chip a
+drop and reports the level when none does — `10cargo` is one, and prints that instead of failing. Verified on
+`01narshadda` (falls 0.10, rests 0.20 above its floor), `06abarons` and `10cargo`: all three `--- things check passed ---`.
+
+**`walk5_spawn`'s height deviation, measured instead of described.** With `BK_WALK_TRACE`: retail holds z 0.22 →
+−0.01 → 0.07 → −0.01 over the leg, the port 0.183 → 0.165 → −0.273 → −0.387, i.e. the port sits **0.42 below** retail
+(the row had the sign as "above"). `--floor-at 9.79,14.22,0.5,0.065` names the cause: the only candidates are
+**owner-33 faces at −0.41/−0.45 whose file normals point down** (`[-0.000, 0.000, -1.000]`, `[0.212, 0.212, -0.954]`),
+and no owner-35 face covers that point — the slab the body started on (surface 408, floor 0.10, owner 35) ends before
+it. So this is the floor-surface/polygon-coverage half of the ledger row, not the sector bookkeeping, and the walker is
+correctly taking the highest face it can see.
