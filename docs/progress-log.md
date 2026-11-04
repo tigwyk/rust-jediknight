@@ -4654,4 +4654,7 @@ plumbed from the runtime into the renderer's `ParticleGrow`; `AddDynamicAdd` (by
 additive colour with no render channel yet; and `GetThingLight`'s answer is not pinned (per-thing script light vs the
 sector's baked light — `force_blinding` is its only caller).
 
-That leaves **11** of the 221 live verbs unanswered, all recorded with their reason.
+That leaves **12** of the 221 live verbs unanswered (recounted), all recorded with their reason: `GetAutoReload`,
+`GetWeaponPriority`, `SetCollideType`, `SetParticleGrowthSpeed`, `AddDynamicAdd`, `GetThingLight`, `SetWeaponFlags`,
+`SetThingCollideSize`, and the four `00_breakingbottle` surface queries (`GetSurfaceNormal`, `GetSurfaceSector`,
+`GetNumSurfaceVertices`, `GetSurfaceVertexPos`).
