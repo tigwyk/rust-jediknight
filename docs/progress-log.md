@@ -4799,3 +4799,13 @@ damage the formula cannot give.
 
 Verified: `cargo test --release` 260 passed; `--gates` 0 of 67 failed, 2 skipped; `--pull` passes on `01narshadda` and
 `06abarons`.
+
+**`SkillTarget` recovered as far as its call chain** (`0x5047e0`, which Ghidra does not expose as a procedure, so it
+was read with `llvm-objdump`). It takes `(victim, player, bin, rank)`, fetches both things, answers **-1.0** when either
+is null or when `thing+0x29c` on the *player* is zero, and otherwise calls
+`0x4dedc0(playerPowerTable, skill 0x19, 3, player, 0, victim, 0, bin, rank, 0, 0)`. Two consequences are now in the
+port: `SkillTarget` returns the engine's -1 for a dead/missing thing (it used to index the template unconditionally),
+and grip's rate is documented as a per-skill entry of the **player's** power table rather than the victim's `damage=`.
+`--pull` prints that chain and the measured 0 instead of claiming the formula is unknown.
+
+Verified: `--pull` passes on `01narshadda` and `06abarons`; `cargo test --release` 260 passed.

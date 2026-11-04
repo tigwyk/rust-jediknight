@@ -8515,8 +8515,20 @@ impl Runtime {
             // and for grip (bin 31) the damage one tick of the hold does. What it returns decides what
             // the scripts do next, so an item always counts as "thrown" and an actor never does: this
             // port does not model disarming.
+            // The engine's own shape, from `0x5047e0` (not a named Ghidra procedure, so read from
+            // the image with `llvm-objdump`): it takes `(victim, player, bin, rank)`, returns `-1.0`
+            // when either thing is null or the **player's** power table (`thing+0x29c`) is empty, and
+            // otherwise calls `0x4dedc0(table, skill 0x19, 3, player, 0, victim, 0, bin, rank, 0, 0)`.
+            // So grip's rate is a per-skill entry of the player's force table, not the victim's
+            // template: this branch is still the port's placeholder until that table is decoded, and
+            // it must at least answer the engine's guards rather than indexing a missing thing.
             "skilltarget" => {
                 let victim = ti(0);
+                let player = ti(1);
+                let alive = |i: usize| self.things.get(i).is_some_and(|t| !t.destroyed);
+                if !alive(victim) || !alive(player) {
+                    return Value::Num(-1.0);
+                }
                 let bin = idx(2) as i32;
                 let type_ = self.types.get(victim).copied().unwrap_or(-1);
                 if bin == 24 {

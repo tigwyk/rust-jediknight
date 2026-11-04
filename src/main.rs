@@ -7153,7 +7153,7 @@ fn main() {
             let rate = vm.var("damage").num();
             if rate <= 0.0 {
                 println!(
-                    "pull: grip's rate is {rate:.0} (the victim's template sets `damage=0`), so the dot deals nothing; the engine's bin-31 formula is still unrecovered"
+                    "pull: grip's rate is {rate:.0} (the victim's template sets `damage=0`), so the dot deals nothing; the engine reads it from the player's power table at `thing+0x29c` (`0x5047e0` -> `0x4dedc0`, skill 0x19), which is still undecoded"
                 );
             } else {
                 assert!(health < before, "grip's grab pulse dealt no damage");
