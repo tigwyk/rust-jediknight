@@ -3987,7 +3987,11 @@ impl Runtime {
             // (id 1). The port reuses the same two scans the use key drives, so an actor with the
             // instinct opens the door it is walking into instead of standing behind it. The engine
             // sweeps a small sphere at the body's leading edge; the use scans are a look-cone
-            // approximation of that, and the reach is the port's use reach.
+            // approximation of that, and the **reach is the actor's own**: `Activate` passes
+            // `*(float *)(thing + 0x2c) - _DAT_00523200`, i.e. the body's `movesize` plus 0.1 — the
+            // same rule the player's use key uses (`use_reach`). A fixed 1.5-unit reach here let an
+            // actor open a door it was still a body-length away from, which the player's own use
+            // action refuses (round 257's measured cantina poses).
             if ai
                 .as_ref()
                 .is_some_and(|class| class.instinct("OpenDoors").is_some())
@@ -3999,10 +4003,11 @@ impl Runtime {
                     self.ai_opendoors.insert(index, self.time + 0.25);
                     let facing = [-yaw.to_radians().sin(), yaw.to_radians().cos()];
                     // `OpenDoors` runs the same action the player's use does, so it is scoped to the
-                    // actor's own sector too.
+                    // actor's own sector too, and reaches as far as its own body does.
                     let sector = body.sector;
-                    self.activate_near(pos, facing, 1.5, sector);
-                    self.use_thing(pos, facing, 1.5, sector);
+                    let reach = self.activate_reach(index);
+                    self.activate_near(pos, facing, reach, sector);
+                    self.use_thing(pos, facing, reach, sector);
                 }
             }
             let Some(thing) = self.things.get_mut(index) else { continue };
@@ -5776,6 +5781,23 @@ impl Runtime {
         self.solids.as_deref().is_some_and(|solids| {
             solids.in_search(sector, other, eye, [facing[0], facing[1], 0.0], reach, 0.025)
         })
+    }
+
+    /// `sithPlayerActions_Activate`'s reach for one body: `movesize + 0.1`
+    /// (`*(float *)(thing + 0x2c) - _DAT_00523200`, and the constant at `0x523200` is -0.1). The
+    /// player's use key calls the same rule. A template without a `movesize` falls back to the
+    /// engine's 0.06 actor body.
+    pub fn activate_reach(&self, index: usize) -> f32 {
+        self.templates
+            .get(index)
+            .and_then(|name| {
+                self.template_hit
+                    .get(name)
+                    .or_else(|| self.template_hit.get(&name.to_ascii_lowercase()))
+            })
+            .map(|(radius, _)| *radius)
+            .unwrap_or(0.06)
+            + 0.1
     }
 
     pub fn activate_near(
@@ -12618,12 +12640,14 @@ mod tests {
         let mut rt = door_runtime();
         let base = rt.things[0].clone();
         // Player at the origin, the actor at the origin facing -x (the port's forward is
-        // `(-sin, cos)`), and a door thing 1.5 units along -x, linked to cog 0 as link 3.
+        // `(-sin, cos)`), and a door thing **0.12** units along -x (the cantina plate's measured
+        // in-reach pose), linked to cog 0 as link 3. The reach is the actor's `movesize + 0.1`,
+        // the engine's own activate rule, so a door a body-length away is *not* in reach.
         let mut actor = base.clone();
         actor.pos = [0.0, 0.0, 0.0];
         actor.yaw = 90.0;
         let mut door = base.clone();
-        door.pos = [-1.5, 0.0, 0.0];
+        door.pos = [-0.12, 0.0, 0.0];
         rt.things = vec![base, actor, door];
         rt.templates = vec!["walkplayer".into(), "tuskan".into(), "door".into()];
         rt.types = vec![10, 2, 0];
@@ -12643,6 +12667,29 @@ mod tests {
             }),
             "the actor did not activate the door in front: {:?}",
             rt.pending_messages
+        );
+
+        // The same door at 0.93 — the pose retail's use action refuses — is out of reach.
+        let mut far = door_runtime();
+        let base = far.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 90.0;
+        let mut door = base.clone();
+        door.pos = [-0.93, 0.0, 0.0];
+        far.things = vec![base, actor, door];
+        far.templates = vec!["walkplayer".into(), "tuskan".into(), "door".into()];
+        far.types = vec![10, 2, 0];
+        far.ai.insert(
+            1,
+            crate::ai::parse("alignment=-1.0, rank=0.5, fov=180\n\nOpenDoors\n"),
+        );
+        far.thing_links.push((0, 3, 2));
+        far.ai_tick(0, 0.1);
+        assert!(
+            far.pending_messages.is_empty(),
+            "an actor activated a door 0.93 away, past its own reach: {:?}",
+            far.pending_messages
         );
 
         // Without the instinct the same body does nothing to the door.

@@ -677,8 +677,13 @@ What the session settles, all of it already on the deviation ledger with its ret
   move in the port at all — their poses walk into geometry — so their captures were never measuring a walk. The
   gate now preflights every leg with `walk-preflight.ps1` (headless `--walk --warp`) and excludes the blocked ones;
   a stuck leg aborts with a clear error instead of being held against the wall.**
-- **`opendoors`** — the port uses the 1.5-unit use reach and a look cone where the engine sweeps the actor's body
-  radius; walk an actor at a closed door and compare which door it opens.
+- **`opendoors`** — **the reach is the engine's now (round 339)**: `Activate` passes
+  `*(float *)(thing + 0x2c) - _DAT_00523200` (`movesize + 0.1`), and the handler ran the player's action on the
+  actor's body, so an actor reaches exactly as far as the player's use key does — the invented 1.5-unit reach is
+  gone, and the unit test now proves a door at the cantina's measured 0.12 pose is opened while one at 0.93 is
+  refused. What remains is the **cone**: the engine sphere-casts from the eye (`sithIntersect_CheckSphereIntersection`
+  with the thing's radius expanded by `0.4`), and the port's two scans stand in for that sweep. Walk an actor at a
+  closed door and compare which door it opens — that is the window half.
 - **`blindfire`** — the chance is rolled per shot slot, not on the engine's own tick.
 - **`returnhome`** — the port gates on the instinct existing and distance > 0.5, not the engine's awake flag.
 - **`retreat`/`withdraw`** — the mode ends on the withdraw interval instead of on sight of the target, and the away

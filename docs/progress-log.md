@@ -4364,3 +4364,23 @@ budget (900 s timed out mid-tour; 2400 s, with the sweep's one retry, outlived a
 read as a timeout rather than a measurement. The spine is already gated headlessly by `--tour`; the live
 swap path is run by hand (`--tour-live`) and its budget stays at 2400 s. Its escape prints during a long
 tour are the documented walk-offs (gaps.md), not a new defect.
+
+**`opendoors` reaches as far as the player's use key now.** The instinct's handler (`0x50abc0`) runs
+`sithPlayerActions_Activate` (`0x4fc0a0`) on the actor's own body, so the reach is
+`*(float *)(thing + 0x2c) - _DAT_00523200` — the body's `movesize` plus `0.1`, the same rule the player's use
+key uses. The port had invented a flat 1.5 units, which let an actor open a door it was still a body-length
+away from; `Runtime::activate_reach` reads the template's `movesize` (0.06 fallback) and the AI call uses it.
+The unit test moved from a door at 1.5 to the cantina plate's measured **0.12** in-reach pose and gained the
+**0.93** out-of-reach refusal retail records, so the reach is measured rather than asserted.
+
+```
+test runtime::tests::an_actor_with_opendoors_activates_the_door_in_front ... ok
+--- ai check passed ---
+ai-live: 118 shot(s) at the body, its health 100
+--- ai-live check passed ---
+--- door check passed ---
+```
+
+What stays open on that row is the sweep's *shape*: the engine sphere-casts from the eye with the target's
+radius expanded by `0.4`; the port's scans are a look cone. That needs the window half (an actor at a real
+door) and is named in the roadmap, not claimed here.
