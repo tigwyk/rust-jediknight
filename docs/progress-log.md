@@ -3924,3 +3924,11 @@ prints `camera: CycleCamera -> slot 1` from `17b_camera.cog` - the shipped path,
 | `--cog-check` | 34 levels, 0 stubbed, 0 errors (with and without `BK_SABER_CAM=1`) |
 | `--gates` | 0 of 67 failed, 2 skipped |
 | `--soak-all` | 35 levels, 0 non-finite, 0 failed |
+
+## Round 320: the walk sweep's numbers, measured
+
+`gaps.md` claimed `--walk all` kept every level's walker inside its tracked sector (34/34 over 639 crossings).
+The current tree measures **28 of 34**, 20 hull-agreeing, 59 crossings and **no body in the void**: the six that end
+outside their tracked sector (`04escapehouse`, `11gorc`, `16aescapeship`, `16bescapeship`, `17bsarris`, `m10`) all
+keep a sector the level's own hull also claims, i.e. the tracked-sector lag the arbiter note already describes, not a
+body leaving the world. The claim was stale; the row now carries the measurement and the names.
