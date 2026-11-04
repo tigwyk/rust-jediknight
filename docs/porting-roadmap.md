@@ -807,7 +807,7 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 
 | check | command | measured round 340 |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --bins --release` | **251 passed**, 0 failed (round 344) |
+| unit + integration suite | `cargo test --bins --release` | **259 passed**, 0 failed (round 346) |
 | every level's runtime | `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5 bevi-knight --soak-all` | **35 of 35 levels**, 0 non-finite positions, **0** bodies outside every sector (round 331's soak-count fix) |
 | every cog verb | `bevi-knight --cog-check` | **34 levels, 0 stubbed verb calls, 0 errors** |
 | drop-in asset coverage | `bevi-knight --audit` | **35/35 levels clean**, 0 non-drawable models, 10 unresolved asset references, 54 undecoded files |
