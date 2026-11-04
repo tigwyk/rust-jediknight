@@ -1125,11 +1125,13 @@ searched, not read end to end, so this is a targeted review rather than a line-b
   to build that slot list (profile `Lee.plr`? a slot index?) or reach the level by the campaign transition. Until that
   lands, the level-2 spawn refit, the per-level spawn survey and the level-14 cutscene grade stay open.
 - **Cutscene comparison — closed as not automatable (round 284).** Level 14's intro camera is exact against
-  `macamera.key`, but retail cannot be brought to that level by any automated route, and all three are now proved
-  closed: the command line (`-JkArgs '-level,15maw'` exits JK.EXE with code 3 before its window appears; `docs/gaps.md`
-  rounds 60-61), the **Load Game menu** (empty save list with and without a patched `player/Lee/save0000.jks`, while
-  `saves/` holds `autosave.jks`/`quicksave.jks`), and the **`[Debug]` chooser** (`debug-menu.png` offers "Choose
-  Episode" — The Force Within / Jedi's Quests for the Flag / Jedi Training — not levels). The timestamps that made this
+  `macamera.key`, but retail cannot be brought to that level by any of the three routes below — **except through the
+  `[Debug]` level list, which round 297 proved open** and which has since booted levels 2, 4, 6, 9, 12, 13 and 17 (see
+  the bullet above): this row's "not automatable" verdict predates that and applies only to level 14, which has not been
+  driven through it. The other two are proved closed: the command line (`-JkArgs '-level,15maw'` exits JK.EXE with
+  code 3 before its window appears; `docs/gaps.md` rounds 60-61) and the **Load Game menu** (empty save list with and
+  without a patched `player/Lee/save0000.jks`, while `saves/` holds `autosave.jks`/`quicksave.jks`). Retail capture
+  stays user-invoked, so the level-14 leg remains a session task, not an automated one. The timestamps that made this
   row gradable stay in the tooling (`series_times_ms`, `series_span_ms`, and the gate's measured-span capture, proved on
   a 7 200 ms sidecar), so any leg that *does* have a retail series grades on its own interval. The port side of this row
   rests on `macamera.key` rather than on a retail frame — stated as the tradeoff, not as a pass.
