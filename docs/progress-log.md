@@ -4631,3 +4631,15 @@ interval the engine messages that thing's own script slots with `pulse` — the 
 0.05 s, and the damage cadence of `00_deathfloor`/`00_slideceiling`. `ThingState` carries `pulse`/`pulse_at`, the frame
 step re-arms and queues `pulse` to `thing_instances` (the same path `arrived` uses), and `0` switches it off. Test:
 `a_thing_pulse_messages_its_own_script`.
+
+**Two general spawners.** `CreateThingAtPosNR(template, sector, pos, angles)` is the spawner the force scripts use for
+their cones and spheres (`force_absorb`'s `cone_tpl`, `force_grip`'s `sphere_tpl`) and the wrench's splashes; it takes
+the position it is given instead of offsetting from a marker's insert point. `CreateThingNR(template, source)` is the
+same at the source thing with no orientation carried across.
+
+**The static verb list, recounted with `//` comments stripped (the first pass counted commented-out code):** 221 live
+verbs in the 215 cogs, **14** absent from `src/` — `GetAutoReload` (20 sites) and `GetWeaponPriority` (18, both
+ledgered above), the four `00_breakingbottle` surface queries, and one-cog setters (`SetCollideType` ×4,
+`AddDynamicAdd` ×2, `SetParticleGrowthSpeed` ×2, `AddTint`, `SetWeaponFlags`, `SetThingCollideSize`, `GetThingLight`,
+`GetMapModeFlags`). `SetThingFireOffset`'s only calls are commented out in the shipped scripts, so it is dead content
+rather than a gap.

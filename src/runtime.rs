@@ -3138,6 +3138,8 @@ impl Runtime {
                 | "getinv"
                 | "setinv"
                 | "changeinv"
+                | "createthingatposnr"
+                | "createthingnr"
                 | "createbackpack"
                 | "pickupbackpack"
                 | "clearinv"
@@ -8956,6 +8958,32 @@ impl Runtime {
                 let sector = src_sector;
                 Value::Num(self.spawn_at(template, pos, sector, [src_pitch, src_yaw, src_roll]) as f64)
             }
+            // `CreateThingAtPosNR(template, sector, pos, angles)` — the general spawner behind the force
+            // scripts' cones and spheres (`force_absorb`'s `cone_tpl`, `force_grip`'s `sphere_tpl`,
+            // `item_wrenchyellow`'s splashes). It takes the position it is given, unlike `CreateThing`,
+            // which offsets from a marker's insert point.
+            "createthingatposnr" => {
+                let template = match args.first() {
+                    Some(Value::Str(s)) => s.to_ascii_lowercase(),
+                    _ => return Value::Num(-1.0),
+                };
+                let sector = idx(1) as i32;
+                let pos = args.get(2).map(vec3).unwrap_or([0.0; 3]);
+                let angles = args.get(3).map(vec3).unwrap_or([0.0; 3]);
+                Value::Num(self.spawn_at(template, pos, sector, angles) as f64)
+            }
+            // `CreateThingNR(template, source)`: the source thing's position and sector with no
+            // orientation — `creatething` without the marker's rotation carried across.
+            "createthingnr" => {
+                let template = match args.first() {
+                    Some(Value::Str(s)) => s.to_ascii_lowercase(),
+                    _ => return Value::Num(-1.0),
+                };
+                let source = idx(1);
+                let Some(src) = self.thing(source) else { return Value::Num(-1.0) };
+                let (pos, sector) = (src.pos, src.sector);
+                Value::Num(self.spawn_at(template, pos, sector, [0.0, 0.0, 0.0]) as f64)
+            }
             // `sithInventory_CreateBackpack` (`0x4d2740`): a `+backpack` thing at the player's own pose
             // carrying the inventory, at most `0x10` bins, each kept when its amount is above 0.5.
             // shortcut: the engine also requires the `items.dat` record's `0x1`/`0x80` flag bits, which
@@ -9505,6 +9533,35 @@ mod tests {
         rt.things[0].flags = 0x80000;
         assert!(rt.sector_messages(None, Some(0), Some(0)).is_empty());
         assert_eq!(rt.sector_messages(None, Some(0), None), vec![(0, "entered", 1)]);
+    }
+
+    /// `CreateThingAtPosNR` spawns where it is told (the force scripts' cones and spheres), and
+    /// `CreateThingNR` at the source thing with no orientation carried over.
+    #[test]
+    fn spawning_at_a_position_uses_the_given_pose() {
+        let mut rt = door_runtime();
+        rt.things[0].pos = [1.0, 2.0, 3.0];
+        rt.things[0].sector = 7;
+        let at = rt
+            .call(
+                "createthingatposnr",
+                &[
+                    Value::Str("+cone".into()),
+                    Value::Num(5.0),
+                    Value::Vec([4.0, 5.0, 6.0]),
+                    Value::Vec([0.0, 90.0, 0.0]),
+                ],
+            )
+            .num() as usize;
+        assert_eq!(rt.things[at].pos, [4.0, 5.0, 6.0]);
+        assert_eq!(rt.things[at].sector, 5);
+        assert_eq!(rt.things[at].yaw, 90.0);
+        let nr = rt
+            .call("createthingnr", &[Value::Str("+splash".into()), Value::Num(0.0)])
+            .num() as usize;
+        assert_eq!(rt.things[nr].pos, [1.0, 2.0, 3.0]);
+        assert_eq!(rt.things[nr].sector, 7);
+        assert_eq!(rt.things[nr].yaw, 0.0, "CreateThingNR carried an orientation over");
     }
 
     /// `SetThingPulse(thing, seconds)` starts the thing's own timer: every interval its script slots
