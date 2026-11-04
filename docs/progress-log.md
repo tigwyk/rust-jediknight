@@ -4766,3 +4766,18 @@ x, inventory bin 2 = 3, clock 128.50 s, 352 thing(s)`; `AutosaveGame raised the 
 things at 128.50 s`; `--- save check passed ---`.
 
 Verified: `cargo test --release` 260 passed; `--gates` 0 of 67 failed, 2 skipped; `--soak-all` 35/35 levels.
+
+**`walk5_spawn`'s gap is a polygon hole, checked by containment rather than by centroid.** The earlier reading used
+`--faces-at`, which filters by each face's *plane point* (a centroid), so a large floor whose centroid is far reported
+nothing — an inconclusive result. The probe now also lists the faces whose polygon **covers the point in plan**. At the
+row's 600 ms pose (9.79, 14.22, 0.0), where retail is in sector 33 at z −0.01 and the port is 0.42 lower:
+
+- `faces-at: 0 face(s) cover the point in plan`, and `--collide --surfaces-at 9.79,14.22,-0.05` lists no surface with a
+  vertex within 1.5 units at all.
+
+So the level's own geometry has nothing under that point; the port's 0.42 drop comes from a face whose *edge* is within
+the body's 0.065 radius (`floor_candidates` accepts sphere overlap, correctly, for the landing probe). Retail holding
+z ≈ 0 there means the engine's floor answer differs in a way the shipped data cannot arbitrate: the row stays a fixture
+question, and the probe now records the containment result instead of a centroid one.
+
+Verified: `cargo test --release` 260 passed; `--gates` 0 of 67 failed, 2 skipped.

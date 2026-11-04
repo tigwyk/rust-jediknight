@@ -2335,6 +2335,41 @@ fn main() {
             );
         }
         println!("faces-at: {found} within 2.0 plan / 2.0 vertical");
+        // The scan above measures the *plane point* (a centroid), so a big floor whose centroid is
+        // far reports nothing even when it covers the point. This pass asks the containment
+        // question instead, which is what a walker cares about.
+        let covers = |face: &collide::Face, p: [f32; 3]| {
+            let n = face.verts.len();
+            let mut inside = false;
+            for i in 0..n {
+                let a = face.verts[i];
+                let b = face.verts[(i + 1) % n];
+                if (a[1] > p[1]) != (b[1] > p[1]) {
+                    let t = (p[1] - a[1]) / (b[1] - a[1]);
+                    if p[0] < a[0] + t * (b[0] - a[0]) {
+                        inside = !inside;
+                    }
+                }
+            }
+            inside
+        };
+        let mut covering = 0;
+        for face in &solids.faces {
+            if !covers(face, at) {
+                continue;
+            }
+            covering += 1;
+            println!(
+                "  covers surface {} normal ({:>5.2},{:>5.2},{:>5.2}) plane z {:.3} verts {}",
+                face.surface,
+                face.normal[0],
+                face.normal[1],
+                face.normal[2],
+                face.point[2],
+                face.verts.len()
+            );
+        }
+        println!("faces-at: {covering} face(s) cover the point in plan");
         // Which sector does the body resolve to, and what floor does each nearby sector claim right
         // under the point? `sector_for_body` prefers clearance, which on a stacked shaft picks the
         // shaft (levels 17/18 fall at their spawn from exactly that).
