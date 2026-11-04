@@ -242,6 +242,55 @@ pub struct Cog {
 }
 
 impl Cog {
+    /// The answers a class script's `skill:` handler gives: `bin -> ReturnEx(value)`.
+    ///
+    /// `sithCogFunctionThing_SkillTarget` (`0x5047e0`) pops two things and two flexes, checks the
+    /// victim's class cog, and calls `sithCog_SendMessageEx(cog, 25, 3, ...)`. Message id 25 is
+    /// `skill`, so the damage a force power does is the **victim's class script** answering:
+    /// `actor_pm.cog` returns 10 for grip (31) and 5 for deadly sight (34) — "base damage that is
+    /// taken by this actor" — which `force_grip.cog` multiplies by rank/2, and `kyle.cog` returns
+    /// 1 for a successful grip on a player (it applies `2 * rank` itself).
+    pub fn skill_answers(&self) -> Vec<(i32, f32)> {
+        fn returnex(stmt: &Stmt, out: &mut Option<f32>) {
+            match stmt {
+                Stmt::Call(name, args) if name.eq_ignore_ascii_case("returnex") => {
+                    if let Some(Expr::Num(v)) = args.first() {
+                        *out = Some(*v as f32);
+                    }
+                }
+                Stmt::Block(list) => {
+                    for s in list {
+                        returnex(s, out);
+                    }
+                }
+                Stmt::If(_, then, other) => {
+                    returnex(then, out);
+                    if out.is_none()
+                        && let Some(other) = other
+                    {
+                        returnex(other, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        let Some(body) = self.label("skill") else { return out };
+        for stmt in body {
+            let Stmt::If(Expr::Bin(BinOp::Eq, lhs, rhs), then, _) = stmt else { continue };
+            let (Expr::Var(var), Expr::Num(bin)) = (&**lhs, &**rhs) else { continue };
+            if !var.eq_ignore_ascii_case("bin") {
+                continue;
+            }
+            let mut value = None;
+            returnex(then, &mut value);
+            if let Some(value) = value {
+                out.push((*bin as i32, value));
+            }
+        }
+        out
+    }
+
     pub fn label(&self, name: &str) -> Option<&Vec<Stmt>> {
         let want = name.to_ascii_lowercase();
         self.labels.iter().find(|(n, _)| *n == want).map(|(_, s)| s)

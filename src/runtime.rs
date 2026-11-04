@@ -1196,6 +1196,10 @@ pub struct Runtime {
     pub cur_weapon_thing: Option<usize>,
     /// `GetThingClassCog`: the cog a thing's class names.
     pub thing_class_cog: BTreeMap<usize, i32>,
+    /// Each class script's `skill:` answers (`bin -> ReturnEx`), keyed by its cog instance.
+    /// `SkillTarget` returns the victim's class script's answer, which is where a force power's
+    /// damage actually lives (`actor_pm.cog`: 10 for grip, 5 for deadly sight).
+    pub class_skill: BTreeMap<i32, Vec<(i32, f32)>>,
     /// Things the engine has woken. `sithRender` latches `SITH_SECTOR_SEEN` the first time a sector is
     /// drawn, and a thing's class cog is sent `created` when its thing is woken — **not** at level
     /// load. Retail's own saves show it: level 1's load-time autosave carries no population bin
@@ -1851,6 +1855,7 @@ impl Runtime {
             major_mode: BTreeMap::new(),
             cur_weapon_thing: None,
             thing_class_cog: BTreeMap::new(),
+            class_skill: BTreeMap::new(),
             awakened: std::collections::BTreeSet::new(),
             saber_enabled: true,
             saber_cam: 0,
@@ -8535,7 +8540,18 @@ impl Runtime {
                     // Item (5) throws itself; anything else needs a weapon to drop, which is not
                     // modelled — the script then takes its `else` branch and stops the power.
                     Value::Num(if type_ == 5 { 1.0 } else { -1.0 })
+                } else if let Some(answer) = self
+                    .thing_class_cog
+                    .get(&victim)
+                    .and_then(|instance| self.class_skill.get(instance))
+                    .and_then(|answers| answers.iter().find(|(b, _)| *b == bin))
+                    .map(|(_, value)| *value as f64)
+                {
+                    // The shipped answer, e.g. `actor_pm.cog`'s 10 for grip.
+                    Value::Num(answer)
                 } else if bin == 31 {
+                    // No class script answers this bin: the engine's `SendMessageEx` returns its
+                    // default, which the scripts treat as "no damage".
                     Value::Num(self.template_damage.get(&self.templates[victim].to_ascii_lowercase()).copied().unwrap_or(10.0) as f64)
                 } else {
                     Value::Num(0.0)

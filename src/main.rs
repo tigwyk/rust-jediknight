@@ -6365,6 +6365,7 @@ fn main() {
             {
                 let mut rt = sim_world.borrow_mut();
                 rt.thing_class_cog.insert(index, scripts.len() as i32);
+                rt.class_skill.insert(scripts.len() as i32, script.skill_answers());
                 rt.thing_links.push((scripts.len(), 0, index));
             }
             if target.is_none() {
@@ -7081,15 +7082,26 @@ fn main() {
                 println!("--- pull check passed ---");
                 return;
             };
-            let Some(actor) = ({
+            // Any actor will do for the hold, but only one whose class script answers `skill` shows the
+            // rate: `actor_pm.cog` returns 10 for grip, so pick such an actor when the level has one.
+            let actor = {
                 let rt = handle.borrow();
                 rt.things
                     .iter()
                     .enumerate()
-                    .find(|(i, t)| *i != pick && !t.destroyed && rt.types.get(*i).copied() == Some(2))
+                    .filter(|(i, t)| *i != pick && !t.destroyed && rt.types.get(*i).copied() == Some(2))
+                    .find(|(i, _)| {
+                        let template = rt.templates.get(*i).cloned().unwrap_or_default();
+                        world
+                            .level
+                            .template_param(&template, "cog")
+                            .and_then(|name| world.cogs.get(name))
+                            .is_some_and(|script| !script.skill_answers().is_empty())
+                    })
                     .map(|(i, _)| i)
-            }) else {
-                println!("pull: this level places no actor to grip; the grip run is evidenced where one exists");
+            };
+            let Some(actor) = actor else {
+                println!("pull: this level places no actor whose class script answers `skill`; the grip run is evidenced where one exists");
                 println!("--- pull check passed ---");
                 return;
             };
@@ -7114,6 +7126,30 @@ fn main() {
                 .find(|i| i.script.eq_ignore_ascii_case("cog\\force_grip.cog"))
                 .map(|i| i.values.clone())
                 .unwrap_or_default();
+            // A headless probe runs the reduced load: class scripts are started only on the live
+            // path, so `thing_class_cog` is empty here. Bind the victim's own class script the way
+            // that path does, so `SkillTarget` finds the answer it would in the game.
+            let answers = {
+                let template = handle
+                    .borrow()
+                    .templates
+                    .get(actor)
+                    .cloned()
+                    .unwrap_or_default();
+                world
+                    .level
+                    .template_param(&template, "cog")
+                    .and_then(|name| world.cogs.get(name))
+                    .map(|script| script.skill_answers())
+                    .unwrap_or_default()
+            };
+            {
+                let mut rt = handle.borrow_mut();
+                let instance = -(actor as i32) - 1;
+                rt.thing_class_cog.insert(actor, instance);
+                rt.class_skill.insert(instance, answers.clone());
+            }
+            println!("pull: the grip victim's class script answers {answers:?} for (bin, base damage)");
             let mut vm = cog::Vm::with_world(handle.clone());
             vm.source = pick as i64;
             grip.bind(&mut vm, &values);
@@ -24324,6 +24360,7 @@ fn setup(
             let instance = sim.instances.len() - 1;
             let mut rt = sim.world.borrow_mut();
             rt.thing_class_cog.insert(index, instance as i32);
+            rt.class_skill.insert(instance as i32, script.skill_answers());
             class_links.push((instance, index));
             // `created:` is *not* sent here: the engine sends it when the thing's sector is first
             // drawn (`cull_sectors` wakes the room), which is what retail's load-time autosave shows.

@@ -295,12 +295,18 @@ is the player-facing version of this.
 - **Force powers run the shipped scripts, and six of them are gated.** Jump, speed, healing, seeing,
   pull and grip execute the install's own `force_*.cog` and are checked (`--force*`, `--pull`, `--mana`);
   the remaining powers have their scripts and verbs but no check that they change anything.
-- **Grip's disarm and its damage rate are still simplified.** `SkillTarget` (`0x5047e0`, not a named
-  Ghidra procedure — read from the image) returns `-1.0` when either thing is null or the player's
-  power table (`thing+0x29c`) is empty, and otherwise calls `0x4dedc0(table, skill 0x19, 3, player, 0,
-  victim, 0, bin, rank, 0, 0)`. So the rate is a per-skill entry of the **player's** table, not the
-  victim's template: that table is undecoded, the port returns the victim's `damage=` as a placeholder,
-  and the pull still throws items rather than the weapon out of an actor's hand.
+- **Grip's rate is the victim's class script, and that is what the port now reads.** `SkillTarget`
+  (`0x5047e0`, not a named Ghidra procedure — read from the image) returns `-1.0` when either thing is
+  null or the player's power table (`thing+0x29c`) is empty, and otherwise calls `0x4dedc0(table, skill
+  0x19, 3, player, 0, victim, 0, bin, rank, 0, 0)`. That lands in `sithCogFunctionThing_SkillTarget`
+  (`0x5047e0`'s sibling, `0x5047e0` + the thing's class cog), which sends message **25** (`skill`) with
+  the bin and rank to the **victim's class cog** and returns its `ReturnEx`. So the base damage is the
+  actor's own script answering: `actor_pm.cog` returns **10** for grip (31) and 5 for deadly sight (34),
+  `kyle.cog` returns 1 for a player (it applies `2*rank` itself). The port lifts those answers out of
+  each class script (`cog::Cog::skill_answers`) into `class_skill`, keyed by the class cog instance, and
+  `--pull` measures the result: rank 4 grip takes the victim 50 -> **30** (`10*4/2`), where before the
+  rate was the victim's template `damage=0` and nothing was dealt. The pull still throws items rather
+  than the weapon out of an actor's hand (`SkillTarget`'s disarm branch).
 - ~~`--rules`' jump calibration failed~~ — **fixed**: the lateral resolver was pushing along a floor plane's infinite normal and pinning the body, so `walker_step` now keeps the height its vertical step produced and lets the resolver own X and Y. `--rules` measures `apex 0.26 / 0.28` closed form (inside the gate's 15% band) and exits clean (§16.2).
 - **The movement basis is JK's own now, and strafing was backwards until it was.** `walk_target`
   builds motion from `lvec = (cos yaw, sin yaw)` and `rvec = lvec × uvec = (sin yaw, -cos yaw)`; the port
@@ -786,9 +792,9 @@ the summary, is what each check prints:
   `jkSetTarget` and then `ApplyForce`s the item at 30 u/s toward the player with gravity cleared
   (`--pull` measures `velocity [-30.0, 0.0, 0.0]`). `--pull` also runs `force_grip.cog` end to end:
   the targeting pulse picks the actor placed in front, `deactivated` re-reads the rank from bin 31, and
-  the grab pulse sets `0x40000` — its damage is 0 because the rate comes from the player's undecoded
-  power table (see the `SkillTarget` note above). `SkillTarget`'s disarm branch is simplified: pull
-  throws items, it does not shoot the weapon out of an actor's hand.
+  the grab pulse sets `0x40000`, and its rate is the victim's class script's `skill:` answer — rank 4
+  takes the actor 50 -> 30 health (`10*4/2`, see the `SkillTarget` note above). `SkillTarget`'s disarm
+  branch is simplified: pull throws items, it does not shoot the weapon out of an actor's hand.
 - **Only some force powers are exercised.** Jump, speed, healing, seeing, pull and grip have gates; the
   other powers in the menu's own table (throw, lightning, destruction, protection, absorb, blinding,
   deadly sight…) have their scripts and now their verbs, but nothing checks that they do anything.
