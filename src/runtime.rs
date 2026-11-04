@@ -725,6 +725,9 @@ pub const AI_AWARE_SHOT: f32 = 2.0;
 pub const AI_AWARE_KILL: f32 = 5.0;
 /// `sithExplosion_MakeBlast`'s strength (`0x40400000`), kind 1.
 pub const AI_AWARE_BLAST: f32 = 3.0;
+/// `sithWeapon_Update`'s strength while the weapon keeps firing (`0x40000000` = 2.0), kind 2 — the
+/// kind `listen` scans first.
+pub const AI_AWARE_WEAPON: f32 = 2.0;
 /// `sithSoundMixer_PlaySoundThing`'s scale (`_DAT_00522f80` = 0.6, `.rdata`): a sound's awareness
 /// strength is its volume times this.
 pub const AI_AWARE_SOUND_SCALE: f32 = 0.6;
@@ -5196,6 +5199,11 @@ impl Runtime {
             // raises it — the player has no `.ai` class, and requiring one meant no actor ever heard
             // the player's gunfire.
             self.transmit_awareness(sector, 1, pos, AI_AWARE_SHOT, Some(shooter));
+            // `sithWeapon_Update` (`0x4d3530`) raises kind **2** at strength **2.0**
+            // (`0x40000000`) while the weapon's firing flag (`0x40000`) is up, every eighth engine
+            // tick. The port's shots stand in for that stream — the record is strength-keyed, so the
+            // engine's decimation would only repeat the same value.
+            self.transmit_awareness(sector, 2, pos, AI_AWARE_WEAPON, Some(shooter));
         }
         // `sithThing`'s thing-collision callback (`0x4ed24d`) raises AI event 4 when an actor's
         // body touches another thing. This build's actor walk has no solver, so the contact is
@@ -12320,6 +12328,7 @@ mod tests {
         // Acquisition is a separate roll (`sithAI_CanDetectSightThing`) with the engine's one-per-second
         // cadence; this test is about the TurretFire path, so start it already engaged.
         rt.ai_detected.insert(1);
+        rt.sector_adjoins = vec![Vec::new(); 8];
         let emplaced = rt.things[1].pos;
         for _ in 0..30 {
             rt.time += 1.0 / 30.0;
@@ -12327,6 +12336,14 @@ mod tests {
         }
         assert!(rt.shots_fired > 0, "the turret never fired");
         assert_eq!(rt.things[1].pos, emplaced, "the turret walked");
+        // Both awareness kinds a weapon raises: the shot (1) and the weapon's own firing state (2),
+        // which `listen` scans first.
+        for kind in [1u8, 2] {
+            assert!(
+                rt.sector_awareness.contains_key(&(7, kind)),
+                "firing raised no kind-{kind} awareness record"
+            );
+        }
     }
 
     /// `circlestrafe` (`0x509890`): within the instinct's engage distance (0.6–1.0 in the shipped
