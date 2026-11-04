@@ -18448,18 +18448,61 @@ fn cull_sectors(
     // The portal walk borrows the runtime's sector gates; the scope ends before the sighting pass
     // below, which needs to write to it.
     let (overlap, reachable) = {
-        let mut any = |_: &[[f32; 3]]| true;
+        // `sithRender_SectorPortals` admits the room behind a doorway only while the doorway itself is
+        // on screen. This is the conservative half of that test: a doorway with no vertex in front of
+        // the eye cannot be seen through at all (its room is behind the camera or beside it), and one
+        // whose projected corners miss the viewport is off-screen. A doorway that straddles the eye
+        // plane keeps its room — the test may only *add* a room, never hide one that shows.
+        let mut on_screen = |verts: &[[f32; 3]]| {
+            let (mut in_front, mut min_x, mut max_x, mut min_y, mut max_y) =
+                (false, f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+            for v in verts {
+                let p = clip_from_world * Vec4::new(v[0], v[1], v[2], 1.0);
+                if p.w <= 0.0 {
+                    continue;
+                }
+                in_front = true;
+                let (x, y) = (p.x / p.w, p.y / p.w);
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+            in_front && max_x >= -1.0 && min_x <= 1.0 && max_y >= -1.0 && min_y <= 1.0
+        };
         let runtime = sim.as_deref().map(|s| s.world.borrow());
         let gates = runtime.as_ref().map(|rt| rt.gates()).unwrap_or_default();
-        let mut best: Option<(usize, Vec<usize>)> = None;
-        for seed in &seeds {
+        // The unfiltered walk first, exactly as before this round: it is the *baseline* set, and the
+        // doorway test may only take rooms away from it. The seed with the best frustum overlap wins,
+        // and the filtered pass then runs on that same seed, so the choice cannot flip to a seed whose
+        // reachable set happens to hold a room the other seed does not.
+        let mut any = |_: &[[f32; 3]]| true;
+        let mut best: Option<(usize, usize, Vec<usize>)> = None;
+        for (slot, seed) in seeds.iter().enumerate() {
             let reach = view.solids.visible_sectors(&[*seed], gates, &mut any);
             let overlap = reach.iter().filter(|s| frustum.contains(s)).count();
-            if best.as_ref().is_none_or(|(score, _)| overlap > *score) {
-                best = Some((overlap, reach));
+            if best.as_ref().is_none_or(|(score, _, _)| overlap > *score) {
+                best = Some((overlap, slot, reach));
             }
         }
-        best.unwrap_or((0, Vec::new()))
+        match best {
+            Some((_, slot, base)) => {
+                let filtered = view
+                    .solids
+                    .visible_sectors(&[seeds[slot]], gates, &mut on_screen);
+                let filtered_overlap = filtered.iter().filter(|s| frustum.contains(s)).count();
+                // The filtered set replaces the baseline only when it is a usable walk: a seed and at
+                // least one room through an on-screen doorway. A degenerate set would trip the
+                // `reachable.len() > 1` guard below and drop the cull to the bare frustum, which *adds*
+                // rooms the baseline walk had excluded — exactly the opposite of this test's purpose.
+                if filtered_overlap > 0 && filtered.len() > 1 {
+                    (filtered_overlap, filtered)
+                } else {
+                    (base.iter().filter(|s| frustum.contains(s)).count(), base)
+                }
+            }
+            None => (0, Vec::new()),
+        }
     };
     let use_portals = overlap > 0 && reachable.len() > 1;
     if std::env::var_os("BK_CULL_TRACE").is_some() && shown.is_none() {

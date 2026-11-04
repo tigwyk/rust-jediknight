@@ -4528,3 +4528,18 @@ only, and `rebuild_surfaces` patches the batches those faces own — skipping an
 (`keys` records every key's surface list, and a mixed static/scrolling batch is left as it is rather than
 half-patched). The stale offset drops from 66 ms to one frame, static batches are untouched, and `--scroll` now
 asserts the split: the scroll epoch moved and `surface_epoch` did not.
+
+**The portal walk actually tests doorways now.** `collide::visible_sectors` has taken a `sees` predicate since it was written
+and the windowed pass passed `any`, so its BFS admitted every room reachable through any visible adjoin in the frustum.
+It now projects each doorway's own verts: no vertex in front of the eye (clip `w <= 0` for all) or a projected bbox
+outside the viewport drops the room behind it, and a doorway that straddles the eye keeps its room — the rule can only
+add a room, never hide one that shows. Level 1's spawn went from **90 to 84 of 462** drawn sectors and the two captures
+(`target/parity/portal-any.png` / `portal-sees.png`) are byte-identical, so the six culled rooms contributed no pixels.
+
+The doorway test's first cut also taught the failure mode the ledger should keep: the walk's `use_portals` guard
+(`reachable.len() > 1`) drops the cull to the **bare frustum** when the walk degenerates, and a stricter `sees` makes
+that easy — the probe pose's doorways were behind the camera, the filtered set was the seed alone, and the frame then
+drew every room in view, which fired the level-1 goal's `sighted` and left `--ai-live` running past its 600-frame
+verdict into the cutscene (`--live-play` timed out the same way). The filtered walk is now adopted only when it is
+usable and otherwise falls back to the *unfiltered* set, so the cull is monotone: level 1's spawn draws 84 rooms where
+it drew 90, the captures are byte-identical, and `--ai-live` passes again (118 shots, 218 s).
