@@ -3932,3 +3932,36 @@ The current tree measures **28 of 34**, 20 hull-agreeing, 59 crossings and **no 
 outside their tracked sector (`04escapehouse`, `11gorc`, `16aescapeship`, `16bescapeship`, `17bsarris`, `m10`) all
 keep a sector the level's own hull also claims, i.e. the tracked-sector lag the arbiter note already describes, not a
 body leaving the world. The claim was stale; the row now carries the measurement and the names.
+
+## Round 322: the walk sweep now falls
+
+The walk check (`--walk all`) passed `gravity = 0` and a throwaway vertical velocity to `walker_step`, so the body it
+checked floated at its spawn height and could never see a ramp, a step-down or a fall. Retail's own level-3 trace
+descends the katarn ramp (`walk3_spawn-walk.tsv`: z −0.21 → −0.29 while walking), so the check was blind to exactly
+the movement item it was being used to argue about. It now runs the level's gravity (4.0), carrying `vy` across frames;
+`BK_WALK_NO_GRAVITY=1` reproduces the old flat sweep for an A/B. `--move` keeps the flat sweep on purpose: its question
+is whether a body wedges or walks out sideways on eight headings, and with gravity 17 of its headings walk off ledges
+into the "over nothing" count, which is the walk-off class above rather than a collision failure.
+
+Measured, level 3 from retail's pose (−0.72, −4.73, −0.21): the body reads (−0.70, −3.50, −0.31) after 30 frames
+against retail's (−0.70, −3.40, −0.26), and it ends at (−0.70, −1.17, −0.34) in sector 412, contained. Flat, it held
+z −0.14 for the whole leg and ended outside every sector. The lateral half is still missing: retail drifts to x −1.11,
+the port stays at −0.71, because `move_body` slides along walls only and never projects onto the floor plane's tilt.
+
+Running gravity also surfaced what the flat walk hid: six levels walk off their own geometry and fall out of the world
+(`02narshadda` 505 units, `07yun` 720, `09fuelstation` 121, `11gorc` 739, `17asarris` 573, `m_boss17` 573). All six
+start on a floor, so this is a walk off the edge along the spawn yaw, not a start over nothing; the sweep records them
+by name and asserts that no *other* level joins the list. Containment went 28/34 → 24/34 because a falling body also
+leaves its tracked sector; the hull test now agrees on 25 levels over 46 crossings.
+
+`trace-gate.ps1`'s note on `walk3_spawn` said retail's walk "stops against a model at (−0.77, −3.60)". The committed
+retail trace says otherwise: retail slows, drifts left and keeps going to (−1.11, −3.06), and no `solid:` thing lies
+near that point in level 3. The note now names the real cause (the floor slide) and the leg's current numbers
+(209 % travel, 4 sectors off).
+
+| check | result |
+| --- | --- |
+| `cargo test` | 238 passed |
+| `--walk all` | 24/34 contained, 25 hull-agreeing, 46 crossings, 6 recorded walk-offs, 0 other |
+| `trace-gate.ps1` | 10 legs, 0 failures |
+| `trace-gate.ps1 -Only walk3_spawn` | still excluded: 209 %, 4 sectors (floor slide) |
