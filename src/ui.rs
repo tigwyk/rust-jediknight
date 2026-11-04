@@ -22,7 +22,7 @@ pub struct Look<'a> {
     /// level around `GetLocalPlayerThing`.
     pub map: Option<(&'a crate::jkl::Level, [f32; 3], f32)>,
     /// How many world units the map panel shows across its radius.
-    pub map_radius: f32,
+
     /// Palette index for the map's line work and the player's marker.
     pub map_ink: u8,
     /// The engine's fonts in `text_type` order.
@@ -68,7 +68,6 @@ impl<'a> Default for Look<'a> {
         }
         Self {
             map: None,
-            map_radius: 20.0,
             map_ink: 31,
             fonts: &[],
             art: &Empty::art,
@@ -142,7 +141,7 @@ pub fn draw_screen(
                 // around the player. `look.map` carries the level and the player's pose.
                 Some(menus::Panel::Map) => {
                     if let Some((level, player, yaw)) = look.map {
-                        canvas.map([x, y, w, h], level, player, yaw, look.map_radius, &palette, look.map_ink);
+                        canvas.map([x, y, w, h], level, player, yaw, &palette, look.map_ink);
                     }
                 }
                 // `jkGuiTitle_LoadBarDraw` (0x418b90): a frame over the element's own rect, then
@@ -514,7 +513,6 @@ pub fn map(
         level: &crate::jkl::Level,
         player: [f32; 3],
         yaw: f32,
-        radius: f32,
         palette: &[[u8; 3]; 256],
         ink: u8,
     ) -> MapStats {
@@ -542,7 +540,6 @@ pub fn map(
         let near = 0.2f32;
         // `rdCamera_New(90, 1, 0.2, 10, 1)`: the far plane is the engine's own 10 units.
         let far = 10.0f32.max(near + 1.0);
-        let _ = radius;
         let view = |p: [f32; 3]| -> [f32; 3] {
             let (dx, dy, dz) = (p[0] - player[0], p[1] - player[1], p[2] - player[2]);
             [dx * cos - dy * sin + off[0], dx * sin + dy * cos + off[1], dz + off[2]]

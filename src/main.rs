@@ -1977,7 +1977,6 @@ fn main() {
                     level,
                     [pos[0], pos[1], pos[2]],
                     *yaw,
-                    look.map_radius,
                     &ui::palette_of(&base, &palette),
                     look.map_ink,
                 );
