@@ -1196,6 +1196,10 @@ pub struct Runtime {
     /// `0x4c6c40`). The world draw used a base of `1.0`, which is why a level with a mean sector
     /// ambient of 0.52 (`02narshadda`: 641 sectors) came out ~2x the retail brightness.
     pub sector_light_baked: Vec<f32>,
+    /// Each sector's `AMBIENT LIGHT` — the engine's own sector light (`thing + 0x5c` is the sector
+    /// pointer, `+4` its light). `EXTRA LIGHT` is the POV pass's addition, not this field, and
+    /// `sector_ambient` is the sector's ambient *sound*, so the name says which one this is.
+    pub sector_ambient_light: Vec<f32>,
     /// Each `World adjoins` row's `SITH_SURFACE_ADJOIN_*` word: `SetAdjoinFlags`/
     /// `ClearAdjoinFlags` switch these, which is how a force field opens and closes.
     pub adjoin_flags: Vec<u16>,
@@ -1946,6 +1950,7 @@ impl Runtime {
                 .iter()
                 .map(|s| (s.ambient_light + s.extra_light).clamp(0.0, 1.0))
                 .collect(),
+            sector_ambient_light: level.sectors.iter().map(|s| s.ambient_light).collect(),
             adjoin_flags: level.adjoins.iter().map(|a| a.flags).collect(),
             surface_adjoin: level.surfaces.iter().map(|s| s.adjoin).collect(),
             surface_sector: {
@@ -3762,9 +3767,13 @@ impl Runtime {
     ///   multiplies 0.05 (`_DAT_00523094`), the same value the final clamp floors at (cap 1.0,
     ///   `_DAT_00523068`).
     ///
-    /// Not modelled: the engine's darkness term (`*(float *)(sector + 4) < 0.5` scales the chance by
-    /// the sector's light level, and this build keeps no sector light), and its second falloff gate
-    /// reads a byte at `thing + 0x2a8` whose meaning is unrecovered. Both are on the ledger.
+    /// - the darkness term (round 314): the **target's sector** (`thing + 0x5c`) carries the level's
+    ///   baked light at `+4`, and under 0.5 the chance scales by `light + 0.2` (`_DAT_0052308c` is
+    ///   -0.2) unless the watcher's thingflags carry `0x2000000`. That field is the level's
+    ///   `AMBIENT LIGHT` (`Runtime::sector_ambient_light`); `EXTRA LIGHT` belongs to the POV pass instead.
+    ///
+    /// Not modelled: the second falloff gate reads a byte at `thing + 0x2a8` whose meaning is
+    /// unrecovered (on the ledger).
     pub fn detect_chance(&self, actor: usize, target: usize) -> f32 {
         let (Some(watcher), Some(seen)) = (self.things.get(actor), self.things.get(target)) else {
             return 1.0;
@@ -3786,6 +3795,18 @@ impl Runtime {
             let falloff =
                 ((distance - DETECT_NEAR) * DETECT_FALLOFF).clamp(0.0, DETECT_MAX_FALLOFF);
             chance *= 1.0 - falloff;
+            // The darkness term: the engine reads the *target's sector* (`thing + 0x5c`) light at
+            // `+4` and, under 0.5, scales the chance by `light + 0.2` (`_DAT_0052308c` is -0.2) -
+            // unless the watcher's thingflags carry `0x2000000`. A missing sector (a fixture with no
+            // level) reads as lit.
+            let dark = self
+                .sector_ambient_light
+                .get(seen.sector.max(0) as usize)
+                .copied()
+                .unwrap_or(1.0);
+            if watcher.flags & 0x2000000 == 0 && dark < 0.5 {
+                chance *= dark + 0.2;
+            }
             let physics = self
                 .templates
                 .get(target)
@@ -11485,6 +11506,36 @@ mod tests {
             (chance(8.0, moving, 0, 0x80, 0x200, 0x8000) - 0.4).abs() < 1e-5,
             "the watcher's 0x8000 lifts the target's 0x80"
         );
+    }
+
+    /// Round 314: `sithAI_CanDetectSightThing`'s darkness term. The target's **sector** light
+    /// (`AMBIENT LIGHT`) under 0.5 scales the chance by `light + 0.2` (`_DAT_0052308c` is -0.2),
+    /// unless the watcher's thingflags carry `0x2000000`.
+    #[test]
+    fn a_dark_sector_makes_a_target_harder_to_notice() {
+        let chance = |ambient: f32, watcher_flags: u32| {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let mut actor = base.clone();
+            actor.flags = watcher_flags;
+            let mut player = base.clone();
+            player.pos = [8.0, 0.0, 0.0];
+            player.vel = [1.0, 0.0, 0.0];
+            player.sector = 0;
+            rt.things = vec![player, actor];
+            rt.things[1].sector = 0;
+            rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+            rt.types = vec![10, 2];
+            rt.template_move.insert("walkplayer".into(), "physics".into());
+            rt.actor_flags.insert(1, 0x200);
+            rt.sector_ambient_light = vec![ambient];
+            rt.detect_chance(1, 0)
+        };
+        // 8 units and moving is 0.4; a 0.1-light room scales it by 0.3.
+        assert!((chance(0.1, 0) - 0.12).abs() < 1e-5, "the darkness term is not applied");
+        assert!((chance(0.4, 0) - 0.24).abs() < 1e-5, "0.4 light should scale by 0.6");
+        assert!((chance(0.5, 0) - 0.4).abs() < 1e-5, "0.5 light is not dark");
+        assert!((chance(0.1, 0x2000000) - 0.4).abs() < 1e-5, "night vision ignored the darkness");
     }
 
     /// The roll is on **acquisition**: an actor 8 units away with the player standing still has a 0.2

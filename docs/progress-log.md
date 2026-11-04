@@ -3806,3 +3806,24 @@ statement path - and now points at the roadmap's per-marker sweep rather than re
 | `--soak --level static` | skipped: data-only map |
 | `--audit` | 35/35 clean, 10 unresolved asset references, 54 undecoded files |
 | docs links | all resolve |
+
+## Round 314: the detection darkness term, and the shut-sector sweep with a body
+
+`sithAI_CanDetectSightThing` (`0x4ec140`) multiplies the chance by the **target's sector light** when it is under
+0.5. The decomp resolves the pointer (`thing + 0x5c` is the sector, `+4` its light) and the constant
+(`_DAT_0052308c` = -0.2), so the term is `chance *= light + 0.2`, skipped when the watcher's thingflags carry
+`0x2000000` (night vision). The field is the level's `AMBIENT LIGHT`, now kept per sector as
+`Runtime::sector_ambient_light`; `EXTRA LIGHT` stays the POV pass's addition. It is live: 8,341 of 12,415 shipped
+sectors (67 %) bake below 0.5.
+
+`--adjoins` also closes the ledger fixture for the thing-collision row: the same portal sweep runs with the far
+room's openings hidden (`SetSectorAdjoins(across, 0)`, the door scripts' own close) and must stop at the opening's
+plane and stay in the near room, then cross once reopened.
+
+| check | result |
+| --- | --- |
+| `cargo test` | 235 passed (one new: the darkness curve) |
+| `--gates` | 0 of 67 failed, 2 skipped |
+| `--adjoins` | pass, including the shut-sector sweep |
+| `--soak-all` | 35 levels, 0 non-finite, 0 failed |
+| docs links | all resolve |

@@ -6581,14 +6581,19 @@ roll). The sight path in `ai_tick` rolls it when an actor **first registers** th
 deterministic line test, so an engaged actor cannot lose its target to a bad roll. `--ai`'s one-tick firing probe marks
 its actor as engaged first, because it measures the firing gates, not the roll.
 
-Not modelled, on the ledger: the engine's darkness term (it reads the target's sector light — `*(float *)(sector + 4) <
-0.5` scales the chance by the sector's light level — and this build keeps no sector light), the engine's second
-falloff gate (a byte at `thing + 0x2a8` whose meaning is unrecovered), and the engine re-rolls the chance on every
-target refresh where the port rolls on acquisition only.
+The **darkness term is ported (round 314)**: the engine reads the target's sector (`thing + 0x5c`) light at `+4`, and
+under 0.5 scales the chance by `light + 0.2` (`_DAT_0052308c` is -0.2) unless the watcher's thingflags carry
+`0x2000000`. The field is the level's `AMBIENT LIGHT` (`Runtime::sector_ambient_light`); `EXTRA LIGHT` is the POV
+pass's addition. It matters: **8,341 of the install's 12,415 sectors (67%)** bake below 0.5, so most of the game's
+rooms now make a target harder to notice.
 
-Checks (185 tests): `detection_chance_falls_off_with_range_and_pose` pins the whole curve from the constants — inside
+Still not modelled, on the ledger: the engine's second falloff gate (a byte at `thing + 0x2a8` whose meaning is
+unrecovered), and the engine re-rolls the chance on every target refresh where the port rolls on acquisition only.
+
+Checks (236 tests): `detection_chance_falls_off_with_range_and_pose` pins the whole curve from the constants — inside
 2 units 1.0; 8 units moving 0.4 and saturating at 20 units; still 0.2; crouched 0.3; both 0.15; unawake watcher 0.2;
-hidden target/watcher 0.05; a watcher's `0x8000` lifting the target's `0x80`. `a_ranged_actor_acquires_the_player_with_a_roll`
+hidden target/watcher 0.05; a watcher's `0x8000` lifting the target's `0x80`; and
+`a_dark_sector_makes_a_target_harder_to_notice` pins the darkness term at 0.1/0.4/0.5 light and with night vision. `a_ranged_actor_acquires_the_player_with_a_roll`
 puts the player 8 units away (a 0.2 roll), asserts the actor is not detected before ticking, then that it acquires
 within 200 ticks and fires at point-blank range once engaged. Measured before/after: with the acquisition gate disabled
 the acquisition check fails ("the actor never acquired the player at 8 units"). The level-1 and level-3 soaks pass
