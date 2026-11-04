@@ -3647,8 +3647,13 @@ impl Runtime {
             let Some(sector) = solids.sector_at(at, radius) else {
                 return false;
             };
+            // `standable` is the walker's own floor answer: it searches the room **and the adjoins a
+            // body can reach**, which is what a doorway threshold needs. A single-sector `sweep` is
+            // stricter than the level: level 6's first doorway has its floor under the neighbouring
+            // room, so the sweep found nothing and the follower stopped on the threshold for ever.
+            // The reach is unchanged (`height + maxstep`), so a ledge is still a ledge.
             solids
-                .sweep(sector, at, [0.0, 0.0, -1.0], height + maxstep, radius, self.gates())
+                .standable(sector, at, height + maxstep, radius)
                 .is_some()
                 || self.thing_floor(at, radius).is_some()
         };
@@ -4987,9 +4992,12 @@ impl Runtime {
                         && let Some(solids) = self.solids.as_deref()
                     {
                         self.ai_trace_source.insert(index, "blocked");
+                        let sector = solids.sector_at(next, 0.065);
+                        let floor = sector
+                            .and_then(|s| solids.sweep(s, next, [0.0, 0.0, -1.0], 3.0, 0.065, self.gates()));
                         eprintln!(
-                            "ai: {index} cannot step to {next:?}: sector {:?}",
-                            solids.sector_at(next, 0.065)
+                            "ai: {index} cannot step to {next:?}: sector {sector:?}, floor {floor:?}, from {:?}",
+                            self.things.get(index).map(|t| t.pos)
                         );
                     }
                     let _ = self.emit_ai_event(index, 0x400, None);
@@ -5056,6 +5064,9 @@ impl Runtime {
             if scripted.is_some() && destination_reach <= self.ai_standoff {
                 self.ai_move.remove(&index);
                 self.ai_chase.remove(&index);
+                // The route belonged to that destination. Leaving it behind sent the next order's
+                // walk to the old doorway first, because a remaining route outranks the goal.
+                self.ai_route.remove(&index);
                 // Arrived: the AI's moving bit clears with the destination, even for a class-less
                 // scripted actor that is no longer ticked from here on.
                 *self.actor_flags.entry(index).or_insert(0) &= !0x1;

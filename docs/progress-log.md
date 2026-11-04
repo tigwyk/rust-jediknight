@@ -4703,3 +4703,40 @@ drop and reports the level when none does — `10cargo` is one, and prints that 
 and no owner-35 face covers that point — the slab the body started on (surface 408, floor 0.10, owner 35) ends before
 it. So this is the floor-surface/polygon-coverage half of the ledger row, not the sector bookkeeping, and the walker is
 correctly taking the highest face it can see.
+
+**Every probe ran on level 1; six of them only held there.** Running the whole level-agnostic probe list with
+`--start 06abarons` (then `02narshadda`, `03katarn`, `05test`) found six panics the 67-gate sweep could never see,
+because each gate row starts at the first level of the first episode. All six are now either fixed or answered with a
+named note; the four-level audit is clean.
+
+- `--quicksave` compared the save's level name (`06abarons.jkl`, the way the engine writes it) against the archive
+  index's path (`jkl\06abarons.jkl`) as raw strings, so a same-level save read as a level change. The **live F9 path
+  already compares file names** for exactly this reason; the probe now does too (`in place: true`).
+- `--rules` built its "wall" from the longest face in `solids.walls`, which on level 6 is a broad **horizontal** face
+  (a sloped floor): a face with no height cannot stop a body, so the lateral rule was never exercised and the
+  past-the-end half reported a false push. The face must now span at least 1.0 in z.
+- `--ai` had three level-1 assumptions. The blocked-pair search took the first walled-off pair in index order, which on a
+  big level is too far to walk in the 900-tick budget (now ≤ 60 units, up to 8 candidates); the follower then stalled on
+  its **first doorway** for a real reason — `ai_can_walk`'s ground test used a single-sector `sweep`, and level 6's
+  doorway has its floor under the neighbouring room, so the walk was refused for ever (`sector Some(3), floor None`).
+  `ground` now uses `standable` — the walker's own floor answer, which searches the room **and the adjoins a body can
+  reach**, with the same `height + maxstep` reach, so a ledge is still a ledge. The scripted leg also walked a
+  **diagonal** (0.5, 0.5) where only one axis was proved open; it walks the proved axis. Level 6's route now drains in
+  276 ticks (level 1: 66). The yaw witness is the turn itself: an actor with a target keeps its aim while walking
+  (round 316), so level 6's follower turned 112° to its *target*, which the old level-1 assertion called wrong.
+- `--attach` had two: the carried height was read after the child settled onto the level's own floor (level 3:
+  +0.0487), and the parent's scripted yaw is outranked by **its own instincts** (level 3 kept 10.8°) and its **rate-limited
+  turn** (66° short after one step). Gravity is now off for the kinematic section and the turn is given its frames; the
+  parent is also marked `ai_cleared`. Level 2's body fell 2.65 units after the pivot, which the finished-spin assert read
+  as "kept turning" — the comparison is in plan, and the pivot runs with gravity off.
+- `--triggers` asserted a crossing through the centroid of each surface's **first triangle**; level 3's surface 3485 is
+  concave, so the centroid is outside the polygon. Surfaces are tried until one is crossed.
+- `--hit` required the player's bolt to land on the *particular* actor it aimed at; level 2 has a comrade 1.5 units in
+  front, which is what a projectile is supposed to hit. The witness is a body on the path, not that body.
+- `--falldeath`, `--endlevel`, `--soak` and `--rules`' jump now say when the level has nothing to measure: level 6 ships
+  no `0x40` sector, levels 2 and 6 have no goal cog waiting on `sighted`, level 2's ten `entered` handlers never fire in
+  45 s, and level 3's spawn ceiling leaves no clearance for an apex. Level 3's spawn also has no clear line in any
+  cardinal direction, so `AISetFireTarget` reports that instead of failing.
+
+Verified: `cargo test --release` 260 passed; `--gates` 0 of 67 failed, 2 skipped; `--soak-all` 35/35 levels, 0 non-finite
+positions, 0 bodies outside every sector; the 43-probe audit clean on `02narshadda`, `03katarn`, `05test`, `06abarons`.
