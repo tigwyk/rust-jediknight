@@ -4384,3 +4384,15 @@ ai-live: 118 shot(s) at the body, its health 100
 What stays open on that row is the sweep's *shape*: the engine sphere-casts from the eye with the target's
 radius expanded by `0.4`; the port's scans are a look cone. That needs the window half (an actor at a real
 door) and is named in the roadmap, not claimed here.
+
+**`circlestrafe` runs on its own clock.** `FUN_00509890` writes its next call as `class+0x4c + now`, and
+`talk` reads the same slot for its interval — so the first number on the line is milliseconds. The shipped
+`circlestrafe 5000, 30, 0.6, …` replans every **5 s**; the port rotated the ring every frame, which made the
+orbit smoother than retail's. The ring point is chosen once, stored with its due time, and held until the
+interval expires; the unit test asserts it is untouched after a second of frames and replaced after five.
+
+```
+test runtime::tests::a_close_actor_with_circlestrafe_circles_the_target ... ok
+--- ai check passed ---
+--- soak-all check passed ---
+```

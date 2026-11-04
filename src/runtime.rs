@@ -1363,6 +1363,9 @@ pub struct Runtime {
     /// (`0x509890`). The handler picks it at random the first time and flips it when the step is
     /// blocked; the port persists it the same way so the orbit does not jitter every frame.
     pub ai_strafe: BTreeMap<usize, f32>,
+    /// The ring point each actor is walking to, and when `circlestrafe`'s own interval lets it replan
+    /// (the instinct's first number is milliseconds, the same slot `talk` reads its interval from).
+    pub ai_strafe_goal: BTreeMap<usize, (f32, [f32; 3])>,
     /// When each actor started its current `hitandrun` engagement — its first shot after it came back.
     /// The handler (`0x50bb90`) watches the engine's just-fired flag and breaks off after the
     /// instinct's first argument (1000–10000 ms shipped) for its second (1500–3000 ms); the port
@@ -2109,6 +2112,7 @@ impl Runtime {
             ai_flee_until: BTreeMap::new(),
             ai_withdraw: BTreeMap::new(),
             ai_strafe: BTreeMap::new(),
+            ai_strafe_goal: BTreeMap::new(),
             ai_hitrun: BTreeMap::new(),
             ai_randomturn: BTreeMap::new(),
             ai_roam: BTreeMap::new(),
@@ -4606,9 +4610,12 @@ impl Runtime {
             // distance** (0.6-1.0 units in the shipped lines — this is the close-range, lightsaber
             // behaviour), the actor steps around the target by the instinct's angle (30-45 degrees)
             // at half speed, and keeps facing it. The side is picked at random once and kept in a
-            // signed slot, exactly as the handler persists it. The engine replans every 300-500 ms;
-            // the port re-evaluates each frame, so the orbit is smoother than retail's — a deviation
-            // to watch in a windowed leg.
+            // signed slot, exactly as the handler persists it.
+            //
+            // The handler's own clock is the **first number** (`class+0x4c` in the same slot `talk`
+            // reads its interval from), so `circlestrafe 5000, 30, 0.6, …` replans every **5 s** and the
+            // body walks to the rotated point in between; the port recomputed the rotation every frame
+            // and orbited smoothly instead. The goal is held until the interval is up.
             if scripted.is_none()
                 && sighted
                 && let Some(strafe) = ai.as_ref().and_then(|class| class.instinct("CircleStrafe"))
@@ -4618,20 +4625,28 @@ impl Runtime {
                 let angle = strafe.args.first().copied().unwrap_or(30.0) as f32;
                 let engage = strafe.args.get(1).copied().unwrap_or(1.0) as f32;
                 if dist > 0.2 && dist <= engage.max(0.2) {
-                    let side = *self.ai_strafe.entry(index).or_insert_with(|| {
-                        if crate::cog::pseudo_random() < 0.5 { -1.0 } else { 1.0 }
-                    });
-                    let (sin, cos) = (angle * side).to_radians().sin_cos();
-                    // The target -> actor vector, rotated around the target, keeps the radius and
-                    // moves the body along the ring.
-                    let (vx, vy) = (-tx, -ty);
-                    want = [
-                        target[0] + vx * cos - vy * sin,
-                        target[1] + vx * sin + vy * cos,
-                        target[2],
-                    ];
-                    pace = 0.5;
-                    strafing = true;
+                    let due = self.ai_strafe_goal.get(&index).map(|(due, _)| *due).unwrap_or(0.0);
+                    if self.time >= due {
+                        let side = *self.ai_strafe.entry(index).or_insert_with(|| {
+                            if crate::cog::pseudo_random() < 0.5 { -1.0 } else { 1.0 }
+                        });
+                        let (sin, cos) = (angle * side).to_radians().sin_cos();
+                        // The target -> actor vector, rotated around the target, keeps the radius and
+                        // moves the body along the ring.
+                        let (vx, vy) = (-tx, -ty);
+                        self.ai_strafe_goal.insert(
+                            index,
+                            (
+                                self.time + (strafe.weight / 1000.0).max(0.05),
+                                [target[0] + vx * cos - vy * sin, target[1] + vx * sin + vy * cos, target[2]],
+                            ),
+                        );
+                    }
+                    if let Some((_, goal)) = self.ai_strafe_goal.get(&index) {
+                        want = *goal;
+                        pace = 0.5;
+                        strafing = true;
+                    }
                 }
             }
             // A route in hand wins over the destination: each waypoint is a doorway centre the search
@@ -12069,6 +12084,28 @@ mod tests {
         assert!(
             (0.2..0.9).contains(&radius),
             "the actor left the ring: radius {radius:.2}"
+        );
+
+        // The handler's clock is its **first number** (5000 ms): the ring point is chosen once and
+        // held, so the body walks to it instead of re-orbiting every frame. A second of frames must
+        // leave the stored goal untouched, and after the interval it must be a new point.
+        let held = rt.ai_strafe_goal.get(&1).copied().expect("no strafe goal");
+        for _ in 0..30 {
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_eq!(
+            rt.ai_strafe_goal.get(&1).copied(),
+            Some(held),
+            "the ring point was replanned inside the instinct's own 5 s interval"
+        );
+        rt.time += 5.0;
+        for _ in 0..2 {
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert_ne!(
+            rt.ai_strafe_goal.get(&1).map(|(_, goal)| *goal),
+            Some(held.1),
+            "the ring point never moved after the interval expired"
         );
 
         // A control class with the same Follow but no CircleStrafe walks straight in and stops at

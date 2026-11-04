@@ -688,7 +688,11 @@ What the session settles, all of it already on the deviation ledger with its ret
 - **`returnhome`** — the port gates on the instinct existing and distance > 0.5, not the engine's awake flag.
 - **`retreat`/`withdraw`** — the mode ends on the withdraw interval instead of on sight of the target, and the away
   direction has no lateral jitter.
-- **`circlestrafe`** — the port replans every frame where the engine uses 300–500 ms.
+- **`circlestrafe`** — **replans on the instinct's own clock now (round 339)**: the handler sets its next
+  call to `class+0x4c + now`, the same slot `talk` reads its interval from, and the shipped first number is
+  **5000 ms**. The port recomputed the rotation every frame (a smoother orbit than retail's); the ring point
+  is now chosen once and held for the interval, and the unit test proves it is untouched after a second and
+  replaced after five.
 - **`hitandrun`** — break-off lands on the exact threshold instead of within the next AI update.
 - **`turretfire`** — the ±160° aim-head sweep is not modelled (turret fire is modelled as accurate).
 - **`listen`** — the hearing gates and the class's reaction chance are ported (round 233, measured headless); the
