@@ -686,8 +686,13 @@ What the session settles, all of it already on the deviation ledger with its ret
   closed door and compare which door it opens — that is the window half.
 - **`blindfire`** — the chance is rolled per shot slot, not on the engine's own tick.
 - **`returnhome`** — the port gates on the instinct existing and distance > 0.5, not the engine's awake flag.
-- **`retreat`/`withdraw`** — the mode ends on the withdraw interval instead of on sight of the target, and the away
-  direction has no lateral jitter.
+- **`retreat`/`withdraw`** — **the lifetime is the engine's now (round 339)**: `FUN_0050b150` clears the mode on
+  `ai[0x70] == 0` (the remembered target gone), while the instinct's 5000 ms is only how often the handler runs.
+  The port stopped withdrawing when the interval expired; the mode now lasts until the target is destroyed or
+  removed, and a retreat with no live target no longer arms at all. The unit test holds the mode through a run
+  of frames past the interval and clears it when the target is destroyed. Still open: the **lateral jitter** —
+  the handler rotates the away vector by `(rand - 0.5) × _DAT_005232d4`, plus a second component when the
+  attacker's flags carry `0x2000`; those two constants did not read out of this EXE copy, so they are not guessed.
 - **`circlestrafe`** — **replans on the instinct's own clock now (round 339)**: the handler sets its next
   call to `class+0x4c + now`, the same slot `talk` reads its interval from, and the shipped first number is
   **5000 ms**. The port recomputed the rotation every frame (a smoother orbit than retail's); the ring point

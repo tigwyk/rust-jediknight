@@ -4396,3 +4396,22 @@ test runtime::tests::a_close_actor_with_circlestrafe_circles_the_target ... ok
 --- ai check passed ---
 --- soak-all check passed ---
 ```
+
+**A withdrawal lasts until the target is gone, not for 5 s.** `FUN_0050b150` clears the mode when `ai[0x70]`
+(the remembered target pointer) is zero; the instinct's own number (5000 ms shipped) is the *call rate*, which
+the port had mistaken for a lifetime — a hurt actor stopped backing off after five seconds even with the
+shooter still in front of it. `ai_withdraw` now carries an **optional** deadline: `None` for retreat's
+withdrawal (cleared on a destroyed/removed target), `Some` for `hitandrun`'s break-off, whose second number
+really is a duration. A retreat also refuses to arm against a target that is already destroyed, which is what
+keeps the mode from re-arming on the frame it clears. The test walks the actor past the interval, proves the
+mode is still armed, then destroys the target and proves it clears.
+
+The handler's **lateral jitter** stays open: it rotates the away vector by `(rand - 0.5) × _DAT_005232d4` and
+adds a second component when the attacker carries `0x2000`. Those constants did not read out of this copy of
+`JK.EXE` (its section table maps the decomp's VAs 0x400000 lower than the values I tried), so they are not
+guessed at.
+
+```
+test runtime::tests::a_hurt_actor_with_retreat_backs_off ... ok
+--- ai check passed ---
+```

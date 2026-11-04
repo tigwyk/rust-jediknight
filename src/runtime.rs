@@ -1358,7 +1358,10 @@ pub struct Runtime {
     /// `arg1` chance succeeds; `withdraw` (`0x50b150`) walks the actor away from that thing. The port
     /// reuses the scripted flee walk and re-arms on the withdraw instinct's own interval (5000 ms in
     /// the shipped classes).
-    pub ai_withdraw: BTreeMap<usize, (usize, f32)>,
+    /// `(sender, deadline)`: `None` for `retreat`'s withdraw, which the engine ends **only** when the
+    /// target it remembers is gone (`ai[0x70] == 0` clears the mode); `Some` for `hitandrun`'s break-off,
+    /// whose own second argument is a duration.
+    pub ai_withdraw: BTreeMap<usize, (usize, Option<f32>)>,
     /// The signed side (`, -1` or `+1`) each actor circles a target on, for `circlestrafe`
     /// (`0x509890`). The handler picks it at random the first time and flips it when the step is
     /// blocked; the port persists it the same way so the orbit does not jitter every frame.
@@ -4394,10 +4397,18 @@ impl Runtime {
             // hurt it. retreat sets the mode when its health falls under `arg0 × max` (0.50 in every
             // shipped class) and its `arg1` chance (0.25-0.50) succeeds, remembering the current
             // target; withdraw walks the actor away from that target. The port reuses the scripted
-            // flee walk for the step and clears the mode on the withdraw instinct's own interval
-            // (5000 ms shipped) — the engine instead ends it when the target comes back into sight.
+            // flee walk for the step. **The mode ends when the remembered target is gone**
+            // (`FUN_0050b150` clears the bit on `ai[0x70] == 0`); the instinct's own interval (5000 ms
+            // shipped) is only how often the handler runs, so the port's old "clear after the interval"
+            // stopped a withdrawal early. `hitandrun`'s break-off, by contrast, has a real deadline.
+            // A destroyed thing is a null pointer in the engine: it frees the record, so `ai[0x70]` reads
+            // zero the next time the handler runs.
             if let Some((from, until)) = self.ai_withdraw.get(&index).copied()
-                && (self.time >= until || self.things.get(from).is_none())
+                && (self
+                    .things
+                    .get(from)
+                    .is_none_or(|target| target.destroyed)
+                    || until.is_some_and(|u| self.time >= u))
             {
                 self.ai_withdraw.remove(&index);
             }
@@ -4413,12 +4424,15 @@ impl Runtime {
                 let health = self.things.get(index).map(|t| t.health).unwrap_or(0.0);
                 let fraction = retreat.weight;
                 let chance = retreat.args.first().copied().unwrap_or(0.0) as f64;
+                // A retreat needs someone to retreat **from**: with the target destroyed the engine's
+                // target pointer is null and the handler has nothing to back away from.
                 if max_health > 0.0
                     && health < fraction * max_health
+                    && self.things.get(player).is_some_and(|t| !t.destroyed)
                     && crate::cog::pseudo_random() < chance
                 {
-                    let ms = withdraw.weight.max(1.0);
-                    self.ai_withdraw.insert(index, (player, self.time + ms / 1000.0));
+                    let _ = withdraw;
+                    self.ai_withdraw.insert(index, (player, None));
                 }
             }
             // `hitandrun` (`0x50bb90`): fire at the target for the instinct's first argument, then break
@@ -4443,7 +4457,7 @@ impl Runtime {
                     if let Some(start) = self.ai_hitrun.get(&index).copied()
                         && self.time - start >= hold
                     {
-                        self.ai_withdraw.insert(index, (player, self.time + break_off));
+                        self.ai_withdraw.insert(index, (player, Some(self.time + break_off)));
                         self.ai_hitrun.remove(&index);
                     }
                 }
@@ -12174,6 +12188,23 @@ mod tests {
         }
         let backed = rt.things[1].pos[0];
         assert!(backed < -0.3, "the hurt actor did not back off: x {backed:.2}");
+
+        // The instinct's 5000 ms is how often the handler runs, **not** a lifetime: `FUN_0050b150`
+        // clears the mode on `ai[0x70] == 0`, so the withdrawal lasts while the target exists. A run of
+        // frames past the interval must keep it armed, and losing the target must clear it.
+        rt.time += 6.0;
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert!(
+            rt.ai_withdraw.contains_key(&1),
+            "the withdraw mode expired on the instinct's interval, which is only its call rate"
+        );
+        // The target is gone; the actor is still alive and ticking.
+        rt.things[0].destroyed = true;
+        rt.ai_tick(0, 1.0 / 30.0);
+        assert!(
+            !rt.ai_withdraw.contains_key(&1),
+            "the withdraw mode survived the loss of its target"
+        );
 
         // A healthy actor with the same class never arms the mode — and with the body out of its
         // 2-unit sight it has nothing else to walk to, so it stays put.
