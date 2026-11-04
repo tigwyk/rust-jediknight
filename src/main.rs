@@ -2009,6 +2009,31 @@ fn main() {
                 assert!(stats.drawn > 0, "the panel drew no edges at all");
                 assert!(stats.culled_facing > 0, "the facing cull removed nothing");
                 assert!(stats.hidden_seams > 0, "the seam rule removed nothing");
+                // The arrow table drives the same render: three `0x9c` presses (pitch -15) and two
+                // `0x9a` (yaw +10) must produce a different, non-empty drawing. The click routing is
+                // the map screen's, but the state-to-picture path is this one.
+                let mut orbit = ui::MapCamera::default();
+                for id in [0x9c, 0x9c, 0x9c, 0x9a, 0x9a] {
+                    assert!(orbit.arrow(id), "{id:#x} is not an arrow");
+                }
+                let mut probe = ui::Canvas::new(640, 480);
+                let orbited = probe.map(
+                    [40, 40, 520, 320],
+                    level,
+                    [pos[0], pos[1], pos[2]],
+                    orbit,
+                    &ui::palette_of(&base, &palette),
+                    look.map_ink,
+                );
+                println!(
+                    "map panel: the arrows (pitch {:.0}, yaw {:.0}) draw {} edge(s), {} facing-culled",
+                    orbit.pitch, orbit.yaw, orbited.drawn, orbited.culled_facing
+                );
+                assert!(orbited.drawn > 0, "the arrows drew nothing");
+                assert_ne!(
+                    orbited.drawn, stats.drawn,
+                    "pressing the arrows changed nothing on the panel"
+                );
             }
             if let Some((start_pos, start_yaw)) =
                 map_level.as_ref().map(|(_, pos, yaw)| (*pos, *yaw))

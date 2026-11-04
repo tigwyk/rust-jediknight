@@ -4297,6 +4297,9 @@ cargo test: 246 passed (the arrow table is one of them)
 --map-shot: 11765 ink px, 489 edges; --map-orbit -40,30: 18237 ink px, 1776 edges
 ```
 
+`--map-shot` now presses the arrows through that table itself (three `0x9c`, two `0x9a`) and asserts the
+panel changes: pitch -15 / yaw +10 draws **1 073** edges against the default pose's 489.
+
 What is not done here: a **window click** on the arrow art. This machine cannot run the interactive path
 reliably right now, so the wiring is proven by the unit-tested table and the same `MapCamera` driving the
 render at a non-zero orbit, not by a click.
