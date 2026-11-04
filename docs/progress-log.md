@@ -4809,3 +4809,23 @@ and grip's rate is documented as a per-skill entry of the **player's** power tab
 `--pull` prints that chain and the measured 0 instead of claiming the formula is unknown.
 
 Verified: `--pull` passes on `01narshadda` and `06abarons`; `cargo test --release` 260 passed.
+
+**Grip's rate is the victim's class script, and that closes the undecoded table** (round 355). The previous round left
+`SkillTarget` at "-1 or a call into `0x4dedc0`", with grip's rate sourced from the victim's `damage=` because the
+player's power table is undecoded. The call chain now runs to the end: `0x5047e0`'s dispatcher lands in
+`sithCogFunctionThing_SkillTarget`, which sends message **25** (`skill`) with the bin and rank to the **victim's class
+cog** and returns whatever that script answers with `ReturnEx`. The shipped answers are the numbers the scripts
+assume: `actor_pm.cog` returns **10** for grip (31) and 5 for deadly sight (34) — its own comment says "base damage
+that is taken by this actor" — and `kyle.cog` returns 1 for a player, which multiplies it by `2*rank` itself. So the
+actor's own script is the table, not the player's.
+
+The port now lifts those answers out of each parsed class script (`Cog::skill_answers`: the `if (bin == N)` arms of its
+`skill:` label's `ReturnEx`) into `Runtime::class_skill`, keyed by the class cog instance `thing_class_cog` already maps
+the thing to, and `SkillTarget` serves them for any bin before falling back. `--pull` shows the difference directly: the
+grip victim is chosen as the first actor *whose class script answers `skill`*, its answers print as `[(31, 10.0)]`, and
+the grab pulse takes it 50 -> **30** health — `10 * rank / 2` at rank 4 — where it used to take nothing because the
+victim's `damage=` is 0. A headless probe starts its class scripts only on the live path, so the probe binds the
+victim's template `cog=` itself, exactly as the live load does.
+
+Verified: `--pull` passes on `01narshadda` and `06abarons` with the 50 -> 30 measurement; `--force-all`, `--force-live`
+and `--mana` pass; `--gates` 0 of 67 failed, 2 skipped; `cargo test --release` 260 passed.
