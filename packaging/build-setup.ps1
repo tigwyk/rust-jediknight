@@ -128,7 +128,16 @@ try {
         }
     }
 
-    $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+    # `Get-FileHash` is missing from some Windows PowerShell installs (its Utility module can be
+    # trimmed), which turns this script into a false failure when run the way the header says. Use the
+    # framework directly so both `powershell` and `pwsh` work.
+    $stream = [System.IO.File]::OpenRead($setup)
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $hash = ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
+        } finally { $sha.Dispose() }
+    } finally { $stream.Dispose() }
     $size = (Get-Item -LiteralPath $setup).Length
     Write-Host ''
     Write-Host "==> $setup"

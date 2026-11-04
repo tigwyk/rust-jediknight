@@ -4926,3 +4926,18 @@ its clicks into inventory bin 18**, not its text; `jkPlayer_SetChoice`'s writer 
 
 Verified: `--ui-tables` (41 screens, the `light_or_dark` block quoted), byte searches in both GOBs for `GUI_DECIDE`,
 `GUI_LIGHT_OR_DARK`, `decide_a/b` (zero hits) and for `CREDITS_*` (the table, first entries quoted).
+
+**The setup script no longer depends on `Get-FileHash`.** Running the documented command — `powershell
+-ExecutionPolicy Bypass -File packaging\build-setup.ps1 -SkipBuild` — died at its last step with `Get-FileHash is not
+recognized` on this machine (that install's `Microsoft.PowerShell.Utility` is trimmed; `pwsh` has it, `powershell` does
+not). The line now hashes through `[System.Security.Cryptography.SHA256]` and a file stream, so both shells build the
+same artifact; the documented invocation builds end to end here (`28.6 MB`, `sha256 25a304d4…`).
+
+The silent-install smoke (`/S /GAMEPATH=… /DIR=…`) could not run in this environment: the setup reports `setup log
+unavailable: Access to the path '…' is denied` for every path it is given, including `%TEMP%` and the repo, and exits 1
+without copying anything. 32- and 64-bit shells started from the same session write those paths fine, so this is the
+agent shell's restriction on that process, not a setup defect — the Phase 4 clean-machine install check still needs a
+plain desktop session.
+
+Verified: the build above under `powershell` (previously failed) and under `pwsh` (already worked); `cargo test --release`
+262 passed.

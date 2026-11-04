@@ -592,7 +592,10 @@ accepts a browsed/pasted/dragged folder, installs per-user to
 `%LOCALAPPDATA%\Programs\bevi-knight`, saves the game path beside the program, creates Start
 Menu/desktop shortcuts and an Apps & Features uninstall entry. No admin rights; the game
 install is untouched. It also takes `/S /GAMEPATH="..." /DIR="..." /NOSHORTCUTS` for silent
-installs.
+installs. Build it with either shell — the script's hash line used to call `Get-FileHash`, which some
+Windows PowerShell installs do not carry (this machine's does not), so it now computes SHA-256 through
+`System.Security.Cryptography` directly and `powershell -ExecutionPolicy Bypass -File packaging\build-setup.ps1 -SkipBuild`
+runs end to end.
 
 ```powershell
 cargo run --release                      # render the game's first level
