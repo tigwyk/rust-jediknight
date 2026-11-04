@@ -199,7 +199,7 @@ has since outgrown the note. Line numbers drift; the identity is the symbol and 
 | `force.rs` force-point spend order inferred | **new** — *force point spending* |
 | `level_mat.rs` baked vertex-colour light level | **new** — *lighting* |
 | `main.rs` `hoverId` force rows not in a screen | **new** — *force-screen row gating* |
-| `main.rs` soak `outside` reported and loosely asserted (`<= 1`) | not a deviation — test scope |
+| `main.rs` soak `outside` asserted at `<= 1`, `<= 2` on 19a | not a deviation — test scope; `--soak-all` now also fails a child that panicked (round 313) |
 | `main.rs` `build_world` whole world re-batched per change | not a deviation — cost |
 | `main.rs` `actors_follow_runtime` rebuilds the mesh asset | not a deviation — cost |
 | `main.rs` `animate_actors` scripted clip has no own epoch | **new** — *puppet clip timing* |

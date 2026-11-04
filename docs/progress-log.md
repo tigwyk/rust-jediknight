@@ -3783,3 +3783,26 @@ the headless gate sweep is **0 of 67 failed, 2 skipped**, `--feel`/`--walk`/`--c
 **234**. The same function's slow-mo scaling (debug bit `0x400`, `_DAT_00522f94` = **0.2**, read from the
 image) stays unported and is recorded as unreachable from content: the bit's writers are the
 `setdebugmodeflags` cog verbs, which no shipped script calls.
+
+## Round 313: the soak sweep stops swallowing panics, and gaps.md's debt table is corrected
+
+`--soak-all` read each child's stdout and never its exit status, so every per-level soak assertion it
+did not itself repeat - the message-delivery claim and, on `jkl\static.jkl`, an index-out-of-bounds in
+the script pass - failed silently. It now requires `status.success()`, tolerates the one level that
+delivers nothing in a six-second walk explicitly (`BK_SOAK_ALLOW_QUIET`, set only by the sweep; a
+single `--soak` still asserts delivery), and skips the gobs' data-only `static.jkl` outright.
+`--soak`'s containment tolerance is now the level's own: two bodies on 19a (`BK_SOAK_TRACE` names the
+soak's `walkplayer` and a `stormtroop3`), one everywhere else.
+
+`gaps.md` §4 lost two rows the code had outgrown - steering has asked `Collide::route` for a portal
+path since the routing work, and `sleep`/`settimer`/`setpulse` suspend and resume through the VM's
+statement path - and now points at the roadmap's per-marker sweep rather than reading as the whole list.
+
+| check | result |
+| --- | --- |
+| `cargo test` | pass |
+| `--soak-all` | 35 levels, 0 non-finite, 1 level with 2 bodies outside (19a), 0 failed |
+| `--soak --level 19a` | pass |
+| `--soak --level static` | skipped: data-only map |
+| `--audit` | 35/35 clean, 10 unresolved asset references, 54 undecoded files |
+| docs links | all resolve |
