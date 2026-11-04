@@ -175,6 +175,11 @@ pub struct ThingState {
     /// `sithTrackThing_PathMovePause` sets `trackParams.flags |= 0x80` and `...Resume` clears it.
     /// Level 9's pipe doors stop in the doorway this way (`09_stoppipedoors.cog`).
     pub paused: bool,
+    /// `SetThingPulse(thing, seconds)`: the thing's own pulse interval and when the next one is due.
+    /// Every `seconds` the engine messages the thing's own script slots with `pulse` — the blood
+    /// trickle `00_backpack` starts, and the damage cadence of `00_deathfloor`/`00_slideceiling`.
+    pub pulse: f32,
+    pub pulse_at: f32,
     /// `GetPhysicsFlags`/`SetPhysicsFlags` (`physflags=`), and the `jkSetFlags` bits the
     /// force scripts set (`0x20` while a power is mid-flash).
     pub phys_flags: u32,
@@ -1794,6 +1799,8 @@ impl Runtime {
                         .copied()
                         .unwrap_or([0.0; 3]),
                     paused: false,
+                    pulse: 0.0,
+                    pulse_at: 0.0,
                     light: 0.0,
                     light_end: 0.0,
                     light_rate: 0.0,
@@ -2347,6 +2354,8 @@ impl Runtime {
             spin: None,
             rot_vel: self.template_angvel.get(&template).copied().unwrap_or([0.0; 3]),
             paused: false,
+            pulse: 0.0,
+            pulse_at: 0.0,
             light: 0.0,
             light_end: 0.0,
             light_rate: 0.0,
@@ -2676,6 +2685,22 @@ impl Runtime {
             }
             for instance in self.thing_instances(index) {
                 self.pending_messages.push((instance, "arrived", [0.0; 2], None));
+            }
+        }
+        // `SetThingPulse`: a thing's own timer messages its script slots with `pulse` every interval.
+        let pulsing: Vec<usize> = self
+            .things
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.pulse > 0.0 && t.pulse_at <= self.time)
+            .map(|(i, _)| i)
+            .collect();
+        for index in pulsing {
+            if let Some(thing) = self.things.get_mut(index) {
+                thing.pulse_at = self.time + thing.pulse;
+            }
+            for instance in self.thing_instances(index) {
+                self.pending_messages.push((instance, "pulse", [0.0; 2], None));
             }
         }
         // Powerups with `respawn=` come back. The countdown runs in the same step as
@@ -3027,6 +3052,7 @@ impl Runtime {
                 | "getthinglvec"
                 | "setthingrot"
                 | "setthinglook"
+                | "setthingpulse"
                 | "getthingsector"
                 | "setthingsector"
                 | "getthingflags"
@@ -5519,6 +5545,8 @@ impl Runtime {
             spin: None,
             rot_vel: [0.0; 3],
             paused: false,
+            pulse: 0.0,
+            pulse_at: 0.0,
             light: 0.0,
             light_end: 0.0,
             light_rate: 0.0,
@@ -6467,6 +6495,8 @@ impl Runtime {
             spin: None,
             rot_vel: [0.0; 3],
             paused: false,
+            pulse: 0.0,
+            pulse_at: 0.0,
             light: 0.0,
             light_end: 0.0,
             light_rate: 0.0,
@@ -9019,6 +9049,16 @@ impl Runtime {
                 }
                 Value::Nil
             }
+            // `SetThingPulse(thing, seconds)`: start the thing's own pulse timer; `0` stops it.
+            "setthingpulse" => {
+                let interval = num(1) as f32;
+                let now = self.time;
+                if let Some(t) = self.thing_mut(idx(0)) {
+                    t.pulse = interval.max(0.0);
+                    t.pulse_at = now + interval.max(0.0);
+                }
+                Value::Nil
+            }
             "getthingsector" => Value::Num(self.thing(idx(0)).map(|t| t.sector as f64).unwrap_or(-1.0)),
             "setthingsector" => {
                 if let Some(t) = self.thing_mut(idx(0)) {
@@ -9467,6 +9507,36 @@ mod tests {
         assert_eq!(rt.sector_messages(None, Some(0), None), vec![(0, "entered", 1)]);
     }
 
+    /// `SetThingPulse(thing, seconds)` starts the thing's own timer: every interval its script slots
+    /// get a `pulse` message (`00_backpack`'s blood trickle, `00_deathfloor`'s damage cadence).
+    #[test]
+    fn a_thing_pulse_messages_its_own_script() {
+        let mut rt = door_runtime();
+        rt.thing_links.push((7, 0, 0));
+        rt.call("setthingpulse", &[Value::Num(0.0), Value::Num(0.5)]);
+        assert_eq!(rt.things[0].pulse, 0.5);
+        rt.time += 0.6;
+        rt.step(1.0 / 30.0);
+        let pulses = rt
+            .pending_messages
+            .iter()
+            .filter(|(instance, label, _, _)| *instance == 7 && *label == "pulse")
+            .count();
+        assert_eq!(pulses, 1, "the thing's pulse never reached its script");
+        // The timer re-arms rather than firing every frame.
+        rt.pending_messages.clear();
+        rt.step(1.0 / 30.0);
+        assert!(
+            !rt.pending_messages.iter().any(|(_, label, _, _)| *label == "pulse"),
+            "the pulse fired on the very next frame"
+        );
+        // Zero stops it.
+        rt.call("setthingpulse", &[Value::Num(0.0), Value::Num(0.0)]);
+        rt.time += 5.0;
+        rt.step(1.0 / 30.0);
+        assert!(!rt.pending_messages.iter().any(|(_, label, _, _)| *label == "pulse"));
+    }
+
     /// `AiGetMode` is the AI's own flag word — the same value `GetActorFlags` answers, which is what
     /// `actor_*.cog`'s `BitTest(AiGetMode(me), 0x800)` reads to stay out of the way of a fight.
     #[test]
@@ -9623,6 +9693,8 @@ mod tests {
                 spin: None,
             rot_vel: [0.0; 3],
             paused: false,
+                pulse: 0.0,
+                pulse_at: 0.0,
                 light: 0.0,
                 light_end: 0.0,
                 light_rate: 0.0,

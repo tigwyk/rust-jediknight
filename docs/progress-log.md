@@ -4625,3 +4625,9 @@ axis along a direction — snap at blend 0, a partial turn otherwise — and set
 leaves the static list of cog-called verbs absent from `src/` at **20** (recounted): two are ledgered above
 (`GetAutoReload`, `GetWeaponPriority`), six are the `00_breakingbottle`/`force_pull` surface queries, and the rest are
 one-cog setters (`SetThingPulse`, `SetThingFireOffset`, `SetCollideType`, `AddTint`, `SetParticleGrowthSpeed`, …).
+
+**`SetThingPulse` is the thing's own timer.** `SetThingPulse(thing, seconds)` arms a per-thing interval; every
+interval the engine messages that thing's own script slots with `pulse` — the blood trickle `00_backpack` starts at
+0.05 s, and the damage cadence of `00_deathfloor`/`00_slideceiling`. `ThingState` carries `pulse`/`pulse_at`, the frame
+step re-arms and queues `pulse` to `thing_instances` (the same path `arrived` uses), and `0` switches it off. Test:
+`a_thing_pulse_messages_its_own_script`.
