@@ -4598,3 +4598,16 @@ the setup screen's "Automatic reload weapon" slider, whose retail default is unr
 restricts to the current weapon's kind); `GetWeaponPriority(player, bin, 0)` (17 sites) is not a table column at all —
 `sithWeapon_AutoSelect` (`0x4d57a0`) asks the bin's own cog with message `0x13` (`autoselect`) and keeps the largest
 reply, which the port's damage ranking stands in for.
+
+**The instinct table, transcribed in full.** `sithAICmd_Startup` (`0x5091b0`) registers 21 handlers with
+`(name, handler, mask, mode, events)`; the port's per-instinct state gates carry the same conditions, and two were
+cross-checked against it: `primaryfire` `(2, 0)`, `follow`/`turretfire` `(2, 0x800)`, `opendoors` `(2, 0)`,
+`lookfortarget` `(0x204, 0)` (0x4 = still scanning, 0x200 = engaged — the pair `sithAI_CheckSightThing` swaps),
+`sensedanger` `(4, 0x800)`, `hitandrun` `(0xc00, 0)`, `retreat`/`circlestrafe` `(2, 0x800)`, `blindfire` `(2, 0xc00)`,
+`randomturn` `(4, 0)`, `withdraw`/flee `(0x800, 0)`, `returnhome` `(0, 0)`, `lobfire`/`crouch` `(2, 0)`.
+
+**Event 2 has no emitter anywhere in the set.** Every `sithAI_EmitEvent` call site: `0x1000` from
+`WeaponFireProjectile` (what `dodge`'s event mask `0x1003` listens for), `0x100` from the scheduler on a flag change and
+from `AISetMode`/`AIFlee`, `0x400`/`0x800` from the target-message path, and `1` from `DamageActor`. `sensedanger`'s
+event mask is `7`, so its `param_4 == 2` arm is reachable by the dispatcher and *never* raised — the port's "dead
+content" note now rests on the whole call-site list rather than one handler's inventory.
