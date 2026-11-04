@@ -2514,7 +2514,22 @@ the image that is `0x38 hurtimpact`, `0x39 hurtenergy`, `0x3a hurtfire`, `0x3b h
 so the table's base is confirmed. `sithActor_DamageActor` switches on the kind word itself, so a
 combined word takes the default arm.
 
-Still unported from the same function: the 0.1 damage multiplier for a limb hit.
+**Actor-versus-actor damage is a tenth.** The same function scales the damage before it subtracts:
+
+```c
+sender = sithThing_GetThingParent(sender);          /* 0x4cc6a0: climbs +0x80 while +0x74 matches */
+if (sender && kind != 0x20 /*drown*/ && kind != 0x40 /*fall*/
+    && sender[3] == 2 && (sender[0x4c] & 0x1000000) == 0
+    && actor[3] == 2)
+    damage *= 0.1;                                   /* _DAT_005230b0 */
+```
+
+`thing[3]` is the type word (2 = actor), so this reads: a bolt whose top parent is an **actor** does a
+tenth of its damage to another actor, unless that actor's flags carry `0x1000000`. The player is type
+**10**, so player damage is never scaled; no shipped script sets the exemption bit (`SetActorFlags`
+values in the corpus are 0x4/0x8/0x200/0x2000/0xA00000), so AI-versus-AI fighting is cosmetic by design.
+The port applies it at the top of `damage_typed_from`, before the AI event, the `damaged` messages and
+the subtraction, which is the engine's order (its whole function works on the scaled number).
 
 ### A message carries params, and `damaged` can answer
 

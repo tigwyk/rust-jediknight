@@ -298,6 +298,11 @@ pub const DAMAGE_SOUND_FLOOR: f32 = 0.01;
 /// `SITH_AF_INVULNERABLE`: `actor->flags` bit 3. `sithActor_DamageActor` checks it before anything
 /// else, so `SetActorFlags(player, 0x8)` is how a script makes someone untouchable.
 pub const AF_INVULNERABLE: u32 = 0x8;
+/// The actor flag that exempts a hit from `sithActor_DamageActor`'s actor-to-actor scale: when the
+/// attacker is an actor whose `+0x4c` word lacks this bit, damage dealt to another actor is
+/// multiplied by **0.1** (`_DAT_005230b0`). No shipped script sets it (`SetActorFlags` values in the
+/// corpus are 0x4/0x8/0x200/0x2000/0xA00000), so in practice AI-versus-AI damage is a tenth.
+pub const AF_ACTOR_FULL_DAMAGE: u32 = 0x1000000;
 /// `SITH_SECTOR_COGLINKED`: a cog is placed on this sector, so it can hear `sighted`/`entered`.
 pub const SECTOR_COGLINKED: u32 = 0x4;
 /// `SITH_SECTOR_SEEN`: latched the first time the renderer draws the sector.
@@ -6376,6 +6381,22 @@ impl Runtime {
         if self.invulnerable(index, kind) {
             return self.things.get(index).map(|t| t.health).unwrap_or(0.0);
         }
+        // Actor-versus-actor damage is a tenth: `sithActor_DamageActor` scales it when
+        // `GetThingParent(sender)` is an actor without `AF_ACTOR_FULL_DAMAGE` and the victim is an
+        // actor too, with drowning and falls exempt. Applied before the AI event, the messages and the
+        // subtraction, since the engine's whole function works on the scaled number.
+        let mut amount = amount;
+        if kind != 0x20
+            && kind != DAMAGE_FALL
+            && self.types.get(index).copied() == Some(2)
+            && source > 0
+            && usize::try_from(source).is_ok_and(|attacker| {
+                self.types.get(attacker).copied() == Some(2)
+                    && self.actor_flags.get(&attacker).copied().unwrap_or(0) & AF_ACTOR_FULL_DAMAGE == 0
+            })
+        {
+            amount *= 0.1;
+        }
         // `sithActor_DamageActor` (`0x4ecc90`) raises AI **event 1** with the attacker *before* it
         // subtracts the health (`if (param_2 != param_1 && thing->type == 2)
         // sithAI_EmitEvent(thing->ai, 1, param_2)`); `dodge` steps away and `sensedanger` plays its
@@ -11081,7 +11102,8 @@ mod tests {
             ),
         );
         rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
-        assert_eq!(rt.things[1].health, 95.0, "the damage did not apply");
+        // Actor against actor: the engine scales it to a tenth, so the 5 is a 0.5.
+        assert_eq!(rt.things[1].health, 99.5, "the damage did not apply");
         assert_eq!(
             rt.ai_move.get(&1).copied(),
             Some([0.7, 0.0, 0.0]),
@@ -11428,7 +11450,7 @@ mod tests {
         );
         rt.actor_flags.insert(1, 0x4);
         rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
-        assert_eq!(rt.things[1].health, 95.0, "the damage did not apply");
+        assert_eq!(rt.things[1].health, 99.5, "the damage did not apply");
         let flags = rt.actor_flags.get(&1).copied().unwrap_or(0);
         assert_eq!(flags & 0x4, 0, "the awake bit survived the surprise");
         assert_ne!(flags & 0x800, 0, "the alert bit was not set");
@@ -11488,6 +11510,43 @@ mod tests {
         // The lethal blow returns through the kill path, never the hurt sound.
         rt.damage_typed(1, 6.0, DAMAGE_IMPACT);
         assert_eq!(rt.sounds.len(), 2, "a lethal hit played a hurt sound");
+    }
+
+    /// `sithActor_DamageActor`: actor-versus-actor damage is a **tenth**, unless the attacker's actor
+    /// flags carry 0x1000000, and drowning/falls are exempt. The player is type 10, so its own hits are
+    /// never scaled.
+    #[test]
+    fn an_actor_hitting_another_actor_deals_a_tenth() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut victim = base.clone();
+        victim.pos = [1.0, 0.0, 0.0];
+        let mut attacker = base.clone();
+        attacker.pos = [3.0, 0.0, 0.0];
+        rt.things = vec![base, victim, attacker];
+        rt.templates = vec!["walkplayer".into(), "grunt".into(), "grunt".into()];
+        rt.types = vec![10, 2, 2];
+        rt.things[1].health = 100.0;
+
+        rt.damage_typed_from(1, 10.0, DAMAGE_IMPACT, 2);
+        assert_eq!(rt.things[1].health, 99.0, "actor-on-actor damage was not scaled to a tenth");
+
+        // 0x1000000 on the attacker exempts the scale.
+        rt.actor_flags.insert(2, AF_ACTOR_FULL_DAMAGE);
+        rt.damage_typed_from(1, 10.0, DAMAGE_IMPACT, 2);
+        assert_eq!(rt.things[1].health, 89.0, "the full-damage flag was ignored");
+
+        // Falls and drowning are exempt: the same hit unscaled.
+        rt.actor_flags.insert(2, 0);
+        rt.damage_typed_from(1, 2.0, DAMAGE_FALL, 2);
+        assert_eq!(rt.things[1].health, 87.0, "a fall from an actor was scaled");
+        rt.damage_typed_from(1, 2.0, 0x20, 2);
+        assert_eq!(rt.things[1].health, 85.0, "drowning from an actor was scaled");
+
+        // The player (type 10) is not an actor here, so its damage on an actor is full.
+        rt.types[2] = 10;
+        rt.damage_typed_from(1, 4.0, DAMAGE_IMPACT, 2);
+        assert_eq!(rt.things[1].health, 81.0, "the player's damage was scaled");
     }
 
     /// The engine's mode ids are the canonical `.snd` event names, recovered from the pointer array

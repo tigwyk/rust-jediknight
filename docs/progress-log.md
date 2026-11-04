@@ -3997,3 +3997,33 @@ Still open in the same function: the **0.1 limb multiplier** (it needs a hit loc
 not carry). `--hit` also stays broken on some levels for an unrelated reason: the bolt lands on a
 neighbouring thing (`02narshadda`: thing 268 instead of 267), which is the check's nearest-target
 assumption, not the damage path.
+
+## Round 324: actor-versus-actor damage is a tenth
+
+`docs/formats.md` had listed the remaining piece of `sithActor_DamageActor` as "the 0.1 damage
+multiplier for a limb hit". Re-reading the disassembly, it is not about a limb at all: the condition
+checks the **sender's** resolved parent type and the **victim's** type, nothing locational.
+
+```c
+sender = sithThing_GetThingParent(sender);   /* 0x4cc6a0: climbs +0x80 while +0x74 matches */
+if (sender && kind != 0x20 && kind != 0x40 &&
+    sender[3] == 2 && (sender[0x4c] & 0x1000000) == 0 && actor[3] == 2)
+    damage *= 0.1;                            /* _DAT_005230b0 */
+```
+
+So an actor's hit on another actor is scaled to a tenth, unless its actor flags carry `0x1000000`; the
+player is type 10 and is never scaled, and drowning/falls are exempt. No shipped script sets
+`0x1000000` (the corpus's `SetActorFlags` values are 0x4/0x8/0x200/0x2000/0xA00000), so AI-versus-AI
+fighting is cosmetic by design — stormtrooper against stormtrooper plinks rather than shreds.
+
+The port applies it at the top of `Runtime::damage_typed_from`, before the AI event, the `damaged`
+messages and the subtraction (the engine's whole function works on the scaled number). Two existing
+tests asserted `95.0` health for a 5-point AI hit; they now assert `99.5` and say why, and a new test
+pins the four arms: the tenth, the `0x1000000` exemption, the fall/drown exemptions, and the player
+(type 10) hitting for full.
+
+| check | result |
+| --- | --- |
+| `cargo test` | **241 passed** |
+| `--ai` | passes (17 instinct classes, the route and the wall cases unchanged) |
+| `--gates` | 0 of 67 failed, 2 skipped |
