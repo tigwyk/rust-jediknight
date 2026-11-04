@@ -4892,3 +4892,13 @@ substitutions: the arm's sound (mode `0x4f`) has no name in the port's table so 
 
 Verified: `cargo test --release` **262 passed** (new: the arm alerts to a weak heard record, re-broadcasts 8.0, and a
 0.3 weight loses to a 1.0 record); `--ai` passes on `01narshadda`; `--gates --all` 0 of 67 failed, 2 skipped.
+
+**The `0x1000` AI latch has no setter in this build.** Following the sweep's clear through, the setter was
+searched for and not found: no instruction writes `ai + 8 |= 0x1000` (the whole-object disassembly has no such store,
+and the `or ah, 0x10` sites are clip-code and camera-lens words, not an AI block), and no shipped script passes that
+word to `jkSetFlags` — the 24 `jkSetFlags` calls in `Res2.gob` pass `0x5`, `0x8`, `0x15`, `0x20` and `0x200`. So the
+latch is effectively clear in this build, the gate is inert, and the awareness sweep's event 2 is what would re-arm it
+if anything ever set it. Recorded on the emitter's own doc comment so the next reader does not re-litigate it.
+
+Verified: `grep -aoiE "jkset(actor)?flags"` over both GOBs (24 hits, contexts read), and the object scan for an
+`ai+8` store carrying `0x1000`.

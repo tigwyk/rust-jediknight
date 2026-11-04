@@ -3689,7 +3689,11 @@ impl Runtime {
     /// `sithAI_EmitEvent` (`0x4e9f80`): raise one AI **event** on one actor. The engine's outer
     /// gates come first — the thing is not `0x202`-flagged (`SITH_TF` says no AI), it is alive, the AI
     /// is not switched off (`0x2000`), and the `0x1000` one-shot latch lets only event 2 through and
-    /// clears itself doing so — then every instinct whose class line enables the event's mask is
+    /// clears itself doing so. The latch's **setter** is not in this build: nothing in the executable
+    /// writes `ai+8 |= 0x1000` (a full scan finds no such store) and no shipped script writes it
+    /// through `jkSetFlags` (those pass `0x5`, `0x8`, `0x15`, `0x20` and `0x200`), so the gate is
+    /// effectively clear and the awareness sweep's event 2 is what keeps it clear. Then every instinct
+    /// whose class line enables the event's mask is
     /// called **in file order**, stopping at the first handler that returns non-zero.
     ///
     /// Every emit site in the executable is accounted for: `sithActor_DamageActor` raises 1 (this
