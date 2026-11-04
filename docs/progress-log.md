@@ -3741,3 +3741,12 @@ back from the saved state) instead of re-resolving.
 
 Also: `--move-at` printed its table and then carried on into the level (a window and sound); it now returns
 after the probe, as `--floor-at` already did.
+
+**The containment restore was measured and reverted (round 311).** The engine's rule in
+`sithCollision_MoveThing` restores the saved position, direction and sector when the moved sphere is not
+inside its sector; the port re-resolves the sector instead. Transcribing the restore on top of the plane
+guard made things worse: `walk-preflight` went from **22 walkers / 0 failures** to **3 failures**
+(`walk6_spawn`, `walk11_spawn`, `walk18_spawn`), and the live `walk2_spawn` replay shortened from 1.78 to
+**1.57** units while still ending in the same room. Reverted. The re-resolution is load-bearing for those
+three legs because the lateral containment probe uses the feet point (the `shortcut:` marker above it);
+the restore needs the centre probe first, which is what that marker is waiting on.
