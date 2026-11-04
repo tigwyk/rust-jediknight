@@ -367,10 +367,12 @@ pub struct MapCamera {
 }
 
 impl MapCamera {
-    /// One arrow press's effect, by the element id the handler switches on: `0x9a`..`0x9d` step the
-    /// euler by 5 degrees (yaw either way; pitch down with a floor at -90, up with a ceiling at +90 —
-    /// `0x522108`/`0x52210c`/`0x522110`/`0x522114`), and `0x66`..`0x69` pan the camera by 0.1
-    /// (`rdMatrix_PostTranslate34` on `0x5565b0`). Anything else is not an arrow.
+    /// One arrow press's effect. The map screen's own table carries ids **100..105** (`--ui-tables`;
+    /// handler `0x415b60`, absent from the decomp set), and only 102..105 are pinned by recovered
+    /// code: `0x66`..`0x69` pan by 0.1 (`rdMatrix_PostTranslate34` on `0x5565b0`, keyed `id - 0x66`).
+    /// `0x9a`..`0x9d` step the euler by 5 degrees (yaw either way; pitch inside +/-90) with the
+    /// constants at `0x522108`/`0x52210c`/`0x522110`/`0x522114`, but no shipped screen carries those
+    /// ids, so 100/101 stay unassigned rather than guessed.
     pub fn arrow(&mut self, id: i32) -> bool {
         match id {
             0x9a => self.yaw += 5.0,
