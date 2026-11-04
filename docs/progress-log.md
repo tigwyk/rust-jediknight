@@ -4217,6 +4217,13 @@ disassembled now (`llvm-objcopy -I binary` → `llvm-objdump -D --triple=i386`),
 | per-frame compose | update `0x4ec380` | camera × `0x5565e0`, inverted into `0x84de80`, camera stored at `0x84df18`, `0x84df20 = 1` |
 | draw | `sithMap_Draw` (`0x4ec550`) | vertices × `0x84dee8`, facing cull `(cam - centre)·normal > 1e-4`, `IsSurfaceDrawable`, `rdClip_Line3Project`, near-plane test `0x84deb0/deb4` |
 
+Two more facts came out of the same bytes: the first `rdMatrix_PostRotate34` uses the euler block at
+`0x556650`, which is .bss (the `Show` copy writes zeroes there), so it is the identity; and
+`sithMap_Startup` is handed `(11, &0x52e9e0)`, a table of `0.5, 1.0, 1.5, 2.0, 2.5, 2.5, 3.0, 3.5` —
+the zoom steps. The full chain is therefore `camera(0,-2,0.3, panned) x (translate(-player) .
+rotate(pitch, yaw, roll))`, angles in degrees (`stdMath_SinCos` scales by `0x522970`), with
+`rdClip_Line3Project` and the near plane at 0.2, far 10.
+
 The port's panel is top-down and passes its own check, so the projection is **specified, not shipped**:
 there is no retail map frame to grade it against, and replacing a checked drawing blind is a worse trade.
 The roadmap's row now carries the constants, so the next run implements against numbers rather than
