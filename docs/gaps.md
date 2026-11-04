@@ -110,8 +110,12 @@ Three ceilings came with the last of them, and they are marked in the code:
 
 ## 4. Debt already marked in the code
 
-14 `ponytail:` comments name a deliberate ceiling and its upgrade path. Line numbers are left out because they
-rot; grep `ponytail:` in the file named.
+A selection of the `ponytail:` comments that name a deliberate ceiling and its upgrade path (38 markers exist
+in `src/`; the full per-marker sweep is `porting-roadmap.md` §"`ponytail` sweep"). Line numbers are left out
+because they rot; grep `ponytail:` in the file named. **Round 313 removed two rows that the code had outgrown:**
+steering no longer "picks the doorway that looks closest" (the tick asks `Collide::route`, a breadth-first
+walk over the portals) and `sleep`/`settimer`/`setpulse` no longer "run straight on" (the cog VM suspends and
+resumes them, `--sleep`).
 
 | where | the shortcut | the ceiling |
 | --- | --- | --- |
@@ -123,14 +127,14 @@ rot; grep `ponytail:` in the file named.
 | `collide.rs` | the floor probe scans every wall face | O(walls) per moving body per frame |
 | `runtime.rs` | insert offsets live in one process-global table | two worlds loaded at once (level plus cutscene) share it |
 | `runtime.rs` | the bin → projectile mapping is a name heuristic | not the engine's `weaponData` |
-| `runtime.rs` | steering picks the doorway that looks closest on both legs | no path search, so an actor can pick a longer route or lose the chase |
-| `runtime.rs` | `sleep`/`settimer`/`setpulse` run straight on, with no timer queue | a script that only works across resumed sleeps runs its later statements early |
 | `level_mat.rs` | the shader adds no light level | the mesh carries baked vertex colour only |
 | `tex.rs` | one process-global light ramp | a second level in the same process needs the ramp passed through the mesh builder |
 | `tex.rs` | a length check rejects non-bitmap headers | no header version dispatch |
 | `ui.rs` | the map screen has no zoom/orbit transforms | see section 1, overlay map |
 
-The `runtime.rs` sleep row is the one that bites: it changes script behaviour, not just speed.
+The two rows removed in round 313 were the ones that would have changed behaviour, and neither is true any
+more: routing is a portal breadth-first search and the sleep verbs suspend/resume through the VM's statement
+path. What is left is ceilings on cost, precision or a single-level process - none silently changes a script.
 
 ---
 
