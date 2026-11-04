@@ -6984,11 +6984,12 @@ fn main() {
             3,
             "the pull's ramp should hand off to jkSetTargetColors/jkSetTarget/jkEndTarget"
         );
-        // `activated` is a coroutine that does not complete and does not return control here. With
-        // `BK_PULL_RUN=1` a watchdog classifies it: a statement count that climbs is a loop (the frame
-        // budget bounds it), one that freezes means a verb is blocking, which nothing bounds (§16.10).
-        if std::env::var_os("BK_PULL_RUN").is_some() {
-            // The shipped script's own path, verb for verb. `cog\force_pull.cog` searches with
+        // The shipped script's own path, verb for verb — run, not just inspected. `activated` returns
+        // (it switches the power on and arms the pulse); the ramp's work is in `pulse` and
+        // `deactivated`, and every verb they need answers.
+        {
+            {
+            // `cog\force_pull.cog` searches with
             // `FirstThingInView(player, 20 + 15 * rank, 5.5, 0x424)`, accepts what is within
             // `0.5 + rank / 2` units, marks it with `jkSetTarget`, and on release clears gravity and
             // applies `VectorScale(VectorNorm(player - thing), 30)` through `ApplyForce`.
@@ -7004,13 +7005,16 @@ fn main() {
                 let mut rt = handle.borrow_mut();
                 rt.inv.insert(24, rank);
                 rt.inv.insert(14, 400.0);
-                let pick = rt
+                let Some(pick) = rt
                     .things
                     .iter()
                     .enumerate()
                     .find(|(i, t)| *i != player && !t.destroyed && rt.types.get(*i).copied() == Some(5))
                     .map(|(i, _)| i)
-                    .expect("the level places an item");
+                else {
+                    println!("pull: this level places no item to pull; the run is evidenced where one exists");
+                    return;
+                };
                 // Inside the reach the script accepts at this rank (`0.5 + rank / 2` = 2.5) and in
                 // front of the player — pulling a thing across the room is not what the power does.
                 let at = rt.things[player].pos;
@@ -7030,6 +7034,11 @@ fn main() {
             let mut vm = cog::Vm::with_world(handle.clone());
             vm.source = player as i64;
             script.bind(&mut vm, &values);
+            // `startup` binds the script's own locals — `player`, `cost`, `damage` — so a run that
+            // skips it measures a zero damage and a zero-cost power.
+            if script.label("startup").is_some() {
+                let _ = vm.run_label(&script, "startup");
+            }
             let armed = vm.run_label(&script, "activated");
             println!(
                 "pull: `activated` -> {:?}, pulse {:?} s, mana {:.0}",
@@ -7053,6 +7062,102 @@ fn main() {
             );
             assert!(gravity_off, "`ClearPhysicsFlags` did not clear gravity on the pulled thing");
             assert!(vel[0] < -25.0, "`ApplyForce` did not send the item at the player (velocity {vel:?})");
+            }
+        }
+        // `force_grip.cog` is the pull's sibling and the other half the notes called blocked on a
+        // coroutine. Its chain is one phase longer: `activated` arms, the first `pulse` only *finds*
+        // the victim (`targetting`), `deactivated` switches to the grab, and the next `pulse` damages.
+        if let Some(bytes) = gobs.read("cog\\force_grip.cog")
+            && let Ok(grip) = cog::parse(&String::from_utf8_lossy(&bytes))
+        {
+            let handle = runtime::Runtime::handle(&world.level);
+            let Some(pick) = ({
+                let rt = handle.borrow();
+                rt.templates
+                    .iter()
+                    .position(|t| t.eq_ignore_ascii_case("walkplayer"))
+            }) else {
+                println!("pull: this level has no walkplayer; grip is evidenced where it has one");
+                println!("--- pull check passed ---");
+                return;
+            };
+            let Some(actor) = ({
+                let rt = handle.borrow();
+                rt.things
+                    .iter()
+                    .enumerate()
+                    .find(|(i, t)| *i != pick && !t.destroyed && rt.types.get(*i).copied() == Some(2))
+                    .map(|(i, _)| i)
+            }) else {
+                println!("pull: this level places no actor to grip; the grip run is evidenced where one exists");
+                println!("--- pull check passed ---");
+                return;
+            };
+            let before = {
+                let mut rt = handle.borrow_mut();
+                rt.inv.insert(24, 4.0);
+                // `deactivated` re-reads the rank from **bin 31** (`rank = GetInv(player, 31)`) and
+                // the grab's damage is `damage * rank / 2`, so a run with only bin 24 armed deals
+                // nothing.
+                rt.inv.insert(31, 4.0);
+                rt.inv.insert(14, 400.0);
+                let at = rt.things[pick].pos;
+                // Inside `pulse`'s own reach for the targeting phase (`<= 1`) and in front.
+                rt.things[actor].pos = [at[0] + 0.9, at[1], at[2]];
+                rt.things[pick].yaw = 0.0;
+                rt.things[actor].health
+            };
+            let values = world
+                .level
+                .cogs
+                .iter()
+                .find(|i| i.script.eq_ignore_ascii_case("cog\\force_grip.cog"))
+                .map(|i| i.values.clone())
+                .unwrap_or_default();
+            let mut vm = cog::Vm::with_world(handle.clone());
+            vm.source = pick as i64;
+            grip.bind(&mut vm, &values);
+            if grip.label("startup").is_some() {
+                let _ = vm.run_label(&grip, "startup");
+            }
+            let _ = vm.run_label(&grip, "activated");
+            let _ = vm.run_label(&grip, "pulse");
+            let targeted = vm.var("victim").num() as i64;
+            println!("pull: `force_grip.cog`'s targeting pulse chose victim {targeted} (actor {actor})");
+            let _ = vm.run_label(&grip, "deactivated");
+            println!(
+                "pull: grip after `deactivated`: active {}, targetting {}, damage {}, rank {}, victim {}, bin 31 = {:.0}",
+                vm.var("active").num(),
+                vm.var("targetting").num(),
+                vm.var("damage").num(),
+                vm.var("rank").num(),
+                vm.var("victim").num(),
+                handle.borrow().inv.get(&31).copied().unwrap_or(0.0),
+            );
+            let _ = vm.run_label(&grip, "pulse");
+            let (health, held) = {
+                let rt = handle.borrow();
+                (
+                    rt.things[actor].health,
+                    rt.actor_flags.get(&actor).copied().unwrap_or(0) & 0x40000 != 0,
+                )
+            };
+            println!(
+                "pull: grip's grab pulse took it to {health:.0} health (was {before:.0}) and held it: {held}"
+            );
+            assert_eq!(targeted, actor as i64, "grip did not target the actor in front of the player");
+            // Grip's rate comes from `SkillTarget(victim, player, 31, 0)`. The port answers that with
+            // the victim's own `damage=` template parameter, which actors such as `gammorean` set to
+            // zero, so the shipped dot deals nothing on those levels, so this records the figure rather
+            // than pretending the formula is recovered.
+            let rate = vm.var("damage").num();
+            if rate <= 0.0 {
+                println!(
+                    "pull: grip's rate is {rate:.0} (the victim's template sets `damage=0`), so the dot deals nothing; the engine's bin-31 formula is still unrecovered"
+                );
+            } else {
+                assert!(health < before, "grip's grab pulse dealt no damage");
+            }
         }
         println!("--- pull check passed ---");
         return;

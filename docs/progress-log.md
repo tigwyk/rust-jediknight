@@ -4781,3 +4781,21 @@ z ≈ 0 there means the engine's floor answer differs in a way the shipped data 
 question, and the probe now records the containment result instead of a centroid one.
 
 Verified: `cargo test --release` 260 passed; `--gates` 0 of 67 failed, 2 skipped.
+
+**Force pull runs; force grip runs and exposes a rate the port still guesses.** Both powers were "checked on their
+shape" because the notes said `activated` never returns under a synchronous VM. It returns: `force_pull.cog`'s
+`activated` switches bin 24 on and arms `SetPulse(0.33)`, and `--pull` now drives the shipped script verb for verb.
+Level 1: the script's own `pulse` targets the item in front, `deactivated` clears its gravity, and `ApplyForce` sends it
+at the player at `[-30, 0, 0]` — the script's `VectorScale(VectorNorm(...), 30)`. The run needs `startup` first: without
+it `player`/`cost`/`damage` are unbound.
+
+`force_grip.cog` is the sibling and needs one more phase: `activated` arms, `pulse` only *finds* the victim
+(`targetting`), `deactivated` flips to the grab and re-reads the rank from **bin 31** (not 24), and the next `pulse`
+does the damage. The probe runs all four steps: the targeting pulse picks the actor placed in front, the grab pulse
+sets `0x40000`, and the measured **rate is 0** because the victim's template sets `damage=0` — the port's
+`SkillTarget(bin 31)` answer is the victim's own `damage=` parameter, and the engine's formula (`LAB_005047e0`, not a
+named procedure in the Ghidra session) is still unrecovered. The probe records that figure instead of asserting a
+damage the formula cannot give.
+
+Verified: `cargo test --release` 260 passed; `--gates` 0 of 67 failed, 2 skipped; `--pull` passes on `01narshadda` and
+`06abarons`.
