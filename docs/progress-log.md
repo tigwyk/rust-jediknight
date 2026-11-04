@@ -3750,3 +3750,19 @@ guard made things worse: `walk-preflight` went from **22 walkers / 0 failures** 
 **1.57** units while still ending in the same room. Reverted. The re-resolution is load-bearing for those
 three legs because the lateral containment probe uses the feet point (the `shortcut:` marker above it);
 the restore needs the centre probe first, which is what that marker is waiting on.
+
+**The centre probe was then measured on its own, and it is a trade, not a fix.** With the engine's centre
+query alone (`IsSphereInSector(thing->position, 0, sector)`) the gate reads **9 of 10**: `walk6_spawn`
+improves (0.84 -> 1.04 of retail's 1.08) while `walk5_spawn` breaks (3.09 at 83 %, 2 sectors off -> 3.90 at
+105 %, 5 sectors off) - the trade the comment on the feet probe records. A hybrid that asks the centre only
+when the feet point is rejected *and* the resolver agrees with the rejected sector is gate-neutral (10 legs,
+0 failures, every number unchanged) and changes the two un-gated legs the other way: `walk2_spawn` still
+ends at (10.447,-13.727) sector 23, and `walk8_spawn` now walks 2.72 units past the doorway instead of
+stopping at 0.99 - retail stops at 0.96 there with the body in sector 330, which the trace alone cannot
+separate from level 8's scripted opening. Reverted: no gated leg moved, and a heuristic that only relocates
+an un-gated leg is not evidence.
+
+So the containment rule stays as it was. The two blockers it does not solve are now named with their
+measurements: `walk2_spawn`'s body is 0.055 lower than retail's at the riser (retail z 3.12 against the
+port's floor + radius 3.065 at the same x/y, measured on the committed trace), and `walk8_spawn`'s retail
+stop needs a retail-side probe (script hold vs a face) before the port can be asked to stop there.
