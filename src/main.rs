@@ -24996,6 +24996,19 @@ mod escape_tests {
     }
 }
 
+#[cfg(test)]
+mod frame_clock_tests {
+    use super::engine_frame_dt;
+
+    /// `sithTime_Advance` clamps to [10, 500] ms before anything else uses the delta.
+    #[test]
+    fn the_frame_clock_is_clamped_to_ten_and_five_hundred_milliseconds() {
+        assert!((engine_frame_dt(0.004) - 0.010).abs() < 1e-9, "a 4 ms frame became {}", engine_frame_dt(0.004));
+        assert!((engine_frame_dt(0.250) - 0.250).abs() < 1e-9, "a 250 ms frame changed");
+        assert!((engine_frame_dt(1.500) - 0.500).abs() < 1e-9, "a 1.5 s frame became {}", engine_frame_dt(1.500));
+    }
+}
+
 /// The step the simulation systems use: the capture's fixed step, else `BK_FIXED_DT` if it is set,
 /// else the frame's own delta. The walker already pins itself to `1/60` on a capture and to
 /// `BK_FIXED_DT` otherwise; without the same rule here the *scripts* advanced on the wall clock, so a
@@ -25011,10 +25024,17 @@ fn sim_dt(time: &Time, capture: Option<&CaptureDt>) -> f32 {
         std::env::var_os("BK_FIXED_DT")
             .map(|_| env_f32("BK_FIXED_DT", 1.0 / 60.0).clamp(1.0 / 240.0, 0.1))
     });
-    // The engine's own clamp (`sithTime_Advance`, `0x4dd640`): each frame advances the game by its
-    // delta limited to [10, 500] ms. The floor matters as much as the cap — above 100 fps retail's
-    // clock runs faster than wall time, and a port that kept the raw delta would run slower there.
-    fixed.unwrap_or_else(|| time.delta_secs().min(0.1))
+    fixed.unwrap_or_else(|| engine_frame_dt(time.delta_secs()))
+}
+
+/// `sithTime_Advance` (`0x4dd640`): one frame's delta in seconds, clamped to the engine's
+/// **[10, 500] ms**. The floor matters as much as the cap - above 100 fps the engine's clock runs
+/// faster than wall time, and a port that kept the raw delta would run slower there. The slow-mo
+/// scaling the same function applies when debug bit `0x400` is set (`_DAT_00522f94` = 0.2) is not
+/// modelled: no shipped script sets that bit - its writers are the `setdebugmodeflags` cog verbs,
+/// which no level's scripts call (the `--cog-check` sweep names every verb shipped content uses).
+fn engine_frame_dt(delta_secs: f32) -> f32 {
+    (delta_secs * 1000.0).clamp(10.0, 500.0) * 0.001
 }
 
 /// The level's scripts running against the renderer: the world state they mutate, the

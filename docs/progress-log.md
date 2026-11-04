@@ -3768,3 +3768,18 @@ So the containment rule stays as it was. The two blockers it does not solve are 
 measurements: `walk2_spawn`'s body is 0.055 lower than retail's at the riser (retail z 3.12 against the
 port's floor + radius 3.065 at the same x/y, measured on the committed trace), and `walk8_spawn`'s retail
 stop needs a retail-side probe (script hold vs a face) before the port can be asked to stop there.
+
+### Round 312: the frame clock's [10, 500] ms clamp, actually applied
+
+The ledger said round 296 had closed this ("`sim_dt` now uses `clamp(0.01, 0.5)`"). It had not: the code still
+read `time.delta_secs().min(0.1)` - a 100 ms cap and no floor - with the engine's rule in a comment above it.
+`sithTime_Advance` (`0x4dd640`) clamps the frame delta to **10..500 ms** before anything else uses it, so
+above 100 fps retail's clock runs *faster* than wall time and below 2 fps it runs slower; the port matched
+neither edge.
+
+`engine_frame_dt` now applies the clamp, with a unit test on both edges and the interior. It is only reached
+in live play - captures and gates pin the step through `CaptureDt`/`BK_FIXED_DT` - so no parity number moves:
+the headless gate sweep is **0 of 67 failed, 2 skipped**, `--feel`/`--walk`/`--capture` pass, and the suite is
+**234**. The same function's slow-mo scaling (debug bit `0x400`, `_DAT_00522f94` = **0.2**, read from the
+image) stays unported and is recorded as unreachable from content: the bit's writers are the
+`setdebugmodeflags` cog verbs, which no shipped script calls.
