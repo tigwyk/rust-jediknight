@@ -9678,18 +9678,65 @@ fn main() {
         rt.step(1.0);
         assert!(rt.surface_epoch > epoch, "a scrolling sky did not ask for a rebuild");
         let sky_time = rt.time;
+        // What the rebuild reads: the header's starting offset plus the script's speed. `SlideHorizonSky`
+        // and `SlideCeilingSky` move the plane the header placed, they do not replace it.
+        let slid = SurfaceLook::of(&rt, &level);
+        // A copy that starts the planes at zero, which is what the port drew before the header's
+        // `Horizon Sky Offset`/`Ceiling Sky Offset` were read: the two must draw differently.
+        let mut unscrolled = SurfaceLook::of(&rt, &level);
+        unscrolled.sky = [[0.0; 2]; 2];
         drop(rt);
+        assert_eq!(
+            slid.sky[0],
+            [
+                level.horizon_sky_offset[0].rem_euclid(1024.0),
+                level.horizon_sky_offset[1].rem_euclid(1024.0)
+            ],
+            "the horizon sky does not start at the header's own offset"
+        );
+        assert_eq!(
+            slid.sky[1],
+            [
+                (level.ceiling_sky_offset[0] + 0.5 * sky_time).rem_euclid(1024.0),
+                level.ceiling_sky_offset[1].rem_euclid(1024.0)
+            ],
+            "the ceiling sky does not start at the header's offset plus SlideCeilingSky's speed"
+        );
+        println!(
+            "scroll: the header starts the horizon sky at {:?} and the ceiling at {:?} texels ({} pixels per rev)",
+            level.horizon_sky_offset, level.ceiling_sky_offset, level.sky_pixels_per_rev
+        );
+        // The header's offset has to reach the **drawn** UVs, not just this struct: a horizon sky face
+        // whose material starts at the header's offset must draw differently from one that starts at zero.
+        let horizon_face = level
+            .surfaces
+            .iter()
+            .position(|s| s.surfflags & SURFFLAG_SKY != 0 && s.surfflags & SURFFLAG_CEILING_SKY == 0);
+        match horizon_face {
+            Some(face) => {
+                let with = uv_hash(&slid);
+                let without = uv_hash(&unscrolled);
+                println!(
+                    "scroll: horizon sky face {face} starts at {:?} texels from the header (its UVs differ from a zero start: {})",
+                    slid.scroll(face, level.surfaces[face].surfflags),
+                    with != without
+                );
+                if slid.sky[0] != [0.0; 2] {
+                    assert_ne!(with, without, "the header's horizon offset is not in the drawn UVs");
+                }
+            }
+            None => println!("scroll: this level has no horizon sky face"),
+        }
         match sky_face {
             Some(face) => {
-                look.sky = [[0.0; 2], [(0.5f32 * sky_time).rem_euclid(1024.0), 0.0]];
                 assert_ne!(
-                    look.scroll(face, level.surfaces[face].surfflags),
+                    slid.scroll(face, level.surfaces[face].surfflags),
                     [0.0; 2],
                     "the sky offset is not applied to a sky face"
                 );
                 println!(
-                    "scroll: SlideCeilingSky(0.5, 0) moves every ceiling-sky face by {:?} texels after 1 s (surface {face} carries 0x{:x})",
-                    look.sky[1], level.surfaces[face].surfflags
+                    "scroll: SlideCeilingSky(0.5, 0) moves every ceiling-sky face to {:?} texels after 1 s (surface {face} carries 0x{:x})",
+                    slid.sky[1], level.surfaces[face].surfflags
                 );
             }
             None => println!(
@@ -10117,7 +10164,7 @@ fn main() {
             // `light` is pure arithmetic over the per-surface and per-sector columns, so any index
             // shows what a face in that sector is drawn with.
             let surface = 0usize;
-            let before = SurfaceLook::of(&rt).light(surface, rt.things[lamp].sector);
+            let before = SurfaceLook::of(&rt, &level).light(surface, rt.things[lamp].sector);
             rt.call(
                 "ThingLight",
                 &[cog::Value::Num(lamp as f64), cog::Value::Num(2.0), cog::Value::Num(0.0)],
@@ -10127,7 +10174,7 @@ fn main() {
                 rt.thing_light_by_sector()[sector] >= 2.0,
                 "the thing's light did not reach its sector"
             );
-            let after = SurfaceLook::of(&rt).light(surface, rt.things[lamp].sector);
+            let after = SurfaceLook::of(&rt, &level).light(surface, rt.things[lamp].sector);
             println!(
                 "cel: ThingLight(thing {lamp}, 2) lifts its sector's drawn light {before:.2} -> {after:.2}"
             );
@@ -10185,7 +10232,7 @@ fn main() {
                         .is_some_and(|f| f.intensities.iter().any(|i| *i < 0.5))
                 })
                 .expect("a face the level baked dark");
-            let before = SurfaceLook::of(&rt);
+            let before = SurfaceLook::of(&rt, &level);
             let mode = rt.call(
                 "GetFaceLightMode",
                 &[cog::Value::Num(dark as f64)],
@@ -10194,7 +10241,7 @@ fn main() {
                 "SetFaceLightMode",
                 &[cog::Value::Num(dark as f64), cog::Value::Num(0.0)],
             );
-            let after = SurfaceLook::of(&rt);
+            let after = SurfaceLook::of(&rt, &level);
             let read = rt.call("GetFaceLightMode", &[cog::Value::Num(dark as f64)]);
             println!(
                 "cel: SetFaceLightMode(surface {dark}, 0) makes it FULLYLIT — GetFaceLightMode {mode:?} -> {read:?}, and the draw stops darkening it ({:?} -> {:?})",
@@ -16360,8 +16407,10 @@ struct SurfaceLook {
 }
 
 impl SurfaceLook {
-    /// Read the live runtime; the vectors are indexed by surface and by sector.
-    fn of(rt: &runtime::Runtime) -> Self {
+    /// Read the live runtime; the vectors are indexed by surface and by sector. `level` supplies the
+    /// header's starting sky offsets (`Horizon Sky Offset`/`Ceiling Sky Offset`), which the plane pass
+    /// begins at; `SlideHorizonSky`/`SlideCeilingSky` then move it by `rate * time`.
+    fn of(rt: &runtime::Runtime, level: &jkl::Level) -> Self {
         SurfaceLook {
             cels: rt.surfaces.iter().map(|s| s.cel).collect(),
             counts: rt.surface_cels.iter().map(|&c| c as f32).collect(),
@@ -16381,12 +16430,12 @@ impl SurfaceLook {
                 .collect(),
             sky: [
                 [
-                    (rt.sky_scroll[0][0] * rt.time).rem_euclid(1024.0),
-                    (rt.sky_scroll[0][1] * rt.time).rem_euclid(1024.0),
+                    (level.horizon_sky_offset[0] + rt.sky_scroll[0][0] * rt.time).rem_euclid(1024.0),
+                    (level.horizon_sky_offset[1] + rt.sky_scroll[0][1] * rt.time).rem_euclid(1024.0),
                 ],
                 [
-                    (rt.sky_scroll[1][0] * rt.time).rem_euclid(1024.0),
-                    (rt.sky_scroll[1][1] * rt.time).rem_euclid(1024.0),
+                    (level.ceiling_sky_offset[0] + rt.sky_scroll[1][0] * rt.time).rem_euclid(1024.0),
+                    (level.ceiling_sky_offset[1] + rt.sky_scroll[1][1] * rt.time).rem_euclid(1024.0),
                 ],
             ],
             thing_light: rt.thing_light_by_sector(),
@@ -18043,7 +18092,7 @@ fn rebuild_surfaces(
                 .filter(|(_, mode)| **mode == 0)
                 .map(|(surface, _)| *surface)
                 .collect::<std::collections::BTreeSet<usize>>(),
-            SurfaceLook::of(&rt),
+            SurfaceLook::of(&rt, &world.level),
         )
     };
     if epoch == *seen {

@@ -1356,6 +1356,24 @@ material has `0x200` set (`0x204`, `0x224`, `0x304`), while ordinary faces are
 the play area — a level's sky faces span e.g. `y[-52, 13.5]` — and their baked
 per-vertex intensity is **zero**.
 
+The `HEADER` block carries the sky plane's own numbers, and the parser now reads
+them (verbatim from `jkl\04escapehouse.jkl`):
+
+```text
+Ceiling Sky Z        15.000000
+Horizon Distance     100.000000
+Horizon Pixels per Rev  768.000000
+Horizon Sky Offset   0.000000 0.000000
+Ceiling Sky Offset   0.000000 0.000000
+```
+
+`Horizon Sky Offset`/`Ceiling Sky Offset` are the starting texel offsets of the two
+planes (`SlideHorizonSky`/`SlideCeilingSky` move them from there, they do not
+replace them), and `Horizon Pixels per Rev` is how far the horizon texture travels
+per full turn of the view. All 25 shipped levels carry `768` there; two, `03katarn`
+and `10cargo`, start the horizon at `y = -16` texels instead of zero, so on those
+levels the sky faces draw 16 texels lower (wrapped into `0..1024`: 1008).
+
 Two consequences, both visible in the renderer:
 
 1. Passing the baked intensity through draws every sky face black. Sky faces are

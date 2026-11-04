@@ -100,6 +100,12 @@ pub struct Level {
     pub cogs: Vec<CogInstance>,
     pub gravity: f32,
     pub sky_z: f32,
+    /// `Horizon Sky Offset`: the horizon sky plane's starting texel offset.
+    pub horizon_sky_offset: [f32; 2],
+    /// `Ceiling Sky Offset`: the same for the ceiling sky plane.
+    pub ceiling_sky_offset: [f32; 2],
+    /// `Horizon Pixels per Rev`: how many texels the horizon sky travels per full turn.
+    pub sky_pixels_per_rev: f32,
 }
 
 /// A convex room. `center` is inside it by construction, which makes it the one
@@ -260,7 +266,12 @@ impl Level {
 }
 
 pub fn parse(text: &str) -> Level {
-    let mut level = Level { gravity: 4.0, sky_z: 20.0, ..Default::default() };
+    let mut level = Level {
+        gravity: 4.0,
+        sky_z: 20.0,
+        sky_pixels_per_rev: 768.0,
+        ..Default::default()
+    };
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0usize;
 
@@ -281,6 +292,19 @@ pub fn parse(text: &str) -> Level {
         } else if lower.starts_with("ceiling sky z") {
             if let Some(v) = nth_f32(line, 3) {
                 level.sky_z = v;
+            }
+        } else if lower.starts_with("horizon sky offset") {
+            // `Horizon Sky Offset   0.000000 0.000000`: the plane's starting texel offset.
+            if let (Some(x), Some(y)) = (nth_f32(line, 3), nth_f32(line, 4)) {
+                level.horizon_sky_offset = [x, y];
+            }
+        } else if lower.starts_with("ceiling sky offset") {
+            if let (Some(x), Some(y)) = (nth_f32(line, 3), nth_f32(line, 4)) {
+                level.ceiling_sky_offset = [x, y];
+            }
+        } else if lower.starts_with("horizon pixels per rev") {
+            if let Some(v) = nth_f32(line, 4) {
+                level.sky_pixels_per_rev = v;
             }
         }
         // ---- colormaps -----------------------------------------------------
@@ -691,6 +715,19 @@ mod tests {
         let text = "\nSECTOR 0\nBOUNDBOX 0 0 0 10 10 10\nCOLLIDEBOX 1 2 3 4 5 6\n";
         let level = parse(text);
         assert_eq!(level.sectors[0].boundbox, Some(([1.0, 2.0, 3.0], [4.0, 5.0, 6.0])));
+    }
+
+    /// The header's sky block, verbatim from `jkl\04escapehouse.jkl`: the plane pass starts at these
+    /// offsets and `SlideHorizonSky`/`SlideCeilingSky` move them from there.
+    #[test]
+    fn reads_the_header_sky_offsets() {
+        let text = "\nHEADER\n\n# version and global constant settings\n\nVersion          1\n\nWorld Gravity    4.00\n\nCeiling Sky Z    15.000000\n\nHorizon Distance 100.000000\n\nHorizon Pixels per Rev 768.000000\n\nHorizon Sky Offset   3.500000 -2.000000\n\nCeiling Sky Offset   1.000000 0.500000\n\nMipMap Distances\t1.000000\t8.000000\t16.000000\t32.000000\n";
+        let level = parse(text);
+        assert!((level.gravity - 4.0).abs() < 1e-6, "gravity not read");
+        assert!((level.sky_z - 15.0).abs() < 1e-6, "the ceiling sky z not read");
+        assert_eq!(level.horizon_sky_offset, [3.5, -2.0], "the horizon sky offset not read");
+        assert_eq!(level.ceiling_sky_offset, [1.0, 0.5], "the ceiling sky offset not read");
+        assert!((level.sky_pixels_per_rev - 768.0).abs() < 1e-6, "the pixels-per-rev not read");
     }
 
     #[test]

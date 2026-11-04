@@ -4027,3 +4027,35 @@ pins the four arms: the tenth, the `0x1000000` exemption, the fall/drown exempti
 | `cargo test` | **241 passed** |
 | `--ai` | passes (17 instinct classes, the route and the wall cases unchanged) |
 | `--gates` | 0 of 67 failed, 2 skipped |
+## Round 325: the header's sky offsets are where the plane pass starts
+
+`sithRenderSky.c` treats the sky as two **planes**, not geometry: `sithRenderSky_Update` scales by the
+camera's fov and rotates by its yaw, and `HorizonFaceToPlane`/`CeilingFaceToPlane` write the plane's
+verts as screen coordinates (`1/fov`, yaw sin/cos, pitch offsets). The `HEADER` block is where the
+planes start, and the port was drawing every sky face from texel zero:
+
+```
+Horizon Pixels per Rev 768.000000
+Horizon Sky Offset   0.000000 0.000000
+Ceiling Sky Offset   0.000000 0.000000
+```
+
+`jkl::parse` now reads `Horizon Sky Offset`, `Ceiling Sky Offset` and
+`Horizon Pixels per Rev` (the last as the header's own value, kept for the documentation of the
+rate, not applied by this build), and `SurfaceLook::of` starts each sky plane at the header's offset
+before adding `SlideHorizonSky`/`SlideCeilingSky`'s `rate * time`. Two of the 25 shipped levels are
+affected: `03katarn` and `10cargo` start the horizon at `y = -16` texels, so `10cargo`'s horizon sky
+face 4180 now draws at 1008 texels (wrapped into `0..1024`) instead of 0.
+
+| what | result |
+| --- | --- |
+| `jkl::parse` header test | reads gravity, ceiling sky z, both offsets and the pixels-per-rev from the shipped text |
+| `--scroll --level 10cargo` | `horizon sky face 4180 starts at [0.0, 1008.0] texels from the header`, and its UVs differ from a zero start |
+| `--scroll` (default level) | passes; the offsets are 0 there and the check says so |
+| `cargo test` | **242 passed**, 0 failed |
+| `--gates` | 0 of 67 failed, 2 skipped |
+| `compare.ps1 -Gate` | 5 thresholds, 0 failures |
+
+Still missing from the sky: the engine's screen-space **projection** of the planes (the port keeps a
+camera-centred dome as the stand-in, and the dome does not scroll). That is the `gaps.md` Sky row's
+remaining item, now stated with the fields that drive it.
