@@ -1325,6 +1325,10 @@ pub struct Runtime {
     /// instinct's first number (`talk 10000.0, 0.10` in most shipped classes), so it keeps no global
     /// interval.
     pub ai_talk: BTreeMap<usize, f32>,
+    /// When a **damaged** turret's `turretfire` handler kills it. `FUN_0050a0f0` arms this slot to
+    /// `now + arg7` (the shipped `10000` = 10 s) the first time it runs below `arg5` of full health,
+    /// and once the deadline passes it calls `sithActor_KillActor` on its own body.
+    pub ai_turret_down: BTreeMap<usize, f32>,
     /// When each actor's `lobfire` may re-arm the puppet's armed mode. Its handler (`0x509cd0`) only
     /// has the event-`0x100` branch in its mask, and that branch sets
     /// `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in 1000 ms.
@@ -2118,6 +2122,7 @@ impl Runtime {
             ai_scan: BTreeMap::new(),
             ai_listen: BTreeMap::new(),
             ai_talk: BTreeMap::new(),
+            ai_turret_down: BTreeMap::new(),
             ai_lobfire: BTreeMap::new(),
             ai_force: BTreeMap::new(),
             ai_force_cool: BTreeMap::new(),
@@ -5046,6 +5051,9 @@ impl Runtime {
             // the reach, no facing gate and no burst — the ±160-degree head sweep the handler applies
             // is a joint articulation the port cannot reproduce, so that is on the ledger, not hidden.
             let turret_shot = instinct == "TurretFire";
+            // A damaged turret's head sweep, applied to the shot's direction below (`FUN_0050a0f0`
+            // re-rolls ±arg2/±arg3 on every handler call and fires along that offset).
+            let mut turret_sweep: Option<(f32, f32)> = None;
             let Some(primary) = ai.as_ref().and_then(|ai| ai.instinct(instinct)).cloned() else {
                 if fire_trace {
                     eprintln!("ai: {index} `{ai_template}` has no {instinct} instinct");
@@ -5066,11 +5074,34 @@ impl Runtime {
                 // limit, minimum distance, spread. The reach is the engine's fixed 10 units.
                 (arg(0), arg(2), 10.0, arg(4), arg(3))
             } else if turret_shot {
-                // `turretfire`'s shipped line is `750, 75, 160, 160, 5.0, 0.20, 500, 10000, 0`: the first
-                // number is the delay, and the rest are the aim-head sweep and cooldown. The port has no
-                // articulated head, so the shot uses the class's own `sightdist` as the reach and no
-                // facing gate (the turret's fov is 360), and is modelled as accurate.
-                (arg(0), 0.0, ai.as_ref().map(|a| a.sightdist).unwrap_or(5.0), 0.0, 0.0)
+                // `turretfire`'s shipped line is `750, 75, 160, 160, 5.0, 0.20, 500, 10000, 0`: delay,
+                // then the aim-head sweep (±arg2 yaw, ±arg3 pitch), the damaged-health fraction
+                // (arg5 = 0.20), the damaged cadence (arg6 = 500 ms) and the self-destruct delay
+                // (arg7 = 10 s). The port has no articulated head, so a healthy turret fires from the
+                // body, uses the class's `sightdist` as the reach and no facing gate (fov 360).
+                let max_health = self
+                    .template_max_health
+                    .get(&ai_template)
+                    .copied()
+                    .unwrap_or(health)
+                    .max(1.0);
+                let damaged = arg(5) > 0.0 && health < max_health * arg(5);
+                if damaged {
+                    // `FUN_0050a0f0`: the first damaged call arms `now + arg7`; once that passes the
+                    // handler kills the turret (`sithActor_KillActor(thing, thing, 2)`) and aborts.
+                    let kill_s = arg(7) * 0.001;
+                    if kill_s > 0.0 {
+                        let armed = *self.ai_turret_down.entry(index).or_insert(self.time + kill_s);
+                        if self.time >= armed {
+                            self.damage_typed_from(index as i64, health.max(1.0) + 1.0, 0, 0);
+                            continue;
+                        }
+                        turret_sweep = Some((arg(2).max(0.0), arg(3).max(0.0)));
+                    }
+                    (arg(6).max(1.0), 0.0, ai.as_ref().map(|a| a.sightdist).unwrap_or(5.0), 0.0, 0.0)
+                } else {
+                    (arg(0), 0.0, ai.as_ref().map(|a| a.sightdist).unwrap_or(5.0), 0.0, 0.0)
+                }
             } else {
                 (arg(0), arg(1), arg(2), arg(3), arg(4))
             };
@@ -5079,6 +5110,25 @@ impl Runtime {
             } else {
                 (arg(8), arg(9))
             };
+            // A damaged turret's head sweep, applied to the shot's direction: `FUN_0050a0f0` re-rolls
+            // ±arg2 yaw and ±arg3 pitch on every handler call and fires along that offset.
+            if let Some((sweep_yaw, sweep_pitch)) = turret_sweep {
+                let ry = (crate::cog::pseudo_random() as f32 * 2.0 - 1.0) * sweep_yaw;
+                let rp = (crate::cog::pseudo_random() as f32 * 2.0 - 1.0) * sweep_pitch;
+                let (dx, dy, dz) = (
+                    shooting_at[0] - from[0],
+                    shooting_at[1] - from[1],
+                    shooting_at[2] - from[2],
+                );
+                let bearing = dy.atan2(dx) + ry.to_radians();
+                let pitch = dz.atan2((dx * dx + dy * dy).sqrt()) + rp.to_radians();
+                let reach = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-3);
+                shooting_at = [
+                    from[0] + bearing.cos() * pitch.cos() * reach,
+                    from[1] + bearing.sin() * pitch.cos() * reach,
+                    from[2] + pitch.sin() * reach,
+                ];
+            }
             // `BlindFire`'s own cadence: the handler rolls the chance **once per call**, and a failed
             // roll sets its next call to now + **1000 ms** (a success schedules its own interval,
             // `class+0x4c` = 750 ms shipped). The port re-rolled at the shot slot's cadence, which
@@ -12344,6 +12394,81 @@ mod tests {
                 "firing raised no kind-{kind} awareness record"
             );
         }
+    }
+
+    /// `turretfire`'s **damaged** arm (`FUN_0050a0f0`): below `arg5` (0.20) of full health the handler
+    /// sweeps its head randomly inside ±arg2/±arg3, fires on its own `arg6` (500 ms) cadence, and
+    /// arms a self-destruct at `now + arg7` (10 s) that calls `sithActor_KillActor` on the turret
+    /// itself. The port's turret was accurate at any health and never broke down.
+    #[test]
+    fn a_damaged_turret_sweeps_and_kills_itself() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0;
+        actor.health = 10.0; // one tenth of the 100 below: past the 0.20 threshold
+        let mut player = base.clone();
+        player.pos = [2.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "turret".into()];
+        rt.types = vec![10, 2];
+        rt.template_health.insert("turret".into(), 100.0);
+        rt.template_max_health.insert("turret".into(), 100.0);
+        rt.template_weapon.insert("turret".into(), "blaster".into());
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=360, sightdist=5.0, heardist=2.0\n\n\
+                 TurretFire 750.0, 75.0, 160.0, 160.0, 5.0, 0.20, 500.0, 10000.0, 0.0\n",
+            ),
+        );
+        rt.ai_detected.insert(1);
+        rt.sector_adjoins = vec![Vec::new(); 8];
+        // Three seconds: the turret fires on the damaged cadence and is still alive.
+        for _ in 0..90 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(rt.shots_fired > 0, "the damaged turret never fired");
+        assert!(!rt.things[1].destroyed, "the turret died before its self-destruct delay");
+        // Past the ten-second deadline the handler kills its own body.
+        for _ in 0..330 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            rt.things[1].destroyed,
+            "the damaged turret outlived its `arg7` self-destruct delay"
+        );
+
+        // A healthy turret never arms it.
+        let mut healthy = door_runtime();
+        let base = healthy.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.health = 100.0;
+        let mut player = base.clone();
+        player.pos = [2.0, 0.0, 0.0];
+        healthy.things = vec![player, actor];
+        healthy.templates = vec!["walkplayer".into(), "turret".into()];
+        healthy.types = vec![10, 2];
+        healthy.template_health.insert("turret".into(), 100.0);
+        healthy.template_max_health.insert("turret".into(), 100.0);
+        healthy.template_weapon.insert("turret".into(), "blaster".into());
+        healthy.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=360, sightdist=5.0, heardist=2.0\n\n\
+                 TurretFire 750.0, 75.0, 160.0, 160.0, 5.0, 0.20, 500.0, 10000.0, 0.0\n",
+            ),
+        );
+        healthy.ai_detected.insert(1);
+        for _ in 0..420 {
+            healthy.time += 1.0 / 30.0;
+            healthy.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(!healthy.things[1].destroyed, "a healthy turret destroyed itself");
     }
 
     /// `circlestrafe` (`0x509890`): within the instinct's engage distance (0.6–1.0 in the shipped

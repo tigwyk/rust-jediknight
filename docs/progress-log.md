@@ -4503,3 +4503,12 @@ sourced to the player; once the class interval passes, branch B writes `(flags &
 again. The port had read the write backwards (set `0x4` on a find) and never broadcast, so a room's guards each
 acquired on their own eyes and never converged. Both branches are modelled, the acquisition path raises the event,
 and `assets`-free unit tests cover the flags, the record's strength/position/source and a listener reading it.
+
+**A damaged turret sweeps, fires faster, then kills itself.** `FUN_0050a0f0`'s second arm runs only below
+`arg5` of full health (`turretfire 750, 75, 160, 160, 5.0, 0.20, 500, 10000, 0` -> 20 %): it re-rolls a head
+yaw inside ±arg2 and a pitch inside ±arg3 on every call, fires on its own 500 ms cadence, and arms a
+`sithActor_KillActor(thing, thing, 2)` at `now + 10 s`. The port had a healthy turret only. The sweep is applied
+to the shot's direction (no articulated head), and the unit test covers the cadence, the 10 s survival, the
+self-destruct and a healthy control that never arms it. Also settled: withdraw's jitter call is
+`rdVector_Rotate3Acc(vec, angle)` with the **±45°** roll, applied only when the target's `thing + 0x1d0 & 0x2000`
+jkFlag is set (the ±90° roll is a dead store), leaving only that flag's name as the open question.

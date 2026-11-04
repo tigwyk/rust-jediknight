@@ -699,9 +699,11 @@ What the session settles, all of it already on the deviation ledger with its ret
   The port stopped withdrawing when the interval expired; the mode now lasts until the target is destroyed or
   removed, and a retreat with no live target no longer arms at all. The unit test holds the mode through a run
   of frames past the interval and clears it when the target is destroyed. Still open: the **lateral jitter** — the
-  constants are known now (`_DAT_005232d4` = **180**, `_DAT_005232a4` = **90**, `.rdata`, so ±90° and ±45°), but
-  the rotate call (`FUN_0044a09e`) does not say which of the two rolls is the angle, and the attacker-side
-  condition is a thing flag (`thing + 0x1d0 & 0x2000`) not yet identified; the jitter is not guessed at.
+  constants are known and the call is resolved: `FUN_0044a09e` is `rdVector_Rotate3Acc(vec, angle)` — a Z
+  rotation of the (negated) direction — and its argument is the **second** roll, `fStack_18 =
+  (rand − 0.5) × 90` (±45°), taken **only** when the target's `thing + 0x1d0 & 0x2000` (`jkFlags`) is set;
+  otherwise the angle is 0 and the flee is straight away. The `±180 × 0.5` roll (`fStack_14`) is a dead store
+  in this branch. What stays open is that jkFlag's identity (`0x2000`), which no port table names.
 - **`circlestrafe`** — **replans on the instinct's own clock now (round 339)**: the handler sets its next
   call to `class+0x4c + now`, the same slot `talk` reads its interval from, and the shipped first number is
   **5000 ms**. The port recomputed the rotation every frame (a smoother orbit than retail's); the ring point
@@ -712,11 +714,14 @@ What the session settles, all of it already on the deviation ledger with its ret
   firing tick adds a second of *firing* time; a tick without the bit resets the accumulator, and the break-off
   happens when it passes the instinct's first number. The port ran a wall clock from the first shot, which armed
   the run-away after a single shot. The test proves both halves: continuous fire arms it, one shot does not.
-- **`turretfire`** — the ±160° random aim-head sweep is **not** how a healthy turret fires: `FUN_0050a0f0`
-  takes that branch only when the turret is damaged (`health < max × arg5`, `0.20` in the shipped
-  `turretfire 750, 75, 160, 160, 5.0, 0.20, 500, 10000, 0`), where it randomises the head pitch/yaw inside
-  ±arg3/±arg2 and fires on its own cooldown. The port has no articulated head, so that damaged path is
-  absent and a turret fires accurately at any health; healthy turret fire matches the handler's other arm.
+- **`turretfire`** — **closed (round 340)**: the ±160° sweep belongs to the **damaged** arm of `FUN_0050a0f0`
+  (below `arg5` = `0.20` of full health). That arm re-rolls a yaw offset inside ±`arg2` and a pitch offset
+  inside ±`arg3` on every handler call, fires on its own `arg6` (500 ms) cadence instead of the healthy
+  `arg0` (750 ms), and arms `now + arg7` (10 s), after which the handler calls
+  `sithActor_KillActor(thing, thing, 2)` on its own body. The port modelled a healthy turret only, so a
+  damaged one stayed accurate and never broke down; the sweep is applied to the shot's direction (there is no
+  articulated head), and the unit test covers the damaged cadence, the survival before the deadline, the
+  self-destruct and a healthy turret that never arms it.
 - **`listen`** — **the awareness model was rebuilt on the engine's own shape (round 339)**: the third argument of
   `sithAIAwareness_CreateTransmittingEvent` is an event **kind** (0..2), not an alignment, and `ProcessEvent`
   (`0x4f2c30`) keeps one `(strength, position, source thing)` record per sector and kind, replacing it only when
@@ -784,7 +789,7 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 
 | check | command | measured round 332 |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --bins --release` | **248 passed**, 0 failed (round 339) |
+| unit + integration suite | `cargo test --bins --release` | **250 passed**, 0 failed (round 340) |
 | every level's runtime | `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5 bevi-knight --soak-all` | **35 of 35 levels**, 0 non-finite positions, **0** bodies outside every sector (round 331's soak-count fix) |
 | every cog verb | `bevi-knight --cog-check` | **34 levels, 0 stubbed verb calls, 0 errors** |
 | drop-in asset coverage | `bevi-knight --audit` | **35/35 levels clean**, 0 non-drawable models, 10 unresolved asset references, 54 undecoded files |
