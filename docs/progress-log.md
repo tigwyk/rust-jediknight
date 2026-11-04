@@ -4303,3 +4303,21 @@ panel changes: pitch -15 / yaw +10 draws **1 073** edges against the default pos
 What is not done here: a **window click** on the arrow art. This machine cannot run the interactive path
 reliably right now, so the wiring is proven by the unit-tested table and the same `MapCamera` driving the
 render at a non-zero orbit, not by a click.
+
+## Round 338: the map panel's check is a gate
+
+`--map-shot` existed but no sweep ran it. It is row 68 of `GATES` now, so a full run covers the panel's
+projection, its facing and seam culls, the marker at the projected body, the pose sensitivity and the
+arrow presses — the pieces this session built.
+
+```
+--map-shot target\parity\gate-map.png headless pass --- map panel check passed ---
+gates: 0 of 1 failed, 0 skipped
+```
+
+The cog link **mask** was looked at again and stays open: `sithCog_LinkCog` (`0x4df610`) stores a per-link
+word (`link[3]`) and the sector dispatch (`0x4dfd90`) tests it against `1 << (message[+0xc] & 31)`, but
+both are engine-built records — the `.cog` text carries `message <name>` and `thing|sector|surface <name>`
+rows with no mask, and `sithCog_ParseSymbolRef` (`0x4df410`) writes only the kind and the target index.
+Without the message record's `+0xc` assignment the mask's source is not established, so it is not guessed
+at.

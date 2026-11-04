@@ -150,6 +150,7 @@ const GATES: &[&str] = &[
     "--audit",
     "--boot",
     "--ui-audit",
+    "--map-shot target\\parity\\gate-map.png",
     "--walk all",
     "--scale",
     "--rules",
