@@ -876,8 +876,13 @@ What still blocks Phase 4, in the roadmap's own order:
    against; the port-side trigger paths are all headless-tested, but "matches retail" is a retail measurement.
 3. **Phase 3 breadth remainder** (shipped-content order, all ledgered): the latent free-path `track` branch (no
    shipped level starts one), the scope overlay (`jkHudScope.c` is not decompiled and no shipped archive names a scope
-   bitmap — the only hits are `TTRNSCOP.MAT`, a transition material), and the ending screens/choice menu (the UI
-   resources define `GUID_ENDING`/`GUID_CREDITS` but no label strings, so retail itself would draw placeholders).
+   bitmap — the only hits are `TTRNSCOP.MAT`, a transition material), and the ending screens/choice menu (round 357 checked the shipped
+   tables: `--ui-tables` lists the `light_or_dark` screen at `0x535c28` with three text items whose keys —
+   `GUI_LIGHT_OR_DARK`, `GUI_DECIDE_A`, `GUI_DECIDE_B` — exist **nowhere** in the 313-key `GUI_*` string table in
+   `Res1hi.gob`, so by the engine's own rule (`jkGui_InitMenu` only copies a string it finds) retail draws no text there
+   either; the credits side does resolve — `GUI_CREDITS` reads "Credits" and the `CREDITS_*` table in `Res1hi.gob` holds
+   the whole crawl. The missing piece is therefore the engine code that would turn the screen's clicks into bin 18, not
+   its text; `jkPlayer_SetChoice`'s writer is not in `decomp/`).
    **The AI event family is closed as far as this build can reach**: event 2 is produced by the awareness sweep and
    `sensedanger`'s event-2 arm is ported (round 357), `dodge`'s arm is dead content (it demands a weapon-thing source),
    and `0x200` has no reachable producer (`0x4ed1d0` is installed at `0x848600` and never read). The particle arms,

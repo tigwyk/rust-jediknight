@@ -4914,3 +4914,15 @@ the function inventory is sparse rather than this one region being unlucky. The 
 Verified: `binary_session` (Ghidra 12.1.4 available), `resolve_containing_procedure` at `0x4f2b60` (`not_in_procedure`),
 `analyze_function` (`No procedure exists at the requested address`) and `procedure_pseudo_code` with
 `file-offset:0xf2b60` (`maps to 0x4f3760 ... no procedure`).
+
+**The light/dark screen's labels are absent from the shipped data, and the credits table is present.** Row 46 said there
+is no ending screen; the UI tables do carry one — `light_or_dark` at `0x535c28`, three text items on `ui\bm\bkEsc.bm` —
+but its keys `GUI_LIGHT_OR_DARK`, `GUI_DECIDE_A` and `GUI_DECIDE_B` appear nowhere in the 313-key `GUI_*` string table in
+`Res1hi.gob` (`grep` for `GUI_DECIDE` finds zero), and by the engine's own rule the port already implements
+(`jkGui_InitMenu` copies a string only when `jkStrings_GetUniString` finds one) that means a null text — retail draws
+nothing there either. The credits pathway does resolve: `GUI_CREDITS` renders "Credits" and `Res1hi.gob` carries the
+whole `CREDITS_*` crawl ("Jedi Knight", "Justin Chin", ...). So the screen's remaining gap is the **engine code that turns
+its clicks into inventory bin 18**, not its text; `jkPlayer_SetChoice`'s writer is not in `decomp/`.
+
+Verified: `--ui-tables` (41 screens, the `light_or_dark` block quoted), byte searches in both GOBs for `GUI_DECIDE`,
+`GUI_LIGHT_OR_DARK`, `decide_a/b` (zero hits) and for `CREDITS_*` (the table, first entries quoted).
