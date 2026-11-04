@@ -4829,3 +4829,23 @@ victim's template `cog=` itself, exactly as the live load does.
 
 Verified: `--pull` passes on `01narshadda` and `06abarons` with the 50 -> 30 measurement; `--force-all`, `--force-live`
 and `--mana` pass; `--gates` 0 of 67 failed, 2 skipped; `cargo test --release` 260 passed.
+
+**Event 2 has a producer: the awareness sweep** (round 356). The ledger said "no emit site in the executable raises
+event 2", which left `dodge`'s and `sensedanger`'s event-2 arms unreachable and — worse — left the `0x1000` one-shot
+latch with no way to clear. `sithAI_EmitEvent` (`0x4e9f80`) refuses every event but 2 while `ai+0x8 & 0x1000` is set and
+clears the bit doing so, so a latched actor stayed latched forever. The emitter was in the disassembly: `0x4f2b60` is
+the per-frame function that bumps its tick (`DAT_008553b4`), lets each `sithAIAwareness_ProcessEvent` call stamp its
+sector's slot with that tick, and then walks the level's thing table — a thing whose sector's slot carries the current
+stamp gets `sithAI_EmitEvent(thing, 2, 0)` (`0x4f2c05`, `push 0; push 2; push esi`). `transmit_awareness` now raises
+that event for every living thing in every sector it just wrote, once per thing per tick (the engine reaches a thing at
+most once per stamp, which a `time` map enforces). The handlers' event-2 arms are still unported, so the visible effect
+today is the latch. The `dodge` arm itself is decoded for the next round (`0x50b5c1`): awake, `event == 2`, the
+instinct's own weight and the sector slot's strength both positive, the slot's source thing non-null and not the actor,
+`[source+0xc] == 3` with `[source+0x10] == 1`, the `0x4eb090` sight test clear — then a walk to `pos - dir * weight` at
+2.5 with the handler's 1000 ms cooldown and sound `0x4b`.
+
+Verified: `cargo test --release` **261 passed** (new: the sweep clears the latch and reaches a thing once per tick);
+`--gates --all` 0 of 67 failed, 2 skipped; `--soak-all` 35/35 levels; `--walk all` 24/34 contained, worst 3.35;
+`--tour` 28 rows on both arms; `--audit` 35/35 clean; `--cog-check` 34 levels, 0 stubbed; the parity gates re-run at
+round 356's tree — draw 5/0 (`spawn_pose` 0.6393), menu 0.9661, film 1.0000, series 1 graded/0 failures, walk trace
+10 legs/0 failures; `scripts/check-docs-links.ps1` 132/132.
