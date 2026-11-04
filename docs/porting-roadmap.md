@@ -732,13 +732,17 @@ criterion for Phase 1/2.
 Cut a release when: the exit criteria of every phase so far hold, the release note lists the tier per
 level, and a clean-machine install plays level 1 to completion. Multiplayer stays out of scope, as now.
 
-**State at round 327 (re-measured each round; the round-292 and round-265 blocks below are history, not the current numbers).**
+**State at round 332 (re-measured each round; the round-265 block below is history, not the current numbers).**
 
-| check | command | measured round 292 |
+| check | command | measured round 332 |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --bins --release` | **243 passed**, 0 failed (round 327) |
+| unit + integration suite | `cargo test --bins --release` | **244 passed**, 0 failed |
+| every level's runtime | `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5 bevi-knight --soak-all` | **35 of 35 levels**, 0 non-finite positions, **0** bodies outside every sector (round 331's soak-count fix) |
+| every cog verb | `bevi-knight --cog-check` | **34 levels, 0 stubbed verb calls, 0 errors** |
+| drop-in asset coverage | `bevi-knight --audit` | **35/35 levels clean**, 0 non-drawable models, 10 unresolved asset references, 54 undecoded files |
+| campaign graph | `bevi-knight --tour` | **28 rows on both arms**, 25 distinct files, 23 films, 2 terminals, 0 script errors; the `DECIDE` fork's dark arm (`38a.smk` + `54a.smk` -> `16bEscapeShip.jkl`) asserted since round 332 |
 | port gates | `bevi-knight --gates` | **0 of 67 failed, 0 skipped** with a window (round 331); the headless recipe (`BK_SKIP_WINDOW=1`) skips the two window rows, and both pass when run directly |
-| every level's walk | `bevi-knight --walk all` | **24/34 contained**, 25 hull-agreeing, 46 crossings, **6 recorded walk-offs** (`02narshadda`, `07yun`, `09fuelstation`, `11gorc`, `17asarris`, `m_boss17`), no other body in the void; the sweep now runs the level's **gravity** (round 322) |
+| every level's walk | `bevi-knight --walk all` | **24/34 contained**, 25 hull-agreeing, 46 crossings, **6 recorded walk-offs** (`02narshadda`, `07yun`, `09fuelstation`, `11gorc`, `17asarris`, `m_boss17`), worst drop 3.35 (`06abarons`), no other body in the void; the sweep runs the level's **gravity** (round 322) |
 | walk trace | `pwsh -File tools/parity/trace-gate.ps1` | **10 legs, 0 failures** — `walk17_spawn` 117 % / sectors off 0, `walk5_spawn` 83 % / sectors off 2, `walk6_spawn` 94 % / sectors off 2; `walk3_spawn` stays out of the set at 209 % (the floor slide) |
 | parity series | `pwsh -File tools/parity/series-gate.ps1` | **1 graded, 0 failures (round 308)** - `spawn` **world** port 1.0000 / retail 1.0000, |diff| 0.0000, over the sidecar's measured 7.4 s from the same 1204 ms settle. Three fixes made it a real measurement: the harness now records `series_settle_ms` (wall time from "level loaded" to the series' first frame), the gate samples the port at that same game time instead of a fixed 60 frames, and the gate freezes the port's animation (`--no-anim`) and grades it against retail's `series_world_region_ssim`, because retail's own note says its changing pixels are animated characters, not camera motion. Both sides' animated full-series curves still print (port 0.9258 / retail 0.9258) but no longer decide it: level 1's intro Ry stands 0.27 units from the eye, so its clip fills the band and its loop returns the frame bit-identical (1.0000 at 4.2 s) - a pose limitation, not world drift |
 | parity menu | `pwsh -File tools/parity/menu-gate.ps1` | **SSIM 0.9661, floor 0.90 (round 310)** - `retail-capture.ps1 -MainMenuShot` writes `target/parity/retail/main-menu.png` at 640x480 and the port renders the same screen with `BK_WINDOW=640x480 --menu singleplayer --shot`; both sides are captured on demand, so the gate runs anywhere the game and the port exist. Round 310's UI tonemapping removal moved it up from 0.9521 |
