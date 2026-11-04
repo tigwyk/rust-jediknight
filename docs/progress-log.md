@@ -4643,3 +4643,15 @@ ledgered above), the four `00_breakingbottle` surface queries, and one-cog sette
 `AddDynamicAdd` ×2, `SetParticleGrowthSpeed` ×2, `AddTint`, `SetWeaponFlags`, `SetThingCollideSize`, `GetThingLight`,
 `GetMapModeFlags`). `SetThingFireOffset`'s only calls are commented out in the shipped scripts, so it is dead content
 rather than a gap.
+
+**Three of the last verbs settle, three do not.** `GetMapModeFlags` is the getter for the word the port already keeps
+(`SetMapModeFlags`/`ClearMapModeFlags`, read back by `force_pull`), and `AddTint` is the same channel as
+`AddDynamicTint` — `pow_keyyellow` adds `(0, 0, 0.2)` through one name and `00_aiturncoat` the same value through the
+other. `SetCollideType(thing, 0|1)` turns out to have **no consumer in this port**: the dark-jedi scripts use it to make a
+pulled weapon non-collidable for 0.3 s, but only `_structure`/`_walkstruct` models are solid here, so a spawned powerup
+never collides in the first place. `SetParticleGrowthSpeed` (`-0.8`, a shrinking force sphere) needs a per-thing override
+plumbed from the runtime into the renderer's `ParticleGrow`; `AddDynamicAdd` (byte-range `180, 260, 230`) is a per-thing
+additive colour with no render channel yet; and `GetThingLight`'s answer is not pinned (per-thing script light vs the
+sector's baked light — `force_blinding` is its only caller).
+
+That leaves **11** of the 221 live verbs unanswered, all recorded with their reason.

@@ -3119,6 +3119,7 @@ impl Runtime {
                 | "enableirmode"
                 | "disableirmode"
                 | "setmapmodeflags"
+                | "getmapmodeflags"
                 | "clearmapmodeflags"
                 | "getsectorflags"
                 | "playsoundthing"
@@ -3304,6 +3305,7 @@ impl Runtime {
                 | "getinvmax"
                 | "setinvavailable"
                 | "adddynamictint"
+                | "addtint"
                 | "selectweapon"
                 | "setcurinvweapon"
                 | "getcurinvweapon"
@@ -7421,6 +7423,9 @@ impl Runtime {
                 self.set_ir_mode(false);
                 Value::Num(1.0)
             }
+            // `GetMapModeFlags`: the word `SetMapModeFlags`/`ClearMapModeFlags` keep. `force_pull` reads
+            // it back to know which mode it set.
+            "getmapmodeflags" => Value::Num(self.map_mode_flags as f64),
             "setmapmodeflags" => {
                 self.map_mode_flags = num(0) as u32;
                 Value::Num(self.map_mode_flags as f64)
@@ -9322,7 +9327,10 @@ impl Runtime {
             // `AddDynamicTint(player, r, g, b)`: `sithPlayer_AddDynamicTint` **adds** to the player's
             // palette tint with the engine's clamps — a powerup flash and damage share the channels —
             // so this is not a replacement.
-            "adddynamictint" => {
+            // `AddTint(player, r, g, b)` is the same channel `AddDynamicTint` writes:
+            // `pow_keyyellow` adds `(0, 0, 0.2)` through one name and `00_aiturncoat` the same value
+            // through the other.
+            "adddynamictint" | "addtint" => {
                 add_dynamic_tint(&mut self.tint, [num(1) as f32, num(2) as f32, num(3) as f32]);
                 Value::Nil
             }
@@ -9533,6 +9541,17 @@ mod tests {
         rt.things[0].flags = 0x80000;
         assert!(rt.sector_messages(None, Some(0), Some(0)).is_empty());
         assert_eq!(rt.sector_messages(None, Some(0), None), vec![(0, "entered", 1)]);
+    }
+
+    /// `SetMapModeFlags`/`GetMapModeFlags`: `force_pull` writes the word and reads it back.
+    #[test]
+    fn the_map_mode_word_round_trips() {
+        let mut rt = door_runtime();
+        assert_eq!(rt.call("getmapmodeflags", &[]).num(), 0.0);
+        rt.call("setmapmodeflags", &[Value::Num(3.0)]);
+        assert_eq!(rt.call("getmapmodeflags", &[]).num(), 3.0);
+        rt.call("clearmapmodeflags", &[]);
+        assert_eq!(rt.call("getmapmodeflags", &[]).num(), 0.0);
     }
 
     /// `CreateThingAtPosNR` spawns where it is told (the force scripts' cones and spheres), and
