@@ -972,6 +972,9 @@ pub struct Runtime {
     pub camera_focus: [Option<usize>; 7],
     pub camera_secondary: [Option<usize>; 7],
     pub current_camera: usize,
+    /// `sithCamera_CycleCamera`'s own index (`DAT_008ee5a8`), which walks the engine's two-entry
+    /// table `{0, 1}`: the toggle is not "whatever slot is current, plus one", it is this cursor.
+    pub camera_cycle: usize,
     /// `SetCurrentCamera`: a **script** camera is current, not the player's own view. A level's opening
     /// uses it to take the body over — level 14 points slot 0 at thing 45 (`MAcamera.key`) and retail's
     /// body then moves 0.00 units with forward held.
@@ -2029,6 +2032,7 @@ impl Runtime {
             camera_focus: [None; 7],
             camera_secondary: [None; 7],
             current_camera: 0,
+            camera_cycle: 0,
             script_camera: false,
             shake_pos: [0.0; 3],
             shake_angle: [0.0; 3],
@@ -3118,6 +3122,7 @@ impl Runtime {
                 | "surfacelightanim"
                 | "setcamerafocus"
                 | "setcurrentcamera"
+                | "cyclecamera"
                 | "getcameramode"
                 | "getprimaryfocus"
                 | "getsecondaryfocus"
@@ -8295,6 +8300,16 @@ impl Runtime {
             }
             "getmajormode" => Value::Num(self.major_mode.get(&ti(0)).copied().unwrap_or(0) as f64),
             // The camera slot `SetCurrentCamera` chose.
+            // `CycleCamera()` (`0x4c54d0`): the engine's global toggle between camera objects 0 and
+            // 1 (`DAT_00549088` = {0, 1}), i.e. first person and the external/saber camera. The
+            // shipped callers are the camera scripts, and they only reach it when
+            // `jkGetSaberCam() == 1`, so it is how a cutscene hands the view back to the third-person
+            // camera the player was already using.
+            "cyclecamera" => {
+                self.camera_cycle = (self.camera_cycle + 1) % 2;
+                self.current_camera = self.camera_cycle;
+                Value::Nil
+            }
             "getcurrentcamera" => Value::Num(self.current_camera as f64),
             // The cog a thing's class names; -1 when it names none.
             "getthingclasscog" => Value::Num(self.thing_class_cog.get(&ti(0)).copied().unwrap_or(-1) as f64),

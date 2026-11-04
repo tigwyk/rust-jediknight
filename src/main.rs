@@ -9743,6 +9743,24 @@ fn main() {
         rt.call("SetCameraFocus", &[cog::Value::Num(3.0), cog::Value::Num(player as f64)]);
         assert_eq!(rt.camera_focus_thing(), None, "a focus on the player must be plain POV");
 
+        // `CycleCamera()` (`0x4c54d0`) walks the engine's two-entry table (`{0, 1}`), which is the
+        // first-person / external pair; the camera scripts reach it only when the saber camera is on.
+        rt.current_camera = 0;
+        rt.camera_cycle = 0;
+        rt.call("CycleCamera", &[]);
+        assert_eq!(rt.current_camera, 1, "CycleCamera did not walk to camera 1");
+        rt.call("CycleCamera", &[]);
+        assert_eq!(rt.current_camera, 0, "CycleCamera did not walk back to camera 0");
+        rt.saber_cam = 1;
+        assert_eq!(
+            rt.call("jkGetSaberCam", &[]),
+            cog::Value::Num(1.0),
+            "jkGetSaberCam did not read the third-person flag"
+        );
+        rt.saber_cam = 0;
+        println!(
+            "camera: CycleCamera toggles slots 0<->1, and jkGetSaberCam answers the third-person flag the cutscene scripts branch on"
+        );
         // `SetPOVShake('0 -.003 0', '1 0 0', .05, 80)`: a kick that recovers. The angle decays at 80
         // degrees a second, so 5 ms takes a degree down to 0.6, and the position at 0.05/s takes
         // 60 ms to settle.
@@ -13688,6 +13706,12 @@ fn ui_input(
     // reaches through `sithCamera_CycleCamera`.
     if overlay.menu.is_none() && keys.just_pressed(KeyCode::KeyV) {
         chase.on = !chase.on;
+        // `jkGetSaberCam()` answers the engine's own saber-camera flag, and the camera scripts
+        // (`17b_camera.cog`, `20b_camera.cog`, the `*_rahnlines` set) branch on it to `CycleCamera()`
+        // out of the cutscene camera into the external one. In this build that is this toggle.
+        if let Some(sim) = sim.as_deref() {
+            sim.world.borrow_mut().saber_cam = i32::from(chase.on);
+        }
         println!(
             "camera: {} person",
             if chase.on { "third" } else { "first" }

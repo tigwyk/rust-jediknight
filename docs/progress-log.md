@@ -3889,3 +3889,20 @@ unawake 0.5 moved out of that block to where the decomp puts it (distance only, 
 | `cargo test` | 238 passed (`a_lit_saber_makes_the_body_obvious` new) |
 | `--gates` | 0 of 67 failed, 2 skipped |
 | `--soak-all` | 35 levels, 0 non-finite, 0 failed |
+
+## Round 318: `CycleCamera()` and the saber-camera flag
+
+`sithCamera_CycleCamera` (`0x4c54d0`) keeps its own cursor (`DAT_008ee5a8`, walking `{0, 1}` from the table at
+`0x549088`) and sets the current camera to `table[cursor]`; it is not "the next slot". The port now has the verb and
+the cursor. Its shipped callers (`17b_camera.cog`, `20b_camera.cog`, the `*_rahnlines` set) reach it only through
+`if (jkGetSaberCam() == 1)`, so the flag is wired to the third-person toggle - before this both were dead, and a
+cutscene in third person handed the view back to first person where retail did not.
+
+`--camera` now asserts both: `CycleCamera` walks 0 -> 1 -> 0, and `jkGetSaberCam` reads the flag.
+
+| check | result |
+| --- | --- |
+| `cargo test` | 238 passed |
+| `--camera` | pass, with the new assertions |
+| `--gates` | 0 of 67 failed, 2 skipped |
+| `--soak-all` | 35 levels, 0 non-finite, 0 failed |
