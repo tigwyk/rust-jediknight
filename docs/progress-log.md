@@ -4678,3 +4678,10 @@ Two fixes follow from the table: `CreateBackpack` now keeps any bin whose amount
 and `SetThingLook`'s blend is scaled by **10** (the port used 1). The puppet stride keeps its clamp for now: the advance
 is `speed * dt * 280` in `rdPuppet_AdvanceTrack`'s own unit, and whether that argument is milliseconds of clip time or
 frames is not established, so the row keeps its "constant not recovered" caveat only for that unit.
+
+**The awareness floor is 0.0, not 0.00277.** `sithAIAwareness_ProcessEvent` (`0x4f2c30`) reads
+`fVar3 = _DAT_0052315c` and recurses only `if (fVar3 < param_6)`, where `param_6` is the remaining strength. A direct
+read of `JK.EXE`'s `.rdata` at `0x52315c` gives **0.0** — and the literal `0.00277` does not occur anywhere in the file
+(byte search). The port had carried that number since round 110 as if recovered; `AI_AWARE_FLOOR` is now `0.0`, which
+makes the guard "any positive remainder crosses, a spent one does not". The `--adjoins` gate and the below-floor unit
+check still pass, and the roadmap row records the correction.

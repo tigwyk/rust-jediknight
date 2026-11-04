@@ -719,8 +719,10 @@ fn turn_toward(before: f32, wanted: f32, rate: f32, dt: f32) -> f32 {
 }
 
 /// `sithAIAwareness_ProcessEvent`'s floor (`0x52315c`): a propagated event stops crossing adjoins
-/// once its strength falls below this.
-pub const AI_AWARE_FLOOR: f32 = 0.00277;
+/// once its remaining strength falls below this. The executable spells the constant **0.0** (read
+/// from `JK.EXE`'s `.rdata`; the port carried an invented `0.00277` until the read), so the guard is
+/// "any positive strength crosses, a spent one does not".
+pub const AI_AWARE_FLOOR: f32 = 0.0;
 /// The strength a fired shot's event carries: `sithWeapon_WeaponFire` (`0x4d44f0`) creates it with
 /// `0x40800000` = 4.0. `sithActor_KillActor` uses 5.0 and `sithWeapon_DestroyWeapon` 2.0; the port
 /// raises the firing one, which is what a fight is mostly made of.

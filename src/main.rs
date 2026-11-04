@@ -10676,7 +10676,7 @@ fn main() {
 
         // `sithAIAwareness_ProcessEvent` (`0x004f2c30`) against the level's own adjoin graph: the
         // event is recorded per sector and side, its strength decays by the adjoin's `dist`, and the
-        // walk stops under the engine's floor (`0x52315c` = 0.00277).
+        // walk stops under the engine's floor (`0x52315c` = 0.0).
         let connected = rt
             .sector_adjoins
             .iter()
