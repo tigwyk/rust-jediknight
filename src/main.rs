@@ -10688,33 +10688,43 @@ fn main() {
             .expect("no opening costs less than a shot's awareness budget");
         let (from, to, cost) = connected;
         assert!(cost < runtime::AI_AWARE_SHOT, "an adjoin costs more than a shot is worth");
-        rt.transmit_awareness(from, -1, [1.0, 2.0, 3.0], runtime::AI_AWARE_SHOT);
+        rt.transmit_awareness(from, 1, [1.0, 2.0, 3.0], runtime::AI_AWARE_SHOT, Some(0));
         assert_eq!(
-            rt.awareness_at(from, -1),
+            rt.awareness_at(from),
             Some([1.0, 2.0, 3.0]),
             "the event was not recorded in its own sector"
         );
         assert!(
-            rt.awareness_at(to, -1).is_some(),
+            rt.awareness_at(to).is_some(),
             "the event did not cross the adjoin into sector {to}"
         );
-        assert!(
-            rt.awareness_at(from, 1).is_none(),
-            "the record leaked to the other side"
+        // A weaker event does not replace the stronger one already in its kind's slot.
+        rt.transmit_awareness(from, 1, [9.0, 9.0, 9.0], runtime::AI_AWARE_SHOT * 0.5, Some(0));
+        assert_eq!(
+            rt.awareness_at(from),
+            Some([1.0, 2.0, 3.0]),
+            "a weaker event replaced the stronger one in the same kind"
+        );
+        // Different kinds are separate records, and the listener reads kind 2 before 1 and 0.
+        rt.transmit_awareness(from, 0, [7.0, 7.0, 7.0], runtime::AI_AWARE_KILL, Some(0));
+        assert_eq!(
+            rt.awareness_at(from),
+            Some([1.0, 2.0, 3.0]),
+            "kind 0 outranked the kind-1 shot the listener should read first"
         );
         // A strength that starts below the engine's floor is recorded where it happened and crosses
         // no opening at all (rooms can share more than one adjoin, so this is per-opening, not
         // per-pair).
-        rt.transmit_awareness(from, 7, [4.0, 5.0, 6.0], runtime::AI_AWARE_FLOOR * 0.5);
-        assert_eq!(rt.awareness_at(from, 7), Some([4.0, 5.0, 6.0]), "the weak event was not recorded");
+        rt.transmit_awareness(from, 2, [4.0, 5.0, 6.0], runtime::AI_AWARE_FLOOR * 0.5, None);
+        assert_eq!(rt.awareness_at(from), Some([4.0, 5.0, 6.0]), "the weak event was not recorded");
         for (next, _) in &rt.sector_adjoins[from as usize] {
             assert!(
-                rt.awareness_at(*next, 7).is_none(),
+                rt.sector_awareness.get(&(*next, 2)).is_none(),
                 "an event below the floor crossed the opening {from} -> {next}"
             );
         }
         println!(
-            "adjoins: awareness sector {from} -> {to} costs {cost:.2} (a shot carries {}, the floor is {}); a below-floor event crosses no opening and a side's record stays its own",
+            "adjoins: awareness sector {from} -> {to} costs {cost:.2} (a shot carries {}, the floor is {}); a below-floor event crosses no opening, a weaker event cannot displace a kind's record, and kind 2 answers before 1",
             runtime::AI_AWARE_SHOT,
             runtime::AI_AWARE_FLOOR
         );

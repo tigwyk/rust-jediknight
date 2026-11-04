@@ -4440,3 +4440,29 @@ Two ledger rows were read to their handler and rewritten with the finding rather
 - **`turretfire`**'s ±160° head sweep is the **damaged** arm (`health < max × arg5`, `0.20` shipped): the
   handler randomises the head inside ±160° and fires on its own cooldown only then. A healthy turret fires
   along its body exactly as the port does, so the row was over-stated before.
+
+**Awareness was keyed by alignment; it is keyed by event kind now.** Two engine reads rewrote the model. First,
+`sithAIAwareness_CreateTransmittingEvent`'s third argument is not a side: every call site passes **0** (a death, a
+thrown weapon, a noise), **1** (a weapon shot, an explosion) or **2**, and `ProcessEvent` (`0x4f2c30`) indexes a
+25-dword block per sector with it — one `(strength, position, source thing)` record per kind, replaced only when
+the new event is stronger. The listener scans kind 2, then 1, then 0. Second, the strengths are the call sites'
+own: `WeaponFire`/`FireProjectile` **2.0** (`0x40800000`, kind 1), `MakeBlast` **3.0** (`0x40400000`, kind 1),
+`KillActor` **5.0** (`0x40a00000`, kind 0), and each passes the thing as the **source**.
+
+The port had keyed the record by the shooter's *alignment* and skipped any shooter without an `.ai` class. Both
+were wrong in a way a player would meet: a shot could never cross alignments, and the **player's gunfire raised no
+event at all** — enemies heard nothing. The record is `BTreeMap<(sector, kind), (strength, position, time, source)>`
+now; shots raise kind 1 from every shooter including the player, a death raises kind 0 with the killer as the
+source, an explosion raises kind 1 at 3.0, and a failed `listen` roll turns at the source thing's current position
+before falling back to the remembered point. `awareness_at` reads in the listener's kind order.
+
+```
+test runtime::tests::a_shot_is_heard_across_alignments_and_the_source_thing_is_kept ... ok
+test runtime::tests::a_listen_chance_of_zero_ignores_a_sound_in_clear_hearing ... ok
+--- adjoin check passed ---
+gates: 0 of 67 failed, 0 skipped
+```
+
+`--walk all` is unchanged (24/34 contained, six recorded walk-offs), `--soak-all` 35/35, `--ai` and `--ai-live`
+pass, and the suite is 248 tests. What is still missing on the row is `PlaySoundThing`'s noise event: it uses
+kind 0 with a volume times `_DAT_00522f80`, and that constant did not read out of this copy of `JK.EXE`.

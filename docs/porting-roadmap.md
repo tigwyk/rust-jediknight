@@ -710,11 +710,17 @@ What the session settles, all of it already on the deviation ledger with its ret
   `turretfire 750, 75, 160, 160, 5.0, 0.20, 500, 10000, 0`), where it randomises the head pitch/yaw inside
   ±arg3/±arg2 and fires on its own cooldown. The port has no articulated head, so that damaged path is
   absent and a turret fires accurately at any health; healthy turret fire matches the handler's other arm.
-- **`listen`** — the hearing gates and the class's reaction chance are ported (round 233, measured headless), and
-  **the look-only turn on a failed roll is in (round 339)**: `FUN_0050a6f0` ends with `SetLookPos` on every path
-  and only a success also calls `SetMovePos`, so a `Listen 0.0` sentry now turns toward a shot it does not react
-  to (the test asserts both halves). Still open: the **damage-event path**, where the look goes at the event's own
-  source thing rather than the remembered point, and events are one remembered position per sector and side.
+- **`listen`** — **the awareness model was rebuilt on the engine's own shape (round 339)**: the third argument of
+  `sithAIAwareness_CreateTransmittingEvent` is an event **kind** (0..2), not an alignment, and `ProcessEvent`
+  (`0x4f2c30`) keeps one `(strength, position, source thing)` record per sector and kind, replacing it only when
+  the new event is stronger. The port had keyed the record by the shooter's **alignment**, which meant a shot could
+  never reach an actor of the other side — and, because it also demanded a `.ai` class on the shooter, the
+  **player's gunfire raised no event at all**, so enemies never heard it. The records are kind-keyed now, the
+  listener scans kind 2 then 1 then 0 (`heard_event`), a failed roll turns at the event's **source thing** when it
+  still exists, and the engine's own sources are wired with their measured strengths: a shot (`WeaponFire`,
+  `FireProjectile`) kind 1 at **2.0**, an explosion (`MakeBlast`) kind 1 at **3.0**, a death (`KillActor`) kind 0 at
+  **5.0**. Still open: `sithSoundMixer_PlaySoundThing`'s noisemaker events (kind 0, strength = volume ×
+  `_DAT_00522f80`), whose scale constant did not read out of this copy of `JK.EXE`.
 - **`AISetMode`** — only the `0x2000` off switch is honoured; the wake bit (`0x4`) needs the engine's own wake logic
   first.
 - **AI engagement timing** — the level-3 same-pose pair: a port run and a retail capture at the recorded vantage, to

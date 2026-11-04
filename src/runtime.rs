@@ -719,7 +719,12 @@ pub const AI_AWARE_FLOOR: f32 = 0.00277;
 /// The strength a fired shot's event carries: `sithWeapon_WeaponFire` (`0x4d44f0`) creates it with
 /// `0x40800000` = 4.0. `sithActor_KillActor` uses 5.0 and `sithWeapon_DestroyWeapon` 2.0; the port
 /// raises the firing one, which is what a fight is mostly made of.
-pub const AI_AWARE_SHOT: f32 = 4.0;
+/// `sithWeapon_WeaponFire`'s and `sithWeapon_FireProjectile`'s strength (`0x40800000`), kind 1.
+pub const AI_AWARE_SHOT: f32 = 2.0;
+/// `sithActor_KillActor`'s strength (`0x40a00000`), kind 0.
+pub const AI_AWARE_KILL: f32 = 5.0;
+/// `sithExplosion_MakeBlast`'s strength (`0x40400000`), kind 1.
+pub const AI_AWARE_BLAST: f32 = 3.0;
 /// How long a record stays fresh. The engine's own fade is not recovered; the flat value keeps the
 /// old stand-in's window.
 pub const AI_AWARE_SECONDS: f32 = 8.0;
@@ -1386,11 +1391,15 @@ pub struct Runtime {
     /// shot is the event; the engine keeps per-sector records that propagate through adjoins and
     /// fade. This build has neither the per-adjoin attenuation nor the recovered reader, so an
     /// alert lands on buyers within a radius and expires (see `AWARE_RADIUS`/`AWARE_SECONDS`).
-    /// `sithAIAwareness`'s records: per sector and side, the **ring of recent sounds** — newest
-    /// first, at most three entries (the engine's listener scans three), each `(strength, position,
-    /// time)`. `ProcessEvent` keeps a 25-dword block per sector indexed by side; these are the fields
-    /// the AI actually reads plus the fade time.
-    pub sector_awareness: BTreeMap<(i32, i32), Vec<(f32, [f32; 3], f32)>>,
+    /// `sithAIAwareness`'s records: **one event per sector and kind**. `CreateTransmittingEvent`'s
+    /// third argument is that kind, not an alignment — every call site passes `0` (a death, a thrown
+    /// weapon, a sound), `1` (a weapon shot, an explosion) or `2`, and `ProcessEvent` (`0x4f2c30`)
+    /// keeps strength, position and the **source thing** in the kind's own slot, replacing it only
+    /// when the new event is stronger. The listener (`0x50a6f0`) scans kind 2, then 1, then 0, and
+    /// turns at the event's source thing when it has one. Keying by alignment instead meant a shot
+    /// could never reach an actor of the other side — and a shot by the player, who has no `.ai`
+    /// class, raised no event at all.
+    pub sector_awareness: BTreeMap<(i32, u8), (f32, [f32; 3], f32, Option<usize>)>,
     /// The adjoin graph the record propagates through: `(neighbour sector, cost)` per sector. The
     /// cost is the adjoin's own `dist` float — the only per-portal number a level carries, and the
     /// field `004f2c30_sithAIAwareness_ProcessEvent.c` reads through the adjoin link.
@@ -3265,7 +3274,14 @@ impl Runtime {
     /// side, then walk the adjoin graph, subtracting each adjoin's attenuation and stopping under the
     /// engine's floor. Each sector keeps a **ring of the three most recent events** with their own
     /// positions — that is what `sithAICmd_Listen` scans (newest first), so three are kept here too.
-    pub fn transmit_awareness(&mut self, sector: i32, side: i32, pos: [f32; 3], strength: f32) {
+    pub fn transmit_awareness(
+        &mut self,
+        sector: i32,
+        kind: u8,
+        pos: [f32; 3],
+        strength: f32,
+        source: Option<usize>,
+    ) {
         let mut stack = vec![(sector, strength)];
         let mut visited = 0usize;
         while let Some((at, strength)) = stack.pop() {
@@ -3276,14 +3292,17 @@ impl Runtime {
             if at < 0 || at as usize >= self.sector_adjoins.len() {
                 continue;
             }
-            let ring = self.sector_awareness.entry((at, side)).or_default();
-            // A stronger event already in the ring carries the propagation; a new one only adds its
-            // own position for the listener to scan.
-            if ring.iter().any(|r| r.0 >= strength) {
+            // `ProcessEvent`: `if (stored_strength < new_strength) { store }` — a weaker event does
+            // not replace the one already there, and does not propagate past it either.
+            let stronger = self
+                .sector_awareness
+                .get(&(at, kind))
+                .is_none_or(|(stored, _, _, _)| *stored < strength);
+            if !stronger {
                 continue;
             }
-            ring.insert(0, (strength, pos, self.time));
-            ring.truncate(3);
+            self.sector_awareness
+                .insert((at, kind), (strength, pos, self.time, source));
             for (next, cost) in &self.sector_adjoins[at as usize] {
                 let next_strength = strength - cost;
                 if next_strength > AI_AWARE_FLOOR {
@@ -3292,20 +3311,19 @@ impl Runtime {
             }
         }
         // Fade the records that are past the window, the way the engine's own timer does.
-        self.sector_awareness.retain(|_, ring| {
-            ring.retain(|(_, _, at)| self.time - *at < AI_AWARE_SECONDS);
-            !ring.is_empty()
-        });
+        self.sector_awareness
+            .retain(|_, (_, _, at, _)| self.time - *at < AI_AWARE_SECONDS);
     }
 
     /// What an actor standing in `sector` on `side` would read as the last known enemy position: the
     /// freshest event in the sector's ring that is still inside the window.
-    pub fn awareness_at(&self, sector: i32, side: i32) -> Option<[f32; 3]> {
-        self.sector_awareness
-            .get(&(sector, side))?
-            .iter()
-            .find(|(_, _, at)| self.time - *at < AI_AWARE_SECONDS)
-            .map(|(_, pos, _)| *pos)
+    pub fn awareness_at(&self, sector: i32) -> Option<[f32; 3]> {
+        // The listener's own order, kind 2 then 1 then 0, and the first record still inside the window
+        // answers — the engine has no "newest across kinds" reader.
+        [2u8, 1, 0].into_iter().find_map(|kind| {
+            let (_, pos, at, _) = self.sector_awareness.get(&(sector, kind))?;
+            (self.time - *at < AI_AWARE_SECONDS).then_some(*pos)
+        })
     }
 
     /// `listen` (`0x50a6f0`, the `sithAICmd_Listen` handler): the newest sound in `sector`'s ring
@@ -3319,23 +3337,21 @@ impl Runtime {
     pub fn heard_event(
         &self,
         sector: i32,
-        side: i32,
         from: [f32; 3],
         forward: [f32; 2],
         heardist: f32,
-    ) -> Option<([f32; 3], f32)> {
-        self.sector_awareness
-            .get(&(sector, side))?
-            .iter()
-            .filter(|(_, _, at)| self.time - *at < AI_AWARE_SECONDS)
-            .find(|(_, pos, _)| {
-                let blocked = self
-                    .solids
-                    .as_ref()
-                    .is_some_and(|solids| solids.segment_blocked(from, *pos));
-                hearable(from, forward, *pos, heardist, blocked)
-            })
-            .map(|(_, pos, at)| (*pos, *at))
+    ) -> Option<([f32; 3], f32, Option<usize>)> {
+        [2u8, 1, 0].into_iter().find_map(|kind| {
+            let (_, pos, at, source) = self.sector_awareness.get(&(sector, kind))?;
+            if self.time - *at >= AI_AWARE_SECONDS {
+                return None;
+            }
+            let blocked = self
+                .solids
+                .as_ref()
+                .is_some_and(|solids| solids.segment_blocked(from, *pos));
+            hearable(from, forward, *pos, heardist, blocked).then_some((*pos, *at, *source))
+        })
     }
 
     /// One random row of an actor's own `.snd` class for a sound-mode event — what
@@ -4294,7 +4310,16 @@ impl Runtime {
                         self.queue_mode_sound(index, "fear", from);
                         let side = ai.as_ref().map(|c| c.alignment as i32).unwrap_or(0);
                         let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
-                        self.transmit_awareness(sector, side, from, AI_AWARE_ALERT);
+                        // The engine raises a weapon event (kind 1) on fire; this port's alert stands
+                        // in for the actor's own `sensedanger` cry, at the same kind and the strength
+                        // the port tuned (round 307), with the actor as the source.
+                        self.transmit_awareness(
+                            sector,
+                            1,
+                            from,
+                            AI_AWARE_ALERT,
+                            Some(index),
+                        );
                         if std::env::var_os("BK_AI_TRACE").is_some() {
                             eprintln!(
                                 "ai: {index} senses the danger and alerts sector {sector} side {side} from {from:?}"
@@ -4338,8 +4363,7 @@ impl Runtime {
             // its own room and alignment own — that is the reader the stand-in could not express.
             let remembered = self.ai_last_seen.get(&index).copied().or_else(|| {
                 let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
-                let side = ai.as_ref().map(|ai| ai.alignment as i32).unwrap_or(0);
-                // `listen` (`0x50a6f0`): the ring is scanned **newest first**, and the handler's own
+                // `listen` (`0x50a6f0`): the record is scanned **kind 2, then 1, then 0**, and the handler's own
                 // conditions decide what is heard (`heard_event`: `heardist`, line of sight, and — for
                 // a sound through geometry — nearer than one unit and in front). It then rolls the
                 // class's reaction chance **once per sound** (`listen`'s first number: 0.50 in most
@@ -4352,8 +4376,8 @@ impl Runtime {
                     .as_ref()
                     .map(|class| class.heardist)
                     .unwrap_or(f32::INFINITY);
-                let (heard, at) =
-                    self.heard_event(sector, side, here, [yaw.cos(), yaw.sin()], heardist)?;
+                let (heard, at, source) =
+                    self.heard_event(sector, here, [yaw.cos(), yaw.sin()], heardist)?;
                 if let Some((last_at, last_pos, answered)) = self.ai_listen.get(&index).copied()
                     && last_at == at
                     && last_pos == heard
@@ -4376,10 +4400,16 @@ impl Runtime {
                 // and only a *success* also calls `SetMovePos`. The port's failed roll did nothing at
                 // all, so a `Listen 0.0` sentry never turned toward a shot.
                 if !answered {
-                    self.ai_look.insert(index, heard);
+                    // `SetLookPos` at the event's **source thing** when it still exists (`thing + 0xb8`),
+                    // otherwise at the remembered point — the handler's two arms.
+                    let at_source = source
+                        .and_then(|src| self.things.get(src))
+                        .filter(|t| !t.destroyed)
+                        .map(|t| t.pos);
+                    self.ai_look.insert(index, at_source.unwrap_or(heard));
                 }
                 if answered && std::env::var_os("BK_AI_TRACE").is_some() {
-                    eprintln!("ai: {index} hears an event in sector {sector} side {side}");
+                    eprintln!("ai: {index} hears an event in sector {sector}");
                 }
                 answered.then_some(heard)
             }).or_else(|| {
@@ -5083,10 +5113,13 @@ impl Runtime {
         // carries it through the adjoin graph for the shooter's own side. The record is the
         // shooter's position, which is what makes reinforcements converge on gunfire.
         for shooter in shooters {
-            let Some(side) = self.ai.get(&shooter).map(|a| a.alignment as i32) else { continue };
             let Some(thing) = self.things.get(shooter) else { continue };
             let (sector, pos) = (thing.sector, thing.pos);
-            self.transmit_awareness(sector, side, pos, AI_AWARE_SHOT);
+            // `sithWeapon_WeaponFire` (`0x4d44f0`) and `FireProjectile` (`0x4d5f20`) raise kind **1**
+            // at strength **2.0** (`0x40800000`) with the weapon/thing as the source. Every shooter
+            // raises it — the player has no `.ai` class, and requiring one meant no actor ever heard
+            // the player's gunfire.
+            self.transmit_awareness(sector, 1, pos, AI_AWARE_SHOT, Some(shooter));
         }
         // `sithThing`'s thing-collision callback (`0x4ed24d`) raises AI event 4 when an actor's
         // body touches another thing. This build's actor walk has no solver, so the contact is
@@ -6274,6 +6307,10 @@ impl Runtime {
         self.templates.push(explode.clone());
         self.types.push(kind);
         self.arm_life(index);
+        // `sithExplosion_MakeBlast` (`0x4fb920`) raises kind **1** at strength **3.0** (`0x40400000`)
+        // at the blast, with the blast thing as the source — a grenade is heard from further than a
+        // rifle shot.
+        self.transmit_awareness(sector, 1, at, AI_AWARE_BLAST, Some(index));
         Some(index)
     }
 
@@ -6504,6 +6541,15 @@ impl Runtime {
         } else {
             return 0.0;
         };
+        // `sithActor_KillActor` (`0x4ecfe0`) raises the awareness event **before** it messages the
+        // scripts: kind 0, strength 5.0 (`0x40a00000`), at the victim, with the killer as the source.
+        if died {
+            if let Some(t) = self.things.get(index) {
+                let (sector, at) = (t.sector, t.pos);
+                let killer = usize::try_from(source).ok().filter(|k| *k != index);
+                self.transmit_awareness(sector, 0, at, AI_AWARE_KILL, killer);
+            }
+        }
         // `SITH_MESSAGE_DAMAGED` (10) and `SITH_MESSAGE_KILLED` (12) go to the cogs linked to the
         // thing that was hit; the level's scripts wait on both (level 1: `damaged` x4, `killed` x5).
         // The params are the engine's: the amount and the damage-type word, which is what a handler's
@@ -10532,10 +10578,9 @@ mod tests {
         );
         // Newest first: a fresh shot 5 units along +x (out of earshot), an older one 1.5 units along
         // +y (inside it). The guard must walk toward the one it can hear.
-        rt.sector_awareness.insert(
-            (7, -1),
-            vec![(4.0, [5.0, 0.0, 0.0], 0.0), (3.0, [0.0, 1.5, 0.0], 0.0)],
-        );
+        // Kind 2 is the listener's first slot; the older kind-1 record is the fallback.
+        rt.sector_awareness.insert((7, 2), (4.0, [5.0, 0.0, 0.0], 0.0, None));
+        rt.sector_awareness.insert((7, 1), (3.0, [0.0, 1.5, 0.0], 0.0, None));
         for _ in 0..40 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
@@ -10544,6 +10589,52 @@ mod tests {
         assert!(
             p[1] > 0.2 && p[0].abs() < 0.1,
             "the guard walked toward the wrong sound: {p:?}"
+        );
+    }
+
+    /// The awareness record is keyed by **event kind**, not by alignment: `CreateTransmittingEvent`'s
+    /// third argument is a 0..2 slot (`0x4f2c30`), and every call site passes 0, 1 or 2 — the engine
+    /// has no notion of a light-side shot. The port keyed the record by the shooter's alignment, so a
+    /// shot could never reach an actor of the other side (and a shot by the player, who carries no
+    /// `.ai` class at all, raised no event: enemies never heard gunfire).
+    #[test]
+    fn a_shot_is_heard_across_alignments_and_the_source_thing_is_kept() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut player = base.clone();
+        player.pos = [-9.0, 0.0, 0.0]; // out of sight: the shot, not the body, is what the actor hears
+        let mut listener = base.clone();
+        listener.pos = [0.0, 0.0, 0.0]; // sector 7, alignment 1.0 (light)
+        let mut shooter = base.clone();
+        shooter.pos = [-1.2, 0.0, 0.0]; // the same room, behind the listener (out of its 90-degree view)
+        rt.things = vec![player, listener, shooter];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into(), "door".into()];
+        rt.types = vec![10, 2, 0];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.sector_adjoins = vec![Vec::new(); 8];
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=1.0, rank=0.5, fov=90, sightdist=2.0, heardist=4.0\n\nListen 1.0\n",
+            ),
+        );
+        rt.transmit_awareness(7, 1, [-1.2, 0.0, 0.0], super::AI_AWARE_SHOT, Some(2));
+        let (_, _, _, source) = rt.sector_awareness.get(&(7, 1)).copied().expect("no record");
+        assert_eq!(source, Some(2), "the event did not keep its source thing");
+        let heard = rt.heard_event(7, [0.0, 0.0, 0.0], [1.0, 0.0], 4.0);
+        assert_eq!(
+            heard.map(|(pos, _, source)| (pos, source)),
+            Some(([-1.2, 0.0, 0.0], Some(2))),
+            "a light-side actor did not hear the shot its own room carries"
+        );
+        for _ in 0..40 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        assert!(
+            rt.things[1].pos[0] < -0.2,
+            "the listener did not walk toward a shot from another alignment: {:?}",
+            rt.things[1].pos
         );
     }
 
@@ -10570,7 +10661,7 @@ mod tests {
         );
         // A shot five units away: outside the two-unit hearing, so the guard must not react.
         rt.sector_awareness
-            .insert((7, -1), vec![(4.0, [5.0, 0.0, 0.0], 0.0)]);
+            .insert((7, 1), (4.0, [5.0, 0.0, 0.0], 0.0, None));
         for _ in 0..30 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
@@ -10582,7 +10673,7 @@ mod tests {
         );
         // A shot inside it: the same actor walks toward it.
         rt.sector_awareness
-            .insert((7, -1), vec![(4.0, [1.5, 0.0, 0.0], rt.time)]);
+            .insert((7, 1), (4.0, [1.5, 0.0, 0.0], rt.time, None));
         for _ in 0..30 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
@@ -10619,7 +10710,7 @@ mod tests {
         // Inside the two-unit hearing and in clear line — a sound a `Listen 1.0` class walks at — but
         // this class's chance is zero, so it must only hear it.
         rt.sector_awareness
-            .insert((7, -1), vec![(4.0, [1.5, 0.0, 0.0], 0.0)]);
+            .insert((7, 1), (4.0, [1.5, 0.0, 0.0], 0.0, None));
         for _ in 0..40 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
@@ -10638,7 +10729,7 @@ mod tests {
         // The same chance 1.0 reacts to a *new* event; the same event would not be re-rolled.
         rt.ai.insert(1, class("1.0"));
         rt.sector_awareness
-            .insert((7, -1), vec![(4.0, [1.5, 0.0, 0.0], rt.time)]);
+            .insert((7, 1), (4.0, [1.5, 0.0, 0.0], rt.time, None));
         for _ in 0..40 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
@@ -11112,13 +11203,13 @@ mod tests {
             "the alert did not take the player as its target"
         );
         assert_eq!(
-            rt.awareness_at(7, -1),
+            rt.awareness_at(7),
             Some([1.0, 0.0, 0.0]),
             "the alert raised no awareness event"
         );
-        let ring = rt.sector_awareness.get(&(7, -1)).expect("no ring");
+        let record = rt.sector_awareness.get(&(7, 1)).expect("no kind-1 record");
         assert_eq!(
-            ring[0].0, super::AI_AWARE_ALERT,
+            record.0, super::AI_AWARE_ALERT,
             "the awareness event is not the handler's 3.0 strength"
         );
     }
