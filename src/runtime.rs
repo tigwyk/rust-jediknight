@@ -1435,6 +1435,8 @@ pub struct Runtime {
     /// could never reach an actor of the other side — and a shot by the player, who has no `.ai`
     /// class, raised no event at all.
     pub sector_awareness: BTreeMap<(i32, u8), (f32, [f32; 3], f32, Option<usize>)>,
+    /// When each thing last received AI event 2 (the awareness sweep raises it once per tick).
+    pub awareness_event_at: BTreeMap<usize, f32>,
     /// The adjoin graph the record propagates through: `(neighbour sector, cost)` per sector. The
     /// cost is the adjoin's own `dist` float — the only per-portal number a level carries, and the
     /// field `004f2c30_sithAIAwareness_ProcessEvent.c` reads through the adjoin link.
@@ -2170,6 +2172,7 @@ impl Runtime {
             ai_randomturn: BTreeMap::new(),
             ai_roam: BTreeMap::new(),
             sector_awareness: BTreeMap::new(),
+            awareness_event_at: BTreeMap::new(),
             sector_adjoins: sector_adjoins.clone(),
             ai_fire_target: BTreeMap::new(),
             ai_flee: BTreeMap::new(),
@@ -3353,6 +3356,7 @@ impl Runtime {
         source: Option<usize>,
     ) {
         let mut stack = vec![(sector, strength)];
+        let mut written: Vec<i32> = Vec::new();
         let mut visited = 0usize;
         while let Some((at, strength)) = stack.pop() {
             visited += 1;
@@ -3371,6 +3375,9 @@ impl Runtime {
             if !stronger {
                 continue;
             }
+            if !written.contains(&at) {
+                written.push(at);
+            }
             self.sector_awareness
                 .insert((at, kind), (strength, pos, self.time, source));
             for (next, cost) in &self.sector_adjoins[at as usize] {
@@ -3383,6 +3390,28 @@ impl Runtime {
         // Fade the records that are past the window, the way the engine's own timer does.
         self.sector_awareness
             .retain(|_, (_, _, at, _)| self.time - *at < AI_AWARE_SECONDS);
+        // The per-frame sweep after `ProcessEvent` in the engine's own update (`0x4f2b60`): the tick
+        // counter `DAT_008553b4` is bumped, every `ProcessEvent` call stamps its sector's slot with
+        // it, and then the level's thing table is walked — a thing whose sector's slot carries the
+        // current stamp gets **AI event 2** with argument 0. That is the one event the `0x1000`
+        // one-shot latch lets through (it clears the latch doing so), so this is what re-arms
+        // `dodge`'s shot path after the first dodge. The engine reaches each thing at most once per
+        // tick, which is the same guard here.
+        for at in written {
+            let things: Vec<usize> = self
+                .things
+                .iter()
+                .enumerate()
+                .filter(|(index, thing)| !thing.destroyed && thing.sector == at && {
+                    self.awareness_event_at.get(index) != Some(&self.time)
+                })
+                .map(|(index, _)| index)
+                .collect();
+            for index in things {
+                self.awareness_event_at.insert(index, self.time);
+                let _ = self.emit_ai_event(index, 2, None);
+            }
+        }
     }
 
     /// What an actor standing in `sector` on `side` would read as the last known enemy position: the
@@ -3596,9 +3625,11 @@ impl Runtime {
     /// Every emit site in the executable is accounted for: `sithActor_DamageActor` raises 1 (this
     /// build calls it from `damage_typed_from`), `sithWeapon_WeaponFireProjectile` raises `0x1000`
     /// (called from `fire_with_spread`), `sithAI_InstinctUpdate`/the two AI-flag helpers raise the
-    /// `0x100` cascade, and the track-target helper raises `0x400`/`0x800`. **Nothing emits event 2 or
-    /// event 4**, so those branches of `dodge` and `sensedanger` are dead in retail content too — the
-    /// dispatcher's mask table lists them because the handlers do, not because content reaches them.
+    /// `0x100` cascade, the track-target helper raises `0x400`/`0x800`, and the per-frame awareness
+    /// sweep (`0x4f2b60`) raises **event 2** on every thing in a sector whose slot ProcessEvent just
+    /// stamped (`transmit_awareness` raises it here). Event 4 comes from the actor/player contact
+    /// test. The handlers' event-2 arms are still unported, so the sweep's only effect today is to
+    /// clear the `0x1000` one-shot latch.
     /// `sithAI_CanWalk` (`0x4eb4b0`): is there ground under the step's destination?
     ///
     /// The engine sweeps a sphere downward from the next position for `GetThingHeight + maxstep` and
@@ -4184,8 +4215,8 @@ impl Runtime {
             // is the awake bit `00_aisleep.cog` writes (`aisetmode(enemy, 0x200)`), so a wakeable ryther
             // draws its weapon when it wakes and holsters when it sleeps. The `param_4 == 0` branch —
             // the one that calls `sithAI_FireWeapon` with a lobbed chance — is **dead content**: the
-            // engine's emit inventory raises only 1, `0x100`, `0x400`, `0x800` and `0x1000`, so no
-            // event-0 reaches it (the same finding as `dodge`'s event 2).
+            // engine's emit inventory raises only 1, `0x100`, `0x400`, `0x800`, `0x1000` and event 2
+            // from the awareness sweep, so no event-0 reaches it.
             if ai
                 .as_ref()
                 .is_some_and(|class| class.instinct("LobFire").is_some())
@@ -11447,8 +11478,8 @@ mod tests {
     /// sets `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in 1000 ms. `0x200` is
     /// the awake bit `00_aisleep.cog` writes, so a wakeable ryther draws its weapon when it wakes and
     /// holsters when it sleeps. The `param_4 == 0` branch, the one that calls `sithAI_FireWeapon` with a
-    /// lobbed chance, is dead content: the emit inventory raises only 1, `0x100`, `0x400`, `0x800` and
-    /// `0x1000`, so nothing ever delivers event 0 to it (the same finding as `dodge`'s event 2).
+    /// lobbed chance, is dead content: the emit inventory raises only 1, `0x100`, `0x400`, `0x800`,
+    /// `0x1000` and the awareness sweep's event 2, so nothing ever delivers event 0 to it.
     #[test]
     fn lobfire_follows_the_awake_bit_instead_of_lobbing_a_shot() {
         let mut rt = door_runtime();
@@ -12089,6 +12120,34 @@ mod tests {
             )),
         );
         rt
+    }
+
+    /// The awareness sweep raises **event 2**, the one event the `0x1000` one-shot latch lets through,
+    /// and clears the latch doing so. Without it an actor dodges exactly one shot per level: the shot
+    /// arms the latch, nothing ever disarms it, and every later `0x1000` is dropped by the gate.
+    #[test]
+    fn the_awareness_sweep_re_arms_the_one_shot_dodge_latch() {
+        let mut rt = shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0);
+        rt.sector_adjoins = vec![Vec::new(); 8]; // both things sit in sector 7 (`door_runtime`)
+        // A latched actor drops every event but 2 — the engine's own rate limit.
+        rt.actor_flags.insert(1, 0x200 | 0x1000);
+        assert!(!rt.emit_ai_event(1, 0x1000, Some(0)), "the latch let a shot through");
+        // Awareness in the actor's sector is the event-2 producer; it disarms the latch.
+        rt.time += 0.5;
+        rt.transmit_awareness(7, 0, [2.0, 0.0, 0.0], 3.0, None);
+        assert_eq!(
+            rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x1000,
+            0,
+            "event 2 must clear the one-shot latch"
+        );
+        // And the sweep reaches a thing at most once per tick.
+        rt.actor_flags.insert(1, 0x200 | 0x1000);
+        rt.transmit_awareness(7, 0, [2.0, 0.0, 0.0], 3.5, None);
+        assert_eq!(
+            rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x1000,
+            0x1000,
+            "a second awareness event in the same tick must not re-raise event 2"
+        );
     }
 
     /// `dodge`'s shot-passing path (`0x50b360`, event `0x1000`): the **player's** shot with
