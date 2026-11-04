@@ -4059,3 +4059,22 @@ face 4180 now draws at 1008 texels (wrapped into `0..1024`) instead of 0.
 Still missing from the sky: the engine's screen-space **projection** of the planes (the port keeps a
 camera-centred dome as the stand-in, and the dome does not scroll). That is the `gaps.md` Sky row's
 remaining item, now stated with the fields that drive it.
+## Round 326: the saber is drawn with the body's own `drawsaber` row
+
+`draw_row` named `drawgun`/`holster` only, so `weap_saber.cog`'s `SetArmedMode(player, 2)` changed
+the armed mode and the body played no draw at all. The scripts select three modes — every armed
+weapon cog sends `1`, `weap_saber.cog` sends `2`, holstering sends `0` — and the shipped puppets
+carry `drawsaber` for exactly that (24 of level 1's, plus Kyle's own: `kydrawsb.key`). The row is
+mode 0 in every puppet, so the existing `(row, 0)` fallback in the draw lookup is what reaches it.
+
+| what | result |
+| --- | --- |
+| `draw_row_tests` | `(0,1)` `drawgun`, `(0,2)` `drawsaber`, `(2,0)`/`(1,0)` `holster`, a mode swap names nothing, mode 3 stays unselected |
+| `--animate` | `the player draws the saber with `kydrawsb.key` (mode 0): weap_saber.cog's SetArmedMode(player, 2) selects it` |
+| `cargo test` | **242 passed**, 0 failed |
+| `--gates` | 0 of 67 failed, 2 skipped |
+| parity gates | draw 5 thresholds/0 failures, series 1/1, menu 0.9661, film 1.0000 |
+
+A scan of every `.cog` in the three archives (540 of them) is what settles the modes: six cogs send
+`1`, four send `0`, `weap_saber.cog` alone sends `2`, and none sends `3` — so `drawfists` (24
+puppets) is deliberately left unwired rather than guessed at.

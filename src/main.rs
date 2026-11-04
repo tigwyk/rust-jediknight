@@ -11232,6 +11232,41 @@ fn main() {
                     .map(|state| state.key.as_str())
                     .unwrap_or("?")
             );
+            // `weap_saber.cog` selects mode **2** when the saber is drawn, and the row that mode
+            // names is `drawsaber`: the body has to have it in mode 2 for `draw_row`'s pick to play.
+            let saber = puppet
+                .states
+                .iter()
+                .find(|state| state.name.eq_ignore_ascii_case("drawsaber"));
+            match saber {
+                Some(state) => {
+                    // The shipped rows are mode 0 in every puppet that carries them, so the draw
+                    // lookup falls back to mode 0 whenever the armed mode has no set of its own.
+                    assert!(
+                        state.mode == 0 || state.mode == 2,
+                        "the player's `drawsaber` row is in mode {}, which the lookup does not reach",
+                        state.mode
+                    );
+                    assert!(
+                        world.keys.contains_key(&state.key.to_ascii_lowercase()),
+                        "the player's `drawsaber` row names `{}`, which is not a shipped key",
+                        state.key
+                    );
+                    println!(
+                        "  the player draws the saber with `{}` (mode {}): `weap_saber.cog`'s SetArmedMode(player, 2) selects it",
+                        state.key, state.mode
+                    );
+                }
+                None => println!(
+                    "  the player's puppet ({}) ships no `drawsaber` row",
+                    world
+                        .level
+                        .things
+                        .get(player)
+                        .and_then(|thing| world.level.template_param(&thing.template, "puppet"))
+                        .unwrap_or("?")
+                ),
+            }
         }
         println!("--- animate check passed ---");
         return;
@@ -18744,14 +18779,20 @@ fn animate_actors(mut capture: Option<Res<CaptureDt>>,
 
 /// Which state row a change of armed mode plays, if the puppet has one.
 ///
-/// The rows are `drawgun`/`holster` (24 actors ship each). **Not** `mount`/`dismount`: those are
-/// the names of the *weapon cog's* keyframe symbols (`mountAnim=bryvmnt.key`), which animate the
-/// first-person viewmodel, not the body. Mixing the two up is what made an earlier round report
-/// that no puppet shipped a draw animation.
+/// The rows are `drawgun`/`holster` (24 actors ship each) and, on Kyle's own puppet, `drawsaber`
+/// and `drawfists`. **Not** `mount`/`dismount`: those are the names of the *weapon cog's* keyframe
+/// symbols (`mountAnim=bryvmnt.key`), which animate the first-person viewmodel, not the body.
+/// Mixing the two up is what made an earlier round report that no puppet shipped a draw animation.
+///
+/// The modes are the scripts' own: every armed weapon cog calls `SetArmedMode(player, 1)` except
+/// `weap_saber.cog`, which calls `2`; `weap_fists.cog` holsters with `0` like the rest, so the
+/// `drawfists` row 24 puppets ship is never selected by a shipped script and is left out here.
+/// Holstering is `0` whatever was out, and the anim class carries one `holster` row for it.
 fn draw_row(from: usize, to: usize) -> Option<&'static str> {
     match (from, to) {
         (0, 1) => Some("drawgun"),
-        (1, 0) => Some("holster"),
+        (0, 2) => Some("drawsaber"),
+        (drawn, 0) if drawn != 0 => Some("holster"),
         _ => None,
     }
 }
@@ -26463,8 +26504,16 @@ mod draw_row_tests {
         assert_eq!(draw_row(1, 0), Some("holster"));
         assert_eq!(draw_row(0, 0), None);
         assert_eq!(draw_row(1, 1), None);
-        // Modes beyond armed/unarmed are not the port's (crouch and the rest are a separate row).
+        // The saber and the fists are their own modes: `weap_saber.cog` sets 2, and holstering the
+        // saber is mode 0, so both directions have a row.
+        assert_eq!(draw_row(0, 2), Some("drawsaber"));
+        assert_eq!(draw_row(2, 0), Some("holster"));
+        // Swapping one drawn weapon for another is not a draw: the scripts never do it.
         assert_eq!(draw_row(1, 2), None);
+        assert_eq!(draw_row(2, 1), None);
+        // No shipped script sets mode 3 (`weap_fists.cog` holsters with 0), so the `drawfists` row
+        // those 24 puppets ship stays unselected rather than being guessed at.
+        assert_eq!(draw_row(0, 3), None);
     }
 }
 
