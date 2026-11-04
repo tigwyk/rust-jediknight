@@ -763,7 +763,7 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 
 | check | command | measured round 332 |
 | --- | --- | --- |
-| unit + integration suite | `cargo test --bins --release` | **244 passed**, 0 failed |
+| unit + integration suite | `cargo test --bins --release` | **247 passed**, 0 failed (round 339) |
 | every level's runtime | `BK_SKIP_WINDOW=1 BK_MUTE=1 BK_SOAK_SECONDS=5 bevi-knight --soak-all` | **35 of 35 levels**, 0 non-finite positions, **0** bodies outside every sector (round 331's soak-count fix) |
 | every cog verb | `bevi-knight --cog-check` | **34 levels, 0 stubbed verb calls, 0 errors** |
 | drop-in asset coverage | `bevi-knight --audit` | **35/35 levels clean**, 0 non-drawable models, 10 unresolved asset references, 54 undecoded files |
@@ -776,6 +776,13 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 | parity film | `pwsh -File tools/parity/film-gate.ps1` | **SSIM 1.0000, floor 0.99 (round 310)** - the retail opening-film capture against the port's `BK_FILM_HOLD=147` frame; the crawl holds for film frames 91..178, so no wall-clock alignment is needed |
 | parity draw | `pwsh -File tools/parity/compare.ps1 -Gate` | **5 thresholds, 0 failures (round 310)**; 12 pairs compared, 1 not captured. The floors were re-derived this round: the merged rounds' ambient-base lighting rule (`rdCamera_SetAmbientLight`'s `ambient + extraLight`) darkened level 1 by ~5 luma, which moved the three route pairs' MAD past the old floors. A/B against `866793d` and against the `1.0` base is recorded in `thresholds.tsv`; level 1's residual is the *lighting* ledger row |
 | retail saves | `bevi-knight --save <file>.jks` | retail lists decode: **357 entries** (quicksave) / **73** (autosave) with the player at that level's own spawn and health 100 |
+
+**Round 339 added six technical closures** (evidence in `docs/progress-log.md`): the inventory verbs clamp to
+`items.dat`'s `min`/`max` like `sithInventory_ChangeInventory`/`SetInventory`; `--force-live` witnesses the lift by the
+velocity the script sets (2.85 u/s measured) instead of a razor-thin ceiling contact; `opendoors` reaches with the
+engine's `movesize + 0.1` rather than an invented 1.5 units; `circlestrafe` replans on its own 5 s clock;
+`withdraw` lasts until its target is gone (the interval is only its call rate); `blindfire` rolls per handler call with
+the engine's 1 s retry on a miss; and a failed `listen` roll turns the actor toward the sound it ignores.
 
 Closed since round 265, with the evidence in `docs/progress-log.md`: the AI-engagement row (the port lands no hits at the
 row's own pose), the cutscene row (retail cannot be booted into a non-first level — three routes proved closed), the
