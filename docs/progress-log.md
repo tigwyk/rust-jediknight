@@ -5626,3 +5626,24 @@ so a door leaf's box is either misplaced or far wider than the leaf there. Radia
 not change that, and the cause was not found in the time available. Reverted; the sweep stays a circle. The next attempt
 should print the leaf box at 17bsarris' spawn with its `thing.yaw` and compare it against the door's surfaces before
 touching the sweep.
+
+### Round 398: the door capture is **invulnerable** -- every bolt is swallowed before the shield bar
+
+Chasing Phase 1 step 5 (the door encounter must match retail's health/kill order), `--hit`-style tracing of the live
+capture (`BK_HIT_TRACE`) shows every landed bolt taking the invulnerability path:
+
+```
+hit: 11 ignored -- player thing 0 is invulnerable (flags 0x8)
+hit: the player took 11, 100 shield(s) and 100 health left owner Some(155)
+```
+
+`Flags 0x8` is `SITH_AF_INVULNERABLE`, and `SetActorFlags(player, 0x8)` is the **level-end chain's freeze** (`01_goal0.cog`
+sets it before its sleep; the `--endlevel` gate asserts that pair). Something runs that chain during the capture --
+the trace names the caller as cog indices 145+ in the runtime's cog list, which is not the level's 42 placed instances,
+so the freeze is coming from a global cog the level-end sequence drives. Retail's own door series loses 100 -> 44 health
+at the same pose, so retail is *not* frozen there.
+
+The capture therefore reports 0 damage by construction, not by an AI gap: the earlier "15 hits, 29 HP" figure was
+measured before something started arming the goal at this pose. Next step: name those cogs (the runtime's cog list has
+no name map alongside `caller_cog`) and find which level-1 trigger arms the goal chain during a warp capture, then stop
+the freeze from holding outside an actual end-level.

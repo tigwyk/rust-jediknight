@@ -6695,6 +6695,12 @@ impl Runtime {
         // The player goes through the same guard as any actor (`sithActor_DamageActor` takes the
         // player branch too), so a scripted invulnerability covers bolts as well as everything else.
         if self.invulnerable(player, kind) {
+            if std::env::var_os("BK_HIT_TRACE").is_some() {
+                eprintln!(
+                    "hit: {amount:.0} ignored -- player thing {player} is invulnerable (flags {:#x})",
+                    self.actor_flags.get(&player).copied().unwrap_or(0)
+                );
+            }
             return (
                 self.player_shields,
                 self.things.get(player).map(|t| t.health).unwrap_or(0.0),
@@ -8315,6 +8321,12 @@ impl Runtime {
             "setactorflags" | "aisetmode" => {
                 let actor = ti(0);
                 let mode = idx(1) as u32;
+                if mode & AF_INVULNERABLE != 0 && std::env::var_os("BK_HIT_TRACE").is_some() {
+                    eprintln!(
+                        "hit: SetActorFlags({actor}, {mode:#x}) made the player invulnerable (cog {})",
+                        self.caller_cog
+                    );
+                }
                 *self.actor_flags.entry(actor).or_insert(0) |= mode;
                 // `aisetmode(enemy, 0x200)` is how `00_aisleep.cog` wakes an actor; the same write
                 // puts a script-disabled actor back into the AI (`sithCogFunctionAI.c`). The bit is
