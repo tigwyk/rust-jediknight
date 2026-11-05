@@ -5572,3 +5572,15 @@ retail-vs-port health comparison has no port-side number -- which is what the it
 So the port's body is on a different, steeper surface than retail's at the same x, not merely walking it too fast. The
 next probe is the surface at the body's own xy every second (plane and face), which is what would say whether the body
 is on the ramp's top skin, its underside, or a trim polygon.
+
+### Round 395: the cosine does reach the step; the leg ends at a stop, not a distance
+
+With the cosine applied, the trace prints `slope: cos 0.707 target [0.0, 2.4]` and the move's own `left` is 0.0222 per
+frame (1.33 u/s). The capture still ends at 6.5075 -- because that is where the body **stops** (against a solid), not a
+distance limit: both builds arrive and wait.
+
+So the ratio the fixture reports (3.81 against 1.56) is a *rate* comparison that only shows while both are still moving,
+and the port arrives early. Getting the rate right needs the engine's own unit relation first: the walk target is 2.4 while
+the body's measured speed is 0.77, a factor of ~3.1 (`MODEL_SCALE`), and a cosine applied to the target does not move the
+measured speed the way that factor predicts. That arithmetic is the next thing to pin down, before any further change to
+this leg.
