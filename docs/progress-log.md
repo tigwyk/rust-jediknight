@@ -5607,3 +5607,22 @@ The other half of level 11 is the **shut leaf's own faces**: sector 9 (the doorw
 opening and the leaf's space. The sweep now tests a shut neighbour's faces as walls, clipped to the opening's mouth
 (projected onto its own plane), which stops the body at the leaf -- `a_shut_opening_leaf_blocks_the_body_through_its_own_faces`
 covers it. Trace gate **10/10**, `--walk all` 24/34 unchanged, **265 tests**.
+
+### Round 397: solid things stay circles -- the bounds **box** wins the leaves and loses level 17
+
+The remaining stop divergence (`walk_switch` 0.185 short of retail's -3.67) is the cantina leaf: the walker's thing
+model is a circle of `min(size, plan)`, and the leaf's model is ~0.025 thick, so the body stops a body radius early.
+Tried the model's **bounds box** (rotated by the thing's yaw) for the sweep, for every thing and then only for the
+`4x4door`/`4x4elev` templates:
+
+| leg | circle | box (door slabs) | retail |
+|---|---|---|---|
+| walk_switch | -3.485 | **-3.665** | -3.67 |
+| walk11_spawn | 13.1955 | 13.1955 | 13.2 |
+| walk17_spawn | 0.70 (pass) | **0.00** | 0.70 |
+
+The box is exactly right for the leaves and drops `walk17_spawn` to zero travel: the body is blocked at its own spawn,
+so a door leaf's box is either misplaced or far wider than the leaf there. Radial-only recovery and door-only slabs did
+not change that, and the cause was not found in the time available. Reverted; the sweep stays a circle. The next attempt
+should print the leaf box at 17bsarris' spawn with its `thing.yaw` and compare it against the door's surfaces before
+touching the sweep.
