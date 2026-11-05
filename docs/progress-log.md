@@ -5697,3 +5697,22 @@ Weapons (`type=3`) are now destroyed on that contact, the way `sithThing_Update`
 path-movers keep the old stop-and-`blocked` behaviour. `a_projectile_dies_on_the_surface_it_hits` is the regression test
 and it fails on the old code ("the bolt froze on the wall: [-5.02, 0.0, 0.0]" -- the push-out carried it through the
 room). Gates unchanged: **267 tests**, `--gates` 0 of 67, trace gate 10/10.
+
+
+### Round 402: which actor should hit the body, and why none does
+
+With projectiles dying correctly the fight is now measurable actor by actor (`BK_AI_ROSTER` prints the roster once;
+`BK_AI_TRACE` prints acquisition):
+
+```
+roster: 154 `reeyeesgun` d 0.34 cone false los true yaw -15 bearing 92 off 107 ai yes
+roster: 155 `reeyeesgun` d 1.33 cone true  los true yaw -45 bearing 43 off  88 ai yes
+ai: 155 flags 0x233 cleared false target Some([1.40, 9.70, 6.32])
+ai: 154 flags 0x4   cleared false target None
+```
+
+Two things follow. **Actor 154 stands 0.34 units from the body** with a clear line and never acquires: the port's
+`LookForTarget` only remembers a body that is inside the actor's FOV *cone*, and nothing turns an actor toward a body it
+has not already remembered -- so an actor that happens to face away stands still for the whole capture. And the actors
+that *do* acquire (155/157) fire into the wall 0.37 from the body: their `+elaser` is stopped by a sector plane at
+x ~1.13 (sector 210), i.e. the port's LOS check and its projectile resolver disagree about the same doorway.
