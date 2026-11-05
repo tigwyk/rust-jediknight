@@ -85,7 +85,10 @@ walk15_spawn	16aEscapeShip	0.00	4.19	-3.047	0	0	1000
 # walk17_spawn: debug entry 17.
 walk17_spawn	18Ascend	3.24	-9.21	-8.137	0	0	1000
 #
-# walk18_spawn: debug entry 18.
+# walk18_spawn: debug entry 18. **Unusable leg, kept as a record**: retail's own trace travels 0.88 units and
+# then reads sector 0 for the rest of the hold (the capture walked the body out of the map), and the port
+# reports no floor under the pose (`--floor-at -0.35,-2.15,0.083` -> sector 723, floor_under None) and is
+# blocked within 0.3 units from every heading probed. The preflight fails it, which is loud on purpose.
 walk18_spawn	19A.jkl	-0.35	-2.15	0.083	0	0	1000
 #
 # walk19_spawn: debug entry 19.
