@@ -5294,6 +5294,7 @@ Two restore variants were built and measured:
 |---|---|---|---|---|
 | restore whenever the step did not cross | 18/34 | 12 | 31 | panics (`m_boss17` leaves its sector) |
 | restore only when the resolver's sector does not adjoin | 20/34 | 19 | 40 | panics (`m_boss17`) |
+| restore only when non-adjacent **and** the centre probe | 18/34 | 17 | 40 | panics (`m_boss17`) |
 | baseline | 24/34 | 25 | 46 | passes |
 
 Both are worse because `inside_sector` on the **feet** point is strict at exactly 0.0, so a body standing on a floor is
