@@ -5670,3 +5670,16 @@ timer: kyle.cog id 2 -> Ok(Nil)
 ```
 
 Gates: **266 tests**, `--gates` **0 of 67 failed**, trace gate **10/10**, `--walk all` 24/34.
+
+
+### Round 400: the door capture fires, and every bolt is lost
+
+With the freeze gone the encounter runs: `ai: 3 shot(s) at the player` and then one per cadence, from actors 151/155/157
+at 1.3-3.4 units, aimed through the port's own `sithActor_UpdateAimJoints` path (yaw snapped to the bearing, elevation
+included) -- and **none of them lands** (`hit: the player took` never prints, health stays 100). Retail's reference at the
+same pose loses 100 -> 44.
+
+So the open question is now the line of fire, not the AI: the body is warped onto the doorway (the level's `00_door.cog`
+leaf sits at 1.20, 9.65, 6.35 and the pose is 1.40, 9.70, 6.36), and a bolt that crosses a shut leaf's sector, a wall
+surface or a solid thing is being destroyed without a trace. Next step: log every bolt's death (world impact, thing hit,
+blast) under `BK_FIRE_TRACE` and check the first shot's flight against the actor's line to the body.
