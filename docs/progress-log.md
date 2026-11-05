@@ -4946,3 +4946,26 @@ installer and the installed tree are measured working.
 
 Verified: the build above under `powershell` (previously failed) and under `pwsh` (already worked); `cargo test --release`
 262 passed.
+
+### Round 359 (verification pass): level 2's lip and landing, probed
+
+The round-308/311 seam was re-probed against the fresh fixture with the headless tools rather than reasoned from
+the notes, and the two defects separate cleanly:
+
+- **The lip has a real floor.** `--floor-at 10.447,-13.727,3.065` reports `body sector 22`, `surface 200 owner 22
+  floor 3.0000 travelled 0.0000`, `floor_under -> Some((3.0, 0.0, 22))`, `standable -> Some((22, 3.0, 0.0))` — the
+  body stands on a genuine face, so the *block* at the lip is the step predicate's containment test (the sweep
+  adopts the 0.024-deep sliver 23), not a missing floor.
+- **The landing floor exists in the data.** `--floor-at 10.02,-14.69,1.92` (retail's last sample) reports
+  `surface 388 owner 39 floor 1.8000` and `surface 390 owner 39 floor 1.8000`, `floor_under -> Some((1.8, 0.055, 39))`
+  — retail's 1.8 floor is in the level. So the port's miss is the downward chain from the lip (via 23/33), as round
+  311 concluded, not absent geometry.
+
+`git log`: the level-2 fixture (`tools/parity/walktrace/walk2_spawn-walk.tsv`) is committed, the stale yaw -99.98
+row is gone, and `trace-gate.ps1` names the leg with its measured numbers while keeping it out of the default set;
+default gate **10 legs, 0 failures** re-run this round. Suite **262 passed**, `--gates --all` **0 of 67 failed, 2
+skipped**, `--walk all` **24/34 contained, 25 hull-agreeing, 46 crossings, 6 void, worst contained drop 3.35**.
+
+`walk18_spawn` is recorded as an unusable leg: `--floor-at -0.35,-2.15,0.083` finds sector 723 with
+`floor_under -> None`, every heading probed blocks within 0.3 units, and retail's own trace reads sector 0 for the
+last 2.4 s of its hold (it walked out of the map).
