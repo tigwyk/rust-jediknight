@@ -4933,11 +4933,16 @@ recognized` on this machine (that install's `Microsoft.PowerShell.Utility` is tr
 not). The line now hashes through `[System.Security.Cryptography.SHA256]` and a file stream, so both shells build the
 same artifact; the documented invocation builds end to end here (`28.6 MB`, `sha256 25a304d4…`).
 
-The silent-install smoke (`/S /GAMEPATH=… /DIR=…`) could not run in this environment: the setup reports `setup log
-unavailable: Access to the path '…' is denied` for every path it is given, including `%TEMP%` and the repo, and exits 1
-without copying anything. 32- and 64-bit shells started from the same session write those paths fine, so this is the
-agent shell's restriction on that process, not a setup defect — the Phase 4 clean-machine install check still needs a
-plain desktop session.
+**The silent install works; the earlier "denied" reading was the launch directory, not the setup.** Copied out of the
+repo (`C:\Users\Lee\AppData\Local\Temp\bk-setup-copy.exe`) the same binary runs `/S /GAMEPATH=… /DIR=…` to
+**exit 0** and installs `bevi-knight.exe`, `bevi-knight-uninstall.exe`, `smkdec.exe`, `game-path.txt`, `docs/`,
+`LICENSE`, `NOTICE` and `README.md`; the installed program reads its path from `game-path.txt` and loads
+`01narshadda.jkl`. Launched from `dist\bevi-knight-0.1.1-setup.exe` (or from a freshly created directory — a copy
+under `target\setup-g.exe` works, a copy under `dist\zz.exe` and one in a new `probe-dir\` do not) the process is
+denied *every* write, `%TEMP%` included, which a ten-line `csc` probe reproduces with no WinForms and no setup code in
+it: the denial follows the directory a process is launched from in this agent shell, and `target\`, `src\` and
+`tools\` copies of that probe write fine. So the Phase 4 clean-machine check still needs a plain desktop, but the
+installer and the installed tree are measured working.
 
 Verified: the build above under `powershell` (previously failed) and under `pwsh` (already worked); `cargo test --release`
 262 passed.

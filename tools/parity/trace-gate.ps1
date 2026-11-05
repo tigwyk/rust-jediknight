@@ -35,6 +35,11 @@ powershell -NoProfile -File tools/parity/trace-gate.ps1
 #    model at (-0.77,-3.60)" reading was wrong for the same reason; both halves stay open.
 #  * walk5_spawn: joined in round 125 (81 % with 2 of 6 sectors) once the model footprint replaced the
 #    template cylinder; the slab-ramp sector difference is within the gate's allowance.
+#  * walk2_spawn: added in the round-359 retail window; the fixture is retail's own trace of the
+#    quarter-turn pose (yaw -189.98, sectors 22 -> 39, travel 2.82) and the port blocks at the 0.2-high
+#    lip at (10.447,-13.727,3.065) after 1.78 units, so the leg fails on travel and on all six sector
+#    samples (port 29/36/23). The seam is the sector 22/23 sliver + the two-hop floor chain to sector 39
+#    (rounds 308/311), not the step predicate: it stays out of the default set until that is fixed.
 # Both legs stay runnable with -Only.
 # The default set is every leg the preflight **walks** among those with a committed retail trace. `walk_door0`,
 # `walk7_spawn`, `walk14_spawn`, `walk19_spawn` and `walk26_spawn` are retail script holds (their own capture
