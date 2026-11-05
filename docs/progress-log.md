@@ -5281,3 +5281,22 @@ That leaves `walk_switch`'s stop unexplained by doors: retail ends at -3.67 (sec
 -4.435 (sector 104), and the leg is named for the switch that opens this door -- so the likely blocker is the *switch
 panel* or a wall beside it, not the doorway itself. Next probe: `--surfaces-at`/`--near-things` on (-4.75, -3.67,
 -1.18) on 01narshadda.
+
+**`walk_switch`'s pass-through is a *sector jump*, and the engine's restore is not safe to apply as-is.** At retail's
+stop (-4.75, -3.67, -1.18) `--faces-at` puts the point inside sector 59 (clearance +0.03) and outside 104 (-0.13), and
+59's adjoins are [248, 262, 263] -- so the port's 59 -> 104 route is not a doorway at all: `walker_step`'s containment
+fallback adopts whatever sector `sector_at` returns. Decompiled `MoveThing` does the opposite: when
+`IsSphereInSector(position, 0, thing->sector)` fails it restores the saved position, direction and sector.
+
+Two restore variants were built and measured:
+
+| variant | kept inside | hull agree | crossings | gate |
+|---|---|---|---|---|
+| restore whenever the step did not cross | 18/34 | 12 | 31 | panics (`m_boss17` leaves its sector) |
+| restore only when the resolver's sector does not adjoin | 20/34 | 19 | 40 | panics (`m_boss17`) |
+| baseline | 24/34 | 25 | 46 | passes |
+
+Both are worse because `inside_sector` on the **feet** point is strict at exactly 0.0, so a body standing on a floor is
+"outside" every frame and a restore freezes it (`11gorc` walked 0.0 units in the first variant). The restore only
+becomes viable once that probe uses the engine's own centre query without regressing walk4/walk5/walk13 -- the code's
+`shortcut:` note already names that trade. Reverted; `--walk all` back at 24/34 and the 263 tests green.
