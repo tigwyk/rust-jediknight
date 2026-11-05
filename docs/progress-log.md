@@ -4998,3 +4998,17 @@ camera for the whole 4 s window while retail's own trace walks within 600 ms. Wh
 as early as retail's is the open question, and it is one root cause behind three legs, so it is the next thing to
 look at rather than ten separate collision questions. `walk27`'s short travel and `walk_switch`/`walk8`/`walk15`/
 `walk22`'s over-travel are separate.
+
+**The three zero-travel legs are a harness asymmetry, not collision.** `BK_CAMERA_TRACE` on `11gorc` shows the
+level's opening script camera holding slot 0 with a focus thing from the first frame, and the focus clearing at
+**sim 13.12 s** (`state Some((true, 0, None, 13.118))`); the walker zeroes the held-forward input while the camera
+has a non-player focus, so a 1 s settle + 3 s hold never reaches a free body. Retail's own capture reaches the level
+**after skipping its opening**, which is why its trace walks from its 600 ms sample. The legs are therefore not
+comparable as captured: they need either a matching skip on the port side or a settle long enough for both sides
+(re-capturing retail at the same 13 s+ settle). `walk20_spawn` and `walk23_spawn` show the same shape.
+
+**Phase 1 step 4, the door row, measured in both builds.** `retail-capture.ps1 -Shots walk-shots.tsv -Only walk_door0
+-Keys ENTER -ConsoleCommands 'cogstatus 0'` (17:53 run) reads retail's cog 0 after the use: `doorstatus 0`,
+`movestatus 0`; the port at the same pose (`BK_USE=1 --cogstatus-after 0 --frames 90`) prints `use: nothing linked
+within reach`. Both agree the row pose is not a trigger at the engine's `moveSize + 0.1` reach — the row proves the
+reach, not a door opening.
