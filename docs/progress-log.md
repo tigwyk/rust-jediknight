@@ -5039,3 +5039,16 @@ Conclusion for the next attempt: the seam is not only the landing chain — rela
 leg by giving back containment elsewhere. A correct fix has to keep `inside` strict and make the *lifted* point
 contained where the engine says it should be (a riser's own tread), or move the containment verdict fully to the
 caller's post-move re-test with the sector re-resolution corrected.
+
+### Round 359 (fourth part): the three stuck legs are a scripted-opening divergence
+
+`BK_WALK_HOLD_AFTER=13000` (past the opening camera's 13.12 s) does free the port's body on `11gorc`: it walks
+**5.80 units** from the warp pose where it walked 0.00 with the 1 s settle. Capturing retail on the same footing
+(`retail-capture.ps1 -WalkTraceSettleMs 13000 -Only walk11_spawn`) then shows why they still cannot be compared:
+retail's own `coords` at the settle's end read **Pos (-0.15, 9.00, -1.75) sector 11**, i.e. the level's opening
+**moved the body 3.4 units** from the row pose, and it then walks only 0.59 from there; the port's body is still at
+the warp pose (-0.17, 12.38, -0.23). So `11gorc`/`20aboc.jkl`/`17bsarris.jkl` are not "port blocks" legs at all —
+the level start itself diverges (a script places the player in retail and the port's warp outlives it). That is a
+separate finding from the walk code, and the three legs stay out of any comparison until the opening is run the same
+way on both sides. The captured retail trace stays in `target/parity/trace` (not committed: it starts from a
+different pose than the row).
