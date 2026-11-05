@@ -5352,3 +5352,22 @@ level's starting sector/adjoin flags for the harness (the `--endlevel` gate alre
 machinery exists), and geometry for the *open* leaf -- retail's stop sits on a leaf candidate at (-4.43, -3.70, -0.93)
 where the port has no solid, because the leaf thing never moves in its own sector box. Neither is a stat/flag tweak;
 both are the moving-door model, which is why round 376's sweep variants could not close it.
+
+### Round 381: the walk harness can now walk a level's own startup state
+
+`--walk all` walked bare geometry (`Gates::default`), so no door script had run and every doorway was open. The
+harness now boots the level's placed scripts headlessly (`BK_WALK_GATES=1`: `Runtime::handle`, `wire_links`, run each
+cog's `startup`), and passes the resulting sector/adjoin flags into `walk_level`. `BK_WALK_AT="x,y,z,yaw"` starts a leg
+at a recorded pose, so a retail leg can be measured headlessly.
+
+Measured:
+
+- Level 1's startup switches **7 sector flag words** and leaves **5 openings without `MOVE`** -- the door scripts do
+  close their sectors, and `00_door.cog`'s `startup` is where.
+- The synthetic `--walk all` table does **not change**: 0 of 34 rows differ with gates on. The spawn-yaw walk never
+  crosses a door, so the harness's own rows were never talking about doors, and the door legs cannot be fixed there.
+- `walk_switch`'s pose under the harness moves 0.4 units where the capture moves 1.48: the harness steps at
+  `rules.walk` from the first frame, while the capture ramps acceleration and settles. So the leg's 206 % ratio is a
+  capture-path measurement, and comparing it needs the capture, not `--walk`.
+
+264 tests green, `--walk all` unchanged at 24/34.

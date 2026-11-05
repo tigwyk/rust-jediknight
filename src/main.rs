@@ -11408,7 +11408,7 @@ fn main() {
             let (mut best, mut any_fall, mut sum, mut runs, mut undone) = (0.0f32, false, 0.0f32, 0usize, 0usize);
             for heading in 0..HEADINGS {
                 let turn = heading as f32 * std::f32::consts::TAU / HEADINGS as f32;
-                let Some(r) = walk_level(&level, 180, true, turn, None, false) else { continue };
+                let Some(r) = walk_level(&level, 180, true, turn, None, collide::Gates::default(), false) else { continue };
                 runs += 1;
                 sum += r.travelled;
                 best = best.max(r.travelled);
@@ -11457,7 +11457,7 @@ fn main() {
                 // `--warp` with `--walk` preflights one walk-trace leg: does the body actually move
                 // forward from that pose, or is the route a wall? (The QA window's walk capture is only
                 // worth running on a leg that passes this.)
-                match walk_level(&world.level, frames, false, 0.0, warp, true) {
+                match walk_level(&world.level, frames, false, 0.0, warp, collide::Gates::default(), true) {
                     Some(result) => println!(
                         "walk: travelled {:.2} units, {} blocked frame(s), {} sector transition(s), contained {}, hull {}",
                         result.travelled,
@@ -15725,6 +15725,10 @@ fn walk_level(
     quiet: bool,
     turn: f32,
     start_at: Option<([f32; 3], f32)>,
+    // What the level's own `startup` scripts switched. Empty is the bare-geometry walk; a level's
+    // door scripts close their sector here (`00_door.cog`: `SectorAdjoins(doorsector, 0)`), which is
+    // the state retail's captures were taken in.
+    gates: collide::Gates<'_>,
     // Whether the check runs the level's gravity. `--walk all` does: its question is whether the body
     // stays in the world, and retail's own trace descends a ramp. `--move` does not: its question is
     // whether the body wedges or walks out sideways, which a flat sweep answers without the walk-offs.
@@ -15819,7 +15823,7 @@ fn walk_level(
         };
         let (moved, crossed, _landed) = walker_step(
             &solids,
-            collide::Gates::default(),
+            gates,
             &mut sector,
             &mut pos,
             &mut walk_fall,
@@ -16043,6 +16047,50 @@ fn ends_check(gobs: &gob::GobSet) {
 }
 /// `--walk all`: the same walk on every level, to see whether collision holds in the
 /// whole install rather than in one hand-picked room.
+/// Run a level's placed scripts far enough for their `startup` handlers, so the walk sees the
+/// sector/adjoin flags the level opens with -- the state retail's captures were taken in.
+fn boot_level_scripts(level: &jkl::Level, gobs: &gob::GobSet) -> runtime::World {
+    let sim = runtime::Runtime::handle(level);
+    let mut cogs: HashMap<String, cog::Cog> = HashMap::new();
+    for inst in &level.cogs {
+        if cogs.contains_key(&inst.script) {
+            continue;
+        }
+        if let Some(raw) = gobs.read(&inst.script) {
+            if let Ok(script) = cog::parse(&String::from_utf8_lossy(&raw)) {
+                cogs.insert(inst.script.clone(), script);
+            }
+        }
+    }
+    sim.borrow_mut().wire_links(&level.cogs, &cogs);
+    let before = sim.borrow().sector_flags.clone();
+    for (index, inst) in level.cogs.iter().enumerate() {
+        let Some(script) = cogs.get(&inst.script) else { continue };
+        let mut vm = cog::Vm::with_world(sim.clone());
+        vm.cog_index = index as i32;
+        script.bind(&mut vm, &inst.values);
+        if script.label("startup").is_some() {
+            let _ = vm.run_label(script, "startup");
+        }
+    }
+    {
+        let rt = sim.borrow();
+        let closed = rt
+            .sector_flags
+            .iter()
+            .zip(&before)
+            .filter(|(now, was)| **now != **was)
+            .count();
+        let moves = rt
+            .adjoin_flags
+            .iter()
+            .filter(|f| **f & collide::ADJOIN_MOVE == 0)
+            .count();
+        println!("  gates: {closed} sector flag word(s) switched, {moves} opening(s) without MOVE");
+    }
+    sim
+}
+
 fn walk_all(gobs: &gob::GobSet, frames: u32) {
     let levels: Vec<String> =
         gobs.names().into_iter().filter(|n| n.ends_with(".jkl")).collect();
@@ -16065,13 +16113,28 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     let mut stray: Vec<String> = Vec::new();
     // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
     let only = std::env::var("BK_WALK_ONLY").ok();
+    // `BK_WALK_AT="x,y,z,yaw"`: start the body at a recorded pose (the eye convention the retail walk
+    // legs use) instead of the level's own start, so a leg can be measured headlessly.
+    let at = std::env::var("BK_WALK_AT").ok().and_then(|v| {
+        let n: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+        (n.len() == 4).then(|| ([n[0], n[1], n[2]], n[3]))
+    });
     for name in &levels {
         if only.as_ref().is_some_and(|only| !name.contains(only.as_str())) {
             continue;
         }
         let Some(raw) = gobs.read(name) else { continue };
         let level = jkl::parse(&String::from_utf8_lossy(&raw));
-        match walk_level(&level, frames, true, 0.0, None, true) {
+        // `BK_WALK_GATES=1`: run the level's own `startup` scripts first and walk with what they
+        // switched. Without it every doorway is open, so a leg that ends at a shut door cannot be
+        // compared at all (`walk_switch` ran 1.49 units through one).
+        let booted = std::env::var_os("BK_WALK_GATES")
+            .is_some_and(|v| !v.is_empty())
+            .then(|| boot_level_scripts(&level, gobs));
+        // Held for the walk: `Gates` borrows the runtime's flag words.
+        let gate_guard = booted.as_ref().map(|sim| sim.borrow());
+        let gates = gate_guard.as_ref().map(|rt| rt.gates()).unwrap_or_default();
+        match walk_level(&level, frames, true, 0.0, at, gates, true) {
             Some(r) => {
                 transitions += r.transitions;
                 kept += r.contained as usize;
