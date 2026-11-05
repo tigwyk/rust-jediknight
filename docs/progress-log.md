@@ -5159,3 +5159,11 @@ openings the move reaches does add 9 through 14's own portal, but the "skip a ne
 overlaps" guard then drops it, because by that point the body is inside the radius it must be stopped by. The fix has
 to reach sector 9 while the body is still in 15, i.e. collect the rooms before the crossing plane, and then not skip
 the face that a crossing would land in.
+
+**The two-hop reach is the right idea and the wrong landing (yet).** Pointing a far room's portal normal at the body
+before testing it (otherwise every second hop looks behind the body and never counts) lets the sweep collect sector 9
+while the body is still in 15. The level-11 row then reads **0.9 units, 580 blocked frames, contained, hull agrees** --
+retail's 0.83 -- and `--walk all` goes 24 -> 26 levels kept inside, crossings 46 -> 43, 263 tests green. But the gate
+then panics: `08escape88` drops 2.92 **and** leaves its sector, which the sweep assertion forbids. Both runs are in
+this round's history; the change is not landed. Next: find why the widened contact lets the 08escape88 body leave its
+sector (a neighbour face blocks mid-doorway, so the slide/containment pair ends in the void) before widening again.
