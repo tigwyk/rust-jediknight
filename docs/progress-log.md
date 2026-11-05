@@ -5093,8 +5093,12 @@ Measured on the three legs that never moved before (1 s settle, committed retail
 | walk20_spawn | 0.00 | **4.63** | 4.20 |
 | walk23_spawn | 0.00 | **5.81** | 4.00 |
 
-They walk in retail's direction now but over-travel, because the script's **input-lock timing** is still not
-modelled: retail holds the body ~1.8 s at `walk11_spawn` and then moves only 0.83 units, while the port walks from
+A full re-sweep of all 20 walkable legs after the change: **11 pass, 9 fail** (was 10/10), and `walk27_spawn` is
+fixed outright (**3.94 / retail 3.24, 122 %, sectors off 0** where it was 56 % and 2.4 s of standing still). That
+leg had the same script-camera shape, which is why the frame fix reached it.
+
+The three named legs walk in retail's direction now but over-travel, because the script's **input-lock timing** is
+still not modelled: retail holds the body ~1.8 s at `walk11_spawn` and then moves only 0.83 units, while the port walks from
 the first settle frame. That timing is the next piece, and the legs stay out of the default set until it matches.
 The rest of the net is unchanged: suite **263 passed** (the new camera-yaw test), `--gates` **0 of 67 failed, 2
 skipped**, `--walk all` **24/34 contained, 25 hull, 46 crossings**, default trace gate **10 legs, 0 failures**.
