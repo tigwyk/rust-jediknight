@@ -16256,6 +16256,42 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
             path.reverse();
             println!("  hops {from} -> {to}: {} hop(s), path {path:?}", path.len().saturating_sub(1));
         }
+        // `BK_HOPS="a:b"`: how many portal hops separate two sectors, and the path. A door leaf's room
+        // is normally not the room the body walks through, and the number says what a bounded reach
+        // would have to cover (level 1's cantina leaf is two hops from the street it blocks).
+        if let Some((from, to)) = std::env::var("BK_HOPS").ok().and_then(|v| {
+            let (a, b) = v.split_once(':')?;
+            Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+        }) {
+            let solids = collide::build(&level);
+            let mut prev: HashMap<usize, usize> = HashMap::new();
+            let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            seen.insert(from);
+            queue.push_back(from);
+            while let Some(sector) = queue.pop_front() {
+                if sector == to {
+                    break;
+                }
+                for portal in solids.portals.get(sector).into_iter().flatten() {
+                    if seen.insert(portal.adjoin) {
+                        prev.insert(portal.adjoin, sector);
+                        queue.push_back(portal.adjoin);
+                    }
+                }
+            }
+            let mut path = vec![to];
+            let mut step = to;
+            while let Some(&p) = prev.get(&step) {
+                path.push(p);
+                step = p;
+                if p == from {
+                    break;
+                }
+            }
+            path.reverse();
+            println!("  hops {from} -> {to}: {} hop(s), path {path:?}", path.len().saturating_sub(1));
+        }
         // `BK_WALK_GATES=1`: run the level's own `startup` scripts first and walk with what they
         // switched. Without it every doorway is open, so a leg that ends at a shut door cannot be
         // compared at all (`walk_switch` ran 1.49 units through one).

@@ -5419,3 +5419,25 @@ re-measured at their previous travels, 265 tests green.
 
 Regression test: `a_body_walks_into_an_overlapped_solid_thing_and_is_stopped` (two-hop reach + zero-travel contact +
 walking out of an overlap left free).
+
+### Round 384: solid things as boxes -- measured against the whole gate, reverted
+
+The leaf's remaining 0.185 units are its collision *shape*: the port uses one cylinder (`min(size, model plan)`
+= 0.200) where the engine collides with the leaf's own surface (half-thickness ~0.02, which is what retail's stop at
+-3.67 matches). A box per thing was built and measured.
+
+| variant | trace gate | walk5 | walk17 |
+|---|---|---|---|
+| cylinder (landed) | 10/10 | 74 % | 117 % |
+| box, bounds centred on the model | **3 failures** | 39 % | 7 % |
+| box capped by the template radius | 3 failures | 39 % | 7 % |
+| + box kept on the thing's origin | 2 failures | 39 % | 7 % |
+| + corner contacts slide | 2 failures | 57 % | 7 % |
+
+`walk17` is the reason: `18Ascend` spawns the body **between two `4x4door` leaves** (0.2 x 0.02 each, 0.37 apart), and
+a box pair leaves no gap for a 0.065 body -- the cylinder pair only "worked" because an overlap was skipped outright.
+`walk5` is the same class in a milder form (57 % against 74 %).
+
+So a boxed body needs the *door state* (the leaves move, and retail's spawn has them out of the way) before it can be
+right; that is the moving-door item, not a shape tweak. Reverted; 265 tests, the trace gate at 10/10 and `--walk all`
+at 24/34 are unchanged, and `BK_HOPS="a:b"` is kept as the probe that showed the cantina leaf is two hops out.
