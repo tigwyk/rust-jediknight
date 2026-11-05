@@ -5441,3 +5441,15 @@ a box pair leaves no gap for a 0.065 body -- the cylinder pair only "worked" bec
 So a boxed body needs the *door state* (the leaves move, and retail's spawn has them out of the way) before it can be
 right; that is the moving-door item, not a shape tweak. Reverted; 265 tests, the trace gate at 10/10 and `--walk all`
 at 24/34 are unchanged, and `BK_HOPS="a:b"` is kept as the probe that showed the cantina leaf is two hops out.
+
+### Round 385: the doorway advance is clamped by solids
+
+The crossing advance runs a radius past the doorway plane and is not a wall test, so a leaf standing *in* the opening
+was stepped over and the body ended in the doorway's own sector (262), past the leaf it should stop at. The advance is
+now clamped by the first solid contact along it.
+
+`walk_switch`: ends at **(-4.75, -3.485, -1.235) in sector 59** -- retail ends at (-4.75, -3.67, -1.18) in **59**, so the
+sector agrees for the first time; travel 0.535 against retail's 0.72 (74 %). The remaining 0.16 is the leaf's shape
+(cylinder 0.200 vs a 0.02-thick panel), which round 384 measured as a regression elsewhere when boxed.
+
+265 tests, the trace gate 10/10 and `--walk all` 24/34 unchanged.

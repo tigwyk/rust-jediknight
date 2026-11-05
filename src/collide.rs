@@ -1443,6 +1443,19 @@ impl Solids {
                     dir = [slide[0] / mag, slide[1] / mag, slide[2] / mag];
                 }
                 (None, far, end) => {
+                    // A doorway's crossing advance runs past the plane by a radius, and that step is not
+                    // a wall test: a solid standing *in* the opening (level 1's cantina leaves, two
+                    // portal hops out) would be stepped over and the body would end up in the doorway's
+                    // own sector, past the leaf it should stop at. The advance is clamped by the first
+                    // solid contact along it.
+                    let advanced = ((end[0] - at[0]).powi(2) + (end[1] - at[1]).powi(2)).sqrt();
+                    if advanced > 1e-6
+                        && let Some((travel, _)) = self.sweep_things(at, dir, advanced, radius, far)
+                    {
+                        blocked = true;
+                        at = [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2] + dir[2] * travel];
+                        break;
+                    }
                     // `sweep_rooms` reports its end point in plan and drops the vertical part; a slide
                     // along a ramp carries the body up, so the height is restored here — only on this
                     // path, because the vertical probes rely on the plan-only end.
