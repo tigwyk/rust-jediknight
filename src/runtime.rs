@@ -7465,12 +7465,6 @@ impl Runtime {
     /// twins, which is what the user's note describes), and that is exactly how the view system poses
     /// it. `None` when no scripted camera with a non-player focus is current, which is the normal
     /// case: the view and the body share a yaw then.
-    pub fn script_camera_yaw(&self) -> Option<f32> {
-        let focus = self.camera_focus_thing()?;
-        // `thing.yaw` is degrees, like every other placed angle; the walk basis is radians.
-        self.things.get(focus).map(|thing| thing.yaw.to_radians())
-    }
-
     /// Whether the player's saber should be drawn: armed by `jkSetSaberInfo` **and** not switched
     /// off by `jkDisableSaber`, which the saber scripts call when the blade goes away.
     pub fn saber_shown(&self, player: usize) -> bool {
@@ -9719,30 +9713,6 @@ mod tests {
         rt.things[0].flags = 0x80000;
         assert!(rt.sector_messages(None, Some(0), Some(0)).is_empty());
         assert_eq!(rt.sector_messages(None, Some(0), None), vec![(0, "entered", 1)]);
-    }
-
-    /// A script camera's view yaw: the **movement frame** while one is current. The camera of a
-    /// scripted shot is the focus thing itself, aimed by its own `yaw` (degrees), exactly as the view
-    /// system poses it — level 11's drone is the shipped case.
-    #[test]
-    fn a_script_camera_reports_the_focus_things_yaw_and_nothing_without_a_focus() {
-        let mut rt = door_runtime();
-        rt.things.push(rt.things[0].clone());
-        rt.types = vec![0, 0];
-        rt.current_camera = 0;
-        rt.camera_focus = [Some(1), None, None, None, None, None, None];
-        rt.things[1].yaw = 90.0;
-        let quarter = rt.script_camera_yaw().expect("a focused script camera");
-        assert!((quarter - std::f32::consts::FRAC_PI_2).abs() < 1e-5, "{quarter}");
-        rt.things[1].yaw = 180.0;
-        let half = rt.script_camera_yaw().expect("a focused script camera");
-        assert!((half.abs() - std::f32::consts::PI).abs() < 1e-5, "{half}");
-        // A focus on the body is the player's own eyes, and no focus at all is the normal view: both
-        // answer `None`, which the walker reads as "use the body's own yaw".
-        rt.camera_focus = [Some(0), None, None, None, None, None, None];
-        assert_eq!(rt.script_camera_yaw(), None);
-        rt.camera_focus = [None; 7];
-        assert_eq!(rt.script_camera_yaw(), None);
     }
 
     /// `SetMapModeFlags`/`GetMapModeFlags`: `force_pull` writes the word and reads it back.

@@ -5584,3 +5584,20 @@ and the port arrives early. Getting the rate right needs the engine's own unit r
 the body's measured speed is 0.77, a factor of ~3.1 (`MODEL_SCALE`), and a cosine applied to the target does not move the
 measured speed the way that factor predicts. That arithmetic is the next thing to pin down, before any further change to
 this leg.
+
+### Round 396: the walk is built in the body's frame, and level 11 walks the right way
+
+`walk11_spawn`'s retail trace holds yaw 0 and walks **+y** into sector 15 while the opening camera plays. The port was
+building the walk in the *script camera's* frame, so it walked **-y**, into the level's shut door, and ended in sector 11
+-- the leg read as a 5.4-unit over-travel.
+
+Retail's own input path builds the thrust from the body's yaw; the script camera drives the view, not the walk. With the
+body frame restored (and the `script_camera_yaw` query deleted with its test -- no production caller left):
+
+| leg | before | after | retail |
+|---|---|---|---|
+| walk11_spawn | -y into sector **11** | (-0.20, **13.11**) sector **15** | (-0.04, 13.2) sector 15 -- **88 %** |
+| walk20_spawn | 3.55 (85 %) | 4.64 (**110 %**) | 4.20 |
+| walk23_spawn | 5.81 (145 %) | 5.89 (147 %) | 4.00 |
+
+Gates: trace gate **10/10**, `--walk all` 24/34, **264 tests** (the camera-yaw test went with the query it covered).

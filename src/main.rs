@@ -26670,18 +26670,12 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // path, and the thrust it builds is in the view's frame. `walk11_spawn-walk.tsv` is the fixture —
     // retail's body travels 3.4 units and turns to 177.56 while the opening camera plays, from the
     // same pose where the port used to stand still. Only the *frame* changes; the inputs stay.
-    let (forward, strafe, basis_yaw) = if sim.as_deref().is_some_and(|sim| {
-        let rt = sim.world.borrow();
-        rt.script_camera && rt.camera_focus_thing().is_some()
-    }) {
-        let basis = sim
-            .as_deref()
-            .and_then(|sim| sim.world.borrow().script_camera_yaw())
-            .unwrap_or(player.yaw);
-        (forward, strafe, basis)
-    } else {
-        (forward, strafe, player.yaw)
-    };
+    // The walk is built in the **body's** frame, not the script camera's: `walk11_spawn`'s retail trace
+    // keeps yaw 0 and walks straight +y while the opening camera plays, and the camera basis sent the
+    // port -y instead -- into the level's shut door, the wrong sector. The script camera still drives
+    // the view; it does not steer the walk. (Retail's own input path reads the controls on every path
+    // and builds the thrust from the body's yaw.)
+    let basis_yaw = player.yaw;
     let [along, across] = player.rules.speed(forward, strafe, run, crouch, player.water);
     // A force-speed term adds to `maxThrust` in the engine, so it scales both axes.
     let force = if player.extra_speed > 0.0 {
