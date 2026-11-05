@@ -5232,3 +5232,10 @@ the same place and slips past what retail is stopped by.
 A door-leaf classifier was prototyped (`--door-leaves`: a sector whose plane points fill an opening's cross-section) and
 dropped: with a real point-in-polygon test it flags 2249 of 18180 openings, and it **misses** level 11's own leaf
 (sector 9 in the 15/14 doorway) under the "fills 80 % of the opening" rule. Not a safe key for a load-time block yet.
+
+**walk8's stop sits beside two door models.** `BK_NEAR_THINGS` at retail's stop (51.88, 62.97, 34.64) lists
+`07door5x4` cog-things at (52.30, 63.27, 34.70) and (53.00, 63.27, 34.70), 0.6-0.7 away, plus `table07a/b`. The port's
+`--move-at` walks a body straight through that spot (`52.32, 62.97, 34.64` +y crosses the doorway at 63.27 and ends at
+63.49), so whatever holds retail there is not in the walker's solid list. Also measured: retail's z at the stop (34.64)
+is 0.14 above the 34.50 floor -- it is *not* standing; the value is what a body held mid-step by a contact looks like,
+so the earlier "retail stands on a 0.075 higher floor" reading was wrong.
