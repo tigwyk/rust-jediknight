@@ -5052,3 +5052,23 @@ the level start itself diverges (a script places the player in retail and the po
 separate finding from the walk code, and the three legs stay out of any comparison until the opening is run the same
 way on both sides. The captured retail trace stays in `target/parity/trace` (not committed: it starts from a
 different pose than the row).
+
+### Round 360: level 11's opening, read from the trace and the script
+
+The three zero-walk legs are now explained by the **level start**, not the walker:
+
+- `11_endlevel.cog` (extracted with `--raw cog\11_endlevel.cog`) takes the player over at `startup`:
+  `SetActorFlags(player, 0xa00000)`, `SetCurrentCamera(0)`, `SetCameraFocus(0, camera1)`,
+  `playkey(camera1, campath, 1, 4)`, and hands back with `ClearActorFlags(player, 0xa00000)` +
+  `SetCurrentCamera(0)`. That is the camera the port's `BK_CAMERA_TRACE` shows on focus thing 13 until sim 13.12 s.
+- Retail's own trace of the same warp **does not hold the body**: sample 0 is the row pose
+  (-0.17,12.38,-0.23) sector 19, and by 600 ms the body is at (0.15,11.05,-1.79) sector 11 with yaw 140.34,
+  settling at (-0.15,9.00,-1.75) yaw 177.56 — 3.4 units of travel and 1.6 of fall while the camera plays. The
+  port's body stays at the warp point for the whole 13 s.
+- The port's floor at that pose is real geometry (`--floor-at -0.168011,12.3775,-0.129849` -> surfaces 191/217/224 at
+  **-0.3500**, `floor_under Some((-0.350004, 0.155, 15))`), and the body rests on it at -0.285. Retail passes that
+  height on its way to -1.79, so the two builds disagree about the floor *and* about who moves the body during the
+  scripted opening. Both need settling before `walk11_spawn`/`walk20_spawn`/`walk23_spawn` measure anything.
+
+Also measured this round: no shipped script calls `setthingpos`/`movething` on the player (the only hit is
+`ctf_main.cog`, multiplayer), so the retail motion is either the actor-flag path or physics, not a scripted teleport.
