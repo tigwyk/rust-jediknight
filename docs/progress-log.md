@@ -5776,3 +5776,12 @@ retail's ~56 lost by the same instant (its sidecar reads one bar; the port soaks
 shields settle at 13 and the body survives, so the door series no longer ends with an untouched player. `sees`'s test
 grew a coned class for the cone assertions and keeps the all-round case. Gates: **267 tests**, `--gates` 0 of 67,
 trace gate 10/10.
+
+
+### Round 406: the door series' rate
+
+`BK_AI_TRACE`'s bolt line now carries the clock and the owner, so the rate is countable: over the 10 s door capture
+**17 distinct `+elaser`s** come within two units of the body (154: 9, 236: 5, 155: 2, 244: 1) at 12 damage each, and
+~10 of them land -- the measured 100 shield + 17 health. Retail's own door series reads ~56 lost by the same instant,
+so the port is now in the right order rather than untouched; whether the retail bar is shields or health is the next
+thing its sidecar has to say.

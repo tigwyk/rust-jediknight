@@ -23665,8 +23665,12 @@ fn projectile_hits(
             if flat < 2.0 {
                 let name = rt.templates.get(shot).cloned().unwrap_or_default();
                 eprintln!(
-                    "ai: shot {shot} `{name}` flat {flat:.2} dz {dz:.2} vel {:?} pos {:?} body {:?}",
-                    thing.vel, thing.pos, body.0
+                    "ai: shot {shot} `{name}` at {:.2}s owner {:?} flat {flat:.2} dz {dz:.2} vel {:?} pos {:?} body {:?}",
+                    time.elapsed_secs(),
+                    thing.owner,
+                    thing.vel,
+                    thing.pos,
+                    body.0
                 );
             }
         }
