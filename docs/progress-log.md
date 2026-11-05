@@ -5637,13 +5637,14 @@ hit: 11 ignored -- player thing 0 is invulnerable (flags 0x8)
 hit: the player took 11, 100 shield(s) and 100 health left owner Some(155)
 ```
 
-`Flags 0x8` is `SITH_AF_INVULNERABLE`, and `SetActorFlags(player, 0x8)` is the **level-end chain's freeze** (`01_goal0.cog`
-sets it before its sleep; the `--endlevel` gate asserts that pair). Something runs that chain during the capture --
-the trace names the caller as cog indices 145+ in the runtime's cog list, which is not the level's 42 placed instances,
-so the freeze is coming from a global cog the level-end sequence drives. Retail's own door series loses 100 -> 44 health
-at the same pose, so retail is *not* frozen there.
+`Flags 0x8` is `SITH_AF_INVULNERABLE`. The level-end chain also uses that pair (`01_goal0.cog` sets it before its sleep;
+the `--endlevel` gate asserts both ends), but this capture never logs `jkEndLevel`, so it is not that chain: a shipped
+script sets the freeze and never clears it. The trace names the caller as cog indices 145+, which are not the level's 42
+placed instances, and the runtime's `cog_names` map (added with the probe) does not resolve them because the traced pass
+and the live fight build their VM lists separately. Retail's own door series loses 100 -> 44 health at the same pose, so
+retail is *not* frozen there.
 
 The capture therefore reports 0 damage by construction, not by an AI gap: the earlier "15 hits, 29 HP" figure was
-measured before something started arming the goal at this pose. Next step: name those cogs (the runtime's cog list has
-no name map alongside `caller_cog`) and find which level-1 trigger arms the goal chain during a warp capture, then stop
-the freeze from holding outside an actual end-level.
+measured before something started setting the freeze at this pose. Next step: name the script (the live app's VM list and
+the traced pass need one shared `cog_index -> script` map), then find why it never clears -- the shape is a cutscene's
+invulnerability, since level 1 opens with a film and the capture skips it.

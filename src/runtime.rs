@@ -1239,6 +1239,10 @@ pub struct Runtime {
     /// what `GetSenderID` answers in the receiver (`pCog->idx` in the engine's call). The VM sets it
     /// before each world verb, because only the VM knows which script is running.
     pub caller_cog: i32,
+    /// The script name behind each `cog_index`, so a trace can name the script that called a verb (the
+    /// level's own cog table only reaches the placed instances, while a started VM's index counts every
+    /// VM in start order).
+    pub cog_names: std::collections::BTreeMap<i32, String>,
     pub messages_sent: usize,
     pub sectors: Vec<SectorState>,
     /// Each sector's `SITH_SECTOR_*` word, as the level ships it and as `SetSectorFlags` and
@@ -1869,6 +1873,7 @@ impl Runtime {
             spawned_cogs: std::collections::BTreeSet::new(),
             messages: Vec::new(),
             caller_cog: -1,
+            cog_names: Default::default(),
             messages_sent: 0,
             template_angvel,
             template_vel: level
@@ -8323,8 +8328,12 @@ impl Runtime {
                 let mode = idx(1) as u32;
                 if mode & AF_INVULNERABLE != 0 && std::env::var_os("BK_HIT_TRACE").is_some() {
                     eprintln!(
-                        "hit: SetActorFlags({actor}, {mode:#x}) made the player invulnerable (cog {})",
-                        self.caller_cog
+                        "hit: SetActorFlags({actor}, {mode:#x}) made the player invulnerable (cog {} {})",
+                        self.caller_cog,
+                        self.cog_names
+                            .get(&self.caller_cog)
+                            .map(String::as_str)
+                            .unwrap_or("?")
                     );
                 }
                 *self.actor_flags.entry(actor).or_insert(0) |= mode;

@@ -15213,6 +15213,12 @@ fn run_level(
         // `GetSelfCog` answers the instance's index in the level's cog list, the same number the
         // engine's `pCog->idx` holds: scripts compare it against sender refs and the master cog.
         vm.cog_index = vms.len() as i32;
+        // Name the VM for traces: `Vm::cog_index` is the engine's `pCog->idx`, and the level's cog table
+        // only reaches the *placed* instances, while a cog started from script grows past it.
+        world
+            .borrow_mut()
+            .cog_names
+            .insert(vm.cog_index, inst.script.clone());
         script.bind(&mut vm, &inst.values);
         // Plenty of shipped scripts are purely event driven and declare no `startup`;
         // the engine simply has nothing to call at level load.
