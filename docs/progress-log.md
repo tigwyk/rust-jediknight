@@ -5526,3 +5526,15 @@ trace.
 The fix is in that gate: "no floor of its own" must mean *no face within the landing range*, not "no face within a unit".
 The level-5 regression the current reach guards against (a ledge plane 0.3 above a 0.1001 floor) needs the plane to be
 *below* the feet and within the fall, which the block already checks.
+
+### Round 391: the plane fallback cannot fire -- the body is *under* the plane
+
+Narrowing the gate to the landing range changes nothing (still 6.5075). The reason is the block's own condition: it
+requires the plane to be **below** the feet (`contact <= pos[2]`), and on this ramp the body is 0.3-0.4 *below* the
+walkable plane -- it has sunk into the geometry, where no landing or plane fallback applies. Retail's body at the same
+y is ~0.5 higher, resting on the plane.
+
+So the defect is earlier: the port's body can descend through the ramp's surface (the surface sweep at 0.07 range cannot
+see it, and the plane is only consulted when a face is absent). Fixing it means the vertical sweep must consider the
+sector's own floor **plane** as a candidate contact -- the way the engine's `FindFloor` sweeps surfaces but the body is
+then held by `sithCollision` against the sector -- not a gate on the fallback. Recorded as the next step.
