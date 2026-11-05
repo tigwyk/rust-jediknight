@@ -5021,3 +5021,21 @@ from 0.12 units — the harness holds/foregrounds a key and two clicks still lea
 input-bound. The chain itself is already covered headlessly by `--door` (use → `used` message → script →
 `setsectoradjoins`, with the solver's `passable` flipping), and the reach by the `use_reach` unit tests, so what a
 retail fixture would add is the *retail-side input*, not another assertion.
+
+### Round 359 (third part): the level-2 step seam measured, not guessed
+
+`BK_WALK_TRACE` on the leg separates the predicates: at the lip `clear true lands true advance true` and
+**`inside false`** — the step dies on the raised-point containment alone, in both the sweep's room and the body's
+own sector. That is the sliver 23 story, measured.
+
+A variant was tried and measured: test the swept **advance** as evidence that the step is a riser (the ordering
+`sithCollision_MoveThing` uses — it re-tests the hull *after* the move). It does let the body climb: level 2 walks
+**3.59 units with 0 blocked frames** (was 1.78 with 45), and `--gates` stays 0 of 67. It also costs containment on
+the sweep: **23/34 levels keep the walker inside its sector (was 24/34), 23 hull agreements (was 25)**, and
+`09fuelstation`'s walk-off grows 121.47 -> 134.13 (level 2's own grows 505.25 -> 507.35). The containment rule is
+doing real work on other levels, so the change was **reverted**; the endpoint is the recorded baseline again.
+
+Conclusion for the next attempt: the seam is not only the landing chain — relaxing the step's containment buys this
+leg by giving back containment elsewhere. A correct fix has to keep `inside` strict and make the *lifted* point
+contained where the engine says it should be (a riser's own tread), or move the containment verdict fully to the
+caller's post-move re-test with the sector re-resolution corrected.
