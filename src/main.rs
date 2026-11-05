@@ -16039,7 +16039,12 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     let mut void_names: Vec<String> = Vec::new();
     let mut worst_name = String::new();
     let mut worst_contained = true;
+    // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
+    let only = std::env::var("BK_WALK_ONLY").ok();
     for name in &levels {
+        if only.as_ref().is_some_and(|only| !name.contains(only.as_str())) {
+            continue;
+        }
         let Some(raw) = gobs.read(name) else { continue };
         let level = jkl::parse(&String::from_utf8_lossy(&raw));
         match walk_level(&level, frames, true, 0.0, None, true) {

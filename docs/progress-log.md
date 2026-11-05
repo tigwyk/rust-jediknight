@@ -5167,3 +5167,13 @@ retail's 0.83 -- and `--walk all` goes 24 -> 26 levels kept inside, crossings 46
 then panics: `08escape88` drops 2.92 **and** leaves its sector, which the sweep assertion forbids. Both runs are in
 this round's history; the change is not landed. Next: find why the widened contact lets the 08escape88 body leave its
 sector (a neighbour face blocks mid-doorway, so the slide/containment pair ends in the void) before widening again.
+
+**`08escape88` is a pre-existing containment failure, masked by `11gorc`'s fall.** Its `--walk all` row is identical in
+both builds (1.8 units, 557 blocked, 399->339, contained **NO**, drop 2.92). The gate's assertion is
+`assert!(worst_contained)` over the worst *non-void* drop, and with the two-hop reach `11gorc` stops at the door
+instead of falling 739 units, so `08escape88` becomes that worst and trips the assertion. So the assertion depends on
+another level being worse -- it says nothing about the others. Also: the synthetic `--walk all` walk is not the retail
+fixture. `walk8_spawn` starts at (52.83, 62.86, 34.457) and the port walks 0.09 units there before stopping, so the
+2.92 drop is the gate's own spawn-yaw walk off a ledge, not the compared leg.
+
+Harness: `BK_WALK_ONLY=<substring>` filters `--walk all` to one level, so its traces can be read alone.
