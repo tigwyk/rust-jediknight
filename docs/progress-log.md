@@ -5492,3 +5492,17 @@ Two models measured on the capture, both reverted:
 The trace says why it is not a simple slope question: the body is **ungrounded on 212 of 243 frames** while it climbs, so
 the walk is being carried by the vertical/step path and the air drag, not by the grounded walk integration. `walk15` needs
 its grounded state explained before any speed model can be judged against it.
+
+### Round 389: walk15's ramp is a plane, not a face -- the landing probe never sees it
+
+Measured, then reverted:
+
+- The ramp is found by the **plane** query (`floor_surface` -> surface 4227, a floor plane) but the body is ungrounded
+  on 212 of 243 frames, and the flat legs are grounded 221-235 of 243, so this is specific to the slope.
+- Widening the landing probe to the engine's own range (`sithPhysics_FindFloor`: `moveSize + 0.005`, the shipped
+  `0x523184` = -0.005) changes nothing: the capture still ends at 6.5075, so the landing path is not rejecting by a
+  whisker -- `floor_under` (the **face** query) simply has no face over this body, while the plane query does.
+
+The next step is therefore in `floor_under`: a 45-degree ramp's triangles are classified by `normal[2] < -0.7`, and a
+normal of 0.7071 sits a hundredth from that line, so a triangle authored slightly shallower is a `wall` and the surface
+sweep misses it. Classify ramps by their *host sector's* floor plane, or file them in both lists, before measuring speed.
