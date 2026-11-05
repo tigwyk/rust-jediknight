@@ -5506,3 +5506,23 @@ Measured, then reverted:
 The next step is therefore in `floor_under`: a 45-degree ramp's triangles are classified by `normal[2] < -0.7`, and a
 normal of 0.7071 sits a hundredth from that line, so a triangle authored slightly shallower is a `wall` and the surface
 sweep misses it. Classify ramps by their *host sector's* floor plane, or file them in both lists, before measuring speed.
+
+### Round 390: walk15's ramp, pinned to the exact branch
+
+`--floor-at` along `walk15_spawn`'s path (`16aEscapeShip`, x = 0):
+
+| y | sector | plane floor | `standable` face |
+|---|---|---|---|
+| 4.19 | 387 | -2.663 | -2.265 (0.40 *above* the plane) |
+| 4.60 | 407 | -2.218 | -2.689 (**0.42 below** the plane) |
+| 5.20 | 386 | -2.225 | -2.265 |
+
+So on this ramp the walkable surface is the **sector plane**, and the nearest face is 0.42 below it. The landing sweep's
+range is `radius + the frame's fall` (~0.07), so it never reaches that face and the body is not grounded; and the plane
+fallback that would hold it is gated on `floor_under(..., reach 1.0, ...).is_none()`, which the deep face defeats. That
+gate is why the body falls a little, catches the deep face, climbs the plane, and repeats -- the 212-of-243 ungrounded
+trace.
+
+The fix is in that gate: "no floor of its own" must mean *no face within the landing range*, not "no face within a unit".
+The level-5 regression the current reach guards against (a ledge plane 0.3 above a 0.1001 floor) needs the plane to be
+*below* the feet and within the fall, which the block already checks.
