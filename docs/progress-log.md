@@ -5338,3 +5338,17 @@ rule the widening lets it use once more.
 The fix is the door leaf, not the sweep: a doorway that is *static* geometry should never be entered through a step
 allowance, and a doorway that a script slides must have its planes moved. Round 376 put the same conclusion in the
 roadmap item; this trace is the measurement behind it.
+
+### Round 380: why the walk gate cannot settle a door leg
+
+`Gates` is empty in `--walk`: the harness walks bare geometry, so every doorway is passable and no door script has
+run. That is the reason `walk_switch` passes where retail stops -- its leaf is a door, the capture has it shut, and the
+comparison runs against a level whose flags were never seeded (`Gates::default`). The same applies to level 11's
+sector-9 leaf and the cantina's 261: the shipped door script's own `SectorAdjoins(doorsector, 0)` never executes in a
+walk row.
+
+So the door item needs two things before any collision rule can be tuned: a headless script boot that yields the
+level's starting sector/adjoin flags for the harness (the `--endlevel` gate already runs cogs headless, so the
+machinery exists), and geometry for the *open* leaf -- retail's stop sits on a leaf candidate at (-4.43, -3.70, -0.93)
+where the port has no solid, because the leaf thing never moves in its own sector box. Neither is a stat/flag tweak;
+both are the moving-door model, which is why round 376's sweep variants could not close it.
