@@ -92,7 +92,11 @@ impl Ai {
         if reach <= 0.001 || reach > self.sightdist.max(0.001) {
             return false;
         }
-        if self.fov <= 0.0 {
+        // `sithAI_CheckSightThing` (`0x4eb090`) applies the cone only when its angle argument is
+        // **positive**, and that argument is the cosine of the half angle: a class whose `fov=` is
+        // 180 has `cos 90 = 0` and is therefore not coned at all. A point-blank actor facing away
+        // (level 1's `reeyeesgun` at 0.34 units, cone `false`, `off 107`) sees the body in retail.
+        if self.fov <= 0.0 || self.fov >= 180.0 {
             return true;
         }
         let facing = yaw.to_radians();
@@ -229,14 +233,20 @@ OpenDoors
 
     #[test]
     fn sight_uses_distance_and_the_cone() {
-        let ai = parse(RYB);
+        // 200 degrees has a *negative* cosine half angle, so the engine's cone gate
+        // (`sithAI_CheckSightThing` applies it only when the cosine is positive) never fires:
+        // such a class sees all round. A coned class is what exercises the cone.
+        let wide = parse(RYB);
         let at = [0.0, 0.0, 0.0];
-        // Yaw 0 faces +X. A target 3 units ahead is seen; 8 units is beyond sightdist=5.
-        assert!(ai.sees(at, 0.0, [3.0, 0.0, 0.0]));
-        assert!(!ai.sees(at, 0.0, [8.0, 0.0, 0.0]));
-        // 200 degrees total means 100 either side: 90 degrees off the facing is seen, 170 is not.
-        assert!(ai.sees(at, 0.0, [0.0, 3.0, 0.0]));
-        assert!(!ai.sees(at, 0.0, [-3.0, 0.1, 0.0]));
+        assert!(wide.sees(at, 0.0, [3.0, 0.0, 0.0]));
+        assert!(!wide.sees(at, 0.0, [8.0, 0.0, 0.0]), "beyond sightdist=5");
+        assert!(wide.sees(at, 0.0, [-3.0, 0.1, 0.0]), "200 degrees is all round in the engine");
+
+        let coned = parse(&RYB.replace("fov=200", "fov=90"));
+        // 90 degrees total means 45 either side: 40 degrees off the facing is seen, 50 is not.
+        assert!(coned.sees(at, 0.0, [3.0, 2.5, 0.0]));
+        assert!(!coned.sees(at, 0.0, [0.0, 3.0, 0.0]));
+        assert!(!coned.sees(at, 0.0, [-3.0, 0.1, 0.0]));
     }
 
     /// `sithAI_CheckSightThing` measures `sightdist` over the **full** vector: it subtracts the two

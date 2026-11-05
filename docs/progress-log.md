@@ -5752,3 +5752,27 @@ without the death arm (`the bolt froze on the wall: [-5.02, 0.0, 0.0]`). What is
 nothing turns an actor toward a body it has not already remembered -- `sithAI_CheckSightThing` (`0x4eb090`) shows the
 engine's cone is gated on a **positive angle argument**, so a zero/omitted angle means "sees all round". Gates:
 **267 tests**, `--gates` 0 of 67, trace gate 10/10.
+
+
+### Round 405: `fov=200` is not a cone, and the door fight now shoots back
+
+`sithAI_CheckSightThing` (`0x4eb090`) takes the half angle's **cosine** and applies the cone only when that cosine is
+positive. A class with `fov=200` therefore has `cos 100 = -0.17`: the gate is skipped and it sees all round. `Ai::sees`
+now follows that rule (`fov <= 0` or `fov >= 180` -- no cone), which is what retail's own door capture shows: the
+`reeyeesgun` at 0.34 units from the body, facing 107 degrees away (`cone false`), fires.
+
+Before / after on the same 600-frame door capture:
+
+```
+before: (no hits at all)
+after:  hit: the player took 12, 18 shield(s) and 100 health left owner Some(154)
+        hit: the player took 12, 0 shield(s) and 100 health left owner Some(154)
+        hit: the player took 12, 0 shield(s) and 95 health left owner Some(154)
+        hit: the player took 12, 0 shield(s) and 83 health left owner Some(154)
+```
+
+The body now takes damage from the room's own actors: shields 100 -> 0 and health 100 -> 83 inside 10 s, against
+retail's ~56 lost by the same instant (its sidecar reads one bar; the port soaks 100 shield first). Over a minute the
+shields settle at 13 and the body survives, so the door series no longer ends with an untouched player. `sees`'s test
+grew a coned class for the cone assertions and keeps the all-round case. Gates: **267 tests**, `--gates` 0 of 67,
+trace gate 10/10.
