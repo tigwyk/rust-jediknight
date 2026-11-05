@@ -5189,3 +5189,25 @@ to **NO** (12.3 -> 12.4 and 1.8 -> 1.5 units), and the counts go 24 -> 23 kept i
 crossings. Not landed: the fix trades two containment failures for one, and the 06abarons pair needs explaining first
 (the widened contact stops the body mid-doorway and the slide carries it out, the same shape the door sector produces).
 `--walk all` is back at 24/34 with the 263 tests green.
+
+### Round 376: three widened-sweep variants, and why the sweep is the wrong lever
+
+Each variant below was built, run through `--walk all` and the 263 tests, then reverted; the numbers are the gate's.
+
+| variant | kept inside | hull agree | crossings | fixed | broken |
+|---|---|---|---|---|---|
+| baseline | 24/34 | 25 | 46 | - | - |
+| neighbours the move reaches (overlap guard) | 23/34 | 27 | 45 | `11gorc` (0.9 u, contained) | `06abarons`, `06bbarons` leave their sector |
+| + far-side portal normal flipped | 26/34 | 25 | 43 | `11gorc` | `06abarons`, `06bbarons` |
+| + neighbour faces only past the doorway distance | 26/34 | 25 | 43 | `11gorc` | `06abarons` 12.3 -> 1.8, `06bbarons` |
+| + neighbour faces only inside the doorway's cross-section | 25/34 | 23 | 43 | `11gorc`, `06abarons` restored | `03katarn`, `06bbarons`, `09fuelstation` leave their sector |
+
+So the widened contact fixes the level-11 leaf exactly and breaks a different level every time it is narrowed or
+widened: the trade is not a threshold to tune, it is that a *static* door sector is not the same object as a door that
+the level's script slides open. The port has no moving-door geometry, so blocking every face of a door sector blocks
+open doorways too, and not blocking them lets a shut one through.
+
+The next concrete step is therefore a **door-leaf classification at load**, not a wider sweep: for each portal, a sector
+whose planes all fall inside that portal's cross-section is a leaf; mark the portal blocked when the leaf is present and
+the level does not move it (or drive it from the door's own `setadjoinflags`), leaving every other contact exactly as it
+is today. That keeps the 46-crossing baseline untouched on levels without leaves.

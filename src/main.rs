@@ -15844,6 +15844,9 @@ fn walk_level(
         travelled += moved;
         if crossed {
             transitions += 1;
+            if std::env::var_os("BK_WALK_TRACE").is_some() {
+                eprintln!("walk trace: crossed into sector {sector} at ({:.2} {:.2} {:.2})", pos[0], pos[1], pos[2]);
+            }
         }
         if !quiet && frame % 30 == 0 {
             println!(
