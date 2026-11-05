@@ -5247,3 +5247,22 @@ which is what a released key plus drag looks like, not a wall (a wall ends the f
 1.48 against its 0.72. So of the five excluded legs: walk3 is documented (retail veers left off geometry the port does
 not see), walk8/walk22 are **truncated fixtures**, walk15 is a ramp-speed divergence, and walk_switch is a steady-speed
 divergence that is still open. Re-capturing is user-invoked (`aefec79`), so the fixtures cannot simply be retaken here.
+
+**The leaf-occlusion rule does not find level 11's own leaf.** Dropping any opening that a whole sector fills (polygon
+containment, 60 % fill, 0.5 thick) leaves `11gorc` at 24.1 units / `19->14` -- the leaf is not detected -- while it
+does change `06bbarons` (1.8, contained) and makes `c2` leave its sector. Reverted.
+
+Two conclusions, both measured:
+
+1. `walk_switch`'s stop is a real pass-through, not a coast: its port trace runs -2.95 -> -4.435 (1.49 units) into
+   sector 104 where retail ends at -3.67 in sector 59, and one of the earlier leaf candidates sits at (-4.43, -3.70,
+   -0.93), i.e. exactly there.
+2. Heuristics over the static level data are the wrong instrument. A JK door leaf is a *thing* the scripts move, and the
+   only faithful model is to drive the leaf's sector planes from the door thing's pose (or its `setadjoinflags`), which
+   the port does not do yet. Every static-data guess either misses the shut leaf (level 11) or shuts an open doorway
+   (`06bbarons`, `c2`).
+
+So the next step on this family is a **door model**, not another sweep variant: find the `type=door`/`07door*` things in
+a level, bind each to the sector box it moves, and update that sector's planes (or the adjoin flags) from the door's
+scripted state each frame. That is what the engine does (`sithThing` on a door leaf + `setadjoinflags`), and it is why
+both the shut case and the open case can then be right at once.
