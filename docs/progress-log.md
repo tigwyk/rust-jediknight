@@ -5301,3 +5301,23 @@ Both are worse because `inside_sector` on the **feet** point is strict at exactl
 "outside" every frame and a restore freezes it (`11gorc` walked 0.0 units in the first variant). The restore only
 becomes viable once that probe uses the engine's own centre query without regressing walk4/walk5/walk13 -- the code's
 `shortcut:` note already names that trade. Reverted; `--walk all` back at 24/34 and the 263 tests green.
+
+### Round 378: `jkMain_EndLevel`'s arm item -- implemented, and the choice's writer does not exist
+
+Ghidra is usable on `JK.EXE` (`12e8c8c3…`), so the ending question was settled from the shipped binary rather than
+guessed.
+
+`jkMain_EndLevel` (`0x402eb0`) reads the episode entry's two bins (`+0x30`, `+0x34`) -- the port already parses those
+columns as `lightpow`/`darkpow` -- and for each: `0x13 < bin < 0x23` and `jkPlayer_GetChoice()`, granting
+`sithInventory_SetCarries(player, bin, 1)`. The light bin is granted unless the choice is 2, the dark one unless it is
+1, so a choice of 0 grants both. The port parsed both columns and never spent them: a level's own arm item was dropped.
+
+Implemented as `episode::Episode::end_level_items` with the binary's rule and a unit test, and wired into
+`watch_level_complete` (it applies the grant before the tally). 264 tests green, `--walk all` unchanged.
+
+The **writer** is answered too: the only two callers of `sithInventory_SetCarries` (`0x4d21e0`) are `jkMain_EndLevel`
+and `0x4d2560`, which is a bulk inventory reset that clears every bin (it walks the item table calling
+`FUN_004d2000`/`FUN_004d21e0` with 0 and zeroes the tallies at `+0x1348`). Neither writes bin 18, and the `light_or_dark`
+screen's name string (`0x535c28`) is referenced only from the UI table itself (`0x535db8`), not from code. So in this
+build nothing converts the ending screen's clicks into `SITHBIN_CHOICE`, which is why the value is neutral; the port's
+neutral default is therefore faithful, and the remaining work on that item is the screen's *presentation*, not a writer.

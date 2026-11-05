@@ -2588,6 +2588,7 @@ fn main() {
             first: campaign_start.clone(),
             cuts,
             next,
+            episode: episode.clone(),
             films_done: false,
             pre,
             swap,
@@ -12637,6 +12638,9 @@ struct FlowPlan {
     pre: Vec<String>,
     /// The level that loads after that.
     next: Option<String>,
+    /// The episode this level belongs to, for what the engine grants when it ends
+    /// (`jkMain_EndLevel`, which reads the entry's `lightpow`/`darkpow` bins).
+    episode: Option<episode::Episode>,
     /// Set once the completion queue above has played out (immediately for a level that leads
     /// straight to another level). `queue_next_level` waits on it, so a two-film transition cannot
     /// swap the level halfway through its films.
@@ -12828,6 +12832,20 @@ fn watch_level_complete(
     // the draw path already — the screen was simply never shown.
     if !*tallied {
         *tallied = true;
+        // `jkMain_EndLevel` (`0x402eb0`): the episode entry's two arm bins are granted here, gated on
+        // `jkPlayer_GetChoice` -- inventory bin 18 -- with `sithInventory_SetCarries(..., 1)`.
+        let choice = sim.world.borrow().inv.get(&18).copied().unwrap_or(0.0) as i32;
+        let items = plan
+            .episode
+            .as_ref()
+            .map(|episode| episode.end_level_items(&plan.level, choice))
+            .unwrap_or_default();
+        for (bin, amount) in &items {
+            sim.world.borrow_mut().inv.insert(*bin, *amount);
+        }
+        if !items.is_empty() {
+            println!("endlevel: choice {choice} grants bin(s) {items:?}");
+        }
         // The level's own state lands here, before the tally draws it: `jkMain_EndLevel` raises the
         // rank and credits the stars the tally then repeats, and `jkGuiSingleTally_Show` computes
         // the alignment and stores it (bin 75) as it draws — which is why retail's level-2 autosave

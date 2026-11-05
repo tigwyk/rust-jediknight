@@ -48,7 +48,7 @@ pub struct Sequence {
     pub comment: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Episode {
     pub title: String,
     pub kind: i32,
@@ -127,6 +127,30 @@ impl Episode {
     /// [`flow_after_row`](Self::flow_after_row) with that row's id.
     pub fn flow_after(&self, level_file: &str) -> FlowAfter<'_> {
         self.flow_after_with(level_file, false)
+    }
+
+    /// What the engine grants when this level ends: `jkMain_EndLevel` (`0x402eb0`).
+    ///
+    /// Its episode entry carries two bins -- `lightpow` and `darkpow`, at `+0x30` and `+0x34` -- and for
+    /// each the engine checks `0x13 < bin < 0x23` and `jkPlayer_GetChoice()`, which is inventory bin 18:
+    /// the light bin is granted unless the choice is 2 (dark), the dark one unless it is 1 (light). The
+    /// grant is `sithInventory_SetCarries(player, bin, 1)`, so a repechage level sets the amount to 1
+    /// rather than adding. A choice of 0 (never chosen) grants both, which is what the binary does.
+    ///
+    /// The port parsed both columns from the start and never spent them, so a level's own arm item was
+    /// silently dropped.
+    pub fn end_level_items(&self, level_file: &str, choice: i32) -> Vec<(i32, f32)> {
+        let Some(row) = self.row_for(level_file) else { return Vec::new() };
+        let mut out = Vec::new();
+        for (bin, allowed) in [
+            (row.lightpow, choice != 2),
+            (row.darkpow, choice != 1),
+        ] {
+            if allowed && bin > 0x13 && bin < 0x23 {
+                out.push((bin, 1.0));
+            }
+        }
+        out
     }
 
     /// [`flow_after`](Self::flow_after) with the endgame fork's arm: `dark` picks the `gotoB` side of
@@ -323,6 +347,22 @@ mod tests {
     /// item's (`jkPlayer_GetChoice`, bin `0x12`: `2` is dark) and defaults to the light one, since the
     /// endgame screen that grants it is not implemented — and both films are kept so
     /// the app plays the whole transition. This is the shipped manifest's own shape (row 143).
+    #[test]
+    fn the_level_end_grants_the_episode_arms_item() {
+        // `jkMain_EndLevel`: bins 20..34 only, light unless choice 2, dark unless choice 1, amount 1.
+        let e = parse(
+            "\"Ep\"\nTYPE  1\n\
+             11: 1 1 LEVEL 01narshadda.jkl 25 30 12 -1\n\
+             12: 1 1 LEVEL 02narshadda.jkl 0  0 13 -1\n",
+        );
+        assert_eq!(e.end_level_items("01narshadda.jkl", 0), vec![(25, 1.0), (30, 1.0)]);
+        assert_eq!(e.end_level_items("01narshadda.jkl", 1), vec![(25, 1.0)]);
+        assert_eq!(e.end_level_items("01narshadda.jkl", 2), vec![(30, 1.0)]);
+        // A bin outside 20..34 is not an arm item, and an unknown level grants nothing.
+        assert!(e.end_level_items("02narshadda.jkl", 0).is_empty());
+        assert!(e.end_level_items("nope.jkl", 0).is_empty());
+    }
+
     #[test]
     fn a_decision_row_is_crossed_and_its_films_are_kept_in_order() {
         let e = parse(
