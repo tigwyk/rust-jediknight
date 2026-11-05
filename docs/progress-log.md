@@ -5548,3 +5548,15 @@ That closes the classification thread and leaves the measured statement from rou
 that ramp is the **sector plane**, the body sinks below it, and the landing sweep only consults planes inside the fall
 band. The engine's `sithCollision` keeps a body off a sector plane directly, which this port's vertical sweep does not
 do for a body already below it.
+
+### Round 393: the door row's fight does not start from the warp pose
+
+Reproducing the door measurement needs the body **at** the pose (`--warp`, not `--shot-at`, which moves only the camera):
+
+`--start 01narshadda --warp "1.400084,9.700065,6.357114,105.000092" --frames 600` lands the body at (1.4, 9.7, 6.265)
+in sector 60 and it **never takes a hit**: health and shields read 100.0 for all 600 frames.
+
+So the ledger's "29 health after 600 frames" cannot be reproduced from the pose alone; it came from a run in which the
+AI engaged (the captured shots/hits imply live enemy fire). Either the enemies are behind the cantina door, which the
+port now holds shut at startup, or the capture's own input drove them. Until that setup is reproduced, the row's
+retail-vs-port health comparison has no port-side number -- which is what the item needs.
