@@ -16039,6 +16039,9 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     let mut void_names: Vec<String> = Vec::new();
     let mut worst_name = String::new();
     let mut worst_contained = true;
+    // Every level that walked out of its own sector after a drop. One global `worst` said nothing about
+    // the others: `11gorc` falling 739 units masked `08escape88`'s 2.92 outright.
+    let mut stray: Vec<String> = Vec::new();
     // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
     let only = std::env::var("BK_WALK_ONLY").ok();
     for name in &levels {
@@ -16066,6 +16069,9 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                     worst_drop = r.dropped.max(0.0);
                     worst_name = name.to_string();
                     worst_contained = r.contained;
+                }
+                if r.void_frames == 0 && r.dropped.max(0.0) > 0.1 && !r.contained {
+                    stray.push(name.clone());
                 }
                 println!(
                     "{:<30} {:>9.1} {:>8} {:>10} {:>9}  {} {:>7.2}",
@@ -16118,6 +16124,16 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
         worst_contained,
         "the worst drop was {worst_drop:.2} on {worst_name} and the body also left its sector"
     );
+    // Known: the synthetic spawn-yaw walk leaves the ledge on these. Recorded so the gate fails only
+    // when a level *newly* drops and leaves its sector (the single-worst assert hid three of these).
+    const WALK_STRAY: &[&str] = &[
+        "jkl\\04escapehouse.jkl",
+        "jkl\\08escape88.jkl",
+        "jkl\\10cargo.jkl",
+        "jkl\\19b.jkl",
+    ];
+    let new_stray: Vec<&String> = stray.iter().filter(|n| !WALK_STRAY.contains(&n.as_str())).collect();
+    assert!(new_stray.is_empty(), "levels newly dropped and left their sector: {new_stray:?}");
     println!("--- walk check passed ---");
 }
 

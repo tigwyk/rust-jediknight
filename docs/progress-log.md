@@ -5177,3 +5177,15 @@ fixture. `walk8_spawn` starts at (52.83, 62.86, 34.457) and the port walks 0.09 
 2.92 drop is the gate's own spawn-yaw walk off a ledge, not the compared leg.
 
 Harness: `BK_WALK_ONLY=<substring>` filters `--walk all` to one level, so its traces can be read alone.
+
+**Every level is now checked, not just the worst one.** `--walk all` used `assert!(worst_contained)` over the single
+largest non-void drop, so one bad level hid the rest. Asserting per level shows **four** that already dropped and left
+their sector at baseline: `04escapehouse`, `08escape88`, `10cargo`, `19b` (recorded in `WALK_STRAY`; the gate now
+fails only on a new one).
+
+**The two-hop reach, measured against that gate.** `11gorc` 24.1 units / `19->14` / hull **differs** becomes **0.9
+units / 580 blocked / contained / hull agrees** -- retail's 0.83. But `06abarons` and `06bbarons` flip from contained
+to **NO** (12.3 -> 12.4 and 1.8 -> 1.5 units), and the counts go 24 -> 23 kept inside / 25 -> 27 hull agree / 46 -> 45
+crossings. Not landed: the fix trades two containment failures for one, and the 06abarons pair needs explaining first
+(the widened contact stops the body mid-doorway and the slide carries it out, the same shape the door sector produces).
+`--walk all` is back at 24/34 with the 263 tests green.
