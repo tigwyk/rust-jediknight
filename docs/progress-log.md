@@ -5601,3 +5601,9 @@ body frame restored (and the `script_camera_yaw` query deleted with its test -- 
 | walk23_spawn | 5.81 (145 %) | 5.89 (147 %) | 4.00 |
 
 Gates: trace gate **10/10**, `--walk all` 24/34, **264 tests** (the camera-yaw test went with the query it covered).
+
+The other half of level 11 is the **shut leaf's own faces**: sector 9 (the doorway leaf between 15 and 14) has
+`SITH_SECTOR_ADJOINS_OFF`, and the port's sector sweep only read the current room's planes, so the body crossed the
+opening and the leaf's space. The sweep now tests a shut neighbour's faces as walls, clipped to the opening's mouth
+(projected onto its own plane), which stops the body at the leaf -- `a_shut_opening_leaf_blocks_the_body_through_its_own_faces`
+covers it. Trace gate **10/10**, `--walk all` 24/34 unchanged, **265 tests**.

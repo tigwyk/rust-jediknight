@@ -858,6 +858,47 @@ impl Solids {
                 }
             }
 
+            // A shut opening's own sector **is** the door leaf: the level's scripts closed it
+            // (`00_door.cog`'s `startup` calls `SectorAdjoins(doorsector, 0)`), and the leaf's faces are
+            // what retail stops the body at -- 11gorc's sector 9 leaf between 15 and 14 is the shipped
+            // case (retail stops at y 13.19). The walkable passage is often a different sector beside
+            // the leaf, so refusing the crossing alone still lets the body through the leaf's space;
+            // its faces are tested here as walls, inside the opening they seal.
+            for portal in self.portals.get(sector).into_iter().flatten() {
+                if gates.passable(sector, portal.adjoin, portal.link) {
+                    continue;
+                }
+                let Some(leaf) = self.sectors.get(portal.adjoin) else { continue };
+                let mouth = Face {
+                    normal: portal.normal,
+                    point: portal.point,
+                    verts: portal.verts.clone(),
+                    surface: usize::MAX,
+                };
+                for plane in leaf {
+                    let face = self
+                        .face_of
+                        .get(&plane.surface)
+                        .and_then(|i| self.faces.get(*i))
+                        .or_else(|| self.floor_of.get(&plane.surface).and_then(|i| self.floors.get(*i)))
+                        .or_else(|| self.wall_of.get(&plane.surface).and_then(|i| self.walls.get(*i)));
+                    let Some(face) = face else { continue };
+                    if let Some(hit) = self.face_contact(face, from, dir, left, radius, sector) {
+                        // The leaf's face stands *behind* the opening, so compare it with the mouth
+                        // projected onto the opening's own plane -- not the raw 3D point.
+                        let off = dot(sub(hit.point, portal.point), portal.normal);
+                        let flat = [
+                            hit.point[0] - portal.normal[0] * off,
+                            hit.point[1] - portal.normal[1] * off,
+                            hit.point[2] - portal.normal[2] * off,
+                        ];
+                        if sphere_face(flat, radius, &mouth) && wall.is_none_or(|w| hit.distance < w.distance) {
+                            wall = Some(hit);
+                        }
+                    }
+                }
+            }
+
             // Adjoins are openings, never contacts: the sweep goes through them. A doorway behind the
             // direction of travel, or one leading back into a room already searched, is not taken.
             for portal in self.portals.get(sector).into_iter().flatten() {
@@ -961,6 +1002,39 @@ impl Solids {
         }
         (closest, sector, [from[0] + dir[0] * left, from[1] + dir[1] * left, from[2]])
     }
+    /// One surface's contact for a sphere of `radius` sweeping `dir` over `left` from `from`.
+    fn face_contact(
+        &self,
+        face: &Face,
+        from: [f32; 3],
+        dir: [f32; 3],
+        left: f32,
+        radius: f32,
+        sector: usize,
+    ) -> Option<Sweep> {
+        let normal = if dot(sub(from, face.point), face.normal) < 0.0 {
+            [-face.normal[0], -face.normal[1], -face.normal[2]]
+        } else {
+            face.normal
+        };
+        if dot(dir, normal) >= -1e-4 {
+            return None;
+        }
+        let t = sphere_plane(from, dir, left, radius, normal, face.point)?;
+        let at = [from[0] + dir[0] * t, from[1] + dir[1] * t, from[2] + dir[2] * t];
+        if !sphere_face(at, radius, face) {
+            return None;
+        }
+        Some(Sweep {
+            distance: t,
+            surface: face.surface,
+            normal,
+            sector,
+            point: at,
+            top: face.verts.iter().map(|v| v[2]).fold(f32::MIN, f32::max),
+        })
+    }
+
     /// How far to step a body that is crossing a doorway, from its contact point.
     ///
     /// Two constraints, and they disagree on thin geometry:
@@ -2963,6 +3037,49 @@ mod tests {
         assert!(
             !room.in_search(0, 2, [3.0, 0.0, 1.0], [-1.0, 0.0, 0.0], 0.1, r),
             "a body far from the wall opening searched the next room"
+        );
+    }
+
+    /// A **shut** opening's sector is the door leaf, and its faces stop the body even when the passage
+    /// the body crosses is a different sector beside it (level 11's sector 9 leaf between 15 and 14;
+    /// retail stops at y 13.19). An opening the scripts left passable stays a contact-free crossing.
+    #[test]
+    fn a_shut_opening_leaf_blocks_the_body_through_its_own_faces() {
+        let mut room = seam_floor();
+        let opening = |normal: [f32; 3], adjoin: usize| Portal {
+            adjoin,
+            link: 0,
+            verts: vec![[-1.0, 0.0, -1.0], [1.0, 0.0, -1.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]],
+            normal,
+            point: [0.0, 0.0, 0.0],
+        };
+        // Sector 0 opens into 1; 1 is shut, and its own wall sits just past the opening.
+        room.portals = vec![vec![opening([0.0, 1.0, 0.0], 1)], Vec::new()];
+        room.sectors = vec![
+            vec![Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surface: usize::MAX }],
+            vec![
+                Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surface: usize::MAX },
+                Plane { normal: [0.0, -1.0, 0.0], point: [0.0, 0.1, 0.0], surface: 77 },
+            ],
+        ];
+        room.spheres = vec![([0.0, 0.0, 0.0], 8.0), ([0.0, 0.3, 0.0], 8.0)];
+        room.walls = vec![Face {
+            normal: [0.0, -1.0, 0.0],
+            point: [0.0, 0.1, 0.0],
+            verts: vec![[-1.0, 0.1, -1.0], [1.0, 0.1, -1.0], [1.0, 0.1, 1.0], [-1.0, 0.1, 1.0]],
+            surface: 77,
+        }];
+        room.wall_of = [(77usize, 0usize)].into_iter().collect();
+        let r = 0.065;
+        let shut = Gates { sectors: &[0, crate::collide::SECTOR_ADJOINS_OFF], adjoins: &[0, 0] };
+        // Passable: the body crosses into 1; the wall there is its own room's, so it is a contact too.
+        // Shut: the *leaf's* faces stop it before the crossing is taken.
+        let dir = [0.0, 1.0, 0.0];
+        let before = room.sweep_rooms(0, [0.0, -0.2, 0.0], dir, 0.5, r, shut);
+        let leaf_hit = before.0.map(|hit| hit.point[1]);
+        assert!(
+            leaf_hit.is_some_and(|y| y <= 0.1),
+            "the shut leaf did not stop the body at its face: {leaf_hit:?}"
         );
     }
 
