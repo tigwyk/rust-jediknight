@@ -5476,3 +5476,19 @@ first attempt stalled at y 4.60 and closed the leg 0.4 short of retail's 1.56.
 So the slope belongs in the **velocity integration** (or as slope gravity the walker's thrust fights, which is what
 `sithPhysics` does), not in the position step. Reverted again; `walk15_spawn` stays at 244 %, and the next attempt has
 to start at the control/velocity side of `walker_step`, not at its `delta`.
+
+### Round 388: slope scaling reaches the velocity and changes nothing -- walk15 is airborne
+
+Two models measured on the capture, both reverted:
+
+- **Gravity along the floor** (`pull = g * n_z * n_h`, the engine's own gravity): with this level's `gravity 4` and
+  `drag 0.5`, the pull is 2.0 units/s^2, which settles a 45-degree climb *below zero* -- retail walks it at 0.52. The
+  capture closed from 2.32 to 1.07 across (69 % of retail's 1.56), so the model is wrong even though it moves the leg
+  in the right direction.
+- **Target scaled by the cosines** (`walk speed * n.z`): the probe finds a 45-degree floor (cos 0.707 most frames) and the
+  factor is applied to the integrated target, yet the capture is **unchanged** at 6.5075 -- the horizontal motion is not
+  coming from `target`.
+
+The trace says why it is not a simple slope question: the body is **ungrounded on 212 of 243 frames** while it climbs, so
+the walk is being carried by the vertical/step path and the air drag, not by the grounded walk integration. `walk15` needs
+its grounded state explained before any speed model can be judged against it.
