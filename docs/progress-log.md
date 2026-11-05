@@ -5538,3 +5538,13 @@ So the defect is earlier: the port's body can descend through the ramp's surface
 see it, and the plane is only consulted when a face is absent). Fixing it means the vertical sweep must consider the
 sector's own floor **plane** as a candidate contact -- the way the engine's `FindFloor` sweeps surfaces but the body is
 then held by `sithCollision` against the sector -- not a gate on the fallback. Recorded as the next step.
+
+### Round 392: the classification cut is not the answer either
+
+Filing 45-degree surfaces as floors (`FLOOR_COS` 0.7 -> 0.6) leaves `walk15` exactly where it was (6.5075), so the
+ramp's triangles were never the missing contact: at y 4.6 the only face within a unit is the one 0.42 *below* the plane.
+
+That closes the classification thread and leaves the measured statement from round 391 standing: the walkable surface on
+that ramp is the **sector plane**, the body sinks below it, and the landing sweep only consults planes inside the fall
+band. The engine's `sithCollision` keeps a body off a sector plane directly, which this port's vertical sweep does not
+do for a body already below it.
