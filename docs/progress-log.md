@@ -5121,3 +5121,25 @@ y 12.69, the port crosses 19 -> **14** at y ~13.0 (`--faces-at -0.04,13.20,-0.23
 clearance +/-0.025), and the two rooms carry different walls — which is why retail stops after 0.83 units where the
 port walks on. The same shape explains `walk20_spawn` (boundary at a different y) and level 2's sliver. So the next
 real target is **which of two candidate portals a move crosses**, not the step predicate or the input frame.
+
+## Round 375 -- the level-11 stop is a shut door **sector**, and the sweep only reads one sector
+
+Chasing the 0.83-unit stop: `--collide --surfaces-at -0.6,13.225,-0.35` (with the new bounds match) lists a solid
+box whose faces sit at y 13.26..13.31, x -0.60..0.20, z -0.35..0.41 -- surfaces 56..62, all `adjoin -1`, in **sector
+9**. That is the shut doorway leaf between 15 and 14, modelled as its own sector. Retail's body stops at y 13.19
+(13.26 minus the 0.065 radius); the port's walker walks through it.
+
+The reason is scope, not the plane test: `Solid::sweep_rooms` tests **only the body's own sector's** planes, plus the
+adjoin planes, while `sithCollision_SearchForSurfaceCollisions` walks the adjoins the move reaches and tests their
+faces too. `BK_SECTOR_TRACE` on the crossing shows `15 -> 14 ... lands_inside true`, i.e. the port's gate is open and
+nothing in sector 15 blocks.
+
+Tried the obvious fix -- collect the sectors whose openings the move reaches (<= 4) and test their planes, skipping
+faces a neighbouring room merely overlaps. It stopped the through-walk (`--walk all` 24 -> 28 levels kept inside,
+crossings 46 -> 45), but `walk11` then walked **backwards** from the start: the steering path itself went the other
+way, so the change confounds collision with route choice. Reverted; `--walk all` is back at 24/34 and the 263 tests
+are green.
+
+Kept: `--surfaces-at` now also matches a point inside a surface's own bounds (a portal's vertices can be many units
+from the doorway it spans). Next: isolate the steering route from the collision query before expanding the sweep,
+otherwise an over-block and a re-route look identical in the trace.

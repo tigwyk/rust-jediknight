@@ -7866,8 +7866,13 @@ fn main() {
                 if pts.len() < 3 {
                     continue;
                 }
+                // A portal's vertices can sit many units from the doorway it spans, so a point inside
+                // the surface's own bounds counts too.
                 let near = pts.iter().any(|p| {
                     ((p[0] - at[0]).powi(2) + (p[1] - at[1]).powi(2) + (p[2] - at[2]).powi(2)).sqrt() < 1.5
+                }) || (0..3).all(|k| {
+                    let (lo, hi) = pts.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p[k]), hi.max(p[k])));
+                    at[k] >= lo - 0.2 && at[k] <= hi + 0.2
                 });
                 if !near {
                     continue;
