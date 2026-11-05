@@ -5465,3 +5465,14 @@ drops from 0.013 to 0.004 -- so the factor that reached the body was ~0.3, not 0
 y 4.60 in sector 387 (`blocked true` on a full delta, no solid and no wall named by the traces) where retail walks on
 to 5.75. The slope idea is not disproven, but this leg cannot test it: the port's body is stopped on that ramp for a
 different reason first. Reverted; `walk15_spawn` stays at 244 % and the blocker at y 4.60 is the next thread.
+
+### Round 387: the walk15 stall is a feedback loop, named from the trace
+
+With the lateral step scaled by the floor's cosine (`n.z` = 0.707 here), the body's per-frame advance at y 4.27 reads
+**0.0021**, not the 0.013 x 0.707 the factor implies -- the *velocity itself* collapsed, so the walker's moved distance is
+being fed back into the next frame's speed. Scaling the step therefore throttles the body geometrically, which is why the
+first attempt stalled at y 4.60 and closed the leg 0.4 short of retail's 1.56.
+
+So the slope belongs in the **velocity integration** (or as slope gravity the walker's thrust fights, which is what
+`sithPhysics` does), not in the position step. Reverted again; `walk15_spawn` stays at 244 %, and the next attempt has
+to start at the control/velocity side of `walker_step`, not at its `delta`.
