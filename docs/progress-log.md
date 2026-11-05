@@ -5371,3 +5371,28 @@ Measured:
   capture-path measurement, and comparing it needs the capture, not `--walk`.
 
 264 tests green, `--walk all` unchanged at 24/34.
+
+### Round 382: the cantina door is a solid thing the sweep never searches
+
+The switch leg's blocker is identified. Level 1 places two `4x3door_1` leaves at (-4.75, -3.75, -1.1) and
+(-4.45, -3.75, -1.1): `collide=3`, `size=0.250312`, model plan radius 0.200, z span -1.25..-0.95. They *are* in the
+app's solid list --
+
+```
+solid: `4x3door_1` at [-4.75, -3.75, -1.1] radius 0.200 z -1.250..-0.950
+```
+
+-- and retail's stop sits exactly where they are: the leg ends at y = -3.67, and a 0.065 body meeting the leaf's face
+at -3.75 stops at -3.685. The port walks to -4.435 with **zero** `blocked by a solid model` trace lines, so the leaf is
+never tested.
+
+`sweep_things` filters by `in_search`, which asks whether the move *crosses* the portal into the thing's sector. A door
+leaf lives in its own thin sector beside the opening it seals, and the body crosses the *next* sector over, so the leaf
+is skipped. Adding a one-hop neighbour reach and then a two-hop reach changed nothing (both reverted), so sector 260 is
+not a portal neighbour of 59 or of the rooms 59 opens into -- the relationship needs the sweep's own room list.
+
+The engine's `SearchForThingCollisions` walks the sector lists **as the sweep reaches them**, one room at a time; this
+port does one pre-pass over the whole move and then filters. That structure, not a reach radius, is the next step.
+
+New probes kept: `BK_THINGS_NEAR="x,y,z"` (what a level places near a point, with its `collide=`/`size=` and the solid
+cylinder if any) and `BK_WALK_SCRIPTS=1` (a level's script names and any `startup` that failed).

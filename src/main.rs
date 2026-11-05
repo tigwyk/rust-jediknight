@@ -16070,7 +16070,11 @@ fn boot_level_scripts(level: &jkl::Level, gobs: &gob::GobSet) -> runtime::World 
         vm.cog_index = index as i32;
         script.bind(&mut vm, &inst.values);
         if script.label("startup").is_some() {
-            let _ = vm.run_label(script, "startup");
+            if let Err(e) = vm.run_label(script, "startup") {
+                if std::env::var_os("BK_WALK_SCRIPTS").is_some() {
+                    println!("  startup {}.cog: {e:?}", inst.script);
+                }
+            }
         }
     }
     {
@@ -16086,7 +16090,21 @@ fn boot_level_scripts(level: &jkl::Level, gobs: &gob::GobSet) -> runtime::World 
             .iter()
             .filter(|f| **f & collide::ADJOIN_MOVE == 0)
             .count();
-        println!("  gates: {closed} sector flag word(s) switched, {moves} opening(s) without MOVE");
+        let which: Vec<usize> = rt
+            .sector_flags
+            .iter()
+            .zip(&before)
+            .enumerate()
+            .filter(|(_, (now, was))| **now != **was)
+            .map(|(i, _)| i)
+            .collect();
+        println!("  gates: {closed} sector flag word(s) switched {which:?}, {moves} opening(s) without MOVE");
+        if std::env::var_os("BK_WALK_SCRIPTS").is_some() {
+            let mut names: Vec<&str> = level.cogs.iter().map(|c| c.script.as_str()).collect();
+            names.sort();
+            names.dedup();
+            println!("  scripts: {names:?}");
+        }
     }
     sim
 }
@@ -16125,6 +16143,55 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
         }
         let Some(raw) = gobs.read(name) else { continue };
         let level = jkl::parse(&String::from_utf8_lossy(&raw));
+        // `BK_THINGS_NEAR="x,y,z"`: what the level places within two units of a point -- the quickest
+        // way to tell a switch, a door leaf or a decor prop from a wall the body should stop at.
+        if let Some(at) = std::env::var("BK_THINGS_NEAR").ok().and_then(|v| {
+            let n: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            (n.len() == 3).then(|| [n[0], n[1], n[2]])
+        }) {
+            let mut near: Vec<(f32, &jkl::Thing)> = level
+                .things
+                .iter()
+                .map(|t| {
+                    let d = ((t.pos[0] - at[0]).powi(2) + (t.pos[1] - at[1]).powi(2) + (t.pos[2] - at[2]).powi(2)).sqrt();
+                    (d, t)
+                })
+                .filter(|(d, _)| *d <= 2.0)
+                .collect();
+            near.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let solids = collide::build(&level);
+            let solid_near: Vec<String> = solids
+                .things
+                .iter()
+                .filter(|(c, ..)| {
+                    ((c[0] - at[0]).powi(2) + (c[1] - at[1]).powi(2) + (c[2] - at[2]).powi(2)).sqrt() <= 2.0
+                })
+                .map(|(c, r, zmin, zmax, sec)| format!("{c:?} r {r:.2} z {zmin:.2}..{zmax:.2} sector {sec}"))
+                .collect();
+            println!("  solids near: {solid_near:?}");
+            // Which rooms adjoin each other here, and where the leaves' sector sits: a door leaf lives
+            // in its own thin sector beside the opening, so this says whether a sweep can reach it.
+            if let Some(room) = solids.sector_for_body([at[0], at[1], at[2] + 0.5]) {
+                let adj: Vec<usize> = solids.portals.get(room).map(|p| p.iter().map(|x| x.adjoin).collect()).unwrap_or_default();
+                println!("  room {room} adjoins {adj:?}");
+                for a in &adj {
+                    let two: Vec<usize> = solids.portals.get(*a).map(|p| p.iter().map(|x| x.adjoin).collect()).unwrap_or_default();
+                    println!("  room {a} adjoins {two:?}");
+                }
+            }
+            for (d, t) in near.iter().take(8) {
+                let solid = runtime::solid_radius(&level, &t.template);
+                println!(
+                    "  near {d:.2}: {} flags {:#x} sector {} at {:?} collide={:?} size={:?} solid={solid:?}",
+                    t.template,
+                    t.flags,
+                    t.sector,
+                    t.pos,
+                    level.template_param(&t.template, "collide"),
+                    level.template_param(&t.template, "size")
+                );
+            }
+        }
         // `BK_WALK_GATES=1`: run the level's own `startup` scripts first and walk with what they
         // switched. Without it every doorway is open, so a leg that ends at a shut door cannot be
         // compared at all (`walk_switch` ran 1.49 units through one).
