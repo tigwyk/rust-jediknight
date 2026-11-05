@@ -5266,3 +5266,18 @@ So the next step on this family is a **door model**, not another sweep variant: 
 a level, bind each to the sector box it moves, and update that sector's planes (or the adjoin flags) from the door's
 scripted state each frame. That is what the engine does (`sithThing` on a door leaf + `setadjoinflags`), and it is why
 both the shut case and the open case can then be right at once.
+
+**The door *is* modelled -- and that is not what stops the cantina walk.** `--start 01narshadda --door` runs the
+whole chain on the level's own scripts: `00_door.cog` on thing 4, `frame Num(1.0)`, `flags (1, 0)`, **4 doorways
+that were shut now passable**, and after 3 s the piece sits at frame 1.0 with `goal Num(0.0)`. So sector flags are
+already driven by the door scripts, and `Gates::passable` already reads them.
+
+Blocking a portal whose own *surface owner* sector is shut (`setsectoradjoins` is called on the leaf's sector, not on
+either room's) was implemented and measured: `--walk all` unchanged (24/34, 46 crossings) and the live cantina walk
+still reaches y -4.435 in sector 104. Reverted -- the rule is faithful but changes nothing here, so the leaf's sector is
+not shut when `walk_switch` is compared.
+
+That leaves `walk_switch`'s stop unexplained by doors: retail ends at -3.67 (sector 59) where the port continues to
+-4.435 (sector 104), and the leg is named for the switch that opens this door -- so the likely blocker is the *switch
+panel* or a wall beside it, not the doorway itself. Next probe: `--surfaces-at`/`--near-things` on (-4.75, -3.67,
+-1.18) on 01narshadda.
