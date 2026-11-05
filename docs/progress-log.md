@@ -5716,3 +5716,17 @@ Two things follow. **Actor 154 stands 0.34 units from the body** with a clear li
 has not already remembered -- so an actor that happens to face away stands still for the whole capture. And the actors
 that *do* acquire (155/157) fire into the wall 0.37 from the body: their `+elaser` is stopped by a sector plane at
 x ~1.13 (sector 210), i.e. the port's LOS check and its projectile resolver disagree about the same doorway.
+
+
+### Round 403: the sector tracks the move, and the resolver's walls are the remaining mismatch
+
+A moving thing kept the sector it was created in, so a bolt that crossed three rooms in one frame was resolved against
+the *first* room's planes. `Runtime::step` now re-derives the sector from the new position (the engine enters each room
+the move lands in, `sithThing_EnterSector`) and stores it, before the surface resolve.
+
+That did not change the door fight by itself, and the `BK_AI_TRACE` line now names the disagreement exactly: shot 382
+travels from 0.53 to 0.33 units of the body -- on a line the roster calls **los true** -- and is pushed out by a
+surface in **sector 76** at (1.185, 9.550, 6.359) (push +0.02 in y, i.e. a *sliver* sector's own plane, not a face the
+segment test sees). So the remaining gap is that `resolve_stepped`'s plane push treats a thin sector's bounding plane as
+a wall where `segment_blocked` (and the engine's face test) does not. Gates unchanged: **267 tests**, `--gates` 0 of 67,
+trace gate 10/10.

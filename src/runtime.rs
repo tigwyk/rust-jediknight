@@ -2896,7 +2896,18 @@ impl Runtime {
                 // `collide::sweep`, so a thing crosses a shut adjoin (a closed force field) that
                 // stops the player. The engine's `SearchForSurfaceCollisions` treats it as solid for
                 // every body; putting projectiles and actors on the swept path is the upgrade.
-                let sector = t.sector.max(0) as usize;
+                // The sector **tracks the move**: a bolt crosses several rooms per frame and the
+                // engine enters each one (`sithThing_EnterSector`) as the move lands, while a stale
+                // sector had the resolver pushing against a room the thing was not in (level 1's
+                // door fight: a bolt "in" sector 210 pushed out by a sector-339 wall 0.37 short of
+                // the body, while the LOS test called the same line clear).
+                let probe = if self.types.get(i).copied() == Some(3) { 0.02 } else { 0.4 };
+                let sector = solids
+                    .sector_at(t.pos, probe)
+                    .unwrap_or(t.sector.max(0) as usize);
+                if sector as i32 != t.sector {
+                    t.sector = sector as i32;
+                }
                 // A projectile is not a 0.4-radius body: the engine collides it by its template's
                 // own `movesize` (`+bryarbolt` is 0.001), and the fixed 0.4 made every bolt stop on
                 // a doorway jamb half a unit short of its target — level 1's door and catwalk fights
