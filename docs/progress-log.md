@@ -5796,3 +5796,14 @@ own log (`setup log unavailable: ... Denied`, on both `%TEMP%` and the repo's `t
 install folder. That is this shell's sandbox on newly created executables, not the setup's logic -- the checklist's
 install -> `--check` -> uninstall run was made on a normal desktop. So "clean-machine install to level 1 completion"
 stays the one item that needs another desktop, with the artifact now current.
+
+
+### Round 408: the door series' real target is ~22 damage a second, not 56 total
+
+Retail's `route_door` sidecar (`target/parity/retail/route_door.json`, 8 frames at 1 s) reads health 100 -> 44 by its
+last frame, and its shields are spent before health can move, so the room deals retail **~156 damage in ~7 s: ~22 a
+second**. The port's 10 s capture now measures **117** -- 100 shield + 17 health -- i.e. ~12 a second, about half the
+retail rate and no longer "untouched". Two candidate causes, both cheap to check next time: retail's `+elaser` in that
+room may be fired by more actors than the port has acquired (the roster shows 10 actors with `los true`, 3 `cone true`
+before round 405), and the port's shields refill on the level start (`player_shields: 100.0`) while retail's warp left
+the body with an empty bar -- so the health half of the comparison starts from different bars.
