@@ -5239,3 +5239,11 @@ dropped: with a real point-in-polygon test it flags 2249 of 18180 openings, and 
 63.49), so whatever holds retail there is not in the walker's solid list. Also measured: retail's z at the stop (34.64)
 is 0.14 above the 34.50 floor -- it is *not* standing; the value is what a body held mid-step by a contact looks like,
 so the earlier "retail stands on a 0.075 higher floor" reading was wrong.
+
+**walk8's and walk22's retail traces end by coasting, not by hitting something.** Per 600 ms segment, walk8 moves
+(0.09, 0.02, 0.00, 0.00, 0.00) and walk22 (0.63, 0.19, 0.21, 0.00, 0.00): the displacement decays to nothing over ~1.2 s,
+which is what a released key plus drag looks like, not a wall (a wall ends the full-speed strides at the contact frame).
+`walk_switch` is different again -- it moves at a steady ~0.5 u/s for the whole 2.4 s capture -- and the port covers
+1.48 against its 0.72. So of the five excluded legs: walk3 is documented (retail veers left off geometry the port does
+not see), walk8/walk22 are **truncated fixtures**, walk15 is a ramp-speed divergence, and walk_switch is a steady-speed
+divergence that is still open. Re-capturing is user-invoked (`aefec79`), so the fixtures cannot simply be retaken here.
