@@ -6795,6 +6795,15 @@ impl Runtime {
             from[2] + sz * closest,
         );
         let flat = ((cx - b.pos[0]).powi(2) + (cy - b.pos[1]).powi(2)).sqrt();
+        if std::env::var_os("BK_SHOT_TRACE").is_some() {
+            eprintln!(
+                "shot trace: shot {shot} -> target {target} ({name}) from {from:?} to {:?} closest flat {flat:.3} (limit {:.3}) cz {cz:.3} body {:.3}..{:.3}",
+                a.pos,
+                radius + 0.15,
+                b.pos[2],
+                b.pos[2] + height
+            );
+        }
         if flat > radius + 0.15 {
             return false;
         }
