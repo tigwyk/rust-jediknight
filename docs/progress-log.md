@@ -5115,3 +5115,9 @@ Re-measured with the same committed retail fixtures: `walk20_spawn` moves 4.63 -
 and `walk27_spawn` still passes; `walk11`/`walk23` are unchanged because their focus thing's yaw is 0, so their gap is
 elsewhere: retail's body travels only 0.83 units and stops (sector 15) while the port walks 5.4 straight (+y). With
 the inputs now genuinely applied, that is a **collision** difference at the level-11 start, not the lock timing.
+
+The level-11 start also shows **which neighbour a boundary picks** is what diverges: retail crosses 19 -> **15** at
+y 12.69, the port crosses 19 -> **14** at y ~13.0 (`--faces-at -0.04,13.20,-0.23` puts the point in both hulls, with
+clearance +/-0.025), and the two rooms carry different walls — which is why retail stops after 0.83 units where the
+port walks on. The same shape explains `walk20_spawn` (boundary at a different y) and level 2's sliver. So the next
+real target is **which of two candidate portals a move crosses**, not the step predicate or the input frame.
