@@ -5683,3 +5683,17 @@ So the open question is now the line of fire, not the AI: the body is warped ont
 leaf sits at 1.20, 9.65, 6.35 and the pose is 1.40, 9.70, 6.36), and a bolt that crosses a shut leaf's sector, a wall
 surface or a solid thing is being destroyed without a trace. Next step: log every bolt's death (world impact, thing hit,
 blast) under `BK_FIRE_TRACE` and check the first shot's flight against the actor's line to the body.
+
+
+### Round 401: a projectile that hits a surface dies there
+
+`Runtime::step`'s collision arm stopped a flying thing on the surface it hit (`vel` zeroed, `target` cleared) but kept it
+alive for the rest of its `timer=` life. A bolt parked in a doorway is invisible to `impacts` (a stopped bolt's swept
+segment is a point), so level 1's AI fire died at the walls: the `BK_AI_TRACE`/`BK_SHOT_TRACE` pair shows one bolt
+closing to 0.37 units from the body and then being **pushed out to x 1.13** by a surface plane in sector 210, and another
+teleporting three units to sit still for the rest of the capture.
+
+Weapons (`type=3`) are now destroyed on that contact, the way `sithThing_Update` explodes a projectile; actors and
+path-movers keep the old stop-and-`blocked` behaviour. `a_projectile_dies_on_the_surface_it_hits` is the regression test
+and it fails on the old code ("the bolt froze on the wall: [-5.02, 0.0, 0.0]" -- the push-out carried it through the
+room). Gates unchanged: **267 tests**, `--gates` 0 of 67, trace gate 10/10.

@@ -2916,9 +2916,17 @@ impl Runtime {
                 // two frames, so "the new position is in no sector" counts too. That is the swept
                 // test a position-only resolver cannot make.
                 let escaped = solids.sector_at(t.pos, 0.1).is_none();
+                // A **projectile** that reaches a surface dies there: the engine's
+                // `sithThing_Update` explodes the weapon and removes it, while a stopped-but-alive
+                // bolt froze mid-air (its `vel` zeroed, its damage live) and could never hit again.
+                let projectile = self.types.get(i).copied() == Some(3);
                 if hit && (resolved[0] - t.pos[0]).abs() + (resolved[1] - t.pos[1]).abs() > 0.01 {
-                    if std::env::var_os("BK_AI_TRACE").is_some() && self.types.get(i).copied() == Some(3) {
-                        eprintln!("ai: shot {i} pushed out at {:?} -> {:?} (sector {sector})", t.pos, resolved);
+                    if std::env::var_os("BK_AI_TRACE").is_some() && projectile {
+                        eprintln!("ai: shot {i} hit a surface at {:?} (push to {:?}, sector {sector})", t.pos, resolved);
+                    }
+                    if projectile {
+                        t.destroyed = true;
+                        continue;
                     }
                     t.pos[0] = resolved[0];
                     t.pos[1] = resolved[1];
@@ -2926,7 +2934,7 @@ impl Runtime {
                     t.target = None;
                     blocked.push(i);
                 } else if escaped || solids.segment_blocked(previous, t.pos) {
-                    if std::env::var_os("BK_AI_TRACE").is_some() && self.types.get(i).copied() == Some(3) {
+                    if std::env::var_os("BK_AI_TRACE").is_some() && projectile {
                         // Which face stopped it: a muzzle inside a jamb and a bolt aimed into a wall
                         // look identical in the position alone.
                         eprintln!(
@@ -2935,6 +2943,10 @@ impl Runtime {
                             t.pos,
                             solids.segment_blocked_at(previous, t.pos)
                         );
+                    }
+                    if projectile {
+                        t.destroyed = true;
+                        continue;
                     }
                     // Put it back where it last made sense and stop it: the segment test is what
                     // catches a mover that stepped clean over a wall between two frames.
@@ -11731,6 +11743,61 @@ mod tests {
             "the pit did not trigger the jump nudge: {:?}",
             rt.things[1].vel
         );
+    }
+
+    /// A **projectile** that reaches a level surface dies there, the way `sithThing_Update` explodes
+    /// a weapon on contact: a bolt stopped with its `vel` zeroed but its damage still live froze
+    /// mid-air for the rest of its `timer=` life and could never hit anything again (level 1's door
+    /// fight: every AI bolt ended up parked in a doorway).
+    #[test]
+    fn a_projectile_dies_on_the_surface_it_hits() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        // One room, one wall at x = 1.2 (a plane the swept resolver pushes out of).
+        let plane = |normal: [f32; 3], point: [f32; 3], surface: usize| {
+            crate::collide::Plane { normal, point, surface }
+        };
+        let planes = vec![
+            plane([-1.0, 0.0, 0.0], [1.2, 0.0, 0.0], 41),
+            plane([1.0, 0.0, 0.0], [-5.0, 0.0, 0.0], 41),
+            plane([0.0, -1.0, 0.0], [0.0, -2.0, 0.0], 41),
+            plane([0.0, 1.0, 0.0], [0.0, 2.0, 0.0], 41),
+            plane([0.0, 0.0, -1.0], [0.0, 0.0, -2.0], 41),
+            plane([0.0, 0.0, 1.0], [0.0, 0.0, 2.0], 41),
+        ];
+        rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+            sectors: vec![planes.clone()],
+            hull: vec![planes],
+            boxes: vec![None],
+            portals: vec![Vec::new()],
+            spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+            things: Vec::new(),
+            floors: Vec::new(),
+            walls: Vec::new(),
+            wall_of: Default::default(),
+            floor_of: Default::default(),
+            faces: Vec::new(),
+            face_of: Default::default(),
+            portal_faces: Vec::new(),
+            surface_owner: vec![0, 0, 0, 0],
+            adjoin_flags: Vec::new(),
+        }));
+        let mut bolt = base.clone();
+        bolt.pos = [0.0, 0.0, 0.0];
+        bolt.sector = 0;
+        bolt.vel = [6.0, 0.0, 0.0];
+        bolt.damage = 12.0;
+        rt.things = vec![base, bolt];
+        rt.templates = vec!["walkplayer".into(), "+elaser".into()];
+        rt.types = vec![10, 3];
+        for _ in 0..60 {
+            rt.step(1.0 / 30.0);
+            if rt.things[1].destroyed {
+                break;
+            }
+        }
+        assert!(rt.things[1].destroyed, "the bolt froze on the wall: {:?}", rt.things[1].pos);
+        assert!(rt.things[1].pos[0] < 1.2, "the bolt was left past the wall: {:?}", rt.things[1].pos);
     }
 
     /// class line's own 2000 ms clock; a standing actor is refused by the AI moving bit `0x1`.
