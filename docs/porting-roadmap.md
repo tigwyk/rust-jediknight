@@ -822,6 +822,15 @@ level, and a clean-machine install plays level 1 to completion. Multiplayer stay
 | retail saves | `bevi-knight --save <file>.jks` | retail lists decode: **357 entries** (quicksave) / **73** (autosave) with the player at that level's own spawn and health 100 (round 340, not re-run since) |
 | silent install | `bevi-knight-0.1.1-setup.exe /S /GAMEPATH=… /DIR=…` | **exit 0** (round 359, from a copy outside the repo): installs `bevi-knight.exe`, the uninstaller, `smkdec.exe`, `game-path.txt`, `docs/`, `LICENSE`, `NOTICE`, `README.md`, and the installed exe finds the game through `game-path.txt` and loads `01narshadda.jkl`. The same binary launched from `dist\` (or a fresh untracked directory) reports `Access denied` for every write in this agent shell — a csc write probe reproduces that with no setup code in it, so the denial follows the launching directory, not the installer |
 
+**Round 359-360 moved three rows of the table.** The walk-trace row now reads **10 legs, 0 failures** by default
+with `walk2_spawn` tracked as a measured failure (63 % travel, sectors off 6/6 — the sector 22/23 sliver's step
+containment, which a `--walk all` experiment showed cannot be relaxed without giving up containment on other
+levels); a full sweep of **all 20 walkable legs** is 10 pass / 10 fail, and three of those (`walk11`, `walk20`,
+`walk23`) are newly explained: the port zeroed the walk inputs under a script camera, while the engine reads
+them in the **view's** frame. That is fixed (`Runtime::script_camera_yaw`), so those legs now move in retail's
+direction but over-travel until the script's input-lock timing is modelled. The silent-install row is new
+(exit 0 from a copy outside the repo; the earlier "Access denied" was the launch directory).
+
 **Round 340 closed four more AI ledger rows** (evidence in `docs/progress-log.md`): a find now **broadcasts**
 (`CreateTransmittingEvent(player->sector, actor->pos, 0, 3.0, player)`) and writes the engine's engaged word, with the
 scan's awake bit re-set by the handler's own interval arm; a firing weapon raises awareness **kind 2** beside the shot
