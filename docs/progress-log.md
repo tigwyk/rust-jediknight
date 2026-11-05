@@ -5143,3 +5143,19 @@ are green.
 Kept: `--surfaces-at` now also matches a point inside a surface's own bounds (a portal's vertices can be many units
 from the doorway it spans). Next: isolate the steering route from the collision query before expanding the sweep,
 otherwise an over-block and a re-route look identical in the trace.
+
+### Round 375, follow-up: two facts that change how the doorway fix can be made
+
+**The `walk11` trace leg is not reproducible.** The same command, same commit, gave a forward walk (max y 24.68) at
+first and a backward one (max y 12.38) later; three repeat runs then all read 12.38. The walk direction comes from
+`script_camera_yaw()` at the moment `BK_WALK_HOLD_AFTER` expires, so it depends on where the drone is when the hold
+ends. The leg cannot arbitrate a collision change; `--walk all` (fixed forward, no script camera) is the stable
+measure and gives `11gorc` 24.1 units / 0 blocked frames both before and after every variant tried.
+
+**The leaf sits past the portal plane.** The 14/15 portal is at y 13.225; the leaf's front face is at y 13.26. A body
+that crosses the portal arrives 0.035 inside the leaf's radius, and sector 9 is not adjacent to 15 (15 adjoins
+17,18,19,14,16), so the door is only reachable as a *second* hop (15 -> 14 -> 9). The frontier that follows the
+openings the move reaches does add 9 through 14's own portal, but the "skip a neighbour face the sphere already
+overlaps" guard then drops it, because by that point the body is inside the radius it must be stopped by. The fix has
+to reach sector 9 while the body is still in 15, i.e. collect the rooms before the crossing plane, and then not skip
+the face that a crossing would land in.
