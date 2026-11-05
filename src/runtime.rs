@@ -2936,6 +2936,16 @@ impl Runtime {
                         eprintln!("ai: shot {i} hit a surface at {:?} (push to {:?}, sector {sector})", t.pos, resolved);
                     }
                     if projectile {
+                        // A **projectile** is a ray, not a body. A plane push that runs *along* the
+                        // flight is the containment resolver sliding it out of a thin sector, not a
+                        // wall (level 1's door fight: +0.02 in +y while the bolt climbed at +2.09);
+                        // only a push that opposes the velocity is a surface in front of it.
+                        let along = (resolved[0] - t.pos[0]) * t.vel[0]
+                            + (resolved[1] - t.pos[1]) * t.vel[1]
+                            + (resolved[2] - t.pos[2]) * t.vel[2];
+                        if along >= 0.0 {
+                            continue;
+                        }
                         t.destroyed = true;
                         continue;
                     }

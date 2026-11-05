@@ -5730,3 +5730,25 @@ surface in **sector 76** at (1.185, 9.550, 6.359) (push +0.02 in y, i.e. a *sliv
 segment test sees). So the remaining gap is that `resolve_stepped`'s plane push treats a thin sector's bounding plane as
 a wall where `segment_blocked` (and the engine's face test) does not. Gates unchanged: **267 tests**, `--gates` 0 of 67,
 trace gate 10/10.
+
+
+### Round 404: a bolt stops on a wall, not on a sliver's plane push -- the door fight lands hits
+
+The containment resolver's plane push was doing double duty. For a body it is right: a body caught in a thin sector is
+nudged out. For a **projectile** it is not: the door fight's bolts were pushed +0.02 in `y` while climbing at +2.09 u/s
+and every one of them died 0.33 from its target. `Runtime::step` now judges a projectile's plane contact by the push's
+*alignment with the flight* -- a push that runs along the velocity is the resolver sliding it out of a sliver, and the
+bolt flies on; only a push that opposes the velocity is a surface in front of it. The swept `segment_blocked` test still
+kills anything that steps clean over a face, and the shape test is what now lands the shots:
+
+```
+hit: the player took 10, 90 shield(s) and 100 health left owner Some(155)
+```
+
+`+elaser` hits reach the body and drain the shield for the first time in this level's door capture. The unit test
+(`a_projectile_dies_on_the_surface_it_hits`) covers both halves: a wall kills the bolt, and the blast proof it fails
+without the death arm (`the bolt froze on the wall: [-5.02, 0.0, 0.0]`). What is left is the *rate*: actor 154 stands
+0.34 units from the body and never acquires, because `LookForTarget`'s scan requires the body inside the `fov=` cone and
+nothing turns an actor toward a body it has not already remembered -- `sithAI_CheckSightThing` (`0x4eb090`) shows the
+engine's cone is gated on a **positive angle argument**, so a zero/omitted angle means "sees all round". Gates:
+**267 tests**, `--gates` 0 of 67, trace gate 10/10.
