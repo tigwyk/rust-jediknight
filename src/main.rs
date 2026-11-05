@@ -26389,13 +26389,21 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // slot with no focus, and retail walks there. Keying on `script_camera` alone held the player for the
     // rest of any level that had ever called `SetCurrentCamera` — `walk5_spawn` stood still at 0.00 against
     // retail's 3.73. `camera_focus_thing()` is `None` for POV and for a focus on the player.
-    let (forward, strafe) = if sim.as_deref().is_some_and(|sim| {
+    // A script camera does **not** take the controls away: `sithControl_Update` reads them on every
+    // path, and the thrust it builds is in the view's frame. `walk11_spawn-walk.tsv` is the fixture —
+    // retail's body travels 3.4 units and turns to 177.56 while the opening camera plays, from the
+    // same pose where the port used to stand still. Only the *frame* changes; the inputs stay.
+    let (forward, strafe, basis_yaw) = if sim.as_deref().is_some_and(|sim| {
         let rt = sim.world.borrow();
         rt.script_camera && rt.camera_focus_thing().is_some()
     }) {
-        (0.0, 0.0)
+        let basis = sim
+            .as_deref()
+            .and_then(|sim| sim.world.borrow().script_camera_yaw())
+            .unwrap_or(player.yaw);
+        (forward, strafe, basis)
     } else {
-        (forward, strafe)
+        (forward, strafe, player.yaw)
     };
     let [along, across] = player.rules.speed(forward, strafe, run, crouch, player.water);
     // A force-speed term adds to `maxThrust` in the engine, so it scales both axes.
@@ -26405,7 +26413,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         1.0
     };
     let [along, across] = [along * force, across * force];
-    let target = walk_target(along, across, player.yaw);
+    let target = walk_target(along, across, basis_yaw);
     // Integrate the way `sithPhysics_UpdatePlayerPhysics` does: `acceleration` comes from the input,
     // velocity takes `acceleration * dt`, and `ApplyDrag` scales it by `1 - drag * dt` — at a fixed
     // 50 Hz step with a rollover (`OLDSTEP_TARGET_FPS`, `OLDSTEP_DELTA_50FPS`), so the feel does not

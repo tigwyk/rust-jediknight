@@ -5072,3 +5072,29 @@ The three zero-walk legs are now explained by the **level start**, not the walke
 
 Also measured this round: no shipped script calls `setthingpos`/`movething` on the player (the only hit is
 `ctf_main.cog`, multiplayer), so the retail motion is either the actor-flag path or physics, not a scripted teleport.
+
+### Round 360 (second part): a script camera moves the input frame, not the controls
+
+The port zeroed the walk inputs whenever a script camera with a non-player focus was current. Round 139's
+reading of the engine says otherwise — `sithControl_Update` reads the controls on every path, and the thrust it
+builds is in the **view's** frame — and the retail fixture for `walk11_spawn` shows it: from the row pose retail's
+body travels while the opening camera plays.
+
+The rule is now the engine's: `Runtime::script_camera_yaw` returns the current script camera's yaw from its
+camera-to-focus segment (the same `forward = (-sin, cos)` basis `yaw_axes` uses), and the walker takes its
+movement frame from it while a script camera is current, falling back to the body's yaw otherwise. Unit test
+covers the mapping and both `None` cases (a focus on the body, no focus).
+
+Measured on the three legs that never moved before (1 s settle, committed retail fixtures):
+
+| leg | before | after | retail |
+|---|---|---|---|
+| walk11_spawn | 0.00 | **6.07** (same +y direction) | 3.96 |
+| walk20_spawn | 0.00 | **4.63** | 4.20 |
+| walk23_spawn | 0.00 | **5.81** | 4.00 |
+
+They walk in retail's direction now but over-travel, because the script's **input-lock timing** is still not
+modelled: retail holds the body ~1.8 s at `walk11_spawn` and then moves only 0.83 units, while the port walks from
+the first settle frame. That timing is the next piece, and the legs stay out of the default set until it matches.
+The rest of the net is unchanged: suite **263 passed** (the new camera-yaw test), `--gates` **0 of 67 failed, 2
+skipped**, `--walk all` **24/34 contained, 25 hull, 46 crossings**, default trace gate **10 legs, 0 failures**.
