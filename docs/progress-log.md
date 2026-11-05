@@ -4969,3 +4969,32 @@ skipped**, `--walk all` **24/34 contained, 25 hull-agreeing, 46 crossings, 6 voi
 `walk18_spawn` is recorded as an unusable leg: `--floor-at -0.35,-2.15,0.083` finds sector 723 with
 `floor_under -> None`, every heading probed blocks within 0.3 units, and retail's own trace reads sector 0 for the
 last 2.4 s of its hold (it walked out of the map).
+
+### Round 359 (second part): the whole leg set, not the default ten
+
+The gate's default set is the ten legs that passed; every other leg is runnable with `-Only` and had never been
+swept together. Running **all 20 walkable legs** (the preflight drops 9: 8 retail script holds plus `walk18_spawn`)
+gives **10 pass, 10 fail**:
+
+| leg | port / retail | ratio | sectors off |
+|---|---|---|---|
+| walk_cantina, walk_street45, walk_street90 | 2.65/2.59, 2.21/2.20, 2.21/2.21 | 102 %, 100 %, 100 % | 2, 2, 1 |
+| walk4, walk5, walk6 | 1.11/1.11, 3.09/3.73, 0.84/1.08 | 100 %, 83 %, 78 % | 1, 2, 2 |
+| walk9, walk12, walk13, walk17 | 2.04/1.68, 5.03/3.95, 1.27/1.30, 0.82/0.70 | 121 %, 127 %, 98 %, 117 % | 1, 0, 0, 0 |
+| walk_switch | 1.48/0.72 | **206 %** | 4 |
+| walk3 | 3.57/1.71 | **209 %** (the floor slide) | 4 |
+| walk8 | 2.72/0.96 | **283 %** | 5 |
+| walk15 | 3.81/1.56 | **244 %** | 5 |
+| walk22 | 2.90/1.03 | **282 %** | 4 |
+| walk2 | 1.78/2.82 | 63 % | 6 |
+| walk27 | 1.80/3.24 | 56 % | 0 |
+| walk11, walk20, walk23 | **0.00** / 0.83, 4.20, 4.00 | 0 % | 3, 3, 5 |
+
+Three of the failures (`walk11_spawn` = `11gorc`, `walk20_spawn` = `20aboc.jkl`, `walk23_spawn` = `17bsarris.jkl`)
+are a different shape: the port's body never moves at all. The walker zeroes the forced forward input while
+`script_camera` is set and `camera_focus_thing()` points at a non-player thing (`sithControl_PlayerMovement`'s
+script-camera takeover, measured in the level-14 comment), so these three levels are still under their opening
+camera for the whole 4 s window while retail's own trace walks within 600 ms. Whether the port's camera slot clears
+as early as retail's is the open question, and it is one root cause behind three legs, so it is the next thing to
+look at rather than ten separate collision questions. `walk27`'s short travel and `walk_switch`/`walk8`/`walk15`/
+`walk22`'s over-travel are separate.
