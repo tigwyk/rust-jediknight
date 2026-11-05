@@ -5211,3 +5211,24 @@ The next concrete step is therefore a **door-leaf classification at load**, not 
 whose planes all fall inside that portal's cross-section is a leaf; mark the portal blocked when the leaf is present and
 the level does not move it (or drive it from the door's own `setadjoinflags`), leaving every other contact exactly as it
 is today. That keeps the 46-crossing baseline untouched on levels without leaves.
+
+### Round 377: the five excluded legs, read one at a time
+
+`trace-gate.ps1 -Only` on them confirms the gate's numbers are current: `walk_switch` 206 %, `walk3_spawn` 209 %,
+`walk8_spawn` 282 %, `walk15_spawn` 244 %, `walk22_spawn` 282 % (all fail on travel and sectors). The retail traces
+separate two different defects:
+
+* **walk8_spawn and walk22_spawn are real stops.** Retail holds still for the last 1.2 s of the capture: walk8 at
+  (51.88, 62.97, 34.64) sector 330, walk22 at (0.00, 6.22, -1.26) sector 408.
+* **walk15_spawn is not a stop.** Retail keeps moving to the end of the capture at ~0.5 u/s horizontally up a ~40 deg
+  ramp (y 4.19 -> 5.75, z -3.01 -> -1.73); the port does the same climb faster. That leg is a ramp-speed divergence,
+  not a pass-through.
+
+walk8's stop is a **step height**: `--move-at "52.83,62.86,34.457,-0.04,0.0046,0.065,40"` steps the body over the
+ledge at step 21 and it lands at z 34.567 with the floor at 34.50, then walks on to x 51.27. Retail ends at z 34.64,
+i.e. on a floor ~0.075 higher, and something at that height stops it. So the port steps onto a *lower* floor choice at
+the same place and slips past what retail is stopped by.
+
+A door-leaf classifier was prototyped (`--door-leaves`: a sector whose plane points fill an opening's cross-section) and
+dropped: with a real point-in-polygon test it flags 2249 of 18180 openings, and it **misses** level 11's own leaf
+(sector 9 in the 15/14 doorway) under the "fills 80 % of the opening" rule. Not a safe key for a load-time block yet.
