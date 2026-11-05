@@ -5560,3 +5560,15 @@ So the ledger's "29 health after 600 frames" cannot be reproduced from the pose 
 AI engaged (the captured shots/hits imply live enemy fire). Either the enemies are behind the cantina door, which the
 port now holds shut at startup, or the capture's own input drove them. Until that setup is reproduced, the row's
 retail-vs-port health comparison has no port-side number -- which is what the item needs.
+
+### Round 394: walk15 is not the step path, and its implied slope is 54 degrees
+
+- Seating the body on the floor it steps onto changes nothing on this leg.
+- `BK_STEP=0.0` and `BK_STEP=0.2` both leave the capture at 6.5075: the step-up path is not involved at all.
+- The trace's own speeds are the fact to work from: horizontal 0.77 u/s (unchanged walk speed) with a vertical rise of
+  ~1.05 u/s -- an implied **54-degree** surface, where retail's rise over the same 3 s is 0.43/s at 0.52 horizontal
+  (39 degrees).
+
+So the port's body is on a different, steeper surface than retail's at the same x, not merely walking it too fast. The
+next probe is the surface at the body's own xy every second (plane and face), which is what would say whether the body
+is on the ramp's top skin, its underside, or a trim polygon.
