@@ -5785,3 +5785,14 @@ trace gate 10/10.
 ~10 of them land -- the measured 100 shield + 17 health. Retail's own door series reads ~56 lost by the same instant,
 so the port is now in the right order rather than untouched; whether the retail bar is shields or health is the next
 thing its sidecar has to say.
+
+
+### Round 407: the installer rebuilds from this tree; the install itself needs a normal desktop
+
+`packaging/build-setup.ps1` rebuilt `dist/bevi-knight-0.1.1-setup.exe` from the current checkout -- it runs
+`cargo build --release` first, so the 29.7 MB payload (sha256 `0ef965c8ef29...`) carries the fights and gates above.
+What this session cannot do is *run* it: the launched setup is denied write access to every path it tries, including its
+own log (`setup log unavailable: ... Denied`, on both `%TEMP%` and the repo's `target/`), and exits 1 before creating the
+install folder. That is this shell's sandbox on newly created executables, not the setup's logic -- the checklist's
+install -> `--check` -> uninstall run was made on a normal desktop. So "clean-machine install to level 1 completion"
+stays the one item that needs another desktop, with the artifact now current.
