@@ -7460,22 +7460,15 @@ impl Runtime {
     ///
     /// `sithControl_Update` reads the controls whether or not a script camera is current, and the
     /// thrust it builds is in the *view's* frame — so during a cutscene "forward" walks along the
-    /// camera, not along the body's own facing. Round 139's note names the rule; level 11's opening
-    /// measures it (`walk11_spawn-walk.tsv`: retail's body turns to 177.56 and travels 3.4 units while
-    /// the camera plays). `None` when no scripted camera with a non-player focus is current, which is
-    /// the normal case: the view and the body share a yaw then.
+    /// camera, not along the body's own facing. The camera of a scripted shot **is** the focus thing,
+    /// aimed by its own angles (`SetCameraFocus(slot, camera1)` — level 11's drone flying around the
+    /// twins, which is what the user's note describes), and that is exactly how the view system poses
+    /// it. `None` when no scripted camera with a non-player focus is current, which is the normal
+    /// case: the view and the body share a yaw then.
     pub fn script_camera_yaw(&self) -> Option<f32> {
-        let camera = self.camera_thing(self.current_camera)?;
         let focus = self.camera_focus_thing()?;
-        let from = self.things.get(camera)?.pos;
-        let to = self.things.get(focus)?.pos;
-        let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
-        if dx * dx + dy * dy < 1e-6 {
-            return None;
-        }
-        // The port's yaw basis (`yaw_axes`) is `forward = (-sin, cos)`, so a direction maps back to
-        // `atan2(-dx, dy)`.
-        Some((-dx).atan2(dy))
+        // `thing.yaw` is degrees, like every other placed angle; the walk basis is radians.
+        self.things.get(focus).map(|thing| thing.yaw.to_radians())
     }
 
     /// Whether the player's saber should be drawn: armed by `jkSetSaberInfo` **and** not switched
@@ -9728,28 +9721,22 @@ mod tests {
         assert_eq!(rt.sector_messages(None, Some(0), None), vec![(0, "entered", 1)]);
     }
 
-    /// A script camera's view yaw: the **movement frame** while one is current. The mapping is the
-    /// port's own basis (`yaw_axes`: `forward = (-sin, cos)`) read back from the camera-to-focus
-    /// segment, which is what level 11's opening measures (`walk11_spawn-walk.tsv`).
+    /// A script camera's view yaw: the **movement frame** while one is current. The camera of a
+    /// scripted shot is the focus thing itself, aimed by its own `yaw` (degrees), exactly as the view
+    /// system poses it — level 11's drone is the shipped case.
     #[test]
-    fn a_script_camera_reports_the_view_yaw_and_nothing_without_a_focus() {
+    fn a_script_camera_reports_the_focus_things_yaw_and_nothing_without_a_focus() {
         let mut rt = door_runtime();
-        // 0 the body, 1 a camera thing, 2 the thing it looks at.
         rt.things.push(rt.things[0].clone());
-        rt.things.push(rt.things[0].clone());
-        rt.types = vec![0, 1, 0];
+        rt.types = vec![0, 0];
         rt.current_camera = 0;
-        rt.camera_focus = [Some(2), None, None, None, None, None, None];
-        rt.things[1].pos = [0.0, 0.0, 0.0];
-        // Straight up +y is yaw 0; along -x is a quarter turn; the reverse is half.
-        rt.things[2].pos = [0.0, 1.0, 0.0];
-        assert_eq!(rt.script_camera_yaw(), Some(0.0));
-        rt.things[2].pos = [-1.0, 0.0, 0.0];
-        let quarter = rt.script_camera_yaw().expect("a camera looking along -x");
+        rt.camera_focus = [Some(1), None, None, None, None, None, None];
+        rt.things[1].yaw = 90.0;
+        let quarter = rt.script_camera_yaw().expect("a focused script camera");
         assert!((quarter - std::f32::consts::FRAC_PI_2).abs() < 1e-5, "{quarter}");
-        rt.things[2].pos = [0.0, -1.0, 0.0];
-        let half = rt.script_camera_yaw().expect("a camera looking along -y");
-        assert!(half.abs() - std::f32::consts::PI < 1e-5, "{half}");
+        rt.things[1].yaw = 180.0;
+        let half = rt.script_camera_yaw().expect("a focused script camera");
+        assert!((half.abs() - std::f32::consts::PI).abs() < 1e-5, "{half}");
         // A focus on the body is the player's own eyes, and no focus at all is the normal view: both
         // answer `None`, which the walker reads as "use the body's own yaw".
         rt.camera_focus = [Some(0), None, None, None, None, None, None];

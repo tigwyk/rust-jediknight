@@ -5102,3 +5102,16 @@ still not modelled: retail holds the body ~1.8 s at `walk11_spawn` and then move
 the first settle frame. That timing is the next piece, and the legs stay out of the default set until it matches.
 The rest of the net is unchanged: suite **263 passed** (the new camera-yaw test), `--gates` **0 of 67 failed, 2
 skipped**, `--walk all` **24/34 contained, 25 hull, 46 crossings**, default trace gate **10 legs, 0 failures**.
+
+### Round 360 (third part): the script camera is the focus thing, aimed by its own yaw
+
+The user's note pins the mechanism: level 11's opening camera is the **drone** (`camera1`) flying around the twins, so
+Kyle is on screen — the shot is the drone's view, not the player's. That is also how the port's view system already
+poses a scripted camera (`focus_camera` reads the focus thing's `pos/yaw/pitch`), so `Runtime::script_camera_yaw` now
+returns exactly that yaw instead of deriving one from a camera-to-focus vector (which for the drone case — focus **is**
+the camera — was degenerate).
+
+Re-measured with the same committed retail fixtures: `walk20_spawn` moves 4.63 -> **3.55 (85 % of retail's 4.20)**
+and `walk27_spawn` still passes; `walk11`/`walk23` are unchanged because their focus thing's yaw is 0, so their gap is
+elsewhere: retail's body travels only 0.83 units and stops (sector 15) while the port walks 5.4 straight (+y). With
+the inputs now genuinely applied, that is a **collision** difference at the level-11 start, not the lock timing.
