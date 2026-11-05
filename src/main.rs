@@ -16169,6 +16169,34 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                 .map(|(c, r, zmin, zmax, sec)| format!("{c:?} r {r:.2} z {zmin:.2}..{zmax:.2} sector {sec}"))
                 .collect();
             println!("  solids near: {solid_near:?}");
+            // How far a solid thing's room is from the body's, in portal hops. A leaf that hangs off a
+            // room the sweep reaches needs the sweep's *own* room order; one that is many hops away can
+            // only be found by walking rooms, not by any bounded reach.
+            if let Some(here) = solids.sector_for_body([at[0], at[1], at[2] + 0.5]) {
+                let mut dist: HashMap<usize, usize> = HashMap::new();
+                dist.insert(here, 0);
+                let mut frontier = vec![here];
+                while let Some(sector) = frontier.pop() {
+                    let d = dist[&sector];
+                    for portal in solids.portals.get(sector).into_iter().flatten() {
+                        if !dist.contains_key(&portal.adjoin) {
+                            dist.insert(portal.adjoin, d + 1);
+                            frontier.push(portal.adjoin);
+                        }
+                    }
+                }
+                for (c, r, _, _, sec) in solids.things.iter().take(0) {
+                    let _ = (c, r, sec);
+                }
+                for (c, r, _, _, sec) in &solids.things {
+                    if ((c[0] - at[0]).powi(2) + (c[1] - at[1]).powi(2) + (c[2] - at[2]).powi(2)).sqrt() <= 2.0 {
+                        println!(
+                            "  solid at {c:?} r {r:.2} sits in sector {sec}: {} hop(s) from {here}",
+                            dist.get(sec).map(|d| d.to_string()).unwrap_or_else(|| "unreached".into())
+                        );
+                    }
+                }
+            }
             // Which rooms adjoin each other here, and where the leaves' sector sits: a door leaf lives
             // in its own thin sector beside the opening, so this says whether a sweep can reach it.
             if let Some(room) = solids.sector_for_body([at[0], at[1], at[2] + 0.5]) {
@@ -16191,6 +16219,42 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                     level.template_param(&t.template, "size")
                 );
             }
+        }
+        // `BK_HOPS="a:b"`: how many portal hops separate two sectors, and the path. A door leaf's room
+        // is normally not the room the body walks through, and the number says what a bounded reach
+        // would have to cover.
+        if let Some((from, to)) = std::env::var("BK_HOPS").ok().and_then(|v| {
+            let (a, b) = v.split_once(':')?;
+            Some((a.trim().parse::<usize>().ok()?, b.trim().parse::<usize>().ok()?))
+        }) {
+            let solids = collide::build(&level);
+            let mut prev: HashMap<usize, usize> = HashMap::new();
+            let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            seen.insert(from);
+            queue.push_back(from);
+            while let Some(sector) = queue.pop_front() {
+                if sector == to {
+                    break;
+                }
+                for portal in solids.portals.get(sector).into_iter().flatten() {
+                    if seen.insert(portal.adjoin) {
+                        prev.insert(portal.adjoin, sector);
+                        queue.push_back(portal.adjoin);
+                    }
+                }
+            }
+            let mut path = vec![to];
+            let mut step = to;
+            while let Some(&p) = prev.get(&step) {
+                path.push(p);
+                step = p;
+                if p == from {
+                    break;
+                }
+            }
+            path.reverse();
+            println!("  hops {from} -> {to}: {} hop(s), path {path:?}", path.len().saturating_sub(1));
         }
         // `BK_WALK_GATES=1`: run the level's own `startup` scripts first and walk with what they
         // switched. Without it every doorway is open, so a leg that ends at a shut door cannot be

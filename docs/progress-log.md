@@ -5396,3 +5396,26 @@ port does one pre-pass over the whole move and then filters. That structure, not
 
 New probes kept: `BK_THINGS_NEAR="x,y,z"` (what a level places near a point, with its `collide=`/`size=` and the solid
 cylinder if any) and `BK_WALK_SCRIPTS=1` (a level's script names and any `startup` that failed).
+
+### Round 383: the cantina door stops the body now
+
+Two measured changes, and the switch leg moves from a 206 % over-travel to a stop at the leaf.
+
+1. **Two-hop thing reach.** `59 -> 260` is measured at **2 portal hops** (`path [59, 262, 260]`, new `BK_HOPS="a:b"`
+   probe), so `sweep_things` now searches a thing's room one hop past the rooms this sector opens into. Before this the
+   leaf in sector 260 was never tested: the body crossed 59 -> 262 and the cantina leaves live beside that opening, not
+   in it.
+2. **Overlap stops the move.** The first contact left the body *touching* the leaf, and `c <= 0.0` skipped every frame
+   after it -- the tunnelling. A body walking *into* an overlapped solid is now stopped at distance 0 with the outward
+   normal; walking *out* (the escape direction) is still free.
+
+With both, `walk_switch` ends at **(-4.75, -3.485, -1.235) in sector 59** -- retail ends at -3.67 in 59. Travel 0.535
+against 0.72 (**74 %**, from 1.48 / 206 %) and the sector now agrees; the remaining 0.185 is the leaf's collision
+volume: the port uses the model's plan radius (0.200), while retail's stop matches a much thinner leaf (~0.08), i.e. the
+engine collides with the leaf's own surface, not a cylinder around it.
+
+Unchanged elsewhere: `--walk all` 24/34 with and without gates, the trace gate 10/10, `walk3`/`walk8`/`walk15`/`walk22`
+re-measured at their previous travels, 265 tests green.
+
+Regression test: `a_body_walks_into_an_overlapped_solid_thing_and_is_stopped` (two-hop reach + zero-travel contact +
+walking out of an overlap left free).

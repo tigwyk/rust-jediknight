@@ -1176,7 +1176,17 @@ impl Solids {
         for &(centre, thing_radius, z_min, z_max, thing_sector) in &self.things {
             // `SearchForThingCollisions` walks the sector lists of the sectors the sweep reaches: a
             // crate in the room next door is not a contact until the body gets to the opening.
-            if !self.in_search(sector, thing_sector, at, dir, left, radius) {
+            let next_to = |from: usize, to: usize| {
+                self.portals
+                    .get(from)
+                    .is_some_and(|portals| portals.iter().any(|portal| portal.adjoin == to))
+            };
+            let reachable = self.in_search(sector, thing_sector, at, dir, left, radius)
+                || next_to(sector, thing_sector)
+                || self.portals.get(sector).is_some_and(|portals| {
+                    portals.iter().any(|portal| next_to(portal.adjoin, thing_sector))
+                });
+            if !reachable {
                 continue;
             }
             if at[2] + radius < z_min || at[2] - radius > z_max {
@@ -1186,8 +1196,18 @@ impl Solids {
             let (dx, dy) = (at[0] - centre[0], at[1] - centre[1]);
             let b = 2.0 * (dir[0] * dx + dir[1] * dy);
             let c = dx * dx + dy * dy - span * span;
-            // Already overlapping: the push resolver owns that state, not the sweep.
+            // Already overlapping. The engine pushes the body out (`SearchForThingCollisions` returns
+            // the push); this move has no push channel, so a body walking *into* the solid is stopped at
+            // distance 0 instead of tunnelling through it, while a body walking *out* -- the escape
+            // direction -- is left free. Skipping overlap entirely was what walked the body through
+            // level 1's cantina leaves: the first frame's contact landed it touching, and every frame
+            // after that was "already overlapping".
             if c <= 0.0 {
+                let out_len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                let out = [dx / out_len, dy / out_len, 0.0];
+                if dir[0] * out[0] + dir[1] * out[1] < 0.0 && best.is_none_or(|(near, _)| 0.0 < near) {
+                    best = Some((0.0, out));
+                }
                 continue;
             }
             let disc = b * b - 4.0 * c;
@@ -2930,6 +2950,45 @@ mod tests {
         assert!(
             !room.in_search(0, 2, [3.0, 0.0, 1.0], [-1.0, 0.0, 0.0], 0.1, r),
             "a body far from the wall opening searched the next room"
+        );
+    }
+
+    /// A body that walks into a solid thing it already touches is **stopped**, not tunnelled
+    /// through. Two door leaves stand in their own thin sector beside the opening they seal (level 1's
+    /// cantina doors are in 260, two portal hops from the street the body walks), so the search has to
+    /// see one hop past the rooms this sector opens into -- and the first contact leaves the body
+    /// overlapping, which used to be skipped every frame after it.
+    #[test]
+    fn a_body_walks_into_an_overlapped_solid_thing_and_is_stopped() {
+        let mut room = seam_floor();
+        let opening = |normal: [f32; 3], adjoin: usize| Portal {
+            adjoin,
+            link: 0,
+            verts: Vec::new(),
+            normal,
+            point: [0.0; 3],
+        };
+        // Sector 0 opens into 1, and the leaf's room 2 hangs off 1 only: two hops from the body.
+        room.portals = vec![vec![opening([0.0, 1.0, 0.0], 1)], vec![opening([0.0, 1.0, 0.0], 2)], Vec::new()];
+        room.sectors = vec![
+            vec![Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surface: usize::MAX }],
+            vec![Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surface: usize::MAX }],
+            vec![Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surface: usize::MAX }],
+        ];
+        room.spheres = vec![([0.0, 0.0, 0.0], 8.0), ([0.0, 0.5, 0.0], 8.0), ([0.0, 1.0, 0.0], 8.0)];
+        room.things = vec![([0.0, 0.3, -0.5], 0.2, -1.0, 0.0, 2)];
+        let r = 0.065;
+        let dir = [0.0, 1.0, 0.0];
+        // Touching already (the cylinder's span is 0.265): the sweep must still report the contact.
+        let contact = room.sweep_things([0.0, 0.045, -0.5], dir, 0.5, r, 0);
+        assert!(contact.is_some(), "a body already touching a leaf walked through it");
+        let (travel, normal) = contact.unwrap();
+        assert_eq!(travel, 0.0, "an overlapped solid let the body advance {travel}");
+        assert!(normal[1] < 0.0, "the contact did not push the body back: {normal:?}");
+        // Walking *out* of an overlap is the escape direction, not a new contact.
+        assert!(
+            room.sweep_things([0.0, 0.045, -0.5], [0.0, -1.0, 0.0], 0.5, r, 0).is_none(),
+            "walking out of an overlap was called a collision"
         );
     }
 
