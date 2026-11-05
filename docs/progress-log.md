@@ -5453,3 +5453,15 @@ sector agrees for the first time; travel 0.535 against retail's 0.72 (74 %). The
 (cylinder 0.200 vs a 0.02-thick panel), which round 384 measured as a regression elsewhere when boxed.
 
 265 tests, the trace gate 10/10 and `--walk all` 24/34 unchanged.
+
+### Round 386: the ramp-slope hypothesis for walk15, measured and reverted
+
+Retail's `walk15_spawn` trace climbs at a constant *3D* rate: 1.56 across, 1.28 up in 3 s (0.67 u/s on a 39-degree
+ramp), where the port walks its horizontal speed and gains the height free (3.81 units). The obvious transcription is
+the engine's own: the lateral step is `speed * n.z`, the floor's cosine.
+
+Measured on the capture: the room's floor plane reads **n.z = 0.707** (a 45-degree ramp) and the port's per-frame delta
+drops from 0.013 to 0.004 -- so the factor that reached the body was ~0.3, not 0.71, and the body then stalls at
+y 4.60 in sector 387 (`blocked true` on a full delta, no solid and no wall named by the traces) where retail walks on
+to 5.75. The slope idea is not disproven, but this leg cannot test it: the port's body is stopped on that ramp for a
+different reason first. Reverted; `walk15_spawn` stays at 244 % and the blocker at y 4.60 is the next thread.
