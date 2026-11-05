@@ -1239,6 +1239,9 @@ pub struct Runtime {
     /// what `GetSenderID` answers in the receiver (`pCog->idx` in the engine's call). The VM sets it
     /// before each world verb, because only the VM knows which script is running.
     pub caller_cog: i32,
+    /// The script that is running a verb right now (`Vm::script_name`): a trace names the script that
+    /// set a flag or called an engine verb, which `caller_cog` alone cannot (see `cog_names`).
+    pub caller_script: String,
     /// The script name behind each `cog_index`, so a trace can name the script that called a verb (the
     /// level's own cog table only reaches the placed instances, while a started VM's index counts every
     /// VM in start order).
@@ -1873,6 +1876,7 @@ impl Runtime {
             spawned_cogs: std::collections::BTreeSet::new(),
             messages: Vec::new(),
             caller_cog: -1,
+            caller_script: String::new(),
             cog_names: Default::default(),
             messages_sent: 0,
             template_angvel,
@@ -8326,14 +8330,17 @@ impl Runtime {
             "setactorflags" | "aisetmode" => {
                 let actor = ti(0);
                 let mode = idx(1) as u32;
+                if mode & AF_INVULNERABLE != 0
+                    && std::env::var_os("BK_STACK_TRACE").is_some()
+                    && !self.caller_script.is_empty()
+                {
+                    eprintln!("hit: who set the freeze (cog {} `{}`):\n{}", self.caller_cog, self.caller_script, std::backtrace::Backtrace::force_capture());
+                }
                 if mode & AF_INVULNERABLE != 0 && std::env::var_os("BK_HIT_TRACE").is_some() {
                     eprintln!(
-                        "hit: SetActorFlags({actor}, {mode:#x}) made the player invulnerable (cog {} {})",
+                        "hit: SetActorFlags({actor}, {mode:#x}) made the player invulnerable (cog {} `{}`)",
                         self.caller_cog,
-                        self.cog_names
-                            .get(&self.caller_cog)
-                            .map(String::as_str)
-                            .unwrap_or("?")
+                        self.caller_script
                     );
                 }
                 *self.actor_flags.entry(actor).or_insert(0) |= mode;
@@ -8351,6 +8358,12 @@ impl Runtime {
             "clearactorflags" | "aiclearmode" => {
                 let actor = ti(0);
                 let mode = idx(1) as u32;
+                if mode & AF_INVULNERABLE != 0 && std::env::var_os("BK_HIT_TRACE").is_some() {
+                    eprintln!(
+                        "hit: ClearActorFlags({actor}, {mode:#x}) from cog {} `{}` clears the freeze",
+                        self.caller_cog, self.caller_script
+                    );
+                }
                 *self.actor_flags.entry(actor).or_insert(0) &= !mode;
                 // `01_initialry.cog` starts with `AIClearMode(joery, 0x606)`: the level's first
                 // enemy is walked in by its script and must not acquire or shoot on the way. The

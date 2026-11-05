@@ -5645,6 +5645,28 @@ and the live fight build their VM lists separately. Retail's own door series los
 retail is *not* frozen there.
 
 The capture therefore reports 0 damage by construction, not by an AI gap: the earlier "15 hits, 29 HP" figure was
-measured before something started setting the freeze at this pose. Next step: name the script (the live app's VM list and
-the traced pass need one shared `cog_index -> script` map), then find why it never clears -- the shape is a cutscene's
-invulnerability, since level 1 opens with a film and the capture skips it.
+measured before something started setting the freeze at this pose.
+
+**Round 399 names it and fixes it.** `--cog-source` (new: prints a shipped script's text) shows the owner:
+
+```
+init_kyle:
+   SetActorFlags(player, 8);
+   SetTimerEx(1.50, 1, player, 0);     // the respawn invulnerability, cleared by `timer:` when id == 1
+startup:
+   if(!IsMulti()) call init_kyle;
+   SetTimerEx(2 + 5*rand(), 2, 0, 0);  // the bubbles check, armed in the same frame
+```
+
+The port kept **one** timer per cog, so `startup`'s write erased the 1.5 s clear and the flag stayed set forever. The
+timer slot is now a list (`Vm::timers`, `Vm::take_due_timers`) that fires every due timer earliest-first, and the class
+scripts of the level's ten extra `walkplayer` spawn markers are no longer started (single-player retail neither draws nor
+places them; they each started `kyle.cog` again). Measured on the door capture:
+
+```
+hit: ClearActorFlags(0, 0x8) from cog 42 `kyle.cog` clears the freeze
+timer: kyle.cog id 1 -> Ok(Nil)
+timer: kyle.cog id 2 -> Ok(Nil)
+```
+
+Gates: **266 tests**, `--gates` **0 of 67 failed**, trace gate **10/10**, `--walk all` 24/34.

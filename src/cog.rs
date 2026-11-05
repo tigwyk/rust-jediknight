@@ -1018,15 +1018,22 @@ pub struct Vm {
     /// scripts compare against `GetMasterCog()`. The VM holds it because the world does not know
     /// which of its scripts is calling.
     pub cog_index: i32,
+    /// The script this VM runs (the file name), set by whoever creates it: `cog_index` alone cannot
+    /// name the script behind a verb trace, and a started cog's index is not its place in the level's
+    /// table.
+    pub script_name: String,
     /// This cog's pulse, as the engine keeps it (`SITH_COG_PULSE_SET`): `SetPulse(seconds)` sets
     /// the interval and the next due time, and every cog tick that is due sends the `pulse` message.
     pub pulse: Option<(f32, f32)>,
-    /// This cog's one-shot timer (`SITH_COG_TIMER_SET`): the `timer` message fires once when due.
-    /// `SetTimerEx(seconds, id, val, val2)` also stores the id the handler reads back through
+    /// This cog's one-shot timers (`SITH_COG_TIMER_SET`), each firing the `timer` message once when
+    /// due. `SetTimerEx(seconds, id, val, val2)` also stores the id the handler reads back through
     /// `GetSenderId()` and the two parameter words — the shipped actor scripts branch on exactly
     /// that id (`timer:` in `actor_<class>.cog`: id 0 resets a count, id 1 credits the level's
-    /// population bin), so a timer that arrived with sender 0 would take the wrong arm.
-    pub timer: Option<(f32, i64, [f64; 2])>,
+    /// population bin). A **list**, not one slot: `kyle.cog`'s `init_kyle` arms the 1.5 s respawn
+    /// invulnerability clear (id 1) and its `startup` then arms the bubbles timer (id 2) in the same
+    /// frame, and with one slot the overwrite left the player `SetActorFlags(player, 0x8)` frozen for
+    /// the whole level (the door capture swallowed every bolt).
+    pub timers: Vec<(f32, i64, [f64; 2])>,
     /// Seconds this cog has been running, which is what pulse and timer deadlines are measured against.
     pub now: f32,
     /// When a `sleep` in the interrupted label may continue.
@@ -1090,8 +1097,9 @@ impl Vm {
             sender_type: 0,
             source: 0,
             cog_index: -1,
+            script_name: String::new(),
             pulse: None,
-            timer: None,
+            timers: Vec::new(),
             now: 0.0,
             sleep_until: 0.0,
             resume: None,
@@ -1129,6 +1137,22 @@ impl Vm {
 
     /// Run one label to completion. Errors are returned rather than panicking: a
     /// single bad script must not take the whole level down.
+    /// Take every timer that is due at `now`, earliest first, and leave the rest armed.
+    ///
+    /// A cog may hold more than one timer (`kyle.cog` arms its 1.5 s respawn-invulnerability clear and
+    /// its bubbles timer in the same frame), so the slot is a list and a due batch is collected in
+    /// deadline order -- a handler that re-arms sees the later timers still pending.
+    pub fn take_due_timers(&mut self) -> Vec<(i64, [f64; 2])> {
+        let now = self.now;
+        if !self.timers.iter().any(|(due, _, _)| now >= *due) {
+            return Vec::new();
+        }
+        let (mut due, pending): (Vec<_>, Vec<_>) = self.timers.drain(..).partition(|(at, _, _)| now >= *at);
+        self.timers = pending;
+        due.sort_by(|a, b| a.0.total_cmp(&b.0));
+        due.into_iter().map(|(_, id, params)| (id, params)).collect()
+    }
+
     pub fn run_label(&mut self, cog: &Cog, label: &str) -> Result<Value, String> {
         let Some(body) = cog.label(label) else {
             return Err(format!("no label `{label}`"));
@@ -1497,7 +1521,9 @@ impl Vm {
                     args.get(2).map(|v| v.num()).unwrap_or(0.0),
                     args.get(3).map(|v| v.num()).unwrap_or(0.0),
                 ];
-                self.timer = (value > 0.0).then_some((self.now + value, id, params));
+                if value > 0.0 {
+                    self.timers.push((self.now + value, id, params));
+                }
                 return Value::Nil;
             }
             _ => {}
@@ -1508,6 +1534,7 @@ impl Vm {
                 // Engine verbs can see which cog is calling them (`pCog`): `SendMessage` records that
                 // index as the sender, and the receiver reads it back through `GetSenderID`.
                 world.caller_cog = self.cog_index;
+                world.caller_script.clone_from(&self.script_name);
                 return world.call(name, &args);
             }
         }
@@ -1602,6 +1629,23 @@ pub fn pseudo_random() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `kyle.cog` arms two timers in one frame — the 1.5 s respawn-invulnerability clear (id 1) and
+    /// the bubbles check (id 2) — and with a single slot the startup's write erased the clear, which
+    /// left the player `SetActorFlags(player, 0x8)` frozen for the whole level.
+    #[test]
+    fn two_timers_armed_in_one_frame_both_fire_in_due_order() {
+        let mut vm = Vm::new();
+        vm.timers.push((2.0, 2, [0.0, 0.0]));
+        vm.timers.push((1.5, 1, [7.0, 0.0]));
+        assert!(vm.take_due_timers().is_empty(), "a timer fired before it was due");
+        vm.now = 1.6;
+        assert_eq!(vm.take_due_timers(), vec![(1, [7.0, 0.0])]);
+        assert_eq!(vm.timers.len(), 1, "the later timer was dropped");
+        vm.now = 2.0;
+        assert_eq!(vm.take_due_timers(), vec![(2, [0.0, 0.0])]);
+        assert!(vm.timers.is_empty());
+    }
 
     const DOOR: &str = r#"
 # 1-way Door Script

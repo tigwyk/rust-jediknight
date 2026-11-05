@@ -806,6 +806,7 @@ fn main() {
     let mut play: Option<String> = None;
     let mut names: Option<String> = None;
     let mut cogs_only = false;
+    let mut cog_source: Option<String> = None;
     let mut cogs_filter = String::new();
     let mut run_only = false;
     let mut run_filter = String::new();
@@ -817,6 +818,15 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--check" => check = true,
+            // `--cog-source <name>`: print a shipped script's text, for reading what a label does
+            // (the class scripts are the player's and the actors' own behaviour, and the port has no
+            // other way to read one).
+            "--cog-source" => {
+                cog_source = args.get(i + 1).cloned();
+                if cog_source.is_some() {
+                    i += 1;
+                }
+            }
             "--cogs" => {
                 cogs_only = true;
                 if let Some(v) = args.get(i + 1) {
@@ -6403,10 +6413,14 @@ fn main() {
                 let _ = vm.run_label(script, "created");
                 // The timer `created:` armed, ticked the way the app's pulse system ticks it.
                 vm.now += 2.0;
-                if let Some((due, id, params)) = vm.timer
-                    && vm.now >= due
+                if let Some((_, id, params)) = vm
+                    .timers
+                    .iter()
+                    .copied()
+                    .filter(|(due, _, _)| vm.now >= *due)
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
                 {
-                    vm.timer = None;
+                    vm.timers.retain(|(due, _, _)| vm.now < *due);
                     vm.sender = id;
                     sim_world.borrow_mut().last_params = params.to_vec();
                     let _ = vm.run_label(script, "timer");
@@ -11140,6 +11154,14 @@ fn main() {
             "adjoins: SetSectorFlags({sector}, 2) makes the sector water (was {was_water}); SetSectorAdjoins({sector}, 0) shuts its doorways"
         );
         println!("--- adjoin check passed ---");
+        return;
+    }
+
+    if let Some(name) = &cog_source {
+        match gobs.read(name) {
+            Some(data) => print!("{}", String::from_utf8_lossy(&data)),
+            None => println!("cog-source: `{name}` is not in the archive"),
+        }
         return;
     }
 
@@ -20409,21 +20431,22 @@ fn run_pulses_and_timers(capture: Option<Res<CaptureDt>>,
                 fired += 1;
             }
         }
-        if let Some((due, id, params)) = vm.timer
-            && vm.now >= due
-        {
-            vm.timer = None;
-            if script.label("timer").is_some() {
-                // The engine sends the message with the timer's own id as the sender
-                // (`sithCogFunction_SetTimerEx`'s second argument) and its two words as the
-                // handler's parameters: the actor scripts branch on `GetSenderId()`.
-                vm.sender = id;
-                handle.borrow_mut().last_params = params.to_vec();
-                let result = vm.run_label(script, "timer");
-                if std::env::var_os("BK_PULSE_TRACE").is_some() {
-                    println!("timer: {script_name} id {id} -> {result:?}");
+        // Every timer that is due fires, earliest first: a cog may hold more than one (`kyle.cog`
+        // arms its 1.5 s invulnerability clear and its bubbles timer in the same frame).
+        for (id, params) in vm.take_due_timers() {
+            {
+                if script.label("timer").is_some() {
+                    // The engine sends the message with the timer's own id as the sender
+                    // (`sithCogFunction_SetTimerEx`'s second argument) and its two words as the
+                    // handler's parameters: the actor scripts branch on `GetSenderId()`.
+                    vm.sender = id;
+                    handle.borrow_mut().last_params = params.to_vec();
+                    let result = vm.run_label(script, "timer");
+                    if std::env::var_os("BK_PULSE_TRACE").is_some() {
+                        println!("timer: {script_name} id {id} -> {result:?}");
+                    }
+                    fired += 1;
                 }
-                fired += 1;
             }
         }
     }
@@ -22013,7 +22036,7 @@ fn live_check(
     let armed = sim
         .instances
         .iter()
-        .filter(|(_, vm)| vm.pulse.is_some() || vm.timer.is_some())
+        .filter(|(_, vm)| vm.pulse.is_some() || !vm.timers.is_empty())
         .count();
     let pulses = pulses.as_ref().map(|p| p.0).unwrap_or(0);
     say(
@@ -22556,7 +22579,9 @@ fn load_item_cogs(
                 rt.bin_cog_index.insert(bin, vm.cog_index);
             }
             rt.spawned_cogs.insert(key);
+            rt.cog_names.insert(vm.cog_index, name.clone());
         }
+        vm.script_name = name.clone();
         sim.instances.push((name.clone(), vm));
     }
 }
@@ -24583,6 +24608,11 @@ fn setup(
         // `GetSelfCog` is the instance's own index in the level's cog list, which is the order the
         // engine creates them in — so this is the same number a script compares against.
         vm.cog_index = sim.instances.len() as i32;
+        sim.world
+            .borrow_mut()
+            .cog_names
+            .insert(vm.cog_index, inst.script.clone());
+        vm.script_name = inst.script.clone();
         sim.instances.push((inst.script.clone(), vm));
     }
     // The player's class script comes from its **template**, not from a `cogs` row: every shipped
@@ -24602,7 +24632,20 @@ fn setup(
                     let _ = vm.run_label(script, "startup");
                 }
                 vm.cog_index = sim.instances.len() as i32;
+                sim.world
+                    .borrow_mut()
+                    .cog_names
+                    .insert(vm.cog_index, name.clone());
+                vm.script_name = name.clone();
                 sim.instances.push((name.clone(), vm));
+                // Link it to the **thing** like every other class instance: the engine's message bus
+                // addresses a thing's own cog (`sithThing_GetCog`), and `kyle.cog`'s `created:` is
+                // where its startup's `SetActorFlags(player, 0x8)` (the intro's freeze) is cleared.
+                // Without the link the player stayed invulnerable for the whole level.
+                let instance = sim.instances.len() - 1;
+                let mut rt = sim.world.borrow_mut();
+                rt.thing_class_cog.insert(player, instance as i32);
+                rt.class_skill.insert(instance as i32, script.skill_answers());
                 println!("scripts: started the player's class script `{name}` (from template `{template}`)");
             }
         }
@@ -24625,6 +24668,14 @@ fn setup(
             if index == player {
                 continue; // the player's class script is the block above
             }
+            // The level's **other** player starts are multiplayer spawn markers, which single-player
+            // retail neither draws nor places -- and whose class script is `kyle.cog` again: level 1
+            // carries ten of them, and eleven `kyle.cog` startups each ran `SetActorFlags(player, 0x8)`,
+            // leaving the local player invulnerable for the whole level (the door capture's every bolt
+            // was swallowed).
+            if is_local_player(&thing.template) {
+                continue;
+            }
             let Some(name) = level.template_param(&thing.template, "cog").map(|s| s.to_string()) else {
                 continue;
             };
@@ -24636,6 +24687,7 @@ fn setup(
             vm.sender_ref = index as i64;
             vm.source = index as i64;
             vm.cog_index = sim.instances.len() as i32;
+            vm.script_name = name.clone();
             if script.label("startup").is_some() {
                 let _ = vm.run_label(script, "startup");
             }
