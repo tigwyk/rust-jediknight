@@ -5321,3 +5321,20 @@ and `0x4d2560`, which is a bulk inventory reset that clears every bin (it walks 
 screen's name string (`0x535c28`) is referenced only from the UI table itself (`0x535db8`), not from code. So in this
 build nothing converts the ending screen's clicks into `SITHBIN_CHOICE`, which is why the value is neutral; the port's
 neutral default is therefore faithful, and the remaining work on that item is the screen's *presentation*, not a writer.
+
+### Round 379: the two-hop flip, explained from 06abarons' own trace
+
+The widened contact is closed as a lever, not a threshold: round 376's table already showed every narrowing broke a
+different level, and the trace now names the mechanism.
+
+`06abarons`' accepted doorway is 564: depth 0.1779 against a 0.13 body, and **the strict test refuses every advance**
+(`inside false` at 0.0846, 0.0946 and 0.1496). The body is only let in by the one-step allowance (`stepped true`, feet
+0.07 above the far floor). That is the seam: the port's doorway admits the body by standing it a step high on the far
+side, so the containment check that later runs on the far sector's polygon is already outside it by construction, and
+with the two-hop reach the body advances one more step (12.3 -> 12.4 units) before the neighbour face blocks it -- one
+step further out along exactly that allowance. The level is therefore not broken *by* the widening; it is admitted by a
+rule the widening lets it use once more.
+
+The fix is the door leaf, not the sweep: a doorway that is *static* geometry should never be entered through a step
+allowance, and a doorway that a script slides must have its planes moved. Round 376 put the same conclusion in the
+roadmap item; this trace is the measurement behind it.
