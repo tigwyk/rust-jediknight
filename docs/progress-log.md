@@ -5012,3 +5012,12 @@ comparable as captured: they need either a matching skip on the port side or a s
 `movestatus 0`; the port at the same pose (`BK_USE=1 --cogstatus-after 0 --frames 90`) prints `use: nothing linked
 within reach`. Both agree the row pose is not a trigger at the engine's `moveSize + 0.1` reach — the row proves the
 reach, not a door opening.
+
+**Why step 4's "each trigger" stops here.** Level 1's placed cogs expose three trigger shapes, and each has the best
+fixture its input allows: `entered` (the secret-area script) is a retail number and is asserted by `--secret`
+(`maxsecrets 6, flags 1`), `crossed`/`used` on a door needs the use key and reads `doorstatus 0`/`movestatus 0` in
+**both** builds at the row pose (measured above), and the cantina switch's positive needs a use input retail accepts
+from 0.12 units — the harness holds/foregrounds a key and two clicks still leave the door shut, so that capture is
+input-bound. The chain itself is already covered headlessly by `--door` (use → `used` message → script →
+`setsectoradjoins`, with the solver's `passable` flipping), and the reach by the `use_reach` unit tests, so what a
+retail fixture would add is the *retail-side input*, not another assertion.
