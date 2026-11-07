@@ -6033,3 +6033,29 @@ normal first New Game is unchanged.
 Not changed: the Single Player screen's `Load` row still has no save-slot picker (the pause menu's
 one-slot Load path is the existing workaround), and the Cutscenes/Credits rows are still outside
 this level-loading path.
+
+### Round 419: the two tinted route rows cannot be a static renderer gate
+
+Checkpoint commit `061f3b1` captures rounds 412-418. The next render step was to isolate
+`route_catwalk` / `route_door`, then gate them if they were pose/tint matched.
+
+They are not. Re-capturing both with the current release and the normal 600-frame policy:
+
+| row | retail r/g | port r/g | port health | result |
+|---|---|---|---|---|
+| `route_catwalk` | 1.418 | 1.469 | 79 | tint is close; the fighter's animation phase is not |
+| `route_door` | 2.308 | 1.446 | 83 | retail is redder despite health 81 |
+
+`BK_TINT=0.929,0,0` raised the door's red mean to 73.5 (retail 73.0), but green/blue stayed
+47.5/55.8 against retail's 31.6/33.7; the tint is not the whole term. A correlation search over
+±60 px puts the door pair's best alignment at x=60 (0.56), while the catwalk's is (-2,+2) - the
+door reference carries a camera pose/shake or a crop offset the static row does not reproduce.
+The catwalk reference has a fighter at a different animation frame, the same reason `spawn` is
+series-gated.
+
+One candidate was tested and reverted: adding `Tonemapping::None` to the world cameras. A/B on the
+static rows barely moved the numbers (`spawn_pose` 0.6387 default vs 0.6369 none; `level2_spawn`
+0.4328 vs 0.4326), so it is not the remaining term and the tree is back to the checkpoint.
+
+No thresholds were added. The two rows remain `UNGRADED`; a renderer claim needs a state-matched
+retail capture, not another ground/luma tweak. `cargo test --release` is **272 passed, 0 failed**.

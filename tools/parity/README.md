@@ -122,6 +122,14 @@ engine's `FindFloor`/`AttachThingToSurface` behaviour), which moved the pair 0.4
 the rest is retail's deeper red (Phase 1 step 3/5). Those are gaps, not renderer tolerance (see
 `docs/gaps.md` §5.9).
 
+Round 419 re-captured both rows and confirmed the static gate is the wrong instrument: the catwalk's
+tint now matches (port r/g 1.469, retail 1.418) but its fighter is at a different animation frame; the
+door's reference is redder than the port's even at 83 vs 81 health, and a ±60 px alignment search finds
+its best offset at x=60 (catwalk: -2,+2), so the reference carries a camera pose/shake the row does not.
+Neither is a renderer delta. `BK_TINT=0.929,0,0` matched the door's red mean 73.5/73.0 but left green/blue
+47.5/55.8 against 31.6/33.7, and `Tonemapping::None` moved the static rows by <0.002 SSIM and was
+reverted. Keep the rows ungraded until a state-matched retail capture exists.
+
 The numbers are tied to the capture policy above (600 frames, window from the retail sidecar, default
 16-bit retail renderer) — changing framing or frame count invalidates them.
 
