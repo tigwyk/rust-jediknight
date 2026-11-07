@@ -46,6 +46,10 @@ pub const EDGES: &[Edge] = &[
     Edge { from: 0x526680, id: 13, to: 0x52b588 }, // jkGuiSetup_Show
     Edge { from: 0x526680, id: 14, to: 0x526d98 }, // jkGuiPlayer_ShowNewPlayer
     Edge { from: 0x526680, id: 15, to: 0x5269f0 }, // jkGuiMain_ShowCutscenes
+    // The single-player screen's dev-only `(Debug)` row: `jkGuiSingleplayer_Show` case 0x66
+    // enumerates every episode in 0x536168 and, after Ok, that episode's levels in 0x5365a0.
+    Edge { from: 0x535e58, id: 102, to: 0x536168 },
+
     // jkGuiEsc_Show (0x411c30): the pause menu's rows.
     Edge { from: 0x529560, id: 10, to: 0x5311e0 }, // jkGuiObjectives_Show
     Edge { from: 0x529560, id: 11, to: 0x52ea68 }, // jkGuiMap_Show
@@ -197,6 +201,8 @@ mod tests {
         // The boot chain: main -> single player -> New Game, and the pause menu's own actions.
         assert_eq!(step(0x535e58, 100, "GUI_NEWGAME"), Step::NewGame);
         assert_eq!(step(0x535e58, 101, "GUI_LOAD"), Step::Nothing);
+        // The dev row opens the episode chooser, then the level chooser is its Ok.
+        assert_eq!(step(0x535e58, 102, "GUI_DEBUG_PLAY"), Step::Open(0x536168));
         assert_eq!(step(0x535e58, -1, "GUI_CANCEL"), Step::Close);
         assert_eq!(step(0x529560, 1, "GUI_RETURN_TO_GAME"), Step::Close);
         assert_eq!(step(0x529560, 14, "GUI_RESTART"), Step::Restart);

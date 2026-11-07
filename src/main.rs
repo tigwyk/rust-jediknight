@@ -805,6 +805,10 @@ fn main() {
     let mut look = 0.0f32;
     let mut play: Option<String> = None;
     let mut names: Option<String> = None;
+    // `--help`: answer without touching the game data, like the setup utilities. An unknown switch
+    // is an error, not a level name: falling through used to launch the main menu, which made a
+    // typo indistinguishable from a successful capture run.
+    let mut help = false;
     let mut cogs_only = false;
     let mut cog_source: Option<String> = None;
     let mut cogs_filter = String::new();
@@ -1351,13 +1355,30 @@ fn main() {
                 i += 1;
                 level_name = args.get(i).cloned();
             }
+            "--help" | "-h" => help = true,
             other => {
-                if !other.starts_with('-') {
-                    level_name = Some(other.to_string());
+                if other.starts_with('-') {
+                    eprintln!(
+                        "unknown option `{other}` (a level name is positional; use --help for usage)"
+                    );
+                    std::process::exit(2);
                 }
+                level_name = Some(other.to_string());
             }
         }
         i += 1;
+    }
+
+    if help {
+        println!(
+            "bevi-knight - a port of Star Wars Jedi Knight: Dark Forces II\n\n  \
+             bevi-knight [--game DIR] [--start LEVEL] [options]\n  \
+             bevi-knight --gates\n\n\
+             Common options: --start LEVEL, --warp \"x,y,z,yaw\", --shot FILE, --frames N,\n\
+             --mute, --gates, --campaign, --audit. The complete option list and what each check\n\
+             exercises are in README.md and docs/gates.txt."
+        );
+        return;
     }
 
     // A level named on the command line may be `03katarn`, `03katarn.jkl` or `jkl\03katarn.jkl`.
@@ -2401,8 +2422,8 @@ fn main() {
                 }
             }
         }
-        // Solid *things* block the sweep through a separate list (`Solids.things`, model cylinders);
-        // a door or crate in front of the body is invisible to the face scan.
+        // Solid *things* block the sweep through a separate list (`Solids.things`, model boxes and
+        // cylinders); a door or crate in front of the body is invisible to the face scan.
         // The level's own surfaces near the point, with `adjoin` and `surfflags`: a face the sweep treats
         // as solid but whose surface is an adjoin is the "retail walks through, the port blocks" case.
         for (i, s) in world.level.surfaces.iter().enumerate() {
@@ -2435,14 +2456,14 @@ fn main() {
                 lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]
             );
         }
-        for (centre, radius, _height, top, _sector) in &solids.things {
-            let d = ((centre[0] - at[0]).powi(2) + (centre[1] - at[1]).powi(2)).sqrt();
-            if d > 3.0 || (centre[2] - at[2]).abs() > 3.0 {
+        for thing in &solids.things {
+            let d = ((thing.centre[0] - at[0]).powi(2) + (thing.centre[1] - at[1]).powi(2)).sqrt();
+            if d > 3.0 || (thing.centre[2] - at[2]).abs() > 3.0 {
                 continue;
             }
             println!(
-                "  thing at ({:.2},{:.2},{:.2}) radius {radius:.3} top {:.3} distance {d:.2}",
-                centre[0], centre[1], centre[2], top
+                "  thing at ({:.2},{:.2},{:.2}) radius {:.3} top {:.3} half {:?} distance {d:.2}",
+                thing.centre[0], thing.centre[1], thing.centre[2], thing.radius, thing.z_max, thing.half
             );
         }
         for sector in solids.sectors_around(at) {
@@ -2582,15 +2603,20 @@ fn main() {
         // episode is `03-04a.smk` with `gotoA 11`, and 11 is level 1. Retail plays it, then drops the
         // player into the cantina; a start at `first_level` skipped it, which is what a player
         // reported as missing (`--start` and every capture still skip it, deliberately).
-        let pre: Vec<String> = match &episode {
-            Some(episode) if !start_in_level && level_name == campaign_start => {
+        let opening: Vec<String> = episode
+            .as_ref()
+            .map(|episode| {
                 episode
-                    .flow_before(&level_name)
+                    .flow_before(&campaign_start)
                     .iter()
                     .map(|s| s.file.clone())
                     .collect()
-            }
-            _ => Vec::new(),
+            })
+            .unwrap_or_default();
+        let pre = if !start_in_level && level_name == campaign_start {
+            opening.clone()
+        } else {
+            Vec::new()
         };
         FlowPlan {
             game: game.clone(),
@@ -2600,7 +2626,9 @@ fn main() {
             next,
             episode: episode.clone(),
             films_done: false,
+            reset_inventory: false,
             pre,
+            opening,
             swap,
         }
     };
@@ -8171,11 +8199,16 @@ fn main() {
         {
             let things = &solids.things;
             assert!(!things.is_empty(), "no solid things at all in this level");
-            for (_, radius, lo, hi, _sector) in things {
-                assert!(*radius > 0.0, "a solid thing with radius {radius}");
-                assert!(hi > lo, "a solid thing whose model spans {lo}..{hi}");
+            for thing in things {
+                assert!(thing.radius > 0.0, "a solid thing with radius {}", thing.radius);
+                assert!(
+                    thing.z_max > thing.z_min,
+                    "a solid thing whose model spans {}..{}",
+                    thing.z_min,
+                    thing.z_max
+                );
             }
-            let heights: Vec<f32> = things.iter().map(|(_, _, lo, hi, _)| hi - lo).collect();
+            let heights: Vec<f32> = things.iter().map(|thing| thing.z_max - thing.z_min).collect();
             let low = heights.iter().cloned().fold(f32::MAX, f32::min);
             let tall = heights.iter().cloned().fold(0.0f32, f32::max);
             assert!(tall > low * 1.5, "every solid thing is the same height ({low}..{tall})");
@@ -12425,6 +12458,7 @@ fn main() {
         }
     );
 
+    let debug_catalog = DebugCatalog::new(&gobs);
     let mut app = App::new();
     if let Some(played) = startup_cutscene {
         app.insert_resource(played);
@@ -12470,6 +12504,7 @@ fn main() {
         }))
         .add_plugins((level_mat::LevelMaterialPlugin, palette::PalettePlugin))
         .insert_resource(Archives(gobs))
+        .insert_resource(debug_catalog)
         .insert_resource(Screens(menus))
         .insert_resource(CaptureMode(
             shot.is_some() || live || sim || complete_after.is_some() || !animating || goal_check,
@@ -12643,6 +12678,83 @@ fn main() {
 #[derive(Resource, Deref)]
 struct Archives(gob::GobSet);
 
+/// One archive the dev `(Debug)` chooser can open: its `episode.jk` and the `misc\cogstrings.uni`
+/// that archive itself carries for the level labels.
+struct DebugEpisode {
+    episode: episode::Episode,
+    labels: uni::Uni,
+}
+
+impl DebugEpisode {
+    /// Retail's label for a level file: `jkGuiTitle_quicksave_related_func1` shortens the file
+    /// (`04EscapeHouse.jkl` -> `04ESCAPEHOUSE`), lowercases it, looks it up in that episode's
+    /// `cogstrings.uni`, and falls back to the key itself. The table row reads
+    /// `"4 - The Jedi's Lightsaber"`, not the `episode.jk` comment.
+    fn level_label(&self, file: &str) -> String {
+        let key = short_level_key(file);
+        self.labels
+            .get(key)
+            .filter(|label| !label.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| key.to_ascii_lowercase())
+    }
+}
+
+/// The install's episode manifests, for the dev `(Debug)` chooser: each episode's title, its level
+/// rows, and the labels from that same archive, in the order retail's directory scan finds them.
+#[derive(Resource, Default)]
+struct DebugCatalog(Vec<DebugEpisode>);
+
+impl DebugCatalog {
+    fn new(gobs: &gob::GobSet) -> Self {
+        let cogstrings = gobs.all_named("misc\\cogstrings.uni");
+        Self(
+            gobs.all_named("episode.jk")
+                .iter()
+                .filter_map(|entry| {
+                    let raw = gobs.read_entry(entry)?;
+                    let labels = cogstrings
+                        .iter()
+                        .find(|label| label.archive == entry.archive)
+                        .and_then(|label| gobs.read_entry(label))
+                        .map(|data| uni::parse(&String::from_utf8_lossy(&data)))
+                        .unwrap_or_default();
+                    Some(DebugEpisode {
+                        episode: episode::parse(&String::from_utf8_lossy(&raw)),
+                        labels,
+                    })
+                })
+                .collect(),
+        )
+    }
+}
+
+/// The name `stdFnames_CopyShortName` hands the string table: the last path component with its
+/// extension removed (`jkl\04EscapeHouse.jkl` -> `04EscapeHouse`).
+fn short_level_key(file: &str) -> &str {
+    let name = file.rsplit(['\\', '/']).next().unwrap_or(file);
+    name.rsplit_once('.').map_or(name, |(stem, _)| stem)
+}
+
+/// The labels for a debug list screen: the episodes, or the selected episode's levels.
+fn debug_entries(catalog: Option<&DebugCatalog>, base: u32, episode: usize) -> Vec<String> {
+    let Some(catalog) = catalog else { return Vec::new() };
+    match base {
+        0x536168 => catalog.0.iter().map(|e| e.episode.title.clone()).collect(),
+        0x5365a0 => catalog
+            .0
+            .get(episode)
+            .map(|e| {
+                e.episode
+                    .levels()
+                    .map(|s| e.level_label(&s.file))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 /// Where finishing the loaded level leads, resolved from the episode graph at startup.
 #[derive(Resource)]
 struct FlowPlan {
@@ -12658,6 +12770,9 @@ struct FlowPlan {
     /// The cutscenes that play **before** this level. Only the campaign start fills this: the
     /// opening film is the one row no forward walk reaches (`03-04a.smk` -> level 1).
     pre: Vec<String>,
+    /// The campaign's opening film, kept even after `pre` has played. Retail's `jk_loadFile` starts
+    /// the episode from its first row, so New Game after returning to the menu plays it again.
+    opening: Vec<String>,
     /// The level that loads after that.
     next: Option<String>,
     /// The episode this level belongs to, for what the engine grants when it ends
@@ -12667,6 +12782,10 @@ struct FlowPlan {
     /// straight to another level). `queue_next_level` waits on it, so a two-film transition cannot
     /// swap the level halfway through its films.
     films_done: bool,
+    /// The next swap is a new game or a debug start, which retail marks with `DAT_00549fa0 = 1`
+    /// so `sithOpenPostProcess` resets the player's inventory. A campaign transition or Restart
+    /// leaves it clear and carries the inventory across.
+    reset_inventory: bool,
     /// Whether to actually swap the loaded world (see [`swap_level`] for the boundary).
     swap: bool,
 }
@@ -13036,15 +13155,17 @@ fn swap_level(world: &mut bevy::prelude::World) {
     let Some(name) = world.resource_mut::<PendingLevel>().0.take() else { return };
     // Read the successor and the manifest while the borrow is immutable, then swap. The manifest is
     // `episode.jk`, which every archive holds (`JK1`, `JK1MP`, `JK1CTF`): a bare `read` returns the
-    // last one — the multiplayer list — and resolving the campaign's successor against that stopped
-    // the campaign after level 2. Ask for the single-player episode explicitly, as `setup` does.
+    // last one — the training list — and resolving the campaign's successor against that stopped
+    // the campaign after level 2. The episode is the one whose graph actually carries this level;
+    // a campaign transition still resolves to `JK1`, while a debug start on a CTF or training level
+    // follows that category's own rows.
     let (next, episode) = {
         let gobs = &world.resource::<Archives>().0;
         match load(gobs, &name) {
             Ok(next) => {
                 let episode = episodes_of(gobs)
                     .into_iter()
-                    .find(|(_, e)| e.kind == episode::KIND_SINGLE)
+                    .find(|(_, e)| e.row_for(&name).is_some())
                     .map(|(_, e)| e);
                 (next, episode)
             }
@@ -13062,9 +13183,12 @@ fn swap_level(world: &mut bevy::prelude::World) {
     // What the *player* keeps: the engine's `jkPlayer_*` state outlives the level, and this build
     // rebuilds the runtime from the incoming `.jkl`, so it has to be taken off the old one first.
     // It rides on the incoming `World` and `setup` applies it before the new level's scripts run.
-    let carried = world
-        .get_resource::<Sim>()
-        .map(|sim| sim.world.borrow().carry());
+    let reset_inventory = world
+        .get_resource_mut::<FlowPlan>()
+        .is_some_and(|mut plan| std::mem::take(&mut plan.reset_inventory));
+    let carried = (!reset_inventory)
+        .then(|| world.get_resource::<Sim>().map(|sim| sim.world.borrow().carry()))
+        .flatten();
     // The endgame fork's arm is the player's own choice (`jkPlayer_GetChoice`: bin `0x12`, `2` dark),
     // read before the old runtime goes away — it is what `jkMain_EndLevel` passes down as the arm.
     let dark_arm = world
@@ -13086,6 +13210,7 @@ fn swap_level(world: &mut bevy::prelude::World) {
     world.insert_resource(next);
     if let Some(mut plan) = world.get_resource_mut::<FlowPlan>() {
         plan.level = name.clone();
+        plan.episode = episode.clone();
         let (cuts, after) = episode
             .map(|e| {
                 let flow = e.flow_after_with(&name, dark_arm);
@@ -13714,6 +13839,9 @@ struct Overlay {
     lines: Vec<(usize, String)>,
     /// Index into the menu's selectable rows.
     selected: usize,
+    /// The entry highlighted in a debug chooser's list box, and which episode its level list is for.
+    list_selected: usize,
+    debug_episode: usize,
     /// Whether the inventory strip is open for selection. `I` toggles it; while it is open the
     /// arrows move `inv_selected` and Enter uses that item (`UseBin`, the engine's own path).
     inventory: bool,
@@ -13766,6 +13894,8 @@ impl Overlay {
             pending: None,
             lines: Vec::new(),
             selected: 0,
+            list_selected: 0,
+            debug_episode: 0,
             inventory: false,
             inv_selected: 0,
             carried_bins: Vec::new(),
@@ -14162,6 +14292,7 @@ fn refresh_overlay(
     player: Option<Res<Player>>,
     screens: Option<Res<Screens>>,
     assets: Option<Res<UiAssets>>,
+    catalog: Option<Res<DebugCatalog>>,
     sim: Option<Res<Sim>>,
     // A cutscene owns the screen while it plays: the engine drew it instead of the HUD, and
     // the canvas has to stay the film rather than be cleared and redrawn under it.
@@ -14234,6 +14365,11 @@ fn refresh_overlay(
                 })
                 .unwrap_or(None);
             let checkbox = screen.art.iter().position(|n| n.eq_ignore_ascii_case("check.bm")).map(|i| i as i32);
+            // The dev chooser's list, from the install's own episode graph; empty on every
+            // other screen, which keeps their list boxes (none) blank as before.
+            let debug_list = debug_entries(catalog.as_deref(), screen.base, overlay.debug_episode);
+            let list = (!debug_list.is_empty()).then_some(debug_list.as_slice());
+            let list_selected = overlay.list_selected;
             // A run-time dialog's lines are literal text, not keys.
             let lines = overlay.lines.clone();
             let text = |index: usize| {
@@ -14259,6 +14395,8 @@ fn refresh_overlay(
                 text: &text,
                 force_level: force_star.map(|art| (art, &level_of as &dyn Fn(i32) -> i32)),
                 map: live_map,
+                list,
+                list_selected,
                 ..ui::Look::default()
             };
             let backdrop = ui::Backdrop { base: &base, panel: panel.as_ref() };
@@ -14307,7 +14445,8 @@ fn ui_input(
     screens: Option<Res<Screens>>,
     mut chase: ResMut<Chase>,
     assets: Option<Res<UiAssets>>,
-    plan: Option<Res<FlowPlan>>,
+    catalog: Option<Res<DebugCatalog>>,
+    mut plan: Option<ResMut<FlowPlan>>,
     overview: Option<Res<Overview>>,
     mut pending: ResMut<PendingLevel>,
     mut overlay: ResMut<Overlay>,
@@ -14410,6 +14549,37 @@ fn ui_input(
     let Some(screen) = overlay.menu.clone().and_then(|name| screens.find(&name).cloned()) else {
         return;
     };
+    // The debug choosers: the arrows move through the list, and Enter is their Ok. Their lists
+    // are not menu rows, so the generic cursor below must not run.
+    if matches!(screen.base, 0x536168 | 0x5365a0) {
+        let count = debug_entries(catalog.as_deref(), screen.base, overlay.debug_episode).len();
+        if count > 0 {
+            if keys.just_pressed(KeyCode::ArrowDown) {
+                overlay.list_selected = (overlay.list_selected + 1) % count;
+                overlay.dirty = true;
+            }
+            if keys.just_pressed(KeyCode::ArrowUp) {
+                overlay.list_selected = (overlay.list_selected + count - 1) % count;
+                overlay.dirty = true;
+            }
+        }
+        if keys.just_pressed(KeyCode::Enter)
+            && let Some(index) = screen.items.iter().position(|item| item.id == 1 && item.key == "GUI_OK")
+        {
+            let strings = assets.as_deref().map(|a| &a.strings).cloned().unwrap_or_default();
+            activate(
+                &screen,
+                index,
+                &mut overlay,
+                &strings,
+                catalog.as_deref(),
+                plan.as_deref_mut(),
+                &mut pending,
+                &mut commands,
+            );
+        }
+        return;
+    }
     let rows = screen.rows();
     if rows.is_empty() {
         return;
@@ -14429,7 +14599,8 @@ fn ui_input(
             rows[overlay.selected % rows.len()],
             &mut overlay,
             &strings,
-            plan.as_deref(),
+            catalog.as_deref(),
+            plan.as_deref_mut(),
             &mut pending,
             &mut commands,
         );
@@ -14440,7 +14611,8 @@ fn ui_input(
 fn apply_pending(
     screens: Option<Res<Screens>>,
     assets: Option<Res<UiAssets>>,
-    plan: Option<Res<FlowPlan>>,
+    catalog: Option<Res<DebugCatalog>>,
+    mut plan: Option<ResMut<FlowPlan>>,
     mut pending: ResMut<PendingLevel>,
     mut overlay: ResMut<Overlay>,
     mut commands: Commands,
@@ -14448,9 +14620,22 @@ fn apply_pending(
     let Some(id) = overlay.pending.take() else { return };
     let (Some(screens), Some(name)) = (screens, overlay.menu.clone()) else { return };
     let Some(screen) = screens.find(&name).cloned() else { return };
-    if let Some(index) = screen.items.iter().position(|item| item.id == id) {
+    if let Some(index) = screen
+        .items
+        .iter()
+        .position(|item| item.id == id && item.kind != menus::LISTBOX)
+    {
         let strings = assets.as_deref().map(|a| &a.strings).cloned().unwrap_or_default();
-        activate(&screen, index, &mut overlay, &strings, plan.as_deref(), &mut pending, &mut commands);
+        activate(
+            &screen,
+            index,
+            &mut overlay,
+            &strings,
+            catalog.as_deref(),
+            plan.as_deref_mut(),
+            &mut pending,
+            &mut commands,
+        );
     }
 }
 
@@ -14460,7 +14645,8 @@ fn ui_mouse(
     windows: Query<&Window>,
     screens: Option<Res<Screens>>,
     assets: Option<Res<UiAssets>>,
-    plan: Option<Res<FlowPlan>>,
+    catalog: Option<Res<DebugCatalog>>,
+    mut plan: Option<ResMut<FlowPlan>>,
     overview: Option<Res<Overview>>,
     sim: Option<Res<Sim>>,
     bank: Option<Res<SoundBank>>,
@@ -14498,6 +14684,24 @@ fn ui_mouse(
         return;
     }
     let (Some(screen), Some(index)) = (screen, hover) else { return };
+    // A click in a debug chooser's list box selects that entry; it does not press Ok. The
+    // selected entry is what Ok and Enter then commit.
+    if screen.items[index].kind == menus::LISTBOX
+        && let Some(at) = at
+    {
+        let entries = debug_entries(catalog.as_deref(), screen.base, overlay.debug_episode);
+        let font = usize::try_from(screen.items[index].text_type)
+            .ok()
+            .and_then(|t| assets.as_deref().and_then(|a| a.fonts.get(t)));
+        if let Some(font) = font
+            && let Some(selected) =
+                ui::list_at(screen.items[index].rect, font.height as i32, entries.len(), overlay.list_selected, at)
+        {
+            overlay.list_selected = selected;
+            overlay.dirty = true;
+        }
+        return;
+    }
     // A click on a row moves the keyboard cursor there, so Enter and the arrows continue
     // from what was clicked; anything else runs its own id.
     let rows = screen.rows();
@@ -14510,7 +14714,16 @@ fn ui_mouse(
         play_menu_wav(&name, &sim, &bank);
     }
     let strings = assets.as_deref().map(|a| &a.strings).cloned().unwrap_or_default();
-    activate(&screen, index, &mut overlay, &strings, plan.as_deref(), &mut pending, &mut commands);
+    activate(
+        &screen,
+        index,
+        &mut overlay,
+        &strings,
+        catalog.as_deref(),
+        plan.as_deref_mut(),
+        &mut pending,
+        &mut commands,
+    );
 }
 
 /// Run one element's id: open the screen the retail graph says it opens, otherwise close
@@ -14520,7 +14733,8 @@ fn activate(
     index: usize,
     overlay: &mut Overlay,
     strings: &uni::Uni,
-    plan: Option<&FlowPlan>,
+    catalog: Option<&DebugCatalog>,
+    mut plan: Option<&mut FlowPlan>,
     pending: &mut PendingLevel,
     commands: &mut Commands,
 ) {
@@ -14536,6 +14750,50 @@ fn activate(
     // The name is resolved to its bin against `items.dat` by a system that holds the runtime.
     if screen.base == 0x52f168 && item.kind == 1 {
         commands.insert_resource(SpendPower(item.id));
+        return;
+    }
+    // The debug chooser's list is a controller, not a button: Enter and the mouse select an
+    // entry, and Ok is what commits it.
+    if item.kind == menus::LISTBOX {
+        return;
+    }
+    // Debug, step 1: Ok on the episode list opens that episode's level list. The screen name
+    // `singleplayer` is shared by all three arrays, so the history entry must be its address.
+    if screen.base == 0x536168 && item.id == 1 {
+        let episodes = debug_entries(catalog, 0x536168, 0);
+        if episodes.is_empty() {
+            return;
+        }
+        overlay.debug_episode = overlay.list_selected.min(episodes.len() - 1);
+        // Retail's Cancel on the level list breaks out of `jkGuiSingleplayer_Show`'s loop and
+        // redraws the Single Player screen, not the episode list: the two choosers are one
+        // nested flow. Keep the history at the screen that opened Debug.
+        overlay.show(Some("0x5365a0".to_string()), 0);
+        overlay.list_selected = 0;
+        println!("debug: episode `{}`", episodes[overlay.debug_episode]);
+        return;
+    }
+    // Debug, step 2: Ok on the level list starts that level through the same level-swap path
+    // New Game uses.
+    if screen.base == 0x5365a0 && item.id == 1 {
+        let Some(entry) = catalog.and_then(|c| c.0.get(overlay.debug_episode)) else { return };
+        let Some(level) = entry.episode.levels().nth(overlay.list_selected) else { return };
+        let level = level.file.clone();
+        // Debug is a level browser, not New Game. Retail's picker (`jk_sub_403470`, 0x403470)
+        // sets the level and starts gameplay without calling `jkSmack_SmackPlay`. `FlowPlan.pre`
+        // is campaign-start-only here, so clear it before `play_intro_films` runs after the swap.
+        if let Some(plan) = plan.as_deref_mut() {
+            plan.pre.clear();
+            plan.reset_inventory = true;
+            // The selected category owns the level's episode graph: CTF/training levels end
+            // through their own manifest, not the single-player campaign's.
+            plan.episode = Some(entry.episode.clone());
+        }
+        overlay.history.clear();
+        overlay.started = true;
+        overlay.show(None, 0);
+        println!("debug: starting {level}");
+        pending.0 = Some(level);
         return;
     }
     let step = nav::step(screen.base, item.id, &item.key);
@@ -14563,6 +14821,13 @@ fn activate(
             // campaign's first level, Restart is the one that is loaded.
             let Some(plan) = plan else { return };
             let level = if step == nav::Step::NewGame { plan.first.clone() } else { plan.level.clone() };
+            // `jk_loadFile` (New Game) sets `DAT_00549fa0`; `jk_MissionReload` (Restart) does not.
+            // New Game also starts the episode from its first row, so the opening film is queued
+            // again even when this is a return to the main menu after an earlier campaign.
+            if step == nav::Step::NewGame {
+                plan.reset_inventory = true;
+                plan.pre = plan.opening.clone();
+            }
             overlay.history.clear();
             overlay.started = true;
             overlay.show(None, 0);
@@ -14580,6 +14845,7 @@ fn activate(
             // `find` takes a hex address, which is what the graph is keyed by.
             overlay.history.push(screen.name.clone());
             overlay.show(Some(format!("{to:#x}")), 0);
+            overlay.list_selected = 0;
         }
         nav::Step::Dialog { screen: to, keys } => {
             // A run-time dialog: its text elements carry no key, so the lines are the
@@ -15535,6 +15801,19 @@ struct WalkResult {
     end_sector: usize,
 }
 
+/// The horizontal part of a downward step projected onto a floor plane.
+///
+/// `sithCollision_MoveThing` slides the body's movement along the face it hits. For a downward
+/// velocity, the tangential horizontal component is `remaining * normal.z * normal.xy`; the vertical
+/// part is handled by the landing sweep. Level 3's start uses the file normal
+/// `[0.191,-0.815,-0.547]`, whose upward flip gives the measured `(-x,+y)` downhill direction.
+fn slope_step(normal: [f32; 3], remaining: f32) -> [f32; 2] {
+    [
+        normal[0] * remaining * normal[2],
+        normal[1] * remaining * normal[2],
+    ]
+}
+
 /// One frame of walking: gravity, the floor, then the solid planes, then any doorway.
 /// Shared by the headless `--walk` sweep and the in-app player so both run the same code.
 ///
@@ -15563,6 +15842,12 @@ fn walker_step(
     // Where the frame started, so a move that would leave the world can be undone.
     let frame_start = *pos;
     let mut landed = false;
+    // The downward part of this step that the floor did not consume, projected along the landing
+    // face: `MoveThing` slides a body down a ramp, and the player physics adds gravity every 0.02 s
+    // step. Level 3's authored start is on a 57-degree slope (normal `[0.191,-0.815,-0.547]` in the
+    // file); retail slides from `(-0.68,-5.23,0.27)` to `(-0.76,-4.73,-0.20)` while an unmodified
+    // floor snap stands still.
+    let mut slope_slide: Option<[f32; 2]> = None;
 
     // Vertical: the fall is a *sweep*, the way `sithCollision_MoveThing` moves any body — so it stops at
     // the first floor it meets and crosses doorways on the way down. That is what makes a walkway whose
@@ -15582,14 +15867,16 @@ fn walker_step(
         // −1.18 after a second (floor −1.25 + 0.065). A landing may lower the body onto a floor or
         // hold it there; it must never *lift* it.
         let land = solids
-            .floor_under(*sector, *pos, -drop + radius, radius)
-            .filter(|(floor, travelled, _)| {
+            .floor_contact(*sector, *pos, -drop + radius, radius)
+            .filter(|(floor, travelled, _, _)| {
                 // `travelled` is the distance from the body's centre down to the contact point, so
                 // the fall may only reach a floor whose contact is inside this frame's travel, and
                 // the contact must not be above where the body already is.
                 *travelled <= -drop + 1e-3 && *floor + radius <= pos[2] + 1e-3
             })
-            .map(|(floor, _, owner)| (floor + radius, Some(owner)));
+            .map(|(floor, travelled, owner, normal)| {
+                (floor + radius, Some(owner), travelled, Some(normal))
+            });
         let mut land = land;
         // The fallback exists for a sector with **no floor plane of its own** (`19A`'s 723, level 18's
         // spawn). It must not substitute for a sector that has one: level 5's body was lifted frame by
@@ -15613,7 +15900,7 @@ fn walker_step(
                 .fold(None, |best: Option<f32>, floor| {
                     Some(best.map_or(floor, |b| b.max(floor)))
                 })
-                .map(|floor| (floor + radius, None));
+                .map(|floor| (floor + radius, None, 0.0, None));
         }
         // A sector whose face list has **no floor at all** under the body still supports it on its own
         // plane: 18Ascend's spawn stands over a shaft opening (`adjoin 1150`) and the level has no
@@ -15636,16 +15923,36 @@ fn walker_step(
         {
             let contact = plane + radius;
             if contact <= pos[2] + 1e-3 && contact >= pos[2] + drop - 1e-3 {
-                land = Some((contact, None));
+                land = Some((contact, None, 0.0, None));
             }
         }
         match land {
-            Some((z, owner)) => {
+            Some((z, owner, travelled, normal)) => {
                 if std::env::var_os("BK_WALK_TRACE").is_some() {
                     eprintln!("walk trace:     landed on {z:.3} after {:.3}", -drop);
                 }
                 pos[2] = z;
                 let _ = owner;
+                // The engine's `MoveThing` projects the whole gravity step along the surface; the
+                // vertical speed is what keeps feeding a ramp. Zero it only on a flat floor (a ramp
+                // keeps it, which is why retail's level-3 body accelerates downhill). A floor threshold,
+                // not a slope cutoff: `sithCollision_SearchForSurfaceCollisions` has no angle test.
+                // `shortcut: idle-only ramp slide`, because the input walk already carries the body
+                // along a ramp and the two addends double-count (level 9's `walk9_spawn` went from
+                // 2.00 to 4.38 against retail's 1.68). Upgrade when the engine's combined 3D move
+                // replaces the separate horizontal/vertical sweeps.
+                let idle = move_dir[0].abs() <= 1e-4 && move_dir[1].abs() <= 1e-4
+                    || std::env::var_os("BK_SLOPE_INPUT").is_some();
+                let sloped = idle
+                    && std::env::var_os("BK_NO_SLOPE").is_none()
+                    && normal.is_some_and(|n| n[2] > 0.2 && n[2] < 1.0 - 1e-3);
+                if sloped {
+                    let normal = normal.unwrap();
+                    let remaining = (-drop - travelled).max(0.0);
+                    if remaining > 0.0 {
+                        slope_slide = Some(slope_step(normal, remaining));
+                    }
+                }
                 *vy = 0.0;
                 // The engine keeps an "on ground" flag from exactly this event: the vertical sweep was
                 // stopped by a surface. Deriving it from `vy == 0.0` instead leaves a body on a
@@ -15672,7 +15979,13 @@ fn walker_step(
         }
     }
     // Lateral: the engine's own move — sweep, slide along whatever was hit, step over anything low.
-    let delta = [move_dir[0] * dt, move_dir[1] * dt, 0.0];
+    let mut delta = [move_dir[0] * dt, move_dir[1] * dt, 0.0];
+    if let Some(slide) = slope_slide {
+        // The plane normal's xy is the downslope direction; `slide` is the tangential horizontal
+        // distance from this step's gravity component.
+        delta[0] += slide[0];
+        delta[1] += slide[1];
+    }
     let before = *pos;
     // `BK_STEP` is the experiment hook the constants file documents: the step allowance is a scale
     // the walker exercises (`--walk all` is sensitive to it), and a level whose kerb is taller than
@@ -16191,10 +16504,24 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
             let solid_near: Vec<String> = solids
                 .things
                 .iter()
-                .filter(|(c, ..)| {
-                    ((c[0] - at[0]).powi(2) + (c[1] - at[1]).powi(2) + (c[2] - at[2]).powi(2)).sqrt() <= 2.0
+                .filter(|thing| {
+                    ((thing.centre[0] - at[0]).powi(2)
+                        + (thing.centre[1] - at[1]).powi(2)
+                        + (thing.centre[2] - at[2]).powi(2))
+                    .sqrt()
+                        <= 2.0
                 })
-                .map(|(c, r, zmin, zmax, sec)| format!("{c:?} r {r:.2} z {zmin:.2}..{zmax:.2} sector {sec}"))
+                .map(|thing| {
+                    format!(
+                        "{:?} r {:.2} z {:.2}..{:.2} half {:?} sector {}",
+                        thing.centre,
+                        thing.radius,
+                        thing.z_min,
+                        thing.z_max,
+                        thing.half,
+                        thing.sector
+                    )
+                })
                 .collect();
             println!("  solids near: {solid_near:?}");
             // How far a solid thing's room is from the body's, in portal hops. A leaf that hangs off a
@@ -16213,14 +16540,19 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                         }
                     }
                 }
-                for (c, r, _, _, sec) in solids.things.iter().take(0) {
-                    let _ = (c, r, sec);
-                }
-                for (c, r, _, _, sec) in &solids.things {
-                    if ((c[0] - at[0]).powi(2) + (c[1] - at[1]).powi(2) + (c[2] - at[2]).powi(2)).sqrt() <= 2.0 {
+                for thing in &solids.things {
+                    if ((thing.centre[0] - at[0]).powi(2)
+                        + (thing.centre[1] - at[1]).powi(2)
+                        + (thing.centre[2] - at[2]).powi(2))
+                    .sqrt()
+                        <= 2.0
+                    {
                         println!(
-                            "  solid at {c:?} r {r:.2} sits in sector {sec}: {} hop(s) from {here}",
-                            dist.get(sec).map(|d| d.to_string()).unwrap_or_else(|| "unreached".into())
+                            "  solid at {:?} r {:.2} sits in sector {}: {} hop(s) from {here}",
+                            thing.centre,
+                            thing.radius,
+                            thing.sector,
+                            dist.get(&thing.sector).map(|d| d.to_string()).unwrap_or_else(|| "unreached".into())
                         );
                     }
                 }
@@ -23054,10 +23386,11 @@ fn draw_player_body(
 }
 /// Every solid thing in the level, with the vertical span of its own model.
 ///
-/// The radius is the engine's `size=` (see [`runtime::solid_radius`]); the span is the model's own
-/// bounding box, which is what `sithThing` collides against. A template whose model is not loaded keeps a
-/// body-sized span rather than disappearing from the list.
-fn solid_things(world: &World, solids: &collide::Solids) -> Vec<([f32; 3], f32, f32, f32, usize)> {
+/// A `collide=3` thing uses the model's oriented bounds box, the engine's mesh-collision case; every
+/// other collidable thing uses the engine's sphere, tightened to the model's plan footprint for
+/// furniture. A template whose model is not loaded keeps the template's `size=` sphere rather than
+/// disappearing from the list.
+fn solid_things(world: &World, solids: &collide::Solids) -> Vec<collide::ThingSolid> {
     let _ = solids;
     solid_things_at(
         &SolidShapes::build(world).0,
@@ -23065,34 +23398,69 @@ fn solid_things(world: &World, solids: &collide::Solids) -> Vec<([f32; 3], f32, 
             .level
             .things
             .iter()
-            .map(|thing| (thing.pos, thing.sector.max(0) as usize)),
+            .map(|thing| (thing.pos, thing.sector.max(0) as usize, thing.yaw)),
     )
 }
 
-/// Every level thing the walker collides with, placed at the positions and sectors given.
+/// Every level thing the walker collides with, placed at the positions, sectors and yaws given.
 fn solid_things_at(
-    shapes: &[Option<(f32, f32, f32)>],
-    placed: impl Iterator<Item = ([f32; 3], usize)>,
-) -> Vec<([f32; 3], f32, f32, f32, usize)> {
+    shapes: &[Option<SolidShape>],
+    placed: impl Iterator<Item = ([f32; 3], usize, f32)>,
+) -> Vec<collide::ThingSolid> {
     shapes
         .iter()
         .zip(placed)
-        .filter_map(|(shape, (pos, sector))| {
-            shape.map(|(radius, lo, hi)| (pos, radius, pos[2] + lo, pos[2] + hi, sector))
+        .filter_map(|(shape, (pos, sector, yaw))| {
+            let shape = shape.as_ref()?;
+            let (lo, hi) = (shape.lo, shape.hi);
+            if let Some(half) = shape.half {
+                let (sin, cos) = yaw.to_radians().sin_cos();
+                let (mx, my) = ((lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5);
+                Some(collide::ThingSolid {
+                    centre: [
+                        pos[0] + mx * cos - my * sin,
+                        pos[1] + mx * sin + my * cos,
+                        pos[2],
+                    ],
+                    radius: shape.radius,
+                    z_min: pos[2] + lo[2],
+                    z_max: pos[2] + hi[2],
+                    sector,
+                    half: Some(half),
+                    yaw,
+                })
+            } else {
+                Some(collide::ThingSolid {
+                    centre: pos,
+                    radius: shape.radius,
+                    z_min: pos[2] + lo[2],
+                    z_max: pos[2] + hi[2],
+                    sector,
+                    half: None,
+                    yaw,
+                })
+            }
         })
         .collect()
 }
 
-/// Per level thing, the cylinder the walker collides with as `(radius, lo, hi)`, the vertical span
-/// being offsets from the thing's own origin. `None` means the walker ignores that thing.
+/// Per level thing, the volume the walker collides with. `None` means the walker ignores it.
 ///
 /// The geometry is cached because it walks every model's bounds, while a thing's *position* changes:
 /// `4x4door` and `4x4elev` follow their frame paths from load (`18Ascend` spawns the player between
 /// two elevator leaves, and a frozen copy of their closed pose pinned the body there for the whole
-/// leg). `None` is also what keeps a thing out of the list when its template has no `size=` or is an
-/// actor — see the reasons on the filters below.
+/// leg). A `collide=3` thing keeps the model's own bounds; the engine collides it as mesh, so its
+/// plan extents are the door leaf's thickness (0.0125), not the template's 0.2 body radius.
+#[derive(Clone, Copy)]
+struct SolidShape {
+    radius: f32,
+    lo: [f32; 3],
+    hi: [f32; 3],
+    half: Option<[f32; 2]>,
+}
+
 #[derive(Resource)]
-struct SolidShapes(Vec<Option<(f32, f32, f32)>>);
+struct SolidShapes(Vec<Option<SolidShape>>);
 
 impl SolidShapes {
     fn build(world: &World) -> Self {
@@ -23119,11 +23487,15 @@ impl SolidShapes {
                 out.push(None);
                 continue;
             };
-            // The model's own bounds give both the vertical span `sithThing` collides against **and** a plan
-            // footprint far tighter than the template's `size=` (which is a body-sized radius, not the
-            // furniture's): `table4`'s is 0.154 while its model is ~0.1 wide. Blocking with the template
-            // radius sealed the cantina leg (102 % -> 12 %) and level 4 (100 % -> 50 %), so the tighter
-            // footprint is what a blocking contact has to use.
+            // `sithThing_ParseThingArg` case 2 writes `collide=` to `+0x28`; only value 3 (and a
+            // sphere-vs-thing case with a `collide=3` partner) selects mesh collision in
+            // `sithIntersect_CheckSphereThingIntersection`. The model's bounds give the leaf its
+            // thickness; the template's `size=` is a body-sized radius.
+            let mesh = world
+                .level
+                .template_param(&thing.template, "collide")
+                .and_then(|value| value.trim().parse::<i32>().ok())
+                == Some(3);
             let model = world
                 .template_model
                 .get(&thing.template.to_ascii_lowercase())
@@ -23133,38 +23505,68 @@ impl SolidShapes {
                     let (lo, hi) = bounds(model, &pose);
                     (lo, hi)
                 });
-            let span = model
-                .map(|(lo, hi)| (lo[2], hi[2]))
-                .filter(|(lo, hi)| hi > lo)
-                .unwrap_or((-radius, radius));
-            let radius = model
-                .map(|(lo, hi)| {
-                    let plan = lo[0].abs().max(hi[0].abs()).max(lo[1].abs()).max(hi[1].abs());
-                    radius.min(plan).max(0.02)
-                })
-                .unwrap_or(radius);
+            let shape = match model {
+                Some((lo, hi)) if mesh && hi[2] > lo[2] => SolidShape {
+                    radius,
+                    lo,
+                    hi,
+                    half: Some([
+                        (hi[0] - lo[0]).abs() * 0.5,
+                        (hi[1] - lo[1]).abs() * 0.5,
+                    ]),
+                },
+                _ => {
+                    let span = model
+                        .map(|(lo, hi)| (lo[2], hi[2]))
+                        .filter(|(lo, hi)| hi > lo)
+                        .unwrap_or((-radius, radius));
+                    // The model's plan footprint is far tighter than the template's `size=` (which is
+                    // a body-sized radius, not the furniture's): `table4`'s is 0.154 while its model
+                    // is ~0.1 wide. Blocking with the template radius sealed the cantina leg
+                    // (102 % -> 12 %) and level 4 (100 % -> 50 %).
+                    let radius = model
+                        .map(|(lo, hi)| {
+                            let plan = lo[0].abs().max(hi[0].abs()).max(lo[1].abs()).max(hi[1].abs());
+                            radius.min(plan).max(0.02)
+                        })
+                        .unwrap_or(radius);
+                    SolidShape {
+                        radius,
+                        lo: [-radius, -radius, span.0],
+                        hi: [radius, radius, span.1],
+                        half: None,
+                    }
+                }
+            };
             if std::env::var_os("BK_THINGS_TRACE").is_some() {
                 eprintln!(
-                    "solid: `{}` at {:?} radius {radius:.3} z {:.3}..{:.3}",
+                    "solid: `{}` at {:?} radius {:.3} z {:.3}..{:.3} collide {:?} model {:?}..{:?} half {:?} yaw {:.3} sector {}",
                     thing.template,
                     thing.pos,
-                    thing.pos[2] + span.0,
-                    thing.pos[2] + span.1
+                    shape.radius,
+                    thing.pos[2] + shape.lo[2],
+                    thing.pos[2] + shape.hi[2],
+                    world.level.template_param(&thing.template, "collide"),
+                    shape.lo,
+                    shape.hi,
+                    shape.half,
+                    thing.yaw,
+                    thing.sector
                 );
             }
-            out.push(Some((radius, span.0, span.1)));
+            out.push(Some(shape));
         }
         Self(out)
     }
 
-    /// The cylinders for a runtime, whose things carry the moved positions and their own sectors.
-    fn place(&self, things: &[crate::runtime::ThingState]) -> Vec<([f32; 3], f32, f32, f32, usize)> {
+    /// The solids for a runtime, whose things carry the moved positions and their own sectors.
+    fn place(&self, things: &[crate::runtime::ThingState]) -> Vec<collide::ThingSolid> {
         solid_things_at(
             &self.0,
             things
                 .iter()
                 .take(self.0.len())
-                .map(|thing| (thing.pos, thing.sector.max(0) as usize)),
+                .map(|thing| (thing.pos, thing.sector.max(0) as usize, thing.yaw)),
         )
     }
 }
@@ -25180,7 +25582,17 @@ fn setup(
     // 0.065 sweep does not see. `BK_PLAYER_CLEARANCE` probes a wider footprint only for placement,
     // leaving the collision radius (and the door width it fits through) alone.
     let clearance = env_f32("BK_PLAYER_CLEARANCE", PLAYER_RADIUS);
-    match spawn_point(&world.level, &solids, sector, start, clearance, "walkplayer") {
+    // `BK_SPAWN_AUTHORED=1`: reproduce the engine's load path (`sithPlayer_PlacePlayers` copies the
+    // player thing's position and sector; `sithPlayer_NewPlayer` sets them and resets movement) instead
+    // of resolving a standable point before play. The body then falls and slides from the authored
+    // pose exactly as retail's does; the normal path keeps the placement nudge for now.
+    let authored_spawn = std::env::var_os("BK_SPAWN_AUTHORED").is_some();
+    if authored_spawn {
+        println!("walker: authored spawn {start:?} in sector {sector} (no placement resolution)");
+    }
+    match authored_spawn.then_some((start, sector)).or_else(|| {
+        spawn_point(&world.level, &solids, sector, start, clearance, "walkplayer")
+    }) {
         Some((body, room)) => {
             let nudged =
                 (body[0] - recorded[0]).abs() > 1e-3 || (body[1] - recorded[1]).abs() > 1e-3;
@@ -25370,9 +25782,10 @@ fn setup(
         level.gravity
     );
     // Solid things, with the span their own model occupies. `collide::build` cannot know it — the models
-    // are parsed after the level — so the spans are filled here, where both are in hand. The cylinder
-    // used to be eight radii tall in either direction, which is a guess: a table is short, a column is
-    // tall, and `--walk all` measured the guess.
+    // are parsed after the level — so the spans are filled here, where both are in hand. `collide=3`
+    // keeps the model's bounds box (the engine's mesh case); the rest stay cylinders, because the
+    // template's `size=` is the engine's movement sphere and only the model's plan footprint is a
+    // tighter fit for furniture.
     let mut solids = solids;
     let shapes = SolidShapes::build(&world);
     solids.things = solid_things_at(
@@ -25381,7 +25794,7 @@ fn setup(
             .level
             .things
             .iter()
-            .map(|thing| (thing.pos, thing.sector.max(0) as usize)),
+            .map(|thing| (thing.pos, thing.sector.max(0) as usize, thing.yaw)),
     );
     commands.insert_resource(Collision(solids));
     commands.insert_resource(shapes);
@@ -25415,7 +25828,7 @@ fn setup(
         // (0.120114 above the floor at level 1) and the first gravity sweep lands it at the sphere
         // contact, `floor + radius` — retail's own `coords` goes −1.13 → −1.18 there. The value here
         // is replaced by the first frame's landing.
-        grounded: true,
+        grounded: !authored_spawn,
         gravity: rules.gravity.max(1.0),
         rules,
         water: false,
@@ -26645,6 +27058,25 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         collide::Gates { sectors: &sector_flags, adjoins: &adjoin_flags }
     };
 
+    if std::env::var_os("BK_ELEV_TRACE").is_some()
+        && let Some(sim) = sim.as_deref()
+    {
+        let rt = sim.world.borrow();
+        for (index, thing) in rt.things.iter().enumerate() {
+            let Some(template) = rt.templates.get(index) else { continue };
+            if !template.to_ascii_lowercase().contains("elev") {
+                continue;
+            }
+            println!(
+                "elev: thing {index} `{template}` at {:?} target {:?} frame {} frames {}",
+                thing.pos,
+                thing.target,
+                thing.frame,
+                thing.frames.len()
+            );
+        }
+    }
+
     // A capture may not read the machine's keyboard or mouse: the same command has to reach the same
     // pose every run (§16.13). The env hooks (BK_WALK_FORWARD) still drive the walker.
     let live = !overview.capture;
@@ -26954,13 +27386,52 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // same sphere as any other floor: `top + radius`.
     if vy <= 0.0
         && let Some(sim) = sim.as_deref()
-        && let Some(top) = sim.world.borrow().thing_floor(pos, player.rules.radius)
+        && let Some(top) = sim
+            .world
+            .borrow()
+            .thing_floor([pos[0], pos[1], before[2]], player.rules.radius)
     {
         let feet = pos[2] - player.rules.radius;
         // One frame's fall, so a body that has just dropped past the surface still lands on it, while
-        // a body standing *under* a table is not teleported onto it.
+        // a body standing *under* a table is not teleported onto it. Query at the frame's start because
+        // the current position is already below a platform the fall crossed: level 19a's `4x4elev_1`
+        // top was skipped and the body ended 0.1 below it.
         let step = (-vy * dt).max(0.02);
-        if top <= feet + step && top >= feet - 0.02 {
+        let accept = top <= before[2] - player.rules.radius + step && top >= feet - 0.02;
+        if std::env::var_os("BK_THINGFLOOR_TRACE").is_some() {
+            eprintln!(
+                "thing-floor: before feet {:.3}, after feet {feet:.3}, top {top:.3}, step {step:.3}, accept {accept}",
+                before[2] - player.rules.radius
+            );
+        }
+        if accept {
+            pos[2] = top + player.rules.radius;
+            vy = 0.0;
+            landed = true;
+        }
+    }
+    // A moving elevator's top rises into the body. The ordinary thing-floor query above accepts only a
+    // surface at or just below the feet, so the first fast lift step leaves the body under the platform
+    // (level 19a: the `4x4elev_1` top went from -2.10 to -1.96 while the feet were at -2.05). The
+    // engine's collision carries whatever stands on the surface; do the same for the elevator templates
+    // only, so a table above the feet is not a lift.
+    if vy <= 0.0
+        && let Some(sim) = sim.as_deref()
+        && let Some(top) = sim
+            .world
+            .borrow()
+            .elevator_floor([pos[0], pos[1], before[2]], player.rules.radius)
+    {
+        let feet = pos[2] - player.rules.radius;
+        let before_feet = before[2] - player.rules.radius;
+        let rise = top - feet;
+        let accept = top > feet - 0.02 && top <= before_feet + 0.2;
+        if std::env::var_os("BK_THINGFLOOR_TRACE").is_some() {
+            eprintln!(
+                "elevator-floor: before feet {before_feet:.3}, after feet {feet:.3}, top {top:.3}, rise {rise:.3}, accept {accept}"
+            );
+        }
+        if accept {
             pos[2] = top + player.rules.radius;
             vy = 0.0;
             landed = true;
@@ -27977,6 +28448,21 @@ mod walker_tests {
 
     /// The player falls from a level's authored pose to the swept sphere contact.
     #[test]
+    fn a_slope_projects_the_gravity_step_downhill() {
+        // Level 3's `--floor-at` normal, flipped toward the body by `floor_contact`. The measured
+        // retail settle is `(-0.76,-4.75,-0.20)` from the authored `(-0.68,-5.23,0.27)`: down in
+        // y and slightly left in x, which is this normal's horizontal direction.
+        let normal = [-0.19143078, 0.8150017, 0.54692453];
+        let step = slope_step(normal, 0.08);
+        assert!(step[0] < 0.0, "x should go left: {step:?}");
+        assert!(step[1] > 0.0, "y should go down the lane: {step:?}");
+        let want = 0.08 * normal[2] * (normal[0] * normal[0] + normal[1] * normal[1]).sqrt();
+        assert!((step[0] * step[0] + step[1] * step[1]).sqrt() - want < 1e-5);
+        // A flat floor has no horizontal projection.
+        assert_eq!(slope_step([0.0, 0.0, 1.0], 0.08), [0.0, 0.0]);
+    }
+
+    #[test]
     fn a_body_placed_above_its_floor_falls_to_the_sphere_contact() {
         // The player is not an attached body: `sithPlayer_NewPlayer` (`0x4c8ec0`) never calls
         // `sithPhysics_FindFloor`, and nothing attaches a body on landing (the only two callers of
@@ -28324,6 +28810,39 @@ mod pov_sway_tests {
         assert_eq!(pov_sway_step(42.0, 0.02, 0.0), 0.0);
         // A body pressed against a wall moves nothing, so the phase rests at zero too.
         assert_eq!(pov_sway_step(42.0, 0.0, 350.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod debug_catalog_tests {
+    use super::{DebugEpisode, episode, short_level_key, uni};
+
+    /// `stdFnames_CopyShortName` takes the last path component and drops the extension.
+    #[test]
+    fn the_level_key_is_the_short_name_without_extension() {
+        assert_eq!(short_level_key("jkl\\01narshadda.jkl"), "01narshadda");
+        assert_eq!(short_level_key("04EscapeHouse.jkl"), "04EscapeHouse");
+        assert_eq!(short_level_key("c1"), "c1");
+    }
+
+    /// The retail list says `1 - Double-Cross on Nar Shaddaa`, from the episode's own
+    /// `misc\cogstrings.uni`; the `episode.jk` comment (`Level 1: Narshadda`) is not a label.
+    #[test]
+    fn a_level_label_comes_from_the_episode_cogstrings_table() {
+        let episode = episode::parse(
+            "\"The Force Within\"\nTYPE 1\n\
+             11: 1 1 LEVEL 01narshadda.jkl 0 0 12 -1\n",
+        );
+        let labels = uni::parse(
+            "MSGS 2\n\"01NARSHADDA\" 0 \"1 - Double-Cross on Nar Shaddaa\"\nEND\n",
+        );
+        let entry = DebugEpisode { episode, labels };
+        assert_eq!(
+            entry.level_label("jkl\\01narshadda.jkl"),
+            "1 - Double-Cross on Nar Shaddaa"
+        );
+        // Retail falls back to the lowercased short key when the table has no row.
+        assert_eq!(entry.level_label("04EscapeHouse.jkl"), "04escapehouse");
     }
 }
 

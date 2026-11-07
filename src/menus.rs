@@ -38,6 +38,8 @@ pub const PICBUTTON: i32 = 1;
 pub const CUSTOM: i32 = 7;
 /// `ELEMENT_CHECKBOX`: an element with a check box to the left of its text.
 pub const CHECKBOX: i32 = 3;
+/// `ELEMENT_LISTBOX`: the rect a screen fills with a scrolling list.
+pub const LISTBOX: i32 = 4;
 /// How many screens a 640x480 UI can hold, used to reject nonsense rects.
 const SCREEN: [i32; 2] = [640, 480];
 

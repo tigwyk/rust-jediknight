@@ -357,8 +357,11 @@ fn template_floor(template: &str) -> Option<(f32, f32, f32)> {
 /// `collide=0`, and `_walkstruct` inherits the first through its `_structure` base. Every placed
 /// template carries its own `size=` (the radius), so a thing is solid exactly when its chain's
 /// `collide` is non-zero. That is why `column01` (`_structure`, `size=0.204987`) stops a body in
-/// retail while `tuskensoused` (`_ghostdecor`) does not — and why the port, which has no
-/// model collision at all, walks through both.
+/// retail while `tuskensoused` (`_ghostdecor`) does not.
+///
+/// `collide=3` selects the engine's model-mesh collision, which the walker models as the model's
+/// bounds box (`SolidShapes`); this function still supplies the `size=` fallback for a template
+/// whose model did not load and the movement sphere for the other collidable values.
 ///
 /// Returns `None` for a thing the engine lets a body pass through.
 pub fn solid_radius(level: &crate::jkl::Level, template: &str) -> Option<f32> {
@@ -366,7 +369,9 @@ pub fn solid_radius(level: &crate::jkl::Level, template: &str) -> Option<f32> {
     if collide == 0 {
         return None;
     }
-    // The radius is the template's own `size=`; `movesize=` is the same for everything placed.
+    // The radius is the template's own `size=`; `movesize=` is the same for everything placed. The
+    // walker uses the model's bounds box instead when `collide=3` (the engine's mesh case); this
+    // radius remains the engine's movement sphere for every other collidable thing.
     let size = level.template_param(template, "size")?.trim().parse::<f32>().ok()?;
     (size > 0.0).then_some(size)
 }
@@ -6110,6 +6115,24 @@ impl Runtime {
     /// `ponytail:` the footprint is the model's axis-aligned half extents, so a thing rotated off the
     /// axes is covered a little generously; the engine uses the drawn surfaces.
     pub fn thing_floor(&self, pos: [f32; 3], body_radius: f32) -> Option<f32> {
+        self.thing_floor_filter(pos, body_radius, false)
+    }
+
+    /// The floor of a moving elevator under the body.
+    ///
+    /// A lift is not an ordinary prop: its top rises into a body standing on it, and the engine's
+    /// collision carries the body with the surface. Restricting this to the `*elev*` templates keeps
+    /// a table or crate above the feet from teleporting a body upward.
+    pub fn elevator_floor(&self, pos: [f32; 3], body_radius: f32) -> Option<f32> {
+        self.thing_floor_filter(pos, body_radius, true)
+    }
+
+    fn thing_floor_filter(
+        &self,
+        pos: [f32; 3],
+        body_radius: f32,
+        elevators_only: bool,
+    ) -> Option<f32> {
         let feet = pos[2] - body_radius;
         let mut best: Option<f32> = None;
         for (index, thing) in self.things.iter().enumerate() {
@@ -6117,6 +6140,9 @@ impl Runtime {
                 continue;
             }
             let Some(template) = self.templates.get(index) else { continue };
+            if elevators_only && !template.to_ascii_lowercase().contains("elev") {
+                continue;
+            }
             let Some((top_offset, half_x, half_y)) = template_floor(template) else { continue };
             if (pos[0] - thing.pos[0]).abs() > half_x + body_radius
                 || (pos[1] - thing.pos[1]).abs() > half_y + body_radius
@@ -6126,7 +6152,8 @@ impl Runtime {
             let top = thing.pos[2] + top_offset;
             // A surface under the feet: the caller decides whether the body is close enough to rest on
             // it. Anything above the feet is something the body is beside, not standing on.
-            if top <= feet + 0.1 && best.is_none_or(|at| top > at) {
+            let reach = if elevators_only { 0.2 } else { 0.1 };
+            if top <= feet + reach && best.is_none_or(|at| top > at) {
                 best = Some(top);
             }
         }

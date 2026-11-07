@@ -2511,7 +2511,7 @@ The level-14 row ends here, and the evidence is three menus/commands rather than
 |---|---|
 | command line, `-JkArgs '-level,15maw'` | JK.EXE exits with code 3 before its window appears (`docs/gaps.md` rounds 60-61, re-proved today) |
 | Load Game, patched scratch save | retail shows an **empty** save list; the identical run without the patch shows the same empty list, so the patch is not the cause — retail does not enumerate these slots at all |
-| `[Debug]` on the Single Player submenu | "Choose Episode": *The Force Within / Jedi's Quests for the Flag / Jedi Training* — episodes, not levels (`debug-menu.png`) |
+| `[Debug]` on the Single Player submenu | "Choose Episode": *The Force Within / Jedi Capture the Flag / Jedi Training* — episodes, not levels (`debug-menu.png`) |
 
 The port's own reader confirms the patched save is well-formed (`version 6, episode 'JK1', level '15maw.jkl', 452 495
 bytes, 7 704 records, 330 thing records`), so the file is not the obstacle; retail's slot bookkeeping is. Reaching level
@@ -5807,3 +5807,229 @@ retail rate and no longer "untouched". Two candidate causes, both cheap to check
 room may be fired by more actors than the port has acquired (the roster shows 10 actors with `los true`, 3 `cone true`
 before round 405), and the port's shields refill on the level start (`player_shields: 100.0`) while retail's warp left
 the body with an empty bar -- so the health half of the comparison starts from different bars.
+
+
+### Round 409: the retail door HUD was misread; the settled combat state already matches
+
+Round 408's 44-health target was not in the image. Reading the raw frames directly gives retail **100 health / 88
+shields** in `route_door-series-0.png` and **81 / 0** in `route_door-raw.png`; the earlier "100 -> 44 health" and the
+derived 22 damage/s target are withdrawn. The green shield digits in the small series frames also made 77 look like 11,
+so the series must not be used for a per-second rate without enlarged crops.
+
+The current port was rebuilt and run through `tools/parity/port-capture.ps1 -Only route_door`, then repeated with the
+same direct 600-frame invocation and no trace environment. Both captures read **83 health / 0 shields**. The second
+run's ordinary hit log has 10 hits (nine 12-damage hits and one 11), leaving 83 after the shield/health rounding. That
+is 2 health from retail's settled 81 / 0 and closes Phase 1 step 5's stationary door-health endpoint. No kill occurred
+in this no-input encounter, so it says nothing about kill order.
+
+### Round 410: `collide=3` is the model box, and the spawn overlap no longer pins it
+
+The door leaf's remaining 0.185 units were its collision shape, and round 397's box attempt was reverted because
+`walk17_spawn` fell to zero travel. The decompiled gate was missing: `sithIntersect_CheckSphereThingIntersection`
+(`0x5080d0`) uses the model's mesh only when `sithThing_ParseThingArg`'s `collide=` word (case 2, `+0x28`) is **3**
+for either thing; every other collidable thing is the `size=` movement sphere. On `18Ascend` that is 108 model-box
+things and 138 spheres, so boxing every model was both too broad and unnecessary.
+
+`ThingSolid` now carries `half: Option<[f32; 2]>` plus the thing's yaw: `Some` for a loaded `collide=3` model (its
+bounds box, centre from the model's own plan midpoint), `None` for the engine's sphere (still tightened to the model
+plan for furniture). The sweep, push-out and sight/shot segment all use the same shape, so none of them keeps a stale
+cylinder beside the box.
+
+The round-397 spawn pin had a second cause: the recorded pose starts **inside** both elevator leaves' inflated boxes
+(0.014 and 0.016 deep), and treating "already overlapping and moving into the nearest face" as a contact made the two
+opposed leaves stop the body at distance 0 every frame. A box overlap within `1e-3` of a face is a real contact and
+still blocks; a deeper overlap is an initial-pose overlap and is left to the post-move push, which lets the body walk
+out. A body stopping against a face lands within float dust of it, so the next frame still blocks.
+
+Measured:
+
+| leg | cylinder | collide=3 box | retail |
+|---|---|---|---|
+| walk_switch | -3.485 | **-3.6725** sector 59 | -3.67, sector 59 |
+| walk17_spawn | 0.82 / 117 % | **0.692 / 100 %** | 0.70 |
+| walk_cantina | 2.64 | 2.65 / 102 % | 2.59 |
+
+The trace gate is **10 legs, 0 failures** (`walk17_spawn` xy 0.005, 0 sectors off). `--walk all` is unchanged at
+**24/34 contained, 25 hull-agreeing, 46 crossings**, 268 tests pass, and `--gates` reads **0 of 67 failed**. Regression
+test: `a_thin_model_leaf_collides_as_its_box` (thin-face stop, footprint miss, 90-degree rotation, push, sight).
+
+### Round 411: the setup artifact carries the round-410 binary
+
+Phase 4's reachable half was stale: `dist/bevi-knight-0.1.1-setup.exe` embedded the binary from before the
+`collide=3` box fix. `packaging/build-setup.ps1` was rerun from this tree (native csc setup + in-box payload, no
+downloads) and the embedded `payload.zip` was extracted through its own `payload.zip` manifest resource.
+
+    setup:   dist\bevi-knight-0.1.1-setup.exe  29.7 MB
+             sha256 cbdb03f436340cdbbc10ede098f95c3b75929a3181d12fc86eb5a7b6f7ec3bac
+    payload: bevi-knight.exe sha256 74fe7b29...ace52
+    build:   target\release\bevi-knight.exe sha256 74fe7b29...ace52
+
+Launching the setup from `dist\` is the sandboxed case: both `Start-Process` and a direct invocation exit without
+creating the install folder, and the child prints `setup log unavailable: Access to the path '...\setup.log' is
+denied.` Copying the same `setup.exe` to `%TEMP%` and launching it there (same binary, same sha256) succeeds:
+
+    19:32:00  start: /S /GAMEPATH=G:\Games\Star Wars Jedi Knight - Dark Forces 2
+              /DIR=C:\Users\Lee\AppData\Local\Temp\bk-install-test /NOSHORTCUTS
+    19:32:00  installing 0.1.1 from ... to ...
+    19:32:01  installed
+
+The installed `bevi-knight.exe` hashed **74fe7b29...ace52** (the build's own hash), `game-path.txt` carried the GOG
+folder, `--check` printed `--- all checks passed ---`, and `--gates` from the installed path read **0 of 67 failed,
+0 skipped**. `bevi-knight-uninstall.exe /S` then removed the folder and the `HKCU\...\Uninstall\bevi-knight` key.
+The same install routine was also exercised in-process against `target/parity/install` before the temp-copy run,
+with the same hash and checks.
+
+Still open for Phase 4: a **clean-machine** run (this is the same desktop) and a human level-1 playthrough. The
+launched wrapper, artifact, installed-build path, checks and uninstall are no longer unknowns.
+
+### Round 412: priority reset -- render coverage first, and unknown flags no longer boot the menu
+
+The draw gate's coverage is the real gap: only **five rows are gated**, and all five are level 1
+(`spawn_pose`, `spawn_yaw30`, `route_cantina`, `route_lower`, `route_street`). Levels 2, 5 and 14 have pairs
+but no threshold, and their known residuals are lighting, water/16-bit colour and the cutscene interval. The
+`retail-level{2..21}-spawn.png` fixtures are not a substitute: five are all-black 1440x900 frames, the fifteen
+640x480 frames have no pose sidecar, and their scores (0.07-0.22) measure framing/HUD scale, not renderer
+fidelity. The installer is therefore deprioritized behind render parity; Phase 4 stays blocked on clean machine
+and human play.
+
+A current **all-level** survey was captured rather than reusing the 20-level sheet:
+`target/parity/survey-all.tsv` (35 captures, 240 frames each, 35/35 succeeded) and
+`target/parity/survey-all-sheet.png`. All 34 gameplay levels render their own non-blank geometry; `static` is
+the empty test scene. This proves load/render presence, not correctness against retail; the side-by-side sheet
+`target/parity/spawn-pairs-sheet.png` shows that the old unposed references disagree on framing and time in
+both directions.
+
+The first defect found while running the survey was the tool itself: an unknown flag fell through the argument
+match and launched the main menu, and `--help` did the same. Two stray windows were opened and killed. The
+parser now prints usage for `--help`/`-h` and exits **2** with `unknown option ...` for any other unconsumed
+`-` argument; a positional non-option remains a level name. Smoke: `--help` exits 0 with usage, `--bogus-flag`
+exits 2, no process or window remains. `cargo test --release` is **268 passed**.
+
+Next render work, in order: fix the level(s) the player actually sees wrong (with pose-verified retail pairs,
+not the old survey); level-1 lighting; level-2 lighting; level-5 water/colour; then a non-blank/material
+all-level smoke gate. Do not tune against the unposed spawn survey.
+
+### Round 413: the level-3 body moves at load because the walker had no ramp projection
+
+Retail does not play a level-3 spawn animation. `sithPlayer_PlacePlayers` (`0x4c8670`) copies the player
+thing's position and sector into the spawn table, and `sithPlayer_NewPlayer` (`0x4c8ec0`) sets them and
+resets movement (`sithPhysics_ResetThingMovement`, `0x4f61a0`). The body then falls under gravity, and
+`sithCollision_MoveThing` (`0x4e7950`) projects the movement along the floor it hits. The port started the
+body `grounded` on a resolved floor point and its vertical sweep only snapped z: no tangential part.
+
+The level-3 authored start stands on surface 3386 with file normal `[0.191,-0.815,-0.547]` (a 57-degree
+slope; flipped toward the body it is `[-0.191,0.815,0.547]`). `--floor-at` shows the floor at 0.2051 and
+the body at 0.2701. Retail's settled vector, `(-0.76,-4.75,-0.20)` from `(-0.68,-5.23,0.27)`, is
+`(-0.08,+0.48,-0.47)` — the same direction as the normal's horizontal part.
+
+`collide::Solids::floor_contact` now returns the highest landing's normal; `walker_step` adds
+`slope_step(normal, remaining)` to the lateral delta and still zeroes `vy` on the landing, so a ramp is not
+mistaken for a fall. Port after 10 s: **`(-0.7466,-4.9466,-0.1713)` sector 370**, no fall damage, health
+lost only to the room's AI. Retail is `(-0.76,-4.75,-0.20)` sector 370; the remaining **0.20 units** of y
+are the unported accumulating slope speed (the idle-only slide is a documented shortcut).
+
+Trace gate: **10 legs, 0 failures** (the first enabled run had `walk9_spawn` at 4.38/1.68 because the
+input walk and the gravity slide double-counted; restricting the slide to an idle body restored
+2.00/1.68). `cargo test --release`: **269 passed**; `--walk all` unchanged at 24/34 in-sector. Added
+`slope_step` unit test (direction and flat-floor zero). `BK_SPAWN_AUTHORED=1` is the diagnostic exact
+spawn; `BK_NO_SLOPE=1` disables the projection.
+
+Still open: the four other settling starts. Ten-second traces: **18ascend** ends `(3.244,-9.210,-8.135)` sector 485 against retail's `(3.24,-9.21,-8.1)`/485, and **19b** ends `(3.015,-1.381,-14.581)` sector 448 against retail's `(3.01,-1.38,-14.53)`/448 — both settle to retail by the capture time, so the load-pose table was reading the lift before it moved. **Level 9** ends `(1.353,5.743,0.155)` sector 275 against retail's `(1.07,5.46,0.07)`/874, and **19a** ends `(-0.350,-2.150,-2.135)`/722 against retail's `(-0.35,-2.15,0.12)`/723; those two still need the lift/sector transition. The remaining 0.20 on level 3 needs the engine's combined 3D move rather than an idle planar addend.
+
+### Round 414: a falling body now lands on a platform it crossed; 19a's lift still stalls
+
+The solid-thing floor query ran at the **post-fall** position, so a platform top between the frame's
+start and end feet was above the body and rejected: level 19a's `4x4elev_1` top `-2.102` was below the
+start feet `-2.045` but above the final feet `-2.200`, and the body fell through it. `thing_floor` now
+queries the frame-start position and accepts a top between the two feet; `elevator_floor` also carries
+a body when a rising `*elev*` top moves into it.
+
+Result: 19a's body is picked up on the lift's first step (`z -1.980 → -1.897`), but the lift itself stops
+at frame `0.0667` (`target None`) instead of travelling to frame 1 (`z -0.061`). The level's
+`4x4elev_1` has two frames; `00_std_elev.cog` calls `MoveToFrame(elevator, 1, 4.0)`, so the remaining
+work is the lift script/arrival path, not the player carry. Level 9 still ends sector 275 rather than
+874. Regression suite: **269 tests**, trace gate **10/10**, `--gates` **0/67**.
+
+### Round 415: the dev `(Debug)` menu reaches the episode and level choosers
+
+The single-player screen's `(Debug)` row (`GUI_DEBUG_PLAY`, id 102) was visible but had no graph edge,
+and the two dev screens (`0x536168` Choose Episode, `0x5365a0` Choose Level) share the `singleplayer`
+name with the regular screen. `nav` now maps id 102 to the episode chooser, and the activation path
+reads the install's own `episode.jk` manifests for both lists: three episodes, then the selected
+episode's level rows. Up/Down scrolls the list, Enter or Ok commits, and Ok on a level starts it through
+the same `PendingLevel` swap as New Game (`debug: starting 01narshadda.jkl`).
+
+The menu renderer gained the `type 4` list box: a scrolling column with a selected-row marker, using the
+screen's own font and palette. Pending `--menu <screen>/<id>` activation now skips a list box when a
+button shares its id (`0x536168`'s list and Ok are both id 1), which is what exposed the duplicate-id bug.
+
+Verified: route `0x535e58/102` -> Choose Episode, `0x536168/1` -> Choose Level, `0x5365a0/1` -> live
+`01narshadda.jkl`; captures at `target/parity/port/debug-from-row.png`,
+`debug-levels.png`, and `debug-start-level.png`. A live scancode test on the level chooser pressed Down
+then Enter and logged `debug: starting 02narshadda.jkl`, so the arrow selection is real input, not only
+the pending-id path. Tests: **270 passed**; `--boot` and `--ui-audit` pass (18/18 menu edges).
+
+### Round 416: debug level starts no longer play the campaign opening film
+
+`FlowPlan.pre` is filled at process start when the initial level is the campaign start, so it held
+`03-04a.smk`. A debug level start set `overlay.started = true` and requested the selected level, but
+`swap_level` updated only `level`, `cuts` and `next`. `play_intro_films.after(swap_level)` then saw a
+started game with a non-empty `pre` and played the opening film over whichever level the debug list had
+chosen. The level selection was irrelevant; the film was startup state that debug never cleared.
+
+`activate` now receives `FlowPlan` mutably, and the debug level-start branch clears `plan.pre` before
+requesting the swap. Retail parity checks out: the retail debug branch calls `jk_sub_403470`
+(`0x403470`), which sets the level name and GUI state 5 and never calls `jkSmack_SmackPlay`; the
+opening film remains a New Game path only. Static verification only:
+`cargo check --release` passes. No game or retail process was launched, so the runtime frame is not
+re-observed here.
+
+### Round 417: the dev level picker matches retail's order, labels and back path
+
+The retail chooser was compared against `jkEpisode_LoadVerify`, `jkGuiSingleplayer_Show` case `0x66`,
+`jkGuiSingleplayer_sub_41AA30`, `jkGuiTitle_quicksave_related_func1` and `jk_sub_403470`, plus the
+retail captures `retail-debug-menu.png` and `retail-debug-levels.png`. Four visible differences were
+fixed:
+
+- **Category order.** Retail lists the episode archives in the order its directory scan finds them:
+  `The Force Within`, `Jedi Capture the Flag`, `Jedi Training`. The port sorted by `TYPE`, which put
+  training second and CTF third. `DebugCatalog` now keeps the archive order from `episode.jk`.
+- **Level labels.** Retail labels a level from that episode's own `misc\cogstrings.uni`, keyed by the
+  short filename (`04EscapeHouse.jkl` -> `04ESCAPEHOUSE`), so row 1 is `1 - Double-Cross on Nar
+  Shaddaa`. The port drew the `episode.jk` comment (`Level 1: Narshadda`). The catalog now carries
+  the selected archive's string table; a missing row falls back to the lowercased short key, as
+  `jkGuiTitle_quicksave_related_func1` does.
+- **Cancel from the level list.** Retail's `jkGuiSingleplayer_Show` loop breaks back to the Single
+  Player screen. The port's history returned to the episode list. Opening the level list no longer
+  pushes an episode history entry, so Escape/Cancel returns to Single Player.
+- **Which episode the level belongs to.** A debug start now records the selected category on
+  `FlowPlan`, and `swap_level` resolves the episode whose `episode.jk` actually contains the loaded
+  level. CTF and training levels therefore stop using the single-player graph for their next level
+  and their end-of-level items. Debug starts (and New Game) also skip the inventory carry, matching
+  the `DAT_00549fa0 = 1` reset that retail's `sithOpenPostProcess` performs; Restart and campaign
+  transitions still carry.
+
+Unknowns kept explicit: retail first prefers loose `episode_<archive>.jkl` files over the manifest
+fallback in `jkGuiSingleplayer_sub_41AA30`; this install has none, and the port still reads the
+manifest only. The `[Debug]` row itself is reachable only in retail `-devMode`; the port exposes the
+dev chooser without a mode switch.
+
+Verified: `cargo test --release` **272 passed, 0 failed** (including `debug_catalog_tests`), and
+`cargo check --release` passes. No game or retail process was launched.
+
+### Round 418: New Game queues the campaign opening film every time
+
+Retail's Single Player `New Game` path is `jkGuiSingleplayer_Show` case 100 -> `jk_loadFile` (which
+sets `DAT_00549fa0 = 1`) -> `jkEpisode_Load` -> `jkMain_StartNextLevelInEpisode(1,1)`. The episode
+starts at its first row, which is the `03-04a.smk` cut into `01narshadda.jkl`; the same path runs
+when the player has returned to the main menu.
+
+The port filled `FlowPlan.pre` only once at process start. The first New Game played the opening
+film, but after the film `pre` was empty; Abort back to the main menu and a second New Game skipped
+the film. `FlowPlan` now keeps `opening` separately from the per-start `pre`, and New Game requeues
+`opening` alongside the inventory reset. The initial campaign start still uses the same list, so a
+normal first New Game is unchanged.
+
+Not changed: the Single Player screen's `Load` row still has no save-slot picker (the pause menu's
+one-slot Load path is the existing workaround), and the Cutscenes/Credits rows are still outside
+this level-loading path.

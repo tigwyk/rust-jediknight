@@ -29,6 +29,140 @@ pub struct Plane {
     pub surface: usize,
 }
 
+/// A placed thing the walker collides with.
+///
+/// `half` is `Some` only for a `collide=3` thing with a loaded model: the model's bounds give the
+/// leaves a thickness the template `size=` does not. Otherwise the engine's movement sphere applies,
+/// whose radius the caller already tightens to the model's plan footprint for furniture.
+#[derive(Clone, Copy, Debug)]
+pub struct ThingSolid {
+    /// Collision centre in plan, and the thing's own z for the span's origin.
+    pub centre: [f32; 3],
+    pub radius: f32,
+    pub z_min: f32,
+    pub z_max: f32,
+    pub sector: usize,
+    pub half: Option<[f32; 2]>,
+    /// Degrees, the engine's `rdMatrix_Build34` yaw.
+    pub yaw: f32,
+}
+
+impl ThingSolid {
+    /// World point to the thing's own plan frame.
+    fn local(&self, p: [f32; 2]) -> [f32; 2] {
+        let (sin, cos) = self.yaw.to_radians().sin_cos();
+        let (x, y) = (p[0] - self.centre[0], p[1] - self.centre[1]);
+        [x * cos + y * sin, -x * sin + y * cos]
+    }
+
+    /// World direction to the thing's own plan frame.
+    fn local_dir(&self, v: [f32; 2]) -> [f32; 2] {
+        let (sin, cos) = self.yaw.to_radians().sin_cos();
+        [v[0] * cos + v[1] * sin, -v[0] * sin + v[1] * cos]
+    }
+
+    /// A direction in the thing's plan frame to world.
+    fn to_world(&self, v: [f32; 2]) -> [f32; 2] {
+        let (sin, cos) = self.yaw.to_radians().sin_cos();
+        [v[0] * cos - v[1] * sin, v[0] * sin + v[1] * cos]
+    }
+
+    /// Sweep a walking sphere against this thing. `None` for a sphere is the engine's cylinder;
+    /// `Some` is the model's oriented plan box extruded over the model's z span.
+    fn sweep_plan(
+        &self,
+        at: [f32; 3],
+        dir: [f32; 3],
+        left: f32,
+        radius: f32,
+    ) -> Option<(f32, [f32; 3])> {
+        let Some(half) = self.half else {
+            let span = self.radius + radius;
+            let (dx, dy) = (at[0] - self.centre[0], at[1] - self.centre[1]);
+            let b = 2.0 * (dir[0] * dx + dir[1] * dy);
+            let c = dx * dx + dy * dy - span * span;
+            // Already overlapping. A body walking *out* -- the escape direction -- is left free;
+            // one walking in is stopped at distance 0 instead of tunnelling through.
+            if c <= 0.0 {
+                let out_len = (dx * dx + dy * dy).sqrt().max(1e-6);
+                let out = [dx / out_len, dy / out_len, 0.0];
+                if dir[0] * out[0] + dir[1] * out[1] < 0.0 {
+                    return Some((0.0, out));
+                }
+                return None;
+            }
+            let disc = b * b - 4.0 * c;
+            if disc < 0.0 {
+                return None;
+            }
+            let t = (-b - disc.sqrt()) / 2.0;
+            if !(0.0..=left).contains(&t) {
+                return None;
+            }
+            let (hx, hy) = (dx + dir[0] * t, dy + dir[1] * t);
+            let len = (hx * hx + hy * hy).sqrt().max(1e-6);
+            return Some((t, [hx / len, hy / len, 0.0]));
+        };
+        let local = self.local([at[0], at[1]]);
+        let dir_local = self.local_dir([dir[0], dir[1]]);
+        let ext = [half[0] + radius, half[1] + radius];
+        if local[0].abs() <= ext[0] && local[1].abs() <= ext[1] {
+            // Starting inside the inflated box. A body that has just stopped against a face sits
+            // within float dust of it and must stay stopped; one whose recorded pose starts deeper
+            // (the elevator spawn overlaps two leaves by 0.014) has to be free to walk out, or the
+            // sweep pins it at the spawn for the whole leg. Deep overlaps are resolved by the push
+            // pass after the move.
+            let (px, py) = (ext[0] - local[0].abs(), ext[1] - local[1].abs());
+            let normal = if px <= py {
+                [if local[0] >= 0.0 { 1.0 } else { -1.0 }, 0.0]
+            } else {
+                [0.0, if local[1] >= 0.0 { 1.0 } else { -1.0 }]
+            };
+            if px.min(py) < 1e-3
+                && dir_local[0] * normal[0] + dir_local[1] * normal[1] < 0.0
+            {
+                let n = self.to_world(normal);
+                return Some((0.0, [n[0], n[1], 0.0]));
+            }
+            return None;
+        }
+        let mut near = 0.0f32;
+        let mut far = left;
+        let mut normal = [0.0f32; 2];
+        for axis in 0..2 {
+            let d = dir_local[axis];
+            let l = local[axis];
+            if d.abs() < 1e-8 {
+                if l.abs() > ext[axis] {
+                    return None;
+                }
+                continue;
+            }
+            let t1 = (-ext[axis] - l) / d;
+            let t2 = (ext[axis] - l) / d;
+            let (enter, exit, sign) = if t1 <= t2 {
+                (t1, t2, -1.0)
+            } else {
+                (t2, t1, 1.0)
+            };
+            if enter > near {
+                near = enter;
+                normal = [0.0; 2];
+                normal[axis] = sign;
+            }
+            far = far.min(exit);
+            if near > far {
+                return None;
+            }
+        }
+        if near > left || normal == [0.0; 2] {
+            return None;
+        }
+        let n = self.to_world(normal);
+        Some((near, [n[0], n[1], 0.0]))
+    }
+}
+
 #[derive(Clone)]
 pub struct Solids {
     /// Per sector, the planes of its solid surfaces.
@@ -55,18 +189,13 @@ pub struct Solids {
     /// `collide=` the template chain carries. Retail stops Kyle at the cantina's columns and tables;
     /// without these he walks through both, which is what a player notices first.
     ///
-    /// ponytail: a vertical cylinder of the template's own `size=` radius and eight radii of height,
-    /// not the model's box — a *structure* whose model is much taller or offset from its origin is
-    /// approximated. The `.3do` bounds are the upgrade path, and the radius is the engine's own
-    /// number (`sithThing` collision), so the width is right even where the height is a guess.
-    /// Each solid thing: its centre, its collision radius (`size=` from the template chain), the
-    /// vertical span of its own model, and the sector the thing belongs to. The cylinder used to be
-    /// eight radii tall in both directions, which is a guess: a table is short and a column is tall,
-    /// and the `.3do` knows which. The sector is part of the record because
-    /// `sithCollision_SearchForThingCollisions` walks the **moving body's** sector thing list: a thing
-    /// standing in another room cannot touch it. `18Ascend`'s spawn sits over an elevator whose leaves
-    /// belong to the shaft below (sector 504), and colliding with them from 485 pinned the body.
-    pub things: Vec<([f32; 3], f32, f32, f32, usize)>,
+    /// `sithIntersect_CheckSphereThingIntersection` (`0x5080d0`) uses the model's mesh only when
+    /// either thing has `collide=3` (`sithThing_ParseThingArg` case 2, `+0x28`); every other
+    /// collidable thing is a sphere from `size=`. A door leaf is `collide=3`, so its 0.025-thick
+    /// box is the contact — a `size=` cylinder stops the body 0.185 early. The sector is part of the
+    /// record because `sithCollision_SearchForThingCollisions` walks the **moving body's** sector
+    /// thing list: a thing standing in another room cannot touch it.
+    pub things: Vec<ThingSolid>,
     /// Every downward-facing solid surface with its polygon: the floors a body can stand on.
     pub floors: Vec<Face>,
     /// Every vertical solid surface with its polygon: the walls. A wall only pushes while the
@@ -1150,16 +1279,16 @@ impl Solids {
     /// The nearest **solid model** the body would run into: `(travel, normal)` in plan.
     ///
     /// `sithCollision` treats a collidable thing's model as solid surfaces, so a walking body is
-    /// **blocked** by a crate or a table and slides along it. The port's model of a thing is a
-    /// cylinder sized from the model's own plan footprint (see `solid_things`), so the equivalent test
-    /// is a swept circle against a circle: solve `|P + d t - C| = R + r`. The normal is radial, which is
-    /// the right slide frame for a round obstacle and is what makes a body round it instead of stopping.
-    /// Whether a segment crosses a **solid thing's** cylinder — the bar counter, a crate, a column.
+    /// **blocked** by a crate or a table and slides along it. A `collide=3` thing is its model's
+    /// oriented bounds box, and the rest are cylinders sized from the model's own plan footprint
+    /// (see `solid_things`): the circle test solves `|P + d t - C| = R + r`, while the box test sweeps
+    /// the sphere in the thing's own frame. Both return the face normal as the slide frame.
+    /// Whether a segment crosses a **solid thing** — the bar counter, a crate, a column.
     ///
     /// The engine's sight and shot rays go through the collision search, so a table between two
     /// bodies blocks both; `segment_blocked` alone tests world surfaces, which let level 1's cantina
     /// patron see the player across the bar counter (round 307). A segment that *starts* inside a
-    /// cylinder is not blocked by it: that is the actor's own body.
+    /// solid is not blocked by it: that is the actor's own body.
     pub fn segment_thing(&self, from: [f32; 3], to: [f32; 3]) -> bool {
         let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
@@ -1173,7 +1302,44 @@ impl Solids {
         if a < 1e-8 {
             return false;
         }
-        for &(centre, radius, z_min, z_max, _sector) in &self.things {
+        for thing in &self.things {
+            let (centre, radius, z_min, z_max) = (thing.centre, thing.radius, thing.z_min, thing.z_max);
+            if let Some(half) = thing.half {
+                let from_local = thing.local([from[0], from[1]]);
+                let to_local = thing.local([to[0], to[1]]);
+                // A ray that starts or ends inside the leaf is an actor's own body, not an obstacle.
+                if (from_local[0].abs() <= half[0] && from_local[1].abs() <= half[1])
+                    || (to_local[0].abs() <= half[0] && to_local[1].abs() <= half[1])
+                {
+                    continue;
+                }
+                let d_local = [to_local[0] - from_local[0], to_local[1] - from_local[1]];
+                let mut near = 0.0f32;
+                let mut far = len;
+                for axis in 0..2 {
+                    if d_local[axis].abs() < 1e-8 {
+                        if from_local[axis].abs() > half[axis] {
+                            near = f32::MAX;
+                            break;
+                        }
+                        continue;
+                    }
+                    let t1 = (-half[axis] - from_local[axis]) / d_local[axis];
+                    let t2 = (half[axis] - from_local[axis]) / d_local[axis];
+                    near = near.max(t1.min(t2));
+                    far = far.min(t1.max(t2));
+                    if near > far {
+                        break;
+                    }
+                }
+                if near > 0.0 && near <= len {
+                    let (z0, z1) = (from[2] + dir[2] * near, from[2] + dir[2] * far);
+                    if z0.min(z1) <= z_max && z0.max(z1) >= z_min {
+                        return true;
+                    }
+                }
+                continue;
+            }
             let (dx, dy) = (from[0] - centre[0], from[1] - centre[1]);
             let b = 2.0 * (dir[0] * dx + dir[1] * dy);
             let c = dx * dx + dy * dy - radius * radius;
@@ -1247,7 +1413,7 @@ impl Solids {
         sector: usize,
     ) -> Option<(f32, [f32; 3])> {
         let mut best: Option<(f32, [f32; 3])> = None;
-        for &(centre, thing_radius, z_min, z_max, thing_sector) in &self.things {
+        for thing in &self.things {
             // `SearchForThingCollisions` walks the sector lists of the sectors the sweep reaches: a
             // crate in the room next door is not a contact until the body gets to the opening.
             let next_to = |from: usize, to: usize| {
@@ -1255,47 +1421,22 @@ impl Solids {
                     .get(from)
                     .is_some_and(|portals| portals.iter().any(|portal| portal.adjoin == to))
             };
-            let reachable = self.in_search(sector, thing_sector, at, dir, left, radius)
-                || next_to(sector, thing_sector)
+            let reachable = self.in_search(sector, thing.sector, at, dir, left, radius)
+                || next_to(sector, thing.sector)
                 || self.portals.get(sector).is_some_and(|portals| {
-                    portals.iter().any(|portal| next_to(portal.adjoin, thing_sector))
+                    portals.iter().any(|portal| next_to(portal.adjoin, thing.sector))
                 });
             if !reachable {
                 continue;
             }
-            if at[2] + radius < z_min || at[2] - radius > z_max {
+            if at[2] + radius < thing.z_min || at[2] - radius > thing.z_max {
                 continue;
             }
-            let span = thing_radius + radius;
-            let (dx, dy) = (at[0] - centre[0], at[1] - centre[1]);
-            let b = 2.0 * (dir[0] * dx + dir[1] * dy);
-            let c = dx * dx + dy * dy - span * span;
-            // Already overlapping. The engine pushes the body out (`SearchForThingCollisions` returns
-            // the push); this move has no push channel, so a body walking *into* the solid is stopped at
-            // distance 0 instead of tunnelling through it, while a body walking *out* -- the escape
-            // direction -- is left free. Skipping overlap entirely was what walked the body through
-            // level 1's cantina leaves: the first frame's contact landed it touching, and every frame
-            // after that was "already overlapping".
-            if c <= 0.0 {
-                let out_len = (dx * dx + dy * dy).sqrt().max(1e-6);
-                let out = [dx / out_len, dy / out_len, 0.0];
-                if dir[0] * out[0] + dir[1] * out[1] < 0.0 && best.is_none_or(|(near, _)| 0.0 < near) {
-                    best = Some((0.0, out));
-                }
+            let Some((t, normal)) = thing.sweep_plan(at, dir, left, radius) else {
                 continue;
-            }
-            let disc = b * b - 4.0 * c;
-            if disc < 0.0 {
-                continue;
-            }
-            let t = (-b - disc.sqrt()) / 2.0;
-            if !(0.0..=left).contains(&t) {
-                continue;
-            }
+            };
             if best.is_none_or(|(near, _)| t < near) {
-                let (hx, hy) = (dx + dir[0] * t, dy + dir[1] * t);
-                let len = (hx * hx + hy * hy).sqrt().max(1e-6);
-                best = Some((t, [hx / len, hy / len, 0.0]));
+                best = Some((t, normal));
             }
         }
         best
@@ -1599,40 +1740,62 @@ impl Solids {
 
     /// Push a body out of any solid model it has ended up inside.
     ///
-    /// `sithPhysics` treats a collidable thing as a cylinder; the radius is the template`s own
-    /// `size=` (the engine`s number, `sithThing` collision), and the height is the eight radii the
-    /// `Solids::things` comment names as the known approximation.
+    /// A `collide=3` thing pushes out through its model box's nearest face; the rest use the
+    /// template's own `size=` cylinder, the engine`s movement-sphere rule.
     fn push_out_of_things(&self, mut at: [f32; 3], radius: f32, sector: usize) -> [f32; 3] {
-        for &(centre, thing_radius, z_min, z_max, thing_sector) in &self.things {
-            if !self.in_search(sector, thing_sector, at, [0.0; 3], 0.0, radius) {
+        for thing in &self.things {
+            if !self.in_search(sector, thing.sector, at, [0.0; 3], 0.0, radius) {
                 continue;
             }
             // The body's own radius against the thing's model span: a table blocks a walking body, a
             // lamp above head height does not.
-            if at[2] + radius < z_min || at[2] - radius > z_max {
+            if at[2] + radius < thing.z_min || at[2] - radius > thing.z_max {
                 continue;
             }
-            let (dx, dy) = (at[0] - centre[0], at[1] - centre[1]);
+            if let Some(half) = thing.half {
+                let local = thing.local([at[0], at[1]]);
+                let ext = [half[0] + radius, half[1] + radius];
+                let (px, py) = (ext[0] - local[0].abs(), ext[1] - local[1].abs());
+                if px <= 0.0 || py <= 0.0 {
+                    continue;
+                }
+                let normal = if px <= py {
+                    [if local[0] >= 0.0 { 1.0 } else { -1.0 }, 0.0]
+                } else {
+                    [0.0, if local[1] >= 0.0 { 1.0 } else { -1.0 }]
+                };
+                let n = thing.to_world(normal);
+                at[0] += n[0] * px.min(py);
+                at[1] += n[1] * px.min(py);
+                if std::env::var_os("BK_MOVE_TRACE").is_some() {
+                    eprintln!(
+                        "move: pushed out of the model box at {:?} half {half:?} yaw {:.3} to {:?}",
+                        thing.centre, thing.yaw, [at[0], at[1], at[2]]
+                    );
+                }
+                continue;
+            }
+            let (dx, dy) = (at[0] - thing.centre[0], at[1] - thing.centre[1]);
             let apart = (dx * dx + dy * dy).sqrt();
-            let least = thing_radius + radius;
+            let least = thing.radius + radius;
             if apart >= least {
                 continue;
             }
             if apart > 1e-5 {
                 let scale = least / apart;
-                at[0] = centre[0] + dx * scale;
-                at[1] = centre[1] + dy * scale;
+                at[0] = thing.centre[0] + dx * scale;
+                at[1] = thing.centre[1] + dy * scale;
             } else {
                 // Dead centre: pick a direction rather than divide by zero.
-                at[0] = centre[0] + least;
+                at[0] = thing.centre[0] + least;
             }
             // `BK_MOVE_TRACE`: a body pushed out of a solid thing every frame is a body walking
             // inside a model — `move_body` reports `blocked` only because of this push, which is why
             // the sweep said "nothing ahead" while the walker crawled.
             if std::env::var_os("BK_MOVE_TRACE").is_some() {
                 eprintln!(
-                    "move: pushed out of the collision cylinder at {:?} radius {thing_radius:.3} (z {z_min:.2}..{z_max:.2}) to {:?}",
-                    centre, [at[0], at[1], at[2]]
+                    "move: pushed out of the collision cylinder at {:?} radius {:.3} (z {:.2}..{:.2}) to {:?}",
+                    thing.centre, thing.radius, thing.z_min, thing.z_max, [at[0], at[1], at[2]]
                 );
             }
         }
@@ -1735,6 +1898,39 @@ impl Solids {
             .filter(|face| self.surface_owner.get(face.surface).copied().unwrap_or(room) == room)
             .chain(self.portal_faces.iter().filter(move |(owner, _)| *owner == room).map(|(_, face)| face))
             .any(|face| sphere_face(pos, radius, face))
+    }
+
+    /// The same landing `floor_under` picks, with the surface normal turned toward the body.
+    ///
+    /// `sithCollision_MoveThing` moves a body along the plane it hits; the walker needs the normal to
+    /// turn a downward step into the tangential part. `floor_candidates` keeps the file's raw normal
+    /// (the probe prints it, `up false` and all), so flip it the same way every other query does.
+    pub fn floor_contact(
+        &self,
+        sector: usize,
+        pos: [f32; 3],
+        height: f32,
+        radius: f32,
+    ) -> Option<(f32, f32, usize, [f32; 3])> {
+        let mut best: Option<(f32, f32, usize, [f32; 3])> = None;
+        for (floor, travelled, owner, raw, surface) in self.floor_candidates(sector, pos, height, radius) {
+            if best.is_none_or(|(near, _, _, _)| floor > near) {
+                let normal = self
+                    .face_of
+                    .get(&surface)
+                    .and_then(|i| self.faces.get(*i))
+                    .map(|face| {
+                        if dot(sub(pos, face.point), face.normal) < 0.0 {
+                            [-face.normal[0], -face.normal[1], -face.normal[2]]
+                        } else {
+                            face.normal
+                        }
+                    })
+                    .unwrap_or(raw);
+                best = Some((floor, travelled, owner, normal));
+            }
+        }
+        best
     }
 
     /// `sithPhysics_FindFloor`: the floor under a body, found by sweeping a sphere straight down.
@@ -3106,7 +3302,15 @@ mod tests {
             vec![Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surface: usize::MAX }],
         ];
         room.spheres = vec![([0.0, 0.0, 0.0], 8.0), ([0.0, 0.5, 0.0], 8.0), ([0.0, 1.0, 0.0], 8.0)];
-        room.things = vec![([0.0, 0.3, -0.5], 0.2, -1.0, 0.0, 2)];
+        room.things = vec![ThingSolid {
+            centre: [0.0, 0.3, -0.5],
+            radius: 0.2,
+            z_min: -1.0,
+            z_max: 0.0,
+            sector: 2,
+            half: None,
+            yaw: 0.0,
+        }];
         let r = 0.065;
         let dir = [0.0, 1.0, 0.0];
         // Touching already (the cylinder's span is 0.265): the sweep must still report the contact.
@@ -3128,7 +3332,15 @@ mod tests {
     #[test]
     fn a_solid_thing_blocks_the_sight_segment_but_not_from_inside_it() {
         let mut room = seam_floor();
-        room.things = vec![([1.0, 0.0, -0.5], 0.5, -1.0, 0.0, 0)];
+        room.things = vec![ThingSolid {
+            centre: [1.0, 0.0, -0.5],
+            radius: 0.5,
+            z_min: -1.0,
+            z_max: 0.0,
+            sector: 0,
+            half: None,
+            yaw: 0.0,
+        }];
         assert!(
             room.segment_thing([0.0, 0.0, -0.5], [2.0, 0.0, -0.5]),
             "a counter between the bodies did not block sight"
@@ -3156,6 +3368,59 @@ mod tests {
         assert!(
             room.segment_thing([0.4, 0.0, 0.1], [1.6, 0.0, -0.3]),
             "a ray dipping into the counter from above was not blocked"
+        );
+    }
+
+    /// A `collide=3` door leaf is its model's 0.025-thick box, not the template's 0.2 `size=`
+    /// cylinder: retail lets the body stand much closer to the leaf before it stops.
+    #[test]
+    fn a_thin_model_leaf_collides_as_its_box() {
+        let mut room = seam_floor();
+        room.things = vec![ThingSolid {
+            centre: [1.0, 0.0, -0.5],
+            radius: 0.2,
+            z_min: -1.0,
+            z_max: 0.0,
+            sector: 0,
+            half: Some([0.2, 0.0125]),
+            yaw: 0.0,
+        }];
+        let r = 0.065;
+        // Broad side at y = -0.025: the body stops at 0.0125 + 0.065 from the centre, where the
+        // old 0.2-radius cylinder stopped at 0.265.
+        let (travel, normal) = room
+            .sweep_things([1.0, -0.3, -0.5], [0.0, 1.0, 0.0], 0.5, r, 0)
+            .expect("the leaf did not stop the body");
+        assert!((travel - 0.2225).abs() < 1e-4, "the leaf stopped at {travel}");
+        assert!(normal[1] < -0.99, "the leaf's normal was {normal:?}");
+        // A path just past the leaf's 0.2 half width misses it; the old radius caught it.
+        assert!(
+            room.sweep_things([1.3, -0.3, -0.5], [0.0, 1.0, 0.0], 0.5, r, 0)
+                .is_none(),
+            "a body beside the leaf was stopped"
+        );
+        // The box turns with the thing's yaw: at 90 degrees the thin side faces world x.
+        room.things[0].yaw = 90.0;
+        let (travel, normal) = room
+            .sweep_things([1.3, 0.0, -0.5], [-1.0, 0.0, 0.0], 0.5, r, 0)
+            .expect("the turned leaf did not stop the body");
+        assert!((travel - 0.2225).abs() < 1e-4, "the turned leaf stopped at {travel}");
+        assert!(normal[0] > 0.99, "the turned leaf's normal was {normal:?}");
+        // A body inside the leaf's inflated box is pushed out through the thin face.
+        room.things[0].yaw = 0.0;
+        let pushed = room.push_out_of_things([1.0, 0.0, -0.5], r, 0);
+        assert!(
+            (pushed[1].abs() - 0.0775).abs() < 1e-4,
+            "the push put the body at {pushed:?}"
+        );
+        // Sight and shots use the same box.
+        assert!(
+            room.segment_thing([1.0, -0.3, -0.5], [1.0, 0.3, -0.5]),
+            "the leaf did not block a ray across it"
+        );
+        assert!(
+            !room.segment_thing([1.0, 0.0, -0.5], [1.0, 0.3, -0.5]),
+            "the leaf blocked the ray of a body already inside it"
         );
     }
 

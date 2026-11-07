@@ -12,7 +12,7 @@
 //! index, and the two read as cream and gold only through the background's palette.
 
 use crate::bm;
-use crate::menus::{self, CHECKBOX, CUSTOM, PICBUTTON, Screen};
+use crate::menus::{self, CHECKBOX, CUSTOM, LISTBOX, PICBUTTON, Screen};
 use crate::sft;
 use crate::uni;
 
@@ -45,6 +45,11 @@ pub struct Look<'a> {
     /// Literal text for a run-time dialog's element: `jkGuiDialog_Message` fills the lines
     /// of an already-built Ok/Cancel menu, whose text elements carry no key.
     pub text: &'a dyn Fn(usize) -> Option<String>,
+    /// A screen's list-box entries, in draw order. The debug chooser is the one screen family
+    /// whose list the port fills from the install's own episode graph.
+    pub list: Option<&'a [String]>,
+    /// The entry the list box highlights.
+    pub list_selected: usize,
     /// How far a `Panel::LoadBar` has filled, 0..=100.
     pub load_percent: f32,
 }
@@ -76,6 +81,8 @@ impl<'a> Default for Look<'a> {
             stars: None,
             force_level: None,
             text: &Empty::text,
+            list: None,
+            list_selected: 0,
             load_percent: 0.0,
         }
     }
@@ -124,6 +131,29 @@ pub fn draw_screen(
         }
         let lit = selected == Some(index);
         let [x, y, w, h] = item.rect;
+        // A list box is a scrolling column of the strings the screen's handler supplies. The
+        // engine's own two are the debug episode and level choosers; their entries are the
+        // install's `episode.jk` rows, not element keys.
+        if item.kind == LISTBOX {
+            let Some(entries) = look.list else { continue };
+            let font = usize::try_from(item.text_type).ok().and_then(|t| look.fonts.get(t));
+            let Some(font) = font.filter(|f| f.height > 0) else { continue };
+            let (first, visible, line) =
+                list_layout(item.rect, font.height as i32, entries.len(), look.list_selected);
+            let selected = look.list_selected.min(entries.len().saturating_sub(1));
+            for row in first..(first + visible).min(entries.len()) {
+                let ty = y + 4 + (row - first) as i32 * line;
+                if row == selected {
+                    // The selected row's marker: a two-pixel bar at the list's left edge.
+                    for py in ty..ty + font.height as i32 {
+                        canvas.put(x + 2, py, &palette, 0xff);
+                        canvas.put(x + 3, py, &palette, 0xff);
+                    }
+                }
+                canvas.draw_text_palette(font, x + 7, ty, &entries[row], &palette, 1);
+            }
+            continue;
+        }
         // A custom element is a rect the screen's own code paints, and its own draw
         // callback says which one: `item.panel()`.
         if item.kind == CUSTOM {
@@ -230,6 +260,40 @@ pub fn draw_screen(
         canvas.draw_text_palette(font, tx, ty, text, &palette, 1);
     }
 }
+/// The visible slice of a list box: first entry, how many fit, and the row pitch.
+///
+/// The list keeps the selected entry on screen and scrolls the minimum needed, so the first
+/// page shows the top and a selection at the end shows the bottom.
+pub fn list_layout(rect: [i32; 4], line_height: i32, count: usize, selected: usize) -> (usize, usize, i32) {
+    let line = line_height.max(1) + 2;
+    let room = (rect[3] - 8).max(1) as usize;
+    let visible = (room / line as usize).max(1).min(count.max(1));
+    let max_start = count.saturating_sub(visible);
+    let first = selected.saturating_sub(visible.saturating_sub(1)).min(max_start);
+    (first, visible, line)
+}
+
+/// The list entry under a canvas point, using the same layout [`list_layout`] draws.
+pub fn list_at(
+    rect: [i32; 4],
+    line_height: i32,
+    count: usize,
+    selected: usize,
+    at: [i32; 2],
+) -> Option<usize> {
+    let [x, y, w, h] = rect;
+    if at[0] < x || at[1] < y || at[0] >= x + w || at[1] >= y + h {
+        return None;
+    }
+    let (first, visible, line) = list_layout(rect, line_height, count, selected);
+    let row = ((at[1] - y - 4).max(0) / line) as usize;
+    if row >= visible {
+        return None;
+    }
+    let index = first + row;
+    (index < count).then_some(index)
+}
+
 /// The palette a bitmap is drawn with: its own, or the level colormap's when it carries
 /// none (the engine's `menu->palette` is the background's, and `bkdialog.bm` has none).
 pub fn palette_of(art: &bm::Bm, fallback: &[[u8; 3]; 256]) -> [[u8; 3]; 256] {
@@ -1099,6 +1163,17 @@ mod tests {
         assert_eq!(pixel(322, 220), 9);
         assert_eq!(pixel(316, 220), 0);
         assert_eq!(pixel(323, 220), 0);
+    }
+
+    #[test]
+    fn a_list_keeps_the_selection_in_view() {
+        let rect = [0, 0, 100, 50];
+        // A 10px font with the row pitch's 2px gap fits three rows in the 42px box.
+        assert_eq!(list_layout(rect, 10, 20, 0), (0, 3, 12));
+        assert_eq!(list_layout(rect, 10, 20, 19), (17, 3, 12));
+        assert_eq!(list_at(rect, 10, 20, 19, [5, 6]), Some(17));
+        assert_eq!(list_at(rect, 10, 20, 19, [5, 42]), None, "below the last visible row");
+        assert_eq!(list_at(rect, 10, 20, 19, [101, 6]), None, "outside the box");
     }
 
     #[test]

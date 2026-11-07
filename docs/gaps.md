@@ -304,8 +304,8 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
    is why the door capture showed no damage at all. `is_pickup` now excludes any thing that carries
    `damage=` (a shot in flight); with that guard the port's body takes hits at the door (shield 100 → 91
    on the first volley), as retail's does. The two upper rows still score 0.45/0.42, and the reason is
-   the engine's **damage tint**, not a scripted effect: retail's own series shows the body losing health as
-   the picture reddens (door 100 → 44 over the eight frames, catwalk 100/100 → 81/11), and the decomp
+   the engine's **damage tint**, not a scripted effect: retail's raw door HUD ends at 81 health / 0
+   shields (the earlier 44-health reading was wrong; round 409), and the decomp
    gives the rule — `sithActor_DamageActor` calls `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)` for
    the local player, `sithPlayer_Update` decays the three channels by 0.4 per second, and
    `stdPalEffects_UpdatePalette` adds `round(byte * tint * 0.5)` to each palette channel. The port's
@@ -428,10 +428,11 @@ Ordered by risk per hour, using the call counts in section 3 rather than subsyst
      fights therefore started and finished faster than retail's. `turn_toward` clamps the turn per
      frame, with a unit test.
 
-   Measured on the door capture (600 frames): **41–47 shots and 15 hits** (≈165 damage, the body left
-   at **29 health** where retail's own HUD at ~10 s reads 56), up from 32 shots and 6 hits; the body
-   survives the window and the frame is red (crop red mean 46 → 67). The catwalk body is hit too. The
-   pair scores do not move (door 0.417, catwalk 0.449): retail's reference is a deeper red and the
+   Measured on the door capture (600 frames): this round produced **41–47 shots and 15 hits** (≈165 damage,
+   the body left at **29 health**). The later reading of retail's HUD as 56 was wrong: its settled raw
+   frame reads **81 health / 0 shields**, and the current port reads **83 / 0** in two uninstrumented
+   runs (round 409). The body survives the window and the frame is red (crop red mean 46 → 67). The
+   catwalk body is hit too. The pair scores do not move (door 0.417, catwalk 0.449): retail's reference is a deeper red and the
    doorway framing dominates that pair, so the rows stay ungraded on picture, not on state.
 
    The gate run also caught a real bug: `AIFlee` was ignored by the "out of sight and nothing
@@ -2333,7 +2334,7 @@ level-2 sections all parse, so the failure is after the parse - the restore cann
 world together (the records are level 1's; the truncated variant hangs the same way). The box is
 modal and eats console keys, which is why the `coords` polling never answered. Also photographed the
 **[Debug]** entry of the Single Player submenu (`tools/parity/retail-debug-menu.png`): it is a
-**Choose Episode** list - *The Force Within*, *Jedi's Quests for the Flag* (selected), *Jedi Training***
+**Choose Episode** list - *The Force Within*, *Jedi Capture the Flag* (selected), *Jedi Training***
 - with Cancel/Ok. That is an episode picker, not a level picker, so it does not boot level 2 by
 itself; but selecting an episode then Ok may start that episode's first level, which is a new lever
 for Phase 2 breadth (the other episodes' first levels are not the campaign's first). Next probes:

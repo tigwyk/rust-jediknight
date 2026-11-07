@@ -105,16 +105,17 @@ real regression: the pre-fix spawn camera (0.055 units low) scores 0.2284, the f
 `route_catwalk` and `route_door` are captured but deliberately **ungraded**, and the reason is now
 measured rather than assumed. The port warps the player to the row's pose (`--warp`), the way retail's
 `warp` leaves its body, so scripts and AI do see a body there. Retail's reference in those two rooms
-is **red from damage tint**, though: the body is taking damage (level 1's door: health 100 → 44 over
-the series; catwalk: 100/100 → 81/11), and the engine's damage path adds a red palette tint
+is **red from damage tint**, though: the body is taking damage (level 1's door: the settled raw HUD
+reads 81 health / 0 shields; catwalk: 100/100 → 81/11), and the engine's damage path adds a red palette tint
 (`sithActor_DamageActor` calls `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)`; it decays 0.4 per
 second and is applied as `palette += round(palette * tint * 0.5)`). Both halves are ported now: the
 state (adds with the engine's clamps, the 0.4/s decay, the damage flash — unit-tested) and the draw
 (a fullscreen palette pass on the world camera that scales the finished picture's bytes by
 `1 + tint/2`; a 1.0 red tint measures ×1.52). The rows stay `UNGRADED` at 0.45/0.42 for a different
 reason: retail's own 1 s series turns red at ~5–6 s and its settled reference at ~10 s is saturated
-(r/g 2.0), while the port's 10 s capture now lands **15 hits** (≈165 damage, the body left at 29
-health) and draws red 46 → 67 — the state is close, the picture is not: retail's reference is a
+(r/g 2.0), while two uninstrumented 10 s port captures read **83 health / 0 shields** against retail's
+**81 / 0** and draw red 46 → 67 — the settled state is within 2 health, the picture is not: retail's
+reference is a
 deeper red and the doorway framing dominates that pair. At the catwalk the body now **stands on the
 catwalk model** (a solid thing, whose top the loader registers and the idle attachment holds — the
 engine's `FindFloor`/`AttachThingToSurface` behaviour), which moved the pair 0.4493 → **0.4603**;
@@ -415,7 +416,9 @@ mismatch recorded here has been fixed; `--links` is the check.
   log says who hit whom; `BK_AI_TRACE=1` prints every actor-frame that has line of sight to the body
   (range, dot, `ready`); `BK_AI_ROSTER=1` dumps every actor near the body once — AI class, cone test,
   line of sight and how far off its facing the body is, which is the fastest way to see why a room is
-  quiet. At level 1's door: the capture now lands 15 hits on the body (41-47 shots); the rest fall into a
+  quiet. At level 1's door the uninstrumented 600-frame capture lands 10 hits and ends at 83 health /
+  0 shields (retail's settled raw frame: 81 / 0). Do not compare a `BK_AI_TRACE=2` run's damage total:
+  its output volume changed the encounter in round 409. The rest of the shots fall into a
   Greedo standing in the lines; the roster shows 56 armed actors within 8 units, all with a clear line,
   most facing >100° away. (They turn onto a target they have now - rate-limited by `maxrotthrust` - and a side-mate's shot tells the rest where it is: `sithAIAwareness` modelled; an actor keeps its aim while walking
   and the chase keeps its class's `Follow` standoff.)

@@ -78,8 +78,8 @@ param(
   # The save records the level name twice (offsets 132/1616) and its number (int32 at 1612);
   # patching all three is the only way retail will load a level other than the first.
   [string]$BootSaveLevel = '',
-  # Start a different episode from the [Debug] chooser (1 = The Force Within, 2 = Jedi's Quests
-  # for the Flag, 3 = Jedi Training) instead of the campaign's first level, then log coords.
+  # Start a different episode from the [Debug] chooser (1 = The Force Within, 2 = Jedi Capture the
+  # Flag, 3 = Jedi Training) instead of the campaign's first level, then log coords.
   [string]$StartEpisode = ''
 )
 
