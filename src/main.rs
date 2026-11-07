@@ -5,6 +5,7 @@
 //! not from any original source. Nothing here reads or needs the original EXE;
 //! only the data archives are used.
 
+mod surface;
 mod ai;
 mod bm;
 mod cog;
@@ -46,6 +47,10 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowResolution};
 use bevy::camera::visibility::RenderLayers;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use surface::{
+    SURFFLAG_CEILING_SKY, SURFFLAG_SKY, SurfaceBatches, SurfaceLook, SurfaceScene,
+    is_sky_surface,
+};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot, ScreenshotCaptured};
 use std::collections::HashMap;
@@ -10160,7 +10165,9 @@ fn main() {
         look.scrolls[index] = [rate[0] * time, rate[1] * time];
         // The digest of every UV in the batches, sorted first because `batches` is a `HashMap`.
         let uv_hash = |look: &SurfaceLook| -> u64 {
-            let (batches, _, _) = build_world(level, &world.images, &Default::default(), look, false);
+            let built =
+                SurfaceScene::from_look(look.clone()).build(level, &world.images, &Default::default(), false);
+            let batches = built.batches;
             let mut h = 0xcbf2_9ce4_8422_2325u64;
             let mut words: Vec<u64> = Vec::new();
             for batch in batches.values() {
@@ -10407,7 +10414,9 @@ fn main() {
         // and the rgb is the light. The words are sorted first because `batches` is a `HashMap`, and
         // its iteration order is not stable between two builds of the same world.
         let hash = |look: &SurfaceLook| -> u64 {
-            let (batches, _, _) = build_world(level, &world.images, &Default::default(), look, false);
+            let built =
+                SurfaceScene::from_look(look.clone()).build(level, &world.images, &Default::default(), false);
+            let batches = built.batches;
             let mut words: Vec<u64> = Vec::new();
             for batch in batches.values() {
                 for color in &batch.colors {
@@ -10449,7 +10458,12 @@ fn main() {
         // `fps` times a second, which is the number that decides whether the animation can ride the
         // rebuild path at all.
         let started = std::time::Instant::now();
-        let _ = build_world(level, &world.images, &Default::default(), &look, false);
+        let _ = SurfaceScene::from_look(look.clone()).build(
+            level,
+            &world.images,
+            &Default::default(),
+            false,
+        );
         let rebuild_ms = started.elapsed().as_secs_f64() * 1000.0;
         let centre = {
             let (mut cx, mut cy, mut cz, mut n) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
@@ -10790,8 +10804,14 @@ fn main() {
             .map(|(i, s)| (i, s.verts.len(), claims[i][0]))
             .expect("no drawn surface with a single claiming sector");
         let triangles = |hidden: &std::collections::BTreeSet<usize>| -> usize {
-            build_world(level, &Default::default(), hidden, &SurfaceLook::default(), false)
-                .0
+            let built = SurfaceScene::default().build(
+                level,
+                &Default::default(),
+                hidden,
+                false,
+            );
+            built
+                .batches
                 .values()
                 .map(|batch| batch.indices.len() / 3)
                 .sum()
@@ -17489,17 +17509,20 @@ fn effect_material_cels(
 }
 
 fn image_from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Image {
-    let mut image = Image::new(
+    // `Image::new` asserts that its data is the top mip only. The texture needs the whole chain, so
+    // build the descriptor first and assign the chain after; the descriptor's mip count then matches
+    // the data. Passing the chain to `Image::new` panics in debug builds.
+    let mut image = Image::new_uninit(
         Extent3d {
             width,
             height,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        mip_chain(rgba, width, height),
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
+    image.data = Some(mip_chain(rgba, width, height));
     image.texture_descriptor.mip_level_count = width.max(height).max(1).ilog2() + 1;
     // JK texture vertices are in texels and run far past one texture width, so the
     // material tiles across a surface. Without repeat addressing the default
@@ -17510,6 +17533,21 @@ fn image_from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         ..default()
     });
     image
+}
+
+#[cfg(test)]
+mod image_from_rgba_tests {
+    use super::image_from_rgba;
+
+    /// `Image::new` debug-asserts that its data is the top mip only; the helper passes the full mip
+    /// chain, so it must build the image uninitialised and assign the chain afterwards. This is the
+    /// `--scroll` crash in miniature: a 4x4 RGBA top level is 64 bytes, its chain is 84.
+    #[test]
+    fn a_full_mip_chain_is_not_rejected_as_a_top_level() {
+        let image = image_from_rgba(4, 4, vec![0; 4 * 4 * 4]);
+        assert_eq!(image.texture_descriptor.mip_level_count, 3);
+        assert_eq!(image.data.as_ref().map(Vec::len), Some((16 + 4 + 1) * 4));
+    }
 }
 
 /// Append a box-filtered mip chain to an RGBA8 top level.
@@ -17555,151 +17593,6 @@ fn mip_chain(top: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
 // mesh building
 // ---------------------------------------------------------------------------
 
-/// `surfflags` bit that marks a sky backdrop face.
-///
-/// Observed: every face carrying the level's sky material has `0x200` set in its
-/// surface flags (`0x204`, `0x224`, `0x304`), while ordinary faces are `0x0`,
-/// `0x4` or `0x5`. Sky faces are large vertical backdrop walls far outside the
-/// play area, and their baked per-vertex intensity is zero.
-const SURFFLAG_SKY: u32 = 0x200;
-
-/// Whether a surface's **texture** moves without its geometry changing — it has a `SlideWall` rate or
-/// the world-wide sky offset applies to it. Only such faces are re-laid by a scroll-only rebuild.
-fn surface_scrolls(look: &SurfaceLook, index: usize, surface: &jkl::Surface) -> bool {
-    is_sky_surface(surface) || look.scroll(index, surface.surfflags) != [0.0; 2]
-}
-
-fn is_sky_surface(surface: &jkl::Surface) -> bool {
-    surface.surfflags & (SURFFLAG_SKY | SURFFLAG_CEILING_SKY) != 0
-}
-
-
-/// `SITH_SURFACE_CEILINGSKY` — the other half of the engine sky test. The port only knew the horizon bit.
-const SURFFLAG_CEILING_SKY: u32 = 0x400;
-
-/// What the scripts have changed about how the world looks: each surface's cel, each surface's extra
-/// light and each sector's light. The renderer bakes all three into the mesh the level shader draws,
-/// so they travel together — and a change to any of them is what `Runtime::surface_epoch` announces.
-#[derive(Default)]
-struct SurfaceLook {
-    cels: Vec<f32>,
-    /// Each surface's material cel count, so `(own cel + material cel)` wraps where the shader expects.
-    counts: Vec<f32>,
-    lights: Vec<f32>,
-    /// Per sector, `AMBIENT LIGHT + EXTRA LIGHT`: the engine's per-sector camera ambient. It is the
-    /// **base** of a world vertex's light product, not an addition on top of full brightness.
-    ambient: Vec<f32>,
-    sectors: Vec<f32>,
-    /// `MaterialAnim`'s per-material cel (`rdMaterial.curCelNum`).
-    materials: HashMap<i32, f32>,
-    /// `ThingLight`'s light summed per sector: retail lights a radius around the thing, and this
-    /// build's baked sector light is the granularity it has, so the sum is added to the sector's own.
-    thing_light: Vec<f32>,
-    /// `SetFaceLightMode`: a face whose mode is `RD_LIGHTMODE_FULLYLIT` (0) is drawn at full
-    /// brightness whatever the bake says — that is what makes the CTF force fields glow.
-    light_modes: Vec<i32>,
-    /// `SlideWall`'s accumulated texel offset per surface — the engine adds `scrollVector * dt` to
-    /// `texVertOffset` and wraps it at 1024, which from the clock is just `rate * time`.
-    scrolls: Vec<[f32; 2]>,
-    /// `SlideHorizonSky`/`SlideCeilingSky`'s world-wide offset, `[horizon, ceiling]`: every sky face
-    /// of that kind moves by it.
-    sky: [[f32; 2]; 2],
-}
-
-impl SurfaceLook {
-    /// Read the live runtime; the vectors are indexed by surface and by sector. `level` supplies the
-    /// header's starting sky offsets (`Horizon Sky Offset`/`Ceiling Sky Offset`), which the plane pass
-    /// begins at; `SlideHorizonSky`/`SlideCeilingSky` then move it by `rate * time`.
-    fn of(rt: &runtime::Runtime, level: &jkl::Level) -> Self {
-        SurfaceLook {
-            cels: rt.surfaces.iter().map(|s| s.cel).collect(),
-            counts: rt.surface_cels.iter().map(|&c| c as f32).collect(),
-            lights: rt.surfaces.iter().map(|s| s.light).collect(),
-            ambient: rt.sector_light_baked.clone(),
-            sectors: rt.sectors.iter().map(|s| s.light).collect(),
-            materials: rt.material_cel.iter().map(|(&k, &v)| (k, v)).collect(),
-            scrolls: rt
-                .surfaces
-                .iter()
-                .map(|s| {
-                    [
-                        (s.slide[0] * rt.time).rem_euclid(1024.0),
-                        (s.slide[1] * rt.time).rem_euclid(1024.0),
-                    ]
-                })
-                .collect(),
-            sky: [
-                [
-                    (level.horizon_sky_offset[0] + rt.sky_scroll[0][0] * rt.time).rem_euclid(1024.0),
-                    (level.horizon_sky_offset[1] + rt.sky_scroll[0][1] * rt.time).rem_euclid(1024.0),
-                ],
-                [
-                    (level.ceiling_sky_offset[0] + rt.sky_scroll[1][0] * rt.time).rem_euclid(1024.0),
-                    (level.ceiling_sky_offset[1] + rt.sky_scroll[1][1] * rt.time).rem_euclid(1024.0),
-                ],
-            ],
-            thing_light: rt.thing_light_by_sector(),
-            light_modes: (0..rt.surfaces.len())
-                .map(|s| rt.face_light_mode.get(&s).copied().unwrap_or(3))
-                .collect(),
-        }
-    }
-
-    /// The texel offset a scrolling surface's texture is drawn at: its own (`SlideWall`) or, for a
-    /// sky face, the world-wide sky offset of that kind.
-    fn scroll(&self, surface: usize, flags: u32) -> [f32; 2] {
-        let sky = if flags & SURFFLAG_CEILING_SKY != 0 {
-            self.sky[1]
-        } else if flags & SURFFLAG_SKY != 0 {
-            self.sky[0]
-        } else {
-            [0.0; 2]
-        };
-        let own = self.scrolls.get(surface).copied().unwrap_or([0.0; 2]);
-        [own[0] + sky[0], own[1] + sky[1]]
-    }
-
-    /// The cel a surface draws: its own, which is 0 unless a script moved it, plus the animated cel of
-    /// its material — `rdActive` uses the material's (`cel == -1`) when the surface has none of its
-    /// own, and every shipped surface starts there.
-    fn cel(&self, surface: usize, material: i32) -> f32 {
-        let own = self.cels.get(surface).copied().unwrap_or(0.0).max(0.0);
-        let material = self.materials.get(&material).copied().unwrap_or(0.0);
-        let total = own + material;
-        let count = self.counts.get(surface).copied().unwrap_or(1.0).max(1.0);
-        if count > 1.0 {
-            total % count
-        } else {
-            0.0
-        }
-    }
-
-    /// `RD_LIGHTMODE_FULLYLIT`: the face is drawn at full brightness whatever the bake says.
-    fn fullbright(&self, surface: usize) -> bool {
-        self.light_modes.get(surface).copied() == Some(0)
-    }
-
-    /// The factor the level's baked vertex light is multiplied by: the engine adds a surface's and a
-    /// sector's `extraLight` on top of the baked term, so 0 means "as the level was built".
-    fn light(&self, surface: usize, sector: i32) -> f32 {
-        let surface = self.lights.get(surface).copied().unwrap_or(0.0);
-        let index = usize::try_from(sector).unwrap_or(usize::MAX);
-        let sector_own = self.sectors.get(index).copied().unwrap_or(0.0);
-        // `ThingLight`: the lamps standing in this sector, summed (see `thing_light_by_sector`).
-        let things = self.thing_light.get(index).copied().unwrap_or(0.0);
-        // The sector's baked ambient is the base: `rdCamera_SetAmbientLight` takes
-        // `ambient + extraLight` per sector, so a dark room is a low base, not `1.0 + deltas`.
-        let base = self.ambient.get(index).copied().unwrap_or(1.0);
-        (base + surface + sector_own + things).clamp(0.0, 4.0)
-    }
-}
-
-/// The light for a drawn surface. `owner` is the single sector the level lists the surface under;
-/// duplicate claimant batches reuse it so the same polygon cannot draw at two brightnesses.
-fn surface_light(look: &SurfaceLook, surface: usize, owner: Option<usize>) -> f32 {
-    owner.map_or_else(|| look.light(surface, -1), |sector| look.light(surface, sector as i32))
-}
-
 #[cfg(test)]
 mod surface_light_tests {
     use super::*;
@@ -17730,27 +17623,23 @@ mod surface_light_tests {
     #[test]
     fn duplicate_claims_take_the_owner_sector_light() {
         let look = SurfaceLook { ambient: vec![0.25, 0.75], ..Default::default() };
-        assert!((surface_light(&look, 0, Some(1)) - 0.75).abs() < 1e-6);
-        assert!((surface_light(&look, 0, None) - 1.0).abs() < 1e-6);
+        assert!((super::surface::surface_light(&look, 0, Some(1)) - 0.75).abs() < 1e-6);
+        assert!((super::surface::surface_light(&look, 0, None) - 1.0).abs() < 1e-6);
     }
 }
 
 /// One accumulated triangle batch per material.
 #[derive(Clone, Default)]
-struct Batch {
+pub(crate) struct Batch {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
-}/// The world's surface batches: which mesh asset draws which `(sector, material)`. A script's
-/// `SetFaceGeoMode` has to stop drawing polygons, so the rebuild patches these meshes in place
-/// rather than respawning the sector's entities.
-#[derive(Resource, Default)]
-struct SurfaceBatches(Vec<((usize, i32), Handle<Mesh>)>, HashMap<(usize, i32), Vec<usize>>);
+}
 
 impl Batch {
-    fn push_polygon(
+    pub(crate) fn push_polygon(
         &mut self,
         level: &jkl::Level,
         surface: &jkl::Surface,
@@ -18029,7 +17918,13 @@ fn audit(gobs: &gob::GobSet) -> Result<(), String> {
         // Build the actual draw geometry, headless: a level whose surfaces pass the
         // index checks can still produce no triangles (degenerate or collinear
         // polygons), and that would render as an empty world with no error.
-        let (batches, _, _) = build_world(&level, &Default::default(), &Default::default(), &SurfaceLook::default(), false);
+        let built = SurfaceScene::default().build(
+            &level,
+            &Default::default(),
+            &Default::default(),
+            false,
+        );
+        let batches = built.batches;
         let world_tris: usize = batches.values().map(|b| b.indices.len() / 3).sum();
         let empty_batches = batches.values().filter(|b| b.indices.is_empty()).count();
         if textured > 0 && world_tris == 0 {
@@ -19225,80 +19120,6 @@ fn newell(points: &[[f32; 3]]) -> Option<[f32; 3]> {
 // bevy setup
 // ---------------------------------------------------------------------------
 
-/// Batch every drawable surface by material, so the world is one entity per
-/// texture rather than one per polygon. Returns the batches and the count of
-/// non-drawable surfaces (portal markers and degenerate faces).
-///
-/// `tex_size` is only needed to normalise texture vertices, so a caller that just
-/// wants to know whether the geometry builds can pass an empty image map.
-///
-/// Batches are keyed by `(sector, material)`: one entity per room per texture is what
-/// lets the portal walk in `collide::visible_sectors` hide whole rooms with a
-/// `Visibility` flip. Keying by material alone drew the level as a handful of
-/// all-or-nothing meshes and made sector culling impossible.
-fn build_world(
-    level: &jkl::Level,
-    images: &HashMap<i32, Image>,
-    hidden: &std::collections::BTreeSet<usize>,
-    look: &SurfaceLook,
-    only_scrolling: bool,
-) -> (HashMap<(usize, i32), Batch>, usize, HashMap<(usize, i32), Vec<usize>>) {
-    let claims = collide::surface_claims(level);
-    // A surface can be listed by several overlapping sector ranges (a trigger volume inside a
-    // room, for instance). Drawing it in each visible claimant keeps culling correct, but the
-    // engine has one owning sector per surface; using each claimant's ambient made the same
-    // geometry change brightness with whichever list happened to draw last.
-    let light_owners = collide::surface_sectors(level);
-    let mut batches: HashMap<(usize, i32), Batch> = HashMap::new();
-    let mut keys: HashMap<(usize, i32), Vec<usize>> = HashMap::new();
-    let mut skipped = 0usize;
-    for (index, surface) in level.surfaces.iter().enumerate() {
-        if only_scrolling && !surface_scrolls(look, index, surface) {
-            continue;
-        }
-        // Not drawn: no material, not a polygon, or a script set its geomode to `GEOMETRY_NONE`.
-        if surface.material < 0 || surface.verts.len() < 3 || hidden.contains(&index) {
-            skipped += 1;
-            continue;
-        }
-        // A surface's frame comes from the script (`SetWallCel`, `SurfaceAnim`), and every surface
-        // starts at cel 0 — the `.jkl` row carries no cel of its own.
-        let cel = look.cel(index, surface.material);
-        let scroll = look.scroll(index, surface.surfflags);
-        let tex_size = images
-            .get(&surface.material)
-            .map(|img| {
-                (
-                    img.texture_descriptor.size.width as f32,
-                    img.texture_descriptor.size.height as f32,
-                )
-            })
-            .unwrap_or((1.0, 1.0));
-
-        // A surface drawn in every sector that claims it: hiding any one claimant still
-        // leaves it on screen as long as another is visible. Its light comes from the one
-        // owning sector, so the duplicate draws cannot disagree about brightness.
-        let owners = claims.get(index).map(Vec::as_slice).unwrap_or(&[]);
-        let owner = light_owners.get(index).copied().filter(|sector| *sector != usize::MAX);
-        let light = surface_light(look, index, owner);
-        if owners.is_empty() {
-            keys.entry((usize::MAX, surface.material)).or_default().push(index);
-            batches
-                .entry((usize::MAX, surface.material))
-                .or_default()
-                .push_polygon(level, surface, tex_size, cel, light, scroll, look.fullbright(index));
-        }
-        for &sector in owners {
-            keys.entry((sector, surface.material)).or_default().push(index);
-            batches
-                .entry((sector, surface.material))
-                .or_default()
-                .push_polygon(level, surface, tex_size, cel, light, scroll, look.fullbright(index));
-        }
-    }
-    (batches, skipped, keys)
-}
-
 /// Rebuild the world's surface batches when a script hides or restores a surface.
 ///
 /// `SetFaceGeoMode(surface, 0)` is `GEOMETRY_NONE` (`00_breakingglass.cog` shatters glass with it,
@@ -19316,7 +19137,7 @@ fn rebuild_surfaces(
 ) {
     let _span = Span::new("rebuild_surfaces");
     let (Some(sim), Some(world), Some(batches)) = (sim, world, batches) else { return };
-    let (epoch, hidden, look) = {
+    let (epoch, hidden, scene) = {
         let rt = sim.world.borrow();
         (
             // The geomode, the cel and the light all end up baked into the mesh; the pair of epochs is
@@ -19328,7 +19149,7 @@ fn rebuild_surfaces(
                 .filter(|(_, mode)| **mode == 0)
                 .map(|(surface, _)| *surface)
                 .collect::<std::collections::BTreeSet<usize>>(),
-            SurfaceLook::of(&rt, &world.level),
+            SurfaceScene::new(&rt, &world.level),
         )
     };
     if epoch == *seen {
@@ -19340,21 +19161,8 @@ fn rebuild_surfaces(
     // build would drop its static polygons.
     let scroll_only = !geomode_moved && epoch.1 == seen.1;
     *seen = epoch;
-    let (built, _, built_keys) = build_world(&world.level, &world.images, &hidden, &look, scroll_only);
-    let mut patched = 0usize;
-    for (key, handle) in &batches.0 {
-        if scroll_only
-            && built_keys.get(key).map(Vec::len).unwrap_or(0)
-                < batches.1.get(key).map(Vec::len).unwrap_or(0)
-        {
-            continue;
-        }
-        let Some(batch) = built.get(key).cloned() else { continue };
-        if let Some(mut mesh) = meshes.get_mut(handle) {
-            *mesh = to_mesh(batch);
-            patched += 1;
-        }
-    }
+    let built = scene.build(&world.level, &world.images, &hidden, scroll_only);
+    let patched = batches.apply(&built, &mut meshes, scroll_only);
     if geomode_moved {
         println!(
             "surfaces: geomode changed, {patched} batch(es) rebuilt with {} surface(s) hidden",
@@ -24801,7 +24609,8 @@ fn setup(
     // Surfaces a script has hidden before the world was built (`GEOMETRY_NONE`). Scripts start before
     // the meshes are built, so a level that hides glass in `startup` is already accounted for here;
     // anything later goes through `rebuild_surfaces`.
-    let (batches, skipped, keys) = build_world(level, &world.images, &Default::default(), &SurfaceLook::default(), false);
+    let built = SurfaceScene::default().build(level, &world.images, &Default::default(), false);
+    let (batches, skipped, keys) = (built.batches, built.skipped, built.keys);
     let no_mat = level.surfaces.iter().filter(|s| s.material < 0).count();
     let few_verts = level.surfaces.iter().filter(|s| s.verts.len() < 3).count();
     println!(
