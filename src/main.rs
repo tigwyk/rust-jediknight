@@ -17694,6 +17694,12 @@ impl SurfaceLook {
     }
 }
 
+/// The light for a drawn surface. `owner` is the single sector the level lists the surface under;
+/// duplicate claimant batches reuse it so the same polygon cannot draw at two brightnesses.
+fn surface_light(look: &SurfaceLook, surface: usize, owner: Option<usize>) -> f32 {
+    owner.map_or_else(|| look.light(surface, -1), |sector| look.light(surface, sector as i32))
+}
+
 #[cfg(test)]
 mod surface_light_tests {
     use super::*;
@@ -17717,6 +17723,15 @@ mod surface_light_tests {
         // A level whose sectors bake a full 1.0 stays exactly as it was.
         let bright = SurfaceLook { ambient: vec![1.0], ..Default::default() };
         assert_eq!(bright.light(0, 0), 1.0);
+    }
+
+    /// Every claimant batch of one surface takes the owning sector's light. A trigger sector that
+    /// also lists the room's wall must not give the duplicate a second brightness.
+    #[test]
+    fn duplicate_claims_take_the_owner_sector_light() {
+        let look = SurfaceLook { ambient: vec![0.25, 0.75], ..Default::default() };
+        assert!((surface_light(&look, 0, Some(1)) - 0.75).abs() < 1e-6);
+        assert!((surface_light(&look, 0, None) - 1.0).abs() < 1e-6);
     }
 }
 
@@ -19229,6 +19244,11 @@ fn build_world(
     only_scrolling: bool,
 ) -> (HashMap<(usize, i32), Batch>, usize, HashMap<(usize, i32), Vec<usize>>) {
     let claims = collide::surface_claims(level);
+    // A surface can be listed by several overlapping sector ranges (a trigger volume inside a
+    // room, for instance). Drawing it in each visible claimant keeps culling correct, but the
+    // engine has one owning sector per surface; using each claimant's ambient made the same
+    // geometry change brightness with whichever list happened to draw last.
+    let light_owners = collide::surface_sectors(level);
     let mut batches: HashMap<(usize, i32), Batch> = HashMap::new();
     let mut keys: HashMap<(usize, i32), Vec<usize>> = HashMap::new();
     let mut skipped = 0usize;
@@ -19256,10 +19276,12 @@ fn build_world(
             .unwrap_or((1.0, 1.0));
 
         // A surface drawn in every sector that claims it: hiding any one claimant still
-        // leaves it on screen as long as another is visible.
+        // leaves it on screen as long as another is visible. Its light comes from the one
+        // owning sector, so the duplicate draws cannot disagree about brightness.
         let owners = claims.get(index).map(Vec::as_slice).unwrap_or(&[]);
+        let owner = light_owners.get(index).copied().filter(|sector| *sector != usize::MAX);
+        let light = surface_light(look, index, owner);
         if owners.is_empty() {
-            let light = look.light(index, -1);
             keys.entry((usize::MAX, surface.material)).or_default().push(index);
             batches
                 .entry((usize::MAX, surface.material))
@@ -19267,7 +19289,6 @@ fn build_world(
                 .push_polygon(level, surface, tex_size, cel, light, scroll, look.fullbright(index));
         }
         for &sector in owners {
-            let light = look.light(index, sector as i32);
             keys.entry((sector, surface.material)).or_default().push(index);
             batches
                 .entry((sector, surface.material))

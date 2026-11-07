@@ -6057,5 +6057,19 @@ One candidate was tested and reverted: adding `Tonemapping::None` to the world c
 static rows barely moved the numbers (`spawn_pose` 0.6387 default vs 0.6369 none; `level2_spawn`
 0.4328 vs 0.4326), so it is not the remaining term and the tree is back to the checkpoint.
 
-No thresholds were added. The two rows remain `UNGRADED`; a renderer claim needs a state-matched
-retail capture, not another ground/luma tweak. `cargo test --release` is **272 passed, 0 failed**.
+One ownership fix did land. A surface can be listed by several overlapping sector ranges; the world
+draw keeps every claimant for culling, but it lit each duplicate with that claimant's own ambient.
+The last claimant now supplies the light for every copy (`collide::surface_sectors`), so duplicate
+draws cannot disagree. Measured on the same captures:
+
+| row | before | after |
+|---|---|---|
+| `spawn_yaw30` | 0.5930 | **0.6041** |
+| `route_cantina` | 0.7439 | **0.7450** |
+| `route_street` | 0.7313 | **0.7328** |
+| `route_catwalk` | 0.4230 | **0.4310** |
+| `level2_spawn` | 0.4326 | **0.4331** |
+
+The five gated rows still pass: `compare.ps1 -Gate` **5 thresholds, 0 failures**. The two route rows
+remain `UNGRADED`; a renderer claim there needs a state-matched retail capture, not another
+ground/luma tweak. `cargo test --release` is **273 passed, 0 failed**.
