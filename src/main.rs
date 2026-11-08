@@ -11829,7 +11829,7 @@ fn main() {
         let mut vy = 0.0f32;
         let dt = 1.0 / 30.0;
         for _ in 0..60 {
-            walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+            walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false, false);
         }
         // Drop from the roomiest place the level has, not from the spawn: level 1's walkplayer stands in a
         // crawlspace 0.3 units tall, and a body lifted above its own ceiling is *outside its sector*, which
@@ -11867,7 +11867,7 @@ fn main() {
             // the old `before < 0` test then never fired at all.
             let mut peak = 0.0f32;
             for _ in 0..900 {
-                walker_step(&solids, collide::Gates::default(), &mut sector, &mut p2, &mut v2, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut p2, &mut v2, [0.0, 0.0], dt, rules.radius, rules.gravity, false, false);
                 peak = peak.max(-v2);
                 if v2 == 0.0 && peak > 0.0 {
                     break;
@@ -12272,7 +12272,7 @@ fn main() {
             // Settle on the floor first: the thing's origin is at the level's walkplayer
             // point, which is not necessarily a radius above the floor.
             for _ in 0..30 {
-                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false, false);
             }
             let base = pos[2];
             let mut airetime = 0.0f32;
@@ -12281,7 +12281,7 @@ fn main() {
             vy = rules.jump;
             let trace = std::env::var_os("BK_JUMP_TRACE").is_some();
             for frame in 0..300 {
-                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false);
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false, false);
                 if trace && (frame < 6 || (18..28).contains(&frame) || (60..64).contains(&frame)) {
                     eprintln!(
                         "jump trace {frame}: z {:.3} base {base:.3} vy {vy:.2} support {:?} floor {:?}",
@@ -12614,7 +12614,7 @@ fn main() {
                     sky_follows_camera,
                     ambient_follows_view,
                     play_exit,
-                    advance_sim,
+                    advance_sim.after(ai_shots),
                 )
                     .run_if(no_screen_open),
                 (demo_aim, sync_player_thing, health_follows_damage, infrared_follows_force, fire_player, sprite_demo, draw_created, grow_particles, cycle_particle_cels, projectile_hits, respawn_on_death)
@@ -15906,6 +15906,9 @@ fn walker_step(
     radius: f32,
     gravity: f32,
     allow_step: bool,
+    // A settle probe: land on a floor if one is inside the downward reach, but never fall or slide
+    // when there is none. The AI's post-walk resolve must not invent a 0.6-unit fall.
+    probe: bool,
 ) -> (f32, bool, bool) {
     // Where the frame started, so a move that would leave the world can be undone.
     let frame_start = *pos;
@@ -16012,6 +16015,7 @@ fn walker_step(
                 let idle = move_dir[0].abs() <= 1e-4 && move_dir[1].abs() <= 1e-4
                     || std::env::var_os("BK_SLOPE_INPUT").is_some();
                 let sloped = idle
+                    && !probe
                     && std::env::var_os("BK_NO_SLOPE").is_none()
                     && normal.is_some_and(|n| n[2] > 0.2 && n[2] < 1.0 - 1e-3);
                 if sloped {
@@ -16028,7 +16032,11 @@ fn walker_step(
                 // (09fuelstation: vy oscillates ±0.9 and `grounded` is never true).
                 landed = true;
             }
-            None => pos[2] += drop,
+            None => {
+                if !probe {
+                    pos[2] += drop;
+                }
+            }
         }
     } else {
         // Rising: the mirror of the fall. The engine's sweep stops the sphere at the ceiling (centre at
@@ -16240,6 +16248,7 @@ fn walk_level(
             STEP,
             radius,
             gravity,
+            false,
             false,
         );
         if std::env::var("BK_TRACE").is_ok() && frame < 3 {
@@ -20575,6 +20584,17 @@ fn share_collider(
     sim: Option<Res<Sim>>,
 ) {
     let (Some(collisions), Some(sim)) = (collisions, sim) else { return };
+    // The motion step keeps its own handle even when `BK_NO_SOLIDS` turns the collision arm off:
+    // the AI settle was never part of that A/B.
+    let needs_motion = sim
+        .world
+        .borrow()
+        .motion_solids
+        .as_ref()
+        .is_none_or(|solids| !std::sync::Arc::ptr_eq(solids, &collisions.0));
+    if needs_motion {
+        sim.world.borrow_mut().motion_solids = Some(std::sync::Arc::clone(&collisions.0));
+    }
     if std::env::var_os("BK_NO_SOLIDS").is_some() {
         return;
     }
@@ -24563,7 +24583,6 @@ fn ai_shots(capture: Option<Res<CaptureDt>>,
     time: Res<Time>,
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
-    collisions: Option<Res<Collision>>,
 ) {
     let (Some(sim), Some(player)) = (sim, player) else { return };
     let dt = sim_dt(&time, capture.as_deref());
@@ -24576,9 +24595,6 @@ fn ai_shots(capture: Option<Res<CaptureDt>>,
     let eye = player.pos;
     rt.things[index].pos = [eye.x, eye.y, eye.z];
     let fired = rt.ai_tick(index, dt);
-    if let Some(collisions) = collisions.as_deref() {
-        rt.settle_walked(&collisions.0);
-    }
     if fired > 0 {
         println!("ai: {fired} shot(s) at the player");
     }
@@ -25640,29 +25656,31 @@ fn setup(
     let rules = Rules::from_level(level);
     println!("rules: {}", rules.describe());
     commands.insert_resource(Player {
-        fall_damage: 0.0,
+        body: runtime::PlayerBody {
+            pos: Vec3::from(start),
+            vy: 0.0,
+            sector,
+            // `sithPlayer_NewPlayer` (`0x4c8ec0`) sets the position and enters the sector; it never
+            // attaches and never runs a floor search, so the body starts at the level's authored height
+            // (0.120114 above the floor at level 1) and the first gravity sweep lands it at the sphere
+            // contact, `floor + radius` — retail's own `coords` goes −1.13 → −1.18 there. The value here
+            // is replaced by the first frame's landing.
+            grounded: !authored_spawn,
+            gravity: rules.gravity.max(1.0),
+            water: false,
+            vel: [0.0; 2],
+            step_rollover: 0.0,
+            last_move: 0.0,
+            fall_damage: 0.0,
+            fall_killed: false,
+            fall_fade: 1.0,
+        },
         extra_speed: 0.0,
-        vel: [0.0; 2],
-        step_rollover: 0.0,
-        last_move: 0.0,
-        fall_killed: false,
-        fall_fade: 1.0,
-        pos: Vec3::from(start),
-        vy: 0.0,
         yaw: player_yaw,
         pitch: 0.0,
-        sector,
         last_use: f32::NEG_INFINITY,
         use_hits: 0,
-        // `sithPlayer_NewPlayer` (`0x4c8ec0`) sets the position and enters the sector; it never
-        // attaches and never runs a floor search, so the body starts at the level's authored height
-        // (0.120114 above the floor at level 1) and the first gravity sweep lands it at the sphere
-        // contact, `floor + radius` — retail's own `coords` goes −1.13 → −1.18 there. The value here
-        // is replaced by the first frame's landing.
-        grounded: !authored_spawn,
-        gravity: rules.gravity.max(1.0),
         rules,
-        water: false,
         health: 100.0,
         shields: 100.0,
         eye: eye_height,
@@ -26083,17 +26101,11 @@ impl Rules {
 /// The player's own state: where the body is, how fast it is falling, and where it looks.
 #[derive(Resource)]
 struct Player {
-    pos: Vec3,
-    vy: f32,
+    body: runtime::PlayerBody,
     yaw: f32,
     pitch: f32,
-    sector: usize,
-    grounded: bool,
-    gravity: f32,
     /// The level's own motion: speeds, jump and radius from `walkplayer`'s template.
     rules: Rules,
-    /// Standing on a water or deep-water surface, which halves movement.
-    water: bool,
     /// The shield bar in front of that health (`SITHBIN_SHIELDS`), mirrored the same way.
     shields: f32,
     /// Health, mirrored from the runtime's own `walkplayer` thing so the HUD can show what the
@@ -26111,28 +26123,21 @@ struct Player {
     /// sector with a low ceiling cannot hold it: level 1's spawn puts 1.45 inside the ceiling
     /// and the view renders from inside the geometry, so it is fitted to the room.
     eye: f32,
-    /// Fall damage owed to the runtime, applied on the next frame by `apply_fall_damage`. The walker only
-    /// knows the impact speed; the runtime owns the health.
-    fall_damage: f32,
     /// The force-speed term (`SetActorExtraSpeed`), applied to the walk speed.
-        extra_speed: f32,
-    /// Horizontal velocity in level units per second. The engine never sets a speed directly:
-    /// `sithControl_PlayerMovement` sets `acceleration`, `sithPhysics_UpdatePlayerPhysics` adds
-    /// `acceleration * dt` and applies `ApplyDrag(vel, drag)`, so walking is an exponential approach to
-    /// `maxThrust * MODEL_SCALE / drag`. Moving by `speed * dt` instead reads as instant starts and
-    /// stops, which is what "the controls feel weird" was.
-    vel: [f32; 2],
-    /// Leftover time for the fixed 50 Hz physics step (`OLDSTEP_TARGET_FPS`).
-    step_rollover: f32,
-    /// How far the body actually moved last frame, in level units: `jkPlayer_DrawPov` advances the
-    /// weapon's sway phase by this (the engine's `thing + 0x264`, the distance
-    /// `sithCollision_MoveThing` reports), so a body pressed against a wall does not sway.
-    last_move: f32,
-    /// `SITH_AF_FALLKILLED`: the player fell too fast in a `SITH_SECTOR_FALLDEATH` sector and is dying.
-    /// The palette fades at 0.7 a second and death follows (`sithPlayer.c:265`).
-    fall_killed: bool,
-    /// The palette fade the fall death runs down, 1 → 0 (`sithPlayer.c:267`).
-    fall_fade: f32,
+    extra_speed: f32,
+}
+
+impl std::ops::Deref for Player {
+    type Target = runtime::PlayerBody;
+    fn deref(&self) -> &Self::Target {
+        &self.body
+    }
+}
+
+impl std::ops::DerefMut for Player {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.body
+    }
 }
 
 /// Where to put the player: the level's `walkplayer` position, nudged out of anything it overlaps.
@@ -26554,7 +26559,7 @@ mod rise_tests {
         let dt = 1.0 / 60.0;
         let mut highest = f32::MIN;
         for _ in 0..180 {
-            walker_step(&room, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, radius, 4.0, false);
+            walker_step(&room, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, radius, 4.0, false, false);
             highest = highest.max(pos[2]);
             let ceiling = room.ceiling_above(sector, pos).expect("the room has a ceiling");
             assert!(pos[2] + radius <= ceiling + 1e-3, "the head went through the ceiling: centre {:.3} + radius {radius} > {ceiling:.3}", pos[2]);
@@ -27233,151 +27238,26 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
             solids.0.floor_below(sector, pos)
         );
     }
-    let before = pos;
-    // One sweep per engine sub-step (`sithPhysics_UpdateThingPhysics` → `MoveThing`), not one per
-    // frame: the distance per sweep is `vel * 0.02` whatever the frame rate did.
-    let mut achieved_len = 0.0f32;
-    let mut landed = false;
-    let mut crossed = false;
-    for _ in 0..steps {
-        // Not shadowed as `landed`: the accumulation below needs the outer flag, and shadowing it
-        // silently left every frame "airborne" on a level that lands every sub-step.
-        let (len, cross, step_landed) = walker_step(
-            &solids.0,
-            gates,
-            &mut sector,
-            &mut pos,
-            &mut vy,
-            dir,
-            1.0 / 50.0,
-            player.rules.radius,
-            gravity,
-            true,
-        );
-        achieved_len = achieved_len.max(len);
-        crossed |= cross;
-        landed |= step_landed;
-    }
-    if trace {
-        let vel = player.vel;
-        let len = (vel[0] * vel[0] + vel[1] * vel[1]).sqrt();
-        let ahead = if len > 1e-4 {
-            solids
-                .0
-                .sweep(sector, pos, [vel[0] / len, vel[1] / len, 0.0], 0.5, player.rules.radius, gates)
-        } else {
-            None
-        };
-        eprintln!(
-            "walk trace:   -> sector {sector} pos {pos:?} vy {vy:.2} vel {vel:?} ahead {ahead:?}"
-        );
-    }
-
-    // A wall takes the velocity component that ran into it, which is what makes a body slide along a
-    // wall instead of stopping dead; the walker reports when it pushed the body out.
-    // `walker_step` reports how far the resolver let the body actually travel; when a wall ate part of
-    // the frame, the fraction that survived is the velocity along the wall — that is the slide.
-    if trace {
-        eprintln!("walk trace: achieved {achieved_len:.5} vel-before-slide {:?}", player.vel);
-    }
-    // A solid model under the body is a floor. The engine's collision includes a thing's own surfaces,
-    // so a catwalk slab or a crate top stops a fall; the surface sweep above only knows the level's
-    // faces, which is why a catwalk pose used to drop the body out of the level. The contact is the
-    // same sphere as any other floor: `top + radius`.
-    if vy <= 0.0
-        && let Some(sim) = sim.as_deref()
-        && let Some(top) = sim
-            .world
-            .borrow()
-            .thing_floor([pos[0], pos[1], before[2]], player.rules.radius)
-    {
-        let feet = pos[2] - player.rules.radius;
-        // One frame's fall, so a body that has just dropped past the surface still lands on it, while
-        // a body standing *under* a table is not teleported onto it. Query at the frame's start because
-        // the current position is already below a platform the fall crossed: level 19a's `4x4elev_1`
-        // top was skipped and the body ended 0.1 below it.
-        let step = (-vy * dt).max(0.02);
-        let accept = top <= before[2] - player.rules.radius + step && top >= feet - 0.02;
-        if std::env::var_os("BK_THINGFLOOR_TRACE").is_some() {
-            eprintln!(
-                "thing-floor: before feet {:.3}, after feet {feet:.3}, top {top:.3}, step {step:.3}, accept {accept}",
-                before[2] - player.rules.radius
-            );
-        }
-        if accept {
-            pos[2] = top + player.rules.radius;
-            vy = 0.0;
-            landed = true;
-        }
-    }
-    // A moving elevator's top rises into the body. The ordinary thing-floor query above accepts only a
-    // surface at or just below the feet, so the first fast lift step leaves the body under the platform
-    // (level 19a: the `4x4elev_1` top went from -2.10 to -1.96 while the feet were at -2.05). The
-    // engine's collision carries whatever stands on the surface; do the same for the elevator templates
-    // only, so a table above the feet is not a lift.
-    if vy <= 0.0
-        && let Some(sim) = sim.as_deref()
-        && let Some(top) = sim
-            .world
-            .borrow()
-            .elevator_floor([pos[0], pos[1], before[2]], player.rules.radius)
-    {
-        let feet = pos[2] - player.rules.radius;
-        let before_feet = before[2] - player.rules.radius;
-        let rise = top - feet;
-        let accept = top > feet - 0.02 && top <= before_feet + 0.2;
-        if std::env::var_os("BK_THINGFLOOR_TRACE").is_some() {
-            eprintln!(
-                "elevator-floor: before feet {before_feet:.3}, after feet {feet:.3}, top {top:.3}, rise {rise:.3}, accept {accept}"
-            );
-        }
-        if accept {
-            pos[2] = top + player.rules.radius;
-            vy = 0.0;
-            landed = true;
-        }
-    }
-    // The **slid movement** feeds the velocity. `MoveThing` reports it as `thing + 0x264`, and this walker's
-    // `target` re-accelerates from `player.vel` every frame, so the velocity must follow what the move made:
-    // removing the rewrite was measured on four sampled legs with no change, but the full trace gate then
-    // failed `walk9_spawn` (4 sector mismatches) — the retail traces are the oracle here, not the decomp's
-    // field split.
-    if achieved_len > 0.0 {
-        let moved = [(pos[0] - before[0]) / dt.max(1e-4), (pos[1] - before[1]) / dt.max(1e-4)];
-        let want = [player.vel[0], player.vel[1]];
-        let want_len = (want[0] * want[0] + want[1] * want[1]).sqrt();
-        let moved_len = (moved[0] * moved[0] + moved[1] * moved[1]).sqrt();
-        if moved_len < want_len * 0.99 {
-            player.vel = moved;
-        }
-    }
-    // Landing: `sithThing_AttachThingToSurface` hurts a body whose downward speed into the surface exceeds
-    // 2.5 (`-dot(vel, normal)`), so a fall that ends this frame with a negative speed is an impact.
-    // The curve wants the engine's velocity units. This world runs gravity and thrust through
-    // `physics_scale`, so a fall gains `sqrt(physics_scale)` more speed than the engine's would over the
-    // same drop (v = sqrt(2gh), and g is scaled but h is not); dividing by that root puts the impact back
-    // in the units `sithCollision_FallHurt` was written for, so a drop hurts as much as the engine intends.
-    let engine_impact = -player.vy / physics_scale().max(1.0).sqrt();
-    if vy == 0.0 && engine_impact > 2.5 {
-        let damage = fall_damage(engine_impact);
-        if damage > 0.0 {
-            player.fall_damage += damage;
-            println!(
-                "fall: landed at {:.1} u/s ({engine_impact:.1} in engine units), {damage:.0} damage",
-                -player.vy
-            );
-        }
-    }
-    player.vy = vy;
-    player.sector = sector;
-    player.pos = Vec3::from(pos);
-    // The engine's `thing + 0x264` is what `sithCollision_MoveThing` reported for this step, which is
-    // what the POV sway phase advances by (`jkPlayer_DrawPov`) — the blocked distance is not moved.
-    player.last_move = achieved_len;
-    // `derived from the landing event`, not from `vy == 0.0`: a body on a thrusting floor never has
-    // zero vertical speed, and such a body could never jump. A landing this frame, or a resting body
-    // (vy already zero), is on the ground.
-    player.grounded = landed || player.vy == 0.0;
+    let radius = player.rules.radius;
+    let crossed = sim
+        .as_deref()
+        .map(|sim| {
+            sim.world.borrow_mut().step_player(
+                &mut player.body,
+                &solids.0,
+                steps,
+                dir,
+                dt,
+                radius,
+                gravity,
+                thrust[2],
+                gates,
+            )
+        })
+        .unwrap_or(false);
+    let pos = player.pos.to_array();
+    let sector = player.sector;
+    let vy = player.vy;
     // Phase 0.5 trace v0: one line per frame, so a retail walk trace (`coords` polled on a cadence)
     // can be compared against it by distance travelled (`tools/parity/trace-compare.ps1`). Health and
     // shields are what `coords` cannot carry; they are here because the port's body has them.
@@ -27422,30 +27302,10 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         *trace_tick += 1;
     }
     if std::env::var_os("BK_JUMP_TRACE").is_some() {
-        eprintln!("jump trace: z {:.3} vy {vy:.2} landed {landed} sector {sector}", player.pos.z);
-    }
-    // The engine's fall death (`sithPlayer.c:251`, `decomp/004c89d0_sithPlayer_Update.c:80`): falling
-    // faster than 3 u/s inside a sector flagged `SITH_SECTOR_FALLDEATH` marks the player
-    // `SITH_AF_FALLKILLED` and the palette runs down at 0.7 a second; at zero, `sithPlayer_KillPlayer`.
-    if !player.fall_killed
-        && fall_death_rule(
-            -player.vy / physics_scale().max(1.0).sqrt(),
-            gates.sectors.get(player.sector).copied().unwrap_or(0),
-        )
-    {
-        player.fall_killed = true;
-        player.fall_fade = 1.0;
-        println!("fall death: the player fell out of the level; the palette starts to fade");
-    }
-    if player.fall_killed {
-        player.fall_fade -= dt * 0.7;
-        if player.fall_fade <= 0.0 {
-            // `sithPlayer_KillPlayer` takes the whole player: lethal damage is this port's death path
-            // (`--die`), and `respawn_after_death` puts the body back at the level's start.
-            player.fall_killed = false;
-            player.fall_fade = 1.0;
-            player.fall_damage += 1000.0;
-        }
+        eprintln!(
+            "jump trace: z {:.3} vy {vy:.2} landed {} sector {sector}",
+            player.pos.z, player.grounded
+        );
     }
     // Water halves movement: the engine reads the surface under the feet (`SITH_SURFACE_WATER`
     // 0x20000 / `VERYDEEPWATER` 0x100000) and the sector's own `SITH_SECTOR_UNDERWATER` — the bit
@@ -28489,7 +28349,7 @@ mod walker_tests {
         // One body radius: the same pair `setup` and `walk_level` start a body from.
         let (mut sector, mut pos, mut vy) = (0usize, [0.5f32, 0.0, PLAYER_RADIUS], 0.0f32);
         for _ in 0..60 {
-            walker_step(solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [1.0, 0.0], 1.0 / 30.0, PLAYER_RADIUS, 0.0, true);
+            walker_step(solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [1.0, 0.0], 1.0 / 30.0, PLAYER_RADIUS, 0.0, true, false);
         }
         (sector, pos)
     }
@@ -28523,7 +28383,7 @@ mod walker_tests {
         let (mut sector, mut vy) = (0usize, 0.0f32);
         let mut pos = [0.5f32, 0.0, PLAYER_RADIUS + 0.055];
         for _ in 0..60 {
-            walker_step(&synced, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], 1.0 / 30.0, PLAYER_RADIUS, 4.0, false);
+            walker_step(&synced, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], 1.0 / 30.0, PLAYER_RADIUS, 4.0, false, false);
         }
         assert!(
             (pos[2] - PLAYER_RADIUS).abs() < 1e-3,

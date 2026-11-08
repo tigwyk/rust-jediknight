@@ -904,6 +904,22 @@ pub struct ThingMotion {
     pub arrived: Vec<usize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PlayerBody {
+    pub pos: Vec3,
+    pub vy: f32,
+    pub sector: usize,
+    pub grounded: bool,
+    pub gravity: f32,
+    pub water: bool,
+    pub vel: [f32; 2],
+    pub step_rollover: f32,
+    pub last_move: f32,
+    pub fall_damage: f32,
+    pub fall_killed: bool,
+    pub fall_fade: f32,
+}
+
 pub struct Runtime {
     pub things: Vec<ThingState>,
     /// Template name per thing, for `GetThingTemplate`.
@@ -1109,6 +1125,10 @@ pub struct Runtime {
     /// and sends `blocked` — `SITH_MESSAGE_BLOCKED`, the eighth most common label on level 1 (x8) —
     /// which is what a door script uses to know a body is in the way.
     pub solids: Option<std::sync::Arc<crate::collide::Solids>>,
+    /// The geometry `Runtime::step` settles walked actors against. This is set even when
+    /// `BK_NO_SOLIDS` turns the collision arm off, because the AI settle is a motion responsibility,
+    /// not the A/B switch's.
+    pub(crate) motion_solids: Option<std::sync::Arc<crate::collide::Solids>>,
     /// `(cog instance, link id, sector)` for every `sector` symbol a level's scripts declare:
     /// `sithCog_LinkCogToSector` in tabular form, so a sector's `entered`/`exited` can find its cogs.
     pub sector_links: Vec<(usize, i32, usize)>,
@@ -2015,6 +2035,7 @@ impl Runtime {
             thing_links: Vec::new(),
             pending_messages: Vec::new(),
             solids: None,
+            motion_solids: None,
             template_min_damage: level
                 .templates
                 .iter()
@@ -3108,6 +3129,9 @@ impl Runtime {
             }
         }
         self.update_attachments(&mut moved);
+        if let Some(solids) = self.motion_solids.clone() {
+            self.settle_walked(&solids, &mut moved);
+        }
         self.things_moved += moved.len();
         ThingMotion {
             moved,
@@ -5600,23 +5624,165 @@ impl Runtime {
         fired
     }
 
+    /// Move the player body through the same `walker_step` the AI settle uses. Input, drag and the
+    /// sub-step count stay with the caller; the sweep, thing floors, velocity feedback and fall
+    /// death live here.
+    pub fn step_player(
+        &mut self,
+        body: &mut PlayerBody,
+        solids: &crate::collide::Solids,
+        steps: usize,
+        dir: [f32; 2],
+        dt: f32,
+        radius: f32,
+        gravity: f32,
+        thrust_z: f32,
+        gates: Gates<'_>,
+    ) -> bool {
+        // The fall impact is measured before this frame's sector thrust, which is what the old
+        // walker did when it read `player.vy` before committing the thrust-scaled local.
+        let impact_vy = body.vy;
+        body.vy += thrust_z * dt;
+        let before = body.pos.to_array();
+        let mut pos = before;
+        let mut sector = body.sector;
+        let mut vy = body.vy;
+        let mut achieved_len = 0.0f32;
+        let mut landed = false;
+        let mut crossed = false;
+        for _ in 0..steps {
+            let (len, cross, step_landed) = crate::walker_step(
+                solids,
+                gates,
+                &mut sector,
+                &mut pos,
+                &mut vy,
+                dir,
+                1.0 / 50.0,
+                radius,
+                gravity,
+                true,
+                false,
+            );
+            achieved_len = achieved_len.max(len);
+            crossed |= cross;
+            landed |= step_landed;
+        }
+        // A solid model under the body is a floor. The engine's collision includes a thing's own
+        // surfaces, so a catwalk slab or a crate top stops a fall; the surface sweep above only
+        // knows the level's faces.
+        if vy <= 0.0
+            && let Some(top) = self.thing_floor([pos[0], pos[1], before[2]], radius)
+        {
+            let feet = pos[2] - radius;
+            let step = (-vy * dt).max(0.02);
+            let accept = top <= before[2] - radius + step && top >= feet - 0.02;
+            if accept {
+                pos[2] = top + radius;
+                vy = 0.0;
+                landed = true;
+            }
+        }
+        // A moving elevator's top rises into the body.
+        if vy <= 0.0
+            && let Some(top) = self.elevator_floor([pos[0], pos[1], before[2]], radius)
+        {
+            let feet = pos[2] - radius;
+            let before_feet = before[2] - radius;
+            let accept = top > feet - 0.02 && top <= before_feet + 0.2;
+            if accept {
+                pos[2] = top + radius;
+                vy = 0.0;
+                landed = true;
+            }
+        }
+        // The slid movement feeds the velocity, as `MoveThing` reports it at `thing + 0x264`.
+        if achieved_len > 0.0 {
+            let moved = [(pos[0] - before[0]) / dt.max(1e-4), (pos[1] - before[1]) / dt.max(1e-4)];
+            let want = body.vel;
+            let want_len = (want[0] * want[0] + want[1] * want[1]).sqrt();
+            let moved_len = (moved[0] * moved[0] + moved[1] * moved[1]).sqrt();
+            if moved_len < want_len * 0.99 {
+                body.vel = moved;
+            }
+        }
+        // Landing damage wants the engine's velocity units, not this world's gravity-scaled fall.
+        let engine_impact = -impact_vy / crate::physics_scale().max(1.0).sqrt();
+        if vy == 0.0 && engine_impact > 2.5 {
+            let damage = crate::fall_damage(engine_impact);
+            if damage > 0.0 {
+                body.fall_damage += damage;
+                println!(
+                    "fall: landed at {:.1} u/s ({engine_impact:.1} in engine units), {damage:.0} damage",
+                    -body.vy
+                );
+            }
+        }
+        body.vy = vy;
+        body.sector = sector;
+        body.pos = Vec3::from(pos);
+        body.last_move = achieved_len;
+        body.grounded = landed || body.vy == 0.0;
+        // The engine's fall death (`sithPlayer.c:251`).
+        if !body.fall_killed
+            && crate::fall_death_rule(
+                -body.vy / crate::physics_scale().max(1.0).sqrt(),
+                gates.sectors.get(body.sector).copied().unwrap_or(0),
+            )
+        {
+            body.fall_killed = true;
+            body.fall_fade = 1.0;
+            println!("fall death: the player fell out of the level; the palette starts to fade");
+        }
+        if body.fall_killed {
+            body.fall_fade -= dt * 0.7;
+            if body.fall_fade <= 0.0 {
+                body.fall_killed = false;
+                body.fall_fade = 1.0;
+                body.fall_damage += 1000.0;
+            }
+        }
+        crossed
+    }
+
     /// Put the actors `ai_tick` walked back on their feet and out of the walls: the runtime's own
-    /// `resolve_stepped`/`support`, not a second copy in the app. The caller runs this after
-    /// `ai_tick`; keeping it out of the tick leaves the AI's own ledge test unchanged.
-    pub fn settle_walked(&mut self, solids: &crate::collide::Solids) {
+    /// `resolve_stepped` and the walker's `floor_contact`, not a second `support` rule. `step` calls
+    /// this after its motion loop; the walked list is consumed there.
+    fn settle_walked(&mut self, solids: &crate::collide::Solids, moved: &mut Vec<usize>) {
         for actor in std::mem::take(&mut self.walked) {
             let Some(thing) = self.things.get(actor) else { continue };
             let (pos, sector) = (thing.pos, thing.sector.max(0) as usize);
             let (resolved, _) = solids.resolve_stepped(sector, pos, 0.5);
             let mut next = [resolved[0], resolved[1], pos[2]];
-            if let Some(floor) = solids.support(next, 0.5, 0.6) {
-                next[2] = floor + 0.5;
-            }
+            // The player's own sweep settles the actor: a 0.6-unit downward probe plus the walker's
+            // containment and floor rule. `move_body` has no horizontal delta here, so this only
+            // lands the body and keeps it out of a wall.
+            let mut next_sector = sector;
+            let mut vy = -0.6;
+            let _ = crate::walker_step(
+                solids,
+                crate::collide::Gates::default(),
+                &mut next_sector,
+                &mut next,
+                &mut vy,
+                [0.0, 0.0],
+                1.0,
+                0.5,
+                0.0,
+                false,
+                true,
+            );
             if let Some(thing) = self.things.get_mut(actor) {
-                let moved = (next[0] - pos[0]).abs() + (next[1] - pos[1]).abs();
-                thing.pos = next;
-                if moved > 0.01 && std::env::var_os("BK_AI_TRACE").is_some() {
-                    println!("ai: actor {actor} step held out of the geometry");
+                if next_sector != sector {
+                    thing.sector = i32::try_from(next_sector).unwrap_or(thing.sector);
+                }
+                if next != thing.pos {
+                    let moved_xy = (next[0] - pos[0]).abs() + (next[1] - pos[1]).abs();
+                    thing.pos = next;
+                    moved.push(actor);
+                    if moved_xy > 0.01 && std::env::var_os("BK_AI_TRACE").is_some() {
+                        println!("ai: actor {actor} step held out of the geometry");
+                    }
                 }
             }
         }
@@ -13148,6 +13314,107 @@ mod tests {
     }
 
     #[test]
+    fn step_settles_the_actors_it_walked() {
+        let mut rt = door_runtime();
+        rt.templates = vec!["door1".into()];
+        rt.things[0].pos = [0.0, 0.0, 1.0];
+        rt.things[0].sector = 0;
+        rt.walked = vec![0];
+        let floor = crate::collide::Face {
+            normal: [0.0, 0.0, -1.0],
+            point: [0.0; 3],
+            verts: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            surface: 1,
+        };
+        rt.motion_solids = Some(std::sync::Arc::new(crate::collide::Solids {
+            sectors: vec![Vec::new()],
+            floors: vec![floor.clone()],
+            faces: vec![floor],
+            surface_owner: vec![0, 0],
+            ..Default::default()
+        }));
+        let motion = rt.step(0.0);
+        assert_eq!(motion.moved, vec![0], "the settled actor was not reported");
+        assert!(
+            (rt.things[0].pos[2] - 0.5).abs() < 1e-4,
+            "the actor was not put on the floor: {:?}",
+            rt.things[0].pos
+        );
+        assert!(rt.walked.is_empty(), "the settled actors were left in the list");
+    }
+
+    #[test]
+    fn step_settle_does_not_drop_an_actor_without_a_floor() {
+        let mut rt = door_runtime();
+        rt.templates = vec!["door1".into()];
+        rt.things[0].pos = [0.0, 0.0, 1.0];
+        rt.things[0].sector = 0;
+        rt.walked = vec![0];
+        rt.motion_solids = Some(std::sync::Arc::new(crate::collide::Solids::default()));
+        let motion = rt.step(0.0);
+        assert_eq!(rt.things[0].pos, [0.0, 0.0, 1.0], "a floorless probe dropped the actor");
+        assert!(motion.moved.is_empty(), "a floorless probe reported a move");
+    }
+
+    #[test]
+    fn step_player_lands_the_body_and_keeps_the_sector() {
+        let floor = crate::collide::Face {
+            normal: [0.0, 0.0, -1.0],
+            point: [0.0; 3],
+            verts: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            surface: 1,
+        };
+        let solids = crate::collide::Solids {
+            sectors: vec![Vec::new()],
+            floors: vec![floor.clone()],
+            faces: vec![floor],
+            surface_owner: vec![0, 0],
+            ..Default::default()
+        };
+        let mut rt = door_runtime();
+        let mut body = PlayerBody {
+            pos: Vec3::new(0.0, 0.0, 0.5),
+            vy: 0.0,
+            sector: 0,
+            grounded: false,
+            gravity: 4.0,
+            water: false,
+            vel: [0.0; 2],
+            step_rollover: 0.0,
+            last_move: 0.0,
+            fall_damage: 0.0,
+            fall_killed: false,
+            fall_fade: 1.0,
+        };
+        for _ in 0..200 {
+            rt.step_player(
+                &mut body,
+                &solids,
+                1,
+                [0.0, 0.0],
+                1.0 / 30.0,
+                0.065,
+                4.0,
+                0.0,
+                crate::collide::Gates::default(),
+            );
+        }
+        assert!(body.grounded, "the player body never landed");
+        assert!((body.pos.z - 0.065).abs() < 1e-3, "z {} after landing", body.pos.z);
+        assert_eq!(body.sector, 0);
+    }
+
+    #[test]
     fn a_frame_path_reports_its_arrival() {
         let mut rt = door_runtime();
         // The local player's path move is the walker's; use a door so `step` owns the pose.
@@ -13193,7 +13460,7 @@ mod tests {
             sectors: vec![vec![plane]],
             ..Default::default()
         };
-        rt.settle_walked(&solids);
+        rt.settle_walked(&solids, &mut Vec::new());
         assert!(
             (rt.things[0].pos[0] - 0.2).abs() > 0.1,
             "the actor stayed inside the plane: {:?}",

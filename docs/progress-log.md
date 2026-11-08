@@ -6133,15 +6133,16 @@ list. A pure `angvel` prop is reported in `turned`, so `advance_sim` no longer r
 and scans every thing for `rot_vel`; it redraws the union of moved and turned, and the report line
 uses either list. The blocked/arrived events the step already queued ride out on the same value.
 
-The AI's post-walk resolve moved to `Runtime::settle_walked`, called by `ai_shots` after `ai_tick`
-with the `Collision` geometry. The frame path no longer holds a copy of `resolve_stepped`/`support`,
-and `Runtime::walked` is private scratch again; the `--ai` diagnostic still queries the geometry
-directly to prove the wall push. `arrived` is now collected after the motion loop, so the returned
-event belongs to the step that produced it rather than the next one.
+The AI's post-walk resolve is now inside `Runtime::step`: `motion_solids` is handed over even under
+`BK_NO_SOLIDS`, the step consumes the private `walked` list, and each actor is settled with the
+player's own `walker_step` sweep. `ai_shots` only calls `ai_tick`, and `advance_sim` is ordered after
+it. Actor grounding keeps the runtime's `floor_surface` rule; the player and AI motion sweep share
+`walker_step`'s floor chain. `arrived` is collected after the motion loop, so the returned event
+belongs to the step that produced it rather than the next one.
 
-Not yet one floor rule or one step for the player: `settle_walked` still uses `support`, and
-`Runtime::step`'s actor grounding still uses `floor_surface`; the walker still owns the player. Those
-are the remaining halves of candidate 05.
+The player's input, drag and sub-step count still live in `walk_player`, but the sweep, thing
+floors, velocity feedback and fall death run in `Runtime::step_player`; the body uses the shared
+`PlayerBody` and the same `walker_step` the AI settle uses.
 
-Measured: `cargo test` **290 passed, 0 failed** (rotation-only, same-step arrival, and settle tests
-added).
+Measured: `cargo test` **293 passed, 0 failed** (rotation-only, same-step arrival, step/settle,
+floorless-settle, and player-step tests added); `--ai` check passes.
