@@ -3936,9 +3936,9 @@ fn main() {
                     cog::Value::Num(0.5),
                 ],
             );
-            rt.step(0.25);
+            rt.step(None, 0.25);
             let mid = rt.sound_volume[channel];
-            rt.step(0.25);
+            rt.step(None, 0.25);
             let end = rt.sound_volume[channel];
             println!(
                 "sound: ChangeSoundVol(channel {channel}, 0.0, 0.5 s) fades 0.50 -> {mid:.2} after a quarter second and {end:.2} after half, then stops ({})",
@@ -3953,7 +3953,7 @@ fn main() {
                 "ChangeSoundVol",
                 &[cog::Value::Num(channel as f64), cog::Value::Num(9.0), cog::Value::Num(1.0)],
             );
-            rt.step(1.0);
+            rt.step(None, 1.0);
             println!(
                 "sound: ChangeSoundVol(9.0 over 1 s) lands on {:.1}, the engine's 1.5 ceiling",
                 rt.sound_volume[channel]
@@ -4625,7 +4625,7 @@ fn main() {
                 for (instance, label, params, _source) in std::mem::take(&mut rt.pending_messages) {
                     queued.push((label.to_string(), Some(player), Some(instance as i32), params));
                 }
-                rt.step(dt);
+                rt.step(None, dt);
                 rt.ai_tick(player, dt);
                 let mut extra = std::mem::take(&mut rt.messages);
                 queued.append(&mut extra);
@@ -5380,14 +5380,14 @@ fn main() {
                     })
                     .count()
             };
-            rt.step(0.31);
+            rt.step(None, 0.31);
             let first = fired(&rt);
             rt.messages.clear();
-            rt.step(0.31);
+            rt.step(None, 0.31);
             let second = fired(&rt);
             rt.call("DeactivateBin", &[cog::Value::Num(player as f64), cog::Value::Num(22.0)]);
             rt.messages.clear();
-            rt.step(1.0);
+            rt.step(None, 1.0);
             let after = rt.messages.len();
             println!(
                 "items: a held bin fires {first} time(s), re-arms to {second}, and {after} message(s) after release"
@@ -5647,9 +5647,10 @@ fn main() {
         }
         let after = rt.things[actor].pos;
         let moved = ((after[0] - start[0]).powi(2) + (after[1] - start[1]).powi(2)).sqrt();
-        // The chase is a straight line, so the game puts every actor the tick walked back on the
-        // floor and out of the walls (`ai_shots`). This is that pass, on a body shoved into a wall:
-        // it has to come back out, or actors walk through bulkheads.
+        // The chase is a straight line, so the runtime's step puts every actor the tick walked back
+        // on the floor and out of the walls. This drives that real path: tick the AI so the actor is
+        // on the walked list, shove it 0.4 into a wall, and let the step settle it. It has to come
+        // back out, and the step's own result has to name the new pose.
         {
             let solids = collide::build(&world.level);
             if let Some(face) = solids.walls.first() {
@@ -5660,14 +5661,39 @@ fn main() {
                     p[1] - n[1] * 0.4,
                     p[2] - n[2] * 0.4,
                 ];
+                let saved = (
+                    rt.things[actor].pos,
+                    rt.things[actor].sector,
+                    rt.things[player].pos,
+                    rt.things[player].sector,
+                );
+                // Farther than the standoff so the tick walks the body and lists it.
+                rt.things[player].pos = [at[0] + standoff + 1.5, at[1], at[2]];
+                rt.things[player].sector = saved.3;
+                rt.things[actor].pos = at;
+                rt.ai_move.remove(&actor);
+                rt.ai_route.remove(&actor);
+                rt.ai_tick(player, 1.0 / 30.0);
                 let sector = rt.things[actor].sector.max(0) as usize;
-                let (out, _) = solids.resolve_stepped(sector, inside, 0.5);
+                rt.things[actor].pos = inside;
+                rt.things[actor].sector = sector as i32;
+                rt.things[actor].vel = [0.0; 3];
+                let motion = rt.step(Some(&solids), 1.0 / 30.0);
+                let out = rt.things[actor].pos;
                 let pushed = ((out[0] - inside[0]).powi(2)
                     + (out[1] - inside[1]).powi(2)
                     + (out[2] - inside[2]).powi(2))
                 .sqrt();
-                println!("ai: a body 0.4 inside a wall is pushed {pushed:.2} back out");
-                assert!(pushed > 0.05, "the wall did not push the body out ({pushed:.3})");
+                println!("ai: a body 0.4 inside a wall is pushed {pushed:.2} back out by the step");
+                assert!(pushed > 0.05, "the step did not push the body out ({pushed:.3})");
+                assert!(
+                    motion.moved.contains(&actor),
+                    "the settled pose was not part of the step result"
+                );
+                rt.things[actor].pos = saved.0;
+                rt.things[actor].sector = saved.1;
+                rt.things[player].pos = saved.2;
+                rt.things[player].sector = saved.3;
             }
         }
         // `Collision::route`: the adjoin-graph path an actor has to follow when a wall sits between
@@ -6162,7 +6188,7 @@ fn main() {
         }
         // Hold for 0.5 s, then release: `duration` is the hold, and a hold past
         // `rank * 0.35` is clamped to it.
-        sim_world.borrow_mut().step(0.5);
+        sim_world.borrow_mut().step(None, 0.5);
         if let Err(e) = vm.run_label(&script, "deactivated") {
             println!("force {power}: deactivated -> {e}");
         }
@@ -6666,13 +6692,13 @@ fn main() {
                 &[cog::Value::Num(item as f64), cog::Value::Vec([0.0, 90.0, 0.0])],
             );
             for _ in 0..30 {
-                rt.step(1.0 / 30.0);
+                rt.step(None, 1.0 / 30.0);
             }
             let turned = rt.things[item].yaw;
             // Four more seconds at 90 deg/s: 450 degrees, so the angle wraps to 90, and a spin that
             // never wrapped would read 450.
             for _ in 0..120 {
-                rt.step(1.0 / 30.0);
+                rt.step(None, 1.0 / 30.0);
             }
             let wrapped = rt.things[item].yaw;
             println!(
@@ -6737,7 +6763,7 @@ fn main() {
                 let secs = rt.template_respawn[&template.to_ascii_lowercase()];
                 rt.take_item(index as i64, player as i64);
                 assert!(rt.things[index].destroyed, "`{template}` did not leave");
-                rt.step(secs + 0.5);
+                rt.step(None, secs + 0.5);
                 assert!(!rt.things[index].destroyed, "`{template}` did not respawn after {secs} s");
                 println!("respawn: `{template}` came back after {secs} s");
             }
@@ -7013,7 +7039,7 @@ fn main() {
             let _ = vm.run_label(&script, "deactivated");
             let mut rt = handle.borrow_mut();
             let gravity_off = rt.things[item].phys_flags & 0x1 == 0;
-            rt.step(1.0 / 30.0);
+            rt.step(None, 1.0 / 30.0);
             let vel = rt.things[item].vel;
             println!(
                 "pull: after `deactivated`, gravity cleared: {gravity_off}, velocity {vel:?} (the script asks for 30 toward the player)"
@@ -7172,14 +7198,14 @@ fn main() {
         rt.inv.insert(14, 0.0);
         let empty = rt.inv.get(&14).copied().unwrap_or(0.0) as f64;
         for _ in 0..60 {
-            rt.step(1.0 / 60.0);
+            rt.step(None, 1.0 / 60.0);
         }
         let after = rt.inv.get(&14).copied().unwrap_or(0.0) as f64;
         println!("mana: {empty} -> {after:.1} after one second of regeneration");
         assert!(after > 10.0, "mana did not regenerate in a second (got {after:.1})");
         // Keep going to the ceiling, then past it.
         for _ in 0..1200 {
-            rt.step(1.0 / 60.0);
+            rt.step(None, 1.0 / 60.0);
         }
         let full = rt.inv.get(&14).copied().unwrap_or(0.0) as f64;
         println!("mana: clamps at {full:.1} (pool {})", rt.mana_max);
@@ -8751,7 +8777,7 @@ fn main() {
                 // Ask the path to move and step until it reports the end of the run.
                 rt.things[*thing].target = Some((last, 1.0));
                 for _ in 0..240 {
-                    rt.step(1.0 / 30.0);
+                    rt.step(None, 1.0 / 30.0);
                 }
                 let queued = rt
                     .pending_messages
@@ -8874,7 +8900,7 @@ fn main() {
             rt.things[thing].vel = [-n[0] * 4.0, -n[1] * 4.0, -n[2] * 4.0];
             let from = rt.things[thing].pos;
             for _ in 0..60 {
-                rt.step(1.0 / 30.0);
+                rt.step(None, 1.0 / 30.0);
             }
             stopped = rt
                 .pending_messages
@@ -8982,7 +9008,7 @@ fn main() {
         let dt = 1.0 / 30.0;
         let mut landed = None;
         for _ in 0..60 {
-            rt.step(dt);
+            rt.step(None, dt);
             if let Some(hit) = rt.impacts(first_created, dt).into_iter().next() {
                 landed = Some(hit);
                 break;
@@ -9074,14 +9100,14 @@ fn main() {
             let timer = rt.template_timer.get(&blast_template).copied().unwrap_or(0.0);
             assert!(timer > 0.0, "`{blast_template}` ships no `timer=`, so there is nothing to expire");
             for _ in 0..10 {
-                rt.step(dt);
+                rt.step(None, dt);
             }
             assert!(
                 !rt.things[blast].destroyed,
                 "`{blast_template}` vanished before its {timer:.1} s timer"
             );
             for _ in 0..30 {
-                rt.step(dt);
+                rt.step(None, dt);
             }
             println!(
                 "hit: `{blast_template}` (timer {timer:.1} s) is still solid after 0.33 s and gone after 1.33 s"
@@ -9108,7 +9134,7 @@ fn main() {
         rt.fire(actor_index as i64, &actor_weapon).expect("the actor fires");
         let mut landed = None;
         for _ in 0..60 {
-            rt.step(dt);
+            rt.step(None, dt);
             if let Some(hit) = rt.impacts(first_created, dt).into_iter().find(|(_, t, _)| *t == player) {
                 landed = Some(hit);
                 break;
@@ -9253,7 +9279,7 @@ fn main() {
         let mut blocked = false;
         let mut carried = damage;
         for _ in 0..120 {
-            rt.step(dt);
+            rt.step(None, dt);
             let p = rt.things[shot].pos;
             let d = ((p[0] - target_pos[0]).powi(2) + (p[1] - target_pos[1]).powi(2) + (p[2] - target_pos[2]).powi(2)).sqrt();
             if d < 1.0 {
@@ -9596,14 +9622,14 @@ fn main() {
         rt.things[a].frames = vec![[0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [4.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
         rt.things[a].frame = 0.0;
         rt.things[a].target = Some((1.0, 2.0));
-        rt.step(0.25);
+        rt.step(None, 0.25);
         let moved = rt.things[a].pos[0];
         let paused = rt.call("PathMovePause", &[cog::Value::Num(a as f64)]);
-        rt.step(1.0);
+        rt.step(None, 1.0);
         let held = rt.things[a].pos[0];
         let still_moving = rt.call("IsMoving", &[cog::Value::Num(a as f64)]);
         let resumed = rt.call("PathMoveResume", &[cog::Value::Num(a as f64)]);
-        rt.step(0.25);
+        rt.step(None, 0.25);
         let carried_on = rt.things[a].pos[0];
         println!(
             "things: PathMovePause answered {paused:?} at x {moved:.2}, a second later it is still {held:.2} (`IsMoving` {still_moving:?}), and PathMoveResume answered {resumed:?} so it carries on to {carried_on:.2}"
@@ -9655,7 +9681,7 @@ fn main() {
                 ],
             );
             for _ in 0..30 {
-                rt.step(1.0 / 30.0);
+                rt.step(None, 1.0 / 30.0);
             }
             let rising = rt.things[a].vel[2];
             let after = rt.things[a].pos[2];
@@ -9736,7 +9762,7 @@ fn main() {
                 rt.things[index].sector = i32::try_from(candidate).unwrap();
                 rt.things[index].vel = [0.0; 3];
                 for _ in 0..30 {
-                    rt.step(1.0 / 30.0);
+                    rt.step(None, 1.0 / 30.0);
                 }
                 let fell = at[2] - rt.things[index].pos[2];
                 if fell > 0.05 {
@@ -9790,7 +9816,7 @@ fn main() {
             .find(|(_, t)| t.rot_vel != [0.0; 3] && t.target.is_none())
             .map(|(i, t)| (i, t.yaw, t.rot_vel));
         if let Some((index, before, rot_vel)) = spinning {
-            rt.step(0.5);
+            rt.step(None, 0.5);
             let after = rt.things[index].yaw;
             let turned = (after - before).abs() > 1e-3;
             assert!(turned, "thing {index} did not spin at {rot_vel:?}: yaw {before} -> {after}");
@@ -9849,7 +9875,7 @@ fn main() {
         rt.things[actor].phys_flags &= !0x1;
         rt.things[child].phys_flags &= !0x1;
         rt.things[actor].pos = [2.0, 0.0, 0.0];
-        rt.step(1.0 / 30.0);
+        rt.step(None, 1.0 / 30.0);
         let carried = rt.things[child].pos;
         println!(
             "attach: with the parent at [2, 0, 0] the attached thing {child} (`{}`, type {:?}, insert {:?}) sits at {carried:?} (the offset it was attached at was [1, 0, 0.5])",
@@ -9866,13 +9892,13 @@ fn main() {
         );
         // Turning the parent swings the child around it, and turning it back puts the child back.
         rt.things[actor].yaw = 90.0;
-        rt.step(1.0 / 30.0);
+        rt.step(None, 1.0 / 30.0);
         let turned = rt.things[child].pos;
         rt.things[actor].yaw = 0.0;
         // `maxrotthrust` clamps a scripted yaw like any other turn: level 3's body was 66 deg short
         // after one step, so wait for the turn to arrive before reading the child back.
         for _ in 0..60 {
-            rt.step(1.0 / 30.0);
+            rt.step(None, 1.0 / 30.0);
             if rt.things[actor].yaw.abs() < 0.5 {
                 break;
             }
@@ -9895,7 +9921,7 @@ fn main() {
             "AttachThingToThing",
             &[cog::Value::Num(child as f64), cog::Value::Num(-1.0)],
         );
-        rt.step(1.0 / 30.0);
+        rt.step(None, 1.0 / 30.0);
         let left = rt.things[child].pos;
         println!("attach: after detaching, the parent moved to [5, 0, 0] and the thing stayed at {left:?}");
         assert!(
@@ -9951,12 +9977,12 @@ fn main() {
         );
         // Half of a 90-degree turn over two seconds: the pivot is the origin, so the body orbits from
         // +X to +Y and the attached thing rides at twice the radius.
-        rt.step(1.0);
+        rt.step(None, 1.0);
         let (half, riding) = (rt.things[actor].pos, rt.things[child].pos);
         let (half_yaw, riding_yaw) = (rt.things[actor].yaw, rt.things[child].yaw);
-        rt.step(1.0);
+        rt.step(None, 1.0);
         let (end, done) = (rt.things[actor].pos, rt.things[actor].spin.is_none());
-        rt.step(1.0);
+        rt.step(None, 1.0);
         let still = rt.things[actor].pos;
         println!(
             "pivot: RotatePivot(0, 2 s) turns the body about the origin: after 1 s {half:?} at {half_yaw:.0} deg, after 2 s {end:?}; the attached thing rides at {riding:?} ({riding_yaw:.0} deg), and a finished spin stops ({done}, {still:?})"
@@ -10111,7 +10137,7 @@ fn main() {
         // A second of clock must both move the texture and carry a body: the offset from the clock is
         // `rate * time`, and the walker adds `rate * dt` a frame. The scroll has its **own** epoch, so
         // the renderer re-lays the scrolling faces and leaves the static batches alone.
-        rt.step(1.0);
+        rt.step(None, 1.0);
         assert!(rt.scroll_epoch > scrolls, "a scrolling surface did not ask for a rebuild");
         assert_eq!(rt.surface_epoch, epoch, "a scroll re-batched the whole level");
         let time = rt.time;
@@ -10155,7 +10181,7 @@ fn main() {
         rt.call("SlideCeilingSky", &[cog::Value::Num(0.5), cog::Value::Num(0.0)]);
         assert_eq!(rt.sky_scroll[1], [0.5, 0.0], "SlideCeilingSky did not record the speed pair");
         let epoch = rt.scroll_epoch;
-        rt.step(1.0);
+        rt.step(None, 1.0);
         assert!(rt.scroll_epoch > epoch, "a scrolling sky did not ask for a rebuild");
         let sky_time = rt.time;
         // What the rebuild reads: the header's starting offset plus the script's speed. `SlideHorizonSky`
@@ -10324,10 +10350,10 @@ fn main() {
         let (pos, angle) = rt.camera_shake();
         assert_eq!(pos, [0.0, -0.003, 0.0]);
         assert_eq!(angle, [1.0, 0.0, 0.0]);
-        rt.step(0.005);
+        rt.step(None, 0.005);
         let (_, angle) = rt.camera_shake();
         assert!((angle[0] - 0.6).abs() < 1e-3, "the angle did not decay at its rate: {angle:?}");
-        rt.step(1.0);
+        rt.step(None, 1.0);
         let (pos, angle) = rt.camera_shake();
         assert_eq!(pos, [0.0; 3], "the position offset did not settle");
         assert_eq!(angle, [0.0; 3], "the angle offset did not settle");
@@ -10545,7 +10571,7 @@ fn main() {
             let before: Vec<f32> = state.borrow().surfaces.iter().map(|s| s.cel).collect();
             let light_before: Vec<f32> = state.borrow().surfaces.iter().map(|s| s.light).collect();
             let sector_before: Vec<f32> = state.borrow().sectors.iter().map(|s| s.light).collect();
-            state.borrow_mut().step(1.0);
+            state.borrow_mut().step(None, 1.0);
             let after: Vec<f32> = state.borrow().surfaces.iter().map(|s| s.cel).collect();
             let light_after: Vec<f32> = state.borrow().surfaces.iter().map(|s| s.light).collect();
             let moved = before.iter().zip(&after).filter(|(a, b)| a != b).count();
@@ -10601,15 +10627,15 @@ fn main() {
                 ],
             );
             let before = rt.surfaces[index].light;
-            rt.step(0.5);
+            rt.step(None, 0.5);
             let halfway = rt.surfaces[index].light;
-            rt.step(0.5);
+            rt.step(None, 0.5);
             let done = rt.surfaces[index].light;
             assert!((before - 0.0).abs() < 1e-4, "SurfaceLightAnim did not start at `start`");
             assert!((halfway - 0.5).abs() < 1e-3, "the light ramp did not reach half: {halfway}");
             assert!((done - 1.0).abs() < 1e-4, "the light ramp did not settle at `end`: {done}");
             // A second step must not keep walking: a rate is one-shot.
-            rt.step(1.0);
+            rt.step(None, 1.0);
             assert!((rt.surfaces[index].light - 1.0).abs() < 1e-4, "the light ramp did not stop");
             (rt.sectors[sector].light, rt.surfaces[index].light)
         };
@@ -10646,7 +10672,7 @@ fn main() {
             let start = rt.material_cel.get(&material).copied().unwrap_or(-1.0);
             // 4 fps: a cel every 250 ms, so 300 ms is one step and takes cel 0 to 1 (of the material's
             // own count) — the shipped `09sign.mat` has 2.
-            rt.step(0.3);
+            rt.step(None, 0.3);
             let stepped = rt.material_cel.get(&material).copied().unwrap_or(-1.0);
             assert_ne!(stepped, start, "MaterialAnim did not walk the material cel");
             look.materials.insert(material, stepped);
@@ -10701,9 +10727,9 @@ fn main() {
             );
             assert_eq!(answer, cog::Value::Num(lamp as f64), "ThingLightAnim did not answer the record");
             assert_eq!(rt.things[lamp].light, 0.0, "ThingLightAnim did not start from `start`");
-            rt.step(1.0);
+            rt.step(None, 1.0);
             let half = rt.things[lamp].light;
-            rt.step(1.0);
+            rt.step(None, 1.0);
             let full = rt.things[lamp].light;
             println!(
                 "cel: ThingLightAnim(0 -> 1, period 4) ramps over period/2 = 2 s: {half:.2} after one second and {full:.2} after two, then stops ({})",
@@ -12060,7 +12086,7 @@ fn main() {
                     "GetGoalFrame did not report the destination the piece is moving to"
                 );
                 for _ in 0..180 {
-                    let motion = handle.borrow_mut().step(1.0 / 60.0);
+                    let motion = handle.borrow_mut().step(None, 1.0 / 60.0);
                     if motion.moved.is_empty() {
                         break;
                     }
@@ -15759,7 +15785,7 @@ fn run_level(
     let mut steps = 0usize;
     let mut last_moved = 0usize;
     for _ in 0..60 {
-        let moved = world.borrow_mut().step(1.0 / 60.0).moved.len();
+        let moved = world.borrow_mut().step(None, 1.0 / 60.0).moved.len();
         steps += 1;
         last_moved = last_moved.max(moved);
     }
@@ -20584,17 +20610,6 @@ fn share_collider(
     sim: Option<Res<Sim>>,
 ) {
     let (Some(collisions), Some(sim)) = (collisions, sim) else { return };
-    // The motion step keeps its own handle even when `BK_NO_SOLIDS` turns the collision arm off:
-    // the AI settle was never part of that A/B.
-    let needs_motion = sim
-        .world
-        .borrow()
-        .motion_solids
-        .as_ref()
-        .is_none_or(|solids| !std::sync::Arc::ptr_eq(solids, &collisions.0));
-    if needs_motion {
-        sim.world.borrow_mut().motion_solids = Some(std::sync::Arc::clone(&collisions.0));
-    }
     if std::env::var_os("BK_NO_SOLIDS").is_some() {
         return;
     }
@@ -26645,9 +26660,23 @@ struct Sim {
 struct Deliver(bool);
 
 /// Step the scripts' world and push the moved things' poses into the renderer.
-fn advance_sim(capture: Option<Res<CaptureDt>>, time: Res<Time>, sim: Option<ResMut<Sim>>, mut drawn: Query<&mut Transform>) {
+///
+/// The step settles the actors the AI tick walked, so it gets the level's collider view from here
+/// rather than keeping a second copy of it on the runtime. `BK_NO_SOLIDS` only turns off the
+/// collision arm in `share_collider`; the AI settle is a motion responsibility and still runs.
+fn advance_sim(
+    capture: Option<Res<CaptureDt>>,
+    time: Res<Time>,
+    sim: Option<ResMut<Sim>>,
+    collisions: Option<Res<Collision>>,
+    mut drawn: Query<&mut Transform>,
+) {
     let Some(mut sim) = sim else { return };
-    let motion = sim.world.borrow_mut().step(sim_dt(&time, capture.as_deref()));
+    let geometry = collisions.as_ref().map(|c| c.0.as_ref());
+    let motion = sim
+        .world
+        .borrow_mut()
+        .step(geometry, sim_dt(&time, capture.as_deref()));
     // The thing's **whole** pose, in the engine's own basis: `thing_quat` is what `spawn` uses, and
     // `from_rotation_z(-yaw)` (this path's original form) is that basis with the yaw negated, so a
     // moved door or lift was drawn mirrored about its facing. A placed thing that spins (`angvel=`

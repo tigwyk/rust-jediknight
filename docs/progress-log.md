@@ -6146,3 +6146,22 @@ floors, velocity feedback and fall death run in `Runtime::step_player`; the body
 
 Measured: `cargo test` **293 passed, 0 failed** (rotation-only, same-step arrival, step/settle,
 floorless-settle, and player-step tests added); `--ai` check passes.
+
+### Round 424: the step takes the caller's geometry view
+
+`Runtime::step` now takes the collider view its caller already owns — `step(geometry: Option<&Solids>,
+dt)` — instead of reading `motion_solids`, a second handle on the same level geometry that existed
+only so the post-walk settle could run under `BK_NO_SOLIDS`. The field, its initialisation and
+`share_collider`'s wiring are gone. `advance_sim` passes the `Collision` resource it already sees;
+`share_collider` now hands the runtime only the collider the movers use, so the `BK_NO_SOLIDS` A/B
+still stops `self.solids` from being installed while the AI settle keeps running.
+
+`ai_shots` is unchanged and still only drives `ai_tick`; the settle stays in the step, which reports
+the settled pose on `ThingMotion::moved`. `--ai` now exercises that path: it ticks the AI so the
+actor lands on the walked list, shoves the body 0.4 units into a wall, calls the real `Runtime::step`
+with the level's collider, and asserts the body is pushed out and the step result names it. The
+floorless-settle unit test also checks that a step with no geometry leaves the walked list alone.
+
+Measured: `cargo test` **293 passed, 0 failed**; `--ai` passes ("a body 0.4 inside a wall is
+pushed 4.75 back out by the step"); a live `--start 01narshadda --exit-after 900` run stayed up,
+drew an actor's motion and took an AI shot with the settle going through `advance_sim`.
