@@ -163,8 +163,8 @@ impl ThingSolid {
     }
 }
 
-#[derive(Clone)]
-pub struct Solids {
+#[derive(Clone, Default)]
+pub struct LevelGeometry {
     /// Per sector, the planes of its solid surfaces.
     pub sectors: Vec<Vec<Plane>>,
     /// Per sector, only the planes that **bound** the cell: every vertex the sector claims is behind
@@ -195,7 +195,7 @@ pub struct Solids {
     /// box is the contact — a `size=` cylinder stops the body 0.185 early. The sector is part of the
     /// record because `sithCollision_SearchForThingCollisions` walks the **moving body's** sector
     /// thing list: a thing standing in another room cannot touch it.
-    pub things: Vec<ThingSolid>,
+    pub things: std::sync::Arc<std::sync::RwLock<Vec<ThingSolid>>>,
     /// Every downward-facing solid surface with its polygon: the floors a body can stand on.
     pub floors: Vec<Face>,
     /// Every vertical solid surface with its polygon: the walls. A wall only pushes while the
@@ -220,6 +220,36 @@ pub struct Solids {
     pub surface_owner: Vec<usize>,
     /// `World adjoins` flags by link id. Fixtures that do not provide them default to passable.
     pub adjoin_flags: Vec<u16>,
+    /// Every sector that claims each surface, derived once with the collision build. Drawing needs
+    /// all claimants; `surface_owner` stays the first one used by collision reachability.
+    pub surface_claims: Vec<Vec<usize>>,
+    /// Surface -> the last sector that lists it, the runtime's script lookup.
+    pub surface_sectors: Vec<usize>,
+    /// Adjoin row -> the surface that carries it.
+    pub adjoin_surface: Vec<usize>,
+    /// Sector-to-sector links with the adjoin row's attenuation, derived once from the mirrors.
+    pub sector_adjoins: Vec<Vec<(i32, f32)>>,
+}
+
+/// The collision-facing name for the one geometry record.
+pub type Solids = LevelGeometry;
+
+impl LevelGeometry {
+    /// Replace the dynamic solid things. Doors and lifts move, so this is the one mutable slice of
+    /// the record; it lives behind a lock so every owner shares the update without cloning geometry.
+    /// Callers must not hold a read guard from [`Self::things`] here, or the write would wait on itself.
+    pub fn set_things(&self, things: Vec<ThingSolid>) {
+        *self
+            .things
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = things;
+    }
+
+    pub fn things(&self) -> std::sync::RwLockReadGuard<'_, Vec<ThingSolid>> {
+        self.things
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// A surface with its polygon, for the queries that need coverage rather than a plane.
@@ -452,7 +482,7 @@ fn polygon_normal(pts: &[[f32; 3]]) -> Option<[f32; 3]> {
 /// Which sector owns each surface: `sector.surfaces` is a `(first, count)` range into the
 /// surface table, so this is a flat expansion of it. `usize::MAX` for a surface no sector
 /// claims.
-pub fn surface_sectors(level: &crate::jkl::Level) -> Vec<usize> {
+fn surface_sectors(level: &crate::jkl::Level) -> Vec<usize> {
     let mut surface_sector: Vec<usize> = vec![usize::MAX; level.surfaces.len()];
     for (i, sector) in level.sectors.iter().enumerate() {
         let (first, count) = sector.surfaces;
@@ -471,7 +501,7 @@ pub fn surface_sectors(level: &crate::jkl::Level) -> Vec<usize> {
 /// floor can be claimed by the room *and* by a thin trigger volume inside it. Taking only
 /// the last claimant (as a single `surface_sectors` slot must) puts that floor in the
 /// trigger's batch, and hiding the trigger then hides the floor. Drawing needs all claims.
-pub fn surface_claims(level: &crate::jkl::Level) -> Vec<Vec<usize>> {
+fn surface_claims(level: &crate::jkl::Level) -> Vec<Vec<usize>> {
     let mut claims: Vec<Vec<usize>> = vec![Vec::new(); level.surfaces.len()];
     for (i, sector) in level.sectors.iter().enumerate() {
         let (first, count) = sector.surfaces;
@@ -491,7 +521,8 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     // Which sector each surface belongs to, and which surface carries each adjoin index:
     // both are needed to turn "this surface is adjoined to #123" into "the room on the
     // other side is sector N".
-    let surface_sector = surface_sectors(level);
+    let surface_sectors = surface_sectors(level);
+    let surface_claims = surface_claims(level);
     let mut adjoin_surface: Vec<usize> = vec![usize::MAX; level.adjoins.len()];
     for (i, surface) in level.surfaces.iter().enumerate() {
         if let Ok(a) = usize::try_from(surface.adjoin) {
@@ -502,12 +533,37 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
             }
         }
     }
+    // Sector-to-sector links with the attenuation the AI graph uses. The mirror row is the cost, as
+    // in `sithAIAwareness`'s `ProcessEvent`; one link per opening.
+    let mut sector_adjoins: Vec<Vec<(i32, f32)>> = vec![Vec::new(); level.sectors.len()];
+    for (adjoin, row) in level.adjoins.iter().enumerate() {
+        let Ok(mirror) = usize::try_from(row.mirror) else { continue };
+        let (Some(first), Some(second)) = (
+            adjoin_surface.get(adjoin).copied().filter(|s| *s != usize::MAX),
+            adjoin_surface.get(mirror).copied().filter(|s| *s != usize::MAX),
+        ) else {
+            continue;
+        };
+        if mirror <= adjoin {
+            continue;
+        }
+        let (a, b) = (
+            surface_sectors.get(first).copied().unwrap_or(usize::MAX),
+            surface_sectors.get(second).copied().unwrap_or(usize::MAX),
+        );
+        if a == usize::MAX || b == usize::MAX || a == b {
+            continue;
+        }
+        let cost = level.adjoins.get(mirror).map(|a| a.dist).unwrap_or(0.0).max(0.0);
+        sector_adjoins[a].push((b as i32, cost));
+        sector_adjoins[b].push((a as i32, cost));
+    }
     // The sector across an adjoin: its mirror's surface, and that surface's sector.
     let across = |adjoin: i32| -> Option<usize> {
         let a = usize::try_from(adjoin).ok()?;
         let mirror = usize::try_from(level.adjoins.get(a)?.mirror).ok()?;
         let surface = *adjoin_surface.get(mirror)?;
-        let sector = *surface_sector.get(surface)?;
+        let sector = *surface_sectors.get(surface)?;
         (sector != usize::MAX).then_some(sector)
     };
 
@@ -760,7 +816,11 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         portal_faces,
         surface_owner,
         adjoin_flags: level.adjoins.iter().map(|a| a.flags).collect(),
-        things: Vec::new(),
+        surface_claims,
+        surface_sectors,
+        adjoin_surface,
+        sector_adjoins,
+        things: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
     }
 }
 
@@ -873,7 +933,7 @@ fn sphere_face(pos: [f32; 3], radius: f32, face: &Face) -> bool {
     outside <= radius + 1e-5
 }
 
-impl Solids {
+impl LevelGeometry {
     /// The engine's collision search: sweep a sphere from `start` along `dir` for `dist`, walking
     /// through adjoins, and report the first solid surface it meets.
     ///
@@ -1302,7 +1362,8 @@ impl Solids {
         if a < 1e-8 {
             return false;
         }
-        for thing in &self.things {
+        let things = self.things();
+        for thing in things.iter() {
             let (centre, radius, z_min, z_max) = (thing.centre, thing.radius, thing.z_min, thing.z_max);
             if let Some(half) = thing.half {
                 let from_local = thing.local([from[0], from[1]]);
@@ -1413,7 +1474,8 @@ impl Solids {
         sector: usize,
     ) -> Option<(f32, [f32; 3])> {
         let mut best: Option<(f32, [f32; 3])> = None;
-        for thing in &self.things {
+        let things = self.things();
+        for thing in things.iter() {
             // `SearchForThingCollisions` walks the sector lists of the sectors the sweep reaches: a
             // crate in the room next door is not a contact until the body gets to the opening.
             let next_to = |from: usize, to: usize| {
@@ -1743,7 +1805,8 @@ impl Solids {
     /// A `collide=3` thing pushes out through its model box's nearest face; the rest use the
     /// template's own `size=` cylinder, the engine`s movement-sphere rule.
     fn push_out_of_things(&self, mut at: [f32; 3], radius: f32, sector: usize) -> [f32; 3] {
-        for thing in &self.things {
+        let things = self.things();
+        for thing in things.iter() {
             if !self.in_search(sector, thing.sector, at, [0.0; 3], 0.0, radius) {
                 continue;
             }
@@ -2160,7 +2223,7 @@ pub fn crosses(level: &crate::jkl::Level, surface: usize, from: [f32; 3], to: [f
     in_polygon(&verts, normal, p)
 }
 
-impl Solids {
+impl LevelGeometry {
     /// Whether the segment `from -> to` runs into any of the level's wall faces.
 ///
 /// A position-only resolver cannot see a mover that steps clean over a thin wall between two frames,
@@ -2203,7 +2266,7 @@ pub fn segment_blocked_at(&self, from: [f32; 3], to: [f32; 3]) -> Option<(usize,
 }
 }
 
-impl Solids {
+impl LevelGeometry {
     /// The sector a point is in: the smallest hull sphere that contains it and whose
     /// solid planes put it inside. Returns `None` outside every sector.
     pub fn sector_at(&self, pos: [f32; 3], slack: f32) -> Option<usize> {
@@ -2646,7 +2709,7 @@ impl Solids {
 #[cfg(test)]
 pub(crate) fn test_room() -> Solids {
     Solids {
-        things: Vec::new(),
+        things: Default::default(),
         boxes: Vec::new(),
         hull: Vec::new(),
         floor_of: std::collections::HashMap::new(),
@@ -2694,6 +2757,7 @@ pub(crate) fn test_room() -> Solids {
         portal_faces: Vec::new(),
         surface_owner: Vec::new(),
         adjoin_flags: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -2714,7 +2778,7 @@ mod tests {
             surface,
         };
         Solids {
-            things: Vec::new(),
+            things: Default::default(),
             boxes: Vec::new(),
             hull: Vec::new(),
             floor_of: std::collections::HashMap::new(),
@@ -2729,6 +2793,7 @@ mod tests {
         portal_faces: Vec::new(),
         surface_owner: Vec::new(),
         adjoin_flags: Vec::new(),
+        ..Default::default()
         }
     }
 
@@ -2777,7 +2842,7 @@ mod tests {
             vec![[-1.0, 0.0, z], [1.0, 0.0, z], [1.0, 0.0, z + 1.0], [-1.0, 0.0, z + 1.0]]
         };
         Solids {
-        things: Vec::new(),
+        things: Default::default(),
             boxes: Vec::new(),
             hull: Vec::new(),
             sectors: vec![Vec::new(), Vec::new(), Vec::new()],
@@ -2799,6 +2864,7 @@ mod tests {
                 ],
                 vec![Portal { adjoin: 1, link: 3, verts: quad(8.0), normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0] }],
             ],
+            ..Default::default()
         }
     }
 
@@ -2867,7 +2933,7 @@ mod tests {
         faces.extend(walls.iter().cloned());
         let face_of = faces.iter().enumerate().map(|(i, f)| (f.surface, i)).collect();
         Solids {
-        things: Vec::new(),
+        things: Default::default(),
             boxes: Vec::new(),
             hull: Vec::new(),
             sectors,
@@ -2882,6 +2948,7 @@ mod tests {
             adjoin_flags: Vec::new(),
             wall_of: [(1usize, 0usize), (2, 1)].into_iter().collect(),
             floor_of: [(0usize, 0usize)].into_iter().collect(),
+            ..Default::default()
         }
     }
 
@@ -3302,7 +3369,7 @@ mod tests {
             vec![Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surface: usize::MAX }],
         ];
         room.spheres = vec![([0.0, 0.0, 0.0], 8.0), ([0.0, 0.5, 0.0], 8.0), ([0.0, 1.0, 0.0], 8.0)];
-        room.things = vec![ThingSolid {
+        room.set_things(vec![ThingSolid {
             centre: [0.0, 0.3, -0.5],
             radius: 0.2,
             z_min: -1.0,
@@ -3310,7 +3377,7 @@ mod tests {
             sector: 2,
             half: None,
             yaw: 0.0,
-        }];
+        }]);
         let r = 0.065;
         let dir = [0.0, 1.0, 0.0];
         // Touching already (the cylinder's span is 0.265): the sweep must still report the contact.
@@ -3332,7 +3399,7 @@ mod tests {
     #[test]
     fn a_solid_thing_blocks_the_sight_segment_but_not_from_inside_it() {
         let mut room = seam_floor();
-        room.things = vec![ThingSolid {
+        room.set_things(vec![ThingSolid {
             centre: [1.0, 0.0, -0.5],
             radius: 0.5,
             z_min: -1.0,
@@ -3340,7 +3407,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
-        }];
+        }]);
         assert!(
             room.segment_thing([0.0, 0.0, -0.5], [2.0, 0.0, -0.5]),
             "a counter between the bodies did not block sight"
@@ -3376,7 +3443,7 @@ mod tests {
     #[test]
     fn a_thin_model_leaf_collides_as_its_box() {
         let mut room = seam_floor();
-        room.things = vec![ThingSolid {
+        room.set_things(vec![ThingSolid {
             centre: [1.0, 0.0, -0.5],
             radius: 0.2,
             z_min: -1.0,
@@ -3384,7 +3451,7 @@ mod tests {
             sector: 0,
             half: Some([0.2, 0.0125]),
             yaw: 0.0,
-        }];
+        }]);
         let r = 0.065;
         // Broad side at y = -0.025: the body stops at 0.0125 + 0.065 from the centre, where the
         // old 0.2-radius cylinder stopped at 0.265.
@@ -3400,14 +3467,14 @@ mod tests {
             "a body beside the leaf was stopped"
         );
         // The box turns with the thing's yaw: at 90 degrees the thin side faces world x.
-        room.things[0].yaw = 90.0;
+        room.things.write().expect("things lock")[0].yaw = 90.0;
         let (travel, normal) = room
             .sweep_things([1.3, 0.0, -0.5], [-1.0, 0.0, 0.0], 0.5, r, 0)
             .expect("the turned leaf did not stop the body");
         assert!((travel - 0.2225).abs() < 1e-4, "the turned leaf stopped at {travel}");
         assert!(normal[0] > 0.99, "the turned leaf's normal was {normal:?}");
         // A body inside the leaf's inflated box is pushed out through the thin face.
-        room.things[0].yaw = 0.0;
+        room.things.write().expect("things lock")[0].yaw = 0.0;
         let pushed = room.push_out_of_things([1.0, 0.0, -0.5], r, 0);
         assert!(
             (pushed[1].abs() - 0.0775).abs() < 1e-4,
@@ -3439,5 +3506,81 @@ mod tests {
         assert_eq!(room.support([0.0, 0.0, 4.0], 0.35, 1.0), None);
         // A face above the feet is never support: that is what made the walker climb.
         assert_eq!(room.support([0.0, 0.0, -1.4], 0.35, 1.0), None);
+    }
+
+    /// One build carries the surface maps, the runtime takes them, and the dynamic solid things are
+    /// shared through the record instead of being copied with it.
+    #[test]
+    fn geometry_maps_and_things_are_shared_records() {
+        let mut level = crate::jkl::Level::default();
+        level.vertices = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        level.surfaces = vec![crate::jkl::Surface {
+            material: 0,
+            surfflags: 0,
+            geo: 4,
+            adjoin: -1,
+            verts: vec![(0, 0), (1, 1), (2, 2)],
+            intensities: vec![1.0; 3],
+            normal: [0.0, 0.0, 1.0],
+        }];
+        level.sectors = vec![
+            crate::jkl::Sector { surfaces: (0, 1), ..Default::default() },
+            crate::jkl::Sector { surfaces: (0, 1), ..Default::default() },
+        ];
+
+        let mut geometry = build(&level);
+        assert_eq!(geometry.surface_claims[0], vec![0, 1], "all claimants were not kept");
+        assert_eq!(geometry.surface_sectors[0], 1, "the last claimant was not recorded");
+
+        // The runtime takes the supplied map rather than deriving its own.
+        geometry.surface_sectors[0] = 7;
+        let runtime = crate::runtime::Runtime::new_with_geometry(&level, &geometry);
+        assert_eq!(runtime.surface_sector[0], 7);
+
+        // `set_things` is the one mutable slice; a clone of the record sees it without a deep clone.
+        let shared = geometry.clone();
+        shared.set_things(vec![ThingSolid {
+            centre: [1.0, 2.0, 3.0],
+            radius: 0.2,
+            z_min: -1.0,
+            z_max: 0.0,
+            sector: 0,
+            half: None,
+            yaw: 0.0,
+        }]);
+        assert_eq!(geometry.things().len(), 1, "the geometry copy did not share its things");
+    }
+
+    /// The sector-adjoin graph is built from the same mirrors the level ships, once.
+    #[test]
+    fn geometry_pairs_the_mirrored_adjoins() {
+        let face = |adjoin: i32| crate::jkl::Surface {
+            material: 0,
+            surfflags: 0,
+            geo: 4,
+            adjoin,
+            verts: vec![(0, 0), (1, 1), (2, 2)],
+            intensities: vec![1.0; 3],
+            normal: [0.0, 0.0, 1.0],
+        };
+        let mut level = crate::jkl::Level::default();
+        level.vertices = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        level.surfaces = vec![face(0), face(1)];
+        level.sectors = vec![
+            crate::jkl::Sector { surfaces: (0, 1), ..Default::default() },
+            crate::jkl::Sector { surfaces: (1, 1), ..Default::default() },
+        ];
+        level.adjoins = vec![
+            crate::jkl::Adjoin { flags: 0x7, mirror: 1, dist: 2.0 },
+            crate::jkl::Adjoin { flags: 0x7, mirror: 0, dist: 3.0 },
+        ];
+
+        let geometry = build(&level);
+        assert_eq!(geometry.adjoin_surface, vec![0, 1]);
+        assert_eq!(
+            geometry.sector_adjoins,
+            vec![vec![(1, 3.0)], vec![(0, 3.0)]],
+            "one opening carries the mirror row's distance for both directions"
+        );
     }
 }

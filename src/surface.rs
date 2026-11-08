@@ -178,11 +178,12 @@ impl SurfaceScene {
     pub(crate) fn build(
         &self,
         level: &jkl::Level,
+        geometry: &crate::collide::LevelGeometry,
         images: &HashMap<i32, Image>,
         hidden: &std::collections::BTreeSet<usize>,
         only_scrolling: bool,
     ) -> Built {
-        build_world(level, images, hidden, &self.look, only_scrolling)
+        build_world(level, geometry, images, hidden, &self.look, only_scrolling)
     }
 }
 
@@ -253,17 +254,18 @@ impl SurfaceBatches {
 /// alone drew the level as a handful of all-or-nothing meshes and made sector culling impossible.
 fn build_world(
     level: &jkl::Level,
+    geometry: &crate::collide::LevelGeometry,
     images: &HashMap<i32, Image>,
     hidden: &std::collections::BTreeSet<usize>,
     look: &SurfaceLook,
     only_scrolling: bool,
 ) -> Built {
-    let claims = crate::collide::surface_claims(level);
+    let claims = &geometry.surface_claims;
     // A surface can be listed by several overlapping sector ranges (a trigger volume inside a
     // room, for instance). Drawing it in each visible claimant keeps culling correct, but the
     // engine has one owning sector per surface; using each claimant's ambient made the same
     // geometry change brightness with whichever list happened to draw last.
-    let light_owners = crate::collide::surface_sectors(level);
+    let light_owners = &geometry.surface_sectors;
     let mut batches: HashMap<(usize, i32), Batch> = HashMap::new();
     let mut keys: HashMap<(usize, i32), Vec<usize>> = HashMap::new();
     let mut skipped = 0usize;
@@ -372,9 +374,15 @@ mod tests {
     #[test]
     fn build_world_batches_a_surface_under_its_sector() {
         let level = triangle_level();
+        let geometry = crate::collide::build(&level);
 
-        let built =
-            SurfaceScene::default().build(&level, &Default::default(), &Default::default(), false);
+        let built = SurfaceScene::default().build(
+            &level,
+            &geometry,
+            &Default::default(),
+            &Default::default(),
+            false,
+        );
 
         assert_eq!(built.skipped, 0);
         assert_eq!(built.batches.len(), 1);
@@ -384,6 +392,31 @@ mod tests {
             .expect("surface batch keyed by sector and material");
         assert_eq!(batch.indices.len(), 3, "one triangle");
         assert_eq!(built.keys.get(&(0, 0)).map(Vec::as_slice), Some(&[0][..]));
+    }
+
+    /// The batch pass reads the claims it is handed; it does not re-derive them from the level.
+    #[test]
+    fn scene_batches_the_geometry_claims() {
+        let level = triangle_level();
+        let mut geometry = crate::collide::build(&level);
+        assert_eq!(geometry.surface_claims[0], vec![0]);
+
+        geometry.surface_claims[0].clear();
+        let built = SurfaceScene::default().build(
+            &level,
+            &geometry,
+            &Default::default(),
+            &Default::default(),
+            false,
+        );
+        assert!(
+            built.batches.contains_key(&(usize::MAX, 0)),
+            "the unclaimed surface did not take the no-sector fallback"
+        );
+        assert!(
+            !built.batches.contains_key(&(0, 0)),
+            "the surface was re-derived into sector 0 after its geometry claim was cleared"
+        );
     }
 
     /// `SurfaceBatches::apply` replaces the mesh behind the batch key; this is the path
@@ -433,6 +466,7 @@ mod tests {
     #[test]
     fn scene_builds_from_the_runtime_snapshot() {
         let level = triangle_level();
+        let geometry = crate::collide::build(&level);
 
         let world = runtime::Runtime::handle(&level);
         {
@@ -441,7 +475,7 @@ mod tests {
             rt.material_cel.insert(0, 1.0);
         }
         let scene = SurfaceScene::new(&world.borrow(), &level);
-        let built = scene.build(&level, &Default::default(), &Default::default(), false);
+        let built = scene.build(&level, &geometry, &Default::default(), &Default::default(), false);
 
         assert_eq!(built.batches.len(), 1);
         let alpha = built
@@ -455,8 +489,13 @@ mod tests {
             "the scene ignored the runtime's material cel"
         );
 
-        let default =
-            SurfaceScene::default().build(&level, &Default::default(), &Default::default(), false);
+        let default = SurfaceScene::default().build(
+            &level,
+            &geometry,
+            &Default::default(),
+            &Default::default(),
+            false,
+        );
         assert_eq!(
             default
                 .batches

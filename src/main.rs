@@ -2461,7 +2461,8 @@ fn main() {
                 lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]
             );
         }
-        for thing in &solids.things {
+        let things = solids.things();
+        for thing in things.iter() {
             let d = ((thing.centre[0] - at[0]).powi(2) + (thing.centre[1] - at[1]).powi(2)).sqrt();
             if d > 3.0 || (thing.centre[2] - at[2]).abs() > 3.0 {
                 continue;
@@ -5664,109 +5665,12 @@ fn main() {
                 assert!(pushed > 0.05, "the wall did not push the body out ({pushed:.3})");
             }
         }
-        // Portal steering: with the straight line walled off, the chosen heading has to point at a
-        // doorway rather than into the wall. `best_portal` is the one-hop probe; the tick's real path
-        // is `sector_route` (`Collide::route`), which the check below drives.
+        // `Collision::route`: the adjoin-graph path an actor has to follow when a wall sits between
+        // it and its target. The search is what a real chase needs; this proves it finds a chain
+        // across rooms whose straight line is walled off.
         {
             let solids = collide::build(&world.level);
             rt.solids = Some(std::sync::Arc::new(solids));
-            rt.portals = {
-                let claims = collide::surface_claims(&world.level);
-                let mut surface_of_adjoin: Vec<Option<usize>> =
-                    vec![None; world.level.adjoins.len()];
-                for (i, s) in world.level.surfaces.iter().enumerate() {
-                    if s.adjoin >= 0
-                        && let Some(slot) = surface_of_adjoin.get_mut(s.adjoin as usize)
-                    {
-                        *slot = Some(i);
-                    }
-                }
-                let mut out = Vec::new();
-                for (i, s) in world.level.surfaces.iter().enumerate() {
-                    if s.adjoin < 0 {
-                        continue;
-                    }
-                    let Some(near) = claims.get(i).and_then(|c| c.first()).copied() else { continue };
-                    let Some(mirror) = world
-                        .level
-                        .adjoins
-                        .get(s.adjoin as usize)
-                        .map(|a| a.mirror)
-                        .filter(|m| *m >= 0)
-                    else {
-                        continue;
-                    };
-                    let Some(far) = surface_of_adjoin.get(mirror as usize).copied().flatten()
-                    else {
-                        continue;
-                    };
-                    let Some(far_sector) = claims.get(far).and_then(|c| c.first()).copied() else {
-                        continue;
-                    };
-                    if far_sector == near {
-                        continue;
-                    }
-                    let mut centre = [0.0f32; 3];
-                    let mut n = 0usize;
-                    for (v, _) in &s.verts {
-                        if let Some(p) = world.level.vertices.get(*v as usize) {
-                            for k in 0..3 {
-                                centre[k] += p[k];
-                            }
-                            n += 1;
-                        }
-                    }
-                    if n == 0 {
-                        continue;
-                    }
-                    for k in 0..3 {
-                        centre[k] /= n as f32;
-                    }
-                    out.push((near, far_sector, centre));
-                }
-                out
-            };
-            // An actor against a wall, a target on the far side of it.
-            let wall = rt.solids.as_ref().and_then(|s| s.walls.first()).cloned();
-            if let Some(face) = wall {
-                let n = face.normal;
-                let from = [
-                    face.point[0] + n[0] * 0.6,
-                    face.point[1] + n[1] * 0.6,
-                    face.point[2] + n[2] * 0.6,
-                ];
-                let target = [
-                    face.point[0] - n[0] * 6.0,
-                    face.point[1] - n[1] * 6.0,
-                    face.point[2] - n[2] * 6.0,
-                ];
-                let blocked = rt
-                    .solids
-                    .as_ref()
-                    .is_some_and(|s| s.segment_blocked(from, target));
-                let portal = rt.best_portal(from, target);
-                println!(
-                    "ai: a wall between the actor and its target: blocked {blocked}, steering at portal {portal:?}"
-                );
-                assert!(blocked, "the test wall did not block the straight line");
-                if let Some(centre) = portal {
-                    // The heading must actually leave the wall: the portal is not behind the actor.
-                    let (mx, my) = (centre[0] - from[0], centre[1] - from[1]);
-                    let to_target = (target[0] - from[0], target[1] - from[1]);
-                    let len = (mx * mx + my * my).sqrt().max(0.001);
-                    let tl = (to_target.0 * to_target.0 + to_target.1 * to_target.1).sqrt();
-                    let dot = (mx * to_target.0 + my * to_target.1) / (len * tl);
-                    println!("ai: the portal is {dot:.2} along the way to the target");
-                    assert!(dot > -1.0, "the portal is not in the level's own direction at all");
-                } else {
-                    println!("ai: no portal to steer at on this level");
-                }
-            }
-            // `Collision::route`: the adjoin-graph path an actor has to follow when a wall sits between
-            // it and its target. `best_portal` above is one hop — it picks the doorway that shortcuts
-            // the straight line, and once the actor is through it, the next tick picks the same one
-            // again. The search is what a real chase needs; this proves it finds a chain across rooms
-            // whose straight line is walled off.
             let mut candidates: Vec<(usize, usize, Vec<[f32; 3]>)> = Vec::new();
             let spheres_all = rt.solids.as_ref().map(|s| s.spheres.clone()).unwrap_or_default();
             for (a, sphere) in spheres_all.iter().enumerate() {
@@ -7891,14 +7795,14 @@ fn main() {
         // `sithCollision_SearchForSurfaceCollisions`. What it has to prove here is the one thing the old
         // floor queries could not do on a real level: find a floor that belongs to *another sector*,
         // across the doorway under the body.
-        let mut solids = collide::build(&world.level);
-        solids.things = solid_things(&world, &solids);
+        let solids = collide::build(&world.level);
+        solids.set_things(solid_things(&world, &solids));
         let radius = PLAYER_RADIUS;
         // that took a polygon's normal from its first three vertices silently dropped the ones whose
         // first three are collinear — level 1's street floor (surface 3510, the 8-vertex slab at
         // z = -1.325 in sector 361) among them, which was a hole a body fell through, and walls,
         // which a body walked into. This runs before the spawn checks so it covers every level.
-        let claimed = collide::surface_sectors(&world.level);
+        let claimed = &solids.surface_sectors;
         let pts_of = |s: &jkl::Surface| -> Vec<[f32; 3]> {
             s.verts
                 .iter()
@@ -8202,9 +8106,9 @@ fn main() {
         // have a positive span, and the set must contain both a low thing (a table) and a tall one (a
         // column), or the spans were never filled in.
         {
-            let things = &solids.things;
+            let things = solids.things();
             assert!(!things.is_empty(), "no solid things at all in this level");
-            for thing in things {
+            for thing in things.iter() {
                 assert!(thing.radius > 0.0, "a solid thing with radius {}", thing.radius);
                 assert!(
                     thing.z_max > thing.z_min,
@@ -8501,7 +8405,7 @@ fn main() {
         let script = world.cogs.get(&inst.script).expect("parsed soundtrack");
         let sector = {
             let solids = collide::build(&world.level);
-            let claims = collide::surface_claims(&world.level);
+            let claims = &solids.surface_claims;
             let _ = (&solids, claims);
             None::<usize>
         };
@@ -10129,6 +10033,7 @@ fn main() {
         // surface (`sithThing.c`). The conveyor scripts are the shipped case: `00_conveyor.cog`,
         // `02_cratelift.cog` and `02_cratepuzzle_a.cog` drive ten belts between them.
         let level = &world.level;
+        let geometry = collide::build(level);
         let state = runtime::Runtime::handle(level);
         // A surface with a bitmap and more than one texvert, so a scroll really moves its UVs.
         let Some((index, _)) = level.surfaces.iter().enumerate().find(|(_, s)| {
@@ -10166,7 +10071,7 @@ fn main() {
         // The digest of every UV in the batches, sorted first because `batches` is a `HashMap`.
         let uv_hash = |look: &SurfaceLook| -> u64 {
             let built =
-                SurfaceScene::from_look(look.clone()).build(level, &world.images, &Default::default(), false);
+                SurfaceScene::from_look(look.clone()).build(level, &geometry, &world.images, &Default::default(), false);
             let batches = built.batches;
             let mut h = 0xcbf2_9ce4_8422_2325u64;
             let mut words: Vec<u64> = Vec::new();
@@ -10388,6 +10293,7 @@ fn main() {
         // colour's alpha, which `level.wesl` folds into `v`; the claim to test is that the number
         // reaches the batch the mesh is built from, and that a different cel is a different mesh.
         let level = &world.level;
+        let geometry = collide::build(level);
         let cels = &world.material_cels;
         let multi: Vec<(usize, i32)> = level
             .surfaces
@@ -10415,7 +10321,7 @@ fn main() {
         // its iteration order is not stable between two builds of the same world.
         let hash = |look: &SurfaceLook| -> u64 {
             let built =
-                SurfaceScene::from_look(look.clone()).build(level, &world.images, &Default::default(), false);
+                SurfaceScene::from_look(look.clone()).build(level, &geometry, &world.images, &Default::default(), false);
             let batches = built.batches;
             let mut words: Vec<u64> = Vec::new();
             for batch in batches.values() {
@@ -10460,6 +10366,7 @@ fn main() {
         let started = std::time::Instant::now();
         let _ = SurfaceScene::from_look(look.clone()).build(
             level,
+            &geometry,
             &world.images,
             &Default::default(),
             false,
@@ -10793,7 +10700,8 @@ fn main() {
         // that the mode is stored — it is that the polygons leave the world's batches, which is what
         // `rebuild_surfaces` patches in place.
         let level = &world.level;
-        let claims = collide::surface_claims(level);
+        let geometry = collide::build(level);
+        let claims = &geometry.surface_claims;
         let (index, verts, sector) = level
             .surfaces
             .iter()
@@ -10806,6 +10714,7 @@ fn main() {
         let triangles = |hidden: &std::collections::BTreeSet<usize>| -> usize {
             let built = SurfaceScene::default().build(
                 level,
+                &geometry,
                 &Default::default(),
                 hidden,
                 false,
@@ -16522,7 +16431,7 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
             near.sort_by(|a, b| a.0.total_cmp(&b.0));
             let solids = collide::build(&level);
             let solid_near: Vec<String> = solids
-                .things
+                .things()
                 .iter()
                 .filter(|thing| {
                     ((thing.centre[0] - at[0]).powi(2)
@@ -16560,7 +16469,8 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                         }
                     }
                 }
-                for thing in &solids.things {
+                let things = solids.things();
+                for thing in things.iter() {
                     if ((thing.centre[0] - at[0]).powi(2)
                         + (thing.centre[1] - at[1]).powi(2)
                         + (thing.centre[2] - at[2]).powi(2))
@@ -17918,8 +17828,10 @@ fn audit(gobs: &gob::GobSet) -> Result<(), String> {
         // Build the actual draw geometry, headless: a level whose surfaces pass the
         // index checks can still produce no triangles (degenerate or collinear
         // polygons), and that would render as an empty world with no error.
+        let geometry = collide::build(&level);
         let built = SurfaceScene::default().build(
             &level,
+            &geometry,
             &Default::default(),
             &Default::default(),
             false,
@@ -19132,11 +19044,14 @@ fn rebuild_surfaces(
     sim: Option<Res<Sim>>,
     world: Option<Res<World>>,
     batches: Option<Res<SurfaceBatches>>,
+    view: Option<Res<SectorView>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut seen: Local<(u32, u32, u32)>,
 ) {
     let _span = Span::new("rebuild_surfaces");
-    let (Some(sim), Some(world), Some(batches)) = (sim, world, batches) else { return };
+    let (Some(sim), Some(world), Some(batches), Some(view)) = (sim, world, batches, view) else {
+        return;
+    };
     let (epoch, hidden, scene) = {
         let rt = sim.world.borrow();
         (
@@ -19161,7 +19076,7 @@ fn rebuild_surfaces(
     // build would drop its static polygons.
     let scroll_only = !geomode_moved && epoch.1 == seen.1;
     *seen = epoch;
-    let built = scene.build(&world.level, &world.images, &hidden, scroll_only);
+    let built = scene.build(&world.level, &view.solids, &world.images, &hidden, scroll_only);
     let patched = batches.apply(&built, &mut meshes, scroll_only);
     if geomode_moved {
         println!(
@@ -19193,7 +19108,7 @@ struct SectorId(usize);
 /// The portal graph and the entities each sector owns.
 #[derive(Resource)]
 struct SectorView {
-    solids: collide::Solids,
+    solids: std::sync::Arc<collide::LevelGeometry>,
     by_sector: Vec<Vec<Entity>>,
 }
 
@@ -20496,17 +20411,26 @@ struct TriggerCount(usize);
 fn share_collider(
     collisions: Option<Res<Collision>>,
     sim: Option<Res<Sim>>,
-    mut done: Local<bool>,
 ) {
-    if *done {
+    let (Some(collisions), Some(sim)) = (collisions, sim) else { return };
+    if std::env::var_os("BK_NO_SOLIDS").is_some() {
         return;
     }
-    let (Some(collisions), Some(sim)) = (collisions, sim) else { return };
-    if std::env::var_os("BK_NO_SOLIDS").is_none() {
-        sim.world.borrow_mut().solids = Some(std::sync::Arc::new(collisions.0.clone()));
+    // A level swap installs a fresh runtime, so "done" cannot be a one-shot local: hand the current
+    // record over whenever the runtime does not already point at it.
+    let needs = sim
+        .world
+        .borrow()
+        .solids
+        .as_ref()
+        .is_none_or(|solids| !std::sync::Arc::ptr_eq(solids, &collisions.0));
+    if needs {
+        sim.world.borrow_mut().solids = Some(std::sync::Arc::clone(&collisions.0));
+        println!(
+            "collision: the runtime can now stop moving things ({} sectors)",
+            collisions.0.sectors.len()
+        );
     }
-    *done = true;
-    println!("collision: the runtime can now stop moving things ({} sectors)", collisions.0.sectors.len());
 }
 
 /// Resume the cogs a `sleep` interrupted, which is the engine's `script_running == 2` state.
@@ -24585,6 +24509,9 @@ fn setup(
 ) {
 
     let level = &world.level;
+    // One collision/map record per level. The renderer, the walker, the culler, and the runtime all
+    // share this Arc; building it here also keeps `collide::build` out of each consumer.
+    let mut geometry = collide::build(level);
 
     // Hand the sector ambience to the audio system.
     for (name, bytes) in &world.ambient {
@@ -24609,7 +24536,7 @@ fn setup(
     // Surfaces a script has hidden before the world was built (`GEOMETRY_NONE`). Scripts start before
     // the meshes are built, so a level that hides glass in `startup` is already accounted for here;
     // anything later goes through `rebuild_surfaces`.
-    let built = SurfaceScene::default().build(level, &world.images, &Default::default(), false);
+    let built = SurfaceScene::default().build(level, &geometry, &world.images, &Default::default(), false);
     let (batches, skipped, keys) = (built.batches, built.skipped, built.keys);
     let no_mat = level.surfaces.iter().filter(|s| s.material < 0).count();
     let few_verts = level.surfaces.iter().filter(|s| s.verts.len() < 3).count();
@@ -24749,16 +24676,15 @@ fn setup(
     // with a room it is no longer in pops out right in front of the camera. Bevy already
     // frustum-culls them per mesh, which is both safe and enough.
 
-    // The portal walk needs the sector graph, not its planes: reuse the collision build
-    // so "the room behind this doorway" means the same thing to drawing and to walking.
-    commands.insert_resource(SectorView { solids: collide::build(level), by_sector });
+    // The portal walk needs the sector graph, not its planes: the one geometry record shared with
+    // collision and the runtime. Its entities are attached after the solid things are filled.
 
     // Start the level's own scripts. This is the same binding `--run` reports on, but
     // here it feeds the renderer: `startup` always runs (that is what the engine does
     // at load); `--sim` also delivers each declared message once so animated geometry
     // acts without a player to trigger it.
     let mut sim = Sim {
-        world: runtime::Runtime::handle(level),
+        world: runtime::Runtime::handle_with_geometry(level, &geometry),
         instances: Vec::new(),
         entities,
         elapsed: 0.0,
@@ -25035,82 +24961,6 @@ fn setup(
                 rt.thing_links.push((instance, 0, thing));
             }
         }
-        // Portals for the actors' steering: a surface two sectors share is a doorway, and its centre
-        // is where an actor heads when the straight line to its target is walled off.
-        {
-            let claims = collide::surface_claims(&world.level);
-            // A portal surface is owned by *one* sector; the far side is the surface its adjoin's
-            // `mirror` names. So the map is adjoin index -> surface, then mirror -> far surface ->
-            // that surface's sector.
-            let mut surface_of_adjoin: Vec<Option<usize>> = vec![None; world.level.adjoins.len()];
-            for (index, surface) in world.level.surfaces.iter().enumerate() {
-                if surface.adjoin >= 0
-                    && let Some(slot) = surface_of_adjoin.get_mut(surface.adjoin as usize)
-                {
-                    *slot = Some(index);
-                }
-            }
-            let mut portals: Vec<(usize, usize, [f32; 3])> = Vec::new();
-            for (index, surface) in world.level.surfaces.iter().enumerate() {
-                if surface.adjoin < 0 {
-                    continue;
-                }
-                let Some(near_sector) = claims.get(index).and_then(|s| s.first()).copied() else {
-                    continue;
-                };
-                let Some(mirror) = world
-                    .level
-                    .adjoins
-                    .get(surface.adjoin as usize)
-                    .map(|a| a.mirror)
-                    .filter(|m| *m >= 0)
-                else {
-                    continue;
-                };
-                let Some(far_surface) = surface_of_adjoin.get(mirror as usize).copied().flatten()
-                else {
-                    continue;
-                };
-                let Some(far_sector) = claims.get(far_surface).and_then(|s| s.first()).copied()
-                else {
-                    continue;
-                };
-                let _ = near_sector;
-                if far_sector == near_sector {
-                    continue;
-                }
-                let mut centre = [0.0f32; 3];
-                let mut n = 0usize;
-                for (v, _) in &surface.verts {
-                    if let Some(p) = world.level.vertices.get(*v as usize) {
-                        for k in 0..3 {
-                            centre[k] += p[k];
-                        }
-                        n += 1;
-                    }
-                }
-                if n == 0 {
-                    continue;
-                }
-                for k in 0..3 {
-                    centre[k] /= n as f32;
-                }
-                portals.push((near_sector, far_sector, centre));
-            }
-            {
-                let two_sided = claims.iter().filter(|c| c.len() >= 2).count();
-                let with_adjoin = world.level.surfaces.iter().filter(|s| s.adjoin >= 0).count();
-                println!(
-                    "pathing: {} surface(s) with an adjoin, {two_sided} claimed by two sectors, {} portal(s)",
-                    with_adjoin,
-                    portals.len()
-                );
-            }
-            if !portals.is_empty() {
-                println!("pathing: {} portal(s) for actor steering", portals.len());
-                sim.world.borrow_mut().portals = portals;
-            }
-        }
     }
     commands.insert_resource(sim);
 
@@ -25337,7 +25187,7 @@ fn setup(
         }
     }
     // The walker: same code path as `--walk`, with the level's `walkplayer` as its start.
-    let solids = collide::build(level);
+    let solids = &geometry;
     // The body's centre, not the eye: `walk_player` adds `PLAYER_EYE` when it places the
     // camera, so seeding the eye here put the camera one eye-height too high.
     // `--stand <template>`: stand in that thing's own sector and face it, which is how an
@@ -25616,17 +25466,18 @@ fn setup(
     // keeps the model's bounds box (the engine's mesh case); the rest stay cylinders, because the
     // template's `size=` is the engine's movement sphere and only the model's plan footprint is a
     // tighter fit for furniture.
-    let mut solids = solids;
     let shapes = SolidShapes::build(&world);
-    solids.things = solid_things_at(
+    solids.set_things(solid_things_at(
         &shapes.0,
         world
             .level
             .things
             .iter()
             .map(|thing| (thing.pos, thing.sector.max(0) as usize, thing.yaw)),
-    );
-    commands.insert_resource(Collision(solids));
+    ));
+    let geometry = std::sync::Arc::new(geometry);
+    commands.insert_resource(Collision(std::sync::Arc::clone(&geometry)));
+    commands.insert_resource(SectorView { solids: geometry, by_sector });
     commands.insert_resource(shapes);
     // The ammo bin the player's weapon spends, resolved once from the weapon's own powerup cog.
     let ammo_bin = ammo_bin_for(&world);
@@ -25671,7 +25522,7 @@ fn setup(
 
 /// The level's solid planes, built once at load.
 #[derive(Resource)]
-struct Collision(collide::Solids);
+struct Collision(std::sync::Arc<collide::LevelGeometry>);
 
 /// The third-person boom: off by default (retail boots into first person), `V` toggles it.
 ///
@@ -26810,7 +26661,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     world: Option<Res<World>>,
-    solids: Option<ResMut<Collision>>,
+    solids: Option<Res<Collision>>,
     shapes: Option<Res<SolidShapes>>,
     sim: Option<Res<Sim>>,
     mut player: Option<ResMut<Player>>,
@@ -26825,13 +26676,13 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // `--trace-out`: the frame counter for the written trace (Phase 0.5 trace v0).
     mut trace_tick: Local<u32>,
 ) {
-    let (Some(mut solids), Some(player)) = (solids, player.as_mut()) else { return };
+    let (Some(solids), Some(player)) = (solids, player.as_mut()) else { return };
     // A door or lift follows its frame path, and the engine collides a body against the thing where
     // it is now. The cylinders were built from the level file's own placements, so a leaf that had
     // already slid aside still blocked: `18Ascend` spawns the player between two elevator leaves and
     // the frozen closed pair pinned the body for the whole leg.
     if let (Some(sim), Some(shapes)) = (sim.as_deref(), shapes.as_deref()) {
-        solids.0.things = shapes.place(&sim.world.borrow().things);
+        solids.0.set_things(shapes.place(&sim.world.borrow().things));
     }
     // `--overview` and `--near` exist to frame a fixed shot; a walker would fight them.
     if overview.overview || near.0.is_some() {
@@ -28206,7 +28057,7 @@ mod walker_tests {
             [1.0, -2.0, 2.0],
         ];
         collide::Solids {
-            things: Vec::new(),
+            things: Default::default(),
             boxes: Vec::new(),
             hull: Vec::new(),
             // The sweep reaches a face through these maps, so a fixture that leaves them empty cannot
@@ -28259,6 +28110,7 @@ mod walker_tests {
             portal_faces: Vec::new(),
             surface_owner: vec![0, 0, 0],
             adjoin_flags: Vec::new(),
+            ..Default::default()
         }
     }
 

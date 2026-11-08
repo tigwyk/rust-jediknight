@@ -6073,3 +6073,22 @@ draws cannot disagree. Measured on the same captures:
 The five gated rows still pass: `compare.ps1 -Gate` **5 thresholds, 0 failures**. The two route rows
 remain `UNGRADED`; a renderer claim there needs a state-matched retail capture, not another
 ground/luma tweak. `cargo test --release` is **273 passed, 0 failed**.
+
+### Round 420: one level-geometry record behind the collider
+
+The collision build now owns the surface claims, the surface-to-owner map, the adjoin-to-surface
+map, and the sector-adjoin graph (`collide::LevelGeometry`, aliased as `Solids`). The app builds it
+once; `Collision`, `SectorView`, the surface batcher, and `Runtime::handle_with_geometry` share the
+same `Arc`. `share_collider` clones the `Arc`, not the geometry. Solid door/lift things live behind
+a shared lock, so `walk_player` still updates the current leaf positions without cloning the record.
+
+The renderer no longer re-derives claims or owners. The runtime shares the same collision `Arc`; its
+two lookup vectors (surface owner and sector adjoins) are copied once from the record at
+construction. `Runtime::new` keeps a derivation fallback for tests and probes; the app takes the
+supplied maps.
+
+Verified: `cargo test` **280 passed, 0 failed**; a 20-frame `--start` run loaded the level and ran
+the actor systems without panic.
+
+The dead actor-steering cache (`Runtime::portals`, `best_portal`, and the per-load portal list) was
+also removed; `Collision::route` still walks the collision record's own adjoins.

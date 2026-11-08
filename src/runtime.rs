@@ -961,10 +961,6 @@ pub struct Runtime {
     /// `(cog instance, link id, surface)` for every `surface` symbol a level's scripts declare:
     /// `sithCog_LinkCogToSurface` in tabular form. The player's use action messages these.
     pub surface_links: Vec<(usize, i32, usize)>,
-    /// Portals: `(sector a, sector b, centre)` for every surface two sectors share. Actors steer
-    /// through these when the straight line to their target is walled off, which is the cheap half
-    /// of the engine's pathing: it routes through doorways without a graph search.
-    pub portals: Vec<(usize, usize, [f32; 3])>,
     /// `(cog instance, link id, thing)` for every `thing` symbol a level's scripts declare:
     /// `sithCog_LinkCogToThing` in tabular form.
     pub thing_links: Vec<(usize, i32, usize)>,
@@ -1534,6 +1530,16 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(level: &Level) -> Self {
+        Self::new_inner(level, None)
+    }
+
+    /// Build with the level's one geometry record: the surface owners and sector adjoin graph are
+    /// taken from it instead of being derived a second time.
+    pub fn new_with_geometry(level: &Level, geometry: &crate::collide::LevelGeometry) -> Self {
+        Self::new_inner(level, Some(geometry))
+    }
+
+    fn new_inner(level: &Level, geometry: Option<&crate::collide::LevelGeometry>) -> Self {
         // Template tables first: a placed thing's health and type come from its template,
         // not from a default. A projectile's damage is only meaningful if the actor it
         // hits started with the `health=` its template names.
@@ -1562,27 +1568,51 @@ impl Runtime {
                     .map(|e| (t.name.to_ascii_lowercase(), e.to_ascii_lowercase()))
             })
             .collect();
+        // A surface's sector: the level groups surfaces per room (`SECTOR` rows carry
+        // `(first, count)` over the surface list). The app hands the one geometry record over;
+        // the fallback keeps a bare `Runtime::new` usable for tests and probes.
+        let surface_sector: Vec<i32> = geometry
+            .map(|geometry| {
+                geometry
+                    .surface_sectors
+                    .iter()
+                    .map(|&sector| {
+                        if sector == usize::MAX {
+                            -1
+                        } else {
+                            sector as i32
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                let mut table = vec![-1i32; level.surfaces.len()];
+                for (sector, room) in level.sectors.iter().enumerate() {
+                    let (first, count) = room.surfaces;
+                    for index in first..(first + count).min(level.surfaces.len()) {
+                        table[index] = sector as i32;
+                    }
+                }
+                table
+            });
         // `sithAIAwareness` propagates through the **adjoin graph** (`ProcessEvent` recurses over a
         // sector's adjoin list, subtracting each adjoin's attenuation). An adjoin is shared by the
         // two surfaces of one opening, so pairing those surfaces gives the sector-to-sector links;
         // the cost is the adjoin row's `dist` float, which is the only per-portal number shipped.
-        let mut sector_adjoins: Vec<Vec<(i32, f32)>> = vec![Vec::new(); level.sectors.len()];
-        {
-            // A surface's sector: the level groups surfaces per room (`SECTOR` rows carry
-            // `(first, count)` over the surface list).
-            let mut surface_sector: Vec<i32> = vec![-1; level.surfaces.len()];
-            for (sector, room) in level.sectors.iter().enumerate() {
-                let (first, count) = room.surfaces;
-                for index in first..(first + count).min(level.surfaces.len()) {
-                    surface_sector[index] = sector as i32;
-                }
-            }
+        let sector_adjoins: Vec<Vec<(i32, f32)>> = if let Some(geometry) = geometry {
+            geometry.sector_adjoins.clone()
+        } else {
+            let mut links: Vec<Vec<(i32, f32)>> = vec![Vec::new(); level.sectors.len()];
             // Each surface owns one adjoin row, and the row's `mirror` names the row of the surface on
             // the other side of the same opening (`World adjoins 0: 0x7 50 2.00` — flags, mirror,
             // dist). Pairing those rows gives the sector-to-sector links.
             let mut surface_of_adjoin: Vec<Option<usize>> = vec![None; level.adjoins.len()];
             for (index, surface) in level.surfaces.iter().enumerate() {
-                if let Some(slot) = usize::try_from(surface.adjoin).ok().filter(|slot| *slot < level.adjoins.len()) {
+                if let Some(slot) = usize::try_from(surface.adjoin)
+                    .ok()
+                    .filter(|slot| *slot < level.adjoins.len())
+                    && surface_of_adjoin[slot].is_none()
+                {
                     surface_of_adjoin[slot] = Some(index);
                 }
             }
@@ -1604,10 +1634,11 @@ impl Runtime {
                 // `ProcessEvent` subtracts the attenuation it finds through the adjoin's link; the
                 // link is the mirror row, so its `dist` is the cost.
                 let cost = level.adjoins.get(mirror).map(|a| a.dist).unwrap_or(0.0).max(0.0);
-                sector_adjoins[a as usize].push((b, cost));
-                sector_adjoins[b as usize].push((a, cost));
+                links[a as usize].push((b, cost));
+                links[b as usize].push((a, cost));
             }
-        }
+            links
+        };
         // `fireoffset=(x/y/z)`: where a shot leaves the shooter, in the template's own frame and
         // level units (x lateral, y forward, z up) — the port used to scale it by ten, which put a
         // Ree-Yees' muzzle 0.8 units ahead of a 0.07-radius body and made retail's point-blank hits
@@ -1969,7 +2000,6 @@ impl Runtime {
             view_list: Vec::new(),
             view_at: 0,
             last_params: Vec::new(),
-            portals: Vec::new(),
             thing_links: Vec::new(),
             pending_messages: Vec::new(),
             solids: None,
@@ -2059,18 +2089,7 @@ impl Runtime {
             sector_ambient_light: level.sectors.iter().map(|s| s.ambient_light).collect(),
             adjoin_flags: level.adjoins.iter().map(|a| a.flags).collect(),
             surface_adjoin: level.surfaces.iter().map(|s| s.adjoin).collect(),
-            surface_sector: {
-                // A surface's sector: the level groups surfaces per room (`SECTOR` rows carry
-                // `(first, count)` over the surface list).
-                let mut table = vec![-1i32; level.surfaces.len()];
-                for (sector, room) in level.sectors.iter().enumerate() {
-                    let (first, count) = room.surfaces;
-                    for index in first..(first + count).min(level.surfaces.len()) {
-                        table[index] = sector as i32;
-                    }
-                }
-                table
-            },
+            surface_sector,
             surface_geomode: level
                 .surfaces
                 .iter()
@@ -2187,7 +2206,7 @@ impl Runtime {
             ai_roam: BTreeMap::new(),
             sector_awareness: BTreeMap::new(),
             awareness_event_at: BTreeMap::new(),
-            sector_adjoins: sector_adjoins.clone(),
+            sector_adjoins,
             ai_fire_target: BTreeMap::new(),
             ai_flee: BTreeMap::new(),
             ai_classes: BTreeMap::new(),
@@ -2258,6 +2277,10 @@ impl Runtime {
 
     pub fn handle(level: &Level) -> World {
         World::new(Self::new(level))
+    }
+
+    pub fn handle_with_geometry(level: &Level, geometry: &crate::collide::LevelGeometry) -> World {
+        World::new(Self::new_with_geometry(level, geometry))
     }
 
     /// `sithSurface_Update`'s cel animation: a surface with a rate walks its material's cels.
@@ -6437,8 +6460,7 @@ impl Runtime {
     /// The doorway centres from `from`'s room to the room `want` stands in, for an actor whose straight
     /// line is walled off: `Collide::route`, the breadth-first walk over portal links the engine's
     /// `sithAI` path is equivalent to. The sector of a point comes from the collision build's own hull
-    /// tests, which is the same answer a body standing there gets. (The old note described a greedy
-    /// one-hop pick; that is `best_portal`, the probe's helper, not this route.)
+    /// tests, which is the same answer a body standing there gets.
     fn sector_route(&self, index: usize, from: [f32; 3], want: [f32; 3]) -> Option<Vec<[f32; 3]>> {
         let solids = self.solids.as_deref()?;
         // A point can sit in more than one hull (doorway space belongs to both rooms), so every
@@ -6465,20 +6487,6 @@ impl Runtime {
             }
         }
         None
-    }
-
-    pub fn best_portal(&self, from: [f32; 3], target: [f32; 3]) -> Option<[f32; 3]> {
-        let mut best: Option<([f32; 3], f32)> = None;
-        for (_, _, centre) in &self.portals {
-            let leg = |a: [f32; 3], b: [f32; 3]| {
-                ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
-            };
-            let cost = leg(from, *centre) + leg(*centre, target);
-            if best.is_none_or(|(_, c)| cost < c) {
-                best = Some((*centre, cost));
-            }
-        }
-        best.map(|(centre, _)| centre)
     }
 
     /// Wake every thing standing in `sector` and answer the class instances that should be sent
@@ -10094,7 +10102,7 @@ mod tests {
                 boxes: vec![None],
                 portals: vec![Vec::new()],
                 spheres: vec![([0.0, 0.0, 0.0], 100.0)],
-                things: Vec::new(),
+                things: Default::default(),
                 floors: Vec::new(),
                 walls: Vec::new(),
                 wall_of: Default::default(),
@@ -10104,6 +10112,7 @@ mod tests {
                 portal_faces: Vec::new(),
                 surface_owner: Vec::new(),
                 adjoin_flags: Vec::new(),
+                ..Default::default()
             }));
             rt
         }
@@ -11767,7 +11776,7 @@ mod tests {
             boxes: vec![None],
             portals: vec![Vec::new()],
             spheres: vec![([0.0, 0.0, 0.0], 100.0)],
-            things: Vec::new(),
+            things: Default::default(),
             floors: vec![near.clone(), far.clone()],
             walls: Vec::new(),
             wall_of: Default::default(),
@@ -11777,6 +11786,7 @@ mod tests {
             portal_faces: Vec::new(),
             surface_owner: vec![0, 0, 0, 0],
             adjoin_flags: Vec::new(),
+                ..Default::default()
         }));
         for _ in 0..40 {
             rt.ai_tick(0, 0.05);
@@ -11819,7 +11829,7 @@ mod tests {
             boxes: vec![None],
             portals: vec![Vec::new()],
             spheres: vec![([0.0, 0.0, 0.0], 100.0)],
-            things: Vec::new(),
+            things: Default::default(),
             floors: Vec::new(),
             walls: Vec::new(),
             wall_of: Default::default(),
@@ -11829,6 +11839,7 @@ mod tests {
             portal_faces: Vec::new(),
             surface_owner: vec![0, 0, 0, 0],
             adjoin_flags: Vec::new(),
+                ..Default::default()
         }));
         let mut bolt = base.clone();
         bolt.pos = [0.0, 0.0, 0.0];
@@ -11958,7 +11969,7 @@ mod tests {
                 boxes: vec![None],
                 portals: vec![Vec::new()],
                 spheres: vec![([0.0, 0.0, 0.0], 100.0)],
-                things: Vec::new(),
+                things: Default::default(),
                 floors: vec![floor.clone()],
                 walls: Vec::new(),
                 wall_of: Default::default(),
@@ -11968,6 +11979,7 @@ mod tests {
                 portal_faces: Vec::new(),
                 surface_owner: vec![0, 0],
                 adjoin_flags: Vec::new(),
+                ..Default::default()
             }));
             rt
         }
@@ -13906,7 +13918,7 @@ mod tests {
                     boxes: vec![None],
                     portals: vec![Vec::new()],
                     spheres: vec![([0.0, 0.0, 0.0], 100.0)],
-                    things: Vec::new(),
+                    things: Default::default(),
                     floors: vec![floor()],
                     walls: Vec::new(),
                     wall_of: Default::default(),
@@ -13916,6 +13928,7 @@ mod tests {
                     portal_faces: Vec::new(),
                     surface_owner: vec![0, 0],
                     adjoin_flags: Vec::new(),
+                ..Default::default()
                 }));
             }
             rt
@@ -13989,7 +14002,7 @@ mod tests {
                 boxes: vec![None],
                 portals: vec![Vec::new()],
                 spheres: vec![([0.0, 0.0, 0.0], 100.0)],
-                things: Vec::new(),
+                things: Default::default(),
                 floors: vec![upper.clone(), lower.clone()],
                 walls: Vec::new(),
                 wall_of: Default::default(),
@@ -13999,6 +14012,7 @@ mod tests {
                 portal_faces: Vec::new(),
             surface_owner: vec![0, 0, 0, 0],
             adjoin_flags: Vec::new(),
+                ..Default::default()
             }));
             rt
         }
