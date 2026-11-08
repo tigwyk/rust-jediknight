@@ -1125,10 +1125,6 @@ pub struct Runtime {
     /// and sends `blocked` — `SITH_MESSAGE_BLOCKED`, the eighth most common label on level 1 (x8) —
     /// which is what a door script uses to know a body is in the way.
     pub solids: Option<std::sync::Arc<crate::collide::Solids>>,
-    /// The geometry `Runtime::step` settles walked actors against. This is set even when
-    /// `BK_NO_SOLIDS` turns the collision arm off, because the AI settle is a motion responsibility,
-    /// not the A/B switch's.
-    pub(crate) motion_solids: Option<std::sync::Arc<crate::collide::Solids>>,
     /// `(cog instance, link id, sector)` for every `sector` symbol a level's scripts declare:
     /// `sithCog_LinkCogToSector` in tabular form, so a sector's `entered`/`exited` can find its cogs.
     pub sector_links: Vec<(usize, i32, usize)>,
@@ -2035,7 +2031,6 @@ impl Runtime {
             thing_links: Vec::new(),
             pending_messages: Vec::new(),
             solids: None,
-            motion_solids: None,
             template_min_damage: level
                 .templates
                 .iter()
@@ -2608,10 +2603,18 @@ impl Runtime {
 
     /// Advance every moving thing, returning the pose changes and queued events.
     ///
+    /// `geometry` is the caller's collider view: the step settles the actors `ai_tick` walked
+    /// against it, and their corrected poses ride out on `ThingMotion::moved`. The runtime keeps no
+    /// second copy of that view.
+    ///
     /// `ThingMotion::moved` and `ThingMotion::turned` name every thing whose transform changed;
     /// `blocked` and `arrived` are the script events this step already queued. A renderer can
     /// rewrite just those transforms instead of the whole level's.
-    pub fn step(&mut self, dt: f32) -> ThingMotion {
+    pub fn step(
+        &mut self,
+        geometry: Option<&crate::collide::Solids>,
+        dt: f32,
+    ) -> ThingMotion {
         let mut moved = Vec::new();
         let mut turned = Vec::new();
         self.time += dt;
@@ -3129,8 +3132,8 @@ impl Runtime {
             }
         }
         self.update_attachments(&mut moved);
-        if let Some(solids) = self.motion_solids.clone() {
-            self.settle_walked(&solids, &mut moved);
+        if let Some(solids) = geometry {
+            self.settle_walked(solids, &mut moved);
         }
         self.things_moved += moved.len();
         ThingMotion {
@@ -10092,7 +10095,7 @@ mod tests {
         rt.call("setthingpulse", &[Value::Num(0.0), Value::Num(0.5)]);
         assert_eq!(rt.things[0].pulse, 0.5);
         rt.time += 0.6;
-        rt.step(1.0 / 30.0);
+        rt.step(None, 1.0 / 30.0);
         let pulses = rt
             .pending_messages
             .iter()
@@ -10101,7 +10104,7 @@ mod tests {
         assert_eq!(pulses, 1, "the thing's pulse never reached its script");
         // The timer re-arms rather than firing every frame.
         rt.pending_messages.clear();
-        rt.step(1.0 / 30.0);
+        rt.step(None, 1.0 / 30.0);
         assert!(
             !rt.pending_messages.iter().any(|(_, label, _, _)| *label == "pulse"),
             "the pulse fired on the very next frame"
@@ -10109,7 +10112,7 @@ mod tests {
         // Zero stops it.
         rt.call("setthingpulse", &[Value::Num(0.0), Value::Num(0.0)]);
         rt.time += 5.0;
-        rt.step(1.0 / 30.0);
+        rt.step(None, 1.0 / 30.0);
         assert!(!rt.pending_messages.iter().any(|(_, label, _, _)| *label == "pulse"));
     }
 
@@ -10336,10 +10339,10 @@ mod tests {
 
         // Half a unit over its floor and out of the creation reach: the body falls.
         let mut falling = runtime([0.0, 0.0, 0.5], 150.0);
-        falling.step(1.0 / 30.0);
+        falling.step(None, 1.0 / 30.0);
         assert!(falling.things[0].vel[2] < 0.0, "an actor with the gravity bit did not start to fall");
         for _ in 0..90 {
-            falling.step(1.0 / 30.0);
+            falling.step(None, 1.0 / 30.0);
         }
         assert!(
             (falling.things[0].pos[2] - 0.065).abs() < 1e-3,
@@ -10351,14 +10354,14 @@ mod tests {
         // The mass gate (`0x4f6270` reads `+0x204`): the same body with no mass floats.
         let mut floating = runtime([0.0, 0.0, 0.5], 0.0);
         for _ in 0..30 {
-            floating.step(1.0 / 30.0);
+            floating.step(None, 1.0 / 30.0);
         }
         assert_eq!(floating.things[0].pos[2], 0.5, "a massless body fell anyway");
 
         // Inside the creation reach (`moveSize + 0.005`, × 1.1) and above the contact: standing.
         let mut standing = runtime([0.0, 0.0, 0.07], 150.0);
         for _ in 0..30 {
-            standing.step(1.0 / 30.0);
+            standing.step(None, 1.0 / 30.0);
         }
         assert_eq!(standing.things[0].pos[2], 0.07, "a standing actor sank onto its floor");
         assert_eq!(standing.things[0].vel[2], 0.0, "a standing actor kept a vertical velocity");
@@ -10480,7 +10483,7 @@ mod tests {
 
         // Two seconds of motion at 2 frames/s reaches frame 1 and the thing moves.
         for _ in 0..240 {
-            rt.step(1.0 / 120.0);
+            rt.step(None, 1.0 / 120.0);
         }
         assert_eq!(rt.call("GetCurFrame", &[Value::Num(0.0)]), Value::Num(1.0));
         assert_eq!(rt.things[0].pos[0], 1.0);
@@ -10549,15 +10552,15 @@ mod tests {
         let shot = rt.fire(0, &bolt).expect("projectile");
         assert_eq!(rt.things[shot].damage, 30.0);
         // `sithWeapon_Update`: damage -= rate * dt, floored at mindamage.
-        rt.step(1.0);
+        rt.step(None, 1.0);
         assert_eq!(rt.things[shot].damage, 15.0);
         // The floor holds no matter how long it flies.
-        rt.step(10.0);
+        rt.step(None, 10.0);
         assert_eq!(rt.things[shot].damage, 10.0);
         // A weapon without the decay flag keeps its damage.
         rt.template_decay.remove(&bolt);
         let steady = rt.fire(0, &bolt).expect("projectile");
-        rt.step(5.0);
+        rt.step(None, 5.0);
         assert_eq!(rt.things[steady].damage, 30.0);
     }
 
@@ -10624,7 +10627,7 @@ mod tests {
         assert_eq!(rt.things.len(), 2);
         // Fired along the shooter's facing: yaw 0 faces +X in this world.
         assert!(rt.things[shot].vel[0] > 0.0, "vel {:?}", rt.things[shot].vel);
-        rt.step(0.5);
+        rt.step(None, 0.5);
         assert!(rt.things[shot].pos[0] > 1.0, "pos {:?}", rt.things[shot].pos);
 
         // Damage lands, and a killing blow marks the thing destroyed.
@@ -10650,9 +10653,9 @@ mod tests {
         assert!((rt.tint[0] - 1.0).abs() < 1e-5, "red not clamped: {:?}", rt.tint);
         assert!((rt.tint[2] - 0.5).abs() < 1e-5, "blue not clamped: {:?}", rt.tint);
         // Half a second of `sithPlayer_Update` takes 0.2 off the red, and it reaches zero.
-        rt.step(0.5);
+        rt.step(None, 0.5);
         assert!((rt.tint[0] - 0.8).abs() < 1e-4, "tint after half a second {:?}", rt.tint);
-        rt.step(10.0);
+        rt.step(None, 10.0);
         assert_eq!(rt.tint, [0.0; 3], "the tint did not decay away");
     }
 
@@ -10701,12 +10704,12 @@ mod tests {
         // `SurfaceAnim(surface, 15)`: a cel every 1/15 s. Half a second is 7 steps of 1/15,
         // so cel 7, and 7 % 3 = 1.
         rt.call("SurfaceAnim", &[Value::Num(index as f64), Value::Num(15.0)]);
-        rt.step(0.5);
+        rt.step(None, 0.5);
         assert_eq!(rt.surfaces[index].cel, 1.0);
         assert!(rt.surface_epoch > epoch, "a cel step did not ask for a rebuild");
         // A material with one cel never advances, whatever the rate says.
         rt.surface_cels[index] = 1;
-        rt.step(1.0);
+        rt.step(None, 1.0);
         assert_eq!(rt.surfaces[index].cel, 1.0);
     }
 
@@ -10729,12 +10732,12 @@ mod tests {
             &[Value::Num(sector as f64), Value::Num(0.5), Value::Num(2.0)],
         );
         assert_eq!(rt.sectors[sector].light, 0.0, "a fade should not snap to its target");
-        rt.step(1.0);
+        rt.step(None, 1.0);
         assert!((rt.sectors[sector].light - 0.25).abs() < 1e-5);
-        rt.step(1.0);
+        rt.step(None, 1.0);
         assert!((rt.sectors[sector].light - 0.5).abs() < 1e-5);
         // Settled: the rate is one-shot, so a long step does not overshoot.
-        rt.step(10.0);
+        rt.step(None, 10.0);
         assert!((rt.sectors[sector].light - 0.5).abs() < 1e-5);
 
         // `SurfaceLightAnim(surface, 0.2, 1.0, 0.5)`: `cog_00_forcefield.cog`'s startup ramp,
@@ -10756,11 +10759,11 @@ mod tests {
         );
         assert_eq!(answer, Value::Num(surface as f64), "the verb answers the surface index");
         assert_eq!(rt.surfaces[surface].light, 0.2);
-        rt.step(0.1);
+        rt.step(None, 0.1);
         assert!((rt.surfaces[surface].light - 0.52).abs() < 1e-4);
-        rt.step(0.2);
+        rt.step(None, 0.2);
         assert!((rt.surfaces[surface].light - 1.0).abs() < 1e-5);
-        rt.step(1.0);
+        rt.step(None, 1.0);
         assert!((rt.surfaces[surface].light - 1.0).abs() < 1e-5, "the ramp kept walking");
         // A backwards ramp is no ramp: the engine answers -1 and leaves the surface alone.
         let refused = rt.call(
@@ -12067,7 +12070,7 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "+elaser".into()];
         rt.types = vec![10, 3];
         for _ in 0..60 {
-            rt.step(1.0 / 30.0);
+            rt.step(None, 1.0 / 30.0);
             if rt.things[1].destroyed {
                 break;
             }
@@ -12468,7 +12471,7 @@ mod tests {
             tint: [0.0; 3],
             colormap: 0,
         }];
-        rt.step(1.0);
+        rt.step(None, 1.0);
         assert!(
             rt.things[1].pos[2] > 4.0,
             "the thrust sector did not lift a free body: {}",
@@ -13307,7 +13310,7 @@ mod tests {
             vel: [0.0; 3],
         });
         let mut rt = Runtime::new(&level);
-        let motion = rt.step(1.0);
+        let motion = rt.step(None, 1.0);
         assert_eq!(motion.turned, vec![0], "a spinning prop was not reported as turned");
         assert!(!motion.moved.contains(&0), "a pure spin was reported as a translation");
         assert!((rt.things[0].yaw - 90.0).abs() < 1e-4, "yaw {} after one second", rt.things[0].yaw);
@@ -13331,14 +13334,14 @@ mod tests {
             ],
             surface: 1,
         };
-        rt.motion_solids = Some(std::sync::Arc::new(crate::collide::Solids {
+        let solids = crate::collide::Solids {
             sectors: vec![Vec::new()],
             floors: vec![floor.clone()],
             faces: vec![floor],
             surface_owner: vec![0, 0],
             ..Default::default()
-        }));
-        let motion = rt.step(0.0);
+        };
+        let motion = rt.step(Some(&solids), 0.0);
         assert_eq!(motion.moved, vec![0], "the settled actor was not reported");
         assert!(
             (rt.things[0].pos[2] - 0.5).abs() < 1e-4,
@@ -13355,8 +13358,13 @@ mod tests {
         rt.things[0].pos = [0.0, 0.0, 1.0];
         rt.things[0].sector = 0;
         rt.walked = vec![0];
-        rt.motion_solids = Some(std::sync::Arc::new(crate::collide::Solids::default()));
-        let motion = rt.step(0.0);
+        let solids = crate::collide::Solids::default();
+        // Without a caller-owned view there is nothing to settle against, and the walked list is
+        // left for the next tick.
+        rt.step(None, 0.0);
+        assert_eq!(rt.things[0].pos, [0.0, 0.0, 1.0], "a step with no geometry moved the actor");
+        assert_eq!(rt.walked, vec![0], "a step with no geometry consumed the walked list");
+        let motion = rt.step(Some(&solids), 0.0);
         assert_eq!(rt.things[0].pos, [0.0, 0.0, 1.0], "a floorless probe dropped the actor");
         assert!(motion.moved.is_empty(), "a floorless probe reported a move");
     }
@@ -13421,7 +13429,7 @@ mod tests {
         rt.templates = vec!["door1".into()];
         rt.thing_links = vec![(5, 0, 0)];
         rt.things[0].target = Some((1.0, 10.0));
-        let motion = rt.step(0.2);
+        let motion = rt.step(None, 0.2);
         assert_eq!(motion.arrived, vec![0], "the arriving thing was not reported");
         assert!(motion.moved.contains(&0), "the path move was not reported");
         assert!(
@@ -13433,7 +13441,7 @@ mod tests {
         );
         assert_eq!(rt.things[0].frame, 1.0);
         assert_eq!(rt.things[0].target, None);
-        let next = rt.step(0.2);
+        let next = rt.step(None, 0.2);
         assert!(next.arrived.is_empty(), "the arrival was reported twice");
         assert_eq!(
             rt.pending_messages

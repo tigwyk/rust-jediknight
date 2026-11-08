@@ -1094,12 +1094,14 @@ ai: actor 85 step held out of the geometry
 **The chase now respects walls.** `ai_tick` has no collider, so it walks in a straight line - `.ai`
 gives sight and speed, not a path. It keeps the actors it moved in the private `Runtime::walked` list;
 `Runtime::step` consumes that list and settles each actor with the player's own `walker_step` sweep,
-before the step returns. `ai_shots` only drives `ai_tick`; `--ai` checks the wall push directly, and
-the `step_settles_the_actors_it_walked` unit test covers the consume. The gate shoves a body 0.4
-units into a wall:
+before the step returns. The step takes the caller's geometry view (`Option<&Solids>`), so the
+runtime keeps no second collider handle: `advance_sim` passes the level's `Collision` resource and
+`ai_shots` only drives `ai_tick`. `--ai` exercises that path — it ticks the AI, shoves the walked
+body 0.4 units into a wall, and lets the step push it out and report the new pose — and the
+`step_settles_the_actors_it_walked` unit test covers the consume. The gate prints:
 
 ```text
-ai: a body 0.4 inside a wall is pushed 6.72 back out
+ai: a body 0.4 inside a wall is pushed 4.75 back out by the step
 ```
 
 `ponytail:` that is an **avoidance pass, not a pathfinder**. An actor that walks into a wall slides
