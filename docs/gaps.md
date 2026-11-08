@@ -1344,8 +1344,8 @@ and the campaign chain is now a gate of its own.
   rows: it collects every film in order (level 15: `38a.smk` then `39a.smk`), crosses the `DECIDE`
   row on the arm the choice item names (`jkPlayer_GetChoice`, bin `0x12`: `2` is dark; the endgame
   screen that grants it is not implemented, so the light arm is the default), and stops at the
-  next level. The app's film queue plays both and only sets `films_done` when the queue and the
-  running film are both finished, so the level swap cannot cut a two-film transition short;
+  next level. The app's film queue plays both and only reaches `FlowPhase::Ready` when the queue
+  and the running film are both finished, so the level swap cannot cut a two-film transition short;
   `film_step` is unit-tested, and a live run (`--start 15maw --complete-after 0.1`) was watched
   through `38a.smk` → `39a.smk` → `16aEscapeShip.jkl loaded`.
 - **`--tour` is the release-content gate.** It walks every campaign level file (25 files, 28 rows

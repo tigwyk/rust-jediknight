@@ -2624,6 +2624,11 @@ fn main() {
         } else {
             Vec::new()
         };
+        let phase = if pre.is_empty() {
+            FlowPhase::Playing
+        } else {
+            FlowPhase::Intro
+        };
         FlowPlan {
             game: game.clone(),
             level: level_name.clone(),
@@ -2631,7 +2636,7 @@ fn main() {
             cuts,
             next,
             episode: episode.clone(),
-            films_done: false,
+            phase,
             reset_inventory: false,
             pre,
             opening,
@@ -12438,7 +12443,10 @@ fn main() {
         .insert_resource(CaptureMode(
             shot.is_some() || live || sim || complete_after.is_some() || !animating || goal_check,
         ))
-        .insert_resource(TourLive { active: tour_live })
+        .insert_resource(TourLive {
+            active: tour_live,
+            ..Default::default()
+        })
         .insert_resource(SaberBlade::default())
         .insert_resource(Viewmodel::default())
         .insert_resource(PendingRestore::default())
@@ -12491,6 +12499,7 @@ fn main() {
         .insert_resource(plan)
         .insert_resource(PendingLevel::default())
         .insert_resource(CompleteAfter(complete_after))
+        .init_resource::<CompletionTimer>()
         .insert_resource(ExitAfter(exit_after.unwrap_or(u64::MAX)))
         .insert_resource(CogStatusAfter(cogstatus_after))
         .insert_resource(ActorMoves(actor_moves))
@@ -12684,6 +12693,27 @@ fn debug_entries(catalog: Option<&DebugCatalog>, base: u32, episode: usize) -> V
     }
 }
 
+/// The level transition's one state. Campaign graph data stays on [`FlowPlan`]; these are the
+/// per-transition UI/swap phases that used to live in five systems' `Local` flags.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum FlowPhase {
+    /// The loaded level is being played.
+    #[default]
+    Playing,
+    /// The campaign's opening film is running.
+    Intro,
+    /// The level ended; the rank/grants/tally have not been committed yet.
+    Complete,
+    /// The tally screen is up; the films wait for the player to close it.
+    Tally,
+    /// The completion films are playing out.
+    Films,
+    /// Films are done and the successor can be requested.
+    Ready,
+    /// The successor has been handed to [`PendingLevel`].
+    Swapping,
+}
+
 /// Where finishing the loaded level leads, resolved from the episode graph at startup.
 #[derive(Resource)]
 struct FlowPlan {
@@ -12707,16 +12737,44 @@ struct FlowPlan {
     /// The episode this level belongs to, for what the engine grants when it ends
     /// (`jkMain_EndLevel`, which reads the entry's `lightpow`/`darkpow` bins).
     episode: Option<episode::Episode>,
-    /// Set once the completion queue above has played out (immediately for a level that leads
-    /// straight to another level). `queue_next_level` waits on it, so a two-film transition cannot
-    /// swap the level halfway through its films.
-    films_done: bool,
+    /// The one state advanced by the completion, film, tally, tour, and swap inputs.
+    phase: FlowPhase,
     /// The next swap is a new game or a debug start, which retail marks with `DAT_00549fa0 = 1`
     /// so `sithOpenPostProcess` resets the player's inventory. A campaign transition or Restart
     /// leaves it clear and carries the inventory across.
     reset_inventory: bool,
     /// Whether to actually swap the loaded world (see [`swap_level`] for the boundary).
     swap: bool,
+}
+
+impl FlowPlan {
+    /// New Game: reset the inventory, queue the campaign's opening film, and return the level to load.
+    fn begin_new_game(&mut self) -> String {
+        self.reset_inventory = true;
+        self.pre = self.opening.clone();
+        self.phase = if self.pre.is_empty() {
+            FlowPhase::Playing
+        } else {
+            FlowPhase::Intro
+        };
+        self.first.clone()
+    }
+
+    /// Restart: reload the same level from its start, carrying the inventory and with no intro film.
+    fn restart_level(&mut self) -> String {
+        self.pre.clear();
+        self.phase = FlowPhase::Swapping;
+        self.level.clone()
+    }
+
+    /// A debug level pick: no campaign opening film, inventory reset, and the chosen category owns
+    /// the level's episode graph.
+    fn begin_debug_level(&mut self, episode: episode::Episode) {
+        self.pre.clear();
+        self.reset_inventory = true;
+        self.phase = FlowPhase::Swapping;
+        self.episode = Some(episode);
+    }
 }
 
 /// Everything the loaded level spawned: geometry batches, models and the sky dome. A level
@@ -12741,6 +12799,16 @@ struct CompleteAfter(Option<f32>);
 #[derive(Resource, Default)]
 struct TourLive {
     active: bool,
+    last: Option<String>,
+    count: u32,
+    finished: bool,
+}
+
+#[derive(Resource, Default)]
+struct CompletionTimer {
+    seen: Option<String>,
+    waited: f32,
+    done: Option<String>,
 }
 
 /// Call the engine's own `jkEndLevel` on **each** level of a run. The timer belongs to the level, not
@@ -12751,24 +12819,22 @@ fn complete_level_on_timer(
     after: Option<Res<CompleteAfter>>,
     sim: Option<Res<Sim>>,
     plan: Option<Res<FlowPlan>>,
-    mut waited: Local<f32>,
-    mut seen: Local<Option<String>>,
-    mut done: Local<Option<String>>,
+    mut timer: ResMut<CompletionTimer>,
 ) {
     let (Some(after), Some(sim), Some(plan)) = (after, sim, plan) else { return };
     let Some(seconds) = after.0 else { return };
-    if seen.as_deref() != Some(plan.level.as_str()) {
-        *seen = Some(plan.level.clone());
-        *waited = 0.0;
+    if timer.seen.as_deref() != Some(plan.level.as_str()) {
+        timer.seen = Some(plan.level.clone());
+        timer.waited = 0.0;
     }
-    if done.as_deref() == Some(plan.level.as_str()) {
+    if timer.done.as_deref() == Some(plan.level.as_str()) {
         return;
     }
-    *waited += time.delta_secs();
-    if *waited < seconds {
+    timer.waited += time.delta_secs();
+    if timer.waited < seconds {
         return;
     }
-    *done = Some(plan.level.clone());
+    timer.done = Some(plan.level.clone());
     sim.world.borrow_mut().call("jkendlevel", &[cog::Value::Num(1.0)]);
     println!("complete: called jkEndLevel after {seconds:.2}s on {}", plan.level);
 }
@@ -12777,28 +12843,25 @@ fn complete_level_on_timer(
 /// levels were actually swapped. Counts the levels so a stall in the middle fails the gate rather
 /// than passing at the first one.
 fn tour_live_exit(
-    tour: Option<Res<TourLive>>,
+    mut tour: Option<ResMut<TourLive>>,
     plan: Option<Res<FlowPlan>>,
     sim: Option<Res<Sim>>,
     mut exit: MessageWriter<AppExit>,
-    mut last: Local<Option<String>>,
-    mut count: Local<u32>,
-    mut finished: Local<bool>,
 ) {
-    let (Some(tour), Some(plan), Some(sim)) = (tour, plan, sim) else { return };
-    if !tour.active || *finished {
+    let (Some(tour), Some(plan), Some(sim)) = (tour.as_mut(), plan, sim) else { return };
+    if !tour.active || tour.finished {
         return;
     }
-    if last.as_deref() != Some(plan.level.as_str()) {
-        *last = Some(plan.level.clone());
-        *count += 1;
+    if tour.last.as_deref() != Some(plan.level.as_str()) {
+        tour.last = Some(plan.level.clone());
+        tour.count += 1;
     }
-    if plan.next.is_none() && plan.films_done && sim.world.borrow().level_complete {
-        *finished = true;
+    if plan.next.is_none() && plan.phase == FlowPhase::Ready && sim.world.borrow().level_complete {
+        tour.finished = true;
         assert_eq!(
-            *count, 21,
+            tour.count, 21,
             "tour-live finished {} level(s), not the 21 on the campaign's light spine",
-            *count
+            tour.count
         );
         assert!(
             plan.level.eq_ignore_ascii_case("21ajerec.jkl"),
@@ -12807,7 +12870,7 @@ fn tour_live_exit(
         );
         println!(
             "tour-live: {} level(s) finished and swapped, through the end at {}",
-            *count, plan.level
+            tour.count, plan.level
         );
         println!("--- tour-live check passed ---");
         exit.write(AppExit::Success);
@@ -12827,7 +12890,7 @@ const TALLY_SCREEN: u32 = 0x531530;
 /// The next move for the completion film queue. Pure so the two-film ordering can be tested
 /// without a window: a running film is waited on, a finished one is dropped (its resource goes away
 /// at the end of the frame) and the **next** film starts on the following frame, and `Done` is only
-/// reported when the queue is empty — which is what [`FlowPlan::films_done`] hands to the level swap.
+/// reported when the queue is empty — which is when the transition reaches [`FlowPhase::Ready`].
 #[derive(Debug, PartialEq, Eq)]
 enum FilmStep {
     Wait,
@@ -12849,8 +12912,8 @@ fn film_step(cuts: &[String], playing: Option<bool>) -> FilmStep {
 
 /// When the level's scripts call `jkEndLevel`, play the graph's films in order and name the level
 /// that follows them. A transition can have more than one film — the campaign's `DECIDE` row sits
-/// between level 15's film and the chosen path's — so this owns a queue, and only marks the
-/// transition played once the queue and the running film are both done (see [`FlowPlan::films_done`]).
+/// between level 15's film and the chosen path's — so this owns a queue, and only reaches
+/// [`FlowPhase::Ready`] once the queue and the running film are both done.
 fn watch_level_complete(
     mut commands: Commands,
     sim: Option<Res<Sim>>,
@@ -12860,8 +12923,6 @@ fn watch_level_complete(
     mut overlay: Option<ResMut<Overlay>>,
     capture: Option<Res<CaptureMode>>,
     capture_dt: Option<Res<CaptureDt>>,
-    mut announced: Local<bool>,
-    mut tallied: Local<bool>,
 ) {
     let (Some(sim), Some(mut plan)) = (sim, plan) else { return };
     // A capture measures the level it booted. `06abarons` ships a script that ends the level when the
@@ -12877,15 +12938,15 @@ fn watch_level_complete(
         return;
     }
     if !sim.world.borrow().level_complete {
-        // These locals belong to one completion, not to the process. A fresh level starts with the
-        // flags clear, so reset here or a campaign's second level would skip its rank credit, its
-        // tally screen and its completion print.
-        *announced = false;
-        *tallied = false;
+        // A fresh level starts Playing. The intro phase belongs to the opening film before play;
+        // every other transition phase belongs to a completion that is no longer signalled.
+        if plan.phase != FlowPhase::Intro {
+            plan.phase = FlowPhase::Playing;
+        }
         return;
     }
-    if !*announced {
-        *announced = true;
+    if plan.phase == FlowPhase::Playing {
+        plan.phase = FlowPhase::Complete;
         println!(
             "level {} complete -> cutscene {}, then {}",
             plan.level,
@@ -12900,8 +12961,7 @@ fn watch_level_complete(
     // The tally comes first, as retail does: `jkGuiSingleTally_Show` (base `0x531530`) shows the
     // rank, the secrets and the stars before the film runs. Its rows are filled by `tally_lines` in
     // the draw path already — the screen was simply never shown.
-    if !*tallied {
-        *tallied = true;
+    if plan.phase == FlowPhase::Complete {
         // `jkMain_EndLevel` (`0x402eb0`): the episode entry's two arm bins are granted here, gated on
         // `jkPlayer_GetChoice` -- inventory bin 18 -- with `sithInventory_SetCarries(..., 1)`.
         let choice = sim.world.borrow().inv.get(&18).copied().unwrap_or(0.0) as i32;
@@ -12942,18 +13002,29 @@ fn watch_level_complete(
             overlay.show(Some(format!("{TALLY_SCREEN:#x}")), 0);
             println!("tally: rank {rank:.0}, secrets {found:.0} of {total:.0}");
         }
+        // A tour run is checking the chain, not watching films: name the films and mark the transition
+        // done at once, so the next level loads.
+        if tour.as_ref().is_some_and(|tour| tour.active) {
+            for name in std::mem::take(&mut plan.cuts) {
+                println!("tour-live: film {name} skipped");
+            }
+            plan.phase = FlowPhase::Ready;
+            return;
+        }
+        plan.phase = if playing_for_real {
+            FlowPhase::Tally
+        } else {
+            FlowPhase::Films
+        };
     }
     // The player closes the tally (Ok or Escape) before the film takes the screen.
-    if overlay.as_ref().is_some_and(|overlay| overlay.menu.is_some()) {
-        return;
-    }
-    // A tour run is checking the chain, not watching films: name the films and mark the transition
-    // done at once, so the next level loads.
-    if tour.as_ref().is_some_and(|tour| tour.active) {
-        for name in std::mem::take(&mut plan.cuts) {
-            println!("tour-live: film {name} skipped");
+    if plan.phase == FlowPhase::Tally {
+        if overlay.as_ref().is_some_and(|overlay| overlay.menu.is_some()) {
+            return;
         }
-        plan.films_done = true;
+        plan.phase = FlowPhase::Films;
+    }
+    if plan.phase != FlowPhase::Films {
         return;
     }
     // A film that is still running holds the queue. When it ends its resource is dropped **now** and
@@ -12962,7 +13033,7 @@ fn watch_level_complete(
     // transition.
     match film_step(&plan.cuts, playing.as_ref().map(|playing| playing.finished)) {
         FilmStep::Wait => {}
-        FilmStep::Done => plan.films_done = true,
+        FilmStep::Done => plan.phase = FlowPhase::Ready,
         FilmStep::DropFinished => commands.remove_resource::<cutscene::Cutscene>(),
         FilmStep::Play(name) => {
             plan.cuts.remove(0);
@@ -12996,30 +13067,43 @@ fn play_intro_films(
     capture: Option<Res<CaptureMode>>,
     overview: Option<Res<Overview>>,
     overlay: Option<Res<Overlay>>,
+    pending: Option<Res<PendingLevel>>,
     mut commands: Commands,
-    mut intro_playing: Local<bool>,
 ) {
     let Some(plan) = plan.as_mut() else { return };
+    // The level that owns the film is not loaded yet: starting it here would put the film on the
+    // old level, and the swap removes it. `swap_level` clears the request first.
+    if pending.as_ref().is_some_and(|pending| pending.0.is_some()) {
+        return;
+    }
     // A capture, a probe or a gate is not a play session: it wants the level, not a two-minute
     // film in front of it. Clearing the list says so once rather than on every frame.
     if capture.is_some_and(|c| c.0) || overview.is_some_and(|o| o.capture) {
         plan.pre.clear();
+        // Skip the intro film, but do not reset a completion that a capture is walking through:
+        // `--tour-live` is a capture run and still needs Complete -> Films -> Ready -> swap.
+        if plan.phase == FlowPhase::Intro {
+            plan.phase = FlowPhase::Playing;
+        }
+        return;
+    }
+    if plan.phase != FlowPhase::Intro {
         return;
     }
     // A running film holds the list. Only an intro film is *this* system's to retire: a transition
     // film belongs to `watch_level_complete`'s queue, and removing it here would fight the queue.
     if let Some(playing) = playing.as_ref() {
-        if !*intro_playing {
-            return;
-        }
         if !playing.finished {
             return;
         }
         commands.remove_resource::<cutscene::Cutscene>();
-        *intro_playing = false;
+        if plan.pre.is_empty() {
+            plan.phase = FlowPhase::Playing;
+        }
         return;
     }
     if plan.pre.is_empty() {
+        plan.phase = FlowPhase::Playing;
         return;
     }
     // Not at the boot menu: only a game that has been started plays its opening film. (A `--start`
@@ -13038,7 +13122,6 @@ fn play_intro_films(
                 plan.pre.len()
             );
             commands.insert_resource(played);
-            *intro_playing = true;
         }
         None => println!("cutscene: could not decode {}", file.display()),
     }
@@ -13046,29 +13129,25 @@ fn play_intro_films(
 /// When the film has played out, ask for the next level. The swap itself happens in
 /// [`swap_level`] so the reload does not run in the middle of another system's borrows.
 fn queue_next_level(
-    plan: Option<Res<FlowPlan>>,
+    mut plan: Option<ResMut<FlowPlan>>,
     sim: Option<Res<Sim>>,
     mut pending: ResMut<PendingLevel>,
-    mut asked: Local<bool>,
 ) {
-    let (Some(plan), Some(sim)) = (plan, sim) else { return };
-    // One transition request per level: the flag resets with the level, not with the process. It used
-    // to stay set after the first swap, so a campaign would stop after its second level.
+    let (Some(plan), Some(sim)) = (plan.as_mut(), sim) else { return };
     if !sim.world.borrow().level_complete {
-        *asked = false;
+        if plan.phase != FlowPhase::Intro {
+            plan.phase = FlowPhase::Playing;
+        }
         return;
     }
-    if *asked || !plan.swap {
+    if plan.phase != FlowPhase::Ready || !plan.swap {
         return;
     }
-    // The transition's films hold the level change: `watch_level_complete` sets `films_done` only
+    // The transition's films hold the level change: `watch_level_complete` reaches `Ready` only
     // when the queue and the running film are both finished, so a level that plays two films (the
     // campaign's decision) cannot swap halfway through.
-    if !plan.films_done {
-        return;
-    }
     let Some(next) = plan.next.clone() else { return };
-    *asked = true;
+    plan.phase = FlowPhase::Swapping;
     println!("level: loading {next}");
     pending.0 = Some(next);
 }
@@ -13151,7 +13230,11 @@ fn swap_level(world: &mut bevy::prelude::World) {
             .unwrap_or((Vec::new(), None));
         plan.cuts = cuts;
         plan.next = after;
-        plan.films_done = false;
+        plan.phase = if plan.pre.is_empty() {
+            FlowPhase::Playing
+        } else {
+            FlowPhase::Intro
+        };
     }
     // The same startup path, now that `World` holds the new level.
     // The film is over: give the screen back to the HUD of the level that just loaded. The
@@ -14712,11 +14795,7 @@ fn activate(
         // sets the level and starts gameplay without calling `jkSmack_SmackPlay`. `FlowPlan.pre`
         // is campaign-start-only here, so clear it before `play_intro_films` runs after the swap.
         if let Some(plan) = plan.as_deref_mut() {
-            plan.pre.clear();
-            plan.reset_inventory = true;
-            // The selected category owns the level's episode graph: CTF/training levels end
-            // through their own manifest, not the single-player campaign's.
-            plan.episode = Some(entry.episode.clone());
+            plan.begin_debug_level(entry.episode.clone());
         }
         overlay.history.clear();
         overlay.started = true;
@@ -14749,14 +14828,11 @@ fn activate(
             // all start over instead of resuming the world the menu was drawn over. New Game is the
             // campaign's first level, Restart is the one that is loaded.
             let Some(plan) = plan else { return };
-            let level = if step == nav::Step::NewGame { plan.first.clone() } else { plan.level.clone() };
-            // `jk_loadFile` (New Game) sets `DAT_00549fa0`; `jk_MissionReload` (Restart) does not.
-            // New Game also starts the episode from its first row, so the opening film is queued
-            // again even when this is a return to the main menu after an earlier campaign.
-            if step == nav::Step::NewGame {
-                plan.reset_inventory = true;
-                plan.pre = plan.opening.clone();
-            }
+            let level = if step == nav::Step::NewGame {
+                plan.begin_new_game()
+            } else {
+                plan.restart_level()
+            };
             overlay.history.clear();
             overlay.started = true;
             overlay.show(None, 0);
@@ -27588,7 +27664,47 @@ mod audio_tests {
 
 #[cfg(test)]
 mod transition_tests {
-    use super::{FilmStep, film_step};
+    use super::{FilmStep, FlowPhase, FlowPlan, film_step};
+    use std::path::PathBuf;
+
+    fn plan() -> FlowPlan {
+        FlowPlan {
+            game: PathBuf::new(),
+            level: "01narshadda.jkl".into(),
+            first: "01narshadda.jkl".into(),
+            cuts: Vec::new(),
+            pre: Vec::new(),
+            opening: vec!["03-04a.smk".into()],
+            next: None,
+            episode: None,
+            phase: FlowPhase::Playing,
+            reset_inventory: false,
+            swap: true,
+        }
+    }
+
+    /// The transition state lives on the resource, not in `Local`s: a New Game queues the opening
+    /// film, a Restart clears it, and neither leaves the previous level's phase behind.
+    #[test]
+    fn start_modes_set_the_transition_phase() {
+        let mut plan = plan();
+        assert_eq!(plan.begin_new_game(), "01narshadda.jkl");
+        assert_eq!(plan.phase, FlowPhase::Intro);
+        assert_eq!(plan.pre, vec!["03-04a.smk".to_string()]);
+        assert!(plan.reset_inventory);
+
+        plan.phase = FlowPhase::Ready;
+        plan.pre = vec!["38a.smk".into()];
+        assert_eq!(plan.restart_level(), "01narshadda.jkl");
+        assert_eq!(plan.phase, FlowPhase::Swapping);
+        assert!(plan.pre.is_empty());
+
+        // A build without an opening film still starts in Playing, not Intro.
+        plan.opening.clear();
+        plan.phase = FlowPhase::Ready;
+        plan.begin_new_game();
+        assert_eq!(plan.phase, FlowPhase::Playing);
+    }
 
     /// The two-film transition (the campaign's decision): a queued film is started, a running one
     /// waited on, a finished one dropped first, and `Done` only once nothing is left — which is the

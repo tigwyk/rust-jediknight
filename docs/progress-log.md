@@ -6092,3 +6092,19 @@ the actor systems without panic.
 
 The dead actor-steering cache (`Runtime::portals`, `best_portal`, and the per-load portal list) was
 also removed; `Collision::route` still walks the collision record's own adjoins.
+
+### Round 421: the level transition is one state
+
+`FlowPlan.phase` is now the one state advanced by the completion, tally, film, tour, and swap
+inputs; the five systems' `Local` flags are gone. New Game sets `Intro` and queues the opening film,
+Restart and a debug pick set `Swapping` until their level loads, the tally waits in `Tally`, the film
+queue ends in `Ready`, and the swap request moves to `Swapping`. A capture run skips only an `Intro`,
+so it no longer rewinds a completion it is walking through. An intro waits while a level swap is
+pending, and the swap preserves `Intro` when the arrival has an opening film; Restart and debug picks
+sit in `Swapping` until the new level is loaded, so they cannot re-finish the old one. The start modes
+are a small `FlowPlan` API, and the tour's count/last/finished now live on its resource instead of
+three `Local`s, and the timer's seen/waited/done live on `CompletionTimer` instead of three more.
+
+Measured: `cargo test` **281 passed, 0 failed** (a start-mode phase test was added);
+`--tour-live` walked **21 levels**, all swapped, and ended at `21ajerec.jkl` with
+`--- tour-live check passed ---`.
