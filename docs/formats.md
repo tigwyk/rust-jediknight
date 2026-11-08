@@ -1088,13 +1088,14 @@ after attaching to the live runtime instead:
 
 ```text
 ai: 3 shot(s) at the player
-ai: 3 actor step(s) held out of the geometry
+ai: actor 85 step held out of the geometry
 ```
 
-**The chase now respects walls.** `ai_tick` has no collider (the runtime is level-agnostic), so it
-walks in a straight line - `.ai` gives sight and speed, not a path. It now hands the actors it moved
-back through `Runtime::walked`, and `ai_shots` resolves each of them against the level's planes and
-floor before they are drawn. `--ai` asserts the mechanism on a body shoved 0.4 units into a wall:
+**The chase now respects walls.** `ai_tick` has no collider, so it walks in a straight line - `.ai`
+gives sight and speed, not a path. It keeps the actors it moved in the private `Runtime::walked` list;
+`Runtime::settle_walked` resolves each of them against the level's planes and floor before they are
+drawn, and `ai_shots` hands it the `Collision` geometry after the tick. `--ai` asserts the mechanism
+on a body shoved 0.4 units into a wall:
 
 ```text
 ai: a body 0.4 inside a wall is pushed 6.72 back out
@@ -2906,8 +2907,8 @@ The port has no physics velocity: `ai_tick` moves an actor by writing its positi
 `Runtime::walk_vel` records the velocity each actor walked at (`(next - from) / dt`), and
 `locomotion_state` applies the same axis-and-threshold rule to it. A renderer-side
 displacement was tried first and is wrong — the sim ticks and the render frames do not line
-up (a 0.33 u/s walk measured 3.6 u/s), and `ai_shots` re-seats an actor that ends up inside
-a wall, a push the `--ai` gate reports at 6.7 units, which reads as a sprint sideways. A
+up (a 0.33 u/s walk measured 3.6 u/s), and `Runtime::settle_walked` re-seats an actor that ends
+up inside a wall, a push the `--ai` gate reports at 6.7 units, which reads as a sprint sideways. A
 script's `PlayKey` still overrides the choice, and a dead actor plays `death` once and holds
 the last frame. A state change restarts the clip, which is `sithPuppet_PlayMode` clearing
 `animStartedMs`.

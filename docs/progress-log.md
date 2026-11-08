@@ -6125,3 +6125,23 @@ once, calls it, and applies the engine's pull-in if it got a focus. `--controls`
 Measured: `cargo test` **287 passed, 0 failed** (six camera-placement tests added);
 `--controls`, `--camera`, and `--camera-pull` all pass; a live `BK_CHASE=1 --start 01narshadda`
 run kept the third-person camera and the actor systems up without a panic.
+
+### Round 423: ThingMotion reports what changed
+
+`Runtime::step` now returns `ThingMotion { moved, turned, blocked, arrived }` instead of a bare
+list. A pure `angvel` prop is reported in `turned`, so `advance_sim` no longer re-borrows the runtime
+and scans every thing for `rot_vel`; it redraws the union of moved and turned, and the report line
+uses either list. The blocked/arrived events the step already queued ride out on the same value.
+
+The AI's post-walk resolve moved to `Runtime::settle_walked`, called by `ai_shots` after `ai_tick`
+with the `Collision` geometry. The frame path no longer holds a copy of `resolve_stepped`/`support`,
+and `Runtime::walked` is private scratch again; the `--ai` diagnostic still queries the geometry
+directly to prove the wall push. `arrived` is now collected after the motion loop, so the returned
+event belongs to the step that produced it rather than the next one.
+
+Not yet one floor rule or one step for the player: `settle_walked` still uses `support`, and
+`Runtime::step`'s actor grounding still uses `floor_surface`; the walker still owns the player. Those
+are the remaining halves of candidate 05.
+
+Measured: `cargo test` **290 passed, 0 failed** (rotation-only, same-step arrival, and settle tests
+added).

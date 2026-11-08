@@ -12060,8 +12060,8 @@ fn main() {
                     "GetGoalFrame did not report the destination the piece is moving to"
                 );
                 for _ in 0..180 {
-                    let moved = handle.borrow_mut().step(1.0 / 60.0);
-                    if moved.is_empty() {
+                    let motion = handle.borrow_mut().step(1.0 / 60.0);
+                    if motion.moved.is_empty() {
                         break;
                     }
                 }
@@ -15759,7 +15759,7 @@ fn run_level(
     let mut steps = 0usize;
     let mut last_moved = 0usize;
     for _ in 0..60 {
-        let moved = world.borrow_mut().step(1.0 / 60.0).len();
+        let moved = world.borrow_mut().step(1.0 / 60.0).moved.len();
         steps += 1;
         last_moved = last_moved.max(moved);
     }
@@ -24568,7 +24568,6 @@ fn ai_shots(capture: Option<Res<CaptureDt>>,
     let (Some(sim), Some(player)) = (sim, player) else { return };
     let dt = sim_dt(&time, capture.as_deref());
     let mut rt = sim.world.borrow_mut();
-    let mut adjusted = 0usize;
     let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer"))
     else {
         return;
@@ -24577,35 +24576,11 @@ fn ai_shots(capture: Option<Res<CaptureDt>>,
     let eye = player.pos;
     rt.things[index].pos = [eye.x, eye.y, eye.z];
     let fired = rt.ai_tick(index, dt);
+    if let Some(collisions) = collisions.as_deref() {
+        rt.settle_walked(&collisions.0);
+    }
     if fired > 0 {
         println!("ai: {fired} shot(s) at the player");
-    }
-    // The chase walks in a straight line, because the runtime has no collider: `.ai` gives sight and
-    // speed, not a path. Put the actors the tick moved back on their feet and out of the walls
-    // before they are drawn, which is the minimum that stops them strolling through bulkheads.
-    let walked = rt.walked.clone();
-    if let Some(collisions) = collisions.as_deref() {
-        let solids = &collisions.0;
-        for actor in walked {
-            let Some(thing) = rt.things.get(actor) else { continue };
-            let (pos, sector) = (thing.pos, thing.sector.max(0) as usize);
-            let (resolved, _) = solids.resolve_stepped(sector, pos, 0.5);
-            let mut next = [resolved[0], resolved[1], pos[2]];
-            // Back onto the floor it is standing over, so a chase over rubble does not sink.
-            if let Some(floor) = solids.support(next, 0.5, 0.6) {
-                next[2] = floor + 0.5;
-            }
-            if let Some(thing) = rt.things.get_mut(actor) {
-                let moved = (next[0] - pos[0]).abs() + (next[1] - pos[1]).abs();
-                thing.pos = next;
-                if moved > 0.01 {
-                    adjusted += 1;
-                }
-            }
-        }
-    }
-    if adjusted > 0 && std::env::var_os("BK_AI_TRACE").is_some() {
-        println!("ai: {adjusted} actor step(s) held out of the geometry");
     }
 }
 
@@ -26667,19 +26642,23 @@ struct Deliver(bool);
 /// Step the scripts' world and push the moved things' poses into the renderer.
 fn advance_sim(capture: Option<Res<CaptureDt>>, time: Res<Time>, sim: Option<ResMut<Sim>>, mut drawn: Query<&mut Transform>) {
     let Some(mut sim) = sim else { return };
-    let moved = sim.world.borrow_mut().step(sim_dt(&time, capture.as_deref()));
+    let motion = sim.world.borrow_mut().step(sim_dt(&time, capture.as_deref()));
     // The thing's **whole** pose, in the engine's own basis: `thing_quat` is what `spawn` uses, and
     // `from_rotation_z(-yaw)` (this path's original form) is that basis with the yaw negated, so a
     // moved door or lift was drawn mirrored about its facing. A placed thing that spins (`angvel=`
-    // from its template) turns without translating, so `step`'s `moved` list never names it; the
-    // angular-velocity scan below picks those up. Actors are `actors_follow_runtime`'s, and the local
-    // player's pose is the walker's.
+    // from its template) turns without translating; `ThingMotion::turned` names it so this system
+    // no longer re-borrows the runtime and scans every thing's angular velocity.
+    let first = motion.moved.first().or_else(|| motion.turned.first()).copied();
+    let mut changed = motion.moved;
+    changed.extend(motion.turned);
+    changed.sort_unstable();
+    changed.dedup();
     let poses: Vec<(usize, Transform)> = {
         let w = sim.world.borrow();
         w.things
             .iter()
             .enumerate()
-            .filter(|(i, t)| moved.contains(i) || t.rot_vel != [0.0; 3])
+            .filter(|(i, _)| changed.binary_search(i).is_ok())
             .map(|(i, t)| {
                 (
                     i,
@@ -26706,9 +26685,10 @@ fn advance_sim(capture: Option<Res<CaptureDt>>, time: Res<Time>, sim: Option<Res
     // Once a second, say what the renderer is actually showing for one moving thing:
     // the entity's own transform, not the runtime's copy of the position.
     sim.elapsed += sim_dt(&time, capture.as_deref());
-    if !moved.is_empty() && (sim.reported == 0.0 || sim.elapsed - sim.reported >= 1.0) {
+    if let Some(i) = first
+        && (sim.reported == 0.0 || sim.elapsed - sim.reported >= 1.0)
+    {
         sim.reported = sim.elapsed;
-        let i = moved[0];
         if let Some(shown) = sim.entities.get(&i).and_then(|e| e.first()).copied() {
             if let Ok(tf) = drawn.get_mut(shown) {
                 let want = {

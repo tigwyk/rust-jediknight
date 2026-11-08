@@ -890,6 +890,20 @@ fn hearable(from: [f32; 3], forward: [f32; 2], pos: [f32; 3], heardist: f32, blo
         && (forward[0] * dx + forward[1] * dy) / reach > AI_LISTEN_FRONT_DOT
 }
 
+/// One physics step's pose changes and events.
+///
+/// `moved` and `turned` are the things whose transform changed. `turned` names a thing whose
+/// angular velocity is nonzero this step; it may also be in `moved`, and a thing that only turns
+/// is never in `moved`. `blocked` and `arrived` are the messages the step already queued for
+/// scripts.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ThingMotion {
+    pub moved: Vec<usize>,
+    pub turned: Vec<usize>,
+    pub blocked: Vec<usize>,
+    pub arrived: Vec<usize>,
+}
+
 pub struct Runtime {
     pub things: Vec<ThingState>,
     /// Template name per thing, for `GetThingTemplate`.
@@ -1100,10 +1114,8 @@ pub struct Runtime {
     pub sector_links: Vec<(usize, i32, usize)>,
 
 
-    /// The actors that walked on the last `ai_tick`, so the caller can put them back on the floor
-    /// and out of walls: `ai_tick` has no collider (the runtime is level-agnostic), and this is the
-    /// hand-off to the system that does.
-    pub walked: Vec<usize>,
+    /// The actors that walked on the last `ai_tick`; `settle_walked` consumes the list.
+    walked: Vec<usize>,
     /// The velocity each of those actors walked at, in world units per second: `(x, y)`. This is
     /// the port's `physicsParams.vel` for an actor — `sithPuppet_UpdateThingMove` transforms it
     /// into the thing's own frame to choose `stand`/`walk`/`run`/`walkback`/`strafe*`, and nothing
@@ -2573,10 +2585,14 @@ impl Runtime {
         }
     }
 
-    /// Advance every moving thing. Returns the indices that moved, so a renderer can
+    /// Advance every moving thing, returning the pose changes and queued events.
+    ///
+    /// `ThingMotion::moved` and `ThingMotion::turned` name every thing whose transform changed;
+    /// `blocked` and `arrived` are the script events this step already queued. A renderer can
     /// rewrite just those transforms instead of the whole level's.
-    pub fn step(&mut self, dt: f32) -> Vec<usize> {
+    pub fn step(&mut self, dt: f32) -> ThingMotion {
         let mut moved = Vec::new();
+        let mut turned = Vec::new();
         self.time += dt;
         // `PlayKey` on a **thing** (a script camera's `MAcamera.key`) moves its pose: the key's single
         // node carries the dolly, relative to the pose the key started from. Level 14's opening key walks
@@ -2717,22 +2733,6 @@ impl Runtime {
                     moved.push(index);
                 }
             }
-        }        // A frame path that reaches its target sends `arrived` to the cogs linked to that thing.
-        // `ThingState::step` sets the flag; clearing it here keeps each arrival one message.
-        let arrived: Vec<usize> = self
-            .things
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.arrived)
-            .map(|(i, _)| i)
-            .collect();
-        for index in arrived {
-            if let Some(thing) = self.things.get_mut(index) {
-                thing.arrived = false;
-            }
-            for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "arrived", [0.0; 2], None));
-            }
         }
         // `SetThingPulse`: a thing's own timer messages its script slots with `pulse` every interval.
         let pulsing: Vec<usize> = self
@@ -2857,7 +2857,11 @@ impl Runtime {
             if Some(i) == player_at {
                 // Path moves still run — a script can walk the player along frames — but the body's
                 // velocity is the walker's to integrate, and `t.vel` is left for it to consume.
+                let rotating = t.rot_vel != [0.0; 3];
                 let _ = t.step(dt);
+                if rotating {
+                    turned.push(i);
+                }
                 continue;
             }
             // `sithPhysics_UpdateThingPhysics`'s gravity arm (`0x4f6270`): a body whose **mass** is not
@@ -2914,6 +2918,9 @@ impl Runtime {
                 }
             }
             let path_moved = t.step(dt);
+            if t.rot_vel != [0.0; 3] {
+                turned.push(i);
+            }
             // A thing that runs into the level stops and sends `blocked`; nothing here moves a
             // projectile out of the world (the renderer's own bounds test removes those).
             if let Some(solids) = &self.solids
@@ -3041,8 +3048,8 @@ impl Runtime {
                 }
             }
         }
-        for index in blocked {
-            for instance in self.thing_instances(index) {
+        for index in &blocked {
+            for instance in self.thing_instances(*index) {
                 self.pending_messages.push((instance, "blocked", [0.0; 2], None));
             }
         }
@@ -3074,14 +3081,40 @@ impl Runtime {
             if !moved.contains(&index) {
                 moved.push(index);
             }
+            if !turned.contains(&index) {
+                turned.push(index);
+            }
         }
         // Attached things follow their parent: `sithThing_AttachThingToThing` stores the offset in the
         // parent's own frame (`rdMatrix_TransformVectorOrtho34` into `field_4C`), and the parent's
         // motion carries the child from there. A crate riding a lift and a catwalk hanging off a ship
         // are both this, and so is the sphere `force_absorb.cog` hangs on the player.
+        // A frame path that reaches its target sends `arrived` to the cogs linked to that thing.
+        // The flags were set by the motion loop above; collecting them here returns this step's
+        // arrivals instead of the previous step's.
+        let arrived: Vec<usize> = self
+            .things
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.arrived)
+            .map(|(i, _)| i)
+            .collect();
+        for index in &arrived {
+            if let Some(thing) = self.things.get_mut(*index) {
+                thing.arrived = false;
+            }
+            for instance in self.thing_instances(*index) {
+                self.pending_messages.push((instance, "arrived", [0.0; 2], None));
+            }
+        }
         self.update_attachments(&mut moved);
         self.things_moved += moved.len();
-        moved
+        ThingMotion {
+            moved,
+            turned,
+            blocked,
+            arrived,
+        }
     }
 
     /// Place every attached thing at `parent.position + parent.rotation * offset`, and carry the
@@ -4257,7 +4290,6 @@ impl Runtime {
             });
         }
         let mut fired = 0;
-        let mut walked = 0;
         self.walked.clear();
         self.walk_vel.clear();
         let mut shots: Vec<(usize, String, f32)> = Vec::new();
@@ -4983,7 +5015,6 @@ impl Runtime {
                         thing.yaw =
                             turn_toward(thing.yaw, away[1].atan2(away[0]).to_degrees(), turn_rate, dt);
                     }
-                    walked += 1;
                     self.walked.push(index);
                     let dt = dt.max(1e-4);
                     self.walk_vel
@@ -5205,7 +5236,6 @@ impl Runtime {
                 if facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4 {
                     want_yaw = facing.1.atan2(facing.0).to_degrees();
                 }
-                walked += 1;
                 self.walked.push(index);
                 // A waypoint is a doorway centre the route search found: reaching it pops the list so
                 // the next frame aims at the one after, and an empty list hands the goal back to the
@@ -5567,8 +5597,29 @@ impl Runtime {
         for index in contacts {
             self.emit_ai_event(index, 4, Some(player));
         }
-        let _ = walked;
         fired
+    }
+
+    /// Put the actors `ai_tick` walked back on their feet and out of the walls: the runtime's own
+    /// `resolve_stepped`/`support`, not a second copy in the app. The caller runs this after
+    /// `ai_tick`; keeping it out of the tick leaves the AI's own ledge test unchanged.
+    pub fn settle_walked(&mut self, solids: &crate::collide::Solids) {
+        for actor in std::mem::take(&mut self.walked) {
+            let Some(thing) = self.things.get(actor) else { continue };
+            let (pos, sector) = (thing.pos, thing.sector.max(0) as usize);
+            let (resolved, _) = solids.resolve_stepped(sector, pos, 0.5);
+            let mut next = [resolved[0], resolved[1], pos[2]];
+            if let Some(floor) = solids.support(next, 0.5, 0.6) {
+                next[2] = floor + 0.5;
+            }
+            if let Some(thing) = self.things.get_mut(actor) {
+                let moved = (next[0] - pos[0]).abs() + (next[1] - pos[1]).abs();
+                thing.pos = next;
+                if moved > 0.01 && std::env::var_os("BK_AI_TRACE").is_some() {
+                    println!("ai: actor {actor} step held out of the geometry");
+                }
+            }
+        }
     }
 
     /// `sithWeapon_Update`'s decay, one step's worth: damage falls by `rate * dt`, floored
@@ -13066,6 +13117,89 @@ mod tests {
         // collision sweep, and a prop that only turns must not run it.
         let _ = rt.things[0].step(1.0);
         assert!((rt.things[0].yaw - 90.0).abs() < 1e-4, "yaw {} after one second", rt.things[0].yaw);
+    }
+
+    #[test]
+    fn a_pure_spin_is_reported_as_turned_not_moved() {
+        let mut level = Level::default();
+        level.templates.push(crate::jkl::Template {
+            name: "fan1".into(),
+            base: None,
+            params: vec![("angvel".into(), "(0.000000/90.000000/0.000000)".into())],
+            model3d: Some("fan1.3do".into()),
+            sprite: None,
+        });
+        level.things.push(crate::jkl::Thing {
+            template: "fan1".into(),
+            pos: [0.0; 3],
+            pitch: 0.0,
+            yaw: 0.0,
+            roll: 0.0,
+            sector: 0,
+            flags: 0,
+            frames: Vec::new(),
+            vel: [0.0; 3],
+        });
+        let mut rt = Runtime::new(&level);
+        let motion = rt.step(1.0);
+        assert_eq!(motion.turned, vec![0], "a spinning prop was not reported as turned");
+        assert!(!motion.moved.contains(&0), "a pure spin was reported as a translation");
+        assert!((rt.things[0].yaw - 90.0).abs() < 1e-4, "yaw {} after one second", rt.things[0].yaw);
+    }
+
+    #[test]
+    fn a_frame_path_reports_its_arrival() {
+        let mut rt = door_runtime();
+        // The local player's path move is the walker's; use a door so `step` owns the pose.
+        rt.templates = vec!["door1".into()];
+        rt.thing_links = vec![(5, 0, 0)];
+        rt.things[0].target = Some((1.0, 10.0));
+        let motion = rt.step(0.2);
+        assert_eq!(motion.arrived, vec![0], "the arriving thing was not reported");
+        assert!(motion.moved.contains(&0), "the path move was not reported");
+        assert!(
+            rt.pending_messages
+                .iter()
+                .any(|(instance, label, _, _)| *instance == 5 && *label == "arrived"),
+            "the arrival was not queued for the linked cog: {:?}",
+            rt.pending_messages
+        );
+        assert_eq!(rt.things[0].frame, 1.0);
+        assert_eq!(rt.things[0].target, None);
+        let next = rt.step(0.2);
+        assert!(next.arrived.is_empty(), "the arrival was reported twice");
+        assert_eq!(
+            rt.pending_messages
+                .iter()
+                .filter(|(_, label, _, _)| *label == "arrived")
+                .count(),
+            1,
+            "the arrival was queued twice"
+        );
+    }
+
+    #[test]
+    fn settle_walked_moves_an_actor_out_of_the_geometry() {
+        let mut rt = door_runtime();
+        rt.things[0].sector = 0;
+        rt.things[0].pos = [0.0, 0.0, 0.2];
+        rt.walked = vec![0];
+        let plane = crate::collide::Plane {
+            normal: [1.0, 0.0, 0.0],
+            point: [0.0; 3],
+            surface: 1,
+        };
+        let solids = crate::collide::Solids {
+            sectors: vec![vec![plane]],
+            ..Default::default()
+        };
+        rt.settle_walked(&solids);
+        assert!(
+            (rt.things[0].pos[0] - 0.2).abs() > 0.1,
+            "the actor stayed inside the plane: {:?}",
+            rt.things[0].pos
+        );
+        assert!(rt.walked.is_empty(), "the settled actors were left in the list");
     }
 
     /// A lit saber is the block's own gate: with the blade on, the range falloff, the darkness term
