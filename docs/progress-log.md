@@ -6108,3 +6108,20 @@ three `Local`s, and the timer's seen/waited/done live on `CompletionTimer` inste
 Measured: `cargo test` **281 passed, 0 failed** (a start-mode phase test was added);
 `--tour-live` walked **21 levels**, all swapped, and ended at `21ajerec.jkl` with
 `--- tour-live check passed ---`.
+
+### Round 422: one camera placement, one third-person mode
+
+`player.third_person` and `Chase::on` are one `CameraMode` (`Chase::mode`); `V` and its old `C` alias
+flip it, and the runtime's `saber_cam` is its script-visible mirror. The old 0.66-unit
+`third_person_view` path is gone, so first person and the chase camera cannot disagree and the body
+visibility check reads the same value.
+
+`camera_placement` is the one pure placement: body eye, mode, boom, scripted focus, `SetPOVShake`,
+and a capture's `--shot-at`. It returns the eye, look, and the focus a third-person `camera_pull`
+starts from; a shot is never boomed or pulled. `walk_player` now reads the runtime focus and shake
+once, calls it, and applies the engine's pull-in if it got a focus. `--controls`, `--camera`,
+`--camera-pull`, and the live walker all use it.
+
+Measured: `cargo test` **287 passed, 0 failed** (six camera-placement tests added);
+`--controls`, `--camera`, and `--camera-pull` all pass; a live `BK_CHASE=1 --start 01narshadda`
+run kept the third-person camera and the actor systems up without a panic.

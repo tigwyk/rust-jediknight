@@ -900,9 +900,8 @@ The camera is no longer a design choice: every number below came out of `JK.EXE`
   units (`BK_CHASE_DIST`), toggled with `V` and started on with `BK_CHASE=1`; `--camera-pull`
   casts sixteen directions from level 1's largest sector and asserts every pulled camera is
   nearer than the boom, and that a `1e-4` boom is returned exactly where it was asked.
-  (`C`, seeded by `BK_THIRD_PERSON`, still selects an earlier 0.66-unit `third_person_view` boom
-  with no body, which `--controls` asserts; the `V` chase is the one the camera pull-in and the
-  drawn body belong to.)
+  (`C` is now only an alias for the same `CameraMode`; both keys use
+  `camera_placement`, and the chase's pull-in and the drawn body belong to that one state.)
 - **The body in that view is an actor, not a special case.** `spawn_models` spawns the local
   `walkplayer` like every other thing — `ky.3do` in per-material parts, `ky.pup` driving it —
   and `animate_actors` gives it the same `stand`/`walk`/`run`/`fire`/`death` states the NPCs get

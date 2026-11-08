@@ -8268,23 +8268,69 @@ fn main() {
         );
         assert!((pitch - limits.1).abs() < 1e-3, "the pitch clamp is not the template limit");
 
-        // Third person stands the camera behind the look axis at the engine's follow height (0.2 above
-        // the body) and aims it at the body's eye.
-        let boom = third_person_boom();
-        let (eye3, target3) = third_person_view(Vec3::new(1.0, 2.0, 3.0), 0.0, 0.0, boom);
-        let behind = eye3 - target3;
-        println!(
-            "controls: third person puts the eye {:.2} u behind and {:.2} u above the body, boom {boom:.2}",
-            -behind.dot(Vec3::Y),
-            eye3.z - target3.z
+        // Third person is one placement: a boom behind the look axis from the body's eye, and the
+        // focus the caller sweeps for the pull-in.
+        let body = Vec3::new(1.0, 2.0, 3.0);
+        let boom = 3.0;
+        let pose = camera_placement(
+            body,
+            PLAYER_EYE,
+            0.0,
+            0.0,
+            CameraMode::ThirdPerson,
+            boom,
+            None,
+            CameraShake::default(),
+            None,
         );
-        assert!((eye3.z - (3.0 + THIRD_PERSON_UP)).abs() < 1e-5, "third person is not at the follow height ({})", eye3.z);
-        assert!((target3.z - (3.0 + PLAYER_EYE)).abs() < 1e-5, "third person does not aim at the eye");
-        assert!(behind.dot(Vec3::Y) < 0.0, "the third-person eye is in front of the body");
-        assert!((Vec3::new(behind.x, behind.y, 0.0).length() - boom).abs() < 1e-4, "the boom is not the boom");
-        let (eye_side, _) = third_person_view(Vec3::ZERO, std::f32::consts::FRAC_PI_2, 0.0, boom);
+        let focus = body + Vec3::Z * PLAYER_EYE;
+        let behind = focus - pose.eye;
+        println!(
+            "controls: third person puts the eye {:.2} u behind the eye, boom {boom:.2}",
+            behind.length()
+        );
+        assert!((pose.eye.z - focus.z).abs() < 1e-5, "third person is not at the eye height ({})", pose.eye.z);
+        assert!((behind.length() - boom).abs() < 1e-4, "the boom is not the boom");
+        assert!(behind.dot(Vec3::Y) > 0.0, "the third-person eye is in front of the body");
+        assert_eq!(pose.pull_focus, Some(focus));
+        let side = camera_placement(
+            Vec3::ZERO,
+            PLAYER_EYE,
+            std::f32::consts::FRAC_PI_2,
+            0.0,
+            CameraMode::ThirdPerson,
+            boom,
+            None,
+            CameraShake::default(),
+            None,
+        );
         // Yaw 90 looks along -X (`yaw_axes` gives `(-sin, cos)`), so the eye belongs at +X.
-        assert!(eye_side.x > boom * 0.99, "yaw 90 does not put the eye behind the -X look axis ({eye_side})");
+        assert!(side.eye.x > boom * 0.99, "yaw 90 does not put the eye behind the -X look axis ({})", side.eye);
+        // A scripted camera replaces the body eye, shake moves it, and the boom starts from the
+        // shaken focus rather than the body.
+        let scripted = camera_placement(
+            body,
+            PLAYER_EYE,
+            0.0,
+            0.0,
+            CameraMode::ThirdPerson,
+            boom,
+            Some(CameraFocus {
+                pos: Vec3::new(4.0, 5.0, 6.0),
+                yaw: 0.0,
+                pitch: 0.0,
+            }),
+            CameraShake {
+                offset: Vec3::Z * 0.1,
+                angles: Vec3::ZERO,
+            },
+            None,
+        );
+        let focus = Vec3::new(4.0, 5.0, 6.1);
+        assert!((scripted.eye - (focus - Vec3::Y * boom)).length() < 1e-6);
+        assert!((scripted.look - Vec3::Y).length() < 1e-6);
+        assert_eq!(scripted.pull_focus, Some(focus));
+        println!("controls: scripted focus and shake feed the same third-person boom");
         // Vertical look is **modern**: a screen-signed delta with y down looks down. The env override
         // restores retail's inverted sense, and both directions are asserted so the sign cannot flip.
 
@@ -10288,6 +10334,27 @@ fn main() {
         println!(
             "camera: slots and shake: focus 3 -> thing {other} reads back, a focus on the player is POV, and a shot's kick (1 deg, 80 deg/s) decays to 0.6 in 5 ms and to nothing in a second"
         );
+        // The same placement the walker uses: a capture's shot wins over the third-person boom and
+        // leaves no pull focus.
+        let shot = camera_placement(
+            Vec3::ZERO,
+            PLAYER_EYE,
+            0.0,
+            0.0,
+            CameraMode::ThirdPerson,
+            3.0,
+            None,
+            CameraShake::default(),
+            Some(CameraFocus {
+                pos: Vec3::new(7.0, 8.0, 9.0),
+                yaw: -std::f32::consts::FRAC_PI_2,
+                pitch: 0.0,
+            }),
+        );
+        assert!((shot.eye - Vec3::new(7.0, 8.0, 9.0)).length() < 1e-6);
+        assert!((shot.look - Vec3::X).length() < 1e-6);
+        assert_eq!(shot.pull_focus, None);
+        println!("camera: placement lets a shot override the third-person boom");
         println!("--- camera check passed ---");
         return;
     }
@@ -13253,8 +13320,7 @@ fn swap_level(world: &mut bevy::prelude::World) {
         .find(|t| t.template.eq_ignore_ascii_case("walkplayer"))
         .map(|t| (Vec3::from(t.pos) + Vec3::Z * PLAYER_EYE, t.yaw.to_radians()));
     if let Some((eye, yaw)) = eye {
-        let (yaw_f, _) = yaw_axes(yaw);
-    let aim = Vec3::new(yaw_f[0], yaw_f[1], 0.0);
+        let aim = camera_aim(yaw, 0.0);
         let mut cameras = world.query_filtered::<&mut Transform, (With<Camera3d>, Without<OverlayQuad>)>();
         if let Ok(mut transform) = cameras.single_mut(world) {
             *transform = Transform::from_translation(eye).looking_at(eye + aim, Vec3::Z);
@@ -14518,17 +14584,14 @@ fn ui_input(
     // `V`: third person. The boom is `Chase::length` behind the eye and `collide::camera_pull`
     // shortens it to whatever is in the way — the engine's own third-person behaviour, which retail
     // reaches through `sithCamera_CycleCamera`.
-    if overlay.menu.is_none() && keys.just_pressed(KeyCode::KeyV) {
-        chase.on = !chase.on;
-        // `jkGetSaberCam()` answers the engine's own saber-camera flag, and the camera scripts
-        // (`17b_camera.cog`, `20b_camera.cog`, the `*_rahnlines` set) branch on it to `CycleCamera()`
-        // out of the cutscene camera into the external one. In this build that is this toggle.
-        if let Some(sim) = sim.as_deref() {
-            sim.world.borrow_mut().saber_cam = i32::from(chase.on);
-        }
+    if !overview.as_ref().is_some_and(|overview| overview.capture)
+        && overlay.menu.is_none()
+        && (keys.just_pressed(KeyCode::KeyV) || keys.just_pressed(KeyCode::KeyC))
+    {
+        chase.toggle();
         println!(
             "camera: {} person",
-            if chase.on { "third" } else { "first" }
+            if chase.third_person() { "third" } else { "first" }
         );
     }    // `M`: the field log and its map panel, which `refresh_overlay` now fills from the live level.
     if overlay.menu.is_none() && overlay.started && keys.just_pressed(KeyCode::KeyM) {
@@ -16303,8 +16366,21 @@ fn camera_pull_check(gobs: &gob::GobSet) {
     let (mut pulled, mut free) = (0usize, 0usize);
     for step in 0..16 {
         let angle = std::f32::consts::TAU * step as f32 / 16.0;
-        let dir = [angle.cos(), angle.sin(), 0.0];
-        let want = [eye[0] + dir[0] * boom, eye[1] + dir[1] * boom, eye[2] + dir[2] * boom];
+        // Yaw is measured from -X (`yaw_axes` gives `(-sin, cos)`), so this is the old `(cos, sin)`
+        // direction as a placement, not a second boom formula.
+        let pose = camera_placement(
+            Vec3::from(eye),
+            0.0,
+            angle + std::f32::consts::FRAC_PI_2,
+            0.0,
+            CameraMode::ThirdPerson,
+            boom,
+            None,
+            CameraShake::default(),
+            None,
+        );
+        let want = pose.eye.to_array();
+        assert_eq!(pose.pull_focus, Some(Vec3::from(eye)));
         let (got, hit) = solids.camera_pull(sector, eye, want, radius);
         let reach = ((got[0] - eye[0]).powi(2) + (got[1] - eye[1]).powi(2) + (got[2] - eye[2]).powi(2)).sqrt();
         match hit {
@@ -16326,9 +16402,19 @@ fn camera_pull_check(gobs: &gob::GobSet) {
     // a long boom in an enclosed room never exercises.
     for step in 0..8 {
         let angle = std::f32::consts::TAU * step as f32 / 8.0;
-        let dir = [angle.cos(), angle.sin(), 0.0];
         let short = 1e-4f32;
-        let want = [eye[0] + dir[0] * short, eye[1] + dir[1] * short, eye[2]];
+        let pose = camera_placement(
+            Vec3::from(eye),
+            0.0,
+            angle + std::f32::consts::FRAC_PI_2,
+            0.0,
+            CameraMode::ThirdPerson,
+            short,
+            None,
+            CameraShake::default(),
+            None,
+        );
+        let want = pose.eye.to_array();
         let (got, hit) = solids.camera_pull(sector, eye, want, radius);
         assert!(hit.is_none(), "a {short} boom hit something");
         assert!(
@@ -23174,7 +23260,7 @@ fn draw_player_body(
     };
     // Under 0.6 the boom has pulled the camera inside him, where `cull_mode: None` shows his insides;
     // retail never meets this because it draws no local body at all.
-    let shown = chase.on
+    let shown = chase.third_person()
         && cam
             .iter()
             .next()
@@ -25089,7 +25175,7 @@ fn setup(
     // axis; fall back to looking at the level centre when the level has no player.
     let yaw = player.map(|t| t.yaw.to_radians());
     let mut aim = yaw
-        .map(|y| { let (f, _) = yaw_axes(y); Vec3::new(f[0], f[1], 0.0) })
+        .map(|y| camera_aim(y, 0.0))
         .unwrap_or_else(|| Vec3::new(center.x, center.y, eye.z) - eye);
     if aim.length() < 0.5 {
         aim = Vec3::new(1.0, 0.0, 0.0);
@@ -25103,10 +25189,23 @@ fn setup(
     // camera pitch in degrees (positive up). Retail's `warp` cannot set its own, so pairs use 0 unless
     // a retail reference is measured otherwise (see `tools/parity/shots.tsv`).
     if let Some((at, y, pitch)) = SHOT_AT.get().copied() {
-        eye = Vec3::from(at);
-        let (f, _) = yaw_axes(y.to_radians());
-        let p = pitch.to_radians();
-        aim = Vec3::new(f[0] * p.cos(), f[1] * p.cos(), p.sin());
+        let shot = camera_placement(
+            Vec3::ZERO,
+            PLAYER_EYE,
+            0.0,
+            0.0,
+            CameraMode::FirstPerson,
+            0.0,
+            None,
+            CameraShake::default(),
+            Some(CameraFocus {
+                pos: Vec3::from(at),
+                yaw: y.to_radians(),
+                pitch: pitch.to_radians(),
+            }),
+        );
+        eye = shot.eye;
+        aim = shot.look;
     }
 
     if !cameras.is_empty() {
@@ -25592,7 +25691,6 @@ fn setup(
         health: 100.0,
         shields: 100.0,
         eye: eye_height,
-        third_person: std::env::var_os("BK_THIRD_PERSON").is_some(),
     });
 }
 
@@ -25600,15 +25698,62 @@ fn setup(
 #[derive(Resource)]
 struct Collision(std::sync::Arc<collide::LevelGeometry>);
 
-/// The third-person boom: off by default (retail boots into first person), `V` toggles it.
+/// The one third-person switch: `V` (and the old `C` alias) flip this value, and the runtime's
+/// `saber_cam` flag is its script-visible mirror.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum CameraMode {
+    #[default]
+    FirstPerson,
+    ThirdPerson,
+}
+
+/// A camera eye and the direction it looks, plus the focus a third-person boom is pulled from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CameraPose {
+    eye: Vec3,
+    look: Vec3,
+    /// `Some` only for an unscripted third-person boom: the point the collision sweep starts at.
+    pull_focus: Option<Vec3>,
+}
+
+/// A scripted camera or a capture's shot: a position and angles in radians.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CameraFocus {
+    pos: Vec3,
+    yaw: f32,
+    pitch: f32,
+}
+
+/// `SetPOVShake`: a position offset and three angle offsets, in degrees.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct CameraShake {
+    offset: Vec3,
+    angles: Vec3,
+}
+
+/// The camera rig: the one first/third-person mode and the third-person boom length.
 ///
+/// Off by default (retail boots into first person), `V` or `C` toggles it.
 /// The length is the distance the camera wants to sit behind the eye; `collide::camera_pull` — the
 /// port of `sithCamera_SearchSectorInRadius` — shortens it to whatever is in the way. `BK_CHASE_DIST`
 /// overrides the length so a capture can frame a room or a corridor.
 #[derive(Resource)]
 struct Chase {
-    on: bool,
+    mode: CameraMode,
     length: f32,
+}
+
+impl Chase {
+    fn third_person(&self) -> bool {
+        self.mode == CameraMode::ThirdPerson
+    }
+
+    fn toggle(&mut self) {
+        self.mode = match self.mode {
+            CameraMode::FirstPerson => CameraMode::ThirdPerson,
+            CameraMode::ThirdPerson => CameraMode::FirstPerson,
+        };
+    }
 }
 
 impl Default for Chase {
@@ -25616,7 +25761,11 @@ impl Default for Chase {
         Self {
             // `BK_CHASE=1` starts in third person, which is how a capture or a probe sees the boom
             // without a key press; `V` toggles it in play.
-            on: std::env::var_os("BK_CHASE").is_some(),
+            mode: if std::env::var_os("BK_CHASE").is_some() {
+                CameraMode::ThirdPerson
+            } else {
+                CameraMode::FirstPerson
+            },
             length: std::env::var("BK_CHASE_DIST")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -25987,9 +26136,7 @@ struct Player {
     /// sector with a low ceiling cannot hold it: level 1's spawn puts 1.45 inside the ceiling
     /// and the view renders from inside the geometry, so it is fitted to the room.
     eye: f32,
-    /// Third person: the engine's follow camera height with a boom behind the look axis. `C` toggles.
-    third_person: bool,
-        /// Fall damage owed to the runtime, applied on the next frame by `apply_fall_damage`. The walker only
+    /// Fall damage owed to the runtime, applied on the next frame by `apply_fall_damage`. The walker only
     /// knows the impact speed; the runtime owns the health.
     fall_damage: f32,
     /// The force-speed term (`SetActorExtraSpeed`), applied to the walk speed.
@@ -26182,6 +26329,63 @@ fn camera_lean(vel: [f32; 2], yaw: f32) -> f32 {
     (5.0 * (vel[0] * right[0] + vel[1] * right[1])).clamp(-8.0, 8.0)
 }
 
+/// The direction a view angle looks along, before any mode or effect changes it.
+fn camera_aim(yaw: f32, pitch: f32) -> Vec3 {
+    let (forward, _) = yaw_axes(yaw);
+    Vec3::new(
+        forward[0] * pitch.cos(),
+        forward[1] * pitch.cos(),
+        pitch.sin(),
+    )
+}
+
+/// The one camera placement: body eye, one mode, one boom, scripted focus, shake, and shot override.
+///
+/// Precedence is fixed. A scripted focus replaces the player's body eye and angles, shake is applied
+/// to that view, and a third-person boom starts from the shaken eye; a capture's shot wins over
+/// everything and is never boomed or pulled. First person returns no `pull_focus`; third person
+/// returns the focus the caller must sweep to its returned eye with `collide::camera_pull`.
+fn camera_placement(
+    body: Vec3,
+    eye_height: f32,
+    yaw: f32,
+    pitch: f32,
+    mode: CameraMode,
+    boom: f32,
+    focus: Option<CameraFocus>,
+    shake: CameraShake,
+    shot: Option<CameraFocus>,
+) -> CameraPose {
+    let mut look = camera_aim(yaw, pitch);
+    let mut eye = body + Vec3::Z * eye_height;
+    if let Some(focus) = focus {
+        eye = focus.pos;
+        look = camera_aim(focus.yaw, focus.pitch);
+    }
+    eye += shake.offset;
+    if shake.angles != Vec3::ZERO {
+        let turn = Quat::from_rotation_z(-shake.angles.z.to_radians());
+        let right = look.cross(Vec3::Z).try_normalize().unwrap_or(Vec3::X);
+        let nod = Quat::from_axis_angle(right, shake.angles.x.to_radians());
+        look = (turn * nod * look).try_normalize().unwrap_or(look);
+    }
+    let mut pull_focus = None;
+    if mode == CameraMode::ThirdPerson && shot.is_none() {
+        pull_focus = Some(eye);
+        eye -= look * boom;
+    }
+    if let Some(shot) = shot {
+        eye = shot.pos;
+        look = camera_aim(shot.yaw, shot.pitch);
+        pull_focus = None;
+    }
+    CameraPose {
+        eye,
+        look,
+        pull_focus,
+    }
+}
+
 /// The engine's projection: a fixed **horizontal** field of view, with the vertical angle left to the
 /// window's aspect.
 ///
@@ -26298,38 +26502,6 @@ fn apply_look(
 /// `BK_INVERT_Y=1` restores retail's inverted vertical look.
 fn look_inverted() -> bool {
     std::env::var_os("BK_INVERT_Y").is_some()
-}
-
-/// How far above the body the engine puts a follow camera.
-///
-/// `FUN_004c56b0`'s follow case (`0x4c59ce`) takes the thing's z and subtracts `-0.2`
-/// (`0x522dec`), then adds an offset built from the orbit matrix — so its camera sits **0.2 above the
-/// thing**, about the height of an actor's head. Third person keeps that height.
-const THIRD_PERSON_UP: f32 = 0.2;
-
-/// The boom length: the port's own standoff rule (`radius * 2.5 + 0.5`, the same one `--stand` uses)
-/// at the player's radius, which at `PLAYER_RADIUS` is a little over three body heights.
-fn third_person_boom() -> f32 {
-    PLAYER_RADIUS * 2.5 + 0.5
-}
-
-/// Where a third-person camera sits and what it aims at, for a body at `pos` looking along `yaw`/`pitch`.
-///
-/// The engine's own follow case is a *spectator orbit*: it spins the camera 8 degrees per second
-/// (`0x4c5a79`: `dt * 8.0` fed to `FUN_00441a30`) and never lets the player aim it, which is fine for a
-/// cutscene and useless for playing. What is engine-derived here is the height and the convention —
-/// translate by the body's position in level units, aim at the body's eye — and the boom is the port's
-/// own, because a steerable chase camera needs a distance the engine never chose.
-fn third_person_view(pos: Vec3, yaw: f32, pitch: f32, boom: f32) -> (Vec3, Vec3) {
-    let (forward, _) = yaw_axes(yaw);
-    let look = Vec3::new(
-        forward[0] * pitch.cos(),
-        forward[1] * pitch.cos(),
-        pitch.sin(),
-    );
-    let target = pos + Vec3::Z * PLAYER_EYE;
-    let eye = pos + Vec3::Z * THIRD_PERSON_UP - look * boom;
-    (eye, target)
 }
 
 /// One frame of the player's horizontal motion, integrated as the engine does.
@@ -26746,7 +26918,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     mouse: Res<bevy::input::mouse::AccumulatedMouseMotion>,
     overlay: Option<Res<Overlay>>,
     // The overlay camera is a `Camera3d` too, so it must be excluded or `single_mut` fails and
-    mut chase: ResMut<Chase>,
+    chase: ResMut<Chase>,
     // the walker's view never moves (which is what happened for every round before this one).
     mut cam: Query<&mut Transform, (With<Camera3d>, With<WorldCamera>)>,
     // `--trace-out`: the frame counter for the written trace (Phase 0.5 trace v0).
@@ -26838,15 +27010,6 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // pose every run (§16.13). The env hooks (BK_WALK_FORWARD) still drive the walker.
     let live = !overview.capture;
     let held = |key: KeyCode| live && keys.pressed(key);
-    // `C` toggles third person. Retail has no such key in single player (its follow camera is a
-    // spectator orbit), so there is nothing to match; the port needs one and this is it.
-    if live && keys.just_pressed(KeyCode::KeyC) {
-        player.third_person = !player.third_person;
-        println!(
-            "camera: {}",
-            if player.third_person { "third person" } else { "first person" }
-        );
-    }
     if held(KeyCode::ArrowLeft) {
         player.yaw += 1.5 * dt;
     }
@@ -27330,43 +27493,15 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         println!("sector {sector}");
     }
 
-    // Stand the camera where the eyes are and aim it along yaw/pitch — unless a capture has been given
-    // its own vantage (`--shot-at`), in which case the camera stays exactly where the caller put it.
-    if SHOT_AT.get().is_some() {
-        return;
-    }
-    let eye = player.pos + Vec3::Z * player.eye;
-    let (forward, _) = yaw_axes(player.yaw);
-    let look = Vec3::new(
-        forward[0] * player.pitch.cos(),
-        forward[1] * player.pitch.cos(),
-        player.pitch.sin(),
-    );
-    // Third person: stand behind the look axis and aim at the body's eye. A wall between the two shortens
-    // the boom rather than putting the camera inside the geometry (§16.9's lesson, applied to the camera).
-    let mut eye = eye;
-    let mut look = look;
-    if player.third_person {
-        let boom = third_person_boom();
-        let (mut third_eye, target) = third_person_view(player.pos, player.yaw, player.pitch, boom);
-        let mut length = boom;
-        for _ in 0..4 {
-            if !solids.0.segment_blocked([target.x, target.y, target.z], [third_eye.x, third_eye.y, third_eye.z]) {
-                break;
-            }
-            length *= 0.6;
-            let (shorter, _) = third_person_view(player.pos, player.yaw, player.pitch, length);
-            third_eye = shorter;
+    // The scripts read `jkGetSaberCam()`; keep its mirror on the one mode value, including when
+    // `BK_CHASE` started the run in third person rather than a key press.
+    if let Some(sim) = sim.as_deref() {
+        let flag = i32::from(chase.third_person());
+        let mut rt = sim.world.borrow_mut();
+        if rt.saber_cam != flag {
+            rt.saber_cam = flag;
         }
-        // If even the shortest boom lands outside every sector, the corner is too tight for a chase
-        // camera: sit at the body's own eye rather than inside the wall.
-        if solids.0.sector_at([third_eye.x, third_eye.y, third_eye.z], 0.0).is_none() {
-            third_eye = player.pos + Vec3::Z * player.eye;
-        }
-        eye = third_eye;
-        look = target - third_eye;
     }
-
     // A script can point the camera at a thing of its own (`SetCameraFocus(slot, camera)` +
     // `SetCurrentCamera(slot)`): `00_fallcamera.cog` cuts to a camera watching the fall,
     // `06_max.cog` and the C3 levels cut to placed cameras, and `00_cameratricks.cog` focuses a
@@ -27382,41 +27517,35 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         )
     }).unwrap_or((None, ([0.0; 3], [0.0; 3])));
     let focus_camera = camera_read.0;
-    let shake = camera_read.1;
-
-    if let Some((pos, yaw, pitch)) = focus_camera {
-        // `thing.yaw` is in **degrees**; `yaw_axes` takes radians like every other view angle here. With
-        // the placed `droidcam` at yaw 0 the mix-up was invisible; a key that turns the camera exposes it.
-        let (forward, _) = yaw_axes(yaw.to_radians());
-        let pitch = pitch.to_radians();
-        eye = Vec3::from(pos);
-        look = Vec3::new(
-            forward[0] * pitch.cos(),
-            forward[1] * pitch.cos(),
-            pitch.sin(),
-        );
-    }
-    // `SetPOVShake`: the offset a shot or an earthquake kicks the view by, decaying back to zero.
-    // The engine adds the angle offset to the view angles; the port rotates the aim it already has,
-    // which is the same thing and also works while a scripted camera is in charge.
-    {
-        let (pos, angle) = shake;
-        eye += Vec3::from(pos);
-        if angle != [0.0; 3] {
-            let turn = Quat::from_rotation_z(-angle[2].to_radians());
-            let right = look.cross(Vec3::Z).try_normalize().unwrap_or(Vec3::X);
-            let nod = Quat::from_axis_angle(right, angle[0].to_radians());
-            look = (turn * nod * look).try_normalize().unwrap_or(look);
-        }
-    }
-
-    // Third person: a boom behind the eye along the look direction, then
-    // `sithCamera_SearchSectorInRadius` — the engine's own pull-in — shortens it to the first thing
-    // between the player and the camera. `V` toggles it; first person is the default because that is
-    // what retail boots into.
-    if chase.on {
-        let focus = eye;
-        let want = focus - look.normalize_or(Vec3::NEG_X) * chase.length;
+    let focus = focus_camera.map(|(pos, yaw, pitch)| CameraFocus {
+        pos: Vec3::from(pos),
+        yaw: yaw.to_radians(),
+        pitch: pitch.to_radians(),
+    });
+    let shake = CameraShake {
+        offset: Vec3::from(camera_read.1.0),
+        angles: Vec3::from(camera_read.1.1),
+    };
+    let shot = SHOT_AT.get().copied().map(|(pos, yaw, pitch)| CameraFocus {
+        pos: Vec3::from(pos),
+        yaw: yaw.to_radians(),
+        pitch: pitch.to_radians(),
+    });
+    let mut pose = camera_placement(
+        player.pos,
+        player.eye,
+        player.yaw,
+        player.pitch,
+        chase.mode,
+        chase.length,
+        focus,
+        shake,
+        shot,
+    );
+    // `SetPOVShake` and the scripted focus are already applied. The boom is the last player-owned
+    // placement, and `sithCamera_SearchSectorInRadius` — the engine's own pull-in — shortens it to
+    // the first thing between the eye and the camera.
+    if let Some(focus) = pose.pull_focus {
         // `0x3ca3d70a` (0.02) is the radius `sithCamera_SearchSectorInRadius` passes. `PLAYER_EYE`
         // (0.037) is *larger* than the eye's height above the floor, so the sphere starts touching the
         // floor plane and every boom collapsed to nothing — the third-person view was first person.
@@ -27424,15 +27553,19 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         // start outside its own hull, where every plane reports a contact at distance 0 and the boom
         // collapses onto the player.
         let sector = solids.0.sector_at(focus.to_array(), 0.5).unwrap_or(player.sector);
-        let (pulled, hit) = solids.0.camera_pull(sector, focus.to_array(), want.to_array(), 0.02);
-        let pulled = Vec3::from(pulled);
-        eye = pulled;
+        let wanted = pose.eye;
+        let (pulled, hit) = solids.0.camera_pull(sector, focus.to_array(), wanted.to_array(), 0.02);
+        pose.eye = Vec3::from(pulled);
         if std::env::var_os("BK_CAMERA_TRACE").is_some() {
             println!(
-                "camera: third person wanted {want:?}, pulled to {pulled:?} (surface {hit:?})"
+                "camera: third person wanted {wanted:?}, pulled to {:?} (surface {hit:?})",
+                pose.eye
             );
         }
-    }    tf.translation = eye;
+    }
+    let eye = pose.eye;
+    let look = pose.look;
+    tf.translation = eye;
     if std::env::var_os("BK_CAMERA_TRACE").is_some() {
         let state = sim.as_deref().map(|sim| {
             let rt = sim.world.borrow();
@@ -27447,10 +27580,14 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     }
     if let Some(dir) = look.try_normalize() {
         *tf = tf.looking_to(dir, Vec3::Z);
-        // The engine's own strafe lean (see camera_lean): the up axis tilts toward the right column.
-        let lean = camera_lean(player.vel, player.yaw);
-        if lean != 0.0 {
-            tf.rotate_local_z(-lean.to_radians());
+        // A capture's shot is an authored pose; movement lean would rotate the frame between two
+        // supposedly identical captures.
+        if SHOT_AT.get().is_none() {
+            // The engine's own strafe lean (see camera_lean): the up axis tilts toward the right column.
+            let lean = camera_lean(player.vel, player.yaw);
+            if lean != 0.0 {
+                tf.rotate_local_z(-lean.to_radians());
+            }
         }
     }
 }
@@ -27720,6 +27857,139 @@ mod transition_tests {
         assert_eq!(film_step(&rest, None), FilmStep::Play("39a.smk".into()));
         assert_eq!(film_step(&rest, Some(true)), FilmStep::DropFinished);
         assert_eq!(film_step(&[], None), FilmStep::Done);
+    }
+}
+
+#[cfg(test)]
+mod camera_tests {
+    use super::{CameraFocus, CameraMode, CameraShake, Chase, camera_placement};
+    use bevy::prelude::Vec3;
+
+    #[test]
+    fn first_person_stands_at_the_eye_and_aims_along_the_view() {
+        let body = Vec3::new(1.0, 2.0, 3.0);
+        let pose = camera_placement(
+            body,
+            0.5,
+            0.0,
+            0.0,
+            CameraMode::FirstPerson,
+            3.0,
+            None,
+            CameraShake::default(),
+            None,
+        );
+        assert!((pose.eye - (body + Vec3::Z * 0.5)).length() < 1e-6);
+        assert!((pose.look - Vec3::Y).length() < 1e-6);
+        assert_eq!(pose.pull_focus, None);
+    }
+
+    #[test]
+    fn third_person_puts_the_eye_behind_the_aim_and_keeps_the_boom_aim() {
+        let body = Vec3::new(1.0, 2.0, 3.0);
+        let pose = camera_placement(
+            body,
+            0.5,
+            0.0,
+            0.0,
+            CameraMode::ThirdPerson,
+            3.0,
+            None,
+            CameraShake::default(),
+            None,
+        );
+        let focus = body + Vec3::Z * 0.5;
+        assert!((pose.eye - (focus - Vec3::Y * 3.0)).length() < 1e-6);
+        assert!((pose.look - Vec3::Y).length() < 1e-6);
+        assert_eq!(pose.pull_focus, Some(focus));
+    }
+
+    #[test]
+    fn scripted_focus_is_boomed_in_third_person() {
+        let focus = CameraFocus {
+            pos: Vec3::new(4.0, 5.0, 6.0),
+            yaw: std::f32::consts::FRAC_PI_2,
+            pitch: 0.0,
+        };
+        let pose = camera_placement(
+            Vec3::ZERO,
+            0.5,
+            0.0,
+            0.0,
+            CameraMode::ThirdPerson,
+            3.0,
+            Some(focus),
+            CameraShake::default(),
+            None,
+        );
+        assert!((pose.eye - (focus.pos + Vec3::X * 3.0)).length() < 1e-6);
+        assert!((pose.look - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-6);
+        assert_eq!(pose.pull_focus, Some(focus.pos));
+    }
+
+    #[test]
+    fn shake_moves_the_eye_and_turns_the_aim() {
+        let pose = camera_placement(
+            Vec3::ZERO,
+            0.5,
+            0.0,
+            0.0,
+            CameraMode::FirstPerson,
+            3.0,
+            None,
+            CameraShake {
+                offset: Vec3::new(0.1, 0.2, 0.3),
+                angles: Vec3::new(0.0, 0.0, 90.0),
+            },
+            None,
+        );
+        assert!((pose.eye - Vec3::new(0.1, 0.2, 0.8)).length() < 1e-6);
+        assert!((pose.look - Vec3::X).length() < 1e-6);
+    }
+
+    #[test]
+    fn shot_override_wins_over_focus_and_shake() {
+        let focus = CameraFocus {
+            pos: Vec3::new(4.0, 5.0, 6.0),
+            yaw: 0.0,
+            pitch: 0.0,
+        };
+        let shot = CameraFocus {
+            pos: Vec3::new(7.0, 8.0, 9.0),
+            yaw: -std::f32::consts::FRAC_PI_2,
+            pitch: 0.0,
+        };
+        let pose = camera_placement(
+            Vec3::ZERO,
+            0.5,
+            0.0,
+            0.0,
+            CameraMode::ThirdPerson,
+            3.0,
+            Some(focus),
+            CameraShake {
+                offset: Vec3::ONE,
+                angles: Vec3::ZERO,
+            },
+            Some(shot),
+        );
+        assert!((pose.eye - shot.pos).length() < 1e-6);
+        assert!((pose.look - Vec3::X).length() < 1e-6);
+        assert_eq!(pose.pull_focus, None);
+    }
+
+    #[test]
+    fn one_mode_value_drives_first_and_third_person() {
+        let mut chase = Chase {
+            mode: CameraMode::FirstPerson,
+            length: 3.0,
+        };
+        assert!(!chase.third_person());
+        chase.toggle();
+        assert!(chase.third_person());
+        assert_eq!(chase.mode, CameraMode::ThirdPerson);
+        chase.toggle();
+        assert_eq!(chase.mode, CameraMode::FirstPerson);
     }
 }
 

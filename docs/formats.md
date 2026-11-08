@@ -5734,14 +5734,12 @@ orient).
 
 The port's own chase camera is mode 4's shape, not the orbit's:
 
-* **the boom** — `Chase::length` behind the eye (3.0, or `BK_CHASE_DIST`), toggled with **`V`**,
-  started on with `BK_CHASE=1` for captures; that is the third-person view the round log in
-  `docs/gaps.md` describes, and the only one that draws the body. The earlier `C` toggle
-  (`BK_THIRD_PERSON=1`) still flips `player.third_person`, and the `third_person_view` path it
-  reaches is still in the build too: a 0.66 boom (`PLAYER_RADIUS * 2.5 + 0.5`, the `--stand` rule)
-  shortened step by step by `segment_blocked`, with no body drawn, and `--controls` still asserts
-  its geometry (0.66 behind the look axis, 0.16 above the aimed point, behind the correct axis at
-  yaw 90). Both keys change the view.
+* **the boom** — one `CameraMode` (first person, or third with `Chase::length`, 3.0 or
+  `BK_CHASE_DIST`), toggled with **`V`** or its old **`C`** alias, started on with `BK_CHASE=1`
+  for captures. `camera_placement` is the single placement: body eye,
+  mode, boom, scripted focus, `SetPOVShake`, and a capture's shot; `walk_player` asks it for the
+  eye and look, and `collide::camera_pull` shortens the boom. `--controls`, `--camera`, and
+  `--camera-pull` call the same placement, so the gate cannot drift from the view.
 * **the pull-in** — `collide::camera_pull` is `sithCamera_SearchSectorInRadius`'s own shape:
   normalise `focus -> want`, cast with the sector walk (`sweep_rooms`, so a camera behind a doorway
   is not pulled in by the wall beside the door), and **return the contact point** — the engine puts
