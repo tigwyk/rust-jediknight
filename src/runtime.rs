@@ -946,7 +946,7 @@ pub struct ThingMotion {
 
 /// The player's own body: where it is, how it moves, and where it looks. The runtime writes it
 /// through `step_player`, `teleport_player` and `respawn_player`; everything else reads it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PlayerBody {
     pub pos: Vec3,
     pub vy: f32,
@@ -965,6 +965,35 @@ pub struct PlayerBody {
     pub pitch: f32,
     /// How high the eye sits above the body's centre.
     pub eye: f32,
+    /// How high the body's **centre** rests above its floor. `radius` for a body that fell onto the
+    /// surface (the swept sphere contact) and `sithPhysics_GetThingHeight` (`walkplayer`'s model insert,
+    /// 0.120114) for one a `warp` attached: retail's warped route poses read `coords` z at exactly
+    /// `floor + 0.120114` and hold it while walking, where the sphere contact is 0.055 lower.
+    pub rest: f32,
+}
+
+impl Default for PlayerBody {
+    /// A body that has not been warped rests at the movement sphere's contact, so `rest` defaults to
+    /// the player's radius rather than zero: zero would seat it on its own floor.
+    fn default() -> Self {
+        PlayerBody {
+            pos: Vec3::ZERO,
+            vy: 0.0,
+            sector: 0,
+            grounded: false,
+            gravity: 0.0,
+            water: false,
+            vel: [0.0; 2],
+            step_rollover: 0.0,
+            last_move: 0.0,
+            fall_killed: false,
+            fall_fade: 1.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            eye: crate::PLAYER_EYE,
+            rest: crate::PLAYER_RADIUS,
+        }
+    }
 }
 
 /// One frame of player intent. The app reads the keys and the body; the runtime turns this into
@@ -5834,11 +5863,11 @@ impl Runtime {
             f32::INFINITY,
             radius,
             true,
-        ) && rest.height > body.pos.z - radius
+        ) && rest.height > body.pos.z - body.rest
             && body.vy <= 0.0
             && !(input.jump && body.grounded)
         {
-            body.pos.z = rest.height + radius;
+            body.pos.z = rest.height + body.rest;
             body.vy = 0.0;
             body.grounded = true;
         }
@@ -5940,6 +5969,25 @@ impl Runtime {
                 pos[2] = top + radius;
                 vy = 0.0;
                 landed = true;
+            }
+        }
+        // A body a `warp` attached rests on its surface by `sithPhysics_GetThingHeight`, not at the
+        // movement sphere's contact: `warp` runs `sithPhysics_FindFloor`, which attaches the thing and
+        // leaves it at the authored pose. The sweep lands it at `floor + radius` every frame; while a
+        // floor is inside the attached body's reach (`GetThingHeight * 1.1`, `0x523184`), put it back on
+        // the attach height. Retail's warped route poses read `coords` z at exactly that height and hold
+        // it while walking (the route trace measures the 0.055 the sphere contact was short by).
+        if body.rest > radius + 1e-4 && vy <= 0.0 {
+            let reach = (body.rest - radius) * 1.1 + 0.02;
+            if let Some(rest) =
+                solids.resting_floor(sector, [pos[0], pos[1], pos[2]], reach, radius, false)
+            {
+                let height = rest.height + body.rest;
+                if (height - pos[2]).abs() <= reach {
+                    pos[2] = height;
+                    vy = 0.0;
+                    landed = true;
+                }
             }
         }
         // The slid movement feeds the velocity, as `MoveThing` reports it at `thing + 0x264`.
@@ -10714,6 +10762,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             eye: crate::PLAYER_EYE,
+            rest: crate::PLAYER_RADIUS,
         }
     }
 
@@ -14100,6 +14149,36 @@ mod tests {
         assert!(body.grounded, "the player body never landed");
         assert!((body.pos.z - 0.065).abs() < 1e-3, "z {} after landing", body.pos.z);
         assert_eq!(body.sector, 0);
+    }
+
+    /// A body a `warp` attached rests at `sithPhysics_GetThingHeight` (`walkplayer`'s 0.120114 model
+    /// insert), not at the movement sphere's 0.065 contact: retail's warped route poses hold
+    /// `coords` z at that height while walking, and the route trace measured the sphere contact
+    /// 0.055 low on every leg.
+    #[test]
+    fn a_warped_body_rests_at_the_model_height() {
+        let solids = floor_room();
+        let mut rt = Runtime::new(&Level::default());
+        let rules = crate::Rules::from_level(&Level::default());
+        let height = 0.120114f32;
+        let mut body = walk_body(Vec3::new(0.0, 0.0, -1.0 + height));
+        body.rest = height;
+        for _ in 0..60 {
+            rt.step_player(
+                &mut body,
+                &solids,
+                PlayerInput::default(),
+                &rules,
+                1.0 / 60.0,
+                crate::collide::Gates::default(),
+            );
+        }
+        assert!(
+            (body.pos.z - (-1.0 + height)).abs() < 1e-3,
+            "the attached body settled at {:.4}, not floor + {height:.4}",
+            body.pos.z
+        );
+        assert!(body.grounded, "the attached body is not standing on its surface");
     }
 
     #[test]

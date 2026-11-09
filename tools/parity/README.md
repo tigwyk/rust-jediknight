@@ -334,10 +334,10 @@ Files:
 
 | Path | What it is |
 |---|---|
-| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. |
+| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `switch` fires the level's cantina-door switch (the captures began with that door open), `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key; the scenario rows take no ticks, so the 600 ms sample grid never moves. |
 | `tools/parity/routetrace/level1-route-retail.tsv` | Retail-derived reference, one row every 600 ms (36 ticks). Provenance is in the file header. |
 | `tools/parity/routetrace/level1-route-port.tsv` | The port's committed oracle, produced by the replay. |
-| `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), compare to the committed port fixture, and reject a trace with one position moved 0.25 units. `-Retail` also compares against the retail reference at `-Epsilon`. |
+| `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), compare to the committed port fixture, reject a trace with one position moved 0.25 units, and match the retail reference within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it for an experiment). |
 
 The trace format is tab-separated, `#` comments allowed, one header row:
 
@@ -352,19 +352,25 @@ tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
 - `x/y/z` are the player **body** position — the value retail's `coords` prints (the camera rides one
   `eyeOffset` above it, `walkplayer`'s 0.037) — so a retail capture and this trace name the same point.
 - `sector` is the tracked sector the body is in.
-- `vel_x/vel_y` are the body's horizontal world velocity and `vel_z` its vertical one, in level
-  units per second. Retail's columns are the position derivative over the 600 ms window.
+- `vel_x/vel_y/vel_z` are the position derivative over the 600 ms sample window, in level units per
+  second — the same quantity as the retail fixture's columns (a body pinned against a wall reads zero).
 - `health/shields` come from the player thing and `rt.player_shields`; the retail capture reads
   them from the player thing (`thing+0x134`) and inventory bin 60.
 - `door0_*` and `switch_*` are placed cogs 0 (`00_door.cog`) and 11 (`00_doorswitch.cog`), four
   symbols each (`doorstatus`, `movestatus`, and the script's own open/close variables). `-` is a
   field the run does not have (no such cog, or a retail capture that did not record it).
 
-A **leg boundary is a `warp`**, not a walk. The port cannot yet walk the cantina and door rooms
-without the solid-furniture and door collision issue #10 owns; the route therefore measures the
-four legs' movement against retail now and becomes one continuous walk when that lands (the script
-format does not change). The gate's retail comparison is report-only by default for the same
-reason, and `-Retail` turns it into a failure check when a slice expects parity.
+A **leg boundary is a `warp`**, not a walk: the retail reference is four separate per-leg captures
+from the level's own authored placements, so the route is the same four walks. Issue #10 fixed what
+each leg exposed — the spawn seat no longer lifts the body onto the cantina's `00table`, the walk
+rate is the engine's `maxthrust*0.7/(surfdrag+0.2)` (0.4375 walk / 0.875 run), a `warp` attaches the
+body at `GetThingHeight` (0.120114, where retail's `coords` holds z), and a low solid model is a step
+the walker climbs — so the legs hold retail's sectors and vertical travel.
+
+The per-sample position tolerance is the **retail harness's**, stated in
+`level1-route-retail.tsv`'s header: a 600 ms sample advances a variable amount of engine time, so
+one sample's travel (at most ~0.9 units at level 1's 0.875 u/s) is the measurement resolution.
+Sectors are compared exactly and are never tolerated away.
 
 `--route-compare <expected> <actual>` is the comparator the gate uses; `BK_ROUTE_EPSILON=<units>`
 sets an absolute tolerance for every numeric column (sector stays exact, and `-` fields are skipped).
@@ -455,7 +461,10 @@ the bar empties is the script working, not a bug.
 The capture runs the `Update` schedule on one executor thread, the same rule #8's replay uses: the
 shared cog LCG is thread-local, so with the default executor two runs of the same fixed step could
 fire a different number of shots. Two captures are therefore byte-identical apart from the file name,
-and the gate's repeatability check reports zero delta.
+and the gate's repeatability check reports zero delta. The same pin applies to every fixed-step
+capture (`--shot`, `BK_ENCOUNTER_OUT`, `--replay`): without it the walk traces drift too — `walk_cantina`
+travelled 2.6 units on one run and 1.0 on the next, because an AI actor driven from the LCG stood in
+the body's path. Play keeps the default executor.
 
 The gate is the instrument for #11 (AI engagement timing) and #12 (combat timing). #11 measured its
 door-gunner acquisition, cadence and facing against the fixture and fixed the timing differences
