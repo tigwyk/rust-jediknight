@@ -404,10 +404,29 @@ hold that frame's state between grid points; the port hits are its fixed 60 Hz s
   type-3 bolts the same way retail does, and writes the runtime's hit events.
 - Gate: `pwsh -File tools/parity/encounter-gate.ps1` seeds the committed retail fixture from
   `tools/parity/encounter/`, records the port twice (and fails if the two runs leave the measured
-  run-to-run band: same shape and endpoint, event-timing and actor-state deltas within it), and reports the
-  per-shot/per-hit timing deltas, the per-hit health/shield deltas, the settled endpoint, and the actor
-  position/facing/health deltas at every sample. It exits non-zero when any of them leaves its tolerance,
-  and its thresholds are parameters with their reasons in the script header.
+  run-to-run band: same shape and endpoint, event-timing and actor-state deltas and the same kill
+  order), and reports the per-shot/per-hit timing deltas, the per-hit health/shield deltas, the kill
+  order, the settled endpoint, and the actor position/facing/health deltas at every sample. It exits
+  non-zero when any of them leaves its tolerance, and its thresholds are parameters with their reasons
+  in the script header.
+
+Kill order is read off the trace: both captures drop a thing once it is gone (the retail reader skips
+an actor at 0 health, the port's trace a destroyed one) and both name an actor by the level's own
+placement index, so the last sample a thing appears in is its death time. The door fixture kills
+nobody on either side in ten seconds and the gate prints that explicitly (`kill order: retail [], port
+[]`); a fixture whose actors walk out of the 8-unit sampling radius would read the same way, which is
+why the position check above is what tells the two apart.
+
+The player's damage split is the shipped `item_shields.cog`'s: the bar takes the whole hit, a bar above
+50 stops it completely, and the rest is scaled by `1 - shieldsLeft / 50` (which is above 1 when the hit
+spent the bar). Energy (2) and fire (4) share that branch and saber (16) gets half protection; every
+other kind reaches health with the bar untouched. A fixture where the port's per-hit health rises as
+the bar empties is the script working, not a bug.
+
+The capture runs the `Update` schedule on one executor thread, the same rule #8's replay uses: the
+shared cog LCG is thread-local, so with the default executor two runs of the same fixed step could
+fire a different number of shots. Two captures are therefore byte-identical apart from the file name,
+and the gate's repeatability check reports zero delta.
 
 The gate is the instrument for #11 (AI engagement timing) and #12 (combat timing); until those land its
 default run reports the known AI-timing gap rather than passing.

@@ -138,7 +138,8 @@ pub enum EncounterEvent {
         template: String,
         pos: [f32; 3],
     },
-    /// The player was hit: how much the shot carried, and the bar after shields absorbed it.
+    /// The player was hit: the amount the two bars actually lost, and the bar values after the hit —
+    /// the same numbers the retail capture writes from `thing + 0x134` and inventory bin 60.
     Hit {
         t: f32,
         amount: f32,
@@ -319,6 +320,8 @@ pub const SAVE_SECTION: u32 = 0x1001;
 /// `SithDamageType`: what kind of hurt, as a bitmask. Only the bits this port distinguishes.
 pub const DAMAGE_IMPACT: u32 = 0x01;
 pub const DAMAGE_ENERGY: u32 = 0x02;
+/// Fire (0x04) is the other kind `item_shields.cog` protects, beside energy.
+pub const DAMAGE_FIRE: u32 = 0x04;
 pub const DAMAGE_SABER: u32 = 0x10;
 pub const DAMAGE_FALL: u32 = 0x40;
 /// `sithActor_PlayDamageSoundFx` (`0x4ece90`) only cries out for a blow of at least **3** points
@@ -7209,13 +7212,16 @@ impl Runtime {
         out
     }
 
-    /// Damage the **player**, the way `sithPlayer` does: shields absorb it first, and the rest
-    /// comes off health. Returns the pair after the hit.
+    /// Damage the **player**: `sithActor_DamageActor`'s subtraction, with the shield bar standing
+    /// in front of health the way the shipped `item_shields.cog` does it.
     ///
-    /// A generic `DamageThing` on the walkplayer bypasses the shield bar, which is why the HUD's
-    /// second number never moved: `--hit` showed the player taking 9 straight off health while the
-    /// shields read 100. This is the engine's order — `sithPlayer_Update` spends shields before
-    /// health and only dies when health reaches 0.
+    /// The engine does not absorb shield-first in C: it broadcasts `damaged` to the player's
+    /// inventory item cogs whose `items.dat` flags carry `0x10` (`sithInventory_BroadcastMessage`,
+    /// `0x4d24a0`) and applies the amount the handler returns. Bin 60's script (`item_shields.cog`)
+    /// owns the bar: it spends the whole hit on it, stops a hit while the bar is above 50, and lets
+    /// health take a share that grows as the bar falls (see [`Self::shield_script`], which is that
+    /// script's arithmetic). The runtime's bar is a field rather than a VM, so the script's branch is
+    /// ported here; the draw and sound half of the script is not (ledger).
     pub fn damage_player(&mut self, amount: f32, kind: u32) -> (f32, f32) {
         let player = self.player_thing();
         // The player goes through the same guard as any actor (`sithActor_DamageActor` takes the
@@ -7235,11 +7241,18 @@ impl Runtime {
         // `sithActor_DamageActor` tints the local player's palette on damage that lands, before the
         // shields are spent: its call is `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)`.
         add_dynamic_tint(&mut self.tint, [amount * DAMAGE_TINT, 0.0, 0.0]);
+        let before = self.player_shields
+            + self.things.get(player).map(|t| t.health).unwrap_or(0.0);
+        // `item_shields.cog` has branches for energy (2), fire (4) and saber (16) only; any other
+        // kind reaches health with the bar untouched, exactly as the script does.
         let mut left = amount;
-        if self.player_shields > 0.0 {
-            let absorbed = left.min(self.player_shields);
-            self.player_shields -= absorbed;
-            left -= absorbed;
+        if self.player_shields > 0.0
+            && matches!(kind, DAMAGE_ENERGY | DAMAGE_FIRE | DAMAGE_SABER)
+        {
+            let (health_part, shields_left) =
+                Self::shield_script(kind, self.player_shields, amount);
+            self.player_shields = shields_left;
+            left = health_part;
         }
         if let Some(thing) = self.things.get_mut(player) {
             thing.health = (thing.health - left).max(0.0);
@@ -7249,14 +7262,46 @@ impl Runtime {
             }
         }
         if self.encounter_events_enabled {
+            let health = self.things.get(player).map(|t| t.health).unwrap_or(0.0);
+            // The retail capture writes the amount the bars actually lost, net of a recharge, so
+            // the row is the same number on both sides.
+            let amount = before - (self.player_shields + health);
             self.encounter_events.push(EncounterEvent::Hit {
                 t: self.time,
                 amount,
                 shields: self.player_shields,
-                health: self.things.get(player).map(|t| t.health).unwrap_or(0.0),
+                health,
             });
         }
         (self.player_shields, self.things.get(player).map(|t| t.health).unwrap_or(0.0))
+    }
+
+    /// `item_shields.cog`'s `damaged` arithmetic for one protected hit: `(health damage, bar after)`.
+    ///
+    /// Energy and fire share the branch this mirrors, saber halves the hit first. The bar takes the
+    /// whole hit; a bar above **50** stops it completely; a hit that crosses 50 loses what it
+    /// overshot; and the rest is scaled by `1 - shieldsLeft / 50` on the script's raw `shieldsLeft`.
+    /// That factor is **above 1** when the hit spent the bar (the script keeps the negative value),
+    /// which is why the door fixture's health loss per hit grows as the bar empties.
+    fn shield_script(kind: u32, shields: f32, damage: f32) -> (f32, f32) {
+        let damage = if kind == DAMAGE_SABER { damage * 0.5 } else { damage };
+        let shields_left = shields - damage;
+        let mut health = if shields_left > 50.0 {
+            0.0
+        } else if shields > 50.0 {
+            damage - (shields - 50.0)
+        } else {
+            damage
+        };
+        if health > 0.0 {
+            health *= 1.0 - shields_left / 50.0;
+        }
+        // `damage = damage + halfdamage` puts the saber's other half back before it lands.
+        if kind == DAMAGE_SABER {
+            health += damage;
+        }
+        // `SetInv(player, 60, shieldsLeft)` clamps at the item's own minimum, 0.
+        (health, shields_left.max(0.0))
     }
 
     /// Move the player's body to `pos` and publish the runtime's own pose at once. The one entry
@@ -10982,17 +11027,75 @@ mod tests {
         }
     }
 
-    /// A landed player hit carries the shot's amount and the bar **after** shields absorbed it, which
-    /// is the pair the retail fixture samples from `thing + 0x134` and inventory bin 60.
+    /// The door fixture's own player bars, hit for hit (`tools/parity/encounter/door_encounter.tsv`,
+    /// 9.9 s: `player` rows at 3, 11, 18, 23, 30, 37, 43, 52, 60, 69, 78, 85 and 93 tenths). The
+    /// engine's split is not shield-first: `item_shields.cog`'s `damaged` handler (bin 60) spends the
+    /// whole hit on the bar but lets health take a share that grows as the bar falls, and the
+    /// fixture's `100 -> 22.3` health is what that arithmetic produces for thirteen ~11.3-point
+    /// energy bolts. The expected bars are the fixture's literals, not a recomputation.
+    #[test]
+    fn the_door_fixtures_player_bars_come_out_of_the_shields_script_per_hit() {
+        let mut rt = door_runtime();
+        // (shields, health) after each of the fixture's thirteen hits.
+        let fixture = [
+            (88.6, 100.0),
+            (77.4, 100.0),
+            (66.1, 100.0),
+            (54.8, 100.0),
+            (43.4, 99.1),
+            (32.1, 95.1),
+            (20.7, 88.4),
+            (9.4, 79.2),
+            (0.0, 67.5),
+            (0.0, 56.2),
+            (0.0, 45.0),
+            (0.0, 33.6),
+            (0.0, 22.3),
+        ];
+        for (index, (shields, health)) in fixture.iter().enumerate() {
+            let (got_shields, got_health) = rt.damage_player(11.3, DAMAGE_ENERGY);
+            assert!(
+                (got_shields - shields).abs() < 0.3,
+                "hit {}: shields {got_shields:.2}, fixture {shields}",
+                index + 1
+            );
+            assert!(
+                (got_health - health).abs() < 0.3,
+                "hit {}: health {got_health:.2}, fixture {health}",
+                index + 1
+            );
+        }
+    }
+
+    /// The script only acts on the kinds it names: energy (2) and fire (4) share a branch, saber
+    /// (16) gets half protection, and every other kind — an explosion's impact, force, falls —
+    /// reaches health untouched, bar and all.
+    #[test]
+    fn only_energy_fire_and_saber_hits_meet_the_shield_script() {
+        let mut rt = door_runtime();
+        assert_eq!(rt.damage_player(30.0, DAMAGE_IMPACT), (100.0, 70.0), "impact bypasses the bar");
+
+        let mut rt = door_runtime();
+        let (shields, health) = rt.damage_player(11.3, DAMAGE_FIRE);
+        assert!((shields - 88.7).abs() < 1e-3, "fire: shields {shields}");
+        assert_eq!(health, 100.0, "fire behind a full bar must not reach health");
+
+        let mut rt = door_runtime();
+        // Half of 20 is 10; the bar takes 10 and health the same 10 (`damage + halfdamage`).
+        assert_eq!(rt.damage_player(20.0, DAMAGE_SABER), (90.0, 90.0), "saber half protection");
+    }
+
+    /// A landed player hit carries the bar **after** the hit and the amount the bars actually lost,
+    /// which is what the retail capture writes (`amount = previous shields + health - current`).
     #[test]
     fn encounter_telemetry_queues_landed_player_hits_with_the_bar_after() {
         let mut rt = door_runtime();
         rt.encounter_events_enabled = true;
         rt.player_shields = 50.0;
         rt.time = 3.0;
-        rt.damage_player(12.0, DAMAGE_ENERGY);
+        rt.damage_player(11.3, DAMAGE_ENERGY);
         rt.time = 3.5;
-        rt.damage_player(50.0, DAMAGE_ENERGY);
+        rt.damage_player(11.3, DAMAGE_ENERGY);
         let hits: Vec<(f32, f32, f32, f32)> = rt
             .encounter_events
             .iter()
@@ -11003,9 +11106,14 @@ mod tests {
             .collect();
         assert_eq!(hits.len(), 2, "one hit row per landed shot");
         assert!((hits[0].0 - 3.0).abs() < 1e-5);
-        assert_eq!((hits[0].1, hits[0].2, hits[0].3), (12.0, 38.0, 100.0));
-        // 50 more: the remaining 38 shields absorb, and 12 comes off health.
-        assert_eq!((hits[1].1, hits[1].2, hits[1].3), (50.0, 0.0, 88.0));
+        // Bar 50 -> 38.7, health takes 11.3 * (1 - 38.7/50).
+        assert!((hits[0].1 - 13.8538).abs() < 1e-3, "amount {}", hits[0].1);
+        assert!((hits[0].2 - 38.7).abs() < 1e-3, "shields {}", hits[0].2);
+        assert!((hits[0].3 - 97.4462).abs() < 1e-3, "health {}", hits[0].3);
+        // Bar 38.7 -> 27.4, health takes 11.3 * (1 - 27.4/50).
+        assert!((hits[1].1 - 16.4076).abs() < 1e-3, "amount {}", hits[1].1);
+        assert!((hits[1].2 - 27.4).abs() < 1e-3, "shields {}", hits[1].2);
+        assert!((hits[1].3 - 92.3386).abs() < 1e-3, "health {}", hits[1].3);
 
         // A hit the player's invulnerability refuses is not a landed hit and writes no row.
         rt.actor_flags.insert(0, AF_INVULNERABLE);
@@ -11063,7 +11171,7 @@ mod tests {
     #[test]
     fn damage_and_scripts_add_to_one_decaying_palette_tint() {
         let mut rt = door_runtime();
-        // 20 damage adds 0.8 of red — before the shields are spent, as the engine's call is.
+        // 20 damage adds 0.8 of red — before the bar takes any of it, as the engine's call is.
         rt.damage_player(20.0, 0);
         assert!((rt.tint[0] - 0.8).abs() < 1e-5, "tint {:?}", rt.tint);
         // A script adds its own channels: red clamps at 1.0, blue at 0.5, and it is an add.
