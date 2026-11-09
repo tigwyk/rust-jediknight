@@ -671,7 +671,8 @@ function Invoke-JkWalkTrace {
 # without a second format:
 #
 #   music        `PlaySong`'s start/end track; `music_loop` is the mixer's loop flag (1/0)
-#   music_vol    f32 0x0054A678
+#   music_vol    f32 0x0054A67C  (`sithSoundMixer_SetMusicVolume` 0x4DAF40: the script volume;
+#                     0x0054A678 is the user's global multiplier the two are applied through)
 #   ambient      the loop channel (flags bit 0x1) with the largest gain; its script volume
 #   sounds       non-loop channels that started in the window, as `name@gain`
 #
@@ -705,7 +706,7 @@ function Invoke-JkAudioRoute {
   $clock0 = -1
   $sample = {
     param([int]$tick)
-    $vol = [JkRetail]::ReadFloat($ProcessId, 0x0054A678)
+    $vol = [JkRetail]::ReadFloat($ProcessId, 0x0054A67C)
     $from = [JkRetail]::ReadU32($ProcessId, 0x008BBC74)
     $to = [JkRetail]::ReadU32($ProcessId, 0x008BBC70)
     $loop = [JkRetail]::ReadU32($ProcessId, 0x00835FCC)
@@ -810,7 +811,7 @@ function Invoke-JkAudioRoute {
 #
 #   song range        u32 start 0x008BBC74, u32 end 0x008BBC70, u32 loop-back 0x00835FCC,
 #                     u32 playing 0x00835FD0                 (`sithSoundMixer_PlaySong`, 0x4DAE60)
-#   music volume      f32 0x0054A678                           (`SetMusicVol` cog function, 0x4FA569)
+#   music volume      f32 0x0054A67C                           (`SetMusicVol` cog function, 0x4FA569)
 #   mixer channels    base 0x00835FE8, 32 entries of 0x5C:
 #                       +0x08 sound struct, +0x0C flags, +0x14 volume, +0x18 min radius,
 #                       +0x1C max radius, +0x38 distance, +0x48 thing
@@ -829,7 +830,7 @@ function Invoke-JkAudioProbe {
   )
   $clock0 = Read-JkGameMs -ProcessId $ProcessId
   if ($clock0 -lt 0) { throw 'audio probe: the game clock (0x00836C14) could not be read' }
-  $vol0 = [JkRetail]::ReadFloat($ProcessId, 0x0054A678)
+  $vol0 = [JkRetail]::ReadFloat($ProcessId, 0x0054A67C)
   Log ("audio probe: start song {0}..{1} (loop {2}, playing {3}) volume {4:N3}" -f [JkRetail]::ReadU32($ProcessId, 0x008BBC74), [JkRetail]::ReadU32($ProcessId, 0x008BBC70), [JkRetail]::ReadU32($ProcessId, 0x00835FCC), [JkRetail]::ReadU32($ProcessId, 0x00835FD0), $vol0)
   $next = 0
   while ($true) {
@@ -838,7 +839,7 @@ function Invoke-JkAudioProbe {
     $elapsed = [double]$clock - [double]$clock0
     if ($elapsed -ge $Milliseconds) { break }
     if ($elapsed -lt $next) { Start-Sleep -Milliseconds 8; continue }
-    $vol = [JkRetail]::ReadFloat($ProcessId, 0x0054A678)
+    $vol = [JkRetail]::ReadFloat($ProcessId, 0x0054A67C)
     $from = [JkRetail]::ReadU32($ProcessId, 0x008BBC74)
     $to = [JkRetail]::ReadU32($ProcessId, 0x008BBC70)
     $num = [JkRetail]::ReadU32($ProcessId, 0x00835FCC)
