@@ -25,11 +25,13 @@
 # height a `warp` leaves a body at — so the legs now hold retail's sectors and vertical travel.
 #
 # Scenario rows (no tick cost, so the sample grid stays on retail's 600 ms cadence):
-#   switch           press the cantina-door switch through the level's own `activate` message; the
-#                    retail captures began with that door open.
 #   seed <vx> <vy>   start a leg at the velocity the retail capture already had at its pose (its
 #                    first 600 ms already covered the leg's travel; the fixture's row-0 `vel` is 0
 #                    only because that window has no earlier sample).
+# There is no `switch` row: retail's own `cogstatus 11` reads `doorstatus 0` after the cantina walk
+# with that door already open, and the replay's synthetic `activate` (the only thing that made the
+# port read 2) is a scenario the retail capture never performed. Without it the replay's positions
+# are unchanged and its switch cog reads retail's value; the gate compares the two now.
 # The street leg holds 90°, the direction retail's body actually travelled: the capture's 45° input
 # was clamped by the doorway jamb, and the port's door leaf sits 0.035 units from retail's, so the
 # recorded path is replayed rather than the clamp offset.
@@ -45,7 +47,6 @@ seed	0.3726	0.7844
 input	180	1	0
 warp	cantina		-2.200043	-2.900013	-1.142886	105.000092
 input	144	1	0
-switch
 warp	street		5.474939	-1.899975	0.657119	90.000000
 input	180	1	0
 warp	door		1.300000	9.000000	6.237000	0.000000

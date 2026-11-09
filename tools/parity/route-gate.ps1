@@ -23,6 +23,10 @@
     4. retail parity — the replay matches `level1-route-retail.tsv` within the **epsilon the fixture
        states** (`# epsilon <units>` in its header). Sectors stay exact inside the comparator.
 
+  Before 2-4, every field of both traces must be present: the comparator skips a `-`, so a required
+  health, shield or cog column left as `-` would measure parity for the position columns only and
+  pass. The gate rejects any `-` in either trace.
+
   `-Epsilon` overrides the fixture's stated value for an experiment; the gate's verdict is the
   fixture's.
 
@@ -93,6 +97,40 @@ if ($hashA -ne $hashB) {
 }
 Write-Host ("PASS  determinism: two replays are identical ({0} rows)" -f ((Get-Content -LiteralPath $runA).Count - 1))
 
+# 1b. Required fields. A `-` is a field the comparator would skip, so the gate rejects it before any
+# comparison: health, shields and the two cogs are the trace's required fields, and level 1 has both
+# cogs. Leaving any of them `-` would measure parity for the position columns only (issue #8 shipped
+# that way).
+if (-not (Test-Path -LiteralPath $RetailPath)) {
+  Write-Host "FAIL  retail: missing $RetailPath"
+  exit 1
+}
+function Find-MissingField([string]$Path) {
+  $header = $null
+  $lineNo = 0
+  foreach ($line in Get-Content -LiteralPath $Path) {
+    $lineNo++
+    if ($line -match '^\s*(#|$)') { continue }
+    $cells = @($line -split "`t")
+    if (-not $header) { $header = $cells; continue }
+    for ($i = 1; $i -lt $header.Count -and $i -lt $cells.Count; $i++) {
+      if ($cells[$i] -eq '-') { return ("line {0}, column '{1}'" -f $lineNo, $header[$i]) }
+    }
+  }
+  return $null
+}
+$retailMissing = Find-MissingField $RetailPath
+if ($retailMissing) {
+  Write-Host ("FAIL  retail: {0} leaves a required field as '-' ({1})" -f $RetailFixture, $retailMissing)
+  exit 1
+}
+$portMissing = Find-MissingField $runA
+if ($portMissing) {
+  Write-Host ("FAIL  port: the replay leaves a required field as '-' ({0})" -f $portMissing)
+  exit 1
+}
+Write-Host 'PASS  required fields: health, shields and both cog states are recorded on both sides'
+
 # 2. The committed oracle. The comparator is the app's own `--route-compare`; exit code is the gate.
 & $Exe --route-compare $PortPath $runA
 if ($LASTEXITCODE -ne 0) {
@@ -133,10 +171,6 @@ if ($Perturb) {
 
 # 4. Retail parity, at the epsilon the fixture states. The fixture is the oracle, so the tolerance is
 # part of it: `# epsilon <units>` is the harness's own resolution (see the file's header).
-if (-not (Test-Path -LiteralPath $RetailPath)) {
-  Write-Host "FAIL  retail: missing $RetailPath"
-  exit 1
-}
 $stated = Select-String -LiteralPath $RetailPath -Pattern '^\s*#\s*epsilon\s+([0-9.]+)' | Select-Object -First 1
 if (-not $stated) {
   Write-Host "FAIL  retail: $RetailFixture states no '# epsilon <units>' tolerance"

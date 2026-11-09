@@ -29,6 +29,13 @@ param(
   # File name (without `.tsv`) for the encounter trace. Empty uses the shots row's name; the gate's
   # fixture is `door_encounter`, while the pose row is `route_door`.
   [string]$EncounterName = '',
+  # Issue #8's continuous retail route: run every row of `-RoutePlan` in ONE game session and sample
+  # the bars on the 600 ms grid the port replays. The selected shots row must be the level's own
+  # start (no pose), i.e. `-Only spawn` with `shots.tsv`.
+  [switch]$RouteWalk,
+  [string]$RoutePlan = 'tools/parity/routes/level1-route.tsv',
+  [string]$RouteOut = 'target/parity/routetrace',
+  [string]$RouteName = 'level1-route-retail-continuous',
   # Capture a walk leg even when the headless preflight says the body cannot advance from the pose
   # (`tools/parity/walk-preflight.ps1`). Not recommended: a blocked leg parks the game against a wall.
   [switch]$ForceWalk,
@@ -532,6 +539,26 @@ function Read-JkGameMs {
 #
 # The port replays the same thing with `--trace-out` and `BK_WALK_FORWARD=1` (fixed 1/60 s step), and
 # `tools/parity/trace-compare.ps1` compares the two at the segment times.
+#
+# Player bars, the f32s both the walk trace and the encounter telemetry record: health at
+# `thing+0x134` (`GetThingHealth`) and inventory bin 60 shields at `inventory + 0x88 + 60*0x18`
+# (`sithInventory_SetInventory`). The plausibility guards are the encounter reader's: a wrong
+# pointer must abort the capture, not write zeros into a fixture.
+function Read-JkPlayerBars {
+  param([Parameter(Mandatory)][int]$ProcessId)
+  $thing = [JkRetail]::ReadU32($ProcessId, 0x008319A4)
+  if ($thing -le 0) { throw "player bars: the player thing pointer (0x008319A4) read $thing" }
+  $inv = [JkRetail]::ReadU32($ProcessId, $thing + 0x1C0)
+  if ($inv -le 0) { throw "player bars: the inventory pointer (thing+0x1C0) read $inv" }
+  $health = [JkRetail]::ReadFloat($ProcessId, $thing + 0x134)
+  $shields = [JkRetail]::ReadFloat($ProcessId, $inv + 0x88 + 60 * 0x18)
+  if ([double]::IsNaN($health) -or [double]::IsNaN($shields)) {
+    throw "player bars: the player bars could not be read (health $health, shields $shields)"
+  }
+  if ($health -lt 0.0 -or $health -gt 1000.0) { throw "player bars: implausible health $health at thing+0x134" }
+  if ($shields -lt -0.01 -or $shields -gt 200.01) { throw "player bars: implausible shields $shields at inventory bin 60" }
+  [pscustomobject]@{ Health = $health; Shields = $shields }
+}
 function Invoke-JkWalkTrace {
   param(
     [Parameter(Mandatory)][int]$ProcessId,
@@ -544,14 +571,16 @@ function Invoke-JkWalkTrace {
   $path = Join-Path $script:TraceOut ("{0}-walk.tsv" -f $Name)
   $segments = [math]::Max(1, [int][math]::Floor($Milliseconds / $HoldMs))
   $lines = New-Object System.Collections.Generic.List[string]
-  # `game_ms` is appended (not replacing `held_ms`) so older fixtures and readers keep their columns.
-  $lines.Add((@("held_ms", "x", "y", "z", "sector", "yaw", "game_ms") -join ([char]9)))
+  # `game_ms` is appended (not replacing `held_ms`) so older fixtures and readers keep their columns;
+  # `health`/`shields` are the route reference's two bar columns (issue #8's required fields).
+  $lines.Add((@("held_ms", "x", "y", "z", "sector", "yaw", "game_ms", "health", "shields") -join ([char]9)))
   $start = Read-JkCoords -ProcessId $ProcessId
   if (-not $start) { throw 'walk trace: the start pose could not be read from coords' }
   Log ("walk trace: start " + $start.Raw)
   $clock0 = Read-JkGameMs -ProcessId $ProcessId
   if ($clock0 -lt 0) { throw 'walk trace: the game clock (0x00836c14) could not be read' }
-  $lines.Add((@(0, $start.Pos[0], $start.Pos[1], $start.Pos[2], $start.Sector, $start.Pyr[1], 0) -join ([char]9)))
+  $bars = Read-JkPlayerBars -ProcessId $ProcessId
+  $lines.Add((@(0, $start.Pos[0], $start.Pos[1], $start.Pos[2], $start.Sector, $start.Pyr[1], 0, ('{0:F1}' -f $bars.Health), ('{0:F1}' -f $bars.Shields)) -join ([char]9)))
   $samples = 0
   if ($SettleMs -gt 0) {
     Log ("walk trace: settling {0} ms before the hold" -f $SettleMs)
@@ -596,7 +625,8 @@ function Invoke-JkWalkTrace {
       if ($clock -lt 0) { throw "walk trace: the game clock could not be read after segment $i" }
       $gameMs = $clock - $clock0
       $samples++
-      $lines.Add((@($held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $sample.Pyr[1], $gameMs) -join ([char]9)))
+      $bars = Read-JkPlayerBars -ProcessId $ProcessId
+      $lines.Add((@($held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $sample.Pyr[1], $gameMs, ('{0:F1}' -f $bars.Health), ('{0:F1}' -f $bars.Shields)) -join ([char]9)))
       Log ("walk trace: {0} ms held ({5} ms game) at ({1:N3}, {2:N3}, {3:N3}) sector {4}" -f $held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $gameMs)
       # Stuck detection (see the comment above the hold loop): a body against a wall has not moved.
       $dx = [double]$sample.Pos[0] - $previous[0]
@@ -651,6 +681,138 @@ function Invoke-JkWalkTrace {
       }
     }
   }
+  return $path
+}
+# `-RouteWalk`: the retail half of issue #8's scripted route, in ONE game session.
+#
+# The port's replay is one continuous run. Four independent retail leg captures each started from a
+# fresh level load, so their bars carried different pre-warp damage and could not be compared; this
+# runs the same `tools/parity/routes/level1-route.tsv` rows without reloading. A `warp` row runs the
+# console warp at its tick (the body goes one eye offset below the script's camera eye, as retail's
+# `warp` leaves it), an `input` row holds forward for its ticks in 600 ms segments, and the bars are
+# read from memory at every segment end — no console while the fight is live. Cogs are read with
+# `cogstatus` at the start and after each leg, where the plan can change them. `seed` rows are the
+# port's compensation for retail's coast, so they need no action here; `switch`/`use` rows are
+# logged and not synthesized (retail's own links deliver those messages).
+function Invoke-JkRouteTrace {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][string]$Plan,
+    [Parameter(Mandatory)][string]$OutDir,
+    [Parameter(Mandatory)][string]$Name
+  )
+  $path = Join-Path $OutDir ("{0}.tsv" -f $Name)
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add((@('tick', 't_s', 'health', 'shields', 'door0_status', 'door0_movestatus', 'door0_opendoors', 'door0_closedoors',
+        'switch_status', 'switch_movestatus', 'switch_opendoors', 'switch_closedoors') -join ([char]9)))
+  $cogs = [ordered]@{
+    door0_status = $null; door0_movestatus = $null; door0_opendoors = $null; door0_closedoors = $null
+    switch_status = $null; switch_movestatus = $null; switch_opendoors = $null; switch_closedoors = $null
+  }
+  $wanted = @{
+    0  = @{ doorstatus = 'door0_status'; movestatus = 'door0_movestatus'; opendoors = 'door0_opendoors'; closedoors = 'door0_closedoors' }
+    11 = @{ doorstatus = 'switch_status'; movestatus = 'switch_movestatus'; open_doors = 'switch_opendoors'; close_doors = 'switch_closedoors' }
+  }
+  # A reply can carry the previous command's tail, so a symbol that does not appear keeps its value.
+  $readCogs = {
+    foreach ($cog in 0, 11) {
+      foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $ProcessId -Command ("cogstatus {0}" -f $cog))) {
+        if ($line -match "Symbol \d+: '([a-zA-Z_0-9]+)'\s*=\s*([-0-9.]+)") {
+          $symbol = $Matches[1]
+          if ($wanted[$cog].ContainsKey($symbol)) { $cogs[$wanted[$cog][$symbol]] = [double]$Matches[2] }
+        }
+      }
+    }
+  }
+  $addRow = {
+    param([int]$Tick, [double]$Health, [double]$Shields)
+    $cells = @($Tick, ('{0:F4}' -f ($Tick / 60.0)), ('{0:F1}' -f $Health), ('{0:F1}' -f $Shields))
+    foreach ($key in $cogs.Keys) {
+      $value = $cogs[$key]
+      $cells += $(if ($null -eq $value) { '-' } else { '{0:F3}' -f $value })
+    }
+    $lines.Add(($cells -join ([char]9)))
+  }
+  & $readCogs
+  $bars = Read-JkPlayerBars -ProcessId $ProcessId
+  & $addRow 0 $bars.Health $bars.Shields
+  $tick = 0
+  foreach ($line in Get-Content -LiteralPath $Plan) {
+    if ($line -match '^\s*(#|$)') { continue }
+    $f = $line -split "`t"
+    switch ($f[0]) {
+      'warp' {
+        $x = $f[3]
+        if ($x -and $x -ne '-') {
+          $bodyZ = [double]$f[5] - $script:JkEyeOffset
+          # `warp x y z pitch yaw roll` (the shots flow's own argument order): passing the route's yaw
+          # in the pitch slot left the body facing nowhere and unable to walk.
+          $command = 'warp {0} {1} {2} 0 {3} 0' -f $f[3], $f[4], $bodyZ, $f[6]
+          $reply = @(Invoke-JkDevConsoleCommand -ProcessId $ProcessId -Command $command)
+          if ($reply -match 'Position not in world') { throw "route trace: warp failed: $command" }
+          $coords = Read-JkCoords -ProcessId $ProcessId
+          Log ("route: {0} -> {1}" -f $command, $(if ($coords) { $coords.Raw } else { 'coords unavailable' }))
+          # The shots flow waits this long after a warp before a walk; the game is still finishing
+          # the console/foreground transition and would swallow the first hold.
+          Start-Sleep -Milliseconds 900
+        }
+      }
+      'input' {
+        if ([double]$f[3] -ne 0) { throw 'route trace: strafe input is not supported' }
+        $segments = [int]([int]$f[1] / 36)
+        # Like the walk trace: the key goes down before the window is raised, so the frame that
+        # resumes the game after a console/foreground wait already sees it (a 600 ms press entirely
+        # inside a paused window is one frame or none at the engine's few-fps render rate).
+        Send-JkKeyDown -Name 'UP'
+        for ($i = 1; $i -le $segments; $i++) {
+          # A console read between segments takes the focus, so DInput only sees the hold after the
+          # game window is raised and foreground (the walk trace's own loop; its body moves).
+          $gameWindow = Get-JkWindow -ProcessId $ProcessId
+          $active = [JkRetail]::Activate($gameWindow)
+          Log ("route: focus activated={0} foreground={1}" -f $active, [JkRetail]::ForegroundTitle())
+          for ($attempt = 0; $attempt -lt 8; $attempt++) {
+            if ($gameWindow -eq [IntPtr]::Zero) { break }
+            [void][JkRetail]::ShowWindow($gameWindow, 9)
+            [void][JkRetail]::SetForegroundWindow($gameWindow)
+            Start-Sleep -Milliseconds 120
+            if ([JkRetail]::ForegroundTitle() -eq 'Jedi Knight') { break }
+          }
+          Send-JkKeyDown -Name 'UP'
+          $clockBefore = Read-JkGameMs -ProcessId $ProcessId
+          Start-Sleep -Milliseconds 600
+          Send-JkKeyUp -Name 'UP'
+          $clockAfter = Read-JkGameMs -ProcessId $ProcessId
+          Log ("route: hold clock {0} -> {1} ms" -f $clockBefore, $clockAfter)
+          $tick += 36
+          $bars = Read-JkPlayerBars -ProcessId $ProcessId
+          & $addRow $tick $bars.Health $bars.Shields
+          # End the segment with a console read like the walk trace: it freezes the game between
+          # holds, so the pre-pressed key cannot move the body during the foreground wait and each
+          # 600 ms sample measures one hold (the committed walk traces' methodology).
+          $holdCoords = Read-JkCoords -ProcessId $ProcessId
+          if ($holdCoords) {
+            Log ("route: tick {0} ({1} ms held) pos ({2:N2}, {3:N2}, {4:N2}) sector {5}; health {6:N1} shields {7:N1}" -f `
+                $tick, ($i * 600), $holdCoords.Pos[0], $holdCoords.Pos[1], $holdCoords.Pos[2], $holdCoords.Sector, $bars.Health, $bars.Shields)
+          } else {
+            Log ("route: tick {0} ({1} ms held) health {2:N1} shields {3:N1} (coords unavailable)" -f $tick, ($i * 600), $bars.Health, $bars.Shields)
+          }
+        }
+        Send-JkKeyUp -Name 'UP'
+        $coords = Read-JkCoords -ProcessId $ProcessId
+        if ($coords) { Log ("route: leg end -> " + $coords.Raw) } else { Log 'route: leg end coordinates unavailable' }
+        & $readCogs
+      }
+      'switch' {
+        # Retail opens that door through the level's own plate link. The port's synthetic `activate`
+        # was removed from the plan; script it here only if retail's own reading ever needs it.
+        Log 'route: switch row has no synthetic action'
+      }
+      'use' { Log 'route: use row has no synthetic action in this plan' }
+      'seed' { }
+    }
+  }
+  Set-Content -LiteralPath $path -Value $lines -Encoding utf8
+  Log ("route trace: wrote {0} ({1} row(s))" -f $path, ($lines.Count - 1))
   return $path
 }
 # `-EncounterMs`: the retail half of issue #9's door-encounter telemetry.
@@ -1032,6 +1194,10 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
 
     # Skip the intro movies: activate the window, ESC, retry until the bright Players screen.
     Start-Sleep -Seconds 2
+    # The shell is not the foreground process, so the game can start behind whatever was focused and
+    # every synthetic key would go there. Raise it through the foreground thread's input queue first.
+    $activated = [JkRetail]::Activate($gameWindow)
+    Log "raised the game window (activated=$activated, foreground=$([JkRetail]::ForegroundTitle()))"
     Send-JkClick -X 50 -Y 50
     if ($IntroShotMs -gt 0) {
       # The (50,50) click dismissed the dev console, so the movie has just started: wait on it.
@@ -1260,6 +1426,17 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       $traceName = if ($EncounterName) { $EncounterName } else { $name }
       $tracePath = Invoke-JkEncounterTrace -ProcessId $process.Id -Name $traceName -Milliseconds $EncounterMs -CadenceMs $EncounterCadenceMs -OutDir $encounterDir
       Log "encounter trace mode: skipped the screenshot series/reference for '$name' (wrote $tracePath)"
+      return
+    }
+
+    # Issue #8: the continuous retail route replaces the screenshot series. The row must be the
+    # level's own start — a warp row would make the spawn leg a different measurement.
+    if ($RouteWalk) {
+      if ($null -ne $requestedPose) { throw "route walk '$name' must be a level-start row (no pose), not a warp row" }
+      $routeDir = Resolve-FromRepo $RouteOut
+      New-Item -ItemType Directory -Force -Path $routeDir | Out-Null
+      $routePath = Invoke-JkRouteTrace -ProcessId $process.Id -Plan (Resolve-FromRepo $RoutePlan) -OutDir $routeDir -Name $RouteName
+      Log "route trace mode: skipped the screenshot series/reference for '$name' (wrote $routePath)"
       return
     }
 

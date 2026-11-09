@@ -23,6 +23,7 @@ public static class JkRetail {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
@@ -176,6 +177,37 @@ public static class JkRetail {
     try { SetFocus(target); } finally { AttachThreadInput(myThread, targetThread, false); }
   }
   public static void SetControlText(IntPtr h, string text) { SendMessage(h, 0x000C, IntPtr.Zero, text); } // WM_SETTEXT
+  // Bring the game window to the front and give it the keyboard. A process the shell did not start
+  // in the foreground cannot just call SetForegroundWindow (Windows' foreground lock), which is how
+  // a capture run on a busy desktop ended up with the game behind another app and every synthetic
+  // key going to that app. Attaching to the foreground thread's input queue lifts the lock for the
+  // call; returns whether the game actually became foreground.
+  public static bool Activate(IntPtr h) {
+    uint mine = GetCurrentThreadId();
+    IntPtr fg = GetForegroundWindow();
+    uint fgThread = 0;
+    if (fg != IntPtr.Zero) { GetWindowThreadProcessId(fg, out fgThread); }
+    bool attached = fgThread != 0 && fgThread != mine && AttachThreadInput(mine, fgThread, true);
+    try {
+      ShowWindow(h, 9);
+      // Topmost, then foreground: the capture reads the *screen region*, so a window merely raised
+      // in z-order is still covered by whatever the user has open. The engine's fullscreen window
+      // covers the whole monitor while it runs; it is closed by the harness afterwards.
+      SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040); // TOPMOST | NOSIZE | NOMOVE | SHOWWINDOW
+      // A synthetic ALT tap satisfies the foreground lock's "the process received the last input"
+      // rule, so SetForegroundWindow is allowed to move keyboard focus to the game after a console
+      // dialog raised another window.
+      One(0x38, true, false);
+      System.Threading.Thread.Sleep(15);
+      One(0x38, false, false);
+      System.Threading.Thread.Sleep(15);
+      SetForegroundWindow(h);
+      SetFocus(h);
+      return GetForegroundWindow() == h;
+    } finally {
+      if (attached) { AttachThreadInput(mine, fgThread, false); }
+    }
+  }
   public static string ForegroundTitle() {
     var h = GetForegroundWindow(); var sb = new StringBuilder(512); GetWindowText(h, sb, 512);
     return h.ToString() + ":'" + sb.ToString() + "'";
