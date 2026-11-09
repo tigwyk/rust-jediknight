@@ -5297,9 +5297,9 @@ impl Runtime {
                         let m = self.ai.get(&index).map(|c| c.maxstep).unwrap_or(0.5).max(0.0);
                         let sector = solids.sector_at(next, r);
                         let lifted = [next[0], next[1], next[2] + 0.01];
-                        let stand = sector.and_then(|s| solids.standable(s, lifted, h + m, r));
+                        let stand = sector.and_then(|s| solids.resting_floor(s, lifted, h + m, r));
                         eprintln!(
-                            "ai: {index} cannot step to {next:?}: sector {sector:?}, standable {stand:?} (reach {:.2}), from {:?}",
+                            "ai: {index} cannot step to {next:?}: sector {sector:?}, floor {stand:?} (reach {:.2}), from {:?}",
                             h + m,
                             self.things.get(index).map(|t| t.pos)
                         );
