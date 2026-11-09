@@ -2660,13 +2660,16 @@ driven through the verb the script would call; and the **visual** half of seeing
 that tints the world — is not drawn yet, because the level shader is the one piece the distance term
 needs too (§6).
 
-**Shields, death and respawn: the player has a life cycle now.** `sithPlayer_Update` spends the shield
-bar before health, and the status bar draws both numbers. This build had neither: every hit came off
-health directly, the shield number was the HUD's default, and health reaching 0 did nothing at all —
-the walker kept walking at 0.
+**Shields, death and respawn: the player has a life cycle now.** The shield bar's own rule is the
+shipped `item_shields.cog`: the engine broadcasts `damaged` to the player's inventory item cogs and
+bin 60's script spends the bar and returns the health share (see the deviation ledger's *player shield
+split* row). `sithPlayer_Update` runs the palette tint and the bar's life cycle, and the status bar
+draws both numbers. This build had neither: every hit came off health directly, the shield number was
+the HUD's default, and health reaching 0 did nothing at all — the walker kept walking at 0.
 
-`Runtime::damage_player` is now the one path player damage takes: shields absorb first, the remainder
-comes off health, and 0 health sets `player_dead`. `Runtime::respawn_player` puts the player back at
+`Runtime::damage_player` is now the one path player damage takes: the shield script's split — energy
+and fire share the branch, saber halves first, and an impact reaches health with the bar untouched —
+and 0 health sets `player_dead`. `Runtime::respawn_player` puts the player back at
 the level's own `walkplayer` with both bars full. `respawn_on_death` carries that into the running
 game — the runtime's body resets its pose, sector and fall state, and the app only refreshes the
 status-bar numbers from the answer — and `health_follows_damage` mirrors both numbers into the status
@@ -2676,8 +2679,8 @@ bar, which is what makes the damage visible at all.
 
 ```text
 die: player starts with 100 health and 100 shields
-die: 30 damage -> 70 shield(s), 100 health      <- the bar absorbs it, health untouched
-die: 200 more -> 0 shield(s), 0 health          <- the rest goes through
+die: 30 energy damage -> 70 shield(s), 100 health   <- the bar takes the whole hit; above 50 it stops it
+die: 200 more -> 0 shield(s), 0 health              <- past 50 the leftover is scaled and goes through
 die: respawn at the level's start -> 100 health, 100 shields
 ```
 

@@ -1169,7 +1169,7 @@ fn main() {
             "--hit" => hit_check = true,
             "--camera-pull" => camera_pull_flag = true,
         "--ends" => ends_check_flag = true,
-            // `--die`: shields absorb first, health reaches 0, and the level's start brings the
+            // `--die`: the shield script's split, health reaches 0, and the level's start brings the
             // player back with a full bar.
             "--die" => die_check = true,
             "--fire" => {
@@ -6833,7 +6833,8 @@ fn main() {
     }
 
     if die_check {
-        // The player's own damage path: shields first, then health, then the level's start.
+        // The player's own damage path: the shield script's split, then health, then the level's
+        // start. Energy is a kind `item_shields.cog` protects (an impact blast bypasses the bar).
         let sim_world = runtime::Runtime::handle(&world.level);
         let mut rt = sim_world.borrow_mut();
         let player = rt
@@ -6844,12 +6845,12 @@ fn main() {
         let spawn = rt.things[player].pos;
         let (health, shields) = (rt.things[player].health, rt.player_shields);
         println!("die: player starts with {health:.0} health and {shields:.0} shields");
-        let (shields, health) = rt.damage_player(30.0, runtime::DAMAGE_IMPACT);
-        println!("die: 30 damage -> {shields:.0} shield(s), {health:.0} health");
-        assert!((shields - (100.0 - 30.0)).abs() < 0.01, "the shields did not absorb it");
-        assert!((health - 100.0).abs() < 0.01, "health moved before the shields were gone");
-        // Through the shields and into health: 70 shield + 130 health is lethal.
-        let (shields, health) = rt.damage_player(200.0, runtime::DAMAGE_IMPACT);
+        let (shields, health) = rt.damage_player(30.0, runtime::DAMAGE_ENERGY);
+        println!("die: 30 energy damage -> {shields:.0} shield(s), {health:.0} health");
+        assert!((shields - 70.0).abs() < 0.01, "the bar did not take the hit");
+        assert!((health - 100.0).abs() < 0.01, "health moved while the bar was above 50");
+        // Through the bar and into health: 70 shield and 100 health is lethal.
+        let (shields, health) = rt.damage_player(200.0, runtime::DAMAGE_ENERGY);
         println!("die: 200 more -> {shields:.0} shield(s), {health:.0} health");
         assert_eq!(shields, 0.0, "shields should be spent");
         assert_eq!(health, 0.0, "the player should be dead");
@@ -9208,10 +9209,16 @@ fn main() {
         }
         match landed {
             Some((index, _, carried)) => {
-                let left = rt.damage(player as i64, carried);
+                // A bolt on the walkplayer goes through the player's own damage path, which is where
+                // the shield bar stands (`item_shields.cog`'s split), not the generic thing path.
+                let shields_before = rt.player_shields;
+                let (shields, left) = rt.damage_player(carried, runtime::DAMAGE_ENERGY);
                 rt.things[index].destroyed = true;
-                println!("hit: the player took {carried:.0}, {left:.0} health left");
-                assert!(left < health_before, "the player took no damage");
+                println!("hit: the player took {carried:.0}, {shields:.0} shield(s) and {left:.0} health left");
+                assert!(
+                    shields < shields_before || left < health_before,
+                    "the player took no damage"
+                );
             }
             None => println!(
                 "hit: no bolt from thing {actor_index} reached the player on this level (the line of fire is blocked); the player's own shots are the evidenced direction here"
