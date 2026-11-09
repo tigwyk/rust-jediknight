@@ -17,6 +17,18 @@ param(
   # input, so a leg that starts after the opening settles for this window first. The trace's `held_ms`
   # starts at 0 after it, and `port-trace.ps1` takes the same value from the row's optional 8th column.
   [int]$WalkTraceSettleMs = 0,
+  # Issue #9's door-encounter telemetry, retail half: after the level loads and the row's warp has
+  # been applied, sample the engine's own memory (player health, inventory bin 60 shields, the thing
+  # array for actors and fired projectiles, and `DAT_00836c14` for the game clock) on a fixed
+  # game-time cadence for this many milliseconds, then write <name>.tsv into -EncounterOut. 0 keeps
+  # the normal screenshot captures. The dev console is NOT polled during the trace: it pauses the
+  # game and would change the encounter.
+  [int]$EncounterMs = 0,
+  [int]$EncounterCadenceMs = 100,
+  [string]$EncounterOut = 'target/parity/encounter',
+  # File name (without `.tsv`) for the encounter trace. Empty uses the shots row's name; the gate's
+  # fixture is `door_encounter`, while the pose row is `route_door`.
+  [string]$EncounterName = '',
   # Capture a walk leg even when the headless preflight says the body cannot advance from the pose
   # (`tools/parity/walk-preflight.ps1`). Not recommended: a blocked leg parks the game against a wall.
   [switch]$ForceWalk,
@@ -641,6 +653,160 @@ function Invoke-JkWalkTrace {
   }
   return $path
 }
+# `-EncounterMs`: the retail half of issue #9's door-encounter telemetry.
+#
+# Everything is read straight out of the engine's memory, because the dev console is a dialog that
+# pauses the game: a `coords`/`aistatus` poll on a cadence would stop the encounter between samples
+# and measure a different fight. The addresses come from the decompilation (each is a fixed runtime
+# address; JK.EXE has no relocations):
+#
+#   player thing            *(u32*)0x008319A4
+#   health                  f32 at thing + 0x134        (`GetThingHealth`, sithPlayer health)
+#   inventory block         *(u32*)(thing + 0x1C0)
+#   shields (bin 60)        f32 at inventory + 0x88 + 60*0x18
+#                           (`sithInventory_SetInventory` 0x4D2000: amount = base + bin*0x18)
+#   world                   *(u32*)0x008339C8
+#   thing count / base      u32 at world + 0xBC / u32 at world + 0xC4 (`FUN_004da770`),
+#                           stride 0x2B0; type at +0x0C (2 actor, 3 weapon/projectile, 10 player),
+#                           template u16 at +0x04, angles f32x3 at +0x88, position f32x3 at +0xB8
+#   game clock (ms)         *(u32*)0x00836C14           (`sithTime_Advance`)
+#
+# The row shape is the port's (`t_ms kind thing template x y z yaw health shields detail`), so
+# `tools/parity/encounter-gate.ps1` compares the two without a second format. A `shot` row is a
+# type-3 thing that appeared since the previous sample (a fired bolt; placed weapons are already in
+# the baseline), a `hit` row is a drop in the player's shields or health, and `player`/`actor` rows
+# are state at the fixed game-time cadence.
+function Invoke-JkEncounterTrace {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][string]$Name,
+    [int]$Milliseconds = 10000,
+    [int]$CadenceMs = 100,
+    [Parameter(Mandatory)][string]$OutDir
+  )
+  $path = Join-Path $OutDir ("{0}.tsv" -f $Name)
+  $playerThing = [JkRetail]::ReadU32($ProcessId, 0x008319A4)
+  if ($playerThing -le 0) { throw "encounter trace: the player thing pointer (0x008319A4) read $playerThing" }
+  $world = [JkRetail]::ReadU32($ProcessId, 0x008339C8)
+  if ($world -le 0) { throw "encounter trace: the world pointer (0x008339C8) read $world" }
+  $inv = [JkRetail]::ReadU32($ProcessId, $playerThing + 0x1C0)
+  if ($inv -le 0) { throw "encounter trace: the player inventory pointer (thing+0x1C0) read $inv" }
+  $health0 = [JkRetail]::ReadFloat($ProcessId, $playerThing + 0x134)
+  $shields0 = [JkRetail]::ReadFloat($ProcessId, $inv + 0x88 + 60 * 0x18)
+  if ([double]::IsNaN($health0) -or [double]::IsNaN($shields0)) {
+    throw "encounter trace: the player bars could not be read (health $health0, shields $shields0)"
+  }
+  # Plausibility guards: a wrong offset must fail the capture, not write a fixture full of zeros.
+  if ($health0 -lt 0.0 -or $health0 -gt 1000.0) { throw "encounter trace: implausible health $health0 at thing+0x134" }
+  if ($shields0 -lt -0.01 -or $shields0 -gt 200.01) { throw "encounter trace: implausible shields $shields0 at inventory bin 60" }
+  Log ("encounter trace: player thing {0}, health {1}, shields {2}, world {3}" -f $playerThing, $health0, $shields0, $world)
+
+  $clock0 = Read-JkGameMs -ProcessId $ProcessId
+  if ($clock0 -lt 0) { throw 'encounter trace: the game clock (0x00836C14) could not be read' }
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add((@('t_ms', 'kind', 'thing', 'template', 'x', 'y', 'z', 'yaw', 'health', 'shields', 'detail') -join ([char]9)))
+  $previous = $null
+  $previousType3 = @{}
+  $sampled = 0
+  $nextSample = 0
+  $shots = 0
+  $hits = 0
+  $failedReads = 0
+  while ($true) {
+    $clock = Read-JkGameMs -ProcessId $ProcessId
+    if ($clock -lt 0) { throw 'encounter trace: the game clock stopped reading' }
+    $elapsed = [double]$clock - [double]$clock0
+    if ($elapsed -ge $Milliseconds) { break }
+    if ($elapsed -lt $nextSample) { Start-Sleep -Milliseconds 8; continue }
+
+    $count = [JkRetail]::ReadU32($ProcessId, $world + 0xBC)
+    $base = [JkRetail]::ReadU32($ProcessId, $world + 0xC4)
+    if ($count -le 0 -or $count -gt 5000 -or $base -le 0) {
+      $failedReads++
+      Start-Sleep -Milliseconds 8
+      continue
+    }
+    $bytes = [JkRetail]::ReadBytes($ProcessId, $base, [int]($count * 0x2B0))
+    if ($null -eq $bytes) {
+      $failedReads++
+      Start-Sleep -Milliseconds 8
+      continue
+    }
+    $health = [JkRetail]::ReadFloat($ProcessId, $playerThing + 0x134)
+    $invNow = [JkRetail]::ReadU32($ProcessId, $playerThing + 0x1C0)
+    $shields = if ($invNow -gt 0) { [JkRetail]::ReadFloat($ProcessId, $invNow + 0x88 + 60 * 0x18) } else { [double]::NaN }
+    if ([double]::IsNaN($health) -or [double]::IsNaN($shields)) {
+      $failedReads++
+      Start-Sleep -Milliseconds 8
+      continue
+    }
+    $px = [JkRetail]::ReadFloat($ProcessId, $playerThing + 0xB8)
+    $py = [JkRetail]::ReadFloat($ProcessId, $playerThing + 0xBC)
+    $pz = [JkRetail]::ReadFloat($ProcessId, $playerThing + 0xC0)
+    # `thing + 0x88` is `orient.rvec` (rdMatrix): a yaw-only rotation gives
+    # (cos yaw, sin yaw, 0), so atan2(y, x) recovers the body yaw. Reading the raw element
+    # (the old 0x8C) is sin(yaw), not degrees -- actor facings need this conversion.
+    $pyaw = [math]::Atan2([double][JkRetail]::ReadFloat($ProcessId, $playerThing + 0x8C), [double][JkRetail]::ReadFloat($ProcessId, $playerThing + 0x88)) * 180.0 / [math]::PI
+    $sampleMs = [math]::Round($nextSample)
+
+    $currentType3 = @{}
+    $sampleLines = New-Object System.Collections.Generic.List[string]
+    $sampleLines.Add((@($sampleMs, 'player', $playerThing, 'walkplayer', ('{0:F4}' -f $px), ('{0:F4}' -f $py), ('{0:F4}' -f $pz), ('{0:F2}' -f $pyaw), ('{0:F1}' -f $health), ('{0:F1}' -f $shields), '') -join ([char]9)))
+    for ($i = 0; $i -lt $count; $i++) {
+      $offset = $i * 0x2B0
+      $type = [BitConverter]::ToInt32($bytes, $offset + 0x0C)
+      if ($type -eq 3) {
+        $template = [BitConverter]::ToUInt16($bytes, $offset + 0x04)
+        $x = [BitConverter]::ToSingle($bytes, $offset + 0xB8)
+        $y = [BitConverter]::ToSingle($bytes, $offset + 0xBC)
+        $z = [BitConverter]::ToSingle($bytes, $offset + 0xC0)
+        $currentType3[$i] = [pscustomobject]@{ Template = $template; X = $x; Y = $y; Z = $z }
+        # A placed weapon is in the baseline sample; anything new afterwards is a fired bolt.
+        if ($sampled -gt 0 -and -not $previousType3.ContainsKey($i)) {
+          $shots++
+          $sampleLines.Add((@($sampleMs, 'shot', $i, $template, ('{0:F4}' -f $x), ('{0:F4}' -f $y), ('{0:F4}' -f $z), '', '', '', '') -join ([char]9)))
+          Log ("encounter trace: shot at {0} ms from thing {1} template {2} at ({3:N2}, {4:N2}, {5:N2})" -f $sampleMs, $i, $template, $x, $y, $z)
+        }
+        continue
+      }
+      if ($type -ne 2) { continue }
+      $actorHealth = [BitConverter]::ToSingle($bytes, $offset + 0x134)
+      if ($actorHealth -le 0.0) { continue }
+      $x = [BitConverter]::ToSingle($bytes, $offset + 0xB8)
+      $y = [BitConverter]::ToSingle($bytes, $offset + 0xBC)
+      $z = [BitConverter]::ToSingle($bytes, $offset + 0xC0)
+      $dx = $x - $px
+      $dy = $y - $py
+      if (($dx * $dx + $dy * $dy) -gt (8.0 * 8.0)) { continue }
+      # Same conversion as the player: orient.rvec (cos yaw, sin yaw) -> degrees.
+      $yaw = [math]::Atan2([double][BitConverter]::ToSingle($bytes, $offset + 0x8C), [double][BitConverter]::ToSingle($bytes, $offset + 0x88)) * 180.0 / [math]::PI
+      $template = [BitConverter]::ToUInt16($bytes, $offset + 0x04)
+      $sampleLines.Add((@($sampleMs, 'actor', $i, $template, ('{0:F4}' -f $x), ('{0:F4}' -f $y), ('{0:F4}' -f $z), ('{0:F2}' -f $yaw), ('{0:F1}' -f $actorHealth), '', '') -join ([char]9)))
+    }
+    # A landed hit is a drop in either bar. Shield recharge and respawns raise them; only drops count.
+    if ($null -ne $previous) {
+      $lost = ($previous.Shields - $shields) + ($previous.Health - $health)
+      if (($previous.Shields - $shields) -gt 0.05 -or ($previous.Health - $health) -gt 0.05) {
+        $hits++
+        $amount = [math]::Max(0.0, $lost)
+        $sampleLines.Add((@($sampleMs, 'hit', $playerThing, '', '', '', '', '', ('{0:F1}' -f $health), ('{0:F1}' -f $shields), ('amount {0:F1}' -f $amount)) -join ([char]9)))
+        Log ("encounter trace: hit at {0} ms for {1:N1}, {2:N1} shield(s), {3:N1} health" -f $sampleMs, $amount, $shields, $health)
+      }
+    }
+    foreach ($line in $sampleLines) { $lines.Add($line) }
+    $previous = [pscustomobject]@{ Health = $health; Shields = $shields }
+    $previousType3 = $currentType3
+    $sampled++
+    # The rows fill the fixed cadence even when the engine renders slower: a grid point between two
+    # frames holds the state of the frame before it, so both sides have a row every `CadenceMs`.
+    $nextSample += $CadenceMs
+  }
+  Set-Content -LiteralPath $path -Value $lines -Encoding utf8
+  if ($sampled -eq 0) { throw 'encounter trace: no samples were taken' }
+  if ($failedReads -gt 0) { Log ("encounter trace: {0} read attempt(s) failed and were retried" -f $failedReads) }
+  Log ("encounter trace: wrote {0} ({1} sample(s), {2} shot(s), {3} hit(s) over {4} ms of game time)" -f $path, $sampled, $shots, $hits, $Milliseconds)
+  return $path
+}
 # Wait until FFmpeg reports the game window as bright (the Players screen is a bright static frame;
 # the intro movies are dark). Returns the luma average or $null.
 function Wait-JkBrightScreen {
@@ -1082,7 +1248,19 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       if ($warpReply -match 'Position not in world') {
         throw "warp failed for row '$name' in level '$level': Position not in world"
       }
-      Start-Sleep -Milliseconds 900
+      if ($EncounterMs -le 0) { Start-Sleep -Milliseconds 900 }
+    }
+
+    # Issue #9: a door-encounter run replaces the screenshot series (the `finally` still closes the
+    # game and restores the desktop). It runs before any console command or action key so nothing
+    # pauses the clock or perturbs the fight.
+    if ($EncounterMs -gt 0) {
+      $encounterDir = Resolve-FromRepo $EncounterOut
+      New-Item -ItemType Directory -Force -Path $encounterDir | Out-Null
+      $traceName = if ($EncounterName) { $EncounterName } else { $name }
+      $tracePath = Invoke-JkEncounterTrace -ProcessId $process.Id -Name $traceName -Milliseconds $EncounterMs -CadenceMs $EncounterCadenceMs -OutDir $encounterDir
+      Log "encounter trace mode: skipped the screenshot series/reference for '$name' (wrote $tracePath)"
+      return
     }
 
     if ($Keys.Count -gt 0) {

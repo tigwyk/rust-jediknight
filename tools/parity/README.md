@@ -379,6 +379,61 @@ A replay is reproducible by construction: the step is pinned at 1/60 s and the r
 schedule on one executor thread. The AI's shared LCG is thread-local, so with the default
 multi-threaded executor the same script could land a hit a frame apart between runs; one thread makes
 every call site see the same sequence. Play keeps the default executor.
+## Door encounter telemetry (issue #9)
+
+The fixed level-1 door encounter (the `route_door` pose, `tools/parity/door-encounter.tsv`) is captured on
+both builds as one TSV so AI and combat timing can be compared instead of inferred:
+
+```text
+t_ms  kind  thing  template  x  y  z  yaw  health  shields  detail
+```
+
+`kind` is `player`/`actor` at the row's cadence (100 ms here), `shot` when an actor fires, and `hit` when
+a shot lands on the player — the hit row carries the health and shields **after** the hit. Both sides use
+the engine's game clock, not wall time, so the timeline is comparable at different frame rates. The
+retail engine renders a few frames a second, so its `hit` row is the damage that landed since the
+previous sample (two bolts in one frame are one row) and its rows hold that frame's state between
+grid points; the port records every shot and hit at its fixed 60 Hz step.
+
+- Retail: `pwsh -File tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door -EncounterMs 10000 -EncounterCadenceMs 100 -EncounterName door_encounter`
+  writes `target/parity/encounter/door_encounter.tsv` (the pose row is `route_door`; `-EncounterName`
+  matches the encounter file's name). It samples the engine's memory directly (the dev console
+  pauses the game, so polling it would change the fight): player health is the f32 at
+  `thing+0x134` from the player pointer `0x008319A4`, shields are inventory bin 60
+  (`*(thing+0x1C0) + 0x88 + 60*0x18`), and actors/projectiles come from the thing array
+  (`world = 0x008339C8`, count at `+0xBC`, base at `+0xC4`, stride `0x2B0`). The addresses and their
+  decompiled sources are in `Invoke-JkEncounterTrace`.
+- Port: `pwsh -File tools/parity/port-encounter.ps1` runs the same pose for the row's fixed 1/60 s
+  frames with `BK_ENCOUNTER_OUT` set; the runtime queues shot/hit events and the app samples the player
+  and the actors within 8 units.
+- Gate: `pwsh -File tools/parity/encounter-gate.ps1` seeds the committed retail fixture from
+  `tools/parity/encounter/`, records the port twice (and fails if the two runs leave the measured
+  run-to-run band: same shape and endpoint, event-timing and actor-state deltas and the same kill
+  order), and reports the per-shot/per-hit timing deltas, the per-hit health/shield deltas, the kill
+  order, the settled endpoint, and the actor position/facing/health deltas at every sample. It exits
+  non-zero when any of them leaves its tolerance, and its thresholds are parameters with their reasons
+  in the script header.
+
+Kill order is read off the trace: both captures drop a thing once it is gone (the retail reader skips
+an actor at 0 health, the port's trace a destroyed one) and both name an actor by the level's own
+placement index, so the last sample a thing appears in is its death time. The door fixture kills
+nobody on either side in ten seconds and the gate prints that explicitly (`kill order: retail [], port
+[]`); a fixture whose actors walk out of the 8-unit sampling radius would read the same way, which is
+why the position check above is what tells the two apart.
+
+The player's damage split is the shipped `item_shields.cog`'s: the bar takes the whole hit, a bar above
+50 stops it completely, and the rest is scaled by `1 - shieldsLeft / 50` (which is above 1 when the hit
+spent the bar). Energy (2) and fire (4) share that branch and saber (16) gets half protection; every
+other kind reaches health with the bar untouched. A fixture where the port's per-hit health rises as
+the bar empties is the script working, not a bug.
+
+The capture runs the `Update` schedule on one executor thread, the same rule #8's replay uses: the
+shared cog LCG is thread-local, so with the default executor two runs of the same fixed step could
+fire a different number of shots. Two captures are therefore byte-identical apart from the file name,
+and the gate's repeatability check reports zero delta.
+
+The gate is the instrument for #11 (AI engagement timing) and #12 (combat timing); until those land its
+default run reports the known AI-timing gap rather than passing.
 
 ### Retail's cog namespace
 

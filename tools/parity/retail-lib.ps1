@@ -58,6 +58,24 @@ public static class JkRetail {
     } finally { CloseHandle(h); }
   }
 
+  // A block of the game's memory, or null. Used by the encounter telemetry to read the whole thing
+  // array in one call per sample instead of one process open per field.
+  public static byte[] ReadBytes(uint pid, long addr, int count) {
+    IntPtr h = OpenProcess(0x0010, false, pid);
+    if (h == IntPtr.Zero) { return null; }
+    try {
+      var buf = new byte[count]; IntPtr read;
+      if (!ReadProcessMemory(h, new IntPtr(addr), buf, count, out read) || read.ToInt64() != count) { return null; }
+      return buf;
+    } finally { CloseHandle(h); }
+  }
+
+  // One f32 from the game's memory, or NaN when the read fails.
+  public static float ReadFloat(uint pid, long addr) {
+    var buf = ReadBytes(pid, addr, 4);
+    return buf == null ? float.NaN : BitConverter.ToSingle(buf, 0);
+  }
+
   // WM_CLOSE on the game window runs the engine's own shutdown: it stops the level, shuts DirectDraw
   // down and restores the desktop display mode. Killing the process skips all of that (the monitor
   // stays in the 640x480 game mode), so the harness closes it this way first.
