@@ -1465,6 +1465,9 @@ impl LevelGeometry {
         })
     }
 
+    /// Sweep a walking body against the placed solid models. The third value is the contacted
+    /// thing's model top (`z_max`), which is what tells `move_body` whether the contact is a low
+    /// obstruction the body can step over or a wall.
     fn sweep_things(
         &self,
         at: [f32; 3],
@@ -1472,8 +1475,8 @@ impl LevelGeometry {
         left: f32,
         radius: f32,
         sector: usize,
-    ) -> Option<(f32, [f32; 3])> {
-        let mut best: Option<(f32, [f32; 3])> = None;
+    ) -> Option<(f32, [f32; 3], f32)> {
+        let mut best: Option<(f32, [f32; 3], f32)> = None;
         let things = self.things();
         for thing in things.iter() {
             // `SearchForThingCollisions` walks the sector lists of the sectors the sweep reaches: a
@@ -1491,14 +1494,15 @@ impl LevelGeometry {
             if !reachable {
                 continue;
             }
-            if at[2] + radius < thing.z_min || at[2] - radius > thing.z_max {
+            // A body whose feet are on or above the model's top stands on it; it is not a wall.
+            if at[2] + radius < thing.z_min || at[2] - radius >= thing.z_max - 1e-4 {
                 continue;
             }
             let Some((t, normal)) = thing.sweep_plan(at, dir, left, radius) else {
                 continue;
             };
-            if best.is_none_or(|(near, _)| t < near) {
-                best = Some((t, normal));
+            if best.is_none_or(|(near, _, _)| t < near) {
+                best = Some((t, normal, thing.z_max));
             }
         }
         best
@@ -1546,9 +1550,28 @@ impl LevelGeometry {
             // walks into a crate stops against it (retail does: `walk3_spawn` and `walk6_spawn` both
             // halt at props), and the radial normal makes the slide round it.
             let body = self.sweep_things(at, dir, left, radius, here);
-            if let Some((travel, normal)) = body
+            if let Some((travel, normal, top)) = body
                 && room.0.is_none_or(|hit| travel < hit.distance)
             {
+                // A low model is a **step**, not a wall: `sithCollision_MoveThing` climbs anything
+                // within `moveSize + 0.01` of the feet. Level 1's spawn body meets the cantina's
+                // 0.081-high `00table` while it is still a few centimetres above the floor; the engine
+                // steps onto it, crosses and drops off the far edge, which is why retail's spawn leg
+                // walks to sector 349 while the port's body wedged against the tabletop.
+                // (0.081 for the cantina's `00table`, 0.075 by `moveSize + 0.01`), so allow the 0.02
+                // lip; the level's 0.2-high crates stay solid.
+                // shortcut: the exact engine step is unread, upgrade when the mesh sweep is recovered.
+                if top - (at[2] - radius) <= step + 0.02 {
+                    if std::env::var_os("BK_MOVE_TRACE").is_some() {
+                        eprintln!(
+                            "move: stepping over a low model at {:?} top {top:.3} feet {:.3}",
+                            [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2]],
+                            at[2] - radius
+                        );
+                    }
+                    at[2] = top + radius + 1e-3;
+                    continue;
+                }
                 blocked = true;
                 if std::env::var_os("BK_MOVE_TRACE").is_some() {
                     eprintln!(
@@ -1727,7 +1750,7 @@ impl LevelGeometry {
                     // solid contact along it.
                     let advanced = ((end[0] - at[0]).powi(2) + (end[1] - at[1]).powi(2)).sqrt();
                     if advanced > 1e-6
-                        && let Some((travel, _)) = self.sweep_things(at, dir, advanced, radius, far)
+                        && let Some((travel, _, _)) = self.sweep_things(at, dir, advanced, radius, far)
                     {
                         blocked = true;
                         at = [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2] + dir[2] * travel];
@@ -2223,7 +2246,12 @@ impl LevelGeometry {
                 });
             }
         }
-        if let Some(top) = self.prop_floor(pos, radius, reach)
+        // A placement seat (`lift`) resolves the **floor**, not the top of a table the body overlaps.
+        // Level 1's spawn overlaps the bar's `00table`: its top is 0.026 above the body's feet, so an
+        // unlimited-reach seat lifted the body onto it and the walker then wedged against the bar
+        // instead of walking retail's route along the floor. A landing still takes a prop top.
+        if !lift
+            && let Some(top) = self.prop_floor(pos, radius, reach)
             && best.is_none_or(|near| top > near.height)
         {
             best = Some(Rest {
@@ -2963,6 +2991,79 @@ mod tests {
             "the floor under a seam body is {height}, not the patch plane"
         );
     }
+
+    /// A placement seat resolves the floor, not a tabletop the body overlaps; a landing still stops
+    /// on a prop's model top. Level 1's spawn overlaps the cantina bar's `00table`: its top is above
+    /// the body's feet, so an unlimited-reach seat put the body **on the table** and the walker then
+    /// wedged against the bar instead of walking retail's route at floor height.
+    #[test]
+    fn a_placement_seat_ignores_a_prop_top_but_a_landing_takes_it() {
+        let mut room = seam_floor();
+        room.set_things(vec![ThingSolid {
+            centre: [0.5, 0.0, 0.0],
+            radius: 0.3,
+            z_min: -0.1,
+            z_max: 0.07,
+            sector: 0,
+            half: None,
+            yaw: 0.0,
+        }]);
+        let radius = 0.065f32;
+        // The seat probes one radius above the body's centre (0.12), which puts the tabletop below
+        // the probe's feet, where `prop_floor` would otherwise accept it.
+        let seat = room
+            .resting_floor(0, [0.5, 0.0, 0.12 + radius], f32::INFINITY, radius, true)
+            .expect("the seat found no floor");
+        assert!(
+            (seat.height - 0.0).abs() < 1e-4,
+            "the seat lifted the body onto the table: height {}",
+            seat.height
+        );
+        // A falling body still lands on the table, not through it onto the room floor.
+        let land = room
+            .resting_floor(0, [0.5, 0.0, 0.2], 0.3, radius, false)
+            .expect("the landing found no floor");
+        assert!(
+            (land.height - 0.07).abs() < 1e-4,
+            "the landing ignored the table top: height {}",
+            land.height
+        );
+    }
+    /// A low solid model is a **step**, not a wall: a body still falling onto the floor meets the
+    /// model's top within the engine's `moveSize + 0.01` allowance and climbs it. Level 1's spawn
+    /// body reaches the cantina's 0.081-high `00table` while still a few centimetres above the floor;
+    /// retail steps on the table and drops off its far edge (its spawn leg reaches sector 349),
+    /// while a body already at floor height would be stopped by it.
+    #[test]
+    fn a_low_solid_model_is_a_step_not_a_wall() {
+        let mut room = seam_floor();
+        room.set_things(vec![ThingSolid {
+            centre: [0.0, 0.3, 0.0],
+            radius: 0.1,
+            z_min: 0.0,
+            z_max: 0.08,
+            sector: 0,
+            half: Some([0.1, 0.1]),
+            yaw: 0.0,
+        }]);
+        let radius = 0.065f32;
+        let step = 0.066f32;
+        // Feet at 0.030, model top at 0.080: 0.050 is inside the step allowance.
+        let (moved, _, _) =
+            room.move_body(0, [0.0, -0.3, 0.095], [0.0, 0.5, 0.0], radius, step, Gates::default());
+        assert!(moved[1] > 0.0, "the body never got over the low model: {moved:?}");
+        assert!(
+            (moved[2] - (0.08 + radius)).abs() < 0.01,
+            "the body did not step onto the model's top: {moved:?}"
+        );
+        // A body already on the floor meets an over-tall model as a wall, unchanged.
+        room.things.write().expect("things lock")[0].z_max = 0.3;
+        let (stopped, _, blocked) =
+            room.move_body(0, [0.0, -0.3, radius], [0.0, 1.0, 0.0], radius, step, Gates::default());
+        assert!(blocked, "a tall model did not block the body");
+        assert!(stopped[1] < 0.2, "the body walked through a tall model: {stopped:?}");
+    }
+
     /// Two rooms joined by one opening, and a third room reachable only through the second.
     fn corridor() -> Solids {
         let quad = |z: f32| {
@@ -3606,7 +3707,7 @@ mod tests {
         // Touching already (the cylinder's span is 0.265): the sweep must still report the contact.
         let contact = room.sweep_things([0.0, 0.045, -0.5], dir, 0.5, r, 0);
         assert!(contact.is_some(), "a body already touching a leaf walked through it");
-        let (travel, normal) = contact.unwrap();
+        let (travel, normal, _) = contact.unwrap();
         assert_eq!(travel, 0.0, "an overlapped solid let the body advance {travel}");
         assert!(normal[1] < 0.0, "the contact did not push the body back: {normal:?}");
         // Walking *out* of an overlap is the escape direction, not a new contact.
@@ -3678,7 +3779,7 @@ mod tests {
         let r = 0.065;
         // Broad side at y = -0.025: the body stops at 0.0125 + 0.065 from the centre, where the
         // old 0.2-radius cylinder stopped at 0.265.
-        let (travel, normal) = room
+        let (travel, normal, _) = room
             .sweep_things([1.0, -0.3, -0.5], [0.0, 1.0, 0.0], 0.5, r, 0)
             .expect("the leaf did not stop the body");
         assert!((travel - 0.2225).abs() < 1e-4, "the leaf stopped at {travel}");
@@ -3691,7 +3792,7 @@ mod tests {
         );
         // The box turns with the thing's yaw: at 90 degrees the thin side faces world x.
         room.things.write().expect("things lock")[0].yaw = 90.0;
-        let (travel, normal) = room
+        let (travel, normal, _) = room
             .sweep_things([1.3, 0.0, -0.5], [-1.0, 0.0, 0.0], 0.5, r, 0)
             .expect("the turned leaf did not stop the body");
         assert!((travel - 0.2225).abs() < 1e-4, "the turned leaf stopped at {travel}");

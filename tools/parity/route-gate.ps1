@@ -10,7 +10,7 @@
   capture step; the replay writes `tick t_s x y z sector vel_x vel_y vel_z health shields` plus the
   door/switch cog state every 600 ms (36 ticks) to a trace in the documented format.
 
-  The gate checks three things:
+  The gate checks four things:
 
     1. determinism — the same script replayed twice produces byte-identical traces (retail and port
        must produce the same trace from the same inputs, so the port's own repeatability is a
@@ -19,17 +19,17 @@
        field for field;
     3. self-check — a copy of the trace with one position moved 0.25 units is **rejected** by the
        comparator, so the gate is known to fail on a perturbed trace and pass on the unmodified one.
-       `-Perturb` runs that check; the gate's normal run compares the unmodified trace.
+       `-Perturb` runs that check; the gate's normal run compares the unmodified trace;
+    4. retail parity — the replay matches `level1-route-retail.tsv` within the **epsilon the fixture
+       states** (`# epsilon <units>` in its header). Sectors stay exact inside the comparator.
 
-  `-Retail` additionally compares the replay against the retail-derived fixture
-  (`level1-route-retail.tsv`) within `-Epsilon`. That comparison is not gated by default: the route's
-  cantina and door legs are collision-limited today (issue #10 owns that), so the retail deltas are
-  reported, not failed, until movement parity lands.
+  `-Epsilon` overrides the fixture's stated value for an experiment; the gate's verdict is the
+  fixture's.
 
 .EXAMPLE
   pwsh -File tools/parity/route-gate.ps1
   pwsh -File tools/parity/route-gate.ps1 -Perturb
-  pwsh -File tools/parity/route-gate.ps1 -Retail -Epsilon 0.5
+  pwsh -File tools/parity/route-gate.ps1 -Epsilon 0.5
 #>
 [CmdletBinding()]
 param(
@@ -38,8 +38,8 @@ param(
   [string]$PortFixture = 'tools/parity/routetrace/level1-route-port.tsv',
   [string]$RetailFixture = 'tools/parity/routetrace/level1-route-retail.tsv',
   [string]$Out = 'target/parity/routetrace',
-  [double]$Epsilon = 0.10,
-  [switch]$Retail,
+  # 0 means "use the epsilon the retail fixture states in its header".
+  [double]$Epsilon = 0,
   [switch]$Perturb
 )
 
@@ -131,26 +131,34 @@ if ($Perturb) {
   Write-Host 'route gate: the perturbed trace failed and the unmodified trace passed, as required'
 }
 
-# 4. Optional: the retail-derived route reference, within an explicit epsilon. Reported, and failed
-# only when `-Retail` is asked for.
-if (Test-Path -LiteralPath $RetailPath) {
-  $env:BK_ROUTE_EPSILON = $Epsilon.ToString([cultureinfo]::InvariantCulture)
-  try {
-    & $Exe --route-compare $RetailPath $runA
-    $retailOk = $LASTEXITCODE -eq 0
-  } finally {
-    Remove-Item Env:BK_ROUTE_EPSILON -ErrorAction SilentlyContinue
-  }
-  if ($retailOk) {
-    Write-Host ("PASS  retail: the replay matches {0} within {1}" -f $RetailFixture, $Epsilon)
-  } else {
-    Write-Host ("ROUTE PARITY DELTA (not gated): the replay differs from {0} beyond {1}" -f $RetailFixture, $Epsilon)
-    if ($Retail) { exit 1 }
-  }
-} elseif ($Retail) {
+# 4. Retail parity, at the epsilon the fixture states. The fixture is the oracle, so the tolerance is
+# part of it: `# epsilon <units>` is the harness's own resolution (see the file's header).
+if (-not (Test-Path -LiteralPath $RetailPath)) {
   Write-Host "FAIL  retail: missing $RetailPath"
   exit 1
 }
+$stated = Select-String -LiteralPath $RetailPath -Pattern '^\s*#\s*epsilon\s+([0-9.]+)' | Select-Object -First 1
+if (-not $stated) {
+  Write-Host "FAIL  retail: $RetailFixture states no '# epsilon <units>' tolerance"
+  exit 1
+}
+$fixtureEpsilon = [double]$stated.Matches[0].Groups[1].Value
+$tolerance = if ($Epsilon -gt 0) { $Epsilon } else { $fixtureEpsilon }
+if ($Epsilon -gt 0 -and $Epsilon -ne $fixtureEpsilon) {
+  Write-Host ("note: comparing at {0} (the fixture states {1})" -f $Epsilon, $fixtureEpsilon)
+}
+$env:BK_ROUTE_EPSILON = $tolerance.ToString([cultureinfo]::InvariantCulture)
+try {
+  & $Exe --route-compare $RetailPath $runA
+  $retailOk = $LASTEXITCODE -eq 0
+} finally {
+  Remove-Item Env:BK_ROUTE_EPSILON -ErrorAction SilentlyContinue
+}
+if (-not $retailOk) {
+  Write-Host ("FAIL  retail: the replay differs from {0} beyond {1}" -f $RetailFixture, $tolerance)
+  exit 1
+}
+Write-Host ("PASS  retail: the replay matches {0} within {1}" -f $RetailFixture, $tolerance)
 
 Write-Host 'route gate: 0 failure(s)'
 exit 0
