@@ -925,8 +925,8 @@ fn main() {
                 }
                 i += 3;
             }
-            // `--walk <frames>`: push the level's walkplayer forward through its own
-            // collision for that many frames and report where it ends up. No window.
+            // `--walk <frames>`: push the level's walkplayer forward through the runtime's own
+            // player step for that many frames and report where it ends up. No window.
             // `--walk all` does it for every level in the install.
             "--walk" => {
                 walk = Some(match arg_value(&args, &mut i).map(String::as_str) {
@@ -12161,7 +12161,8 @@ fn main() {
             // A speed scale anywhere in the chain breaks all three at once, which is how the old
             // `physics_scale = 10` stayed hidden: it moved the walk, the jump and gravity together.
             println!(
-                "  derived: walk = maxthrust/surfdrag = {thrust}/{drag} = {want_walk:.3}, jump = jumpspeed = {jump:.3}, gravity = level gravity = {:.3}",
+                "  derived: walk {want_walk:.3} (measured retail; maxthrust/surfdrag {thrust}/{drag} = {:.3} is retired), jump = jumpspeed = {jump:.3}, gravity = level gravity = {:.3}",
+                thrust / drag,
                 world.level.gravity
             );
         }
@@ -14435,7 +14436,7 @@ fn refresh_overlay(
             // The field-log map panel needs the **live** level and pose: without them the panel
             // draws its frame and nothing inside, which is what a player opening the map saw.
             let live_map = match (world.as_deref(), player.as_deref()) {
-                (Some(world), Some(player)) => live_map_for(&screen, &world.level, player.pos, overlay.map),
+                (Some(world), Some(player)) => live_map_for(&screen, &world.level, player.body.pos, overlay.map),
                 _ => None,
             };
             let art = |index: i32| -> Option<bm::Bm> {
@@ -16098,12 +16099,14 @@ fn walker_step(
     (moved, crossed, landed)
 }
 
-/// `--walk <frames>`: the collision solver exercised on a real level, with no window.
+/// `--walk <frames>`: the runtime's player step exercised on a real level, with no window.
 ///
 /// Starts at the level's own `walkplayer` thing — where the game puts you — and holds
-/// "forward" for the requested number of frames, resolving against the sector's solid
-/// surfaces each step. A level whose geometry and sector table disagree shows up here
-/// as a walker that leaves its sector, or one that never stops against a wall.
+/// "forward" for the requested number of frames by calling `Runtime::step_player`, the same
+/// entry `walk_player` calls in the window: one body, one integration and one sweep, so the
+/// probe and the game cannot disagree about how a body walks. A level whose geometry and
+/// sector table disagree shows up here as a walker that leaves its sector, or one that never
+/// stops against a wall.
 fn walk_level(
     level: &jkl::Level,
     frames: u32,
@@ -16121,7 +16124,7 @@ fn walk_level(
 ) -> Option<WalkResult> {
     // Same rules as the window: the sweep is only meaningful if it walks the same way.
     let rules = Rules::from_level(level);
-    let (radius, speed) = (rules.radius, rules.walk);
+    let radius = rules.radius;
     // The sweep starts the body one radius above the level's own start, which is where `setup` puts it.
     let EYE = rules.radius;
     const STEP: f32 = 1.0 / 30.0;
@@ -16158,10 +16161,6 @@ fn walk_level(
         return None;
     };
     let yaw = yaw_deg.to_radians() + turn;
-    // The walker faces the way the level's start faces, in the engine's own basis (`yaw_axes`), with
-    // `turn` radians added so one level can be walked from several headings.
-    let (b, _) = yaw_axes(yaw);
-    let forward = [b[0], b[1], 0.0];
     if std::env::var("BK_TRACE").is_ok() {
         println!("  start sector {sector}, {} planes:", solids.sectors[sector].len());
         for p in &solids.sectors[sector] {
@@ -16185,40 +16184,38 @@ fn walk_level(
         .map(|f| f.point[2])
         .fold(f32::INFINITY, f32::min);
 
-    // The body's vertical velocity across frames, as the window carries it.
-    let mut walk_fall = 0.0f32;
+    // The probe drives `Runtime::step_player` — the entry the window's `walk_player` and the live
+    // checks use — instead of resolving a body of its own, so a leg this probe says walks is a leg
+    // the game walks, with the same target assembly, drag ramp, sub-steps and environment.
+    let mut rt = runtime::Runtime::new_with_geometry(level, &solids);
+    // The window's gravity, not a flat zero: retail's own trace descends the katarn ramp
+    // (`walk3_spawn`: z -0.21 -> -0.29 while walking), and a check that floats the body can never
+    // see a ramp, a step-down or a fall. `BK_WALK_NO_GRAVITY=1` keeps the old flat walk for an A/B.
+    let gravity = if falls && std::env::var_os("BK_WALK_NO_GRAVITY").is_none() {
+        rules.gravity.max(1.0)
+    } else {
+        0.0
+    };
+    let mut body = runtime::PlayerBody {
+        pos: Vec3::from(start),
+        sector: start_sector,
+        gravity,
+        yaw,
+        eye: EYE,
+        ..Default::default()
+    };
+    let input = runtime::PlayerInput { forward: 1.0, yaw, ..Default::default() };
     for frame in 0..frames {
-        // The same water rule the window applies: standing on a flagged surface halves
-        // the speed for that frame.
-        let water = solids
-            .floor_surface(sector, [pos[0], pos[1], pos[2] - radius + 0.01])
-            .and_then(|(_, surface)| level.surfaces.get(surface))
-            .is_some_and(|surface| surface.surfflags & (0x2_0000 | 0x10_0000) != 0);
-        if water {
+        let before = body.pos.to_array();
+        // What the body asked for this frame: the frame is blocked when it achieved less than half
+        // of it, which is the same question the old free walker asked of its fixed step.
+        let want = (body.vel[0].powi(2) + body.vel[1].powi(2)).sqrt() * STEP;
+        let crossed = rt.step_player(&mut body, &solids, input, &rules, STEP, gates);
+        let pos = body.pos.to_array();
+        let sector = body.sector;
+        if body.water {
             wet_frames += 1;
         }
-        let step_speed = if water { speed * 0.5 } else { speed };
-        // The window's gravity, not a flat zero: retail's own trace descends the katarn ramp
-        // (`walk3_spawn`: z -0.21 -> -0.29 while walking), and a check that floats the body can never
-        // see a ramp, a step-down or a fall. `BK_WALK_NO_GRAVITY=1` keeps the old flat walk for an A/B.
-        let gravity = if falls && std::env::var_os("BK_WALK_NO_GRAVITY").is_none() {
-            level.gravity
-        } else {
-            0.0
-        };
-        let (moved, crossed, _landed) = walker_step(
-            &solids,
-            gates,
-            &mut sector,
-            &mut pos,
-            &mut walk_fall,
-            [forward[0] * step_speed, forward[1] * step_speed],
-            STEP,
-            radius,
-            gravity,
-            false,
-            false,
-        );
         if std::env::var("BK_TRACE").is_ok() && frame < 3 {
             // Which plane holds the walker, and how hard: the quickest way to tell a
             // narrow doorway from a plane that should not be solid at all.
@@ -16241,7 +16238,8 @@ fn walk_level(
                 solids.sectors[sector].len()
             );
         }
-        if moved < step_speed * STEP * 0.5 {
+        let moved = ((pos[0] - before[0]).powi(2) + (pos[1] - before[1]).powi(2)).sqrt();
+        if want > 0.0 && moved < want * 0.5 {
             blocked += 1;
         }
         // Below every floor in the level: the one outcome a collision system must never allow. A body may
@@ -16263,6 +16261,8 @@ fn walk_level(
             );
         }
     }
+    let pos = body.pos.to_array();
+    let sector = body.sector;
     // The report must ask the rule's own question: `inside_sector` at the body's origin, box
     // short-circuit included. A hand-rolled "every plane within radius + 0.05" test answers something
     // else — it ignores `COLLIDEBOX`, which `sithIntersect_IsSphereInSector` checks first — and so
@@ -16538,6 +16538,16 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     // Every level that walked out of its own sector after a drop. One global `worst` said nothing about
     // the others: `11gorc` falling 739 units masked `08escape88`'s 2.92 outright.
     let mut stray: Vec<String> = Vec::new();
+    // The six spawn-yaw lines that run off the level's geometry. They are recorded, not asserted: the
+    // fall is a walk off the edge, not a collision drop-out (see the assertion block below).
+    const WALK_OFF_THE_EDGE: &[&str] = &[
+        "jkl\\02narshadda.jkl",
+        "jkl\\07yun.jkl",
+        "jkl\\09fuelstation.jkl",
+        "jkl\\11gorc.jkl",
+        "jkl\\17asarris.jkl",
+        "jkl\\m_boss17.jkl",
+    ];
     // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
     let only = std::env::var("BK_WALK_ONLY").ok();
     // `BK_WALK_AT="x,y,z,yaw"`: start the body at a recorded pose (the eye convention the retail walk
@@ -16744,13 +16754,21 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                     }
                 }
                 // Only a walk that stayed in the world speaks about descent: the six levels that walk
-                // off their own edge drop the whole way and are recorded above.
-                if r.void_frames == 0 && r.dropped.max(0.0) >= worst_drop {
+                // off their own edge drop the whole way and are recorded above. A run that lands one
+                // of those bodies but ends outside its sector is still that walk-off, not a new drop.
+                if r.void_frames == 0
+                    && !WALK_OFF_THE_EDGE.contains(&name.as_str())
+                    && r.dropped.max(0.0) >= worst_drop
+                {
                     worst_drop = r.dropped.max(0.0);
                     worst_name = name.to_string();
                     worst_contained = r.contained;
                 }
-                if r.void_frames == 0 && r.dropped.max(0.0) > 0.1 && !r.contained {
+                if r.void_frames == 0
+                    && !WALK_OFF_THE_EDGE.contains(&name.as_str())
+                    && r.dropped.max(0.0) > 0.1
+                    && !r.contained
+                {
                     stray.push(name.clone());
                 }
                 println!(
@@ -16779,18 +16797,11 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     // The walk is the level's own spawn yaw, straight forward. On six levels that line runs off the
     // level's geometry and the body falls out (`--walk all` prints the drops): 02narshadda 505,
     // 07yun 720, 09fuelstation 121, 11gorc 739, 17asarris 573 (and its m_boss17 twin). They are
-    // recorded, not asserted: the fall is a walk off the edge, not a collision drop-out — the pre-gravity
-    // check could not see it at all because it floated the body. Level 18's shaft (`18Ascend`) lands.
+    // recorded, not asserted (`WALK_OFF_THE_EDGE` above): the fall is a walk off the edge, not a
+    // collision drop-out — the pre-gravity check could not see it at all because it floated the body.
+    // Level 18's shaft (`18Ascend`) lands.
     // `shortcut: those six lines are not covered by the assertion, upgrade when each level's own
     // floor under the spawn yaw is measured (gaps §5.9 has the walk traces for three of them).`
-    const WALK_OFF_THE_EDGE: &[&str] = &[
-        "jkl\\02narshadda.jkl",
-        "jkl\\07yun.jkl",
-        "jkl\\09fuelstation.jkl",
-        "jkl\\11gorc.jkl",
-        "jkl\\17asarris.jkl",
-        "jkl\\m_boss17.jkl",
-    ];
     println!(
         "sweep: {voids} level(s) left the body in the void, {over_nothing} started over no floor, worst drop {worst_drop:.2} ({worst_name})"
     );
@@ -19183,12 +19194,14 @@ fn rebuild_surfaces(
     sim: Option<Res<Sim>>,
     world: Option<Res<World>>,
     batches: Option<Res<SurfaceBatches>>,
-    view: Option<Res<SectorView>>,
+    collisions: Option<Res<Collision>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut seen: Local<(u32, u32, u32)>,
 ) {
     let _span = Span::new("rebuild_surfaces");
-    let (Some(sim), Some(world), Some(batches), Some(view)) = (sim, world, batches, view) else {
+    let (Some(sim), Some(world), Some(batches), Some(collisions)) =
+        (sim, world, batches, collisions)
+    else {
         return;
     };
     let (epoch, hidden, scene) = {
@@ -19215,7 +19228,7 @@ fn rebuild_surfaces(
     // build would drop its static polygons.
     let scroll_only = !geomode_moved && epoch.1 == seen.1;
     *seen = epoch;
-    let built = scene.build(&world.level, &view.solids, &world.images, &hidden, scroll_only);
+    let built = scene.build(&world.level, &collisions.0, &world.images, &hidden, scroll_only);
     let patched = batches.apply(&built, &mut meshes, scroll_only);
     if geomode_moved {
         println!(
@@ -19244,10 +19257,10 @@ struct Cull(bool);
 #[derive(Component)]
 struct SectorId(usize);
 
-/// The portal graph and the entities each sector owns.
+/// The portal graph and the entities each sector owns. The level's geometry is read from the
+/// caller-owned [`Collision`] resource; this keeps no handle of its own.
 #[derive(Resource)]
 struct SectorView {
-    solids: std::sync::Arc<collide::LevelGeometry>,
     by_sector: Vec<Vec<Entity>>,
 }
 
@@ -19293,12 +19306,13 @@ fn cull_sectors(
     // The scripts' switched adjoin flags: `ClearAdjoinFlags(visFace, 1)` hides the room behind an
     // opening, and the walk below has to skip it.
     sim: Option<Res<Sim>>,
+    collisions: Option<Res<Collision>>,
     cams: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
     mut batches: Query<(&SectorId, &mut Visibility)>,
     mut shown: Local<Option<(usize, usize)>>,
 ) {
     let _span = Span::new("cull_sectors");
-    let Some(view) = view else { return };
+    let (Some(view), Some(collisions)) = (view, collisions) else { return };
     if !on.as_deref().is_none_or(|c| c.0) {
         return;
     }
@@ -19321,7 +19335,7 @@ fn cull_sectors(
     // not inside), so it stays a diagnostic and the safe sphere test decides. A sector
     // whose bounding sphere is off screen cannot be seen; one that straddles the edge
     // stays drawn, which is the only failure direction here.
-    // Portal occlusion from a **tracked** sector: the walker keeps `player.sector` through its own
+    // Portal occlusion from a **tracked** sector: the walker keeps `player.body.sector` through its own
     // physics, so the portal walk has a reliable seed and can hide a room that is in the frustum but
     // not reachable through any opening (§16.1). The camera's own position was the unreliable seed —
     // level 1's floor is a sector the camera stands above, not inside.
@@ -19333,13 +19347,13 @@ fn cull_sectors(
     // reachable set best covers the frustum wins. With no overlap at all the cull falls back to the
     // frustum rather than blanking the level, and says so under `BK_CULL_TRACE=1`.
     let frustum: Vec<usize> = (0..view.by_sector.len())
-        .filter(|&sector| match view.solids.spheres.get(sector) {
+        .filter(|&sector| match collisions.0.spheres.get(sector) {
             Some((centre, radius)) => sphere_in_frustum(&planes, Vec3::from(*centre), *radius),
             None => true,
         })
         .collect();
     let mut seeds: Vec<usize> = Vec::new();
-    if let Some(tracked) = player.as_ref().map(|p| p.sector) {
+    if let Some(tracked) = player.as_ref().map(|p| p.body.sector) {
         seeds.push(tracked);
     }
     if let Some(level) = level.as_ref()
@@ -19353,7 +19367,7 @@ fn cull_sectors(
     {
         seeds.push(jkl);
     }
-    if let Some(at) = view.solids.sector_at([here.x, here.y, here.z], 0.2)
+    if let Some(at) = collisions.0.sector_at([here.x, here.y, here.z], 0.2)
         && !seeds.contains(&at)
     {
         seeds.push(at);
@@ -19392,7 +19406,7 @@ fn cull_sectors(
         let mut any = |_: &[[f32; 3]]| true;
         let mut best: Option<(usize, usize, Vec<usize>)> = None;
         for (slot, seed) in seeds.iter().enumerate() {
-            let reach = view.solids.visible_sectors(&[*seed], gates, &mut any);
+            let reach = collisions.0.visible_sectors(&[*seed], gates, &mut any);
             let overlap = reach.iter().filter(|s| frustum.contains(s)).count();
             if best.as_ref().is_none_or(|(score, _, _)| overlap > *score) {
                 best = Some((overlap, slot, reach));
@@ -19400,8 +19414,8 @@ fn cull_sectors(
         }
         match best {
             Some((_, slot, base)) => {
-                let filtered = view
-                    .solids
+                let filtered = collisions
+                    .0
                     .visible_sectors(&[seeds[slot]], gates, &mut on_screen);
                 let filtered_overlap = filtered.iter().filter(|s| frustum.contains(s)).count();
                 // The filtered set replaces the baseline only when it is a usable walk: a seed and at
@@ -19498,7 +19512,7 @@ fn cull_sectors(
             println!("cull trace: the walkplayer's `.jkl` sector is {jkl:?}");
         }
         let frustum: Vec<usize> = (0..view.by_sector.len())
-            .filter(|&s| match view.solids.spheres.get(s) {
+            .filter(|&s| match collisions.0.spheres.get(s) {
                 Some((c, r)) => sphere_in_frustum(&planes, Vec3::from(*c), *r),
                 None => true,
             })
@@ -20226,12 +20240,12 @@ fn use_key(
     // port activate the cantina switch from 0.8 units, where retail's own use action does nothing
     // (round 257's measurement); the reach is not a harness question, it was the port's over-reach.
     let use_reach = use_reach(player.rules.radius);
-    let eye = [player.pos.x, player.pos.y, player.pos.z + player.eye];
+    let eye = [player.body.pos.x, player.body.pos.y, player.body.pos.z + player.body.eye];
     // The port's forward axis is `yaw_axes`' `(-sin, cos)` (`sithCamera`'s own frame), not `(cos, sin)`:
 
     // with the wrong axis the use action's cone faced 90 degrees off and every switch was "behind" the
     // player (`dot` was -0.45 for the cantina switch, round 201).
-    let facing = [-player.yaw.sin(), player.yaw.cos()];
+    let facing = [-player.body.yaw.sin(), player.body.yaw.cos()];
     let mut rt = sim.world.borrow_mut();
     // **Surfaces first.** A switch is a surface link (`00_doorswitch.cog`: `surface switch0 linkid=2`)
     // while the same script also links its *doors* as things (linkid=1, the lock-sound arm). With
@@ -20270,7 +20284,7 @@ fn deliver_crossed(
     mut count: Option<ResMut<TriggerCount>>,
 ) {
     let (Some(world), Some(sim), Some(player)) = (world, sim, player) else { return };
-    let now = player.pos;
+    let now = player.body.pos;
     let from = *last;
     *last = Some(now);
     let Some(from) = from else { return };
@@ -20485,7 +20499,7 @@ fn deliver_sector_triggers(
     mut count: Option<ResMut<TriggerCount>>,
 ) {
     let (Some(world), Some(sim), Some(player)) = (world, sim.as_mut(), player) else { return };
-    let sector = player.sector;
+    let sector = player.body.sector;
     let previous = *last;
     if previous == Some(sector) {
         return;
@@ -20771,7 +20785,7 @@ fn ai_probe(
             ];
             // The port's forward is `(-sin yaw, cos yaw)`, so yaw 0 faces **+Y**: the old
             // FRAC_PI_2 faced -X and the press only "passed" on a message count the teleport tainted.
-            player.yaw = 0.0;
+            player.body.yaw = 0.0;
             sim.world
                 .borrow_mut()
                 .teleport_player(&mut player.body, stand, Some(pos.1.max(0) as usize));
@@ -20866,7 +20880,7 @@ fn use_live_probe(
                     .unwrap_or(0);
                 (sector, [-4.29f32, -3.82, -1.18])
             };
-            player.yaw = 180.0f32.to_radians();
+            player.body.yaw = 180.0f32.to_radians();
             sim.world
                 .borrow_mut()
                 .teleport_player(&mut player.body, pose, Some(sector.max(0) as usize));
@@ -20959,7 +20973,7 @@ fn sight_probe(
             if state.0 < 30 {
                 return;
             }
-            player.yaw = 0.0;
+            player.body.yaw = 0.0;
             sim.world
                 .borrow_mut()
                 .teleport_player(&mut player.body, [-4.5, 14.0, 3.84], Some(230));
@@ -21233,7 +21247,7 @@ fn goal_probe(
     // and `cull_sectors` — it passed for months and then failed when an unrelated system changed the
     // order. The registration orders these three explicitly, and the pose stays put until the level
     // ends. This is a synthetic observation, so pinning the body is the honest thing to do.
-    player.yaw = std::f32::consts::FRAC_PI_2;
+    player.body.yaw = std::f32::consts::FRAC_PI_2;
     sim.world.borrow_mut().teleport_player(
         &mut player.body,
         [pos[0], pos[1] - 8.0, pos[2]],
@@ -21565,7 +21579,7 @@ fn force_probe(
                 }
                 return;
             };
-            state.3 = player.pos.z;
+            state.3 = player.body.pos.z;
             sim.world.borrow_mut().messages.push((
                 "activated".to_string(),
                 Some(body),
@@ -21590,12 +21604,12 @@ fn force_probe(
             ));
             state.1 = 3;
             state.0 = 0;
-            state.2 = player.pos.z;
+            state.2 = player.body.pos.z;
             state.6 = 0.0;
         }
         // 3: the first jump is done — measure its peak, then train the power and jump again.
         3 => {
-            state.2 = state.2.max(player.pos.z);
+            state.2 = state.2.max(player.body.pos.z);
             // The script's own lift is a **velocity** (`duration + 2.5` u/s, asserted at 3.00 in the
             // unit gate); the rise it produces is small and can be stopped by the spawn's overhang, so
             // the velocity is the witness that survives both frame timing and geometry.
@@ -21619,7 +21633,7 @@ fn force_probe(
                 .as_deref()
                 .and_then(|solids| {
                     solids.0.ceiling_over(
-                        [player.pos.x, player.pos.y, state.3],
+                        [player.body.pos.x, player.body.pos.y, state.3],
                         0.35,
                         player.rules.radius,
                     )
@@ -21651,7 +21665,7 @@ fn force_probe(
         }
         // 4: wait to land, then raise the power and jump again with the same hold.
         4 => {
-            if !player.grounded || state.0 < 4 {
+            if !player.body.grounded || state.0 < 4 {
                 return;
             }
             {
@@ -21660,7 +21674,7 @@ fn force_probe(
             }
             let Some(cog) = jump_cog else { return };
             state.4 = sim.world.borrow().inv.get(&14).copied().unwrap_or(0.0);
-            state.3 = player.pos.z;
+            state.3 = player.body.pos.z;
             sim.world.borrow_mut().messages.push((
                 "activated".to_string(),
                 Some(body),
@@ -21683,10 +21697,10 @@ fn force_probe(
             ));
             state.1 = 6;
             state.0 = 0;
-            state.2 = player.pos.z;
+            state.2 = player.body.pos.z;
         }
         _ => {
-            state.2 = state.2.max(player.pos.z);
+            state.2 = state.2.max(player.body.pos.z);
             if state.0 < 40 {
                 return;
             }
@@ -21755,7 +21769,7 @@ fn live_play_drive(
     // Long enough for a jump to rise and land: `jkPlayer`'s jump is a short hop.
     const JUMP_FRAMES: u32 = 30;
     let state = playing.get_or_insert_with(|| LivePlayState {
-        start: player.as_deref().map(|p| p.pos),
+        start: player.as_deref().map(|p| p.body.pos),
         ..Default::default()
     });
     // The clock starts when the body exists: a big level spends its first frames loading, and a
@@ -21765,21 +21779,21 @@ fn live_play_drive(
         return;
     }
     if state.start.is_none() {
-        state.start = player.as_deref().map(|p| p.pos);
+        state.start = player.as_deref().map(|p| p.body.pos);
     }
     // Jump **first**, before the body walks anywhere: it stands on its spawn floor now, and the walk
     // phase can step off a ledge (16aescapeship ends up falling for the rest of the run, so the jump
     // was never attempted there). One press, then the flight, then the landing: mashing made the body
     // re-jump the instant it touched down, so every reading caught it mid-air.
     if !state.jump_done {
-        let grounded = player.as_deref().is_some_and(|p| p.grounded);
+        let grounded = player.as_deref().is_some_and(|p| p.body.grounded);
         state.jump_frames += 1;
         if !state.jump_started {
             // Wait for the floor, bounded: a body that never touches one cannot jump, and waiting
             // forever would leave the check with no verdict at all.
             if grounded {
                 state.jump_started = true;
-                state.jump_base = player.as_deref().map(|p| p.pos.z);
+                state.jump_base = player.as_deref().map(|p| p.body.pos.z);
                 keys.press(KeyCode::Space);
             } else if state.jump_frames > 90 {
                 state.jump_done = true;
@@ -21791,7 +21805,7 @@ fn live_play_drive(
         }
         keys.release(KeyCode::Space);
         if let (Some(base), Some(player)) = (state.jump_base, player.as_deref()) {
-            state.jump_peak = state.jump_peak.max(player.pos.z - base);
+            state.jump_peak = state.jump_peak.max(player.body.pos.z - base);
         }
         // Landed: it left the ground and is back on it. The cap keeps a body that falls out of the
         // level from stalling the run.
@@ -21805,11 +21819,11 @@ fn live_play_drive(
     // Tracked every frame, not only at the end: if the body moves and then snaps back, the summary
     // at the end says "moved 0.00" and hides the cause.
     if let Some(player) = player.as_deref() {
-        if state.sector_last != Some(player.sector) {
+        if state.sector_last != Some(player.body.sector) {
             if state.sector_last.is_some() {
                 state.crossings += 1;
             }
-            state.sector_last = Some(player.sector);
+            state.sector_last = Some(player.body.sector);
             // How many scripts are linked into the room the body just entered. A crossing into a room
             // nothing is linked to is silent by design; a crossing into a room with links is not.
             // Only links whose script has an `entered:` label can answer — `sector_enter` skips the rest
@@ -21819,7 +21833,7 @@ fn live_play_drive(
                 let capable: Vec<usize> = rt
                     .sector_links
                     .iter()
-                    .filter(|(_, _, sector)| *sector == player.sector)
+                    .filter(|(_, _, sector)| *sector == player.body.sector)
                     .filter(|(instance, _, _)| {
                         sim.instances
                             .get(*instance)
@@ -21833,7 +21847,7 @@ fn live_play_drive(
                     for instance in &capable {
                         println!(
                             "live-play: sector {} link -> instance {instance} ({:?}) of {}",
-                            player.sector,
+                            player.body.sector,
                             sim.instances.get(*instance).map(|(n, _)| n.clone()),
                             sim.instances.len()
                         );
@@ -21848,13 +21862,13 @@ fn live_play_drive(
     if let (Some(start), Some(player)) = (state.start, player.as_deref()) {
         // Horizontal, like the final measurement: a jump adds vertical movement, and counting it made
         // a body that only jumped fail as "moves and snaps back".
-        state.max_moved = state.max_moved.max((player.pos - start).truncate().length());
+        state.max_moved = state.max_moved.max((player.body.pos - start).truncate().length());
     }
     if state.clock <= WALK_SECONDS {
         // The walk's own first frame is the baseline: taking it when the body first appeared counted a
         // script's teleport at level start as movement.
         if state.frame == 1 {
-            state.start = player.as_deref().map(|p| p.pos);
+            state.start = player.as_deref().map(|p| p.body.pos);
         }
         // Held, not tapped: the walker reads `just_pressed`/`pressed`, and a released key moves nothing.
         //
@@ -21866,13 +21880,13 @@ fn live_play_drive(
         }
         keys.press(KeyCode::KeyW);
         if let Some(player) = player.as_deref() {
-            let speed = (player.vel[0] * player.vel[0] + player.vel[1] * player.vel[1]).sqrt();
+            let speed = (player.body.vel[0] * player.body.vel[0] + player.body.vel[1] * player.body.vel[1]).sqrt();
             state.peak_speed = state.peak_speed.max(speed);
         }
         return;
     }
     if state.walked.is_none() {
-        state.walked = player.as_deref().map(|p| p.pos);
+        state.walked = player.as_deref().map(|p| p.body.pos);
         for key in [KeyCode::KeyW, KeyCode::KeyD, KeyCode::KeyS, KeyCode::KeyA] {
             keys.release(key);
         }
@@ -21881,13 +21895,13 @@ fn live_play_drive(
         // Lateral movement after the forward walk: `D` is strafe right in the port's mapping.
         keys.press(KeyCode::KeyD);
         if let Some(player) = player.as_deref() {
-            let speed = (player.vel[0] * player.vel[0] + player.vel[1] * player.vel[1]).sqrt();
+            let speed = (player.body.vel[0] * player.body.vel[0] + player.body.vel[1] * player.body.vel[1]).sqrt();
             state.peak_strafe_speed = state.peak_strafe_speed.max(speed);
         }
         return;
     }
     if state.strafed.is_none() {
-        state.strafed = player.as_deref().map(|p| p.pos);
+        state.strafed = player.as_deref().map(|p| p.body.pos);
         keys.release(KeyCode::KeyD);
         if let Some(sim) = sim.as_deref() {
             // Live things, not the vector length: a slot freed earlier in the same frame is reused, so
@@ -21946,7 +21960,7 @@ fn live_play_drive(
         player_health,
         if player_dead { " (dead)" } else { "" }
     );
-    let landed = player.as_deref().and_then(|p| state.jump_base.map(|base| p.pos.z - base));
+    let landed = player.as_deref().and_then(|p| state.jump_base.map(|base| p.body.pos.z - base));
     // The runtime's own counter: a bolt can be born and destroyed between two frames at 10 fps, so a
     // sample of live things said "0 shots" on a working trigger.
     let fired = sim
@@ -22055,10 +22069,10 @@ fn live_play_drive(
         .as_deref()
         .zip(player.as_deref())
         .and_then(|(solids, player)| {
-            let base = state.jump_base.unwrap_or(player.pos.z);
+            let base = state.jump_base.unwrap_or(player.body.pos.z);
             solids
                 .0
-                .ceiling_over([player.pos.x, player.pos.y, base], 0.35, player.rules.radius)
+                .ceiling_over([player.body.pos.x, player.body.pos.y, base], 0.35, player.rules.radius)
                 .filter(|ceiling| base + state.jump_peak + player.rules.radius >= ceiling - 0.02)
         })
         .is_some();
@@ -22147,18 +22161,18 @@ fn live_check(
     let mut fallen = None;
     if let (Some(player), Some(collisions)) = (player.as_deref(), collisions.as_deref()) {
         let solids = &collisions.0;
-        let pos = [player.pos.x, player.pos.y, player.pos.z];
-        match solids.floor_under(player.sector, pos, 1.0, player.rules.radius) {
+        let pos = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
+        match solids.floor_under(player.body.sector, pos, 1.0, player.rules.radius) {
             Some((floor, travelled, _)) => {
                 println!(
                     "live: the body stands in sector {} at z {:.2}, floor {:.2} ({travelled:.2} below it)",
-                    player.sector, pos[2], floor
+                    player.body.sector, pos[2], floor
                 );
                 if travelled > 2.0 {
                     fallen = Some(format!("the body is falling: floor {travelled:.2} below it"));
                 }
             }
-            None => fallen = Some(format!("no floor under the live body in sector {}", player.sector)),
+            None => fallen = Some(format!("no floor under the live body in sector {}", player.body.sector)),
         }
     }
     let rt = sim.world.borrow();
@@ -22473,16 +22487,16 @@ fn sprite_demo(
         // — the engine's own basis, which `docs/formats.md` §24 recovered and `yaw_axes` holds —
         // so `(cos, sin)` puts the thing 90 degrees to the side instead.
         let ahead = env_f32("BK_SPRITE_AHEAD", 1.5);
-        let (sin, cos) = player.yaw.sin_cos();
+        let (sin, cos) = player.body.yaw.sin_cos();
         if let Some(index) = *live
             && let Some(thing) = rt.things.get_mut(index)
         {
             thing.pos = [
-                player.pos.x - sin * ahead,
-                player.pos.y + cos * ahead,
-                player.pos.z,
+                player.body.pos.x - sin * ahead,
+                player.body.pos.y + cos * ahead,
+                player.body.pos.z,
             ];
-            thing.sector = player.sector as i32;
+            thing.sector = player.body.sector as i32;
         }
         return;
     }
@@ -22493,16 +22507,16 @@ fn sprite_demo(
     );
     let cog::Value::Num(index) = created else { return };
     let index = index as usize;
-    let (sin, cos) = player.yaw.sin_cos();
+    let (sin, cos) = player.body.yaw.sin_cos();
     let ahead = env_f32("BK_SPRITE_AHEAD", 1.5);
     let at = [
-        player.pos.x - sin * ahead,
-        player.pos.y + cos * ahead,
-        player.pos.z,
+        player.body.pos.x - sin * ahead,
+        player.body.pos.y + cos * ahead,
+        player.body.pos.z,
     ];
     if let Some(thing) = rt.things.get_mut(index) {
         thing.pos = at;
-        thing.sector = player.sector as i32;
+        thing.sector = player.body.sector as i32;
     }
     println!("sprite demo: `{template}` at {at:?}, thing {index}");
     *live = Some(index);
@@ -22538,8 +22552,8 @@ fn demo_aim(
         .filter(|(_, _, d)| *d >= 2.0 && *d <= 25.0)
         .min_by(|a, b| a.2.total_cmp(&b.2));
     if let Some((index, target, distance)) = nearest {
-        player.yaw = (target[1] - origin[1]).atan2(target[0] - origin[0]);
-        player.pitch = 0.0;
+        player.body.yaw = (target[1] - origin[1]).atan2(target[0] - origin[0]);
+        player.body.pitch = 0.0;
         *aimed = true;
         println!("demo: aiming at thing {index} ({distance:.1} units away)");
     }
@@ -22575,8 +22589,8 @@ fn fire_player(
     // The runtime's thing is synced to the camera already; `fire` spawns down its +Y, so
     // the shoot direction is the player's yaw. The weapon is the runtime's, so a pickup
     // changes what fires.
-    rt.things[index].yaw = player.yaw.to_degrees();
-    rt.things[index].pitch = player.pitch.to_degrees();
+    rt.things[index].yaw = player.body.yaw.to_degrees();
+    rt.things[index].pitch = player.body.pitch.to_degrees();
     let weapon = rt.current_weapon();
     let _ = &gun.0;
     // A scripted `SetFireWait` locks the trigger until its cooldown runs out. Checked before the ammo
@@ -22902,11 +22916,11 @@ fn draw_viewmodel(
         )
     };
     let (moved, speed_norm) = player.as_deref().map_or((0.0, 0.0), |player| {
-        let speed = (player.vel[0] * player.vel[0]
-            + player.vel[1] * player.vel[1]
-            + player.vy * player.vy)
+        let speed = (player.body.vel[0] * player.body.vel[0]
+            + player.body.vel[1] * player.body.vel[1]
+            + player.body.vy * player.body.vy)
             .sqrt();
-        (player.last_move, speed / player.rules.max_vel.max(0.001))
+        (player.body.last_move, speed / player.rules.max_vel.max(0.001))
     });
     view.sway_phase = pov_sway_step(view.sway_phase, moved, rate);
     let sway = {
@@ -24053,7 +24067,7 @@ fn collect_items(
     else {
         return;
     };
-    let body = [player.pos.x, player.pos.y, player.pos.z];
+    let body = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
     // Contact, not proximity: the engine collects a thing when its collide volume meets the player's,
     // so the reach is the two templates' `movesize` radii. The flat 1.0 that stood here swept up
     // everything in a unit — level 1 starts the body beside a `shieldrecharge`, and the port took it
@@ -24366,8 +24380,8 @@ fn play_requested_sounds(
     if requests.is_empty() {
         return;
     }
-    let eye = [player.pos.x, player.pos.y, player.pos.z];
-    let yaw = player.yaw.to_radians();
+    let eye = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
+    let yaw = player.body.yaw.to_radians();
     // `yaw_axes`' forward: `(-sin, cos)`, the same frame the walker and camera use.
     let facing = (-yaw.sin(), yaw.cos());
     let mut played = 0;
@@ -24511,7 +24525,7 @@ fn ai_shots(capture: Option<Res<CaptureDt>>,
         return;
     };
     // The player's runtime thing is the AI's target.
-    let eye = player.pos;
+    let eye = player.body.pos;
     rt.things[index].pos = [eye.x, eye.y, eye.z];
     let fired = rt.ai_tick(index, dt);
     if fired > 0 {
@@ -24531,9 +24545,9 @@ fn ambient_follows_view(
     // `SectorSound` may have replaced the sector's ambient: the script's override wins over the
     // level's own (`sithSoundMixer_SetSectorAmbientSound` writes the sector itself).
     let wanted = sim
-        .map(|sim| sim.world.borrow().sector_ambient.get(&(player.sector as i32)).cloned())
+        .map(|sim| sim.world.borrow().sector_ambient.get(&(player.body.sector as i32)).cloned())
         .unwrap_or_default()
-        .or_else(|| world.level.sectors.get(player.sector).and_then(|s| s.sound.clone()));
+        .or_else(|| world.level.sectors.get(player.body.sector).and_then(|s| s.sound.clone()));
     if let Some((name, entity)) = ambience.playing.clone() {
         if wanted.as_ref().is_some_and(|(wanted, _)| *wanted == name) {
             return;
@@ -25560,9 +25574,8 @@ fn setup(
             .iter()
             .map(|thing| (thing.pos, thing.sector.max(0) as usize, thing.yaw)),
     ));
-    let geometry = std::sync::Arc::new(geometry);
-    commands.insert_resource(Collision(std::sync::Arc::clone(&geometry)));
-    commands.insert_resource(SectorView { solids: geometry, by_sector });
+    commands.insert_resource(Collision(std::sync::Arc::new(geometry)));
+    commands.insert_resource(SectorView { by_sector });
     commands.insert_resource(shapes);
     // The ammo bin the player's weapon spends, resolved once from the weapon's own powerup cog.
     let ammo_bin = ammo_bin_for(&world);
@@ -26040,19 +26053,6 @@ struct Player {
     use_hits: u32,
     /// The force-speed term (`SetActorExtraSpeed`), applied to the walk speed.
     extra_speed: f32,
-}
-
-impl std::ops::Deref for Player {
-    type Target = runtime::PlayerBody;
-    fn deref(&self) -> &Self::Target {
-        &self.body
-    }
-}
-
-impl std::ops::DerefMut for Player {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.body
-    }
 }
 
 /// Where to put the player: the level's `walkplayer` position, nudged out of anything it overlaps.
@@ -26842,16 +26842,16 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     let live = !overview.capture;
     let held = |key: KeyCode| live && keys.pressed(key);
     if held(KeyCode::ArrowLeft) {
-        player.yaw += 1.5 * dt;
+        player.body.yaw += 1.5 * dt;
     }
     if held(KeyCode::ArrowRight) {
-        player.yaw -= 1.5 * dt;
+        player.body.yaw -= 1.5 * dt;
     }
     if held(KeyCode::ArrowUp) {
-        player.pitch = (player.pitch + 1.0 * dt).min(1.4);
+        player.body.pitch = (player.body.pitch + 1.0 * dt).min(1.4);
     }
     if held(KeyCode::ArrowDown) {
-        player.pitch = (player.pitch - 1.0 * dt).max(-1.4);
+        player.body.pitch = (player.body.pitch - 1.0 * dt).max(-1.4);
     }
 
     // Mouse look, while no screen is open. The cursor is locked then (see `grab_cursor`), which is what
@@ -26862,10 +26862,10 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(LOOK_SENSITIVITY);
         let limits = (player.rules.pitch_min, player.rules.pitch_max);
-        let (mut yaw, mut pitch) = (player.yaw, player.pitch);
+        let (mut yaw, mut pitch) = (player.body.yaw, player.body.pitch);
         apply_look(&mut yaw, &mut pitch, mouse.delta, sens, limits, look_inverted());
-        player.yaw = yaw;
-        player.pitch = pitch;
+        player.body.yaw = yaw;
+        player.body.pitch = pitch;
     }
 
     // Movement in the walker's own frame, then converted to world (x, z).
@@ -26923,19 +26923,19 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // The app owns the keys and the body's facing; the runtime owns the target, the fixed-rate
     // velocity integration and the jump. Keeping the walk in the body's frame is what the retail
     // `walk11_spawn` trace shows while the opening camera plays.
-    let jump = live && keys.just_pressed(KeyCode::Space) && player.grounded;
+    let jump = live && keys.just_pressed(KeyCode::Space) && player.body.grounded;
     let input = runtime::PlayerInput {
         forward,
         strafe,
         run,
         crouch,
         jump,
-        yaw: player.yaw,
-        pitch: player.pitch,
+        yaw: player.body.yaw,
+        pitch: player.body.pitch,
         extra_speed: player.extra_speed,
     };
-    let pos = [player.pos.x, player.pos.y, player.pos.z];
-    let sector = player.sector;
+    let pos = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
+    let sector = player.body.sector;
     // The player is **not** an attached body. `sithPhysics_FindFloor` — the only route to
     // `sithThing_AttachThingToSurface` outside the cog verb — runs at creation/load and for a body
     // that is already attached (`sithThing_UpdateMove`), and `sithPlayer_NewPlayer` (`0x4c8ec0`)
@@ -26945,17 +26945,17 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // every frame; `walker_step`'s vertical sweep stops the body at `floor + radius` and zeroes
     // `vy`, which is the engine's ground contact. Placed things are the ones that attach (created
     // through `sithThing_Initialize`/`LoadPostProcess`, `FindFloor(..., 1)`).
-    let vy = player.vy;
+    let vy = player.body.vy;
     let trace = std::env::var_os("BK_WALK_TRACE").is_some();
     if trace {
         eprintln!(
             "walk trace: live {live} W {} escape {} forward {forward} strafe {strafe} vel {:?} extra {} crouch {crouch}",
             keys.pressed(KeyCode::KeyW),
             keys.pressed(KeyCode::Escape),
-            player.vel,
+            player.body.vel,
             player.extra_speed
         );
-        eprintln!("walk trace: dt {dt:.4} grounded {}", player.grounded);
+        eprintln!("walk trace: dt {dt:.4} grounded {}", player.body.grounded);
         // The player thing's `SetActorFlags` bits and `jkSetFlags` bits: a level's opening script uses these
         // to take the body out of action (the flag the engine's control loop tests is `player->flags & 0x202`).
         let (actor, jk) = sim
@@ -27021,8 +27021,8 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
                 .step_player(&mut player.body, &solids.0, input, &rules, dt, gates)
         })
         .unwrap_or(false);
-    let sector = player.sector;
-    let vy = player.vy;
+    let sector = player.body.sector;
+    let vy = player.body.vy;
     // Phase 0.5 trace v0: one line per frame, so a retail walk trace (`coords` polled on a cadence)
     // can be compared against it by distance travelled (`tools/parity/trace-compare.ps1`). Health and
     // shields are what `coords` cannot carry; they are here because the port's body has them.
@@ -27055,11 +27055,11 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
                 "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.3}\t{:.1}\t{:.1}",
                 *trace_tick,
                 f64::from(*trace_tick) * f64::from(dt),
-                player.pos.x,
-                player.pos.y,
-                player.pos.z,
-                player.sector,
-                player.vy,
+                player.body.pos.x,
+                player.body.pos.y,
+                player.body.pos.z,
+                player.body.sector,
+                player.body.vy,
                 health,
                 shields
             );
@@ -27069,7 +27069,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     if std::env::var_os("BK_JUMP_TRACE").is_some() {
         eprintln!(
             "jump trace: z {:.3} vy {vy:.2} landed {} sector {sector}",
-            player.pos.z, player.grounded
+            player.body.pos.z, player.body.grounded
         );
     }
     if crossed {
@@ -27115,10 +27115,10 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         pitch: pitch.to_radians(),
     });
     let mut pose = camera_placement(
-        player.pos,
-        player.eye,
-        player.yaw,
-        player.pitch,
+        player.body.pos,
+        player.body.eye,
+        player.body.yaw,
+        player.body.pitch,
         chase.mode,
         chase.length,
         focus,
@@ -27135,7 +27135,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         // The sector the *eye* is in, not the one the runtime last wrote: a stale index makes the walk
         // start outside its own hull, where every plane reports a contact at distance 0 and the boom
         // collapses onto the player.
-        let sector = solids.0.sector_at(focus.to_array(), 0.5).unwrap_or(player.sector);
+        let sector = solids.0.sector_at(focus.to_array(), 0.5).unwrap_or(player.body.sector);
         let wanted = pose.eye;
         let (pulled, hit) = solids.0.camera_pull(sector, focus.to_array(), wanted.to_array(), 0.02);
         pose.eye = Vec3::from(pulled);
@@ -27167,7 +27167,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         // supposedly identical captures.
         if SHOT_AT.get().is_none() {
             // The engine's own strafe lean (see camera_lean): the up axis tilts toward the right column.
-            let lean = camera_lean(player.vel, player.yaw);
+            let lean = camera_lean(player.body.vel, player.body.yaw);
             if lean != 0.0 {
                 tf.rotate_local_z(-lean.to_radians());
             }
