@@ -2604,8 +2604,10 @@ impl Runtime {
     /// Advance every moving thing, returning the pose changes and queued events.
     ///
     /// `geometry` is the caller's collider view: the step settles the actors `ai_tick` walked
-    /// against it, and their corrected poses ride out on `ThingMotion::moved`. The runtime keeps no
-    /// second copy of that view.
+    /// against it, and their corrected poses ride out on `ThingMotion::moved`. The step keeps no
+    /// settle-only duplicate handle for the view it receives — `Runtime::solids` remains the
+    /// movers' collider. `None` settles nothing, and leaves the walked list for a later step that
+    /// gets geometry; an intervening `ai_tick` clears it.
     ///
     /// `ThingMotion::moved` and `ThingMotion::turned` name every thing whose transform changed;
     /// `blocked` and `arrived` are the script events this step already queued. A renderer can
@@ -13359,8 +13361,8 @@ mod tests {
         rt.things[0].sector = 0;
         rt.walked = vec![0];
         let solids = crate::collide::Solids::default();
-        // Without a caller-owned view there is nothing to settle against, and the walked list is
-        // left for the next tick.
+        // Without a caller-owned view there is nothing to settle against: the walked list is left
+        // for a later step that gets geometry, and an intervening `ai_tick` would clear it.
         rt.step(None, 0.0);
         assert_eq!(rt.things[0].pos, [0.0, 0.0, 1.0], "a step with no geometry moved the actor");
         assert_eq!(rt.walked, vec![0], "a step with no geometry consumed the walked list");

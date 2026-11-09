@@ -4625,8 +4625,8 @@ fn main() {
                 for (instance, label, params, _source) in std::mem::take(&mut rt.pending_messages) {
                     queued.push((label.to_string(), Some(player), Some(instance as i32), params));
                 }
-                rt.step(None, dt);
                 rt.ai_tick(player, dt);
+                rt.step(Some(&solids), dt);
                 let mut extra = std::mem::take(&mut rt.messages);
                 queued.append(&mut extra);
                 queued
@@ -5679,10 +5679,10 @@ fn main() {
                 rt.things[actor].sector = sector as i32;
                 rt.things[actor].vel = [0.0; 3];
                 let motion = rt.step(Some(&solids), 1.0 / 30.0);
-                let out = rt.things[actor].pos;
-                let pushed = ((out[0] - inside[0]).powi(2)
-                    + (out[1] - inside[1]).powi(2)
-                    + (out[2] - inside[2]).powi(2))
+                let settled = rt.things[actor].pos;
+                let pushed = ((settled[0] - inside[0]).powi(2)
+                    + (settled[1] - inside[1]).powi(2)
+                    + (settled[2] - inside[2]).powi(2))
                 .sqrt();
                 println!("ai: a body 0.4 inside a wall is pushed {pushed:.2} back out by the step");
                 assert!(pushed > 0.05, "the step did not push the body out ({pushed:.3})");
