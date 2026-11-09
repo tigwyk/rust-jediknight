@@ -1,6 +1,7 @@
 target/
 scrap/
 dist/
+.scratch/
 # Ghidra decompilation dumps (tools/ghidra/ExportDecomp.java writes here): LucasArts' code, read
 # locally, never redistributed.
 decomp/
