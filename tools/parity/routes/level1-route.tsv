@@ -1,4 +1,5 @@
-# Level-1 scripted route replay (issue #8). One `warp` per leg, then a held-forward `input`.
+# Level-1 scripted route replay (issue #8). A `warp` per leg (except the level's own start), then a
+# held-forward `input`.
 #
 # The warp poses are retail's own recorded route placements: the `walkplayer` things the level
 # ships, read by retail's `coords` and committed in `tools/parity/shots.tsv` (the `route_*` rows)
@@ -18,12 +19,18 @@
 #   door      180   tools/parity/walktrace/walk_door0-walk.tsv (5 x 600 ms)
 #
 # The three committed legs are the same rows `trace-gate.ps1` replays; the spawn leg is the level's
-# own start pose. A leg boundary is a `warp`, not a walk: the port cannot yet walk the cantina and
-# door rooms without the solid-furniture and door collision issue #10 owns, so the route measures
-# the four legs' movement against retail now and becomes a continuous walk when that lands.
+# own start pose. A leg boundary is a `warp`, not a walk: the retail reference is four separate
+# per-leg captures from the level's own authored placements, so the route is the same four walks.
+# Issue #10 fixed what each leg exposed — the spawn seat, the engine's walk rate, and the attach
+# height a `warp` leaves a body at — so the legs now hold retail's sectors and vertical travel.
+#
+# The spawn leg carries no pose: retail's spawn trace starts at the level's own start (it is not a
+# `warp` capture), and the engine does not attach a body that was placed at load — it falls from the
+# authored pose to the swept sphere contact (z -1.13 -> -1.18). A warp here would attach it at model
+# height and hold z where retail shows it falling.
 #
 # kind	name		x		y		z		yaw_deg
-warp	spawn		-10.443433	-5.455094	-1.092886	-59.994
+warp	spawn		-		-		-		-
 input	180	1	0
 warp	cantina		-2.200043	-2.900013	-1.142886	105.000092
 input	144	1	0
