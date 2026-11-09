@@ -317,6 +317,63 @@ trace gate: 4 leg(s), 0 failure(s)
 The table above is the gate's first four legs as it shipped. It now runs **15 legs** with **one tracked failure** -
 `walk5_spawn`, the floor-search-scope deviation on the roadmap's ledger; `docs/gates.txt` carries the current numbers
 each round rather than this snapshot.
+
+## Scripted route replay (issue #8)
+
+The shared level-1 oracle for the movement, telemetry and integration slices. `--replay` drives the
+port from a committed input script at the fixed 1/60 s capture step, and `--route-trace` writes the
+comparable trace.
+
+```powershell
+cargo build --release
+pwsh -NoProfile -File tools/parity/route-gate.ps1            # determinism + committed-fixture gate
+pwsh -NoProfile -File tools/parity/route-gate.ps1 -Perturb   # ... and prove a perturbed trace fails
+```
+
+Files:
+
+| Path | What it is |
+|---|---|
+| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. |
+| `tools/parity/routetrace/level1-route-retail.tsv` | Retail-derived reference, one row every 600 ms (36 ticks). Provenance is in the file header. |
+| `tools/parity/routetrace/level1-route-port.tsv` | The port's committed oracle, produced by the replay. |
+| `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), compare to the committed port fixture, and reject a trace with one position moved 0.25 units. `-Retail` also compares against the retail reference at `-Epsilon`. |
+
+The trace format is tab-separated, `#` comments allowed, one header row:
+
+```text
+tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
+      door0_status  door0_movestatus  door0_opendoors  door0_closedoors
+      switch_status  switch_movestatus  switch_opendoors  switch_closedoors
+```
+
+- `tick` counts 1/60 s steps; `t_s = tick / 60`. Rows are written at ticks `0, 36, 72, ...`
+  (600 ms), the cadence a retail `coords` poll segments a walk into.
+- `x/y/z` are the player **body** position — the value retail's `coords` prints (the camera rides one
+  `eyeOffset` above it, `walkplayer`'s 0.037) — so a retail capture and this trace name the same point.
+- `sector` is the tracked sector the body is in.
+- `vel_x/vel_y` are the body's horizontal world velocity and `vel_z` its vertical one, in level
+  units per second. Retail's columns are the position derivative over the 600 ms window.
+- `health/shields` come from the player thing and `rt.player_shields`; the retail capture reads
+  them from the player thing (`thing+0x134`) and inventory bin 60.
+- `door0_*` and `switch_*` are placed cogs 0 (`00_door.cog`) and 11 (`00_doorswitch.cog`), four
+  symbols each (`doorstatus`, `movestatus`, and the script's own open/close variables). `-` is a
+  field the run does not have (no such cog, or a retail capture that did not record it).
+
+A **leg boundary is a `warp`**, not a walk. The port cannot yet walk the cantina and door rooms
+without the solid-furniture and door collision issue #10 owns; the route therefore measures the
+four legs' movement against retail now and becomes one continuous walk when that lands (the script
+format does not change). The gate's retail comparison is report-only by default for the same
+reason, and `-Retail` turns it into a failure check when a slice expects parity.
+
+`--route-compare <expected> <actual>` is the comparator the gate uses; `BK_ROUTE_EPSILON=<units>`
+sets an absolute tolerance for every numeric column (sector stays exact, and `-` fields are skipped).
+
+A replay is reproducible by construction: the step is pinned at 1/60 s and the replay runs the Update
+schedule on one executor thread. The AI's shared LCG is thread-local, so with the default
+multi-threaded executor the same script could land a hit a frame apart between runs; one thread makes
+every call site see the same sequence. Play keeps the default executor.
+
 ### Retail's cog namespace
 
 `coglist` prints `<id>: <script> <script>` per instance. The console buffer only keeps the tail, which

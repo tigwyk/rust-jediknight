@@ -1,0 +1,33 @@
+# Level-1 scripted route replay (issue #8). One `warp` per leg, then a held-forward `input`.
+#
+# The warp poses are retail's own recorded route placements: the `walkplayer` things the level
+# ships, read by retail's `coords` and committed in `tools/parity/shots.tsv` (the `route_*` rows)
+# and `tools/parity/walk-shots.tsv` (the walk legs). They are camera EYES in world units; the
+# replay puts the body one template eye offset below (the same subtraction retail's `warp` and
+# this port's `--warp` do), so both sides' bodies start at the same point.
+#
+# `input <ticks> <forward> <strafe>` holds that intent for the ticks; the capture step is 1/60 s.
+# A leg's length is its retail trace's held-key window (600 ms per retail sample), so the port's
+# 600 ms samples fall on the same ticks as the retail capture's `held_ms` samples.
+#
+#   leg      ticks  retail source
+#   spawn     180   tools/parity/walktrace/spawn-walk.tsv  (5 x 600 ms; retaken from retail's
+#                   recorded spawn pose; the level's own start is the same pose)
+#   cantina   144   tools/parity/walktrace/walk_cantina-walk.tsv (4 x 600 ms)
+#   street    180   tools/parity/walktrace/walk_street45-walk.tsv (5 x 600 ms)
+#   door      180   tools/parity/walktrace/walk_door0-walk.tsv (5 x 600 ms)
+#
+# The three committed legs are the same rows `trace-gate.ps1` replays; the spawn leg is the level's
+# own start pose. A leg boundary is a `warp`, not a walk: the port cannot yet walk the cantina and
+# door rooms without the solid-furniture and door collision issue #10 owns, so the route measures
+# the four legs' movement against retail now and becomes a continuous walk when that lands.
+#
+# kind	name		x		y		z		yaw_deg
+warp	spawn		-10.443433	-5.455094	-1.092886	-59.994
+input	180	1	0
+warp	cantina		-2.200043	-2.900013	-1.142886	105.000092
+input	144	1	0
+warp	street		5.474939	-1.899975	0.657119	45.000000
+input	180	1	0
+warp	door		1.300000	9.000000	6.237000	0.000000
+input	180	1	0
