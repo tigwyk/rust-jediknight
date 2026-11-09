@@ -7238,6 +7238,14 @@ checks, and even those should be run deliberately.
 - `-Windowed` (dgVoodoo `FullScreenMode=false`, borderless, `CaptureMouse=true`, 640x480) was measured
   live: the window was 640x480, but the user still saw the game take over the whole display on every
   run. It is opt-in again and the README/log no longer claim a windowed capture.
+- **DxWnd 2.06.16 was tried as the real window layer (2026-11-09).** It does host JK in a 640x480
+  window at `(50,50)` without changing the desktop, and the menu/console path works once clicks are
+  translated by the client origin. Entering a level is not stable: the menu click reaches New Game,
+  then JK exits/crashes in `stdBitmap_ConvertColorFormat` (`JK.EXE` +0x2d4ce, `c0000005`); the 3D
+  attempt also faulted in `dxwnd.dll` +0x7b367. Tried renderer `primary surface`, `none`, and `GDI`,
+  and DirectX `Automatic`/`1-6`; software and dgVoodoo copies both failed. So DxWnd is not a usable
+  capture path for this title; use a VM/isolated display or keep retail captures on the fullscreen
+  path with explicit approval. The experiment was reverted from the harness.
 - The exit-segment plan's four `warp` rows must keep the plan's empty column after the name (the
   harness reads x/y/z/yaw at fixed indices); a 6-field row shifted them (`warp 9.62 6.357114 104.963`)
   and aborted the run.
