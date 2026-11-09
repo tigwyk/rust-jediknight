@@ -24,6 +24,11 @@ param(
   # the normal screenshot captures. The dev console is NOT polled during the trace: it pauses the
   # game and would change the encounter.
   [int]$EncounterMs = 0,
+  # Issue #13's retail audio probe: after the level loads and the row's warp is applied, read the
+  # engine's own music and mixer state for this many game milliseconds and log it. Capture
+  # instrumentation only (see `Invoke-JkAudioProbe`); 0 disables it.
+  [int]$AudioProbeMs = 0,
+  [int]$AudioProbeCadenceMs = 100,
   [int]$EncounterCadenceMs = 100,
   [string]$EncounterOut = 'target/parity/encounter',
   # File name (without `.tsv`) for the encounter trace. Empty uses the shots row's name; the gate's
@@ -653,6 +658,73 @@ function Invoke-JkWalkTrace {
   }
   return $path
 }
+# `-AudioProbeMs`: the retail half of issue #13's audio fixture, probe form.
+#
+# Capture instrumentation only. The addresses are the engine's own globals (JK.EXE has no
+# relocations, so they are fixed), recovered from the decompiled mixer:
+#
+#   song range        u32 start 0x008BBC74, u32 end 0x008BBC70, u32 loop-back 0x00835FCC,
+#                     u32 playing 0x00835FD0                 (`sithSoundMixer_PlaySong`, 0x4DAE60)
+#   music volume      f32 0x0054A678                           (`SetMusicVol` cog function, 0x4FA569)
+#   mixer channels    base 0x00835FE8, 32 entries of 0x5C:
+#                       +0x08 sound struct, +0x0C flags, +0x14 volume, +0x18 min radius,
+#                       +0x1C max radius, +0x38 distance, +0x48 thing
+#                     (`sithSoundMixer_PlaySoundThing`, 0x4DBA60)
+#   sound name        the sound struct's own char[32] at +0 (`FUN_004EF1D0` copies the name in)
+#
+# Nothing is written to the process: the probe only reads. `music_vol` is the mixer's own value; a
+# channel's `gain` mirrors the port's `snd::volume` (base, linear min..max falloff, 0.75 final
+# scale) from the channel's own fields, without the rear-pan term (the channel keeps no listener
+# basis; a sound behind the listener would read high).
+function Invoke-JkAudioProbe {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [int]$Milliseconds = 4000,
+    [int]$CadenceMs = 100
+  )
+  $clock0 = Read-JkGameMs -ProcessId $ProcessId
+  if ($clock0 -lt 0) { throw 'audio probe: the game clock (0x00836C14) could not be read' }
+  $vol0 = [JkRetail]::ReadFloat($ProcessId, 0x0054A678)
+  Log ("audio probe: start song {0}..{1} (loop {2}, playing {3}) volume {4:N3}" -f [JkRetail]::ReadU32($ProcessId, 0x008BBC74), [JkRetail]::ReadU32($ProcessId, 0x008BBC70), [JkRetail]::ReadU32($ProcessId, 0x00835FCC), [JkRetail]::ReadU32($ProcessId, 0x00835FD0), $vol0)
+  $next = 0
+  while ($true) {
+    $clock = Read-JkGameMs -ProcessId $ProcessId
+    if ($clock -lt 0) { throw 'audio probe: the game clock stopped reading' }
+    $elapsed = [double]$clock - [double]$clock0
+    if ($elapsed -ge $Milliseconds) { break }
+    if ($elapsed -lt $next) { Start-Sleep -Milliseconds 8; continue }
+    $vol = [JkRetail]::ReadFloat($ProcessId, 0x0054A678)
+    $from = [JkRetail]::ReadU32($ProcessId, 0x008BBC74)
+    $to = [JkRetail]::ReadU32($ProcessId, 0x008BBC70)
+    $num = [JkRetail]::ReadU32($ProcessId, 0x00835FCC)
+    $playing = [JkRetail]::ReadU32($ProcessId, 0x00835FD0)
+    $channels = @()
+    for ($i = 0; $i -lt 32; $i++) {
+      $base = 0x00835FE8 + $i * 0x5C
+      $flags = [JkRetail]::ReadU32($ProcessId, $base + 0x0C)
+      if (($flags -band 0x20000) -eq 0) { continue }
+      $sound = [JkRetail]::ReadU32($ProcessId, $base + 0x08)
+      if ($sound -le 0) { continue }
+      $nameBytes = [JkRetail]::ReadBytes($ProcessId, $sound, 32)
+      if ($null -eq $nameBytes) { continue }
+      $zero = [Array]::IndexOf($nameBytes, [byte]0)
+      if ($zero -lt 0) { $zero = 32 }
+      $name = [Text.Encoding]::ASCII.GetString($nameBytes, 0, $zero)
+      $volume = [JkRetail]::ReadFloat($ProcessId, $base + 0x14)
+      $minR = [JkRetail]::ReadFloat($ProcessId, $base + 0x18)
+      $maxR = [JkRetail]::ReadFloat($ProcessId, $base + 0x1C)
+      $dist = [JkRetail]::ReadFloat($ProcessId, $base + 0x38)
+      $thing = [JkRetail]::ReadU32($ProcessId, $base + 0x48)
+      $fade = 0.0
+      if ($maxR -gt $minR) { $fade = [math]::Min(1.0, [math]::Max(0.0, ($dist - $minR) / ($maxR - $minR))) }
+      $gain = [math]::Min(1.0, [math]::Max(0.0, $volume * (1.0 - $fade))) * 0.75
+      $channels += ('{0}@{1:F3}(v={2:F3} d={3:F2} r={4:F2}..{5:F2} thing={6} flags=0x{7:X})' -f $name, $gain, $volume, $dist, $minR, $maxR, $thing, $flags)
+    }
+    Log ("audio probe: t={0} music={1},{2},{3} playing={4} vol={5:F3} channels=[{6}]" -f [math]::Round($elapsed), $from, $to, $num, $playing, $vol, ($channels -join '; '))
+    $next += $CadenceMs
+  }
+  Log 'audio probe: done'
+}
 # `-EncounterMs`: the retail half of issue #9's door-encounter telemetry.
 #
 # Everything is read straight out of the engine's memory, because the dev console is a dialog that
@@ -1051,6 +1123,17 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       return
     }
     Start-Sleep -Milliseconds 400
+    # Capture instrumentation: another application can hold the foreground on this workstation, and
+    # the click/ESC then goes to it (the intro never skips). Activate the game window first, the same
+    # way the walk trace does before each held segment.
+    $gameWindow = Get-JkWindow -ProcessId $process.Id
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
+      if ($gameWindow -eq [IntPtr]::Zero) { break }
+      [void][JkRetail]::ShowWindow($gameWindow, 9)
+      [void][JkRetail]::SetForegroundWindow($gameWindow)
+      Start-Sleep -Milliseconds 150
+      if ([JkRetail]::ForegroundTitle() -eq 'Jedi Knight') { break }
+    }
     Send-JkKey 'ESC'
     Start-Sleep -Milliseconds 2000
     $bright = Wait-JkBrightScreen -TimeoutSec 3
@@ -1058,6 +1141,10 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     while (($null -eq $bright -or $bright -le 55.0) -and $escRetries -lt 8) {
       $escRetries++
       Log "intro still playing (window yavg=$bright); sending ESC again ($escRetries)"
+      if ($gameWindow -ne [IntPtr]::Zero) {
+        [void][JkRetail]::SetForegroundWindow($gameWindow)
+        Start-Sleep -Milliseconds 120
+      }
       Send-JkKey 'ESC'
       Start-Sleep -Milliseconds 1400
       $bright = Wait-JkBrightScreen -TimeoutSec 2
@@ -1249,6 +1336,15 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
         throw "warp failed for row '$name' in level '$level': Position not in world"
       }
       if ($EncounterMs -le 0) { Start-Sleep -Milliseconds 900 }
+    }
+
+    # Issue #13: the retail audio probe, before any console command or key so nothing pauses the
+    # clock or perturbs what the mixer is doing.
+    if ($AudioProbeMs -gt 0) {
+      if ($null -ne $requestedPose) { Start-Sleep -Milliseconds 900 }
+      Invoke-JkAudioProbe -ProcessId $process.Id -Milliseconds $AudioProbeMs -CadenceMs $AudioProbeCadenceMs
+      Log "audio probe mode: skipped the screenshot series/reference for '$name'"
+      return
     }
 
     # Issue #9: a door-encounter run replaces the screenshot series (the `finally` still closes the
