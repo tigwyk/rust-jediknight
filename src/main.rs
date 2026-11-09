@@ -16403,8 +16403,9 @@ fn route_cog_values(world: &World, sim: &Sim) -> [Option<f64>; 8] {
 
 /// The audio trace's columns, sampled on the route trace's 600 ms cadence.
 ///
-/// `music`/`music_end`/`music_loop` are `PlaySong`'s track range; `music_vol` is `SetMusicVol`'s
-/// current value (the scripts fade it from a pulse). `ambient`/`ambient_vol` are the sector's own
+/// `music`/`music_end` are `PlaySong`'s track range and `music_loop` is the mixer's loop flag
+/// (1/0; the engine stores the third argument as a boolean and wraps back to `music`), while
+/// `music_vol` is `SetMusicVol`'s current value (the scripts fade it from a pulse). `ambient`/`ambient_vol` are the sector's own
 /// `SOUND` loop (or a script's `SectorSound` override). `sounds` lists every one-shot the window
 /// played, space separated as `wav@gain`, where `gain` is the mixer's attenuated volume — so a
 /// missing sound, an extra one, a late one and a quiet one are all visible in the same column.
@@ -16417,7 +16418,8 @@ const AUDIO_TRACE_FIELDS: [&str; 9] = [
 #[derive(Debug, Clone, PartialEq)]
 struct AudioTraceRow {
     tick: u32,
-    /// `PlaySong(start, end, loopto)` as the runtime holds it.
+    /// `PlaySong(start, end, loop)` as the trace records it: the mixer stores the third argument
+    /// as a boolean loop flag and always wraps back to `start`.
     music: Option<(i32, i32, i32)>,
     /// `music_vol`'s value.
     music_volume: Option<f64>,
@@ -16480,7 +16482,7 @@ fn parse_audio_trace(text: &str) -> Result<Vec<AudioTraceRow>, String> {
             as u32;
         let music = match (number(2, "music")?, number(3, "music_end")?, number(4, "music_loop")?) {
             (Some(start), Some(end), Some(loops)) => {
-                Some((start as i32, end as i32, loops as i32))
+                Some((start as i32, end as i32, i32::from(loops != 0.0)))
             }
             _ => None,
         };
@@ -16721,7 +16723,7 @@ fn write_audio_trace_row(
         let _ = writeln!(file, "{}", AUDIO_TRACE_FIELDS.join("\t"));
     }
     let (music, end, loops) = music
-        .map(|(start, end, loops)| (start.to_string(), end.to_string(), loops.to_string()))
+        .map(|(start, end, loops)| (start.to_string(), end.to_string(), u8::from(loops != 0).to_string()))
         .unwrap_or_else(|| ("-".to_string(), "-".to_string(), "-".to_string()));
     let (ambient_name, ambient_volume) = ambient
         .map(|(name, volume)| (name.clone(), format!("{volume:.3}")))
@@ -16866,14 +16868,14 @@ input 72 1 0
         let text = "\
 # an audio trace
 tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
-0\t0.0000\t12\t13\t12\t0.000\t01cantinaband02.wav\t0.300\t
-36\t0.6000\t12\t13\t12\t0.050\t01cantinaband02.wav\t0.300\tpistol-1.wav@0.250 ricochet01.wav@0.050
+0\t0.0000\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\t
+36\t0.6000\t12\t13\t1\t0.050\t01cantinaband02.wav\t0.300\tpistol-1.wav@0.250 ricochet01.wav@0.050
 72\t1.2000\t-\t-\t-\t1.000\t-\t-\t
 ";
         let rows = parse_audio_trace(text).expect("the trace parses");
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].tick, 0);
-        assert_eq!(rows[0].music, Some((12, 13, 12)));
+        assert_eq!(rows[0].music, Some((12, 13, 1)));
         assert_eq!(rows[0].music_volume, Some(0.0));
         assert_eq!(rows[0].ambient, Some(("01cantinaband02.wav".to_string(), 0.3)));
         assert_eq!(rows[0].sounds, Some(Vec::new()));
@@ -16886,7 +16888,7 @@ tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
         // A `-` cell is "not recorded", not "silent".
         let unrecorded = "\
 tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
-0\t0.0000\t12\t13\t12\t-\t-\t-\t-
+0\t0.0000\t12\t13\t1\t-\t-\t-\t-
 ";
         let rows = parse_audio_trace(unrecorded).expect("an unrecorded trace parses");
         assert_eq!(rows[0].music_volume, None);
@@ -16899,7 +16901,7 @@ tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
     fn the_audio_comparator_names_missing_extra_mistimed_and_attenuated_sounds() {
         let row = |tick: u32, sounds: Vec<(&str, f64)>| AudioTraceRow {
             tick,
-            music: Some((12, 13, 12)),
+            music: Some((12, 13, 1)),
             music_volume: Some(0.5),
             ambient_recorded: true,
             ambient: Some(("01cantinaband02.wav".to_string(), 0.3)),

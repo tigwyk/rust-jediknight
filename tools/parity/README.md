@@ -438,7 +438,8 @@ route trace:
 tick  t_s  music  music_end  music_loop  music_vol  ambient  ambient_vol  sounds
 ```
 
-- `music`/`music_end`/`music_loop` are `PlaySong(start, end, loopto)`'s range (`-` when nothing is
+- `music`/`music_end` are `PlaySong(start, end)`'s track range and `music_loop` is the
+  mixer's loop flag, 1/0 (`-` when nothing is
   playing); `music_vol` is `SetMusicVol`'s current value, which level 1's `01_SoundTrack.cog` drives
   from a 0.1 s pulse (0.05 a step up, 0.1 down).
 - `ambient`/`ambient_vol` are the sector's own `SOUND` loop (a script's `SectorSound` wins), and the
@@ -466,9 +467,14 @@ Files:
 | Path | What it is |
 |---|---|
 | `tools/parity/routes/level1-audio-route.tsv` | Issue #8's four route legs unchanged, plus the bar's doorway walked both ways. Each door leg starts one step from the trigger plane, so the crossing is the leg's first walk tick and the fade's phase is the script's, not movement's. |
-| `tools/parity/audiotrace/level1-audio-retail.tsv` | Retail-derived: the music range and its fade values come from `01_SoundTrack.cog`'s own `startup`/`crossed`/`pulse` code and the engine's 100 ms pulse; ambience comes from retail's own sector list (`tools/parity/routetrace/level1-route-retail.tsv`) and the level's `SOUND` rows. Rows where the port's body is in a different sector than retail's are `-` (issue #10's movement parity owns the difference). |
+| `tools/parity/audiotrace/level1-audio-retail.tsv` | **Captured from retail** by `retail-capture.ps1 -AudioRoute tools/parity/routes/level1-audio-route.tsv -AudioRouteOut tools/parity/audiotrace/level1-audio-retail.tsv`: the harness boots level 1 with `-devMode`, applies each route leg's `warp` through the dev console, holds forward for the leg, and reads the engine's own state at every 600 ms of route game time — song range and loop flag (0x008BBC74/0x008BBC70/0x00835FCC), `SetMusicVol`'s value (f32 0x0054A678), and the 32-entry mixer table at 0x00835FE8 (sound name from the sound struct's own char[32], loop bit 0x1, volume, radii, distance) for the ambience loop and the one-shots. Capture instrumentation only: no shipping behavior changes. |
 | `tools/parity/audiotrace/level1-audio-port.tsv` | The port's committed oracle, produced by the replay. |
 | `tools/parity/audio-gate.ps1` | The gate above. |
+
+Capture limitation: on this workstation retail's redbook device never starts (`0x00835FD0` reads 0,
+the MCI open fails), so the captured `music_vol` stays at the mixer's initial 1.0 and cannot show the
+script's fade; the port's fixture carries the fade. That is a device limitation of the capture
+environment, not a fixture choice, and the gate reports it as the retail delta.
 
 Two port fixes came out of the fixture: a surface crossing now carries its `linkid=` as the
 `GetSenderId()` the script reads (level 1's fade-up and fade-down are the same plane under two links,

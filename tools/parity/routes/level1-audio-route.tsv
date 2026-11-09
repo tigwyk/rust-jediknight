@@ -15,9 +15,9 @@
 #   cantina      144  the cantina placement (issue #8)
 #   street       180  the street placement (issue #8)
 #   door         180  the upper door placement (issue #8)
-#   approach       6  a neutral pose: the door leg is far away in x, so this warp cannot cross
+#   approach       6  a neutral pose: the level's own spawn, far from the door plane
 #   bar_in       150  walk out of the bar: crossed linkid 1 arms the +0.05/0.1 s fade up
-#   return         6  a neutral pose on the bar's own side
+#   return         6  a neutral pose: the cantina placement, on the bar's own side
 #   bar_out      150  walk back in: crossed linkid 0 arms the -0.1/0.1 s fade down
 #
 # kind	name		x		y		z		yaw_deg
@@ -29,11 +29,11 @@ warp	street		5.474939	-1.899975	0.657119	45.000000
 input	180	1	0
 warp	door		1.300000	9.000000	6.237000	0.000000
 input	180	1	0
-warp	approach	8.000000	-5.400000	-1.050000	0.000000
+warp	approach	-10.443433	-5.455094	-1.092886	-59.994
 input	6	0	0
 warp	bar_in		-8.000000	-5.005000	-1.050000	0.000000
 input	150	1	0
-warp	return		8.000000	-5.005000	-1.050000	0.000000
+warp	return		-2.200043	-2.900013	-1.142886	105.000092
 input	6	0	0
 warp	bar_out		-8.000000	-4.995000	-1.050000	180.000000
 input	150	1	0
