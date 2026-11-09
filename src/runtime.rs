@@ -356,6 +356,10 @@ pub const SECTOR_SEEN: u32 = 0x4000;
 pub const TF_CAPTURED: u32 = 0x400;
 /// `SITH_TF_INCAMFOV`: latched the first time the renderer draws the thing.
 pub const TF_INCAMFOV: u32 = 0x100000;
+/// The JKL `thingflags` difficulty bits: `0x1000` not in Easy, `0x2000` not in Medium, `0x4000`
+/// not in Hard. The loader does not create a placement the active difficulty excludes. The port
+/// runs Medium (`GetDifficulty` answers 1), so a row carrying this bit is not spawned.
+pub const TF_NOT_MEDIUM: u32 = 0x2000;
 /// A template's `type=` word as the engine's `SithThingType` number.
 ///
 /// From `types_enums.h`: camera 1, actor 2, weapon 3, debris 4, item 5, explosion 6,
@@ -1376,6 +1380,10 @@ pub struct Runtime {
     pub cur_weapon_thing: Option<usize>,
     /// `GetThingClassCog`: the cog a thing's class names.
     pub thing_class_cog: BTreeMap<usize, i32>,
+    /// `CaptureThing`'s cog: the engine stores the calling cog at `thing + 0x2a0`, and the thing's
+    /// `damaged`/`killed` messages go there (`FUN_00502e40`). One cog per thing; a later capture
+    /// replaces it.
+    pub thing_capture_cog: BTreeMap<usize, i32>,
     /// Each class script's `skill:` answers (`bin -> ReturnEx`), keyed by its cog instance.
     /// `SkillTarget` returns the victim's class script's answer, which is where a force power's
     /// damage actually lives (`actor_pm.cog`: 10 for grip, 5 for deadly sight).
@@ -2034,11 +2042,19 @@ impl Runtime {
                     .map(|v| (t.name.to_ascii_lowercase(), v))
             })
             .collect();
+        // A row the active difficulty excludes is not created: the retail loader leaves its pool
+        // slot empty (type 0), which is also why a later `CreateThing` reuses those low slots.
+        let excluded: Vec<bool> = level
+            .things
+            .iter()
+            .map(|t| t.flags & TF_NOT_MEDIUM != 0)
+            .collect();
         Self {
             things: level
                 .things
                 .iter()
-                .map(|t| ThingState {
+                .enumerate()
+                .map(|(index, t)| ThingState {
                     pos: t.pos,
                     insert: template_insert(&t.template.to_ascii_lowercase()),
                     yaw: t.yaw,
@@ -2046,15 +2062,19 @@ impl Runtime {
                     roll: t.roll,
                     head_pitch: 0.0,
                     sector: t.sector,
-                    flags: t.flags,
-                    health: template_health
-                        .get(&t.template.to_ascii_lowercase())
-                        .copied()
-                        .unwrap_or(1.0),
+                    flags: if excluded[index] { 0 } else { t.flags },
+                    health: if excluded[index] {
+                        0.0
+                    } else {
+                        template_health
+                            .get(&t.template.to_ascii_lowercase())
+                            .copied()
+                            .unwrap_or(1.0)
+                    },
                     frame: 0.0,
                     target: None,
                     frames: t.frames.clone(),
-                    destroyed: false,
+                    destroyed: excluded[index],
                     vel: t.vel,
                     // Placed things are not projectiles; a `CreateThing` gives them their
                     // damage, and only a fired weapon decays.
@@ -2094,7 +2114,14 @@ impl Runtime {
             types: level
                 .things
                 .iter()
-                .map(|t| thing_type(level.template_param(&t.template, "type")))
+                .enumerate()
+                .map(|(index, t)| {
+                    if excluded[index] {
+                        0
+                    } else {
+                        thing_type(level.template_param(&t.template, "type"))
+                    }
+                })
                 .collect(),
             template_types,
             template_health,
@@ -2136,6 +2163,7 @@ impl Runtime {
             major_mode: BTreeMap::new(),
             cur_weapon_thing: None,
             thing_class_cog: BTreeMap::new(),
+            thing_capture_cog: BTreeMap::new(),
             class_skill: BTreeMap::new(),
             awakened: std::collections::BTreeSet::new(),
             saber_enabled: true,
@@ -3085,7 +3113,11 @@ impl Runtime {
                 solids.resting_floor(
                     sector,
                     [t.pos[0], t.pos[1], t.pos[2] + lift],
-                    f32::INFINITY,
+                    // Only a floor at the body's feet is a landing. An unbounded reach found the
+                    // room 11 units below a catwalk edge and snapped the roaming powerdroid there
+                    // (z 7.85 -> -3.74 in one sample); a body that walks off is left to fall,
+                    // which this runtime does not model for a walked actor.
+                    1.0,
                     body_radius[index],
                     false,
                 )
@@ -6207,6 +6239,15 @@ impl Runtime {
                 false,
                 true,
             );
+            // The walker's floor rule snaps to whatever floor is under the probe, so an actor that
+            // steps off a catwalk was teleported to the room below in one sample (level 1's roaming
+            // powerdroid: z 7.85 -> -3.74 in 100 ms). A drop deeper than the 0.6-unit probe is not a
+            // step: refuse the move instead. The engine falls such a body under gravity, which the
+            // runtime does not model for a walked actor.
+            if next[2] < pos[2] - 0.6 {
+                next = pos;
+                next_sector = sector;
+            }
             if let Some(thing) = self.things.get_mut(actor) {
                 if next_sector != sector {
                     thing.sector = i32::try_from(next_sector).unwrap_or(thing.sector);
@@ -7160,11 +7201,18 @@ impl Runtime {
     }
     /// Which instances are linked to `thing`, so a damage or death can message them.
     pub fn thing_instances(&self, thing: usize) -> Vec<usize> {
-        self.thing_links
+        let mut out: Vec<usize> = self
+            .thing_links
             .iter()
             .filter(|(_, _, target)| *target == thing)
             .map(|(instance, _, _)| *instance)
-            .collect()
+            .collect();
+        if let Some(instance) = self.thing_capture_cog.get(&thing).map(|i| *i as usize)
+            && !out.contains(&instance)
+        {
+            out.push(instance);
+        }
+        out
     }
 
     /// `sithCog_ThingSendMessageEx` addressed at a thing's own scripts (`0x4dfaf0`). The engine
@@ -9867,8 +9915,18 @@ impl Runtime {
                 Value::Nil
             }
             "capturething" => {
+                // `CaptureThing(thing)` — `FUN_00502e40`: the engine stores the calling cog at
+                // `thing + 0x2a0` and sets `SITH_TF_CAPTURED`. It does **not** remove the thing:
+                // `00_REPLACEENEMY.cog` captures the enemy it just created, and destroying it there
+                // kept the three medium-difficulty replacements out of the level.
                 if let Some(t) = self.thing_mut(idx(0)) {
-                    t.destroyed = true;
+                    t.flags |= TF_CAPTURED;
+                }
+                if let Ok(thing) = usize::try_from(idx(0))
+                    && self.caller_cog >= 0
+                    && self.things.get(thing).is_some()
+                {
+                    self.thing_capture_cog.insert(thing, self.caller_cog);
                 }
                 Value::Nil
             }
@@ -10617,6 +10675,63 @@ mod tests {
         assert_eq!(rt.things[nr].pos, [1.0, 2.0, 3.0]);
         assert_eq!(rt.things[nr].sector, 7);
         assert_eq!(rt.things[nr].yaw, 0.0, "CreateThingNR carried an orientation over");
+    }
+
+    /// Two halves of the door gate's actor-set mismatch. A placement the active difficulty excludes
+    /// is not created — retail leaves the pool slot type 0 and a later `CreateThing` reuses it — and
+    /// `CaptureThing` captures a spawned thing instead of destroying it (`00_REPLACEENEMY.cog`
+    /// creates its enemy at a ghost marker, then captures it; the port removed it again).
+    #[test]
+    fn a_medium_excluded_placement_is_empty_and_capture_keeps_the_spawned_actor() {
+        let mut level = Level::default();
+        level.templates.push(crate::jkl::Template {
+            name: "_actor".into(),
+            base: None,
+            params: vec![("type".into(), "actor".into()), ("health".into(), "50".into())],
+            model3d: None,
+            sprite: None,
+        });
+        level.templates.push(crate::jkl::Template {
+            name: "enemy".into(),
+            base: Some("_actor".into()),
+            params: Vec::new(),
+            model3d: None,
+            sprite: None,
+        });
+        let placed = |pos: [f32; 3], flags: u32| crate::jkl::Thing {
+            template: "enemy".into(),
+            pos,
+            pitch: 0.0,
+            yaw: 0.0,
+            roll: 0.0,
+            sector: 0,
+            flags,
+            frames: Vec::new(),
+            vel: [0.0; 3],
+            aiclass: None,
+        };
+        level.things.push(placed([0.0; 3], 0));
+        level.things.push(placed([2.0, 0.0, 0.0], TF_NOT_MEDIUM));
+        let mut rt = Runtime::new(&level);
+        assert_eq!(rt.types, vec![2, 0], "the medium-excluded placement was still an actor");
+        assert!(rt.things[1].destroyed, "the medium-excluded placement was not left empty");
+        let spawned = rt
+            .call("CreateThing", &[Value::Str("enemy".into()), Value::Num(0.0)])
+            .num() as usize;
+        assert_eq!(rt.types[spawned], 2);
+        rt.caller_cog = 7;
+        rt.call("CaptureThing", &[Value::Num(spawned as f64)]);
+        assert!(!rt.things[spawned].destroyed, "CaptureThing removed the thing it captured");
+        assert_ne!(
+            rt.things[spawned].flags & TF_CAPTURED,
+            0,
+            "CaptureThing did not set SITH_TF_CAPTURED"
+        );
+        assert_eq!(
+            rt.thing_instances(spawned),
+            vec![7],
+            "the capture cog is not on the thing's message list"
+        );
     }
 
     /// `SetThingPulse(thing, seconds)` starts the thing's own timer: every interval its script slots

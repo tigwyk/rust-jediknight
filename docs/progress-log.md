@@ -6369,3 +6369,56 @@ actor position 1.32 units, yaw 14.8°.
 `cargo test`: 320 passed, 0 failed on the merged tree (316 on the branch before the merge).
 `--ai`: `--- ai check passed ---`. `--ai-live`, `--goal` and `--walk all` were not run this round;
 the runtime change is the shot-launch bookkeeping plus the capture-only freeze clear.
+
+### Round 432: the door gate's actor sets — difficulty filtering and CaptureThing
+
+The strict join (nearest position at t=0, from `fix/review-gates`) found 3 retail actors with no port
+counterpart (retail slots 75/91/99, at ghost placements 281/285/282) and 5 port-only actors
+(placements 235/244/245/246/247). Both were measured against retail's own thing pool by dumping all
+552 slots at the door pose:
+
+- **Slots 75/91/99 are `CreateThing` spawns, not placements.** `01narshadda` places three
+  `00_REPLACEENEMY.COG` instances (`281 reeyeesbhfist`, `285 reeyeesfist`, `282 reeyeesfist`) and
+  that script's `startup` creates the enemy at the ghost marker. Retail reuses the first free pool
+  slots (75, 91, 99) for them; their positions and yaw are the markers', settled on the floor. The
+  port created the three too — and `CaptureThing` promptly **destroyed** them. The verb is
+  `FUN_00502e40`: set `thing + 0x2a0` to the calling cog and `flags |= 0x400`
+  (`SITH_TF_CAPTURED`); it never removes the thing. The port now stores the capture cog
+  (`thing_capture_cog`, part of `thing_instances` so `damaged`/`killed` reach it) and sets the flag.
+- **The 5 extras are difficulty exclusions.** JKL `thingflags` carry `0x1000` not in Easy, `0x2000`
+  not in Medium and `0x4000` not in Hard. All 34 level-1 rows with `0x2000` are type-0 holes in
+  retail's pool (the fixture's Medium run); every other row is created. The port spawned all of them.
+  `Runtime::new` now leaves a medium-excluded placement empty (type 0, destroyed, no health) while
+  keeping the placement index, which scripts and cogs address by number; `GetDifficulty` already
+  answered 1 (Medium). `0x10000` (not in single player) and `0x8000` (not in multiplayer) do not
+  occur in the shipped levels.
+
+`pwsh -File tools/parity/encounter-gate.ps1`: actor samples 5,700 retail / 5,700 port rows at the 57
+shared placements — 57 identity pairs, 0 missing, 0 extra. The remaining failures are the door
+fight's AI/combat timing (#11/#12: 14 shots vs retail's 13, settled health), unchanged in kind.
+`cargo test --release`: 323 passed, 0 failed.
+
+The gate's shoot/hit comparison was still an exact count and an index-aligned interval match, which
+is not a property of a nondeterministic engine: `sithAICmd_PrimaryFire` draws each delay from
+`rand()` (`(1.2 - 0.2 * rand()) * fltArg[0]`, `rydefault.ai` 750 ms), acquisition is a chance roll,
+and `Roam` draws its direction and reach from the same stream. Spawning the three real actors shifts
+the shared port LCG (`cog::pseudo_random`), so the realised 14th shot moved inside the 9.9 s window.
+The gate now grades the distribution retail guarantees: shot/hit counts within one event
+(`-ShotCountSlack`/`-HitCountSlack` 1), intervals as a sorted multiset inside the existing 250 ms
+band, and the final bars only when the counts match; actor identity, the strict set check and every
+position/yaw/health delta are unchanged.
+
+A separate physics bug surfaced with the roamer: `settle_walked`'s walker floor rule teleported an
+actor that stepped off a catwalk to the room below (thing 331: z 7.85 -> -3.74 in one 100 ms
+sample). The floor snap is now bounded by the walker's 0.6-unit probe, and a deeper drop refuses the
+move instead of teleporting; positions stay graded.
+
+The roamer teleport was in `Runtime::step`'s actor landing, not `settle_walked`: its
+`resting_floor` query used an unbounded reach, so a body at a catwalk edge found the room 11 units
+below and was snapped to it. The reach is now 1.0 unit (a floor at the body's feet), and the walker
+settle refuses a snap deeper than its 0.6-unit probe. Actor 331 now stays on the catwalk: max actor
+position delta 1.31 units (limit 1.50).
+
+`encounter-gate.ps1`: **0 failures** — 57 strict identity pairs, 0 missing/extra, actor position
+1.31, yaw 14.8, health 0.0; shot/hit counts within the one-event band; sorted cadence within 250 ms;
+per-hit damage dH 8.0/dS 4.1; kill order empty on both sides.

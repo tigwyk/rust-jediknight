@@ -439,10 +439,15 @@ a full 10,000 ms adds a sample (and, at the gunner's cadence, a shot) retail nev
   order, the settled endpoint, and the actor position/facing/health deltas at every sample. It exits
   non-zero when any of them leaves its tolerance, and its thresholds are parameters with their reasons
   in the script header. Fire cadence is graded on consecutive-shot **intervals** (retail's impact and
-  the port's launch of the same shot differ by a constant flight, which intervals cancel), and actor
-  rows are joined by **authored placement** — nearest position at the first sample — because retail's
-  `thing` is a slot in the engine's thing pool while the port's is the level's placement order. An
-  actor either side reports and the other does not fails; there is no missing-actor fraction.
+  the port's launch of the same shot differ by a constant flight, which intervals cancel). Retail's
+  timing is nondeterministic: `sithAICmd_PrimaryFire` jitters every delay by `(1.2 - 0.2 * rand())`
+  and acquisition is a chance roll, so the gate allows one event in the shot/hit counts and compares
+  the intervals as a **sorted multiset** inside the cadence band rather than in one run's order; the
+  final bars are compared only when the counts match, and every shared hit's damage is always graded.
+  Actor rows are joined by **authored placement** — nearest position at the first sample — because
+  retail's `thing` is a slot in the engine's thing pool while the port's is the level's placement
+  order. An actor either side reports and the other does not fails; there is no missing-actor
+  fraction.
 
 The port samples before the frame's AI tick for its `player`/`actor` rows, matching retail's 100 ms
 points; the `shot`/`hit` rows are written after the tick, evicted from the runtime's event queue, so
