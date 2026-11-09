@@ -646,6 +646,8 @@ fn main() {
     // samples every 36 ticks (600 ms), the cadence a retail `coords` poll keeps.
     let mut replay: Option<std::path::PathBuf> = None;
     let mut route_trace: Option<std::path::PathBuf> = None;
+    let mut audio_trace: Option<std::path::PathBuf> = None;
+    let mut audio_compare: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
 
     let mut sim = false;
     let mut dump: Option<String> = None;
@@ -954,6 +956,26 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+            }
+            // `--audio-trace <path>`: the replay's audio state, one row on the route trace's
+            // 600 ms cadence (music selection and volume, sector ambience, sounds played).
+            "--audio-trace" => {
+                audio_trace = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--audio-compare <expected> <actual>`: the audio gate. Reports missing, extra,
+            // mistimed and differently attenuated sounds, plus music/ambience differences.
+            "--audio-compare" => {
+                let expected = args.get(i + 1).cloned();
+                let actual = args.get(i + 2).cloned();
+                i += 2;
+                let (Some(expected), Some(actual)) = (expected, actual) else {
+                    println!("usage: --audio-compare <expected.tsv> <actual.tsv>");
+                    std::process::exit(2);
+                };
+                audio_compare = Some((
+                    std::path::PathBuf::from(expected),
+                    std::path::PathBuf::from(actual),
+                ));
             }
             "--sim" => sim = true,
             // `--pose <model> <key> <frame>`: one model, posed from one keyframe.
@@ -1440,6 +1462,23 @@ fn main() {
     if route_trace.is_some() && route_plan.is_none() {
         eprintln!("--route-trace needs --replay <path>");
         std::process::exit(2);
+    }
+    if audio_trace.is_some() && route_plan.is_none() {
+        eprintln!("--audio-trace needs --replay <path>");
+        std::process::exit(2);
+    }
+    if let Some((expected, actual)) = audio_compare.as_ref() {
+        let epsilon = std::env::var("BK_AUDIO_EPSILON")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.02);
+        match audio_trace_compare(expected, actual, epsilon) {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
     }
     // A replay is a capture that must be reproducible, not just fixed-step: see the executor note
     // at the end of the app setup.
@@ -12659,6 +12698,8 @@ fn main() {
         ))
         .insert_resource(RouteReplay(route_plan))
         .insert_resource(RouteTraceOut(route_trace))
+        .insert_resource(AudioTraceOut(audio_trace))
+        .insert_resource(AudioLog::default())
         .insert_resource(RouteNow::default())
         .insert_resource(RouteCursor::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
@@ -12709,7 +12750,7 @@ fn main() {
             Update,
             (
                 (
-                    run_pulses_and_timers,
+                    run_pulses_and_timers.before(resume_sleeping_labels),
                     resume_sleeping_labels,
                     deliver_sector_triggers,
                     deliver_thing_messages,
@@ -12747,6 +12788,11 @@ fn main() {
                     billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
+                    audio_trace_sample
+                        .after(route_replay)
+                        .after(walk_player)
+                        .after(play_requested_sounds)
+                        .after(music_follows_scripts),
                     queue_next_level,
                 )
                     .run_if(no_screen_open),
@@ -16346,6 +16392,397 @@ fn route_cog_values(world: &World, sim: &Sim) -> [Option<f64>; 8] {
     out
 }
 
+/// The audio trace's columns, sampled on the route trace's 600 ms cadence.
+///
+/// `music`/`music_end`/`music_loop` are `PlaySong`'s track range; `music_vol` is `SetMusicVol`'s
+/// current value (the scripts fade it from a pulse). `ambient`/`ambient_vol` are the sector's own
+/// `SOUND` loop (or a script's `SectorSound` override). `sounds` lists every one-shot the window
+/// played, space separated as `wav@gain`, where `gain` is the mixer's attenuated volume — so a
+/// missing sound, an extra one, a late one and a quiet one are all visible in the same column.
+const AUDIO_TRACE_FIELDS: [&str; 9] = [
+    "tick", "t_s", "music", "music_end", "music_loop", "music_vol", "ambient", "ambient_vol",
+    "sounds",
+];
+
+/// One parsed audio-trace row.
+#[derive(Debug, Clone, PartialEq)]
+struct AudioTraceRow {
+    tick: u32,
+    /// `PlaySong(start, end, loopto)` as the runtime holds it.
+    music: Option<(i32, i32, i32)>,
+    /// `music_vol`'s value.
+    music_volume: Option<f64>,
+    /// Whether the ambience was recorded at this sample. The retail-derived reference leaves it out
+    /// where the body's sector differs from the port's (issue #10's movement parity owns that), so the
+    /// comparator skips those rows' ambience instead of reading `-` as "no ambient loop".
+    ambient_recorded: bool,
+    ambient: Option<(String, f64)>,
+    /// `(wav, gain)` for every one-shot the window played. `None` is a `-` cell: the fixture did not
+    /// record that window (a retail-derived reference has no audio capture for one-shots yet), so the
+    /// comparator skips it rather than treating it as silence.
+    sounds: Option<Vec<(String, f64)>>,
+}
+
+fn parse_audio_trace(text: &str) -> Result<Vec<AudioTraceRow>, String> {
+    let mut rows = Vec::new();
+    let mut columns: Option<Vec<usize>> = None;
+    for (line_no, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        // `trim()` would eat the trailing tab of a row whose `sounds` cell is empty (a recorded
+        // window with nothing played), turning "silence" into "not recorded".
+        let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
+        if columns.is_none() {
+            let mut order = Vec::with_capacity(AUDIO_TRACE_FIELDS.len());
+            for field in AUDIO_TRACE_FIELDS {
+                match cells.iter().position(|c| *c == field) {
+                    Some(index) => order.push(index),
+                    None => {
+                        return Err(format!(
+                            "line {}: audio trace header has no `{field}` column",
+                            line_no + 1
+                        ))
+                    }
+                }
+            }
+            columns = Some(order);
+            continue;
+        }
+        let order = columns.as_ref().expect("header just parsed");
+        let cell = |slot: usize| -> &str {
+            order
+                .get(slot)
+                .and_then(|index| cells.get(*index))
+                .copied()
+                .unwrap_or("-")
+        };
+        let number = |slot: usize, field: &str| -> Result<Option<f64>, String> {
+            let raw = cell(slot);
+            if raw == "-" || raw.is_empty() {
+                return Ok(None);
+            }
+            raw.parse::<f64>()
+                .map(Some)
+                .map_err(|_| format!("line {}: `{raw}` is not a number ({field})", line_no + 1))
+        };
+        let tick = number(0, "tick")?
+            .ok_or_else(|| format!("line {}: the tick is `-`", line_no + 1))?
+            as u32;
+        let music = match (number(2, "music")?, number(3, "music_end")?, number(4, "music_loop")?) {
+            (Some(start), Some(end), Some(loops)) => {
+                Some((start as i32, end as i32, loops as i32))
+            }
+            _ => None,
+        };
+        let ambient_recorded = cell(6) != "-";
+        let ambient = if !ambient_recorded || cell(6).is_empty() {
+            None
+        } else {
+            Some((cell(6).to_string(), number(7, "ambient_vol")?.unwrap_or(0.0)))
+        };
+        let sounds = if cell(8) == "-" {
+            None
+        } else {
+            let mut sounds = Vec::new();
+            for entry in cell(8).split([' ', ';']).filter(|e| !e.is_empty()) {
+                let (name, gain) = entry
+                    .split_once('@')
+                    .ok_or_else(|| format!("line {}: `{entry}` is not `wav@gain`", line_no + 1))?;
+                let gain = gain.parse::<f64>().map_err(|_| {
+                    format!("line {}: `{gain}` is not a gain ({entry})", line_no + 1)
+                })?;
+                sounds.push((name.to_string(), gain));
+            }
+            Some(sounds)
+        };
+        rows.push(AudioTraceRow {
+            tick,
+            music,
+            music_volume: number(5, "music_vol")?,
+            ambient_recorded,
+            ambient,
+            sounds,
+        });
+    }
+    if rows.is_empty() {
+        return Err("the audio trace has a header but no rows".to_string());
+    }
+    Ok(rows)
+}
+
+/// Compare two audio traces. Every one-shot sound is classified as:
+///
+/// * **missing** — the reference played it and the trace did not, at any tick;
+/// * **extra** — the trace played it and the reference did not;
+/// * **mistimed** — the same wav at the same gain-ish exists, but in another 600 ms window;
+/// * **attenuated** — the same wav in the same window at a different gain (the mixer's distance
+///   and facing volume, so this is "audible but not as loud as retail");
+///
+/// plus a per-sample music selection/volume and ambient difference. `epsilon` is the absolute
+/// tolerance for the gain and volume numbers; the tick is exact (a 600 ms row is the comparison's
+/// unit, and a mistimed sound is reported rather than quietly accepted).
+fn compare_audio_rows(
+    expected: &[AudioTraceRow],
+    actual: &[AudioTraceRow],
+    epsilon: f64,
+) -> Result<(usize, usize), String> {
+    if expected.len() != actual.len() {
+        return Err(format!(
+            "audio-compare: FAIL {} row(s) expected, {} in the trace",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    let mut failures: Vec<String> = Vec::new();
+    let mut states = 0usize;
+    for (want, got) in expected.iter().zip(actual) {
+        if want.tick != got.tick {
+            failures.push(format!("tick {}: the trace has tick {}", want.tick, got.tick));
+            continue;
+        }
+        states += 1;
+        let tick = want.tick;
+        if want.music != got.music {
+            failures.push(format!(
+                "music: tick {tick} expected {:?}, trace {:?}",
+                want.music, got.music
+            ));
+        }
+        if let (Some(want), Some(got)) = (want.music_volume, got.music_volume) {
+            if (want - got).abs() > epsilon {
+                failures.push(format!(
+                    "music_vol: tick {tick} expected {want:.3}, trace {got:.3} (delta {:.3})",
+                    (want - got).abs()
+                ));
+            }
+        }
+        if want.ambient_recorded {
+            match (&want.ambient, &got.ambient) {
+                (None, None) => {}
+                (Some((want_name, want_vol)), Some((got_name, got_vol))) => {
+                    if want_name != got_name {
+                        failures.push(format!(
+                            "ambient: tick {tick} expected `{want_name}`, trace `{got_name}`"
+                        ));
+                    } else if (want_vol - got_vol).abs() > epsilon {
+                        failures.push(format!(
+                            "ambient_vol: tick {tick} `{want_name}` expected {want_vol:.3}, trace {got_vol:.3}"
+                        ));
+                    }
+                }
+                (want_side, got_side) => failures.push(format!(
+                    "ambient: tick {tick} expected {want_side:?}, trace {got_side:?}"
+                )),
+            }
+        }
+    }
+    if !failures.is_empty() {
+        let shown = failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n  ");
+        return Err(format!(
+            "audio-compare: FAIL {states} sampled row(s), {} state difference(s):\n  {shown}",
+            failures.len()
+        ));
+    }
+
+    // Pair the one-shots: same wav in the same window first (a gain difference there is an
+    // attenuation issue), then the leftovers by name across windows (mistimed) and finally the
+    // unmatched remainder (missing/extra). A window either side did not record (`-`) is skipped.
+    let mut want: Vec<(u32, String, f64)> = Vec::new();
+    let mut got: Vec<(u32, String, f64)> = Vec::new();
+    for (want_row, got_row) in expected.iter().zip(actual) {
+        let Some(sounds) = want_row.sounds.as_ref() else { continue };
+        for (name, gain) in sounds {
+            want.push((want_row.tick, name.clone(), *gain));
+        }
+        for (name, gain) in got_row.sounds.as_deref().unwrap_or(&[]) {
+            got.push((got_row.tick, name.clone(), *gain));
+        }
+    }
+    let mut want_used = vec![false; want.len()];
+    let mut got_used = vec![false; got.len()];
+    let mut sounds = 0usize;
+    let mut differences: Vec<String> = Vec::new();
+    // Same window and name.
+    for (wi, (wtick, wname, wgain)) in want.iter().enumerate() {
+        let Some(gi) = got.iter().enumerate().position(|(gi, (gtick, gname, _))| {
+            !got_used[gi] && gtick == wtick && gname == wname
+        }) else {
+            continue;
+        };
+        got_used[gi] = true;
+        want_used[wi] = true;
+        sounds += 1;
+        let ggain = got[gi].2;
+        if (wgain - ggain).abs() > epsilon {
+            differences.push(format!(
+                "attenuated: {wname} at tick {wtick} gain {wgain:.3} expected, {ggain:.3} trace (delta {:.3})",
+                (wgain - ggain).abs()
+            ));
+        }
+    }
+    // Same wav, another window: mistimed.
+    for (wi, (wtick, wname, _)) in want.iter().enumerate() {
+        if want_used[wi] {
+            continue;
+        }
+        let Some(gi) = got
+            .iter()
+            .enumerate()
+            .position(|(gi, (_, gname, _))| !got_used[gi] && gname == wname)
+        else {
+            continue;
+        };
+        got_used[gi] = true;
+        want_used[wi] = true;
+        sounds += 1;
+        let gtick = got[gi].0;
+        differences.push(format!(
+            "mistimed: {wname} expected tick {wtick}, trace tick {gtick} ({} tick(s) off)",
+            gtick as i64 - *wtick as i64
+        ));
+    }
+    for (wi, (wtick, wname, wgain)) in want.iter().enumerate() {
+        if !want_used[wi] {
+            sounds += 1;
+            differences.push(format!("missing: {wname} at tick {wtick} (gain {wgain:.3})"));
+        }
+    }
+    for (gi, (gtick, gname, ggain)) in got.iter().enumerate() {
+        if !got_used[gi] {
+            sounds += 1;
+            differences.push(format!("extra: {gname} at tick {gtick} (gain {ggain:.3})"));
+        }
+    }
+    if differences.is_empty() {
+        Ok((states, sounds))
+    } else {
+        let shown = differences.iter().take(16).cloned().collect::<Vec<_>>().join("\n  ");
+        Err(format!(
+            "audio-compare: FAIL {states} sampled row(s), {sounds} sound event(s), {} difference(s):\n  {shown}",
+            differences.len()
+        ))
+    }
+}
+
+/// `--audio-compare`: parse both traces and apply [`compare_audio_rows`] at `epsilon`.
+fn audio_trace_compare(
+    expected: &std::path::Path,
+    actual: &std::path::Path,
+    epsilon: f64,
+) -> Result<(), String> {
+    let read = |path: &std::path::Path| -> Result<Vec<AudioTraceRow>, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        parse_audio_trace(&text).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let want = read(expected)?;
+    let got = read(actual)?;
+    let (states, sounds) = compare_audio_rows(&want, &got, epsilon)?;
+    println!(
+        "audio-compare: PASS {states} row(s), {sounds} sound event(s), music and ambience within {epsilon}"
+    );
+    Ok(())
+}
+
+/// One audio-trace line. See [`AUDIO_TRACE_FIELDS`] for the columns and
+/// [`audio_trace_sample`] for what fills them.
+fn write_audio_trace_row(
+    path: &std::path::Path,
+    tick: u32,
+    music: Option<(i32, i32, i32)>,
+    music_volume: f32,
+    ambient: Option<&(String, f32)>,
+    sounds: &[(u32, String, f32)],
+) {
+    use std::io::Write;
+    let first = tick == 0;
+    let open = || {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true);
+        if first {
+            options.truncate(true);
+        } else {
+            options.append(true);
+        }
+        options.open(path)
+    };
+    let Ok(mut file) = open() else { return };
+    if first {
+        let _ = writeln!(file, "{}", AUDIO_TRACE_FIELDS.join("\t"));
+    }
+    let (music, end, loops) = music
+        .map(|(start, end, loops)| (start.to_string(), end.to_string(), loops.to_string()))
+        .unwrap_or_else(|| ("-".to_string(), "-".to_string(), "-".to_string()));
+    let (ambient_name, ambient_volume) = ambient
+        .map(|(name, volume)| (name.clone(), format!("{volume:.3}")))
+        .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
+    let sounds = sounds
+        .iter()
+        .map(|(_, name, gain)| format!("{name}@{gain:.3}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = writeln!(
+        file,
+        "{tick}\t{:.4}\t{music}\t{end}\t{loops}\t{music_volume:.3}\t{ambient_name}\t{ambient_volume}\t{sounds}",
+        f64::from(tick) / 60.0,
+    );
+}
+
+/// `--audio-trace`: write the audio state every 600 ms of the replay.
+///
+/// The music selection and volume and the sector ambience are read straight from the runtime, so
+/// they are the values the mixer would use; the one-shots come from [`AudioLog`], which
+/// `play_requested_sounds` fills with the gain each sound actually played at. Ordered after both
+/// (`route_replay` moves the cursor, `walk_player` places the body) so a sample describes the
+/// frame's own tick.
+fn audio_trace_sample(
+    replay: Option<Res<RouteReplay>>,
+    out: Option<Res<AudioTraceOut>>,
+    cursor: Option<Res<RouteCursor>>,
+    player: Option<Res<Player>>,
+    world: Option<Res<World>>,
+    sim: Option<Res<Sim>>,
+    mut log: Option<ResMut<AudioLog>>,
+) {
+    let (Some(replay), Some(cursor), Some(out), Some(player), Some(world), Some(sim)) =
+        (replay, cursor, out, player, world, sim)
+    else {
+        return;
+    };
+    if replay.0.is_none() {
+        return;
+    }
+    let Some(path) = out.0.as_deref() else { return };
+    // `route_replay` has already stepped the cursor this frame, so the frame's tick is one back.
+    let tick = cursor.tick.saturating_sub(1);
+    if tick % ROUTE_SAMPLE_TICKS != 0 {
+        return;
+    }
+    let (music, music_volume, override_sound) = {
+        let rt = sim.world.borrow();
+        (
+            rt.music,
+            rt.music_volume,
+            rt.sector_ambient.get(&(player.body.sector as i32)).cloned(),
+        )
+    };
+    // The same rule `ambient_follows_view` uses: a script's `SectorSound` override wins over the
+    // sector's own `SOUND` row.
+    let ambient = override_sound.or_else(|| {
+        world
+            .level
+            .sectors
+            .get(player.body.sector)
+            .and_then(|s| s.sound.clone())
+    });
+    let sounds: Vec<(u32, String, f32)> = log
+        .as_mut()
+        .map(|log| std::mem::take(&mut log.played))
+        .unwrap_or_default();
+    write_audio_trace_row(path, tick, music, music_volume, ambient.as_ref(), &sounds);
+}
+
 #[cfg(test)]
 mod route_tests {
     use super::*;
@@ -16413,6 +16850,96 @@ input 72 1 0
             compare_route_rows(&expected, &perturbed, 0.30).is_ok(),
             "the tolerance is an absolute bound, so 0.30 accepts it"
         );
+    }
+
+    #[test]
+    fn an_audio_trace_parses_its_state_and_sound_events() {
+        let text = "\
+# an audio trace
+tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
+0\t0.0000\t12\t13\t12\t0.000\t01cantinaband02.wav\t0.300\t
+36\t0.6000\t12\t13\t12\t0.050\t01cantinaband02.wav\t0.300\tpistol-1.wav@0.250 ricochet01.wav@0.050
+72\t1.2000\t-\t-\t-\t1.000\t-\t-\t
+";
+        let rows = parse_audio_trace(text).expect("the trace parses");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].tick, 0);
+        assert_eq!(rows[0].music, Some((12, 13, 12)));
+        assert_eq!(rows[0].music_volume, Some(0.0));
+        assert_eq!(rows[0].ambient, Some(("01cantinaband02.wav".to_string(), 0.3)));
+        assert_eq!(rows[0].sounds, Some(Vec::new()));
+        assert_eq!(
+            rows[1].sounds,
+            Some(vec![("pistol-1.wav".to_string(), 0.25), ("ricochet01.wav".to_string(), 0.05)])
+        );
+        assert_eq!(rows[2].music, None);
+        assert_eq!(rows[2].ambient, None);
+        // A `-` cell is "not recorded", not "silent".
+        let unrecorded = "\
+tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
+0\t0.0000\t12\t13\t12\t-\t-\t-\t-
+";
+        let rows = parse_audio_trace(unrecorded).expect("an unrecorded trace parses");
+        assert_eq!(rows[0].music_volume, None);
+        assert!(!rows[0].ambient_recorded);
+        assert_eq!(rows[0].sounds, None);
+    }
+
+    /// The comparator's four sound categories, which are the whole point of an audio gate.
+    #[test]
+    fn the_audio_comparator_names_missing_extra_mistimed_and_attenuated_sounds() {
+        let row = |tick: u32, sounds: Vec<(&str, f64)>| AudioTraceRow {
+            tick,
+            music: Some((12, 13, 12)),
+            music_volume: Some(0.5),
+            ambient_recorded: true,
+            ambient: Some(("01cantinaband02.wav".to_string(), 0.3)),
+            sounds: Some(sounds.into_iter().map(|(n, g)| (n.to_string(), g)).collect()),
+        };
+        let want = vec![
+            row(0, vec![("a.wav", 0.75), ("b.wav", 0.5), ("c.wav", 0.25), ("d.wav", 0.5)]),
+            row(36, vec![("e.wav", 0.5)]),
+        ];
+        let got = vec![
+            // `a.wav` quiet, `b.wav` missing, `g.wav` extra.
+            row(0, vec![("a.wav", 0.4), ("d.wav", 0.5), ("g.wav", 0.5)]),
+            // `c.wav` arrived a window late, `e.wav` never played and `h.wav` is extra.
+            row(36, vec![("c.wav", 0.25), ("h.wav", 0.5)]),
+        ];
+        let error = compare_audio_rows(&want, &got, 0.02).expect_err("a changed mix must fail");
+        for expected in [
+            "attenuated: a.wav at tick 0",
+            "missing: b.wav at tick 0",
+            "extra: g.wav at tick 0",
+            "mistimed: c.wav expected tick 0",
+            "missing: e.wav at tick 36",
+            "extra: h.wav at tick 36",
+        ] {
+            assert!(error.contains(expected), "the gate did not report `{expected}`:\n{error}");
+        }
+        // The same mix compares clean.
+        assert!(compare_audio_rows(&want, &want, 0.02).is_ok());
+        // A different music volume is its own difference, not a sound one.
+        let mut quieter = want.clone();
+        quieter[0].music_volume = Some(0.2);
+        let error = compare_audio_rows(&want, &quieter, 0.02).expect_err("a quieter song must fail");
+        assert!(error.contains("music_vol: tick 0"), "{error}");
+    }
+
+    /// The committed fixtures live in the repo, so the gate's own contract is testable without the
+    /// game data or a window.
+    #[test]
+    fn the_committed_audio_fixtures_compare_equal_to_themselves() {
+        for name in ["level1-audio-port.tsv", "level1-audio-retail.tsv"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tools/parity/audiotrace")
+                .join(name);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let rows = parse_audio_trace(&text).expect("fixture parses");
+            compare_audio_rows(&rows, &rows, 0.02)
+                .unwrap_or_else(|e| panic!("{name} does not compare to itself: {e}"));
+        }
     }
 }
 
@@ -20845,6 +21372,7 @@ fn deliver_crossed(
     world: Option<Res<World>>,
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
+    solids: Option<Res<Collision>>,
     mut last: Local<Option<Vec3>>,
     mut count: Option<ResMut<TriggerCount>>,
 ) {
@@ -20857,19 +21385,32 @@ fn deliver_crossed(
         return;
     }
     let (a, b) = ([from.x, from.y, from.z], [now.x, now.y, now.z]);
-    let surfaces: Vec<usize> = sim.world.borrow().surface_links.iter().map(|(_, _, s)| *s).collect();
+    // Retail tests the surfaces of the sector the body is **in**, not every linked surface on the
+    // level: a doorway is two coincident polygons, one per room, and both carry a link. Fire both and
+    // `01_SoundTrack.cog` gets `onAdjoin` (+0.05) and `offAdjoin` (-0.1) in the same frame, so the
+    // music never leaves zero. The body's sector at the segment's start is the room it is leaving.
+    let from_sector = solids.as_deref().and_then(|solids| solids.0.sector_for_body(a));
+    let (surfaces, owners): (Vec<usize>, Vec<i32>) = {
+        let rt = sim.world.borrow();
+        (
+            rt.surface_links.iter().map(|(_, _, s)| *s).collect(),
+            rt.surface_links
+                .iter()
+                .map(|(_, _, s)| rt.surface_sector.get(*s).copied().unwrap_or(-1))
+                .collect(),
+        )
+    };
     let mut queued = 0usize;
-    for surface in surfaces {
+    for (surface, owner) in surfaces.into_iter().zip(owners) {
+        if owner >= 0 && from_sector.is_some_and(|sector| sector != owner as usize) {
+            continue;
+        }
         if !collide::crosses(&world.level, surface, a, b) {
             continue;
         }
-        let mut rt = sim.world.borrow_mut();
-        for (instance, _, linked) in &rt.surface_links.clone() {
-            if *linked == surface {
-                rt.pending_messages.push((*instance, "crossed", [0.0; 2], None));
-                queued += 1;
-            }
-        }
+        // The link id rides as the sender id: the soundtrack's fade-up and fade-down are the same
+        // surface polygon under two links, and only `GetSenderId()` tells them apart.
+        queued += sim.world.borrow_mut().crossed_surface(surface);
     }
     if let Some(count) = count.as_mut() {
         count.0 += queued;
@@ -21138,18 +21679,19 @@ fn share_collider(
 ///
 /// `sithCog_ProcessCog` wakes a waiting cog when its deadline passes; here the label is run again and
 /// `run_label` continues from the statement after the `sleep`.
-fn resume_sleeping_labels(capture: Option<Res<CaptureDt>>, 
-    time: Res<Time>,
+fn resume_sleeping_labels(
     world: Option<Res<World>>,
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<PulseCount>>,
 ) {
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
-    let dt = sim_dt(&time, capture.as_deref());
     let mut resumed = 0usize;
     for (script_name, vm) in &mut sim.instances {
-        vm.now += dt;
-          if std::env::var_os("BK_PULSE_TRACE").is_some() && vm.sleeping_label().is_some() {
+        // The cog clock advances **once** per frame, in `run_pulses_and_timers`; this system only
+        // asks whether a sleep has come due. Both used to add `dt`, so a coroutine's clock ran at
+        // twice real time — level 1's music fade (0.05 every 0.1 s) reached full volume in 1 s
+        // instead of 2 (#13).
+        if std::env::var_os("BK_PULSE_TRACE").is_some() && vm.sleeping_label().is_some() {
               println!("pulse: `{script_name}` sleeping (now {:.2}, until {:.2}, waiting {})", vm.now, vm.sleep_until, vm.sleeping());
           }
         if vm.sleeping() || vm.sleeping_label().is_none() {
@@ -24940,6 +25482,8 @@ fn play_requested_sounds(
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
     bank: Option<Res<SoundBank>>,
+    cursor: Option<Res<RouteCursor>>,
+    mut log: Option<ResMut<AudioLog>>,
 ) {
     let (Some(sim), Some(player), Some(bank)) = (sim, player, bank) else { return };
     let (requests, channel_volume, channel_pitch_of) = {
@@ -24959,8 +25503,8 @@ fn play_requested_sounds(
     let facing = (-yaw.sin(), yaw.cos());
     let mut played = 0;
     for request in requests {
-        let Some((clip, min, max, volume)) = bank.clips.get(&request.name.to_ascii_lowercase())
-        else {
+        let wav = request.name.to_ascii_lowercase();
+        let Some((clip, min, max, volume)) = bank.clips.get(&wav) else {
             continue;
         };
         let (distance, forward) = match request.pos {
@@ -24999,6 +25543,12 @@ fn play_requested_sounds(
             },
         ));
         played += 1;
+        if let Some(log) = log.as_mut() {
+            // The replay's tick, not wall time: a trace is a function of the script. `route_replay`
+            // has already advanced the cursor for this frame, so the frame's own tick is one back.
+            let tick = cursor.as_ref().map_or(0, |c| c.tick.saturating_sub(1));
+            log.played.push((tick, wav, gain));
+        }
     }
     if played > 0 {
         println!("sound: {played} request(s) played with attenuation");
@@ -26967,6 +27517,20 @@ struct RouteReplay(Option<RoutePlan>);
 /// `--route-trace <path>`: where the replay writes its sampled trace.
 #[derive(Resource, Default)]
 struct RouteTraceOut(Option<std::path::PathBuf>);
+
+/// `--audio-trace <path>`: where the replay writes its **audio** trace — the music selection and
+/// volume, the sector ambience, and the one-shot sounds the scripts and actors played, sampled on
+/// the route trace's 600 ms cadence.
+#[derive(Resource, Default)]
+struct AudioTraceOut(Option<std::path::PathBuf>);
+
+/// The one-shot sounds that actually played since the last audio-trace sample: `(replay tick, wav,
+/// gain)`. `gain` is the mixer's attenuated volume (`snd::volume`), so a sound 10 units away and one
+/// at the listener are different numbers, which is what "differently attenuated" means.
+#[derive(Resource, Default)]
+struct AudioLog {
+    played: Vec<(u32, String, f32)>,
+}
 
 /// The script's input for the tick `route_replay` is on, read by `walk_player`. `None` outside a
 /// replay and on the final tick.

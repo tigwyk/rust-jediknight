@@ -1,0 +1,39 @@
+# Level-1 audio route (issue #13): the shared scripted route from issue #8, plus the bar door.
+#
+# The first four legs are `level1-route.tsv`'s own rows, unchanged (spawn, cantina, street, door).
+# The last two legs walk the bar's doorway at (-8, -5), where `01_SoundTrack.cog` links `onAdjoin`
+# (surface 206, linkid 1) and `offAdjoin` (surface 213, linkid 0). Leaving the bar (sector 19) turns
+# the redbook music up; coming back turns it down.
+#
+# Each door leg starts one step from the plane (0.005 units), so its crossing is the leg's **first
+# walk tick** whatever the movement rule does — the fade's phase is then a property of the script,
+# not of movement parity (issue #10). The warps in between stay on one side of the plane, so they
+# cannot cross it themselves.
+#
+#   leg        ticks  what it does
+#   spawn        180  level 1's own start, the route's first leg (issue #8)
+#   cantina      144  the cantina placement (issue #8)
+#   street       180  the street placement (issue #8)
+#   door         180  the upper door placement (issue #8)
+#   approach       6  a neutral pose: the door leg is far away in x, so this warp cannot cross
+#   bar_in       150  walk out of the bar: crossed linkid 1 arms the +0.05/0.1 s fade up
+#   return         6  a neutral pose on the bar's own side
+#   bar_out      150  walk back in: crossed linkid 0 arms the -0.1/0.1 s fade down
+#
+# kind	name		x		y		z		yaw_deg
+warp	spawn		-10.443433	-5.455094	-1.092886	-59.994
+input	180	1	0
+warp	cantina		-2.200043	-2.900013	-1.142886	105.000092
+input	144	1	0
+warp	street		5.474939	-1.899975	0.657119	45.000000
+input	180	1	0
+warp	door		1.300000	9.000000	6.237000	0.000000
+input	180	1	0
+warp	approach	8.000000	-5.400000	-1.050000	0.000000
+input	6	0	0
+warp	bar_in		-8.000000	-5.005000	-1.050000	0.000000
+input	150	1	0
+warp	return		8.000000	-5.005000	-1.050000	0.000000
+input	6	0	0
+warp	bar_out		-8.000000	-4.995000	-1.050000	180.000000
+input	150	1	0

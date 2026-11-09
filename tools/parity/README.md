@@ -374,6 +374,54 @@ schedule on one executor thread. The AI's shared LCG is thread-local, so with th
 multi-threaded executor the same script could land a hit a frame apart between runs; one thread makes
 every call site see the same sequence. Play keeps the default executor.
 
+### Audio state gate (issue #13)
+
+`--audio-trace <path>` writes the replay's audio state on the same 600 ms (36-tick) cadence as the
+route trace:
+
+```text
+tick  t_s  music  music_end  music_loop  music_vol  ambient  ambient_vol  sounds
+```
+
+- `music`/`music_end`/`music_loop` are `PlaySong(start, end, loopto)`'s range (`-` when nothing is
+  playing); `music_vol` is `SetMusicVol`'s current value, which level 1's `01_SoundTrack.cog` drives
+  from a 0.1 s pulse (0.05 a step up, 0.1 down).
+- `ambient`/`ambient_vol` are the sector's own `SOUND` loop (a script's `SectorSound` wins), and the
+  cell is empty when the sector names none.
+- `sounds` lists every one-shot the window played as `wav@gain`; `gain` is the mixer's attenuated
+  volume (`snd::volume`), so distance and facing are in the number. `-` means **not recorded** (the
+  retail-derived fixture leaves this column out: no retail audio capture exists yet, and the level's
+  one-shots depend on AI timing, not on authored data).
+
+```powershell
+pwsh -NoProfile -File tools/parity/audio-gate.ps1            # determinism + port oracle + retail
+pwsh -NoProfile -File tools/parity/audio-gate.ps1 -Perturb   # ... and prove a 0.25 gain change fails
+```
+
+`--audio-compare <expected> <actual>` is the comparator; the gate's exit code is its verdict. It
+classifies every sound difference as **missing** (the reference played it, the trace did not),
+**extra**, **mistimed** (same wav in another 600 ms window) or **attenuated** (same window, different
+gain), and reports per-sample music selection/volume and ambience differences. `BK_AUDIO_EPSILON`
+(default 0.02) is the absolute tolerance for gains and volumes; the gate passes 0.12, two 0.1 s pulse
+steps, because the VM clock accumulates 1/60 s in f32 and a pulse boundary lands one frame either
+side of the model's 100 ms grid.
+
+Files:
+
+| Path | What it is |
+|---|---|
+| `tools/parity/routes/level1-audio-route.tsv` | Issue #8's four route legs unchanged, plus the bar's doorway walked both ways. Each door leg starts one step from the trigger plane, so the crossing is the leg's first walk tick and the fade's phase is the script's, not movement's. |
+| `tools/parity/audiotrace/level1-audio-retail.tsv` | Retail-derived: the music range and its fade values come from `01_SoundTrack.cog`'s own `startup`/`crossed`/`pulse` code and the engine's 100 ms pulse; ambience comes from retail's own sector list (`tools/parity/routetrace/level1-route-retail.tsv`) and the level's `SOUND` rows. Rows where the port's body is in a different sector than retail's are `-` (issue #10's movement parity owns the difference). |
+| `tools/parity/audiotrace/level1-audio-port.tsv` | The port's committed oracle, produced by the replay. |
+| `tools/parity/audio-gate.ps1` | The gate above. |
+
+Two port fixes came out of the fixture: a surface crossing now carries its `linkid=` as the
+`GetSenderId()` the script reads (level 1's fade-up and fade-down are the same plane under two links,
+and both were being reported), and a crossed test now only considers the surfaces of the sector the
+body is leaving (the two coincident doorway polygons no longer cancel each other in one frame). The
+cog clock was also advancing twice per frame (`run_pulses_and_timers` and `resume_sleeping_labels`
+both added `dt`), which ran every shipped fade at double speed; it now advances once.
+
 ### Retail's cog namespace
 
 `coglist` prints `<id>: <script> <script>` per instance. The console buffer only keeps the tail, which
