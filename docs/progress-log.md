@@ -6303,13 +6303,31 @@ retail. Two root causes, both measured against the fixture:
 
 Measured on the merged tree (with #12's damage split and the executor pin that makes the capture
 run-to-run identical): the gate passes **repeatability** exactly (shot/hit deltas 0 ms, actor
-0.00 units), **per-hit damage** (max dH 7.0, dS 4.1 against 10/10), duration, kill order and
-settled shields. It still reports 7 failures: the port's other door actors (153, 157, 291 — a rifle,
-a gunner and a Greedo) acquire and fire where retail's series has only the point-blank gunner
-firing, so the port samples 16 bolts against retail's 9, lands 11 hits against 13 and is 1,733 ms
-late by the late hits (settled 38.0 health against 22.3); the actor maximum is 1.67 units /
-178.4 deg. The acquisition side of that (which placed actors the engine lets engage) is the next
-slice; this round's changes are the basis and the placement class it depends on.
+0.00 units), **duration**, **per-hit damage** (max dH 7.5, dS 4.1 against 10/10), **kill order**,
+**settled shields** and **settled health** (26.1 against 22.3). Position is 1.34 units (limit
+1.50). Four failures remain:
+
+- **Shot/hit pairing drifts** to 1,600 ms and lands 12 hits against retail's 13. The port's gunner
+  is right on cadence (833 ms mean against retail's 750, inside the per-shot tolerance at first),
+  but the encounter's origin drops the warp frame's own shot, so every port row is one shot/index
+  behind retail's series and the late pairs accumulate the difference. The origin drop is in the
+  telemetry (`EncounterTrace::started`), not in the AI: keeping that frame's events was tried and
+  moved the first row to 2,100 ms because the record's clock is already past the event stamps, so
+  the fix needs the trace to stamp frames, not events.
+- **Actor yaw 176°.** Thing 331's placement class (`gonkroam.ai`) still is not loaded — the file
+  table only collects template `aiclass=` names — so the port's droid stands at its spawn yaw while
+  retail's roams. Loading it was tried this round: the droid then roams (its yaw ends on retail's
+  105°) but walks off the ledge and falls 12 units, because the port has no actor support on a
+  **solid thing's model top**; that is the walkability gap, not AI timing, so the load is reverted
+  to keep position passing. Matching retail's roam facing also needs the engine's random stream,
+  which the port cannot reproduce; the gate's single actor-yaw tolerance grades that random facing
+  as if it were deterministic.
+- The scan now collides the sight ray against **solid things** (`segment_thing`), as
+  `sithAI_CheckSightThing` does; this removed the port-only acquisitions by 153/157/291 behind the
+  balcony rail. The blocked-turn fix (a roamer turns even when the legs are held) is in as well.
+
+The next slice: actor support on solid-thing tops, then the trace's frame-stamped origin, then the
+acquired-actor list.
 
 Measured: `cargo test` **315 passed, 0 failed** on the merged tree (313 before #12 merged; new here:
 the engine-basis cone, the first-tick fire on an already-aimed actor, and the placement

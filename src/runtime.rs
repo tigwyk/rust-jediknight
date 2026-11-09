@@ -5048,8 +5048,14 @@ impl Runtime {
                             );
                             let range = (dx * dx + dy * dy + dz * dz).sqrt();
                             let in_cone = ai.as_ref().is_some_and(|ai| ai.sees(thing.0, thing.2, target));
+                            // `sithAI_CheckSightThing` casts its sight ray against the level's
+                            // **collision**, which includes solid things: a railing or a body in the
+                            // way blocks the find exactly as a wall does. The scan tested only the
+                            // world faces, so level 1's door actors standing behind the balcony rail
+                            // acquired the player while retail's never did.
                             let clear = self.solids.as_ref().is_none_or(|s| {
                                 !s.segment_blocked(thing.0, target)
+                                    && !s.segment_thing(thing.0, target)
                             });
                             // The scan is the **acquisition** path: the handler runs
                             // `sithAI_CheckSightThing`, whose detection roll is
@@ -5354,6 +5360,15 @@ impl Runtime {
                         );
                     }
                     let _ = self.emit_ai_event(index, 0x400, None);
+                    // `SetLookFrame` sets the facing even when the legs cannot take the step: a
+                    // roamer turns where it wants to go while a ledge holds the body. The port stood
+                    // still, so level 1's roaming droid never matched retail's sweep.
+                    if (facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4)
+                        && let Some(thing) = self.things.get_mut(index)
+                    {
+                        let wanted = (-facing.0).atan2(facing.1).to_degrees();
+                        thing.yaw = turn_toward(thing.yaw, wanted, turn_rate, dt);
+                    }
                     continue;
                 }
                 if let Some(thing) = self.things.get_mut(index) {
@@ -5657,7 +5672,10 @@ impl Runtime {
                     thing.ai_wait = burst_ms / 1000.0;
                 } else {
                     thing.ai_burst = (burst - 1.0).max(0.0);
-                    let jitter = 1.2 - 0.2 * crate::cog::pseudo_random() as f32;
+                    // `sithAICmd_PrimaryFire` jitters the shot delay by ±20% (the ledger's figure).
+                    // The asymmetric `1.2 - 0.2 * frand` averaged 1.1 and put the door gunner's
+                    // cadence at ~825 ms, where retail's fixture measures ~750 ms.
+                    let jitter = 1.0 - 0.2 + 0.4 * crate::cog::pseudo_random() as f32;
                     thing.ai_wait = delay_ms / 1000.0 * jitter;
                 }
             }

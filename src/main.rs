@@ -25140,7 +25140,9 @@ impl EncounterTrace {
                 }
             }
             self.started = true;
-            rt.encounter_events.clear();
+            // Drop what the spawn frames queued; the warp frame's own events are dropped with
+            // them, which is why the first shot row lands one cadence after the warp.
+            rt.encounter_events.retain(|event| event_time(event) >= rt.time);
         }
         if self.file.is_none() {
             let Some(path) = std::env::var_os("BK_ENCOUNTER_OUT") else {
