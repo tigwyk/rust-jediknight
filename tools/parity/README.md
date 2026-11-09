@@ -493,6 +493,70 @@ door-gunner acquisition, cadence and facing against the fixture and fixed the ti
 (landed-shot rows, the intro freeze at capture start, the 9.9 s window, the roamer facing exemption);
 its default run passes. #12 (the player's damage split) is still the shipped `item_shields.cog`'s.
 
+### Audio state gate (issue #13)
+
+`--audio-trace <path>` writes the replay's audio state on the same 600 ms (36-tick) cadence as the
+route trace:
+
+```text
+tick  t_s  music  music_end  music_loop  music_vol  ambient  ambient_vol  sounds
+```
+
+- `music`/`music_end` are `PlaySong(start, end)`'s track range and `music_loop` is the
+  mixer's loop flag, 1/0 (`-` when nothing is
+  playing); `music_vol` is `SetMusicVol`'s current value, which level 1's `01_SoundTrack.cog` drives
+  from a 0.1 s pulse (0.05 a step up, 0.1 down).
+- `ambient`/`ambient_vol` are the sector's own `SOUND` loop (a script's `SectorSound` wins), and the
+  cell is empty when the sector names none.
+- `sounds` lists every one-shot the window played as `wav@gain`; `gain` is the mixer's attenuated
+  volume (`snd::volume`), so distance and facing are in the number. `-` means **not recorded**. The
+  retail fixture records the capture's one-shots and marks the AI/combat and body-movement ones as
+  dynamic above the header:
+
+  ```text
+  # dynamic: kwalk02.wav, trprsht1.wav, kshieldhit01.wav, ...
+  ```
+
+  The comparator drops every listed wav from **both** sides, so those remain recorded evidence but
+  out of the pass/fail, while a route-controlled sound (door/switch/fade/script) still compares. The
+  classifier's four categories are exercised by the self-check and the port oracle.
+
+```powershell
+pwsh -NoProfile -File tools/parity/audio-gate.ps1            # determinism + port oracle + retail + door
+pwsh -NoProfile -File tools/parity/audio-gate.ps1 -Perturb   # ... and prove a 0.25 gain change fails
+```
+
+`--audio-compare <expected> <actual>` is the comparator; the gate's exit code is its verdict. It
+classifies every sound difference as **missing** (the reference played it, the trace did not),
+**extra**, **mistimed** (same wav in another 600 ms window) or **attenuated** (same window, different
+gain), and reports per-sample music selection/volume and ambience differences. `BK_AUDIO_EPSILON`
+(default 0.02) is the absolute tolerance for gains and volumes; the gate passes 0.12, two 0.1 s pulse
+steps, because the VM clock accumulates 1/60 s in f32 and a pulse boundary lands one frame either
+side of the model's 100 ms grid.
+
+Files:
+
+| Path | What it is |
+|---|---|
+| `tools/parity/routes/level1-audio-route.tsv` | Issue #8's four route legs unchanged, plus the bar's doorway walked both ways. The door adjoin is a **y = -5 plane** (`--collide --surfaces-at -8,-5,-1.05`: surface 206, sector 19, adjoin 73, x `-8.10..-7.90`, z `-1.150..-0.700`, normal `(0,-1,0)`; 213 is its opposite face), so the legs walk in y (`yaw 180` in, `yaw 0` out). |
+| `tools/parity/routes/level1-audio-route-door.tsv` | The doorway alone, captured in a **fresh process** (`retail-capture.ps1 -Only route_door -AudioRoute … -AudioRouteOut …`). In a fresh process retail crosses: `bar_in` reaches `y -5.187` by tick 36 and `bar_out` fires `crossed`, taking `currvol` 0.25 at tick 288, 0.50 at 324 (0.75 at the script's end). In the full four-leg process retail's body wedges on the elevator car's shut leaf and never crosses, so the door leg's state is only measurable from a fresh process. |
+| `tools/parity/audiotrace/level1-audio-retail.tsv` | **Captured from retail** by `retail-capture.ps1 -AudioRoute tools/parity/routes/level1-audio-route.tsv -AudioRouteOut tools/parity/audiotrace/level1-audio-retail.tsv`: the harness boots level 1 with `-devMode`, applies each route leg's `warp` through the dev console, holds forward for the leg, and reads the engine's own state at every 600 ms of route game time — song range and loop flag (0x008BBC74/0x008BBC70/0x00835FCC), `SetMusicVol`'s value (f32 0x0054A678), and the 32-entry mixer table at 0x00835FE8 (sound name from the sound struct's own char[32], loop bit 0x1, volume, radii, distance) for the ambience loop and the one-shots. Capture instrumentation only: no shipping behavior changes. |
+| `tools/parity/audiotrace/level1-audio-port.tsv` | The port's committed oracle, produced by the replay. |
+| `tools/parity/audio-gate.ps1` | The gate above. |
+| `tools/parity/audiotrace/level1-audio-door-port.tsv` / `-door-retail.tsv` | The bar doorway captured on its own in a **fresh process** (`level1-audio-route-door.tsv`), where retail crosses: `bar_in` reaches `y -5.187` by tick 36, `bar_out` fires `crossed`, and `currvol` takes 0.15 at tick 252 and 0.40 at 288. The port fades from tick 216 (0.05/0.35/0.65): the fade curve is ~0.2 ahead of retail's (phase -36 ticks). The gate compares this pair event-aligned (first fade change from 0, not raw tick numbers): 2 aligned samples, worst delta 0.100 within 0.12, and it passes. |
+
+Capture limitation: on this workstation retail's redbook device never starts (`0x00835FD0` reads 0,
+the MCI open fails), so the captured `music_vol` stays at the mixer's initial 1.0 and cannot show the
+script's fade; the port's fixture carries the fade. That is a device limitation of the capture
+environment, not a fixture choice, and the gate reports it as the retail delta.
+
+Two port fixes came out of the fixture: a surface crossing now carries its `linkid=` as the
+`GetSenderId()` the script reads (level 1's fade-up and fade-down are the same plane under two links,
+and both were being reported), and a crossed test now only considers the surfaces of the sector the
+body is leaving (the two coincident doorway polygons no longer cancel each other in one frame). The
+cog clock was also advancing twice per frame (`run_pulses_and_timers` and `resume_sleeping_labels`
+both added `dt`), which ran every shipped fade at double speed; it now advances once.
+
 ### Retail's cog namespace
 
 `coglist` prints `<id>: <script> <script>` per instance. The console buffer only keeps the tail, which

@@ -107,6 +107,20 @@ pub struct SoundRequest {
     pub pitch: f32,
 }
 
+/// A positional/ambient **loop** a script started (`PlaySoundThing`/`PlaySoundPos` with a loop or
+/// ambient flag in its final argument, e.g. `00_PlayAmbient.cog`'s `0x045`). Retail's mixer keeps
+/// these as loop channels next to the sector's `SOUND` loop; the capture's `ambient` column is the
+/// loudest *playing* loop channel, not the sector's declared sound.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SoundLoop {
+    pub name: String,
+    pub volume: f32,
+    pub pos: Option<[f32; 3]>,
+    pub min_radius: f32,
+    pub max_radius: f32,
+    pub flags: i32,
+}
+
 /// `RotatePivot(thing, frame, seconds)`: spin a thing about the pivot its own `frame=` entry names.
 ///
 /// The engine keeps this on the track parameters (`curOrient.scale` is the pivot, `moveFrameDeltaAngles`
@@ -1475,6 +1489,9 @@ pub struct Runtime {
     /// `PlaySoundThing` names a thing and `PlaySoundPos` a position; a request with no place
     /// is `PlaySoundLocal`, which the mixer does not attenuate by distance.
     pub sounds: Vec<SoundRequest>,
+    /// Script-started loop channels (`PlaySound*` with the loop/ambient flag), one entry per
+    /// name+place: a timer that repeats the same request every 0.5 s refreshes it, it does not stack.
+    pub sound_loops: Vec<SoundLoop>,
     /// Pending timers, summed — enough to show scripts driving a clock.
     pub timers: f32,
     pub inv: BTreeMap<i32, f32>,
@@ -2385,6 +2402,7 @@ impl Runtime {
                 .collect(),
             surface_flags: level.surfaces.iter().map(|s| s.surfflags).collect(),
             sounds: Vec::new(),
+            sound_loops: Vec::new(),
             timers: 0.0,
             inv: BTreeMap::new(),
             inv_available: BTreeMap::new(),
@@ -6288,7 +6306,7 @@ impl Runtime {
     /// that fraction — `((rand/32768) - 0.5) * error` on each component, then normalized. A missed
     /// shot is a shot that flies wide, which is what makes a firefight survivable.
     pub fn fire_spread(&mut self, shooter: i64, template: &str, error: f32) -> Option<usize> {
-        self.fire_with_spread(shooter, template, error)
+        self.fire_with_spread(shooter, template, error, None)
     }
 
     /// Fire `template` from the shooter: spawn it just in front of the shooter's eye and give it the
@@ -6298,7 +6316,7 @@ impl Runtime {
     /// template, launched along the barrel; the speed in the shipped templates is `vel=(0/4/0)` for
     /// `+bryarbolt`, i.e. 4 units per second down the model's +Y.
     pub fn fire(&mut self, shooter: i64, template: &str) -> Option<usize> {
-        self.fire_with_spread(shooter, template, 0.0)
+        self.fire_with_spread(shooter, template, 0.0, None)
     }
 
     /// `sithAI_RandomFireVector` (0x4eb920): add `((rand/32768) - 0.5) * error` to each component of
@@ -6323,6 +6341,7 @@ impl Runtime {
         shooter: i64,
         template: &str,
         error: f32,
+        sound: Option<&str>,
     ) -> Option<usize> {
         // Every shot the runtime spawns, counted where it is actually spawned. A check that samples
         // live things misses a bolt that dies between two frames, and at 10 fps that is most of them.
@@ -6503,7 +6522,30 @@ impl Runtime {
         {
             self.emit_ai_event(actor, 0x1000, Some(index));
         }
+        // `sithWeapon_WeaponFireProjectile` (`0x4d45a0`) plays the sound the caller named through
+        // `sithSoundMixer_PlaySoundThing(sound, shooter, 1.0, …)` (`0x4dba60`) — but only when one is
+        // named: `weap_bryar.cog` passes `pistol-1.wav`, while the AI's own shot names none, so an
+        // actor's class `fire1` row stands in (`gr.snd`: `pistol-1.wav` at 1.0–4.0 units).
+        self.queue_shot_sound(shooter, pos, sound);
         Some(index)
+    }
+
+    /// The wav a shot plays, queued the way `sithWeapon_WeaponFireProjectile` plays it: on the
+    /// shooter, at volume 1.0, so `play_requested_sounds` applies the class's own fade radius.
+    fn queue_shot_sound(&mut self, shooter: i64, at: [f32; 3], sound: Option<&str>) {
+        let named = sound.map(str::trim).filter(|name| !name.is_empty());
+        let wav = match named {
+            Some(name) => name.to_ascii_lowercase(),
+            None => {
+                let Some(index) = usize::try_from(shooter).ok() else { return };
+                let Some(wav) = self.chatter_wav(index, "fire1") else { return };
+                wav
+            }
+        };
+        let channel = self.sound_volume.len();
+        self.sound_volume.push(1.0);
+        self.sound_pitch.push(1.0);
+        self.sounds.push(SoundRequest { name: wav, volume: 1.0, pos: Some(at), channel, pitch: 1.0 });
     }
 
     /// `TakeItem(item, player)`: the item leaves the world and the player's inventory bin
@@ -7049,6 +7091,26 @@ impl Runtime {
         Some(surface)
     }
 
+
+    /// `crossed`: a segment through a linked surface messages its scripts once per link, with the
+    /// surface's **link id** as the sender.
+    ///
+    /// Retail's `GetSenderId()` is the link id here, exactly as it is for `activate`;
+    /// `01_SoundTrack.cog` fades the bar's music **up** for `linkid=1` (`onAdjoin`) and **down** for
+    /// `linkid=0` (`offAdjoin`), so a message without it always chose the down branch and the
+    /// soundtrack never became audible (round: issue #13).
+    pub fn crossed_surface(&mut self, surface: usize) -> usize {
+        let links = self.surface_links.clone();
+        let mut queued = 0;
+        for (instance, link, linked) in links {
+            if linked != surface {
+                continue;
+            }
+            self.pending_messages.push((instance, "crossed", [0.0; 2], Some(link as i64)));
+            queued += 1;
+        }
+        queued
+    }
 
     /// Which cog instances a level's own `cogs` section links to its things, surfaces and sectors.
     ///
@@ -8819,7 +8881,13 @@ impl Runtime {
                 });
                 let Some(weapon) = weapon else { return Value::Num(-1.0) };
                 let error = args.get(5).map(vec3).map(|v| v[2]).unwrap_or(0.0);
-                let shot = self.fire_with_spread(index as i64, &weapon, error as f32);
+                // `FireProjectile(sender, template, sound, mode, offset, …)`: the sound is played
+                // only when the script names one (`weap_bryar.cog` passes `pistol-1.wav`).
+                let sound = match args.get(2) {
+                    Some(Value::Str(name)) if !name.is_empty() => Some(name.as_str()),
+                    _ => None,
+                };
+                let shot = self.fire_with_spread(index as i64, &weapon, error as f32, sound);
                 Value::Num(shot.map(|i| i as f64).unwrap_or(-1.0))
             }
             // `SyncThingPos`/`SyncSurface` and their siblings: multiplayer state pushes. A single-player
@@ -10330,13 +10398,56 @@ impl Runtime {
                     None
                 };
                 if !name.is_empty() {
+                    // `PlaySoundThing(sound, thing, volume, min, max, flags)` and
+                    // `PlaySoundPos(sound, pos, volume, min, max, flags)` carry the mixer flags in
+                    // their last argument; `PlaySoundLocal(sound, volume, pan, flags)` in its fourth.
+                    // `0x045` (the ambient installs pass it) sets the loop bit, so the request is a
+                    // **channel** the mixer keeps playing, not a one-shot. Without this the
+                    // `00_PlayAmbient.cog` rumble was requested every 0.5 s and dropped (no `.snd`
+                    // clip), and the audio trace could not see the bar's only loop.
+                    let flags_at = match lower.as_str() {
+                        "playsoundlocal" => 3,
+                        _ => 5,
+                    };
+                    let flags = if args.len() > flags_at { args[flags_at].num() as i32 } else { 0 };
+                    let (min_radius, max_radius) = match lower.as_str() {
+                        "playsoundlocal" => (0.0, 0.0),
+                        _ => (
+                            args.get(3).map(|v| v.num() as f32).unwrap_or(0.0),
+                            args.get(4).map(|v| v.num() as f32).unwrap_or(0.0),
+                        ),
+                    };
                     // `PlaySound*` answers the **channel**, which is what `ChangeSoundVol` and
                     // `ChangeSoundPitch` take — `sithSoundMixer_PlaySound` returns one and the shipped
                     // scripts store it (`02_crowstart.cog`).
                     let channel = self.sound_volume.len();
                     self.sound_volume.push(volume);
                     self.sound_pitch.push(1.0);
-                    self.sounds.push(SoundRequest { name, volume, pos, channel, pitch: 1.0 });
+                    if flags & 0x1 != 0 {
+                        // The engine's ambient installs re-issue the same request every 0.5 s; the
+                        // mixer holds one loop per name and place, so refresh instead of stacking.
+                        if let Some(existing) = self
+                            .sound_loops
+                            .iter_mut()
+                            .find(|l| l.name.eq_ignore_ascii_case(&name) && l.pos == pos)
+                        {
+                            existing.volume = volume;
+                            existing.min_radius = min_radius;
+                            existing.max_radius = max_radius;
+                            existing.flags = flags;
+                        } else {
+                            self.sound_loops.push(SoundLoop {
+                                name,
+                                volume,
+                                pos,
+                                min_radius,
+                                max_radius,
+                                flags,
+                            });
+                        }
+                    } else {
+                        self.sounds.push(SoundRequest { name, volume, pos, channel, pitch: 1.0 });
+                    }
                     Value::Num(channel as f64)
                 } else {
                     Value::Num(-1.0)
@@ -12751,6 +12862,48 @@ mod tests {
             "the listener did not walk toward a shot from another alignment: {:?}",
             rt.things[1].pos
         );
+    }
+
+    /// `sithWeapon_WeaponFireProjectile` (`0x4d45a0`) plays the sound the caller named through
+    /// `sithSoundMixer_PlaySoundThing(sound, shooter, 1.0, …)`; the AI's own shot names none, so the
+    /// shooter's class `fire1` row is what a player hears (`gr.snd`: `pistol-1.wav`).
+    #[test]
+    fn a_shot_queues_the_shooters_fire_sound() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut gunner = base.clone();
+        gunner.pos = [3.0, 4.0, 5.0];
+        gunner.sector = 7;
+        rt.things = vec![base, gunner];
+        rt.templates = vec!["walkplayer".into(), "greedo".into()];
+        rt.types = vec![10, 2];
+        rt.template_soundclass.insert("greedo".into(), "gr.snd".into());
+        rt.sound_classes.insert(
+            "gr.snd".into(),
+            std::collections::BTreeMap::from([(
+                "fire1".to_string(),
+                vec![("pistol-1.wav".to_string(), 1.0)],
+            )]),
+        );
+        rt.template_vel.insert("+ebolt".into(), [0.0, 6.0, 0.0]);
+        rt.template_damage.insert("+ebolt".into(), 12.0);
+        assert!(rt.fire_spread(1, "+ebolt", 0.0).is_some(), "the shot spawned");
+        assert_eq!(rt.sounds.len(), 1, "the shot made no sound");
+        assert_eq!(rt.sounds[0].name, "pistol-1.wav");
+        assert_eq!(rt.sounds[0].pos, Some([3.0, 4.0, 5.0]), "the sound left the shooter");
+        assert_eq!(rt.sounds[0].volume, 1.0);
+        // The script path names its own wav (`weap_bryar.cog`'s `fireSound`).
+        rt.sounds.clear();
+        rt.call(
+            "FireProjectile",
+            &[
+                super::Value::Num(1.0),
+                super::Value::Str("+ebolt".into()),
+                super::Value::Str("laser03.wav".into()),
+            ],
+        );
+        assert_eq!(rt.sounds.len(), 1, "the script's named shot sound was dropped");
+        assert_eq!(rt.sounds[0].name, "laser03.wav");
     }
 
     /// `FUN_0050aa80`'s find is a **broadcast**: the branch clears the actor's awake bit, sets the
@@ -15702,6 +15855,24 @@ mod tests {
             Some(0),
             "the plate's own sector did not reach it"
         );
+    }
+
+    /// A surface crossing carries its own link id as the sender, which is what tells an
+    /// `onAdjoin` (`linkid=1`) from an `offAdjoin` (`linkid=0`): level 1's soundtrack script fades
+    /// the bar's music up or down on that number, so a message without it always faded down.
+    #[test]
+    fn a_surface_crossing_carries_the_link_id_as_the_sender() {
+        let mut rt = door_runtime();
+        rt.surface_links = vec![(0, 1, 206), (1, 0, 213), (2, 2, 206)];
+        assert_eq!(rt.crossed_surface(206), 2, "both links to surface 206 were messaged");
+        let senders: Vec<(usize, Option<i64>)> = rt
+            .pending_messages
+            .iter()
+            .map(|(instance, _, _, sender)| (*instance, *sender))
+            .collect();
+        assert_eq!(senders, vec![(0, Some(1)), (2, Some(2))], "a crossing lost its link id");
+        assert_eq!(rt.crossed_surface(213), 1, "the offAdjoin link was not messaged");
+        assert_eq!(rt.pending_messages[2].3, Some(0), "link 0 must arrive as sender 0");
     }
 
     /// `sithAI_CanWalk` (`0x4eb4b0`): the engine probes the step's destination and, finding nothing,

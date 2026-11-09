@@ -646,6 +646,8 @@ fn main() {
     // samples every 36 ticks (600 ms), the cadence a retail `coords` poll keeps.
     let mut replay: Option<std::path::PathBuf> = None;
     let mut route_trace: Option<std::path::PathBuf> = None;
+    let mut audio_trace: Option<std::path::PathBuf> = None;
+    let mut audio_compare: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
 
     let mut sim = false;
     let mut dump: Option<String> = None;
@@ -954,6 +956,26 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+            }
+            // `--audio-trace <path>`: the replay's audio state, one row on the route trace's
+            // 600 ms cadence (music selection and volume, sector ambience, sounds played).
+            "--audio-trace" => {
+                audio_trace = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--audio-compare <expected> <actual>`: the audio gate. Reports missing, extra,
+            // mistimed and differently attenuated sounds, plus music/ambience differences.
+            "--audio-compare" => {
+                let expected = args.get(i + 1).cloned();
+                let actual = args.get(i + 2).cloned();
+                i += 2;
+                let (Some(expected), Some(actual)) = (expected, actual) else {
+                    println!("usage: --audio-compare <expected.tsv> <actual.tsv>");
+                    std::process::exit(2);
+                };
+                audio_compare = Some((
+                    std::path::PathBuf::from(expected),
+                    std::path::PathBuf::from(actual),
+                ));
             }
             "--sim" => sim = true,
             // `--pose <model> <key> <frame>`: one model, posed from one keyframe.
@@ -1440,6 +1462,23 @@ fn main() {
     if route_trace.is_some() && route_plan.is_none() {
         eprintln!("--route-trace needs --replay <path>");
         std::process::exit(2);
+    }
+    if audio_trace.is_some() && route_plan.is_none() {
+        eprintln!("--audio-trace needs --replay <path>");
+        std::process::exit(2);
+    }
+    if let Some((expected, actual)) = audio_compare.as_ref() {
+        let epsilon = std::env::var("BK_AUDIO_EPSILON")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.02);
+        match audio_trace_compare(expected, actual, epsilon) {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
     }
     // A replay is a capture that must be reproducible, not just fixed-step: see the executor note
     // at the end of the app setup.
@@ -12669,6 +12708,8 @@ fn main() {
         ))
         .insert_resource(RouteReplay(route_plan))
         .insert_resource(RouteTraceOut(route_trace))
+        .insert_resource(AudioTraceOut(audio_trace))
+        .insert_resource(AudioLog::default())
         .insert_resource(RouteNow::default())
         .insert_resource(RouteCursor::default())
         .insert_resource(RoutePrev::default())
@@ -12680,6 +12721,7 @@ fn main() {
         .insert_resource(SpriteDemo(sprite_template))
         .insert_resource(Look(look))
         .insert_resource(Ambience::default())
+        .insert_resource(LoopPlayers::default())
         .insert_resource(PlaySound(play_sound))
         .insert_resource(Deliver(sim))
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
@@ -12720,7 +12762,7 @@ fn main() {
             Update,
             (
                 (
-                    run_pulses_and_timers,
+                    run_pulses_and_timers.before(resume_sleeping_labels),
                     resume_sleeping_labels,
                     deliver_sector_triggers,
                     deliver_thing_messages,
@@ -12758,6 +12800,12 @@ fn main() {
                     billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
+                    audio_trace_sample
+                        .after(route_replay)
+                        .after(walk_player)
+                        .after(play_requested_sounds)
+                        .after(music_follows_scripts)
+                        .before(ambient_follows_view),
                     queue_next_level,
                 )
                     .run_if(no_screen_open),
@@ -12774,6 +12822,7 @@ fn main() {
             )
                 .run_if(no_screen_open),
         )
+        .add_systems(Update, (play_script_loops.after(play_requested_sounds),).run_if(no_screen_open))
         .add_systems(Update, palette_tint_pass.run_if(no_screen_open))
         .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open))
         .add_systems(Update, save_slots_probe)
@@ -16406,6 +16455,481 @@ fn route_cog_values(world: &World, sim: &Sim) -> [Option<f64>; 8] {
     out
 }
 
+/// The audio trace's columns, sampled on the route trace's 600 ms cadence.
+///
+/// `music`/`music_end` are `PlaySong`'s track range and `music_loop` is the mixer's loop flag
+/// (1/0; the engine stores the third argument as a boolean and wraps back to `music`), while
+/// `music_vol` is `SetMusicVol`'s current value (the scripts fade it from a pulse). `ambient`/`ambient_vol` are the sector's own
+/// `SOUND` loop (or a script's `SectorSound` override). `sounds` lists every one-shot the window
+/// played, space separated as `wav@gain`, where `gain` is the mixer's attenuated volume — so a
+/// missing sound, an extra one, a late one and a quiet one are all visible in the same column.
+const AUDIO_TRACE_FIELDS: [&str; 9] = [
+    "tick", "t_s", "music", "music_end", "music_loop", "music_vol", "ambient", "ambient_vol",
+    "sounds",
+];
+
+/// One parsed audio-trace row.
+#[derive(Debug, Clone, PartialEq)]
+struct AudioTraceRow {
+    tick: u32,
+    /// `PlaySong(start, end, loop)` as the trace records it: the mixer stores the third argument
+    /// as a boolean loop flag and always wraps back to `start`.
+    music: Option<(i32, i32, i32)>,
+    /// `music_vol`'s value.
+    music_volume: Option<f64>,
+    /// Whether the ambience was recorded at this sample. The retail-derived reference leaves it out
+    /// where the body's sector differs from the port's (issue #10's movement parity owns that), so the
+    /// comparator skips those rows' ambience instead of reading `-` as "no ambient loop".
+    ambient_recorded: bool,
+    ambient: Option<(String, f64)>,
+    /// `(wav, gain)` for every one-shot the window played. `None` is a `-` cell: the fixture did not
+    /// record that window (a retail-derived reference has no audio capture for one-shots yet), so the
+    /// comparator skips it rather than treating it as silence.
+    sounds: Option<Vec<(String, f64)>>,
+}
+
+fn parse_audio_trace(text: &str) -> Result<Vec<AudioTraceRow>, String> {
+    let mut rows = Vec::new();
+    let mut columns: Option<Vec<usize>> = None;
+    for (line_no, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        // `trim()` would eat the trailing tab of a row whose `sounds` cell is empty (a recorded
+        // window with nothing played), turning "silence" into "not recorded".
+        let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
+        if columns.is_none() {
+            let mut order = Vec::with_capacity(AUDIO_TRACE_FIELDS.len());
+            for field in AUDIO_TRACE_FIELDS {
+                match cells.iter().position(|c| *c == field) {
+                    Some(index) => order.push(index),
+                    None => {
+                        return Err(format!(
+                            "line {}: audio trace header has no `{field}` column",
+                            line_no + 1
+                        ))
+                    }
+                }
+            }
+            columns = Some(order);
+            continue;
+        }
+        let order = columns.as_ref().expect("header just parsed");
+        let cell = |slot: usize| -> &str {
+            order
+                .get(slot)
+                .and_then(|index| cells.get(*index))
+                .copied()
+                .unwrap_or("-")
+        };
+        let number = |slot: usize, field: &str| -> Result<Option<f64>, String> {
+            let raw = cell(slot);
+            if raw == "-" || raw.is_empty() {
+                return Ok(None);
+            }
+            raw.parse::<f64>()
+                .map(Some)
+                .map_err(|_| format!("line {}: `{raw}` is not a number ({field})", line_no + 1))
+        };
+        let tick = number(0, "tick")?
+            .ok_or_else(|| format!("line {}: the tick is `-`", line_no + 1))?
+            as u32;
+        let music = match (number(2, "music")?, number(3, "music_end")?, number(4, "music_loop")?) {
+            (Some(start), Some(end), Some(loops)) => {
+                Some((start as i32, end as i32, i32::from(loops != 0.0)))
+            }
+            _ => None,
+        };
+        let ambient_recorded = cell(6) != "-";
+        let ambient = if !ambient_recorded || cell(6).is_empty() {
+            None
+        } else {
+            Some((cell(6).to_string(), number(7, "ambient_vol")?.unwrap_or(0.0)))
+        };
+        let sounds = if cell(8) == "-" {
+            None
+        } else {
+            let mut sounds = Vec::new();
+            for entry in cell(8).split([' ', ';']).filter(|e| !e.is_empty()) {
+                let (name, gain) = entry
+                    .split_once('@')
+                    .ok_or_else(|| format!("line {}: `{entry}` is not `wav@gain`", line_no + 1))?;
+                let gain = gain.parse::<f64>().map_err(|_| {
+                    format!("line {}: `{gain}` is not a gain ({entry})", line_no + 1)
+                })?;
+                sounds.push((name.to_string(), gain));
+            }
+            Some(sounds)
+        };
+        rows.push(AudioTraceRow {
+            tick,
+            music,
+            music_volume: number(5, "music_vol")?,
+            ambient_recorded,
+            ambient,
+            sounds,
+        });
+    }
+    if rows.is_empty() {
+        return Err("the audio trace has a header but no rows".to_string());
+    }
+    Ok(rows)
+}
+
+/// Compare two audio traces. Every one-shot sound is classified as:
+///
+/// * **missing** — the reference played it and the trace did not, at any tick;
+/// * **extra** — the trace played it and the reference did not;
+/// * **mistimed** — the same wav at the same gain-ish exists, but in another 600 ms window;
+/// * **attenuated** — the same wav in the same window at a different gain (the mixer's distance
+///   and facing volume, so this is "audible but not as loud as retail");
+///
+/// plus a per-sample music selection/volume and ambient difference. `epsilon` is the absolute
+/// tolerance for the gain and volume numbers; the tick is exact (a 600 ms row is the comparison's
+/// unit, and a mistimed sound is reported rather than quietly accepted).
+fn compare_audio_rows(
+    expected: &[AudioTraceRow],
+    actual: &[AudioTraceRow],
+    epsilon: f64,
+) -> Result<(usize, usize), String> {
+    if expected.len() != actual.len() {
+        return Err(format!(
+            "audio-compare: FAIL {} row(s) expected, {} in the trace",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    let mut failures: Vec<String> = Vec::new();
+    let mut states = 0usize;
+    for (want, got) in expected.iter().zip(actual) {
+        if want.tick != got.tick {
+            failures.push(format!("tick {}: the trace has tick {}", want.tick, got.tick));
+            continue;
+        }
+        states += 1;
+        let tick = want.tick;
+        if want.music != got.music {
+            failures.push(format!(
+                "music: tick {tick} expected {:?}, trace {:?}",
+                want.music, got.music
+            ));
+        }
+        if let (Some(want), Some(got)) = (want.music_volume, got.music_volume) {
+            if (want - got).abs() > epsilon {
+                failures.push(format!(
+                    "music_vol: tick {tick} expected {want:.3}, trace {got:.3} (delta {:.3})",
+                    (want - got).abs()
+                ));
+            }
+        }
+        if want.ambient_recorded {
+            match (&want.ambient, &got.ambient) {
+                (None, None) => {}
+                (Some((want_name, want_vol)), Some((got_name, got_vol))) => {
+                    if want_name != got_name {
+                        failures.push(format!(
+                            "ambient: tick {tick} expected `{want_name}`, trace `{got_name}`"
+                        ));
+                    } else if (want_vol - got_vol).abs() > epsilon {
+                        failures.push(format!(
+                            "ambient_vol: tick {tick} `{want_name}` expected {want_vol:.3}, trace {got_vol:.3}"
+                        ));
+                    }
+                }
+                (want_side, got_side) => failures.push(format!(
+                    "ambient: tick {tick} expected {want_side:?}, trace {got_side:?}"
+                )),
+            }
+        }
+    }
+    if !failures.is_empty() {
+        let shown = failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n  ");
+        return Err(format!(
+            "audio-compare: FAIL {states} sampled row(s), {} state difference(s):\n  {shown}",
+            failures.len()
+        ));
+    }
+
+    // Pair the one-shots: same wav in the same window first (a gain difference there is an
+    // attenuation issue), then the leftovers by name across windows (mistimed) and finally the
+    // unmatched remainder (missing/extra). A window either side did not record (`-`) is skipped.
+    let mut want: Vec<(u32, String, f64)> = Vec::new();
+    let mut got: Vec<(u32, String, f64)> = Vec::new();
+    for (want_row, got_row) in expected.iter().zip(actual) {
+        let Some(sounds) = want_row.sounds.as_ref() else { continue };
+        for (name, gain) in sounds {
+            want.push((want_row.tick, name.clone(), *gain));
+        }
+        for (name, gain) in got_row.sounds.as_deref().unwrap_or(&[]) {
+            got.push((got_row.tick, name.clone(), *gain));
+        }
+    }
+    let mut want_used = vec![false; want.len()];
+    let mut got_used = vec![false; got.len()];
+    let mut sounds = 0usize;
+    let mut differences: Vec<String> = Vec::new();
+    // Same window and name.
+    for (wi, (wtick, wname, wgain)) in want.iter().enumerate() {
+        let Some(gi) = got.iter().enumerate().position(|(gi, (gtick, gname, _))| {
+            !got_used[gi] && gtick == wtick && gname == wname
+        }) else {
+            continue;
+        };
+        got_used[gi] = true;
+        want_used[wi] = true;
+        sounds += 1;
+        let ggain = got[gi].2;
+        if (wgain - ggain).abs() > epsilon {
+            differences.push(format!(
+                "attenuated: {wname} at tick {wtick} gain {wgain:.3} expected, {ggain:.3} trace (delta {:.3})",
+                (wgain - ggain).abs()
+            ));
+        }
+    }
+    // Same wav, another window: mistimed.
+    for (wi, (wtick, wname, _)) in want.iter().enumerate() {
+        if want_used[wi] {
+            continue;
+        }
+        let Some(gi) = got
+            .iter()
+            .enumerate()
+            .position(|(gi, (_, gname, _))| !got_used[gi] && gname == wname)
+        else {
+            continue;
+        };
+        got_used[gi] = true;
+        want_used[wi] = true;
+        sounds += 1;
+        let gtick = got[gi].0;
+        differences.push(format!(
+            "mistimed: {wname} expected tick {wtick}, trace tick {gtick} ({} tick(s) off)",
+            gtick as i64 - *wtick as i64
+        ));
+    }
+    for (wi, (wtick, wname, wgain)) in want.iter().enumerate() {
+        if !want_used[wi] {
+            sounds += 1;
+            differences.push(format!("missing: {wname} at tick {wtick} (gain {wgain:.3})"));
+        }
+    }
+    for (gi, (gtick, gname, ggain)) in got.iter().enumerate() {
+        if !got_used[gi] {
+            sounds += 1;
+            differences.push(format!("extra: {gname} at tick {gtick} (gain {ggain:.3})"));
+        }
+    }
+    if differences.is_empty() {
+        Ok((states, sounds))
+    } else {
+        let shown = differences.iter().take(16).cloned().collect::<Vec<_>>().join("\n  ");
+        Err(format!(
+            "audio-compare: FAIL {states} sampled row(s), {sounds} sound event(s), {} difference(s):\n  {shown}",
+            differences.len()
+        ))
+    }
+}
+
+/// `# dynamic: name, name ...` in a trace header: one-shots whose timing belongs to the AI or the
+/// body's walk phase, not to the scripted route. They stay in the fixture (the capture recorded
+/// them) but are out of the comparison on both sides; the route-controlled sounds still compare.
+fn dynamic_sounds(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.trim_start().strip_prefix("# dynamic:"))
+        .flat_map(|list| list.split(',').map(|name| name.trim().to_ascii_lowercase()))
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn drop_dynamic_sounds(rows: &mut [AudioTraceRow], dynamic: &[String]) {
+    for row in rows.iter_mut() {
+        let Some(sounds) = row.sounds.as_mut() else { continue };
+        sounds.retain(|(name, _)| !dynamic.iter().any(|d| name.eq_ignore_ascii_case(d)));
+    }
+}
+
+/// `--audio-compare`: parse both traces and apply [`compare_audio_rows`] at `epsilon`.
+fn audio_trace_compare(
+    expected: &std::path::Path,
+    actual: &std::path::Path,
+    epsilon: f64,
+) -> Result<(), String> {
+    let read = |path: &std::path::Path| -> Result<(Vec<AudioTraceRow>, Vec<String>), String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let rows = parse_audio_trace(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok((rows, dynamic_sounds(&text)))
+    };
+    let (mut want, want_dynamic) = read(expected)?;
+    let (mut got, got_dynamic) = read(actual)?;
+    let mut dynamic = want_dynamic;
+    dynamic.extend(got_dynamic);
+    drop_dynamic_sounds(&mut want, &dynamic);
+    drop_dynamic_sounds(&mut got, &dynamic);
+    let (states, sounds) = compare_audio_rows(&want, &got, epsilon)?;
+    println!(
+        "audio-compare: PASS {states} row(s), {sounds} sound event(s), music and ambience within {epsilon}"
+    );
+    Ok(())
+}
+
+/// One audio-trace line. See [`AUDIO_TRACE_FIELDS`] for the columns and
+/// [`audio_trace_sample`] for what fills them.
+fn write_audio_trace_row(
+    path: &std::path::Path,
+    tick: u32,
+    music: Option<(i32, i32, i32)>,
+    music_volume: f32,
+    ambient: Option<&(String, f32)>,
+    sounds: &[(u32, String, f32)],
+) {
+    use std::io::Write;
+    let first = tick == 0;
+    let open = || {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true);
+        if first {
+            options.truncate(true);
+        } else {
+            options.append(true);
+        }
+        options.open(path)
+    };
+    let Ok(mut file) = open() else { return };
+    if first {
+        let _ = writeln!(file, "{}", AUDIO_TRACE_FIELDS.join("\t"));
+    }
+    let (music, end, loops) = music
+        .map(|(start, end, loops)| (start.to_string(), end.to_string(), u8::from(loops != 0).to_string()))
+        .unwrap_or_else(|| ("-".to_string(), "-".to_string(), "-".to_string()));
+    let (ambient_name, ambient_volume) = ambient
+        .map(|(name, volume)| (name.clone(), format!("{volume:.3}")))
+        .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
+    let sounds = sounds
+        .iter()
+        .map(|(_, name, gain)| format!("{name}@{gain:.3}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = writeln!(
+        file,
+        "{tick}\t{:.4}\t{music}\t{end}\t{loops}\t{music_volume:.3}\t{ambient_name}\t{ambient_volume}\t{sounds}",
+        f64::from(tick) / 60.0,
+    );
+}
+
+/// `--audio-trace`: write the audio state every 600 ms of the replay.
+///
+/// The music selection and volume and the sector ambience are read straight from the runtime, so
+/// they are the values the mixer would use; the one-shots come from [`AudioLog`], which
+/// `play_requested_sounds` fills with the gain each sound actually played at. Ordered after both
+/// (`route_replay` moves the cursor, `walk_player` places the body) so a sample describes the
+/// frame's own tick.
+fn audio_trace_sample(
+    replay: Option<Res<RouteReplay>>,
+    out: Option<Res<AudioTraceOut>>,
+    cursor: Option<Res<RouteCursor>>,
+    player: Option<Res<Player>>,
+    sim: Option<Res<Sim>>,
+    ambience: Option<Res<Ambience>>,
+    collisions: Option<Res<Collision>>,
+    world: Option<Res<World>>,
+    cams: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+    mut last_sector: Local<Option<usize>>,
+    mut log: Option<ResMut<AudioLog>>,
+) {
+    let (Some(replay), Some(cursor), Some(out), Some(player), Some(sim)) =
+        (replay, cursor, out, player, sim)
+    else {
+        return;
+    };
+    if replay.0.is_none() {
+        return;
+    }
+    let Some(path) = out.0.as_deref() else { return };
+    // `route_replay` has already stepped the cursor this frame, so the frame's tick is one back.
+    let tick = cursor.tick.saturating_sub(1);
+    if tick % ROUTE_SAMPLE_TICKS != 0 {
+        return;
+    }
+    let (music, music_volume, loops) = {
+        let rt = sim.world.borrow();
+        (rt.music, rt.music_volume, rt.sound_loops.clone())
+    };
+    // Retail's capture reads the mixer's loop channels: a sector `SOUND` loop the body has entered,
+    // and the positional loops scripts start (`00_PlayAmbient.cog`'s `00rumbleamb01.wav`). It reports
+    // the loudest by mixer gain, `volume * (1 - fade) * 0.75`, and the channel's own volume.
+    let listener = [
+        player.body.pos.x,
+        player.body.pos.y,
+        player.body.pos.z + PLAYER_RADIUS,
+    ];
+    // The sample grid lands one frame after a console `warp`; retail's row on that grid point still
+    // names the room being left, so this sample uses the *previous* frame's sector.
+    let leaving = last_sector.unwrap_or(player.body.sector);
+    *last_sector = Some(player.body.sector);
+    // Retail mixes a 3D sound only while its source is in the active sector set: the bar's
+    // `00rumbleamb01` (a positional loop on thing 220) is silent at the level start and audible once
+    // the player reaches the bar. Portal reachability from the player's sector is that set's safe half.
+    let visible: Option<Vec<usize>> = collisions.as_ref().map(|c| {
+        let rt = sim.world.borrow();
+        drawn_sectors(&c.0, rt.gates(), player.body.sector, &cams)
+    });
+    let mut ambient: Option<(String, f32)> = None;
+    // Retail starts from a zero gain and only replaces it when a loop is **audible**; a positional
+    // loop beyond its `maxDist` is silent and does not name the ambience (`00rumbleamb01` at spawn).
+    let mut best = 0.0f32;
+    if let Some((name, volume, _)) = ambience.as_ref().and_then(|a| a.playing.clone()) {
+        let gain = volume.clamp(0.0, 1.0) * 0.75;
+        if gain > best {
+            best = gain;
+            ambient = Some((name, volume));
+        }
+    }
+    for l in &loops {
+        if let (Some(visible), Some(p)) = (visible.as_ref(), l.pos) {
+            let source = collisions.as_ref().and_then(|c| c.0.sector_at(p, 0.2));
+            if !source.is_some_and(|s| visible.contains(&s)) {
+                continue;
+            }
+        }
+        let fade = match l.pos {
+            Some(p) if l.max_radius > l.min_radius => {
+                let d = ((p[0] - listener[0]).powi(2)
+                    + (p[1] - listener[1]).powi(2)
+                    + (p[2] - listener[2]).powi(2))
+                .sqrt();
+                ((d - l.min_radius) / (l.max_radius - l.min_radius)).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        let gain = (l.volume * (1.0 - fade)).clamp(0.0, 1.0) * 0.75;
+        if gain > best {
+            best = gain;
+            ambient = Some((l.name.clone(), l.volume));
+        }
+    }
+    if ambient.is_none()
+        && let Some(world) = world.as_ref()
+    {
+        let declared = sim.world.borrow().sector_ambient.get(&(leaving as i32)).cloned();
+        let declared = declared.or_else(|| {
+            world
+                .level
+                .sectors
+                .get(leaving)
+                .and_then(|s| s.sound.clone())
+        });
+        if let Some((name, volume)) = declared {
+            ambient = Some((name, volume));
+        }
+    }
+    let sounds: Vec<(u32, String, f32)> = log
+        .as_mut()
+        .map(|log| std::mem::take(&mut log.played))
+        .unwrap_or_default();
+    write_audio_trace_row(path, tick, music, music_volume, ambient.as_ref(), &sounds);
+}
+
 #[cfg(test)]
 mod route_tests {
     use super::*;
@@ -16473,6 +16997,122 @@ input 72 1 0
             compare_route_rows(&expected, &perturbed, 0.30).is_ok(),
             "the tolerance is an absolute bound, so 0.30 accepts it"
         );
+    }
+
+    #[test]
+    fn an_audio_trace_parses_its_state_and_sound_events() {
+        let text = "\
+# an audio trace
+tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
+0\t0.0000\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\t
+36\t0.6000\t12\t13\t1\t0.050\t01cantinaband02.wav\t0.300\tpistol-1.wav@0.250 ricochet01.wav@0.050
+72\t1.2000\t-\t-\t-\t1.000\t-\t-\t
+";
+        let rows = parse_audio_trace(text).expect("the trace parses");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].tick, 0);
+        assert_eq!(rows[0].music, Some((12, 13, 1)));
+        assert_eq!(rows[0].music_volume, Some(0.0));
+        assert_eq!(rows[0].ambient, Some(("01cantinaband02.wav".to_string(), 0.3)));
+        assert_eq!(rows[0].sounds, Some(Vec::new()));
+        assert_eq!(
+            rows[1].sounds,
+            Some(vec![("pistol-1.wav".to_string(), 0.25), ("ricochet01.wav".to_string(), 0.05)])
+        );
+        assert_eq!(rows[2].music, None);
+        assert_eq!(rows[2].ambient, None);
+        // A `-` cell is "not recorded", not "silent".
+        let unrecorded = "\
+tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
+0\t0.0000\t12\t13\t1\t-\t-\t-\t-
+";
+        let rows = parse_audio_trace(unrecorded).expect("an unrecorded trace parses");
+        assert_eq!(rows[0].music_volume, None);
+        assert!(!rows[0].ambient_recorded);
+        assert_eq!(rows[0].sounds, None);
+    }
+
+    /// The comparator's four sound categories, which are the whole point of an audio gate.
+    #[test]
+    fn the_audio_comparator_names_missing_extra_mistimed_and_attenuated_sounds() {
+        let row = |tick: u32, sounds: Vec<(&str, f64)>| AudioTraceRow {
+            tick,
+            music: Some((12, 13, 1)),
+            music_volume: Some(0.5),
+            ambient_recorded: true,
+            ambient: Some(("01cantinaband02.wav".to_string(), 0.3)),
+            sounds: Some(sounds.into_iter().map(|(n, g)| (n.to_string(), g)).collect()),
+        };
+        let want = vec![
+            row(0, vec![("a.wav", 0.75), ("b.wav", 0.5), ("c.wav", 0.25), ("d.wav", 0.5)]),
+            row(36, vec![("e.wav", 0.5)]),
+        ];
+        let got = vec![
+            // `a.wav` quiet, `b.wav` missing, `g.wav` extra.
+            row(0, vec![("a.wav", 0.4), ("d.wav", 0.5), ("g.wav", 0.5)]),
+            // `c.wav` arrived a window late, `e.wav` never played and `h.wav` is extra.
+            row(36, vec![("c.wav", 0.25), ("h.wav", 0.5)]),
+        ];
+        let error = compare_audio_rows(&want, &got, 0.02).expect_err("a changed mix must fail");
+        for expected in [
+            "attenuated: a.wav at tick 0",
+            "missing: b.wav at tick 0",
+            "extra: g.wav at tick 0",
+            "mistimed: c.wav expected tick 0",
+            "missing: e.wav at tick 36",
+            "extra: h.wav at tick 36",
+        ] {
+            assert!(error.contains(expected), "the gate did not report `{expected}`:\n{error}");
+        }
+        // The same mix compares clean.
+        assert!(compare_audio_rows(&want, &want, 0.02).is_ok());
+        // A different music volume is its own difference, not a sound one.
+        let mut quieter = want.clone();
+        quieter[0].music_volume = Some(0.2);
+        let error = compare_audio_rows(&want, &quieter, 0.02).expect_err("a quieter song must fail");
+        assert!(error.contains("music_vol: tick 0"), "{error}");
+    }
+
+    /// The `# dynamic:` header keeps a captured one-shot in the fixture but out of the comparison
+    /// on both sides: its timing belongs to the AI or the body's walk phase, not the route.
+    #[test]
+    fn a_dynamic_header_removes_that_one_shot_from_both_sides() {
+        let header = "# dynamic: trprsht1.wav\n";
+        assert_eq!(dynamic_sounds(header), vec!["trprsht1.wav".to_string()]);
+        let row = AudioTraceRow {
+            tick: 0,
+            music: None,
+            music_volume: Some(0.0),
+            ambient_recorded: false,
+            ambient: None,
+            sounds: Some(vec![
+                ("trprsht1.wav".to_string(), 0.5),
+                ("dooropen.wav".to_string(), 0.5),
+            ]),
+        };
+        let mut rows = vec![row];
+        drop_dynamic_sounds(&mut rows, &["trprsht1.wav".to_string()]);
+        assert_eq!(
+            rows[0].sounds,
+            Some(vec![("dooropen.wav".to_string(), 0.5)]),
+            "the route-controlled sound stays and the dynamic one goes"
+        );
+    }
+
+    /// The committed fixtures live in the repo, so the gate's own contract is testable without the
+    /// game data or a window.
+    #[test]
+    fn the_committed_audio_fixtures_compare_equal_to_themselves() {
+        for name in ["level1-audio-port.tsv", "level1-audio-retail.tsv"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tools/parity/audiotrace")
+                .join(name);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let rows = parse_audio_trace(&text).expect("fixture parses");
+            compare_audio_rows(&rows, &rows, 0.02)
+                .unwrap_or_else(|e| panic!("{name} does not compare to itself: {e}"));
+        }
     }
 
     /// The trace's velocity is the retail fixture's quantity — the position derivative over the
@@ -19946,6 +20586,46 @@ fn sphere_in_frustum(planes: &[[f32; 4]; 6], centre: Vec3, radius: f32) -> bool 
     planes.iter().all(|p| p[0] * centre.x + p[1] * centre.y + p[2] * centre.z + p[3] >= -radius)
 }
 
+/// Is a portal's polygon in front of the eye and on screen? `sithRender_SectorPortals` admits the
+/// room behind a doorway only while the doorway itself is on screen. The audio cull reuses the same
+/// rule: retail mixes a 3D sound only while its source room is drawn, which is why the bar's
+/// `00rumbleamb01` positional loop is silent from the level's spawn corridor.
+fn doorway_on_screen(clip_from_world: Mat4, verts: &[[f32; 3]]) -> bool {
+    let (mut in_front, mut min_x, mut max_x, mut min_y, mut max_y) =
+        (false, f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for v in verts {
+        let p = clip_from_world * Vec4::new(v[0], v[1], v[2], 1.0);
+        if p.w <= 0.0 {
+            continue;
+        }
+        in_front = true;
+        let (x, y) = (p.x / p.w, p.y / p.w);
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    in_front && max_x >= -1.0 && min_x <= 1.0 && max_y >= -1.0 && min_y <= 1.0
+}
+
+/// The rooms retail would have drawn from `seed`: the portal walk, with each doorway admitted only
+/// while it is on screen. Falls back to the unfiltered walk when there is no camera.
+fn drawn_sectors(
+    solids: &collide::LevelGeometry,
+    gates: collide::Gates<'_>,
+    seed: usize,
+    cams: &Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+) -> Vec<usize> {
+    let clip = cams
+        .iter()
+        .find(|(camera, _, _)| camera.order == 0)
+        .map(|(camera, transform, _)| camera.clip_from_view() * Mat4::from(transform.affine().inverse()));
+    match clip {
+        Some(clip) => solids.visible_sectors(&[seed], gates, &mut |verts| doorway_on_screen(clip, verts)),
+        None => solids.visible_sectors(&[seed], gates, &mut |_| true),
+    }
+}
+
 fn cull_sectors(
     on: Option<Res<Cull>>,
     view: Option<Res<SectorView>>,
@@ -20194,7 +20874,12 @@ fn cull_sectors(
 #[derive(Resource, Default)]
 struct Ambience {
     sources: HashMap<String, Handle<AudioSource>>,
-    playing: Option<(String, Entity)>,
+    /// The sector loop that is **playing** — `name`, the sector `SOUND` volume, and its sink.
+    playing: Option<(String, f32, Entity)>,
+    /// The sector the loop state was last computed for: one frame behind the body, which is the
+    /// phase retail's console `warp` lands on (the sample on the warp's grid point still sees the
+    /// room being left). Reset on every level swap.
+    last_sector: Option<usize>,
 }
 
 /// Every `.wav` the shipped `.snd` classes name, ready to play, with the fade radii and
@@ -20936,6 +21621,7 @@ fn deliver_crossed(
     world: Option<Res<World>>,
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
+    solids: Option<Res<Collision>>,
     mut last: Local<Option<Vec3>>,
     mut count: Option<ResMut<TriggerCount>>,
 ) {
@@ -20948,19 +21634,32 @@ fn deliver_crossed(
         return;
     }
     let (a, b) = ([from.x, from.y, from.z], [now.x, now.y, now.z]);
-    let surfaces: Vec<usize> = sim.world.borrow().surface_links.iter().map(|(_, _, s)| *s).collect();
+    // Retail tests the surfaces of the sector the body is **in**, not every linked surface on the
+    // level: a doorway is two coincident polygons, one per room, and both carry a link. Fire both and
+    // `01_SoundTrack.cog` gets `onAdjoin` (+0.05) and `offAdjoin` (-0.1) in the same frame, so the
+    // music never leaves zero. The body's sector at the segment's start is the room it is leaving.
+    let from_sector = solids.as_deref().and_then(|solids| solids.0.sector_for_body(a));
+    let (surfaces, owners): (Vec<usize>, Vec<i32>) = {
+        let rt = sim.world.borrow();
+        (
+            rt.surface_links.iter().map(|(_, _, s)| *s).collect(),
+            rt.surface_links
+                .iter()
+                .map(|(_, _, s)| rt.surface_sector.get(*s).copied().unwrap_or(-1))
+                .collect(),
+        )
+    };
     let mut queued = 0usize;
-    for surface in surfaces {
+    for (surface, owner) in surfaces.into_iter().zip(owners) {
+        if owner >= 0 && from_sector.is_some_and(|sector| sector != owner as usize) {
+            continue;
+        }
         if !collide::crosses(&world.level, surface, a, b) {
             continue;
         }
-        let mut rt = sim.world.borrow_mut();
-        for (instance, _, linked) in &rt.surface_links.clone() {
-            if *linked == surface {
-                rt.pending_messages.push((*instance, "crossed", [0.0; 2], None));
-                queued += 1;
-            }
-        }
+        // The link id rides as the sender id: the soundtrack's fade-up and fade-down are the same
+        // surface polygon under two links, and only `GetSenderId()` tells them apart.
+        queued += sim.world.borrow_mut().crossed_surface(surface);
     }
     if let Some(count) = count.as_mut() {
         count.0 += queued;
@@ -21229,18 +21928,19 @@ fn share_collider(
 ///
 /// `sithCog_ProcessCog` wakes a waiting cog when its deadline passes; here the label is run again and
 /// `run_label` continues from the statement after the `sleep`.
-fn resume_sleeping_labels(capture: Option<Res<CaptureDt>>, 
-    time: Res<Time>,
+fn resume_sleeping_labels(
     world: Option<Res<World>>,
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<PulseCount>>,
 ) {
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
-    let dt = sim_dt(&time, capture.as_deref());
     let mut resumed = 0usize;
     for (script_name, vm) in &mut sim.instances {
-        vm.now += dt;
-          if std::env::var_os("BK_PULSE_TRACE").is_some() && vm.sleeping_label().is_some() {
+        // The cog clock advances **once** per frame, in `run_pulses_and_timers`; this system only
+        // asks whether a sleep has come due. Both used to add `dt`, so a coroutine's clock ran at
+        // twice real time — level 1's music fade (0.05 every 0.1 s) reached full volume in 1 s
+        // instead of 2 (#13).
+        if std::env::var_os("BK_PULSE_TRACE").is_some() && vm.sleeping_label().is_some() {
               println!("pulse: `{script_name}` sleeping (now {:.2}, until {:.2}, waiting {})", vm.now, vm.sleep_until, vm.sleeping());
           }
         if vm.sleeping() || vm.sleeping_label().is_none() {
@@ -25040,6 +25740,8 @@ fn play_requested_sounds(
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
     bank: Option<Res<SoundBank>>,
+    cursor: Option<Res<RouteCursor>>,
+    mut log: Option<ResMut<AudioLog>>,
 ) {
     let (Some(sim), Some(player), Some(bank)) = (sim, player, bank) else { return };
     let (requests, channel_volume, channel_pitch_of) = {
@@ -25059,8 +25761,8 @@ fn play_requested_sounds(
     let facing = (-yaw.sin(), yaw.cos());
     let mut played = 0;
     for request in requests {
-        let Some((clip, min, max, volume)) = bank.clips.get(&request.name.to_ascii_lowercase())
-        else {
+        let wav = request.name.to_ascii_lowercase();
+        let Some((clip, min, max, volume)) = bank.clips.get(&wav) else {
             continue;
         };
         let (distance, forward) = match request.pos {
@@ -25099,6 +25801,12 @@ fn play_requested_sounds(
             },
         ));
         played += 1;
+        if let Some(log) = log.as_mut() {
+            // The replay's tick, not wall time: a trace is a function of the script. `route_replay`
+            // has already advanced the cursor for this frame, so the frame's own tick is one back.
+            let tick = cursor.as_ref().map_or(0, |c| c.tick.saturating_sub(1));
+            log.played.push((tick, wav, gain));
+        }
     }
     if played > 0 {
         println!("sound: {played} request(s) played with attenuation");
@@ -25391,16 +26099,34 @@ fn ambient_follows_view(
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
     mut ambience: ResMut<Ambience>,
+    mut sinks: Query<&mut AudioSink>,
 ) {
     let (Some(world), Some(player)) = (world, player) else { return };
+    // The engine starts a sector's `SOUND` loop on a sector **entry**. The sector the level starts in
+    // is not an entry: level 1's start sector names `01cantinaband02.wav` in the JKL, yet retail's
+    // capture is silent there until the body leaves and comes back.
     // `SectorSound` may have replaced the sector's ambient: the script's override wins over the
     // level's own (`sithSoundMixer_SetSectorAmbientSound` writes the sector itself).
+    // Retail's console `warp` takes effect on the **next** frame, so the sample on the warp's grid
+    // point still sees the room the body is leaving. Apply the body's sector one frame late, which
+    // is the same phase: `audio_trace_sample` runs before this system.
+    let here = ambience.last_sector.unwrap_or(player.body.sector);
+    ambience.last_sector = Some(player.body.sector);
     let wanted = sim
-        .map(|sim| sim.world.borrow().sector_ambient.get(&(player.body.sector as i32)).cloned())
+        .map(|sim| sim.world.borrow().sector_ambient.get(&(here as i32)).cloned())
         .unwrap_or_default()
-        .or_else(|| world.level.sectors.get(player.body.sector).and_then(|s| s.sound.clone()));
-    if let Some((name, entity)) = ambience.playing.clone() {
-        if wanted.as_ref().is_some_and(|(wanted, _)| *wanted == name) {
+        .or_else(|| world.level.sectors.get(here).and_then(|s| s.sound.clone()));
+    if let Some((name, current, entity)) = ambience.playing.clone() {
+        if let Some((wanted, volume)) = wanted.clone()
+            && wanted == name
+        {
+            // `SectorSound` can move the volume while the body stays in the sector.
+            if (current - volume).abs() > 0.005
+                && let Ok(mut sink) = sinks.get_mut(entity)
+            {
+                sink.set_volume(Volume::Linear(volume.clamp(0.0, 1.0) * sound_gain()));
+                ambience.playing = Some((name, volume, entity));
+            }
             return;
         }
         commands.entity(entity).despawn();
@@ -25412,16 +26138,112 @@ fn ambient_follows_view(
         .spawn((
             AudioPlayer::new(source),
             PlaybackSettings {
-                // Once, not Loop: the engine plays the range `from..to` and wraps, so the next
-                // track is the mixer`s business (`Runtime::advance_music`), not the sink`s.
-                mode: PlaybackMode::Once,
+                // A sector `SOUND` is a loop: retail keeps the channel playing while the body is in
+                // the sector, so the mixer never restarts it.
+                mode: PlaybackMode::Loop,
                 volume: Volume::Linear(volume.clamp(0.0, 1.0) * sound_gain()),
                 ..default()
             },
         ))
         .id();
-    println!("ambience: {name} (volume {volume:.2})");
-    ambience.playing = Some((name, entity));
+    println!("ambience: {name} (volume {volume:.2}) in sector {}", player.body.sector);
+    ambience.playing = Some((name, volume, entity));
+}
+
+/// The script-started loop channels the mixer is playing (`Runtime::sound_loops`): one looping
+/// `AudioPlayer` per name+place, its volume the mixer's attenuated gain.
+#[derive(Resource, Default)]
+struct LoopPlayers {
+    /// `(name, position)` -> (sink entity, the gain it was set to).
+    playing: Vec<(String, Option<[f32; 3]>, Entity, f32)>,
+}
+
+fn play_script_loops(
+    mut commands: Commands,
+    sim: Option<Res<Sim>>,
+    player: Option<Res<Player>>,
+    bank: Option<Res<SoundBank>>,
+    ambience: Option<Res<Ambience>>,
+    collisions: Option<Res<Collision>>,
+    cams: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+    mut state: ResMut<LoopPlayers>,
+    mut sinks: Query<&mut AudioSink>,
+) {
+    let (Some(sim), Some(player)) = (sim, player) else { return };
+    let loops = sim.world.borrow().sound_loops.clone();
+    let visible: Option<Vec<usize>> = collisions.as_ref().map(|c| {
+        let rt = sim.world.borrow();
+        drawn_sectors(&c.0, rt.gates(), player.body.sector, &cams)
+    });
+    let listener = [
+        player.body.pos.x,
+        player.body.pos.y,
+        player.body.pos.z + PLAYER_RADIUS,
+    ];
+    let mut still: Vec<(String, Option<[f32; 3]>)> = Vec::new();
+    for l in &loops {
+        if let (Some(visible), Some(p)) = (visible.as_ref(), l.pos) {
+            let source = collisions.as_ref().and_then(|c| c.0.sector_at(p, 0.2));
+            if !source.is_some_and(|s| visible.contains(&s)) {
+                continue;
+            }
+        }
+        let fade = match l.pos {
+            Some(p) if l.max_radius > l.min_radius => {
+                let d = ((p[0] - listener[0]).powi(2)
+                    + (p[1] - listener[1]).powi(2)
+                    + (p[2] - listener[2]).powi(2))
+                .sqrt();
+                ((d - l.min_radius) / (l.max_radius - l.min_radius)).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        let gain = (l.volume * (1.0 - fade)).clamp(0.0, 1.0) * sound_gain();
+        if gain <= 0.0 { continue; }
+        if std::env::var_os("BK_SOUND_TRACE").is_some() {
+            eprintln!("loop: {} pos {:?} gain {gain:.3}", l.name, l.pos);
+        }
+        still.push((l.name.clone(), l.pos));
+        if let Some(entry) = state
+            .playing
+            .iter_mut()
+            .find(|(name, pos, _, _)| name.eq_ignore_ascii_case(&l.name) && *pos == l.pos)
+        {
+            if (entry.3 - gain).abs() > 0.01
+                && let Ok(mut sink) = sinks.get_mut(entry.2)
+            {
+                sink.set_volume(Volume::Linear(gain));
+                entry.3 = gain;
+            }
+            continue;
+        }
+        // The loop is a mixer ambient, so it is not in the `.snd` class table: the level loader only
+        // reads the wavs a sector `SOUND` names. Fall back to the sector table's handles.
+        let source = bank
+            .as_ref()
+            .and_then(|bank| bank.clips.get(&l.name).map(|c| c.0.clone()))
+            .or_else(|| ambience.as_ref().and_then(|a| a.sources.get(&l.name).cloned()));
+        let Some(source) = source else { continue };
+        let entity = commands
+            .spawn((
+                AudioPlayer::new(source),
+                PlaybackSettings {
+                    mode: PlaybackMode::Loop,
+                    volume: Volume::Linear(gain),
+                    ..default()
+                },
+            ))
+            .id();
+        state.playing.push((l.name.clone(), l.pos, entity, gain));
+    }
+    state.playing.retain(|(name, pos, entity, _)| {
+        if still.iter().any(|(n, p)| n.eq_ignore_ascii_case(name) && p == pos) {
+            true
+        } else {
+            commands.entity(*entity).despawn();
+            false
+        }
+    });
 }
 
 fn setup(
@@ -25454,6 +26276,43 @@ fn setup(
     for (name, bytes) in &world.ambient {
         let source = audio.add(AudioSource { bytes: bytes.clone().into() });
         ambience.sources.insert(name.clone(), source);
+    }
+    if let Some((_, _, entity)) = ambience.playing.take() {
+        commands.entity(entity).despawn();
+    }
+    ambience.last_sector = None;
+    // The engine starts the sector the player loads in straight away (level 1: sector 339,
+    // `01cantinaband02.wav` 0.30), so the first audio sample already has it.
+    {
+        // The level's own `walkplayer` thing (the runtime's `player_thing` order is the same index).
+        let player = world
+            .level
+            .things
+            .iter()
+            .position(|t| t.template.eq_ignore_ascii_case("walkplayer"))
+            .unwrap_or(0);
+        let sector = world
+            .level
+            .things
+            .get(player)
+            .and_then(|thing| usize::try_from(thing.sector).ok())
+            .unwrap_or(0);
+        if let Some((name, volume)) = world.level.sectors.get(sector).and_then(|s| s.sound.clone())
+            && let Some(source) = ambience.sources.get(&name).cloned()
+        {
+            let entity = commands
+                .spawn((
+                    AudioPlayer::new(source),
+                    PlaybackSettings {
+                        mode: PlaybackMode::Loop,
+                        volume: Volume::Linear(volume.clamp(0.0, 1.0) * sound_gain()),
+                        ..default()
+                    },
+                ))
+                .id();
+            println!("ambience: {name} (volume {volume:.2}) at load, sector {sector}");
+            ambience.playing = Some((name, volume, entity));
+        }
     }
 
     // The sound classes' clips: every wav they name, with the class's own fade radii and
@@ -27273,6 +28132,20 @@ struct RouteReplay(Option<RoutePlan>);
 /// `--route-trace <path>`: where the replay writes its sampled trace.
 #[derive(Resource, Default)]
 struct RouteTraceOut(Option<std::path::PathBuf>);
+
+/// `--audio-trace <path>`: where the replay writes its **audio** trace — the music selection and
+/// volume, the sector ambience, and the one-shot sounds the scripts and actors played, sampled on
+/// the route trace's 600 ms cadence.
+#[derive(Resource, Default)]
+struct AudioTraceOut(Option<std::path::PathBuf>);
+
+/// The one-shot sounds that actually played since the last audio-trace sample: `(replay tick, wav,
+/// gain)`. `gain` is the mixer's attenuated volume (`snd::volume`), so a sound 10 units away and one
+/// at the listener are different numbers, which is what "differently attenuated" means.
+#[derive(Resource, Default)]
+struct AudioLog {
+    played: Vec<(u32, String, f32)>,
+}
 
 /// The script's input for the tick `route_replay` is on, read by `walk_player`. `None` outside a
 /// replay and on the final tick.
