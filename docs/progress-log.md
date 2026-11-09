@@ -6412,3 +6412,13 @@ A separate physics bug surfaced with the roamer: `settle_walked`'s walker floor 
 actor that stepped off a catwalk to the room below (thing 331: z 7.85 -> -3.74 in one 100 ms
 sample). The floor snap is now bounded by the walker's 0.6-unit probe, and a deeper drop refuses the
 move instead of teleporting; positions stay graded.
+
+The roamer teleport was in `Runtime::step`'s actor landing, not `settle_walked`: its
+`resting_floor` query used an unbounded reach, so a body at a catwalk edge found the room 11 units
+below and was snapped to it. The reach is now 1.0 unit (a floor at the body's feet), and the walker
+settle refuses a snap deeper than its 0.6-unit probe. Actor 331 now stays on the catwalk: max actor
+position delta 1.31 units (limit 1.50).
+
+`encounter-gate.ps1`: **0 failures** — 57 strict identity pairs, 0 missing/extra, actor position
+1.31, yaw 14.8, health 0.0; shot/hit counts within the one-event band; sorted cadence within 250 ms;
+per-hit damage dH 8.0/dS 4.1; kill order empty on both sides.

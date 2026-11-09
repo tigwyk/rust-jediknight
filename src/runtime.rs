@@ -3113,7 +3113,11 @@ impl Runtime {
                 solids.resting_floor(
                     sector,
                     [t.pos[0], t.pos[1], t.pos[2] + lift],
-                    f32::INFINITY,
+                    // Only a floor at the body's feet is a landing. An unbounded reach found the
+                    // room 11 units below a catwalk edge and snapped the roaming powerdroid there
+                    // (z 7.85 -> -3.74 in one sample); a body that walks off is left to fall,
+                    // which this runtime does not model for a walked actor.
+                    1.0,
                     body_radius[index],
                     false,
                 )
