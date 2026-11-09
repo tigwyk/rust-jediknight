@@ -6188,3 +6188,26 @@ crossings, 6 recorded void rows, worst drop 3.35); `trace-gate.ps1` passes all *
 legs with 0 failures; `--live-play --start 01narshadda` passes (forward 0.09 units at 2.24 u/s peak;
 strafe displacement 0.00 but lateral peak 2.24 u/s, so the input is asserted; 1 projectile; 0.11 jump
 stopped by the ceiling).
+
+### Round 426: the runtime owns the player's environment and final pose
+
+`Runtime::step_player` now reads the environment itself instead of taking it from `walk_player`:
+it seats a body whose feet start below the floor, applies the sector's own `thrust`, the `slide` of
+the surface under the feet, and the water state (the new `Runtime::in_water`, which reads the
+surface water bits and `SITH_SECTOR_UNDERWATER`), then applies landing and fall-death damage to the
+local player's health through `damage_typed(..., DAMAGE_FALL)` (setting `player_dead` on a lethal
+one). The app's `apply_fall_damage` transfer and its per-frame `sync_player_thing` pose copy are
+gone; the step publishes the final eye point, facing, aim and sector onto the player's own thing, so
+the camera, the HUD, scripts and projectiles read one body. `player.yaw`, `player.pitch` and
+`player.eye` moved into `PlayerBody` (the `Deref` keeps every gameplay read where it was), and
+`SetThingVel(player, ...)` is consumed as an impulse inside the step.
+
+`teleport_player` and `respawn_player` are the only other writers: the `--ai-live`, `--use-live`,
+`--sight-live`, `--goal` and death paths call them instead of assigning the body directly (and the
+use-live probe no longer writes the runtime thing separately).
+
+Measured: `cargo test` **302 passed, 0 failed** (conveyor carry, sector thrust, water halving, the
+post-step thing pose, and fall damage applied by the step added); `--live-play --start 01narshadda`
+passes (forward 0.09 units at 2.24 u/s peak; 1 projectile; 0.11 jump stopped by the ceiling),
+`--goal`, `--sight-live` and `--use-live` pass, as do `--rules`, `--adjoins`, `--things`, `--feel`,
+`--die` and `--walk all` (24/34 contained, 46 crossings, worst drop 3.35).
