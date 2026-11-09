@@ -39,6 +39,9 @@ param(
   [string]$Route = 'tools/parity/routes/level1-audio-route.tsv',
   [string]$PortFixture = 'tools/parity/audiotrace/level1-audio-port.tsv',
   [string]$RetailFixture = 'tools/parity/audiotrace/level1-audio-retail.tsv',
+  [string]$DoorRoute = 'tools/parity/routes/level1-audio-route-door.tsv',
+  [string]$DoorPortFixture = 'tools/parity/audiotrace/level1-audio-door-port.tsv',
+  [string]$DoorRetailFixture = 'tools/parity/audiotrace/level1-audio-door-retail.tsv',
   [string]$Out = 'target/parity/audiotrace',
   [double]$Epsilon = 0.12,
   [switch]$Perturb,
@@ -57,6 +60,9 @@ function Resolve-PathUnderRoot([string]$Path) {
 $RoutePath = Resolve-PathUnderRoot $Route
 $PortPath = Resolve-PathUnderRoot $PortFixture
 $RetailPath = Resolve-PathUnderRoot $RetailFixture
+$DoorRoutePath = Resolve-PathUnderRoot $DoorRoute
+$DoorPortPath = Resolve-PathUnderRoot $DoorPortFixture
+$DoorRetailPath = Resolve-PathUnderRoot $DoorRetailFixture
 $OutDir = Resolve-PathUnderRoot $Out
 $Exe = Join-Path $Root 'target\release\bevi-knight.exe'
 
@@ -75,11 +81,11 @@ $runA = Join-Path $OutDir 'level1-audio-a.tsv'
 $runB = Join-Path $OutDir 'level1-audio-b.tsv'
 $log = Join-Path $OutDir 'level1-audio-port.log'
 
-function Invoke-Replay([string]$Trace) {
+function Invoke-Replay([string]$Trace, [string]$Route = $RoutePath) {
   if (Test-Path -LiteralPath $Trace) { Remove-Item -LiteralPath $Trace -Force }
   $env:BK_HEADLESS = '1'
   try {
-    $arguments = @('--start', $Level, '--replay', $RoutePath, '--audio-trace', $Trace, '--mute')
+    $arguments = @('--start', $Level, '--replay', $Route, '--audio-trace', $Trace, '--mute')
     if ($Game) { $arguments = @('--game', $Game) + $arguments }
     & $Exe @arguments *> $log
   } finally {
@@ -163,6 +169,67 @@ if (-not $retailOk) {
   exit 1
 }
 Write-Host ("PASS  retail: the replay matches {0} within {1}" -f $RetailFixture, $Epsilon)
+
+# 5. The bar doorway on its own: a fresh process for each side, because retail's body wedges on the
+#    elevator leaf when the four-leg process reaches the door. The fade's *authored* values are
+#    compared event-aligned: the port reaches the crossing one 600 ms sample earlier than retail
+#    (walk acceleration differs, movement parity's domain), so the first non-zero sample of each
+#    side anchors the pair and the phase is reported rather than hidden.
+Write-Host 'audio gate: replaying the fresh-process door segment twice...'
+$doorA = Join-Path $OutDir 'level1-audio-door-a.tsv'
+$doorB = Join-Path $OutDir 'level1-audio-door-b.tsv'
+Invoke-Replay $doorA -Route $DoorRoutePath
+Invoke-Replay $doorB -Route $DoorRoutePath
+$doorHashA = (Get-FileHash -LiteralPath $doorA -Algorithm SHA256).Hash
+$doorHashB = (Get-FileHash -LiteralPath $doorB -Algorithm SHA256).Hash
+if ($doorHashA -ne $doorHashB) {
+  Write-Host "FAIL  door determinism: two replays differ ($doorHashA vs $doorHashB)"
+  exit 1
+}
+Write-Host 'PASS  door determinism: two replays are identical'
+
+$doorOracle = & $Exe --audio-compare $DoorPortPath $doorA 2>&1
+if ($LASTEXITCODE -ne 0) {
+  Write-Host 'FAIL  door oracle: the replay differs from the committed door trace'
+  $doorOracle | Write-Host
+  exit 1
+}
+Write-Host 'PASS  door oracle: the replay matches tools/parity/audiotrace/level1-audio-door-port.tsv'
+
+function Read-MusicVol([string]$Path) {
+  $rows = @()
+  $first = $null
+  foreach ($line in (Get-Content -LiteralPath $Path)) {
+    if ($line.TrimStart().StartsWith('#')) { continue }
+    $cells = $line -split "`t"
+    if ($cells[0] -eq 'tick') { continue }
+    $value = [double]$cells[5]
+    if ($null -eq $first) { $first = $value }
+    $rows += [pscustomobject]@{ Tick = [int]$cells[0]; Value = $value }
+  }
+  return ,@($rows, $first)
+}
+$expected = Read-MusicVol $DoorRetailPath
+$actual = Read-MusicVol $doorA
+$expectedRows = $expected[0]; $expectedStart = $expected[1]
+$actualRows = $actual[0]; $actualStart = $actual[1]
+$expectedFrom = @($expectedRows | Where-Object { $_.Value -ne $expectedStart })
+$actualFrom = @($actualRows | Where-Object { $_.Value -ne $actualStart })
+if ($expectedFrom.Count -eq 0) { Write-Host 'FAIL  door fade: the retail reference shows no fade'; exit 1 }
+if ($actualFrom.Count -eq 0) { Write-Host 'FAIL  door fade: the replay shows no fade'; exit 1 }
+$pairs = [math]::Min($expectedFrom.Count, $actualFrom.Count)
+if ($pairs -lt 2) { Write-Host 'FAIL  door fade: fewer than two aligned samples'; exit 1 }
+$worst = 0.0
+for ($i = 0; $i -lt $pairs; $i++) {
+  $delta = [math]::Abs($expectedFrom[$i].Value - $actualFrom[$i].Value)
+  if ($delta -gt $worst) { $worst = $delta }
+}
+$phase = $actualFrom[0].Tick - $expectedFrom[0].Tick
+if ($worst -gt $Epsilon) {
+  Write-Host ("FAIL  door fade: {0} aligned sample(s), worst delta {1:F3} > {2}, phase {3} tick(s)" -f $pairs, $worst, $Epsilon, $phase)
+  exit 1
+}
+Write-Host ("PASS  door fade: {0} aligned sample(s) within {1} (worst delta {2:F3}); phase {3} tick(s) — the port crosses one sample earlier, movement acceleration only" -f $pairs, $Epsilon, $worst, $phase)
 
 Write-Host 'audio gate: 0 failure(s)'
 exit 0

@@ -16730,19 +16730,42 @@ fn compare_audio_rows(
     }
 }
 
+/// `# dynamic: name, name ...` in a trace header: one-shots whose timing belongs to the AI or the
+/// body's walk phase, not to the scripted route. They stay in the fixture (the capture recorded
+/// them) but are out of the comparison on both sides; the route-controlled sounds still compare.
+fn dynamic_sounds(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.trim_start().strip_prefix("# dynamic:"))
+        .flat_map(|list| list.split(',').map(|name| name.trim().to_ascii_lowercase()))
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn drop_dynamic_sounds(rows: &mut [AudioTraceRow], dynamic: &[String]) {
+    for row in rows.iter_mut() {
+        let Some(sounds) = row.sounds.as_mut() else { continue };
+        sounds.retain(|(name, _)| !dynamic.iter().any(|d| name.eq_ignore_ascii_case(d)));
+    }
+}
+
 /// `--audio-compare`: parse both traces and apply [`compare_audio_rows`] at `epsilon`.
 fn audio_trace_compare(
     expected: &std::path::Path,
     actual: &std::path::Path,
     epsilon: f64,
 ) -> Result<(), String> {
-    let read = |path: &std::path::Path| -> Result<Vec<AudioTraceRow>, String> {
+    let read = |path: &std::path::Path| -> Result<(Vec<AudioTraceRow>, Vec<String>), String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        parse_audio_trace(&text).map_err(|e| format!("{}: {e}", path.display()))
+        let rows = parse_audio_trace(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok((rows, dynamic_sounds(&text)))
     };
-    let want = read(expected)?;
-    let got = read(actual)?;
+    let (mut want, want_dynamic) = read(expected)?;
+    let (mut got, got_dynamic) = read(actual)?;
+    let mut dynamic = want_dynamic;
+    dynamic.extend(got_dynamic);
+    drop_dynamic_sounds(&mut want, &dynamic);
+    drop_dynamic_sounds(&mut got, &dynamic);
     let (states, sounds) = compare_audio_rows(&want, &got, epsilon)?;
     println!(
         "audio-compare: PASS {states} row(s), {sounds} sound event(s), music and ambience within {epsilon}"
@@ -17048,6 +17071,32 @@ tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
         quieter[0].music_volume = Some(0.2);
         let error = compare_audio_rows(&want, &quieter, 0.02).expect_err("a quieter song must fail");
         assert!(error.contains("music_vol: tick 0"), "{error}");
+    }
+
+    /// The `# dynamic:` header keeps a captured one-shot in the fixture but out of the comparison
+    /// on both sides: its timing belongs to the AI or the body's walk phase, not the route.
+    #[test]
+    fn a_dynamic_header_removes_that_one_shot_from_both_sides() {
+        let header = "# dynamic: trprsht1.wav\n";
+        assert_eq!(dynamic_sounds(header), vec!["trprsht1.wav".to_string()]);
+        let row = AudioTraceRow {
+            tick: 0,
+            music: None,
+            music_volume: Some(0.0),
+            ambient_recorded: false,
+            ambient: None,
+            sounds: Some(vec![
+                ("trprsht1.wav".to_string(), 0.5),
+                ("dooropen.wav".to_string(), 0.5),
+            ]),
+        };
+        let mut rows = vec![row];
+        drop_dynamic_sounds(&mut rows, &["trprsht1.wav".to_string()]);
+        assert_eq!(
+            rows[0].sounds,
+            Some(vec![("dooropen.wav".to_string(), 0.5)]),
+            "the route-controlled sound stays and the dynamic one goes"
+        );
     }
 
     /// The committed fixtures live in the repo, so the gate's own contract is testable without the

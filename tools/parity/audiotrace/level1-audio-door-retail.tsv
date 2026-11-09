@@ -1,3 +1,4 @@
+# dynamic: kwalk01.wav, kwalk02.wav, landbasic01.wav
 tick	t_s	music	music_end	music_loop	music_vol	ambient	ambient_vol	sounds
 0	0.0000	12	13	1	0.000	00rumbleamb01.wav	1.000	
 36	0.6000	12	13	1	0.000	00rumbleamb01.wav	1.000	kwalk02.wav@0.750
