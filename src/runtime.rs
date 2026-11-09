@@ -3099,7 +3099,13 @@ impl Runtime {
                 // A **projectile** that reaches a surface dies there: the engine's
                 // `sithThing_Update` explodes the weapon and removes it, while a stopped-but-alive
                 // bolt froze mid-air (its `vel` zeroed, its damage live) and could never hit again.
-                let projectile = self.types.get(i).copied() == Some(3);
+                // A type-3 body carrying the gravity bit is a shipped **gravity good**, not a shot:
+                // `_debris` ships `physflags=0x201` and has to land on the vertical stop below, while
+                // `_weapon` (the fired bolts) ships `0x200` with no gravity bit. Without the test a
+                // falling `_debris` chip died on the first surface it brushed and its corpse coasted
+                // on its last velocity instead of resting (round 246's gate).
+                let projectile =
+                    self.types.get(i).copied() == Some(3) && t.phys_flags & 0x1 == 0;
                 if hit && (resolved[0] - t.pos[0]).abs() + (resolved[1] - t.pos[1]).abs() > 0.01 {
                     if std::env::var_os("BK_AI_TRACE").is_some() && projectile {
                         eprintln!("ai: shot {i} hit a surface at {:?} (push to {:?}, sector {sector})", t.pos, resolved);
@@ -10788,6 +10794,65 @@ mod tests {
         assert!(
             rt.things[0].pos[2].abs() < 1e-3,
             "the good did not rest on the plane: z {}",
+            rt.things[0].pos[2]
+        );
+        assert_eq!(rt.things[0].vel[2], 0.0, "the landed good kept a downward velocity");
+    }
+
+    /// A `_debris` chip is `type=weapon` (`0x201`) but it is not a shot: a surface push its fall
+    /// brushes is not a projectile impact. The projectile rule — die on the surface in front of you
+    /// — is for `_weapon` bodies, which ship `0x200` with no gravity bit. Reading the type alone
+    /// destroyed a falling chip mid-air on the first plane it touched, and because a destroyed body
+    /// kept its last velocity it coasted down for ever (the `--things` gate's "landed debris chip
+    /// kept falling"). The good must keep falling and land.
+    #[test]
+    fn a_gravity_good_that_brushes_a_surface_lands_instead_of_dying() {
+        let mut rt = door_runtime();
+        rt.things[0].pos = [0.0, 0.0, 0.5];
+        rt.things[0].phys_flags = 0x201;
+        rt.templates = vec!["debris".into()];
+        rt.types = vec![3];
+        rt.mass.insert(0, 0.1);
+        rt.template_hit.insert("debris".into(), (0.2, 0.2));
+        let floor = crate::collide::Plane {
+            normal: [0.0, 0.0, -1.0],
+            point: [0.0; 3],
+            surface: 1,
+        };
+        // A tilted plane inside the body's radius: the push is above the mover's 0.01 horizontal
+        // threshold *and* has a vertical part that opposes the fall, which is the projectile arm's
+        // "surface in front of me" test.
+        let brace = crate::collide::Plane {
+            normal: [-0.866_025_4, 0.0, -0.5],
+            point: [0.0, 0.0, 0.4],
+            surface: 2,
+        };
+        rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+            sectors: vec![vec![floor, brace]],
+            hull: vec![vec![floor]],
+            boxes: vec![None],
+            portals: vec![Vec::new()],
+            spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+            floors: Vec::new(),
+            walls: Vec::new(),
+            wall_of: Default::default(),
+            floor_of: Default::default(),
+            faces: Vec::new(),
+            face_of: Default::default(),
+            portal_faces: Vec::new(),
+            surface_owner: Vec::new(),
+            adjoin_flags: Vec::new(),
+            ..Default::default()
+        }));
+        rt.step(None, 1.0 / 30.0);
+        assert!(!rt.things[0].destroyed, "a gravity good died on the surface it brushed");
+        for _ in 0..120 {
+            rt.step(None, 1.0 / 30.0);
+        }
+        assert!(!rt.things[0].destroyed, "the gravity good died before it landed");
+        assert!(
+            rt.things[0].pos[2].abs() < 1e-3,
+            "the good did not reach the floor: z {}",
             rt.things[0].pos[2]
         );
         assert_eq!(rt.things[0].vel[2], 0.0, "the landed good kept a downward velocity");
