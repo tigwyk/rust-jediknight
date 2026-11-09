@@ -1191,7 +1191,7 @@ fn main() {
             "--hit" => hit_check = true,
             "--camera-pull" => camera_pull_flag = true,
         "--ends" => ends_check_flag = true,
-            // `--die`: shields absorb first, health reaches 0, and the level's start brings the
+            // `--die`: the shield script's split, health reaches 0, and the level's start brings the
             // player back with a full bar.
             "--die" => die_check = true,
             "--fire" => {
@@ -6872,7 +6872,8 @@ fn main() {
     }
 
     if die_check {
-        // The player's own damage path: shields first, then health, then the level's start.
+        // The player's own damage path: the shield script's split, then health, then the level's
+        // start. Energy is a kind `item_shields.cog` protects (an impact blast bypasses the bar).
         let sim_world = runtime::Runtime::handle(&world.level);
         let mut rt = sim_world.borrow_mut();
         let player = rt
@@ -6883,12 +6884,12 @@ fn main() {
         let spawn = rt.things[player].pos;
         let (health, shields) = (rt.things[player].health, rt.player_shields);
         println!("die: player starts with {health:.0} health and {shields:.0} shields");
-        let (shields, health) = rt.damage_player(30.0, runtime::DAMAGE_IMPACT);
-        println!("die: 30 damage -> {shields:.0} shield(s), {health:.0} health");
-        assert!((shields - (100.0 - 30.0)).abs() < 0.01, "the shields did not absorb it");
-        assert!((health - 100.0).abs() < 0.01, "health moved before the shields were gone");
-        // Through the shields and into health: 70 shield + 130 health is lethal.
-        let (shields, health) = rt.damage_player(200.0, runtime::DAMAGE_IMPACT);
+        let (shields, health) = rt.damage_player(30.0, runtime::DAMAGE_ENERGY);
+        println!("die: 30 energy damage -> {shields:.0} shield(s), {health:.0} health");
+        assert!((shields - 70.0).abs() < 0.01, "the bar did not take the hit");
+        assert!((health - 100.0).abs() < 0.01, "health moved while the bar was above 50");
+        // Through the bar and into health: 70 shield and 100 health is lethal.
+        let (shields, health) = rt.damage_player(200.0, runtime::DAMAGE_ENERGY);
         println!("die: 200 more -> {shields:.0} shield(s), {health:.0} health");
         assert_eq!(shields, 0.0, "shields should be spent");
         assert_eq!(health, 0.0, "the player should be dead");
@@ -9247,10 +9248,16 @@ fn main() {
         }
         match landed {
             Some((index, _, carried)) => {
-                let left = rt.damage(player as i64, carried);
+                // A bolt on the walkplayer goes through the player's own damage path, which is where
+                // the shield bar stands (`item_shields.cog`'s split), not the generic thing path.
+                let shields_before = rt.player_shields;
+                let (shields, left) = rt.damage_player(carried, runtime::DAMAGE_ENERGY);
                 rt.things[index].destroyed = true;
-                println!("hit: the player took {carried:.0}, {left:.0} health left");
-                assert!(left < health_before, "the player took no damage");
+                println!("hit: the player took {carried:.0}, {shields:.0} shield(s) and {left:.0} health left");
+                assert!(
+                    shields < shields_before || left < health_before,
+                    "the player took no damage"
+                );
             }
             None => println!(
                 "hit: no bolt from thing {actor_index} reached the player on this level (the line of fire is blocked); the player's own shots are the evidenced direction here"
@@ -12826,11 +12833,13 @@ fn main() {
         .add_systems(Update, refresh_force_screen)
         .add_systems(Update, seed_force_screen_powers)
         .add_systems(Update, arm_for_capture);
-    // A replay must be reproducible between runs, not only between frames. Several systems draw from
-    // the shared LCG in `cog::pseudo_random`, which is thread-local, so the multi-threaded executor
-    // gives different systems different sequences and a hit can land a frame apart from run to run.
-    // One executor thread makes every call site see the same sequence. Play keeps the default.
-    if replaying {
+    // A replay or a door-encounter capture (`BK_ENCOUNTER_OUT`) must be reproducible between runs,
+    // not only between frames. Several systems draw from the shared LCG in `cog::pseudo_random`,
+    // which is thread-local, so the multi-threaded executor gives different systems different
+    // sequences and a hit can land a frame apart from run to run — the encounter gate reports that
+    // as shots/hits differing by more than its run-to-run slack. One executor thread makes every
+    // call site see the same sequence. Play keeps the default.
+    if replaying || std::env::var_os("BK_ENCOUNTER_OUT").is_some() {
         app.edit_schedule(bevy::app::Update, |schedule| {
             schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
         });
@@ -25631,6 +25640,146 @@ fn billboard_sprites(
     }
 }
 
+/// `BK_ENCOUNTER_OUT`: the fixed door-encounter timeline (issue #9).
+///
+/// One TSV carries the same three observations the retail capture samples from the engine's own
+/// memory — shots, landed player hits, and actor state at a fixed cadence — on the runtime's game
+/// clock. `tools/parity/port-encounter.ps1` runs this, `retail-capture.ps1 -EncounterMs` writes the
+/// retail half, and `tools/parity/encounter-gate.ps1` compares them.
+#[derive(Default)]
+struct EncounterTrace {
+    file: Option<std::fs::File>,
+    /// Runtime seconds of the first recorded frame; every `t_ms` is relative to it.
+    origin: Option<f32>,
+    /// Next fixed-cadence sample time, in runtime seconds.
+    next_sample: f32,
+    disabled: bool,
+    /// The first frame at the encounter pose has been recorded. The frame the app starts can still
+    /// see the level's spawn pose (the warp lands in `walk_player`, which may run after this one).
+    started: bool,
+}
+
+impl EncounterTrace {
+    /// Drain this frame's shot/hit events and, on the cadence, sample the player and the actors
+    /// around it. The runtime's clock is the time axis, so a fixed-step capture and retail's own
+    /// engine clock land on the same scale.
+    fn record(&mut self, rt: &mut runtime::Runtime, player: usize) {
+        use std::io::Write;
+        if self.disabled {
+            return;
+        }
+        if !self.started {
+            // Wait for the warp the capture asked for: the first frames can still hold the level's
+            // spawn pose until `walk_player` publishes the body, and a sample from there would put
+            // the wrong position at t=0.
+            if let Some((eye, _)) = WARP.get() {
+                let Some(body) = rt.things.get(player) else { return };
+                if (body.pos[0] - eye[0]).abs() > 0.05 || (body.pos[1] - eye[1]).abs() > 0.05 {
+                    return;
+                }
+            }
+            self.started = true;
+            rt.encounter_events.clear();
+        }
+        if self.file.is_none() {
+            let Some(path) = std::env::var_os("BK_ENCOUNTER_OUT") else {
+                self.disabled = true;
+                return;
+            };
+            match std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&path) {
+                Ok(mut file) => {
+                    let _ = writeln!(
+                        file,
+                        "t_ms\tkind\tthing\ttemplate\tx\ty\tz\tyaw\thealth\tshields\tdetail"
+                    );
+                    self.file = Some(file);
+                }
+                Err(error) => {
+                    eprintln!("encounter: cannot write {}: {error}", path.to_string_lossy());
+                    self.disabled = true;
+                    return;
+                }
+            }
+        }
+        let Some(file) = self.file.as_mut() else { return };
+        let origin = *self.origin.get_or_insert(rt.time);
+        for event in std::mem::take(&mut rt.encounter_events) {
+            let t_ms = ((event_time(&event) - origin).max(0.0) * 1000.0).round();
+            match event {
+                runtime::EncounterEvent::Shot {
+                    owner,
+                    template,
+                    pos,
+                    ..
+                } => {
+                    let _ = writeln!(
+                        file,
+                        "{t_ms:.0}\tshot\t{owner}\t{template}\t{:.4}\t{:.4}\t{:.4}\t\t\t\towner {owner}",
+                        pos[0], pos[1], pos[2]
+                    );
+                }
+                runtime::EncounterEvent::Hit {
+                    amount,
+                    shields,
+                    health,
+                    ..
+                } => {
+                    let _ = writeln!(
+                        file,
+                        "{t_ms:.0}\thit\t{player}\t\t\t\t\t\t{health:.1}\t{shields:.1}\tamount {amount:.1}"
+                    );
+                }
+            }
+        }
+        let t = rt.time - origin;
+        while self.next_sample <= t + 1e-4 {
+            let sample_ms = (self.next_sample * 1000.0).round();
+            let Some(body) = rt.things.get(player) else { return };
+            let _ = writeln!(
+                file,
+                "{sample_ms:.0}\tplayer\t{player}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.2}\t{:.1}\t{:.1}\t",
+                rt.templates.get(player).cloned().unwrap_or_default(),
+                body.pos[0],
+                body.pos[1],
+                body.pos[2],
+                body.yaw,
+                body.health,
+                rt.player_shields
+            );
+            for (index, thing) in rt.things.iter().enumerate() {
+                if index == player
+                    || thing.destroyed
+                    || thing.health <= 0.0
+                    || rt.types.get(index).copied() != Some(2)
+                {
+                    continue;
+                }
+                let (dx, dy) = (thing.pos[0] - body.pos[0], thing.pos[1] - body.pos[1]);
+                if dx * dx + dy * dy > 8.0 * 8.0 {
+                    continue;
+                }
+                let _ = writeln!(
+                    file,
+                    "{sample_ms:.0}\tactor\t{index}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.2}\t{:.1}\t\t",
+                    rt.templates.get(index).cloned().unwrap_or_default(),
+                    thing.pos[0],
+                    thing.pos[1],
+                    thing.pos[2],
+                    thing.yaw,
+                    thing.health
+                );
+            }
+            self.next_sample += 0.1;
+        }
+    }
+}
+
+fn event_time(event: &runtime::EncounterEvent) -> f32 {
+    match event {
+        runtime::EncounterEvent::Shot { t, .. } | runtime::EncounterEvent::Hit { t, .. } => *t,
+    }
+}
+
 /// Give every actor its `.ai` instinct class, and let the armed ones shoot at the player.
 ///
 /// The instinct scheduler's weights are not implemented (see `Runtime::ai_tick`); what this
@@ -25638,6 +25787,7 @@ fn billboard_sprites(
 fn ai_shots(capture: Option<Res<CaptureDt>>, 
     time: Res<Time>,
     sim: Option<Res<Sim>>,
+    mut encounter: Local<EncounterTrace>,
 ) {
     let Some(sim) = sim else { return };
     let dt = sim_dt(&time, capture.as_deref());
@@ -25652,6 +25802,7 @@ fn ai_shots(capture: Option<Res<CaptureDt>>,
     if fired > 0 {
         println!("ai: {fired} shot(s) at the player");
     }
+    encounter.record(&mut rt, index);
 }
 
 /// Swap the sector ambience when the player enters a sector with a different `SOUND`.
