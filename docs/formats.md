@@ -2144,8 +2144,11 @@ for (int32_t i = framesToApply; i > 0; i--) {
 ```
 
 `ApplyDrag` is `vel *= 1 - drag * dt`, so with `acceleration = target * drag` the velocity approaches the
-target exponentially and never overshoots. `integrate_walk` in `src/main.rs` is that loop, at
-`1/50` s with a rollover, and `--feel` pins the result:
+target exponentially and never overshoots. `integrate_walk` in `src/runtime.rs` is that loop, at
+`1/50` s with a rollover. `Runtime::step_player` owns the target assembly, this integration count and
+the jump; `walk_player` supplies the intent and the environment it reads, then reads the resulting
+body. The sub-step count also drives the sweep, so a frame with two engine steps moves the body twice. `--feel`
+pins the result:
 
 ```text
 feel: walk 6.67 u/s, drag 3.00; speed after 0.05 s 0.73, 0.15 s 2.89, 0.5 s 5.55, 2 s 6.27
@@ -3307,7 +3310,8 @@ net one-unit-per-second lift. The shipped users are updrafts — level 21's core
 and multiplayer `m5_antigrav.cog`'s four anti-gravity columns.
 
 The port folds it into both halves of the body: `Runtime::step` adds `thrust * dt` to a thing's velocity
-before it moves (a crate in the column rises), and `walk_player` adds it to the walk velocity's two
+before it moves (a crate in the column rises), and `walk_player` hands it to `Runtime::step_player`,
+which adds it to the walk velocity's two
 horizontal terms and to `vy` — the same place gravity enters. `--things` checks the arithmetic: a
 resting thing gains 5 u/s over a second and rises 2.58 units.
 
@@ -3330,7 +3334,7 @@ rdVector_ScaleAdd3Acc(&pThing->field_268, &v8, secDeltaTime);
 So a conveyor is both — the belt texture crawls and the body on it is carried. The port does the same:
 `Runtime::SurfaceState.slide` is the vector, the mesh's UVs get `slide * time` (the runtime does not
 integrate: from the clock, `texVertOffset` *is* `rate * time`, and the engine's 1024 wrap is
-`rem_euclid`), and `walk_player` adds `slide * dt` to the body while it stands on that surface.
+`rem_euclid`), and `Runtime::step_player` adds `slide * dt` to the body while it stands on that surface.
 `BK_SCROLL_TRACE=1` prints the carry. The shipped belts are `00_conveyor.cog` and level 2's
 `02_cratelift.cog`/`02_cratepuzzle_a.cog` — ten surfaces between them.
 

@@ -8177,8 +8177,8 @@ fn main() {
                 };
                 let cam_forward = flat(cam.forward().as_vec3());
                 let cam_right = flat(cam.right().as_vec3());
-                let forward = walk_target(1.0, 0.0, yaw);
-                let right = walk_target(0.0, 1.0, yaw);
+                let forward = runtime::walk_target(1.0, 0.0, yaw);
+                let right = runtime::walk_target(0.0, 1.0, yaw);
                 let forward = Vec3::new(forward[0], forward[1], 0.0);
                 let right = Vec3::new(right[0], right[1], 0.0);
                 assert!(
@@ -8391,7 +8391,7 @@ fn main() {
             let mut ticks = (seconds * 60.0) as i32;
             while ticks > 0 {
                 ticks -= 1;
-                integrate_walk(&mut vel, [terminal, 0.0], rules.drag, 1.0 / 60.0, &mut rollover);
+                runtime::integrate_walk(&mut vel, [terminal, 0.0], rules.drag, 1.0 / 60.0, &mut rollover);
             }
             (vel[0] * vel[0] + vel[1] * vel[1]).sqrt()
         };
@@ -8407,10 +8407,10 @@ fn main() {
         assert!(after[3] > terminal * 0.9, "the walk never reaches its terminal speed");
         let mut rollover = 0.0;
         let mut vel = [0.0f32; 2];
-        integrate_walk(&mut vel, [terminal, 0.0], rules.drag, 1.0, &mut rollover);
+        runtime::integrate_walk(&mut vel, [terminal, 0.0], rules.drag, 1.0, &mut rollover);
         let held = vel[0];
         for _ in 0..6 {
-            integrate_walk(&mut vel, [0.0, 0.0], rules.drag, 1.0 / 60.0, &mut rollover);
+            runtime::integrate_walk(&mut vel, [0.0, 0.0], rules.drag, 1.0 / 60.0, &mut rollover);
         }
         println!("feel: released at {held:.2} u/s, 0.1 s later {:.2}", vel[0]);
         assert!(vel[0] < held * 0.9 && vel[0] > 0.0, "the walk does not slide to a stop");
@@ -21960,6 +21960,10 @@ fn live_play_drive(
     if state.clock <= WALK_SECONDS + STRAFE_SECONDS {
         // Lateral movement after the forward walk: `D` is strafe right in the port's mapping.
         keys.press(KeyCode::KeyD);
+        if let Some(player) = player.as_deref() {
+            let speed = (player.vel[0] * player.vel[0] + player.vel[1] * player.vel[1]).sqrt();
+            state.peak_strafe_speed = state.peak_strafe_speed.max(speed);
+        }
         return;
     }
     if state.strafed.is_none() {
@@ -22014,10 +22018,11 @@ fn live_play_drive(
         })
         .unwrap_or((0.0, true));
     println!(
-        "live-play: forward walk moved {:.2} units (peak {:.2} u/s); strafe moved {:.2}; player health {:.1}{}",
+        "live-play: forward walk moved {:.2} units (peak {:.2} u/s); strafe moved {:.2} (peak {:.2} u/s); player health {:.1}{}",
         moved.0,
         state.peak_speed,
         strafed,
+        state.peak_strafe_speed,
         player_health,
         if player_dead { " (dead)" } else { "" }
     );
@@ -22090,6 +22095,15 @@ fn live_play_drive(
         );
         failed += 1;
     }
+    // The lateral phase can be stopped by furniture — level 1's spawn is against the cantina bar — but
+    // the input still has to produce lateral speed. A dropped or inverted strafe never does.
+    if strafed < 0.02 && state.peak_strafe_speed < 0.2 {
+        println!(
+            "live-play: FAIL the body strafed only {strafed:.2} units at {:.2} u/s",
+            state.peak_strafe_speed
+        );
+        failed += 1;
+    }
     // "Nothing to fire" is not a broken trigger: a bot map can start the player with an empty clip and
     // no weapon cog armed (m10, m_boss15 — `out of ammo (bin 11 is empty)`), and a saber level swings
     // instead of shooting. Report which one it is instead of calling the map broken.
@@ -22154,6 +22168,8 @@ struct LivePlayState {
     /// table 0.73 units ahead, and the walker's rewrite turns a blocked step into the velocity it made,
     /// so the *distance* is the room's while the speed is the input's.
     peak_speed: f32,
+    /// The same measure for the lateral phase: furniture can stop the displacement, not the input.
+    peak_strafe_speed: f32,
     max_moved: f32,
     start: Option<Vec3>,
     walked: Option<Vec3>,
@@ -25965,21 +25981,21 @@ const PLAYER_EYE: f32 = 0.037;
 /// ×0.7 (`sithPlayerActions_JumpWithVel`). Template lengths are model-space, so they are
 /// scaled by `MODEL_SCALE` into level space, gravity included.
 #[derive(Clone, Copy)]
-struct Rules {
+pub(crate) struct Rules {
     /// Settled ground speed in level units per second (walking).
-    walk: f32,
+    pub(crate) walk: f32,
     /// Upward velocity added by a jump.
     jump: f32,
     /// The level's `WORLD GRAVITY`, in level units per second squared.
     gravity: f32,
     /// Body radius for the collision solver (`movesize`).
-    radius: f32,
+    pub(crate) radius: f32,
     /// `surfdrag=` from the `walkplayer` template: what settles a thrust into a speed, and
     /// so what converts a force-speed term into one.
-    drag: f32,
+    pub(crate) drag: f32,
     /// `airdrag=` — the drag while not standing on a surface. Much smaller than `surfdrag`, which is
     /// why a jump keeps its momentum.
-    air_drag: f32,
+    pub(crate) air_drag: f32,
     /// The head-pitch clamp, in radians: `minheadpitch`/`maxheadpitch` from the actor template, which is
     /// what `sithControl` clamps against. Falls back to about 80 degrees either way.
     pitch_min: f32,
@@ -25992,9 +26008,8 @@ struct Rules {
 }
 
 impl Rules {
-    fn from_level(level: &jkl::Level) -> Rules {
+    pub(crate) fn from_level(level: &jkl::Level) -> Rules {
         let name = "walkplayer";
-        let thrust = level.template_f32(name, "maxthrust").unwrap_or(2.0);
         // `sithPhysics_UpdatePlayerPhysics` (0x4f6860) damps the horizontal velocity with
         // `ApplyDrag(vel, thing+0x20c - DAT_005231a4, 0, dt)`, and `DAT_005231a4` is **−0.2** in the
         // retail image (read at VA 0x5231a4 of the staged JK.EXE), so the rate is `surfdrag + 0.2`,
@@ -26064,11 +26079,11 @@ impl Rules {
     /// 0.5 there, and crouching in water therefore quarter-speeds the player.
     /// `extra` is the force-speed term: the engine adds it to `maxThrust` before drag
     /// settles the speed, so it converts the same way — `walk + extra * MODEL_SCALE / drag`.
-    fn extra_walk(&self, extra: f32) -> f32 {
+    pub(crate) fn extra_walk(&self, extra: f32) -> f32 {
         self.walk + extra * physics_scale() / self.drag.max(0.001)
     }
 
-    fn speed(&self, forward: f32, strafe: f32, run: bool, crouch: bool, water: bool) -> [f32; 2] {
+    pub(crate) fn speed(&self, forward: f32, strafe: f32, run: bool, crouch: bool, water: bool) -> [f32; 2] {
         // `move_multiplier`: FAST doubles, crouch *replaces* it with a half.
         let multiplier = if crouch {
             0.5
@@ -26088,7 +26103,7 @@ impl Rules {
     }
 
     /// A jump's upward velocity; crouching cuts it to 0.7.
-    fn jump_velocity(&self, crouch: bool) -> f32 {
+    pub(crate) fn jump_velocity(&self, crouch: bool) -> f32 {
         if crouch {
             self.jump * 0.7
         } else {
@@ -26272,28 +26287,6 @@ fn spawn_point(
     }
     best.filter(|(_, _, clearance)| *clearance > radius)
         .map(|(body, _room, _)| (body, sector))
-}
-
-/// The world direction of a movement input, from the engine's own basis.
-///
-/// JK builds the body's motion in its local frame and turns it into the world with the thing
-/// orientation, whose axes are `lvec` (forward) and `rvec = lvec × uvec` (right). With
-/// `lvec = (cos yaw, sin yaw, 0)` and `uvec = (0, 0, 1)` that is:
-///
-/// ```text
-/// forward = ( cos yaw,  sin yaw)
-/// right   = ( sin yaw, -cos yaw)      // lvec x uvec
-/// ```
-///
-/// The strafe sign was **backwards** (`(-sin yaw, cos yaw)`, which is *left*), so `A` and `D` were
-/// swapped. This function is the single place the mapping lives, and `--controls` checks it against the
-/// camera transform the renderer actually uses.
-fn walk_target(along: f32, across: f32, yaw: f32) -> [f32; 2] {
-    let (forward, right) = yaw_axes(yaw);
-    [
-        forward[0] * along + right[0] * across,
-        forward[1] * along + right[1] * across,
-    ]
 }
 
 /// The engine's own yaw basis, and the only place the mapping lives.
@@ -26497,41 +26490,6 @@ fn apply_look(
 /// `BK_INVERT_Y=1` restores retail's inverted vertical look.
 fn look_inverted() -> bool {
     std::env::var_os("BK_INVERT_Y").is_some()
-}
-
-/// One frame of the player's horizontal motion, integrated as the engine does.
-///
-/// `sithPhysics_UpdatePlayerPhysics` runs a **fixed 50 Hz** step (`OLDSTEP_TARGET_FPS`), adding
-/// `acceleration * OLDSTEP_DELTA_50FPS` to the velocity and applying `sithPhysics_ApplyDrag`, which
-/// multiplies by `1 - drag * dt`. With `acceleration = target * drag` the velocity approaches `target`
-/// exponentially and never overshoots, which is the feel of the retail walk: a short ramp, a short slide.
-///
-/// The rollover is the engine's own `physicsRolloverFrames`: leftover time carries to the next frame, so
-/// 60 fps and 144 fps produce the same motion.
-/// Integrate the walk velocity at the engine's own rate, and report how many 0.02 s sub-steps that
-/// was.
-///
-/// `sithPhysics_UpdateThingPhysics` (JK.EXE `0x4f6860`) converts a frame delta into
-/// `ROUND(dt * 50)` sub-steps of `0.02`, keeping the remainder in the thing (`+0x240`), and each
-/// sub-step integrates the velocity *and* calls `MoveThing` (`0x4e7950`) once. The caller needs the
-/// count for the second half of that: a single sweep per frame was covering up to five engine steps
-/// after a hitch, which can cross a seam no 0.02 s step can.
-fn integrate_walk(vel: &mut [f32; 2], target: [f32; 2], drag: f32, dt: f32, rollover: &mut f32) -> usize {
-    const STEP: f32 = 1.0 / 50.0;
-    let drag = drag.max(0.0);
-    *rollover += dt.max(0.0);
-    // A long stall (a load, a menu) must not turn into hundreds of steps.
-    *rollover = rollover.min(STEP * 8.0);
-    let mut steps = 0;
-    while *rollover >= STEP {
-        *rollover -= STEP;
-        for axis in 0..2 {
-            vel[axis] += target[axis] * drag * STEP;
-            vel[axis] *= (1.0 - drag * STEP).clamp(0.0, 1.0);
-        }
-        steps += 1;
-    }
-    steps
 }
 
 /// `--shot <path>`: render a few frames, save a PNG of the viewport and exit.
@@ -27103,30 +27061,18 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // port -y instead -- into the level's shut door, the wrong sector. The script camera still drives
     // the view; it does not steer the walk. (Retail's own input path reads the controls on every path
     // and builds the thrust from the body's yaw.)
-    let basis_yaw = player.yaw;
-    let [along, across] = player.rules.speed(forward, strafe, run, crouch, player.water);
-    // A force-speed term adds to `maxThrust` in the engine, so it scales both axes.
-    let force = if player.extra_speed > 0.0 {
-        player.rules.extra_walk(player.extra_speed) / player.rules.walk
-    } else {
-        1.0
-    };
-    let [along, across] = [along * force, across * force];
-    let target = walk_target(along, across, basis_yaw);
-    // Integrate the way `sithPhysics_UpdatePlayerPhysics` does: `acceleration` comes from the input,
-    // velocity takes `acceleration * dt`, and `ApplyDrag` scales it by `1 - drag * dt` — at a fixed
-    // 50 Hz step with a rollover (`OLDSTEP_TARGET_FPS`, `OLDSTEP_DELTA_50FPS`), so the feel does not
-    // depend on the frame rate. `a = target * drag` settles the velocity at exactly the target.
-    let drag = if player.grounded { player.rules.drag } else { player.rules.air_drag };
-    // How many of the engine's 0.02 s sub-steps this frame is worth; the move below runs once per
-    // sub-step, exactly where `UpdateThingPhysics` calls `MoveThing`.
-    let steps = {
-        let mut vel = player.vel;
-        let mut rollover = player.step_rollover;
-        let steps = integrate_walk(&mut vel, target, drag, dt, &mut rollover);
-        player.vel = vel;
-        player.step_rollover = rollover;
-        steps
+    // The app owns the keys and the body's facing; the runtime owns the target, the fixed-rate
+    // velocity integration and the jump. Keeping the walk in the body's frame is what the retail
+    // `walk11_spawn` trace shows while the opening camera plays.
+    let jump = live && keys.just_pressed(KeyCode::Space) && player.grounded;
+    let input = runtime::PlayerInput {
+        forward,
+        strafe,
+        run,
+        crouch,
+        jump,
+        yaw: player.yaw,
+        extra_speed: player.extra_speed,
     };
     // A scrolling surface carries whatever stands on it: `sithThing.c` adds
     // `scrollVector * dt` to the velocity of a thing attached to a `SITH_SURFACE_SCROLLING` surface,
@@ -27162,17 +27108,8 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
                 .unwrap_or([0.0; 3])
         })
         .unwrap_or([0.0; 3]);
-    let dir = [
-        player.vel[0] + carry[0] + thrust[0] * dt,
-        player.vel[1] + carry[1] + thrust[1] * dt,
-    ];
     if thrust != [0.0; 3] && std::env::var_os("BK_SCROLL_TRACE").is_some() {
         println!("thrust: sector {} accelerates the body at {thrust:?} units/s^2", player.sector);
-    }
-
-    if live && keys.just_pressed(KeyCode::Space) && player.grounded {
-        player.vy = player.rules.jump_velocity(crouch);
-        player.grounded = false;
     }
 
     // A body placed with its feet below the current floor needs the same initial seat as
@@ -27183,13 +27120,14 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         [player.pos.x, player.pos.y, player.pos.z + player.rules.radius],
     ) && player.pos.z - player.rules.radius < floor - 0.01
         && player.vy <= 0.0
+        && !jump
     {
         player.pos.z = floor + player.rules.radius;
         player.vy = 0.0;
         player.grounded = true;
     }
-    let mut pos = [player.pos.x, player.pos.y, player.pos.z];
-    let mut sector = player.sector;
+    let pos = [player.pos.x, player.pos.y, player.pos.z];
+    let sector = player.sector;
     // The player is **not** an attached body. `sithPhysics_FindFloor` — the only route to
     // `sithThing_AttachThingToSurface` outside the cog verb — runs at creation/load and for a body
     // that is already attached (`sithThing_UpdateMove`), and `sithPlayer_NewPlayer` (`0x4c8ec0`)
@@ -27199,18 +27137,18 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // every frame; `walker_step`'s vertical sweep stops the body at `floor + radius` and zeroes
     // `vy`, which is the engine's ground contact. Placed things are the ones that attach (created
     // through `sithThing_Initialize`/`LoadPostProcess`, `FindFloor(..., 1)`).
-    let mut vy = player.vy + thrust[2] * dt;
+    let vy = player.vy + thrust[2] * dt;
     let gravity = player.gravity;
     let trace = std::env::var_os("BK_WALK_TRACE").is_some();
     if trace {
         eprintln!(
-            "walk trace: live {live} W {} escape {} forward {forward} strafe {strafe} vel {:?} target {target:?} extra {} crouch {crouch}",
+            "walk trace: live {live} W {} escape {} forward {forward} strafe {strafe} vel {:?} extra {} crouch {crouch}",
             keys.pressed(KeyCode::KeyW),
             keys.pressed(KeyCode::Escape),
             player.vel,
             player.extra_speed
         );
-        eprintln!("walk trace: dt {dt:.4} drag {:.3} grounded {} steps?", drag, player.grounded);
+        eprintln!("walk trace: dt {dt:.4} grounded {}", player.grounded);
         // The player thing's `SetActorFlags` bits and `jkSetFlags` bits: a level's opening script uses these
         // to take the body out of action (the flag the engine's control loop tests is `player->flags & 0x202`).
         let (actor, jk) = sim
@@ -27267,19 +27205,19 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
             solids.0.floor_below(sector, pos)
         );
     }
-    let radius = player.rules.radius;
+    let rules = player.rules;
     let crossed = sim
         .as_deref()
         .map(|sim| {
             sim.world.borrow_mut().step_player(
                 &mut player.body,
                 &solids.0,
-                steps,
-                dir,
+                input,
+                &rules,
                 dt,
-                radius,
                 gravity,
-                thrust[2],
+                thrust,
+                carry,
                 gates,
             )
         })

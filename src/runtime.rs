@@ -920,6 +920,61 @@ pub struct PlayerBody {
     pub fall_fade: f32,
 }
 
+/// One frame of player intent. The app reads the keys and the body; the runtime turns this into
+/// a target velocity, integrates it at the engine's fixed rate, and applies a jump.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PlayerInput {
+    pub forward: f32,
+    pub strafe: f32,
+    pub run: bool,
+    pub crouch: bool,
+    pub jump: bool,
+    /// The body's facing in radians. The walk is built in the body's frame.
+    pub yaw: f32,
+    /// `SetActorExtraSpeed`'s force-speed term.
+    pub extra_speed: f32,
+}
+
+/// Map input in the body's frame to a world-space horizontal target.
+///
+/// The engine's basis has `forward = (-sin yaw, cos yaw)` and `right = (cos yaw, sin yaw)`;
+/// `crate::yaw_axes` is the single definition of that mapping.
+pub(crate) fn walk_target(along: f32, across: f32, yaw: f32) -> [f32; 2] {
+    let (forward, right) = crate::yaw_axes(yaw);
+    [
+        forward[0] * along + right[0] * across,
+        forward[1] * along + right[1] * across,
+    ]
+}
+
+/// One frame of the player's horizontal velocity, integrated as the engine does.
+///
+/// `sithPhysics_UpdatePlayerPhysics` runs a fixed 50 Hz step (`OLDSTEP_TARGET_FPS`), adding
+/// `acceleration * OLDSTEP_DELTA_50FPS` to the velocity and applying `sithPhysics_ApplyDrag`,
+/// which multiplies by `1 - drag * dt`. With `acceleration = target * drag` the velocity
+/// approaches `target * (1 - drag * dt)` exponentially; the decay runs inside the same sub-step.
+///
+/// The rollover is the engine's `physicsRolloverFrames`: leftover time carries to the next frame,
+/// so 60 fps and 144 fps produce the same motion. Returns the number of 0.02 s sub-steps, which is
+/// also how many times the caller must sweep the body.
+pub(crate) fn integrate_walk(vel: &mut [f32; 2], target: [f32; 2], drag: f32, dt: f32, rollover: &mut f32) -> usize {
+    const STEP: f32 = 1.0 / 50.0;
+    let drag = drag.max(0.0);
+    *rollover += dt.max(0.0);
+    // A long stall (a load, a menu) must not turn into hundreds of steps.
+    *rollover = rollover.min(STEP * 8.0);
+    let mut steps = 0;
+    while *rollover >= STEP {
+        *rollover -= STEP;
+        for axis in 0..2 {
+            vel[axis] += target[axis] * drag * STEP;
+            vel[axis] *= (1.0 - drag * STEP).clamp(0.0, 1.0);
+        }
+        steps += 1;
+    }
+    steps
+}
+
 pub struct Runtime {
     pub things: Vec<ThingState>,
     /// Template name per thing, for `GetThingTemplate`.
@@ -5629,26 +5684,56 @@ impl Runtime {
         fired
     }
 
-    /// Move the player body through the same `walker_step` the AI settle uses. Input, drag and the
-    /// sub-step count stay with the caller; the sweep, thing floors, velocity feedback and fall
-    /// death live here.
+    /// Advance the player body from one frame's input and carry it through the same `walker_step`
+    /// the AI settle uses. Run/walk scaling, drag, the fixed sub-step count, target assembly, jump,
+    /// the sweep, thing floors, velocity feedback and fall death live here; the caller only supplies
+    /// the intent and the environment it already reads.
+    ///
+    /// `carry` is a scrolling surface's velocity and `thrust` the sector's acceleration; both are
+    /// still read by the app in this ticket.
+    #[allow(clippy::too_many_arguments)]
     pub fn step_player(
         &mut self,
         body: &mut PlayerBody,
         solids: &crate::collide::Solids,
-        steps: usize,
-        dir: [f32; 2],
+        input: PlayerInput,
+        rules: &crate::Rules,
         dt: f32,
-        radius: f32,
         gravity: f32,
-        thrust_z: f32,
+        thrust: [f32; 3],
+        carry: [f32; 2],
         gates: Gates<'_>,
     ) -> bool {
+        let [along, across] = rules.speed(
+            input.forward,
+            input.strafe,
+            input.run,
+            input.crouch,
+            body.water,
+        );
+        // A force-speed term adds to `maxThrust` in the engine, so it scales both axes.
+        let force = if input.extra_speed > 0.0 {
+            rules.extra_walk(input.extra_speed) / rules.walk
+        } else {
+            1.0
+        };
+        let target = walk_target(along * force, across * force, input.yaw);
+        let drag = if body.grounded { rules.drag } else { rules.air_drag };
+        let steps = integrate_walk(&mut body.vel, target, drag, dt, &mut body.step_rollover);
+        if input.jump && body.grounded {
+            body.vy = rules.jump_velocity(input.crouch);
+            body.grounded = false;
+        }
         // The fall impact is measured before this frame's sector thrust, which is what the old
         // walker did when it read `player.vy` before committing the thrust-scaled local.
         let impact_vy = body.vy;
-        body.vy += thrust_z * dt;
+        body.vy += thrust[2] * dt;
         let before = body.pos.to_array();
+        let dir = [
+            body.vel[0] + carry[0] + thrust[0] * dt,
+            body.vel[1] + carry[1] + thrust[1] * dt,
+        ];
+        let radius = rules.radius;
         let mut pos = before;
         let mut sector = body.sector;
         let mut vy = body.vy;
@@ -10297,6 +10382,23 @@ mod tests {
         rt
     }
 
+    fn walk_body(pos: Vec3) -> PlayerBody {
+        PlayerBody {
+            pos,
+            vy: 0.0,
+            sector: 0,
+            grounded: true,
+            gravity: 4.0,
+            water: false,
+            vel: [0.0; 2],
+            step_rollover: 0.0,
+            last_move: 0.0,
+            fall_damage: 0.0,
+            fall_killed: false,
+            fall_fade: 1.0,
+        }
+    }
+
     /// `sithPhysics_UpdateThingPhysics`'s gravity arm is not a weapons-only rule: the shipped `_actor`
     /// carries `physflags=0x4a4f` and `mass=150`, so an actor that walks off its floor falls like the
     /// `_debris` goods. The gate is the thing's mass (`+0x204`) as well as the `0x1` bit, and a body
@@ -13392,36 +13494,158 @@ mod tests {
             ..Default::default()
         };
         let mut rt = door_runtime();
-        let mut body = PlayerBody {
-            pos: Vec3::new(0.0, 0.0, 0.5),
-            vy: 0.0,
-            sector: 0,
-            grounded: false,
-            gravity: 4.0,
-            water: false,
-            vel: [0.0; 2],
-            step_rollover: 0.0,
-            last_move: 0.0,
-            fall_damage: 0.0,
-            fall_killed: false,
-            fall_fade: 1.0,
-        };
+        let rules = crate::Rules::from_level(&Level::default());
+        let mut body = walk_body(Vec3::new(0.0, 0.0, 0.5));
+        body.grounded = false;
         for _ in 0..200 {
             rt.step_player(
                 &mut body,
                 &solids,
-                1,
-                [0.0, 0.0],
+                PlayerInput::default(),
+                &rules,
                 1.0 / 30.0,
-                0.065,
                 4.0,
-                0.0,
+                [0.0; 3],
+                [0.0; 2],
                 crate::collide::Gates::default(),
             );
         }
         assert!(body.grounded, "the player body never landed");
         assert!((body.pos.z - 0.065).abs() < 1e-3, "z {} after landing", body.pos.z);
         assert_eq!(body.sector, 0);
+    }
+
+    #[test]
+    fn step_player_reaches_the_walk_speed() {
+        let solids = crate::collide::test_room();
+        let mut rt = Runtime::new(&Level::default());
+        let rules = crate::Rules::from_level(&Level::default());
+        let mut body = walk_body(Vec3::new(1.5, 0.0, -0.935));
+        let input = PlayerInput {
+            forward: 1.0,
+            yaw: 90.0,
+            ..PlayerInput::default()
+        };
+        for _ in 0..120 {
+            rt.step_player(
+                &mut body,
+                &solids,
+                input,
+                &rules,
+                1.0 / 60.0,
+                4.0,
+                [0.0; 3],
+                [0.0; 2],
+                crate::collide::Gates::default(),
+            );
+        }
+        let speed = (body.vel[0] * body.vel[0] + body.vel[1] * body.vel[1]).sqrt();
+        assert!(
+            speed > rules.walk * 0.9 && speed < rules.walk * 1.01,
+            "the walk reached {speed:.3} after two seconds, not near {:.3}",
+            rules.walk
+        );
+        assert!(body.pos.x < 1.5, "the body did not walk: {:?}", body.pos);
+    }
+
+    #[test]
+    fn step_player_strafes_right() {
+        let solids = crate::collide::test_room();
+        let mut rt = Runtime::new(&Level::default());
+        let rules = crate::Rules::from_level(&Level::default());
+        let base = -1.0 + rules.radius;
+        let mut body = walk_body(Vec3::new(-0.5, 0.0, base));
+        let input = PlayerInput {
+            strafe: 1.0,
+            ..PlayerInput::default()
+        };
+        for _ in 0..60 {
+            rt.step_player(
+                &mut body,
+                &solids,
+                input,
+                &rules,
+                1.0 / 60.0,
+                4.0,
+                [0.0; 3],
+                [0.0; 2],
+                crate::collide::Gates::default(),
+            );
+        }
+        assert!(body.pos.x > -0.4, "D did not move the body right: {:?}", body.pos);
+    }
+
+    #[test]
+    fn step_player_jumps_and_lands() {
+        let solids = crate::collide::test_room();
+        let mut rt = Runtime::new(&Level::default());
+        let rules = crate::Rules::from_level(&Level::default());
+        let base = -1.0 + rules.radius;
+        let mut body = walk_body(Vec3::new(0.0, 0.0, base));
+        let mut peak = base;
+        for frame in 0..90 {
+            let input = PlayerInput {
+                jump: frame == 0,
+                ..PlayerInput::default()
+            };
+            rt.step_player(
+                &mut body,
+                &solids,
+                input,
+                &rules,
+                1.0 / 60.0,
+                4.0,
+                [0.0; 3],
+                [0.0; 2],
+                crate::collide::Gates::default(),
+            );
+            peak = peak.max(body.pos.z);
+        }
+        assert!(peak > base + 0.1, "the jump never rose: peak {peak:.3} from {base:.3}");
+        assert!(body.grounded, "the jump never landed");
+        assert!(
+            (body.pos.z - base).abs() < 1e-3,
+            "landed at {:.3}, not {base:.3}",
+            body.pos.z
+        );
+    }
+
+    #[test]
+    fn integrate_walk_keeps_the_fixed_fifty_hz_substeps() {
+        let mut vel = [0.0f32; 2];
+        let mut rollover = 0.0;
+        let mut steps = 0;
+        for _ in 0..60 {
+            steps += integrate_walk(&mut vel, [1.0, 0.0], 3.2, 1.0 / 60.0, &mut rollover);
+        }
+        assert_eq!(steps, 50, "one second at 60 fps was not fifty 0.02 s sub-steps");
+        let mut vel = [0.0f32; 2];
+        let mut rollover = 0.0;
+        assert_eq!(
+            integrate_walk(&mut vel, [1.0, 0.0], 3.2, 0.1, &mut rollover),
+            5,
+            "a 0.1 s frame was not five 0.02 s sub-steps"
+        );
+        // The engine's exponential approach settles at the target: ten seconds at 60 fps.
+        let mut vel = [0.0f32; 2];
+        let mut rollover = 0.0;
+        for _ in 0..600 {
+            integrate_walk(&mut vel, [1.2, 0.0], 3.2, 1.0 / 60.0, &mut rollover);
+        }
+        let settled = vel[0];
+        for _ in 0..60 {
+            integrate_walk(&mut vel, [1.2, 0.0], 3.2, 1.0 / 60.0, &mut rollover);
+        }
+        assert!(
+            (vel[0] - settled).abs() < 1e-3,
+            "the walk was still moving at {settled:.3} -> {:.3}",
+            vel[0]
+        );
+        // The measured retail band is 1.07-1.23 u/s; the engine's decay lands inside it.
+        assert!(
+            (1.07..=1.23).contains(&settled),
+            "the walk settled at {settled:.3}, outside the retail band"
+        );
     }
 
     #[test]

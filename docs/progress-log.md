@@ -6165,3 +6165,26 @@ floorless-settle unit test also checks that a step with no geometry leaves the w
 Measured: `cargo test` **293 passed, 0 failed**; `--ai` passes ("a body 0.4 inside a wall is
 pushed 4.75 back out by the step"); a live `--start 01narshadda --exit-after 900` run stayed up,
 drew an actor's motion and took an AI shot with the settle going through `advance_sim`.
+
+### Round 425: player input and horizontal integration move into the runtime
+
+`PlayerInput` now carries the app's intent: forward/strafe, run, crouch, jump, the body's yaw and
+the force-speed term; water is read from the `PlayerBody` it already owns. `Runtime::step_player`
+turns that into the target with
+`walk_target`, integrates it at the engine's fixed 50 Hz rollover with `integrate_walk`, applies the
+jump, then runs the same `walker_step` sweep it already owned. `walk_player` no longer builds a
+target, integrates velocity, counts sub-steps or writes `player.vy`; it passes the intent and reads
+the resulting `PlayerBody`. The target and integration helpers moved out of `src/main.rs`, so the two
+ray helpers have one home.
+
+The jump uses the old precondition (`Space` just pressed while grounded) before the runtime applies
+it, preserving the old floor-seat ordering. Strafing is covered by a synthetic-room step test; the
+level-1 live spawn's strafe phase still reports 0.00 because the body is against the cantina
+furniture, while its forward speed reaches 2.24 u/s.
+
+Measured: `cargo test` **297 passed, 0 failed** (settled walk band, 50 sub-steps per second, a jump
+that lands, and a rightward strafe added); `--walk all` passes (24/34 levels contained, 46 sector
+crossings, 6 recorded void rows, worst drop 3.35); `trace-gate.ps1` passes all **10** committed retail
+legs with 0 failures; `--live-play --start 01narshadda` passes (forward 0.09 units at 2.24 u/s peak;
+strafe displacement 0.00 but lateral peak 2.24 u/s, so the input is asserted; 1 projectile; 0.11 jump
+stopped by the ceiling).
