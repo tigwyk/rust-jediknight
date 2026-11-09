@@ -4,6 +4,16 @@
 # (tick = 36 x 1/60 s; x/y/z are the player BODY position, the value retail's `coords` prints;
 #  vel_x/vel_y/vel_z are the position derivative over the 600 ms sample window, in world units per second).
 #
+# `# epsilon` is this fixture's **stated tolerance**, in the trace's own units: the gate compares every
+# numeric column against it (sector stays exact). It is the retail harness's resolution, not a parity
+# slack: a 600 ms hold advances a variable amount of engine time (2-4 frames of the engine's [10,500] ms
+# clock, plus the first segment's window-activation wait with the key already down), so one sample's
+# displacement varies by up to a full sample of travel — 0.9 units at level 1's 0.875 u/s, and 1.5 u/s
+# once that displacement is divided by the 600 ms window into the velocity columns. The port advances
+# exactly 600 ms of game time per row, so the residual is that quantisation. Two retail captures of the
+# cantina leg already disagree by 0.18 units and by a sector at 1.8 s.
+# epsilon 1.70
+#
 # Provenance, per leg (all committed under tools/parity/):
 #   spawn     tools/parity/walktrace/spawn-walk.tsv       (retail capture at the level's spawn pose)
 #   cantina   tools/parity/walktrace/walk_cantina-walk.tsv
