@@ -44,6 +44,7 @@ public static class JkRetail {
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
   [DllImport("kernel32.dll")] static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int n, out IntPtr read);
+  [DllImport("kernel32.dll")] static extern bool WriteProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int n, out IntPtr written);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
 
   // One u32 from the game's memory (PROCESS_VM_READ), or -1. JK.EXE has a fixed 0x400000 base and no
@@ -74,6 +75,19 @@ public static class JkRetail {
   public static float ReadFloat(uint pid, long addr) {
     var buf = ReadBytes(pid, addr, 4);
     return buf == null ? float.NaN : BitConverter.ToSingle(buf, 0);
+  }
+
+  // Capture instrumentation only: write one u32 into the launched game. The harness uses this to set
+  // its music-initialized flag when the CD/MCI device is absent, so the level's SetMusicVol calls are
+  // not dropped (they are the only source of the script's fade).
+  public static bool WriteU32(uint pid, long addr, uint value) {
+    IntPtr h = OpenProcess(0x0010 | 0x0020 | 0x0008, false, pid);
+    if (h == IntPtr.Zero) { return false; }
+    try {
+      var buf = BitConverter.GetBytes(value); IntPtr written;
+      if (!WriteProcessMemory(h, new IntPtr(addr), buf, 4, out written) || written.ToInt64() != 4) { return false; }
+      return true;
+    } finally { CloseHandle(h); }
   }
 
   // WM_CLOSE on the game window runs the engine's own shutdown: it stops the level, shuts DirectDraw
