@@ -1,0 +1,15 @@
+# Level-1 audio route, door segment (issue #13): the bar doorway on its own, captured in a
+# fresh process so the body reaches the threshold without the four-leg walk's state.
+#
+# Geometry (`--collide --surfaces-at -8,-5,-1.05`): the adjoin is a y = -5 plane, surface 206
+# (sector 19, adjoin 73) spanning x -8.10..-7.90, z -1.150..-0.700, normal (0,-1,0); 213 is the
+# opposite face. Retail `crossed` fires on this opening (a capture recorded `currvol` 0.75), so
+# the leg walks through the opening in y.
+#
+# kind	name		x		y		z		yaw_deg
+warp	bar_in		-8.000000	-4.600000	-0.925000	180.000000
+input	150	1	0
+warp	return		-8.000000	-5.400000	-0.925000	0.000000
+input	6	0	0
+warp	bar_out		-8.000000	-5.400000	-0.925000	0.000000
+input	150	1	0

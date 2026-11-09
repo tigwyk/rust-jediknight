@@ -187,6 +187,10 @@ pub struct Thing {
     pub frames: Vec<[f32; 6]>,
     /// `vel=(x/y/z)`.
     pub vel: [f32; 3],
+    /// `aiclass=` on the **placement**, which overrides the template's. Level 1's door room ships
+    /// `powerdroid` thing 331 with `aiclass=gonkroam.ai` over its template's `gonk.ai`, and the
+    /// roaming variant is the one retail turns with (`RandomTurn`/`Roam`).
+    pub aiclass: Option<String>,
 }
 
 impl Thing {
@@ -665,6 +669,7 @@ fn parse_thing(line: &str) -> Option<Thing> {
     let mut flags = 0;
     let mut frames = Vec::new();
     let mut vel = [0.0; 3];
+    let mut aiclass = None;
     for word in f[9..].iter() {
         if let Some(v) = word.strip_prefix("thingflags=0x") {
             flags = u32::from_str_radix(v, 16).unwrap_or(0);
@@ -678,6 +683,11 @@ fn parse_thing(line: &str) -> Option<Thing> {
             if nums.len() == 3 {
                 vel = [nums[0], nums[1], nums[2]];
             }
+        } else if let Some(v) = word.strip_prefix("aiclass=") {
+            let v = v.trim();
+            if !v.is_empty() {
+                aiclass = Some(v.to_string());
+            }
         }
     }
     Some(Thing {
@@ -690,6 +700,7 @@ fn parse_thing(line: &str) -> Option<Thing> {
         flags,
         frames,
         vel,
+        aiclass,
     })
 }
 
@@ -737,5 +748,16 @@ mod tests {
         let actor = Thing::parse_frame("frame=(-4.476/15.877/3.840)").expect("actor frame");
         assert_eq!(actor, [-4.476, 15.877, 3.84, 0.0, 0.0, 0.0]);
         assert_eq!(Thing::parse_frame("frame=(1/2)"), None);
+    }
+
+    /// A placement can override its template's `aiclass=`; the engine loads the placement's. Level
+    /// 1's door powerdroid is the shipped case (`gonkroam.ai` over the template's `gonk.ai`).
+    #[test]
+    fn a_placement_carries_its_own_aiclass() {
+        let text = "\nWORLD THINGS 1\n\n0:\tpowerdroid\tpowerdroid\t1.0\t2.0\t3.0\t0.0\t-15.0\t0.0\t326\taiclass=gonkroam.ai\n";
+        let level = parse(text);
+        assert_eq!(level.things.len(), 1);
+        assert_eq!(level.things[0].template, "powerdroid");
+        assert_eq!(level.things[0].aiclass.as_deref(), Some("gonkroam.ai"));
     }
 }

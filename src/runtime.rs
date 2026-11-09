@@ -6,7 +6,7 @@
 //! that read or write it. Everything starts from the level file and is then mutated
 //! by scripts, exactly as the engine does.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::math::{Quat, Vec3};
 
@@ -107,6 +107,20 @@ pub struct SoundRequest {
     pub pitch: f32,
 }
 
+/// A positional/ambient **loop** a script started (`PlaySoundThing`/`PlaySoundPos` with a loop or
+/// ambient flag in its final argument, e.g. `00_PlayAmbient.cog`'s `0x045`). Retail's mixer keeps
+/// these as loop channels next to the sector's `SOUND` loop; the capture's `ambient` column is the
+/// loudest *playing* loop channel, not the sector's declared sound.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SoundLoop {
+    pub name: String,
+    pub volume: f32,
+    pub pos: Option<[f32; 3]>,
+    pub min_radius: f32,
+    pub max_radius: f32,
+    pub flags: i32,
+}
+
 /// `RotatePivot(thing, frame, seconds)`: spin a thing about the pivot its own `frame=` entry names.
 ///
 /// The engine keeps this on the track parameters (`curOrient.scale` is the pivot, `moveFrameDeltaAngles`
@@ -125,6 +139,44 @@ pub struct PivotSpin {
     /// accumulation that drifts.
     pub start_pos: [f32; 3],
     pub start_angles: [f32; 3],
+}
+
+/// One observation the `BK_ENCOUNTER_OUT` trace writes: a shot as it leaves a shooter, or damage
+/// that landed on the local player. Both carry the runtime's own clock, so the encounter TSV is a
+/// game-time timeline rather than a sample of wall time.
+#[derive(Clone, Debug)]
+pub enum EncounterEvent {
+    Shot {
+        t: f32,
+        owner: usize,
+        template: String,
+        pos: [f32; 3],
+    },
+    /// A fired shot that landed on the player: its launch time and shooter, written as the trace's
+    /// `shot` row. Retail's fixture can only see shots through their impact on the player, so this
+    /// is the comparable observation; the plain `Shot` event is the spawn record.
+    ShotLanded {
+        t: f32,
+        owner: usize,
+        template: String,
+        pos: [f32; 3],
+    },
+    /// The player was hit: the amount the two bars actually lost, and the bar values after the hit —
+    /// the same numbers the retail capture writes from `thing + 0x134` and inventory bin 60.
+    Hit {
+        t: f32,
+        amount: f32,
+        shields: f32,
+        health: f32,
+    },
+}
+
+/// Whether the door-encounter telemetry is on (`BK_ENCOUNTER_OUT`). A process-wide check: the flag
+/// is set once by the capture harness, and queuing an event per shot is only wanted then.
+fn encounter_capture() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("BK_ENCOUNTER_OUT").is_some());
+    *ON
 }
 
 #[derive(Clone)]
@@ -291,6 +343,8 @@ pub const SAVE_SECTION: u32 = 0x1001;
 /// `SithDamageType`: what kind of hurt, as a bitmask. Only the bits this port distinguishes.
 pub const DAMAGE_IMPACT: u32 = 0x01;
 pub const DAMAGE_ENERGY: u32 = 0x02;
+/// Fire (0x04) is the other kind `item_shields.cog` protects, beside energy.
+pub const DAMAGE_FIRE: u32 = 0x04;
 pub const DAMAGE_SABER: u32 = 0x10;
 pub const DAMAGE_FALL: u32 = 0x40;
 /// `sithActor_PlayDamageSoundFx` (`0x4ece90`) only cries out for a blow of at least **3** points
@@ -316,6 +370,10 @@ pub const SECTOR_SEEN: u32 = 0x4000;
 pub const TF_CAPTURED: u32 = 0x400;
 /// `SITH_TF_INCAMFOV`: latched the first time the renderer draws the thing.
 pub const TF_INCAMFOV: u32 = 0x100000;
+/// The JKL `thingflags` difficulty bits: `0x1000` not in Easy, `0x2000` not in Medium, `0x4000`
+/// not in Hard. The loader does not create a placement the active difficulty excludes. The port
+/// runs Medium (`GetDifficulty` answers 1), so a row carrying this bit is not spawned.
+pub const TF_NOT_MEDIUM: u32 = 0x2000;
 /// A template's `type=` word as the engine's `SithThingType` number.
 ///
 /// From `types_enums.h`: camera 1, actor 2, weapon 3, debris 4, item 5, explosion 6,
@@ -906,7 +964,7 @@ pub struct ThingMotion {
 
 /// The player's own body: where it is, how it moves, and where it looks. The runtime writes it
 /// through `step_player`, `teleport_player` and `respawn_player`; everything else reads it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PlayerBody {
     pub pos: Vec3,
     pub vy: f32,
@@ -925,6 +983,35 @@ pub struct PlayerBody {
     pub pitch: f32,
     /// How high the eye sits above the body's centre.
     pub eye: f32,
+    /// How high the body's **centre** rests above its floor. `radius` for a body that fell onto the
+    /// surface (the swept sphere contact) and `sithPhysics_GetThingHeight` (`walkplayer`'s model insert,
+    /// 0.120114) for one a `warp` attached: retail's warped route poses read `coords` z at exactly
+    /// `floor + 0.120114` and hold it while walking, where the sphere contact is 0.055 lower.
+    pub rest: f32,
+}
+
+impl Default for PlayerBody {
+    /// A body that has not been warped rests at the movement sphere's contact, so `rest` defaults to
+    /// the player's radius rather than zero: zero would seat it on its own floor.
+    fn default() -> Self {
+        PlayerBody {
+            pos: Vec3::ZERO,
+            vy: 0.0,
+            sector: 0,
+            grounded: false,
+            gravity: 0.0,
+            water: false,
+            vel: [0.0; 2],
+            step_rollover: 0.0,
+            last_move: 0.0,
+            fall_killed: false,
+            fall_fade: 1.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            eye: crate::PLAYER_EYE,
+            rest: crate::PLAYER_RADIUS,
+        }
+    }
 }
 
 /// One frame of player intent. The app reads the keys and the body; the runtime turns this into
@@ -1003,8 +1090,18 @@ pub struct Runtime {
     /// World gravity, from the level's own `World Gravity` line: what pulls a physics thing down.
     pub gravity: f32,
     /// Every shot the runtime spawned, so a check can ask "did the trigger work" without sampling
-    /// live things: a bolt can be born and destroyed between two frames at 10 fps.
+    /// live things: a bolt can be born and destroyed between two frames at 10 fps. The count is
+    /// cheap and always kept; the per-event timeline below is only queued when the harness asks.
     pub shots_fired: usize,
+    /// `BK_ENCOUNTER_OUT`: shots and landed player hits in time order, drained by the app into the
+    /// door-encounter TSV. Empty unless the capture harness sets the variable.
+    pub encounter_events: Vec<EncounterEvent>,
+    /// The launch time of every fired projectile by its thing index, so a hit can report the shot
+    /// that produced it (retail's fixture only records shots that landed on the player).
+    pub encounter_shot_time: BTreeMap<usize, f32>,
+    /// Whether new events are queued. The capture harness turns it on by setting `BK_ENCOUNTER_OUT`
+    /// at launch; tests flip it directly.
+    pub encounter_events_enabled: bool,
     /// A template's `health=`/`maxhealth=`, so a created thing starts with real health.
     pub template_health: BTreeMap<String, f32>,
     /// A template's `vel=` — a projectile's launch speed — and its `damage=`.
@@ -1024,6 +1121,12 @@ pub struct Runtime {
     pub template_min_damage: BTreeMap<String, f32>,
     /// `maxhealth=`, the ceiling `HealThing` clamps to.
     pub template_max_health: BTreeMap<String, f32>,
+    /// Templates in the shipped `_debris` family (the template itself or anything deriving from it).
+    /// They are `type=weapon` but they are rubble, not shots: the mover must let them land instead of
+    /// destroying them on the first surface they brush. The fired-projectile arm keys on this, not on
+    /// the gravity bit, because shipped gravity-falling projectiles (`+grenade2`, `08tiebomb`) are
+    /// still shots even though a cog creates the tie bomb.
+    pub template_debris: BTreeSet<String>,
     /// A template's `thingflags=`, the word `SITH_TF_*` bits live in: a shot starts with it, and the
     /// player-fire pre-sweep tests its bit `0x200000` before raising `dodge`'s shot event.
     pub template_thingflags: BTreeMap<String, u32>,
@@ -1031,6 +1134,10 @@ pub struct Runtime {
     /// ships `0x20440d`, whose bit `0x200000` is what `sithWeapon_WeaponFireProjectile`'s player
     /// pre-sweep tests before it raises `dodge`'s shot event.
     pub template_typeflags: BTreeMap<String, u32>,
+    /// A template's `damageclass=`, the `SithDamageType` word `sithActor_DamageActor` branches on.
+    /// `_weapon` ships energy (`0x2`), `_debris` and `08tiebomb` impact (`0x1`), `_explosion` and
+    /// `+grenade2` fire (`0x4`). Read through the template chain, so `+bryarbolt` inherits `_weapon`'s.
+    pub template_damageclass: BTreeMap<String, u32>,
     /// A template's `soundclass=`, keyed by template name and reduced to the `.snd` class's lowercase
     /// basename: the class `talk` picks its mood sounds from (`sithSoundClass_PlayModeRandom`).
     pub template_soundclass: BTreeMap<String, String>,
@@ -1038,6 +1145,14 @@ pub struct Runtime {
     /// sound-mode **event name** (`create`, `happy`, `fear`, …), each a list of `(wav, maxVolume)`.
     /// The runtime has no file access, so `setup` hands this over after the loader parses them.
     pub sound_classes: BTreeMap<String, BTreeMap<String, Vec<(String, f32)>>>,
+    /// The stream the **AI's own shot sound** picks from. Every other sound-mode pick draws on
+    /// `cog::pseudo_random`, as retail's `rand()` does, because those picks sit in the same stream
+    /// as the AI's fire delays and every script's `Rand()`. A shot names no wav in retail, so this
+    /// fallback must not draw there — a runtime-local LCG keeps it random per run and deterministic.
+    sound_rng: u64,
+    /// The row last played per `(thing, mode)`, so a check can name the sound a hit just queued
+    /// without drawing again.
+    last_sound: BTreeMap<(usize, String), String>,
     /// `timer=`: how long a created thing lives, in seconds, before `sithThing_Update` destroys it.
     /// An impact effect's whole lifetime is this field.
     pub template_timer: BTreeMap<String, f32>,
@@ -1287,6 +1402,10 @@ pub struct Runtime {
     pub cur_weapon_thing: Option<usize>,
     /// `GetThingClassCog`: the cog a thing's class names.
     pub thing_class_cog: BTreeMap<usize, i32>,
+    /// `CaptureThing`'s cog: the engine stores the calling cog at `thing + 0x2a0`, and the thing's
+    /// `damaged`/`killed` messages go there (`FUN_00502e40`). One cog per thing; a later capture
+    /// replaces it.
+    pub thing_capture_cog: BTreeMap<usize, i32>,
     /// Each class script's `skill:` answers (`bin -> ReturnEx`), keyed by its cog instance.
     /// `SkillTarget` returns the victim's class script's answer, which is where a force power's
     /// damage actually lives (`actor_pm.cog`: 10 for grip, 5 for deadly sight).
@@ -1378,6 +1497,9 @@ pub struct Runtime {
     /// `PlaySoundThing` names a thing and `PlaySoundPos` a position; a request with no place
     /// is `PlaySoundLocal`, which the mixer does not attenuate by distance.
     pub sounds: Vec<SoundRequest>,
+    /// Script-started loop channels (`PlaySound*` with the loop/ambient flag), one entry per
+    /// name+place: a timer that repeats the same request every 0.5 s refreshes it, it does not stack.
+    pub sound_loops: Vec<SoundLoop>,
     /// Pending timers, summed — enough to show scripts driving a clock.
     pub timers: f32,
     pub inv: BTreeMap<i32, f32>,
@@ -1862,6 +1984,56 @@ impl Runtime {
                     .map(|flags| (t.name.to_ascii_lowercase(), flags))
             })
             .collect();
+        // The shipped `_debris` family is `type=weapon physflags=0x201`, yet it is rubble: the mover
+        // lets it land. Its name chain is the actual distinction, because the gravity bit alone also
+        // covers fired projectiles (`+grenade2 physflags=0x225`, `08tiebomb` the same), and a cog
+        // creates the tie bomb with `CreateThingAtPos`, so "has an owner" cannot stand in for it.
+        let in_debris_family = |name: &str| {
+            let mut current = name;
+            for _ in 0..8 {
+                if current.eq_ignore_ascii_case("_debris") {
+                    return true;
+                }
+                let Some(template) = level
+                    .templates
+                    .iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(current))
+                else {
+                    break;
+                };
+                match template.base.as_deref() {
+                    Some(base) => current = base,
+                    None => break,
+                }
+            }
+            false
+        };
+        let template_debris: BTreeSet<String> = level
+            .templates
+            .iter()
+            .filter(|t| in_debris_family(&t.name))
+            .map(|t| t.name.to_ascii_lowercase())
+            .collect();
+        // `damageclass=` selects the hurt kind: `_weapon` ships energy, `_debris`/`08tiebomb`
+        // impact, `_explosion`/`+grenade2` fire. The hit path passed `DAMAGE_ENERGY` for every shot,
+        // which sent a grenade's fire and a tie bomb's impact down the energy branch.
+        let template_damageclass: BTreeMap<String, u32> = level
+            .templates
+            .iter()
+            .filter_map(|t| {
+                level
+                    .template_param(&t.name, "damageclass")
+                    .and_then(|raw| {
+                        let raw = raw.trim();
+                        u32::from_str_radix(
+                            raw.trim_start_matches("0x").trim_start_matches("0X"),
+                            16,
+                        )
+                        .ok()
+                    })
+                    .map(|kind| (t.name.to_ascii_lowercase(), kind))
+            })
+            .collect();
         // `timer=` is the thing's life left, in seconds: `THINGPARAM_TIMER` stores
         // `lifeLeftSec * 1000` in `msecLifeLeft` and `sithThing_Update` destroys the thing when it
         // runs out. It is what makes an impact spark a spark — `+laserhit` ships `timer=0.5`.
@@ -1895,11 +2067,19 @@ impl Runtime {
                     .map(|v| (t.name.to_ascii_lowercase(), v))
             })
             .collect();
+        // A row the active difficulty excludes is not created: the retail loader leaves its pool
+        // slot empty (type 0), which is also why a later `CreateThing` reuses those low slots.
+        let excluded: Vec<bool> = level
+            .things
+            .iter()
+            .map(|t| t.flags & TF_NOT_MEDIUM != 0)
+            .collect();
         Self {
             things: level
                 .things
                 .iter()
-                .map(|t| ThingState {
+                .enumerate()
+                .map(|(index, t)| ThingState {
                     pos: t.pos,
                     insert: template_insert(&t.template.to_ascii_lowercase()),
                     yaw: t.yaw,
@@ -1907,15 +2087,19 @@ impl Runtime {
                     roll: t.roll,
                     head_pitch: 0.0,
                     sector: t.sector,
-                    flags: t.flags,
-                    health: template_health
-                        .get(&t.template.to_ascii_lowercase())
-                        .copied()
-                        .unwrap_or(1.0),
+                    flags: if excluded[index] { 0 } else { t.flags },
+                    health: if excluded[index] {
+                        0.0
+                    } else {
+                        template_health
+                            .get(&t.template.to_ascii_lowercase())
+                            .copied()
+                            .unwrap_or(1.0)
+                    },
                     frame: 0.0,
                     target: None,
                     frames: t.frames.clone(),
-                    destroyed: false,
+                    destroyed: excluded[index],
                     vel: t.vel,
                     // Placed things are not projectiles; a `CreateThing` gives them their
                     // damage, and only a fired weapon decays.
@@ -1955,7 +2139,14 @@ impl Runtime {
             types: level
                 .things
                 .iter()
-                .map(|t| thing_type(level.template_param(&t.template, "type")))
+                .enumerate()
+                .map(|(index, t)| {
+                    if excluded[index] {
+                        0
+                    } else {
+                        thing_type(level.template_param(&t.template, "type"))
+                    }
+                })
                 .collect(),
             template_types,
             template_health,
@@ -1971,6 +2162,9 @@ impl Runtime {
             template_mass,
             gravity: level.gravity,
             shots_fired: 0,
+            encounter_events: Vec::new(),
+            encounter_shot_time: BTreeMap::new(),
+            encounter_events_enabled: encounter_capture(),
             prints: Vec::new(),
             hud_message: None,
             string_buffer: String::new(),
@@ -1994,6 +2188,7 @@ impl Runtime {
             major_mode: BTreeMap::new(),
             cur_weapon_thing: None,
             thing_class_cog: BTreeMap::new(),
+            thing_capture_cog: BTreeMap::new(),
             class_skill: BTreeMap::new(),
             awakened: std::collections::BTreeSet::new(),
             saber_enabled: true,
@@ -2055,8 +2250,10 @@ impl Runtime {
             template_timer,
             template_minheadpitch,
             template_maxheadpitch,
+            template_debris,
             template_thingflags,
             template_typeflags,
+            template_damageclass,
             template_soundclass: level
                 .templates
                 .iter()
@@ -2067,6 +2264,8 @@ impl Runtime {
                 })
                 .collect(),
             sound_classes: BTreeMap::new(),
+            sound_rng: 0x9E37_79B9_7F4A_7C15,
+            last_sound: BTreeMap::new(),
             thing_timer: BTreeMap::new(),
             player_shields: 100.0,
             player_dead: false,
@@ -2213,6 +2412,7 @@ impl Runtime {
                 .collect(),
             surface_flags: level.surfaces.iter().map(|s| s.surfflags).collect(),
             sounds: Vec::new(),
+            sound_loops: Vec::new(),
             timers: 0.0,
             inv: BTreeMap::new(),
             inv_available: BTreeMap::new(),
@@ -2941,7 +3141,11 @@ impl Runtime {
                 solids.resting_floor(
                     sector,
                     [t.pos[0], t.pos[1], t.pos[2] + lift],
-                    f32::INFINITY,
+                    // Only a floor at the body's feet is a landing. An unbounded reach found the
+                    // room 11 units below a catwalk edge and snapped the roaming powerdroid there
+                    // (z 7.85 -> -3.74 in one sample); a body that walks off is left to fall,
+                    // which this runtime does not model for a walked actor.
+                    1.0,
                     body_radius[index],
                     false,
                 )
@@ -3059,7 +3263,15 @@ impl Runtime {
                 // A **projectile** that reaches a surface dies there: the engine's
                 // `sithThing_Update` explodes the weapon and removes it, while a stopped-but-alive
                 // bolt froze mid-air (its `vel` zeroed, its damage live) and could never hit again.
-                let projectile = self.types.get(i).copied() == Some(3);
+                // A `_debris` body is `type=weapon` but rubble, not a shot: it has to land on the
+                // vertical stop below instead of dying on the first surface it brushes (round 246's
+                // gate). Keying on the gravity bit was wrong: shipped projectiles fall too
+                // (`+grenade2 physflags=0x225`, `08tiebomb`), so the template family is the test.
+                let projectile = self.types.get(i).copied() == Some(3)
+                    && !self.templates.get(i).is_some_and(|template| {
+                        self.template_debris
+                            .contains(&template.to_ascii_lowercase())
+                    });
                 if hit && (resolved[0] - t.pos[0]).abs() + (resolved[1] - t.pos[1]).abs() > 0.01 {
                     if std::env::var_os("BK_AI_TRACE").is_some() && projectile {
                         eprintln!("ai: shot {i} hit a surface at {:?} (push to {:?}, sector {sector})", t.pos, resolved);
@@ -3648,19 +3860,49 @@ impl Runtime {
     /// One random row of an actor's own `.snd` class for a sound-mode event — what
     /// `sithSoundClass_PlayModeRandom` (`0x4e6b70`) picks: `class->+0x20 + mode*4` is the mode's list
     /// and a random entry is played. The class comes from the template's `soundclass=`.
-    fn chatter_wav(&self, index: usize, mode: &str) -> Option<String> {
+    ///
+    /// The draw is the engine's `rand()`, like the rest of a script's stream: talk, fear and hurt
+    /// picks consume it in retail too, so keeping them here is what holds the AI's fire cadence.
+    /// The AI's own shot sound is the one pick retail never makes — see [`Self::shot_fire_wav`].
+    fn chatter_wav(&mut self, index: usize, mode: &str) -> Option<String> {
         let template = self.templates.get(index)?.to_ascii_lowercase();
-        let class = self.template_soundclass.get(&template)?;
-        let rows = self.sound_classes.get(class)?.get(mode)?;
+        let class = self.template_soundclass.get(&template)?.clone();
+        let rows = self.sound_classes.get(&class)?.get(mode)?;
         let pick = (crate::cog::pseudo_random() * rows.len() as f64) as usize;
-        rows.get(pick.min(rows.len().saturating_sub(1)))
-            .map(|(wav, _)| wav.clone())
+        let wav = rows.get(pick.min(rows.len().saturating_sub(1)))?.0.clone();
+        self.last_sound.insert((index, mode.to_string()), wav.clone());
+        Some(wav)
+    }
+
+    /// The `fire1` row an AI shot plays. Retail's AI shot names no wav, so the class row stands in;
+    /// the pick must **not** come from `cog::pseudo_random` — retail never draws there, and a draw
+    /// would shift the AI fire delays that share the stream (issue #13).
+    fn shot_fire_wav(&mut self, index: usize) -> Option<String> {
+        let template = self.templates.get(index)?.to_ascii_lowercase();
+        let class = self.template_soundclass.get(&template)?.clone();
+        let rows = self.sound_classes.get(&class)?.get("fire1")?;
+        self.sound_rng = self
+            .sound_rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let pick = ((self.sound_rng >> 33) as usize) % rows.len().max(1);
+        rows.get(pick.min(rows.len().saturating_sub(1))).map(|(wav, _)| wav.clone())
     }
 
     /// The row a hurt of `kind` would play for this actor, so a check can name it without queueing
-    /// anything: the actor's own `soundclass=` row for the damage kind's mode.
+    /// anything: the row the actor's own class last played for the damage kind's mode.
     pub fn hurt_sound_wav(&self, index: usize, kind: u32) -> Option<String> {
-        self.chatter_wav(index, Self::hurt_mode(kind))
+        let mode = Self::hurt_mode(kind);
+        if let Some(wav) = self.last_sound.get(&(index, mode.to_string())) {
+            return Some(wav.clone());
+        }
+        let template = self.templates.get(index)?.to_ascii_lowercase();
+        let class = self.template_soundclass.get(&template)?;
+        self.sound_classes
+            .get(class)?
+            .get(mode)?
+            .first()
+            .map(|(wav, _)| wav.clone())
     }
 
     /// Queue the random row of the actor's own class for a sound mode at `at` — what
@@ -4218,7 +4460,7 @@ impl Runtime {
             // is `vel * dt`), so this is a real but small unstick toward the target.
             t.vel[0] += dir[0] * 0.1;
             t.vel[1] += dir[1] * 0.1;
-            t.yaw = dir[1].atan2(dir[0]).to_degrees();
+            t.yaw = (-dir[0]).atan2(dir[1]).to_degrees();
         }
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} is blocked and nudges toward {goal:?} (jump)");
@@ -4448,6 +4690,20 @@ impl Runtime {
             thing.ai_wait = (thing.ai_wait - dt).max(0.0);
             let ready = thing.ai_wait <= 0.0;
             let (from, yaw, health) = (thing.pos, thing.yaw, thing.health);
+            // `sithAI_sub_4EAD60` builds the sight eye from the thing's model offset, above the
+            // body's origin. An actor standing on a table, a crate or a balcony therefore casts its
+            // sight ray from above that surface, and the ray leaves the solid thing it stands on;
+            // the port's ray started *on* the surface, its leaf was skipped by the solid test, and
+            // level 1's upstairs Greedo saw the player straight through the balcony floor and
+            // turned while retail's actor never moved.
+            let eye = {
+                let radius = self
+                    .template_hit
+                    .get(&ai_template.to_ascii_lowercase())
+                    .map(|(radius, _)| *radius)
+                    .unwrap_or(0.065);
+                [from[0], from[1], from[2] + radius + 0.01]
+            };
             // `talk` (`0x50be20`, the second-most-used instinct after `listen`: 198 classes): idle
             // chatter on the instinct's own clock. Its first number is the interval in milliseconds
             // (`talk 10000.0, 0.10` in most shipped classes, `3000.0, 0.40` in `boc`) and the second
@@ -4518,7 +4774,9 @@ impl Runtime {
             let look = self.ai_look.get(&index).copied();
             // `AISetLookPos` is a standing turn: it decides facing whenever the legs are not carrying
             // the actor somewhere, which is how `00_AIPatrol.cog` reverses at the end of each leg.
-            let look_yaw = look.map(|l| (l[1] - from[1]).atan2(l[0] - from[0]).to_degrees());
+            let look_yaw = look.map(|l| {
+                (-(l[0] - from[0])).atan2(l[1] - from[1]).to_degrees()
+            });
             // No instinct class means no sight and no instincts: a class-less actor still walks a
             // destination a script gave it, but it never spots the player on its own.
             // Sight needs a **clear line**. `Ai::sees` is distance and cone only, so without
@@ -4528,7 +4786,7 @@ impl Runtime {
             let sighted = ai_on
                 && ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target))
                 && self.solids.as_ref().is_none_or(|s| {
-                    !s.segment_blocked(from, target) && !s.segment_thing(from, target)
+                    !s.segment_blocked(eye, target) && !s.segment_thing(eye, target)
                 });
             // `sithAI_CanDetectSightThing` (`0x4ec140`): a clear line is not the same as noticing. The
             // engine rolls its detection chance whenever it refreshes a target; the port rolls it when
@@ -4683,7 +4941,7 @@ impl Runtime {
                 let (sin, cos) = yaw.to_radians().sin_cos();
                 eprintln!(
                     "ai: sees {index} range {range:.2} dot {:.2} ready {ready} yaw {yaw:.1} rate {turn_rate:.1} from {from:?} target {target:?}",
-                    (cos * sx + sin * sy) / range
+                    (cos * sy - sin * sx) / range
                 );
             }
             // `AISetFireTarget`: what this actor shoots at, when a script names it. That replaces the
@@ -4791,6 +5049,17 @@ impl Runtime {
             // its own room and alignment own — that is the reader the stand-in could not express.
             let remembered = self.ai_last_seen.get(&index).copied().or_else(|| {
                 let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
+                // Only a class with a handler consumes the sound record: `listen` (`0x50a6f0`) or
+                // `follow`, whose handler is what walks to an awareness position. `pednarsh.ai`
+                // (the cantina crowd) ships `SenseDanger`, `Flee` and `OpenDoors` only, and its
+                // actors stand still in retail's door series while the port walked them at every
+                // gunshot — the hearing path's default 1.0 ran for classes that cannot hear.
+                let hears = ai.as_ref().is_some_and(|class| {
+                    class.instinct("Listen").is_some() || class.instinct("Follow").is_some()
+                });
+                if !hears {
+                    return None;
+                }
                 // `listen` (`0x50a6f0`): the record is scanned **kind 2, then 1, then 0**, and the handler's own
                 // conditions decide what is heard (`heard_event`: `heardist`, line of sight, and — for
                 // a sound through geometry — nearer than one unit and in front). It then rolls the
@@ -4805,7 +5074,7 @@ impl Runtime {
                     .map(|class| class.heardist)
                     .unwrap_or(f32::INFINITY);
                 let (heard, at, source) =
-                    self.heard_event(sector, here, [yaw.cos(), yaw.sin()], heardist)?;
+                    self.heard_event(sector, here, [-yaw.sin(), yaw.cos()], heardist)?;
                 if let Some((last_at, last_pos, answered)) = self.ai_listen.get(&index).copied()
                     && last_at == at
                     && last_pos == heard
@@ -5006,8 +5275,14 @@ impl Runtime {
                             );
                             let range = (dx * dx + dy * dy + dz * dz).sqrt();
                             let in_cone = ai.as_ref().is_some_and(|ai| ai.sees(thing.0, thing.2, target));
+                            // `sithAI_CheckSightThing` casts its sight ray against the level's
+                            // **collision**, which includes solid things: a railing or a body in the
+                            // way blocks the find exactly as a wall does. The scan tested only the
+                            // world faces, so level 1's door actors standing behind the balcony rail
+                            // acquired the player while retail's never did.
                             let clear = self.solids.as_ref().is_none_or(|s| {
                                 !s.segment_blocked(thing.0, target)
+                                    && !s.segment_thing(thing.0, target)
                             });
                             // The scan is the **acquisition** path: the handler runs
                             // `sithAI_CheckSightThing`, whose detection roll is
@@ -5098,7 +5373,7 @@ impl Runtime {
                         thing.pos = next;
                         thing.ai_target = Some(goal);
                         thing.yaw =
-                            turn_toward(thing.yaw, away[1].atan2(away[0]).to_degrees(), turn_rate, dt);
+                            turn_toward(thing.yaw, (-away[0]).atan2(away[1]).to_degrees(), turn_rate, dt);
                     }
                     self.walked.push(index);
                     let dt = dt.max(1e-4);
@@ -5312,6 +5587,18 @@ impl Runtime {
                         );
                     }
                     let _ = self.emit_ai_event(index, 0x400, None);
+                    // `SetLookFrame` turns toward the goal even when the legs are held by a ledge
+                    // (`SetLookFrame` is the handler's own call), but only when the goal is the
+                    // actor's business: a scripted destination or a target it can see. A roamer's
+                    // blocked random point turned level 1's cantina crowd 78°, where retail's own
+                    // actors keep their placed facing for the whole encounter.
+                    if (scripted.is_some() || sighted)
+                        && (facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4)
+                        && let Some(thing) = self.things.get_mut(index)
+                    {
+                        let wanted = (-facing.0).atan2(facing.1).to_degrees();
+                        thing.yaw = turn_toward(thing.yaw, wanted, turn_rate, dt);
+                    }
                     continue;
                 }
                 if let Some(thing) = self.things.get_mut(index) {
@@ -5319,7 +5606,7 @@ impl Runtime {
                     thing.ai_target = Some(goal);
                 }
                 if facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4 {
-                    want_yaw = facing.1.atan2(facing.0).to_degrees();
+                    want_yaw = (-facing.0).atan2(facing.1).to_degrees();
                 }
                 self.walked.push(index);
                 // A waypoint is a doorway centre the route search found: reaching it pops the list so
@@ -5354,7 +5641,7 @@ impl Runtime {
                 // face the player at level 1's spawn, which is the whole frame's change in the spawn
                 // series (round 307). Without a target the authored facing stands.
                 if sighted && engaged {
-                    want_yaw = (target[1] - from[1]).atan2(target[0] - from[0]).to_degrees();
+                    want_yaw = (-(target[0] - from[0])).atan2(target[1] - from[1]).to_degrees();
                 } else if let Some(yaw) = look_yaw {
                     want_yaw = yaw;
                 }
@@ -5549,14 +5836,15 @@ impl Runtime {
             if aim.is_some()
                 && let Some(thing) = self.things.get_mut(index)
             {
-                thing.yaw = sy.atan2(sx).to_degrees();
+                thing.yaw = (-sx).atan2(sy).to_degrees();
             }
             let yaw = self.things.get(index).map(|t| t.yaw).unwrap_or(yaw);
             // `minDot`: the actor fires only once it is facing the target, which is what makes it
-            // turn before shooting rather than snap.
-            let facing = yaw.to_radians().sin_cos();
+            // turn before shooting rather than snap. The engine's facing is `(-sin yaw, cos yaw)`.
+            let (sin, cos) = yaw.to_radians().sin_cos();
+            let facing = (-sin, cos);
             let dot = if range > 1e-4 {
-                (facing.1 * sx + facing.0 * sy) / range
+                (facing.1 * sy + facing.0 * sx) / range
             } else {
                 1.0
             };
@@ -5584,7 +5872,7 @@ impl Runtime {
             }
             shots.push((index, weapon, error));
             if let Some(thing) = self.things.get_mut(index) {
-                thing.yaw = sy.atan2(sx).to_degrees();
+                thing.yaw = (-sx).atan2(sy).to_degrees();
                 // `sithActor_UpdateAimJoints`: the aim points at the target in **three** dimensions.
                 // Without the elevation an actor shoots level at a player standing on a ledge and the
                 // bolt passes underneath — the bug the player had until round 109.
@@ -5614,7 +5902,10 @@ impl Runtime {
                     thing.ai_wait = burst_ms / 1000.0;
                 } else {
                     thing.ai_burst = (burst - 1.0).max(0.0);
-                    let jitter = 1.2 - 0.2 * crate::cog::pseudo_random() as f32;
+                    // `sithAICmd_PrimaryFire` jitters the shot delay by ±20% (the ledger's figure).
+                    // The asymmetric `1.2 - 0.2 * frand` averaged 1.1 and put the door gunner's
+                    // cadence at ~825 ms, where retail's fixture measures ~750 ms.
+                    let jitter = 1.0 - 0.2 + 0.4 * crate::cog::pseudo_random() as f32;
                     thing.ai_wait = delay_ms / 1000.0 * jitter;
                 }
             }
@@ -5726,11 +6017,11 @@ impl Runtime {
             f32::INFINITY,
             radius,
             true,
-        ) && rest.height > body.pos.z - radius
+        ) && rest.height > body.pos.z - body.rest
             && body.vy <= 0.0
             && !(input.jump && body.grounded)
         {
-            body.pos.z = rest.height + radius;
+            body.pos.z = rest.height + body.rest;
             body.vy = 0.0;
             body.grounded = true;
         }
@@ -5832,6 +6123,25 @@ impl Runtime {
                 pos[2] = top + radius;
                 vy = 0.0;
                 landed = true;
+            }
+        }
+        // A body a `warp` attached rests on its surface by `sithPhysics_GetThingHeight`, not at the
+        // movement sphere's contact: `warp` runs `sithPhysics_FindFloor`, which attaches the thing and
+        // leaves it at the authored pose. The sweep lands it at `floor + radius` every frame; while a
+        // floor is inside the attached body's reach (`GetThingHeight * 1.1`, `0x523184`), put it back on
+        // the attach height. Retail's warped route poses read `coords` z at exactly that height and hold
+        // it while walking (the route trace measures the 0.055 the sphere contact was short by).
+        if body.rest > radius + 1e-4 && vy <= 0.0 {
+            let reach = (body.rest - radius) * 1.1 + 0.02;
+            if let Some(rest) =
+                solids.resting_floor(sector, [pos[0], pos[1], pos[2]], reach, radius, false)
+            {
+                let height = rest.height + body.rest;
+                if (height - pos[2]).abs() <= reach {
+                    pos[2] = height;
+                    vy = 0.0;
+                    landed = true;
+                }
             }
         }
         // The slid movement feeds the velocity, as `MoveThing` reports it at `thing + 0x264`.
@@ -5956,7 +6266,18 @@ impl Runtime {
         for actor in std::mem::take(&mut self.walked) {
             let Some(thing) = self.things.get(actor) else { continue };
             let (pos, sector) = (thing.pos, thing.sector.max(0) as usize);
-            let (resolved, _) = solids.resolve_stepped(sector, pos, 0.5);
+            // The body's own collision radius, not the walker's 0.5: a resolved face pushes only
+            // when the body's *feet* are below its top edge, and a 0.5 probe put the feet of a
+            // body standing on a catwalk or a table 0.5 under the surface — so every wall face of
+            // the thing it stood on shoved it sideways (level 1's powerdroid was ejected 0.4 units
+            // off its ledge). The engine collides a thing with its own size.
+            let radius = self
+                .templates
+                .get(actor)
+                .map(|name| name.to_ascii_lowercase())
+                .and_then(|name| self.template_hit.get(&name).map(|(radius, _)| *radius))
+                .unwrap_or(0.065);
+            let (resolved, _) = solids.resolve_stepped(sector, pos, radius);
             let mut next = [resolved[0], resolved[1], pos[2]];
             // The player's own sweep settles the actor: a 0.6-unit downward probe plus the walker's
             // containment and floor rule. `move_body` has no horizontal delta here, so this only
@@ -5976,6 +6297,15 @@ impl Runtime {
                 false,
                 true,
             );
+            // The walker's floor rule snaps to whatever floor is under the probe, so an actor that
+            // steps off a catwalk was teleported to the room below in one sample (level 1's roaming
+            // powerdroid: z 7.85 -> -3.74 in 100 ms). A drop deeper than the 0.6-unit probe is not a
+            // step: refuse the move instead. The engine falls such a body under gravity, which the
+            // runtime does not model for a walked actor.
+            if next[2] < pos[2] - 0.6 {
+                next = pos;
+                next_sector = sector;
+            }
             if let Some(thing) = self.things.get_mut(actor) {
                 if next_sector != sector {
                     thing.sector = i32::try_from(next_sector).unwrap_or(thing.sector);
@@ -6016,7 +6346,7 @@ impl Runtime {
     /// that fraction — `((rand/32768) - 0.5) * error` on each component, then normalized. A missed
     /// shot is a shot that flies wide, which is what makes a firefight survivable.
     pub fn fire_spread(&mut self, shooter: i64, template: &str, error: f32) -> Option<usize> {
-        self.fire_with_spread(shooter, template, error)
+        self.fire_with_spread(shooter, template, error, None)
     }
 
     /// Fire `template` from the shooter: spawn it just in front of the shooter's eye and give it the
@@ -6026,7 +6356,7 @@ impl Runtime {
     /// template, launched along the barrel; the speed in the shipped templates is `vel=(0/4/0)` for
     /// `+bryarbolt`, i.e. 4 units per second down the model's +Y.
     pub fn fire(&mut self, shooter: i64, template: &str) -> Option<usize> {
-        self.fire_with_spread(shooter, template, 0.0)
+        self.fire_with_spread(shooter, template, 0.0, None)
     }
 
     /// `sithAI_RandomFireVector` (0x4eb920): add `((rand/32768) - 0.5) * error` to each component of
@@ -6051,6 +6381,7 @@ impl Runtime {
         shooter: i64,
         template: &str,
         error: f32,
+        sound: Option<&str>,
     ) -> Option<usize> {
         // Every shot the runtime spawns, counted where it is actually spawned. A check that samples
         // live things misses a bolt that dies between two frames, and at 10 fps that is most of them.
@@ -6066,7 +6397,9 @@ impl Runtime {
         // shot left level, however the player was aiming.
         let pitch = src.pitch;
         let (sin, cos) = yaw.to_radians().sin_cos();
-        let flat = [speed[1] * cos - speed[0] * sin, speed[1] * sin + speed[0] * cos];
+        // The engine's basis is `forward = (-sin yaw, cos yaw)`, `right = (cos yaw, sin yaw)`; the
+        // template velocity is in the shooter's own frame (`x` right, `y` forward).
+        let flat = [speed[0] * cos - speed[1] * sin, speed[0] * sin + speed[1] * cos];
         // Pitch tilts that horizontal aim up or down and the template's own z rides along, so a shot
         // aimed 30 degrees up leaves with `speed * sin(30)` in z. `rotate_by_angles` is the engine's
         // `rdMatrix_Build34`, whose yaw starts at +Y; this world's camera yaw starts at +X, so the
@@ -6084,6 +6417,17 @@ impl Runtime {
         let kind = self.template_types.get(&template).copied().unwrap_or(3);
         // The shot starts at full damage and loses it in flight when the weapon decays.
         let damage = self.template_damage.get(&template).copied().unwrap_or(0.0);
+        if self.encounter_events_enabled {
+            self.encounter_events.push(EncounterEvent::Shot {
+                t: self.time,
+                owner: usize::try_from(shooter).unwrap_or(usize::MAX),
+                template: template.clone(),
+                pos,
+            });
+            // The projectile's own index, for the hit that ends it: `projectile_hits` reports the
+            // launch time when the bolt lands so retail's hit rows and the port's shots line up.
+            self.encounter_shot_time.insert(self.things.len(), self.time);
+        }
         if std::env::var_os("BK_HIT_TRACE").is_some() {
             // The shooter's body and the shot's heading, so a trace can say who hit whom: a bolt's
             // origin alone cannot tell a point-blank friendly hit from a wide shot.
@@ -6201,6 +6545,10 @@ impl Runtime {
         self.templates.push(template);
         self.types.push(kind);
         let index = self.things.len() - 1;
+        if self.encounter_events_enabled {
+            // The shot's own index now exists; the hit that ends it reports this launch time.
+            self.encounter_shot_time.insert(index, self.time);
+        }
         self.arm_life(index);
         // `sithWeapon_WeaponFireProjectile`'s **player-only pre-sweep**: when the shooter is the local
         // player and the projectile's `typeflags` (the `SITH_WF_*` word, `thing + 0x130`, which
@@ -6214,7 +6562,30 @@ impl Runtime {
         {
             self.emit_ai_event(actor, 0x1000, Some(index));
         }
+        // `sithWeapon_WeaponFireProjectile` (`0x4d45a0`) plays the sound the caller named through
+        // `sithSoundMixer_PlaySoundThing(sound, shooter, 1.0, …)` (`0x4dba60`) — but only when one is
+        // named: `weap_bryar.cog` passes `pistol-1.wav`, while the AI's own shot names none, so an
+        // actor's class `fire1` row stands in (`gr.snd`: `pistol-1.wav` at 1.0–4.0 units).
+        self.queue_shot_sound(shooter, pos, sound);
         Some(index)
+    }
+
+    /// The wav a shot plays, queued the way `sithWeapon_WeaponFireProjectile` plays it: on the
+    /// shooter, at volume 1.0, so `play_requested_sounds` applies the class's own fade radius.
+    fn queue_shot_sound(&mut self, shooter: i64, at: [f32; 3], sound: Option<&str>) {
+        let named = sound.map(str::trim).filter(|name| !name.is_empty());
+        let wav = match named {
+            Some(name) => name.to_ascii_lowercase(),
+            None => {
+                let Some(index) = usize::try_from(shooter).ok() else { return };
+                let Some(wav) = self.shot_fire_wav(index) else { return };
+                wav
+            }
+        };
+        let channel = self.sound_volume.len();
+        self.sound_volume.push(1.0);
+        self.sound_pitch.push(1.0);
+        self.sounds.push(SoundRequest { name: wav, volume: 1.0, pos: Some(at), channel, pitch: 1.0 });
     }
 
     /// `TakeItem(item, player)`: the item leaves the world and the player's inventory bin
@@ -6761,6 +7132,26 @@ impl Runtime {
     }
 
 
+    /// `crossed`: a segment through a linked surface messages its scripts once per link, with the
+    /// surface's **link id** as the sender.
+    ///
+    /// Retail's `GetSenderId()` is the link id here, exactly as it is for `activate`;
+    /// `01_SoundTrack.cog` fades the bar's music **up** for `linkid=1` (`onAdjoin`) and **down** for
+    /// `linkid=0` (`offAdjoin`), so a message without it always chose the down branch and the
+    /// soundtrack never became audible (round: issue #13).
+    pub fn crossed_surface(&mut self, surface: usize) -> usize {
+        let links = self.surface_links.clone();
+        let mut queued = 0;
+        for (instance, link, linked) in links {
+            if linked != surface {
+                continue;
+            }
+            self.pending_messages.push((instance, "crossed", [0.0; 2], Some(link as i64)));
+            queued += 1;
+        }
+        queued
+    }
+
     /// Which cog instances a level's own `cogs` section links to its things, surfaces and sectors.
     ///
     /// A level's `cogs` rows carry one value per non-local symbol, and the script's `symbols` section
@@ -6912,11 +7303,18 @@ impl Runtime {
     }
     /// Which instances are linked to `thing`, so a damage or death can message them.
     pub fn thing_instances(&self, thing: usize) -> Vec<usize> {
-        self.thing_links
+        let mut out: Vec<usize> = self
+            .thing_links
             .iter()
             .filter(|(_, _, target)| *target == thing)
             .map(|(instance, _, _)| *instance)
-            .collect()
+            .collect();
+        if let Some(instance) = self.thing_capture_cog.get(&thing).map(|i| *i as usize)
+            && !out.contains(&instance)
+        {
+            out.push(instance);
+        }
+        out
     }
 
     /// `sithCog_ThingSendMessageEx` addressed at a thing's own scripts (`0x4dfaf0`). The engine
@@ -7159,13 +7557,16 @@ impl Runtime {
         out
     }
 
-    /// Damage the **player**, the way `sithPlayer` does: shields absorb it first, and the rest
-    /// comes off health. Returns the pair after the hit.
+    /// Damage the **player**: `sithActor_DamageActor`'s subtraction, with the shield bar standing
+    /// in front of health the way the shipped `item_shields.cog` does it.
     ///
-    /// A generic `DamageThing` on the walkplayer bypasses the shield bar, which is why the HUD's
-    /// second number never moved: `--hit` showed the player taking 9 straight off health while the
-    /// shields read 100. This is the engine's order — `sithPlayer_Update` spends shields before
-    /// health and only dies when health reaches 0.
+    /// The engine does not absorb shield-first in C: it broadcasts `damaged` to the player's
+    /// inventory item cogs whose `items.dat` flags carry `0x10` (`sithInventory_BroadcastMessage`,
+    /// `0x4d24a0`) and applies the amount the handler returns. Bin 60's script (`item_shields.cog`)
+    /// owns the bar: it spends the whole hit on it, stops a hit while the bar is above 50, and lets
+    /// health take a share that grows as the bar falls (see [`Self::shield_script`], which is that
+    /// script's arithmetic). The runtime's bar is a field rather than a VM, so the script's branch is
+    /// ported here; the draw and sound half of the script is not (ledger).
     pub fn damage_player(&mut self, amount: f32, kind: u32) -> (f32, f32) {
         let player = self.player_thing();
         // The player goes through the same guard as any actor (`sithActor_DamageActor` takes the
@@ -7185,11 +7586,18 @@ impl Runtime {
         // `sithActor_DamageActor` tints the local player's palette on damage that lands, before the
         // shields are spent: its call is `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)`.
         add_dynamic_tint(&mut self.tint, [amount * DAMAGE_TINT, 0.0, 0.0]);
+        let before = self.player_shields
+            + self.things.get(player).map(|t| t.health).unwrap_or(0.0);
+        // `item_shields.cog` has branches for energy (2), fire (4) and saber (16) only; any other
+        // kind reaches health with the bar untouched, exactly as the script does.
         let mut left = amount;
-        if self.player_shields > 0.0 {
-            let absorbed = left.min(self.player_shields);
-            self.player_shields -= absorbed;
-            left -= absorbed;
+        if self.player_shields > 0.0
+            && matches!(kind, DAMAGE_ENERGY | DAMAGE_FIRE | DAMAGE_SABER)
+        {
+            let (health_part, shields_left) =
+                Self::shield_script(kind, self.player_shields, amount);
+            self.player_shields = shields_left;
+            left = health_part;
         }
         if let Some(thing) = self.things.get_mut(player) {
             thing.health = (thing.health - left).max(0.0);
@@ -7198,7 +7606,47 @@ impl Runtime {
                 self.player_dead = true;
             }
         }
+        if self.encounter_events_enabled {
+            let health = self.things.get(player).map(|t| t.health).unwrap_or(0.0);
+            // The retail capture writes the amount the bars actually lost, net of a recharge, so
+            // the row is the same number on both sides.
+            let amount = before - (self.player_shields + health);
+            self.encounter_events.push(EncounterEvent::Hit {
+                t: self.time,
+                amount,
+                shields: self.player_shields,
+                health,
+            });
+        }
         (self.player_shields, self.things.get(player).map(|t| t.health).unwrap_or(0.0))
+    }
+
+    /// `item_shields.cog`'s `damaged` arithmetic for one protected hit: `(health damage, bar after)`.
+    ///
+    /// Energy and fire share the branch this mirrors, saber halves the hit first. The bar takes the
+    /// whole hit; a bar above **50** stops it completely; a hit that crosses 50 loses what it
+    /// overshot; and the rest is scaled by `1 - shieldsLeft / 50` on the script's raw `shieldsLeft`.
+    /// That factor is **above 1** when the hit spent the bar (the script keeps the negative value),
+    /// which is why the door fixture's health loss per hit grows as the bar empties.
+    fn shield_script(kind: u32, shields: f32, damage: f32) -> (f32, f32) {
+        let damage = if kind == DAMAGE_SABER { damage * 0.5 } else { damage };
+        let shields_left = shields - damage;
+        let mut health = if shields_left > 50.0 {
+            0.0
+        } else if shields > 50.0 {
+            damage - (shields - 50.0)
+        } else {
+            damage
+        };
+        if health > 0.0 {
+            health *= 1.0 - shields_left / 50.0;
+        }
+        // `damage = damage + halfdamage` puts the saber's other half back before it lands.
+        if kind == DAMAGE_SABER {
+            health += damage;
+        }
+        // `SetInv(player, 60, shieldsLeft)` clamps at the item's own minimum, 0.
+        (health, shields_left.max(0.0))
     }
 
     /// Move the player's body to `pos` and publish the runtime's own pose at once. The one entry
@@ -7505,6 +7953,22 @@ impl Runtime {
             && self.actor_flags.get(&index).copied().unwrap_or(0) & AF_INVULNERABLE != 0
     }
 
+    /// Report the launch of a shot that just landed on the player. Retail's door fixture can only
+    /// observe shots through their impact (its `hit` rows), so the port's `shot` row is the same
+    /// shot's launch; the gate compares the two streams nearest-time, a flight apart. A shot the
+    /// player's invulnerability swallowed is not reported: retail's fixture has no such row.
+    pub fn note_shot_landed(&mut self, shot: usize) {
+        if !self.encounter_events_enabled {
+            return;
+        }
+        let Some(t) = self.encounter_shot_time.remove(&shot) else { return };
+        let Some(thing) = self.things.get(shot) else { return };
+        let owner = thing.owner.unwrap_or(shot);
+        let template = self.templates.get(shot).cloned().unwrap_or_default();
+        let pos = thing.pos;
+        self.encounter_events.push(EncounterEvent::ShotLanded { t, owner, template, pos });
+    }
+
     /// The damage this template deals (`damage=`), for a projectile that hits.
     /// How much damage a *flying* projectile still carries.
     ///
@@ -7518,6 +7982,24 @@ impl Runtime {
             .get(&template.to_ascii_lowercase())
             .copied()
             .unwrap_or(0.0)
+    }
+
+    /// The `SithDamageType` a template deals, from its `damageclass=` chain. A template with no
+    /// word falls back to impact, the engine's default arm.
+    pub fn damage_kind_of(&self, template: &str) -> u32 {
+        self.template_damageclass
+            .get(&template.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(DAMAGE_IMPACT)
+    }
+
+    /// The kind of hurt a shot thing deals, so a hit uses its own template's `damageclass=`
+    /// (energy for `+bryarbolt`, fire for `+grenade2`, impact for `08tiebomb`).
+    pub fn shot_damage_kind(&self, shot: usize) -> u32 {
+        self.templates
+            .get(shot)
+            .map(|template| self.damage_kind_of(template))
+            .unwrap_or(DAMAGE_IMPACT)
     }
 
     /// First thing index in `sector`, or -1: `FirstThingInSector`.
@@ -8439,7 +8921,13 @@ impl Runtime {
                 });
                 let Some(weapon) = weapon else { return Value::Num(-1.0) };
                 let error = args.get(5).map(vec3).map(|v| v[2]).unwrap_or(0.0);
-                let shot = self.fire_with_spread(index as i64, &weapon, error as f32);
+                // `FireProjectile(sender, template, sound, mode, offset, …)`: the sound is played
+                // only when the script names one (`weap_bryar.cog` passes `pistol-1.wav`).
+                let sound = match args.get(2) {
+                    Some(Value::Str(name)) if !name.is_empty() => Some(name.as_str()),
+                    _ => None,
+                };
+                let shot = self.fire_with_spread(index as i64, &weapon, error as f32, sound);
                 Value::Num(shot.map(|i| i as f64).unwrap_or(-1.0))
             }
             // `SyncThingPos`/`SyncSurface` and their siblings: multiplayer state pushes. A single-player
@@ -9535,8 +10023,18 @@ impl Runtime {
                 Value::Nil
             }
             "capturething" => {
+                // `CaptureThing(thing)` — `FUN_00502e40`: the engine stores the calling cog at
+                // `thing + 0x2a0` and sets `SITH_TF_CAPTURED`. It does **not** remove the thing:
+                // `00_REPLACEENEMY.cog` captures the enemy it just created, and destroying it there
+                // kept the three medium-difficulty replacements out of the level.
                 if let Some(t) = self.thing_mut(idx(0)) {
-                    t.destroyed = true;
+                    t.flags |= TF_CAPTURED;
+                }
+                if let Ok(thing) = usize::try_from(idx(0))
+                    && self.caller_cog >= 0
+                    && self.things.get(thing).is_some()
+                {
+                    self.thing_capture_cog.insert(thing, self.caller_cog);
                 }
                 Value::Nil
             }
@@ -9940,13 +10438,56 @@ impl Runtime {
                     None
                 };
                 if !name.is_empty() {
+                    // `PlaySoundThing(sound, thing, volume, min, max, flags)` and
+                    // `PlaySoundPos(sound, pos, volume, min, max, flags)` carry the mixer flags in
+                    // their last argument; `PlaySoundLocal(sound, volume, pan, flags)` in its fourth.
+                    // `0x045` (the ambient installs pass it) sets the loop bit, so the request is a
+                    // **channel** the mixer keeps playing, not a one-shot. Without this the
+                    // `00_PlayAmbient.cog` rumble was requested every 0.5 s and dropped (no `.snd`
+                    // clip), and the audio trace could not see the bar's only loop.
+                    let flags_at = match lower.as_str() {
+                        "playsoundlocal" => 3,
+                        _ => 5,
+                    };
+                    let flags = if args.len() > flags_at { args[flags_at].num() as i32 } else { 0 };
+                    let (min_radius, max_radius) = match lower.as_str() {
+                        "playsoundlocal" => (0.0, 0.0),
+                        _ => (
+                            args.get(3).map(|v| v.num() as f32).unwrap_or(0.0),
+                            args.get(4).map(|v| v.num() as f32).unwrap_or(0.0),
+                        ),
+                    };
                     // `PlaySound*` answers the **channel**, which is what `ChangeSoundVol` and
                     // `ChangeSoundPitch` take — `sithSoundMixer_PlaySound` returns one and the shipped
                     // scripts store it (`02_crowstart.cog`).
                     let channel = self.sound_volume.len();
                     self.sound_volume.push(volume);
                     self.sound_pitch.push(1.0);
-                    self.sounds.push(SoundRequest { name, volume, pos, channel, pitch: 1.0 });
+                    if flags & 0x1 != 0 {
+                        // The engine's ambient installs re-issue the same request every 0.5 s; the
+                        // mixer holds one loop per name and place, so refresh instead of stacking.
+                        if let Some(existing) = self
+                            .sound_loops
+                            .iter_mut()
+                            .find(|l| l.name.eq_ignore_ascii_case(&name) && l.pos == pos)
+                        {
+                            existing.volume = volume;
+                            existing.min_radius = min_radius;
+                            existing.max_radius = max_radius;
+                            existing.flags = flags;
+                        } else {
+                            self.sound_loops.push(SoundLoop {
+                                name,
+                                volume,
+                                pos,
+                                min_radius,
+                                max_radius,
+                                flags,
+                            });
+                        }
+                    } else {
+                        self.sounds.push(SoundRequest { name, volume, pos, channel, pitch: 1.0 });
+                    }
                     Value::Num(channel as f64)
                 } else {
                     Value::Num(-1.0)
@@ -10287,6 +10828,63 @@ mod tests {
         assert_eq!(rt.things[nr].yaw, 0.0, "CreateThingNR carried an orientation over");
     }
 
+    /// Two halves of the door gate's actor-set mismatch. A placement the active difficulty excludes
+    /// is not created — retail leaves the pool slot type 0 and a later `CreateThing` reuses it — and
+    /// `CaptureThing` captures a spawned thing instead of destroying it (`00_REPLACEENEMY.cog`
+    /// creates its enemy at a ghost marker, then captures it; the port removed it again).
+    #[test]
+    fn a_medium_excluded_placement_is_empty_and_capture_keeps_the_spawned_actor() {
+        let mut level = Level::default();
+        level.templates.push(crate::jkl::Template {
+            name: "_actor".into(),
+            base: None,
+            params: vec![("type".into(), "actor".into()), ("health".into(), "50".into())],
+            model3d: None,
+            sprite: None,
+        });
+        level.templates.push(crate::jkl::Template {
+            name: "enemy".into(),
+            base: Some("_actor".into()),
+            params: Vec::new(),
+            model3d: None,
+            sprite: None,
+        });
+        let placed = |pos: [f32; 3], flags: u32| crate::jkl::Thing {
+            template: "enemy".into(),
+            pos,
+            pitch: 0.0,
+            yaw: 0.0,
+            roll: 0.0,
+            sector: 0,
+            flags,
+            frames: Vec::new(),
+            vel: [0.0; 3],
+            aiclass: None,
+        };
+        level.things.push(placed([0.0; 3], 0));
+        level.things.push(placed([2.0, 0.0, 0.0], TF_NOT_MEDIUM));
+        let mut rt = Runtime::new(&level);
+        assert_eq!(rt.types, vec![2, 0], "the medium-excluded placement was still an actor");
+        assert!(rt.things[1].destroyed, "the medium-excluded placement was not left empty");
+        let spawned = rt
+            .call("CreateThing", &[Value::Str("enemy".into()), Value::Num(0.0)])
+            .num() as usize;
+        assert_eq!(rt.types[spawned], 2);
+        rt.caller_cog = 7;
+        rt.call("CaptureThing", &[Value::Num(spawned as f64)]);
+        assert!(!rt.things[spawned].destroyed, "CaptureThing removed the thing it captured");
+        assert_ne!(
+            rt.things[spawned].flags & TF_CAPTURED,
+            0,
+            "CaptureThing did not set SITH_TF_CAPTURED"
+        );
+        assert_eq!(
+            rt.thing_instances(spawned),
+            vec![7],
+            "the capture cog is not on the thing's message list"
+        );
+    }
+
     /// `SetThingPulse(thing, seconds)` starts the thing's own timer: every interval its script slots
     /// get a `pulse` message (`00_backpack`'s blood trickle, `00_deathfloor`'s damage cadence).
     #[test]
@@ -10512,6 +11110,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             eye: crate::PLAYER_EYE,
+            rest: crate::PLAYER_RADIUS,
         }
     }
 
@@ -10598,6 +11197,7 @@ mod tests {
         rt.things[0].phys_flags = 0x1;
         rt.templates = vec!["debris".into()];
         rt.types = vec![3];
+        rt.template_debris.insert("debris".into());
         rt.mass.insert(0, 0.1);
         rt.template_hit.insert("debris".into(), (0.2, 0.2));
         let plane = || crate::collide::Plane {
@@ -10631,6 +11231,158 @@ mod tests {
             rt.things[0].pos[2]
         );
         assert_eq!(rt.things[0].vel[2], 0.0, "the landed good kept a downward velocity");
+    }
+
+    /// A `_debris` chip is `type=weapon` (`0x201`) but it is not a shot: a surface push its fall
+    /// brushes is not a projectile impact. The projectile rule — die on the surface in front of you
+    /// — is for weapon projectiles, which the template family names (`_debris` is rubble, and every
+    /// fired template is everything else). Reading the type alone destroyed a falling chip mid-air
+    /// on the first plane it touched, and because a destroyed body kept its last velocity it coasted
+    /// down for ever (the `--things` gate's "landed debris chip kept falling"). The good must keep
+    /// falling and land.
+    #[test]
+    fn a_gravity_good_that_brushes_a_surface_lands_instead_of_dying() {
+        let mut rt = door_runtime();
+        rt.things[0].pos = [0.0, 0.0, 0.5];
+        rt.things[0].phys_flags = 0x201;
+        rt.templates = vec!["debris".into()];
+        rt.types = vec![3];
+        rt.template_debris.insert("debris".into());
+        rt.mass.insert(0, 0.1);
+        rt.template_hit.insert("debris".into(), (0.2, 0.2));
+        let floor = crate::collide::Plane {
+            normal: [0.0, 0.0, -1.0],
+            point: [0.0; 3],
+            surface: 1,
+        };
+        // A tilted plane inside the body's radius: the push is above the mover's 0.01 horizontal
+        // threshold *and* has a vertical part that opposes the fall, which is the projectile arm's
+        // "surface in front of me" test.
+        let brace = crate::collide::Plane {
+            normal: [-0.866_025_4, 0.0, -0.5],
+            point: [0.0, 0.0, 0.4],
+            surface: 2,
+        };
+        rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+            sectors: vec![vec![floor, brace]],
+            hull: vec![vec![floor]],
+            boxes: vec![None],
+            portals: vec![Vec::new()],
+            spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+            floors: Vec::new(),
+            walls: Vec::new(),
+            wall_of: Default::default(),
+            floor_of: Default::default(),
+            faces: Vec::new(),
+            face_of: Default::default(),
+            portal_faces: Vec::new(),
+            surface_owner: Vec::new(),
+            adjoin_flags: Vec::new(),
+            ..Default::default()
+        }));
+        rt.step(None, 1.0 / 30.0);
+        assert!(!rt.things[0].destroyed, "a gravity good died on the surface it brushed");
+        for _ in 0..120 {
+            rt.step(None, 1.0 / 30.0);
+        }
+        assert!(!rt.things[0].destroyed, "the gravity good died before it landed");
+        assert!(
+            rt.things[0].pos[2].abs() < 1e-3,
+            "the good did not reach the floor: z {}",
+            rt.things[0].pos[2]
+        );
+        assert_eq!(rt.things[0].vel[2], 0.0, "the landed good kept a downward velocity");
+    }
+
+    /// Shipped projectiles carry the gravity bit too: `+grenade2` and `08tiebomb` both ship
+    /// `physflags=0x225`, and `08_tiebomber.cog` creates the tie bomb with `CreateThingAtPos`, so
+    /// neither is fired through `fire()` in the owner sense. They are still shots and must die on the
+    /// surface they hit; only the `_debris` family lands.
+    #[test]
+    fn gravity_bit_projectiles_still_die_on_a_surface() {
+        for template in ["+grenade2", "08tiebomb"] {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let plane = |normal: [f32; 3], point: [f32; 3], surface: usize| {
+                crate::collide::Plane { normal, point, surface }
+            };
+            let planes = vec![
+                plane([-1.0, 0.0, 0.0], [1.2, 0.0, 0.0], 41),
+                plane([1.0, 0.0, 0.0], [-5.0, 0.0, 0.0], 41),
+                plane([0.0, -1.0, 0.0], [0.0, -2.0, 0.0], 41),
+                plane([0.0, 1.0, 0.0], [0.0, 2.0, 0.0], 41),
+                plane([0.0, 0.0, -1.0], [0.0, 0.0, -2.0], 41),
+                plane([0.0, 0.0, 1.0], [0.0, 0.0, 2.0], 41),
+            ];
+            rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+                sectors: vec![planes.clone()],
+                hull: vec![planes],
+                boxes: vec![None],
+                portals: vec![Vec::new()],
+                spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+                things: Default::default(),
+                floors: Vec::new(),
+                walls: Vec::new(),
+                wall_of: Default::default(),
+                floor_of: Default::default(),
+                faces: Vec::new(),
+                face_of: Default::default(),
+                portal_faces: Vec::new(),
+                surface_owner: vec![0, 0, 0, 0],
+                adjoin_flags: Vec::new(),
+                ..Default::default()
+            }));
+            let mut bomb = base.clone();
+            bomb.pos = [0.0, 0.0, 0.0];
+            bomb.sector = 0;
+            bomb.vel = [6.0, 0.0, 0.0];
+            bomb.damage = 12.0;
+            bomb.phys_flags = 0x225;
+            rt.things = vec![base, bomb];
+            rt.templates = vec!["walkplayer".into(), template.into()];
+            rt.types = vec![10, 3];
+            for _ in 0..60 {
+                rt.step(None, 1.0 / 30.0);
+                if rt.things[1].destroyed {
+                    break;
+                }
+            }
+            assert!(
+                rt.things[1].destroyed,
+                "`{template}` (gravity bit, not debris) froze on the wall: {:?}",
+                rt.things[1].pos
+            );
+        }
+    }
+
+    /// `damageclass=` is the word `sithActor_DamageActor` branches on, and it follows the template
+    /// chain: `+bryarbolt` inherits `_weapon`'s energy (`0x2`), while `+grenade2` ships fire (`0x4`)
+    /// and `08tiebomb` impact (`0x1`). The hit path passed `DAMAGE_ENERGY` for every shot, so a
+    /// grenade's fire and a tie bomb's impact took the energy branch in `item_shields.cog`.
+    #[test]
+    fn a_projectiles_damage_kind_comes_from_its_template_damageclass() {
+        let template = |name: &str, base: Option<&str>, params: &[(&str, &str)]| crate::jkl::Template {
+            name: name.to_string(),
+            base: base.map(str::to_string),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            model3d: None,
+            sprite: None,
+        };
+        let mut level = Level::default();
+        level.templates = vec![
+            template("_weapon", None, &[("damageclass", "0x2")]),
+            template("+bryarbolt", Some("_weapon"), &[]),
+            template("+grenade2", Some("_weapon"), &[("damageclass", "0x4")]),
+            template("08tiebomb", Some("_weapon"), &[("damageclass", "0x1")]),
+        ];
+        let mut rt = Runtime::new(&level);
+        rt.templates = vec!["+bryarbolt".into(), "+grenade2".into(), "08tiebomb".into()];
+        assert_eq!(rt.shot_damage_kind(0), DAMAGE_ENERGY, "a bolt inherits `_weapon`'s energy");
+        assert_eq!(rt.shot_damage_kind(1), DAMAGE_FIRE, "a grenade is fire");
+        assert_eq!(rt.shot_damage_kind(2), DAMAGE_IMPACT, "a tie bomb is impact");
     }
 
     /// The projectile body is the template's `movesize` — the engine's collision radius and what
@@ -10877,22 +11629,145 @@ mod tests {
         rt.template_vel.insert(bolt.clone(), [0.0, 4.0, 0.0]);
         rt.template_damage.insert(bolt.clone(), 1.0);
 
-        // Level: the template's own heading, z untouched.
+        // Level: the engine's forward at yaw 0 is +Y, z untouched.
         let shot = rt.fire(0, &bolt).expect("projectile");
-        assert!((rt.things[shot].vel[0] - 4.0).abs() < 1e-3, "vel {:?}", rt.things[shot].vel);
+        assert!((rt.things[shot].vel[1] - 4.0).abs() < 1e-3, "vel {:?}", rt.things[shot].vel);
+        assert!(rt.things[shot].vel[0].abs() < 1e-3, "yaw 0 fired off the forward axis: {:?}", rt.things[shot].vel);
         assert!(rt.things[shot].vel[2].abs() < 1e-3, "a level shot rose: {:?}", rt.things[shot].vel);
 
         // Aimed 30 degrees up: the speed splits the way `sin`/`cos` say it must.
         rt.things[0].pitch = 30.0;
         let shot = rt.fire(0, &bolt).expect("projectile");
         let vel = rt.things[shot].vel;
-        assert!((vel[0] - 4.0 * 30f32.to_radians().cos()).abs() < 1e-3, "vel {vel:?}");
+        assert!((vel[1] - 4.0 * 30f32.to_radians().cos()).abs() < 1e-3, "vel {vel:?}");
         assert!((vel[2] - 4.0 * 30f32.to_radians().sin()).abs() < 1e-3, "vel {vel:?}");
 
         // And down again, which is the half a player notices on a ledge.
         rt.things[0].pitch = -45.0;
         let shot = rt.fire(0, &bolt).expect("projectile");
         assert!(rt.things[shot].vel[2] < -2.5, "vel {:?}", rt.things[shot].vel);
+    }
+
+    /// `--encounter` telemetry (issue #9): a shot is queued where it leaves the shooter, with the
+    /// runtime's own clock and the shooter's id, so the port's timeline can be compared with the
+    /// retail fixture. The queue is off unless the capture harness asks (no cost in live play).
+    #[test]
+    fn encounter_telemetry_queues_each_shot_with_its_shooter_and_clock() {
+        let mut rt = door_runtime();
+        let bolt = "+bryarbolt".to_string();
+        rt.template_vel.insert(bolt.clone(), [0.0, 4.0, 0.0]);
+        rt.template_damage.insert(bolt.clone(), 12.0);
+        rt.time = 1.25;
+        rt.fire(0, &bolt).expect("projectile");
+        assert!(rt.encounter_events.is_empty(), "telemetry must stay off by default");
+
+        rt.encounter_events_enabled = true;
+        rt.time = 2.5;
+        rt.fire(0, &bolt).expect("projectile");
+        assert_eq!(rt.encounter_events.len(), 1);
+        match &rt.encounter_events[0] {
+            EncounterEvent::Shot { t, owner, template, pos } => {
+                assert!((t - 2.5).abs() < 1e-5, "event time {t}");
+                assert_eq!(*owner, 0, "the shooter's thing index");
+                assert_eq!(template, "+bryarbolt");
+                assert_eq!(*pos, rt.things[0].pos, "the shot leaves the shooter's own position");
+            }
+            other => panic!("expected a shot event, got {other:?}"),
+        }
+    }
+
+    /// The door fixture's own player bars, hit for hit (`tools/parity/encounter/door_encounter.tsv`,
+    /// 9.9 s: `player` rows at 3, 11, 18, 23, 30, 37, 43, 52, 60, 69, 78, 85 and 93 tenths). The
+    /// engine's split is not shield-first: `item_shields.cog`'s `damaged` handler (bin 60) spends the
+    /// whole hit on the bar but lets health take a share that grows as the bar falls, and the
+    /// fixture's `100 -> 22.3` health is what that arithmetic produces for thirteen ~11.3-point
+    /// energy bolts. The expected bars are the fixture's literals, not a recomputation.
+    #[test]
+    fn the_door_fixtures_player_bars_come_out_of_the_shields_script_per_hit() {
+        let mut rt = door_runtime();
+        // (shields, health) after each of the fixture's thirteen hits.
+        let fixture = [
+            (88.6, 100.0),
+            (77.4, 100.0),
+            (66.1, 100.0),
+            (54.8, 100.0),
+            (43.4, 99.1),
+            (32.1, 95.1),
+            (20.7, 88.4),
+            (9.4, 79.2),
+            (0.0, 67.5),
+            (0.0, 56.2),
+            (0.0, 45.0),
+            (0.0, 33.6),
+            (0.0, 22.3),
+        ];
+        for (index, (shields, health)) in fixture.iter().enumerate() {
+            let (got_shields, got_health) = rt.damage_player(11.3, DAMAGE_ENERGY);
+            assert!(
+                (got_shields - shields).abs() < 0.3,
+                "hit {}: shields {got_shields:.2}, fixture {shields}",
+                index + 1
+            );
+            assert!(
+                (got_health - health).abs() < 0.3,
+                "hit {}: health {got_health:.2}, fixture {health}",
+                index + 1
+            );
+        }
+    }
+
+    /// The script only acts on the kinds it names: energy (2) and fire (4) share a branch, saber
+    /// (16) gets half protection, and every other kind — an explosion's impact, force, falls —
+    /// reaches health untouched, bar and all.
+    #[test]
+    fn only_energy_fire_and_saber_hits_meet_the_shield_script() {
+        let mut rt = door_runtime();
+        assert_eq!(rt.damage_player(30.0, DAMAGE_IMPACT), (100.0, 70.0), "impact bypasses the bar");
+
+        let mut rt = door_runtime();
+        let (shields, health) = rt.damage_player(11.3, DAMAGE_FIRE);
+        assert!((shields - 88.7).abs() < 1e-3, "fire: shields {shields}");
+        assert_eq!(health, 100.0, "fire behind a full bar must not reach health");
+
+        let mut rt = door_runtime();
+        // Half of 20 is 10; the bar takes 10 and health the same 10 (`damage + halfdamage`).
+        assert_eq!(rt.damage_player(20.0, DAMAGE_SABER), (90.0, 90.0), "saber half protection");
+    }
+
+    /// A landed player hit carries the bar **after** the hit and the amount the bars actually lost,
+    /// which is what the retail capture writes (`amount = previous shields + health - current`).
+    #[test]
+    fn encounter_telemetry_queues_landed_player_hits_with_the_bar_after() {
+        let mut rt = door_runtime();
+        rt.encounter_events_enabled = true;
+        rt.player_shields = 50.0;
+        rt.time = 3.0;
+        rt.damage_player(11.3, DAMAGE_ENERGY);
+        rt.time = 3.5;
+        rt.damage_player(11.3, DAMAGE_ENERGY);
+        let hits: Vec<(f32, f32, f32, f32)> = rt
+            .encounter_events
+            .iter()
+            .filter_map(|event| match event {
+                EncounterEvent::Hit { t, amount, shields, health } => Some((*t, *amount, *shields, *health)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hits.len(), 2, "one hit row per landed shot");
+        assert!((hits[0].0 - 3.0).abs() < 1e-5);
+        // Bar 50 -> 38.7, health takes 11.3 * (1 - 38.7/50).
+        assert!((hits[0].1 - 13.8538).abs() < 1e-3, "amount {}", hits[0].1);
+        assert!((hits[0].2 - 38.7).abs() < 1e-3, "shields {}", hits[0].2);
+        assert!((hits[0].3 - 97.4462).abs() < 1e-3, "health {}", hits[0].3);
+        // Bar 38.7 -> 27.4, health takes 11.3 * (1 - 27.4/50).
+        assert!((hits[1].1 - 16.4076).abs() < 1e-3, "amount {}", hits[1].1);
+        assert!((hits[1].2 - 27.4).abs() < 1e-3, "shields {}", hits[1].2);
+        assert!((hits[1].3 - 92.3386).abs() < 1e-3, "health {}", hits[1].3);
+
+        // A hit the player's invulnerability refuses is not a landed hit and writes no row.
+        rt.actor_flags.insert(0, AF_INVULNERABLE);
+        rt.damage_player(20.0, DAMAGE_ENERGY);
+        assert_eq!(rt.encounter_events.len(), 2, "an ignored hit must not be recorded");
     }
 
     /// `sithAI_RandomFireVector` (0x4eb920): the aim error jitters the aim **vector** by ±error/2 per
@@ -10928,10 +11803,10 @@ mod tests {
 
         let shot = rt.fire(0, "+bryarbolt").expect("projectile");
         assert_eq!(rt.things.len(), 2);
-        // Fired along the shooter's facing: yaw 0 faces +X in this world.
-        assert!(rt.things[shot].vel[0] > 0.0, "vel {:?}", rt.things[shot].vel);
+        // Fired along the shooter's facing: the engine's yaw 0 faces +Y (`(-sin yaw, cos yaw)`).
+        assert!(rt.things[shot].vel[1] > 0.0, "vel {:?}", rt.things[shot].vel);
         rt.step(None, 0.5);
-        assert!(rt.things[shot].pos[0] > 1.0, "pos {:?}", rt.things[shot].pos);
+        assert!(rt.things[shot].pos[1] > 1.0, "pos {:?}", rt.things[shot].pos);
 
         // Damage lands, and a killing blow marks the thing destroyed.
         assert_eq!(rt.damage(0, 30.0), 70.0);
@@ -10945,7 +11820,7 @@ mod tests {
     #[test]
     fn damage_and_scripts_add_to_one_decaying_palette_tint() {
         let mut rt = door_runtime();
-        // 20 damage adds 0.8 of red — before the shields are spent, as the engine's call is.
+        // 20 damage adds 0.8 of red — before the bar takes any of it, as the engine's call is.
         rt.damage_player(20.0, 0);
         assert!((rt.tint[0] - 0.8).abs() < 1e-5, "tint {:?}", rt.tint);
         // A script adds its own channels: red clamps at 1.0, blue at 0.5, and it is an add.
@@ -12029,6 +12904,48 @@ mod tests {
         );
     }
 
+    /// `sithWeapon_WeaponFireProjectile` (`0x4d45a0`) plays the sound the caller named through
+    /// `sithSoundMixer_PlaySoundThing(sound, shooter, 1.0, …)`; the AI's own shot names none, so the
+    /// shooter's class `fire1` row is what a player hears (`gr.snd`: `pistol-1.wav`).
+    #[test]
+    fn a_shot_queues_the_shooters_fire_sound() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut gunner = base.clone();
+        gunner.pos = [3.0, 4.0, 5.0];
+        gunner.sector = 7;
+        rt.things = vec![base, gunner];
+        rt.templates = vec!["walkplayer".into(), "greedo".into()];
+        rt.types = vec![10, 2];
+        rt.template_soundclass.insert("greedo".into(), "gr.snd".into());
+        rt.sound_classes.insert(
+            "gr.snd".into(),
+            std::collections::BTreeMap::from([(
+                "fire1".to_string(),
+                vec![("pistol-1.wav".to_string(), 1.0)],
+            )]),
+        );
+        rt.template_vel.insert("+ebolt".into(), [0.0, 6.0, 0.0]);
+        rt.template_damage.insert("+ebolt".into(), 12.0);
+        assert!(rt.fire_spread(1, "+ebolt", 0.0).is_some(), "the shot spawned");
+        assert_eq!(rt.sounds.len(), 1, "the shot made no sound");
+        assert_eq!(rt.sounds[0].name, "pistol-1.wav");
+        assert_eq!(rt.sounds[0].pos, Some([3.0, 4.0, 5.0]), "the sound left the shooter");
+        assert_eq!(rt.sounds[0].volume, 1.0);
+        // The script path names its own wav (`weap_bryar.cog`'s `fireSound`).
+        rt.sounds.clear();
+        rt.call(
+            "FireProjectile",
+            &[
+                super::Value::Num(1.0),
+                super::Value::Str("+ebolt".into()),
+                super::Value::Str("laser03.wav".into()),
+            ],
+        );
+        assert_eq!(rt.sounds.len(), 1, "the script's named shot sound was dropped");
+        assert_eq!(rt.sounds[0].name, "laser03.wav");
+    }
+
     /// `FUN_0050aa80`'s find is a **broadcast**: the branch clears the actor's awake bit, sets the
     /// engaged/searching word and raises a kind-0 event of strength 3.0 in the *player's* sector at the
     /// spotter's position, sourced to the player. The port set the awake bit instead and told nobody.
@@ -12037,7 +12954,8 @@ mod tests {
         let mut rt = door_runtime();
         let base = rt.things[0].clone();
         let mut actor = base.clone();
-        actor.pos = [0.0, 0.0, 0.0]; // sector 7, facing +x
+        actor.pos = [0.0, 0.0, 0.0]; // sector 7, facing +x (the engine's yaw -90)
+        actor.yaw = -90.0;
         let mut player = base.clone();
         player.pos = [1.0, 0.0, 0.0]; // one unit ahead: inside the 2.0 always-noticed radius
         rt.things = vec![player, actor];
@@ -12182,7 +13100,7 @@ mod tests {
     #[test]
     fn a_sound_through_geometry_is_heard_only_when_close_and_in_front() {
         let from = [0.0, 0.0, 0.0];
-        let ahead = [1.0, 0.0]; // yaw 0 faces +X
+        let ahead = [1.0, 0.0]; // the facing vector the handler passes (+X here)
         let behind = [-1.0, 0.0];
         // Clear line of sight: bearing does not matter, the class's hearing distance does.
         assert!(hearable(from, behind, [2.0, 0.0, 0.0], 3.0, false));
@@ -12416,8 +13334,8 @@ mod tests {
             rt.things[1].vel
         );
         assert!(
-            rt.things[1].yaw.abs() < 1e-3,
-            "the actor did not face its target: yaw {}",
+            (rt.things[1].yaw + 90.0).abs() < 1e-3,
+            "the actor did not face its +X target: yaw {}",
             rt.things[1].yaw
         );
         // The handler's own 2000 ms clock: an immediate second event does nothing.
@@ -12656,7 +13574,8 @@ mod tests {
         let mut rt = door_runtime();
         let base = rt.things[0].clone();
         let mut actor = base.clone();
-        actor.pos = [1.0, 0.0, 0.0]; // sector 7, alignment -1
+        actor.pos = [1.0, 0.0, 0.0]; // sector 7, alignment -1, facing +x (engine yaw -90)
+        actor.yaw = -90.0;
         let mut player = base.clone();
         player.pos = [2.0, 0.0, 0.0]; // one unit ahead: inside sightdist 2.0 and the 90-degree cone
         rt.things = vec![player, actor];
@@ -12718,6 +13637,7 @@ mod tests {
             let base = rt.things[0].clone();
             let mut actor = base.clone();
             actor.pos = [1.0, 0.0, 0.0];
+            actor.yaw = -90.0; // facing +x, where the body stands
             let mut player = base.clone();
             player.pos = [2.0, 0.0, 0.0];
             rt.things = vec![player, actor];
@@ -12872,14 +13792,15 @@ mod tests {
         assert_eq!(sample(0, None), None, "an actor with no instinct dodged");
     }
 
-    /// A runtime for the shot-dodge checks: player thing 0 at the origin facing +X, one actor at
-    /// (2, 0, 0) whose class has `Dodge 0.3, 0.2` (weight 0.3, step 0.2). The template tables hold what
-    /// `fire` needs — the bolt's `vel=(0/7/0)` and its shipped `typeflags=0x20440d` /
+    /// A runtime for the shot-dodge checks: player thing 0 at the origin facing +X (engine yaw -90),
+    /// one actor at (2, 0, 0) whose class has `Dodge 0.3, 0.2` (weight 0.3, step 0.2). The template
+    /// tables hold what `fire` needs — the bolt's `vel=(0/7/0)` and its shipped `typeflags=0x20440d` /
     /// `thingflags=0x20000001` — and the player's muzzle is its own eye (no `fireoffset=`), so the
     /// sweep is a clean +X line.
     fn shot_dodge_runtime(flags: u32, actor_yaw: f32, bolt_typeflags: u32, sightdist: f32) -> Runtime {
         let mut rt = door_runtime();
-        let base = rt.things[0].clone();
+        let mut base = rt.things[0].clone();
+        base.yaw = -90.0;
         let mut actor = base.clone();
         actor.pos = [2.0, 0.0, 0.0];
         actor.yaw = actor_yaw;
@@ -12910,7 +13831,7 @@ mod tests {
     /// arms the latch, nothing ever disarms it, and every later `0x1000` is dropped by the gate.
     #[test]
     fn the_awareness_sweep_re_arms_the_one_shot_dodge_latch() {
-        let mut rt = shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0);
+        let mut rt = shot_dodge_runtime(0x200, 90.0, 0x20440d, 5.0);
         rt.sector_adjoins = vec![Vec::new(); 8]; // both things sit in sector 7 (`door_runtime`)
         // A latched actor drops every event but 2 — the engine's own rate limit.
         rt.actor_flags.insert(1, 0x200 | 0x1000);
@@ -12939,7 +13860,7 @@ mod tests {
     /// direction-to-the-shot rotated by a random 45-90 degrees: a sideways dodge, not a retreat.
     #[test]
     fn a_player_shot_that_would_hit_an_actor_makes_it_dodge_sideways() {
-        let mut rt = shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0);
+        let mut rt = shot_dodge_runtime(0x200, 90.0, 0x20440d, 5.0);
         assert!(rt.fire(0, "+bryarbolt").is_some(), "the shot did not spawn");
         let shot = rt.things.last().expect("a shot thing");
         assert_eq!(shot.flags, 0x20000001, "the shot did not inherit its template's thingflags");
@@ -12968,18 +13889,18 @@ mod tests {
             rt.ai_move.contains_key(&1)
         };
         // Awake, facing the player, and the shipped bolt typeflags: this is the one that dodges.
-        assert!(fires(shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0)));
+        assert!(fires(shot_dodge_runtime(0x200, 90.0, 0x20440d, 5.0)));
         // Not awake: the handler's first gate.
-        assert!(!fires(shot_dodge_runtime(0x0, 180.0, 0x20440d, 5.0)));
+        assert!(!fires(shot_dodge_runtime(0x0, 90.0, 0x20440d, 5.0)));
         // Facing away: `CheckSightThing`'s cone fails.
         assert!(!fires(shot_dodge_runtime(0x200, 0.0, 0x20440d, 5.0)));
         // Too far for the class's sight.
-        assert!(!fires(shot_dodge_runtime(0x200, 180.0, 0x20440d, 0.5)));
+        assert!(!fires(shot_dodge_runtime(0x200, 90.0, 0x20440d, 0.5)));
         // A projectile without the engine's typeflag bit: no pre-sweep, so no event at all.
         assert!(!fires(shot_dodge_runtime(0x200, 180.0, 0x440d, 5.0)));
         // A non-player shooter: the pre-sweep is player-only in `WeaponFireProjectile`.
-        let mut rt = shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0);
-        rt.things[1].yaw = 180.0;
+        let mut rt = shot_dodge_runtime(0x200, 90.0, 0x20440d, 5.0);
+        rt.things[1].yaw = 90.0;
         assert!(rt.fire(1, "+bryarbolt").is_some(), "the actor's own shot did not spawn");
         assert!(!rt.ai_move.contains_key(&1), "an actor's own shot made somebody dodge");
     }
@@ -13583,6 +14504,7 @@ mod tests {
             flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
+            aiclass: None,
         });
         let mut rt = Runtime::new(&level);
         assert_eq!(rt.things[0].rot_vel, [0.0, 90.0, 0.0], "the template's angvel did not seed rot_vel");
@@ -13612,6 +14534,7 @@ mod tests {
             flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
+            aiclass: None,
         });
         let mut rt = Runtime::new(&level);
         let motion = rt.step(None, 1.0);
@@ -13710,6 +14633,36 @@ mod tests {
         assert!(body.grounded, "the player body never landed");
         assert!((body.pos.z - 0.065).abs() < 1e-3, "z {} after landing", body.pos.z);
         assert_eq!(body.sector, 0);
+    }
+
+    /// A body a `warp` attached rests at `sithPhysics_GetThingHeight` (`walkplayer`'s 0.120114 model
+    /// insert), not at the movement sphere's 0.065 contact: retail's warped route poses hold
+    /// `coords` z at that height while walking, and the route trace measured the sphere contact
+    /// 0.055 low on every leg.
+    #[test]
+    fn a_warped_body_rests_at_the_model_height() {
+        let solids = floor_room();
+        let mut rt = Runtime::new(&Level::default());
+        let rules = crate::Rules::from_level(&Level::default());
+        let height = 0.120114f32;
+        let mut body = walk_body(Vec3::new(0.0, 0.0, -1.0 + height));
+        body.rest = height;
+        for _ in 0..60 {
+            rt.step_player(
+                &mut body,
+                &solids,
+                PlayerInput::default(),
+                &rules,
+                1.0 / 60.0,
+                crate::collide::Gates::default(),
+            );
+        }
+        assert!(
+            (body.pos.z - (-1.0 + height)).abs() < 1e-3,
+            "the attached body settled at {:.4}, not floor + {height:.4}",
+            body.pos.z
+        );
+        assert!(body.grounded, "the attached body is not standing on its surface");
     }
 
     #[test]
@@ -13818,6 +14771,7 @@ mod tests {
             flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
+            aiclass: None,
         });
         Runtime::new(&level)
     }
@@ -14702,6 +15656,46 @@ mod tests {
         assert_eq!(quiet.things[1].pos[0], 2.0, "an actor without `ReturnHome` walked away");
     }
 
+    /// The AI's facing is the engine's `(-sin yaw, cos yaw)`, not a math angle from +X. An actor
+    /// already aimed at the player therefore fires on its first tick with its yaw unchanged, and the
+    /// bolt leaves along +Y — which is exactly what retail's own door gunner does (placed at yaw 0,
+    /// firing down +Y, turning the two degrees onto the body instead of a quarter turn).
+    #[test]
+    fn an_actor_already_aimed_at_the_player_fires_on_the_first_tick() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0; // engine forward is +Y
+        let mut player = base.clone();
+        player.pos = [0.0, 1.5, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "reeyeesgun".into()];
+        rt.types = vec![10, 2];
+        rt.template_move.insert("walkplayer".into(), "physics".into());
+        rt.template_weapon.insert("reeyeesgun".into(), "blaster".into());
+        rt.template_vel.insert("blaster".into(), [0.0, 8.0, 0.0]);
+        rt.template_damage.insert("blaster".into(), 10.0);
+        rt.actor_flags.insert(1, 0x200);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 PrimaryFire 750.0, 0.8, 4.0, 0.0, 0.0, 500.0, 0.0, 0.0, 1.0, 0.0\n",
+            ),
+        );
+        let fired = rt.ai_tick(0, 1.0 / 60.0);
+        assert_eq!(fired, 1, "an actor already facing the player did not fire");
+        assert!(
+            rt.things[1].yaw.abs() < 0.5,
+            "the actor turned {} degrees onto a target it was already facing",
+            rt.things[1].yaw
+        );
+        let shot = rt.things.last().expect("a projectile");
+        assert!(shot.vel[1] > 0.0, "the shot left off the +Y axis: {:?}", shot.vel);
+        assert!(shot.vel[0].abs() < 1e-3, "the shot left off the +Y axis: {:?}", shot.vel);
+    }
+
     /// `blindfire` (`0x509b30`) fires at the **remembered** position when the body is out of sight:
     /// the engine tests that spot against the class's cos limit and a fixed 10-unit reach, rolls the
     /// instinct's chance and fires with its spread. The shipped line is
@@ -14901,6 +15895,24 @@ mod tests {
             Some(0),
             "the plate's own sector did not reach it"
         );
+    }
+
+    /// A surface crossing carries its own link id as the sender, which is what tells an
+    /// `onAdjoin` (`linkid=1`) from an `offAdjoin` (`linkid=0`): level 1's soundtrack script fades
+    /// the bar's music up or down on that number, so a message without it always faded down.
+    #[test]
+    fn a_surface_crossing_carries_the_link_id_as_the_sender() {
+        let mut rt = door_runtime();
+        rt.surface_links = vec![(0, 1, 206), (1, 0, 213), (2, 2, 206)];
+        assert_eq!(rt.crossed_surface(206), 2, "both links to surface 206 were messaged");
+        let senders: Vec<(usize, Option<i64>)> = rt
+            .pending_messages
+            .iter()
+            .map(|(instance, _, _, sender)| (*instance, *sender))
+            .collect();
+        assert_eq!(senders, vec![(0, Some(1)), (2, Some(2))], "a crossing lost its link id");
+        assert_eq!(rt.crossed_surface(213), 1, "the offAdjoin link was not messaged");
+        assert_eq!(rt.pending_messages[2].3, Some(0), "link 0 must arrive as sender 0");
     }
 
     /// `sithAI_CanWalk` (`0x4eb4b0`): the engine probes the step's destination and, finding nothing,
@@ -15163,10 +16175,11 @@ mod tests {
     #[test]
     fn look_for_target_scans_the_class_view_cone() {
         let mut rt = door_runtime();
-        // The body at the origin, an actor two units along +x facing +x (i.e. away from the body).
+        // The body at the origin, an actor two units along +x. The engine's yaw -90 faces +x, which
+        // here is away from the body.
         let mut actor = rt.things[0].clone();
         actor.pos = [2.0, 0.0, 0.0];
-        actor.yaw = 0.0;
+        actor.yaw = -90.0;
         let player = rt.things[0].clone();
         rt.things = vec![player, actor];
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
@@ -15195,7 +16208,7 @@ mod tests {
         // `thingflags & 0x4` is the engine's "plainly visible" bit, which makes the detection roll
         // certain and keeps this a test of the cone, not of the random draw.
         rt.things[0].flags = 0x4;
-        rt.things[1].yaw = 180.0;
+        rt.things[1].yaw = 90.0;
         rt.ai_scan.clear();
         rt.ai_last_seen.clear();
         rt.ai_tick(0, 0.1);

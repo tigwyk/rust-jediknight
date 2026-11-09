@@ -99,7 +99,9 @@ impl Ai {
         if self.fov <= 0.0 || self.fov >= 180.0 {
             return true;
         }
-        let facing = yaw.to_radians();
+        // The engine's facing is `forward = (-sin yaw, cos yaw)` (`sithCamera`'s own frame, held by
+        // the port's `yaw_axes`), so the facing direction is yaw turned a quarter turn.
+        let facing = yaw.to_radians() + std::f32::consts::FRAC_PI_2;
         let target = dy.atan2(dx);
         let mut delta = (target - facing).to_degrees().abs() % 360.0;
         if delta > 180.0 {
@@ -243,10 +245,14 @@ OpenDoors
         assert!(wide.sees(at, 0.0, [-3.0, 0.1, 0.0]), "200 degrees is all round in the engine");
 
         let coned = parse(&RYB.replace("fov=200", "fov=90"));
-        // 90 degrees total means 45 either side: 40 degrees off the facing is seen, 50 is not.
-        assert!(coned.sees(at, 0.0, [3.0, 2.5, 0.0]));
-        assert!(!coned.sees(at, 0.0, [0.0, 3.0, 0.0]));
-        assert!(!coned.sees(at, 0.0, [-3.0, 0.1, 0.0]));
+        // The engine's facing is `forward = (-sin yaw, cos yaw)`: yaw 0 looks along +Y, which is
+        // what retail's own door gunner does when it fires down +Y at yaw 0. 90 degrees total means
+        // 45 either side: 40 degrees off that axis is seen, 50 is not.
+        assert!(coned.sees(at, 0.0, [2.5, 3.0, 0.0]));
+        assert!(!coned.sees(at, 0.0, [3.0, 0.0, 0.0]), "yaw 0 must not look along +X");
+        assert!(!coned.sees(at, 0.0, [0.0, -3.0, 0.0]));
+        // Yaw -90 turns the same cone onto +X.
+        assert!(coned.sees(at, -90.0, [3.0, 0.0, 0.0]));
     }
 
     /// `sithAI_CheckSightThing` measures `sightdist` over the **full** vector: it subtracts the two

@@ -1,0 +1,27 @@
+# Level-1 audio route (issue #13): the exact merged movement-parity route
+# (`tools/parity/routes/level1-route.tsv`, issue #10) plus the bar's door crossing.
+#
+# The four walk legs, the poses, the `seed` rows and the switch are the merged route's own,
+# unchanged; the audio trace samples the same 600 ms grid. The bar doorway is **not** here: retail
+# crosses it only in a fresh process, so it lives in `level1-audio-route-door.tsv` and the gate
+# compares that segment separately.
+#
+# Door geometry, from `--collide --surfaces-at -8,-5,-1.05` (level data, not a guess):
+#   surface 206  sector 19, adjoin 73, y = -5.00, x -8.10..-7.90, z -1.150..-0.700,
+#                normal (0, -1, 0)      <- `onAdjoin` link 1 (music up)
+#   surface 213  the opposite face of the same opening (`offAdjoin` link 0)
+# The opening is a 0.2 x 0.45 slot in the y = -5 plane, so the leg walks in **y** through it
+# (yaw -90 / +90), not in x. The old legs walked +x along the wall, which is why retail slid in y
+# and never crossed while the replay's wall-plane test still fired.
+#
+# kind	name		x		y		z		yaw_deg
+warp	spawn		-		-		-		-
+seed	0.3726	0.7844
+input	180	1	0
+warp	cantina		-2.200043	-2.900013	-1.142886	105.000092
+input	144	1	0
+switch
+warp	street		5.474939	-1.899975	0.657119	90.000000
+input	180	1	0
+warp	door		1.300000	9.000000	6.237000	0.000000
+input	180	1	0

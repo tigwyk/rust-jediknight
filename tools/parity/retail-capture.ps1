@@ -17,6 +17,34 @@ param(
   # input, so a leg that starts after the opening settles for this window first. The trace's `held_ms`
   # starts at 0 after it, and `port-trace.ps1` takes the same value from the row's optional 8th column.
   [int]$WalkTraceSettleMs = 0,
+  # Issue #9's door-encounter telemetry, retail half: after the level loads and the row's warp has
+  # been applied, sample the engine's own memory (player health, inventory bin 60 shields, the thing
+  # array for actors and fired projectiles, and `DAT_00836c14` for the game clock) on a fixed
+  # game-time cadence for this many milliseconds, then write <name>.tsv into -EncounterOut. 0 keeps
+  # the normal screenshot captures. The dev console is NOT polled during the trace: it pauses the
+  # game and would change the encounter.
+  [int]$EncounterMs = 0,
+  # Issue #13's retail audio probe: after the level loads and the row's warp is applied, read the
+  # engine's own music and mixer state for this many game milliseconds and log it. Capture
+  # instrumentation only (see `Invoke-JkAudioProbe`); 0 disables it.
+  [int]$AudioProbeMs = 0,
+  [int]$AudioProbeCadenceMs = 100,
+  # Issue #13's retail audio route: walk this route file in retail and write its audio trace to
+  # `-AudioRouteOut` (port audio-trace schema). Capture instrumentation only.
+  [string]$AudioRoute = '',
+  [string]$AudioRouteOut = 'tools/parity/audiotrace/level1-audio-retail.tsv',
+  [int]$EncounterCadenceMs = 100,
+  [string]$EncounterOut = 'target/parity/encounter',
+  # File name (without `.tsv`) for the encounter trace. Empty uses the shots row's name; the gate's
+  # fixture is `door_encounter`, while the pose row is `route_door`.
+  [string]$EncounterName = '',
+  # Issue #8's continuous retail route: run every row of `-RoutePlan` in ONE game session and sample
+  # the bars on the 600 ms grid the port replays. The selected shots row must be the level's own
+  # start (no pose), i.e. `-Only spawn` with `shots.tsv`.
+  [switch]$RouteWalk,
+  [string]$RoutePlan = 'tools/parity/routes/level1-route.tsv',
+  [string]$RouteOut = 'target/parity/routetrace',
+  [string]$RouteName = 'level1-route-retail-continuous',
   # Capture a walk leg even when the headless preflight says the body cannot advance from the pose
   # (`tools/parity/walk-preflight.ps1`). Not recommended: a blocked leg parks the game against a wall.
   [switch]$ForceWalk,
@@ -520,6 +548,26 @@ function Read-JkGameMs {
 #
 # The port replays the same thing with `--trace-out` and `BK_WALK_FORWARD=1` (fixed 1/60 s step), and
 # `tools/parity/trace-compare.ps1` compares the two at the segment times.
+#
+# Player bars, the f32s both the walk trace and the encounter telemetry record: health at
+# `thing+0x134` (`GetThingHealth`) and inventory bin 60 shields at `inventory + 0x88 + 60*0x18`
+# (`sithInventory_SetInventory`). The plausibility guards are the encounter reader's: a wrong
+# pointer must abort the capture, not write zeros into a fixture.
+function Read-JkPlayerBars {
+  param([Parameter(Mandatory)][int]$ProcessId)
+  $thing = [JkRetail]::ReadU32($ProcessId, 0x008319A4)
+  if ($thing -le 0) { throw "player bars: the player thing pointer (0x008319A4) read $thing" }
+  $inv = [JkRetail]::ReadU32($ProcessId, $thing + 0x1C0)
+  if ($inv -le 0) { throw "player bars: the inventory pointer (thing+0x1C0) read $inv" }
+  $health = [JkRetail]::ReadFloat($ProcessId, $thing + 0x134)
+  $shields = [JkRetail]::ReadFloat($ProcessId, $inv + 0x88 + 60 * 0x18)
+  if ([double]::IsNaN($health) -or [double]::IsNaN($shields)) {
+    throw "player bars: the player bars could not be read (health $health, shields $shields)"
+  }
+  if ($health -lt 0.0 -or $health -gt 1000.0) { throw "player bars: implausible health $health at thing+0x134" }
+  if ($shields -lt -0.01 -or $shields -gt 200.01) { throw "player bars: implausible shields $shields at inventory bin 60" }
+  [pscustomobject]@{ Health = $health; Shields = $shields }
+}
 function Invoke-JkWalkTrace {
   param(
     [Parameter(Mandatory)][int]$ProcessId,
@@ -532,14 +580,16 @@ function Invoke-JkWalkTrace {
   $path = Join-Path $script:TraceOut ("{0}-walk.tsv" -f $Name)
   $segments = [math]::Max(1, [int][math]::Floor($Milliseconds / $HoldMs))
   $lines = New-Object System.Collections.Generic.List[string]
-  # `game_ms` is appended (not replacing `held_ms`) so older fixtures and readers keep their columns.
-  $lines.Add((@("held_ms", "x", "y", "z", "sector", "yaw", "game_ms") -join ([char]9)))
+  # `game_ms` is appended (not replacing `held_ms`) so older fixtures and readers keep their columns;
+  # `health`/`shields` are the route reference's two bar columns (issue #8's required fields).
+  $lines.Add((@("held_ms", "x", "y", "z", "sector", "yaw", "game_ms", "health", "shields") -join ([char]9)))
   $start = Read-JkCoords -ProcessId $ProcessId
   if (-not $start) { throw 'walk trace: the start pose could not be read from coords' }
   Log ("walk trace: start " + $start.Raw)
   $clock0 = Read-JkGameMs -ProcessId $ProcessId
   if ($clock0 -lt 0) { throw 'walk trace: the game clock (0x00836c14) could not be read' }
-  $lines.Add((@(0, $start.Pos[0], $start.Pos[1], $start.Pos[2], $start.Sector, $start.Pyr[1], 0) -join ([char]9)))
+  $bars = Read-JkPlayerBars -ProcessId $ProcessId
+  $lines.Add((@(0, $start.Pos[0], $start.Pos[1], $start.Pos[2], $start.Sector, $start.Pyr[1], 0, ('{0:F1}' -f $bars.Health), ('{0:F1}' -f $bars.Shields)) -join ([char]9)))
   $samples = 0
   if ($SettleMs -gt 0) {
     Log ("walk trace: settling {0} ms before the hold" -f $SettleMs)
@@ -584,7 +634,8 @@ function Invoke-JkWalkTrace {
       if ($clock -lt 0) { throw "walk trace: the game clock could not be read after segment $i" }
       $gameMs = $clock - $clock0
       $samples++
-      $lines.Add((@($held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $sample.Pyr[1], $gameMs) -join ([char]9)))
+      $bars = Read-JkPlayerBars -ProcessId $ProcessId
+      $lines.Add((@($held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $sample.Pyr[1], $gameMs, ('{0:F1}' -f $bars.Health), ('{0:F1}' -f $bars.Shields)) -join ([char]9)))
       Log ("walk trace: {0} ms held ({5} ms game) at ({1:N3}, {2:N3}, {3:N3}) sector {4}" -f $held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $gameMs)
       # Stuck detection (see the comment above the hold loop): a body against a wall has not moved.
       $dx = [double]$sample.Pos[0] - $previous[0]
@@ -639,6 +690,532 @@ function Invoke-JkWalkTrace {
       }
     }
   }
+  return $path
+}
+# `-RouteWalk`: the retail half of issue #8's scripted route, in ONE game session.
+#
+# The port's replay is one continuous run. Four independent retail leg captures each started from a
+# fresh level load, so their bars carried different pre-warp damage and could not be compared; this
+# runs the same `tools/parity/routes/level1-route.tsv` rows without reloading. A `warp` row runs the
+# console warp at its tick (the body goes one eye offset below the script's camera eye, as retail's
+# `warp` leaves it), an `input` row holds forward for its ticks in 600 ms segments, and the bars are
+# read from memory at every segment end — no console while the fight is live. Cogs are read with
+# `cogstatus` at the start and after each leg, where the plan can change them. `seed` rows are the
+# port's compensation for retail's coast, so they need no action here; `switch`/`use` rows are
+# logged and not synthesized (retail's own links deliver those messages).
+function Invoke-JkRouteTrace {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][string]$Plan,
+    [Parameter(Mandatory)][string]$OutDir,
+    [Parameter(Mandatory)][string]$Name
+  )
+  $path = Join-Path $OutDir ("{0}.tsv" -f $Name)
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add((@('tick', 't_s', 'health', 'shields', 'door0_status', 'door0_movestatus', 'door0_opendoors', 'door0_closedoors',
+        'switch_status', 'switch_movestatus', 'switch_opendoors', 'switch_closedoors') -join ([char]9)))
+  $cogs = [ordered]@{
+    door0_status = $null; door0_movestatus = $null; door0_opendoors = $null; door0_closedoors = $null
+    switch_status = $null; switch_movestatus = $null; switch_opendoors = $null; switch_closedoors = $null
+  }
+  $wanted = @{
+    0  = @{ doorstatus = 'door0_status'; movestatus = 'door0_movestatus'; opendoors = 'door0_opendoors'; closedoors = 'door0_closedoors' }
+    11 = @{ doorstatus = 'switch_status'; movestatus = 'switch_movestatus'; open_doors = 'switch_opendoors'; close_doors = 'switch_closedoors' }
+  }
+  # A reply can carry the previous command's tail, so a symbol that does not appear keeps its value.
+  $readCogs = {
+    foreach ($cog in 0, 11) {
+      foreach ($line in @(Invoke-JkDevConsoleCommand -ProcessId $ProcessId -Command ("cogstatus {0}" -f $cog))) {
+        if ($line -match "Symbol \d+: '([a-zA-Z_0-9]+)'\s*=\s*([-0-9.]+)") {
+          $symbol = $Matches[1]
+          if ($wanted[$cog].ContainsKey($symbol)) { $cogs[$wanted[$cog][$symbol]] = [double]$Matches[2] }
+        }
+      }
+    }
+  }
+  $addRow = {
+    param([int]$Tick, [double]$Health, [double]$Shields)
+    $cells = @($Tick, ('{0:F4}' -f ($Tick / 60.0)), ('{0:F1}' -f $Health), ('{0:F1}' -f $Shields))
+    foreach ($key in $cogs.Keys) {
+      $value = $cogs[$key]
+      $cells += $(if ($null -eq $value) { '-' } else { '{0:F3}' -f $value })
+    }
+    $lines.Add(($cells -join ([char]9)))
+  }
+  & $readCogs
+  # Both sides measure movement with the AI off: retail's own `-devMode` switches are `disableai`
+  # (the port's replay passes `--no-ai`) and `noaishots` (the port skips the AI tick, so no shot is
+  # fired at all). Both are **toggles** in the engine, so each is set explicitly with `on`; a warp
+  # also gets them re-applied in case it resets the debug flags.
+  $disableAi = {
+    foreach ($command in 'disableai on', 'noaishots on') {
+      foreach ($reply in @(Invoke-JkDevConsoleCommand -ProcessId $ProcessId -Command $command)) {
+        Log ("route: {0} -> {1}" -f $command, $reply)
+      }
+    }
+  }
+  & $disableAi
+  $bars = Read-JkPlayerBars -ProcessId $ProcessId
+  & $addRow 0 $bars.Health $bars.Shields
+  $tick = 0
+  foreach ($line in Get-Content -LiteralPath $Plan) {
+    if ($line -match '^\s*(#|$)') { continue }
+    $f = $line -split "`t"
+    switch ($f[0]) {
+      'warp' {
+        $x = $f[3]
+        if ($x -and $x -ne '-') {
+          $bodyZ = [double]$f[5] - $script:JkEyeOffset
+          # `warp x y z pitch yaw roll` (the shots flow's own argument order): passing the route's yaw
+          # in the pitch slot left the body facing nowhere and unable to walk.
+          $command = 'warp {0} {1} {2} 0 {3} 0' -f $f[3], $f[4], $bodyZ, $f[6]
+          $reply = @(Invoke-JkDevConsoleCommand -ProcessId $ProcessId -Command $command)
+          if ($reply -match 'Position not in world') { throw "route trace: warp failed: $command" }
+          $coords = Read-JkCoords -ProcessId $ProcessId
+          Log ("route: {0} -> {1}" -f $command, $(if ($coords) { $coords.Raw } else { 'coords unavailable' }))
+          # The shots flow waits this long after a warp before a walk; the game is still finishing
+          # the console/foreground transition and would swallow the first hold.
+          Start-Sleep -Milliseconds 900
+          & $disableAi
+        }
+      }
+      'input' {
+        if ([double]$f[3] -ne 0) { throw 'route trace: strafe input is not supported' }
+        $segments = [int]([int]$f[1] / 36)
+        # Like the walk trace: the key goes down before the window is raised, so the frame that
+        # resumes the game after a console/foreground wait already sees it (a 600 ms press entirely
+        # inside a paused window is one frame or none at the engine's few-fps render rate).
+        Send-JkKeyDown -Name 'UP'
+        for ($i = 1; $i -le $segments; $i++) {
+          # A console read between segments takes the focus, so DInput only sees the hold after the
+          # game window is raised and foreground (the walk trace's own loop; its body moves).
+          $gameWindow = Get-JkWindow -ProcessId $ProcessId
+          $active = [JkRetail]::Activate($gameWindow)
+          Log ("route: focus activated={0} foreground={1}" -f $active, [JkRetail]::ForegroundTitle())
+          for ($attempt = 0; $attempt -lt 8; $attempt++) {
+            if ($gameWindow -eq [IntPtr]::Zero) { break }
+            [void][JkRetail]::ShowWindow($gameWindow, 9)
+            [void][JkRetail]::SetForegroundWindow($gameWindow)
+            Start-Sleep -Milliseconds 120
+            if ([JkRetail]::ForegroundTitle() -eq 'Jedi Knight') { break }
+          }
+          Send-JkKeyDown -Name 'UP'
+          $clockBefore = Read-JkGameMs -ProcessId $ProcessId
+          Start-Sleep -Milliseconds 600
+          Send-JkKeyUp -Name 'UP'
+          $clockAfter = Read-JkGameMs -ProcessId $ProcessId
+          Log ("route: hold clock {0} -> {1} ms" -f $clockBefore, $clockAfter)
+          $tick += 36
+          $bars = Read-JkPlayerBars -ProcessId $ProcessId
+          & $addRow $tick $bars.Health $bars.Shields
+          # End the segment with a console read like the walk trace: it freezes the game between
+          # holds, so the pre-pressed key cannot move the body during the foreground wait and each
+          # 600 ms sample measures one hold (the committed walk traces' methodology).
+          $holdCoords = Read-JkCoords -ProcessId $ProcessId
+          if ($holdCoords) {
+            Log ("route: tick {0} ({1} ms held) pos ({2:N2}, {3:N2}, {4:N2}) sector {5}; health {6:N1} shields {7:N1}" -f `
+                $tick, ($i * 600), $holdCoords.Pos[0], $holdCoords.Pos[1], $holdCoords.Pos[2], $holdCoords.Sector, $bars.Health, $bars.Shields)
+          } else {
+            Log ("route: tick {0} ({1} ms held) health {2:N1} shields {3:N1} (coords unavailable)" -f $tick, ($i * 600), $bars.Health, $bars.Shields)
+          }
+        }
+        Send-JkKeyUp -Name 'UP'
+        $coords = Read-JkCoords -ProcessId $ProcessId
+        if ($coords) { Log ("route: leg end -> " + $coords.Raw) } else { Log 'route: leg end coordinates unavailable' }
+        & $readCogs
+      }
+      'switch' {
+        # Retail opens that door through the level's own plate link. The port's synthetic `activate`
+        # was removed from the plan; script it here only if retail's own reading ever needs it.
+        Log 'route: switch row has no synthetic action'
+      }
+      'use' { Log 'route: use row has no synthetic action in this plan' }
+      'seed' { }
+    }
+  }
+  Set-Content -LiteralPath $path -Value $lines -Encoding utf8
+  Log ("route trace: wrote {0} ({1} row(s))" -f $path, ($lines.Count - 1))
+  return $path
+}
+# `-AudioRoute`: the retail half of issue #13's audio fixture.
+#
+# Walks the same route file the port replays (`--replay`): each `warp` row is applied through the
+# dev console (the game pauses for it), each `input` row holds forward for its tick count. Every
+# 600 ms of route game time a row is written in the port's audio-trace schema, read from the
+# engine's own globals (see `Invoke-JkAudioProbe` for the addresses), so the two files compare
+# without a second format:
+#
+#   music        `PlaySong`'s start/end track; `music_loop` is the mixer's loop flag (1/0)
+#   music_vol    f32 0x0054A678  (`sithSoundMixer_SetMusicVolume` 0x4DB080 clamps the script value
+#                     here; 0x0054A67C is the user's global multiplier the two are applied through)
+#   ambient      the loop channel (flags bit 0x1) with the largest gain; its script volume
+#   sounds       non-loop channels that started in the window, as `name@gain`
+#
+# The window polls the mixer every 100 ms so a short one-shot cannot fall between samples.
+function Invoke-JkAudioRoute {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][string]$RoutePath,
+    [Parameter(Mandatory)][string]$OutPath,
+    [int]$CadenceMs = 600
+  )
+  $route = @()
+  foreach ($line in (Get-Content -LiteralPath $RoutePath)) {
+    if ($line -match '^\s*#' -or $line.Trim() -eq '') { continue }
+    $cells = $line -split "`t"
+    if ($cells[0] -eq 'warp') {
+      # The file's header has a blank column between `name` and `x`, so read the numbers compactly.
+      # A `-` pose is the level's own start: there is no warp to apply for it.
+      $vals = @($cells | Select-Object -Skip 2 | Where-Object { $_ -ne '' })
+      if ($vals.Count -lt 4 -or $vals[0] -eq '-') { continue }
+      $route += [pscustomobject]@{ Kind = 'warp'; X = [double]$vals[0]; Y = [double]$vals[1]; Z = [double]$vals[2]; Yaw = [double]$vals[3]; Ticks = 0 }
+    } elseif ($cells[0] -eq 'input') {
+      $route += [pscustomobject]@{ Kind = 'input'; Ticks = [int]$cells[1] }
+    }
+  }
+  if ($route.Count -eq 0) { throw "audio route: no warp/input rows in $RoutePath" }
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add((@('tick', 't_s', 'music', 'music_end', 'music_loop', 'music_vol', 'ambient', 'ambient_vol', 'sounds') -join ([char]9)))
+  $legTick = 0
+  $sampleMs = 0
+  $windowEvents = New-Object System.Collections.Generic.List[string]
+  $seen = @{}
+  $clock0 = -1
+  $sample = {
+    param([int]$tick)
+    $vol = [JkRetail]::ReadFloat($ProcessId, 0x0054A678)
+    $from = [JkRetail]::ReadU32($ProcessId, 0x008BBC74)
+    $to = [JkRetail]::ReadU32($ProcessId, 0x008BBC70)
+    $loop = [JkRetail]::ReadU32($ProcessId, 0x00835FCC)
+    $playing = [JkRetail]::ReadU32($ProcessId, 0x00835FD0)
+    # The range is the selection; `0x00835FD0` is the MCI start result, which reads 0 when the
+    # redbook device does not start -- the selection is still what the engine holds.
+    $musicName = if ($from -ne 0 -or $to -ne 0) { "$from" } else { '-' }
+    $musicEnd = if ($musicName -ne '-') { "$to" } else { '-' }
+    $musicLoop = if ($musicName -ne '-') { if ($loop -ne 0) { '1' } else { '0' } } else { '-' }
+    $ambient = $null
+    $ambientVol = 0.0
+    $ambientGain = 0.0
+    for ($i = 0; $i -lt 32; $i++) {
+      $base = 0x00835FE8 + $i * 0x5C
+      $flags = [JkRetail]::ReadU32($ProcessId, $base + 0x0C)
+      if (($flags -band 0x20000) -eq 0) { continue }
+      $sound = [JkRetail]::ReadU32($ProcessId, $base + 0x08)
+      if ($sound -le 0) { continue }
+      $nameBytes = [JkRetail]::ReadBytes($ProcessId, $sound, 32)
+      if ($null -eq $nameBytes) { continue }
+      $zero = [Array]::IndexOf($nameBytes, [byte]0)
+      if ($zero -lt 0) { $zero = 32 }
+      $name = [Text.Encoding]::ASCII.GetString($nameBytes, 0, $zero)
+      $isLoop = ($flags -band 0x1) -ne 0
+      $volume = [JkRetail]::ReadFloat($ProcessId, $base + 0x14)
+      $minR = [JkRetail]::ReadFloat($ProcessId, $base + 0x18)
+      $maxR = [JkRetail]::ReadFloat($ProcessId, $base + 0x1C)
+      $dist = [JkRetail]::ReadFloat($ProcessId, $base + 0x38)
+      $fade = 0.0
+      if ($maxR -gt $minR) { $fade = [math]::Min(1.0, [math]::Max(0.0, ($dist - $minR) / ($maxR - $minR))) }
+      $gain = [math]::Min(1.0, [math]::Max(0.0, $volume * (1.0 - $fade))) * 0.75
+      if ($isLoop) {
+        if ($null -eq $ambient -or $gain -gt $ambientGain) {
+          $ambient = $name
+          $ambientVol = $volume
+          $ambientGain = $gain
+        }
+      } elseif (-not $seen.ContainsKey($name)) {
+        $windowEvents.Add(('{0}@{1:F3}' -f $name, $gain))
+      }
+      $seen[$name] = $true
+    }
+    # Empty cells are recorded silence (no loop channel in this window); `-` would mean the field
+    # was not recorded, which is only true when the range itself is unset.
+    $ambientName = if ($null -eq $ambient) { '' } else { $ambient }
+    $ambientVolume = if ($null -eq $ambient) { '' } else { '{0:F3}' -f $ambientVol }
+    $sounds = ($windowEvents -join ' ')
+    $lines.Add((@($tick, ('{0:F4}' -f ([double]$tick / 60.0)), $musicName, $musicEnd, $musicLoop, ('{0:F3}' -f $vol), $ambientName, $ambientVolume, $sounds) -join ([char]9)))
+    $pthing = [JkRetail]::ReadU32($ProcessId, 0x008319A4)
+    if ($pthing -gt 0) {
+      $px = [JkRetail]::ReadFloat($ProcessId, $pthing + 0xB8)
+      $py = [JkRetail]::ReadFloat($ProcessId, $pthing + 0xBC)
+      Log ("audio route: t={0} pos=({1:F3},{2:F3}) music={3} vol={4:F3}" -f $tick, $px, $py, $musicName, [double]$vol)
+    }
+    $windowEvents.Clear()
+    $seen = @{}
+  }
+  $key = 'UP'
+  foreach ($leg in $route) {
+    if ($leg.Kind -eq 'warp') {
+      $cmd = 'warp {0} {1} {2} {3} 0 0' -f $leg.X, $leg.Y, $leg.Z, $leg.Yaw
+      $warpClock0 = Read-JkGameMs -ProcessId $ProcessId
+      $reply = @(Invoke-JkDevConsoleCommand -ProcessId $ProcessId -Command $cmd)
+      $warpClock1 = Read-JkGameMs -ProcessId $ProcessId
+      Log ("audio route: warp game_ms {0} -> {1} ({2} ms of game time spent in the console call)" -f $warpClock0, $warpClock1, ($warpClock1 - $warpClock0))
+      if ($reply -match 'Position not in world') { throw "audio route: $cmd was refused: $reply" }
+      Log "audio route: warp $($leg.X),$($leg.Y),$($leg.Z) yaw $($leg.Yaw)"
+      if ($clock0 -lt 0) {
+        # The route clock starts after the first warp lands the body at the route's own start.
+        Start-Sleep -Milliseconds 400
+        $clock0 = Read-JkGameMs -ProcessId $ProcessId
+        if ($clock0 -lt 0) { throw 'audio route: the game clock (0x00836C14) could not be read' }
+      } elseif ($warpClock1 -gt $warpClock0 -and $warpClock0 -ge 0) {
+        # The engine keeps running while the dev-console command is issued (~0.4-1.2 s of game
+        # time per warp). The route's warps cost zero ticks in the port, so the spent time is
+        # removed from the route clock; otherwise every later leg -- and the bar crossing -- lands
+        # that much later than the port's tick grid and the audio samples compare different legs.
+        $clock0 = $clock0 + ($warpClock1 - $warpClock0)
+        Log ("audio route: route clock re-based by {0} ms for the warp" -f ($warpClock1 - $warpClock0))
+      }
+      continue
+    }
+    $legEndMs = ($legTick + $leg.Ticks) * 1000.0 / 60.0
+    $gameWindow = Get-JkWindow -ProcessId $ProcessId
+    if ($gameWindow -ne [IntPtr]::Zero) {
+      [void][JkRetail]::ShowWindow($gameWindow, 9)
+      [void][JkRetail]::SetForegroundWindow($gameWindow)
+      Start-Sleep -Milliseconds 120
+    }
+    Send-JkKeyDown -Name $key
+    try {
+      while ($true) {
+        $clock = Read-JkGameMs -ProcessId $ProcessId
+        if ($clock -lt 0) { throw 'audio route: the game clock stopped reading' }
+        $elapsed = [double]$clock - [double]$clock0
+        # The engine clock advances in frame-sized jumps under software rendering; fill every grid
+        # point the jump crossed, not just one, so the row count matches the port's timeline.
+        while ($elapsed -ge $sampleMs -and $sampleMs -le $legEndMs) {
+          & $sample ([int]($sampleMs / 1000.0 * 60.0))
+          $sampleMs += $CadenceMs
+        }
+        if ($elapsed -ge $legEndMs) { break }
+        Start-Sleep -Milliseconds 8
+      }
+    } finally {
+      Send-JkKeyUp -Name $key
+    }
+    $legTick += $leg.Ticks
+  }
+  Set-Content -LiteralPath $OutPath -Value $lines -Encoding utf8
+  Log ("audio route: wrote {0} ({1} row(s))" -f $OutPath, ($lines.Count - 1))
+  return $OutPath
+}
+# `-AudioProbeMs`: the retail half of issue #13's audio fixture, probe form.
+#
+# Capture instrumentation only. The addresses are the engine's own globals (JK.EXE has no
+# relocations, so they are fixed), recovered from the decompiled mixer:
+#
+#   song range        u32 start 0x008BBC74, u32 end 0x008BBC70, u32 loop-back 0x00835FCC,
+#                     u32 playing 0x00835FD0                 (`sithSoundMixer_PlaySong`, 0x4DAE60)
+#   music volume      f32 0x0054A678                           (`SetMusicVol` -> 0x4DB080)
+#   mixer channels    base 0x00835FE8, 32 entries of 0x5C:
+#                       +0x08 sound struct, +0x0C flags, +0x14 volume, +0x18 min radius,
+#                       +0x1C max radius, +0x38 distance, +0x48 thing
+#                     (`sithSoundMixer_PlaySoundThing`, 0x4DBA60)
+#   sound name        the sound struct's own char[32] at +0 (`FUN_004EF1D0` copies the name in)
+#
+# Nothing is written to the process: the probe only reads. `music_vol` is the mixer's own value; a
+# channel's `gain` mirrors the port's `snd::volume` (base, linear min..max falloff, 0.75 final
+# scale) from the channel's own fields, without the rear-pan term (the channel keeps no listener
+# basis; a sound behind the listener would read high).
+function Invoke-JkAudioProbe {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [int]$Milliseconds = 4000,
+    [int]$CadenceMs = 100
+  )
+  $clock0 = Read-JkGameMs -ProcessId $ProcessId
+  if ($clock0 -lt 0) { throw 'audio probe: the game clock (0x00836C14) could not be read' }
+  $vol0 = [JkRetail]::ReadFloat($ProcessId, 0x0054A678)
+  Log ("audio probe: start song {0}..{1} (loop {2}, playing {3}) volume {4:N3}" -f [JkRetail]::ReadU32($ProcessId, 0x008BBC74), [JkRetail]::ReadU32($ProcessId, 0x008BBC70), [JkRetail]::ReadU32($ProcessId, 0x00835FCC), [JkRetail]::ReadU32($ProcessId, 0x00835FD0), $vol0)
+  $next = 0
+  while ($true) {
+    $clock = Read-JkGameMs -ProcessId $ProcessId
+    if ($clock -lt 0) { throw 'audio probe: the game clock stopped reading' }
+    $elapsed = [double]$clock - [double]$clock0
+    if ($elapsed -ge $Milliseconds) { break }
+    if ($elapsed -lt $next) { Start-Sleep -Milliseconds 8; continue }
+    $vol = [JkRetail]::ReadFloat($ProcessId, 0x0054A678)
+    $from = [JkRetail]::ReadU32($ProcessId, 0x008BBC74)
+    $to = [JkRetail]::ReadU32($ProcessId, 0x008BBC70)
+    $num = [JkRetail]::ReadU32($ProcessId, 0x00835FCC)
+    $playing = [JkRetail]::ReadU32($ProcessId, 0x00835FD0)
+    $channels = @()
+    for ($i = 0; $i -lt 32; $i++) {
+      $base = 0x00835FE8 + $i * 0x5C
+      $flags = [JkRetail]::ReadU32($ProcessId, $base + 0x0C)
+      if (($flags -band 0x20000) -eq 0) { continue }
+      $sound = [JkRetail]::ReadU32($ProcessId, $base + 0x08)
+      if ($sound -le 0) { continue }
+      $nameBytes = [JkRetail]::ReadBytes($ProcessId, $sound, 32)
+      if ($null -eq $nameBytes) { continue }
+      $zero = [Array]::IndexOf($nameBytes, [byte]0)
+      if ($zero -lt 0) { $zero = 32 }
+      $name = [Text.Encoding]::ASCII.GetString($nameBytes, 0, $zero)
+      $volume = [JkRetail]::ReadFloat($ProcessId, $base + 0x14)
+      $minR = [JkRetail]::ReadFloat($ProcessId, $base + 0x18)
+      $maxR = [JkRetail]::ReadFloat($ProcessId, $base + 0x1C)
+      $dist = [JkRetail]::ReadFloat($ProcessId, $base + 0x38)
+      $thing = [JkRetail]::ReadU32($ProcessId, $base + 0x48)
+      $fade = 0.0
+      if ($maxR -gt $minR) { $fade = [math]::Min(1.0, [math]::Max(0.0, ($dist - $minR) / ($maxR - $minR))) }
+      $gain = [math]::Min(1.0, [math]::Max(0.0, $volume * (1.0 - $fade))) * 0.75
+      $channels += ('{0}@{1:F3}(v={2:F3} d={3:F2} r={4:F2}..{5:F2} thing={6} flags=0x{7:X})' -f $name, $gain, $volume, $dist, $minR, $maxR, $thing, $flags)
+    }
+    Log ("audio probe: t={0} music={1},{2},{3} playing={4} vol={5:F3} channels=[{6}]" -f [math]::Round($elapsed), $from, $to, $num, $playing, $vol, ($channels -join '; '))
+    $next += $CadenceMs
+  }
+  Log 'audio probe: done'
+}
+# `-EncounterMs`: the retail half of issue #9's door-encounter telemetry.
+#
+# Everything is read straight out of the engine's memory, because the dev console is a dialog that
+# pauses the game: a `coords`/`aistatus` poll on a cadence would stop the encounter between samples
+# and measure a different fight. The addresses come from the decompilation (each is a fixed runtime
+# address; JK.EXE has no relocations):
+#
+#   player thing            *(u32*)0x008319A4
+#   health                  f32 at thing + 0x134        (`GetThingHealth`, sithPlayer health)
+#   inventory block         *(u32*)(thing + 0x1C0)
+#   shields (bin 60)        f32 at inventory + 0x88 + 60*0x18
+#                           (`sithInventory_SetInventory` 0x4D2000: amount = base + bin*0x18)
+#   world                   *(u32*)0x008339C8
+#   thing count / base      u32 at world + 0xBC / u32 at world + 0xC4 (`FUN_004da770`),
+#                           stride 0x2B0; type at +0x0C (2 actor, 3 weapon/projectile, 10 player),
+#                           template u16 at +0x04, angles f32x3 at +0x88, position f32x3 at +0xB8
+#   game clock (ms)         *(u32*)0x00836C14           (`sithTime_Advance`)
+#
+# The row shape is the port's (`t_ms kind thing template x y z yaw health shields detail`), so
+# `tools/parity/encounter-gate.ps1` compares the two without a second format. A `shot` row is a
+# type-3 thing that appeared since the previous sample (a fired bolt; placed weapons are already in
+# the baseline), a `hit` row is a drop in the player's shields or health, and `player`/`actor` rows
+# are state at the fixed game-time cadence.
+function Invoke-JkEncounterTrace {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][string]$Name,
+    [int]$Milliseconds = 10000,
+    [int]$CadenceMs = 100,
+    [Parameter(Mandatory)][string]$OutDir
+  )
+  $path = Join-Path $OutDir ("{0}.tsv" -f $Name)
+  $playerThing = [JkRetail]::ReadU32($ProcessId, 0x008319A4)
+  if ($playerThing -le 0) { throw "encounter trace: the player thing pointer (0x008319A4) read $playerThing" }
+  $world = [JkRetail]::ReadU32($ProcessId, 0x008339C8)
+  if ($world -le 0) { throw "encounter trace: the world pointer (0x008339C8) read $world" }
+  $inv = [JkRetail]::ReadU32($ProcessId, $playerThing + 0x1C0)
+  if ($inv -le 0) { throw "encounter trace: the player inventory pointer (thing+0x1C0) read $inv" }
+  $health0 = [JkRetail]::ReadFloat($ProcessId, $playerThing + 0x134)
+  $shields0 = [JkRetail]::ReadFloat($ProcessId, $inv + 0x88 + 60 * 0x18)
+  if ([double]::IsNaN($health0) -or [double]::IsNaN($shields0)) {
+    throw "encounter trace: the player bars could not be read (health $health0, shields $shields0)"
+  }
+  # Plausibility guards: a wrong offset must fail the capture, not write a fixture full of zeros.
+  if ($health0 -lt 0.0 -or $health0 -gt 1000.0) { throw "encounter trace: implausible health $health0 at thing+0x134" }
+  if ($shields0 -lt -0.01 -or $shields0 -gt 200.01) { throw "encounter trace: implausible shields $shields0 at inventory bin 60" }
+  Log ("encounter trace: player thing {0}, health {1}, shields {2}, world {3}" -f $playerThing, $health0, $shields0, $world)
+
+  $clock0 = Read-JkGameMs -ProcessId $ProcessId
+  if ($clock0 -lt 0) { throw 'encounter trace: the game clock (0x00836C14) could not be read' }
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add((@('t_ms', 'kind', 'thing', 'template', 'x', 'y', 'z', 'yaw', 'health', 'shields', 'detail') -join ([char]9)))
+  $previous = $null
+  $previousType3 = @{}
+  $sampled = 0
+  $nextSample = 0
+  $shots = 0
+  $hits = 0
+  $failedReads = 0
+  while ($true) {
+    $clock = Read-JkGameMs -ProcessId $ProcessId
+    if ($clock -lt 0) { throw 'encounter trace: the game clock stopped reading' }
+    $elapsed = [double]$clock - [double]$clock0
+    if ($elapsed -ge $Milliseconds) { break }
+    if ($elapsed -lt $nextSample) { Start-Sleep -Milliseconds 8; continue }
+
+    $count = [JkRetail]::ReadU32($ProcessId, $world + 0xBC)
+    $base = [JkRetail]::ReadU32($ProcessId, $world + 0xC4)
+    if ($count -le 0 -or $count -gt 5000 -or $base -le 0) {
+      $failedReads++
+      Start-Sleep -Milliseconds 8
+      continue
+    }
+    $bytes = [JkRetail]::ReadBytes($ProcessId, $base, [int]($count * 0x2B0))
+    if ($null -eq $bytes) {
+      $failedReads++
+      Start-Sleep -Milliseconds 8
+      continue
+    }
+    $health = [JkRetail]::ReadFloat($ProcessId, $playerThing + 0x134)
+    $invNow = [JkRetail]::ReadU32($ProcessId, $playerThing + 0x1C0)
+    $shields = if ($invNow -gt 0) { [JkRetail]::ReadFloat($ProcessId, $invNow + 0x88 + 60 * 0x18) } else { [double]::NaN }
+    if ([double]::IsNaN($health) -or [double]::IsNaN($shields)) {
+      $failedReads++
+      Start-Sleep -Milliseconds 8
+      continue
+    }
+    $px = [JkRetail]::ReadFloat($ProcessId, $playerThing + 0xB8)
+    $py = [JkRetail]::ReadFloat($ProcessId, $playerThing + 0xBC)
+    $pz = [JkRetail]::ReadFloat($ProcessId, $playerThing + 0xC0)
+    # `thing + 0x88` is `orient.rvec` (rdMatrix): a yaw-only rotation gives
+    # (cos yaw, sin yaw, 0), so atan2(y, x) recovers the body yaw. Reading the raw element
+    # (the old 0x8C) is sin(yaw), not degrees -- actor facings need this conversion.
+    $pyaw = [math]::Atan2([double][JkRetail]::ReadFloat($ProcessId, $playerThing + 0x8C), [double][JkRetail]::ReadFloat($ProcessId, $playerThing + 0x88)) * 180.0 / [math]::PI
+    $sampleMs = [math]::Round($nextSample)
+
+    $currentType3 = @{}
+    $sampleLines = New-Object System.Collections.Generic.List[string]
+    $sampleLines.Add((@($sampleMs, 'player', $playerThing, 'walkplayer', ('{0:F4}' -f $px), ('{0:F4}' -f $py), ('{0:F4}' -f $pz), ('{0:F2}' -f $pyaw), ('{0:F1}' -f $health), ('{0:F1}' -f $shields), '') -join ([char]9)))
+    for ($i = 0; $i -lt $count; $i++) {
+      $offset = $i * 0x2B0
+      $type = [BitConverter]::ToInt32($bytes, $offset + 0x0C)
+      if ($type -eq 3) {
+        $template = [BitConverter]::ToUInt16($bytes, $offset + 0x04)
+        $x = [BitConverter]::ToSingle($bytes, $offset + 0xB8)
+        $y = [BitConverter]::ToSingle($bytes, $offset + 0xBC)
+        $z = [BitConverter]::ToSingle($bytes, $offset + 0xC0)
+        $currentType3[$i] = [pscustomobject]@{ Template = $template; X = $x; Y = $y; Z = $z }
+        # A placed weapon is in the baseline sample; anything new afterwards is a fired bolt.
+        if ($sampled -gt 0 -and -not $previousType3.ContainsKey($i)) {
+          $shots++
+          $sampleLines.Add((@($sampleMs, 'shot', $i, $template, ('{0:F4}' -f $x), ('{0:F4}' -f $y), ('{0:F4}' -f $z), '', '', '', '') -join ([char]9)))
+          Log ("encounter trace: shot at {0} ms from thing {1} template {2} at ({3:N2}, {4:N2}, {5:N2})" -f $sampleMs, $i, $template, $x, $y, $z)
+        }
+        continue
+      }
+      if ($type -ne 2) { continue }
+      $actorHealth = [BitConverter]::ToSingle($bytes, $offset + 0x134)
+      if ($actorHealth -le 0.0) { continue }
+      $x = [BitConverter]::ToSingle($bytes, $offset + 0xB8)
+      $y = [BitConverter]::ToSingle($bytes, $offset + 0xBC)
+      $z = [BitConverter]::ToSingle($bytes, $offset + 0xC0)
+      $dx = $x - $px
+      $dy = $y - $py
+      if (($dx * $dx + $dy * $dy) -gt (8.0 * 8.0)) { continue }
+      # Same conversion as the player: orient.rvec (cos yaw, sin yaw) -> degrees.
+      $yaw = [math]::Atan2([double][BitConverter]::ToSingle($bytes, $offset + 0x8C), [double][BitConverter]::ToSingle($bytes, $offset + 0x88)) * 180.0 / [math]::PI
+      $template = [BitConverter]::ToUInt16($bytes, $offset + 0x04)
+      $sampleLines.Add((@($sampleMs, 'actor', $i, $template, ('{0:F4}' -f $x), ('{0:F4}' -f $y), ('{0:F4}' -f $z), ('{0:F2}' -f $yaw), ('{0:F1}' -f $actorHealth), '', '') -join ([char]9)))
+    }
+    # A landed hit is a drop in either bar. Shield recharge and respawns raise them; only drops count.
+    if ($null -ne $previous) {
+      $lost = ($previous.Shields - $shields) + ($previous.Health - $health)
+      if (($previous.Shields - $shields) -gt 0.05 -or ($previous.Health - $health) -gt 0.05) {
+        $hits++
+        $amount = [math]::Max(0.0, $lost)
+        $sampleLines.Add((@($sampleMs, 'hit', $playerThing, '', '', '', '', '', ('{0:F1}' -f $health), ('{0:F1}' -f $shields), ('amount {0:F1}' -f $amount)) -join ([char]9)))
+        Log ("encounter trace: hit at {0} ms for {1:N1}, {2:N1} shield(s), {3:N1} health" -f $sampleMs, $amount, $shields, $health)
+      }
+    }
+    foreach ($line in $sampleLines) { $lines.Add($line) }
+    $previous = [pscustomobject]@{ Health = $health; Shields = $shields }
+    $previousType3 = $currentType3
+    $sampled++
+    # The rows fill the fixed cadence even when the engine renders slower: a grid point between two
+    # frames holds the state of the frame before it, so both sides have a row every `CadenceMs`.
+    $nextSample += $CadenceMs
+  }
+  Set-Content -LiteralPath $path -Value $lines -Encoding utf8
+  if ($sampled -eq 0) { throw 'encounter trace: no samples were taken' }
+  if ($failedReads -gt 0) { Log ("encounter trace: {0} read attempt(s) failed and were retried" -f $failedReads) }
+  Log ("encounter trace: wrote {0} ({1} sample(s), {2} shot(s), {3} hit(s) over {4} ms of game time)" -f $path, $sampled, $shots, $hits, $Milliseconds)
   return $path
 }
 # Wait until FFmpeg reports the game window as bright (the Players screen is a bright static frame;
@@ -863,9 +1440,22 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     }
     if ($consoleWindow -eq [IntPtr]::Zero) { throw "dev console window 'Jedi Console' did not appear; -devMode may not have been honored" }
     Log "dev console dialog hwnd=$consoleWindow (class #32770, ListBox id 1037)"
+    # Capture instrumentation, before any level script runs: when the CD/MCI device is absent,
+    # sithSoundMixer_Startup leaves the music-initialized flag (0x00835FD4) at 0 and every script
+    # SetMusicVol is dropped, so the level's fade never reaches 0x0054A678. Writing the flag in the
+    # launched game changes no shipping behavior; the process is closed after the capture.
+    if ([JkRetail]::WriteU32($process.Id, 0x00835FD4, 1)) {
+      Log 'music: forced the music-initialized flag (0x00835FD4=1) for the capture (no CD/MCI device)'
+    } else {
+      Log 'music: WARNING could not set 0x00835FD4; the script volume will stay at the mixer default'
+    }
 
     # Skip the intro movies: activate the window, ESC, retry until the bright Players screen.
     Start-Sleep -Seconds 2
+    # The shell is not the foreground process, so the game can start behind whatever was focused and
+    # every synthetic key would go there. Raise it through the foreground thread's input queue first.
+    $activated = [JkRetail]::Activate($gameWindow)
+    Log "raised the game window (activated=$activated, foreground=$([JkRetail]::ForegroundTitle()))"
     Send-JkClick -X 50 -Y 50
     if ($IntroShotMs -gt 0) {
       # The (50,50) click dismissed the dev console, so the movie has just started: wait on it.
@@ -885,6 +1475,17 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       return
     }
     Start-Sleep -Milliseconds 400
+    # Capture instrumentation: another application can hold the foreground on this workstation, and
+    # the click/ESC then goes to it (the intro never skips). Activate the game window first, the same
+    # way the walk trace does before each held segment.
+    $gameWindow = Get-JkWindow -ProcessId $process.Id
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
+      if ($gameWindow -eq [IntPtr]::Zero) { break }
+      [void][JkRetail]::ShowWindow($gameWindow, 9)
+      [void][JkRetail]::SetForegroundWindow($gameWindow)
+      Start-Sleep -Milliseconds 150
+      if ([JkRetail]::ForegroundTitle() -eq 'Jedi Knight') { break }
+    }
     Send-JkKey 'ESC'
     Start-Sleep -Milliseconds 2000
     $bright = Wait-JkBrightScreen -TimeoutSec 3
@@ -892,6 +1493,10 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     while (($null -eq $bright -or $bright -le 55.0) -and $escRetries -lt 8) {
       $escRetries++
       Log "intro still playing (window yavg=$bright); sending ESC again ($escRetries)"
+      if ($gameWindow -ne [IntPtr]::Zero) {
+        [void][JkRetail]::SetForegroundWindow($gameWindow)
+        Start-Sleep -Milliseconds 120
+      }
       Send-JkKey 'ESC'
       Start-Sleep -Milliseconds 1400
       $bright = Wait-JkBrightScreen -TimeoutSec 2
@@ -1082,7 +1687,50 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       if ($warpReply -match 'Position not in world') {
         throw "warp failed for row '$name' in level '$level': Position not in world"
       }
-      Start-Sleep -Milliseconds 900
+      if ($EncounterMs -le 0) { Start-Sleep -Milliseconds 900 }
+    }
+
+    if ($AudioRoute) {
+      $routePath = Resolve-FromRepo $AudioRoute
+      $routeOut = Resolve-FromRepo $AudioRouteOut
+      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $routeOut) | Out-Null
+      $null = Invoke-JkAudioRoute -ProcessId $process.Id -RoutePath $routePath -OutPath $routeOut
+      # `01_soundtrack.cog` is retail cog #39 on level 1; its variables record whether the script's
+      # fade actually ran (`currVol`), which the mixer memory alone cannot prove.
+      $null = Invoke-JkDevConsoleCommand -ProcessId $process.Id -Command 'cogstatus 39'
+      Log "audio route mode: skipped the screenshot series/reference for '$name' (wrote $routeOut)"
+      return
+    }
+    # Issue #13: the retail audio probe, before any console command or key so nothing pauses the
+    # clock or perturbs what the mixer is doing.
+    if ($AudioProbeMs -gt 0) {
+      if ($null -ne $requestedPose) { Start-Sleep -Milliseconds 900 }
+      Invoke-JkAudioProbe -ProcessId $process.Id -Milliseconds $AudioProbeMs -CadenceMs $AudioProbeCadenceMs
+      Log "audio probe mode: skipped the screenshot series/reference for '$name'"
+      return
+    }
+
+    # Issue #9: a door-encounter run replaces the screenshot series (the `finally` still closes the
+    # game and restores the desktop). It runs before any console command or action key so nothing
+    # pauses the clock or perturbs the fight.
+    if ($EncounterMs -gt 0) {
+      $encounterDir = Resolve-FromRepo $EncounterOut
+      New-Item -ItemType Directory -Force -Path $encounterDir | Out-Null
+      $traceName = if ($EncounterName) { $EncounterName } else { $name }
+      $tracePath = Invoke-JkEncounterTrace -ProcessId $process.Id -Name $traceName -Milliseconds $EncounterMs -CadenceMs $EncounterCadenceMs -OutDir $encounterDir
+      Log "encounter trace mode: skipped the screenshot series/reference for '$name' (wrote $tracePath)"
+      return
+    }
+
+    # Issue #8: the continuous retail route replaces the screenshot series. The row must be the
+    # level's own start — a warp row would make the spawn leg a different measurement.
+    if ($RouteWalk) {
+      if ($null -ne $requestedPose) { throw "route walk '$name' must be a level-start row (no pose), not a warp row" }
+      $routeDir = Resolve-FromRepo $RouteOut
+      New-Item -ItemType Directory -Force -Path $routeDir | Out-Null
+      $routePath = Invoke-JkRouteTrace -ProcessId $process.Id -Plan (Resolve-FromRepo $RoutePlan) -OutDir $routeDir -Name $RouteName
+      Log "route trace mode: skipped the screenshot series/reference for '$name' (wrote $routePath)"
+      return
     }
 
     if ($Keys.Count -gt 0) {

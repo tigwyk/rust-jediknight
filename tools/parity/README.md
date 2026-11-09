@@ -317,6 +317,249 @@ trace gate: 4 leg(s), 0 failure(s)
 The table above is the gate's first four legs as it shipped. It now runs **15 legs** with **one tracked failure** -
 `walk5_spawn`, the floor-search-scope deviation on the roadmap's ledger; `docs/gates.txt` carries the current numbers
 each round rather than this snapshot.
+
+## Scripted route replay (issue #8)
+
+The shared level-1 oracle for the movement, telemetry and integration slices. `--replay` drives the
+port from a committed input script at the fixed 1/60 s capture step, and `--route-trace` writes the
+comparable trace.
+
+```powershell
+cargo build --release
+pwsh -NoProfile -File tools/parity/route-gate.ps1            # determinism + committed-fixture gate
+pwsh -NoProfile -File tools/parity/route-gate.ps1 -Perturb   # ... and prove a perturbed trace fails
+```
+
+Files:
+
+| Path | What it is |
+|---|---|
+| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key; the scenario rows take no ticks, so the 600 ms sample grid never moves. There is no `switch` row: retail's `cogstatus 11` reads `doorstatus 0` with that door already open, so the synthetic `activate` it used to send made the port measure a scenario retail never performed. |
+| `tools/parity/routetrace/level1-route-retail.tsv` | Retail-derived reference, one row every 600 ms (36 ticks). Provenance is in the file header. |
+| `tools/parity/routetrace/level1-route-port.tsv` | The port's committed oracle, produced by the replay. |
+| `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), compare to the committed port fixture, reject a trace with one position moved 0.25 units, and match the retail reference within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it for an experiment). |
+
+The trace format is tab-separated, `#` comments allowed, one header row:
+
+```text
+tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
+      door0_status  door0_movestatus  door0_opendoors  door0_closedoors
+      switch_status  switch_movestatus  switch_opendoors  switch_closedoors
+```
+
+- `tick` counts 1/60 s steps; `t_s = tick / 60`. Rows are written at ticks `0, 36, 72, ...`
+  (600 ms), the cadence a retail `coords` poll segments a walk into.
+- `x/y/z` are the player **body** position — the value retail's `coords` prints (the camera rides one
+  `eyeOffset` above it, `walkplayer`'s 0.037) — so a retail capture and this trace name the same point.
+- `sector` is the tracked sector the body is in.
+- `vel_x/vel_y/vel_z` are the position derivative over the 600 ms sample window, in level units per
+  second — the same quantity as the retail fixture's columns (a body pinned against a wall reads zero).
+- `health/shields` come from the player thing and `rt.player_shields`; the retail capture reads
+  them from the player thing (`thing+0x134`) and inventory bin 60. The retail walk trace records
+  both bars per hold segment, so the committed reference has real values here.
+- `door0_*` and `switch_*` are placed cogs 0 (`00_door.cog`) and 11 (`00_doorswitch.cog`), four
+  symbols each (`doorstatus`, `movestatus`, and the script's own open/close variables), read with
+  `cogstatus` after each leg's walk. Level 1 has both cogs, so every field is present; the gate
+  rejects any `-` (the comparator would skip it and measure the position columns only).
+
+A **leg boundary is a `warp`**, not a walk: the retail reference is four separate per-leg captures
+from the level's own authored placements, so the route is the same four walks. Issue #10 fixed what
+each leg exposed — the spawn seat no longer lifts the body onto the cantina's `00table`, the walk
+rate is the measured retail 1.2 u/s (2.4 run), a `warp` attaches the
+body at `GetThingHeight` (0.120114, where retail's `coords` holds z), and a low solid model is a step
+the walker climbs — so the legs hold retail's sectors and vertical travel.
+
+The reference's **bars and cogs come from one continuous retail run**, not four independent leg
+captures: `retail-capture.ps1 -Shots tools/parity/shots.tsv -Only spawn -RouteWalk` reads this same
+route script and runs every leg in one game session (a `warp` between legs, a 600 ms forward hold per
+segment), sampling the bars from engine memory at every segment end. Four per-leg runs each started
+from a fresh level load with their own pre-warp damage, so their bars could not be compared with the
+port's continuous replay. **Both sides capture with the AI off**: the retail walk sets the
+`-devMode` toggles `disableai on` and `noaishots on` (explicitly, and again after every warp, since
+they toggle), and the port's replay passes `--no-ai` (a capture switch that requires `--replay`). The
+route measures movement and cog state, so the cantina ambush is not part of it: it used to kill
+retail's player (100/100 to 0/0 between ticks 180 and 252) while the port survived, which made every
+later bar a guaranteed mismatch. Combat parity is the door encounter's job, and ordinary play keeps
+the AI.
+
+The per-sample position tolerance is the **retail harness's**, stated in
+`level1-route-retail.tsv`'s header: a 600 ms sample advances a variable amount of engine time, so
+one sample's travel (at most ~1.4 units at level 1's 2.4 u/s run) is the measurement resolution.
+Sectors are compared exactly and are never tolerated away.
+
+`--route-compare <expected> <actual>` is the comparator the gate uses; `BK_ROUTE_EPSILON=<units>`
+sets an absolute tolerance for every numeric column (sector stays exact, and `-` fields are skipped).
+
+A replay is reproducible by construction: the step is pinned at 1/60 s and the replay runs the Update
+schedule on one executor thread. The AI's shared LCG is thread-local, so with the default
+multi-threaded executor the same script could land a hit a frame apart between runs; one thread makes
+every call site see the same sequence. Play keeps the default executor.
+## Door encounter telemetry (issue #9)
+
+The fixed level-1 door encounter (the `route_door` pose, `tools/parity/door-encounter.tsv`) is captured on
+both builds as one TSV so AI and combat timing can be compared instead of inferred:
+
+```text
+t_ms  kind  thing  template  x  y  z  yaw  health  shields  detail
+```
+
+`kind` is `player`/`actor` at the row's cadence (100 ms here), `shot` when the port fires a shot that
+lands on the player (the row is that shot's **launch**: time, shooter, template and muzzle), and `hit`
+when a shot's damage lands — the hit row carries the health and shields **after** the hit. Retail can
+only observe a shot through its impact on the player (its memory reader sees a bolt only if it exists
+at a 100 ms sample), so its `shot` rows are a lossy subset of bolts alive at a sample and the port's
+`shot` rows are the landed shots' launches. The gate therefore pairs retail's **`hit`** times with the
+port's `shot` times: the same shots, one flight apart, and both counts are exact instead of a sampling
+race. Both sides use the engine's game clock, not wall time, so the timeline is comparable at
+different frame rates. The port samples **before** the frame's AI tick, so a bolt born and spent inside
+one frame is invisible to retail's 100 ms points; only the impact-driven `shot`/`hit` rows are written
+after the tick. The retail engine renders a few frames a second, so its `hit` row is the damage that
+landed since the previous sample (two bolts in one frame are one row) and its rows
+hold that frame's state between grid points; the port hits are its fixed 60 Hz step.
+
+The trace window is the fixture's own: retail stops at the first sample whose elapsed time reaches
+10 s, so its last row is at 9,900 ms. The port's row runs 594 fixed steps (9.9 s) for the same reason;
+a full 10,000 ms adds a sample (and, at the gunner's cadence, a shot) retail never records.
+
+- Retail: `pwsh -File tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door -EncounterMs 10000 -EncounterCadenceMs 100 -EncounterName door_encounter`
+  writes `target/parity/encounter/door_encounter.tsv` (the pose row is `route_door`; `-EncounterName`
+  matches the encounter file's name). It samples the engine's memory directly (the dev console
+  pauses the game, so polling it would change the fight): player health is the f32 at
+  `thing+0x134` from the player pointer `0x008319A4`, shields are inventory bin 60
+  (`*(thing+0x1C0) + 0x88 + 60*0x18`), and actors/projectiles come from the thing array
+  (`world = 0x008339C8`, count at `+0xBC`, base at `+0xC4`, stride `0x2B0`). The addresses and their
+  decompiled sources are in `Invoke-JkEncounterTrace`.
+- Port: `pwsh -File tools/parity/port-encounter.ps1` runs the same pose for the row's fixed 1/60 s
+  frames with `BK_ENCOUNTER_OUT` set; the app samples the player and the actors within 8 units the
+  same way retail does, and writes a `shot` row for every fired shot that lands on the player and a
+  `hit` row for the damage. The capture starts the player damageable: `kyle.cog`'s `init_kyle` freezes
+  the body for 1.5 s after the level loads, and retail's capture begins after the level has settled, so
+  without that the gunner's first two bolts vanish and its first measured hit lands at 817 ms.
+- Gate: `pwsh -File tools/parity/encounter-gate.ps1` seeds the committed retail fixture from
+  `tools/parity/encounter/`, records the port twice (and fails if the two runs leave the measured
+  run-to-run band: same shape and endpoint, event-timing and actor-state deltas and the same kill
+  order), and reports the per-shot/per-hit timing deltas, the per-hit health/shield deltas, the kill
+  order, the settled endpoint, and the actor position/facing/health deltas at every sample. It exits
+  non-zero when any of them leaves its tolerance, and its thresholds are parameters with their reasons
+  in the script header. Fire cadence is graded on consecutive-shot **intervals** (retail's impact and
+  the port's launch of the same shot differ by a constant flight, which intervals cancel). Retail's
+  timing is nondeterministic: `sithAICmd_PrimaryFire` jitters every delay by `(1.2 - 0.2 * rand())`
+  and acquisition is a chance roll, so the gate allows one event in the shot/hit counts and compares
+  the intervals as a **sorted multiset** inside the cadence band rather than in one run's order; the
+  final bars are compared only when the counts match, and every shared hit's damage is always graded.
+  Actor rows are joined by **authored placement** — nearest position at the first sample — because
+  retail's `thing` is a slot in the engine's thing pool while the port's is the level's placement
+  order. An actor either side reports and the other does not fails; there is no missing-actor
+  fraction.
+
+The port samples before the frame's AI tick for its `player`/`actor` rows, matching retail's 100 ms
+points; the `shot`/`hit` rows are written after the tick, evicted from the runtime's event queue, so
+the shot that fires this frame keeps its launch time. A shot writes its `shot` row only when it
+actually damages the player (an invulnerable body produces no retail row), and the row's time is the
+launch recorded when the projectile spawned.
+
+**Facings are graded only where retail's facing is stable.** A retail facing that moves more than
+`ActorYawTolerance` during the encounter is animation or a random pick, not a facing the port can
+derive. The door fixture's powerdroid facing is a model turntable that sweeps ~350° and holds, and the
+canteen pedestrians whose classes carry `Roam` (`0x50b830`) draw the engine's `rand()` (`0x512d00`, a
+single global stream shared with every detection roll and aim error) for the direction and distance
+every interval. The port marks a roamer in the actor row's `detail` column, and the gate compares the
+absolute yaw only when retail's own facing stayed within the tolerance and the port's class is not a
+roamer; every actor's **position** is still graded strictly. A retail moving facing is reported, not
+graded.
+
+
+Kill order is read off the trace: both captures drop a thing once it is gone (the retail reader skips
+an actor at 0 health, the port's trace a destroyed one), so the last sample each actor id appears in
+is its death time. The ids are side-local (retail's array slot, the port's placement index) and are
+used only within a side for this check; the cross-side join is the placement mapping above. The door
+fixture kills nobody on either side in ten seconds and the gate prints that explicitly (`kill order:
+retail [], port []`); a fixture whose actors walk out of the 8-unit sampling radius would read the
+same way, which is why the position check above is what tells the two apart.
+
+The player's damage split is the shipped `item_shields.cog`'s: the bar takes the whole hit, a bar above
+50 stops it completely, and the rest is scaled by `1 - shieldsLeft / 50` (which is above 1 when the hit
+spent the bar). Energy (2) and fire (4) share that branch and saber (16) gets half protection; every
+other kind reaches health with the bar untouched. A fixture where the port's per-hit health rises as
+the bar empties is the script working, not a bug.
+
+The capture runs the `Update` schedule on one executor thread, the same rule #8's replay uses: the
+shared cog LCG is thread-local, so with the default executor two runs of the same fixed step could
+fire a different number of shots. Two captures are therefore byte-identical apart from the file name,
+and the gate's repeatability check reports zero delta. The same pin applies to every fixed-step
+capture (`--shot`, `BK_ENCOUNTER_OUT`, `--replay`): without it the walk traces drift too — `walk_cantina`
+travelled 2.6 units on one run and 1.0 on the next, because an AI actor driven from the LCG stood in
+the body's path. Play keeps the default executor.
+
+The gate is the instrument for #11 (AI engagement timing) and #12 (combat timing). #11 measured its
+door-gunner acquisition, cadence and facing against the fixture and fixed the timing differences
+(landed-shot rows, the intro freeze at capture start, the 9.9 s window, the roamer facing exemption);
+its default run passes. #12 (the player's damage split) is still the shipped `item_shields.cog`'s.
+
+### Audio state gate (issue #13)
+
+`--audio-trace <path>` writes the replay's audio state on the same 600 ms (36-tick) cadence as the
+route trace:
+
+```text
+tick  t_s  music  music_end  music_loop  music_vol  ambient  ambient_vol  sounds
+```
+
+- `music`/`music_end` are `PlaySong(start, end)`'s track range and `music_loop` is the
+  mixer's loop flag, 1/0 (`-` when nothing is
+  playing); `music_vol` is `SetMusicVol`'s current value, which level 1's `01_SoundTrack.cog` drives
+  from a 0.1 s pulse (0.05 a step up, 0.1 down).
+- `ambient`/`ambient_vol` are the sector's own `SOUND` loop (a script's `SectorSound` wins), and the
+  cell is empty when the sector names none.
+- `sounds` lists every one-shot the window played as `wav@gain`; `gain` is the mixer's attenuated
+  volume (`snd::volume`), so distance and facing are in the number. `-` means **not recorded**. The
+  retail fixture records the capture's one-shots and marks the AI/combat and body-movement ones as
+  dynamic above the header:
+
+  ```text
+  # dynamic: kwalk02.wav, trprsht1.wav, kshieldhit01.wav, ...
+  ```
+
+  The comparator drops every listed wav from **both** sides, so those remain recorded evidence but
+  out of the pass/fail, while a route-controlled sound (door/switch/fade/script) still compares. The
+  classifier's four categories are exercised by the self-check and the port oracle.
+
+```powershell
+pwsh -NoProfile -File tools/parity/audio-gate.ps1            # determinism + port oracle + retail + door
+pwsh -NoProfile -File tools/parity/audio-gate.ps1 -Perturb   # ... and prove a 0.25 gain change fails
+```
+
+`--audio-compare <expected> <actual>` is the comparator; the gate's exit code is its verdict. It
+classifies every sound difference as **missing** (the reference played it, the trace did not),
+**extra**, **mistimed** (same wav in another 600 ms window) or **attenuated** (same window, different
+gain), and reports per-sample music selection/volume and ambience differences. `BK_AUDIO_EPSILON`
+(default 0.02) is the absolute tolerance for gains and volumes; the gate passes 0.12, two 0.1 s pulse
+steps, because the VM clock accumulates 1/60 s in f32 and a pulse boundary lands one frame either
+side of the model's 100 ms grid.
+
+Files:
+
+| Path | What it is |
+|---|---|
+| `tools/parity/routes/level1-audio-route.tsv` | Issue #8's four route legs unchanged, plus the bar's doorway walked both ways. The door adjoin is a **y = -5 plane** (`--collide --surfaces-at -8,-5,-1.05`: surface 206, sector 19, adjoin 73, x `-8.10..-7.90`, z `-1.150..-0.700`, normal `(0,-1,0)`; 213 is its opposite face), so the legs walk in y (`yaw 180` in, `yaw 0` out). |
+| `tools/parity/routes/level1-audio-route-door.tsv` | The doorway alone, captured in a **fresh process** (`retail-capture.ps1 -Only route_door -AudioRoute … -AudioRouteOut …`). In a fresh process retail crosses: `bar_in` reaches `y -5.187` by tick 36 and `bar_out` fires `crossed`, taking `currvol` 0.25 at tick 288, 0.50 at 324 (0.75 at the script's end). In the full four-leg process retail's body wedges on the elevator car's shut leaf and never crosses, so the door leg's state is only measurable from a fresh process. |
+| `tools/parity/audiotrace/level1-audio-retail.tsv` | **Captured from retail** by `retail-capture.ps1 -AudioRoute tools/parity/routes/level1-audio-route.tsv -AudioRouteOut tools/parity/audiotrace/level1-audio-retail.tsv`: the harness boots level 1 with `-devMode`, applies each route leg's `warp` through the dev console, holds forward for the leg, and reads the engine's own state at every 600 ms of route game time — song range and loop flag (0x008BBC74/0x008BBC70/0x00835FCC), `SetMusicVol`'s value (f32 0x0054A678), and the 32-entry mixer table at 0x00835FE8 (sound name from the sound struct's own char[32], loop bit 0x1, volume, radii, distance) for the ambience loop and the one-shots. Capture instrumentation only: no shipping behavior changes. |
+| `tools/parity/audiotrace/level1-audio-port.tsv` | The port's committed oracle, produced by the replay. |
+| `tools/parity/audio-gate.ps1` | The gate above. |
+| `tools/parity/audiotrace/level1-audio-door-port.tsv` / `-door-retail.tsv` | The bar doorway captured on its own in a **fresh process** (`level1-audio-route-door.tsv`), where retail crosses: `bar_in` reaches `y -5.187` by tick 36, `bar_out` fires `crossed`, and `currvol` takes 0.15 at tick 252 and 0.40 at 288. The port fades from tick 216 (0.05/0.35/0.65): the fade curve is ~0.2 ahead of retail's (phase -36 ticks). The gate compares this pair event-aligned (first fade change from 0, not raw tick numbers): 2 aligned samples, worst delta 0.100 within 0.12, and it passes. |
+
+Capture limitation: on this workstation retail's redbook device never starts (`0x00835FD0` reads 0,
+the MCI open fails), so the captured `music_vol` stays at the mixer's initial 1.0 and cannot show the
+script's fade; the port's fixture carries the fade. That is a device limitation of the capture
+environment, not a fixture choice, and the gate reports it as the retail delta.
+
+Two port fixes came out of the fixture: a surface crossing now carries its `linkid=` as the
+`GetSenderId()` the script reads (level 1's fade-up and fade-down are the same plane under two links,
+and both were being reported), and a crossed test now only considers the surfaces of the sector the
+body is leaving (the two coincident doorway polygons no longer cancel each other in one frame). The
+cog clock was also advancing twice per frame (`run_pulses_and_timers` and `resume_sleeping_labels`
+both added `dt`), which ran every shipped fade at double speed; it now advances once.
+
 ### Retail's cog namespace
 
 `coglist` prints `<id>: <script> <script>` per instance. The console buffer only keeps the tail, which

@@ -1,0 +1,22 @@
+# dynamic: kwalk02.wav, trprsht1.wav, kbodyhit01.wav, kyljpa.wav, kshieldhit01.wav, i00gr11z.wav, pistol-1.wav, shothit02.wav, kylgtsa.wav, reeyee02.wav, ptcldroidwalk02.wav, ptcldroidwalk01.wav, kylgtsc.wav, 01shipflyby03.wav, i00ky86z.wav
+tick	t_s	music	music_end	music_loop	music_vol	ambient	ambient_vol	sounds
+0	0.0000	12	13	1	0.000	01cantinaband02.wav	0.300	
+36	0.6000	12	13	1	0.000	01cantinaband02.wav	0.300	
+72	1.2000	12	13	1	0.000	01cantinaband02.wav	0.300	
+108	1.8000	12	13	1	0.000	01cantinaband02.wav	0.300	
+144	2.4000	12	13	1	0.000	01cantinaband02.wav	0.300	
+180	3.0000	12	13	1	0.000	01cantinaband02.wav	0.300	kwalk02.wav@0.750
+216	3.6000	12	13	1	0.000	00techamb03.wav	0.200	trprsht1.wav@0.750 kbodyhit01.wav@0.487 kyljpa.wav@0.750 kshieldhit01.wav@0.750 i00gr11z.wav@0.742 pistol-1.wav@0.750
+252	4.2000	12	13	1	0.000	00techamb03.wav	0.200	
+288	4.8000	12	13	1	0.000	00techamb03.wav	0.200	shothit02.wav@0.439
+324	5.4000	12	13	1	0.000	00techamb03.wav	0.200	kylgtsa.wav@0.750
+360	6.0000	12	13	1	0.000			reeyee02.wav@0.127
+396	6.6000	12	13	1	0.000			ptcldroidwalk02.wav@0.252
+432	7.2000	12	13	1	0.000			
+468	7.8000	12	13	1	0.000			
+504	8.4000	12	13	1	0.000			ptcldroidwalk01.wav@0.264 kylgtsc.wav@0.750
+540	9.0000	12	13	1	0.000			01shipflyby03.wav@0.225
+576	9.6000	12	13	1	0.000			
+612	10.2000	12	13	1	0.000			
+648	10.8000	12	13	1	0.000			i00ky86z.wav@0.750
+684	11.4000	12	13	1	0.000			

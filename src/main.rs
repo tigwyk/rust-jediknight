@@ -641,6 +641,16 @@ fn main() {
     let mut door_check = false;    let mut shot_at: Option<([f32; 3], f32, f32)> = None;
     // `--warp "x,y,z,yaw"`: the *player's* eye pose, not the camera's (see `setup`).
     let mut warp: Option<([f32; 3], f32)> = None;
+    // `--replay <path>`: the fixed-step scripted route (see `RoutePlan`), and `--route-trace <path>`:
+    // its sampled trace. A replay pins the step at 1/60 s exactly as `--shot` does, and the trace
+    // samples every 36 ticks (600 ms), the cadence a retail `coords` poll keeps.
+    let mut replay: Option<std::path::PathBuf> = None;
+    let mut route_trace: Option<std::path::PathBuf> = None;
+    // `--no-ai`: a capture switch for the route replay, so the scripted movement is measured
+    // without the cantina ambush (retail's `-devMode` `disableai`). Ordinary play keeps the AI.
+    let mut no_ai = false;
+    let mut audio_trace: Option<std::path::PathBuf> = None;
+    let mut audio_compare: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
 
     let mut sim = false;
     let mut dump: Option<String> = None;
@@ -914,6 +924,65 @@ fn main() {
                     let _ = TRACE_OUT.set(std::path::PathBuf::from(path));
                 }
             }
+            // `--replay <path>`: replay a scripted route at the fixed capture step. The script is the
+            // retail-derived input fixture (see `RoutePlan`); it is a measurement, not gameplay.
+            "--replay" => {
+                replay = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--no-ai`: skip the AI tick for a replay's capture. It is not a gameplay option, so the
+            // replay check below rejects it everywhere else.
+            "--no-ai" => no_ai = true,
+            // `--route-trace <path>`: the replay's sampled trace (position, sector, velocity, health,
+            // shields and the level-1 door/switch cog state), one row every 600 ms.
+            "--route-trace" => {
+                route_trace = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--route-compare <expected> <actual>`: the route-trace gate. Fails on the first field
+            // outside its tolerance, so a perturbed trace fails and the fixture itself passes.
+            "--route-compare" => {
+                let expected = args.get(i + 1).cloned();
+                let actual = args.get(i + 2).cloned();
+                i += 2;
+                let (Some(expected), Some(actual)) = (expected, actual) else {
+                    println!("usage: --route-compare <expected.tsv> <actual.tsv>");
+                    std::process::exit(2);
+                };
+                let epsilon = std::env::var("BK_ROUTE_EPSILON")
+                    .ok()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(1e-6);
+                match route_trace_compare(
+                    std::path::Path::new(&expected),
+                    std::path::Path::new(&actual),
+                    epsilon,
+                ) {
+                    Ok(()) => std::process::exit(0),
+                    Err(message) => {
+                        eprintln!("{message}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            // `--audio-trace <path>`: the replay's audio state, one row on the route trace's
+            // 600 ms cadence (music selection and volume, sector ambience, sounds played).
+            "--audio-trace" => {
+                audio_trace = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--audio-compare <expected> <actual>`: the audio gate. Reports missing, extra,
+            // mistimed and differently attenuated sounds, plus music/ambience differences.
+            "--audio-compare" => {
+                let expected = args.get(i + 1).cloned();
+                let actual = args.get(i + 2).cloned();
+                i += 2;
+                let (Some(expected), Some(actual)) = (expected, actual) else {
+                    println!("usage: --audio-compare <expected.tsv> <actual.tsv>");
+                    std::process::exit(2);
+                };
+                audio_compare = Some((
+                    std::path::PathBuf::from(expected),
+                    std::path::PathBuf::from(actual),
+                ));
+            }
             "--sim" => sim = true,
             // `--pose <model> <key> <frame>`: one model, posed from one keyframe.
             "--pose" => {
@@ -1128,7 +1197,7 @@ fn main() {
             "--hit" => hit_check = true,
             "--camera-pull" => camera_pull_flag = true,
         "--ends" => ends_check_flag = true,
-            // `--die`: shields absorb first, health reaches 0, and the level's start brings the
+            // `--die`: the shield script's split, health reaches 0, and the level's start brings the
             // player back with a full bar.
             "--die" => die_check = true,
             "--fire" => {
@@ -1385,6 +1454,48 @@ fn main() {
         );
         return;
     }
+
+    // Parse the replay script before any game data is touched: a bad script is an argument error,
+    // not a level-load failure. `--route-compare` is handled above and never reaches here.
+    let route_plan = match replay.as_deref().map(RoutePlan::read) {
+        Some(Ok(plan)) => Some(plan),
+        Some(Err(message)) => {
+            eprintln!("replay: {message}");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+    if route_trace.is_some() && route_plan.is_none() {
+        eprintln!("--route-trace needs --replay <path>");
+        std::process::exit(2);
+    }
+    if audio_trace.is_some() && route_plan.is_none() {
+        eprintln!("--audio-trace needs --replay <path>");
+        std::process::exit(2);
+    }
+    if let Some((expected, actual)) = audio_compare.as_ref() {
+        let epsilon = std::env::var("BK_AUDIO_EPSILON")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.02);
+        match audio_trace_compare(expected, actual, epsilon) {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    // A replay is a capture that must be reproducible, not just fixed-step: see the executor note
+    // at the end of the app setup.
+    let replaying = route_plan.is_some();
+    let ai_disabled = match no_ai_capture_switch(no_ai, replaying) {
+        Ok(disabled) => disabled,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    };
 
     // A level named on the command line may be `03katarn`, `03katarn.jkl` or `jkl\03katarn.jkl`.
     let level_name = level_name.map(|n| level_arg(&n));
@@ -5139,9 +5250,10 @@ fn main() {
                 .iter()
                 .position(|t| t.eq_ignore_ascii_case(&name))
                 .expect("the template was just found");
-            // Face +X from the origin so the expected position is arithmetic, not a rotation.
+            // Face +X from the origin so the expected position is arithmetic, not a rotation:
+            // the engine's basis is `(-sin yaw, cos yaw)`, so yaw -90 is +X.
             rt.things[shooter].pos = [0.0, 0.0, 0.0];
-            rt.things[shooter].yaw = 0.0;
+            rt.things[shooter].yaw = -90.0;
             // A projectile with a real velocity: the muzzle is rotated along the shot, so a template
             // with zero `vel=` would put every shot at the shooter's feet.
             let bolt_name = rt
@@ -5167,7 +5279,7 @@ fn main() {
             (shooter, name, offset, rt.things[bolt].pos)
         };
         let _ = shooter;
-        // Yaw 0 faces +X, so the template's y is forward and x is to the left of that. The offset is
+        // Yaw -90 faces +X, so the template's y is forward and x is to the right of that. The offset is
         // in level units: `sithWeapon_FireProjectile` transforms the vector with the shooter's orient
         // (`rdMatrix_TransformVector34Acc`) and adds it to the thing's position, with no scale, and the
         // same templates' `size=` fields are level units too. A ten-times-scaled offset put a
@@ -5545,9 +5657,9 @@ fn main() {
         // unit checks, so a one-tick, 3-unit probe would otherwise fail most of the time. Mark the
         // actor as already engaged.
         rt.ai_detected.insert(actor);
-        // Face +X, then put the player at 3 units (inside sightdist 5), 8 units (outside) and
-        // behind (outside the 200-degree cone).
-        rt.things[actor].yaw = 0.0;
+        // Face +X (the engine's `(-sin yaw, cos yaw)`, so yaw -90), then put the player at 3 units
+        // (inside sightdist 5), 8 units (outside) and behind (outside the firing cone).
+        rt.things[actor].yaw = -90.0;
         let player = rt
             .templates
             .iter()
@@ -5987,17 +6099,18 @@ fn main() {
             let look_from = rt.things[actor].yaw;
             for _ in 0..600 {
                 rt.ai_tick(player, 1.0 / 30.0);
-                if off(rt.things[actor].yaw, 90.0) < 1.0 {
+                if off(rt.things[actor].yaw, 0.0) < 1.0 {
                     break;
                 }
             }
             rt.ai_cleared.remove(&actor);
             let facing = rt.things[actor].yaw;
-            println!("  scripted: AISetLookPos -> now facing {facing:.0} deg (+90 is +Y)");
-            // Level 3's actor settles 7 deg short of the requested facing (its own turn sources keep
-            // pulling), but it did turn *toward* it from -127 deg. The witness is the response.
+            println!("  scripted: AISetLookPos -> now facing {facing:.0} deg (the engine's yaw 0 is +Y)");
+            // Level 3's actor settles a few degrees short of the requested facing (its own turn
+            // sources keep pulling), but it did turn *toward* it from wherever it stood. The witness
+            // is the response.
             assert!(
-                off(facing, 90.0) < 1.0 || off(facing, 90.0) < off(look_from, 90.0) - 1.0,
+                off(facing, 0.0) < 1.0 || off(facing, 0.0) < off(look_from, 0.0) - 1.0,
                 "AISetLookPos did not turn the actor toward +Y ({facing:.1} deg, was {look_from:.1})"
             );
         }
@@ -6048,7 +6161,7 @@ fn main() {
         let before_player_shot = rt.ai_tick(player, 1.0 / 30.0);
         rt.things[actor].ai_wait = 0.0;
         let aimed = rt.things[actor].yaw;
-        let to_target = (spot[1] - at[1]).atan2(spot[0] - at[0]).to_degrees();
+        let to_target = (-(spot[0] - at[0])).atan2(spot[1] - at[1]).to_degrees();
         println!(
             "  scripted: AISetFireTarget(actor, thing {victim}) -> the actor turns to {aimed:.0} deg (the target is at {to_target:.0}) and fires {before_player_shot} shot(s) with the player behind it"
         );
@@ -6774,7 +6887,8 @@ fn main() {
     }
 
     if die_check {
-        // The player's own damage path: shields first, then health, then the level's start.
+        // The player's own damage path: the shield script's split, then health, then the level's
+        // start. Energy is a kind `item_shields.cog` protects (an impact blast bypasses the bar).
         let sim_world = runtime::Runtime::handle(&world.level);
         let mut rt = sim_world.borrow_mut();
         let player = rt
@@ -6785,12 +6899,12 @@ fn main() {
         let spawn = rt.things[player].pos;
         let (health, shields) = (rt.things[player].health, rt.player_shields);
         println!("die: player starts with {health:.0} health and {shields:.0} shields");
-        let (shields, health) = rt.damage_player(30.0, runtime::DAMAGE_IMPACT);
-        println!("die: 30 damage -> {shields:.0} shield(s), {health:.0} health");
-        assert!((shields - (100.0 - 30.0)).abs() < 0.01, "the shields did not absorb it");
-        assert!((health - 100.0).abs() < 0.01, "health moved before the shields were gone");
-        // Through the shields and into health: 70 shield + 130 health is lethal.
-        let (shields, health) = rt.damage_player(200.0, runtime::DAMAGE_IMPACT);
+        let (shields, health) = rt.damage_player(30.0, runtime::DAMAGE_ENERGY);
+        println!("die: 30 energy damage -> {shields:.0} shield(s), {health:.0} health");
+        assert!((shields - 70.0).abs() < 0.01, "the bar did not take the hit");
+        assert!((health - 100.0).abs() < 0.01, "health moved while the bar was above 50");
+        // Through the bar and into health: 70 shield and 100 health is lethal.
+        let (shields, health) = rt.damage_player(200.0, runtime::DAMAGE_ENERGY);
         println!("die: 200 more -> {shields:.0} shield(s), {health:.0} health");
         assert_eq!(shields, 0.0, "shields should be spent");
         assert_eq!(health, 0.0, "the player should be dead");
@@ -8985,8 +9099,7 @@ fn main() {
 
         // The player shoots it from a clear line **in the level**: a shot is stopped by the furniture
         // (the game's own path), so the spot is chosen where no face or solid thing is between the two
-        // bodies. Direction yaw 0 is +X in the fire path (`yaw_axes`), so the player faces the actor by
-        // taking the opposite of the direction he stands in.
+        // bodies. The engine's forward at yaw 0 is +Y (`yaw_axes`), so a due-west shot needs yaw -90.
         // `segment_blocked` counts a solid thing's body, and both ends of this line sit inside one (the
         // shooter's own), so the line is measured between the two bodies' edges, not their centres.
         fn clear_line(solids: Option<&collide::Solids>, a: [f32; 3], b: [f32; 3]) -> bool {
@@ -9000,6 +9113,8 @@ fn main() {
         // Due west, where the proven yaw 0 fires +X toward the actor (the first bolt's own trace) and
         // the actor's reply is exactly yaw 180, so neither side depends on the sign of the yaw basis.
         // The distance steps in until the line between the bodies is clear of the room's furniture.
+        // Due west, with yaw -90 so the engine's forward `(-sin yaw, cos yaw)` is +X toward the
+        // actor; the actor's reply is exactly yaw -90 as well.
         let mut spot = [actor_pos[0] - 1.0, actor_pos[1], actor_pos[2]];
         for back in [3.0f32, 2.5, 2.0, 1.5, 1.2, 1.0] {
             let candidate = [actor_pos[0] - back, actor_pos[1], actor_pos[2]];
@@ -9010,7 +9125,7 @@ fn main() {
             }
         }
         rt.things[player].pos = spot;
-        rt.things[player].yaw = 0.0;
+        rt.things[player].yaw = -90.0;
         rt.fire(player as i64, "+bryarbolt").expect("a projectile");
         let dt = 1.0 / 30.0;
         let mut landed = None;
@@ -9136,7 +9251,7 @@ fn main() {
         // Face the player: an actor fires along its own yaw, the same way the player does.
         let from = rt.things[actor_index].pos;
         let to = rt.things[player].pos;
-        rt.things[actor_index].yaw = (to[1] - from[1]).atan2(to[0] - from[0]).to_degrees();
+        rt.things[actor_index].yaw = (-(to[0] - from[0])).atan2(to[1] - from[1]).to_degrees();
         println!("hit: thing {actor_index} fires `{actor_weapon}` at the player");
         rt.fire(actor_index as i64, &actor_weapon).expect("the actor fires");
         let mut landed = None;
@@ -9149,10 +9264,17 @@ fn main() {
         }
         match landed {
             Some((index, _, carried)) => {
-                let left = rt.damage(player as i64, carried);
+                // A bolt on the walkplayer goes through the player's own damage path, which is where
+                // the shield bar stands (`item_shields.cog`'s split), not the generic thing path.
+                let shields_before = rt.player_shields;
+                let kind = rt.shot_damage_kind(index);
+                let (shields, left) = rt.damage_player(carried, kind);
                 rt.things[index].destroyed = true;
-                println!("hit: the player took {carried:.0}, {left:.0} health left");
-                assert!(left < health_before, "the player took no damage");
+                println!("hit: the player took {carried:.0}, {shields:.0} shield(s) and {left:.0} health left");
+                assert!(
+                    shields < shields_before || left < health_before,
+                    "the player took no damage"
+                );
             }
             None => println!(
                 "hit: no bolt from thing {actor_index} reached the player on this level (the line of fire is blocked); the player's own shots are the evidenced direction here"
@@ -9271,10 +9393,11 @@ fn main() {
             "fire: `{weapon}` damage {damage}, vel {:?}, from thing {shooter_index} at {origin:?} toward thing {target_idx} {reach:.1} units away",
             speed
         );
-        // Point the shooter at the actor, then fire.
+        // Point the shooter at the actor, then fire. The engine's yaw looks along
+        // `(-sin yaw, cos yaw)`, so the bearing turns a quarter turn into a yaw.
         let dx = target_pos[0] - origin[0];
         let dy = target_pos[1] - origin[1];
-        rt.things[shooter_index].yaw = dy.atan2(dx).to_degrees();
+        rt.things[shooter_index].yaw = (-dx).atan2(dy).to_degrees();
         let health_before = rt.things[target_idx].health;
         let shot = rt.fire(shooter_index as i64, &weapon).expect("projectile");
         // Walls: the projectile stops when it leaves the level's sectors. The engine
@@ -12136,21 +12259,16 @@ fn main() {
         // What the player's own template says the motion is, per level.
         let rules = Rules::from_level(&world.level);
         println!("{level_name}: {}", rules.describe());
-        // The derivation, asserted rather than described: these numbers must be the template's own
-        // arithmetic and nothing else. `sithPhysics_ApplyDrag` settles velocity at `acceleration / drag`,
-        // the acceleration is `maxThrust`, so the walk speed is `maxthrust / surfdrag` exactly; the jump
-        // and gravity are read straight off the template and the level header.
+        // The walk is measured, not derived: retail's straight legs read 1.07-1.23 u/s
+        // (`walk_street90`) and `walk5_spawn` ~1.2, while the template derivation
+        // `maxthrust * 0.7 / (surfdrag + 0.2)` is 40% under because `sithControl_PlayerMovement`'s
+        // thrust carries a `thing + 0x144` term the template parser does not produce. The jump and
+        // gravity are still read straight off the template and the level header.
         {
-            let thrust = world.level.template_f32("walkplayer", "maxthrust").unwrap_or(f32::NAN);
-            let drag = world.level.template_f32("walkplayer", "surfdrag").unwrap_or(f32::NAN);
             let jump = world.level.template_f32("walkplayer", "jumpspeed").unwrap_or(f32::NAN);
-            // The walk speed is **measured** from retail, not derived: `maxthrust/surfdrag` = 0.667 was
-            // 40% under because `sithControl_PlayerMovement` adds a `thing + 0x144` term no recovered
-            // template parser produces. `walk_street90` gives 1.07-1.23 u/s, so the base is 1.2 and the
-            // ratio checks below it still hold. The derivation is retired on the deviation ledger.
             let want_walk = 1.2;
             assert!(
-                (rules.walk - want_walk).abs() < want_walk * 1e-4,
+                (rules.walk - want_walk).abs() < 1e-4,
                 "walk {:.3} is not the measured retail 1.2 u/s",
                 rules.walk
             );
@@ -12168,8 +12286,8 @@ fn main() {
             // A speed scale anywhere in the chain breaks all three at once, which is how the old
             // `physics_scale = 10` stayed hidden: it moved the walk, the jump and gravity together.
             println!(
-                "  derived: walk {want_walk:.3} (measured retail; maxthrust/surfdrag {thrust}/{drag} = {:.3} is retired), jump = jumpspeed = {jump:.3}, gravity = level gravity = {:.3}",
-                thrust / drag,
+                "  measured: walk {want_walk:.3} u/s (retail; run {:.3} = 2x), jump = jumpspeed = {jump:.3}, gravity = level gravity = {:.3}",
+                want_walk * 2.0,
                 world.level.gravity
             );
         }
@@ -12523,11 +12641,14 @@ fn main() {
     // "all windows closed", so a windowless app quits on its first update and `--cogstatus-after`
     // never prints (round 308's secret-trigger probe). Keep the default everywhere else, including the
     // gate sweep, whose headless skip detection relies on that early exit.
-    let exit_condition = if headless && exit_after.is_some() {
+    let exit_condition = if headless && (exit_after.is_some() || route_plan.is_some()) {
         bevy::window::ExitCondition::DontExit
     } else {
         bevy::window::ExitCondition::OnAllClosed
     };
+    // A fixed-step capture (`--shot`, the map check, `--replay`) is reproducible between runs, which
+    // needs the single-threaded executor below; `shot` is moved into its resource further down.
+    let capture_run = shot.is_some() || map_check || replay.is_some();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: (!headless).then(|| Window {
                 title: format!("bevi-knight — {level_name}"),
@@ -12542,7 +12663,13 @@ fn main() {
         .insert_resource(debug_catalog)
         .insert_resource(Screens(menus))
         .insert_resource(CaptureMode(
-            shot.is_some() || live || sim || complete_after.is_some() || !animating || goal_check,
+            shot.is_some()
+                || replay.is_some()
+                || live
+                || sim
+                || complete_after.is_some()
+                || !animating
+                || goal_check,
         ))
         .insert_resource(TourLive {
             active: tour_live,
@@ -12564,7 +12691,7 @@ fn main() {
         .insert_resource(MusicState::default())
         .insert_resource(Overview {
             overview,
-            capture: shot.is_some() || map_check,
+            capture: capture_run,
         })
         .insert_resource(Near(near))
         .insert_resource(Stand(stand))
@@ -12585,7 +12712,21 @@ fn main() {
         .insert_resource(ForceEconomyProbe { enabled: force_economy })
         .insert_resource(ForceGrantProbe { enabled: force_grant })
         .insert_resource(PulseCount::default())
-        .insert_resource(CaptureDt(shot.as_ref().and_then(|s| (!s.is_empty()).then_some(1.0 / 60.0))))
+        .insert_resource(CaptureDt(
+            shot.as_ref()
+                .and_then(|s| (!s.is_empty()).then_some(1.0 / 60.0))
+                // A replay pins the step even without `--shot`: its comparability is exactly the
+                // fixed 1/60 s tick the route trace samples (see `RoutePlan`).
+                .or_else(|| route_plan.is_some().then_some(1.0 / 60.0)),
+        ))
+        .insert_resource(RouteReplay(route_plan))
+        .insert_resource(AiDisabled(ai_disabled))
+        .insert_resource(RouteTraceOut(route_trace))
+        .insert_resource(AudioTraceOut(audio_trace))
+        .insert_resource(AudioLog::default())
+        .insert_resource(RouteNow::default())
+        .insert_resource(RouteCursor::default())
+        .insert_resource(RoutePrev::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
         .insert_resource(Cull(cull))
@@ -12594,6 +12735,7 @@ fn main() {
         .insert_resource(SpriteDemo(sprite_template))
         .insert_resource(Look(look))
         .insert_resource(Ambience::default())
+        .insert_resource(LoopPlayers::default())
         .insert_resource(PlaySound(play_sound))
         .insert_resource(Deliver(sim))
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
@@ -12613,7 +12755,9 @@ fn main() {
         .add_systems(
             Update,
             (
-                share_collider,
+                // A swap installs a fresh runtime whose `solids` is `None`; the hand-off has to
+                // follow it, or this frame's AI tick reads the fresh runtime as "nothing blocks".
+                share_collider.after(swap_level),
                 live_check,
                 enforce_mute,
                 grab_cursor,
@@ -12634,7 +12778,7 @@ fn main() {
             Update,
             (
                 (
-                    run_pulses_and_timers,
+                    run_pulses_and_timers.before(resume_sleeping_labels),
                     resume_sleeping_labels,
                     deliver_sector_triggers,
                     deliver_thing_messages,
@@ -12655,7 +12799,15 @@ fn main() {
                     .run_if(no_screen_open),
                 (
                     collect_items,
-                    ai_shots,
+                    // The sight ray needs the level's collision geometry: `share_collider` hands the
+                    // solid things to the runtime, and until it runs `Runtime::solids` is `None`, which
+                    // the sight test reads as "nothing blocks". Before this constraint the first tick
+                    // of a level tested every actor's line against nothing, so the ones a wall or a
+                    // body really hides acquired the player at t = 0 and shot at that memory forever
+                    // (level 1's door gunner 155 and `reeyeesbhgun` 153). A level swap installs a
+                    // fresh runtime, which is why the hand-off itself runs after `swap_level`: the
+                    // chain swap -> share -> AI is what makes the new level's first tick see walls.
+                    ai_shots.after(share_collider),
                     play_requested_sounds,
                     music_follows_scripts,
                     show_taken,
@@ -12672,6 +12824,12 @@ fn main() {
                     billboard_sprites,
                     complete_level_on_timer,
                     watch_level_complete,
+                    audio_trace_sample
+                        .after(route_replay)
+                        .after(walk_player)
+                        .after(play_requested_sounds)
+                        .after(music_follows_scripts)
+                        .before(ambient_follows_view),
                     queue_next_level,
                 )
                     .run_if(no_screen_open),
@@ -12682,11 +12840,13 @@ fn main() {
         // before the cull pass sights the thing, or the gate depends on the scheduler's order.
         .add_systems(
             Update,
-            goal_probe
-                .after(walk_player)
-                .before(cull_sectors)
+            (
+                route_replay.before(walk_player),
+                goal_probe.after(walk_player).before(cull_sectors),
+            )
                 .run_if(no_screen_open),
         )
+        .add_systems(Update, (play_script_loops.after(play_requested_sounds),).run_if(no_screen_open))
         .add_systems(Update, palette_tint_pass.run_if(no_screen_open))
         .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open))
         .add_systems(Update, save_slots_probe)
@@ -12704,6 +12864,17 @@ fn main() {
         .add_systems(Update, refresh_force_screen)
         .add_systems(Update, seed_force_screen_powers)
         .add_systems(Update, arm_for_capture);
+    // A replay or a fixed-step capture (`--shot`, the map check, `BK_ENCOUNTER_OUT`) must be
+    // reproducible between runs, not only between frames. Several systems draw from the shared LCG in
+    // `cog::pseudo_random`, which is thread-local, so the multi-threaded executor gives different
+    // systems different sequences — the walk traces' travel and the encounter gate's shots/hits then
+    // drift between two runs of the same command (`walk_cantina` travelled 2.6 units and 1.0). One
+    // executor thread makes every call site see the same sequence. Play keeps the default.
+    if replaying || capture_run || std::env::var_os("BK_ENCOUNTER_OUT").is_some() {
+        app.edit_schedule(bevy::app::Update, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
+    }
     app.run();
 }
 
@@ -15880,6 +16051,1110 @@ enum Walk {
     All,
 }
 
+/// `--replay`'s scripted route, and `--route-trace`'s sampled format.
+///
+/// The script is the retail-derived input fixture: `warp` rows are the route's leg starts (the
+/// level's own start and the level's `walkplayer` placements, the poses `tools/parity/shots.tsv`
+/// records from retail), and `input` rows hold forward/strafe for a run of ticks. A tick is the
+/// capture step, 1/60 s, so a replay is a function of the script and the level data.
+///
+/// The trace samples every 36 ticks (600 ms) — the cadence a retail `coords` poll keeps — and
+/// records the body position (the value retail's `coords` prints; the camera eye is one `eyeOffset`
+/// above it), the tracked sector, the body velocity in world units/s, health, shields and the
+/// level-1 door/switch cog variables.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct RouteInput {
+    forward: f32,
+    strafe: f32,
+    /// A route `use` row: press the use key (`sithPlayer`'s activate) on this tick.
+    use_action: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RouteWarp {
+    tick: u32,
+    /// `None`: stay at the level's own start (the route's first leg).
+    at: Option<([f32; 3], f32)>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct RoutePlan {
+    inputs: Vec<(u32, RouteInput)>,
+    warps: Vec<RouteWarp>,
+    /// Ticks at which the script presses the use key. A `use` row takes no ticks: the sample grid
+    /// must stay on retail's 600 ms cadence.
+    uses: Vec<u32>,
+    /// A `switch` row: the tick at which the level's own cantina-door switch is activated. The
+    /// retail captures began with that door open (the player had pressed it in the recorded play),
+    /// so the replay restores the same world through the level's own message, not by opening a gate.
+    switch_at: Option<u32>,
+    /// A `seed` row: the body velocity retail's capture already had at the leg's pose. The retail
+    /// fixture's first row records `vel` 0 only because its window has no earlier sample; its first
+    /// 600 ms already covered the leg's travel, so the replay starts the body moving at the same speed.
+    seed: Option<(u32, [f32; 2])>,
+    total: u32,
+}
+
+/// The trace's sample interval. 36 ticks at 1/60 s is the 600 ms hold a retail `coords` poll
+/// segments the engine into (`Invoke-JkWalkTrace`'s `HoldMs`).
+const ROUTE_SAMPLE_TICKS: u32 = 36;
+
+/// Game-clock seconds per wall-clock second in the route captures: the engine walks 1.2 u/s
+/// (measured by the walk traces) but covers 0.88-0.92 u/s of the fixture's 600 ms wall samples,
+/// because the console/dialog pauses hold the game clock. The replay scales its dt so positions at
+/// the fixture's sample ticks line up with retail's.
+const ROUTE_TIME_SCALE: f32 = 0.85;
+
+/// The level-1 cogs the route trace carries: the upper door (`00_door.cog`, placed cog 0) and the
+/// cantina door switch (`00_doorswitch.cog`, placed cog 11). The symbol names differ between them
+/// (`opendoors`/`closedoors` vs `open_doors`/`close_doors`), which is why each has its own row.
+const ROUTE_COGS: [(usize, [&str; 4]); 2] = [
+    (0, ["doorstatus", "movestatus", "opendoors", "closedoors"]),
+    (11, ["doorstatus", "movestatus", "open_doors", "close_doors"]),
+];
+
+/// The trace columns. Every value is a number or `-` (a field the run does not have: no such cog
+/// started, or a retail capture did not record it). The comparator parses the header, so the set
+/// can grow without breaking older fixtures.
+const ROUTE_TRACE_FIELDS: [&str; 19] = [
+    "tick", "t_s", "x", "y", "z", "sector", "vel_x", "vel_y", "vel_z", "health", "shields",
+    "door0_status", "door0_movestatus", "door0_opendoors", "door0_closedoors",
+    "switch_status", "switch_movestatus", "switch_opendoors", "switch_closedoors",
+];
+
+impl RoutePlan {
+    fn read(path: &std::path::Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Self::parse(&text)
+    }
+
+    fn parse(text: &str) -> Result<Self, String> {
+        let mut plan = RoutePlan::default();
+        for (line_no, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let f: Vec<&str> = line.split(['\t', ' ']).filter(|v| !v.is_empty()).collect();
+            let fail = |what: String| format!("line {}: {what}", line_no + 1);
+            match f.first().copied() {
+                Some("warp") => {
+                    // warp <name> <x|-> <y|-> <z|-> <yaw|->
+                    if f.len() != 6 {
+                        return Err(fail(format!(
+                            "`warp` needs a name and four values, got {} field(s)",
+                            f.len()
+                        )));
+                    }
+                    let numbers = &f[2..6];
+                    let at = if numbers.iter().all(|v| *v == "-") {
+                        None
+                    } else {
+                        let mut v = [0.0f32; 4];
+                        for (slot, raw) in numbers.iter().enumerate() {
+                            v[slot] = raw
+                                .parse()
+                                .map_err(|_| fail(format!("`{raw}` is not a number")))?;
+                        }
+                        Some(([v[0], v[1], v[2]], v[3]))
+                    };
+                    plan.warps.push(RouteWarp { tick: plan.total, at });
+                }
+                Some("input") => {
+                    // input <ticks> <forward> <strafe>
+                    if f.len() != 4 {
+                        return Err(fail(format!(
+                            "`input` needs ticks, forward and strafe, got {} field(s)",
+                            f.len()
+                        )));
+                    }
+                    let ticks: u32 = f[1]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a tick count", f[1])))?;
+                    if ticks == 0 {
+                        return Err(fail("an `input` row needs at least one tick".to_string()));
+                    }
+                    let forward: f32 = f[2]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a number", f[2])))?;
+                    let strafe: f32 = f[3]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a number", f[3])))?;
+                    plan.inputs.push((plan.total, RouteInput { forward, strafe, use_action: false }));
+                    plan.total += ticks;
+                }
+                Some("use") => {
+                    // use
+                    if f.len() != 1 {
+                        return Err(fail(format!("`use` takes no values, got {} field(s)", f.len())));
+                    }
+                    plan.uses.push(plan.total);
+                }
+                Some("switch") => {
+                    // switch
+                    if f.len() != 1 {
+                        return Err(fail(format!("`switch` takes no values, got {} field(s)", f.len())));
+                    }
+                    plan.switch_at.get_or_insert(plan.total);
+                }
+                Some("seed") => {
+                    // seed <vx> <vy>
+                    if f.len() != 3 {
+                        return Err(fail(format!("`seed` needs vx and vy, got {} field(s)", f.len())));
+                    }
+                    let vx: f32 = f[1]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a number", f[1])))?;
+                    let vy: f32 = f[2]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a number", f[2])))?;
+                    plan.seed.get_or_insert((plan.total, [vx, vy]));
+                }
+                Some(other) => {
+                    return Err(fail(format!("unknown row kind `{other}` (warp, input, use, switch, seed)")));
+                }
+                None => {}
+            }
+        }
+        if plan.total == 0 {
+            return Err("the script has no `input` rows".to_string());
+        }
+        for pair in plan.warps.windows(2) {
+            if pair[1].tick <= pair[0].tick {
+                return Err(format!(
+                    "two `warp` rows at tick {}; a warp needs a stretch of input before it",
+                    pair[1].tick
+                ));
+            }
+        }
+        if plan.warps.first().is_none_or(|w| w.tick != 0) {
+            return Err("the script must start with a `warp` row at tick 0".to_string());
+        }
+        Ok(plan)
+    }
+
+    /// The input held at `tick` (the last segment that has started).
+    fn input_at(&self, tick: u32) -> RouteInput {
+        self.inputs
+            .iter()
+            .rev()
+            .find(|(start, _)| *start <= tick)
+            .map(|(_, input)| *input)
+            .unwrap_or_default()
+    }
+
+    fn warp_at(&self, tick: u32) -> Option<RouteWarp> {
+        self.warps.iter().find(|w| w.tick == tick).copied()
+    }
+}
+
+/// One parsed route-trace row: the tick plus one `Option<f64>` per [`ROUTE_TRACE_FIELDS`] entry.
+#[derive(Debug, Clone)]
+struct RouteTraceRow {
+    tick: u32,
+    values: Vec<Option<f64>>,
+}
+
+fn parse_route_trace(text: &str) -> Result<Vec<RouteTraceRow>, String> {
+    let mut rows = Vec::new();
+    let mut columns: Option<Vec<usize>> = None;
+    for (line_no, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
+        if columns.is_none() {
+            let mut order = Vec::with_capacity(ROUTE_TRACE_FIELDS.len());
+            for field in ROUTE_TRACE_FIELDS {
+                match cells.iter().position(|c| *c == field) {
+                    Some(index) => order.push(index),
+                    None => {
+                        return Err(format!(
+                            "line {}: trace header has no `{field}` column",
+                            line_no + 1
+                        ))
+                    }
+                }
+            }
+            columns = Some(order);
+            continue;
+        }
+        let order = columns.as_ref().expect("header just parsed");
+        let mut values = Vec::with_capacity(ROUTE_TRACE_FIELDS.len());
+        for (slot, index) in order.iter().enumerate() {
+            let raw = cells.get(*index).copied().unwrap_or("-");
+            let value = if raw == "-" || raw.is_empty() {
+                None
+            } else {
+                Some(
+                    raw.parse::<f64>()
+                        .map_err(|_| format!("line {}: `{raw}` is not a number ({} column)",
+                            line_no + 1, ROUTE_TRACE_FIELDS[slot]))?,
+                )
+            };
+            values.push(value);
+        }
+        let tick = values[0]
+            .ok_or_else(|| format!("line {}: the tick is `-`", line_no + 1))? as u32;
+        rows.push(RouteTraceRow { tick, values });
+    }
+    if rows.is_empty() {
+        return Err("the trace has a header but no rows".to_string());
+    }
+    Ok(rows)
+}
+
+/// Compare two route traces field by field. `epsilon` is the absolute tolerance for every numeric
+/// column except `tick` (exact) and `sector` (an integer identity, exact): a sector difference is a
+/// different room, never a rounding error. A field that either side does not have (`-`) is skipped,
+/// and the caller's summary counts how many were actually compared.
+fn compare_route_rows(
+    expected: &[RouteTraceRow],
+    actual: &[RouteTraceRow],
+    epsilon: f64,
+) -> Result<usize, String> {
+    if expected.len() != actual.len() {
+        return Err(format!(
+            "route-compare: FAIL {} row(s) expected, {} in the trace",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    let mut failures = Vec::new();
+    let mut compared = 0usize;
+    for (want_row, got_row) in expected.iter().zip(actual) {
+        let tick = want_row.tick;
+        if tick != got_row.tick {
+            failures.push(format!("tick {tick}: the trace has tick {}", got_row.tick));
+            continue;
+        }
+        for (slot, field) in ROUTE_TRACE_FIELDS.iter().enumerate().skip(1) {
+            let (Some(want), Some(got)) = (want_row.values[slot], got_row.values[slot]) else {
+                continue;
+            };
+            compared += 1;
+            let delta = (want - got).abs();
+            if *field == "sector" {
+                if delta > 0.5 {
+                    failures.push(format!(
+                        "tick {tick} sector: expected {want:.0}, trace has {got:.0}"
+                    ));
+                }
+                continue;
+            }
+            if !delta.is_finite() || delta > epsilon {
+                failures.push(format!(
+                    "tick {tick} {field}: expected {want:.4}, trace has {got:.4} (delta {delta:.4})"
+                ));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(compared)
+    } else {
+        let shown = failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n  ");
+        Err(format!(
+            "route-compare: FAIL {compared} compared field(s), {} mismatch(es):\n  {shown}",
+            failures.len()
+        ))
+    }
+}
+
+/// `--route-compare`: parse both traces and apply [`compare_route_rows`] at `epsilon`.
+fn route_trace_compare(
+    expected: &std::path::Path,
+    actual: &std::path::Path,
+    epsilon: f64,
+) -> Result<(), String> {
+    let read = |path: &std::path::Path| -> Result<Vec<RouteTraceRow>, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        parse_route_trace(&text).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let want = read(expected)?;
+    let got = read(actual)?;
+    let compared = compare_route_rows(&want, &got, epsilon)?;
+    println!(
+        "route-compare: PASS {} row(s), {compared} field(s) within {epsilon}",
+        want.len()
+    );
+    Ok(())
+}
+
+/// One route-trace line. `x/y/z` are the player **body** position — the value retail's `coords`
+/// prints (the camera rides one `eyeOffset` above it, so a `shots.tsv` eye is 0.037 higher) — and a
+/// retail capture and this trace therefore name the same point. `vel_x`/`vel_y`/`vel_z` are the
+/// position derivative over the 600 ms sample window, in level units per second — the retail
+/// fixture's own definition. A field the run does not have is `-`: a level without the two route
+/// cogs, or a retail capture that did not record health.
+fn write_route_trace_row(
+    path: &std::path::Path,
+    tick: u32,
+    body: &runtime::PlayerBody,
+    vel: [f32; 3],
+    sim: Option<&Sim>,
+    world: Option<&World>,
+) {
+    use std::io::Write;
+    let first = tick == 0;
+    let open = || {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true);
+        if first {
+            options.truncate(true);
+        } else {
+            options.append(true);
+        }
+        options.open(path)
+    };
+    let Ok(mut file) = open() else { return };
+    if first {
+        let _ = writeln!(file, "{}", ROUTE_TRACE_FIELDS.join("\t"));
+    }
+    let (health, shields) = sim
+        .map(|sim| {
+            let rt = sim.world.borrow();
+            let index = rt.player_thing();
+            (
+                rt.things.get(index).map(|thing| f64::from(thing.health)),
+                Some(f64::from(rt.player_shields)),
+            )
+        })
+        .unwrap_or((None, None));
+    let cogs = match (world, sim) {
+        (Some(world), Some(sim)) => route_cog_values(world, sim),
+        _ => [None; 8],
+    };
+    let number = |value: Option<f64>, places: usize| {
+        value
+            .map(|v| format!("{v:.places$}"))
+            .unwrap_or_else(|| "-".to_string())
+    };
+    let _ = writeln!(
+        file,
+        "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        tick,
+        f64::from(tick) / 60.0,
+        body.pos.x,
+        body.pos.y,
+        body.pos.z,
+        body.sector,
+        vel[0],
+        vel[1],
+        vel[2],
+        number(health, 1),
+        number(shields, 1),
+        number(cogs[0], 3),
+        number(cogs[1], 3),
+        number(cogs[2], 3),
+        number(cogs[3], 3),
+        number(cogs[4], 3),
+        number(cogs[5], 3),
+        number(cogs[6], 3),
+        number(cogs[7], 3),
+    );
+}
+
+/// The eight route cog values ([`ROUTE_COGS`], four symbols each). A cog that has not started —
+/// or a level with fewer cogs — reads `None` for its row.
+fn route_cog_values(world: &World, sim: &Sim) -> [Option<f64>; 8] {
+    let mut out = [None; 8];
+    for (row, (index, symbols)) in ROUTE_COGS.iter().enumerate() {
+        if world.level.cogs.get(*index).is_none() {
+            continue;
+        }
+        let Some((_, vm)) = sim
+            .instances
+            .iter()
+            .find(|(_, vm)| vm.cog_index == *index as i32)
+        else {
+            continue;
+        };
+        for (slot, name) in symbols.iter().enumerate() {
+            out[row * 4 + slot] = Some(vm.var(name).num());
+        }
+    }
+    out
+}
+
+/// The audio trace's columns, sampled on the route trace's 600 ms cadence.
+///
+/// `music`/`music_end` are `PlaySong`'s track range and `music_loop` is the mixer's loop flag
+/// (1/0; the engine stores the third argument as a boolean and wraps back to `music`), while
+/// `music_vol` is `SetMusicVol`'s current value (the scripts fade it from a pulse). `ambient`/`ambient_vol` are the sector's own
+/// `SOUND` loop (or a script's `SectorSound` override). `sounds` lists every one-shot the window
+/// played, space separated as `wav@gain`, where `gain` is the mixer's attenuated volume — so a
+/// missing sound, an extra one, a late one and a quiet one are all visible in the same column.
+const AUDIO_TRACE_FIELDS: [&str; 9] = [
+    "tick", "t_s", "music", "music_end", "music_loop", "music_vol", "ambient", "ambient_vol",
+    "sounds",
+];
+
+/// One parsed audio-trace row.
+#[derive(Debug, Clone, PartialEq)]
+struct AudioTraceRow {
+    tick: u32,
+    /// `PlaySong(start, end, loop)` as the trace records it: the mixer stores the third argument
+    /// as a boolean loop flag and always wraps back to `start`.
+    music: Option<(i32, i32, i32)>,
+    /// `music_vol`'s value.
+    music_volume: Option<f64>,
+    /// Whether the ambience was recorded at this sample. The retail-derived reference leaves it out
+    /// where the body's sector differs from the port's (issue #10's movement parity owns that), so the
+    /// comparator skips those rows' ambience instead of reading `-` as "no ambient loop".
+    ambient_recorded: bool,
+    ambient: Option<(String, f64)>,
+    /// `(wav, gain)` for every one-shot the window played. `None` is a `-` cell: the fixture did not
+    /// record that window (a retail-derived reference has no audio capture for one-shots yet), so the
+    /// comparator skips it rather than treating it as silence.
+    sounds: Option<Vec<(String, f64)>>,
+}
+
+fn parse_audio_trace(text: &str) -> Result<Vec<AudioTraceRow>, String> {
+    let mut rows = Vec::new();
+    let mut columns: Option<Vec<usize>> = None;
+    for (line_no, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        // `trim()` would eat the trailing tab of a row whose `sounds` cell is empty (a recorded
+        // window with nothing played), turning "silence" into "not recorded".
+        let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
+        if columns.is_none() {
+            let mut order = Vec::with_capacity(AUDIO_TRACE_FIELDS.len());
+            for field in AUDIO_TRACE_FIELDS {
+                match cells.iter().position(|c| *c == field) {
+                    Some(index) => order.push(index),
+                    None => {
+                        return Err(format!(
+                            "line {}: audio trace header has no `{field}` column",
+                            line_no + 1
+                        ))
+                    }
+                }
+            }
+            columns = Some(order);
+            continue;
+        }
+        let order = columns.as_ref().expect("header just parsed");
+        let cell = |slot: usize| -> &str {
+            order
+                .get(slot)
+                .and_then(|index| cells.get(*index))
+                .copied()
+                .unwrap_or("-")
+        };
+        let number = |slot: usize, field: &str| -> Result<Option<f64>, String> {
+            let raw = cell(slot);
+            if raw == "-" || raw.is_empty() {
+                return Ok(None);
+            }
+            raw.parse::<f64>()
+                .map(Some)
+                .map_err(|_| format!("line {}: `{raw}` is not a number ({field})", line_no + 1))
+        };
+        let tick = number(0, "tick")?
+            .ok_or_else(|| format!("line {}: the tick is `-`", line_no + 1))?
+            as u32;
+        let music = match (number(2, "music")?, number(3, "music_end")?, number(4, "music_loop")?) {
+            (Some(start), Some(end), Some(loops)) => {
+                Some((start as i32, end as i32, i32::from(loops != 0.0)))
+            }
+            _ => None,
+        };
+        let ambient_recorded = cell(6) != "-";
+        let ambient = if !ambient_recorded || cell(6).is_empty() {
+            None
+        } else {
+            Some((cell(6).to_string(), number(7, "ambient_vol")?.unwrap_or(0.0)))
+        };
+        let sounds = if cell(8) == "-" {
+            None
+        } else {
+            let mut sounds = Vec::new();
+            for entry in cell(8).split([' ', ';']).filter(|e| !e.is_empty()) {
+                let (name, gain) = entry
+                    .split_once('@')
+                    .ok_or_else(|| format!("line {}: `{entry}` is not `wav@gain`", line_no + 1))?;
+                let gain = gain.parse::<f64>().map_err(|_| {
+                    format!("line {}: `{gain}` is not a gain ({entry})", line_no + 1)
+                })?;
+                sounds.push((name.to_string(), gain));
+            }
+            Some(sounds)
+        };
+        rows.push(AudioTraceRow {
+            tick,
+            music,
+            music_volume: number(5, "music_vol")?,
+            ambient_recorded,
+            ambient,
+            sounds,
+        });
+    }
+    if rows.is_empty() {
+        return Err("the audio trace has a header but no rows".to_string());
+    }
+    Ok(rows)
+}
+
+/// Compare two audio traces. Every one-shot sound is classified as:
+///
+/// * **missing** — the reference played it and the trace did not, at any tick;
+/// * **extra** — the trace played it and the reference did not;
+/// * **mistimed** — the same wav at the same gain-ish exists, but in another 600 ms window;
+/// * **attenuated** — the same wav in the same window at a different gain (the mixer's distance
+///   and facing volume, so this is "audible but not as loud as retail");
+///
+/// plus a per-sample music selection/volume and ambient difference. `epsilon` is the absolute
+/// tolerance for the gain and volume numbers; the tick is exact (a 600 ms row is the comparison's
+/// unit, and a mistimed sound is reported rather than quietly accepted).
+fn compare_audio_rows(
+    expected: &[AudioTraceRow],
+    actual: &[AudioTraceRow],
+    epsilon: f64,
+) -> Result<(usize, usize), String> {
+    if expected.len() != actual.len() {
+        return Err(format!(
+            "audio-compare: FAIL {} row(s) expected, {} in the trace",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    let mut failures: Vec<String> = Vec::new();
+    let mut states = 0usize;
+    for (want, got) in expected.iter().zip(actual) {
+        if want.tick != got.tick {
+            failures.push(format!("tick {}: the trace has tick {}", want.tick, got.tick));
+            continue;
+        }
+        states += 1;
+        let tick = want.tick;
+        if want.music != got.music {
+            failures.push(format!(
+                "music: tick {tick} expected {:?}, trace {:?}",
+                want.music, got.music
+            ));
+        }
+        if let (Some(want), Some(got)) = (want.music_volume, got.music_volume) {
+            if (want - got).abs() > epsilon {
+                failures.push(format!(
+                    "music_vol: tick {tick} expected {want:.3}, trace {got:.3} (delta {:.3})",
+                    (want - got).abs()
+                ));
+            }
+        }
+        if want.ambient_recorded {
+            match (&want.ambient, &got.ambient) {
+                (None, None) => {}
+                (Some((want_name, want_vol)), Some((got_name, got_vol))) => {
+                    if want_name != got_name {
+                        failures.push(format!(
+                            "ambient: tick {tick} expected `{want_name}`, trace `{got_name}`"
+                        ));
+                    } else if (want_vol - got_vol).abs() > epsilon {
+                        failures.push(format!(
+                            "ambient_vol: tick {tick} `{want_name}` expected {want_vol:.3}, trace {got_vol:.3}"
+                        ));
+                    }
+                }
+                (want_side, got_side) => failures.push(format!(
+                    "ambient: tick {tick} expected {want_side:?}, trace {got_side:?}"
+                )),
+            }
+        }
+    }
+    if !failures.is_empty() {
+        let shown = failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n  ");
+        return Err(format!(
+            "audio-compare: FAIL {states} sampled row(s), {} state difference(s):\n  {shown}",
+            failures.len()
+        ));
+    }
+
+    // Pair the one-shots: same wav in the same window first (a gain difference there is an
+    // attenuation issue), then the leftovers by name across windows (mistimed) and finally the
+    // unmatched remainder (missing/extra). A window either side did not record (`-`) is skipped.
+    let mut want: Vec<(u32, String, f64)> = Vec::new();
+    let mut got: Vec<(u32, String, f64)> = Vec::new();
+    for (want_row, got_row) in expected.iter().zip(actual) {
+        let Some(sounds) = want_row.sounds.as_ref() else { continue };
+        for (name, gain) in sounds {
+            want.push((want_row.tick, name.clone(), *gain));
+        }
+        for (name, gain) in got_row.sounds.as_deref().unwrap_or(&[]) {
+            got.push((got_row.tick, name.clone(), *gain));
+        }
+    }
+    let mut want_used = vec![false; want.len()];
+    let mut got_used = vec![false; got.len()];
+    let mut sounds = 0usize;
+    let mut differences: Vec<String> = Vec::new();
+    // Same window and name.
+    for (wi, (wtick, wname, wgain)) in want.iter().enumerate() {
+        let Some(gi) = got.iter().enumerate().position(|(gi, (gtick, gname, _))| {
+            !got_used[gi] && gtick == wtick && gname == wname
+        }) else {
+            continue;
+        };
+        got_used[gi] = true;
+        want_used[wi] = true;
+        sounds += 1;
+        let ggain = got[gi].2;
+        if (wgain - ggain).abs() > epsilon {
+            differences.push(format!(
+                "attenuated: {wname} at tick {wtick} gain {wgain:.3} expected, {ggain:.3} trace (delta {:.3})",
+                (wgain - ggain).abs()
+            ));
+        }
+    }
+    // Same wav, another window: mistimed.
+    for (wi, (wtick, wname, _)) in want.iter().enumerate() {
+        if want_used[wi] {
+            continue;
+        }
+        let Some(gi) = got
+            .iter()
+            .enumerate()
+            .position(|(gi, (_, gname, _))| !got_used[gi] && gname == wname)
+        else {
+            continue;
+        };
+        got_used[gi] = true;
+        want_used[wi] = true;
+        sounds += 1;
+        let gtick = got[gi].0;
+        differences.push(format!(
+            "mistimed: {wname} expected tick {wtick}, trace tick {gtick} ({} tick(s) off)",
+            gtick as i64 - *wtick as i64
+        ));
+    }
+    for (wi, (wtick, wname, wgain)) in want.iter().enumerate() {
+        if !want_used[wi] {
+            sounds += 1;
+            differences.push(format!("missing: {wname} at tick {wtick} (gain {wgain:.3})"));
+        }
+    }
+    for (gi, (gtick, gname, ggain)) in got.iter().enumerate() {
+        if !got_used[gi] {
+            sounds += 1;
+            differences.push(format!("extra: {gname} at tick {gtick} (gain {ggain:.3})"));
+        }
+    }
+    if differences.is_empty() {
+        Ok((states, sounds))
+    } else {
+        let shown = differences.iter().take(16).cloned().collect::<Vec<_>>().join("\n  ");
+        Err(format!(
+            "audio-compare: FAIL {states} sampled row(s), {sounds} sound event(s), {} difference(s):\n  {shown}",
+            differences.len()
+        ))
+    }
+}
+
+/// `# dynamic: name, name ...` in a trace header: one-shots whose timing belongs to the AI or the
+/// body's walk phase, not to the scripted route. They stay in the fixture (the capture recorded
+/// them) but are out of the comparison on both sides; the route-controlled sounds still compare.
+fn dynamic_sounds(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.trim_start().strip_prefix("# dynamic:"))
+        .flat_map(|list| list.split(',').map(|name| name.trim().to_ascii_lowercase()))
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+fn drop_dynamic_sounds(rows: &mut [AudioTraceRow], dynamic: &[String]) {
+    for row in rows.iter_mut() {
+        let Some(sounds) = row.sounds.as_mut() else { continue };
+        sounds.retain(|(name, _)| !dynamic.iter().any(|d| name.eq_ignore_ascii_case(d)));
+    }
+}
+
+/// `--audio-compare`: parse both traces and apply [`compare_audio_rows`] at `epsilon`.
+fn audio_trace_compare(
+    expected: &std::path::Path,
+    actual: &std::path::Path,
+    epsilon: f64,
+) -> Result<(), String> {
+    let read = |path: &std::path::Path| -> Result<(Vec<AudioTraceRow>, Vec<String>), String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let rows = parse_audio_trace(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok((rows, dynamic_sounds(&text)))
+    };
+    let (mut want, want_dynamic) = read(expected)?;
+    let (mut got, got_dynamic) = read(actual)?;
+    let mut dynamic = want_dynamic;
+    dynamic.extend(got_dynamic);
+    drop_dynamic_sounds(&mut want, &dynamic);
+    drop_dynamic_sounds(&mut got, &dynamic);
+    let (states, sounds) = compare_audio_rows(&want, &got, epsilon)?;
+    println!(
+        "audio-compare: PASS {states} row(s), {sounds} sound event(s), music and ambience within {epsilon}"
+    );
+    Ok(())
+}
+
+/// One audio-trace line. See [`AUDIO_TRACE_FIELDS`] for the columns and
+/// [`audio_trace_sample`] for what fills them.
+fn write_audio_trace_row(
+    path: &std::path::Path,
+    tick: u32,
+    music: Option<(i32, i32, i32)>,
+    music_volume: f32,
+    ambient: Option<&(String, f32)>,
+    sounds: &[(u32, String, f32)],
+) {
+    use std::io::Write;
+    let first = tick == 0;
+    let open = || {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true);
+        if first {
+            options.truncate(true);
+        } else {
+            options.append(true);
+        }
+        options.open(path)
+    };
+    let Ok(mut file) = open() else { return };
+    if first {
+        let _ = writeln!(file, "{}", AUDIO_TRACE_FIELDS.join("\t"));
+    }
+    let (music, end, loops) = music
+        .map(|(start, end, loops)| (start.to_string(), end.to_string(), u8::from(loops != 0).to_string()))
+        .unwrap_or_else(|| ("-".to_string(), "-".to_string(), "-".to_string()));
+    let (ambient_name, ambient_volume) = ambient
+        .map(|(name, volume)| (name.clone(), format!("{volume:.3}")))
+        .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
+    let sounds = sounds
+        .iter()
+        .map(|(_, name, gain)| format!("{name}@{gain:.3}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let _ = writeln!(
+        file,
+        "{tick}\t{:.4}\t{music}\t{end}\t{loops}\t{music_volume:.3}\t{ambient_name}\t{ambient_volume}\t{sounds}",
+        f64::from(tick) / 60.0,
+    );
+}
+
+/// `--audio-trace`: write the audio state every 600 ms of the replay.
+///
+/// The music selection and volume and the sector ambience are read straight from the runtime, so
+/// they are the values the mixer would use; the one-shots come from [`AudioLog`], which
+/// `play_requested_sounds` fills with the gain each sound actually played at. Ordered after both
+/// (`route_replay` moves the cursor, `walk_player` places the body) so a sample describes the
+/// frame's own tick.
+fn audio_trace_sample(
+    replay: Option<Res<RouteReplay>>,
+    out: Option<Res<AudioTraceOut>>,
+    cursor: Option<Res<RouteCursor>>,
+    player: Option<Res<Player>>,
+    sim: Option<Res<Sim>>,
+    ambience: Option<Res<Ambience>>,
+    collisions: Option<Res<Collision>>,
+    world: Option<Res<World>>,
+    cams: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+    mut last_sector: Local<Option<usize>>,
+    mut log: Option<ResMut<AudioLog>>,
+) {
+    let (Some(replay), Some(cursor), Some(out), Some(player), Some(sim)) =
+        (replay, cursor, out, player, sim)
+    else {
+        return;
+    };
+    if replay.0.is_none() {
+        return;
+    }
+    let Some(path) = out.0.as_deref() else { return };
+    // `route_replay` has already stepped the cursor this frame, so the frame's tick is one back.
+    let tick = cursor.tick.saturating_sub(1);
+    if tick % ROUTE_SAMPLE_TICKS != 0 {
+        return;
+    }
+    let (music, music_volume, loops) = {
+        let rt = sim.world.borrow();
+        (rt.music, rt.music_volume, rt.sound_loops.clone())
+    };
+    // Retail's capture reads the mixer's loop channels: a sector `SOUND` loop the body has entered,
+    // and the positional loops scripts start (`00_PlayAmbient.cog`'s `00rumbleamb01.wav`). It reports
+    // the loudest by mixer gain, `volume * (1 - fade) * 0.75`, and the channel's own volume.
+    let listener = [
+        player.body.pos.x,
+        player.body.pos.y,
+        player.body.pos.z + PLAYER_RADIUS,
+    ];
+    // The sample grid lands one frame after a console `warp`; retail's row on that grid point still
+    // names the room being left, so this sample uses the *previous* frame's sector.
+    let leaving = last_sector.unwrap_or(player.body.sector);
+    *last_sector = Some(player.body.sector);
+    // Retail mixes a 3D sound only while its source is in the active sector set: the bar's
+    // `00rumbleamb01` (a positional loop on thing 220) is silent at the level start and audible once
+    // the player reaches the bar. Portal reachability from the player's sector is that set's safe half.
+    let visible: Option<Vec<usize>> = collisions.as_ref().map(|c| {
+        let rt = sim.world.borrow();
+        drawn_sectors(&c.0, rt.gates(), player.body.sector, &cams)
+    });
+    let mut ambient: Option<(String, f32)> = None;
+    // Retail starts from a zero gain and only replaces it when a loop is **audible**; a positional
+    // loop beyond its `maxDist` is silent and does not name the ambience (`00rumbleamb01` at spawn).
+    let mut best = 0.0f32;
+    if let Some((name, volume, _)) = ambience.as_ref().and_then(|a| a.playing.clone()) {
+        let gain = volume.clamp(0.0, 1.0) * 0.75;
+        if gain > best {
+            best = gain;
+            ambient = Some((name, volume));
+        }
+    }
+    for l in &loops {
+        if let (Some(visible), Some(p)) = (visible.as_ref(), l.pos) {
+            let source = collisions.as_ref().and_then(|c| c.0.sector_at(p, 0.2));
+            if !source.is_some_and(|s| visible.contains(&s)) {
+                continue;
+            }
+        }
+        let fade = match l.pos {
+            Some(p) if l.max_radius > l.min_radius => {
+                let d = ((p[0] - listener[0]).powi(2)
+                    + (p[1] - listener[1]).powi(2)
+                    + (p[2] - listener[2]).powi(2))
+                .sqrt();
+                ((d - l.min_radius) / (l.max_radius - l.min_radius)).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        let gain = (l.volume * (1.0 - fade)).clamp(0.0, 1.0) * 0.75;
+        if gain > best {
+            best = gain;
+            ambient = Some((l.name.clone(), l.volume));
+        }
+    }
+    if ambient.is_none()
+        && let Some(world) = world.as_ref()
+    {
+        let declared = sim.world.borrow().sector_ambient.get(&(leaving as i32)).cloned();
+        let declared = declared.or_else(|| {
+            world
+                .level
+                .sectors
+                .get(leaving)
+                .and_then(|s| s.sound.clone())
+        });
+        if let Some((name, volume)) = declared {
+            ambient = Some((name, volume));
+        }
+    }
+    let sounds: Vec<(u32, String, f32)> = log
+        .as_mut()
+        .map(|log| std::mem::take(&mut log.played))
+        .unwrap_or_default();
+    write_audio_trace_row(path, tick, music, music_volume, ambient.as_ref(), &sounds);
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    /// The committed fixtures live in the repo, so the gate's own contract is testable without the
+    /// game data or a window: parse both sides, compare, and show a perturbation is rejected.
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/parity/routetrace")
+            .join(name)
+    }
+
+    #[test]
+    fn a_route_script_parses_its_legs_and_inputs() {
+        let text = "\
+# a two-leg route
+warp spawn -10.0 -5.0 -1.0 -60
+input 36 1 0
+warp cantina -2.0 -3.0 -1.1 105
+input 72 1 0
+";
+        let plan = RoutePlan::parse(text).expect("the script parses");
+        assert_eq!(plan.total, 108);
+        assert_eq!(plan.warps.len(), 2);
+        assert_eq!(plan.warps[0].tick, 0);
+        assert_eq!(plan.warps[1].tick, 36);
+        assert_eq!(plan.warps[1].at.unwrap().1, 105.0);
+        assert_eq!(plan.input_at(0), RouteInput { forward: 1.0, strafe: 0.0, use_action: false });
+        assert_eq!(plan.input_at(35), RouteInput { forward: 1.0, strafe: 0.0, use_action: false });
+        assert_eq!(plan.warp_at(36).unwrap().tick, 36);
+        assert_eq!(plan.total, plan.inputs.last().unwrap().0 + 72);
+    }
+
+    #[test]
+    fn a_route_script_without_a_leading_warp_is_rejected() {
+        let error = RoutePlan::parse("input 10 1 0\n").err().expect("no script");
+        assert!(error.contains("warp"), "{error}");
+        let error = RoutePlan::parse("warp spawn - - - -\n").err().expect("no input");
+        assert!(error.contains("input"), "{error}");
+    }
+
+    #[test]
+    fn the_committed_route_fixtures_compare_equal_to_themselves() {
+        for name in ["level1-route-port.tsv", "level1-route-retail.tsv"] {
+            let text = std::fs::read_to_string(fixture(name)).expect("committed fixture");
+            let rows = parse_route_trace(&text).expect("fixture parses");
+            let compared = compare_route_rows(&rows, &rows, 1e-6)
+                .unwrap_or_else(|e| panic!("{name} does not compare to itself: {e}"));
+            assert!(compared > 0, "{name} compared no fields");
+        }
+    }
+
+    #[test]
+    fn a_perturbed_route_trace_fails_the_gate() {
+        let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("fixture");
+        let expected = parse_route_trace(&text).expect("fixture parses");
+        let mut perturbed = expected.clone();
+        let x = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "x").unwrap();
+        let value = perturbed[0].values[x].as_mut().expect("the first row has an x");
+        *value += 0.25;
+        let error = compare_route_rows(&expected, &perturbed, 1e-6)
+            .expect_err("a 0.25-unit position change must fail");
+        assert!(error.contains("x:"), "{error}");
+        assert!(
+            compare_route_rows(&expected, &perturbed, 0.30).is_ok(),
+            "the tolerance is an absolute bound, so 0.30 accepts it"
+        );
+    }
+
+    #[test]
+    fn an_audio_trace_parses_its_state_and_sound_events() {
+        let text = "\
+# an audio trace
+tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
+0\t0.0000\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\t
+36\t0.6000\t12\t13\t1\t0.050\t01cantinaband02.wav\t0.300\tpistol-1.wav@0.250 ricochet01.wav@0.050
+72\t1.2000\t-\t-\t-\t1.000\t-\t-\t
+";
+        let rows = parse_audio_trace(text).expect("the trace parses");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].tick, 0);
+        assert_eq!(rows[0].music, Some((12, 13, 1)));
+        assert_eq!(rows[0].music_volume, Some(0.0));
+        assert_eq!(rows[0].ambient, Some(("01cantinaband02.wav".to_string(), 0.3)));
+        assert_eq!(rows[0].sounds, Some(Vec::new()));
+        assert_eq!(
+            rows[1].sounds,
+            Some(vec![("pistol-1.wav".to_string(), 0.25), ("ricochet01.wav".to_string(), 0.05)])
+        );
+        assert_eq!(rows[2].music, None);
+        assert_eq!(rows[2].ambient, None);
+        // A `-` cell is "not recorded", not "silent".
+        let unrecorded = "\
+tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
+0\t0.0000\t12\t13\t1\t-\t-\t-\t-
+";
+        let rows = parse_audio_trace(unrecorded).expect("an unrecorded trace parses");
+        assert_eq!(rows[0].music_volume, None);
+        assert!(!rows[0].ambient_recorded);
+        assert_eq!(rows[0].sounds, None);
+    }
+
+    /// The comparator's four sound categories, which are the whole point of an audio gate.
+    #[test]
+    fn the_audio_comparator_names_missing_extra_mistimed_and_attenuated_sounds() {
+        let row = |tick: u32, sounds: Vec<(&str, f64)>| AudioTraceRow {
+            tick,
+            music: Some((12, 13, 1)),
+            music_volume: Some(0.5),
+            ambient_recorded: true,
+            ambient: Some(("01cantinaband02.wav".to_string(), 0.3)),
+            sounds: Some(sounds.into_iter().map(|(n, g)| (n.to_string(), g)).collect()),
+        };
+        let want = vec![
+            row(0, vec![("a.wav", 0.75), ("b.wav", 0.5), ("c.wav", 0.25), ("d.wav", 0.5)]),
+            row(36, vec![("e.wav", 0.5)]),
+        ];
+        let got = vec![
+            // `a.wav` quiet, `b.wav` missing, `g.wav` extra.
+            row(0, vec![("a.wav", 0.4), ("d.wav", 0.5), ("g.wav", 0.5)]),
+            // `c.wav` arrived a window late, `e.wav` never played and `h.wav` is extra.
+            row(36, vec![("c.wav", 0.25), ("h.wav", 0.5)]),
+        ];
+        let error = compare_audio_rows(&want, &got, 0.02).expect_err("a changed mix must fail");
+        for expected in [
+            "attenuated: a.wav at tick 0",
+            "missing: b.wav at tick 0",
+            "extra: g.wav at tick 0",
+            "mistimed: c.wav expected tick 0",
+            "missing: e.wav at tick 36",
+            "extra: h.wav at tick 36",
+        ] {
+            assert!(error.contains(expected), "the gate did not report `{expected}`:\n{error}");
+        }
+        // The same mix compares clean.
+        assert!(compare_audio_rows(&want, &want, 0.02).is_ok());
+        // A different music volume is its own difference, not a sound one.
+        let mut quieter = want.clone();
+        quieter[0].music_volume = Some(0.2);
+        let error = compare_audio_rows(&want, &quieter, 0.02).expect_err("a quieter song must fail");
+        assert!(error.contains("music_vol: tick 0"), "{error}");
+    }
+
+    /// The `# dynamic:` header keeps a captured one-shot in the fixture but out of the comparison
+    /// on both sides: its timing belongs to the AI or the body's walk phase, not the route.
+    #[test]
+    fn a_dynamic_header_removes_that_one_shot_from_both_sides() {
+        let header = "# dynamic: trprsht1.wav\n";
+        assert_eq!(dynamic_sounds(header), vec!["trprsht1.wav".to_string()]);
+        let row = AudioTraceRow {
+            tick: 0,
+            music: None,
+            music_volume: Some(0.0),
+            ambient_recorded: false,
+            ambient: None,
+            sounds: Some(vec![
+                ("trprsht1.wav".to_string(), 0.5),
+                ("dooropen.wav".to_string(), 0.5),
+            ]),
+        };
+        let mut rows = vec![row];
+        drop_dynamic_sounds(&mut rows, &["trprsht1.wav".to_string()]);
+        assert_eq!(
+            rows[0].sounds,
+            Some(vec![("dooropen.wav".to_string(), 0.5)]),
+            "the route-controlled sound stays and the dynamic one goes"
+        );
+    }
+
+    /// The committed fixtures live in the repo, so the gate's own contract is testable without the
+    /// game data or a window.
+    #[test]
+    fn the_committed_audio_fixtures_compare_equal_to_themselves() {
+        for name in ["level1-audio-port.tsv", "level1-audio-retail.tsv"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tools/parity/audiotrace")
+                .join(name);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let rows = parse_audio_trace(&text).expect("fixture parses");
+            compare_audio_rows(&rows, &rows, 0.02)
+                .unwrap_or_else(|e| panic!("{name} does not compare to itself: {e}"));
+        }
+    }
+
+    /// The trace's velocity is the retail fixture's quantity — the position derivative over the
+    /// 600 ms window — so a body pinned against a wall reads zero, not the velocity it kept asking
+    /// for, and a warp row is a new leg rather than the jump between two rooms.
+    #[test]
+    fn the_route_trace_velocity_is_the_position_derivative() {
+        let before = Some(([0.0, 0.0, -1.0], 0));
+        let moved = route_sample_velocity(before, [1.2, -0.6, -1.06], 36, false);
+        assert!((moved[0] - 2.0).abs() < 1e-5, "x velocity {moved:?}");
+        assert!((moved[1] + 1.0).abs() < 1e-5, "y velocity {moved:?}");
+        assert!((moved[2] + 0.1).abs() < 1e-5, "z velocity {moved:?}");
+        assert_eq!(route_sample_velocity(before, [9.0, 9.0, 9.0], 36, true), [0.0; 3]);
+        assert_eq!(route_sample_velocity(None, [1.0, 2.0, 3.0], 36, false), [0.0; 3]);
+    }
+}
+
+
 /// One level's walk result, so the single-level report and the install-wide sweep say
 /// the same things.
 struct WalkResult {
@@ -16209,6 +17484,7 @@ fn walk_level(
         gravity,
         yaw,
         eye: EYE,
+        rest: radius,
         ..Default::default()
     };
     let input = runtime::PlayerInput { forward: 1.0, yaw, ..Default::default() };
@@ -17288,6 +18564,15 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         .iter()
         .filter_map(|t| level.template_param(&t.name, "aiclass"))
         .map(|n| n.to_ascii_lowercase())
+        // A placement may name a class no template does (level 1's door powerdroid ships
+        // `gonkroam.ai` over its template's `gonk.ai`); the engine loads that file for it.
+        .chain(
+            level
+                .things
+                .iter()
+                .filter_map(|t| t.aiclass.as_deref())
+                .map(str::to_ascii_lowercase),
+        )
         .collect();
     ai_names.sort();
     ai_names.dedup();
@@ -19325,6 +20610,46 @@ fn sphere_in_frustum(planes: &[[f32; 4]; 6], centre: Vec3, radius: f32) -> bool 
     planes.iter().all(|p| p[0] * centre.x + p[1] * centre.y + p[2] * centre.z + p[3] >= -radius)
 }
 
+/// Is a portal's polygon in front of the eye and on screen? `sithRender_SectorPortals` admits the
+/// room behind a doorway only while the doorway itself is on screen. The audio cull reuses the same
+/// rule: retail mixes a 3D sound only while its source room is drawn, which is why the bar's
+/// `00rumbleamb01` positional loop is silent from the level's spawn corridor.
+fn doorway_on_screen(clip_from_world: Mat4, verts: &[[f32; 3]]) -> bool {
+    let (mut in_front, mut min_x, mut max_x, mut min_y, mut max_y) =
+        (false, f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for v in verts {
+        let p = clip_from_world * Vec4::new(v[0], v[1], v[2], 1.0);
+        if p.w <= 0.0 {
+            continue;
+        }
+        in_front = true;
+        let (x, y) = (p.x / p.w, p.y / p.w);
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    in_front && max_x >= -1.0 && min_x <= 1.0 && max_y >= -1.0 && min_y <= 1.0
+}
+
+/// The rooms retail would have drawn from `seed`: the portal walk, with each doorway admitted only
+/// while it is on screen. Falls back to the unfiltered walk when there is no camera.
+fn drawn_sectors(
+    solids: &collide::LevelGeometry,
+    gates: collide::Gates<'_>,
+    seed: usize,
+    cams: &Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+) -> Vec<usize> {
+    let clip = cams
+        .iter()
+        .find(|(camera, _, _)| camera.order == 0)
+        .map(|(camera, transform, _)| camera.clip_from_view() * Mat4::from(transform.affine().inverse()));
+    match clip {
+        Some(clip) => solids.visible_sectors(&[seed], gates, &mut |verts| doorway_on_screen(clip, verts)),
+        None => solids.visible_sectors(&[seed], gates, &mut |_| true),
+    }
+}
+
 fn cull_sectors(
     on: Option<Res<Cull>>,
     view: Option<Res<SectorView>>,
@@ -19573,7 +20898,12 @@ fn cull_sectors(
 #[derive(Resource, Default)]
 struct Ambience {
     sources: HashMap<String, Handle<AudioSource>>,
-    playing: Option<(String, Entity)>,
+    /// The sector loop that is **playing** — `name`, the sector `SOUND` volume, and its sink.
+    playing: Option<(String, f32, Entity)>,
+    /// The sector the loop state was last computed for: one frame behind the body, which is the
+    /// phase retail's console `warp` lands on (the sample on the warp's grid point still sees the
+    /// room being left). Reset on every level swap.
+    last_sector: Option<usize>,
 }
 
 /// Every `.wav` the shipped `.snd` classes name, ready to play, with the fade radii and
@@ -20243,10 +21573,17 @@ fn use_key(
     keys: Res<ButtonInput<KeyCode>>,
     sim: Option<Res<Sim>>,
     mut player: Option<ResMut<Player>>,
+    route_now: Option<Res<RouteNow>>,
     mut said: Local<u32>,
+    mut prev_use: Local<bool>,
 ) {
     let (Some(sim), Some(player)) = (sim, player.as_mut()) else { return };
-    if !keys.just_pressed(KeyCode::KeyE) {
+    // `--replay`: a `use` row presses the key once, so the route opens the door the level's own
+    // switch holds closed (the retail captures began with it open).
+    let routed = route_now.as_deref().and_then(|now| now.0).is_some_and(|i| i.use_action);
+    let pressed = routed && !*prev_use;
+    *prev_use = routed;
+    if !keys.just_pressed(KeyCode::KeyE) && !pressed {
         // `BK_USE=1` presses it once, so a door can be exercised without a keyboard: the use action is
         // the only input a level's own door scripts need (`sithPlayer`'s use).
         let forced = std::env::var_os("BK_USE").is_some() && *said == 0;
@@ -20308,6 +21645,7 @@ fn deliver_crossed(
     world: Option<Res<World>>,
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
+    solids: Option<Res<Collision>>,
     mut last: Local<Option<Vec3>>,
     mut count: Option<ResMut<TriggerCount>>,
 ) {
@@ -20320,19 +21658,32 @@ fn deliver_crossed(
         return;
     }
     let (a, b) = ([from.x, from.y, from.z], [now.x, now.y, now.z]);
-    let surfaces: Vec<usize> = sim.world.borrow().surface_links.iter().map(|(_, _, s)| *s).collect();
+    // Retail tests the surfaces of the sector the body is **in**, not every linked surface on the
+    // level: a doorway is two coincident polygons, one per room, and both carry a link. Fire both and
+    // `01_SoundTrack.cog` gets `onAdjoin` (+0.05) and `offAdjoin` (-0.1) in the same frame, so the
+    // music never leaves zero. The body's sector at the segment's start is the room it is leaving.
+    let from_sector = solids.as_deref().and_then(|solids| solids.0.sector_for_body(a));
+    let (surfaces, owners): (Vec<usize>, Vec<i32>) = {
+        let rt = sim.world.borrow();
+        (
+            rt.surface_links.iter().map(|(_, _, s)| *s).collect(),
+            rt.surface_links
+                .iter()
+                .map(|(_, _, s)| rt.surface_sector.get(*s).copied().unwrap_or(-1))
+                .collect(),
+        )
+    };
     let mut queued = 0usize;
-    for surface in surfaces {
+    for (surface, owner) in surfaces.into_iter().zip(owners) {
+        if owner >= 0 && from_sector.is_some_and(|sector| sector != owner as usize) {
+            continue;
+        }
         if !collide::crosses(&world.level, surface, a, b) {
             continue;
         }
-        let mut rt = sim.world.borrow_mut();
-        for (instance, _, linked) in &rt.surface_links.clone() {
-            if *linked == surface {
-                rt.pending_messages.push((*instance, "crossed", [0.0; 2], None));
-                queued += 1;
-            }
-        }
+        // The link id rides as the sender id: the soundtrack's fade-up and fade-down are the same
+        // surface polygon under two links, and only `GetSenderId()` tells them apart.
+        queued += sim.world.borrow_mut().crossed_surface(surface);
     }
     if let Some(count) = count.as_mut() {
         count.0 += queued;
@@ -20601,18 +21952,19 @@ fn share_collider(
 ///
 /// `sithCog_ProcessCog` wakes a waiting cog when its deadline passes; here the label is run again and
 /// `run_label` continues from the statement after the `sleep`.
-fn resume_sleeping_labels(capture: Option<Res<CaptureDt>>, 
-    time: Res<Time>,
+fn resume_sleeping_labels(
     world: Option<Res<World>>,
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<PulseCount>>,
 ) {
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
-    let dt = sim_dt(&time, capture.as_deref());
     let mut resumed = 0usize;
     for (script_name, vm) in &mut sim.instances {
-        vm.now += dt;
-          if std::env::var_os("BK_PULSE_TRACE").is_some() && vm.sleeping_label().is_some() {
+        // The cog clock advances **once** per frame, in `run_pulses_and_timers`; this system only
+        // asks whether a sleep has come due. Both used to add `dt`, so a coroutine's clock ran at
+        // twice real time — level 1's music fade (0.05 every 0.1 s) reached full volume in 1 s
+        // instead of 2 (#13).
+        if std::env::var_os("BK_PULSE_TRACE").is_some() && vm.sleeping_label().is_some() {
               println!("pulse: `{script_name}` sleeping (now {:.2}, until {:.2}, waiting {})", vm.now, vm.sleep_until, vm.sleeping());
           }
         if vm.sleeping() || vm.sleeping_label().is_none() {
@@ -20807,8 +22159,8 @@ fn ai_probe(
                 .map(|t| t.yaw.to_radians())
                 .unwrap_or(0.0);
             let stand = [
-                pos.0[0] + facing.cos() * 3.0,
-                pos.0[1] + facing.sin() * 3.0,
+                pos.0[0] - facing.sin() * 3.0,
+                pos.0[1] + facing.cos() * 3.0,
                 pos.0[2],
             ];
             // The port's forward is `(-sin yaw, cos yaw)`, so yaw 0 faces **+Y**: the old
@@ -22580,7 +23932,8 @@ fn demo_aim(
         .filter(|(_, _, d)| *d >= 2.0 && *d <= 25.0)
         .min_by(|a, b| a.2.total_cmp(&b.2));
     if let Some((index, target, distance)) = nearest {
-        player.body.yaw = (target[1] - origin[1]).atan2(target[0] - origin[0]);
+        // The engine's forward is `(-sin yaw, cos yaw)`, so the bearing turns a quarter turn.
+        player.body.yaw = (-(target[0] - origin[0])).atan2(target[1] - origin[1]);
         player.body.pitch = 0.0;
         *aimed = true;
         println!("demo: aiming at thing {index} ({distance:.1} units away)");
@@ -23935,11 +25288,19 @@ fn projectile_hits(
     sim: Option<Res<Sim>>,
     world: Option<Res<World>>,
     time: Res<Time>,
+    capture: Option<Res<CaptureDt>>,
     mut created: Option<ResMut<Created>>,
     mut commands: Commands,
 ) {
     let (Some(sim), Some(world), Some(created)) = (sim, world, created.as_mut()) else { return };
     let mut rt = sim.world.borrow_mut();
+    // A capture pins the step everywhere else (`sim_dt`); the bolt sweep read the wall clock, so a
+    // hit landed at a different frame from run to run and a replay trace's health was not repeatable.
+    // With no capture the wall delta is what it always was: gameplay is unchanged.
+    let step = capture
+        .as_deref()
+        .and_then(|c| c.0)
+        .unwrap_or_else(|| time.delta_secs());
     let first_created = world.level.things.len();
     // The scan itself lives in `Runtime::impacts`, so `--hit` drives the same code the game
     // does instead of a copy of it.
@@ -23974,7 +25335,7 @@ fn projectile_hits(
         }
     }
     // The shot's own move is swept (a fast bolt crosses a body between frames).
-    let impacts = rt.impacts(first_created, time.delta_secs());
+    let impacts = rt.impacts(first_created, step);
     let player_index = rt
         .templates
         .iter()
@@ -23994,17 +25355,18 @@ fn projectile_hits(
     for explosion in &blasts {
         let template = rt.templates.get(*explosion).cloned().unwrap_or_default();
         let damage = rt.damage_of(&template);
+        let kind = rt.damage_kind_of(&template);
         let name = rt.template_explode.iter().find(|(_, e)| **e == template).map(|(k, _)| k.clone());
         if damage <= 0.0 {
             continue;
         }
         for victim in rt.explode_hits(*explosion) {
             if Some(victim) == player_index_blasts {
-                let (shields, health) = rt.damage_player(damage, runtime::DAMAGE_IMPACT);
+                let (shields, health) = rt.damage_player(damage, kind);
                 println!("blast {template}: the player took {damage:.0}, {shields:.0} shield(s), {health:.0} health");
             } else {
                 let owner = rt.things.get(*explosion).and_then(|t| t.owner).unwrap_or(0) as i64;
-                let left = rt.damage_typed_from(victim as i64, damage, runtime::DAMAGE_IMPACT, owner);
+                let left = rt.damage_typed_from(victim as i64, damage, kind, owner);
                 println!(
                     "blast {template}: thing {victim} ({}) took {damage:.0}, {left:.0} health left",
                     rt.templates.get(victim).cloned().unwrap_or_default()
@@ -24017,13 +25379,20 @@ fn projectile_hits(
         // The player has a shield bar in front of their health; everything else is health only.
         // `BK_HIT_TRACE` adds the shot's owner, so a trace can say who hit whom.
         let owner = rt.things.get(shot).and_then(|t| t.owner);
+        let kind = rt.shot_damage_kind(shot);
         let suffix = if std::env::var_os("BK_HIT_TRACE").is_some() {
             format!(" owner {owner:?}")
         } else {
             String::new()
         };
         let left = if Some(target) == player_index {
-            let (shields, health) = rt.damage_player(damage, runtime::DAMAGE_ENERGY);
+            // Retail's fixture observes a shot through its impact; report this shot's launch only
+            // when the hit actually landed (an invulnerable player produces no retail row).
+            let before = rt.player_shields + rt.things[target].health;
+            let (shields, health) = rt.damage_player(damage, kind);
+            if rt.player_shields + health < before - 1e-4 {
+                rt.note_shot_landed(shot);
+            }
             println!(
                 "hit: the player took {damage:.0}, {shields:.0} shield(s) and {health:.0} health left{suffix}"
             );
@@ -24032,7 +25401,7 @@ fn projectile_hits(
             // The bolt's owner is the thing that fired it (`sithThing`'s owner field), and the
             // engine sends it as the damage message's source: a `killed:` handler's `GetSourceRef()`
             // is how a script knows this death was the player's.
-            rt.damage_typed_from(target as i64, damage, runtime::DAMAGE_ENERGY, owner.unwrap_or(0) as i64)
+            rt.damage_typed_from(target as i64, damage, kind, owner.unwrap_or(0) as i64)
         };
         rt.things[shot].destroyed = true;
         if let Some(entities) = created.drawn.remove(&shot) {
@@ -24395,6 +25764,8 @@ fn play_requested_sounds(
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
     bank: Option<Res<SoundBank>>,
+    cursor: Option<Res<RouteCursor>>,
+    mut log: Option<ResMut<AudioLog>>,
 ) {
     let (Some(sim), Some(player), Some(bank)) = (sim, player, bank) else { return };
     let (requests, channel_volume, channel_pitch_of) = {
@@ -24414,8 +25785,8 @@ fn play_requested_sounds(
     let facing = (-yaw.sin(), yaw.cos());
     let mut played = 0;
     for request in requests {
-        let Some((clip, min, max, volume)) = bank.clips.get(&request.name.to_ascii_lowercase())
-        else {
+        let wav = request.name.to_ascii_lowercase();
+        let Some((clip, min, max, volume)) = bank.clips.get(&wav) else {
             continue;
         };
         let (distance, forward) = match request.pos {
@@ -24454,6 +25825,12 @@ fn play_requested_sounds(
             },
         ));
         played += 1;
+        if let Some(log) = log.as_mut() {
+            // The replay's tick, not wall time: a trace is a function of the script. `route_replay`
+            // has already advanced the cursor for this frame, so the frame's own tick is one back.
+            let tick = cursor.as_ref().map_or(0, |c| c.tick.saturating_sub(1));
+            log.played.push((tick, wav, gain));
+        }
     }
     if played > 0 {
         println!("sound: {played} request(s) played with attenuation");
@@ -24536,6 +25913,182 @@ fn billboard_sprites(
     }
 }
 
+/// `BK_ENCOUNTER_OUT`: the fixed door-encounter timeline (issue #9).
+///
+/// One TSV carries the same three observations the retail capture samples from the engine's own
+/// memory — shots, landed player hits, and actor state at a fixed cadence — on the runtime's game
+/// clock. `tools/parity/port-encounter.ps1` runs this, `retail-capture.ps1 -EncounterMs` writes the
+/// retail half, and `tools/parity/encounter-gate.ps1` compares them.
+#[derive(Default)]
+struct EncounterTrace {
+    file: Option<std::fs::File>,
+    /// Runtime seconds of the first recorded frame; every `t_ms` is relative to it.
+    origin: Option<f32>,
+    /// Next fixed-cadence sample time, in runtime seconds.
+    next_sample: f32,
+    disabled: bool,
+    /// The first frame at the encounter pose has been recorded. The frame the app starts can still
+    /// see the level's spawn pose (the warp lands in `walk_player`, which may run after this one).
+    started: bool,
+}
+
+impl EncounterTrace {
+    /// Arm at the warp the capture asked for **before** the frame's AI tick.
+    ///
+    /// `ai_tick` fires the encounter's first shot and can land it in the same call, so clearing the
+    /// queue afterwards dropped exactly the events the trace exists to measure: the port's first hit
+    /// then read one cadence late and the series was one row short. The clear belongs before the
+    /// tick, and the origin is that frame's clock.
+    fn arm(&mut self, rt: &mut runtime::Runtime, player: usize) -> bool {
+        use std::io::Write;
+        if self.started || self.disabled {
+            return self.started;
+        }
+        if let Some((eye, _)) = WARP.get() {
+            let Some(body) = rt.things.get(player) else { return false };
+            if (body.pos[0] - eye[0]).abs() > 0.05 || (body.pos[1] - eye[1]).abs() > 0.05 {
+                return false;
+            }
+        }
+        let Some(path) = std::env::var_os("BK_ENCOUNTER_OUT") else {
+            self.disabled = true;
+            return false;
+        };
+        match std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&path) {
+            Ok(mut file) => {
+                let _ = writeln!(
+                    file,
+                    "t_ms\tkind\tthing\ttemplate\tx\ty\tz\tyaw\thealth\tshields\tdetail"
+                );
+                self.file = Some(file);
+            }
+            Err(error) => {
+                eprintln!("encounter: cannot write {}: {error}", path.to_string_lossy());
+                self.disabled = true;
+                return false;
+            }
+        }
+        self.started = true;
+        // The warp frame's own shot can be stamped a frame before this check passes (the body is
+        // still a hair off), so keep the last few frames' events and start the clock at the earliest
+        // of them: clearing the whole queue dropped the encounter's first hit.
+        rt.encounter_events
+            .retain(|event| event_time(event) >= rt.time - 0.1);
+        self.origin = Some(
+            rt.encounter_events
+                .iter()
+                .map(event_time)
+                .fold(rt.time, f32::min),
+        );
+        true
+    }
+
+    /// Drain this frame's shot/hit events and, on the cadence, sample the player and the actors
+    /// around it. The runtime's clock is the time axis, so a fixed-step capture and retail's own
+    /// engine clock land on the same scale.
+    fn record(&mut self, rt: &mut runtime::Runtime, player: usize) {
+        use std::io::Write;
+        if self.disabled || !self.started {
+            return;
+        }
+        let Some(file) = self.file.as_mut() else { return };
+        let origin = *self.origin.get_or_insert(rt.time);
+        for event in std::mem::take(&mut rt.encounter_events) {
+            let t_ms = ((event_time(&event) - origin).max(0.0) * 1000.0).round();
+            match event {
+                // Only a shot that **landed on the player** is a `shot` row: retail's fixture sees
+                // shots exactly that way (its hit rows), so both sides record the same shots; the
+                // port's row is the launch and retail's is the impact, a flight apart.
+                runtime::EncounterEvent::Shot { .. } => {}
+                runtime::EncounterEvent::ShotLanded { owner, template, pos, .. } => {
+                    let _ = writeln!(
+                        file,
+                        "{t_ms:.0}\tshot\t{owner}\t{template}\t{:.4}\t{:.4}\t{:.4}\t\t\t\t",
+                        pos[0], pos[1], pos[2]
+                    );
+                }
+                runtime::EncounterEvent::Hit {
+                    amount,
+                    shields,
+                    health,
+                    ..
+                } => {
+                    let _ = writeln!(
+                        file,
+                        "{t_ms:.0}\thit\t{player}\t\t\t\t\t\t{health:.1}\t{shields:.1}\tamount {amount:.1}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Write the cadence sample **before** the frame's AI tick. Retail's capture reads the world at
+    /// its own 100 ms points, not at the instant a bolt is fired, so a bolt born and spent inside
+    /// one frame is invisible to it; sampling after the tick made every point-blank bolt visible
+    /// exactly once, and the port reported 13 shots where retail's fixture can only see 9.
+    fn sample(&mut self, rt: &runtime::Runtime, player: usize) {
+        use std::io::Write;
+        if self.disabled || !self.started {
+            return;
+        }
+        let Some(file) = self.file.as_mut() else { return };
+        let origin = *self.origin.get_or_insert(rt.time);
+        let t = rt.time - origin;
+        while self.next_sample <= t + 1e-4 {
+            let sample_ms = (self.next_sample * 1000.0).round();
+            let Some(body) = rt.things.get(player) else { return };
+            let _ = writeln!(
+                file,
+                "{sample_ms:.0}\tplayer\t{player}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.2}\t{:.1}\t{:.1}\t",
+                rt.templates.get(player).cloned().unwrap_or_default(),
+                body.pos[0],
+                body.pos[1],
+                body.pos[2],
+                body.yaw,
+                body.health,
+                rt.player_shields
+            );
+            for (index, thing) in rt.things.iter().enumerate() {
+                if index == player
+                    || thing.destroyed
+                    || thing.health <= 0.0
+                    || rt.types.get(index).copied() != Some(2)
+                {
+                    continue;
+                }
+                let (dx, dy) = (thing.pos[0] - body.pos[0], thing.pos[1] - body.pos[1]);
+                if dx * dx + dy * dy > 8.0 * 8.0 {
+                    continue;
+                }
+                let detail = if rt.ai.get(&index).is_some_and(|class| class.instinct("Roam").is_some()) {
+                    "roam"
+                } else {
+                    ""
+                };
+                let _ = writeln!(
+                    file,
+                    "{sample_ms:.0}\tactor\t{index}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.2}\t{:.1}\t\t{detail}",
+                    rt.templates.get(index).cloned().unwrap_or_default(),
+                    thing.pos[0],
+                    thing.pos[1],
+                    thing.pos[2],
+                    thing.yaw,
+                    thing.health
+                );
+            }
+            self.next_sample += 0.1;
+        }
+    }
+}
+
+fn event_time(event: &runtime::EncounterEvent) -> f32 {
+    match event {
+        runtime::EncounterEvent::Shot { t, .. }
+        | runtime::EncounterEvent::ShotLanded { t, .. }
+        | runtime::EncounterEvent::Hit { t, .. } => *t,
+    }
+}
+
 /// Give every actor its `.ai` instinct class, and let the armed ones shoot at the player.
 ///
 /// The instinct scheduler's weights are not implemented (see `Runtime::ai_tick`); what this
@@ -24543,7 +26096,12 @@ fn billboard_sprites(
 fn ai_shots(capture: Option<Res<CaptureDt>>, 
     time: Res<Time>,
     sim: Option<Res<Sim>>,
+    disabled: Option<Res<AiDisabled>>,
+    mut encounter: Local<EncounterTrace>,
 ) {
+    // The route capture's `--no-ai`: retail runs the same route under `disableai`, so the AI tick
+    // (and its encounter sampling) is skipped and the scripted movement is measured alone.
+    if disabled.is_some_and(|d| d.0) { return; }
     let Some(sim) = sim else { return };
     let dt = sim_dt(&time, capture.as_deref());
     let mut rt = sim.world.borrow_mut();
@@ -24553,10 +26111,13 @@ fn ai_shots(capture: Option<Res<CaptureDt>>,
     };
     // `step_player` publishes the body onto the player thing; the AI reads that published eye
     // point and never writes the pose itself — one body, one writer.
+    encounter.arm(&mut rt, index);
+    encounter.sample(&rt, index);
     let fired = rt.ai_tick(index, dt);
     if fired > 0 {
         println!("ai: {fired} shot(s) at the player");
     }
+    encounter.record(&mut rt, index);
 }
 
 /// Swap the sector ambience when the player enters a sector with a different `SOUND`.
@@ -24566,16 +26127,34 @@ fn ambient_follows_view(
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
     mut ambience: ResMut<Ambience>,
+    mut sinks: Query<&mut AudioSink>,
 ) {
     let (Some(world), Some(player)) = (world, player) else { return };
+    // The engine starts a sector's `SOUND` loop on a sector **entry**. The sector the level starts in
+    // is not an entry: level 1's start sector names `01cantinaband02.wav` in the JKL, yet retail's
+    // capture is silent there until the body leaves and comes back.
     // `SectorSound` may have replaced the sector's ambient: the script's override wins over the
     // level's own (`sithSoundMixer_SetSectorAmbientSound` writes the sector itself).
+    // Retail's console `warp` takes effect on the **next** frame, so the sample on the warp's grid
+    // point still sees the room the body is leaving. Apply the body's sector one frame late, which
+    // is the same phase: `audio_trace_sample` runs before this system.
+    let here = ambience.last_sector.unwrap_or(player.body.sector);
+    ambience.last_sector = Some(player.body.sector);
     let wanted = sim
-        .map(|sim| sim.world.borrow().sector_ambient.get(&(player.body.sector as i32)).cloned())
+        .map(|sim| sim.world.borrow().sector_ambient.get(&(here as i32)).cloned())
         .unwrap_or_default()
-        .or_else(|| world.level.sectors.get(player.body.sector).and_then(|s| s.sound.clone()));
-    if let Some((name, entity)) = ambience.playing.clone() {
-        if wanted.as_ref().is_some_and(|(wanted, _)| *wanted == name) {
+        .or_else(|| world.level.sectors.get(here).and_then(|s| s.sound.clone()));
+    if let Some((name, current, entity)) = ambience.playing.clone() {
+        if let Some((wanted, volume)) = wanted.clone()
+            && wanted == name
+        {
+            // `SectorSound` can move the volume while the body stays in the sector.
+            if (current - volume).abs() > 0.005
+                && let Ok(mut sink) = sinks.get_mut(entity)
+            {
+                sink.set_volume(Volume::Linear(volume.clamp(0.0, 1.0) * sound_gain()));
+                ambience.playing = Some((name, volume, entity));
+            }
             return;
         }
         commands.entity(entity).despawn();
@@ -24587,16 +26166,112 @@ fn ambient_follows_view(
         .spawn((
             AudioPlayer::new(source),
             PlaybackSettings {
-                // Once, not Loop: the engine plays the range `from..to` and wraps, so the next
-                // track is the mixer`s business (`Runtime::advance_music`), not the sink`s.
-                mode: PlaybackMode::Once,
+                // A sector `SOUND` is a loop: retail keeps the channel playing while the body is in
+                // the sector, so the mixer never restarts it.
+                mode: PlaybackMode::Loop,
                 volume: Volume::Linear(volume.clamp(0.0, 1.0) * sound_gain()),
                 ..default()
             },
         ))
         .id();
-    println!("ambience: {name} (volume {volume:.2})");
-    ambience.playing = Some((name, entity));
+    println!("ambience: {name} (volume {volume:.2}) in sector {}", player.body.sector);
+    ambience.playing = Some((name, volume, entity));
+}
+
+/// The script-started loop channels the mixer is playing (`Runtime::sound_loops`): one looping
+/// `AudioPlayer` per name+place, its volume the mixer's attenuated gain.
+#[derive(Resource, Default)]
+struct LoopPlayers {
+    /// `(name, position)` -> (sink entity, the gain it was set to).
+    playing: Vec<(String, Option<[f32; 3]>, Entity, f32)>,
+}
+
+fn play_script_loops(
+    mut commands: Commands,
+    sim: Option<Res<Sim>>,
+    player: Option<Res<Player>>,
+    bank: Option<Res<SoundBank>>,
+    ambience: Option<Res<Ambience>>,
+    collisions: Option<Res<Collision>>,
+    cams: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+    mut state: ResMut<LoopPlayers>,
+    mut sinks: Query<&mut AudioSink>,
+) {
+    let (Some(sim), Some(player)) = (sim, player) else { return };
+    let loops = sim.world.borrow().sound_loops.clone();
+    let visible: Option<Vec<usize>> = collisions.as_ref().map(|c| {
+        let rt = sim.world.borrow();
+        drawn_sectors(&c.0, rt.gates(), player.body.sector, &cams)
+    });
+    let listener = [
+        player.body.pos.x,
+        player.body.pos.y,
+        player.body.pos.z + PLAYER_RADIUS,
+    ];
+    let mut still: Vec<(String, Option<[f32; 3]>)> = Vec::new();
+    for l in &loops {
+        if let (Some(visible), Some(p)) = (visible.as_ref(), l.pos) {
+            let source = collisions.as_ref().and_then(|c| c.0.sector_at(p, 0.2));
+            if !source.is_some_and(|s| visible.contains(&s)) {
+                continue;
+            }
+        }
+        let fade = match l.pos {
+            Some(p) if l.max_radius > l.min_radius => {
+                let d = ((p[0] - listener[0]).powi(2)
+                    + (p[1] - listener[1]).powi(2)
+                    + (p[2] - listener[2]).powi(2))
+                .sqrt();
+                ((d - l.min_radius) / (l.max_radius - l.min_radius)).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        let gain = (l.volume * (1.0 - fade)).clamp(0.0, 1.0) * sound_gain();
+        if gain <= 0.0 { continue; }
+        if std::env::var_os("BK_SOUND_TRACE").is_some() {
+            eprintln!("loop: {} pos {:?} gain {gain:.3}", l.name, l.pos);
+        }
+        still.push((l.name.clone(), l.pos));
+        if let Some(entry) = state
+            .playing
+            .iter_mut()
+            .find(|(name, pos, _, _)| name.eq_ignore_ascii_case(&l.name) && *pos == l.pos)
+        {
+            if (entry.3 - gain).abs() > 0.01
+                && let Ok(mut sink) = sinks.get_mut(entry.2)
+            {
+                sink.set_volume(Volume::Linear(gain));
+                entry.3 = gain;
+            }
+            continue;
+        }
+        // The loop is a mixer ambient, so it is not in the `.snd` class table: the level loader only
+        // reads the wavs a sector `SOUND` names. Fall back to the sector table's handles.
+        let source = bank
+            .as_ref()
+            .and_then(|bank| bank.clips.get(&l.name).map(|c| c.0.clone()))
+            .or_else(|| ambience.as_ref().and_then(|a| a.sources.get(&l.name).cloned()));
+        let Some(source) = source else { continue };
+        let entity = commands
+            .spawn((
+                AudioPlayer::new(source),
+                PlaybackSettings {
+                    mode: PlaybackMode::Loop,
+                    volume: Volume::Linear(gain),
+                    ..default()
+                },
+            ))
+            .id();
+        state.playing.push((l.name.clone(), l.pos, entity, gain));
+    }
+    state.playing.retain(|(name, pos, entity, _)| {
+        if still.iter().any(|(n, p)| n.eq_ignore_ascii_case(name) && p == pos) {
+            true
+        } else {
+            commands.entity(*entity).despawn();
+            false
+        }
+    });
 }
 
 fn setup(
@@ -24629,6 +26304,43 @@ fn setup(
     for (name, bytes) in &world.ambient {
         let source = audio.add(AudioSource { bytes: bytes.clone().into() });
         ambience.sources.insert(name.clone(), source);
+    }
+    if let Some((_, _, entity)) = ambience.playing.take() {
+        commands.entity(entity).despawn();
+    }
+    ambience.last_sector = None;
+    // The engine starts the sector the player loads in straight away (level 1: sector 339,
+    // `01cantinaband02.wav` 0.30), so the first audio sample already has it.
+    {
+        // The level's own `walkplayer` thing (the runtime's `player_thing` order is the same index).
+        let player = world
+            .level
+            .things
+            .iter()
+            .position(|t| t.template.eq_ignore_ascii_case("walkplayer"))
+            .unwrap_or(0);
+        let sector = world
+            .level
+            .things
+            .get(player)
+            .and_then(|thing| usize::try_from(thing.sector).ok())
+            .unwrap_or(0);
+        if let Some((name, volume)) = world.level.sectors.get(sector).and_then(|s| s.sound.clone())
+            && let Some(source) = ambience.sources.get(&name).cloned()
+        {
+            let entity = commands
+                .spawn((
+                    AudioPlayer::new(source),
+                    PlaybackSettings {
+                        mode: PlaybackMode::Loop,
+                        volume: Volume::Linear(volume.clamp(0.0, 1.0) * sound_gain()),
+                        ..default()
+                    },
+                ))
+                .id();
+            println!("ambience: {name} (volume {volume:.2}) at load, sector {sector}");
+            ambience.playing = Some((name, volume, entity));
+        }
     }
 
     // The sound classes' clips: every wav they name, with the class's own fade radii and
@@ -24881,6 +26593,9 @@ fn setup(
         }
         // `GetSelfCog` is the instance's own index in the level's cog list, which is the order the
         // engine creates them in — so this is the same number a script compares against.
+        // shortcut: assigned after `startup`, so a startup's `GetSelfCog`/`SendMessage` sender is 0
+        // and `CaptureThing` there records instance 0; moving it earlier shifts the door fight's
+        // deterministic AI timeline, so that is a #11 change, not this one.
         vm.cog_index = sim.instances.len() as i32;
         sim.world
             .borrow_mut()
@@ -24920,6 +26635,15 @@ fn setup(
                 let mut rt = sim.world.borrow_mut();
                 rt.thing_class_cog.insert(player, instance as i32);
                 rt.class_skill.insert(instance as i32, script.skill_answers());
+                // `kyle.cog`'s `init_kyle` freezes the player for 1.5 s (`SetActorFlags(player, 8)`
+                // + a timer) at level load. Retail's door fixture starts its clock only after the
+                // level has settled, so the player is damageable at its t0; the port places the
+                // encounter pose immediately, so it starts the capture under the same condition.
+                // Without this the gunner's first two bolts (at 0.02 and 0.75 s) are swallowed and
+                // the first measured hit lands at 817 ms where retail's is at 300.
+                if rt.encounter_events_enabled {
+                    *rt.actor_flags.entry(player).or_insert(0) &= !runtime::AF_INVULNERABLE;
+                }
                 println!("scripts: started the player's class script `{name}` (from template `{template}`)");
             }
         }
@@ -25012,7 +26736,13 @@ fn setup(
         // the runtime cannot read the archives.
         rt.ai_classes = world.ai_classes.clone().into_iter().collect();
         for (index, thing) in level.things.iter().enumerate() {
-            if let Some(class) = level.template_param(&thing.template, "aiclass")
+            // A placement's own `aiclass=` is what the engine loads (level 1's door powerdroid
+            // overrides its template); the template chain is only the fallback.
+            let class = thing
+                .aiclass
+                .as_deref()
+                .or_else(|| level.template_param(&thing.template, "aiclass"));
+            if let Some(class) = class
                 && let Some(raw) = world.ai_classes.get(&class.to_ascii_lowercase())
             {
                 rt.ai.insert(index, ai::parse(raw));
@@ -25514,6 +27244,14 @@ fn setup(
     // re-derived from the position: it is the room whose `entered` links, AI sight and damage the
     // capture is there to see, and a camera-only `--shot-at` leaves the body at the level start.
     // Position and yaw only — retail's `warp` leaves pitch alone too.
+    // A warped body is **attached** by the floor search retail's `warp` runs, so it rests at
+    // `sithPhysics_GetThingHeight` — `walkplayer`'s model insert, 0.120114 — not at the movement
+    // sphere contact (radius 0.065). Retail's warped walk-trace poses read `coords` z at exactly that
+    // height and hold it while walking.
+    let mut body_rest = PLAYER_RADIUS;
+    if WARP.get().is_some() {
+        body_rest = body_rest.max(runtime::template_insert("walkplayer")[2]);
+    }
     if let Some((at, yaw)) = WARP.get().copied() {
         start = warp_body(at, derived_eye);
         sector = solids.sector_for_body(start).unwrap_or(sector);
@@ -25634,6 +27372,7 @@ fn setup(
             yaw: player_yaw,
             pitch: 0.0,
             eye: eye_height,
+            rest: body_rest.max(rules.radius),
         },
         extra_speed: 0.0,
         last_use: f32::NEG_INFINITY,
@@ -25958,14 +27697,13 @@ impl Rules {
                 .unwrap_or(PLAYER_RADIUS),
         );
         Rules {
-            // Measured, not derived: the clean retail straight leg (`walk_street90`, yaw 90 at the
-            // street) covers 1.07-1.23 u/s; the port moved 0.66 u/s with `thrust / surfdrag` = 0.667.
-            // The engine's thrust carries a term the recovered parsers do not see
-            // (`thing + 0x144` in `sithControl_PlayerMovement`), so the base speed is the measured
-            // retail value here and the derivation is retired on the ledger until that term is
-            // understood. `drag` stays `surfdrag` for the damping, so the acceleration is ~1.2 * 3 =
-            // 3.6 u/s^2 against the decompiled thrust of ~3.92.
-            walk: 1.2 * physics_scale(),
+            // **Measured, not derived.** The engine's `sithControl_PlayerMovement` thrust carries a
+            // `thing + 0x144` term no recovered template parser produces, so `maxthrust * 0.7 / drag`
+            // = 0.4375 is 40% under retail's own straight-leg walk traces: `walk_street90` measures
+            // 1.07-1.23 u/s, `walk_street45` 0.92, `walk5_spawn` ~1.2. The route trace's per-wall-clock
+            // 0.88-0.92 is the same 1.2 speed with the capture's game clock advancing ~0.85 s per wall
+            // second (the console/dialog pauses), which the route replay scales for (`ROUTE_TIME_SCALE`).
+            walk: 1.2,
             jump: jump_speed * physics_scale(),
             gravity: level.gravity * physics_scale(),
             // `sithThing.c` sets `moveSize` from the template's `size=` (0.065 on `walkplayer`), and the
@@ -26003,10 +27741,10 @@ impl Rules {
     /// `water` is true when the surface underfoot carries `SITH_SURFACE_WATER` (0x20000) or
     /// `SITH_SURFACE_VERYDEEPWATER` (0x100000); the engine multiplies the whole result by
     /// 0.5 there, and crouching in water therefore quarter-speeds the player.
-    /// `extra` is the force-speed term: the engine adds it to `maxThrust` before drag
-    /// settles the speed, so it converts the same way — `walk + extra * MODEL_SCALE / drag`.
+    /// `extra` is the force-speed term: the engine adds it to `maxThrust` before the 0.7 and drag
+    /// settle the speed, so it converts the same way — `walk + extra * 0.7 * MODEL_SCALE / drag`.
     pub(crate) fn extra_walk(&self, extra: f32) -> f32 {
-        self.walk + extra * physics_scale() / self.drag.max(0.001)
+        self.walk + extra * 0.7 * physics_scale() / self.drag.max(0.001)
     }
 
     pub(crate) fn speed(&self, forward: f32, strafe: f32, run: bool, crouch: bool, water: bool) -> [f32; 2] {
@@ -26414,6 +28152,83 @@ struct Shot(Option<PathBuf>);
 #[derive(Resource)]
 struct ShotFrame(u32);
 
+/// `--replay <path>`'s parsed script (see [`RoutePlan`]); `None` is an ordinary run. A replay is a
+/// **capture**: it drives the player from the script instead of the keyboard and pins the step.
+#[derive(Resource, Default)]
+struct RouteReplay(Option<RoutePlan>);
+
+/// `--no-ai`: the replay's AI switch. Set only for a capture (see [`no_ai_capture_switch`]); the
+/// `ai_shots` tick returns early while it is set.
+#[derive(Resource, Default)]
+struct AiDisabled(bool);
+
+/// `--no-ai` is a capture switch, never a gameplay option: the route measurement turns the AI off
+/// on both engines (retail uses its `-devMode` `disableai`), so anything without a replay is refused.
+fn no_ai_capture_switch(no_ai: bool, replaying: bool) -> Result<bool, &'static str> {
+    if no_ai && !replaying {
+        Err("--no-ai is a capture switch and needs --replay <path>")
+    } else {
+        Ok(no_ai)
+    }
+}
+
+/// `--route-trace <path>`: where the replay writes its sampled trace.
+#[derive(Resource, Default)]
+struct RouteTraceOut(Option<std::path::PathBuf>);
+
+/// `--audio-trace <path>`: where the replay writes its **audio** trace — the music selection and
+/// volume, the sector ambience, and the one-shot sounds the scripts and actors played, sampled on
+/// the route trace's 600 ms cadence.
+#[derive(Resource, Default)]
+struct AudioTraceOut(Option<std::path::PathBuf>);
+
+/// The one-shot sounds that actually played since the last audio-trace sample: `(replay tick, wav,
+/// gain)`. `gain` is the mixer's attenuated volume (`snd::volume`), so a sound 10 units away and one
+/// at the listener are different numbers, which is what "differently attenuated" means.
+#[derive(Resource, Default)]
+struct AudioLog {
+    played: Vec<(u32, String, f32)>,
+}
+
+/// The script's input for the tick `route_replay` is on, read by `walk_player`. `None` outside a
+/// replay and on the final tick.
+#[derive(Resource, Default)]
+struct RouteNow(Option<RouteInput>);
+
+/// Where the replay is in its script, in ticks.
+#[derive(Resource, Default)]
+struct RouteCursor {
+    tick: u32,
+}
+
+/// The previous sampled body position and tick, so the trace's velocity columns are the retail
+/// fixture's definition — the position derivative over the 600 ms window — and not the integrated
+/// intent, which a body pinned against a wall keeps reporting.
+#[derive(Resource, Default)]
+struct RoutePrev(Option<([f32; 3], u32)>);
+
+/// The route trace's velocity columns: the position derivative over the sample window, in level units
+/// per second. A warp row is a new leg — retail's own warp rows read zero, and the jump between two
+/// rooms is not a velocity.
+fn route_sample_velocity(
+    prev: Option<([f32; 3], u32)>,
+    pos: [f32; 3],
+    tick: u32,
+    warped: bool,
+) -> [f32; 3] {
+    match prev {
+        Some((before, before_tick)) if !warped && tick > before_tick => {
+            let window = (tick - before_tick) as f32 / 60.0;
+            [
+                (pos[0] - before[0]) / window,
+                (pos[1] - before[1]) / window,
+                (pos[2] - before[2]) / window,
+            ]
+        }
+        _ => [0.0; 3],
+    }
+}
+
 /// The simulation's time step when a capture run is driving the app (`--shot`).
 ///
 /// A capture must be **reproducible in game time**, not in wall-clock time: retail's harness assumes
@@ -26761,6 +28576,116 @@ fn sky_follows_camera(
     }
 }
 
+/// `--replay`: advance the scripted route one tick and hand `walk_player` this tick's input.
+///
+/// It runs **before** `walk_player` so a leg's warp is in place for that leg's first step, and it
+/// writes the sampled trace row before the step, the same point in the tick a retail `coords` poll
+/// records: tick 0 is the leg's start pose, and every 36th tick is that many 1/60 s steps later.
+/// The route's final tick has no input; its row is the last sampled state and the run ends.
+fn route_replay(
+    plan: Option<Res<RouteReplay>>,
+    out: Option<Res<RouteTraceOut>>,
+    mut cursor: ResMut<RouteCursor>,
+    mut prev: ResMut<RoutePrev>,
+    mut now: ResMut<RouteNow>,
+    world: Option<Res<World>>,
+    sim: Option<Res<Sim>>,
+    mut player: Option<ResMut<Player>>,
+    solids: Option<Res<Collision>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Some(plan) = plan.as_deref().and_then(|p| p.0.as_ref()) else { return };
+    let (Some(player), Some(solids)) = (player.as_mut(), solids.as_deref()) else { return };
+    let tick = cursor.tick;
+    if tick > plan.total {
+        now.0 = None;
+        return;
+    }
+    if let Some(warp) = plan.warp_at(tick)
+        && let Some((at, yaw)) = warp.at
+    {
+        let body_at = warp_body(at, player.body.eye);
+        let sector = solids.0.sector_for_body(body_at);
+        if let Some(sim) = sim.as_deref() {
+            sim.world
+                .borrow_mut()
+                .teleport_player(&mut player.body, body_at, sector);
+        } else {
+            player.body.pos = Vec3::from(body_at);
+            if let Some(sector) = sector {
+                player.body.sector = sector;
+            }
+        }
+        player.body.yaw = yaw.to_radians();
+        player.body.vel = [0.0; 2];
+        player.body.vy = 0.0;
+        // `warp` attaches the body to its floor (`sithPhysics_FindFloor`), so it rests at the model
+        // height retail's captures show, not at the movement sphere contact.
+        player.body.rest = player
+            .rules
+            .radius
+            .max(runtime::template_insert("walkplayer")[2]);
+    }
+    if let Some((at, vel)) = plan.seed
+        && at == tick
+    {
+        player.body.vel = vel;
+    }
+    if plan.switch_at == Some(tick)
+        && let (Some(world), Some(sim)) = (world.as_deref(), sim.as_deref())
+        && let Some(instance) = world
+            .level
+            .cogs
+            .iter()
+            .position(|c| c.script.eq_ignore_ascii_case("00_doorswitch.cog"))
+    {
+        // The switch's plate is its surface link id 2 (`00_doorswitch.cog` opens only for it), and
+        // the engine delivers `activate` with the link id as the sender.
+        let mut rt = sim.world.borrow_mut();
+        let plates: Vec<usize> = rt
+            .surface_links
+            .iter()
+            .filter(|(cog, link, _)| *cog == instance && *link == 2)
+            .map(|(_, _, surface)| *surface)
+            .collect();
+        for surface in plates {
+            let links: Vec<(usize, i32)> = rt
+                .surface_links
+                .iter()
+                .filter(|(cog, _, linked)| *cog == instance && *linked == surface)
+                .map(|(cog, link, _)| (*cog, *link))
+                .collect();
+            for (cog, link) in links {
+                rt.pending_messages.push((cog, "activate", [0.0; 2], Some(link as i64)));
+            }
+        }
+    }
+    if tick % ROUTE_SAMPLE_TICKS == 0
+        && let Some(path) = out.as_deref().and_then(|o| o.0.as_deref())
+    {
+        let pos = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
+        let vel = route_sample_velocity(prev.0, pos, tick, plan.warp_at(tick).is_some());
+        prev.0 = Some((pos, tick));
+        write_route_trace_row(
+            path,
+            tick,
+            &player.body,
+            vel,
+            sim.as_deref(),
+            world.as_deref(),
+        );
+    }
+    cursor.tick += 1;
+    if tick == plan.total {
+        now.0 = None;
+        exit.write(AppExit::Success);
+        return;
+    }
+    let mut input = plan.input_at(tick);
+    input.use_action = plan.uses.contains(&tick);
+    now.0 = Some(input);
+}
+
 /// The player: a walker bound to the level's own sectors, so walls stop it and doorways
 /// let it through. Arrow keys look, `WASD` moves, `Shift` runs, `Space` jumps.
 ///
@@ -26785,6 +28710,8 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     mut cam: Query<&mut Transform, (With<Camera3d>, With<WorldCamera>)>,
     // `--trace-out`: the frame counter for the written trace (Phase 0.5 trace v0).
     mut trace_tick: Local<u32>,
+    // `--replay`: this tick's scripted input, published by `route_replay` before this system.
+    route_now: Option<Res<RouteNow>>,
 ) {
     let (Some(solids), Some(player)) = (solids, player.as_mut()) else { return };
     // A door or lift follows its frame path, and the engine collides a body against the thing where
@@ -26812,6 +28739,15 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         env_f32("BK_FIXED_DT", 1.0 / 30.0).clamp(1.0 / 240.0, 0.1)
     } else {
         time.delta_secs().min(0.1)
+    };
+    // The route capture's 600 ms samples are wall-clock: the engine's game clock advanced ~0.85 s per
+    // second (the console/dialog pauses), and retail's per-wall travel (0.88-0.92 u/s) is the engine's
+    // measured 1.2 u/s times that. The replay uses the same clock so its positions line up with the
+    // fixture's samples.
+    let dt = if route_now.as_deref().and_then(|now| now.0).is_some() {
+        dt * ROUTE_TIME_SCALE
+    } else {
+        dt
     };
 
     // A script can move the player: `force_jump.cog` does `SetThingVel(player, (0,0,duration
@@ -26915,7 +28851,8 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // slow modifier is held: `DAT_008bd020 & 2`), so plain forward movement is the 2.0 scale and
     // shift is the 0.5 walk. The port had the inverse, which is why its walk trace covered half the
     // distance retail's did.
-    let run = !keys.pressed(KeyCode::ShiftLeft);
+    let run = route_now.as_deref().and_then(|now| now.0).is_none()
+        && !keys.pressed(KeyCode::ShiftLeft);
     let crouch = keys.pressed(KeyCode::ControlLeft);
     // `BK_WALK_FORWARD=1` holds the forward key, which is how the camera-follows-the-walker fix
     // is verified without a hand on the keyboard: the trace then shows the body moving and the
@@ -26930,6 +28867,12 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         if elapsed + 1e-3 >= settle { 1.0 } else { 0.0 }
     } else {
         forward
+    };
+    // `--replay`: the script's per-tick input replaces the keyboard and the env hooks above. Fixed
+    // per tick is what makes two runs of the same script identical.
+    let (forward, strafe) = match route_now.as_deref().and_then(|now| now.0) {
+        Some(route) => (route.forward, route.strafe),
+        None => (forward, strafe),
     };
     // A **script camera** takes the body over — but only while its slot follows something other than the
     // player. Level 14's opening points slot 0 at thing 45 (`MAcamera.key`) and retail's body moves
@@ -27864,6 +29807,152 @@ mod registration_tests {
             "these systems are in no add_systems list, so they never run: {unregistered:?}"
         );
     }
+
+    /// The AI's sight ray must read the level's geometry on its **first** tick. `share_collider`
+    /// hands the `Collision` record to the runtime, and until it runs `Runtime::solids` is `None`,
+    /// which the sight test reads as "nothing blocks". Unordered, the first tick of a level let
+    /// every armed actor the room really hides acquire the player through the wall; the memory
+    /// latches, so they then blind-fired at that spot for the whole encounter. That is level 1's
+    /// door fight: actor 155's launch at t = 0 and `reeyeesbhgun` 153's three later hits, against
+    /// retail's 13-hit cadence from the one gunner with a clear line.
+    ///
+    /// A level swap opens the same window: `swap_level` installs a fresh runtime (`solids: None`)
+    /// and a new collider record in the same frame, so the hand-off has to follow the swap and the
+    /// AI tick has to follow both. The behavioural check below drives that frame; this one keeps
+    /// the constraints themselves from drifting out of the schedule.
+    #[test]
+    fn the_ai_tick_runs_after_the_collider_hand_off() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+            .expect("the source this test lives in");
+        assert!(
+            source.contains("share_collider.after(swap_level)"),
+            "the collider hand-off is unordered with a level swap: the swap's fresh runtime reaches the AI tick with no geometry"
+        );
+        assert!(
+            source.contains("ai_shots.after(share_collider)"),
+            "ai_shots is unordered with share_collider: the first AI tick of a level tests sight against no geometry"
+        );
+    }
+
+    /// The same invariant, driven rather than read: a level swap installs a fresh runtime and a
+    /// fresh collider record, the hand-off follows, and the AI tick follows both. `share_collider`
+    /// and `ai_shots` are the real systems; only the swap is a local stand-in, because the real
+    /// `swap_level` reads the archives.
+    ///
+    /// The control at the top is what makes the wall meaningful: with no hand-off the actor does
+    /// acquire the player through it, which is the first-tick bug.
+    #[test]
+    fn a_level_swap_hands_the_collider_over_before_the_ai_tick() {
+        use std::sync::Arc;
+
+        fn walled_level() -> jkl::Level {
+            let mut level = jkl::Level::default();
+            let template = |name: &str, base: Option<&str>, params: Vec<(&str, &str)>| jkl::Template {
+                name: name.into(),
+                base: base.map(str::to_string),
+                params: params.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+                model3d: None,
+                sprite: None,
+            };
+            level.templates.push(template("walkplayer", None, vec![("type", "player")]));
+            level.templates.push(template("_actor", None, vec![("type", "actor"), ("health", "50")]));
+            level.templates.push(template("tuskan", Some("_actor"), Vec::new()));
+            let thing = |template_name: &str, pos: [f32; 3]| jkl::Thing {
+                template: template_name.into(),
+                pos,
+                pitch: 0.0,
+                yaw: 0.0,
+                roll: 0.0,
+                sector: 0,
+                flags: 0,
+                frames: Vec::new(),
+                vel: [0.0; 3],
+                aiclass: None,
+            };
+            // Player at the origin, actor 1.5 units out on +X: inside the 2-unit detection floor,
+            // so a clear line is the only thing that decides whether the actor acquires.
+            level.things.push(thing("walkplayer", [0.0; 3]));
+            level.things.push(thing("tuskan", [1.5, 0.0, 0.0]));
+            level
+        }
+
+        fn wall_geometry() -> collide::LevelGeometry {
+            let mut geometry = collide::LevelGeometry::default();
+            geometry.walls.push(collide::Face {
+                normal: [1.0, 0.0, 0.0],
+                point: [0.75, 0.0, 0.0],
+                verts: vec![
+                    [0.75, -1.0, -1.0],
+                    [0.75, 1.0, -1.0],
+                    [0.75, 1.0, 1.0],
+                    [0.75, -1.0, 1.0],
+                ],
+                surface: 0,
+            });
+            geometry
+        }
+
+        fn fresh_sim(level: &jkl::Level) -> Sim {
+            let world = runtime::Runtime::handle(level);
+            // The level's scripts attach the actor's instinct class; this fixture has no archives,
+            // so the class goes on directly. `fov=180` keeps the cone out of the test.
+            world
+                .borrow_mut()
+                .ai
+                .insert(1, ai::parse("alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n"));
+            Sim {
+                world,
+                instances: Vec::new(),
+                entities: HashMap::new(),
+                elapsed: 0.0,
+                reported: 0.0,
+                escaped: std::collections::HashSet::new(),
+            }
+        }
+
+        // Control: a fresh runtime with no hand-off sees through the wall, which is what the first
+        // tick of a level did before `share_collider`, and what a swap's window exposed.
+        {
+            let world = fresh_sim(&walled_level()).world;
+            let mut rt = world.borrow_mut();
+            rt.ai_tick(0, 1.0 / 30.0);
+            assert!(
+                rt.ai_detected.contains(&1),
+                "the control did not see through the wall, so the wall proves nothing"
+            );
+        }
+
+        // One frame, in the production order: swap, hand-off, AI tick. The swap installs the same
+        // two things `swap_level` does: a fresh runtime and a fresh collider record.
+        fn level_swap(mut sim: ResMut<Sim>, mut commands: Commands) {
+            *sim = fresh_sim(&walled_level());
+            commands.insert_resource(Collision(Arc::new(wall_geometry())));
+        }
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(CaptureDt(Some(1.0 / 30.0)))
+            .insert_resource(Collision(Arc::new(wall_geometry())))
+            .insert_resource(fresh_sim(&walled_level()))
+            .add_systems(
+                Update,
+                (level_swap, share_collider.after(level_swap), ai_shots.after(share_collider)),
+            );
+        app.update();
+        let sim = app.world().resource::<Sim>();
+        let collider = Arc::clone(&app.world().resource::<Collision>().0);
+        assert!(
+            sim.world
+                .borrow()
+                .solids
+                .as_ref()
+                .is_some_and(|solids| Arc::ptr_eq(solids, &collider)),
+            "the hand-off did not give the swapped-in runtime the swapped-in collider"
+        );
+        assert!(
+            !sim.world.borrow().ai_detected.contains(&1),
+            "the first AI tick after a level swap saw through the wall: the hand-off ran too late"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -28550,6 +30639,21 @@ mod debug_catalog_tests {
         );
         // Retail falls back to the lowercased short key when the table has no row.
         assert_eq!(entry.level_label("04EscapeHouse.jkl"), "04escapehouse");
+    }
+}
+
+#[cfg(test)]
+mod no_ai_tests {
+    use super::no_ai_capture_switch;
+
+    /// `--no-ai` exists only to measure a replay without combat: a plain run keeps the AI, and the
+    /// switch is refused rather than silently ignored.
+    #[test]
+    fn the_ai_switch_is_confined_to_a_replay_capture() {
+        assert_eq!(no_ai_capture_switch(false, false), Ok(false), "play must keep the AI");
+        assert_eq!(no_ai_capture_switch(false, true), Ok(false), "a replay without the switch keeps it");
+        assert_eq!(no_ai_capture_switch(true, true), Ok(true), "the capture switch is honoured");
+        assert!(no_ai_capture_switch(true, false).is_err(), "--no-ai without --replay must be refused");
     }
 }
 

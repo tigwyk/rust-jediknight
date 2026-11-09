@@ -1,0 +1,19 @@
+# Fixed level-1 door encounter for the retail-vs-port telemetry fixture (issue #9).
+#
+# The pose is `shots.tsv`'s `route_door` row (level 1's upper-door `walkplayer` placement, thing
+# 174). Both sides stand the player body there with no input, run for the same **game** time, and
+# sample on the same cadence:
+#
+#   retail: tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door `
+#           -EncounterMs 10000 -EncounterCadenceMs 100
+#   port:   tools/parity/port-encounter.ps1
+#   gate:   tools/parity/encounter-gate.ps1
+#
+# columns: name  level  x  y  z  pitch  yaw  frames  cadence_ms
+# `x y z` are the camera eye, the same convention `shots.tsv` uses; the "port" half passes them to
+# `--shot-at` and `--warp` (body one eye offset below), and the "retail" half warps the body the same
+# way. `frames` is the port's fixed 1/60 s step, so 594 = 9.9 s: retail's loop stops at the first
+# sample whose elapsed time reaches 10 s, so its fixture ends at 9,900 ms. Running the port to a
+# full 10,000 ms adds one sample (and, at the gunner's cadence, one shot) that retail never records.
+name	level	x	y	z	pitch	yaw	frames	cadence_ms
+door_encounter	01narshadda	1.400084	9.700065	6.357114	0	105.000092	594	100

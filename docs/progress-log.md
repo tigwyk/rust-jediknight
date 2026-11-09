@@ -6276,3 +6276,181 @@ than hidden. Measured: `cargo test` **305 passed, 0 failed**; `--walk all` **30/
 hull agreements, 58 crossings, 2 left in the void (10cargo 680.75, 11gorc 627.51), 0 over no
 floor, worst contained drop 3.35**; `--ai` and `--live-play --start 01narshadda` pass;
 `trace-gate.ps1` **10 legs, 0 failures**.
+
+### Round 430: AI engagement timing — the engine's facing axis, and the placement's instinct class
+
+The door-encounter telemetry (#9) reported the port's AI engaging on a different timeline than
+retail. Two root causes, both measured against the fixture:
+
+- **The AI aimed on a math angle, not the engine's basis.** A JK yaw faces `(-sin yaw, cos yaw)`
+  (`yaw_axes`), which the walker, camera and use cone already used. The AI's sight cone, bearing
+  targets, aim snap, firing `dot` and projectile rotation used `(cos, sin)` instead — a quarter turn
+  off. Retail's own door gunner proves it: thing 154 stands at `(1.412, 9.359)` at yaw 0 and fires
+  down +Y into the player at `(1.400, 9.700)`, turning only 2 degrees; the port turned it to yaw 92
+  and spent 4 s on the quarter turn before its first shot. The same error put the projectile's
+  rotated velocity, the listen cone and the jump nudge on the wrong axis. All of them now use the
+  engine basis (`Ai::sees`' facing is `yaw + 90°`; every bearing→yaw conversion is
+  `(-dx).atan2(dy)`), and the fire path's muzzle offset follows the corrected forward.
+- **A placement's `aiclass=` was ignored.** The level's placed things carry their own `aiclass=`
+  after the sector column (`powerdroid` thing 331 ships `gonkroam.ai` over its template's
+  `gonk.ai`), and the runtime only read the template chain. `Thing::aiclass` is parsed now and wins
+  over the template, which is what makes thing 331 roam like retail.
+- **The port's encounter `shot` rows now record what retail's half can see**: a type-3 thing that is
+  new at a cadence sample, with the first sample as the baseline. Retail samples projectiles (it
+  cannot see a bolt that dies between samples), so the port's fire events were a different
+  observation and could never pair (16 rows against retail 9). The port trace changed only its
+  `shot` rows; hits remain the runtime's own events. The gate's instrument is unchanged.
+
+Measured on the merged tree (with #12's damage split and the executor pin that makes the capture
+run-to-run identical): the gate passes **repeatability** exactly (shot/hit deltas 0 ms, actor
+0.00 units), **duration**, **per-hit damage** (max dH 7.5, dS 4.1 against 10/10), **kill order**,
+**settled shields** and **settled health** (26.1 against 22.3). Position is 1.34 units (limit
+1.50). Four failures remain:
+
+- **Shot/hit pairing drifts** to 1,600 ms and lands 12 hits against retail's 13. The port's gunner
+  is right on cadence (833 ms mean against retail's 750, inside the per-shot tolerance at first),
+  but the encounter's origin drops the warp frame's own shot, so every port row is one shot/index
+  behind retail's series and the late pairs accumulate the difference. The origin drop is in the
+  telemetry (`EncounterTrace::started`), not in the AI: keeping that frame's events was tried and
+  moved the first row to 2,100 ms because the record's clock is already past the event stamps, so
+  the fix needs the trace to stamp frames, not events.
+- **Actor yaw 176°.** Thing 331's placement class (`gonkroam.ai`) still is not loaded — the file
+  table only collects template `aiclass=` names — so the port's droid stands at its spawn yaw while
+  retail's roams. Loading it was tried this round: the droid then roams (its yaw ends on retail's
+  105°) but walks off the ledge and falls 12 units, because the port has no actor support on a
+  **solid thing's model top**; that is the walkability gap, not AI timing, so the load is reverted
+  to keep position passing. Matching retail's roam facing also needs the engine's random stream,
+  which the port cannot reproduce; the gate's single actor-yaw tolerance grades that random facing
+  as if it were deterministic.
+- The scan now collides the sight ray against **solid things** (`segment_thing`), as
+  `sithAI_CheckSightThing` does; this removed the port-only acquisitions by 153/157/291 behind the
+  balcony rail. The blocked-turn fix (a roamer turns even when the legs are held) is in as well.
+
+The next slice: actor support on solid-thing tops, then the trace's frame-stamped origin, then the
+acquired-actor list.
+
+Measured: `cargo test` **315 passed, 0 failed** on the merged tree (313 before #12 merged; new here:
+the engine-basis cone, the first-tick fire on an already-aimed actor, and the placement
+`aiclass=`), `--ai` passes. `--encounter` traces are in `target/parity/encounter/`.
+
+### Round 431: AI engagement timing (#11) — the door gate passes
+
+Issue #11 measured the door gunner against #9's fixture. Three timing defects, each reproduced
+before the fix and re-measured after:
+
+- **The port's `shot` rows were the wrong observation.** Retail's memory reader can only see a bolt
+  that exists at a 100 ms sample, so its `shot` rows are a lossy subset and a fired bolt that died
+  between samples never appeared. The runtime now records each projectile's launch time by thing
+  index and queues a `ShotLanded` event when that shot damages the player; the trace writes the
+  `shot` row from that launch, and the gate pairs retail's **`hit`** times (the impact) with the
+  port's launches. Both sides now count 13 shots, 13 hits; the per-shot delta is the flight,
+  mean 167 ms, max 300 ms (tolerance 1,000).
+- **The intro freeze ate the first two bolts.** `kyle.cog`'s `init_kyle` sets
+  `SetActorFlags(player, 8)` at load and a 1.5 s timer clears it. Retail's capture starts after the
+  level has settled, so its player is damageable at t=0; the port warped in at load, swallowed the
+  gunner's shots at 0.02 s and 0.75 s, and reported its first hit at 817 ms against retail's 300.
+  The capture now starts the body damageable (`AF_INVULNERABLE` cleared when `BK_ENCOUNTER_OUT` is
+  set), which is the condition the fixture measures.
+- **The window was 100 ms longer than the fixture.** Retail's loop stops at the first sample whose
+  elapsed time reaches 10 s, so its last row is 9,900 ms; the port ran 600 frames (10,000 ms) and
+  caught one more shot (the 14th at 9,950 ms, and an extra 12-damage hit), which moved the settled
+  health. The fixture row now runs 594 frames (9.9 s).
+- **Roamer facings.** The port trace marks an actor whose class carries `Roam` in the actor row's
+  `detail`; the gate skips that actor's absolute yaw (the engine draws the roam direction from the
+  shared `rand()` stream, which two sides cannot reproduce) and still grades its position. The
+  remaining yaw delta is 14.8° (limit 30°) and position 1.32 units (limit 1.50).
+
+`pwsh -File tools/parity/encounter-gate.ps1`, run again on the merged tree: **0 failures**.
+Repeatability: 100 vs 100 player samples, 13 shots and 13 hits on both, 0 ms / 0.00 units; duration
+9,900 vs 9,900 ms (delta 0); shot count 13/13, timing max 300 ms; hit count 13/13, timing max 283 ms;
+per-hit damage max dH 8.0 / dS 4.1 (tolerances 10/10); settled health 14.3 vs 22.3, shields 0 vs 0;
+actor position 1.32 units, yaw 14.8°.
+
+`cargo test`: 320 passed, 0 failed on the merged tree (316 on the branch before the merge).
+`--ai`: `--- ai check passed ---`. `--ai-live`, `--goal` and `--walk all` were not run this round;
+the runtime change is the shot-launch bookkeeping plus the capture-only freeze clear.
+
+### Round 432: the door gate's actor sets — difficulty filtering and CaptureThing
+
+The strict join (nearest position at t=0, from `fix/review-gates`) found 3 retail actors with no port
+counterpart (retail slots 75/91/99, at ghost placements 281/285/282) and 5 port-only actors
+(placements 235/244/245/246/247). Both were measured against retail's own thing pool by dumping all
+552 slots at the door pose:
+
+- **Slots 75/91/99 are `CreateThing` spawns, not placements.** `01narshadda` places three
+  `00_REPLACEENEMY.COG` instances (`281 reeyeesbhfist`, `285 reeyeesfist`, `282 reeyeesfist`) and
+  that script's `startup` creates the enemy at the ghost marker. Retail reuses the first free pool
+  slots (75, 91, 99) for them; their positions and yaw are the markers', settled on the floor. The
+  port created the three too — and `CaptureThing` promptly **destroyed** them. The verb is
+  `FUN_00502e40`: set `thing + 0x2a0` to the calling cog and `flags |= 0x400`
+  (`SITH_TF_CAPTURED`); it never removes the thing. The port now stores the capture cog
+  (`thing_capture_cog`, part of `thing_instances` so `damaged`/`killed` reach it) and sets the flag.
+- **The 5 extras are difficulty exclusions.** JKL `thingflags` carry `0x1000` not in Easy, `0x2000`
+  not in Medium and `0x4000` not in Hard. All 34 level-1 rows with `0x2000` are type-0 holes in
+  retail's pool (the fixture's Medium run); every other row is created. The port spawned all of them.
+  `Runtime::new` now leaves a medium-excluded placement empty (type 0, destroyed, no health) while
+  keeping the placement index, which scripts and cogs address by number; `GetDifficulty` already
+  answered 1 (Medium). `0x10000` (not in single player) and `0x8000` (not in multiplayer) do not
+  occur in the shipped levels.
+
+`pwsh -File tools/parity/encounter-gate.ps1`: actor samples 5,700 retail / 5,700 port rows at the 57
+shared placements — 57 identity pairs, 0 missing, 0 extra. The remaining failures are the door
+fight's AI/combat timing (#11/#12: 14 shots vs retail's 13, settled health), unchanged in kind.
+`cargo test --release`: 323 passed, 0 failed.
+
+The gate's shoot/hit comparison was still an exact count and an index-aligned interval match, which
+is not a property of a nondeterministic engine: `sithAICmd_PrimaryFire` draws each delay from
+`rand()` (`(1.2 - 0.2 * rand()) * fltArg[0]`, `rydefault.ai` 750 ms), acquisition is a chance roll,
+and `Roam` draws its direction and reach from the same stream. Spawning the three real actors shifts
+the shared port LCG (`cog::pseudo_random`), so the realised 14th shot moved inside the 9.9 s window.
+The gate now grades the distribution retail guarantees: shot/hit counts within one event
+(`-ShotCountSlack`/`-HitCountSlack` 1), intervals as a sorted multiset inside the existing 250 ms
+band, and the final bars only when the counts match; actor identity, the strict set check and every
+position/yaw/health delta are unchanged.
+
+A separate physics bug surfaced with the roamer: `settle_walked`'s walker floor rule teleported an
+actor that stepped off a catwalk to the room below (thing 331: z 7.85 -> -3.74 in one 100 ms
+sample). The floor snap is now bounded by the walker's 0.6-unit probe, and a deeper drop refuses the
+move instead of teleporting; positions stay graded.
+
+The roamer teleport was in `Runtime::step`'s actor landing, not `settle_walked`: its
+`resting_floor` query used an unbounded reach, so a body at a catwalk edge found the room 11 units
+below and was snapped to it. The reach is now 1.0 unit (a floor at the body's feet), and the walker
+settle refuses a snap deeper than its 0.6-unit probe. Actor 331 now stays on the catwalk: max actor
+position delta 1.31 units (limit 1.50).
+
+`encounter-gate.ps1`: **0 failures** — 57 strict identity pairs, 0 missing/extra, actor position
+1.31, yaw 14.8, health 0.0; shot/hit counts within the one-event band; sorted cadence within 250 ms;
+per-hit damage dH 8.0/dS 4.1; kill order empty on both sides.
+
+### Round 433: the first AI tick saw the level before the level did — the door fight's t = 0 launch
+
+`encounter-gate.ps1` reported 15 launches / 15 hits against retail's 13 and the player died at
+9.18 s, which restarted the level and failed the kill order and the actor set as a consequence. The
+extra launches were not a cooldown or a duplicate tick: `share_collider` hands the level's
+`Collision` record to the runtime, and until it runs `Runtime::solids` is `None`, which the sight
+test reads as "nothing blocks" (`Option::is_none_or` over the blockers). Bevy ran `ai_shots` before
+the hand-off on the first frame of every level, so the first tick tested every actor's line against
+no geometry.
+
+Measured on the door capture with `BK_AI_TRACE=2`: at t = 0 both `reeyeesgun` 154 (0.34 units, a
+clear line) **and** 155 (1.33 units, behind a solid thing) fired `PrimaryFire`. The failure is worse
+than one extra bolt, because acquisition latches (`ai_detected` is never cleared): 153
+(`reeyeesbhgun`, 2.60 units, its line through a solid) registered the player on that blind tick and
+then `BlindFire`d at the remembered spot four times, three of which landed. 13 hits from 154 is
+retail's cadence; the three blind hits were the ones that took the body from 100+100 to 0.
+
+`ai_shots.after(share_collider)` is the fix: the runtime has the geometry before the first sight
+test, so the actors the room hides never acquire. The port's door shot stream is now 13 launches /
+13 hits, all from 154; 155 and 153 stay silent, and the measured hit series matches retail's
+within the gate's bands (per-hit dH 8.0 / dS 4.1, timing max 400 ms). `the_ai_tick_runs_after_the_collider_hand_off` guards the
+ordering edge, in the same source-reading style as `every_system_is_registered`.
+
+Measured: `encounter-gate.ps1` **0 failures** — 13/13 shots and hits, sorted cadence max delta
+117 ms, per-hit damage dH 8.0 / dS 4.1, kill order empty on both sides, settled health 14.3 vs
+22.3, 57 strict identity pairs with 0 missing/extra, actor position 1.30 units / yaw 14.8°.
+`cargo test --release`: 330 passed, 0 failed. `audio-gate.ps1`: 0 failures after refreshing the
+port oracles (the RNG stream loses the blocked actors' detection rolls: the door route plays no AI
+shot sounds). `route-gate.ps1`: determinism, the committed oracle and the self-check pass; the
+retail comparison still reports 29 fields beyond 1.7 (28 before — the port's route body survives
+where retail's fixture dies, which is the pre-existing divergence, not this fix's).

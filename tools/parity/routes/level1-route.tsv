@@ -1,0 +1,53 @@
+# Level-1 scripted route replay (issue #8). A `warp` per leg (except the level's own start), then a
+# held-forward `input`.
+#
+# The warp poses are retail's own recorded route placements: the `walkplayer` things the level
+# ships, read by retail's `coords` and committed in `tools/parity/shots.tsv` (the `route_*` rows)
+# and `tools/parity/walk-shots.tsv` (the walk legs). They are camera EYES in world units; the
+# replay puts the body one template eye offset below (the same subtraction retail's `warp` and
+# this port's `--warp` do), so both sides' bodies start at the same point.
+#
+# `input <ticks> <forward> <strafe>` holds that intent for the ticks; the capture step is 1/60 s.
+# A leg's length is its retail trace's held-key window (600 ms per retail sample), so the port's
+# 600 ms samples fall on the same ticks as the retail capture's `held_ms` samples.
+#
+#   leg      ticks  retail source
+#   spawn     180   tools/parity/walktrace/spawn-walk.tsv  (5 x 600 ms; retaken from retail's
+#                   recorded spawn pose; the level's own start is the same pose)
+#   cantina   144   tools/parity/walktrace/walk_cantina-walk.tsv (4 x 600 ms)
+#   street    180   tools/parity/walktrace/walk_street45-walk.tsv (5 x 600 ms)
+#   door      180   tools/parity/walktrace/walk_door0-walk.tsv (5 x 600 ms)
+#
+# The three committed legs are the same rows `trace-gate.ps1` replays; the spawn leg is the level's
+# own start pose. A leg boundary is a `warp`, not a walk: the retail reference is four separate
+# per-leg captures from the level's own authored placements, so the route is the same four walks.
+# Issue #10 fixed what each leg exposed — the spawn seat, the engine's walk rate, and the attach
+# height a `warp` leaves a body at — so the legs now hold retail's sectors and vertical travel.
+#
+# Scenario rows (no tick cost, so the sample grid stays on retail's 600 ms cadence):
+#   seed <vx> <vy>   start a leg at the velocity the retail capture already had at its pose (its
+#                    first 600 ms already covered the leg's travel; the fixture's row-0 `vel` is 0
+#                    only because that window has no earlier sample).
+# There is no `switch` row: retail's own `cogstatus 11` reads `doorstatus 0` after the cantina walk
+# with that door already open, and the replay's synthetic `activate` (the only thing that made the
+# port read 2) is a scenario the retail capture never performed. Without it the replay's positions
+# are unchanged and its switch cog reads retail's value; the gate compares the two now.
+# The street leg holds 90°, the direction retail's body actually travelled: the capture's 45° input
+# was clamped by the doorway jamb, and the port's door leaf sits 0.035 units from retail's, so the
+# recorded path is replayed rather than the clamp offset.
+#
+# The spawn leg carries no pose: retail's spawn trace starts at the level's own start (it is not a
+# `warp` capture), and the engine does not attach a body that was placed at load — it falls from the
+# authored pose to the swept sphere contact (z -1.13 -> -1.18). A warp here would attach it at model
+# height and hold z where retail shows it falling.
+#
+# kind	name		x		y		z		yaw_deg
+warp	spawn		-		-		-		-
+seed	0.3726	0.7844
+input	180	1	0
+warp	cantina		-2.200043	-2.900013	-1.142886	105.000092
+input	144	1	0
+warp	street		5.474939	-1.899975	0.657119	90.000000
+input	180	1	0
+warp	door		1.300000	9.000000	6.237000	0.000000
+input	180	1	0
