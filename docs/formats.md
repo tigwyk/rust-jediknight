@@ -1906,10 +1906,11 @@ stop short of its walls. JK's own answer to falling out of the world is a death,
 longer fall: `sithPlayer_Update` checks `vel.z < -3.0` against `SITH_SECTOR_FALLDEATH`
 (`0x40`, which 32 of level 1's sectors carry). The port has no death yet.
 
-The same code runs in the window: `walker_step` is shared by `--walk` and by the app's
-player (`WASD`, `Shift` to run, `Space` to jump, arrow keys to look, the level's own
-`WORLD GRAVITY` pulling down along -Z, with the eye 0.037 units above the body's own
-position). That is why the sweep is worth running — it measures the movement the window
+The same code runs in the window: `walker_step` is the sweep inside `Runtime::step_player`, which
+`--walk` drives directly and the app's player (`WASD`, `Shift` to run, `Space` to jump, arrow keys to
+look, the level's own `WORLD GRAVITY` pulling down along -Z, with the eye 0.037 units above the
+body's own position) reaches through `walk_player`. That is why the sweep is worth running — it
+measures the movement the window
 actually uses.
 
 ### How the engine places and moves the player — read out of JK.EXE
@@ -2667,8 +2668,9 @@ the walker kept walking at 0.
 `Runtime::damage_player` is now the one path player damage takes: shields absorb first, the remainder
 comes off health, and 0 health sets `player_dead`. `Runtime::respawn_player` puts the player back at
 the level's own `walkplayer` with both bars full. `respawn_on_death` carries that into the running
-game — position, velocity and the `Player` mirror all reset — and `health_follows_damage` mirrors both
-numbers into the status bar, which is what makes the damage visible at all.
+game — the runtime's body resets its pose, sector and fall state, and the app only refreshes the
+status-bar numbers from the answer — and `health_follows_damage` mirrors both numbers into the status
+bar, which is what makes the damage visible at all.
 
 `--die` is the check, and it pins the order rather than the totals:
 
@@ -5446,22 +5448,27 @@ and `sithPhysics_ApplyDrag` decays velocity by `v -= v * drag * dt`. The steady 
 walk = maxthrust / surfdrag = 2.0 / 3.0 = 0.667 level units per second
 ```
 
-Nothing in the engine scales that. The port multiplied it by ten on the reading that 0.667 felt too slow,
-which made the player cross a 38-unit level in six seconds instead of a minute. **`physics_scale` is 1.**
+Nothing in the engine scales that, and **`physics_scale` is 1**. The port does not use this number
+either: the measured retail legs put the base at **1.2 u/s** (`walk_street90`: 1.07–1.23), 40% above
+the derivation, because `sithControl_PlayerMovement` carries a `thing + 0x144` term no recovered
+template parser produces. `Rules::walk` is the measured 1.2 and the derivation stays on the deviation
+ledger with its retire condition; the engine's ratios below still hold. (The old `physics_scale = 10`
+that made the player cross a 38-unit level in six seconds instead of a minute is gone.)
 
 `jumpspeed` is a velocity and gravity is the level header's own number, so both are used as they stand:
 
 | quantity | source | value |
 | --- | --- | --- |
-| walk | `maxthrust / surfdrag` | 0.667 u/s |
-| run / crouch / back / strafe | the engine's own ratios (200% / 50% / −50% / 70%) | 1.33 / 0.33 / 0.33 / 0.47 |
+| walk | measured retail (`walk_street90`) | 1.2 u/s |
+| run / crouch / back / strafe | the engine's own ratios (200% / 50% / −50% / 70%) | 2.4 / 0.6 / 0.6 / 0.84 |
 | jump | `jumpspeed` (`_actor`, inherited by `walkplayer`) | 1.5 u/s |
 | gravity | `WORLD GRAVITY` in the level header | 4.0 u/s² |
 | jump apex | `v² / 2g` | 0.28 units |
 
-`--rules` now **asserts** those three relationships instead of describing them, and the assertion is proven
-to fire: with `BK_PHYS_SCALE=10` it panics with `walk 6.667 is not maxthrust/surfdrag = 0.667` and exits 101.
-Its jump check compares the measured apex with `v²/2g` (0.26 vs 0.28, within the 15% the integrator allows).
+`--rules` **asserts** those three relationships instead of describing them: the walk is exactly the
+measured 1.2 u/s, the jump is the template's `jumpspeed`, and gravity is the level header's, so a
+scale anywhere in the chain fails the gate. Its jump check compares the measured apex with `v²/2g`
+(0.26 vs 0.28, within the 15% the integrator allows).
 
 ### The body is `size x MODEL_SCALE`, the eye is `eyeoffset.z x MODEL_SCALE`
 

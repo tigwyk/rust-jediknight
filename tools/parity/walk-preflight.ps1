@@ -10,8 +10,8 @@
   running for the operator to close).
 
   This script answers "does the body actually move from that pose?" with the port's headless walk probe
-  (`--walk <frames> --warp x,y,z,yaw`, which resolves against the level's own collision and opens no
-  window). For each leg of `walk-shots.tsv` it reports:
+  (`--walk <frames> --warp x,y,z,yaw`, which drives the same `Runtime::step_player` the window's
+  `walk_player` uses and opens no window). For each leg of `walk-shots.tsv` it reports:
 
       leg            level            frames  travel  blocked  retail  verdict
 

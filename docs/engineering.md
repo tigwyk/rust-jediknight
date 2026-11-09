@@ -223,7 +223,7 @@ ate= per second floored at mindamage=): level 1''s bolt is 30 damage dropping to
 | cutscenes (`.smk`) | **it plays**: 25 files, 483 MB, 29,493 frames, all 640×300 at 15.2 fps (`--smk`); the decoder is `SMACKW32.DLL` (71 KB, named exports recovered), not JK.EXE. The VFS finds them through the `Resource/VIDEO` mount, `--cutscene` plays them once in the window in colour, and the known limit is 29 of 768 palette bytes against libsmacker (§16.9) — stage 8 |
 | movement trace (Phase 0.5 v0) | `tools/parity/walk-shots.tsv` + `port-trace.ps1` (port, fixed 1/60 s, `--trace-out`) and `retail-capture.ps1 -WalkTraceMs` (retail, hold-segments + `coords`), compared by `trace-compare.ps1` on the held-key clock; first leg measures start pose 0.000, z 0.055 low, retail 0.9 u/s vs port 0.44 u/s | `port-trace.ps1`, `retail-capture.ps1`, `trace-compare.ps1` |
 | level collision + adjoin (portal) traversal | working: a walker stays inside the level's own sectors, and a passage a script shut (a force field, a closed door's sector) is a wall. **One floor rule** serves every motion caller (`collide::LevelGeometry::resting_floor`): the downward sphere sweep's faces (a walkway slab, a ramp), a plane-only sector's own plane, and a solid thing's model top from the collider's own `ThingSolid` list, so the player's sweep, AI settling, actor grounding and gravity landing all rest a body at the same height (level 1's catwalk pose is the standing case; `--warp`, `BK_WARP_TRACE`) |
-| player motion | working: walk/run/back/strafe/crouch, jump and water derived from the level's own `walkplayer` template chain, gravity scaled from the level, and water halving movement from the floor's surface flags (§16.2); level 1 walks at 0.667 u/s (`maxthrust/surfdrag`), jumps to a 0.28-unit apex in 0.75 s. `--rules` prints the table, the level's flagged-surface counts, and checks the integrated jump against the closed form. Step-up is implemented: `move_body` retries a blocked move from one step up (`moveSize + 0.01` = 0.066 units) and keeps the raised result only when `support` finds a floor there, so a riser is climbed and a wall three times the allowance blocks (§16.2) |
+| player motion | working: walk/run/back/strafe/crouch, jump and water derived from the level's own `walkplayer` template chain, gravity scaled from the level, and water halving movement from the floor's surface flags (§16.2); level 1 walks at 1.2 u/s (measured from retail, §16.2), jumps to a 0.28-unit apex in 0.75 s. `Runtime::step_player` owns the target, the 50 Hz integration and the sweep, and `walk_player` only supplies intent and reads the body it gets back. `--rules` prints the table, the level's flagged-surface counts, and checks the integrated jump against the closed form. Step-up is implemented: `move_body` retries a blocked move from one step up (`moveSize + 0.01` = 0.066 units) and keeps the raised result only when `support` finds a floor there, so a riser is climbed and a wall three times the allowance blocks (§16.2) |
 | sector visibility | working: one batch per (sector, material) + a per-frame clip-plane test, with **portal occlusion on** — the portal graph is symmetric and the seed is the candidate whose walk best covers the frustum, and the culled frame is 0.000% different from `--no-cull` over 230,400 sampled pixels (level 1's spawn: 21 of 462 sectors in the frustum, 11 hidden) (§16.1) |
 
 ### Where the roadmap stands
@@ -487,31 +487,34 @@ The camera is a walker bound to the level's own convex sectors. A `.jkl` surface
 `World adjoins` table's `mirror` field to the sector on the other side — that field is
 what makes portals work, and treating it as a sector index pins you in place
 (`docs/formats.md` §3.1). `--walk all` holds "forward" from each level's own
-`walkplayer` and reports the result:
+`walkplayer` through `Runtime::step_player` — the same entry the window uses — and reports the
+result:
 
 ```
 level                          travelled  blocked    sectors contained  hull
-jkl\03katarn.jkl                     4.5      402   405->428       yes  differs
-jkl\04escapehouse.jkl                1.2      548   800->937        NO  agrees
-jkl\06bbarons.jkl                    0.9      563    318->85        NO  agrees
-jkl\11gorc.jkl                       0.8      563     19->14        NO  agrees
-jkl\m10.jkl                         13.4        0       4->8        NO  differs
+jkl\03katarn.jkl                     4.1      285   405->412       yes  agrees
+jkl\04escapehouse.jkl                0.8      545   800->880        NO  agrees
+jkl\06abarons.jkl                    4.4        0    35->514       yes  agrees
+jkl\09fuelstation.jkl                7.7       37   275->268        NO  differs
+jkl\m10.jkl                          6.4      108       4->2       yes  agrees
 ...
-summary: 30/34 levels with a start kept the walker inside its sector,
-         18 had the hull test agree, 56 sector crossings, 1 without a start
+summary: 26/34 levels with a start kept the walker inside its sector,
+         24 had the hull test agree, 52 sector crossings, 1 without a start
 ```
 
-`contained` holds on 30 of the 34 levels with a start. The four that leave their starting
-sector are named above, and the numbers say why: three are *blocked* for most of the sweep
-(548–563 of 600 frames) and travel about a metre, so the sector they end in is a
-neighbouring sliver the walker was pushed into, not a doorway it walked through; `m10` is the
-power-core level, where the sector's own thrust moves the body. What the gate *asserts* is
-narrower and holds everywhere: **no level leaves the body in the void, and none drops it
-further than a step** — its last two lines are `sweep: 0 level(s) left the body in the void,
-worst drop 0.00`, and those are assertions, not a report. `hull` is a stricter second opinion
-that disagrees where sectors overlap (level 1 has 462 sectors for 352 things, many of them
-trigger slivers). The window runs the same `walker_step` the sweep measures, so walking
-into a wall stops at the wall and walking through a doorway changes sector.
+`contained` holds on 26 of the 34 levels with a start. The eight that leave are named in the
+table, and every one but the recorded walk-off (`09fuelstation`, 21.13 units down) drops less
+than three units — the sector they end in is a neighbouring sliver the body was pushed into,
+not a doorway it walked through; `m10`'s thrust sector now keeps the body contained. What the
+gate *asserts* is narrower and holds everywhere: **no level leaves the body in the void, and
+the worst-drop walk stayed inside its sector** — its last two lines are `sweep: 0 level(s) left
+the body in the void, 0 started over no floor, worst drop 3.26 (jkl\06abarons.jkl)`, and those
+are assertions, not a report. The six spawn-yaw lines that run off the level's own edge
+(`02narshadda`, `07yun`, `09fuelstation`, `11gorc`, `17asarris` and its `m_boss17` twin) are
+recorded, not asserted. `hull` is a stricter second opinion that disagrees where sectors overlap
+(level 1 has 462 sectors for 352 things, many of them trigger slivers). The window's
+`walk_player` calls the same `Runtime::step_player` the sweep measures, so walking into a wall
+stops at the wall and walking through a doorway changes sector.
 
 ### …and its palette effects land on the finished picture
 
@@ -781,7 +784,7 @@ the summary, is what each check prints:
 | --- | --- | --- |
 | jump physics agrees with the rules | `--rules` | `apex 0.26 / 0.28 closed form` |
 | a wall stops a body beside it, not past its end | `--rules` | `pushed true … 27 past its end is pushed false` |
-| the walker stays legal on every level | `--walk all` | `30/34 levels` with a start stay inside their sector; 56 sector crossings; `0` left in the void, worst drop 0.00 |
+| the walker stays legal on every level | `--walk all` | `26/34 levels` with a start stay inside their sector; 52 sector crossings; `0` left in the void, worst *contained* drop 3.26 (`06abarons`); only `09fuelstation` ends outside its sector after its recorded 21.13-unit walk-off |
 | portal occlusion | `--audit` + `--shot` A/B | `21 of 462 sectors in view`, **0.000%** different from `--no-cull` |
 | the colormap material matches the CPU path | `--shot` A/B | **0.00%** of pixels differ, two levels |
 | every label a level waits on | `--cog-check`, `--triggers` | `startup/arrived/timer/pulse/entered/exited/damaged/killed/activate/crossed/blocked` |

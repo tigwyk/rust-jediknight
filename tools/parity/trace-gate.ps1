@@ -4,9 +4,11 @@ Phase 1 step 3's gate: the port's movement trace must match retail's on the capt
 
 .DESCRIPTION
 Retail is the oracle: each leg in `walk-shots.tsv` has a retail trace (`<leg>-walk.tsv`, captured by
-`retail-capture.ps1 -WalkTraceMs`) and the port's replay is produced by `port-trace.ps1`. This gate
-records the port trace and then compares, failing when a leg's displacement or sector progress
-diverges beyond what the harness explains.
+`retail-capture.ps1 -WalkTraceMs`) and the port's replay is produced by `port-trace.ps1`. That replay
+is the app's own runtime step (`walk_player` -> `Runtime::step_player`), and the headless walkability
+preflight drives the same step through `--walk`, so the gate measures the motion path the game runs,
+not a second walker beside it. This gate records the port trace and then compares, failing when a
+leg's displacement or sector progress diverges beyond what the harness explains.
 
 Tolerances, with their reasons:
   * travel within 25% of retail - the retail trace's clock is held-key game time and its first segment

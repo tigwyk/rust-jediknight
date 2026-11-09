@@ -6230,3 +6230,29 @@ thing's top added); `--walk all` passes (24/34 levels contained, 25 hull agreeme
 crossings, 6 recorded void rows, worst drop 3.35); `--move` passes (34 levels × 8 headings, 0 fell
 through, 0 stuck); `--ai`, `--live-play --start 01narshadda` (forward 0.09 units at 2.03 u/s peak,
 0.11 jump stopped by the ceiling), `--ai-live` (37 shots, health 25) and `--live-check` all pass.
+
+### Round 428: one motion path — the runtime step, one body, one collider
+
+`--walk` — and therefore the trace gate's walkability preflight and `--walk all` — no longer
+resolves a body of its own. `walk_level` builds the level's runtime and calls
+`Runtime::step_player`, the same entry the window's `walk_player` and the live checks use, so the
+probe runs the player's target assembly, drag ramp, 50 Hz sub-steps, step-up, water/seating and
+gravity and cannot disagree with the game. The old loop's water rule, fixed speed and direct
+`walker_step` call are gone; `walker_step` remains the collision primitive inside the step.
+
+The walk-off levels are now recorded rather than asserted in every metric: under the runtime step
+only `09fuelstation` still ends outside its sector (its recorded 21.13-unit walk-off), while
+`02narshadda` (11.22, contained), `07yun`, `11gorc`, `17asarris` and `m_boss17` (2.90) stay in the
+world. Measured: `--walk all` **26/34 contained, 24 hull agreements, 52 crossings, 0 left in the
+void, worst contained drop 3.26** (`06abarons`).
+
+The app-side duplicate geometry handle is gone: `SectorView` no longer owns an
+`Arc<LevelGeometry>`; `rebuild_surfaces` and `cull_sectors` read the one caller-owned `Collision`.
+`Runtime::solids` stays — #2 made it the runtime's script/LOS collider deliberately. `Player`'s
+`Deref`/`DerefMut` forwarding shim is removed and every gameplay read and write names
+`player.body`, the runtime-owned `PlayerBody`, so the app cannot read a second pose. `--rules` no
+longer presents the retired `maxthrust/surfdrag` walk as the answer.
+
+Measured: `cargo test` **304 passed, 0 failed**; `--walk all` (above); `--live-play`
+`--start 01narshadda` passes (forward 0.09 units at 2.24 u/s peak, 1 projectile, 0.11 jump stopped
+by the ceiling); `--ai` and `--rules` pass; `trace-gate.ps1` **10 legs, 0 failures**.
