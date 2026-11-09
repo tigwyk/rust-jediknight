@@ -770,7 +770,10 @@ function Invoke-JkAudioRoute {
   foreach ($leg in $route) {
     if ($leg.Kind -eq 'warp') {
       $cmd = 'warp {0} {1} {2} {3} 0 0' -f $leg.X, $leg.Y, $leg.Z, $leg.Yaw
+      $warpClock0 = Read-JkGameMs -ProcessId $ProcessId
       $reply = @(Invoke-JkDevConsoleCommand -ProcessId $ProcessId -Command $cmd)
+      $warpClock1 = Read-JkGameMs -ProcessId $ProcessId
+      Log ("audio route: warp game_ms {0} -> {1} ({2} ms of game time spent in the console call)" -f $warpClock0, $warpClock1, ($warpClock1 - $warpClock0))
       if ($reply -match 'Position not in world') { throw "audio route: $cmd was refused: $reply" }
       Log "audio route: warp $($leg.X),$($leg.Y),$($leg.Z) yaw $($leg.Yaw)"
       if ($clock0 -lt 0) {
@@ -778,6 +781,13 @@ function Invoke-JkAudioRoute {
         Start-Sleep -Milliseconds 400
         $clock0 = Read-JkGameMs -ProcessId $ProcessId
         if ($clock0 -lt 0) { throw 'audio route: the game clock (0x00836C14) could not be read' }
+      } elseif ($warpClock1 -gt $warpClock0 -and $warpClock0 -ge 0) {
+        # The engine keeps running while the dev-console command is issued (~0.4-1.2 s of game
+        # time per warp). The route's warps cost zero ticks in the port, so the spent time is
+        # removed from the route clock; otherwise every later leg -- and the bar crossing -- lands
+        # that much later than the port's tick grid and the audio samples compare different legs.
+        $clock0 = $clock0 + ($warpClock1 - $warpClock0)
+        Log ("audio route: route clock re-based by {0} ms for the warp" -f ($warpClock1 - $warpClock0))
       }
       continue
     }
