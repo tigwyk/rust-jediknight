@@ -6795,7 +6795,7 @@ fn main() {
         assert_eq!(shields, 0.0, "shields should be spent");
         assert_eq!(health, 0.0, "the player should be dead");
         assert!(rt.player_dead, "the death flag is not set");
-        let (shields, health) = rt.respawn_player(spawn);
+        let (shields, health) = rt.respawn_player(&mut runtime::PlayerBody::default(), spawn, None);
         println!("die: respawn at the level's start -> {health:.0} health, {shields:.0} shields");
         assert!(!rt.player_dead, "respawn left the death flag set");
         assert!(health > 0.0 && shields > 0.0, "respawn did not restore the bars");
@@ -11199,11 +11199,11 @@ fn main() {
         }
         // `SetSectorAdjoins(sector, 0)` is the same hide the door scripts use.
         let feet = [at[0], at[1], at[2]];
-        let was_water = in_water(level, &solids, sector, feet, &rt.sector_flags);
+        let was_water = rt.in_water(&solids, sector, feet, &rt.sector_flags);
         rt.call("SetSectorFlags", &[cog::Value::Num(sector as f64), cog::Value::Num(2.0)]);
         assert_eq!(rt.sector_flags[sector] & collide::SECTOR_UNDERWATER, collide::SECTOR_UNDERWATER);
         assert!(
-            in_water(level, &solids, sector, feet, &rt.sector_flags),
+            rt.in_water(&solids, sector, feet, &rt.sector_flags),
             "a sector flagged underwater is not read as water"
         );
         rt.call("SetSectorAdjoins", &[cog::Value::Num(sector as f64), cog::Value::Num(0.0)]);
@@ -12633,7 +12633,6 @@ fn main() {
                     deliver_cog_messages,
                     deliver_crossed,
                     use_key,
-                    apply_fall_damage,
                     (live_play_drive.before(walk_player), walk_player),
                     cull_sectors,
                     rebuild_surfaces,
@@ -12643,7 +12642,7 @@ fn main() {
                     advance_sim.after(ai_shots),
                 )
                     .run_if(no_screen_open),
-                (demo_aim, sync_player_thing, health_follows_damage, infrared_follows_force, fire_player, sprite_demo, draw_created, grow_particles, cycle_particle_cels, projectile_hits, respawn_on_death)
+                (demo_aim, health_follows_damage, infrared_follows_force, fire_player, sprite_demo, draw_created, grow_particles, cycle_particle_cels, projectile_hits, respawn_on_death)
                     .chain()
                     .run_if(no_screen_open),
                 (
@@ -20003,23 +20002,6 @@ fn animating_key(actor: &Actor, dead: bool) -> &str {
     }
 }
 
-/// The player's own state, pushed into the runtime's local-player thing so scripts and
-/// projectiles see where the camera actually is.
-fn sync_player_thing(player: Option<Res<Player>>, sim: Option<Res<Sim>>) {
-    let (Some(player), Some(sim)) = (player, sim) else { return };
-    let mut rt = sim.world.borrow_mut();
-    let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")) else {
-        return;
-    };
-    let eye = player.pos + Vec3::Z * player.eye;
-    rt.things[index].pos = [eye.x, eye.y, eye.z];
-    rt.things[index].yaw = player.yaw.to_degrees();
-    // The aim's pitch: `fire` shoots along the shooter's orientation, so without this the player's
-    // shots left level however far up or down the view was pointed.
-    rt.things[index].pitch = player.pitch.to_degrees();
-    rt.things[index].sector = player.sector as i32;
-}
-
 /// Play one of the menu's own wav names through the same mixer the world uses.
 ///
 /// A GUI sound has no place in the world, which is `PlaySoundLocal`: the request carries no position,
@@ -20787,12 +20769,12 @@ fn ai_probe(
                 pos.0[1] + facing.sin() * 3.0,
                 pos.0[2],
             ];
-            player.pos = Vec3::from(stand);
-            player.sector = pos.1.max(0) as usize;
             // The port's forward is `(-sin yaw, cos yaw)`, so yaw 0 faces **+Y**: the old
             // FRAC_PI_2 faced -X and the press only "passed" on a message count the teleport tainted.
             player.yaw = 0.0;
-            player.vy = 0.0;
+            sim.world
+                .borrow_mut()
+                .teleport_player(&mut player.body, stand, Some(pos.1.max(0) as usize));
             state.3 = stand;
             state.2 = sim.world.borrow().shots_fired;
             state.1 = 1;
@@ -20802,8 +20784,9 @@ fn ai_probe(
         1 => {
             // Hold the body where it was put: it is a probe, and this level puts the spot over a
             // drop — the body falls a unit and out of the actor's sight before it can turn.
-            player.pos = Vec3::from(state.3);
-            player.vy = 0.0;
+            sim.world
+                .borrow_mut()
+                .teleport_player(&mut player.body, state.3, None);
             if state.0 < 600 {
                 return;
             }
@@ -20883,18 +20866,10 @@ fn use_live_probe(
                     .unwrap_or(0);
                 (sector, [-4.29f32, -3.82, -1.18])
             };
-            {
-                let mut rt = sim.world.borrow_mut();
-                let body = rt.player_thing();
-                if let Some(thing) = rt.things.get_mut(body) {
-                    thing.pos = pose;
-                    thing.sector = sector;
-                }
-            }
-            player.pos = Vec3::new(pose[0], pose[1], pose[2]);
-            player.sector = sector.max(0) as usize;
             player.yaw = 180.0f32.to_radians();
-            player.vy = 0.0;
+            sim.world
+                .borrow_mut()
+                .teleport_player(&mut player.body, pose, Some(sector.max(0) as usize));
             state.2 = instance as u32;
             state.3 = player.use_hits;
             keys.press(KeyCode::KeyE);
@@ -20984,10 +20959,10 @@ fn sight_probe(
             if state.0 < 30 {
                 return;
             }
-            player.pos = Vec3::new(-4.5, 14.0, 3.84);
-            player.sector = 230;
             player.yaw = 0.0;
-            player.vy = 0.0;
+            sim.world
+                .borrow_mut()
+                .teleport_player(&mut player.body, [-4.5, 14.0, 3.84], Some(230));
             state.1 = 1;
             state.0 = 0;
             println!("sight-live: standing at (-4.5,14.0) facing 8t88");
@@ -21258,10 +21233,12 @@ fn goal_probe(
     // and `cull_sectors` — it passed for months and then failed when an unrelated system changed the
     // order. The registration orders these three explicitly, and the pose stays put until the level
     // ends. This is a synthetic observation, so pinning the body is the honest thing to do.
-    player.pos = Vec3::new(pos[0], pos[1] - 8.0, pos[2]);
-    player.sector = sector.max(0) as usize;
     player.yaw = std::f32::consts::FRAC_PI_2;
-    player.vy = 0.0;
+    sim.world.borrow_mut().teleport_player(
+        &mut player.body,
+        [pos[0], pos[1] - 8.0, pos[2]],
+        Some(sector.max(0) as usize),
+    );
     if !state.1 {
         state.1 = true;
         println!("goal: placed the body 8 units from thing {goal} in sector {sector} at {pos:?} (body at y-8, yaw 90)");
@@ -22322,34 +22299,6 @@ struct PulseCount(usize);
 /// Nothing carried this before: actors could not hit the player at all (§16.5), so the status bar
 /// always drew its default 100. Now that bolts land on the walkplayer, the number the player sees
 /// is the runtime's.
-/// Apply fall damage the walker recorded: the runtime owns the player's health, so the impact surfaces
-/// there on the next frame (`sithCollision_FallHurt` → `sithThing_DamageThing`).
-fn apply_fall_damage(sim: Option<Res<Sim>>, player: Option<ResMut<Player>>) {    let (Some(sim), Some(mut player)) = (sim, player) else { return };
-    if player.fall_damage <= 0.0 {
-        return;
-    }
-    let damage = std::mem::take(&mut player.fall_damage);
-    let mut rt = sim.world.borrow_mut();
-    let Some(index) = rt
-        .templates
-        .iter()
-        .position(|t| t.eq_ignore_ascii_case("walkplayer"))
-    else {
-        return;
-    };
-    // A landing is a **fall**, not an impact: `sithActor_DamageActor` exempts `SITH_DAMAGE_FALL`
-    // (0x40) from `SITH_AF_INVULNERABLE`, which is why the level-end freeze does not save a body
-    // that drops off a ledge.
-    let left = rt.damage_typed(index as i64, damage, runtime::DAMAGE_FALL);
-    // `damage` is the generic path (messages, `destroyed`); the player's *death* flag is the one
-    // `sithPlayer_KillPlayer` sets, and without it a lethal landing left the body dead on its feet with
-    // nothing to bring it back. The fall death in `walk_player` takes this same road.
-    if left <= 0.0 {
-        rt.player_dead = true;
-    }
-    println!("fall: {damage:.0} damage, {left:.0} health left");
-}
-
 fn health_follows_damage(
     sim: Option<Res<Sim>>,
     world: Option<Res<World>>,
@@ -22482,20 +22431,16 @@ fn respawn_on_death(sim: Option<Res<Sim>>, mut player: Option<ResMut<Player>>, w
         return;
     }
     let Some((spawn, sector)) = spawn else { return };
-    let (shields, health) = rt.respawn_player(spawn);
+    // The sector is part of the body's state, not just its position: leaving the sector the player
+    // died in makes the containment rule refuse every move at the spawn (it is a different room),
+    // and the body stands there unable to walk. The walker's velocity goes too — a respawn is not a
+    // fall. The runtime's entry point resets the pose and clears the fall state.
+    let (shields, health) = rt.respawn_player(
+        &mut player.body,
+        spawn,
+        (sector >= 0).then_some(sector as usize),
+    );
     drop(rt);
-    player.pos = Vec3::from(spawn);
-    player.vy = 0.0;
-    // The sector is part of the body's state, not just its position: leaving the sector the player died in
-    // makes the containment rule refuse every move at the spawn (it is a different room), and the body
-    // stands there unable to walk. The walker's velocity goes too — a respawn is not a fall.
-    player.vel = [0.0; 2];
-    if sector >= 0 {
-        player.sector = sector as usize;
-    }
-    player.fall_killed = false;
-    player.fall_fade = 1.0;
-    player.grounded = true;
     player.health = health;
     player.shields = shields;
     println!("player: died; respawned at the level's start with {health:.0} health and {shields:.0} shields");
@@ -25645,19 +25590,18 @@ fn setup(
             vel: [0.0; 2],
             step_rollover: 0.0,
             last_move: 0.0,
-            fall_damage: 0.0,
             fall_killed: false,
             fall_fade: 1.0,
+            yaw: player_yaw,
+            pitch: 0.0,
+            eye: eye_height,
         },
         extra_speed: 0.0,
-        yaw: player_yaw,
-        pitch: 0.0,
         last_use: f32::NEG_INFINITY,
         use_hits: 0,
         rules,
         health: 100.0,
         shields: 100.0,
-        eye: eye_height,
     });
 }
 
@@ -26071,12 +26015,14 @@ impl Rules {
     }
 }
 
-/// The player's own state: where the body is, how fast it is falling, and where it looks.
+/// The app's view of the player: the runtime's body plus the state that belongs to the interface.
+///
+/// The body's pose (position, sector, facing, eye) is written only by the runtime's
+/// `step_player`/`teleport_player`/`respawn_player`; the camera, the HUD and the projectiles read
+/// this one body.
 #[derive(Resource)]
 struct Player {
     body: runtime::PlayerBody,
-    yaw: f32,
-    pitch: f32,
     /// The level's own motion: speeds, jump and radius from `walkplayer`'s template.
     rules: Rules,
     /// The shield bar in front of that health (`SITHBIN_SHIELDS`), mirrored the same way.
@@ -26092,10 +26038,6 @@ struct Player {
     /// How many times a use reached a script-visible target. The `--use-live` gate's own witness:
     /// counting script messages is tainted by the teleport firing sector triggers (round 304).
     use_hits: u32,
-    /// How high the eye sits above the body. `PLAYER_EYE` is the calibrated height, but a
-    /// sector with a low ceiling cannot hold it: level 1's spawn puts 1.45 inside the ceiling
-    /// and the view renders from inside the geometry, so it is fitted to the room.
-    eye: f32,
     /// The force-speed term (`SetActorExtraSpeed`), applied to the walk speed.
     extra_speed: f32,
 }
@@ -26799,27 +26741,6 @@ fn sky_follows_camera(
 /// This is the `--walk` sweep's code path (`walker_step`) with a keyboard for input, so
 /// the movement the sweep verifies is the movement the window runs.
 #[allow(clippy::too_many_arguments)]
-/// Is the body standing in water? Two rules, both the engine's: the surface under the feet carries
-/// `SITH_SURFACE_WATER` (0x20000) or `VERYDEEPWATER` (0x100000), **or** the sector itself carries
-/// `SITH_SECTOR_UNDERWATER` (0x2) — `sithPhysics.c:43` tests the sector, and that bit is what
-/// `SetSectorFlags(sector, 2)` sets for the shipped levels' "underwater passthru layer".
-fn in_water(
-    level: &jkl::Level,
-    solids: &collide::Solids,
-    sector: usize,
-    feet: [f32; 3],
-    sector_flags: &[u32],
-) -> bool {
-    let underfoot = solids
-        .floor_surface(sector, feet)
-        .and_then(|(_, surface)| level.surfaces.get(surface))
-        .is_some_and(|surface| surface.surfflags & (0x2_0000 | 0x10_0000) != 0);
-    underfoot
-        || sector_flags
-            .get(sector)
-            .is_some_and(|flags| flags & collide::SECTOR_UNDERWATER != 0)
-}
-
 fn walk_player(capture: Option<Res<CaptureDt>>, 
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
@@ -26868,16 +26789,11 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     };
 
     // A script can move the player: `force_jump.cog` does `SetThingVel(player, (0,0,duration
-    // + 2.5))` and expects the world to honour it. Take any velocity the runtime has on the
-    // player thing as a one-shot impulse, then clear it so it is not applied twice.
+    // + 2.5))`; the runtime step consumes that one-shot impulse. The force-speed term is script
+    // state the app reads and hands back as intent.
     if let Some(sim) = sim.as_deref() {
-        let mut rt = sim.world.borrow_mut();
+        let rt = sim.world.borrow();
         if let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")) {
-            let vel = rt.things[index].vel;
-            if vel != [0.0; 3] {
-                player.vy = vel[2];
-                rt.things[index].vel = [0.0; 3];
-            }
             // Force speed: the script's `SetActorExtraSpeed` term scales the walk speed.
             player.extra_speed = rt.things[index].extra_speed;
         }
@@ -27015,60 +26931,9 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         crouch,
         jump,
         yaw: player.yaw,
+        pitch: player.pitch,
         extra_speed: player.extra_speed,
     };
-    // A scrolling surface carries whatever stands on it: `sithThing.c` adds
-    // `scrollVector * dt` to the velocity of a thing attached to a `SITH_SURFACE_SCROLLING` surface,
-    // and that velocity goes through the same move. `SlideWall` is how a conveyor is built, and level
-    // 2's crate puzzle is the shipped case. The surface is read from where the body stood when this
-    // frame began, so the carry joins the walk instead of being overwritten by it.
-    let mut carry = [0.0; 2];
-    if let Some(held) = sim.as_deref() {
-        let held = held.world.borrow();
-        let feet = [player.pos.x, player.pos.y, player.pos.z - player.rules.radius + 0.01];
-        if let Some((_, surface)) = solids.0.floor_surface(player.sector, feet) {
-            // Read through the guard this function already holds: a second `borrow()` here is the
-            // same-thread double borrow the fail-fast `World::take` panics on.
-            carry = held.surfaces.get(surface).map(|s| s.slide).unwrap_or([0.0; 2]);
-            if carry != [0.0; 2] && std::env::var_os("BK_SCROLL_TRACE").is_some() {
-                println!(
-                    "scroll: surface {surface} carries the body at {carry:?} level units/second"
-                );
-            }
-        }
-    }
-    // `SetSectorThrust` is the other half of a conveyor: `sithPhysics.c` adds `sector->thrust * dt`
-    // to a body's velocity exactly like gravity, so an updraft column lifts what stands in it —
-    // level 21's core tube is `'0.0 0.0 1.0'` at 4 to 5, level 10's power core pushes the body out.
-    let thrust = sim
-        .as_deref()
-        .map(|sim| {
-            sim.world
-                .borrow()
-                .sectors
-                .get(player.sector)
-                .map(|s| s.thrust)
-                .unwrap_or([0.0; 3])
-        })
-        .unwrap_or([0.0; 3]);
-    if thrust != [0.0; 3] && std::env::var_os("BK_SCROLL_TRACE").is_some() {
-        println!("thrust: sector {} accelerates the body at {thrust:?} units/s^2", player.sector);
-    }
-
-    // A body placed with its feet below the current floor needs the same initial seat as
-    // the landing sweep. Keep that height correction, but do not re-resolve the sector:
-    // `sithThing_SetSector` belongs to an adjoin contact, not an idle containment query.
-    if let Some((floor, _)) = solids.0.floor_surface(
-        player.sector,
-        [player.pos.x, player.pos.y, player.pos.z + player.rules.radius],
-    ) && player.pos.z - player.rules.radius < floor - 0.01
-        && player.vy <= 0.0
-        && !jump
-    {
-        player.pos.z = floor + player.rules.radius;
-        player.vy = 0.0;
-        player.grounded = true;
-    }
     let pos = [player.pos.x, player.pos.y, player.pos.z];
     let sector = player.sector;
     // The player is **not** an attached body. `sithPhysics_FindFloor` — the only route to
@@ -27080,8 +26945,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // every frame; `walker_step`'s vertical sweep stops the body at `floor + radius` and zeroes
     // `vy`, which is the engine's ground contact. Placed things are the ones that attach (created
     // through `sithThing_Initialize`/`LoadPostProcess`, `FindFloor(..., 1)`).
-    let vy = player.vy + thrust[2] * dt;
-    let gravity = player.gravity;
+    let vy = player.vy;
     let trace = std::env::var_os("BK_WALK_TRACE").is_some();
     if trace {
         eprintln!(
@@ -27152,20 +27016,11 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     let crossed = sim
         .as_deref()
         .map(|sim| {
-            sim.world.borrow_mut().step_player(
-                &mut player.body,
-                &solids.0,
-                input,
-                &rules,
-                dt,
-                gravity,
-                thrust,
-                carry,
-                gates,
-            )
+            sim.world
+                .borrow_mut()
+                .step_player(&mut player.body, &solids.0, input, &rules, dt, gates)
         })
         .unwrap_or(false);
-    let pos = player.pos.to_array();
     let sector = player.sector;
     let vy = player.vy;
     // Phase 0.5 trace v0: one line per frame, so a retail walk trace (`coords` polled on a cadence)
@@ -27217,28 +27072,6 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
             player.pos.z, player.grounded
         );
     }
-    // Water halves movement: the engine reads the surface under the feet (`SITH_SURFACE_WATER`
-    // 0x20000 / `VERYDEEPWATER` 0x100000) and the sector's own `SITH_SECTOR_UNDERWATER` — the bit
-    // `SetSectorFlags(sector, 2)` sets for the shipped "passthru layer" water.
-    player.water = world.as_deref().is_some_and(|world| {
-        let feet = [pos[0], pos[1], pos[2] - player.rules.radius + 0.01];
-        {
-            let wet = in_water(&world.level, &solids.0, sector, feet, gates.sectors);
-            if std::env::var_os("BK_WALK_TRACE").is_some() {
-                let under = solids.0.floor_surface(sector, feet).map(|(_, surface)| surface);
-                let flags = under
-                    .and_then(|surface| world.level.surfaces.get(surface))
-                    .map(|s| s.surfflags);
-                eprintln!(
-                    "walk trace: water {wet} sector {sector} (gate flags {:#x}, floor surface {:?} flags {:?})",
-                    gates.sectors.get(sector).copied().unwrap_or(0),
-                    under,
-                    flags
-                );
-            }
-            wet
-        }
-    });
     if crossed {
         println!("sector {sector}");
     }

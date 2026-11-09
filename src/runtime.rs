@@ -904,7 +904,9 @@ pub struct ThingMotion {
     pub arrived: Vec<usize>,
 }
 
-#[derive(Debug, Clone)]
+/// The player's own body: where it is, how it moves, and where it looks. The runtime writes it
+/// through `step_player`, `teleport_player` and `respawn_player`; everything else reads it.
+#[derive(Debug, Clone, Default)]
 pub struct PlayerBody {
     pub pos: Vec3,
     pub vy: f32,
@@ -915,9 +917,14 @@ pub struct PlayerBody {
     pub vel: [f32; 2],
     pub step_rollover: f32,
     pub last_move: f32,
-    pub fall_damage: f32,
     pub fall_killed: bool,
     pub fall_fade: f32,
+    /// The body's facing in radians.
+    pub yaw: f32,
+    /// The aim's pitch in radians.
+    pub pitch: f32,
+    /// How high the eye sits above the body's centre.
+    pub eye: f32,
 }
 
 /// One frame of player intent. The app reads the keys and the body; the runtime turns this into
@@ -931,6 +938,8 @@ pub struct PlayerInput {
     pub jump: bool,
     /// The body's facing in radians. The walk is built in the body's frame.
     pub yaw: f32,
+    /// The aim's pitch in radians, published with the pose `fire` reads.
+    pub pitch: f32,
     /// `SetActorExtraSpeed`'s force-speed term.
     pub extra_speed: f32,
 }
@@ -1357,6 +1366,10 @@ pub struct Runtime {
     pub surface_geomode: Vec<i32>,
     /// Per-surface state, indexed the way `.jkl` surfaces are: cels, animation, slides.
     pub surfaces: Vec<SurfaceState>,
+    /// Each surface's `SITH_SURFACE_*` word as the level ships it. The water bits
+    /// (`SITH_SURFACE_WATER` 0x20000 / `VERYDEEPWATER` 0x100000) are what halve the player's move;
+    /// `SetSurfaceFlags` is not implemented, so the level's own word is the whole answer.
+    pub surface_flags: Vec<u32>,
     /// Which sector claims each world surface (`SURFACES <first> <count>` per room), `-1` when no room
     /// does. `sithPlayerActions_Activate` searches the **body's own sector** for a switch, so a surface an
     /// adjoining room owns is not reachable from here: the cantina plate is sector 31's, the player stands
@@ -2200,6 +2213,7 @@ impl Runtime {
                     SurfaceState { center, cel: 0.0, anim: 0.0, slide: [0.0; 2], next: 0.0, light: 0.0, light_end: 0.0, light_rate: 0.0 }
                 })
                 .collect(),
+            surface_flags: level.surfaces.iter().map(|s| s.surfflags).collect(),
             sounds: Vec::new(),
             timers: 0.0,
             inv: BTreeMap::new(),
@@ -5665,12 +5679,13 @@ impl Runtime {
     }
 
     /// Advance the player body from one frame's input and carry it through the same `walker_step`
-    /// the AI settle uses. Run/walk scaling, drag, the fixed sub-step count, target assembly, jump,
-    /// the sweep, thing floors, velocity feedback and fall death live here; the caller only supplies
-    /// the intent and the environment it already reads.
+    /// the AI settle uses. Seating, a scrolling surface's carry, the sector's thrust, the water
+    /// state, run/walk scaling, drag, the fixed sub-step count, target assembly, jump, the sweep,
+    /// thing floors, velocity feedback, fall damage and fall death live here; the caller supplies
+    /// only the intent.
     ///
-    /// `carry` is a scrolling surface's velocity and `thrust` the sector's acceleration; both are
-    /// still read by the app in this ticket.
+    /// The final pose is published onto the local player's thing, so camera, HUD, scripts and
+    /// projectiles read one body. `teleport_player` and `respawn_player` are the only other writers.
     #[allow(clippy::too_many_arguments)]
     pub fn step_player(
         &mut self,
@@ -5679,11 +5694,32 @@ impl Runtime {
         input: PlayerInput,
         rules: &crate::Rules,
         dt: f32,
-        gravity: f32,
-        thrust: [f32; 3],
-        carry: [f32; 2],
         gates: Gates<'_>,
     ) -> bool {
+        // A script can move the body: `force_jump.cog`'s `SetThingVel(player, ...)` lands on the
+        // player thing, and the walker consumes it as a one-shot impulse.
+        if let Some(index) = self.local_player() {
+            let vel = self.things[index].vel;
+            if vel != [0.0; 3] {
+                body.vy = vel[2];
+                self.things[index].vel = [0.0; 3];
+            }
+        }
+        let radius = rules.radius;
+        // A body placed with its feet below the current floor needs the same initial seat as the
+        // landing sweep. Keep that height correction, but do not re-resolve the sector:
+        // `sithThing_SetSector` belongs to an adjoin contact, not an idle containment query.
+        if let Some((floor, _)) = solids.floor_surface(
+            body.sector,
+            [body.pos.x, body.pos.y, body.pos.z + radius],
+        ) && body.pos.z - radius < floor - 0.01
+            && body.vy <= 0.0
+            && !(input.jump && body.grounded)
+        {
+            body.pos.z = floor + radius;
+            body.vy = 0.0;
+            body.grounded = true;
+        }
         let [along, across] = rules.speed(
             input.forward,
             input.strafe,
@@ -5704,6 +5740,38 @@ impl Runtime {
             body.vy = rules.jump_velocity(input.crouch);
             body.grounded = false;
         }
+        // `SetSectorThrust` is half of a conveyor: `sithPhysics.c` adds `sector->thrust * dt` to a
+        // body's velocity exactly like gravity, so an updraft column lifts what stands in it —
+        // level 21's core tube is `'0.0 0.0 1.0'` at 4 to 5, level 10's power core pushes the body out.
+        let thrust = self
+            .sectors
+            .get(body.sector)
+            .map(|s| s.thrust)
+            .unwrap_or([0.0; 3]);
+        if thrust != [0.0; 3] && std::env::var_os("BK_SCROLL_TRACE").is_some() {
+            println!("thrust: sector {} accelerates the body at {thrust:?} units/s^2", body.sector);
+        }
+        // A scrolling surface carries whatever stands on it: `sithThing.c` adds
+        // `scrollVector * dt` to the velocity of a thing attached to a `SITH_SURFACE_SCROLLING`
+        // surface, and that velocity goes through the same move. `SlideWall` is how a conveyor is
+        // built, and level 2's crate puzzle is the shipped case. The surface is read from where the
+        // body stood when this frame began, so the carry joins the walk instead of being overwritten.
+        let carry = match solids.floor_surface(
+            body.sector,
+            [body.pos.x, body.pos.y, body.pos.z - radius + 0.01],
+        ) {
+            Some((_, surface)) => {
+                let slide = self.surfaces.get(surface).map(|s| s.slide).unwrap_or([0.0; 2]);
+                if slide != [0.0; 2] && std::env::var_os("BK_SCROLL_TRACE").is_some() {
+                    println!(
+                        "scroll: surface {surface} carries the body at {slide:?} level units/second"
+                    );
+                }
+                slide
+            }
+            None => [0.0; 2],
+        };
+        let gravity = body.gravity;
         // The fall impact is measured before this frame's sector thrust, which is what the old
         // walker did when it read `player.vy` before committing the thrust-scaled local.
         let impact_vy = body.vy;
@@ -5713,7 +5781,6 @@ impl Runtime {
             body.vel[0] + carry[0] + thrust[0] * dt,
             body.vel[1] + carry[1] + thrust[1] * dt,
         ];
-        let radius = rules.radius;
         let mut pos = before;
         let mut sector = body.sector;
         let mut vy = body.vy;
@@ -5768,11 +5835,11 @@ impl Runtime {
         if vy == 0.0 && engine_impact > 2.5 {
             let damage = crate::fall_damage(engine_impact);
             if damage > 0.0 {
-                body.fall_damage += damage;
                 println!(
                     "fall: landed at {:.1} u/s ({engine_impact:.1} in engine units), {damage:.0} damage",
                     -body.vy
                 );
+                self.hurt_player_fall(damage);
             }
         }
         body.vy = vy;
@@ -5796,10 +5863,76 @@ impl Runtime {
             if body.fall_fade <= 0.0 {
                 body.fall_killed = false;
                 body.fall_fade = 1.0;
-                body.fall_damage += 1000.0;
+                self.hurt_player_fall(1000.0);
             }
         }
+        // Water halves movement: the engine reads the surface under the feet (`SITH_SURFACE_WATER`
+        // 0x20000 / `VERYDEEPWATER` 0x100000) and the sector's own `SITH_SECTOR_UNDERWATER` — the
+        // bit `SetSectorFlags(sector, 2)` sets for the shipped "passthru layer" water. It is read
+        // after the move, so the next step's speed is the room the body is actually in.
+        let feet = [body.pos.x, body.pos.y, body.pos.z - radius + 0.01];
+        body.water = self.in_water(solids, body.sector, feet, gates.sectors);
+        if std::env::var_os("BK_WALK_TRACE").is_some() {
+            eprintln!(
+                "walk trace: water {} sector {} (gate flags {:#x})",
+                body.water,
+                body.sector,
+                gates.sectors.get(body.sector).copied().unwrap_or(0),
+            );
+        }
+        self.publish_player(body);
         crossed
+    }
+
+    /// Is a body standing in water at `feet`? Two rules, both the engine's: the surface under the
+    /// feet carries `SITH_SURFACE_WATER` (0x20000) or `VERYDEEPWATER` (0x100000), **or** the
+    /// sector carries `SITH_SECTOR_UNDERWATER` (0x2) — `sithPhysics.c:43` tests the sector.
+    pub fn in_water(
+        &self,
+        solids: &crate::collide::Solids,
+        sector: usize,
+        feet: [f32; 3],
+        sector_flags: &[u32],
+    ) -> bool {
+        solids
+            .floor_surface(sector, feet)
+            .and_then(|(_, surface)| self.surface_flags.get(surface))
+            .is_some_and(|flags| flags & (0x2_0000 | 0x10_0000) != 0)
+            || sector_flags
+                .get(sector)
+                .is_some_and(|flags| flags & crate::collide::SECTOR_UNDERWATER != 0)
+    }
+
+    /// The local player's thing, when the level has one and the runtime holds it.
+    fn local_player(&self) -> Option<usize> {
+        self.templates
+            .iter()
+            .position(|t| t.eq_ignore_ascii_case("walkplayer"))
+            .filter(|index| *index < self.things.len())
+    }
+
+    /// Write the body's final pose onto the local player's thing: the eye point, facing, aim and
+    /// sector. Scripts, projectiles and the renderer read this one body.
+    fn publish_player(&mut self, body: &PlayerBody) {
+        let Some(index) = self.local_player() else { return };
+        let thing = &mut self.things[index];
+        thing.pos = [body.pos.x, body.pos.y, body.pos.z + body.eye];
+        thing.yaw = body.yaw.to_degrees();
+        thing.pitch = body.pitch.to_degrees();
+        thing.sector = body.sector as i32;
+    }
+
+    /// The damage a landing or a fall death deals to the player's own health. A landing is a
+    /// **fall**, not an impact: `sithActor_DamageActor` exempts `SITH_DAMAGE_FALL` (0x40) from
+    /// `SITH_AF_INVULNERABLE`, which is why the level-end freeze does not save a body that drops
+    /// off a ledge.
+    fn hurt_player_fall(&mut self, damage: f32) {
+        let Some(index) = self.local_player() else { return };
+        let left = self.damage_typed(index as i64, damage, DAMAGE_FALL);
+        if left <= 0.0 {
+            self.player_dead = true;
+        }
+        println!("fall: {damage:.0} damage, {left:.0} health left");
     }
 
     /// Put the actors `ai_tick` walked back on their feet and out of the walls: the runtime's own
@@ -7054,10 +7187,30 @@ impl Runtime {
         (self.player_shields, self.things.get(player).map(|t| t.health).unwrap_or(0.0))
     }
 
+    /// Move the player's body to `pos` and publish the runtime's own pose at once. The one entry
+    /// point for a warp: the level's start, a scripted placement, or a gate pinning the body. It
+    /// does not change the facing or the eye height; the caller sets those on the body first.
+    pub fn teleport_player(&mut self, body: &mut PlayerBody, pos: [f32; 3], sector: Option<usize>) {
+        body.pos = Vec3::from(pos);
+        body.vy = 0.0;
+        body.vel = [0.0; 2];
+        body.grounded = true;
+        if let Some(sector) = sector {
+            body.sector = sector;
+        }
+        self.publish_player(body);
+    }
+
     /// Put the player back on its feet at the level's own spawn: full health and shields, the
-    /// death flag cleared. The engine reloads or respawns at the last checkpoint; this build has
-    /// no checkpoint list yet, so it is the level's `walkplayer` position.
-    pub fn respawn_player(&mut self, spawn: [f32; 3]) -> (f32, f32) {
+    /// death flag cleared, and the body reset to the spawn pose. The engine reloads or respawns at
+    /// the last checkpoint; this build has no checkpoint list yet, so it is the level's
+    /// `walkplayer` position.
+    pub fn respawn_player(
+        &mut self,
+        body: &mut PlayerBody,
+        spawn: [f32; 3],
+        sector: Option<usize>,
+    ) -> (f32, f32) {
         let player = self.player_thing();
         let health = self
             .templates
@@ -7068,9 +7221,11 @@ impl Runtime {
         if let Some(thing) = self.things.get_mut(player) {
             thing.health = health;
             thing.destroyed = false;
-            thing.pos = spawn;
             thing.vel = [0.0; 3];
         }
+        self.teleport_player(body, spawn, sector);
+        body.fall_killed = false;
+        body.fall_fade = 1.0;
         self.player_shields = 100.0;
         self.player_dead = false;
         (self.player_shields, health)
@@ -10338,9 +10493,11 @@ mod tests {
             vel: [0.0; 2],
             step_rollover: 0.0,
             last_move: 0.0,
-            fall_damage: 0.0,
             fall_killed: false,
             fall_fade: 1.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            eye: crate::PLAYER_EYE,
         }
     }
 
@@ -13487,9 +13644,6 @@ mod tests {
                 PlayerInput::default(),
                 &rules,
                 1.0 / 30.0,
-                4.0,
-                [0.0; 3],
-                [0.0; 2],
                 crate::collide::Gates::default(),
             );
         }
@@ -13516,9 +13670,6 @@ mod tests {
                 input,
                 &rules,
                 1.0 / 60.0,
-                4.0,
-                [0.0; 3],
-                [0.0; 2],
                 crate::collide::Gates::default(),
             );
         }
@@ -13549,9 +13700,6 @@ mod tests {
                 input,
                 &rules,
                 1.0 / 60.0,
-                4.0,
-                [0.0; 3],
-                [0.0; 2],
                 crate::collide::Gates::default(),
             );
         }
@@ -13577,9 +13725,6 @@ mod tests {
                 input,
                 &rules,
                 1.0 / 60.0,
-                4.0,
-                [0.0; 3],
-                [0.0; 2],
                 crate::collide::Gates::default(),
             );
             peak = peak.max(body.pos.z);
@@ -13591,6 +13736,217 @@ mod tests {
             "landed at {:.3}, not {base:.3}",
             body.pos.z
         );
+    }
+
+    /// A runtime whose level holds the local player, so a step can publish onto its thing.
+    fn player_runtime() -> Runtime {
+        let mut level = Level::default();
+        level.templates.push(crate::jkl::Template {
+            name: "walkplayer".into(),
+            base: None,
+            params: vec![("health".into(), "100".into())],
+            model3d: None,
+            sprite: None,
+        });
+        level.things.push(crate::jkl::Thing {
+            template: "walkplayer".into(),
+            pos: [0.0; 3],
+            pitch: 0.0,
+            yaw: 0.0,
+            roll: 0.0,
+            sector: 0,
+            flags: 0,
+            frames: Vec::new(),
+            vel: [0.0; 3],
+        });
+        Runtime::new(&level)
+    }
+
+    fn slide_surface() -> SurfaceState {
+        SurfaceState {
+            center: [0.0; 3],
+            cel: 0.0,
+            anim: 0.0,
+            slide: [1.0, 0.0],
+            next: 0.0,
+            light: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
+        }
+    }
+
+    /// `test_room`'s floor plane carries no surface id; `floor_surface` and the water/carry rules
+    /// need one, so this names surface 0 on the same geometry.
+    fn floor_room() -> crate::collide::Solids {
+        let mut room = crate::collide::test_room();
+        room.sectors[0][0].surface = 0;
+        room
+    }
+
+    #[test]
+    fn step_player_carries_a_body_on_a_scrolling_surface() {
+        let solids = floor_room();
+        let mut rt = Runtime::new(&Level::default());
+        rt.surfaces.push(slide_surface());
+        let rules = crate::Rules::from_level(&Level::default());
+        let base = -1.0 + rules.radius;
+        let mut body = walk_body(Vec3::new(0.0, 0.0, base));
+        for _ in 0..30 {
+            rt.step_player(
+                &mut body,
+                &solids,
+                PlayerInput::default(),
+                &rules,
+                1.0 / 60.0,
+                crate::collide::Gates::default(),
+            );
+        }
+        assert!(
+            body.pos.x > 0.2,
+            "the conveyor did not carry the body: x {:.3}",
+            body.pos.x
+        );
+    }
+
+    #[test]
+    fn step_player_lifts_a_body_in_a_thrusting_sector() {
+        let solids = crate::collide::test_room();
+        let mut rt = Runtime::new(&Level::default());
+        rt.sectors.push(SectorState {
+            thrust: [0.0, 0.0, 20.0],
+            light: 0.0,
+            light_from: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
+            tint: [0.0; 3],
+            colormap: 0,
+        });
+        let rules = crate::Rules::from_level(&Level::default());
+        let base = -1.0 + rules.radius;
+        let mut body = walk_body(Vec3::new(0.0, 0.0, base));
+        for _ in 0..30 {
+            rt.step_player(
+                &mut body,
+                &solids,
+                PlayerInput::default(),
+                &rules,
+                1.0 / 60.0,
+                crate::collide::Gates::default(),
+            );
+        }
+        assert!(
+            body.pos.z > base + 0.1,
+            "the updraft did not lift the body: z {:.3} from {base:.3}",
+            body.pos.z
+        );
+    }
+
+    #[test]
+    fn step_player_halves_the_walk_in_water() {
+        let solids = floor_room();
+        let rules = crate::Rules::from_level(&Level::default());
+        let input = PlayerInput {
+            forward: 1.0,
+            yaw: 90.0,
+            ..PlayerInput::default()
+        };
+        let base = -1.0 + rules.radius;
+        let speed = |rt: &mut Runtime, body: &mut PlayerBody| {
+            for _ in 0..120 {
+                rt.step_player(
+                    body,
+                    &solids,
+                    input,
+                    &rules,
+                    1.0 / 60.0,
+                    crate::collide::Gates::default(),
+                );
+            }
+            (body.vel[0] * body.vel[0] + body.vel[1] * body.vel[1]).sqrt()
+        };
+        let mut dry_rt = Runtime::new(&Level::default());
+        let mut dry = walk_body(Vec3::new(1.5, 0.0, base));
+        let dry_speed = speed(&mut dry_rt, &mut dry);
+        let mut wet_rt = Runtime::new(&Level::default());
+        // `SITH_SURFACE_WATER` 0x20000 on the test room's floor (surface 0).
+        wet_rt.surface_flags = vec![0x2_0000];
+        let mut wet = walk_body(Vec3::new(1.5, 0.0, base));
+        let wet_speed = speed(&mut wet_rt, &mut wet);
+        assert!(wet.water, "the body on a water surface is not wet");
+        assert!(
+            (wet_speed - dry_speed * 0.5).abs() < dry_speed * 0.1,
+            "water walked at {wet_speed:.3} against {dry_speed:.3} dry"
+        );
+    }
+
+    #[test]
+    fn step_player_publishes_its_final_pose() {
+        let solids = crate::collide::test_room();
+        let mut rt = player_runtime();
+        let rules = crate::Rules::from_level(&Level::default());
+        let base = -1.0 + rules.radius;
+        let mut body = walk_body(Vec3::new(0.0, 0.0, base));
+        body.eye = 0.5;
+        body.yaw = std::f32::consts::FRAC_PI_2;
+        body.pitch = 0.25;
+        let input = PlayerInput {
+            forward: 1.0,
+            yaw: body.yaw,
+            pitch: body.pitch,
+            ..PlayerInput::default()
+        };
+        for _ in 0..10 {
+            rt.step_player(
+                &mut body,
+                &solids,
+                input,
+                &rules,
+                1.0 / 60.0,
+                crate::collide::Gates::default(),
+            );
+        }
+        let player = rt.local_player().expect("the level's walkplayer");
+        let thing = &rt.things[player];
+        assert!((thing.pos[0] - body.pos.x).abs() < 1e-4, "x {:?} vs {:?}", thing.pos, body.pos);
+        assert!((thing.pos[1] - body.pos.y).abs() < 1e-4, "y {:?} vs {:?}", thing.pos, body.pos);
+        assert!(
+            (thing.pos[2] - (body.pos.z + body.eye)).abs() < 1e-4,
+            "the thing is not the eye point: {:?} vs {:?}",
+            thing.pos,
+            body.pos
+        );
+        assert!((thing.yaw - 90.0).abs() < 1e-3, "yaw {}", thing.yaw);
+        assert!((thing.pitch - body.pitch.to_degrees()).abs() < 1e-3, "pitch {}", thing.pitch);
+        assert_eq!(thing.sector, body.sector as i32);
+    }
+
+    #[test]
+    fn step_player_applies_fall_damage_to_the_runtime_player() {
+        let solids = floor_room();
+        let mut rt = player_runtime();
+        let rules = crate::Rules::from_level(&Level::default());
+        let base = -1.0 + rules.radius;
+        let mut body = walk_body(Vec3::new(0.0, 0.0, base + 0.05));
+        body.grounded = false;
+        // `(3.5 - 2.5)^2 * 45` = 45 damage: a landing, not a fall death.
+        body.vy = -3.5;
+        for _ in 0..10 {
+            rt.step_player(
+                &mut body,
+                &solids,
+                PlayerInput::default(),
+                &rules,
+                1.0 / 60.0,
+                crate::collide::Gates::default(),
+            );
+        }
+        let player = rt.local_player().expect("the level's walkplayer");
+        let health = rt.things[player].health;
+        assert!(
+            (health - 55.0).abs() < 1.0,
+            "a 3.5 u/s landing left {health:.1} health, not 55"
+        );
+        assert!(!rt.player_dead, "an ordinary landing killed the player");
     }
 
     #[test]
