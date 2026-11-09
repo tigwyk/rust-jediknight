@@ -6360,10 +6360,12 @@ before the fix and re-measured after:
   shared `rand()` stream, which two sides cannot reproduce) and still grades its position. The
   remaining yaw delta is 14.8° (limit 30°) and position 1.32 units (limit 1.50).
 
-`pwsh -File tools/parity/encounter-gate.ps1`: **0 failures**. Repeatability exact; duration 9,900 vs
-9,900 ms; shot count 13/13, timing max 300 ms; hit count 13/13, timing max 283 ms; per-hit damage
-max dH 8.0 / dS 4.1 (tolerances 10/10); settled health 14.3 vs 22.3, shields 0 vs 0; actor
-position 1.32 units, yaw 14.8°.
+`pwsh -File tools/parity/encounter-gate.ps1`, run again on the merged tree: **0 failures**.
+Repeatability: 100 vs 100 player samples, 13 shots and 13 hits on both, 0 ms / 0.00 units; duration
+9,900 vs 9,900 ms (delta 0); shot count 13/13, timing max 300 ms; hit count 13/13, timing max 283 ms;
+per-hit damage max dH 8.0 / dS 4.1 (tolerances 10/10); settled health 14.3 vs 22.3, shields 0 vs 0;
+actor position 1.32 units, yaw 14.8°.
 
-`cargo test`: 316 passed, 0 failed. `--ai`, `--ai-live`, `--goal`, `--walk all` unchanged (the
-runtime changes are the shot-launch bookkeeping and the capture-only freeze clear).
+`cargo test`: 320 passed, 0 failed on the merged tree (316 on the branch before the merge).
+`--ai`: `--- ai check passed ---`. `--ai-live`, `--goal` and `--walk all` were not run this round;
+the runtime change is the shot-launch bookkeeping plus the capture-only freeze clear.
