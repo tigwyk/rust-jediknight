@@ -363,13 +363,13 @@ tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
 A **leg boundary is a `warp`**, not a walk: the retail reference is four separate per-leg captures
 from the level's own authored placements, so the route is the same four walks. Issue #10 fixed what
 each leg exposed — the spawn seat no longer lifts the body onto the cantina's `00table`, the walk
-rate is the engine's `maxthrust*0.7/(surfdrag+0.2)` (0.4375 walk / 0.875 run), a `warp` attaches the
+rate is the measured retail 1.2 u/s (2.4 run), a `warp` attaches the
 body at `GetThingHeight` (0.120114, where retail's `coords` holds z), and a low solid model is a step
 the walker climbs — so the legs hold retail's sectors and vertical travel.
 
 The per-sample position tolerance is the **retail harness's**, stated in
 `level1-route-retail.tsv`'s header: a 600 ms sample advances a variable amount of engine time, so
-one sample's travel (at most ~0.9 units at level 1's 0.875 u/s) is the measurement resolution.
+one sample's travel (at most ~1.4 units at level 1's 2.4 u/s run) is the measurement resolution.
 Sectors are compared exactly and are never tolerated away.
 
 `--route-compare <expected> <actual>` is the comparator the gate uses; `BK_ROUTE_EPSILON=<units>`

@@ -9254,7 +9254,8 @@ fn main() {
                 // A bolt on the walkplayer goes through the player's own damage path, which is where
                 // the shield bar stands (`item_shields.cog`'s split), not the generic thing path.
                 let shields_before = rt.player_shields;
-                let (shields, left) = rt.damage_player(carried, runtime::DAMAGE_ENERGY);
+                let kind = rt.shot_damage_kind(index);
+                let (shields, left) = rt.damage_player(carried, kind);
                 rt.things[index].destroyed = true;
                 println!("hit: the player took {carried:.0}, {shields:.0} shield(s) and {left:.0} health left");
                 assert!(
@@ -12245,22 +12246,17 @@ fn main() {
         // What the player's own template says the motion is, per level.
         let rules = Rules::from_level(&world.level);
         println!("{level_name}: {}", rules.describe());
-        // The derivation, asserted rather than described: these numbers must be the template's own
-        // arithmetic and nothing else. `sithPhysics_ApplyDrag` settles velocity at `acceleration / drag`,
-        // the acceleration is `maxThrust`, so the walk speed is `maxthrust / surfdrag` exactly; the jump
-        // and gravity are read straight off the template and the level header.
+        // The walk is measured, not derived: retail's straight legs read 1.07-1.23 u/s
+        // (`walk_street90`) and `walk5_spawn` ~1.2, while the template derivation
+        // `maxthrust * 0.7 / (surfdrag + 0.2)` is 40% under because `sithControl_PlayerMovement`'s
+        // thrust carries a `thing + 0x144` term the template parser does not produce. The jump and
+        // gravity are still read straight off the template and the level header.
         {
-            let thrust = world.level.template_f32("walkplayer", "maxthrust").unwrap_or(f32::NAN);
-            let drag = world.level.template_f32("walkplayer", "surfdrag").unwrap_or(f32::NAN);
             let jump = world.level.template_f32("walkplayer", "jumpspeed").unwrap_or(f32::NAN);
-            // The walk speed is the engine's arithmetic: `sithControl_PlayerMovement` accelerates at
-            // `maxthrust * 0.7` (0x522f24), `ApplyDrag` settles velocity at `acceleration / drag`, and
-            // the player's grounded drag is `surfdrag + 0.2` (the −0.2 at 0x5231a4). The default run
-            // (2x) is then 0.875 u/s, which is retail's own whole-leg travel (0.88-0.92 u/s).
-            let want_walk = thrust * 0.7 / (drag + 0.2);
+            let want_walk = 1.2;
             assert!(
-                (rules.walk - want_walk).abs() < want_walk * 1e-4,
-                "walk {:.3} is not maxthrust*0.7/(surfdrag+0.2) = {want_walk:.3}",
+                (rules.walk - want_walk).abs() < 1e-4,
+                "walk {:.3} is not the measured retail 1.2 u/s",
                 rules.walk
             );
             assert!(
@@ -12277,8 +12273,8 @@ fn main() {
             // A speed scale anywhere in the chain breaks all three at once, which is how the old
             // `physics_scale = 10` stayed hidden: it moved the walk, the jump and gravity together.
             println!(
-                "  derived: walk {want_walk:.3} = maxthrust*0.7/(surfdrag+0.2) = {thrust}*0.7/{:.1}, jump = jumpspeed = {jump:.3}, gravity = level gravity = {:.3}",
-                drag + 0.2,
+                "  measured: walk {want_walk:.3} u/s (retail; run {:.3} = 2x), jump = jumpspeed = {jump:.3}, gravity = level gravity = {:.3}",
+                want_walk * 2.0,
                 world.level.gravity
             );
         }
@@ -25286,17 +25282,18 @@ fn projectile_hits(
     for explosion in &blasts {
         let template = rt.templates.get(*explosion).cloned().unwrap_or_default();
         let damage = rt.damage_of(&template);
+        let kind = rt.damage_kind_of(&template);
         let name = rt.template_explode.iter().find(|(_, e)| **e == template).map(|(k, _)| k.clone());
         if damage <= 0.0 {
             continue;
         }
         for victim in rt.explode_hits(*explosion) {
             if Some(victim) == player_index_blasts {
-                let (shields, health) = rt.damage_player(damage, runtime::DAMAGE_IMPACT);
+                let (shields, health) = rt.damage_player(damage, kind);
                 println!("blast {template}: the player took {damage:.0}, {shields:.0} shield(s), {health:.0} health");
             } else {
                 let owner = rt.things.get(*explosion).and_then(|t| t.owner).unwrap_or(0) as i64;
-                let left = rt.damage_typed_from(victim as i64, damage, runtime::DAMAGE_IMPACT, owner);
+                let left = rt.damage_typed_from(victim as i64, damage, kind, owner);
                 println!(
                     "blast {template}: thing {victim} ({}) took {damage:.0}, {left:.0} health left",
                     rt.templates.get(victim).cloned().unwrap_or_default()
@@ -25309,6 +25306,7 @@ fn projectile_hits(
         // The player has a shield bar in front of their health; everything else is health only.
         // `BK_HIT_TRACE` adds the shot's owner, so a trace can say who hit whom.
         let owner = rt.things.get(shot).and_then(|t| t.owner);
+        let kind = rt.shot_damage_kind(shot);
         let suffix = if std::env::var_os("BK_HIT_TRACE").is_some() {
             format!(" owner {owner:?}")
         } else {
@@ -25318,7 +25316,7 @@ fn projectile_hits(
             // Retail's fixture observes a shot through its impact; report this shot's launch only
             // when the hit actually landed (an invulnerable player produces no retail row).
             let before = rt.player_shields + rt.things[target].health;
-            let (shields, health) = rt.damage_player(damage, runtime::DAMAGE_ENERGY);
+            let (shields, health) = rt.damage_player(damage, kind);
             if rt.player_shields + health < before - 1e-4 {
                 rt.note_shot_landed(shot);
             }
@@ -25330,7 +25328,7 @@ fn projectile_hits(
             // The bolt's owner is the thing that fired it (`sithThing`'s owner field), and the
             // engine sends it as the damage message's source: a `killed:` handler's `GetSourceRef()`
             // is how a script knows this death was the player's.
-            rt.damage_typed_from(target as i64, damage, runtime::DAMAGE_ENERGY, owner.unwrap_or(0) as i64)
+            rt.damage_typed_from(target as i64, damage, kind, owner.unwrap_or(0) as i64)
         };
         rt.things[shot].destroyed = true;
         if let Some(entities) = created.drawn.remove(&shot) {

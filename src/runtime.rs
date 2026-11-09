@@ -6,7 +6,7 @@
 //! that read or write it. Everything starts from the level file and is then mutated
 //! by scripts, exactly as the engine does.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::math::{Quat, Vec3};
 
@@ -1117,6 +1117,12 @@ pub struct Runtime {
     pub template_min_damage: BTreeMap<String, f32>,
     /// `maxhealth=`, the ceiling `HealThing` clamps to.
     pub template_max_health: BTreeMap<String, f32>,
+    /// Templates in the shipped `_debris` family (the template itself or anything deriving from it).
+    /// They are `type=weapon` but they are rubble, not shots: the mover must let them land instead of
+    /// destroying them on the first surface they brush. The fired-projectile arm keys on this, not on
+    /// the gravity bit, because shipped gravity-falling projectiles (`+grenade2`, `08tiebomb`) are
+    /// still shots even though a cog creates the tie bomb.
+    pub template_debris: BTreeSet<String>,
     /// A template's `thingflags=`, the word `SITH_TF_*` bits live in: a shot starts with it, and the
     /// player-fire pre-sweep tests its bit `0x200000` before raising `dodge`'s shot event.
     pub template_thingflags: BTreeMap<String, u32>,
@@ -1124,6 +1130,10 @@ pub struct Runtime {
     /// ships `0x20440d`, whose bit `0x200000` is what `sithWeapon_WeaponFireProjectile`'s player
     /// pre-sweep tests before it raises `dodge`'s shot event.
     pub template_typeflags: BTreeMap<String, u32>,
+    /// A template's `damageclass=`, the `SithDamageType` word `sithActor_DamageActor` branches on.
+    /// `_weapon` ships energy (`0x2`), `_debris` and `08tiebomb` impact (`0x1`), `_explosion` and
+    /// `+grenade2` fire (`0x4`). Read through the template chain, so `+bryarbolt` inherits `_weapon`'s.
+    pub template_damageclass: BTreeMap<String, u32>,
     /// A template's `soundclass=`, keyed by template name and reduced to the `.snd` class's lowercase
     /// basename: the class `talk` picks its mood sounds from (`sithSoundClass_PlayModeRandom`).
     pub template_soundclass: BTreeMap<String, String>,
@@ -1958,6 +1968,56 @@ impl Runtime {
                     .map(|flags| (t.name.to_ascii_lowercase(), flags))
             })
             .collect();
+        // The shipped `_debris` family is `type=weapon physflags=0x201`, yet it is rubble: the mover
+        // lets it land. Its name chain is the actual distinction, because the gravity bit alone also
+        // covers fired projectiles (`+grenade2 physflags=0x225`, `08tiebomb` the same), and a cog
+        // creates the tie bomb with `CreateThingAtPos`, so "has an owner" cannot stand in for it.
+        let in_debris_family = |name: &str| {
+            let mut current = name;
+            for _ in 0..8 {
+                if current.eq_ignore_ascii_case("_debris") {
+                    return true;
+                }
+                let Some(template) = level
+                    .templates
+                    .iter()
+                    .find(|t| t.name.eq_ignore_ascii_case(current))
+                else {
+                    break;
+                };
+                match template.base.as_deref() {
+                    Some(base) => current = base,
+                    None => break,
+                }
+            }
+            false
+        };
+        let template_debris: BTreeSet<String> = level
+            .templates
+            .iter()
+            .filter(|t| in_debris_family(&t.name))
+            .map(|t| t.name.to_ascii_lowercase())
+            .collect();
+        // `damageclass=` selects the hurt kind: `_weapon` ships energy, `_debris`/`08tiebomb`
+        // impact, `_explosion`/`+grenade2` fire. The hit path passed `DAMAGE_ENERGY` for every shot,
+        // which sent a grenade's fire and a tie bomb's impact down the energy branch.
+        let template_damageclass: BTreeMap<String, u32> = level
+            .templates
+            .iter()
+            .filter_map(|t| {
+                level
+                    .template_param(&t.name, "damageclass")
+                    .and_then(|raw| {
+                        let raw = raw.trim();
+                        u32::from_str_radix(
+                            raw.trim_start_matches("0x").trim_start_matches("0X"),
+                            16,
+                        )
+                        .ok()
+                    })
+                    .map(|kind| (t.name.to_ascii_lowercase(), kind))
+            })
+            .collect();
         // `timer=` is the thing's life left, in seconds: `THINGPARAM_TIMER` stores
         // `lifeLeftSec * 1000` in `msecLifeLeft` and `sithThing_Update` destroys the thing when it
         // runs out. It is what makes an impact spark a spark — `+laserhit` ships `timer=0.5`.
@@ -2154,8 +2214,10 @@ impl Runtime {
             template_timer,
             template_minheadpitch,
             template_maxheadpitch,
+            template_debris,
             template_thingflags,
             template_typeflags,
+            template_damageclass,
             template_soundclass: level
                 .templates
                 .iter()
@@ -3159,13 +3221,15 @@ impl Runtime {
                 // A **projectile** that reaches a surface dies there: the engine's
                 // `sithThing_Update` explodes the weapon and removes it, while a stopped-but-alive
                 // bolt froze mid-air (its `vel` zeroed, its damage live) and could never hit again.
-                // A type-3 body carrying the gravity bit is a shipped **gravity good**, not a shot:
-                // `_debris` ships `physflags=0x201` and has to land on the vertical stop below, while
-                // `_weapon` (the fired bolts) ships `0x200` with no gravity bit. Without the test a
-                // falling `_debris` chip died on the first surface it brushed and its corpse coasted
-                // on its last velocity instead of resting (round 246's gate).
-                let projectile =
-                    self.types.get(i).copied() == Some(3) && t.phys_flags & 0x1 == 0;
+                // A `_debris` body is `type=weapon` but rubble, not a shot: it has to land on the
+                // vertical stop below instead of dying on the first surface it brushes (round 246's
+                // gate). Keying on the gravity bit was wrong: shipped projectiles fall too
+                // (`+grenade2 physflags=0x225`, `08tiebomb`), so the template family is the test.
+                let projectile = self.types.get(i).copied() == Some(3)
+                    && !self.templates.get(i).is_some_and(|template| {
+                        self.template_debris
+                            .contains(&template.to_ascii_lowercase())
+                    });
                 if hit && (resolved[0] - t.pos[0]).abs() + (resolved[1] - t.pos[1]).abs() > 0.01 {
                     if std::env::var_os("BK_AI_TRACE").is_some() && projectile {
                         eprintln!("ai: shot {i} hit a surface at {:?} (push to {:?}, sector {sector})", t.pos, resolved);
@@ -7832,6 +7896,24 @@ impl Runtime {
             .unwrap_or(0.0)
     }
 
+    /// The `SithDamageType` a template deals, from its `damageclass=` chain. A template with no
+    /// word falls back to impact, the engine's default arm.
+    pub fn damage_kind_of(&self, template: &str) -> u32 {
+        self.template_damageclass
+            .get(&template.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(DAMAGE_IMPACT)
+    }
+
+    /// The kind of hurt a shot thing deals, so a hit uses its own template's `damageclass=`
+    /// (energy for `+bryarbolt`, fire for `+grenade2`, impact for `08tiebomb`).
+    pub fn shot_damage_kind(&self, shot: usize) -> u32 {
+        self.templates
+            .get(shot)
+            .map(|template| self.damage_kind_of(template))
+            .unwrap_or(DAMAGE_IMPACT)
+    }
+
     /// First thing index in `sector`, or -1: `FirstThingInSector`.
     fn first_in_sector(&self, sector: i32) -> i64 {
         self.things
@@ -10960,6 +11042,7 @@ mod tests {
         rt.things[0].phys_flags = 0x1;
         rt.templates = vec!["debris".into()];
         rt.types = vec![3];
+        rt.template_debris.insert("debris".into());
         rt.mass.insert(0, 0.1);
         rt.template_hit.insert("debris".into(), (0.2, 0.2));
         let plane = || crate::collide::Plane {
@@ -10997,10 +11080,11 @@ mod tests {
 
     /// A `_debris` chip is `type=weapon` (`0x201`) but it is not a shot: a surface push its fall
     /// brushes is not a projectile impact. The projectile rule — die on the surface in front of you
-    /// — is for `_weapon` bodies, which ship `0x200` with no gravity bit. Reading the type alone
-    /// destroyed a falling chip mid-air on the first plane it touched, and because a destroyed body
-    /// kept its last velocity it coasted down for ever (the `--things` gate's "landed debris chip
-    /// kept falling"). The good must keep falling and land.
+    /// — is for weapon projectiles, which the template family names (`_debris` is rubble, and every
+    /// fired template is everything else). Reading the type alone destroyed a falling chip mid-air
+    /// on the first plane it touched, and because a destroyed body kept its last velocity it coasted
+    /// down for ever (the `--things` gate's "landed debris chip kept falling"). The good must keep
+    /// falling and land.
     #[test]
     fn a_gravity_good_that_brushes_a_surface_lands_instead_of_dying() {
         let mut rt = door_runtime();
@@ -11008,6 +11092,7 @@ mod tests {
         rt.things[0].phys_flags = 0x201;
         rt.templates = vec!["debris".into()];
         rt.types = vec![3];
+        rt.template_debris.insert("debris".into());
         rt.mass.insert(0, 0.1);
         rt.template_hit.insert("debris".into(), (0.2, 0.2));
         let floor = crate::collide::Plane {
@@ -11052,6 +11137,97 @@ mod tests {
             rt.things[0].pos[2]
         );
         assert_eq!(rt.things[0].vel[2], 0.0, "the landed good kept a downward velocity");
+    }
+
+    /// Shipped projectiles carry the gravity bit too: `+grenade2` and `08tiebomb` both ship
+    /// `physflags=0x225`, and `08_tiebomber.cog` creates the tie bomb with `CreateThingAtPos`, so
+    /// neither is fired through `fire()` in the owner sense. They are still shots and must die on the
+    /// surface they hit; only the `_debris` family lands.
+    #[test]
+    fn gravity_bit_projectiles_still_die_on_a_surface() {
+        for template in ["+grenade2", "08tiebomb"] {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let plane = |normal: [f32; 3], point: [f32; 3], surface: usize| {
+                crate::collide::Plane { normal, point, surface }
+            };
+            let planes = vec![
+                plane([-1.0, 0.0, 0.0], [1.2, 0.0, 0.0], 41),
+                plane([1.0, 0.0, 0.0], [-5.0, 0.0, 0.0], 41),
+                plane([0.0, -1.0, 0.0], [0.0, -2.0, 0.0], 41),
+                plane([0.0, 1.0, 0.0], [0.0, 2.0, 0.0], 41),
+                plane([0.0, 0.0, -1.0], [0.0, 0.0, -2.0], 41),
+                plane([0.0, 0.0, 1.0], [0.0, 0.0, 2.0], 41),
+            ];
+            rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+                sectors: vec![planes.clone()],
+                hull: vec![planes],
+                boxes: vec![None],
+                portals: vec![Vec::new()],
+                spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+                things: Default::default(),
+                floors: Vec::new(),
+                walls: Vec::new(),
+                wall_of: Default::default(),
+                floor_of: Default::default(),
+                faces: Vec::new(),
+                face_of: Default::default(),
+                portal_faces: Vec::new(),
+                surface_owner: vec![0, 0, 0, 0],
+                adjoin_flags: Vec::new(),
+                ..Default::default()
+            }));
+            let mut bomb = base.clone();
+            bomb.pos = [0.0, 0.0, 0.0];
+            bomb.sector = 0;
+            bomb.vel = [6.0, 0.0, 0.0];
+            bomb.damage = 12.0;
+            bomb.phys_flags = 0x225;
+            rt.things = vec![base, bomb];
+            rt.templates = vec!["walkplayer".into(), template.into()];
+            rt.types = vec![10, 3];
+            for _ in 0..60 {
+                rt.step(None, 1.0 / 30.0);
+                if rt.things[1].destroyed {
+                    break;
+                }
+            }
+            assert!(
+                rt.things[1].destroyed,
+                "`{template}` (gravity bit, not debris) froze on the wall: {:?}",
+                rt.things[1].pos
+            );
+        }
+    }
+
+    /// `damageclass=` is the word `sithActor_DamageActor` branches on, and it follows the template
+    /// chain: `+bryarbolt` inherits `_weapon`'s energy (`0x2`), while `+grenade2` ships fire (`0x4`)
+    /// and `08tiebomb` impact (`0x1`). The hit path passed `DAMAGE_ENERGY` for every shot, so a
+    /// grenade's fire and a tie bomb's impact took the energy branch in `item_shields.cog`.
+    #[test]
+    fn a_projectiles_damage_kind_comes_from_its_template_damageclass() {
+        let template = |name: &str, base: Option<&str>, params: &[(&str, &str)]| crate::jkl::Template {
+            name: name.to_string(),
+            base: base.map(str::to_string),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            model3d: None,
+            sprite: None,
+        };
+        let mut level = Level::default();
+        level.templates = vec![
+            template("_weapon", None, &[("damageclass", "0x2")]),
+            template("+bryarbolt", Some("_weapon"), &[]),
+            template("+grenade2", Some("_weapon"), &[("damageclass", "0x4")]),
+            template("08tiebomb", Some("_weapon"), &[("damageclass", "0x1")]),
+        ];
+        let mut rt = Runtime::new(&level);
+        rt.templates = vec!["+bryarbolt".into(), "+grenade2".into(), "08tiebomb".into()];
+        assert_eq!(rt.shot_damage_kind(0), DAMAGE_ENERGY, "a bolt inherits `_weapon`'s energy");
+        assert_eq!(rt.shot_damage_kind(1), DAMAGE_FIRE, "a grenade is fire");
+        assert_eq!(rt.shot_damage_kind(2), DAMAGE_IMPACT, "a tie bomb is impact");
     }
 
     /// The projectile body is the template's `movesize` — the engine's collision radius and what
