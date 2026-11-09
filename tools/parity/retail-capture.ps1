@@ -757,6 +757,12 @@ function Invoke-JkAudioRoute {
     $ambientVolume = if ($null -eq $ambient) { '' } else { '{0:F3}' -f $ambientVol }
     $sounds = ($windowEvents -join ' ')
     $lines.Add((@($tick, ('{0:F4}' -f ([double]$tick / 60.0)), $musicName, $musicEnd, $musicLoop, ('{0:F3}' -f $vol), $ambientName, $ambientVolume, $sounds) -join ([char]9)))
+    $pthing = [JkRetail]::ReadU32($ProcessId, 0x008319A4)
+    if ($pthing -gt 0) {
+      $px = [JkRetail]::ReadFloat($ProcessId, $pthing + 0xB8)
+      $py = [JkRetail]::ReadFloat($ProcessId, $pthing + 0xBC)
+      Log ("audio route: t={0} pos=({1:F3},{2:F3}) music={3} vol={4:F3}" -f $tick, $px, $py, $musicName, [double]$vol)
+    }
     $windowEvents.Clear()
     $seen = @{}
   }
