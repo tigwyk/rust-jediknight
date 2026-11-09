@@ -430,7 +430,10 @@ the bar empties is the script working, not a bug.
 The capture runs the `Update` schedule on one executor thread, the same rule #8's replay uses: the
 shared cog LCG is thread-local, so with the default executor two runs of the same fixed step could
 fire a different number of shots. Two captures are therefore byte-identical apart from the file name,
-and the gate's repeatability check reports zero delta.
+and the gate's repeatability check reports zero delta. The same pin applies to every fixed-step
+capture (`--shot`, `BK_ENCOUNTER_OUT`, `--replay`): without it the walk traces drift too — `walk_cantina`
+travelled 2.6 units on one run and 1.0 on the next, because an AI actor driven from the LCG stood in
+the body's path. Play keeps the default executor.
 
 The gate is the instrument for #11 (AI engagement timing) and #12 (combat timing); until those land its
 default run reports the known AI-timing gap rather than passing.

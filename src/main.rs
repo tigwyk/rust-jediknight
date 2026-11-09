@@ -12594,6 +12594,9 @@ fn main() {
     } else {
         bevy::window::ExitCondition::OnAllClosed
     };
+    // A fixed-step capture (`--shot`, the map check, `--replay`) is reproducible between runs, which
+    // needs the single-threaded executor below; `shot` is moved into its resource further down.
+    let capture_run = shot.is_some() || map_check || replay.is_some();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: (!headless).then(|| Window {
                 title: format!("bevi-knight — {level_name}"),
@@ -12636,7 +12639,7 @@ fn main() {
         .insert_resource(MusicState::default())
         .insert_resource(Overview {
             overview,
-            capture: shot.is_some() || map_check || replay.is_some(),
+            capture: capture_run,
         })
         .insert_resource(Near(near))
         .insert_resource(Stand(stand))
@@ -12788,13 +12791,13 @@ fn main() {
         .add_systems(Update, refresh_force_screen)
         .add_systems(Update, seed_force_screen_powers)
         .add_systems(Update, arm_for_capture);
-    // A replay or a door-encounter capture (`BK_ENCOUNTER_OUT`) must be reproducible between runs,
-    // not only between frames. Several systems draw from the shared LCG in `cog::pseudo_random`,
-    // which is thread-local, so the multi-threaded executor gives different systems different
-    // sequences and a hit can land a frame apart from run to run — the encounter gate reports that
-    // as shots/hits differing by more than its run-to-run slack. One executor thread makes every
-    // call site see the same sequence. Play keeps the default.
-    if replaying || std::env::var_os("BK_ENCOUNTER_OUT").is_some() {
+    // A replay or a fixed-step capture (`--shot`, the map check, `BK_ENCOUNTER_OUT`) must be
+    // reproducible between runs, not only between frames. Several systems draw from the shared LCG in
+    // `cog::pseudo_random`, which is thread-local, so the multi-threaded executor gives different
+    // systems different sequences — the walk traces' travel and the encounter gate's shots/hits then
+    // drift between two runs of the same command (`walk_cantina` travelled 2.6 units and 1.0). One
+    // executor thread makes every call site see the same sequence. Play keeps the default.
+    if replaying || capture_run || std::env::var_os("BK_ENCOUNTER_OUT").is_some() {
         app.edit_schedule(bevy::app::Update, |schedule| {
             schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
         });
