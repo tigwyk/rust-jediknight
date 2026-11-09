@@ -11,14 +11,14 @@
   `retail-capture.ps1 -EncounterMs` samples the retail engine's own memory (player thing health,
   inventory bin 60 shields, the thing array for actors and projectiles, the engine game clock);
   `port-encounter.ps1` runs the port's runtime and writes its own timeline. This gate reports the
-  timing delta of every shot and hit, the per-hit health/shield delta, and the actor state delta at
-  each cadence sample, then exits non-zero when any of them leaves its tolerance. It is the
-  instrument tickets #11 (AI timing) and #12 (combat timing) measure against.
+  timing delta of every shot and hit, the per-hit health/shield delta, the kill order, and the actor
+  state delta at each cadence sample, then exits non-zero when any of them leaves its tolerance. It
+  is the instrument tickets #11 (AI timing) and #12 (combat timing) measure against.
 
   The retail fixture is committed under `tools/parity/encounter/`; a fresh capture in
   `target/parity/encounter/` takes precedence. The gate records the port twice and fails when the
-  two runs leave the measured run-to-run band (shape, endpoint, event timing, actor state), so "the
-  fixture is repeatable" is checked rather than assumed.
+  two runs leave the measured run-to-run band (shape, endpoint, event timing, actor state, kill
+  order), so "the fixture is repeatable" is checked rather than assumed.
 
   Tolerances are parameters with measured defaults. The port's AI is not on retail's timeline yet
   (#11/#12), so the default run is expected to report deltas; the gate still fails on them, which is
@@ -161,6 +161,28 @@ function Get-EventDeltas($BaseEvents, $OtherEvents) {
   return [pscustomobject]@{ Count = $count; Max = $max; Mean = $mean }
 }
 
+# The order things died in, which is what a no-input encounter can say about kill order.
+#
+# Both captures drop a thing from the trace once it is gone — the retail reader skips an actor whose
+# health is 0 or less, and the port's trace skips a destroyed one — and both name an actor by the
+# level's own placement index, so the last sample each thing appears in is its death time. A thing
+# that walks out of the 8-unit sampling radius reads the same way; the actor-position check above is
+# what distinguishes that case (a fixture that grows moving actors should record deaths explicitly).
+function Get-KillOrder($Rows) {
+  $first = @{}
+  $last = @{}
+  $end = 0.0
+  foreach ($row in @($Rows)) {
+    $t = [double]$row.T
+    if ($t -gt $end) { $end = $t }
+    if ($row.Kind -ne 'actor') { continue }
+    $key = [string]$row.Thing
+    if (-not $first.ContainsKey($key)) { $first[$key] = $t }
+    $last[$key] = $t
+  }
+  return @($last.GetEnumerator() | Where-Object { $_.Value -lt $end } | Sort-Object Value | ForEach-Object { $_.Key })
+}
+
 
 
 # ---- retail fixture: committed, with a fresh capture taking precedence -------------------------
@@ -228,6 +250,12 @@ if ($repeatPath) {
   $shotRepeat = Get-EventDeltas $portShots $bShots
   $hitRepeat = Get-EventDeltas $portHits $bHits
   $actorRepeat = Get-ActorDeltas $portRows $bRows
+  $portKills = @(Get-KillOrder $portRows)
+  $bKills = @(Get-KillOrder $bRows)
+  if (($portKills -join ',') -ne ($bKills -join ',')) {
+    Fail ("repeat run's kill order [{0}] differs from the first run's [{1}]" -f ($bKills -join ','), ($portKills -join ','))
+    $repeatOk = $false
+  }
   if ($shotRepeat.Max -gt 4000) { Fail ("repeat shot timing delta {0:N0} ms exceeds 4000 ms" -f $shotRepeat.Max); $repeatOk = $false }
   if ($hitRepeat.Max -gt 5000) { Fail ("repeat hit timing delta {0:N0} ms exceeds 5000 ms" -f $hitRepeat.Max); $repeatOk = $false }
   if ($actorRepeat.Position -gt 2.0) { Fail ("repeat actor position delta {0:N2} exceeds 2.00 units" -f $actorRepeat.Position); $repeatOk = $false }
@@ -307,6 +335,19 @@ if ($hitCount -gt 0) {
   if ($hitMax -gt $HitToleranceMs) { Fail ("hit timing delta {0:N0} ms exceeds {1:N0} ms" -f $hitMax, $HitToleranceMs) }
   if ($healthMax -gt $HealthTolerance) { Fail ("per-hit health delta {0:N1} exceeds {1:N1}" -f $healthMax, $HealthTolerance) }
   if ($shieldMax -gt $ShieldsTolerance) { Fail ("per-hit shields delta {0:N1} exceeds {1:N1}" -f $shieldMax, $ShieldsTolerance) }
+}
+
+# ---- kill order -------------------------------------------------------------------------------
+# The ids are things (not templates), so the sequences compare directly. The door fixture has no
+# player input and no kill in ten seconds on either side; the print makes that measured rather than
+# assumed, and a port that kills someone retail leaves standing fails here.
+$retailKills = @(Get-KillOrder $retailRows)
+$portKills = @(Get-KillOrder $portRows)
+Write-Host ("kill order: retail [{0}], port [{1}]" -f ($retailKills -join ','), ($portKills -join ','))
+if (($retailKills -join ',') -ne ($portKills -join ',')) {
+  Fail ("kill order differs: retail [{0}], port [{1}]" -f ($retailKills -join ','), ($portKills -join ','))
+} else {
+  Write-Host ("PASS  kill order: {0} kill(s) on both sides, the same sequence" -f $retailKills.Count)
 }
 
 # ---- settled endpoint -------------------------------------------------------------------------
