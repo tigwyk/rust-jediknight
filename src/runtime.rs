@@ -4488,6 +4488,20 @@ impl Runtime {
             thing.ai_wait = (thing.ai_wait - dt).max(0.0);
             let ready = thing.ai_wait <= 0.0;
             let (from, yaw, health) = (thing.pos, thing.yaw, thing.health);
+            // `sithAI_sub_4EAD60` builds the sight eye from the thing's model offset, above the
+            // body's origin. An actor standing on a table, a crate or a balcony therefore casts its
+            // sight ray from above that surface, and the ray leaves the solid thing it stands on;
+            // the port's ray started *on* the surface, its leaf was skipped by the solid test, and
+            // level 1's upstairs Greedo saw the player straight through the balcony floor and
+            // turned while retail's actor never moved.
+            let eye = {
+                let radius = self
+                    .template_hit
+                    .get(&ai_template.to_ascii_lowercase())
+                    .map(|(radius, _)| *radius)
+                    .unwrap_or(0.065);
+                [from[0], from[1], from[2] + radius + 0.01]
+            };
             // `talk` (`0x50be20`, the second-most-used instinct after `listen`: 198 classes): idle
             // chatter on the instinct's own clock. Its first number is the interval in milliseconds
             // (`talk 10000.0, 0.10` in most shipped classes, `3000.0, 0.40` in `boc`) and the second
@@ -4570,7 +4584,7 @@ impl Runtime {
             let sighted = ai_on
                 && ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target))
                 && self.solids.as_ref().is_none_or(|s| {
-                    !s.segment_blocked(from, target) && !s.segment_thing(from, target)
+                    !s.segment_blocked(eye, target) && !s.segment_thing(eye, target)
                 });
             // `sithAI_CanDetectSightThing` (`0x4ec140`): a clear line is not the same as noticing. The
             // engine rolls its detection chance whenever it refreshes a target; the port rolls it when
@@ -4833,6 +4847,17 @@ impl Runtime {
             // its own room and alignment own — that is the reader the stand-in could not express.
             let remembered = self.ai_last_seen.get(&index).copied().or_else(|| {
                 let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
+                // Only a class with a handler consumes the sound record: `listen` (`0x50a6f0`) or
+                // `follow`, whose handler is what walks to an awareness position. `pednarsh.ai`
+                // (the cantina crowd) ships `SenseDanger`, `Flee` and `OpenDoors` only, and its
+                // actors stand still in retail's door series while the port walked them at every
+                // gunshot — the hearing path's default 1.0 ran for classes that cannot hear.
+                let hears = ai.as_ref().is_some_and(|class| {
+                    class.instinct("Listen").is_some() || class.instinct("Follow").is_some()
+                });
+                if !hears {
+                    return None;
+                }
                 // `listen` (`0x50a6f0`): the record is scanned **kind 2, then 1, then 0**, and the handler's own
                 // conditions decide what is heard (`heard_event`: `heardist`, line of sight, and — for
                 // a sound through geometry — nearer than one unit and in front). It then rolls the
@@ -5360,10 +5385,13 @@ impl Runtime {
                         );
                     }
                     let _ = self.emit_ai_event(index, 0x400, None);
-                    // `SetLookFrame` sets the facing even when the legs cannot take the step: a
-                    // roamer turns where it wants to go while a ledge holds the body. The port stood
-                    // still, so level 1's roaming droid never matched retail's sweep.
-                    if (facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4)
+                    // `SetLookFrame` turns toward the goal even when the legs are held by a ledge
+                    // (`SetLookFrame` is the handler's own call), but only when the goal is the
+                    // actor's business: a scripted destination or a target it can see. A roamer's
+                    // blocked random point turned level 1's cantina crowd 78°, where retail's own
+                    // actors keep their placed facing for the whole encounter.
+                    if (scripted.is_some() || sighted)
+                        && (facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4)
                         && let Some(thing) = self.things.get_mut(index)
                     {
                         let wanted = (-facing.0).atan2(facing.1).to_degrees();
@@ -6017,7 +6045,18 @@ impl Runtime {
         for actor in std::mem::take(&mut self.walked) {
             let Some(thing) = self.things.get(actor) else { continue };
             let (pos, sector) = (thing.pos, thing.sector.max(0) as usize);
-            let (resolved, _) = solids.resolve_stepped(sector, pos, 0.5);
+            // The body's own collision radius, not the walker's 0.5: a resolved face pushes only
+            // when the body's *feet* are below its top edge, and a 0.5 probe put the feet of a
+            // body standing on a catwalk or a table 0.5 under the surface — so every wall face of
+            // the thing it stood on shoved it sideways (level 1's powerdroid was ejected 0.4 units
+            // off its ledge). The engine collides a thing with its own size.
+            let radius = self
+                .templates
+                .get(actor)
+                .map(|name| name.to_ascii_lowercase())
+                .and_then(|name| self.template_hit.get(&name).map(|(radius, _)| *radius))
+                .unwrap_or(0.065);
+            let (resolved, _) = solids.resolve_stepped(sector, pos, radius);
             let mut next = [resolved[0], resolved[1], pos[2]];
             // The player's own sweep settles the actor: a 0.6-unit downward probe plus the walker's
             // containment and floor rule. `move_body` has no horizontal delta here, so this only

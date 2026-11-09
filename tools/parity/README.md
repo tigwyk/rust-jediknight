@@ -385,10 +385,12 @@ t_ms  kind  thing  template  x  y  z  yaw  health  shields  detail
 `kind` is `player`/`actor` at the row's cadence (100 ms here), `shot` when a fired bolt (a type-3 thing)
 first appears at a cadence sample, and `hit` when a shot lands on the player — the hit row carries the
 health and shields **after** the hit. Both sides use the engine's game clock, not wall time, so the
-timeline is comparable at different frame rates, and both record the same observations: retail can only
+timeline is comparable at different frame rates, and both record the same observation: retail can only
 see a bolt that exists at a sample, so the port samples its bolts the same way (the first sample is the
-baseline of already-placed weapons). The retail engine renders a few frames a second, so its `hit` row
-is the damage that landed since the previous sample (two bolts in one frame are one row) and its rows
+baseline of already-placed weapons). The port samples **before** the frame's AI tick: a bolt that is
+born and spent inside one frame is invisible to retail's 100 ms points, and sampling after the tick
+made every point-blank bolt visible exactly once. The retail engine renders a few frames a second, so
+its `hit` row is the damage that landed since the previous sample (two bolts in one frame are one row) and its rows
 hold that frame's state between grid points; the port hits are its fixed 60 Hz step.
 
 - Retail: `pwsh -File tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door -EncounterMs 10000 -EncounterCadenceMs 100 -EncounterName door_encounter`
@@ -409,6 +411,22 @@ hold that frame's state between grid points; the port hits are its fixed 60 Hz s
   order, the settled endpoint, and the actor position/facing/health deltas at every sample. It exits
   non-zero when any of them leaves its tolerance, and its thresholds are parameters with their reasons
   in the script header.
+
+The port samples **before** the frame's AI tick. Retail reads the world at its own 100 ms points, not
+at the instant a shot is fired, so a bolt born and spent inside one frame is invisible to it; sampling
+after the tick made every point-blank bolt visible exactly once and the port reported 13 shots where
+the fixture can see 9. The encounter trace also arms (clears the spawn frames' events and fixes its
+origin) before the tick, so the frame that fires the first shot keeps it.
+
+**Facings are graded only where retail's facing is stable.** `gonkroam.ai`'s `Roam` handler
+(`0x50b830`) draws the engine's `rand()` (`0x512d00`, a single global stream shared with every
+detection roll and aim error) for the direction and the distance every interval, and the door
+fixture's powerdroid facing is a model turntable that sweeps ~350° and holds; a retail facing that
+moves more than `ActorYawTolerance` during the encounter is therefore animation or a random pick,
+not a facing the port can derive. The gate compares the absolute yaw only when retail's own facing
+stayed within the tolerance, so the port must not invent a turn for an actor retail keeps still, and
+every actor's **position** is still graded strictly. A retail moving facing is reported, not graded.
+
 
 Kill order is read off the trace: both captures drop a thing once it is gone (the retail reader skips
 an actor at 0 health, the port's trace a destroyed one) and both name an actor by the level's own

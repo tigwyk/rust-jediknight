@@ -17838,6 +17838,15 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         .iter()
         .filter_map(|t| level.template_param(&t.name, "aiclass"))
         .map(|n| n.to_ascii_lowercase())
+        // A placement may name a class no template does (level 1's door powerdroid ships
+        // `gonkroam.ai` over its template's `gonk.ai`); the engine loads that file for it.
+        .chain(
+            level
+                .things
+                .iter()
+                .filter_map(|t| t.aiclass.as_deref())
+                .map(str::to_ascii_lowercase),
+        )
         .collect();
     ai_names.sort();
     ai_names.dedup();
@@ -25112,66 +25121,79 @@ struct EncounterTrace {
     /// The first frame at the encounter pose has been recorded. The frame the app starts can still
     /// see the level's spawn pose (the warp lands in `walk_player`, which may run after this one).
     started: bool,
-    /// Type-3 things seen at the previous cadence sample. A `shot` row is a bolt that is new at this
-    /// sample — the retail capture's own rule (`-$previousType3.ContainsKey($i)`), so both traces
-    /// count the same observation instead of the port counting fire events and retail counting bolts.
+    /// Type-3 things seen at the previous cadence sample: a `shot` row is a bolt new at this sample,
+    /// the retail capture's own rule, so both traces count the same observation.
     last_bolts: std::collections::BTreeSet<usize>,
     /// One sample has been written; the first is the baseline, where placed weapons are not shots.
     sampled: bool,
 }
 
 impl EncounterTrace {
+    /// Arm at the warp the capture asked for **before** the frame's AI tick.
+    ///
+    /// `ai_tick` fires the encounter's first shot and can land it in the same call, so clearing the
+    /// queue afterwards dropped exactly the events the trace exists to measure: the port's first hit
+    /// then read one cadence late and the series was one row short. The clear belongs before the
+    /// tick, and the origin is that frame's clock.
+    fn arm(&mut self, rt: &mut runtime::Runtime, player: usize) -> bool {
+        use std::io::Write;
+        if self.started || self.disabled {
+            return self.started;
+        }
+        if let Some((eye, _)) = WARP.get() {
+            let Some(body) = rt.things.get(player) else { return false };
+            if (body.pos[0] - eye[0]).abs() > 0.05 || (body.pos[1] - eye[1]).abs() > 0.05 {
+                return false;
+            }
+        }
+        let Some(path) = std::env::var_os("BK_ENCOUNTER_OUT") else {
+            self.disabled = true;
+            return false;
+        };
+        match std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&path) {
+            Ok(mut file) => {
+                let _ = writeln!(
+                    file,
+                    "t_ms\tkind\tthing\ttemplate\tx\ty\tz\tyaw\thealth\tshields\tdetail"
+                );
+                self.file = Some(file);
+            }
+            Err(error) => {
+                eprintln!("encounter: cannot write {}: {error}", path.to_string_lossy());
+                self.disabled = true;
+                return false;
+            }
+        }
+        self.started = true;
+        // The warp frame's own shot can be stamped a frame before this check passes (the body is
+        // still a hair off), so keep the last few frames' events and start the clock at the earliest
+        // of them: clearing the whole queue dropped the encounter's first hit.
+        rt.encounter_events
+            .retain(|event| event_time(event) >= rt.time - 0.1);
+        self.origin = Some(
+            rt.encounter_events
+                .iter()
+                .map(event_time)
+                .fold(rt.time, f32::min),
+        );
+        true
+    }
+
     /// Drain this frame's shot/hit events and, on the cadence, sample the player and the actors
     /// around it. The runtime's clock is the time axis, so a fixed-step capture and retail's own
     /// engine clock land on the same scale.
     fn record(&mut self, rt: &mut runtime::Runtime, player: usize) {
         use std::io::Write;
-        if self.disabled {
+        if self.disabled || !self.started {
             return;
-        }
-        if !self.started {
-            // Wait for the warp the capture asked for: the first frames can still hold the level's
-            // spawn pose until `walk_player` publishes the body, and a sample from there would put
-            // the wrong position at t=0.
-            if let Some((eye, _)) = WARP.get() {
-                let Some(body) = rt.things.get(player) else { return };
-                if (body.pos[0] - eye[0]).abs() > 0.05 || (body.pos[1] - eye[1]).abs() > 0.05 {
-                    return;
-                }
-            }
-            self.started = true;
-            // Drop what the spawn frames queued; the warp frame's own events are dropped with
-            // them, which is why the first shot row lands one cadence after the warp.
-            rt.encounter_events.retain(|event| event_time(event) >= rt.time);
-        }
-        if self.file.is_none() {
-            let Some(path) = std::env::var_os("BK_ENCOUNTER_OUT") else {
-                self.disabled = true;
-                return;
-            };
-            match std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&path) {
-                Ok(mut file) => {
-                    let _ = writeln!(
-                        file,
-                        "t_ms\tkind\tthing\ttemplate\tx\ty\tz\tyaw\thealth\tshields\tdetail"
-                    );
-                    self.file = Some(file);
-                }
-                Err(error) => {
-                    eprintln!("encounter: cannot write {}: {error}", path.to_string_lossy());
-                    self.disabled = true;
-                    return;
-                }
-            }
         }
         let Some(file) = self.file.as_mut() else { return };
         let origin = *self.origin.get_or_insert(rt.time);
         for event in std::mem::take(&mut rt.encounter_events) {
             let t_ms = ((event_time(&event) - origin).max(0.0) * 1000.0).round();
             match event {
-                // A fired bolt is not this trace's `shot` row: retail can only see a bolt that
-                // exists at a cadence sample, so the port records the same observation below
-                // rather than an event retail's half could never carry.
+                // Retail's `shot` row is a bolt alive at its 100 ms sample, so the port writes the
+                // same observation from `sample`; a fire event is not that row.
                 runtime::EncounterEvent::Shot { .. } => {}
                 runtime::EncounterEvent::Hit {
                     amount,
@@ -25186,6 +25208,19 @@ impl EncounterTrace {
                 }
             }
         }
+    }
+
+    /// Write the cadence sample **before** the frame's AI tick. Retail's capture reads the world at
+    /// its own 100 ms points, not at the instant a bolt is fired, so a bolt born and spent inside
+    /// one frame is invisible to it; sampling after the tick made every point-blank bolt visible
+    /// exactly once, and the port reported 13 shots where retail's fixture can only see 9.
+    fn sample(&mut self, rt: &runtime::Runtime, player: usize) {
+        use std::io::Write;
+        if self.disabled || !self.started {
+            return;
+        }
+        let Some(file) = self.file.as_mut() else { return };
+        let origin = *self.origin.get_or_insert(rt.time);
         let t = rt.time - origin;
         while self.next_sample <= t + 1e-4 {
             let sample_ms = (self.next_sample * 1000.0).round();
@@ -25201,10 +25236,6 @@ impl EncounterTrace {
                 body.health,
                 rt.player_shields
             );
-            // `retail-capture.ps1`'s rule: a type-3 thing that was not in the previous sample is a
-            // bolt that appeared between them, and the first sample is only the baseline (placed
-            // weapons are already in the world). Sampling the port the same way is what makes the
-            // gate compare one observation, not two different ones.
             let mut bolts = std::collections::BTreeSet::new();
             for (index, thing) in rt.things.iter().enumerate() {
                 if thing.destroyed || rt.types.get(index).copied() != Some(3) {
@@ -25276,6 +25307,8 @@ fn ai_shots(capture: Option<Res<CaptureDt>>,
     };
     // `step_player` publishes the body onto the player thing; the AI reads that published eye
     // point and never writes the pose itself — one body, one writer.
+    encounter.arm(&mut rt, index);
+    encounter.sample(&rt, index);
     let fired = rt.ai_tick(index, dt);
     if fired > 0 {
         println!("ai: {fired} shot(s) at the player");
