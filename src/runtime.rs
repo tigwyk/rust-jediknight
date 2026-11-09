@@ -127,6 +127,34 @@ pub struct PivotSpin {
     pub start_angles: [f32; 3],
 }
 
+/// One observation the `BK_ENCOUNTER_OUT` trace writes: a shot as it leaves a shooter, or damage
+/// that landed on the local player. Both carry the runtime's own clock, so the encounter TSV is a
+/// game-time timeline rather than a sample of wall time.
+#[derive(Clone, Debug)]
+pub enum EncounterEvent {
+    Shot {
+        t: f32,
+        owner: usize,
+        template: String,
+        pos: [f32; 3],
+    },
+    /// The player was hit: how much the shot carried, and the bar after shields absorbed it.
+    Hit {
+        t: f32,
+        amount: f32,
+        shields: f32,
+        health: f32,
+    },
+}
+
+/// Whether the door-encounter telemetry is on (`BK_ENCOUNTER_OUT`). A process-wide check: the flag
+/// is set once by the capture harness, and queuing an event per shot is only wanted then.
+fn encounter_capture() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("BK_ENCOUNTER_OUT").is_some());
+    *ON
+}
+
 #[derive(Clone)]
 pub struct ThingState {
     /// The thing's model INSERT OFFSET, for CreateThing's marker-relative positioning.
@@ -1003,8 +1031,15 @@ pub struct Runtime {
     /// World gravity, from the level's own `World Gravity` line: what pulls a physics thing down.
     pub gravity: f32,
     /// Every shot the runtime spawned, so a check can ask "did the trigger work" without sampling
-    /// live things: a bolt can be born and destroyed between two frames at 10 fps.
+    /// live things: a bolt can be born and destroyed between two frames at 10 fps. The count is
+    /// cheap and always kept; the per-event timeline below is only queued when the harness asks.
     pub shots_fired: usize,
+    /// `BK_ENCOUNTER_OUT`: shots and landed player hits in time order, drained by the app into the
+    /// door-encounter TSV. Empty unless the capture harness sets the variable.
+    pub encounter_events: Vec<EncounterEvent>,
+    /// Whether new events are queued. The capture harness turns it on by setting `BK_ENCOUNTER_OUT`
+    /// at launch; tests flip it directly.
+    pub encounter_events_enabled: bool,
     /// A template's `health=`/`maxhealth=`, so a created thing starts with real health.
     pub template_health: BTreeMap<String, f32>,
     /// A template's `vel=` — a projectile's launch speed — and its `damage=`.
@@ -1971,6 +2006,8 @@ impl Runtime {
             template_mass,
             gravity: level.gravity,
             shots_fired: 0,
+            encounter_events: Vec::new(),
+            encounter_events_enabled: encounter_capture(),
             prints: Vec::new(),
             hud_message: None,
             string_buffer: String::new(),
@@ -6084,6 +6121,14 @@ impl Runtime {
         let kind = self.template_types.get(&template).copied().unwrap_or(3);
         // The shot starts at full damage and loses it in flight when the weapon decays.
         let damage = self.template_damage.get(&template).copied().unwrap_or(0.0);
+        if self.encounter_events_enabled {
+            self.encounter_events.push(EncounterEvent::Shot {
+                t: self.time,
+                owner: usize::try_from(shooter).unwrap_or(usize::MAX),
+                template: template.clone(),
+                pos,
+            });
+        }
         if std::env::var_os("BK_HIT_TRACE").is_some() {
             // The shooter's body and the shot's heading, so a trace can say who hit whom: a bolt's
             // origin alone cannot tell a point-blank friendly hit from a wide shot.
@@ -7197,6 +7242,14 @@ impl Runtime {
                 thing.destroyed = true;
                 self.player_dead = true;
             }
+        }
+        if self.encounter_events_enabled {
+            self.encounter_events.push(EncounterEvent::Hit {
+                t: self.time,
+                amount,
+                shields: self.player_shields,
+                health: self.things.get(player).map(|t| t.health).unwrap_or(0.0),
+            });
         }
         (self.player_shields, self.things.get(player).map(|t| t.health).unwrap_or(0.0))
     }
@@ -10893,6 +10946,65 @@ mod tests {
         rt.things[0].pitch = -45.0;
         let shot = rt.fire(0, &bolt).expect("projectile");
         assert!(rt.things[shot].vel[2] < -2.5, "vel {:?}", rt.things[shot].vel);
+    }
+
+    /// `--encounter` telemetry (issue #9): a shot is queued where it leaves the shooter, with the
+    /// runtime's own clock and the shooter's id, so the port's timeline can be compared with the
+    /// retail fixture. The queue is off unless the capture harness asks (no cost in live play).
+    #[test]
+    fn encounter_telemetry_queues_each_shot_with_its_shooter_and_clock() {
+        let mut rt = door_runtime();
+        let bolt = "+bryarbolt".to_string();
+        rt.template_vel.insert(bolt.clone(), [0.0, 4.0, 0.0]);
+        rt.template_damage.insert(bolt.clone(), 12.0);
+        rt.time = 1.25;
+        rt.fire(0, &bolt).expect("projectile");
+        assert!(rt.encounter_events.is_empty(), "telemetry must stay off by default");
+
+        rt.encounter_events_enabled = true;
+        rt.time = 2.5;
+        rt.fire(0, &bolt).expect("projectile");
+        assert_eq!(rt.encounter_events.len(), 1);
+        match &rt.encounter_events[0] {
+            EncounterEvent::Shot { t, owner, template, pos } => {
+                assert!((t - 2.5).abs() < 1e-5, "event time {t}");
+                assert_eq!(*owner, 0, "the shooter's thing index");
+                assert_eq!(template, "+bryarbolt");
+                assert_eq!(*pos, rt.things[0].pos, "the shot leaves the shooter's own position");
+            }
+            other => panic!("expected a shot event, got {other:?}"),
+        }
+    }
+
+    /// A landed player hit carries the shot's amount and the bar **after** shields absorbed it, which
+    /// is the pair the retail fixture samples from `thing + 0x134` and inventory bin 60.
+    #[test]
+    fn encounter_telemetry_queues_landed_player_hits_with_the_bar_after() {
+        let mut rt = door_runtime();
+        rt.encounter_events_enabled = true;
+        rt.player_shields = 50.0;
+        rt.time = 3.0;
+        rt.damage_player(12.0, DAMAGE_ENERGY);
+        rt.time = 3.5;
+        rt.damage_player(50.0, DAMAGE_ENERGY);
+        let hits: Vec<(f32, f32, f32, f32)> = rt
+            .encounter_events
+            .iter()
+            .filter_map(|event| match event {
+                EncounterEvent::Hit { t, amount, shields, health } => Some((*t, *amount, *shields, *health)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hits.len(), 2, "one hit row per landed shot");
+        assert!((hits[0].0 - 3.0).abs() < 1e-5);
+        assert_eq!((hits[0].1, hits[0].2, hits[0].3), (12.0, 38.0, 100.0));
+        // 50 more: the remaining 38 shields absorb, and 12 comes off health.
+        assert_eq!((hits[1].1, hits[1].2, hits[1].3), (50.0, 0.0, 88.0));
+
+        // A hit the player's invulnerability refuses is not a landed hit and writes no row.
+        rt.actor_flags.insert(0, AF_INVULNERABLE);
+        rt.damage_player(20.0, DAMAGE_ENERGY);
+        assert_eq!(rt.encounter_events.len(), 2, "an ignored hit must not be recorded");
     }
 
     /// `sithAI_RandomFireVector` (0x4eb920): the aim error jitters the aim **vector** by ±error/2 per

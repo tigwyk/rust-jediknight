@@ -25081,6 +25081,146 @@ fn billboard_sprites(
     }
 }
 
+/// `BK_ENCOUNTER_OUT`: the fixed door-encounter timeline (issue #9).
+///
+/// One TSV carries the same three observations the retail capture samples from the engine's own
+/// memory — shots, landed player hits, and actor state at a fixed cadence — on the runtime's game
+/// clock. `tools/parity/port-encounter.ps1` runs this, `retail-capture.ps1 -EncounterMs` writes the
+/// retail half, and `tools/parity/encounter-gate.ps1` compares them.
+#[derive(Default)]
+struct EncounterTrace {
+    file: Option<std::fs::File>,
+    /// Runtime seconds of the first recorded frame; every `t_ms` is relative to it.
+    origin: Option<f32>,
+    /// Next fixed-cadence sample time, in runtime seconds.
+    next_sample: f32,
+    disabled: bool,
+    /// The first frame at the encounter pose has been recorded. The frame the app starts can still
+    /// see the level's spawn pose (the warp lands in `walk_player`, which may run after this one).
+    started: bool,
+}
+
+impl EncounterTrace {
+    /// Drain this frame's shot/hit events and, on the cadence, sample the player and the actors
+    /// around it. The runtime's clock is the time axis, so a fixed-step capture and retail's own
+    /// engine clock land on the same scale.
+    fn record(&mut self, rt: &mut runtime::Runtime, player: usize) {
+        use std::io::Write;
+        if self.disabled {
+            return;
+        }
+        if !self.started {
+            // Wait for the warp the capture asked for: the first frames can still hold the level's
+            // spawn pose until `walk_player` publishes the body, and a sample from there would put
+            // the wrong position at t=0.
+            if let Some((eye, _)) = WARP.get() {
+                let Some(body) = rt.things.get(player) else { return };
+                if (body.pos[0] - eye[0]).abs() > 0.05 || (body.pos[1] - eye[1]).abs() > 0.05 {
+                    return;
+                }
+            }
+            self.started = true;
+            rt.encounter_events.clear();
+        }
+        if self.file.is_none() {
+            let Some(path) = std::env::var_os("BK_ENCOUNTER_OUT") else {
+                self.disabled = true;
+                return;
+            };
+            match std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&path) {
+                Ok(mut file) => {
+                    let _ = writeln!(
+                        file,
+                        "t_ms\tkind\tthing\ttemplate\tx\ty\tz\tyaw\thealth\tshields\tdetail"
+                    );
+                    self.file = Some(file);
+                }
+                Err(error) => {
+                    eprintln!("encounter: cannot write {}: {error}", path.to_string_lossy());
+                    self.disabled = true;
+                    return;
+                }
+            }
+        }
+        let Some(file) = self.file.as_mut() else { return };
+        let origin = *self.origin.get_or_insert(rt.time);
+        for event in std::mem::take(&mut rt.encounter_events) {
+            let t_ms = ((event_time(&event) - origin).max(0.0) * 1000.0).round();
+            match event {
+                runtime::EncounterEvent::Shot {
+                    owner,
+                    template,
+                    pos,
+                    ..
+                } => {
+                    let _ = writeln!(
+                        file,
+                        "{t_ms:.0}\tshot\t{owner}\t{template}\t{:.4}\t{:.4}\t{:.4}\t\t\t\towner {owner}",
+                        pos[0], pos[1], pos[2]
+                    );
+                }
+                runtime::EncounterEvent::Hit {
+                    amount,
+                    shields,
+                    health,
+                    ..
+                } => {
+                    let _ = writeln!(
+                        file,
+                        "{t_ms:.0}\thit\t{player}\t\t\t\t\t\t{health:.1}\t{shields:.1}\tamount {amount:.1}"
+                    );
+                }
+            }
+        }
+        let t = rt.time - origin;
+        while self.next_sample <= t + 1e-4 {
+            let sample_ms = (self.next_sample * 1000.0).round();
+            let Some(body) = rt.things.get(player) else { return };
+            let _ = writeln!(
+                file,
+                "{sample_ms:.0}\tplayer\t{player}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.2}\t{:.1}\t{:.1}\t",
+                rt.templates.get(player).cloned().unwrap_or_default(),
+                body.pos[0],
+                body.pos[1],
+                body.pos[2],
+                body.yaw,
+                body.health,
+                rt.player_shields
+            );
+            for (index, thing) in rt.things.iter().enumerate() {
+                if index == player
+                    || thing.destroyed
+                    || thing.health <= 0.0
+                    || rt.types.get(index).copied() != Some(2)
+                {
+                    continue;
+                }
+                let (dx, dy) = (thing.pos[0] - body.pos[0], thing.pos[1] - body.pos[1]);
+                if dx * dx + dy * dy > 8.0 * 8.0 {
+                    continue;
+                }
+                let _ = writeln!(
+                    file,
+                    "{sample_ms:.0}\tactor\t{index}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.2}\t{:.1}\t\t",
+                    rt.templates.get(index).cloned().unwrap_or_default(),
+                    thing.pos[0],
+                    thing.pos[1],
+                    thing.pos[2],
+                    thing.yaw,
+                    thing.health
+                );
+            }
+            self.next_sample += 0.1;
+        }
+    }
+}
+
+fn event_time(event: &runtime::EncounterEvent) -> f32 {
+    match event {
+        runtime::EncounterEvent::Shot { t, .. } | runtime::EncounterEvent::Hit { t, .. } => *t,
+    }
+}
+
 /// Give every actor its `.ai` instinct class, and let the armed ones shoot at the player.
 ///
 /// The instinct scheduler's weights are not implemented (see `Runtime::ai_tick`); what this
@@ -25088,6 +25228,7 @@ fn billboard_sprites(
 fn ai_shots(capture: Option<Res<CaptureDt>>, 
     time: Res<Time>,
     sim: Option<Res<Sim>>,
+    mut encounter: Local<EncounterTrace>,
 ) {
     let Some(sim) = sim else { return };
     let dt = sim_dt(&time, capture.as_deref());
@@ -25102,6 +25243,7 @@ fn ai_shots(capture: Option<Res<CaptureDt>>,
     if fired > 0 {
         println!("ai: {fired} shot(s) at the player");
     }
+    encounter.record(&mut rt, index);
 }
 
 /// Swap the sector ambience when the player enters a sector with a different `SOUND`.
