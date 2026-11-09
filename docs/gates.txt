@@ -2731,3 +2731,30 @@ running app.--carry-check --start 01narshadda                        0   level 2
   audio gate **0 failure(s)** (both routes, retail within 0.12).
 - `cargo test --release`: **331 passed** (new `the_ai_switch_is_confined_to_a_replay_capture`).
 
+## Update — round 266 (final review: the level-boundary hand-off and the encounter identity)
+
+- `share_collider` now runs after `swap_level`, and `ai_shots` after it: a swap installs a fresh
+  runtime (`solids: None`) and a new `Collision`, so a hand-off that ran before the swap left that
+  frame's AI sight ray with no geometry. The order is swap -> hand-off -> AI tick. The behavioural
+  test `a_level_swap_hands_the_collider_over_before_the_ai_tick` drives the real `share_collider`
+  and `ai_shots` in one App frame against a wall between actor and player (the swap is a stand-in:
+  the real one reads the archives). Its control acquires the player through the wall with no
+  hand-off; the swapped-in runtime does not, and it holds the swapped-in collider record. The
+  source check now pins both constraints.
+- `encounter-gate.ps1` builds actor identity from every actor's first appearance on both traces,
+  not from the first tick: it walks the union of sample times and pairs the still-unpaired rows at
+  each sample by nearest position. An actor that walks into the sampling radius later is paired when
+  it appears, and a later retail-only actor no longer drops silently; any actor still unmatched
+  after the last sample fails with its first-seen time. Synthetic traces: a clean pair with a t=100
+  arrival passes (2 pairs); a retail-only t=200 arrival fails as `40@200 ms`; a port-only t=200
+  arrival fails as `300@200 ms`.
+- The audio branch's per-frame `BK_ORDER_TRACE` prints are removed; the documented `BK_AI_TRACE`
+  and `BK_PULSE_TRACE` traces stay.
+- `cargo test --release`: **332 passed**. Encounter gate **0 failure(s)** (57 identity pairs, 0
+  missing/extra; 13 shots/13 hits both sides, settled 14.3 vs retail 22.3). Route gate **0
+  failure(s)** (360 fields within 1e-6 against the port oracle, within 1.7 against retail). Audio
+  gate **0 failure(s)** (both routes, retail within 0.12). Walk-trace gate: **10 legs, 3 failures**
+  (`walk6_spawn`, `walk9_spawn`, `walk17_spawn`). All three reproduce with identical numbers on the
+  unmodified base (`5329822`, rebuilt in this worktree), so they are the branch's standing movement
+  gaps, not this change; `walk5_spawn` passes.
+

@@ -12755,7 +12755,9 @@ fn main() {
         .add_systems(
             Update,
             (
-                share_collider,
+                // A swap installs a fresh runtime whose `solids` is `None`; the hand-off has to
+                // follow it, or this frame's AI tick reads the fresh runtime as "nothing blocks".
+                share_collider.after(swap_level),
                 live_check,
                 enforce_mute,
                 grab_cursor,
@@ -12802,7 +12804,9 @@ fn main() {
                     // the sight test reads as "nothing blocks". Before this constraint the first tick
                     // of a level tested every actor's line against nothing, so the ones a wall or a
                     // body really hides acquired the player at t = 0 and shot at that memory forever
-                    // (level 1's door gunner 155 and `reeyeesbhgun` 153).
+                    // (level 1's door gunner 155 and `reeyeesbhgun` 153). A level swap installs a
+                    // fresh runtime, which is why the hand-off itself runs after `swap_level`: the
+                    // chain swap -> share -> AI is what makes the new level's first tick see walls.
                     ai_shots.after(share_collider),
                     play_requested_sounds,
                     music_follows_scripts,
@@ -21645,7 +21649,6 @@ fn deliver_crossed(
     mut last: Local<Option<Vec3>>,
     mut count: Option<ResMut<TriggerCount>>,
 ) {
-    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER deliver_crossed"); }
     let (Some(world), Some(sim), Some(player)) = (world, sim, player) else { return };
     let now = player.body.pos;
     let from = *last;
@@ -21782,7 +21785,6 @@ fn deliver_cog_messages(
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<TriggerCount>>,
 ) {
-    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER deliver_cog_messages"); }
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
     // The handle, not the field: `instances` is borrowed mutably for the whole loop and a scoring
     // verb borrows this same runtime.
@@ -21955,7 +21957,6 @@ fn resume_sleeping_labels(
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<PulseCount>>,
 ) {
-    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER resume_sleeping_labels"); }
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
     let mut resumed = 0usize;
     for (script_name, vm) in &mut sim.instances {
@@ -22006,7 +22007,6 @@ fn run_pulses_and_timers(capture: Option<Res<CaptureDt>>,
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<PulseCount>>,
 ) {
-    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER run_pulses_and_timers"); }
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
     let dt = sim_dt(&time, capture.as_deref());
     if dt <= 0.0 {
@@ -25767,7 +25767,6 @@ fn play_requested_sounds(
     cursor: Option<Res<RouteCursor>>,
     mut log: Option<ResMut<AudioLog>>,
 ) {
-    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER play_requested_sounds"); }
     let (Some(sim), Some(player), Some(bank)) = (sim, player, bank) else { return };
     let (requests, channel_volume, channel_pitch_of) = {
         let mut rt = sim.world.borrow_mut();
@@ -26100,7 +26099,6 @@ fn ai_shots(capture: Option<Res<CaptureDt>>,
     disabled: Option<Res<AiDisabled>>,
     mut encounter: Local<EncounterTrace>,
 ) {
-    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER ai_shots"); }
     // The route capture's `--no-ai`: retail runs the same route under `disableai`, so the AI tick
     // (and its encounter sampling) is skipped and the scripted movement is measured alone.
     if disabled.is_some_and(|d| d.0) { return; }
@@ -28357,7 +28355,6 @@ fn advance_sim(
     collisions: Option<Res<Collision>>,
     mut drawn: Query<&mut Transform>,
 ) {
-    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER advance_sim"); }
     let Some(mut sim) = sim else { return };
     let geometry = collisions.as_ref().map(|c| c.0.as_ref());
     let motion = sim
@@ -29818,13 +29815,142 @@ mod registration_tests {
     /// latches, so they then blind-fired at that spot for the whole encounter. That is level 1's
     /// door fight: actor 155's launch at t = 0 and `reeyeesbhgun` 153's three later hits, against
     /// retail's 13-hit cadence from the one gunner with a clear line.
+    ///
+    /// A level swap opens the same window: `swap_level` installs a fresh runtime (`solids: None`)
+    /// and a new collider record in the same frame, so the hand-off has to follow the swap and the
+    /// AI tick has to follow both. The behavioural check below drives that frame; this one keeps
+    /// the constraints themselves from drifting out of the schedule.
     #[test]
     fn the_ai_tick_runs_after_the_collider_hand_off() {
         let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
             .expect("the source this test lives in");
         assert!(
+            source.contains("share_collider.after(swap_level)"),
+            "the collider hand-off is unordered with a level swap: the swap's fresh runtime reaches the AI tick with no geometry"
+        );
+        assert!(
             source.contains("ai_shots.after(share_collider)"),
             "ai_shots is unordered with share_collider: the first AI tick of a level tests sight against no geometry"
+        );
+    }
+
+    /// The same invariant, driven rather than read: a level swap installs a fresh runtime and a
+    /// fresh collider record, the hand-off follows, and the AI tick follows both. `share_collider`
+    /// and `ai_shots` are the real systems; only the swap is a local stand-in, because the real
+    /// `swap_level` reads the archives.
+    ///
+    /// The control at the top is what makes the wall meaningful: with no hand-off the actor does
+    /// acquire the player through it, which is the first-tick bug.
+    #[test]
+    fn a_level_swap_hands_the_collider_over_before_the_ai_tick() {
+        use std::sync::Arc;
+
+        fn walled_level() -> jkl::Level {
+            let mut level = jkl::Level::default();
+            let template = |name: &str, base: Option<&str>, params: Vec<(&str, &str)>| jkl::Template {
+                name: name.into(),
+                base: base.map(str::to_string),
+                params: params.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+                model3d: None,
+                sprite: None,
+            };
+            level.templates.push(template("walkplayer", None, vec![("type", "player")]));
+            level.templates.push(template("_actor", None, vec![("type", "actor"), ("health", "50")]));
+            level.templates.push(template("tuskan", Some("_actor"), Vec::new()));
+            let thing = |template_name: &str, pos: [f32; 3]| jkl::Thing {
+                template: template_name.into(),
+                pos,
+                pitch: 0.0,
+                yaw: 0.0,
+                roll: 0.0,
+                sector: 0,
+                flags: 0,
+                frames: Vec::new(),
+                vel: [0.0; 3],
+                aiclass: None,
+            };
+            // Player at the origin, actor 1.5 units out on +X: inside the 2-unit detection floor,
+            // so a clear line is the only thing that decides whether the actor acquires.
+            level.things.push(thing("walkplayer", [0.0; 3]));
+            level.things.push(thing("tuskan", [1.5, 0.0, 0.0]));
+            level
+        }
+
+        fn wall_geometry() -> collide::LevelGeometry {
+            let mut geometry = collide::LevelGeometry::default();
+            geometry.walls.push(collide::Face {
+                normal: [1.0, 0.0, 0.0],
+                point: [0.75, 0.0, 0.0],
+                verts: vec![
+                    [0.75, -1.0, -1.0],
+                    [0.75, 1.0, -1.0],
+                    [0.75, 1.0, 1.0],
+                    [0.75, -1.0, 1.0],
+                ],
+                surface: 0,
+            });
+            geometry
+        }
+
+        fn fresh_sim(level: &jkl::Level) -> Sim {
+            let world = runtime::Runtime::handle(level);
+            // The level's scripts attach the actor's instinct class; this fixture has no archives,
+            // so the class goes on directly. `fov=180` keeps the cone out of the test.
+            world
+                .borrow_mut()
+                .ai
+                .insert(1, ai::parse("alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n"));
+            Sim {
+                world,
+                instances: Vec::new(),
+                entities: HashMap::new(),
+                elapsed: 0.0,
+                reported: 0.0,
+                escaped: std::collections::HashSet::new(),
+            }
+        }
+
+        // Control: a fresh runtime with no hand-off sees through the wall, which is what the first
+        // tick of a level did before `share_collider`, and what a swap's window exposed.
+        {
+            let world = fresh_sim(&walled_level()).world;
+            let mut rt = world.borrow_mut();
+            rt.ai_tick(0, 1.0 / 30.0);
+            assert!(
+                rt.ai_detected.contains(&1),
+                "the control did not see through the wall, so the wall proves nothing"
+            );
+        }
+
+        // One frame, in the production order: swap, hand-off, AI tick. The swap installs the same
+        // two things `swap_level` does: a fresh runtime and a fresh collider record.
+        fn level_swap(mut sim: ResMut<Sim>, mut commands: Commands) {
+            *sim = fresh_sim(&walled_level());
+            commands.insert_resource(Collision(Arc::new(wall_geometry())));
+        }
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(CaptureDt(Some(1.0 / 30.0)))
+            .insert_resource(Collision(Arc::new(wall_geometry())))
+            .insert_resource(fresh_sim(&walled_level()))
+            .add_systems(
+                Update,
+                (level_swap, share_collider.after(level_swap), ai_shots.after(share_collider)),
+            );
+        app.update();
+        let sim = app.world().resource::<Sim>();
+        let collider = Arc::clone(&app.world().resource::<Collision>().0);
+        assert!(
+            sim.world
+                .borrow()
+                .solids
+                .as_ref()
+                .is_some_and(|solids| Arc::ptr_eq(solids, &collider)),
+            "the hand-off did not give the swapped-in runtime the swapped-in collider"
+        );
+        assert!(
+            !sim.world.borrow().ai_detected.contains(&1),
+            "the first AI tick after a level swap saw through the wall: the hand-off ran too late"
         );
     }
 }
