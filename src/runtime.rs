@@ -11165,7 +11165,7 @@ mod tests {
     #[test]
     fn damage_and_scripts_add_to_one_decaying_palette_tint() {
         let mut rt = door_runtime();
-        // 20 damage adds 0.8 of red — before the shields are spent, as the engine's call is.
+        // 20 damage adds 0.8 of red — before the bar takes any of it, as the engine's call is.
         rt.damage_player(20.0, 0);
         assert!((rt.tint[0] - 0.8).abs() < 1e-5, "tint {:?}", rt.tint);
         // A script adds its own channels: red clamps at 1.0, blue at 0.5, and it is an add.
