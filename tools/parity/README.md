@@ -244,8 +244,11 @@ measurable (Phase 1 step 3's exit criterion). Three scripts and two fixtures:
 - Add `-UseAfterWalk <key>` to fire the player's own action binding after the walk and before the
   post-walk console read (`SPACE` is the profile's ACTIVATE binding; `MOUSEMIDDLE` is its mouse
   alternative; `-UseKey` changes the route plan's `use` key too). `walk_exitdoor` uses it at the
-  authored placement 174: the walk stops at the shut door, the hold opens it through `00_door.cog`,
-  and `-ConsoleCommands 'cogstatus 0'` records `doorstatus`/`movestatus`.
+  authored placement 174 with the intent that the walk stops at the shut door and the hold opens it
+  through `00_door.cog`, with `-ConsoleCommands 'cogstatus 0'` recording `doorstatus`/`movestatus`.
+  That intent is **unverified in retail**: every run so far recorded `doorstatus 0`/`movestatus 0`
+  and no crossing (`docs/gaps.md`, round 268), so no retail trace with the door open exists and
+  issue #15's retail acceptance stays blocked.
 - `port-trace.ps1 [-Only <name>]` - the port half: `--warp` to the same pose, `BK_WALK_FORWARD=1`,
   one line per 1/60 s frame, output `target/parity/trace/<name>.tsv`.
 - `trace-compare.ps1 -Name <name> [-Epsilon <units>]` - interpolates the port path to the retail sample
@@ -371,7 +374,9 @@ tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
   both bars per hold segment, so the committed reference has real values here.
 - `door0_*` and `switch_*` are placed cogs 0 (`00_door.cog`) and 11 (`00_doorswitch.cog`), four
   symbols each (`doorstatus`, `movestatus`, and the script's own open/close variables), read with
-  `cogstatus` at every retail sample and from the running VM in the replay. Level 1 has both cogs, so
+  `cogstatus` once per leg end in the retail capture (plus after every `warp`; the dev-console read
+  is the fragile part of a long capture, so the rows between reads carry the last leg-end value) and
+  from the running VM on every replay row. Level 1 has both cogs, so
   every field is present; the gate rejects any `-` (the comparator would skip it and measure the
   position columns only).
 - `door0_opened` and `goal_bin100` are **events**, and the rule is different from the other columns:
@@ -384,7 +389,8 @@ tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
   disagreement on an intermediate row is ignored, a missing cell or a different final value fails.
   The gate also proves the trigger is real: the plan must press the player's use binding (never the
   removed synthetic `switch`), the replay log must name things 4 and 47, and `door0_opened` must be 0
-  on every row up to and including the first use tick.
+  on every row strictly before the first use tick; the use-tick row is sampled before the key press
+  and must also read 0.
 
 A **leg boundary is a `warp`**, not a walk: the retail reference is four separate per-leg captures
 from the level's own authored placements, so the route is the same four walks. Issue #10 fixed what
@@ -396,21 +402,21 @@ the walker climbs — so the legs hold retail's sectors and vertical travel.
 The reference's **bars and cogs come from one continuous retail run**, not four independent leg
 captures: `retail-capture.ps1 -Shots tools/parity/shots.tsv -Only spawn -RouteWalk` reads this same
 route script and runs every leg in one game session (a `warp` between legs, a 600 ms forward hold per
-segment), sampling the bars from engine memory at every segment end. Four per-leg runs each started
-from a fresh level load with their own pre-warp damage, so their bars could not be compared with the
-port's continuous replay. **Both sides capture with the AI off**: the retail walk sets the
-`-devMode` toggles `disableai on` and `noaishots on` (explicitly, and again after every warp, since
-they toggle), and the port's replay passes `--no-ai` (a capture switch that requires `--replay`). The
-route measures movement and cog state, so the cantina ambush is not part of it: it used to kill
-retail's player (100/100 to 0/0 between ticks 180 and 252) while the port survived, which made every
-later bar a guaranteed mismatch. Combat parity is the door encounter's job, and ordinary play keeps
-the AI.
+segment), sampling the bars from engine memory on every row and the cogs once per leg end. Four
+per-leg runs each started from a fresh level load with their own pre-warp damage, so their bars could
+not be compared with the port's continuous replay. **Both sides capture with the AI off**: the
+retail walk sets the `-devMode` toggles `disableai on` and `noaishots on` (explicitly, and again
+after every warp, since they toggle), and the port's replay passes `--no-ai` (a capture switch
+that requires `--replay`). The route measures movement and cog state, so the cantina ambush is not
+part of it: it used to kill retail's player (100/100 to 0/0 between ticks 180 and 252) while the
+port survived, which made every later bar a guaranteed mismatch. Combat parity is the door
+encounter's job, and ordinary play keeps the AI.
 
 **The exit segment (issue #15)** appends the level's own way to 8t88 to those four legs:
 
 | leg | pose | what it measures |
 |---|---|---|
-| `exit_door` | placement 174, eye `(1.400084, 9.700065, 6.357114)`, yaw 90 | one 36-tick hold walks from the placement to the shut portal (the port stops at `x 1.2775`, sector 76; the door is thing 4 at `(1.200002, 9.650073, 6.35)` in sector 74). The `use` row then presses the binding; from that stop the eye is 0.086 from the door origin, inside the engine's `moveSize + 0.1 = 0.165` sweep. `00_door.cog` flips the sector-74 adjoin and opens the leaf; the next sample is `x 0.890`, sector 210 — the crossing. |
+| `exit_door` | warp to the retail stop pose `1.280000, 9.620000, 6.357114`, yaw 105 (eye in sector 60; retail's walk from placement 174 stops here) | `use` presses the binding; the eye is 0.086 from the door origin (thing 4 at `(1.200002, 9.650073, 6.35)` in sector 74), inside the engine's `moveSize + 0.1 = 0.165` sweep. `00_door.cog` opens the leaf: `door0_opened` reads 0 at the use tick 684 and 1 from tick 720. The body stays in sector 60 through `wait 72` and `input 72`; the leg ends with the `warp` to `exit_upper` at tick 828 (sector 431). |
 | `exit_upper` | placement 175 (body `-2.519, 11.001, 6.72`) | the corridor/ramp side of the upper route. |
 | `exit_low` | placement 176 (body `-6.15, 9.65, 4.32`) | the low floor east of the 385 ramp. |
 | `exit_tunnel` | tunnel mouth `(-4.05, 12.0, 4.32)`, sector 407 | `use` on the one-way door (thing 47 at `-4.05, 13.95, 4.375`; `00_1waydoor.cog` opens for a body inside 407), then the hold crosses 407 -> 223 -> 229 -> 215 and the renderer sights 8t88. |

@@ -158,6 +158,7 @@ foreach ($line in Get-Content -LiteralPath $RoutePath) {
   $f = $line -split "`t"
   switch ($f[0]) {
     'input' { $planTicks += [int]$f[1] }
+    'wait' { $planTicks += [int]$f[1] }
     'use' { $planUses.Add($planTicks) }
     'switch' { $planSwitch = $true }
   }
@@ -177,8 +178,9 @@ foreach ($needle in 'use: activated thing 4', 'use: activated thing 47') {
     exit 1
   }
 }
-# The trace's own shape: the door is shut on every row up to and including the first use tick (the
-# port samples that row before the key system runs), and the run ends with both events complete.
+# The trace's own shape: the door is shut on every row strictly before the first use tick, and the
+# use-tick row is sampled before the key press so it must read shut too; the run ends with both
+# events complete.
 $traceLines = @(Get-Content -LiteralPath $runA | Where-Object { $_ -notmatch '^\s*(#|$)' })
 $traceHeader = @($traceLines[0] -split "`t")
 $tickCol = [Array]::IndexOf($traceHeader, 'tick')
@@ -194,11 +196,11 @@ $lastCells = $null
 foreach ($line in $traceLines | Select-Object -Skip 1) {
   $cells = @($line -split "`t")
   $lastCells = $cells
-  # The row at the use tick is the first sample after the press, so it may already read open; every
-  # row strictly before the press must be shut. A synthetic trigger that set the cog state early
-  # shows `1` before the use tick and fails here.
-  if ([int]$cells[$tickCol] -lt $firstUse -and $cells[$doorCol] -ne '0') {
-    Write-Host ("FAIL  anti-synthetic: door0_opened is {0} at tick {1}, before the use tick {2}" -f $cells[$doorCol], $cells[$tickCol], $firstUse)
+  # The use-tick row is sampled before the key press, so it must also read shut; every row strictly
+  # before it must be shut. A synthetic trigger that set the cog state early shows `1` at or before
+  # the use tick and fails here.
+  if ([int]$cells[$tickCol] -le $firstUse -and $cells[$doorCol] -ne '0') {
+    Write-Host ("FAIL  anti-synthetic: door0_opened is {0} at tick {1}, at or before the use tick {2}" -f $cells[$doorCol], $cells[$tickCol], $firstUse)
     exit 1
   }
   if ($cells[$doorCol] -eq '1') { $sawOpen = $true }
