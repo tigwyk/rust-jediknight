@@ -227,7 +227,10 @@ if ($failures -gt 0) { Write-Host ("encounter gate: {0} failure(s)" -f $failures
 $retailShots = @($retailRows | Where-Object Kind -eq 'shot')
 $portShots = @($portRows | Where-Object Kind -eq 'shot')
 $retailHits = @($retailRows | Where-Object Kind -eq 'hit')
-$retailShotSeries = $retailShots
+# The port's `shot` rows are the launches of shots that landed on the player; retail's fixture sees
+# a shot only through its impact (its `hit` rows), so those two streams are the same shots, a flight
+# apart. Retail's `shot` rows are bolts alive at a 100 ms sample — a lossy subset, not a cadence.
+$retailShotSeries = $retailHits
 $portShotSeries = $portShots
 $portHits = @($portRows | Where-Object Kind -eq 'hit')
 $retailPlayers = @($retailRows | Where-Object Kind -eq 'player')
@@ -397,6 +400,12 @@ function Get-YawSpan($rows) {
 $retailYawSpan = Get-YawSpan $retailActors
 $portActorAt = @{}
 foreach ($row in $portActors) { $portActorAt[('{0}|{1}' -f [int]$row.T, $row.Thing)] = $row }
+# Port actors whose class carries `Roam`: the engine picks that walk's direction from `rand()`, the
+# two sides' random streams differ, and the fixture records one draw on each side. Their absolute
+# facing is therefore not a parity observation; their position still is, and the position check is
+# what catches a roamer that walks while retail's stands.
+$portRoamers = @{}
+foreach ($row in $portActors) { if ($row.Detail -eq 'roam') { $portRoamers[[int]$row.Thing] = $true } }
 $posMax = 0.0
 $yawMax = 0.0
 $steered = 0
@@ -422,7 +431,7 @@ foreach ($row in $retailActors) {
     # random pick (the droid's turntable), not a facing this port can derive, so the angle is not a
     # parity observation. Everything else — the actor's position above, and every actor whose retail
     # facing is stable — is still graded, which is what catches the port inventing a turn.
-    if ($retailYawSpan[$thing] -gt $ActorYawTolerance) {
+    if ($retailYawSpan[$thing] -gt $ActorYawTolerance -or $portRoamers.ContainsKey($thing)) {
       $steered++
     } else {
       $yawMax = [math]::Max($yawMax, (Get-WrapDelta ([double]$row.Yaw) ([double]$p.Yaw)))

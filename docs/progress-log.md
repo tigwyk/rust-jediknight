@@ -6332,3 +6332,38 @@ acquired-actor list.
 Measured: `cargo test` **315 passed, 0 failed** on the merged tree (313 before #12 merged; new here:
 the engine-basis cone, the first-tick fire on an already-aimed actor, and the placement
 `aiclass=`), `--ai` passes. `--encounter` traces are in `target/parity/encounter/`.
+
+### Round 431: AI engagement timing (#11) — the door gate passes
+
+Issue #11 measured the door gunner against #9's fixture. Three timing defects, each reproduced
+before the fix and re-measured after:
+
+- **The port's `shot` rows were the wrong observation.** Retail's memory reader can only see a bolt
+  that exists at a 100 ms sample, so its `shot` rows are a lossy subset and a fired bolt that died
+  between samples never appeared. The runtime now records each projectile's launch time by thing
+  index and queues a `ShotLanded` event when that shot damages the player; the trace writes the
+  `shot` row from that launch, and the gate pairs retail's **`hit`** times (the impact) with the
+  port's launches. Both sides now count 13 shots, 13 hits; the per-shot delta is the flight,
+  mean 167 ms, max 300 ms (tolerance 1,000).
+- **The intro freeze ate the first two bolts.** `kyle.cog`'s `init_kyle` sets
+  `SetActorFlags(player, 8)` at load and a 1.5 s timer clears it. Retail's capture starts after the
+  level has settled, so its player is damageable at t=0; the port warped in at load, swallowed the
+  gunner's shots at 0.02 s and 0.75 s, and reported its first hit at 817 ms against retail's 300.
+  The capture now starts the body damageable (`AF_INVULNERABLE` cleared when `BK_ENCOUNTER_OUT` is
+  set), which is the condition the fixture measures.
+- **The window was 100 ms longer than the fixture.** Retail's loop stops at the first sample whose
+  elapsed time reaches 10 s, so its last row is 9,900 ms; the port ran 600 frames (10,000 ms) and
+  caught one more shot (the 14th at 9,950 ms, and an extra 12-damage hit), which moved the settled
+  health. The fixture row now runs 594 frames (9.9 s).
+- **Roamer facings.** The port trace marks an actor whose class carries `Roam` in the actor row's
+  `detail`; the gate skips that actor's absolute yaw (the engine draws the roam direction from the
+  shared `rand()` stream, which two sides cannot reproduce) and still grades its position. The
+  remaining yaw delta is 14.8° (limit 30°) and position 1.32 units (limit 1.50).
+
+`pwsh -File tools/parity/encounter-gate.ps1`: **0 failures**. Repeatability exact; duration 9,900 vs
+9,900 ms; shot count 13/13, timing max 300 ms; hit count 13/13, timing max 283 ms; per-hit damage
+max dH 8.0 / dS 4.1 (tolerances 10/10); settled health 14.3 vs 22.3, shields 0 vs 0; actor
+position 1.32 units, yaw 14.8°.
+
+`cargo test`: 316 passed, 0 failed. `--ai`, `--ai-live`, `--goal`, `--walk all` unchanged (the
+runtime changes are the shot-launch bookkeeping and the capture-only freeze clear).

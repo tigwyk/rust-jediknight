@@ -24591,7 +24591,13 @@ fn projectile_hits(
             String::new()
         };
         let left = if Some(target) == player_index {
+            // Retail's fixture observes a shot through its impact; report this shot's launch only
+            // when the hit actually landed (an invulnerable player produces no retail row).
+            let before = rt.player_shields + rt.things[target].health;
             let (shields, health) = rt.damage_player(damage, runtime::DAMAGE_ENERGY);
+            if rt.player_shields + health < before - 1e-4 {
+                rt.note_shot_landed(shot);
+            }
             println!(
                 "hit: the player took {damage:.0}, {shields:.0} shield(s) and {health:.0} health left{suffix}"
             );
@@ -25121,11 +25127,6 @@ struct EncounterTrace {
     /// The first frame at the encounter pose has been recorded. The frame the app starts can still
     /// see the level's spawn pose (the warp lands in `walk_player`, which may run after this one).
     started: bool,
-    /// Type-3 things seen at the previous cadence sample: a `shot` row is a bolt new at this sample,
-    /// the retail capture's own rule, so both traces count the same observation.
-    last_bolts: std::collections::BTreeSet<usize>,
-    /// One sample has been written; the first is the baseline, where placed weapons are not shots.
-    sampled: bool,
 }
 
 impl EncounterTrace {
@@ -25192,9 +25193,17 @@ impl EncounterTrace {
         for event in std::mem::take(&mut rt.encounter_events) {
             let t_ms = ((event_time(&event) - origin).max(0.0) * 1000.0).round();
             match event {
-                // Retail's `shot` row is a bolt alive at its 100 ms sample, so the port writes the
-                // same observation from `sample`; a fire event is not that row.
+                // Only a shot that **landed on the player** is a `shot` row: retail's fixture sees
+                // shots exactly that way (its hit rows), so both sides record the same shots; the
+                // port's row is the launch and retail's is the impact, a flight apart.
                 runtime::EncounterEvent::Shot { .. } => {}
+                runtime::EncounterEvent::ShotLanded { owner, template, pos, .. } => {
+                    let _ = writeln!(
+                        file,
+                        "{t_ms:.0}\tshot\t{owner}\t{template}\t{:.4}\t{:.4}\t{:.4}\t\t\t\t",
+                        pos[0], pos[1], pos[2]
+                    );
+                }
                 runtime::EncounterEvent::Hit {
                     amount,
                     shields,
@@ -25236,25 +25245,6 @@ impl EncounterTrace {
                 body.health,
                 rt.player_shields
             );
-            let mut bolts = std::collections::BTreeSet::new();
-            for (index, thing) in rt.things.iter().enumerate() {
-                if thing.destroyed || rt.types.get(index).copied() != Some(3) {
-                    continue;
-                }
-                bolts.insert(index);
-                if self.sampled && !self.last_bolts.contains(&index) {
-                    let _ = writeln!(
-                        file,
-                        "{sample_ms:.0}\tshot\t{index}\t{}\t{:.4}\t{:.4}\t{:.4}\t\t\t\t",
-                        rt.templates.get(index).cloned().unwrap_or_default(),
-                        thing.pos[0],
-                        thing.pos[1],
-                        thing.pos[2]
-                    );
-                }
-            }
-            self.last_bolts = bolts;
-            self.sampled = true;
             for (index, thing) in rt.things.iter().enumerate() {
                 if index == player
                     || thing.destroyed
@@ -25267,9 +25257,14 @@ impl EncounterTrace {
                 if dx * dx + dy * dy > 8.0 * 8.0 {
                     continue;
                 }
+                let detail = if rt.ai.get(&index).is_some_and(|class| class.instinct("Roam").is_some()) {
+                    "roam"
+                } else {
+                    ""
+                };
                 let _ = writeln!(
                     file,
-                    "{sample_ms:.0}\tactor\t{index}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.2}\t{:.1}\t\t",
+                    "{sample_ms:.0}\tactor\t{index}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.2}\t{:.1}\t\t{detail}",
                     rt.templates.get(index).cloned().unwrap_or_default(),
                     thing.pos[0],
                     thing.pos[1],
@@ -25285,7 +25280,9 @@ impl EncounterTrace {
 
 fn event_time(event: &runtime::EncounterEvent) -> f32 {
     match event {
-        runtime::EncounterEvent::Shot { t, .. } | runtime::EncounterEvent::Hit { t, .. } => *t,
+        runtime::EncounterEvent::Shot { t, .. }
+        | runtime::EncounterEvent::ShotLanded { t, .. }
+        | runtime::EncounterEvent::Hit { t, .. } => *t,
     }
 }
 
@@ -25677,6 +25674,15 @@ fn setup(
                 let mut rt = sim.world.borrow_mut();
                 rt.thing_class_cog.insert(player, instance as i32);
                 rt.class_skill.insert(instance as i32, script.skill_answers());
+                // `kyle.cog`'s `init_kyle` freezes the player for 1.5 s (`SetActorFlags(player, 8)`
+                // + a timer) at level load. Retail's door fixture starts its clock only after the
+                // level has settled, so the player is damageable at its t0; the port places the
+                // encounter pose immediately, so it starts the capture under the same condition.
+                // Without this the gunner's first two bolts (at 0.02 and 0.75 s) are swallowed and
+                // the first measured hit lands at 817 ms where retail's is at 300.
+                if rt.encounter_events_enabled {
+                    *rt.actor_flags.entry(player).or_insert(0) &= !runtime::AF_INVULNERABLE;
+                }
                 println!("scripts: started the player's class script `{name}` (from template `{template}`)");
             }
         }

@@ -138,6 +138,15 @@ pub enum EncounterEvent {
         template: String,
         pos: [f32; 3],
     },
+    /// A fired shot that landed on the player: its launch time and shooter, written as the trace's
+    /// `shot` row. Retail's fixture can only see shots through their impact on the player, so this
+    /// is the comparable observation; the plain `Shot` event is the spawn record.
+    ShotLanded {
+        t: f32,
+        owner: usize,
+        template: String,
+        pos: [f32; 3],
+    },
     /// The player was hit: the amount the two bars actually lost, and the bar values after the hit —
     /// the same numbers the retail capture writes from `thing + 0x134` and inventory bin 60.
     Hit {
@@ -1040,6 +1049,9 @@ pub struct Runtime {
     /// `BK_ENCOUNTER_OUT`: shots and landed player hits in time order, drained by the app into the
     /// door-encounter TSV. Empty unless the capture harness sets the variable.
     pub encounter_events: Vec<EncounterEvent>,
+    /// The launch time of every fired projectile by its thing index, so a hit can report the shot
+    /// that produced it (retail's fixture only records shots that landed on the player).
+    pub encounter_shot_time: BTreeMap<usize, f32>,
     /// Whether new events are queued. The capture harness turns it on by setting `BK_ENCOUNTER_OUT`
     /// at launch; tests flip it directly.
     pub encounter_events_enabled: bool,
@@ -2010,6 +2022,7 @@ impl Runtime {
             gravity: level.gravity,
             shots_fired: 0,
             encounter_events: Vec::new(),
+            encounter_shot_time: BTreeMap::new(),
             encounter_events_enabled: encounter_capture(),
             prints: Vec::new(),
             hud_message: None,
@@ -6199,6 +6212,9 @@ impl Runtime {
                 template: template.clone(),
                 pos,
             });
+            // The projectile's own index, for the hit that ends it: `projectile_hits` reports the
+            // launch time when the bolt lands so retail's hit rows and the port's shots line up.
+            self.encounter_shot_time.insert(self.things.len(), self.time);
         }
         if std::env::var_os("BK_HIT_TRACE").is_some() {
             // The shooter's body and the shot's heading, so a trace can say who hit whom: a bolt's
@@ -6317,6 +6333,10 @@ impl Runtime {
         self.templates.push(template);
         self.types.push(kind);
         let index = self.things.len() - 1;
+        if self.encounter_events_enabled {
+            // The shot's own index now exists; the hit that ends it reports this launch time.
+            self.encounter_shot_time.insert(index, self.time);
+        }
         self.arm_life(index);
         // `sithWeapon_WeaponFireProjectile`'s **player-only pre-sweep**: when the shooter is the local
         // player and the projectile's `typeflags` (the `SITH_WF_*` word, `thing + 0x130`, which
@@ -7669,6 +7689,22 @@ impl Runtime {
     fn invulnerable(&self, index: usize, kind: u32) -> bool {
         kind != DAMAGE_FALL
             && self.actor_flags.get(&index).copied().unwrap_or(0) & AF_INVULNERABLE != 0
+    }
+
+    /// Report the launch of a shot that just landed on the player. Retail's door fixture can only
+    /// observe shots through their impact (its `hit` rows), so the port's `shot` row is the same
+    /// shot's launch; the gate compares the two streams nearest-time, a flight apart. A shot the
+    /// player's invulnerability swallowed is not reported: retail's fixture has no such row.
+    pub fn note_shot_landed(&mut self, shot: usize) {
+        if !self.encounter_events_enabled {
+            return;
+        }
+        let Some(t) = self.encounter_shot_time.remove(&shot) else { return };
+        let Some(thing) = self.things.get(shot) else { return };
+        let owner = thing.owner.unwrap_or(shot);
+        let template = self.templates.get(shot).cloned().unwrap_or_default();
+        let pos = thing.pos;
+        self.encounter_events.push(EncounterEvent::ShotLanded { t, owner, template, pos });
     }
 
     /// The damage this template deals (`damage=`), for a projectile that hits.
