@@ -12725,6 +12725,7 @@ fn main() {
         .insert_resource(SpriteDemo(sprite_template))
         .insert_resource(Look(look))
         .insert_resource(Ambience::default())
+        .insert_resource(LoopPlayers::default())
         .insert_resource(PlaySound(play_sound))
         .insert_resource(Deliver(sim))
         .insert_resource(ClearColor(Color::srgb(0.02, 0.02, 0.03)))
@@ -12807,7 +12808,8 @@ fn main() {
                         .after(route_replay)
                         .after(walk_player)
                         .after(play_requested_sounds)
-                        .after(music_follows_scripts),
+                        .after(music_follows_scripts)
+                        .before(ambient_follows_view),
                     queue_next_level,
                 )
                     .run_if(no_screen_open),
@@ -12824,6 +12826,7 @@ fn main() {
             )
                 .run_if(no_screen_open),
         )
+        .add_systems(Update, (play_script_loops.after(play_requested_sounds),).run_if(no_screen_open))
         .add_systems(Update, palette_tint_pass.run_if(no_screen_open))
         .add_systems(Update, save_probe.before(quick_save).run_if(no_screen_open))
         .add_systems(Update, save_slots_probe)
@@ -16807,12 +16810,16 @@ fn audio_trace_sample(
     out: Option<Res<AudioTraceOut>>,
     cursor: Option<Res<RouteCursor>>,
     player: Option<Res<Player>>,
-    world: Option<Res<World>>,
     sim: Option<Res<Sim>>,
+    ambience: Option<Res<Ambience>>,
+    collisions: Option<Res<Collision>>,
+    world: Option<Res<World>>,
+    cams: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+    mut last_sector: Local<Option<usize>>,
     mut log: Option<ResMut<AudioLog>>,
 ) {
-    let (Some(replay), Some(cursor), Some(out), Some(player), Some(world), Some(sim)) =
-        (replay, cursor, out, player, world, sim)
+    let (Some(replay), Some(cursor), Some(out), Some(player), Some(sim)) =
+        (replay, cursor, out, player, sim)
     else {
         return;
     };
@@ -16825,23 +16832,78 @@ fn audio_trace_sample(
     if tick % ROUTE_SAMPLE_TICKS != 0 {
         return;
     }
-    let (music, music_volume, override_sound) = {
+    let (music, music_volume, loops) = {
         let rt = sim.world.borrow();
-        (
-            rt.music,
-            rt.music_volume,
-            rt.sector_ambient.get(&(player.body.sector as i32)).cloned(),
-        )
+        (rt.music, rt.music_volume, rt.sound_loops.clone())
     };
-    // The same rule `ambient_follows_view` uses: a script's `SectorSound` override wins over the
-    // sector's own `SOUND` row.
-    let ambient = override_sound.or_else(|| {
-        world
-            .level
-            .sectors
-            .get(player.body.sector)
-            .and_then(|s| s.sound.clone())
+    // Retail's capture reads the mixer's loop channels: a sector `SOUND` loop the body has entered,
+    // and the positional loops scripts start (`00_PlayAmbient.cog`'s `00rumbleamb01.wav`). It reports
+    // the loudest by mixer gain, `volume * (1 - fade) * 0.75`, and the channel's own volume.
+    let listener = [
+        player.body.pos.x,
+        player.body.pos.y,
+        player.body.pos.z + PLAYER_RADIUS,
+    ];
+    // The sample grid lands one frame after a console `warp`; retail's row on that grid point still
+    // names the room being left, so this sample uses the *previous* frame's sector.
+    let leaving = last_sector.unwrap_or(player.body.sector);
+    *last_sector = Some(player.body.sector);
+    // Retail mixes a 3D sound only while its source is in the active sector set: the bar's
+    // `00rumbleamb01` (a positional loop on thing 220) is silent at the level start and audible once
+    // the player reaches the bar. Portal reachability from the player's sector is that set's safe half.
+    let visible: Option<Vec<usize>> = collisions.as_ref().map(|c| {
+        let rt = sim.world.borrow();
+        drawn_sectors(&c.0, rt.gates(), player.body.sector, &cams)
     });
+    let mut ambient: Option<(String, f32)> = None;
+    // Retail starts from a zero gain and only replaces it when a loop is **audible**; a positional
+    // loop beyond its `maxDist` is silent and does not name the ambience (`00rumbleamb01` at spawn).
+    let mut best = 0.0f32;
+    if let Some((name, volume, _)) = ambience.as_ref().and_then(|a| a.playing.clone()) {
+        let gain = volume.clamp(0.0, 1.0) * 0.75;
+        if gain > best {
+            best = gain;
+            ambient = Some((name, volume));
+        }
+    }
+    for l in &loops {
+        if let (Some(visible), Some(p)) = (visible.as_ref(), l.pos) {
+            let source = collisions.as_ref().and_then(|c| c.0.sector_at(p, 0.2));
+            if !source.is_some_and(|s| visible.contains(&s)) {
+                continue;
+            }
+        }
+        let fade = match l.pos {
+            Some(p) if l.max_radius > l.min_radius => {
+                let d = ((p[0] - listener[0]).powi(2)
+                    + (p[1] - listener[1]).powi(2)
+                    + (p[2] - listener[2]).powi(2))
+                .sqrt();
+                ((d - l.min_radius) / (l.max_radius - l.min_radius)).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        let gain = (l.volume * (1.0 - fade)).clamp(0.0, 1.0) * 0.75;
+        if gain > best {
+            best = gain;
+            ambient = Some((l.name.clone(), l.volume));
+        }
+    }
+    if ambient.is_none()
+        && let Some(world) = world.as_ref()
+    {
+        let declared = sim.world.borrow().sector_ambient.get(&(leaving as i32)).cloned();
+        let declared = declared.or_else(|| {
+            world
+                .level
+                .sectors
+                .get(leaving)
+                .and_then(|s| s.sound.clone())
+        });
+        if let Some((name, volume)) = declared {
+            ambient = Some((name, volume));
+        }
+    }
     let sounds: Vec<(u32, String, f32)> = log
         .as_mut()
         .map(|log| std::mem::take(&mut log.played))
@@ -20479,6 +20541,46 @@ fn sphere_in_frustum(planes: &[[f32; 4]; 6], centre: Vec3, radius: f32) -> bool 
     planes.iter().all(|p| p[0] * centre.x + p[1] * centre.y + p[2] * centre.z + p[3] >= -radius)
 }
 
+/// Is a portal's polygon in front of the eye and on screen? `sithRender_SectorPortals` admits the
+/// room behind a doorway only while the doorway itself is on screen. The audio cull reuses the same
+/// rule: retail mixes a 3D sound only while its source room is drawn, which is why the bar's
+/// `00rumbleamb01` positional loop is silent from the level's spawn corridor.
+fn doorway_on_screen(clip_from_world: Mat4, verts: &[[f32; 3]]) -> bool {
+    let (mut in_front, mut min_x, mut max_x, mut min_y, mut max_y) =
+        (false, f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for v in verts {
+        let p = clip_from_world * Vec4::new(v[0], v[1], v[2], 1.0);
+        if p.w <= 0.0 {
+            continue;
+        }
+        in_front = true;
+        let (x, y) = (p.x / p.w, p.y / p.w);
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    in_front && max_x >= -1.0 && min_x <= 1.0 && max_y >= -1.0 && min_y <= 1.0
+}
+
+/// The rooms retail would have drawn from `seed`: the portal walk, with each doorway admitted only
+/// while it is on screen. Falls back to the unfiltered walk when there is no camera.
+fn drawn_sectors(
+    solids: &collide::LevelGeometry,
+    gates: collide::Gates<'_>,
+    seed: usize,
+    cams: &Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+) -> Vec<usize> {
+    let clip = cams
+        .iter()
+        .find(|(camera, _, _)| camera.order == 0)
+        .map(|(camera, transform, _)| camera.clip_from_view() * Mat4::from(transform.affine().inverse()));
+    match clip {
+        Some(clip) => solids.visible_sectors(&[seed], gates, &mut |verts| doorway_on_screen(clip, verts)),
+        None => solids.visible_sectors(&[seed], gates, &mut |_| true),
+    }
+}
+
 fn cull_sectors(
     on: Option<Res<Cull>>,
     view: Option<Res<SectorView>>,
@@ -20727,7 +20829,12 @@ fn cull_sectors(
 #[derive(Resource, Default)]
 struct Ambience {
     sources: HashMap<String, Handle<AudioSource>>,
-    playing: Option<(String, Entity)>,
+    /// The sector loop that is **playing** — `name`, the sector `SOUND` volume, and its sink.
+    playing: Option<(String, f32, Entity)>,
+    /// The sector the loop state was last computed for: one frame behind the body, which is the
+    /// phase retail's console `warp` lands on (the sample on the warp's grid point still sees the
+    /// room being left). Reset on every level swap.
+    last_sector: Option<usize>,
 }
 
 /// Every `.wav` the shipped `.snd` classes name, ready to play, with the fade radii and
@@ -25945,16 +26052,34 @@ fn ambient_follows_view(
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
     mut ambience: ResMut<Ambience>,
+    mut sinks: Query<&mut AudioSink>,
 ) {
     let (Some(world), Some(player)) = (world, player) else { return };
+    // The engine starts a sector's `SOUND` loop on a sector **entry**. The sector the level starts in
+    // is not an entry: level 1's start sector names `01cantinaband02.wav` in the JKL, yet retail's
+    // capture is silent there until the body leaves and comes back.
     // `SectorSound` may have replaced the sector's ambient: the script's override wins over the
     // level's own (`sithSoundMixer_SetSectorAmbientSound` writes the sector itself).
+    // Retail's console `warp` takes effect on the **next** frame, so the sample on the warp's grid
+    // point still sees the room the body is leaving. Apply the body's sector one frame late, which
+    // is the same phase: `audio_trace_sample` runs before this system.
+    let here = ambience.last_sector.unwrap_or(player.body.sector);
+    ambience.last_sector = Some(player.body.sector);
     let wanted = sim
-        .map(|sim| sim.world.borrow().sector_ambient.get(&(player.body.sector as i32)).cloned())
+        .map(|sim| sim.world.borrow().sector_ambient.get(&(here as i32)).cloned())
         .unwrap_or_default()
-        .or_else(|| world.level.sectors.get(player.body.sector).and_then(|s| s.sound.clone()));
-    if let Some((name, entity)) = ambience.playing.clone() {
-        if wanted.as_ref().is_some_and(|(wanted, _)| *wanted == name) {
+        .or_else(|| world.level.sectors.get(here).and_then(|s| s.sound.clone()));
+    if let Some((name, current, entity)) = ambience.playing.clone() {
+        if let Some((wanted, volume)) = wanted.clone()
+            && wanted == name
+        {
+            // `SectorSound` can move the volume while the body stays in the sector.
+            if (current - volume).abs() > 0.005
+                && let Ok(mut sink) = sinks.get_mut(entity)
+            {
+                sink.set_volume(Volume::Linear(volume.clamp(0.0, 1.0) * sound_gain()));
+                ambience.playing = Some((name, volume, entity));
+            }
             return;
         }
         commands.entity(entity).despawn();
@@ -25966,16 +26091,112 @@ fn ambient_follows_view(
         .spawn((
             AudioPlayer::new(source),
             PlaybackSettings {
-                // Once, not Loop: the engine plays the range `from..to` and wraps, so the next
-                // track is the mixer`s business (`Runtime::advance_music`), not the sink`s.
-                mode: PlaybackMode::Once,
+                // A sector `SOUND` is a loop: retail keeps the channel playing while the body is in
+                // the sector, so the mixer never restarts it.
+                mode: PlaybackMode::Loop,
                 volume: Volume::Linear(volume.clamp(0.0, 1.0) * sound_gain()),
                 ..default()
             },
         ))
         .id();
-    println!("ambience: {name} (volume {volume:.2})");
-    ambience.playing = Some((name, entity));
+    println!("ambience: {name} (volume {volume:.2}) in sector {}", player.body.sector);
+    ambience.playing = Some((name, volume, entity));
+}
+
+/// The script-started loop channels the mixer is playing (`Runtime::sound_loops`): one looping
+/// `AudioPlayer` per name+place, its volume the mixer's attenuated gain.
+#[derive(Resource, Default)]
+struct LoopPlayers {
+    /// `(name, position)` -> (sink entity, the gain it was set to).
+    playing: Vec<(String, Option<[f32; 3]>, Entity, f32)>,
+}
+
+fn play_script_loops(
+    mut commands: Commands,
+    sim: Option<Res<Sim>>,
+    player: Option<Res<Player>>,
+    bank: Option<Res<SoundBank>>,
+    ambience: Option<Res<Ambience>>,
+    collisions: Option<Res<Collision>>,
+    cams: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+    mut state: ResMut<LoopPlayers>,
+    mut sinks: Query<&mut AudioSink>,
+) {
+    let (Some(sim), Some(player)) = (sim, player) else { return };
+    let loops = sim.world.borrow().sound_loops.clone();
+    let visible: Option<Vec<usize>> = collisions.as_ref().map(|c| {
+        let rt = sim.world.borrow();
+        drawn_sectors(&c.0, rt.gates(), player.body.sector, &cams)
+    });
+    let listener = [
+        player.body.pos.x,
+        player.body.pos.y,
+        player.body.pos.z + PLAYER_RADIUS,
+    ];
+    let mut still: Vec<(String, Option<[f32; 3]>)> = Vec::new();
+    for l in &loops {
+        if let (Some(visible), Some(p)) = (visible.as_ref(), l.pos) {
+            let source = collisions.as_ref().and_then(|c| c.0.sector_at(p, 0.2));
+            if !source.is_some_and(|s| visible.contains(&s)) {
+                continue;
+            }
+        }
+        let fade = match l.pos {
+            Some(p) if l.max_radius > l.min_radius => {
+                let d = ((p[0] - listener[0]).powi(2)
+                    + (p[1] - listener[1]).powi(2)
+                    + (p[2] - listener[2]).powi(2))
+                .sqrt();
+                ((d - l.min_radius) / (l.max_radius - l.min_radius)).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        let gain = (l.volume * (1.0 - fade)).clamp(0.0, 1.0) * sound_gain();
+        if gain <= 0.0 { continue; }
+        if std::env::var_os("BK_SOUND_TRACE").is_some() {
+            eprintln!("loop: {} pos {:?} gain {gain:.3}", l.name, l.pos);
+        }
+        still.push((l.name.clone(), l.pos));
+        if let Some(entry) = state
+            .playing
+            .iter_mut()
+            .find(|(name, pos, _, _)| name.eq_ignore_ascii_case(&l.name) && *pos == l.pos)
+        {
+            if (entry.3 - gain).abs() > 0.01
+                && let Ok(mut sink) = sinks.get_mut(entry.2)
+            {
+                sink.set_volume(Volume::Linear(gain));
+                entry.3 = gain;
+            }
+            continue;
+        }
+        // The loop is a mixer ambient, so it is not in the `.snd` class table: the level loader only
+        // reads the wavs a sector `SOUND` names. Fall back to the sector table's handles.
+        let source = bank
+            .as_ref()
+            .and_then(|bank| bank.clips.get(&l.name).map(|c| c.0.clone()))
+            .or_else(|| ambience.as_ref().and_then(|a| a.sources.get(&l.name).cloned()));
+        let Some(source) = source else { continue };
+        let entity = commands
+            .spawn((
+                AudioPlayer::new(source),
+                PlaybackSettings {
+                    mode: PlaybackMode::Loop,
+                    volume: Volume::Linear(gain),
+                    ..default()
+                },
+            ))
+            .id();
+        state.playing.push((l.name.clone(), l.pos, entity, gain));
+    }
+    state.playing.retain(|(name, pos, entity, _)| {
+        if still.iter().any(|(n, p)| n.eq_ignore_ascii_case(name) && p == pos) {
+            true
+        } else {
+            commands.entity(*entity).despawn();
+            false
+        }
+    });
 }
 
 fn setup(
@@ -26008,6 +26229,43 @@ fn setup(
     for (name, bytes) in &world.ambient {
         let source = audio.add(AudioSource { bytes: bytes.clone().into() });
         ambience.sources.insert(name.clone(), source);
+    }
+    if let Some((_, _, entity)) = ambience.playing.take() {
+        commands.entity(entity).despawn();
+    }
+    ambience.last_sector = None;
+    // The engine starts the sector the player loads in straight away (level 1: sector 339,
+    // `01cantinaband02.wav` 0.30), so the first audio sample already has it.
+    {
+        // The level's own `walkplayer` thing (the runtime's `player_thing` order is the same index).
+        let player = world
+            .level
+            .things
+            .iter()
+            .position(|t| t.template.eq_ignore_ascii_case("walkplayer"))
+            .unwrap_or(0);
+        let sector = world
+            .level
+            .things
+            .get(player)
+            .and_then(|thing| usize::try_from(thing.sector).ok())
+            .unwrap_or(0);
+        if let Some((name, volume)) = world.level.sectors.get(sector).and_then(|s| s.sound.clone())
+            && let Some(source) = ambience.sources.get(&name).cloned()
+        {
+            let entity = commands
+                .spawn((
+                    AudioPlayer::new(source),
+                    PlaybackSettings {
+                        mode: PlaybackMode::Loop,
+                        volume: Volume::Linear(volume.clamp(0.0, 1.0) * sound_gain()),
+                        ..default()
+                    },
+                ))
+                .id();
+            println!("ambience: {name} (volume {volume:.2}) at load, sector {sector}");
+            ambience.playing = Some((name, volume, entity));
+        }
     }
 
     // The sound classes' clips: every wav they name, with the class's own fade radii and

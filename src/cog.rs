@@ -401,12 +401,13 @@ impl Cog {
         let found = self
             .symbols
             .iter()
-            .any(|s| s.name == candidate)
-            .then_some(candidate)
+            .find(|s| s.name.eq_ignore_ascii_case(&candidate))
+            .map(|s| s.name.clone())
             .or_else(|| {
+                let lower = base.to_ascii_lowercase();
                 self.symbols
                     .iter()
-                    .find(|s| s.linkid == Some(want) && s.name.starts_with(base))
+                    .find(|s| s.linkid == Some(want) && s.name.starts_with(&lower))
                     .map(|s| s.name.clone())
             });
         if std::env::var_os("BK_INDEX_TRACE").is_some() {

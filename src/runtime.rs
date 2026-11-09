@@ -107,6 +107,20 @@ pub struct SoundRequest {
     pub pitch: f32,
 }
 
+/// A positional/ambient **loop** a script started (`PlaySoundThing`/`PlaySoundPos` with a loop or
+/// ambient flag in its final argument, e.g. `00_PlayAmbient.cog`'s `0x045`). Retail's mixer keeps
+/// these as loop channels next to the sector's `SOUND` loop; the capture's `ambient` column is the
+/// loudest *playing* loop channel, not the sector's declared sound.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SoundLoop {
+    pub name: String,
+    pub volume: f32,
+    pub pos: Option<[f32; 3]>,
+    pub min_radius: f32,
+    pub max_radius: f32,
+    pub flags: i32,
+}
+
 /// `RotatePivot(thing, frame, seconds)`: spin a thing about the pivot its own `frame=` entry names.
 ///
 /// The engine keeps this on the track parameters (`curOrient.scale` is the pivot, `moveFrameDeltaAngles`
@@ -1457,6 +1471,9 @@ pub struct Runtime {
     /// `PlaySoundThing` names a thing and `PlaySoundPos` a position; a request with no place
     /// is `PlaySoundLocal`, which the mixer does not attenuate by distance.
     pub sounds: Vec<SoundRequest>,
+    /// Script-started loop channels (`PlaySound*` with the loop/ambient flag), one entry per
+    /// name+place: a timer that repeats the same request every 0.5 s refreshes it, it does not stack.
+    pub sound_loops: Vec<SoundLoop>,
     /// Pending timers, summed — enough to show scripts driving a clock.
     pub timers: f32,
     pub inv: BTreeMap<i32, f32>,
@@ -2295,6 +2312,7 @@ impl Runtime {
                 .collect(),
             surface_flags: level.surfaces.iter().map(|s| s.surfflags).collect(),
             sounds: Vec::new(),
+            sound_loops: Vec::new(),
             timers: 0.0,
             inv: BTreeMap::new(),
             inv_available: BTreeMap::new(),
@@ -10240,13 +10258,56 @@ impl Runtime {
                     None
                 };
                 if !name.is_empty() {
+                    // `PlaySoundThing(sound, thing, volume, min, max, flags)` and
+                    // `PlaySoundPos(sound, pos, volume, min, max, flags)` carry the mixer flags in
+                    // their last argument; `PlaySoundLocal(sound, volume, pan, flags)` in its fourth.
+                    // `0x045` (the ambient installs pass it) sets the loop bit, so the request is a
+                    // **channel** the mixer keeps playing, not a one-shot. Without this the
+                    // `00_PlayAmbient.cog` rumble was requested every 0.5 s and dropped (no `.snd`
+                    // clip), and the audio trace could not see the bar's only loop.
+                    let flags_at = match lower.as_str() {
+                        "playsoundlocal" => 3,
+                        _ => 5,
+                    };
+                    let flags = if args.len() > flags_at { args[flags_at].num() as i32 } else { 0 };
+                    let (min_radius, max_radius) = match lower.as_str() {
+                        "playsoundlocal" => (0.0, 0.0),
+                        _ => (
+                            args.get(3).map(|v| v.num() as f32).unwrap_or(0.0),
+                            args.get(4).map(|v| v.num() as f32).unwrap_or(0.0),
+                        ),
+                    };
                     // `PlaySound*` answers the **channel**, which is what `ChangeSoundVol` and
                     // `ChangeSoundPitch` take — `sithSoundMixer_PlaySound` returns one and the shipped
                     // scripts store it (`02_crowstart.cog`).
                     let channel = self.sound_volume.len();
                     self.sound_volume.push(volume);
                     self.sound_pitch.push(1.0);
-                    self.sounds.push(SoundRequest { name, volume, pos, channel, pitch: 1.0 });
+                    if flags & 0x1 != 0 {
+                        // The engine's ambient installs re-issue the same request every 0.5 s; the
+                        // mixer holds one loop per name and place, so refresh instead of stacking.
+                        if let Some(existing) = self
+                            .sound_loops
+                            .iter_mut()
+                            .find(|l| l.name.eq_ignore_ascii_case(&name) && l.pos == pos)
+                        {
+                            existing.volume = volume;
+                            existing.min_radius = min_radius;
+                            existing.max_radius = max_radius;
+                            existing.flags = flags;
+                        } else {
+                            self.sound_loops.push(SoundLoop {
+                                name,
+                                volume,
+                                pos,
+                                min_radius,
+                                max_radius,
+                                flags,
+                            });
+                        }
+                    } else {
+                        self.sounds.push(SoundRequest { name, volume, pos, channel, pitch: 1.0 });
+                    }
                     Value::Num(channel as f64)
                 } else {
                     Value::Num(-1.0)

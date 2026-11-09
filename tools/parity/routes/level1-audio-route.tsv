@@ -2,7 +2,9 @@
 # (`tools/parity/routes/level1-route.tsv`, issue #10) plus the bar's door crossing.
 #
 # The four walk legs, the poses, the `seed` rows and the switch are the merged route's own,
-# unchanged; the audio trace samples the same 600 ms grid.
+# unchanged; the audio trace samples the same 600 ms grid. The bar doorway is **not** here: retail
+# crosses it only in a fresh process, so it lives in `level1-audio-route-door.tsv` and the gate
+# compares that segment separately.
 #
 # Door geometry, from `--collide --surfaces-at -8,-5,-1.05` (level data, not a guess):
 #   surface 206  sector 19, adjoin 73, y = -5.00, x -8.10..-7.90, z -1.150..-0.700,
@@ -23,9 +25,3 @@ warp	street		5.474939	-1.899975	0.657119	90.000000
 input	180	1	0
 warp	door		1.300000	9.000000	6.237000	0.000000
 input	180	1	0
-warp	bar_in		-8.000000	-4.600000	-0.925000	180.000000
-input	150	1	0
-warp	return		-8.000000	-5.400000	-0.925000	0.000000
-input	6	0	0
-warp	bar_out		-8.000000	-5.400000	-0.925000	0.000000
-input	150	1	0
