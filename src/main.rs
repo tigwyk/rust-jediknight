@@ -12783,7 +12783,13 @@ fn main() {
                     .run_if(no_screen_open),
                 (
                     collect_items,
-                    ai_shots,
+                    // The sight ray needs the level's collision geometry: `share_collider` hands the
+                    // solid things to the runtime, and until it runs `Runtime::solids` is `None`, which
+                    // the sight test reads as "nothing blocks". Before this constraint the first tick
+                    // of a level tested every actor's line against nothing, so the ones a wall or a
+                    // body really hides acquired the player at t = 0 and shot at that memory forever
+                    // (level 1's door gunner 155 and `reeyeesbhgun` 153).
+                    ai_shots.after(share_collider),
                     play_requested_sounds,
                     music_follows_scripts,
                     show_taken,
@@ -29769,6 +29775,23 @@ mod registration_tests {
         assert!(
             unregistered.is_empty(),
             "these systems are in no add_systems list, so they never run: {unregistered:?}"
+        );
+    }
+
+    /// The AI's sight ray must read the level's geometry on its **first** tick. `share_collider`
+    /// hands the `Collision` record to the runtime, and until it runs `Runtime::solids` is `None`,
+    /// which the sight test reads as "nothing blocks". Unordered, the first tick of a level let
+    /// every armed actor the room really hides acquire the player through the wall; the memory
+    /// latches, so they then blind-fired at that spot for the whole encounter. That is level 1's
+    /// door fight: actor 155's launch at t = 0 and `reeyeesbhgun` 153's three later hits, against
+    /// retail's 13-hit cadence from the one gunner with a clear line.
+    #[test]
+    fn the_ai_tick_runs_after_the_collider_hand_off() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+            .expect("the source this test lives in");
+        assert!(
+            source.contains("ai_shots.after(share_collider)"),
+            "ai_shots is unordered with share_collider: the first AI tick of a level tests sight against no geometry"
         );
     }
 }
