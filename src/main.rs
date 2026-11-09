@@ -12780,11 +12780,13 @@ fn main() {
         .add_systems(Update, refresh_force_screen)
         .add_systems(Update, seed_force_screen_powers)
         .add_systems(Update, arm_for_capture);
-    // A replay must be reproducible between runs, not only between frames. Several systems draw from
-    // the shared LCG in `cog::pseudo_random`, which is thread-local, so the multi-threaded executor
-    // gives different systems different sequences and a hit can land a frame apart from run to run.
-    // One executor thread makes every call site see the same sequence. Play keeps the default.
-    if replaying {
+    // A replay or a door-encounter capture (`BK_ENCOUNTER_OUT`) must be reproducible between runs,
+    // not only between frames. Several systems draw from the shared LCG in `cog::pseudo_random`,
+    // which is thread-local, so the multi-threaded executor gives different systems different
+    // sequences and a hit can land a frame apart from run to run — the encounter gate reports that
+    // as shots/hits differing by more than its run-to-run slack. One executor thread makes every
+    // call site see the same sequence. Play keeps the default.
+    if replaying || std::env::var_os("BK_ENCOUNTER_OUT").is_some() {
         app.edit_schedule(bevy::app::Update, |schedule| {
             schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
         });

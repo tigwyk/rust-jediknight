@@ -407,6 +407,11 @@ grid points; the port records every shot and hit at its fixed 60 Hz step.
   position/facing/health deltas at every sample. It exits non-zero when any of them leaves its tolerance,
   and its thresholds are parameters with their reasons in the script header.
 
+The capture runs the `Update` schedule on one executor thread, the same rule #8's replay uses: the
+shared cog LCG is thread-local, so with the default executor two runs of the same fixed step could
+fire a different number of shots. Two captures are therefore byte-identical apart from the file name,
+and the gate's repeatability check reports zero delta.
+
 The gate is the instrument for #11 (AI engagement timing) and #12 (combat timing); until those land its
 default run reports the known AI-timing gap rather than passing.
 
