@@ -487,9 +487,9 @@ tick  t_s  music  music_end  music_loop  music_vol  ambient  ambient_vol  sounds
 - `ambient`/`ambient_vol` are the sector's own `SOUND` loop (a script's `SectorSound` wins), and the
   cell is empty when the sector names none.
 - `sounds` lists every one-shot the window played as `wav@gain`; `gain` is the mixer's attenuated
-  volume (`snd::volume`), so distance and facing are in the number. `-` means **not recorded** (the
-  retail-derived fixture leaves this column out: no retail audio capture exists yet, and the level's
-  one-shots depend on AI timing, not on authored data).
+  volume (`snd::volume`), so distance and facing are in the number. `-` means **not recorded**. The retail fixture leaves this column out: its one-shots are AI-driven
+  and differ run to run, so they are not a reproducible reference. The classifier's four categories
+  are still exercised by the self-check and the port oracle.
 
 ```powershell
 pwsh -NoProfile -File tools/parity/audio-gate.ps1            # determinism + port oracle + retail
@@ -513,6 +513,7 @@ Files:
 | `tools/parity/audiotrace/level1-audio-retail.tsv` | **Captured from retail** by `retail-capture.ps1 -AudioRoute tools/parity/routes/level1-audio-route.tsv -AudioRouteOut tools/parity/audiotrace/level1-audio-retail.tsv`: the harness boots level 1 with `-devMode`, applies each route leg's `warp` through the dev console, holds forward for the leg, and reads the engine's own state at every 600 ms of route game time — song range and loop flag (0x008BBC74/0x008BBC70/0x00835FCC), `SetMusicVol`'s value (f32 0x0054A678), and the 32-entry mixer table at 0x00835FE8 (sound name from the sound struct's own char[32], loop bit 0x1, volume, radii, distance) for the ambience loop and the one-shots. Capture instrumentation only: no shipping behavior changes. |
 | `tools/parity/audiotrace/level1-audio-port.tsv` | The port's committed oracle, produced by the replay. |
 | `tools/parity/audio-gate.ps1` | The gate above. |
+| `tools/parity/audiotrace/level1-audio-door-port.tsv` / `-door-retail.tsv` | The bar doorway captured on its own in a **fresh process** (`level1-audio-route-door.tsv`), where retail crosses: `bar_in` reaches `y -5.187` by tick 36, `bar_out` fires `crossed`, and `currvol` takes 0.15 at tick 252 and 0.40 at 288. The port fades from tick 216 (0.05/0.35/0.65): the fade curve is ~0.2 ahead of retail's, so this pair is evidence, not part of the gate's pass/fail yet. |
 
 Capture limitation: on this workstation retail's redbook device never starts (`0x00835FD0` reads 0,
 the MCI open fails), so the captured `music_vol` stays at the mixer's initial 1.0 and cannot show the
