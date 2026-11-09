@@ -355,10 +355,12 @@ tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
 - `vel_x/vel_y/vel_z` are the position derivative over the 600 ms sample window, in level units per
   second — the same quantity as the retail fixture's columns (a body pinned against a wall reads zero).
 - `health/shields` come from the player thing and `rt.player_shields`; the retail capture reads
-  them from the player thing (`thing+0x134`) and inventory bin 60.
+  them from the player thing (`thing+0x134`) and inventory bin 60. The retail walk trace records
+  both bars per hold segment, so the committed reference has real values here.
 - `door0_*` and `switch_*` are placed cogs 0 (`00_door.cog`) and 11 (`00_doorswitch.cog`), four
-  symbols each (`doorstatus`, `movestatus`, and the script's own open/close variables). `-` is a
-  field the run does not have (no such cog, or a retail capture that did not record it).
+  symbols each (`doorstatus`, `movestatus`, and the script's own open/close variables), read with
+  `cogstatus` after each leg's walk. Level 1 has both cogs, so every field is present; the gate
+  rejects any `-` (the comparator would skip it and measure the position columns only).
 
 A **leg boundary is a `warp`**, not a walk: the retail reference is four separate per-leg captures
 from the level's own authored placements, so the route is the same four walks. Issue #10 fixed what
@@ -426,7 +428,11 @@ a full 10,000 ms adds a sample (and, at the gunner's cadence, a shot) retail nev
   order), and reports the per-shot/per-hit timing deltas, the per-hit health/shield deltas, the kill
   order, the settled endpoint, and the actor position/facing/health deltas at every sample. It exits
   non-zero when any of them leaves its tolerance, and its thresholds are parameters with their reasons
-  in the script header.
+  in the script header. Fire cadence is graded on consecutive-shot **intervals** (retail's impact and
+  the port's launch of the same shot differ by a constant flight, which intervals cancel), and actor
+  rows are joined by **authored placement** — nearest position at the first sample — because retail's
+  `thing` is a slot in the engine's thing pool while the port's is the level's placement order. An
+  actor either side reports and the other does not fails; there is no missing-actor fraction.
 
 The port samples before the frame's AI tick for its `player`/`actor` rows, matching retail's 100 ms
 points; the `shot`/`hit` rows are written after the tick, evicted from the runtime's event queue, so
@@ -446,11 +452,12 @@ graded.
 
 
 Kill order is read off the trace: both captures drop a thing once it is gone (the retail reader skips
-an actor at 0 health, the port's trace a destroyed one) and both name an actor by the level's own
-placement index, so the last sample a thing appears in is its death time. The door fixture kills
-nobody on either side in ten seconds and the gate prints that explicitly (`kill order: retail [], port
-[]`); a fixture whose actors walk out of the 8-unit sampling radius would read the same way, which is
-why the position check above is what tells the two apart.
+an actor at 0 health, the port's trace a destroyed one), so the last sample each actor id appears in
+is its death time. The ids are side-local (retail's array slot, the port's placement index) and are
+used only within a side for this check; the cross-side join is the placement mapping above. The door
+fixture kills nobody on either side in ten seconds and the gate prints that explicitly (`kill order:
+retail [], port []`); a fixture whose actors walk out of the 8-unit sampling radius would read the
+same way, which is why the position check above is what tells the two apart.
 
 The player's damage split is the shipped `item_shields.cog`'s: the bar takes the whole hit, a bar above
 50 stops it completely, and the rest is scaled by `1 - shieldsLeft / 50` (which is above 1 when the hit

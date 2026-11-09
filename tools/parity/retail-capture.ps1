@@ -532,6 +532,26 @@ function Read-JkGameMs {
 #
 # The port replays the same thing with `--trace-out` and `BK_WALK_FORWARD=1` (fixed 1/60 s step), and
 # `tools/parity/trace-compare.ps1` compares the two at the segment times.
+#
+# Player bars, the f32s both the walk trace and the encounter telemetry record: health at
+# `thing+0x134` (`GetThingHealth`) and inventory bin 60 shields at `inventory + 0x88 + 60*0x18`
+# (`sithInventory_SetInventory`). The plausibility guards are the encounter reader's: a wrong
+# pointer must abort the capture, not write zeros into a fixture.
+function Read-JkPlayerBars {
+  param([Parameter(Mandatory)][int]$ProcessId)
+  $thing = [JkRetail]::ReadU32($ProcessId, 0x008319A4)
+  if ($thing -le 0) { throw "player bars: the player thing pointer (0x008319A4) read $thing" }
+  $inv = [JkRetail]::ReadU32($ProcessId, $thing + 0x1C0)
+  if ($inv -le 0) { throw "player bars: the inventory pointer (thing+0x1C0) read $inv" }
+  $health = [JkRetail]::ReadFloat($ProcessId, $thing + 0x134)
+  $shields = [JkRetail]::ReadFloat($ProcessId, $inv + 0x88 + 60 * 0x18)
+  if ([double]::IsNaN($health) -or [double]::IsNaN($shields)) {
+    throw "player bars: the player bars could not be read (health $health, shields $shields)"
+  }
+  if ($health -lt 0.0 -or $health -gt 1000.0) { throw "player bars: implausible health $health at thing+0x134" }
+  if ($shields -lt -0.01 -or $shields -gt 200.01) { throw "player bars: implausible shields $shields at inventory bin 60" }
+  [pscustomobject]@{ Health = $health; Shields = $shields }
+}
 function Invoke-JkWalkTrace {
   param(
     [Parameter(Mandatory)][int]$ProcessId,
@@ -544,14 +564,16 @@ function Invoke-JkWalkTrace {
   $path = Join-Path $script:TraceOut ("{0}-walk.tsv" -f $Name)
   $segments = [math]::Max(1, [int][math]::Floor($Milliseconds / $HoldMs))
   $lines = New-Object System.Collections.Generic.List[string]
-  # `game_ms` is appended (not replacing `held_ms`) so older fixtures and readers keep their columns.
-  $lines.Add((@("held_ms", "x", "y", "z", "sector", "yaw", "game_ms") -join ([char]9)))
+  # `game_ms` is appended (not replacing `held_ms`) so older fixtures and readers keep their columns;
+  # `health`/`shields` are the route reference's two bar columns (issue #8's required fields).
+  $lines.Add((@("held_ms", "x", "y", "z", "sector", "yaw", "game_ms", "health", "shields") -join ([char]9)))
   $start = Read-JkCoords -ProcessId $ProcessId
   if (-not $start) { throw 'walk trace: the start pose could not be read from coords' }
   Log ("walk trace: start " + $start.Raw)
   $clock0 = Read-JkGameMs -ProcessId $ProcessId
   if ($clock0 -lt 0) { throw 'walk trace: the game clock (0x00836c14) could not be read' }
-  $lines.Add((@(0, $start.Pos[0], $start.Pos[1], $start.Pos[2], $start.Sector, $start.Pyr[1], 0) -join ([char]9)))
+  $bars = Read-JkPlayerBars -ProcessId $ProcessId
+  $lines.Add((@(0, $start.Pos[0], $start.Pos[1], $start.Pos[2], $start.Sector, $start.Pyr[1], 0, ('{0:F1}' -f $bars.Health), ('{0:F1}' -f $bars.Shields)) -join ([char]9)))
   $samples = 0
   if ($SettleMs -gt 0) {
     Log ("walk trace: settling {0} ms before the hold" -f $SettleMs)
@@ -596,7 +618,8 @@ function Invoke-JkWalkTrace {
       if ($clock -lt 0) { throw "walk trace: the game clock could not be read after segment $i" }
       $gameMs = $clock - $clock0
       $samples++
-      $lines.Add((@($held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $sample.Pyr[1], $gameMs) -join ([char]9)))
+      $bars = Read-JkPlayerBars -ProcessId $ProcessId
+      $lines.Add((@($held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $sample.Pyr[1], $gameMs, ('{0:F1}' -f $bars.Health), ('{0:F1}' -f $bars.Shields)) -join ([char]9)))
       Log ("walk trace: {0} ms held ({5} ms game) at ({1:N3}, {2:N3}, {3:N3}) sector {4}" -f $held, $sample.Pos[0], $sample.Pos[1], $sample.Pos[2], $sample.Sector, $gameMs)
       # Stuck detection (see the comment above the hold loop): a body against a wall has not moved.
       $dx = [double]$sample.Pos[0] - $previous[0]
@@ -1032,6 +1055,10 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
 
     # Skip the intro movies: activate the window, ESC, retry until the bright Players screen.
     Start-Sleep -Seconds 2
+    # The shell is not the foreground process, so the game can start behind whatever was focused and
+    # every synthetic key would go there. Raise it through the foreground thread's input queue first.
+    $activated = [JkRetail]::Activate($gameWindow)
+    Log "raised the game window (activated=$activated, foreground=$([JkRetail]::ForegroundTitle()))"
     Send-JkClick -X 50 -Y 50
     if ($IntroShotMs -gt 0) {
       # The (50,50) click dismissed the dev console, so the movie has just started: wait on it.

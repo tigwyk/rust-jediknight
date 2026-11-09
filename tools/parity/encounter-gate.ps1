@@ -15,6 +15,17 @@
   state delta at each cadence sample, then exits non-zero when any of them leaves its tolerance. It
   is the instrument tickets #11 (AI timing) and #12 (combat timing) measure against.
 
+  Fire cadence is graded on the **interval** sequence: the two sides observe the same shots a flight
+  apart (retail's impact, the port's launch), so consecutive-shot intervals are comparable even
+  though absolute times are not, and any interval outside `-ShotCadenceToleranceMs` fails. The shot
+  count itself is exact (`-ShotCountSlack` 0).
+
+  Actor rows are joined by **authored placement**, not by the `thing` number: retail's number is a
+  slot in the engine's thing pool and the port's is the level's placement order, and the two only
+  agree where both arrays happen to line up. The gate pairs actors by nearest position at the first
+  sample (`-ActorIdentityTolerance`) and fails when either side reports an actor the other does not;
+  there is no missing-actor fraction.
+
   The retail fixture is committed under `tools/parity/encounter/`; a fresh capture in
   `target/parity/encounter/` takes precedence. The gate records the port twice and fails when the
   two runs leave the measured run-to-run band (shape, endpoint, event timing, actor state, kill
@@ -54,7 +65,14 @@ param(
   [double]$ActorPositionTolerance = 1.5,
   [double]$ActorYawTolerance = 30,
   [double]$ActorHealthTolerance = 15,
-  [double]$ActorMissingFraction = 0.25
+  # Actor identity: retail's `thing` is a thing-pool slot, the port's is the level's placement order,
+  # so the two only agree where both arrays happen to line up. Actors are paired by nearest position
+  # at the first sample; this is the distance below which two rows are the same authored placement
+  # (actors both builds place agree to 0.004 units). An actor with no counterpart fails.
+  [double]$ActorIdentityTolerance = 0.5,
+  # Consecutive-shot interval band. Retail's impacts are quantised by its 100 ms sample grid, so one
+  # interval can differ by that grid plus a frame; measured max on the door fixture is 234 ms.
+  [double]$ShotCadenceToleranceMs = 250
 )
 
 $ErrorActionPreference = 'Stop'
@@ -318,11 +336,31 @@ if ($shotDeltas.Count -gt 0) {
   $maxAbs = ($shotDeltas | ForEach-Object { [math]::Abs($_) } | Measure-Object -Maximum).Maximum
   $meanAbs = ($shotDeltas | ForEach-Object { [math]::Abs($_) } | Measure-Object -Average).Average
   Write-Host ("      per-shot timing delta: max {0:N0} ms, mean {1:N0} ms over {2} paired shot(s) (tolerance {3:N0})" -f $maxAbs, $meanAbs, $shotDeltas.Count, $ShotToleranceMs)
-  # Report the cadence as shots per second, the interval comparison #11 asks for.
-  $retailRate = @($retailShotSeries | Group-Object { [math]::Floor($_.T / 1000) } | ForEach-Object Count)
-  $portRate = @($portShotSeries | Group-Object { [math]::Floor($_.T / 1000) } | ForEach-Object Count)
-  Write-Host ("      shots per second: retail [{0}], port [{1}]" -f ($retailRate -join ','), ($portRate -join ','))
   if ($maxAbs -gt $ShotToleranceMs) { Fail ("shot timing delta {0:N0} ms exceeds {1:N0} ms" -f $maxAbs, $ShotToleranceMs) }
+
+  # Fire cadence: the interval between consecutive shots, which is the cadence itself. Pairing
+  # absolute times cannot answer it — a paired delta carries the flight and any phase the series
+  # starts with — and index-pairing the launch and impact series is the mixed comparison the gate is
+  # not allowed to make. Intervals cancel a constant flight, so the two 13-shot series compare by
+  # interval directly. The count above is the "shot count by interval" half: one count per side, and
+  # a different total fails before the intervals are paired.
+  $retailIntervals = @(for ($i = 1; $i -lt $retailShotSeries.Count; $i++) { [double]$retailShotSeries[$i].T - [double]$retailShotSeries[$i - 1].T })
+  $portIntervals = @(for ($i = 1; $i -lt $portShotSeries.Count; $i++) { [double]$portShotSeries[$i].T - [double]$portShotSeries[$i - 1].T })
+  if ($retailIntervals.Count -ne $portIntervals.Count) {
+    Fail ("shot cadence: retail has {0} interval(s), port {1}" -f $retailIntervals.Count, $portIntervals.Count)
+  } else {
+    $cadenceMax = 0.0
+    for ($i = 0; $i -lt $retailIntervals.Count; $i++) {
+      $cadenceMax = [math]::Max($cadenceMax, [math]::Abs($portIntervals[$i] - $retailIntervals[$i]))
+    }
+    Write-Host ("      cadence intervals: retail [{0}], port [{1}] ms; max delta {2:N0} (tolerance {3:N0})" -f `
+        (($retailIntervals | ForEach-Object { [math]::Round($_) }) -join ','), (($portIntervals | ForEach-Object { [math]::Round($_) }) -join ','), $cadenceMax, $ShotCadenceToleranceMs)
+    if ($cadenceMax -gt $ShotCadenceToleranceMs) {
+      Fail ("shot cadence delta {0:N0} ms exceeds {1:N0} ms" -f $cadenceMax, $ShotCadenceToleranceMs)
+    } else {
+      Write-Host ("PASS  shot cadence: {0} interval(s) within {1:N0} ms" -f $retailIntervals.Count, $ShotCadenceToleranceMs)
+    }
+  }
 }
 
 # ---- hits -------------------------------------------------------------------------------------
@@ -398,24 +436,66 @@ function Get-YawSpan($rows) {
   $spans
 }
 $retailYawSpan = Get-YawSpan $retailActors
-$portActorAt = @{}
-foreach ($row in $portActors) { $portActorAt[('{0}|{1}' -f [int]$row.T, $row.Thing)] = $row }
 # Port actors whose class carries `Roam`: the engine picks that walk's direction from `rand()`, the
 # two sides' random streams differ, and the fixture records one draw on each side. Their absolute
 # facing is therefore not a parity observation; their position still is, and the position check is
 # what catches a roamer that walks while retail's stands.
 $portRoamers = @{}
 foreach ($row in $portActors) { if ($row.Detail -eq 'roam') { $portRoamers[[int]$row.Thing] = $true } }
+
+# **Identity is the authored placement, not the thing number.** Retail's `thing` column is a slot in
+# the engine's thing pool and the port's is the level's placement order; the two agree for most
+# actors but not all (level 1's three ghosts occupy retail slots 75/91/99 while the authored ghosts
+# are placements 281/285/282), so keying by the number pairs different actors and invents extras.
+# Pair each retail actor with the port actor at the first sample by nearest position — actors both
+# builds place at the same authored point agree to 0.004 units — and use that map for the encounter.
+# An actor with no counterpart on the other side is a genuine set difference and fails; there is no
+# missing fraction.
+$firstT = ($retailActors | Measure-Object -Property T -Minimum).Minimum
+$retailFirst = @($retailActors | Where-Object { $_.T -eq $firstT })
+$portFirst = @($portActors | Where-Object { $_.T -eq $firstT })
+$candidates = [System.Collections.Generic.List[object]]::new()
+foreach ($r in $retailFirst) {
+  foreach ($p in $portFirst) {
+    if ($null -eq $r.X -or $null -eq $p.X) { continue }
+    $dx = [double]$p.X - [double]$r.X
+    $dy = [double]$p.Y - [double]$r.Y
+    $dz = [double]$p.Z - [double]$r.Z
+    $distance = [math]::Sqrt($dx * $dx + $dy * $dy + $dz * $dz)
+    if ($distance -le $ActorIdentityTolerance) {
+      $candidates.Add([pscustomobject]@{ Distance = $distance; Retail = [string]$r.Thing; Port = [string]$p.Thing })
+    }
+  }
+}
+$identity = @{}
+$identityUsed = @{}
+foreach ($c in @($candidates | Sort-Object Distance)) {
+  if ($identity.ContainsKey($c.Retail) -or $identityUsed.ContainsKey($c.Port)) { continue }
+  $identity[$c.Retail] = $c.Port
+  $identityUsed[$c.Port] = $true
+}
+$unmatchedRetail = @($retailFirst | Where-Object { -not $identity.ContainsKey([string]$_.Thing) })
+$unmatchedPort = @($portFirst | Where-Object { -not $identityUsed.ContainsKey([string]$_.Thing) })
+
+$portActorAt = @{}
+foreach ($row in $portActors) { $portActorAt[('{0}|{1}' -f [int]$row.T, [string]$row.Thing)] = $row }
 $posMax = 0.0
 $yawMax = 0.0
 $steered = 0
 $actorHealthMax = 0.0
 $compared = 0
 $missing = 0
+$unmatchedSamples = 0
+# Extras are mapped port actors, not the unmatched ones (those are reported at identity level);
+# a mapped port actor that retail did not report is a real divergence in the shared set.
 $extra = @{}
-foreach ($row in $portActors) { $extra[('{0}|{1}' -f [int]$row.T, $row.Thing)] = $true }
+foreach ($row in $portActors) {
+  if ($identityUsed.ContainsKey([string]$row.Thing)) { $extra[('{0}|{1}' -f [int]$row.T, [string]$row.Thing)] = $true }
+}
 foreach ($row in $retailActors) {
-  $key = '{0}|{1}' -f [int]$row.T, $row.Thing
+  if (-not $identity.ContainsKey([string]$row.Thing)) { $unmatchedSamples++; continue }
+  $portThing = $identity[[string]$row.Thing]
+  $key = '{0}|{1}' -f [int]$row.T, $portThing
   $extra.Remove($key)
   if (-not $portActorAt.ContainsKey($key)) { $missing++; continue }
   $p = $portActorAt[$key]
@@ -426,12 +506,11 @@ foreach ($row in $retailActors) {
   $distance = [math]::Sqrt($dx * $dx + $dy * $dy + $dz * $dz)
   $posMax = [math]::Max($posMax, $distance)
   if ($null -ne $p.Yaw -and $null -ne $row.Yaw) {
-    $thing = [int]$row.Thing
     # Retail's own facing moved further than the tolerance: the fixture records an animation or a
     # random pick (the droid's turntable), not a facing this port can derive, so the angle is not a
     # parity observation. Everything else — the actor's position above, and every actor whose retail
     # facing is stable — is still graded, which is what catches the port inventing a turn.
-    if ($retailYawSpan[$thing] -gt $ActorYawTolerance -or $portRoamers.ContainsKey($thing)) {
+    if ($retailYawSpan[[int]$row.Thing] -gt $ActorYawTolerance -or $portRoamers.ContainsKey([int]$portThing)) {
       $steered++
     } else {
       $yawMax = [math]::Max($yawMax, (Get-WrapDelta ([double]$row.Yaw) ([double]$p.Yaw)))
@@ -443,8 +522,8 @@ foreach ($row in $retailActors) {
   $compared++
 }
 $sampleCount = [math]::Min($retailPlayers.Count, $portPlayers.Count)
-Write-Host ("actor samples: {0} retail row(s), {1} port row(s) over {2} sample time(s); compared {3}, missing in port {4}, extra in port {5}" -f `
-    $retailActors.Count, $portActors.Count, $sampleCount, $compared, $missing, $extra.Count)
+Write-Host ("actor samples: {0} retail row(s), {1} port row(s) over {2} sample time(s); {3} identity pair(s), compared {4}, missing in port {5}, extra in port {6}" -f `
+    $retailActors.Count, $portActors.Count, $sampleCount, $identity.Count, $compared, $missing, $extra.Count)
 if ($compared -gt 0) {
   Write-Host ("      max deltas: position {0:N2} units, yaw {1:N1} deg, health {2:N1} (tolerances {3:N2}/{4:N1}/{5:N1})" -f `
       $posMax, $yawMax, $actorHealthMax, $ActorPositionTolerance, $ActorYawTolerance, $ActorHealthTolerance)
@@ -455,12 +534,19 @@ if ($compared -gt 0) {
   if ($yawMax -gt $ActorYawTolerance) { Fail ("actor yaw delta {0:N1} exceeds {1:N1} deg" -f $yawMax, $ActorYawTolerance) }
   if ($actorHealthMax -gt $ActorHealthTolerance) { Fail ("actor health delta {0:N1} exceeds {1:N1}" -f $actorHealthMax, $ActorHealthTolerance) }
 }
-if ($retailActors.Count -gt 0) {
-  $missingFraction = $missing / $retailActors.Count
-  if ($missingFraction -gt $ActorMissingFraction) {
-    Fail ("{0:P0} of retail actor samples have no port actor (tolerance {1:P0})" -f $missingFraction, $ActorMissingFraction)
-  }
+# The set difference is the structural half: an actor retail reports at a cadence sample and the
+# port does not, or the reverse, fails. Extras are not "phantom": a port actor retail never had is
+# exactly the invented-actor case the gate exists to catch.
+if ($unmatchedRetail.Count -gt 0) {
+  Fail ("{0} retail actor(s) have no port actor at t={1} ms ({2}); {3} retail sample(s) unpaired" -f `
+      $unmatchedRetail.Count, $firstT, (($unmatchedRetail | ForEach-Object Thing) -join ','), $unmatchedSamples)
 }
+if ($unmatchedPort.Count -gt 0) {
+  Fail ("{0} port actor(s) have no retail actor at t={1} ms ({2}); {3} port sample(s) unpaired" -f `
+      $unmatchedPort.Count, $firstT, (($unmatchedPort | ForEach-Object Thing) -join ','), ($unmatchedPort.Count * $sampleCount))
+}
+if ($missing -gt 0) { Fail ("{0} mapped retail actor sample(s) have no port actor" -f $missing) }
+if ($extra.Count -gt 0 -and $unmatchedPort.Count -eq 0) { Fail ("{0} port actor sample(s) have no retail actor" -f $extra.Count) }
 
 Write-Host ("encounter gate: {0} failure(s)" -f $failures)
 if ($failures -gt 0) { exit 1 }
