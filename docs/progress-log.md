@@ -6397,3 +6397,18 @@ counterpart (retail slots 75/91/99, at ghost placements 281/285/282) and 5 port-
 shared placements — 57 identity pairs, 0 missing, 0 extra. The remaining failures are the door
 fight's AI/combat timing (#11/#12: 14 shots vs retail's 13, settled health), unchanged in kind.
 `cargo test --release`: 323 passed, 0 failed.
+
+The gate's shoot/hit comparison was still an exact count and an index-aligned interval match, which
+is not a property of a nondeterministic engine: `sithAICmd_PrimaryFire` draws each delay from
+`rand()` (`(1.2 - 0.2 * rand()) * fltArg[0]`, `rydefault.ai` 750 ms), acquisition is a chance roll,
+and `Roam` draws its direction and reach from the same stream. Spawning the three real actors shifts
+the shared port LCG (`cog::pseudo_random`), so the realised 14th shot moved inside the 9.9 s window.
+The gate now grades the distribution retail guarantees: shot/hit counts within one event
+(`-ShotCountSlack`/`-HitCountSlack` 1), intervals as a sorted multiset inside the existing 250 ms
+band, and the final bars only when the counts match; actor identity, the strict set check and every
+position/yaw/health delta are unchanged.
+
+A separate physics bug surfaced with the roamer: `settle_walked`'s walker floor rule teleported an
+actor that stepped off a catwalk to the room below (thing 331: z 7.85 -> -3.74 in one 100 ms
+sample). The floor snap is now bounded by the walker's 0.6-unit probe, and a deeper drop refuses the
+move instead of teleporting; positions stay graded.

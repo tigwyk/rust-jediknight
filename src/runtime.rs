@@ -6235,6 +6235,15 @@ impl Runtime {
                 false,
                 true,
             );
+            // The walker's floor rule snaps to whatever floor is under the probe, so an actor that
+            // steps off a catwalk was teleported to the room below in one sample (level 1's roaming
+            // powerdroid: z 7.85 -> -3.74 in 100 ms). A drop deeper than the 0.6-unit probe is not a
+            // step: refuse the move instead. The engine falls such a body under gravity, which the
+            // runtime does not model for a walked actor.
+            if next[2] < pos[2] - 0.6 {
+                next = pos;
+                next_sector = sector;
+            }
             if let Some(thing) = self.things.get_mut(actor) {
                 if next_sector != sector {
                     thing.sector = i32::try_from(next_sector).unwrap_or(thing.sector);
