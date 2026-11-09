@@ -1145,6 +1145,14 @@ pub struct Runtime {
     /// sound-mode **event name** (`create`, `happy`, `fear`, …), each a list of `(wav, maxVolume)`.
     /// The runtime has no file access, so `setup` hands this over after the loader parses them.
     pub sound_classes: BTreeMap<String, BTreeMap<String, Vec<(String, f32)>>>,
+    /// The stream the **AI's own shot sound** picks from. Every other sound-mode pick draws on
+    /// `cog::pseudo_random`, as retail's `rand()` does, because those picks sit in the same stream
+    /// as the AI's fire delays and every script's `Rand()`. A shot names no wav in retail, so this
+    /// fallback must not draw there — a runtime-local LCG keeps it random per run and deterministic.
+    sound_rng: u64,
+    /// The row last played per `(thing, mode)`, so a check can name the sound a hit just queued
+    /// without drawing again.
+    last_sound: BTreeMap<(usize, String), String>,
     /// `timer=`: how long a created thing lives, in seconds, before `sithThing_Update` destroys it.
     /// An impact effect's whole lifetime is this field.
     pub template_timer: BTreeMap<String, f32>,
@@ -2256,6 +2264,8 @@ impl Runtime {
                 })
                 .collect(),
             sound_classes: BTreeMap::new(),
+            sound_rng: 0x9E37_79B9_7F4A_7C15,
+            last_sound: BTreeMap::new(),
             thing_timer: BTreeMap::new(),
             player_shields: 100.0,
             player_dead: false,
@@ -3850,19 +3860,49 @@ impl Runtime {
     /// One random row of an actor's own `.snd` class for a sound-mode event — what
     /// `sithSoundClass_PlayModeRandom` (`0x4e6b70`) picks: `class->+0x20 + mode*4` is the mode's list
     /// and a random entry is played. The class comes from the template's `soundclass=`.
-    fn chatter_wav(&self, index: usize, mode: &str) -> Option<String> {
+    ///
+    /// The draw is the engine's `rand()`, like the rest of a script's stream: talk, fear and hurt
+    /// picks consume it in retail too, so keeping them here is what holds the AI's fire cadence.
+    /// The AI's own shot sound is the one pick retail never makes — see [`Self::shot_fire_wav`].
+    fn chatter_wav(&mut self, index: usize, mode: &str) -> Option<String> {
         let template = self.templates.get(index)?.to_ascii_lowercase();
-        let class = self.template_soundclass.get(&template)?;
-        let rows = self.sound_classes.get(class)?.get(mode)?;
+        let class = self.template_soundclass.get(&template)?.clone();
+        let rows = self.sound_classes.get(&class)?.get(mode)?;
         let pick = (crate::cog::pseudo_random() * rows.len() as f64) as usize;
-        rows.get(pick.min(rows.len().saturating_sub(1)))
-            .map(|(wav, _)| wav.clone())
+        let wav = rows.get(pick.min(rows.len().saturating_sub(1)))?.0.clone();
+        self.last_sound.insert((index, mode.to_string()), wav.clone());
+        Some(wav)
+    }
+
+    /// The `fire1` row an AI shot plays. Retail's AI shot names no wav, so the class row stands in;
+    /// the pick must **not** come from `cog::pseudo_random` — retail never draws there, and a draw
+    /// would shift the AI fire delays that share the stream (issue #13).
+    fn shot_fire_wav(&mut self, index: usize) -> Option<String> {
+        let template = self.templates.get(index)?.to_ascii_lowercase();
+        let class = self.template_soundclass.get(&template)?.clone();
+        let rows = self.sound_classes.get(&class)?.get("fire1")?;
+        self.sound_rng = self
+            .sound_rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let pick = ((self.sound_rng >> 33) as usize) % rows.len().max(1);
+        rows.get(pick.min(rows.len().saturating_sub(1))).map(|(wav, _)| wav.clone())
     }
 
     /// The row a hurt of `kind` would play for this actor, so a check can name it without queueing
-    /// anything: the actor's own `soundclass=` row for the damage kind's mode.
+    /// anything: the row the actor's own class last played for the damage kind's mode.
     pub fn hurt_sound_wav(&self, index: usize, kind: u32) -> Option<String> {
-        self.chatter_wav(index, Self::hurt_mode(kind))
+        let mode = Self::hurt_mode(kind);
+        if let Some(wav) = self.last_sound.get(&(index, mode.to_string())) {
+            return Some(wav.clone());
+        }
+        let template = self.templates.get(index)?.to_ascii_lowercase();
+        let class = self.template_soundclass.get(&template)?;
+        self.sound_classes
+            .get(class)?
+            .get(mode)?
+            .first()
+            .map(|(wav, _)| wav.clone())
     }
 
     /// Queue the random row of the actor's own class for a sound mode at `at` — what
@@ -6538,7 +6578,7 @@ impl Runtime {
             Some(name) => name.to_ascii_lowercase(),
             None => {
                 let Some(index) = usize::try_from(shooter).ok() else { return };
-                let Some(wav) = self.chatter_wav(index, "fire1") else { return };
+                let Some(wav) = self.shot_fire_wav(index) else { return };
                 wav
             }
         };

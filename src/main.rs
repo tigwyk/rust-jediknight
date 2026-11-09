@@ -21625,6 +21625,7 @@ fn deliver_crossed(
     mut last: Local<Option<Vec3>>,
     mut count: Option<ResMut<TriggerCount>>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER deliver_crossed"); }
     let (Some(world), Some(sim), Some(player)) = (world, sim, player) else { return };
     let now = player.body.pos;
     let from = *last;
@@ -21761,6 +21762,7 @@ fn deliver_cog_messages(
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<TriggerCount>>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER deliver_cog_messages"); }
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
     // The handle, not the field: `instances` is borrowed mutably for the whole loop and a scoring
     // verb borrows this same runtime.
@@ -21933,6 +21935,7 @@ fn resume_sleeping_labels(
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<PulseCount>>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER resume_sleeping_labels"); }
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
     let mut resumed = 0usize;
     for (script_name, vm) in &mut sim.instances {
@@ -21983,6 +21986,7 @@ fn run_pulses_and_timers(capture: Option<Res<CaptureDt>>,
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<PulseCount>>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER run_pulses_and_timers"); }
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
     let dt = sim_dt(&time, capture.as_deref());
     if dt <= 0.0 {
@@ -25743,6 +25747,7 @@ fn play_requested_sounds(
     cursor: Option<Res<RouteCursor>>,
     mut log: Option<ResMut<AudioLog>>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER play_requested_sounds"); }
     let (Some(sim), Some(player), Some(bank)) = (sim, player, bank) else { return };
     let (requests, channel_volume, channel_pitch_of) = {
         let mut rt = sim.world.borrow_mut();
@@ -26074,6 +26079,7 @@ fn ai_shots(capture: Option<Res<CaptureDt>>,
     sim: Option<Res<Sim>>,
     mut encounter: Local<EncounterTrace>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER ai_shots"); }
     let Some(sim) = sim else { return };
     let dt = sim_dt(&time, capture.as_deref());
     let mut rt = sim.world.borrow_mut();
@@ -28312,6 +28318,7 @@ fn advance_sim(
     collisions: Option<Res<Collision>>,
     mut drawn: Query<&mut Transform>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER advance_sim"); }
     let Some(mut sim) = sim else { return };
     let geometry = collisions.as_ref().map(|c| c.0.as_ref());
     let motion = sim
