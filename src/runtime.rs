@@ -333,9 +333,9 @@ fn vec_param(raw: Option<&str>) -> Option<[f32; 3]> {
 }
 
 /// Per solid template, the **top and footprint** of the model it draws: `(top_offset, half_x, half_y)`
-/// in model space, which is world space here. `sithCollision` treats a thing's own model as solid for
-/// every body, so a catwalk slab or a crate top is a floor; the port's surface sweep only knows the
-/// level's geometry. Filled by the loader (which has the models), read by `Runtime::thing_floor`.
+/// in model space, which is world space here. Resting floors come from the collider's own solid
+/// things ([`crate::collide::LevelGeometry::resting_floor`]); this table is only what
+/// `Runtime::elevator_floor` needs to carry a body on a rising lift.
 static TEMPLATE_FLOORS: std::sync::OnceLock<BTreeMap<String, (f32, f32, f32)>> =
     std::sync::OnceLock::new();
 
@@ -2886,7 +2886,7 @@ impl Runtime {
             .iter()
             .position(|t| t.eq_ignore_ascii_case("walkplayer"));
         // Per-body radius and actor grounding, sampled **before** the mutable iteration:
-        // `Runtime::thing_floor` borrows all of `self`, which the loop below forbids.
+        // `resting_floor` borrows the collider, which the loop below forbids.
         let body_radius: Vec<f32> = (0..self.things.len())
             .map(|index| {
                 let Some(name) = self.templates.get(index) else {
@@ -2912,40 +2912,32 @@ impl Runtime {
                 self.things[index].insert[2].max(body_radius[index] + 0.005) * 1.1
             })
             .collect();
-        // The floor each actor stands over: the highest level plane or solid-thing top under it. A body
-        // within `actor_reach` of that floor is standing and keeps the authored height; one that has
-        // walked off a ledge is not, and the gravity arm below takes it. `_actor` ships
-        // `physflags=0x4a4f` and `mass=150`, so actors are gravity bodies like the `_debris` goods.
-        // Sampled before the mutable iteration because `thing_floor` borrows all of `self`.
-        let actor_floor: Vec<Option<f32>> = (0..self.things.len())
+        // The floor each actor stands over: `resting_floor`, the same query the player's sweep
+        // uses. A body within `actor_reach` of that floor is standing and keeps the authored
+        // height; one that has walked off a ledge is not, and the gravity arm below takes it.
+        // `_actor` ships `physflags=0x4a4f` and `mass=150`, so actors are gravity bodies like the
+        // `_debris` goods. The probe is lifted 0.05 exactly as the plane query it replaced was, so
+        // a body resting a hair inside its own floor still has one. Sampled before the mutable
+        // iteration because the query borrows all of `self`.
+        let actor_floor: Vec<Option<crate::collide::Rest>> = (0..self.things.len())
             .map(|index| {
-                if self.types.get(index).copied() != Some(2) {
+                // Type 2 is an actor and type 3 a gravity good; both take the gravity arm below,
+                // which is the landing this floor is for.
+                if !matches!(self.types.get(index).copied(), Some(2) | Some(3)) {
                     return None;
                 }
-                let pos = self.things[index].pos;
-                let plane = self.solids.as_ref().and_then(|solids| {
-                    solids
-                        .sectors_around(pos)
-                        .into_iter()
-                        .filter_map(|sector| {
-                            solids
-                                .floor_surface(sector, [pos[0], pos[1], pos[2] + 0.05])
-                                .map(|(z, _)| z)
-                        })
-                        .fold(None, |best: Option<f32>, z| {
-                            Some(best.map_or(z, |near| near.max(z)))
-                        })
-                });
-                // Standing on level geometry is the common case and ends the query; only a body whose
-                // plane is out of reach needs the solid-thing scan, for a fall onto a crate or lift.
-                if plane.is_some_and(|floor| pos[2] - floor <= actor_reach[index]) {
-                    return plane;
-                }
-                let top = self.thing_floor(pos, body_radius[index]);
-                match (plane, top) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    (a, b) => a.or(b),
-                }
+                let solids = self.solids.as_ref()?;
+                let t = &self.things[index];
+                let sector = usize::try_from(t.sector)
+                    .ok()
+                    .filter(|sector| *sector < solids.sectors.len())
+                    .or_else(|| solids.sector_at(t.pos, 0.1))?;
+                solids.resting_floor(
+                    sector,
+                    [t.pos[0], t.pos[1], t.pos[2] + 0.05],
+                    f32::INFINITY,
+                    body_radius[index],
+                )
             })
             .collect();
         for (i, t) in self.things.iter_mut().enumerate() {
@@ -2973,7 +2965,7 @@ impl Runtime {
             // An actor within its creation reach of the floor it stands over is attached and keeps the
             // level's authored height; one that has walked off a ledge is not, and gravity takes it.
             let grounded =
-                actor_body && actor_floor[i].is_some_and(|floor| t.pos[2] - floor <= actor_reach[i]);
+                actor_body && actor_floor[i].is_some_and(|floor| t.pos[2] - floor.height <= actor_reach[i]);
             if gravity_body {
                 if grounded {
                     // A standing body keeps the offset it attached with; a stale downward velocity
@@ -3116,22 +3108,13 @@ impl Runtime {
             // the step started is a lip the body passed, not a floor it landed on, so it is ignored.
             if gravity_body
                 && let Some(solids) = &self.solids
+                && let Some(rest) = actor_floor[i]
             {
-                let mut floor: Option<f32> = actor_floor[i].filter(|top| *top <= previous[2] + 0.05);
-                for sector in solids.sectors_around(t.pos) {
-                    if let Some((z, _)) =
-                        solids.floor_surface(sector, [t.pos[0], t.pos[1], t.pos[2] + 0.6])
-                        && z <= previous[2] + 0.05
-                    {
-                        floor = Some(floor.map_or(z, |near: f32| near.max(z)));
-                    }
-                }
                 // `sithCollision_MoveThing` stops the swept sphere at the surface, so an actor's centre
                 // comes to rest one radius above it. The `_debris` goods keep the origin-on-plane rule
                 // they were ported with (their inserts are zero, so the two agree).
-                let land = floor.map(|floor| if actor_body { floor + body_radius[i] } else { floor });
-                if let Some(land) = land
-                    && t.pos[2] <= land
+                let land = if actor_body { rest.height + body_radius[i] } else { rest.height };
+                if t.pos[2] <= land
                 {
                     t.pos[2] = land;
                     if t.vel[2] < 0.0 {
@@ -3958,20 +3941,17 @@ impl Runtime {
             let Some(sector) = solids.sector_at(at, radius) else {
                 return false;
             };
-            // `standable` is the walker's own floor answer: it searches the room **and the adjoins a
-            // body can reach**, which is what a doorway threshold needs. A single-sector `sweep` is
-            // stricter than the level: level 6's first doorway has its floor under the neighbouring
-            // room, so the sweep found nothing and the follower stopped on the threshold for ever.
-            // The reach is unchanged (`height + maxstep`), so a ledge is still a ledge.
+            // `resting_floor` is the walker's own floor answer: it searches the room **and the
+            // adjoins a body can reach**, which is what a doorway threshold needs, and it knows the
+            // solid things the engine collides (a catwalk, a crate) as well as the level's faces
+            // and planes. The reach is `height + maxstep`, so a ledge is still a ledge.
             // Probe a hair above the point: a body whose origin sits a millimetre inside a floor
             // (level 2's actor stands 0.0011 under it, and the walk keeps its own z) has no floor
-            // *below* it, so every step was refused and the actor never walked. The reach is
-            // unchanged, so this cannot turn a ledge into ground.
+            // *below* it, so every step was refused and the actor never walked.
             let lifted = [at[0], at[1], at[2] + 0.01];
             solids
-                .standable(sector, lifted, height + maxstep, radius)
+                .resting_floor(sector, lifted, height + maxstep, radius)
                 .is_some()
-                || self.thing_floor(at, radius).is_some()
         };
         if ground(point) {
             return true;
@@ -5317,9 +5297,9 @@ impl Runtime {
                         let m = self.ai.get(&index).map(|c| c.maxstep).unwrap_or(0.5).max(0.0);
                         let sector = solids.sector_at(next, r);
                         let lifted = [next[0], next[1], next[2] + 0.01];
-                        let stand = sector.and_then(|s| solids.standable(s, lifted, h + m, r));
+                        let stand = sector.and_then(|s| solids.resting_floor(s, lifted, h + m, r));
                         eprintln!(
-                            "ai: {index} cannot step to {next:?}: sector {sector:?}, standable {stand:?} (reach {:.2}), from {:?}",
+                            "ai: {index} cannot step to {next:?}: sector {sector:?}, floor {stand:?} (reach {:.2}), from {:?}",
                             h + m,
                             self.things.get(index).map(|t| t.pos)
                         );
@@ -5825,22 +5805,9 @@ impl Runtime {
             crossed |= cross;
             landed |= step_landed;
         }
-        // A solid model under the body is a floor. The engine's collision includes a thing's own
-        // surfaces, so a catwalk slab or a crate top stops a fall; the surface sweep above only
-        // knows the level's faces.
-        if vy <= 0.0
-            && let Some(top) = self.thing_floor([pos[0], pos[1], before[2]], radius)
-        {
-            let feet = pos[2] - radius;
-            let step = (-vy * dt).max(0.02);
-            let accept = top <= before[2] - radius + step && top >= feet - 0.02;
-            if accept {
-                pos[2] = top + radius;
-                vy = 0.0;
-                landed = true;
-            }
-        }
-        // A moving elevator's top rises into the body.
+        // A moving elevator's top rises into the body. This is a carry rule, not a floor choice:
+        // `resting_floor` already seats the body on a lift's top, while a platform that rises into
+        // it has to lift the body, which is what `sithPhysics_UpdateAttachedThingPhysics` does.
         if vy <= 0.0
             && let Some(top) = self.elevator_floor([pos[0], pos[1], before[2]], radius)
         {
@@ -5969,8 +5936,8 @@ impl Runtime {
     }
 
     /// Put the actors `ai_tick` walked back on their feet and out of the walls: the runtime's own
-    /// `resolve_stepped` and the walker's `floor_contact`, not a second `support` rule. `step` calls
-    /// this after its motion loop; the walked list is consumed there.
+    /// `resolve_stepped` and the walker's one floor rule (`resting_floor`), not a second support
+    /// query. `step` calls this after its motion loop; the walked list is consumed there.
     fn settle_walked(&mut self, solids: &crate::collide::Solids, moved: &mut Vec<usize>) {
         for actor in std::mem::take(&mut self.walked) {
             let Some(thing) = self.things.get(actor) else { continue };
@@ -6569,33 +6536,14 @@ impl Runtime {
     }
 
 
-    /// The top of the highest **solid thing** under `pos` whose model the body's feet are on or just
-    /// above, or `None` when the body is over open level geometry.
+    /// The floor of a moving elevator under the body: a **carry** rule, not a floor choice.
     ///
-    /// `sithCollision` treats a thing's own model as solid for every body, so a catwalk slab, a crate
-    /// or a lift platform is a floor. The surface sweep only knows the level's own faces, so without
-    /// this a body on a `_walkstruct` falls through it — level 1's catwalk pose is the standing case.
-    /// `ponytail:` the footprint is the model's axis-aligned half extents, so a thing rotated off the
-    /// axes is covered a little generously; the engine uses the drawn surfaces.
-    pub fn thing_floor(&self, pos: [f32; 3], body_radius: f32) -> Option<f32> {
-        self.thing_floor_filter(pos, body_radius, false)
-    }
-
-    /// The floor of a moving elevator under the body.
-    ///
-    /// A lift is not an ordinary prop: its top rises into a body standing on it, and the engine's
-    /// collision carries the body with the surface. Restricting this to the `*elev*` templates keeps
-    /// a table or crate above the feet from teleporting a body upward.
+    /// A lift's top that rises into a body standing on it lifts the body with the surface, which is
+    /// what `sithPhysics_UpdateAttachedThingPhysics` does. Resting floors come from
+    /// [`crate::collide::LevelGeometry::resting_floor`], which knows every solid thing's top; only
+    /// this lift case needs the template name, and restricting it to `*elev*` keeps a table or crate
+    /// above the feet from teleporting a body upward.
     pub fn elevator_floor(&self, pos: [f32; 3], body_radius: f32) -> Option<f32> {
-        self.thing_floor_filter(pos, body_radius, true)
-    }
-
-    fn thing_floor_filter(
-        &self,
-        pos: [f32; 3],
-        body_radius: f32,
-        elevators_only: bool,
-    ) -> Option<f32> {
         let feet = pos[2] - body_radius;
         let mut best: Option<f32> = None;
         for (index, thing) in self.things.iter().enumerate() {
@@ -6603,7 +6551,7 @@ impl Runtime {
                 continue;
             }
             let Some(template) = self.templates.get(index) else { continue };
-            if elevators_only && !template.to_ascii_lowercase().contains("elev") {
+            if !template.to_ascii_lowercase().contains("elev") {
                 continue;
             }
             let Some((top_offset, half_x, half_y)) = template_floor(template) else { continue };
@@ -6613,10 +6561,7 @@ impl Runtime {
                 continue;
             }
             let top = thing.pos[2] + top_offset;
-            // A surface under the feet: the caller decides whether the body is close enough to rest on
-            // it. Anything above the feet is something the body is beside, not standing on.
-            let reach = if elevators_only { 0.2 } else { 0.1 };
-            if top <= feet + reach && best.is_none_or(|at| top > at) {
+            if top <= feet + 0.2 && best.is_none_or(|at| top > at) {
                 best = Some(top);
             }
         }
@@ -10657,28 +10602,65 @@ mod tests {
         assert_eq!(rt.template_hit["barething"].0, 0.065, "an unnamed size keeps the player's");
     }
 
-    /// `maxrotthrust / surfdrag` degrees a second, the short way round: a body that is 60 degrees
-    /// off turns 10 degrees in a 0.6 s frame at a 16 deg/s rate rather than snapping onto its aim.
-    /// A solid thing's own model is a surface the engine collides with: the loader registers its top
-    /// and footprint, and the body's floor probe finds it. Level 1's catwalk is the standing case.
+    /// A solid thing's own model is a surface the engine collides with, and the **one** floor rule
+    /// reads it: the collider carries every collidable thing's top (`ThingSolid::z_max`), so the
+    /// player's sweep, AI settling, actor grounding and gravity landing all land on the same slab.
     #[test]
     fn a_solid_things_model_is_a_floor() {
-        set_template_floors(BTreeMap::from([(
-            "testcatwalk".to_string(),
-            (0.0123, 0.5, 0.5),
-        )]));
+        let slab = crate::collide::ThingSolid {
+            centre: [0.0, 0.0, 1.0],
+            radius: 0.5,
+            z_min: -0.5,
+            z_max: 1.0123,
+            sector: 0,
+            half: None,
+            yaw: 0.0,
+        };
+        let solids = crate::collide::Solids::default();
+        solids.set_things(vec![slab]);
+        // A body centre 0.065 over the model top is standing on the slab; off its footprint is open
+        // air, and a top below the reach window is not support either.
+        let rest = solids
+            .resting_floor(0, [0.0, 0.0, 1.0123 + 0.065], 0.1, 0.065)
+            .expect("the slab's top");
+        assert_eq!(rest.height, 1.0123);
+        assert!(rest.normal.is_none(), "a thing's top has no level normal");
+        assert_eq!(solids.resting_floor(0, [2.0, 0.0, 1.0123 + 0.065], 0.1, 0.065).map(|r| r.height), None);
+        assert_eq!(solids.resting_floor(0, [0.0, 0.0, 1.0123 + 0.4], 0.1, 0.065).map(|r| r.height), None);
+
+        // The actor path: a room whose floor plane is far below the slab. The actor over the slab is
+        // not within its creation reach of that plane, so gravity takes it and the step's own landing
+        // clamp — the same `resting_floor` — seats it one radius over the *slab*, not the room floor.
         let mut rt = door_runtime();
-        rt.templates = vec!["walkplayer".into(), "testcatwalk".into()];
-        rt.types = vec![10, 0];
-        let mut slab = rt.things[0].clone();
-        slab.pos = [0.0, 0.0, 1.0];
-        rt.things.push(slab);
-        // The model top sits `0.0123` above the thing's position; a body centre 0.065 over it is
-        // standing on the slab.
-        assert_eq!(rt.thing_floor([0.0, 0.0, 1.2], 0.065), Some(1.0123));
-        // Off the footprint is open air, and a surface above the feet is something the body is beside.
-        assert_eq!(rt.thing_floor([2.0, 0.0, 1.2], 0.065), None);
-        assert_eq!(rt.thing_floor([0.0, 0.0, 0.8], 0.065), None);
+        rt.things[0].pos = [0.0, 0.0, 1.5];
+        rt.things[0].sector = 0;
+        rt.things[0].phys_flags = 0x4a4f;
+        rt.templates = vec!["mousebot".into()];
+        rt.types = vec![2];
+        rt.mass.insert(0, 150.0);
+        let plane = crate::collide::Plane {
+            normal: [0.0, 0.0, -1.0],
+            point: [0.0; 3],
+            surface: 1,
+        };
+        let room = crate::collide::Solids {
+            sectors: vec![vec![plane]],
+            hull: vec![vec![plane]],
+            spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+            portals: vec![Vec::new()],
+            ..Default::default()
+        };
+        room.set_things(vec![slab]);
+        rt.solids = Some(std::sync::Arc::new(room));
+        for _ in 0..90 {
+            rt.step(None, 1.0 / 30.0);
+        }
+        assert!(
+            (rt.things[0].pos[2] - (1.0123 + 0.065)).abs() < 1e-3,
+            "the actor did not settle on the slab: z {}",
+            rt.things[0].pos[2]
+        );
+        assert_eq!(rt.things[0].vel[2], 0.0, "the landed actor kept a downward velocity");
     }
 
     /// A projectile's own move is what the engine tests (`sithCollision_SearchForCollisions`), not
@@ -12406,7 +12388,8 @@ mod tests {
             actor.yaw = 180.0;
             let mut player = base.clone();
             // Away from the leap point: a body standing *on* it would count as a solid thing's top
-            // (`thing_floor`), which is the port's stand-in for the engine's walkable-thing bit.
+            // (the collider's `ThingSolid` list), which is the port's stand-in for the engine's
+            // walkable-thing bit.
             player.pos = [0.0, 5.0, 0.065];
             rt.things = vec![player, actor];
             rt.templates = vec!["walkplayer".into(), "tuskan".into()];

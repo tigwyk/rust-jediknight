@@ -1963,39 +1963,6 @@ impl LevelGeometry {
             .any(|face| sphere_face(pos, radius, face))
     }
 
-    /// The same landing `floor_under` picks, with the surface normal turned toward the body.
-    ///
-    /// `sithCollision_MoveThing` moves a body along the plane it hits; the walker needs the normal to
-    /// turn a downward step into the tangential part. `floor_candidates` keeps the file's raw normal
-    /// (the probe prints it, `up false` and all), so flip it the same way every other query does.
-    pub fn floor_contact(
-        &self,
-        sector: usize,
-        pos: [f32; 3],
-        height: f32,
-        radius: f32,
-    ) -> Option<(f32, f32, usize, [f32; 3])> {
-        let mut best: Option<(f32, f32, usize, [f32; 3])> = None;
-        for (floor, travelled, owner, raw, surface) in self.floor_candidates(sector, pos, height, radius) {
-            if best.is_none_or(|(near, _, _, _)| floor > near) {
-                let normal = self
-                    .face_of
-                    .get(&surface)
-                    .and_then(|i| self.faces.get(*i))
-                    .map(|face| {
-                        if dot(sub(pos, face.point), face.normal) < 0.0 {
-                            [-face.normal[0], -face.normal[1], -face.normal[2]]
-                        } else {
-                            face.normal
-                        }
-                    })
-                    .unwrap_or(raw);
-                best = Some((floor, travelled, owner, normal));
-            }
-        }
-        best
-    }
-
     /// `sithPhysics_FindFloor`: the floor under a body, found by sweeping a sphere straight down.
     ///
     /// The engine's range is `height * 1.1` (and `moveSize + 0.005` for a body that is not attached yet),
@@ -2139,6 +2106,158 @@ impl LevelGeometry {
             scan(&all, &mut out);
         }
         out
+    }
+}
+
+/// What a body's feet come to rest on: the single floor answer every motion caller shares.
+///
+/// `height` is the **feet** height, not the centre: a swept sphere stops with its centre one
+/// `radius` above a face, a sector plane and a solid thing's top are already feet heights, so every
+/// caller inverts it the same way (`height + radius`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rest {
+    /// The height the body's feet rest at.
+    pub height: f32,
+    /// How far below the body's centre the contact sits (`pos[2] - (height + radius)`).
+    pub travelled: f32,
+    /// The contact normal turned toward the body, so a ramp gives the direction it slides down.
+    /// A sector plane and a solid thing's top have none.
+    pub normal: Option<[f32; 3]>,
+}
+
+impl LevelGeometry {
+    /// The one floor rule: the player, AI settling, actor grounding and gravity landing all ask
+    /// this, and no caller keeps a second support rule behind it.
+    ///
+    /// In the engine's own order, highest answer wins:
+    ///
+    /// 1. the downward sphere sweep's faces — a catwalk slab, a ramp, a face-only floor;
+    /// 2. a sector's own floor **plane** where its data has no face inside the engine's floor
+    ///    reach (`18Ascend`'s shaft opening), and the planes of the sectors around a body whose
+    ///    sector carries no floor plane at all (`19A`'s 723, level 18's spawn);
+    /// 3. a solid thing's model top (`collide=`, `ThingSolid::z_max`) — a crate, a catwalk, a lift.
+    ///
+    /// `reach` is how far below the feet a surface may be and still count: the walker passes this
+    /// frame's fall, so a body in the air is not caught by a floor it has not reached. Motion
+    /// callers that want the floor under a body wherever it is (actor grounding) pass
+    /// `f32::INFINITY` and compare the answer with their own reach.
+    pub fn resting_floor(
+        &self,
+        sector: usize,
+        pos: [f32; 3],
+        reach: f32,
+        radius: f32,
+    ) -> Option<Rest> {
+        let mut best: Option<Rest> = None;
+        for (floor, travelled, _owner, raw, surface) in
+            self.floor_candidates(sector, pos, reach + radius, radius)
+        {
+            // The fall may only reach a floor whose contact is inside this frame's travel, and the
+            // contact must not be above where the body already is.
+            if travelled > reach + 1e-3 || floor + radius > pos[2] + 1e-3 {
+                continue;
+            }
+            if best.is_none_or(|near| floor > near.height) {
+                // `.jkl` plane normals point out of the room, while the walker wants the normal
+                // turned toward the body; a ramp's horizontal part is the downslope direction.
+                let normal = self
+                    .face_of
+                    .get(&surface)
+                    .and_then(|i| self.faces.get(*i))
+                    .map(|face| {
+                        if dot(sub(pos, face.point), face.normal) < 0.0 {
+                            [-face.normal[0], -face.normal[1], -face.normal[2]]
+                        } else {
+                            face.normal
+                        }
+                    })
+                    .unwrap_or(raw);
+                best = Some(Rest {
+                    height: floor,
+                    travelled,
+                    normal: Some(normal),
+                });
+            }
+        }
+        if best.is_none() {
+            // The shipped data does not always tile, so the plane is the port's own data-gap
+            // repair, not engine behaviour (`sithPhysics_FindFloor` sweeps surfaces only).
+            let plane = match self.floor_below(sector, pos) {
+                // A sector with no floor plane of its own is held by the floor planes of the
+                // sectors around it, which may not be walkable from it at all.
+                None => self
+                    .sectors_around(pos)
+                    .into_iter()
+                    .filter_map(|other| self.floor_below(other, pos))
+                    // Never lift: contact must be at or below where the body already is.
+                    .filter(|floor| floor + radius <= pos[2] + 1e-3)
+                    .fold(None, |best: Option<f32>, floor| {
+                        Some(best.map_or(floor, |near| near.max(floor)))
+                    }),
+                // A sector whose plane is its only floor answers with it where the body is over
+                // the room and no face is inside the engine's floor reach: a walkway slab 0.42
+                // below a ramp still leaves the plane in charge (`walk15`'s 212-of-243 ungrounded
+                // frames), while level 2's ledge plane 3.0 under a 3.065 body is not support.
+                Some(plane) => {
+                    let contact = plane + radius;
+                    (self.room_contains(sector, pos, radius)
+                        && self.floor_under(sector, pos, 1.0, radius).is_none()
+                        && contact <= pos[2] + 1e-3
+                        && pos[2] - contact <= reach + 1e-3)
+                        .then_some(plane)
+                }
+            };
+            if let Some(height) = plane {
+                best = Some(Rest {
+                    height,
+                    travelled: pos[2] - height - radius,
+                    normal: None,
+                });
+            }
+        }
+        if let Some(top) = self.prop_floor(pos, radius, reach)
+            && best.is_none_or(|near| top > near.height)
+        {
+            best = Some(Rest {
+                height: top,
+                travelled: pos[2] - top - radius,
+                normal: None,
+            });
+        }
+        best
+    }
+
+    /// The top of the highest solid thing the body is over, within `reach` below the feet.
+    ///
+    /// `sithCollision` treats a thing's own model as solid for every body, so a catwalk slab, a
+    /// crate or a lift platform is a floor. Tops are already feet heights, and a top above the
+    /// feet is something the body is beside, not standing on.
+    fn prop_floor(&self, pos: [f32; 3], radius: f32, reach: f32) -> Option<f32> {
+        let feet = pos[2] - radius;
+        let mut best: Option<f32> = None;
+        for thing in self.things().iter() {
+            let over = match thing.half {
+                Some(half) => {
+                    let local = thing.local([pos[0], pos[1]]);
+                    local[0].abs() <= half[0] + radius && local[1].abs() <= half[1] + radius
+                }
+                None => {
+                    let (dx, dy) = (pos[0] - thing.centre[0], pos[1] - thing.centre[1]);
+                    dx * dx + dy * dy <= (thing.radius + radius).powi(2)
+                }
+            };
+            if !over {
+                continue;
+            }
+            let top = thing.z_max;
+            if top > feet + 0.02 || feet - top > reach + 1e-3 {
+                continue;
+            }
+            if best.is_none_or(|near| top > near) {
+                best = Some(top);
+            }
+        }
+        best
     }
 }
 
@@ -3085,6 +3204,102 @@ mod tests {
         let (height, surface) = room.floor_surface(0, [0.0, 0.0, -0.95]).expect("floor");
         assert_eq!(surface, 7);
         assert!((height + 1.0).abs() < 1e-4, "height {height}");
+    }
+
+    /// The one floor rule answers the same resting height for the four shapes the motion callers
+    /// used to resolve with different queries: a sector whose floor is only its plane, a walkway
+    /// that is only a face, a ramp, and a solid thing's model top. The same body, at the same pose,
+    /// rests at the same height on every one of them.
+    #[test]
+    fn a_plane_only_sector_a_face_only_walkway_a_ramp_and_a_prop_rest_at_one_height() {
+        const R: f32 = 0.065;
+        let body = [0.0, 0.0, R];
+        let rest = |solids: &Solids| solids.resting_floor(0, body, 0.1, R);
+
+        // 1. Plane only: the cell's planes are its whole floor, with no polygon anywhere.
+        let plane_only = Solids {
+            sectors: vec![vec![
+                Plane { normal: [0.0, 0.0, -1.0], point: [0.0; 3], surface: usize::MAX },
+                Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 2.0], surface: usize::MAX },
+            ]],
+            spheres: vec![([0.0; 3], 4.0)],
+            portals: vec![Vec::new()],
+            ..Default::default()
+        };
+        let plane = rest(&plane_only).expect("a plane-only sector has a floor");
+        assert_eq!(plane.height, 0.0);
+        assert!(plane.normal.is_none(), "a plane carries no face normal");
+
+        // 2. Face only: `floor_below` is `None`, and the slab polygon is the whole floor.
+        let walkway = Face {
+            normal: [0.0, 0.0, 1.0],
+            point: [0.0; 3],
+            verts: vec![[-2.0, -2.0, 0.0], [2.0, -2.0, 0.0], [2.0, 2.0, 0.0], [-2.0, 2.0, 0.0]],
+            surface: 1,
+        };
+        let face_only = Solids {
+            sectors: vec![vec![Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 2.0], surface: 2 }]],
+            spheres: vec![([0.0; 3], 4.0)],
+            portals: vec![Vec::new()],
+            faces: vec![walkway],
+            face_of: [(1usize, 0usize)].into_iter().collect(),
+            surface_owner: vec![0, 0, 0],
+            ..Default::default()
+        };
+        assert!(face_only.floor_below(0, body).is_none(), "the fixture must carry no floor plane");
+        let face = rest(&face_only).expect("a face-only walkway has a floor");
+        assert_eq!(face.height, 0.0);
+
+        // 3. Ramp: a 45-degree face, wound with the file's out-of-room normal. The body already
+        // touches it at this pose, so the resting height matches; the normal is what tells the walker
+        // which way the slope falls.
+        let up = [std::f32::consts::FRAC_1_SQRT_2, 0.0, std::f32::consts::FRAC_1_SQRT_2];
+        let slant = Face {
+            normal: [-up[0], 0.0, -up[2]],
+            point: [0.0; 3],
+            verts: vec![
+                [-2.0, -2.0, 2.0],
+                [2.0, -2.0, -2.0],
+                [2.0, 2.0, -2.0],
+                [-2.0, 2.0, 2.0],
+            ],
+            surface: 1,
+        };
+        let ramp = Solids {
+            sectors: vec![vec![Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 2.0], surface: 2 }]],
+            spheres: vec![([0.0; 3], 4.0)],
+            portals: vec![Vec::new()],
+            faces: vec![slant],
+            face_of: [(1usize, 0usize)].into_iter().collect(),
+            surface_owner: vec![0, 0, 0],
+            ..Default::default()
+        };
+        let ramp = rest(&ramp).expect("a ramp is a floor");
+        assert_eq!(ramp.height, 0.0);
+        let normal = ramp.normal.expect("a ramp keeps its slope");
+        assert!((normal[2] - up[2]).abs() < 1e-4, "the ramp normal must point up: {normal:?}");
+
+        // 4. Solid prop: no level geometry at all, only the thing's model top.
+        let prop = Solids::default();
+        prop.set_things(vec![ThingSolid {
+            centre: [0.0; 3],
+            radius: 0.5,
+            z_min: -1.0,
+            z_max: 0.0,
+            sector: 0,
+            half: None,
+            yaw: 0.0,
+        }]);
+        let top = rest(&prop).expect("a solid thing's top is a floor");
+        assert_eq!(top.height, 0.0);
+        assert!(top.normal.is_none(), "a thing's top carries no level normal");
+
+        // One primitive, four surfaces, one resting height.
+        assert_eq!(
+            [plane.height, face.height, ramp.height, top.height],
+            [0.0; 4],
+            "the motion callers' surfaces must come to rest at the same height"
+        );
     }
 
     #[test]
