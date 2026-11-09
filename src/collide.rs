@@ -2141,20 +2141,28 @@ impl LevelGeometry {
     /// frame's fall, so a body in the air is not caught by a floor it has not reached. Motion
     /// callers that want the floor under a body wherever it is (actor grounding) pass
     /// `f32::INFINITY` and compare the answer with their own reach.
+    ///
+    /// `lift` is the one exception a **placement** needs: `true` lets the answer sit up to the plane
+    /// query's own 0.05 tolerance above the body, and the caller decides whether to raise it (the
+    /// player's initial seat). Every motion caller passes `false`; a falling body never lifts.
     pub fn resting_floor(
         &self,
         sector: usize,
         pos: [f32; 3],
         reach: f32,
         radius: f32,
+        lift: bool,
     ) -> Option<Rest> {
+        // The highest floor this call may return: a landing takes a contact at or below the body's
+        // centre, a placement reaches the plane query's own tolerance above it.
+        let ceiling = if lift { pos[2] + 0.05 } else { pos[2] - radius + 1e-3 };
         let mut best: Option<Rest> = None;
         for (floor, travelled, _owner, raw, surface) in
             self.floor_candidates(sector, pos, reach + radius, radius)
         {
             // The fall may only reach a floor whose contact is inside this frame's travel, and the
             // contact must not be above where the body already is.
-            if travelled > reach + 1e-3 || floor + radius > pos[2] + 1e-3 {
+            if travelled > reach + 1e-3 || floor > ceiling {
                 continue;
             }
             if best.is_none_or(|near| floor > near.height) {
@@ -2189,8 +2197,8 @@ impl LevelGeometry {
                     .sectors_around(pos)
                     .into_iter()
                     .filter_map(|other| self.floor_below(other, pos))
-                    // Never lift: contact must be at or below where the body already is.
-                    .filter(|floor| floor + radius <= pos[2] + 1e-3)
+                    // A landing may not lift the body; a seating call raises the ceiling itself.
+                    .filter(|floor| *floor <= ceiling)
                     .fold(None, |best: Option<f32>, floor| {
                         Some(best.map_or(floor, |near| near.max(floor)))
                     }),
@@ -2202,7 +2210,7 @@ impl LevelGeometry {
                     let contact = plane + radius;
                     (self.room_contains(sector, pos, radius)
                         && self.floor_under(sector, pos, 1.0, radius).is_none()
-                        && contact <= pos[2] + 1e-3
+                        && plane <= ceiling
                         && pos[2] - contact <= reach + 1e-3)
                         .then_some(plane)
                 }
@@ -3214,7 +3222,7 @@ mod tests {
     fn a_plane_only_sector_a_face_only_walkway_a_ramp_and_a_prop_rest_at_one_height() {
         const R: f32 = 0.065;
         let body = [0.0, 0.0, R];
-        let rest = |solids: &Solids| solids.resting_floor(0, body, 0.1, R);
+        let rest = |solids: &Solids| solids.resting_floor(0, body, 0.1, R, false);
 
         // 1. Plane only: the cell's planes are its whole floor, with no polygon anywhere.
         let plane_only = Solids {

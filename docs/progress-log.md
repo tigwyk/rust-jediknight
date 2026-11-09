@@ -6256,3 +6256,23 @@ longer presents the retired `maxthrust/surfdrag` walk as the answer.
 Measured: `cargo test` **304 passed, 0 failed**; `--walk all` (above); `--live-play`
 `--start 01narshadda` passes (forward 0.09 units at 2.24 u/s peak, 1 projectile, 0.11 jump stopped
 by the ceiling); `--ai` and `--rules` pass; `trace-gate.ps1` **10 legs, 0 failures**.
+
+### Round 429: final review fixes — shared seat, type-3 landing, one AI writer
+
+The two-axis review of #4-#6 found four defects. The player seat still used
+`solids.floor_surface` and bypassed the shared floor rule; `resting_floor` now takes the one
+`lift` option a **placement** needs, and the seat is that same query. Its probe is the old seat's
+one-radius point, so only a support above the feet raises the body. **Type-3 gravity goods** were
+probed at the actor's flat 0.05 while their landing writes `rest.height`, so a good wider than
+0.05 measured itself below its own floor and sank for ever; the probe now uses the good's own
+radius. `ai_shots` no longer writes the player thing pose; it reads the pose `step_player`
+publishes. The unused `PlayerInput.pitch` forwarding field is gone, and `player_thing` now uses
+the one `local_player` lookup.
+
+The walk gate no longer hides the six known walk-off levels behind a name skip: each records and
+asserts `(void, contained, drop)`. The shared seat also settles `10cargo` on its ramp face instead
+of the old sector-plane lift, so its spawn-yaw line now walks off; that outcome is recorded rather
+than hidden. Measured: `cargo test` **305 passed, 0 failed**; `--walk all` **30/34 contained, 26
+hull agreements, 58 crossings, 2 left in the void (10cargo 680.75, 11gorc 627.51), 0 over no
+floor, worst contained drop 3.35**; `--ai` and `--live-play --start 01narshadda` pass;
+`trace-gate.ps1` **10 legs, 0 failures**.

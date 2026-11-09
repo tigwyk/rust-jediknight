@@ -938,8 +938,6 @@ pub struct PlayerInput {
     pub jump: bool,
     /// The body's facing in radians. The walk is built in the body's frame.
     pub yaw: f32,
-    /// The aim's pitch in radians, published with the pose `fire` reads.
-    pub pitch: f32,
     /// `SetActorExtraSpeed`'s force-speed term.
     pub extra_speed: f32,
 }
@@ -2916,9 +2914,12 @@ impl Runtime {
         // uses. A body within `actor_reach` of that floor is standing and keeps the authored
         // height; one that has walked off a ledge is not, and the gravity arm below takes it.
         // `_actor` ships `physflags=0x4a4f` and `mass=150`, so actors are gravity bodies like the
-        // `_debris` goods. The probe is lifted 0.05 exactly as the plane query it replaced was, so
-        // a body resting a hair inside its own floor still has one. Sampled before the mutable
-        // iteration because the query borrows all of `self`.
+        // `_debris` goods. The probe is lifted to the point the landing writes: an actor lands at
+        // `height + radius`, so its probe keeps the 0.05 the plane query it replaced used; a type-3
+        // good keeps its origin on the plane, so its probe is lifted by its own radius. A flat 0.05
+        // probed a good wider than 0.05 below its own floor, `resting_floor` refused the contact and
+        // the body sank for ever. Sampled before the mutable iteration because the query borrows all
+        // of `self`.
         let actor_floor: Vec<Option<crate::collide::Rest>> = (0..self.things.len())
             .map(|index| {
                 // Type 2 is an actor and type 3 a gravity good; both take the gravity arm below,
@@ -2932,11 +2933,17 @@ impl Runtime {
                     .ok()
                     .filter(|sector| *sector < solids.sectors.len())
                     .or_else(|| solids.sector_at(t.pos, 0.1))?;
+                let lift = if self.types.get(index).copied() == Some(3) {
+                    body_radius[index]
+                } else {
+                    0.05
+                };
                 solids.resting_floor(
                     sector,
-                    [t.pos[0], t.pos[1], t.pos[2] + 0.05],
+                    [t.pos[0], t.pos[1], t.pos[2] + lift],
                     f32::INFINITY,
                     body_radius[index],
+                    false,
                 )
             })
             .collect();
@@ -3950,7 +3957,7 @@ impl Runtime {
             // *below* it, so every step was refused and the actor never walked.
             let lifted = [at[0], at[1], at[2] + 0.01];
             solids
-                .resting_floor(sector, lifted, height + maxstep, radius)
+                .resting_floor(sector, lifted, height + maxstep, radius, false)
                 .is_some()
         };
         if ground(point) {
@@ -5297,7 +5304,7 @@ impl Runtime {
                         let m = self.ai.get(&index).map(|c| c.maxstep).unwrap_or(0.5).max(0.0);
                         let sector = solids.sector_at(next, r);
                         let lifted = [next[0], next[1], next[2] + 0.01];
-                        let stand = sector.and_then(|s| solids.resting_floor(s, lifted, h + m, r));
+                        let stand = sector.and_then(|s| solids.resting_floor(s, lifted, h + m, r, false));
                         eprintln!(
                             "ai: {index} cannot step to {next:?}: sector {sector:?}, floor {stand:?} (reach {:.2}), from {:?}",
                             h + m,
@@ -5707,16 +5714,23 @@ impl Runtime {
         }
         let radius = rules.radius;
         // A body placed with its feet below the current floor needs the same initial seat as the
-        // landing sweep. Keep that height correction, but do not re-resolve the sector:
-        // `sithThing_SetSector` belongs to an adjoin contact, not an idle containment query.
-        if let Some((floor, _)) = solids.floor_surface(
+        // landing sweep. That is `resting_floor`, at the probe the old `floor_surface` seat used —
+        // one radius above the body; `lift` is the one option a placement needs, because a seat may
+        // raise the body where a landing never would, and its reach is unbounded for the same reason.
+        // Keep the height correction, but do not re-resolve the sector: `sithThing_SetSector`
+        // belongs to an adjoin contact, not an idle containment query. Only a floor above the current
+        // feet seats — this never lowers.
+        if let Some(rest) = solids.resting_floor(
             body.sector,
             [body.pos.x, body.pos.y, body.pos.z + radius],
-        ) && body.pos.z - radius < floor - 0.01
+            f32::INFINITY,
+            radius,
+            true,
+        ) && rest.height > body.pos.z - radius
             && body.vy <= 0.0
             && !(input.jump && body.grounded)
         {
-            body.pos.z = floor + radius;
+            body.pos.z = rest.height + radius;
             body.vy = 0.0;
             body.grounded = true;
         }
@@ -7550,7 +7564,7 @@ impl Runtime {
     /// The thing the camera rides: the level's first `walkplayer`, which is the engine's own rule
     /// (`sithPlayer_Initialize` takes the first thing of type PLAYER).
     pub fn player_thing(&self) -> usize {
-        self.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer")).unwrap_or(0)
+        self.local_player().unwrap_or(0)
     }
 
     /// `jkPlayer_GetJediRank` (`0x4074d0`) is `PlayerGetInvItemAmount(0x14)` truncated — the rank is
@@ -10573,6 +10587,52 @@ mod tests {
         assert_eq!(standing.things[0].vel[2], 0.0, "a standing actor kept a vertical velocity");
     }
 
+    /// A type-3 gravity good keeps its origin on the plane, while an actor rests one radius above.
+    /// The grounding probe must follow that landing: a good wider than the actor's flat 0.05 probe
+    /// used to be measured below its own floor, so `resting_floor` refused the contact and the body
+    /// sank through it for ever.
+    #[test]
+    fn a_gravity_good_wider_than_the_actor_probe_rests_on_a_plane_floor() {
+        let mut rt = door_runtime();
+        rt.things[0].pos = [0.0, 0.0, 0.5];
+        rt.things[0].phys_flags = 0x1;
+        rt.templates = vec!["debris".into()];
+        rt.types = vec![3];
+        rt.mass.insert(0, 0.1);
+        rt.template_hit.insert("debris".into(), (0.2, 0.2));
+        let plane = || crate::collide::Plane {
+            normal: [0.0, 0.0, -1.0],
+            point: [0.0; 3],
+            surface: 1,
+        };
+        rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+            sectors: vec![vec![plane()]],
+            hull: vec![vec![plane()]],
+            boxes: vec![None],
+            portals: vec![Vec::new()],
+            spheres: vec![([0.0, 0.0, 0.0], 100.0)],
+            floors: Vec::new(),
+            walls: Vec::new(),
+            wall_of: Default::default(),
+            floor_of: Default::default(),
+            faces: Vec::new(),
+            face_of: Default::default(),
+            portal_faces: Vec::new(),
+            surface_owner: Vec::new(),
+            adjoin_flags: Vec::new(),
+            ..Default::default()
+        }));
+        for _ in 0..90 {
+            rt.step(None, 1.0 / 30.0);
+        }
+        assert!(
+            rt.things[0].pos[2].abs() < 1e-3,
+            "the good did not rest on the plane: z {}",
+            rt.things[0].pos[2]
+        );
+        assert_eq!(rt.things[0].vel[2], 0.0, "the landed good kept a downward velocity");
+    }
+
     /// The projectile body is the template's `movesize` — the engine's collision radius and what
     /// `getthingmovesize` returns — not the model's bounding radius (which includes the gun) and not
     /// a guess. This pins both the value and the height rule the hit test uses.
@@ -10621,12 +10681,12 @@ mod tests {
         // A body centre 0.065 over the model top is standing on the slab; off its footprint is open
         // air, and a top below the reach window is not support either.
         let rest = solids
-            .resting_floor(0, [0.0, 0.0, 1.0123 + 0.065], 0.1, 0.065)
+            .resting_floor(0, [0.0, 0.0, 1.0123 + 0.065], 0.1, 0.065, false)
             .expect("the slab's top");
         assert_eq!(rest.height, 1.0123);
         assert!(rest.normal.is_none(), "a thing's top has no level normal");
-        assert_eq!(solids.resting_floor(0, [2.0, 0.0, 1.0123 + 0.065], 0.1, 0.065).map(|r| r.height), None);
-        assert_eq!(solids.resting_floor(0, [0.0, 0.0, 1.0123 + 0.4], 0.1, 0.065).map(|r| r.height), None);
+        assert_eq!(solids.resting_floor(0, [2.0, 0.0, 1.0123 + 0.065], 0.1, 0.065, false).map(|r| r.height), None);
+        assert_eq!(solids.resting_floor(0, [0.0, 0.0, 1.0123 + 0.4], 0.1, 0.065, false).map(|r| r.height), None);
 
         // The actor path: a room whose floor plane is far below the slab. The actor over the slab is
         // not within its creation reach of that plane, so gravity takes it and the step's own landing
@@ -13892,7 +13952,6 @@ mod tests {
         let input = PlayerInput {
             forward: 1.0,
             yaw: body.yaw,
-            pitch: body.pitch,
             ..PlayerInput::default()
         };
         for _ in 0..10 {

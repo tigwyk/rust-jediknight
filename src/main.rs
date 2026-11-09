@@ -6795,7 +6795,14 @@ fn main() {
         assert_eq!(shields, 0.0, "shields should be spent");
         assert_eq!(health, 0.0, "the player should be dead");
         assert!(rt.player_dead, "the death flag is not set");
-        let (shields, health) = rt.respawn_player(&mut runtime::PlayerBody::default(), spawn, None);
+        let (shields, health) = rt.respawn_player(
+            &mut runtime::PlayerBody {
+                eye: PLAYER_EYE,
+                ..Default::default()
+            },
+            spawn,
+            None,
+        );
         println!("die: respawn at the level's start -> {health:.0} health, {shields:.0} shields");
         assert!(!rt.player_dead, "respawn left the death flag set");
         assert!(health > 0.0 && shields > 0.0, "respawn did not restore the bars");
@@ -15964,7 +15971,7 @@ fn walker_step(
         // gravity landing share: swept faces (a walkway slab, a ramp, a face-only floor), the
         // sector's own plane where the data has no face, and a solid thing's model top. The chain
         // of three queries that used to live here each guessed at the same thing.
-        let land = solids.resting_floor(*sector, *pos, -drop, radius);
+        let land = solids.resting_floor(*sector, *pos, -drop, radius, false);
         match land {
             Some(rest) => {
                 pos[2] = rest.height + radius;
@@ -16538,16 +16545,22 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     // Every level that walked out of its own sector after a drop. One global `worst` said nothing about
     // the others: `11gorc` falling 739 units masked `08escape88`'s 2.92 outright.
     let mut stray: Vec<String> = Vec::new();
-    // The six spawn-yaw lines that run off the level's geometry. They are recorded, not asserted: the
-    // fall is a walk off the edge, not a collision drop-out (see the assertion block below).
-    const WALK_OFF_THE_EDGE: &[&str] = &[
-        "jkl\\02narshadda.jkl",
-        "jkl\\07yun.jkl",
-        "jkl\\09fuelstation.jkl",
-        "jkl\\11gorc.jkl",
-        "jkl\\17asarris.jkl",
-        "jkl\\m_boss17.jkl",
+    // The levels where the synthetic spawn-yaw walk leaves the level's geometry. Each records the
+    // outcome it has today — `(level, void, contained, drop)` — so none of them can change silently
+    // while the worst-drop/stray checks skip the list. The first six are the authored walk-off lines;
+    // `10cargo` joins them because the shared floor answer seats the body on the ramp's face contact
+    // rather than the sector plane the old seat lifted to, and its line then walks off too. The
+    // walker is not changed to avoid them.
+    const WALK_OFF_THE_EDGE: &[(&str, bool, bool, f32)] = &[
+        ("jkl\\02narshadda.jkl", false, true, 11.22),
+        ("jkl\\07yun.jkl", false, true, 0.00),
+        ("jkl\\09fuelstation.jkl", false, false, 21.13),
+        ("jkl\\10cargo.jkl", true, false, 680.75),
+        ("jkl\\11gorc.jkl", true, false, 627.51),
+        ("jkl\\17asarris.jkl", false, true, 2.77),
+        ("jkl\\m_boss17.jkl", false, true, 2.77),
     ];
+    let off_edge = |name: &str| WALK_OFF_THE_EDGE.iter().find(|(level, ..)| *level == name);
     // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
     let only = std::env::var("BK_WALK_ONLY").ok();
     // `BK_WALK_AT="x,y,z,yaw"`: start the body at a recorded pose (the eye convention the retail walk
@@ -16745,6 +16758,22 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                 transitions += r.transitions;
                 kept += r.contained as usize;
                 agreed += r.in_hull as usize;
+                if let Some((_, void, contained, known_drop)) = off_edge(name.as_str()) {
+                    assert_eq!(
+                        r.void_frames > 0,
+                        *void,
+                        "{name} changed its known walk-off void outcome"
+                    );
+                    assert_eq!(
+                        r.contained, *contained,
+                        "{name} changed its known walk-off containment"
+                    );
+                    assert!(
+                        (r.dropped.max(0.0) - known_drop).abs() < 0.01,
+                        "{name} dropped {:.2} against the recorded {known_drop:.2}",
+                        r.dropped.max(0.0)
+                    );
+                }
                 if r.void_frames > 0 {
                     if r.floor_at_start {
                         voids += 1;
@@ -16753,11 +16782,11 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                         over_nothing += 1;
                     }
                 }
-                // Only a walk that stayed in the world speaks about descent: the six levels that walk
-                // off their own edge drop the whole way and are recorded above. A run that lands one
-                // of those bodies but ends outside its sector is still that walk-off, not a new drop.
+                // Only a walk that stayed in the world speaks about descent: a known walk-off level
+                // is recorded and asserted per level above. A run that lands one of those bodies
+                // but ends outside its sector is still that walk-off, not a new drop.
                 if r.void_frames == 0
-                    && !WALK_OFF_THE_EDGE.contains(&name.as_str())
+                    && off_edge(name.as_str()).is_none()
                     && r.dropped.max(0.0) >= worst_drop
                 {
                     worst_drop = r.dropped.max(0.0);
@@ -16765,7 +16794,7 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                     worst_contained = r.contained;
                 }
                 if r.void_frames == 0
-                    && !WALK_OFF_THE_EDGE.contains(&name.as_str())
+                    && off_edge(name.as_str()).is_none()
                     && r.dropped.max(0.0) > 0.1
                     && !r.contained
                 {
@@ -16794,20 +16823,20 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     );
     // The assertions: containment varies for reasons the table shows, but a body must never be left
     // in the void and must never fall further than a step. Without these the sweep asserted nothing.
-    // The walk is the level's own spawn yaw, straight forward. On six levels that line runs off the
-    // level's geometry and the body falls out (`--walk all` prints the drops): 02narshadda 505,
-    // 07yun 720, 09fuelstation 121, 11gorc 739, 17asarris 573 (and its m_boss17 twin). They are
-    // recorded, not asserted (`WALK_OFF_THE_EDGE` above): the fall is a walk off the edge, not a
-    // collision drop-out — the pre-gravity check could not see it at all because it floated the body.
-    // Level 18's shaft (`18Ascend`) lands.
-    // `shortcut: those six lines are not covered by the assertion, upgrade when each level's own
-    // floor under the spawn yaw is measured (gaps §5.9 has the walk traces for three of them).`
+    // The walk is the level's own spawn yaw, straight forward. Seven lines run off the level's
+    // geometry; each records its exact outcome in `WALK_OFF_THE_EDGE` above and is asserted there,
+    // so none of them can change silently. 11gorc and 10cargo still leave the world — 09fuelstation
+    // ends outside its sector and the rest stay contained — and the fall is a walk off the edge,
+    // not a collision drop-out. Level 18's shaft (`18Ascend`) lands.
+    // `shortcut: those seven lines are excluded from the worst-drop/stray bounds, upgrade when each
+    // level's own floor under the spawn yaw is measured (gaps §5.9 has the walk traces for three of
+    // them).`
     println!(
         "sweep: {voids} level(s) left the body in the void, {over_nothing} started over no floor, worst drop {worst_drop:.2} ({worst_name})"
     );
     for name in &void_names {
         assert!(
-            WALK_OFF_THE_EDGE.contains(&name.as_str()),
+            off_edge(name.as_str()).is_some(),
             "{name} left the body in the void: not one of the known walk-off levels"
         );
     }
@@ -16820,7 +16849,6 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     const WALK_STRAY: &[&str] = &[
         "jkl\\04escapehouse.jkl",
         "jkl\\08escape88.jkl",
-        "jkl\\10cargo.jkl",
         "jkl\\19b.jkl",
     ];
     let new_stray: Vec<&String> = stray.iter().filter(|n| !WALK_STRAY.contains(&n.as_str())).collect();
@@ -24515,18 +24543,16 @@ fn billboard_sprites(
 fn ai_shots(capture: Option<Res<CaptureDt>>, 
     time: Res<Time>,
     sim: Option<Res<Sim>>,
-    player: Option<Res<Player>>,
 ) {
-    let (Some(sim), Some(player)) = (sim, player) else { return };
+    let Some(sim) = sim else { return };
     let dt = sim_dt(&time, capture.as_deref());
     let mut rt = sim.world.borrow_mut();
     let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer"))
     else {
         return;
     };
-    // The player's runtime thing is the AI's target.
-    let eye = player.body.pos;
-    rt.things[index].pos = [eye.x, eye.y, eye.z];
+    // `step_player` publishes the body onto the player thing; the AI reads that published eye
+    // point and never writes the pose itself — one body, one writer.
     let fired = rt.ai_tick(index, dt);
     if fired > 0 {
         println!("ai: {fired} shot(s) at the player");
@@ -26931,7 +26957,6 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         crouch,
         jump,
         yaw: player.body.yaw,
-        pitch: player.body.pitch,
         extra_speed: player.extra_speed,
     };
     let pos = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
