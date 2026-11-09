@@ -646,6 +646,9 @@ fn main() {
     // samples every 36 ticks (600 ms), the cadence a retail `coords` poll keeps.
     let mut replay: Option<std::path::PathBuf> = None;
     let mut route_trace: Option<std::path::PathBuf> = None;
+    // `--no-ai`: a capture switch for the route replay, so the scripted movement is measured
+    // without the cantina ambush (retail's `-devMode` `disableai`). Ordinary play keeps the AI.
+    let mut no_ai = false;
     let mut audio_trace: Option<std::path::PathBuf> = None;
     let mut audio_compare: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
 
@@ -926,6 +929,9 @@ fn main() {
             "--replay" => {
                 replay = arg_value(&args, &mut i).map(std::path::PathBuf::from);
             }
+            // `--no-ai`: skip the AI tick for a replay's capture. It is not a gameplay option, so the
+            // replay check below rejects it everywhere else.
+            "--no-ai" => no_ai = true,
             // `--route-trace <path>`: the replay's sampled trace (position, sector, velocity, health,
             // shields and the level-1 door/switch cog state), one row every 600 ms.
             "--route-trace" => {
@@ -1483,6 +1489,13 @@ fn main() {
     // A replay is a capture that must be reproducible, not just fixed-step: see the executor note
     // at the end of the app setup.
     let replaying = route_plan.is_some();
+    let ai_disabled = match no_ai_capture_switch(no_ai, replaying) {
+        Ok(disabled) => disabled,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    };
 
     // A level named on the command line may be `03katarn`, `03katarn.jkl` or `jkl\03katarn.jkl`.
     let level_name = level_name.map(|n| level_arg(&n));
@@ -12707,6 +12720,7 @@ fn main() {
                 .or_else(|| route_plan.is_some().then_some(1.0 / 60.0)),
         ))
         .insert_resource(RouteReplay(route_plan))
+        .insert_resource(AiDisabled(ai_disabled))
         .insert_resource(RouteTraceOut(route_trace))
         .insert_resource(AudioTraceOut(audio_trace))
         .insert_resource(AudioLog::default())
@@ -12783,7 +12797,13 @@ fn main() {
                     .run_if(no_screen_open),
                 (
                     collect_items,
-                    ai_shots,
+                    // The sight ray needs the level's collision geometry: `share_collider` hands the
+                    // solid things to the runtime, and until it runs `Runtime::solids` is `None`, which
+                    // the sight test reads as "nothing blocks". Before this constraint the first tick
+                    // of a level tested every actor's line against nothing, so the ones a wall or a
+                    // body really hides acquired the player at t = 0 and shot at that memory forever
+                    // (level 1's door gunner 155 and `reeyeesbhgun` 153).
+                    ai_shots.after(share_collider),
                     play_requested_sounds,
                     music_follows_scripts,
                     show_taken,
@@ -21625,6 +21645,7 @@ fn deliver_crossed(
     mut last: Local<Option<Vec3>>,
     mut count: Option<ResMut<TriggerCount>>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER deliver_crossed"); }
     let (Some(world), Some(sim), Some(player)) = (world, sim, player) else { return };
     let now = player.body.pos;
     let from = *last;
@@ -21761,6 +21782,7 @@ fn deliver_cog_messages(
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<TriggerCount>>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER deliver_cog_messages"); }
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
     // The handle, not the field: `instances` is borrowed mutably for the whole loop and a scoring
     // verb borrows this same runtime.
@@ -21933,6 +21955,7 @@ fn resume_sleeping_labels(
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<PulseCount>>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER resume_sleeping_labels"); }
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
     let mut resumed = 0usize;
     for (script_name, vm) in &mut sim.instances {
@@ -21983,6 +22006,7 @@ fn run_pulses_and_timers(capture: Option<Res<CaptureDt>>,
     mut sim: Option<ResMut<Sim>>,
     mut count: Option<ResMut<PulseCount>>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER run_pulses_and_timers"); }
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
     let dt = sim_dt(&time, capture.as_deref());
     if dt <= 0.0 {
@@ -25743,6 +25767,7 @@ fn play_requested_sounds(
     cursor: Option<Res<RouteCursor>>,
     mut log: Option<ResMut<AudioLog>>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER play_requested_sounds"); }
     let (Some(sim), Some(player), Some(bank)) = (sim, player, bank) else { return };
     let (requests, channel_volume, channel_pitch_of) = {
         let mut rt = sim.world.borrow_mut();
@@ -26072,8 +26097,13 @@ fn event_time(event: &runtime::EncounterEvent) -> f32 {
 fn ai_shots(capture: Option<Res<CaptureDt>>, 
     time: Res<Time>,
     sim: Option<Res<Sim>>,
+    disabled: Option<Res<AiDisabled>>,
     mut encounter: Local<EncounterTrace>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER ai_shots"); }
+    // The route capture's `--no-ai`: retail runs the same route under `disableai`, so the AI tick
+    // (and its encounter sampling) is skipped and the scripted movement is measured alone.
+    if disabled.is_some_and(|d| d.0) { return; }
     let Some(sim) = sim else { return };
     let dt = sim_dt(&time, capture.as_deref());
     let mut rt = sim.world.borrow_mut();
@@ -28129,6 +28159,21 @@ struct ShotFrame(u32);
 #[derive(Resource, Default)]
 struct RouteReplay(Option<RoutePlan>);
 
+/// `--no-ai`: the replay's AI switch. Set only for a capture (see [`no_ai_capture_switch`]); the
+/// `ai_shots` tick returns early while it is set.
+#[derive(Resource, Default)]
+struct AiDisabled(bool);
+
+/// `--no-ai` is a capture switch, never a gameplay option: the route measurement turns the AI off
+/// on both engines (retail uses its `-devMode` `disableai`), so anything without a replay is refused.
+fn no_ai_capture_switch(no_ai: bool, replaying: bool) -> Result<bool, &'static str> {
+    if no_ai && !replaying {
+        Err("--no-ai is a capture switch and needs --replay <path>")
+    } else {
+        Ok(no_ai)
+    }
+}
+
 /// `--route-trace <path>`: where the replay writes its sampled trace.
 #[derive(Resource, Default)]
 struct RouteTraceOut(Option<std::path::PathBuf>);
@@ -28312,6 +28357,7 @@ fn advance_sim(
     collisions: Option<Res<Collision>>,
     mut drawn: Query<&mut Transform>,
 ) {
+    if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER advance_sim"); }
     let Some(mut sim) = sim else { return };
     let geometry = collisions.as_ref().map(|c| c.0.as_ref());
     let motion = sim
@@ -29764,6 +29810,23 @@ mod registration_tests {
             "these systems are in no add_systems list, so they never run: {unregistered:?}"
         );
     }
+
+    /// The AI's sight ray must read the level's geometry on its **first** tick. `share_collider`
+    /// hands the `Collision` record to the runtime, and until it runs `Runtime::solids` is `None`,
+    /// which the sight test reads as "nothing blocks". Unordered, the first tick of a level let
+    /// every armed actor the room really hides acquire the player through the wall; the memory
+    /// latches, so they then blind-fired at that spot for the whole encounter. That is level 1's
+    /// door fight: actor 155's launch at t = 0 and `reeyeesbhgun` 153's three later hits, against
+    /// retail's 13-hit cadence from the one gunner with a clear line.
+    #[test]
+    fn the_ai_tick_runs_after_the_collider_hand_off() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+            .expect("the source this test lives in");
+        assert!(
+            source.contains("ai_shots.after(share_collider)"),
+            "ai_shots is unordered with share_collider: the first AI tick of a level tests sight against no geometry"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -30450,6 +30513,21 @@ mod debug_catalog_tests {
         );
         // Retail falls back to the lowercased short key when the table has no row.
         assert_eq!(entry.level_label("04EscapeHouse.jkl"), "04escapehouse");
+    }
+}
+
+#[cfg(test)]
+mod no_ai_tests {
+    use super::no_ai_capture_switch;
+
+    /// `--no-ai` exists only to measure a replay without combat: a plain run keeps the AI, and the
+    /// switch is refused rather than silently ignored.
+    #[test]
+    fn the_ai_switch_is_confined_to_a_replay_capture() {
+        assert_eq!(no_ai_capture_switch(false, false), Ok(false), "play must keep the AI");
+        assert_eq!(no_ai_capture_switch(false, true), Ok(false), "a replay without the switch keeps it");
+        assert_eq!(no_ai_capture_switch(true, true), Ok(true), "the capture switch is honoured");
+        assert!(no_ai_capture_switch(true, false).is_err(), "--no-ai without --replay must be refused");
     }
 }
 

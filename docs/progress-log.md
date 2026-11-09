@@ -6422,3 +6422,35 @@ position delta 1.31 units (limit 1.50).
 `encounter-gate.ps1`: **0 failures** — 57 strict identity pairs, 0 missing/extra, actor position
 1.31, yaw 14.8, health 0.0; shot/hit counts within the one-event band; sorted cadence within 250 ms;
 per-hit damage dH 8.0/dS 4.1; kill order empty on both sides.
+
+### Round 433: the first AI tick saw the level before the level did — the door fight's t = 0 launch
+
+`encounter-gate.ps1` reported 15 launches / 15 hits against retail's 13 and the player died at
+9.18 s, which restarted the level and failed the kill order and the actor set as a consequence. The
+extra launches were not a cooldown or a duplicate tick: `share_collider` hands the level's
+`Collision` record to the runtime, and until it runs `Runtime::solids` is `None`, which the sight
+test reads as "nothing blocks" (`Option::is_none_or` over the blockers). Bevy ran `ai_shots` before
+the hand-off on the first frame of every level, so the first tick tested every actor's line against
+no geometry.
+
+Measured on the door capture with `BK_AI_TRACE=2`: at t = 0 both `reeyeesgun` 154 (0.34 units, a
+clear line) **and** 155 (1.33 units, behind a solid thing) fired `PrimaryFire`. The failure is worse
+than one extra bolt, because acquisition latches (`ai_detected` is never cleared): 153
+(`reeyeesbhgun`, 2.60 units, its line through a solid) registered the player on that blind tick and
+then `BlindFire`d at the remembered spot four times, three of which landed. 13 hits from 154 is
+retail's cadence; the three blind hits were the ones that took the body from 100+100 to 0.
+
+`ai_shots.after(share_collider)` is the fix: the runtime has the geometry before the first sight
+test, so the actors the room hides never acquire. The port's door shot stream is now 13 launches /
+13 hits, all from 154; 155 and 153 stay silent, and the measured hit series matches retail's
+within the gate's bands (per-hit dH 8.0 / dS 4.1, timing max 400 ms). `the_ai_tick_runs_after_the_collider_hand_off` guards the
+ordering edge, in the same source-reading style as `every_system_is_registered`.
+
+Measured: `encounter-gate.ps1` **0 failures** — 13/13 shots and hits, sorted cadence max delta
+117 ms, per-hit damage dH 8.0 / dS 4.1, kill order empty on both sides, settled health 14.3 vs
+22.3, 57 strict identity pairs with 0 missing/extra, actor position 1.30 units / yaw 14.8°.
+`cargo test --release`: 330 passed, 0 failed. `audio-gate.ps1`: 0 failures after refreshing the
+port oracles (the RNG stream loses the blocked actors' detection rolls: the door route plays no AI
+shot sounds). `route-gate.ps1`: determinism, the committed oracle and the self-check pass; the
+retail comparison still reports 29 fields beyond 1.7 (28 before — the port's route body survives
+where retail's fixture dies, which is the pre-existing divergence, not this fix's).

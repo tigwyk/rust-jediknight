@@ -743,6 +743,18 @@ function Invoke-JkRouteTrace {
     $lines.Add(($cells -join ([char]9)))
   }
   & $readCogs
+  # Both sides measure movement with the AI off: retail's own `-devMode` switches are `disableai`
+  # (the port's replay passes `--no-ai`) and `noaishots` (the port skips the AI tick, so no shot is
+  # fired at all). Both are **toggles** in the engine, so each is set explicitly with `on`; a warp
+  # also gets them re-applied in case it resets the debug flags.
+  $disableAi = {
+    foreach ($command in 'disableai on', 'noaishots on') {
+      foreach ($reply in @(Invoke-JkDevConsoleCommand -ProcessId $ProcessId -Command $command)) {
+        Log ("route: {0} -> {1}" -f $command, $reply)
+      }
+    }
+  }
+  & $disableAi
   $bars = Read-JkPlayerBars -ProcessId $ProcessId
   & $addRow 0 $bars.Health $bars.Shields
   $tick = 0
@@ -764,6 +776,7 @@ function Invoke-JkRouteTrace {
           # The shots flow waits this long after a warp before a walk; the game is still finishing
           # the console/foreground transition and would swallow the first hold.
           Start-Sleep -Milliseconds 900
+          & $disableAi
         }
       }
       'input' {

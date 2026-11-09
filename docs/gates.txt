@@ -2713,3 +2713,21 @@ running app.--carry-check --start 01narshadda                        0   level 2
   instincts are implemented.
 - `cargo test --release`: **202 passed** (new `specialattack_event_four_damages_the_collided_player`).
 - `--gates`: 0 of 65 failed, 1 skipped; `--soak-all`: 35/35 clean.
+
+## Update — round 265 (route capture with the AI off)
+
+- The level-1 scripted route is a movement/cog oracle, but its continuous retail capture let the
+  cantina ambush kill the player (100/100 -> 0/0 at tick 252) while the port survived, so 28 fields
+  could never match. Both sides now capture with the AI off: the port replay takes `--no-ai` (a
+  capture-only switch; it exits 2 unless `--replay` is also given, so play keeps the AI), and
+  `retail-capture.ps1 -RouteWalk` sets the `-devMode` toggles `disableai on` and `noaishots on` (they
+  toggle, so the capture sets them explicitly and again after every warp).
+- Recaptured the retail bars/cogs with the AI off (100.0/100.0 and all-zero cogs on every row) and
+  refreshed the port oracle with `--no-ai`; positions/sector/velocity stay the committed walk traces'
+  samples. No `-` fields, no tolerance change (epsilon stays 1.70).
+- Route gate: **0 failure(s)** — determinism, required fields, oracle (360 fields within 1e-6),
+  perturbed-trace self-check, retail within 1.70.
+- Encounter gate **0 failure(s)** (13 shots/13 hits both sides, settled 14.3 vs retail 22.3 health);
+  audio gate **0 failure(s)** (both routes, retail within 0.12).
+- `cargo test --release`: **331 passed** (new `the_ai_switch_is_confined_to_a_replay_capture`).
+
