@@ -6301,15 +6301,16 @@ retail. Two root causes, both measured against the fixture:
   observation and could never pair (16 rows against retail 9). The port trace changed only its
   `shot` rows; hits remain the runtime's own events. The gate's instrument is unchanged.
 
-Measured against the committed fixture (`encounter-gate.ps1`): before this round the port fired 16
-events with the first at 3,000 ms, landed 9 hits and ended 93.7 health; the corrected run samples
-11 bolts, lands 12 hits starting at 900 ms and ends 58.2 health against retail's 22.3. The gate still
-reports 9 failures: the port's other door actors (153, 157, 291 — a rifle, a gunner and a Greedo)
-acquire and fire where retail's series has only the point-blank gunner firing, which drives the
-remaining shot-count/timing, per-hit health and actor position/facing deltas; the actor maximum is
-1.67 units / 178.5 deg. The acquisition side of that (which placed actors the engine lets engage)
-is the next slice; this round's changes are the basis and the placement class they depend on.
+Measured on the merged tree (with #12's damage split and the executor pin that makes the capture
+run-to-run identical): the gate passes **repeatability** exactly (shot/hit deltas 0 ms, actor
+0.00 units), **per-hit damage** (max dH 7.0, dS 4.1 against 10/10), duration, kill order and
+settled shields. It still reports 7 failures: the port's other door actors (153, 157, 291 — a rifle,
+a gunner and a Greedo) acquire and fire where retail's series has only the point-blank gunner
+firing, so the port samples 16 bolts against retail's 9, lands 11 hits against 13 and is 1,733 ms
+late by the late hits (settled 38.0 health against 22.3); the actor maximum is 1.67 units /
+178.4 deg. The acquisition side of that (which placed actors the engine lets engage) is the next
+slice; this round's changes are the basis and the placement class it depends on.
 
-Measured: `cargo test` **313 passed, 0 failed** (new: the engine-basis cone, the first-tick fire on
-an already-aimed actor, and the placement `aiclass=`), and the corrected AI, live-AI and hit gates
-are the next check. `--encounter` traces are in `target/parity/encounter/`.
+Measured: `cargo test` **315 passed, 0 failed** on the merged tree (313 before #12 merged; new here:
+the engine-basis cone, the first-tick fire on an already-aimed actor, and the placement
+`aiclass=`), `--ai` passes. `--encounter` traces are in `target/parity/encounter/`.
