@@ -6211,3 +6211,22 @@ post-step thing pose, and fall damage applied by the step added); `--live-play -
 passes (forward 0.09 units at 2.24 u/s peak; 1 projectile; 0.11 jump stopped by the ceiling),
 `--goal`, `--sight-live` and `--use-live` pass, as do `--rules`, `--adjoins`, `--things`, `--feel`,
 `--die` and `--walk all` (24/34 contained, 46 crossings, worst drop 3.35).
+
+### Round 427: one floor rule for every motion caller
+
+The player's sweep, the AI's post-walk settle, actor grounding and gravity landing now ask one
+primitive, `collide::LevelGeometry::resting_floor`, instead of each keeping its own support query.
+It returns the highest of: the downward sphere sweep's faces (a walkway slab, a ramp, a face-only
+floor), a sector's own plane where its data has no face inside the engine's floor reach (plus the
+port's data-gap rescue from the sectors around a plane-less cell), and a solid thing's model top
+from the collider's own `ThingSolid` list. `walker_step`'s chain of three floor queries is gone,
+`Runtime::step`'s `actor_floor` and landing clamp use the same `Rest` height, and `ai_can_walk`'s
+`standable || thing_floor` fallback is one call. `Runtime::thing_floor` and `floor_contact` are
+deleted; `TEMPLATE_FLOORS` now only feeds `elevator_floor`, the rising-lift carry rule.
+
+Measured: `cargo test` **304 passed, 0 failed** (a fixture proving a plane-only sector, a face-only
+walkway, a ramp and a solid prop rest at one height, and walker/runtime-step landings on a solid
+thing's top added); `--walk all` passes (24/34 levels contained, 25 hull agreements, 46 sector
+crossings, 6 recorded void rows, worst drop 3.35); `--move` passes (34 levels × 8 headings, 0 fell
+through, 0 stuck); `--ai`, `--live-play --start 01narshadda` (forward 0.09 units at 2.03 u/s peak,
+0.11 jump stopped by the ceiling), `--ai-live` (37 shots, health 25) and `--live-check` all pass.
