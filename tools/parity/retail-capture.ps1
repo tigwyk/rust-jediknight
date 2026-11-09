@@ -690,7 +690,9 @@ function Invoke-JkAudioRoute {
     $cells = $line -split "`t"
     if ($cells[0] -eq 'warp') {
       # The file's header has a blank column between `name` and `x`, so read the numbers compactly.
+      # A `-` pose is the level's own start: there is no warp to apply for it.
       $vals = @($cells | Select-Object -Skip 2 | Where-Object { $_ -ne '' })
+      if ($vals.Count -lt 4 -or $vals[0] -eq '-') { continue }
       $route += [pscustomobject]@{ Kind = 'warp'; X = [double]$vals[0]; Y = [double]$vals[1]; Z = [double]$vals[2]; Yaw = [double]$vals[3]; Ticks = 0 }
     } elseif ($cells[0] -eq 'input') {
       $route += [pscustomobject]@{ Kind = 'input'; Ticks = [int]$cells[1] }
