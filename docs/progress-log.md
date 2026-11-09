@@ -6276,3 +6276,40 @@ than hidden. Measured: `cargo test` **305 passed, 0 failed**; `--walk all` **30/
 hull agreements, 58 crossings, 2 left in the void (10cargo 680.75, 11gorc 627.51), 0 over no
 floor, worst contained drop 3.35**; `--ai` and `--live-play --start 01narshadda` pass;
 `trace-gate.ps1` **10 legs, 0 failures**.
+
+### Round 430: AI engagement timing — the engine's facing axis, and the placement's instinct class
+
+The door-encounter telemetry (#9) reported the port's AI engaging on a different timeline than
+retail. Two root causes, both measured against the fixture:
+
+- **The AI aimed on a math angle, not the engine's basis.** A JK yaw faces `(-sin yaw, cos yaw)`
+  (`yaw_axes`), which the walker, camera and use cone already used. The AI's sight cone, bearing
+  targets, aim snap, firing `dot` and projectile rotation used `(cos, sin)` instead — a quarter turn
+  off. Retail's own door gunner proves it: thing 154 stands at `(1.412, 9.359)` at yaw 0 and fires
+  down +Y into the player at `(1.400, 9.700)`, turning only 2 degrees; the port turned it to yaw 92
+  and spent 4 s on the quarter turn before its first shot. The same error put the projectile's
+  rotated velocity, the listen cone and the jump nudge on the wrong axis. All of them now use the
+  engine basis (`Ai::sees`' facing is `yaw + 90°`; every bearing→yaw conversion is
+  `(-dx).atan2(dy)`), and the fire path's muzzle offset follows the corrected forward.
+- **A placement's `aiclass=` was ignored.** The level's placed things carry their own `aiclass=`
+  after the sector column (`powerdroid` thing 331 ships `gonkroam.ai` over its template's
+  `gonk.ai`), and the runtime only read the template chain. `Thing::aiclass` is parsed now and wins
+  over the template, which is what makes thing 331 roam like retail.
+- **The port's encounter `shot` rows now record what retail's half can see**: a type-3 thing that is
+  new at a cadence sample, with the first sample as the baseline. Retail samples projectiles (it
+  cannot see a bolt that dies between samples), so the port's fire events were a different
+  observation and could never pair (16 rows against retail 9). The port trace changed only its
+  `shot` rows; hits remain the runtime's own events. The gate's instrument is unchanged.
+
+Measured against the committed fixture (`encounter-gate.ps1`): before this round the port fired 16
+events with the first at 3,000 ms, landed 9 hits and ended 93.7 health; the corrected run samples
+11 bolts, lands 12 hits starting at 900 ms and ends 58.2 health against retail's 22.3. The gate still
+reports 9 failures: the port's other door actors (153, 157, 291 — a rifle, a gunner and a Greedo)
+acquire and fire where retail's series has only the point-blank gunner firing, which drives the
+remaining shot-count/timing, per-hit health and actor position/facing deltas; the actor maximum is
+1.67 units / 178.5 deg. The acquisition side of that (which placed actors the engine lets engage)
+is the next slice; this round's changes are the basis and the placement class they depend on.
+
+Measured: `cargo test` **313 passed, 0 failed** (new: the engine-basis cone, the first-tick fire on
+an already-aimed actor, and the placement `aiclass=`), and the corrected AI, live-AI and hit gates
+are the next check. `--encounter` traces are in `target/parity/encounter/`.

@@ -382,12 +382,14 @@ both builds as one TSV so AI and combat timing can be compared instead of inferr
 t_ms  kind  thing  template  x  y  z  yaw  health  shields  detail
 ```
 
-`kind` is `player`/`actor` at the row's cadence (100 ms here), `shot` when an actor fires, and `hit` when
-a shot lands on the player — the hit row carries the health and shields **after** the hit. Both sides use
-the engine's game clock, not wall time, so the timeline is comparable at different frame rates. The
-retail engine renders a few frames a second, so its `hit` row is the damage that landed since the
-previous sample (two bolts in one frame are one row) and its rows hold that frame's state between
-grid points; the port records every shot and hit at its fixed 60 Hz step.
+`kind` is `player`/`actor` at the row's cadence (100 ms here), `shot` when a fired bolt (a type-3 thing)
+first appears at a cadence sample, and `hit` when a shot lands on the player — the hit row carries the
+health and shields **after** the hit. Both sides use the engine's game clock, not wall time, so the
+timeline is comparable at different frame rates, and both record the same observations: retail can only
+see a bolt that exists at a sample, so the port samples its bolts the same way (the first sample is the
+baseline of already-placed weapons). The retail engine renders a few frames a second, so its `hit` row
+is the damage that landed since the previous sample (two bolts in one frame are one row) and its rows
+hold that frame's state between grid points; the port hits are its fixed 60 Hz step.
 
 - Retail: `pwsh -File tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door -EncounterMs 10000 -EncounterCadenceMs 100 -EncounterName door_encounter`
   writes `target/parity/encounter/door_encounter.tsv` (the pose row is `route_door`; `-EncounterName`
@@ -398,8 +400,8 @@ grid points; the port records every shot and hit at its fixed 60 Hz step.
   (`world = 0x008339C8`, count at `+0xBC`, base at `+0xC4`, stride `0x2B0`). The addresses and their
   decompiled sources are in `Invoke-JkEncounterTrace`.
 - Port: `pwsh -File tools/parity/port-encounter.ps1` runs the same pose for the row's fixed 1/60 s
-  frames with `BK_ENCOUNTER_OUT` set; the runtime queues shot/hit events and the app samples the player
-  and the actors within 8 units.
+  frames with `BK_ENCOUNTER_OUT` set; the app samples the player, the actors within 8 units, and the
+  type-3 bolts the same way retail does, and writes the runtime's hit events.
 - Gate: `pwsh -File tools/parity/encounter-gate.ps1` seeds the committed retail fixture from
   `tools/parity/encounter/`, records the port twice (and fails if the two runs leave the measured
   run-to-run band: same shape and endpoint, event-timing and actor-state deltas within it), and reports the

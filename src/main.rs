@@ -5198,9 +5198,10 @@ fn main() {
                 .iter()
                 .position(|t| t.eq_ignore_ascii_case(&name))
                 .expect("the template was just found");
-            // Face +X from the origin so the expected position is arithmetic, not a rotation.
+            // Face +X from the origin so the expected position is arithmetic, not a rotation:
+            // the engine's basis is `(-sin yaw, cos yaw)`, so yaw -90 is +X.
             rt.things[shooter].pos = [0.0, 0.0, 0.0];
-            rt.things[shooter].yaw = 0.0;
+            rt.things[shooter].yaw = -90.0;
             // A projectile with a real velocity: the muzzle is rotated along the shot, so a template
             // with zero `vel=` would put every shot at the shooter's feet.
             let bolt_name = rt
@@ -5226,7 +5227,7 @@ fn main() {
             (shooter, name, offset, rt.things[bolt].pos)
         };
         let _ = shooter;
-        // Yaw 0 faces +X, so the template's y is forward and x is to the left of that. The offset is
+        // Yaw -90 faces +X, so the template's y is forward and x is to the right of that. The offset is
         // in level units: `sithWeapon_FireProjectile` transforms the vector with the shooter's orient
         // (`rdMatrix_TransformVector34Acc`) and adds it to the thing's position, with no scale, and the
         // same templates' `size=` fields are level units too. A ten-times-scaled offset put a
@@ -5604,9 +5605,9 @@ fn main() {
         // unit checks, so a one-tick, 3-unit probe would otherwise fail most of the time. Mark the
         // actor as already engaged.
         rt.ai_detected.insert(actor);
-        // Face +X, then put the player at 3 units (inside sightdist 5), 8 units (outside) and
-        // behind (outside the 200-degree cone).
-        rt.things[actor].yaw = 0.0;
+        // Face +X (the engine's `(-sin yaw, cos yaw)`, so yaw -90), then put the player at 3 units
+        // (inside sightdist 5), 8 units (outside) and behind (outside the firing cone).
+        rt.things[actor].yaw = -90.0;
         let player = rt
             .templates
             .iter()
@@ -6046,17 +6047,18 @@ fn main() {
             let look_from = rt.things[actor].yaw;
             for _ in 0..600 {
                 rt.ai_tick(player, 1.0 / 30.0);
-                if off(rt.things[actor].yaw, 90.0) < 1.0 {
+                if off(rt.things[actor].yaw, 0.0) < 1.0 {
                     break;
                 }
             }
             rt.ai_cleared.remove(&actor);
             let facing = rt.things[actor].yaw;
-            println!("  scripted: AISetLookPos -> now facing {facing:.0} deg (+90 is +Y)");
-            // Level 3's actor settles 7 deg short of the requested facing (its own turn sources keep
-            // pulling), but it did turn *toward* it from -127 deg. The witness is the response.
+            println!("  scripted: AISetLookPos -> now facing {facing:.0} deg (the engine's yaw 0 is +Y)");
+            // Level 3's actor settles a few degrees short of the requested facing (its own turn
+            // sources keep pulling), but it did turn *toward* it from wherever it stood. The witness
+            // is the response.
             assert!(
-                off(facing, 90.0) < 1.0 || off(facing, 90.0) < off(look_from, 90.0) - 1.0,
+                off(facing, 0.0) < 1.0 || off(facing, 0.0) < off(look_from, 0.0) - 1.0,
                 "AISetLookPos did not turn the actor toward +Y ({facing:.1} deg, was {look_from:.1})"
             );
         }
@@ -6107,7 +6109,7 @@ fn main() {
         let before_player_shot = rt.ai_tick(player, 1.0 / 30.0);
         rt.things[actor].ai_wait = 0.0;
         let aimed = rt.things[actor].yaw;
-        let to_target = (spot[1] - at[1]).atan2(spot[0] - at[0]).to_degrees();
+        let to_target = (-(spot[0] - at[0])).atan2(spot[1] - at[1]).to_degrees();
         println!(
             "  scripted: AISetFireTarget(actor, thing {victim}) -> the actor turns to {aimed:.0} deg (the target is at {to_target:.0}) and fires {before_player_shot} shot(s) with the player behind it"
         );
@@ -9044,8 +9046,7 @@ fn main() {
 
         // The player shoots it from a clear line **in the level**: a shot is stopped by the furniture
         // (the game's own path), so the spot is chosen where no face or solid thing is between the two
-        // bodies. Direction yaw 0 is +X in the fire path (`yaw_axes`), so the player faces the actor by
-        // taking the opposite of the direction he stands in.
+        // bodies. The engine's forward at yaw 0 is +Y (`yaw_axes`), so a due-west shot needs yaw -90.
         // `segment_blocked` counts a solid thing's body, and both ends of this line sit inside one (the
         // shooter's own), so the line is measured between the two bodies' edges, not their centres.
         fn clear_line(solids: Option<&collide::Solids>, a: [f32; 3], b: [f32; 3]) -> bool {
@@ -9059,6 +9060,8 @@ fn main() {
         // Due west, where the proven yaw 0 fires +X toward the actor (the first bolt's own trace) and
         // the actor's reply is exactly yaw 180, so neither side depends on the sign of the yaw basis.
         // The distance steps in until the line between the bodies is clear of the room's furniture.
+        // Due west, with yaw -90 so the engine's forward `(-sin yaw, cos yaw)` is +X toward the
+        // actor; the actor's reply is exactly yaw -90 as well.
         let mut spot = [actor_pos[0] - 1.0, actor_pos[1], actor_pos[2]];
         for back in [3.0f32, 2.5, 2.0, 1.5, 1.2, 1.0] {
             let candidate = [actor_pos[0] - back, actor_pos[1], actor_pos[2]];
@@ -9069,7 +9072,7 @@ fn main() {
             }
         }
         rt.things[player].pos = spot;
-        rt.things[player].yaw = 0.0;
+        rt.things[player].yaw = -90.0;
         rt.fire(player as i64, "+bryarbolt").expect("a projectile");
         let dt = 1.0 / 30.0;
         let mut landed = None;
@@ -9195,7 +9198,7 @@ fn main() {
         // Face the player: an actor fires along its own yaw, the same way the player does.
         let from = rt.things[actor_index].pos;
         let to = rt.things[player].pos;
-        rt.things[actor_index].yaw = (to[1] - from[1]).atan2(to[0] - from[0]).to_degrees();
+        rt.things[actor_index].yaw = (-(to[0] - from[0])).atan2(to[1] - from[1]).to_degrees();
         println!("hit: thing {actor_index} fires `{actor_weapon}` at the player");
         rt.fire(actor_index as i64, &actor_weapon).expect("the actor fires");
         let mut landed = None;
@@ -9330,10 +9333,11 @@ fn main() {
             "fire: `{weapon}` damage {damage}, vel {:?}, from thing {shooter_index} at {origin:?} toward thing {target_idx} {reach:.1} units away",
             speed
         );
-        // Point the shooter at the actor, then fire.
+        // Point the shooter at the actor, then fire. The engine's yaw looks along
+        // `(-sin yaw, cos yaw)`, so the bearing turns a quarter turn into a yaw.
         let dx = target_pos[0] - origin[0];
         let dy = target_pos[1] - origin[1];
-        rt.things[shooter_index].yaw = dy.atan2(dx).to_degrees();
+        rt.things[shooter_index].yaw = (-dx).atan2(dy).to_degrees();
         let health_before = rt.things[target_idx].health;
         let shot = rt.fire(shooter_index as i64, &weapon).expect("projectile");
         // Walls: the projectile stops when it leaves the level's sectors. The engine
@@ -21344,8 +21348,8 @@ fn ai_probe(
                 .map(|t| t.yaw.to_radians())
                 .unwrap_or(0.0);
             let stand = [
-                pos.0[0] + facing.cos() * 3.0,
-                pos.0[1] + facing.sin() * 3.0,
+                pos.0[0] - facing.sin() * 3.0,
+                pos.0[1] + facing.cos() * 3.0,
                 pos.0[2],
             ];
             // The port's forward is `(-sin yaw, cos yaw)`, so yaw 0 faces **+Y**: the old
@@ -23117,7 +23121,8 @@ fn demo_aim(
         .filter(|(_, _, d)| *d >= 2.0 && *d <= 25.0)
         .min_by(|a, b| a.2.total_cmp(&b.2));
     if let Some((index, target, distance)) = nearest {
-        player.body.yaw = (target[1] - origin[1]).atan2(target[0] - origin[0]);
+        // The engine's forward is `(-sin yaw, cos yaw)`, so the bearing turns a quarter turn.
+        player.body.yaw = (-(target[0] - origin[0])).atan2(target[1] - origin[1]);
         player.body.pitch = 0.0;
         *aimed = true;
         println!("demo: aiming at thing {index} ({distance:.1} units away)");
@@ -25098,6 +25103,12 @@ struct EncounterTrace {
     /// The first frame at the encounter pose has been recorded. The frame the app starts can still
     /// see the level's spawn pose (the warp lands in `walk_player`, which may run after this one).
     started: bool,
+    /// Type-3 things seen at the previous cadence sample. A `shot` row is a bolt that is new at this
+    /// sample — the retail capture's own rule (`-$previousType3.ContainsKey($i)`), so both traces
+    /// count the same observation instead of the port counting fire events and retail counting bolts.
+    last_bolts: std::collections::BTreeSet<usize>,
+    /// One sample has been written; the first is the baseline, where placed weapons are not shots.
+    sampled: bool,
 }
 
 impl EncounterTrace {
@@ -25147,18 +25158,10 @@ impl EncounterTrace {
         for event in std::mem::take(&mut rt.encounter_events) {
             let t_ms = ((event_time(&event) - origin).max(0.0) * 1000.0).round();
             match event {
-                runtime::EncounterEvent::Shot {
-                    owner,
-                    template,
-                    pos,
-                    ..
-                } => {
-                    let _ = writeln!(
-                        file,
-                        "{t_ms:.0}\tshot\t{owner}\t{template}\t{:.4}\t{:.4}\t{:.4}\t\t\t\towner {owner}",
-                        pos[0], pos[1], pos[2]
-                    );
-                }
+                // A fired bolt is not this trace's `shot` row: retail can only see a bolt that
+                // exists at a cadence sample, so the port records the same observation below
+                // rather than an event retail's half could never carry.
+                runtime::EncounterEvent::Shot { .. } => {}
                 runtime::EncounterEvent::Hit {
                     amount,
                     shields,
@@ -25187,6 +25190,29 @@ impl EncounterTrace {
                 body.health,
                 rt.player_shields
             );
+            // `retail-capture.ps1`'s rule: a type-3 thing that was not in the previous sample is a
+            // bolt that appeared between them, and the first sample is only the baseline (placed
+            // weapons are already in the world). Sampling the port the same way is what makes the
+            // gate compare one observation, not two different ones.
+            let mut bolts = std::collections::BTreeSet::new();
+            for (index, thing) in rt.things.iter().enumerate() {
+                if thing.destroyed || rt.types.get(index).copied() != Some(3) {
+                    continue;
+                }
+                bolts.insert(index);
+                if self.sampled && !self.last_bolts.contains(&index) {
+                    let _ = writeln!(
+                        file,
+                        "{sample_ms:.0}\tshot\t{index}\t{}\t{:.4}\t{:.4}\t{:.4}\t\t\t\t",
+                        rt.templates.get(index).cloned().unwrap_or_default(),
+                        thing.pos[0],
+                        thing.pos[1],
+                        thing.pos[2]
+                    );
+                }
+            }
+            self.last_bolts = bolts;
+            self.sampled = true;
             for (index, thing) in rt.things.iter().enumerate() {
                 if index == player
                     || thing.destroyed
@@ -25699,7 +25725,13 @@ fn setup(
         // the runtime cannot read the archives.
         rt.ai_classes = world.ai_classes.clone().into_iter().collect();
         for (index, thing) in level.things.iter().enumerate() {
-            if let Some(class) = level.template_param(&thing.template, "aiclass")
+            // A placement's own `aiclass=` is what the engine loads (level 1's door powerdroid
+            // overrides its template); the template chain is only the fallback.
+            let class = thing
+                .aiclass
+                .as_deref()
+                .or_else(|| level.template_param(&thing.template, "aiclass"));
+            if let Some(class) = class
                 && let Some(raw) = world.ai_classes.get(&class.to_ascii_lowercase())
             {
                 rt.ai.insert(index, ai::parse(raw));
