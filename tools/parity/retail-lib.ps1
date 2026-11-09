@@ -621,9 +621,10 @@ function Install-Jk3DWrapper {
     $conf = $conf -replace '(?m)^Filtering\s*=\s*appdriven', 'Filtering                           = pointsampled'
     $conf = $conf -replace '(?m)^dgVoodooWatermark\s*=\s*true', 'dgVoodooWatermark                   = false'
     if ($Windowed) {
-      # A normal borderless window instead of the game's display-mode switch: the capture is no longer
-      # invasive (no alt-tab/flicker, no desktop mode change). `CaptureMouse` stays true so the game
-      # still receives the injected mouse, and the cursor is not left free on the desktop.
+      # dgVoodoo's windowed config. Measured 2026-11-09: the window became 640x480 borderless, but the
+      # game still took over the whole display (the user saw it fullscreen on every run), so this is
+      # **not** a non-invasive capture for this DirectDraw title. `CaptureMouse` stays true so the
+      # game still receives the injected mouse.
       $conf = $conf -replace '(?m)^FullScreenMode\s*=\s*true', 'FullScreenMode                       = false'
       $conf = $conf -replace '(?m)^WindowedAttributes\s*=\s*$', 'WindowedAttributes                   = borderless'
       $conf = $conf -replace '(?m)^CaptureMouse\s*=\s*false', 'CaptureMouse                         = true'
@@ -642,7 +643,7 @@ function Install-Jk3DWrapper {
       throw "3D wrapper stage failed: $path is missing or too small"
     }
   }
-  $mode = if ($Windowed) { 'windowed (FullScreenMode=false, borderless, CaptureMouse=true)' } else { 'fullscreen' }
+  $mode = if ($Windowed) { 'windowed config (FullScreenMode=false, borderless, CaptureMouse=true; the title still took over the display)' } else { 'fullscreen' }
   Write-JkLog -Message ("3D wrapper staged in the scratch copy (D3DImm.dll, DDraw.dll, dgVoodoo.conf; point filtering, no watermark; {0})" -f $mode) -LogPath $LogPath
 }
 

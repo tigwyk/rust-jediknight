@@ -7,12 +7,12 @@ param(
   [int]$SeriesFrames = 8,
   [int]$LevelTimeoutSec = 45,
   [switch]$Software,
-  # Run the game in a normal borderless window instead of its fullscreen display mode (dgVoodoo
-  # `FullScreenMode=false`, `WindowedAttributes=borderless`, `CaptureMouse=true`). On by default:
-  # a fullscreen capture alt-tabs/flickers and changes the desktop mode. `-Fullscreen` restores the
-  # old display-mode capture (kept for diagnosing a wrapper that rejects windowed).
-  [switch]$Windowed = $true,
-  [switch]$Fullscreen,
+  # Request dgVoodoo's windowed config (`FullScreenMode=false`, `WindowedAttributes=borderless`,
+  # `CaptureMouse=true`). Measured 2026-11-09: the game window became a 640x480 borderless window, but
+  # the user still saw the game take over the whole display on every run, so this does **not** make a
+  # retail capture non-invasive for this DirectDraw title. Opt-in; do not call a capture windowed on
+  # the strength of the config alone.
+  [switch]$Windowed,
   # Phase 0.5 trace v0, retail half: after the level loads (and any warp) hold the forward key in
   # undisturbed 600 ms segments, reading `coords` in between, and write <name>-walk.tsv into
   # target/parity/trace. 0 keeps the normal screenshot captures.
@@ -76,12 +76,13 @@ param(
   # Hold for an action key in `-KeysAfter`. The retail capture runs under software rendering at a
   # few frames per second; a 40 ms tap can fall between frames and the game never sees the use.
   [int]$ActionHoldMs = 600,
-  # Hold this key after a `-WalkTraceMs` leg and before the post-walk console read (e.g. '9' = the
+  # Hold this key after a `-WalkTraceMs` leg and before the post-walk console read (e.g. 'SPACE' = the
   # player's ACTIVATE binding, or 'MOUSEMIDDLE'). The walk's `coords` then show the stop pose and
   # `cogstatus` shows the door the level's own script opened.
   [string]$UseAfterWalk = '',
-  # The ACTIVATE binding for `-UseAfterWalk` and for the route plan's `use` rows.
-  [string]$UseKey = '9',
+  # The ACTIVATE binding for `-UseAfterWalk` and for the route plan's `use` rows. The profile's
+  # `bind 12 57 0x2` stores scancode 57 = 0x39 = SPACE (the PLR codes are scancodes, not VK codes).
+  [string]$UseKey = 'SPACE',
   # How long the game runs after a use before the next console read freezes it.
   [int]$UseSettleMs = 900,
   # How long to leave the game running after `-KeysAfter` before the second console read. The
@@ -715,48 +716,59 @@ function Invoke-JkWalkTrace {
 function Invoke-JkUseKey {
   param(
     [Parameter(Mandatory)][int]$ProcessId,
-    [string]$Key = '9',
+    [string]$Key = 'SPACE',
     [int]$HoldMs = 600,
     [int]$SettleMs = 900
   )
-  $gameWindow = Get-JkWindow -ProcessId $ProcessId
-  if ($gameWindow -ne [IntPtr]::Zero) {
-    Log ("use: focus before '{0}'" -f [JkRetail]::ForegroundTitle())
-    $activated = [JkRetail]::Activate($gameWindow)
-    for ($attempt = 0; $attempt -lt 8; $attempt++) {
-      [void][JkRetail]::ShowWindow($gameWindow, 9)
-      [void][JkRetail]::SetForegroundWindow($gameWindow)
-      Start-Sleep -Milliseconds 120
-      if ([JkRetail]::ForegroundTitle() -eq 'Jedi Knight') { break }
-    }
-    # The dev-console dialog is a separate top-level window and often still foreground after a
-    # `coords` read; a click inside the game window is what actually hands it focus (the F12 helper
-    # does the same). It may fire the weapon once, which is harmless with the AI off.
-    $rect = [JkRetail]::WindowRectText($gameWindow)
-    if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
-      Send-JkClick -X ([int](([int]$Matches[1] + [int]$Matches[3]) / 2)) -Y ([int](([int]$Matches[2] + [int]$Matches[4]) / 2))
-    }
-    Start-Sleep -Milliseconds 400
-    Log ("use: activated={0} focus now '{1}'" -f $activated, [JkRetail]::ForegroundTitle())
-  }
-  foreach ($name in @($Key -split ',' | Where-Object { $_ -ne '' })) {
-    if ($name -match '^MOUSE') {
-      $rect = [JkRetail]::WindowRectText((Get-JkWindow -ProcessId $ProcessId))
-      if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
-        $cx = ([int]$Matches[1] + [int]$Matches[3]) / 2
-        $cy = ([int]$Matches[2] + [int]$Matches[4]) / 2
-        [JkRetail]::MoveTo([int]$cx, [int]$cy)
+  $keys = @($Key -split ',' | Where-Object { $_ -ne '' })
+  $keyboard = @($keys | Where-Object { $_ -notmatch '^MOUSE' })
+  # A keyboard key pressed **after** the game window becomes active is lost: the engine's DirectInput
+  # only reads a key state it saw go down, and the dev-console dialog was the focus a moment before.
+  # Pre-press the keyboard keys, then hand the window focus, then hold (the walk trace pre-presses
+  # UP the same way). Mouse bindings need the cursor inside the active window, so they press after.
+  foreach ($name in $keyboard) { Send-JkKeyDown -Name $name }
+  try {
+    $gameWindow = Get-JkWindow -ProcessId $ProcessId
+    if ($gameWindow -ne [IntPtr]::Zero) {
+      Log ("use: focus before '{0}'" -f [JkRetail]::ForegroundTitle())
+      $activated = [JkRetail]::Activate($gameWindow)
+      for ($attempt = 0; $attempt -lt 8; $attempt++) {
+        [void][JkRetail]::ShowWindow($gameWindow, 9)
+        [void][JkRetail]::SetForegroundWindow($gameWindow)
         Start-Sleep -Milliseconds 120
+        if ([JkRetail]::ForegroundTitle() -eq 'Jedi Knight') { break }
       }
-      Log ("use: pressing {0} for {1} ms" -f $name, $HoldMs)
-      Send-JkMouseButton -Button ($name -replace '^MOUSE', '') -HoldMs $HoldMs
-    } else {
-      Log ("use: holding {0} for {1} ms" -f $name, $HoldMs)
-      Send-JkKeyHold -Name $name -HoldMs $HoldMs
+      # The dev-console dialog is a separate top-level window and often still foreground after a
+      # `coords` read; a click inside the game window is what actually hands it focus (the F12 helper
+      # does the same). It may fire the weapon once, which is harmless with the AI off.
+      $rect = [JkRetail]::WindowRectText($gameWindow)
+      if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
+        Send-JkClick -X ([int](([int]$Matches[1] + [int]$Matches[3]) / 2)) -Y ([int](([int]$Matches[2] + [int]$Matches[4]) / 2))
+      }
+      Start-Sleep -Milliseconds 400
+      Log ("use: activated={0} focus now '{1}'" -f $activated, [JkRetail]::ForegroundTitle())
     }
-    # The engine advances a frame or two in the hold; give the message and the handler a moment
-    # before the next `coords` read freezes the game.
-    Start-Sleep -Milliseconds $SettleMs
+    foreach ($name in $keys) {
+      if ($name -match '^MOUSE') {
+        $rect = [JkRetail]::WindowRectText((Get-JkWindow -ProcessId $ProcessId))
+        if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
+          $cx = ([int]$Matches[1] + [int]$Matches[3]) / 2
+          $cy = ([int]$Matches[2] + [int]$Matches[4]) / 2
+          [JkRetail]::MoveTo([int]$cx, [int]$cy)
+          Start-Sleep -Milliseconds 120
+        }
+        Log ("use: pressing {0} for {1} ms" -f $name, $HoldMs)
+        Send-JkMouseButton -Button ($name -replace '^MOUSE', '') -HoldMs $HoldMs
+      } else {
+        Log ("use: holding {0} for {1} ms (pre-pressed)" -f $name, $HoldMs)
+        Start-Sleep -Milliseconds $HoldMs
+      }
+      # The engine advances a frame or two in the hold; give the message and the handler a moment
+      # before the next `coords` read freezes the game.
+      Start-Sleep -Milliseconds $SettleMs
+    }
+  } finally {
+    foreach ($name in $keyboard) { Send-JkKeyUp -Name $name }
   }
   $gameWindow = Get-JkWindow -ProcessId $ProcessId
   if ($gameWindow -ne [IntPtr]::Zero) {
@@ -786,7 +798,7 @@ function Invoke-JkRouteTrace {
     [Parameter(Mandatory)][string]$Plan,
     [Parameter(Mandatory)][string]$OutDir,
     [Parameter(Mandatory)][string]$Name,
-    [string]$UseKey = '9',
+    [string]$UseKey = 'SPACE',
     [int]$UseHoldMs = 600,
     [int]$UseSettleMs = 900
   )
@@ -2058,7 +2070,7 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     Log "series settle: $seriesSettleMs ms after the level loaded"
     $gameWindow = Get-JkWindow -ProcessId $ProcessId
     if ($gameWindow -ne [IntPtr]::Zero) {
-      Log ("game window after load: " + [JkRetail]::WindowRectText($gameWindow) + $(if ($windowedMode) { ' (windowed)' } else { ' (fullscreen)' }))
+      Log ("game window after load: " + [JkRetail]::WindowRectText($gameWindow) + $(if ($windowedMode) { ' (requested windowed; the title still took over the display)' } else { ' (fullscreen)' }))
     }
     $seriesClock = [Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $SeriesFrames; $i++) {
@@ -2379,8 +2391,8 @@ Log ("display now: " + [JkDisplay]::Summary())
 Save-JkDisplayState -Path $script:DisplayStatePath | Out-Null
 Log "saved desktop mode baseline: $script:DisplayStatePath"
 
-$windowedMode = [bool]$Windowed -and -not [bool]$Fullscreen
-Log ("render window: " + $(if ($windowedMode) { 'windowed' } else { 'fullscreen (-Fullscreen)' }))
+$windowedMode = [bool]$Windowed
+Log ("render window: " + $(if ($windowedMode) { 'windowed config requested (-Windowed); the game still took over the display in the 2026-11-09 measurement' } else { 'fullscreen' }))
 Invoke-JkStaging -Source $GamePath -Destination $WorkCopy -Windowed:$windowedMode
 if ($Software -and $windowedMode) { Log 'note: -Windowed only changes the dgVoodoo path; -Software runs the 8-bit renderer' }
 

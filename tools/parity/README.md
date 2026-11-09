@@ -24,10 +24,11 @@ The retail side never touches your real installation: it works on a copy under
 `-Software` forces the 8-bit software path. With no working 3D path the world renders black and
 only the HUD appears — see Troubleshooting.
 
-The dgVoodoo path runs the game in a **borderless 640x480 window** by default instead of its
-fullscreen display mode: a fullscreen capture alt-tabs, flickers and changes the desktop mode. The
-windowed config keeps `CaptureMouse = true`, so the game still receives the injected mouse.
-`-Fullscreen` restores the old display-mode run for diagnosing a wrapper that rejects windowed.
+`-Windowed` writes dgVoodoo's windowed config (`FullScreenMode=false`, borderless, `CaptureMouse=true`,
+640x480). **It does not make a retail capture non-invasive on this machine**: the window becomes
+640x480 borderless, but the user still saw the game take over the whole display on every run
+(2026-11-09), so retail runs remain invasive and are opt-in. Do not call a capture windowed on the
+strength of the config alone.
 
 ## Requirements
 
@@ -193,9 +194,9 @@ Everything below was verified against the GOG build (the harness works on a scra
 - `JK.EXE -devMode` opens a **dev console window** ("Jedi Console", a `#32770` dialog) whose list
   box logs level parses and command output; the harness reads it to know when a level has loaded
   (`parse section things`).
-- The game's menus are **mouse-only** for synthetic input. The 640x480 game window (windowed by
-  default, top-left at `(0,0)`) has screen coordinates equal to game coordinates; the two clicks
-  needed are `Single Player (320,195)` and `New Game (304,115)`. The intro film is skipped with `ESC`.
+- The game's menus are **mouse-only** for synthetic input. The 640x480 game view has screen
+  coordinates equal to game coordinates; the two clicks needed are `Single Player (320,195)` and
+  `New Game (304,115)`. The intro film is skipped with `ESC`.
 - **A menu click commits to that screen.** Once an option is clicked you are inside that submenu and
   the only way out is its own `Ok`/`Cancel`; clicking a main-menu item from inside a submenu does
   nothing. So driving menus must descend one level at a time and commit/leave before the next step —
@@ -241,7 +242,7 @@ measurable (Phase 1 step 3's exit criterion). Three scripts and two fixtures:
   half. It warps the body to the leg, then holds the UP arrow (the engine's forward binding) and reads
   `coords` between holds; output `target/parity/trace/<name>-walk.tsv`.
 - Add `-UseAfterWalk <key>` to fire the player's own action binding after the walk and before the
-  post-walk console read (`9` is the profile's ACTIVATE binding; `MOUSEMIDDLE` is its mouse
+  post-walk console read (`SPACE` is the profile's ACTIVATE binding; `MOUSEMIDDLE` is its mouse
   alternative; `-UseKey` changes the route plan's `use` key too). `walk_exitdoor` uses it at the
   authored placement 174: the walk stops at the shut door, the hold opens it through `00_door.cog`,
   and `-ConsoleCommands 'cogstatus 0'` records `doorstatus`/`movestatus`.

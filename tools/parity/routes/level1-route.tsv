@@ -59,8 +59,10 @@ input	180	1	0
 # sector 60, yaw 105 (the recorded `route_door` direction). The warp starts there so both sides begin
 # the use at the same measured point; the eye is 0.086 from the door piece (thing 4 at
 # 1.200002, 9.650073, 6.35) in sector 74, inside the use sweep's `moveSize + 0.1 = 0.165`. The `use`
-# row presses the player's ACTIVATE binding, which sends `activate` to the linked thing;
-# `00_door.cog` flips the sector-74 adjoin and opens the leaf, and the next holds cross into 210.
+# row presses the player's ACTIVATE binding (scancode 0x39, SPACE: the profile's `bind 12 57 0x2`;
+# the PLR stores scancodes, so the earlier `9` sent the wrong key), which sends `activate` to the
+# linked thing; `00_door.cog` flips the sector-74 adjoin and opens the leaf, and the next holds
+# cross into 210.
 # (Walking from 174 instead overshoots: the port's 600 ms hold covers 0.26 units where retail's
 # covers 0.14, so the body leaves the 0.165 sweep before the use.)
 #
