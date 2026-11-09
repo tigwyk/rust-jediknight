@@ -29,9 +29,11 @@
 
   Actor rows are joined by **authored placement**, not by the `thing` number: retail's number is a
   slot in the engine's thing pool and the port's is the level's placement order, and the two only
-  agree where both arrays happen to line up. The gate pairs actors by nearest position at the first
-  sample (`-ActorIdentityTolerance`) and fails when either side reports an actor the other does not;
-  there is no missing-actor fraction.
+  agree where both arrays happen to line up. The gate pairs each actor at the first sample where
+  both traces report it (actors both builds place at the same point agree to 0.004 units), so an
+  actor that walks into the sampling radius after the first tick is paired when it appears rather
+  than left unmatched. Any actor still unmatched after the last sample fails; there is no
+  missing-actor fraction.
 
   The retail fixture is committed under `tools/parity/encounter/`; a fresh capture in
   `target/parity/encounter/` takes precedence. The gate records the port twice and fails when the
@@ -466,35 +468,49 @@ foreach ($row in $portActors) { if ($row.Detail -eq 'roam') { $portRoamers[[int]
 # the engine's thing pool and the port's is the level's placement order; the two agree for most
 # actors but not all (level 1's three ghosts occupy retail slots 75/91/99 while the authored ghosts
 # are placements 281/285/282), so keying by the number pairs different actors and invents extras.
-# Pair each retail actor with the port actor at the first sample by nearest position — actors both
+# Pair each actor at the first sample where both traces report it by nearest position — actors both
 # builds place at the same authored point agree to 0.004 units — and use that map for the encounter.
-# An actor with no counterpart on the other side is a genuine set difference and fails; there is no
-# missing fraction.
-$firstT = ($retailActors | Measure-Object -Property T -Minimum).Minimum
-$retailFirst = @($retailActors | Where-Object { $_.T -eq $firstT })
-$portFirst = @($portActors | Where-Object { $_.T -eq $firstT })
-$candidates = [System.Collections.Generic.List[object]]::new()
-foreach ($r in $retailFirst) {
-  foreach ($p in $portFirst) {
-    if ($null -eq $r.X -or $null -eq $p.X) { continue }
-    $dx = [double]$p.X - [double]$r.X
-    $dy = [double]$p.Y - [double]$r.Y
-    $dz = [double]$p.Z - [double]$r.Z
-    $distance = [math]::Sqrt($dx * $dx + $dy * $dy + $dz * $dz)
-    if ($distance -le $ActorIdentityTolerance) {
-      $candidates.Add([pscustomobject]@{ Distance = $distance; Retail = [string]$r.Thing; Port = [string]$p.Thing })
-    }
+# The first tick alone is not enough: an actor that walks into the sampling radius later has no row
+# there, and a map built only at that tick left it unpaired for the encounter (a later retail actor
+# was silently skipped rather than reported). What is left unmatched after every sample is a
+# genuine set difference and fails; there is no missing fraction.
+function Get-FirstSeen($Rows) {
+  $first = @{}
+  foreach ($row in $Rows) {
+    $key = [string]$row.Thing
+    if (-not $first.ContainsKey($key) -or [double]$row.T -lt [double]$first[$key].T) { $first[$key] = $row }
   }
+  return $first
 }
+$retailFirst = Get-FirstSeen $retailActors
+$portFirst = Get-FirstSeen $portActors
 $identity = @{}
 $identityUsed = @{}
-foreach ($c in @($candidates | Sort-Object Distance)) {
-  if ($identity.ContainsKey($c.Retail) -or $identityUsed.ContainsKey($c.Port)) { continue }
-  $identity[$c.Retail] = $c.Port
-  $identityUsed[$c.Port] = $true
+$times = @((@($retailActors | ForEach-Object { [double]$_.T }) + @($portActors | ForEach-Object { [double]$_.T })) | Sort-Object -Unique)
+foreach ($t in $times) {
+  $retailOpen = @($retailActors | Where-Object { [double]$_.T -eq $t -and -not $identity.ContainsKey([string]$_.Thing) })
+  $portOpen = @($portActors | Where-Object { [double]$_.T -eq $t -and -not $identityUsed.ContainsKey([string]$_.Thing) })
+  $candidates = [System.Collections.Generic.List[object]]::new()
+  foreach ($r in $retailOpen) {
+    foreach ($p in $portOpen) {
+      if ($null -eq $r.X -or $null -eq $p.X) { continue }
+      $dx = [double]$p.X - [double]$r.X
+      $dy = [double]$p.Y - [double]$r.Y
+      $dz = [double]$p.Z - [double]$r.Z
+      $distance = [math]::Sqrt($dx * $dx + $dy * $dy + $dz * $dz)
+      if ($distance -le $ActorIdentityTolerance) {
+        $candidates.Add([pscustomobject]@{ Distance = $distance; Retail = [string]$r.Thing; Port = [string]$p.Thing })
+      }
+    }
+  }
+  foreach ($c in @($candidates | Sort-Object Distance)) {
+    if ($identity.ContainsKey($c.Retail) -or $identityUsed.ContainsKey($c.Port)) { continue }
+    $identity[$c.Retail] = $c.Port
+    $identityUsed[$c.Port] = $true
+  }
 }
-$unmatchedRetail = @($retailFirst | Where-Object { -not $identity.ContainsKey([string]$_.Thing) })
-$unmatchedPort = @($portFirst | Where-Object { -not $identityUsed.ContainsKey([string]$_.Thing) })
+$unmatchedRetail = @($retailFirst.Values | Where-Object { -not $identity.ContainsKey([string]$_.Thing) } | Sort-Object T)
+$unmatchedPort = @($portFirst.Values | Where-Object { -not $identityUsed.ContainsKey([string]$_.Thing) } | Sort-Object T)
 
 $portActorAt = @{}
 foreach ($row in $portActors) { $portActorAt[('{0}|{1}' -f [int]$row.T, [string]$row.Thing)] = $row }
@@ -504,7 +520,6 @@ $steered = 0
 $actorHealthMax = 0.0
 $compared = 0
 $missing = 0
-$unmatchedSamples = 0
 # Extras are mapped port actors, not the unmatched ones (those are reported at identity level);
 # a mapped port actor that retail did not report is a real divergence in the shared set.
 $extra = @{}
@@ -512,7 +527,7 @@ foreach ($row in $portActors) {
   if ($identityUsed.ContainsKey([string]$row.Thing)) { $extra[('{0}|{1}' -f [int]$row.T, [string]$row.Thing)] = $true }
 }
 foreach ($row in $retailActors) {
-  if (-not $identity.ContainsKey([string]$row.Thing)) { $unmatchedSamples++; continue }
+  if (-not $identity.ContainsKey([string]$row.Thing)) { continue }
   $portThing = $identity[[string]$row.Thing]
   $key = '{0}|{1}' -f [int]$row.T, $portThing
   $extra.Remove($key)
@@ -557,12 +572,12 @@ if ($compared -gt 0) {
 # port does not, or the reverse, fails. Extras are not "phantom": a port actor retail never had is
 # exactly the invented-actor case the gate exists to catch.
 if ($unmatchedRetail.Count -gt 0) {
-  Fail ("{0} retail actor(s) have no port actor at t={1} ms ({2}); {3} retail sample(s) unpaired" -f `
-      $unmatchedRetail.Count, $firstT, (($unmatchedRetail | ForEach-Object Thing) -join ','), $unmatchedSamples)
+  Fail ("{0} retail actor(s) have no port actor ({1})" -f `
+      $unmatchedRetail.Count, (($unmatchedRetail | ForEach-Object { '{0}@{1:N0} ms' -f $_.Thing, $_.T }) -join ','))
 }
 if ($unmatchedPort.Count -gt 0) {
-  Fail ("{0} port actor(s) have no retail actor at t={1} ms ({2}); {3} port sample(s) unpaired" -f `
-      $unmatchedPort.Count, $firstT, (($unmatchedPort | ForEach-Object Thing) -join ','), ($unmatchedPort.Count * $sampleCount))
+  Fail ("{0} port actor(s) have no retail actor ({1})" -f `
+      $unmatchedPort.Count, (($unmatchedPort | ForEach-Object { '{0}@{1:N0} ms' -f $_.Thing, $_.T }) -join ','))
 }
 if ($missing -gt 0) { Fail ("{0} mapped retail actor sample(s) have no port actor" -f $missing) }
 if ($extra.Count -gt 0 -and $unmatchedPort.Count -eq 0) { Fail ("{0} port actor sample(s) have no retail actor" -f $extra.Count) }
