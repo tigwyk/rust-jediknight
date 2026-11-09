@@ -222,7 +222,7 @@ has since outgrown the note. Line numbers drift; the identity is the symbol and 
 | `runtime.rs` `transmit_awareness` breadth guard | covered — *`sithAIAwareness` propagation* |
 | `runtime.rs` `weapon_for_bin` name-hint fallback | **new** — *weapon auto-select* |
 | `runtime.rs` weapon auto-switch by damage ranking | **new** — *weapon auto-select* |
-| `runtime.rs` `thing_floor` AABB footprint | covered — *thing collision (solid models)* |
+| `runtime.rs` solid-thing floor rule | covered — *thing collision (solid models)*: the collider's `ThingSolid` list feeds `collide::resting_floor`, the one query the player, AI settle, actor grounding and gravity landing share |
 | `runtime.rs` `wire_links` id/mask not filtered | **new** — *cog link filtering* |
 | `runtime.rs` `sector_route` greedy note | **stale** — the tick uses `Collide::route` (breadth-first); the note described the one-hop `best_portal` helper |
 | `runtime.rs` `use_bin` "nothing calls this from a key" | **stale** — the inventory strip calls it; note corrected in round 268 |

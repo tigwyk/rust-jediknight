@@ -15949,9 +15949,6 @@ fn walker_step(
     // Vertical: the fall is a *sweep*, the way `sithCollision_MoveThing` moves any body — so it stops at
     // the first floor it meets and crosses doorways on the way down. That is what makes a walkway whose
     // slab belongs to the room below solid: the ray goes through the portal and finds the slab.
-    //
-    // This replaced a chain of three queries (`support`, then the sector's planes, then a raised
-    // resting probe) that each guessed at the same thing and still let a body fall out of the level.
     *vy -= gravity * dt;
     let drop = *vy * dt;
     if drop < 0.0 {
@@ -15963,73 +15960,19 @@ fn walker_step(
         // falls to the sphere contact: measured at level 1's spawn, `coords` reads z −1.13 at load and
         // −1.18 after a second (floor −1.25 + 0.065). A landing may lower the body onto a floor or
         // hold it there; it must never *lift* it.
-        let land = solids
-            .floor_contact(*sector, *pos, -drop + radius, radius)
-            .filter(|(floor, travelled, _, _)| {
-                // `travelled` is the distance from the body's centre down to the contact point, so
-                // the fall may only reach a floor whose contact is inside this frame's travel, and
-                // the contact must not be above where the body already is.
-                *travelled <= -drop + 1e-3 && *floor + radius <= pos[2] + 1e-3
-            })
-            .map(|(floor, travelled, owner, normal)| {
-                (floor + radius, Some(owner), travelled, Some(normal))
-            });
-        let mut land = land;
-        // The fallback exists for a sector with **no floor plane of its own** (`19A`'s 723, level 18's
-        // spawn). It must not substitute for a sector that has one: level 5's body was lifted frame by
-        // frame onto a ledge plane (0.30/0.42) above its own 0.1001 floor while the strict probe, which
-        // forbids raising a body, correctly refused it, and the body wedged 0.32 above the floor.
-        if land.is_none() && solids.floor_below(*sector, *pos).is_none() {
-            // A sector may carry **no floor plane at all** — `19A`'s sector 723 is the shipped case, and
-            // level 18's spawn stands in it (its floors belong to sectors 0 and 717, whose hulls do not
-            // contain the point). `sithPhysics_FindFloor` (`0x4f5550`) itself sweeps *surfaces*
-            // (`sithCollision_SearchForCollisions` along the body's own axis, range `moveSize + 0.005`),
-            // so where the face list has nothing either, the port falls back to the nearest sector
-            // plane: the floor under a falling body is the highest floor plane of a sector around it
-            // that is below the body. The contact is the sphere, the same as the faces path, and it may
-            // not lift the body.
-            land = solids
-                .sectors_around(*pos)
-                .into_iter()
-                .filter_map(|other| solids.floor_below(other, *pos))
-                // Never lift: contact must be at or below where the body already is.
-                .filter(|floor| floor + radius <= pos[2] + 1e-3)
-                .fold(None, |best: Option<f32>, floor| {
-                    Some(best.map_or(floor, |b| b.max(floor)))
-                })
-                .map(|floor| (floor + radius, None, 0.0, None));
-        }
-        // A sector whose face list has **no floor at all** under the body still supports it on its own
-        // plane: 18Ascend's spawn stands over a shaft opening (`adjoin 1150`) and the level has no
-        // polygon within a unit of it, so the swept surfaces cannot hold the body and the plane is the
-        // only floor there is. Retail rests there. A floor merely *farther away* is not this case —
-        // level 5's walk crosses onto a room whose slab lies half a unit down, and holding the body on
-        // the plane above it kept it from ever descending (the leg walked 105 % at z 0.175 and never
-        // changed sector). The reach is the one `--floor-at` uses for the same question (`height * 1.1`).
-        // ...but only where the body is actually **over** the room. A sector's hull plane runs to
-        // the walls, while its floor polygons stop at a ledge: level 2's spawn walks to a drop where
-        // the downward sweep finds no face and the plane is 3.0 under a 3.065 body, and the plane
-        // alone held it at the edge (the wall on the far side then stopped the walk). 18Ascend's
-        // case is the opposite: the body stands over the sector's own shaft **portal**, so
-        // `room_contains` is true there and the plane still holds it. Measured with
-        // `--floor-at` at level 2 (10.2548,-14.685,3.065): plane 3.0, 0 candidate faces.
-        if land.is_none()
-            && solids.room_contains(*sector, *pos, radius)
-            && solids.floor_under(*sector, *pos, 1.0, radius).is_none()
-            && let Some(plane) = solids.floor_below(*sector, *pos)
-        {
-            let contact = plane + radius;
-            if contact <= pos[2] + 1e-3 && contact >= pos[2] + drop - 1e-3 {
-                land = Some((contact, None, 0.0, None));
-            }
-        }
+        // `resting_floor` is the one floor rule the player, AI settling, actor grounding and
+        // gravity landing share: swept faces (a walkway slab, a ramp, a face-only floor), the
+        // sector's own plane where the data has no face, and a solid thing's model top. The chain
+        // of three queries that used to live here each guessed at the same thing.
+        let land = solids.resting_floor(*sector, *pos, -drop, radius);
         match land {
-            Some((z, owner, travelled, normal)) => {
+            Some(rest) => {
+                pos[2] = rest.height + radius;
                 if std::env::var_os("BK_WALK_TRACE").is_some() {
-                    eprintln!("walk trace:     landed on {z:.3} after {:.3}", -drop);
+                    eprintln!("walk trace:     landed on {:.3} after {:.3}", pos[2], -drop);
                 }
-                pos[2] = z;
-                let _ = owner;
+                let travelled = rest.travelled;
+                let normal = rest.normal;
                 // The engine's `MoveThing` projects the whole gravity step along the surface; the
                 // vertical speed is what keeps feeding a ramp. Zero it only on a flat floor (a ramp
                 // keeps it, which is why retail's level-3 body accelerates downhill). A floor threshold,
@@ -28324,7 +28267,7 @@ mod walker_tests {
     /// The player falls from a level's authored pose to the swept sphere contact.
     #[test]
     fn a_slope_projects_the_gravity_step_downhill() {
-        // Level 3's `--floor-at` normal, flipped toward the body by `floor_contact`. The measured
+        // Level 3's `--floor-at` normal, flipped toward the body by `resting_floor`. The measured
         // retail settle is `(-0.76,-4.75,-0.20)` from the authored `(-0.68,-5.23,0.27)`: down in
         // y and slightly left in x, which is this normal's horizontal direction.
         let normal = [-0.19143078, 0.8150017, 0.54692453];
@@ -28359,6 +28302,37 @@ mod walker_tests {
             PLAYER_RADIUS
         );
         assert_eq!(vy, 0.0, "resting body kept a vertical speed");
+    }
+
+    /// The player's sweep asks the one floor rule, and it finds a solid thing's model top: a body
+    /// falling onto a slab stops one radius over the slab, not on the room floor beneath it.
+    #[test]
+    fn the_walker_settles_on_a_solid_things_top() {
+        let mut synced = step_room();
+        synced.faces = synced.floors.clone();
+        synced.faces.extend(synced.walls.iter().cloned());
+        // Over the lower floor, at the ledge's own height.
+        synced.set_things(vec![collide::ThingSolid {
+            centre: [0.5, 0.0, 0.0],
+            radius: 0.4,
+            z_min: -0.5,
+            z_max: RISER,
+            sector: 0,
+            half: None,
+            yaw: 0.0,
+        }]);
+        let (mut sector, mut vy) = (0usize, 0.0f32);
+        let mut pos = [0.5f32, 0.0, RISER + PLAYER_RADIUS + 0.1];
+        for _ in 0..90 {
+            walker_step(&synced, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], 1.0 / 30.0, PLAYER_RADIUS, 4.0, false, false);
+        }
+        assert!(
+            (pos[2] - (RISER + PLAYER_RADIUS)).abs() < 1e-3,
+            "the sweep did not rest on the slab: z = {} (want {})",
+            pos[2],
+            RISER + PLAYER_RADIUS
+        );
+        assert_eq!(vy, 0.0, "a body resting on the slab kept a vertical speed");
     }
 
     /// A riser below `STEP_UP` is climbed, and a wall above it is not.
