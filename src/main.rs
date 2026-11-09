@@ -25706,6 +25706,9 @@ fn setup(
         }
         // `GetSelfCog` is the instance's own index in the level's cog list, which is the order the
         // engine creates them in — so this is the same number a script compares against.
+        // shortcut: assigned after `startup`, so a startup's `GetSelfCog`/`SendMessage` sender is 0
+        // and `CaptureThing` there records instance 0; moving it earlier shifts the door fight's
+        // deterministic AI timeline, so that is a #11 change, not this one.
         vm.cog_index = sim.instances.len() as i32;
         sim.world
             .borrow_mut()
