@@ -641,6 +641,11 @@ fn main() {
     let mut door_check = false;    let mut shot_at: Option<([f32; 3], f32, f32)> = None;
     // `--warp "x,y,z,yaw"`: the *player's* eye pose, not the camera's (see `setup`).
     let mut warp: Option<([f32; 3], f32)> = None;
+    // `--replay <path>`: the fixed-step scripted route (see `RoutePlan`), and `--route-trace <path>`:
+    // its sampled trace. A replay pins the step at 1/60 s exactly as `--shot` does, and the trace
+    // samples every 36 ticks (600 ms), the cadence a retail `coords` poll keeps.
+    let mut replay: Option<std::path::PathBuf> = None;
+    let mut route_trace: Option<std::path::PathBuf> = None;
 
     let mut sim = false;
     let mut dump: Option<String> = None;
@@ -912,6 +917,42 @@ fn main() {
             "--trace-out" => {
                 if let Some(path) = arg_value(&args, &mut i) {
                     let _ = TRACE_OUT.set(std::path::PathBuf::from(path));
+                }
+            }
+            // `--replay <path>`: replay a scripted route at the fixed capture step. The script is the
+            // retail-derived input fixture (see `RoutePlan`); it is a measurement, not gameplay.
+            "--replay" => {
+                replay = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--route-trace <path>`: the replay's sampled trace (position, sector, velocity, health,
+            // shields and the level-1 door/switch cog state), one row every 600 ms.
+            "--route-trace" => {
+                route_trace = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--route-compare <expected> <actual>`: the route-trace gate. Fails on the first field
+            // outside its tolerance, so a perturbed trace fails and the fixture itself passes.
+            "--route-compare" => {
+                let expected = args.get(i + 1).cloned();
+                let actual = args.get(i + 2).cloned();
+                i += 2;
+                let (Some(expected), Some(actual)) = (expected, actual) else {
+                    println!("usage: --route-compare <expected.tsv> <actual.tsv>");
+                    std::process::exit(2);
+                };
+                let epsilon = std::env::var("BK_ROUTE_EPSILON")
+                    .ok()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(1e-6);
+                match route_trace_compare(
+                    std::path::Path::new(&expected),
+                    std::path::Path::new(&actual),
+                    epsilon,
+                ) {
+                    Ok(()) => std::process::exit(0),
+                    Err(message) => {
+                        eprintln!("{message}");
+                        std::process::exit(1);
+                    }
                 }
             }
             "--sim" => sim = true,
@@ -1385,6 +1426,24 @@ fn main() {
         );
         return;
     }
+
+    // Parse the replay script before any game data is touched: a bad script is an argument error,
+    // not a level-load failure. `--route-compare` is handled above and never reaches here.
+    let route_plan = match replay.as_deref().map(RoutePlan::read) {
+        Some(Ok(plan)) => Some(plan),
+        Some(Err(message)) => {
+            eprintln!("replay: {message}");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+    if route_trace.is_some() && route_plan.is_none() {
+        eprintln!("--route-trace needs --replay <path>");
+        std::process::exit(2);
+    }
+    // A replay is a capture that must be reproducible, not just fixed-step: see the executor note
+    // at the end of the app setup.
+    let replaying = route_plan.is_some();
 
     // A level named on the command line may be `03katarn`, `03katarn.jkl` or `jkl\03katarn.jkl`.
     let level_name = level_name.map(|n| level_arg(&n));
@@ -12523,7 +12582,7 @@ fn main() {
     // "all windows closed", so a windowless app quits on its first update and `--cogstatus-after`
     // never prints (round 308's secret-trigger probe). Keep the default everywhere else, including the
     // gate sweep, whose headless skip detection relies on that early exit.
-    let exit_condition = if headless && exit_after.is_some() {
+    let exit_condition = if headless && (exit_after.is_some() || route_plan.is_some()) {
         bevy::window::ExitCondition::DontExit
     } else {
         bevy::window::ExitCondition::OnAllClosed
@@ -12542,7 +12601,13 @@ fn main() {
         .insert_resource(debug_catalog)
         .insert_resource(Screens(menus))
         .insert_resource(CaptureMode(
-            shot.is_some() || live || sim || complete_after.is_some() || !animating || goal_check,
+            shot.is_some()
+                || replay.is_some()
+                || live
+                || sim
+                || complete_after.is_some()
+                || !animating
+                || goal_check,
         ))
         .insert_resource(TourLive {
             active: tour_live,
@@ -12564,7 +12629,7 @@ fn main() {
         .insert_resource(MusicState::default())
         .insert_resource(Overview {
             overview,
-            capture: shot.is_some() || map_check,
+            capture: shot.is_some() || map_check || replay.is_some(),
         })
         .insert_resource(Near(near))
         .insert_resource(Stand(stand))
@@ -12585,7 +12650,17 @@ fn main() {
         .insert_resource(ForceEconomyProbe { enabled: force_economy })
         .insert_resource(ForceGrantProbe { enabled: force_grant })
         .insert_resource(PulseCount::default())
-        .insert_resource(CaptureDt(shot.as_ref().and_then(|s| (!s.is_empty()).then_some(1.0 / 60.0))))
+        .insert_resource(CaptureDt(
+            shot.as_ref()
+                .and_then(|s| (!s.is_empty()).then_some(1.0 / 60.0))
+                // A replay pins the step even without `--shot`: its comparability is exactly the
+                // fixed 1/60 s tick the route trace samples (see `RoutePlan`).
+                .or_else(|| route_plan.is_some().then_some(1.0 / 60.0)),
+        ))
+        .insert_resource(RouteReplay(route_plan))
+        .insert_resource(RouteTraceOut(route_trace))
+        .insert_resource(RouteNow::default())
+        .insert_resource(RouteCursor::default())
         .insert_resource(Shot(shot.map(PathBuf::from)))
         .insert_resource(ShotFrame(shot_frame))
         .insert_resource(Cull(cull))
@@ -12682,9 +12757,10 @@ fn main() {
         // before the cull pass sights the thing, or the gate depends on the scheduler's order.
         .add_systems(
             Update,
-            goal_probe
-                .after(walk_player)
-                .before(cull_sectors)
+            (
+                route_replay.before(walk_player),
+                goal_probe.after(walk_player).before(cull_sectors),
+            )
                 .run_if(no_screen_open),
         )
         .add_systems(Update, palette_tint_pass.run_if(no_screen_open))
@@ -12704,6 +12780,15 @@ fn main() {
         .add_systems(Update, refresh_force_screen)
         .add_systems(Update, seed_force_screen_powers)
         .add_systems(Update, arm_for_capture);
+    // A replay must be reproducible between runs, not only between frames. Several systems draw from
+    // the shared LCG in `cog::pseudo_random`, which is thread-local, so the multi-threaded executor
+    // gives different systems different sequences and a hit can land a frame apart from run to run.
+    // One executor thread makes every call site see the same sequence. Play keeps the default.
+    if replaying {
+        app.edit_schedule(bevy::app::Update, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
+    }
     app.run();
 }
 
@@ -15879,6 +15964,458 @@ enum Walk {
     Frames(u32),
     All,
 }
+
+/// `--replay`'s scripted route, and `--route-trace`'s sampled format.
+///
+/// The script is the retail-derived input fixture: `warp` rows are the route's leg starts (the
+/// level's own start and the level's `walkplayer` placements, the poses `tools/parity/shots.tsv`
+/// records from retail), and `input` rows hold forward/strafe for a run of ticks. A tick is the
+/// capture step, 1/60 s, so a replay is a function of the script and the level data.
+///
+/// The trace samples every 36 ticks (600 ms) — the cadence a retail `coords` poll keeps — and
+/// records the body position (the value retail's `coords` prints; the camera eye is one `eyeOffset`
+/// above it), the tracked sector, the body velocity in world units/s, health, shields and the
+/// level-1 door/switch cog variables.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct RouteInput {
+    forward: f32,
+    strafe: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RouteWarp {
+    tick: u32,
+    /// `None`: stay at the level's own start (the route's first leg).
+    at: Option<([f32; 3], f32)>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct RoutePlan {
+    inputs: Vec<(u32, RouteInput)>,
+    warps: Vec<RouteWarp>,
+    total: u32,
+}
+
+/// The trace's sample interval. 36 ticks at 1/60 s is the 600 ms hold a retail `coords` poll
+/// segments the engine into (`Invoke-JkWalkTrace`'s `HoldMs`).
+const ROUTE_SAMPLE_TICKS: u32 = 36;
+
+/// The level-1 cogs the route trace carries: the upper door (`00_door.cog`, placed cog 0) and the
+/// cantina door switch (`00_doorswitch.cog`, placed cog 11). The symbol names differ between them
+/// (`opendoors`/`closedoors` vs `open_doors`/`close_doors`), which is why each has its own row.
+const ROUTE_COGS: [(usize, [&str; 4]); 2] = [
+    (0, ["doorstatus", "movestatus", "opendoors", "closedoors"]),
+    (11, ["doorstatus", "movestatus", "open_doors", "close_doors"]),
+];
+
+/// The trace columns. Every value is a number or `-` (a field the run does not have: no such cog
+/// started, or a retail capture did not record it). The comparator parses the header, so the set
+/// can grow without breaking older fixtures.
+const ROUTE_TRACE_FIELDS: [&str; 19] = [
+    "tick", "t_s", "x", "y", "z", "sector", "vel_x", "vel_y", "vel_z", "health", "shields",
+    "door0_status", "door0_movestatus", "door0_opendoors", "door0_closedoors",
+    "switch_status", "switch_movestatus", "switch_opendoors", "switch_closedoors",
+];
+
+impl RoutePlan {
+    fn read(path: &std::path::Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Self::parse(&text)
+    }
+
+    fn parse(text: &str) -> Result<Self, String> {
+        let mut plan = RoutePlan::default();
+        for (line_no, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let f: Vec<&str> = line.split(['\t', ' ']).filter(|v| !v.is_empty()).collect();
+            let fail = |what: String| format!("line {}: {what}", line_no + 1);
+            match f.first().copied() {
+                Some("warp") => {
+                    // warp <name> <x|-> <y|-> <z|-> <yaw|->
+                    if f.len() != 6 {
+                        return Err(fail(format!(
+                            "`warp` needs a name and four values, got {} field(s)",
+                            f.len()
+                        )));
+                    }
+                    let numbers = &f[2..6];
+                    let at = if numbers.iter().all(|v| *v == "-") {
+                        None
+                    } else {
+                        let mut v = [0.0f32; 4];
+                        for (slot, raw) in numbers.iter().enumerate() {
+                            v[slot] = raw
+                                .parse()
+                                .map_err(|_| fail(format!("`{raw}` is not a number")))?;
+                        }
+                        Some(([v[0], v[1], v[2]], v[3]))
+                    };
+                    plan.warps.push(RouteWarp { tick: plan.total, at });
+                }
+                Some("input") => {
+                    // input <ticks> <forward> <strafe>
+                    if f.len() != 4 {
+                        return Err(fail(format!(
+                            "`input` needs ticks, forward and strafe, got {} field(s)",
+                            f.len()
+                        )));
+                    }
+                    let ticks: u32 = f[1]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a tick count", f[1])))?;
+                    if ticks == 0 {
+                        return Err(fail("an `input` row needs at least one tick".to_string()));
+                    }
+                    let forward: f32 = f[2]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a number", f[2])))?;
+                    let strafe: f32 = f[3]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a number", f[3])))?;
+                    plan.inputs.push((plan.total, RouteInput { forward, strafe }));
+                    plan.total += ticks;
+                }
+                Some(other) => {
+                    return Err(fail(format!("unknown row kind `{other}` (warp, input)")));
+                }
+                None => {}
+            }
+        }
+        if plan.total == 0 {
+            return Err("the script has no `input` rows".to_string());
+        }
+        for pair in plan.warps.windows(2) {
+            if pair[1].tick <= pair[0].tick {
+                return Err(format!(
+                    "two `warp` rows at tick {}; a warp needs a stretch of input before it",
+                    pair[1].tick
+                ));
+            }
+        }
+        if plan.warps.first().is_none_or(|w| w.tick != 0) {
+            return Err("the script must start with a `warp` row at tick 0".to_string());
+        }
+        Ok(plan)
+    }
+
+    /// The input held at `tick` (the last segment that has started).
+    fn input_at(&self, tick: u32) -> RouteInput {
+        self.inputs
+            .iter()
+            .rev()
+            .find(|(start, _)| *start <= tick)
+            .map(|(_, input)| *input)
+            .unwrap_or_default()
+    }
+
+    fn warp_at(&self, tick: u32) -> Option<RouteWarp> {
+        self.warps.iter().find(|w| w.tick == tick).copied()
+    }
+}
+
+/// One parsed route-trace row: the tick plus one `Option<f64>` per [`ROUTE_TRACE_FIELDS`] entry.
+#[derive(Debug, Clone)]
+struct RouteTraceRow {
+    tick: u32,
+    values: Vec<Option<f64>>,
+}
+
+fn parse_route_trace(text: &str) -> Result<Vec<RouteTraceRow>, String> {
+    let mut rows = Vec::new();
+    let mut columns: Option<Vec<usize>> = None;
+    for (line_no, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
+        if columns.is_none() {
+            let mut order = Vec::with_capacity(ROUTE_TRACE_FIELDS.len());
+            for field in ROUTE_TRACE_FIELDS {
+                match cells.iter().position(|c| *c == field) {
+                    Some(index) => order.push(index),
+                    None => {
+                        return Err(format!(
+                            "line {}: trace header has no `{field}` column",
+                            line_no + 1
+                        ))
+                    }
+                }
+            }
+            columns = Some(order);
+            continue;
+        }
+        let order = columns.as_ref().expect("header just parsed");
+        let mut values = Vec::with_capacity(ROUTE_TRACE_FIELDS.len());
+        for (slot, index) in order.iter().enumerate() {
+            let raw = cells.get(*index).copied().unwrap_or("-");
+            let value = if raw == "-" || raw.is_empty() {
+                None
+            } else {
+                Some(
+                    raw.parse::<f64>()
+                        .map_err(|_| format!("line {}: `{raw}` is not a number ({} column)",
+                            line_no + 1, ROUTE_TRACE_FIELDS[slot]))?,
+                )
+            };
+            values.push(value);
+        }
+        let tick = values[0]
+            .ok_or_else(|| format!("line {}: the tick is `-`", line_no + 1))? as u32;
+        rows.push(RouteTraceRow { tick, values });
+    }
+    if rows.is_empty() {
+        return Err("the trace has a header but no rows".to_string());
+    }
+    Ok(rows)
+}
+
+/// Compare two route traces field by field. `epsilon` is the absolute tolerance for every numeric
+/// column except `tick` (exact) and `sector` (an integer identity, exact): a sector difference is a
+/// different room, never a rounding error. A field that either side does not have (`-`) is skipped,
+/// and the caller's summary counts how many were actually compared.
+fn compare_route_rows(
+    expected: &[RouteTraceRow],
+    actual: &[RouteTraceRow],
+    epsilon: f64,
+) -> Result<usize, String> {
+    if expected.len() != actual.len() {
+        return Err(format!(
+            "route-compare: FAIL {} row(s) expected, {} in the trace",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    let mut failures = Vec::new();
+    let mut compared = 0usize;
+    for (want_row, got_row) in expected.iter().zip(actual) {
+        let tick = want_row.tick;
+        if tick != got_row.tick {
+            failures.push(format!("tick {tick}: the trace has tick {}", got_row.tick));
+            continue;
+        }
+        for (slot, field) in ROUTE_TRACE_FIELDS.iter().enumerate().skip(1) {
+            let (Some(want), Some(got)) = (want_row.values[slot], got_row.values[slot]) else {
+                continue;
+            };
+            compared += 1;
+            let delta = (want - got).abs();
+            if *field == "sector" {
+                if delta > 0.5 {
+                    failures.push(format!(
+                        "tick {tick} sector: expected {want:.0}, trace has {got:.0}"
+                    ));
+                }
+                continue;
+            }
+            if !delta.is_finite() || delta > epsilon {
+                failures.push(format!(
+                    "tick {tick} {field}: expected {want:.4}, trace has {got:.4} (delta {delta:.4})"
+                ));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(compared)
+    } else {
+        let shown = failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n  ");
+        Err(format!(
+            "route-compare: FAIL {compared} compared field(s), {} mismatch(es):\n  {shown}",
+            failures.len()
+        ))
+    }
+}
+
+/// `--route-compare`: parse both traces and apply [`compare_route_rows`] at `epsilon`.
+fn route_trace_compare(
+    expected: &std::path::Path,
+    actual: &std::path::Path,
+    epsilon: f64,
+) -> Result<(), String> {
+    let read = |path: &std::path::Path| -> Result<Vec<RouteTraceRow>, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        parse_route_trace(&text).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let want = read(expected)?;
+    let got = read(actual)?;
+    let compared = compare_route_rows(&want, &got, epsilon)?;
+    println!(
+        "route-compare: PASS {} row(s), {compared} field(s) within {epsilon}",
+        want.len()
+    );
+    Ok(())
+}
+
+/// One route-trace line. `x/y/z` are the player **body** position — the value retail's `coords`
+/// prints (the camera rides one `eyeOffset` above it, so a `shots.tsv` eye is 0.037 higher) — and a
+/// retail capture and this trace therefore name the same point. `vel_x`/`vel_y` are the body's
+/// horizontal world velocity and `vel_z` its vertical one, in level units per second. A field the
+/// run does not have is `-`: a level without the two route cogs, or a retail capture that did not
+/// record health.
+fn write_route_trace_row(
+    path: &std::path::Path,
+    tick: u32,
+    body: &runtime::PlayerBody,
+    sim: Option<&Sim>,
+    world: Option<&World>,
+) {
+    use std::io::Write;
+    let first = tick == 0;
+    let open = || {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true);
+        if first {
+            options.truncate(true);
+        } else {
+            options.append(true);
+        }
+        options.open(path)
+    };
+    let Ok(mut file) = open() else { return };
+    if first {
+        let _ = writeln!(file, "{}", ROUTE_TRACE_FIELDS.join("\t"));
+    }
+    let (health, shields) = sim
+        .map(|sim| {
+            let rt = sim.world.borrow();
+            let index = rt.player_thing();
+            (
+                rt.things.get(index).map(|thing| f64::from(thing.health)),
+                Some(f64::from(rt.player_shields)),
+            )
+        })
+        .unwrap_or((None, None));
+    let cogs = match (world, sim) {
+        (Some(world), Some(sim)) => route_cog_values(world, sim),
+        _ => [None; 8],
+    };
+    let number = |value: Option<f64>, places: usize| {
+        value
+            .map(|v| format!("{v:.places$}"))
+            .unwrap_or_else(|| "-".to_string())
+    };
+    let _ = writeln!(
+        file,
+        "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        tick,
+        f64::from(tick) / 60.0,
+        body.pos.x,
+        body.pos.y,
+        body.pos.z,
+        body.sector,
+        body.vel[0],
+        body.vel[1],
+        body.vy,
+        number(health, 1),
+        number(shields, 1),
+        number(cogs[0], 3),
+        number(cogs[1], 3),
+        number(cogs[2], 3),
+        number(cogs[3], 3),
+        number(cogs[4], 3),
+        number(cogs[5], 3),
+        number(cogs[6], 3),
+        number(cogs[7], 3),
+    );
+}
+
+/// The eight route cog values ([`ROUTE_COGS`], four symbols each). A cog that has not started —
+/// or a level with fewer cogs — reads `None` for its row.
+fn route_cog_values(world: &World, sim: &Sim) -> [Option<f64>; 8] {
+    let mut out = [None; 8];
+    for (row, (index, symbols)) in ROUTE_COGS.iter().enumerate() {
+        if world.level.cogs.get(*index).is_none() {
+            continue;
+        }
+        let Some((_, vm)) = sim
+            .instances
+            .iter()
+            .find(|(_, vm)| vm.cog_index == *index as i32)
+        else {
+            continue;
+        };
+        for (slot, name) in symbols.iter().enumerate() {
+            out[row * 4 + slot] = Some(vm.var(name).num());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    /// The committed fixtures live in the repo, so the gate's own contract is testable without the
+    /// game data or a window: parse both sides, compare, and show a perturbation is rejected.
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/parity/routetrace")
+            .join(name)
+    }
+
+    #[test]
+    fn a_route_script_parses_its_legs_and_inputs() {
+        let text = "\
+# a two-leg route
+warp spawn -10.0 -5.0 -1.0 -60
+input 36 1 0
+warp cantina -2.0 -3.0 -1.1 105
+input 72 1 0
+";
+        let plan = RoutePlan::parse(text).expect("the script parses");
+        assert_eq!(plan.total, 108);
+        assert_eq!(plan.warps.len(), 2);
+        assert_eq!(plan.warps[0].tick, 0);
+        assert_eq!(plan.warps[1].tick, 36);
+        assert_eq!(plan.warps[1].at.unwrap().1, 105.0);
+        assert_eq!(plan.input_at(0), RouteInput { forward: 1.0, strafe: 0.0 });
+        assert_eq!(plan.input_at(35), RouteInput { forward: 1.0, strafe: 0.0 });
+        assert_eq!(plan.warp_at(36).unwrap().tick, 36);
+        assert_eq!(plan.total, plan.inputs.last().unwrap().0 + 72);
+    }
+
+    #[test]
+    fn a_route_script_without_a_leading_warp_is_rejected() {
+        let error = RoutePlan::parse("input 10 1 0\n").err().expect("no script");
+        assert!(error.contains("warp"), "{error}");
+        let error = RoutePlan::parse("warp spawn - - - -\n").err().expect("no input");
+        assert!(error.contains("input"), "{error}");
+    }
+
+    #[test]
+    fn the_committed_route_fixtures_compare_equal_to_themselves() {
+        for name in ["level1-route-port.tsv", "level1-route-retail.tsv"] {
+            let text = std::fs::read_to_string(fixture(name)).expect("committed fixture");
+            let rows = parse_route_trace(&text).expect("fixture parses");
+            let compared = compare_route_rows(&rows, &rows, 1e-6)
+                .unwrap_or_else(|e| panic!("{name} does not compare to itself: {e}"));
+            assert!(compared > 0, "{name} compared no fields");
+        }
+    }
+
+    #[test]
+    fn a_perturbed_route_trace_fails_the_gate() {
+        let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("fixture");
+        let expected = parse_route_trace(&text).expect("fixture parses");
+        let mut perturbed = expected.clone();
+        let x = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "x").unwrap();
+        let value = perturbed[0].values[x].as_mut().expect("the first row has an x");
+        *value += 0.25;
+        let error = compare_route_rows(&expected, &perturbed, 1e-6)
+            .expect_err("a 0.25-unit position change must fail");
+        assert!(error.contains("x:"), "{error}");
+        assert!(
+            compare_route_rows(&expected, &perturbed, 0.30).is_ok(),
+            "the tolerance is an absolute bound, so 0.30 accepts it"
+        );
+    }
+}
+
 
 /// One level's walk result, so the single-level report and the install-wide sweep say
 /// the same things.
@@ -23935,11 +24472,19 @@ fn projectile_hits(
     sim: Option<Res<Sim>>,
     world: Option<Res<World>>,
     time: Res<Time>,
+    capture: Option<Res<CaptureDt>>,
     mut created: Option<ResMut<Created>>,
     mut commands: Commands,
 ) {
     let (Some(sim), Some(world), Some(created)) = (sim, world, created.as_mut()) else { return };
     let mut rt = sim.world.borrow_mut();
+    // A capture pins the step everywhere else (`sim_dt`); the bolt sweep read the wall clock, so a
+    // hit landed at a different frame from run to run and a replay trace's health was not repeatable.
+    // With no capture the wall delta is what it always was: gameplay is unchanged.
+    let step = capture
+        .as_deref()
+        .and_then(|c| c.0)
+        .unwrap_or_else(|| time.delta_secs());
     let first_created = world.level.things.len();
     // The scan itself lives in `Runtime::impacts`, so `--hit` drives the same code the game
     // does instead of a copy of it.
@@ -23974,7 +24519,7 @@ fn projectile_hits(
         }
     }
     // The shot's own move is swept (a fast bolt crosses a body between frames).
-    let impacts = rt.impacts(first_created, time.delta_secs());
+    let impacts = rt.impacts(first_created, step);
     let player_index = rt
         .templates
         .iter()
@@ -26414,6 +26959,26 @@ struct Shot(Option<PathBuf>);
 #[derive(Resource)]
 struct ShotFrame(u32);
 
+/// `--replay <path>`'s parsed script (see [`RoutePlan`]); `None` is an ordinary run. A replay is a
+/// **capture**: it drives the player from the script instead of the keyboard and pins the step.
+#[derive(Resource, Default)]
+struct RouteReplay(Option<RoutePlan>);
+
+/// `--route-trace <path>`: where the replay writes its sampled trace.
+#[derive(Resource, Default)]
+struct RouteTraceOut(Option<std::path::PathBuf>);
+
+/// The script's input for the tick `route_replay` is on, read by `walk_player`. `None` outside a
+/// replay and on the final tick.
+#[derive(Resource, Default)]
+struct RouteNow(Option<RouteInput>);
+
+/// Where the replay is in its script, in ticks.
+#[derive(Resource, Default)]
+struct RouteCursor {
+    tick: u32,
+}
+
 /// The simulation's time step when a capture run is driving the app (`--shot`).
 ///
 /// A capture must be **reproducible in game time**, not in wall-clock time: retail's harness assumes
@@ -26761,6 +27326,63 @@ fn sky_follows_camera(
     }
 }
 
+/// `--replay`: advance the scripted route one tick and hand `walk_player` this tick's input.
+///
+/// It runs **before** `walk_player` so a leg's warp is in place for that leg's first step, and it
+/// writes the sampled trace row before the step, the same point in the tick a retail `coords` poll
+/// records: tick 0 is the leg's start pose, and every 36th tick is that many 1/60 s steps later.
+/// The route's final tick has no input; its row is the last sampled state and the run ends.
+fn route_replay(
+    plan: Option<Res<RouteReplay>>,
+    out: Option<Res<RouteTraceOut>>,
+    mut cursor: ResMut<RouteCursor>,
+    mut now: ResMut<RouteNow>,
+    world: Option<Res<World>>,
+    sim: Option<Res<Sim>>,
+    mut player: Option<ResMut<Player>>,
+    solids: Option<Res<Collision>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Some(plan) = plan.as_deref().and_then(|p| p.0.as_ref()) else { return };
+    let (Some(player), Some(solids)) = (player.as_mut(), solids.as_deref()) else { return };
+    let tick = cursor.tick;
+    if tick > plan.total {
+        now.0 = None;
+        return;
+    }
+    if let Some(warp) = plan.warp_at(tick)
+        && let Some((at, yaw)) = warp.at
+    {
+        let body_at = warp_body(at, player.body.eye);
+        let sector = solids.0.sector_for_body(body_at);
+        if let Some(sim) = sim.as_deref() {
+            sim.world
+                .borrow_mut()
+                .teleport_player(&mut player.body, body_at, sector);
+        } else {
+            player.body.pos = Vec3::from(body_at);
+            if let Some(sector) = sector {
+                player.body.sector = sector;
+            }
+        }
+        player.body.yaw = yaw.to_radians();
+        player.body.vel = [0.0; 2];
+        player.body.vy = 0.0;
+    }
+    if tick % ROUTE_SAMPLE_TICKS == 0
+        && let Some(path) = out.as_deref().and_then(|o| o.0.as_deref())
+    {
+        write_route_trace_row(path, tick, &player.body, sim.as_deref(), world.as_deref());
+    }
+    cursor.tick += 1;
+    if tick == plan.total {
+        now.0 = None;
+        exit.write(AppExit::Success);
+        return;
+    }
+    now.0 = Some(plan.input_at(tick));
+}
+
 /// The player: a walker bound to the level's own sectors, so walls stop it and doorways
 /// let it through. Arrow keys look, `WASD` moves, `Shift` runs, `Space` jumps.
 ///
@@ -26785,6 +27407,8 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     mut cam: Query<&mut Transform, (With<Camera3d>, With<WorldCamera>)>,
     // `--trace-out`: the frame counter for the written trace (Phase 0.5 trace v0).
     mut trace_tick: Local<u32>,
+    // `--replay`: this tick's scripted input, published by `route_replay` before this system.
+    route_now: Option<Res<RouteNow>>,
 ) {
     let (Some(solids), Some(player)) = (solids, player.as_mut()) else { return };
     // A door or lift follows its frame path, and the engine collides a body against the thing where
@@ -26930,6 +27554,12 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         if elapsed + 1e-3 >= settle { 1.0 } else { 0.0 }
     } else {
         forward
+    };
+    // `--replay`: the script's per-tick input replaces the keyboard and the env hooks above. Fixed
+    // per tick is what makes two runs of the same script identical.
+    let (forward, strafe) = match route_now.as_deref().and_then(|now| now.0) {
+        Some(route) => (route.forward, route.strafe),
+        None => (forward, strafe),
     };
     // A **script camera** takes the body over — but only while its slot follows something other than the
     // player. Level 14's opening points slot 0 at thing 45 (`MAcamera.key`) and retail's body moves
