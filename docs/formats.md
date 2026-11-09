@@ -208,8 +208,8 @@ The consumers the port has to honour, and where the engine puts them:
   a closed door hides nothing in retail (the leaf fills the doorway), and the
   `--no-cull` A/B stays pixel-identical, which is what keeps stage 1's gate meaningful.
 - **water**: `sithPhysics.c:43` halves movement when `pThing->sector->flags &
-  SITH_SECTOR_UNDERWATER`, in addition to the water *surface* flags; `in_water` in
-  `main.rs` reads both.
+  SITH_SECTOR_UNDERWATER`, in addition to the water *surface* flags; `Runtime::in_water`
+  reads both and `Runtime::step_player` stores the answer on the body it steps.
 
 Not yet gated: the port's other movers. A projectile or an actor moves by
 `Runtime::step`, which resolves against the sector's planes and faces
@@ -1925,7 +1925,7 @@ Everything in this list is from the shipped binary, not from its decompilation:
 | the mover | `0x4e7670` | moves the thing and every attached thing recursively, calling `MoveThing` per sub-step |
 | wedged player | `0x4e7950` → `0x4f61a0` | when the slide loop runs past 3 iterations on a *player*, the engine zeroes its physics state — velocity, forces, attached-surface data — instead of leaving it pinned |
 | `sithPhysics_FindFloor` | `0x4f5550` | a **radius-0 ray** along the thing's up axis, `1.1 ×` the thing's last floor gap (`2 ×` for some move types), flags `0x2802`; a `BOTTOM` contact sets the thing's floor state |
-| fall death | `sithPlayer_Update` (`decomp/004c89d0_sithPlayer_Update.c:80`, `sithPlayer.c:251`) | `vel.z < -3.0` **and** the current sector has `SITH_SECTOR_FALLDEATH` (`0x40`) → the body is marked `SITH_AF_FALLKILLED`, the palette runs down at 0.7 a second, and at zero `sithPlayer_KillPlayer` takes it. Implemented: `fall_death_rule` + the fade in `walk_player`, and `respawn_on_death` puts the body back at the level's start. Level 1 ships **32** of those sectors, so it is a rule a player meets |
+| fall death | `sithPlayer_Update` (`decomp/004c89d0_sithPlayer_Update.c:80`, `sithPlayer.c:251`) | `vel.z < -3.0` **and** the current sector has `SITH_SECTOR_FALLDEATH` (`0x40`) → the body is marked `SITH_AF_FALLKILLED`, the palette runs down at 0.7 a second, and at zero `sithPlayer_KillPlayer` takes it. Implemented: `fall_death_rule` + the fade in `Runtime::step_player`, and `respawn_on_death` puts the body back at the level's start. Level 1 ships **32** of those sectors, so it is a rule a player meets |
 
 Two things followed from that: the window now moves the body **once per 0.02 s sub-step**
 (the velocity integration already used the engine's rollover, but the sweep was taking a
@@ -2145,9 +2145,11 @@ for (int32_t i = framesToApply; i > 0; i--) {
 
 `ApplyDrag` is `vel *= 1 - drag * dt`, so with `acceleration = target * drag` the velocity approaches the
 target exponentially and never overshoots. `integrate_walk` in `src/runtime.rs` is that loop, at
-`1/50` s with a rollover. `Runtime::step_player` owns the target assembly, this integration count and
-the jump; `walk_player` supplies the intent and the environment it reads, then reads the resulting
-body. The sub-step count also drives the sweep, so a frame with two engine steps moves the body twice. `--feel`
+`1/50` s with a rollover. `Runtime::step_player` owns seating, the conveyor carry, the sector thrust,
+the water state, target assembly, this integration count, the jump, the sweep, fall damage and fall
+death, and publishes the final pose onto the player's own thing; `walk_player` supplies the intent
+and reads the resulting body. The sub-step count also drives the sweep, so a frame with two engine
+steps moves the body twice. `--feel`
 pins the result:
 
 ```text
@@ -3310,8 +3312,8 @@ net one-unit-per-second lift. The shipped users are updrafts — level 21's core
 and multiplayer `m5_antigrav.cog`'s four anti-gravity columns.
 
 The port folds it into both halves of the body: `Runtime::step` adds `thrust * dt` to a thing's velocity
-before it moves (a crate in the column rises), and `walk_player` hands it to `Runtime::step_player`,
-which adds it to the walk velocity's two
+before it moves (a crate in the column rises), and `Runtime::step_player` reads the body's own sector
+and adds it to the walk velocity's two
 horizontal terms and to `vy` — the same place gravity enters. `--things` checks the arithmetic: a
 resting thing gains 5 u/s over a second and rises 2.58 units.
 
@@ -3792,7 +3794,7 @@ Two other findings on the way:
 
 - `ActivateBin(player, 0, 21)` puts the **bin in the third argument**. Reading the second
   stored the hold under bin 0, so `DeactivateBin(player, 21)` found nothing (hold 0).
-- A force jump only lifts the player because the *script* sets a velocity: `walk_player` now
+- A force jump only lifts the player because the *script* sets a velocity: `Runtime::step_player` now
   reads any velocity the runtime holds on the player thing as a one-shot impulse and clears
   it, so `SetThingVel` moves the camera rather than a number nothing reads.
 
