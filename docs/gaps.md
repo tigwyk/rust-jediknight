@@ -7218,3 +7218,28 @@ The harness work is kept for those deliberate runs:
 The port-side trigger remains verified headless (`use: activated surface 2403`, `doorstatus 2`). The
 retail comparison is **not** to be automated; walk traces and draw parity remain the only windowed
 checks, and even those should be run deliberately.
+
+## Update — round 268 (issue #15: door0 use and the 8t88 exit, port side; retail blocked)
+
+- The door0 trigger is the player's own ACTIVATE message. The port's `use_thing` sends it and
+  `00_door.cog` opens the door; the route's exit segment now carries `door0_opened`/`goal_bin100` and
+  the port replay passes: determinism (33 identical rows), required fields, anti-synthetic use
+  (things 4 and 47), events (`door0_opened` shut before the use tick and latched at the end, final
+  `goal_bin100 = 3`), the committed port oracle (596 fields within 1e-6), and the 0.25-unit perturb
+  rejection (`route-gate.ps1 -Perturb`).
+- Retail's profile stores **scancodes**: `player/Lee/Lee.plr` has `bind 12 57 0x2` = scancode 0x39
+  (SPACE), so the earlier use key `9` (scancode 0x0A) was the wrong key. Even with SPACE, and with
+  the key pre-pressed before the window activation, the retail run's `cogstatus 0` stayed
+  `doorstatus 0`, `movestatus 0` and the body did not cross at the door, so **no retail exit trace
+  exists**. The committed retail fixture is the pre-#15 four-leg route: it has no
+  `door0_opened`/`goal_bin100` columns, and `route-gate.ps1` fails it with
+  `line 48: trace header has no 'door0_opened' column`. Ticket #15's retail acceptance is blocked on
+  delivering a retail use/ACTIVATE input; do not rerun fullscreen to fix it.
+- `-Windowed` (dgVoodoo `FullScreenMode=false`, borderless, `CaptureMouse=true`, 640x480) was measured
+  live: the window was 640x480, but the user still saw the game take over the whole display on every
+  run. It is opt-in again and the README/log no longer claim a windowed capture.
+- The exit-segment plan's four `warp` rows must keep the plan's empty column after the name (the
+  harness reads x/y/z/yaw at fixed indices); a 6-field row shifted them (`warp 9.62 6.357114 104.963`)
+  and aborted the run.
+- `cargo test --release`: 335 passed. `trace-gate.ps1`: 10 legs, 3 failures (`walk6_spawn`,
+  `walk9_spawn`, `walk17_spawn`), none in the use code (the walker is untouched in this change).

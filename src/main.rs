@@ -17074,15 +17074,23 @@ input 72 1 0
         assert!(plan.uses.contains(&0));
     }
 
+    /// The committed port oracle parses, carries the event columns, and compares to itself.
+    ///
+    /// The retail fixture is deliberately not looped here: the only committed retail capture is the
+    /// pre-#15 route (no `door0_opened`/`goal_bin100` columns and no exit segment), so it cannot parse
+    /// against the current header. `route-gate.ps1` is what enforces the retail side and reports that
+    /// blocker; a retail capture is blocked until the harness can run the `use` key.
     #[test]
-    fn the_committed_route_fixtures_compare_equal_to_themselves() {
-        for name in ["level1-route-port.tsv", "level1-route-retail.tsv"] {
-            let text = std::fs::read_to_string(fixture(name)).expect("committed fixture");
-            let rows = parse_route_trace(&text).expect("fixture parses");
-            let compared = compare_route_rows(&rows, &rows, 1e-6)
-                .unwrap_or_else(|e| panic!("{name} does not compare to itself: {e}"));
-            assert!(compared > 0, "{name} compared no fields");
+    fn the_committed_port_route_fixture_parses_and_compares_to_itself() {
+        let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("committed fixture");
+        let rows = parse_route_trace(&text).expect("fixture parses");
+        let header = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
+        for field in ROUTE_EVENT_FIELDS {
+            assert!(header.split('\t').any(|cell| cell == field), "fixture has no {field} column");
         }
+        let compared = compare_route_rows(&rows, &rows, 1e-6)
+            .unwrap_or_else(|e| panic!("the port fixture does not compare to itself: {e}"));
+        assert!(compared > 0, "the port fixture compared no fields");
     }
 
     #[test]
