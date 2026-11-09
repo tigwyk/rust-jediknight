@@ -1,13 +1,16 @@
 # Level-1 audio route (issue #13): the exact merged movement-parity route
 # (`tools/parity/routes/level1-route.tsv`, issue #10) plus the bar's door crossing.
 #
-# The four walk legs, their poses, the `seed` rows and the switch are the merged route's own,
-# unchanged; the audio trace samples the same 600 ms grid. The door crossing is a **one-step walk**,
-# not a warp: `crossed` is a movement event in both engines (a `warp` teleports the body and starts
-# no fade -- measured: the port's replay warp leaves the soundtrack at 0.00 through the door legs),
-# so each door leg starts 0.005 units from the plane and its first walk tick is the crossing. That
-# keeps the fade's start deterministic (the script's `SetPulse(0.1)` ramp) without asking either
-# engine to invent a crossing on a teleport.
+# The four walk legs, the poses, the `seed` rows and the switch are the merged route's own,
+# unchanged; the audio trace samples the same 600 ms grid.
+#
+# Door geometry, from `--collide --surfaces-at -8,-5,-1.05` (level data, not a guess):
+#   surface 206  sector 19, adjoin 73, y = -5.00, x -8.10..-7.90, z -1.150..-0.700,
+#                normal (0, -1, 0)      <- `onAdjoin` link 1 (music up)
+#   surface 213  the opposite face of the same opening (`offAdjoin` link 0)
+# The opening is a 0.2 x 0.45 slot in the y = -5 plane, so the leg walks in **y** through it
+# (yaw -90 / +90), not in x. The old legs walked +x along the wall, which is why retail slid in y
+# and never crossed while the replay's wall-plane test still fired.
 #
 # kind	name		x		y		z		yaw_deg
 warp	spawn		-		-		-		-
@@ -20,11 +23,9 @@ warp	street		5.474939	-1.899975	0.657119	90.000000
 input	180	1	0
 warp	door		1.300000	9.000000	6.237000	0.000000
 input	180	1	0
-warp	approach	-10.443433	-5.455094	-1.092886	-59.994
-input	6	0	0
-warp	bar_in		-8.000000	-5.005000	-1.050000	0.000000
+warp	bar_in		-8.000000	-4.600000	-0.925000	180.000000
 input	150	1	0
-warp	return		-2.200043	-2.900013	-1.142886	105.000092
+warp	return		-8.000000	-5.400000	-0.925000	0.000000
 input	6	0	0
-warp	bar_out		-8.000000	-4.995000	-1.050000	180.000000
+warp	bar_out		-8.000000	-5.400000	-0.925000	0.000000
 input	150	1	0
