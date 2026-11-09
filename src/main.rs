@@ -646,6 +646,9 @@ fn main() {
     // samples every 36 ticks (600 ms), the cadence a retail `coords` poll keeps.
     let mut replay: Option<std::path::PathBuf> = None;
     let mut route_trace: Option<std::path::PathBuf> = None;
+    // `--no-ai`: a capture switch for the route replay, so the scripted movement is measured
+    // without the cantina ambush (retail's `-devMode` `disableai`). Ordinary play keeps the AI.
+    let mut no_ai = false;
     let mut audio_trace: Option<std::path::PathBuf> = None;
     let mut audio_compare: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
 
@@ -926,6 +929,9 @@ fn main() {
             "--replay" => {
                 replay = arg_value(&args, &mut i).map(std::path::PathBuf::from);
             }
+            // `--no-ai`: skip the AI tick for a replay's capture. It is not a gameplay option, so the
+            // replay check below rejects it everywhere else.
+            "--no-ai" => no_ai = true,
             // `--route-trace <path>`: the replay's sampled trace (position, sector, velocity, health,
             // shields and the level-1 door/switch cog state), one row every 600 ms.
             "--route-trace" => {
@@ -1483,6 +1489,13 @@ fn main() {
     // A replay is a capture that must be reproducible, not just fixed-step: see the executor note
     // at the end of the app setup.
     let replaying = route_plan.is_some();
+    let ai_disabled = match no_ai_capture_switch(no_ai, replaying) {
+        Ok(disabled) => disabled,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    };
 
     // A level named on the command line may be `03katarn`, `03katarn.jkl` or `jkl\03katarn.jkl`.
     let level_name = level_name.map(|n| level_arg(&n));
@@ -12707,6 +12720,7 @@ fn main() {
                 .or_else(|| route_plan.is_some().then_some(1.0 / 60.0)),
         ))
         .insert_resource(RouteReplay(route_plan))
+        .insert_resource(AiDisabled(ai_disabled))
         .insert_resource(RouteTraceOut(route_trace))
         .insert_resource(AudioTraceOut(audio_trace))
         .insert_resource(AudioLog::default())
@@ -26083,9 +26097,13 @@ fn event_time(event: &runtime::EncounterEvent) -> f32 {
 fn ai_shots(capture: Option<Res<CaptureDt>>, 
     time: Res<Time>,
     sim: Option<Res<Sim>>,
+    disabled: Option<Res<AiDisabled>>,
     mut encounter: Local<EncounterTrace>,
 ) {
     if std::env::var_os("BK_ORDER_TRACE").is_some() { eprintln!("ORDER ai_shots"); }
+    // The route capture's `--no-ai`: retail runs the same route under `disableai`, so the AI tick
+    // (and its encounter sampling) is skipped and the scripted movement is measured alone.
+    if disabled.is_some_and(|d| d.0) { return; }
     let Some(sim) = sim else { return };
     let dt = sim_dt(&time, capture.as_deref());
     let mut rt = sim.world.borrow_mut();
@@ -28140,6 +28158,21 @@ struct ShotFrame(u32);
 /// **capture**: it drives the player from the script instead of the keyboard and pins the step.
 #[derive(Resource, Default)]
 struct RouteReplay(Option<RoutePlan>);
+
+/// `--no-ai`: the replay's AI switch. Set only for a capture (see [`no_ai_capture_switch`]); the
+/// `ai_shots` tick returns early while it is set.
+#[derive(Resource, Default)]
+struct AiDisabled(bool);
+
+/// `--no-ai` is a capture switch, never a gameplay option: the route measurement turns the AI off
+/// on both engines (retail uses its `-devMode` `disableai`), so anything without a replay is refused.
+fn no_ai_capture_switch(no_ai: bool, replaying: bool) -> Result<bool, &'static str> {
+    if no_ai && !replaying {
+        Err("--no-ai is a capture switch and needs --replay <path>")
+    } else {
+        Ok(no_ai)
+    }
+}
 
 /// `--route-trace <path>`: where the replay writes its sampled trace.
 #[derive(Resource, Default)]
@@ -30480,6 +30513,21 @@ mod debug_catalog_tests {
         );
         // Retail falls back to the lowercased short key when the table has no row.
         assert_eq!(entry.level_label("04EscapeHouse.jkl"), "04escapehouse");
+    }
+}
+
+#[cfg(test)]
+mod no_ai_tests {
+    use super::no_ai_capture_switch;
+
+    /// `--no-ai` exists only to measure a replay without combat: a plain run keeps the AI, and the
+    /// switch is refused rather than silently ignored.
+    #[test]
+    fn the_ai_switch_is_confined_to_a_replay_capture() {
+        assert_eq!(no_ai_capture_switch(false, false), Ok(false), "play must keep the AI");
+        assert_eq!(no_ai_capture_switch(false, true), Ok(false), "a replay without the switch keeps it");
+        assert_eq!(no_ai_capture_switch(true, true), Ok(true), "the capture switch is honoured");
+        assert!(no_ai_capture_switch(true, false).is_err(), "--no-ai without --replay must be refused");
     }
 }
 

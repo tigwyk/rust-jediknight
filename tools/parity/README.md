@@ -374,10 +374,13 @@ captures: `retail-capture.ps1 -Shots tools/parity/shots.tsv -Only spawn -RouteWa
 route script and runs every leg in one game session (a `warp` between legs, a 600 ms forward hold per
 segment), sampling the bars from engine memory at every segment end. Four per-leg runs each started
 from a fresh level load with their own pre-warp damage, so their bars could not be compared with the
-port's continuous replay. Retail does **not** survive that run: the cantina ambush takes the player from
-100/100 to 0/0 between ticks 180 and 252, so the committed reference's later bars are the engine's
-dead-player zeros and its body stops walking (only the warps still move it). The gate reports that
-divergence; it is a retail-vs-port combat difference, not a capture gap.
+port's continuous replay. **Both sides capture with the AI off**: the retail walk sets the
+`-devMode` toggles `disableai on` and `noaishots on` (explicitly, and again after every warp, since
+they toggle), and the port's replay passes `--no-ai` (a capture switch that requires `--replay`). The
+route measures movement and cog state, so the cantina ambush is not part of it: it used to kill
+retail's player (100/100 to 0/0 between ticks 180 and 252) while the port survived, which made every
+later bar a guaranteed mismatch. Combat parity is the door encounter's job, and ordinary play keeps
+the AI.
 
 The per-sample position tolerance is the **retail harness's**, stated in
 `level1-route-retail.tsv`'s header: a 600 ms sample advances a variable amount of engine time, so

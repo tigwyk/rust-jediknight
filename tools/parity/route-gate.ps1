@@ -27,6 +27,13 @@
   health, shield or cog column left as `-` would measure parity for the position columns only and
   pass. The gate rejects any `-` in either trace.
 
+  Both sides capture with the AI **off**: the replay passes `--no-ai` (a capture switch that
+  requires `--replay`), and `retail-capture.ps1 -RouteWalk` sets the `-devMode` toggles
+  `disableai on` and `noaishots on` (both are toggles, so the capture sets them explicitly and
+  re-applies them after every warp). The route's subject is movement and cog state; the cantina
+  ambush used to kill retail's player while the port survived, so the bars could never match.
+  Combat parity has its own gate (the door encounter).
+
   `-Epsilon` overrides the fixture's stated value for an experiment; the gate's verdict is the
   fixture's.
 
@@ -78,7 +85,10 @@ function Invoke-Replay([string]$Trace) {
   if (Test-Path -LiteralPath $Trace) { Remove-Item -LiteralPath $Trace -Force }
   $env:BK_HEADLESS = '1'
   try {
-    & $Exe --start $Level --replay $RoutePath --route-trace $Trace --mute *> $log
+    # `--no-ai`: the route measures movement, not combat. Retail runs the same route under its
+    # `-devMode` `disableai` (see `retail-capture.ps1 -RouteWalk`), so both sides fight nothing and
+    # the cantina ambush cannot kill one side and not the other.
+    & $Exe --start $Level --replay $RoutePath --route-trace $Trace --no-ai --mute *> $log
   } finally {
     Remove-Item Env:BK_HEADLESS -ErrorAction SilentlyContinue
   }
