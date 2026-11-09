@@ -33,6 +33,13 @@ walk_switch	01narshadda	-4.75	-2.95	-1.143	0	180.000000	1000
 # face north and walk through its adjoin. Phase 1 step 4's door trigger: `crossed` should move
 # `doorstatus`/`movestatus` in cog 0, which `cogstatus 0` reports.
 walk_door0	01narshadda	1.30	9.00	6.237	0	0.000000	1000
+
+# walk_exitdoor: the authored `walkplayer` placement 174 (eye 1.400084, 9.700065, 6.357114), facing
+# the door piece (thing 4 at 1.200002, 9.650073, 6.35; yaw 105 is the direction retail's own coords
+# records there, and the port's forward basis `(-sin, cos)` faces the door from it). The forward
+# hold stops at the shut sector-74 portal; `-UseAfterWalk 9` then presses the player's ACTIVATE
+# binding, and the post-walk `cogstatus 0` reports `doorstatus`/`movestatus`.
+walk_exitdoor	01narshadda	1.400084	9.700065	6.357114	0	105.000092	1000
 #
 #
 # walk5_spawn: Phase 2's second non-level-1 probe. level5_spawn's pose (the debug list's entry 5 boots

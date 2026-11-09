@@ -51,3 +51,34 @@ warp	street		5.474939	-1.899975	0.657119	90.000000
 input	180	1	0
 warp	door		1.300000	9.000000	6.237000	0.000000
 input	180	1	0
+#
+# Exit segment (issue #15): door0 through the level's own `activate` message, then the level's own
+# upper-route placements and the one-way door to the 8t88 landing.
+#
+# `exit_door` is the pose the retail walk stops at from placement 174: eye (1.28, 9.62, 6.357114),
+# sector 60, yaw 105 (the recorded `route_door` direction). The warp starts there so both sides begin
+# the use at the same measured point; the eye is 0.086 from the door piece (thing 4 at
+# 1.200002, 9.650073, 6.35) in sector 74, inside the use sweep's `moveSize + 0.1 = 0.165`. The `use`
+# row presses the player's ACTIVATE binding, which sends `activate` to the linked thing;
+# `00_door.cog` flips the sector-74 adjoin and opens the leaf, and the next holds cross into 210.
+# (Walking from 174 instead overshoots: the port's 600 ms hold covers 0.26 units where retail's
+# covers 0.14, so the body leaves the 0.165 sweep before the use.)
+#
+# `exit_upper` is placement 175 (-2.519, 11.001, 6.72 body), `exit_low` placement 176
+# (-6.15, 9.65, 4.32 body), and `exit_tunnel` is the sector-407 tunnel mouth in front of the one-way
+# door (thing 47 at -4.05, 13.95, 4.375; `00_1waydoor.cog` opens it for a body inside 407). The last
+# hold crosses 407 -> 223 -> 229 -> 215; the renderer sights 8t88 on the way and `01_goal0.cog` +
+# `01_endlevel.cog` write goal bin 100 = 3. The final hold stays under the endlevel handler's 3 s
+# sleep, so the last sample is still on the landing.
+warp	exit_door		1.280000	9.620000	6.357114	105.000000
+use
+wait	72
+input	72	1	0
+warp	exit_upper		-2.519000	11.001000	6.757114	110.000000
+input	36	1	0
+warp	exit_low		-6.150000	9.650000	4.357114	0.000000
+input	36	1	0
+warp	exit_tunnel		-4.050000	12.000000	4.357114	0.000000
+input	144	1	0
+use
+input	108	1	0

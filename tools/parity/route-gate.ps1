@@ -84,6 +84,10 @@ $log = Join-Path $OutDir 'level1-route-port.log'
 function Invoke-Replay([string]$Trace) {
   if (Test-Path -LiteralPath $Trace) { Remove-Item -LiteralPath $Trace -Force }
   $env:BK_HEADLESS = '1'
+  # `BK_USE_TRACE=1` makes the use key name the linked thing it activated (`use: activated thing N`).
+  # The anti-synthetic checks below require that line for both level-1 doors: a plan that reached the
+  # cog state some other way cannot produce it.
+  $env:BK_USE_TRACE = '1'
   try {
     # `--no-ai`: the route measures movement, not combat. Retail runs the same route under its
     # `-devMode` `disableai` (see `retail-capture.ps1 -RouteWalk`), so both sides fight nothing and
@@ -91,6 +95,7 @@ function Invoke-Replay([string]$Trace) {
     & $Exe --start $Level --replay $RoutePath --route-trace $Trace --no-ai --mute *> $log
   } finally {
     Remove-Item Env:BK_HEADLESS -ErrorAction SilentlyContinue
+    Remove-Item Env:BK_USE_TRACE -ErrorAction SilentlyContinue
   }
   if (-not (Test-Path -LiteralPath $Trace)) { throw "the replay wrote no trace ($Trace); see $log" }
 }
@@ -140,6 +145,74 @@ if ($portMissing) {
   exit 1
 }
 Write-Host 'PASS  required fields: health, shields and both cog states are recorded on both sides'
+
+# 1c. The door opens through the player's own use binding, not a synthetic `activate`. The plan must
+# press use (door 0 and the one-way door 47), never send the removed synthetic `switch`, and the
+# replay's own use trace must name both linked things. A shortcut that set the cog state cannot
+# produce either line.
+$planTicks = 0
+$planUses = New-Object System.Collections.Generic.List[int]
+$planSwitch = $false
+foreach ($line in Get-Content -LiteralPath $RoutePath) {
+  if ($line -match '^\s*(#|$)') { continue }
+  $f = $line -split "`t"
+  switch ($f[0]) {
+    'input' { $planTicks += [int]$f[1] }
+    'use' { $planUses.Add($planTicks) }
+    'switch' { $planSwitch = $true }
+  }
+}
+if ($planSwitch) {
+  Write-Host 'FAIL  anti-synthetic: the plan contains a `switch` row (the removed synthetic activate)'
+  exit 1
+}
+if ($planUses.Count -lt 2) {
+  Write-Host ('FAIL  anti-synthetic: the plan has {0} use row(s); door0 and the one-way door need the player own use key' -f $planUses.Count)
+  exit 1
+}
+$logText = Get-Content -LiteralPath $log -Raw
+foreach ($needle in 'use: activated thing 4', 'use: activated thing 47') {
+  if ($logText -notmatch [regex]::Escape($needle)) {
+    Write-Host ("FAIL  anti-synthetic: the replay log has no '{0}' line; the door did not open through the use key" -f $needle)
+    exit 1
+  }
+}
+# The trace's own shape: the door is shut on every row up to and including the first use tick (the
+# port samples that row before the key system runs), and the run ends with both events complete.
+$traceLines = @(Get-Content -LiteralPath $runA | Where-Object { $_ -notmatch '^\s*(#|$)' })
+$traceHeader = @($traceLines[0] -split "`t")
+$tickCol = [Array]::IndexOf($traceHeader, 'tick')
+$doorCol = [Array]::IndexOf($traceHeader, 'door0_opened')
+$goalCol = [Array]::IndexOf($traceHeader, 'goal_bin100')
+if ($tickCol -lt 0 -or $doorCol -lt 0 -or $goalCol -lt 0) {
+  Write-Host 'FAIL  anti-synthetic: the trace has no tick/door0_opened/goal_bin100 column'
+  exit 1
+}
+$firstUse = $planUses[0]
+$sawOpen = $false
+$lastCells = $null
+foreach ($line in $traceLines | Select-Object -Skip 1) {
+  $cells = @($line -split "`t")
+  $lastCells = $cells
+  # The row at the use tick is the first sample after the press, so it may already read open; every
+  # row strictly before the press must be shut. A synthetic trigger that set the cog state early
+  # shows `1` before the use tick and fails here.
+  if ([int]$cells[$tickCol] -lt $firstUse -and $cells[$doorCol] -ne '0') {
+    Write-Host ("FAIL  anti-synthetic: door0_opened is {0} at tick {1}, before the use tick {2}" -f $cells[$doorCol], $cells[$tickCol], $firstUse)
+    exit 1
+  }
+  if ($cells[$doorCol] -eq '1') { $sawOpen = $true }
+}
+if (-not $sawOpen -or $lastCells[$doorCol] -ne '1') {
+  Write-Host 'FAIL  anti-synthetic: door0_opened never latched'
+  exit 1
+}
+if ($lastCells[$goalCol] -ne '3') {
+  Write-Host ("FAIL  goal: the last row records goal_bin100 {0}, not 3" -f $lastCells[$goalCol])
+  exit 1
+}
+Write-Host 'PASS  anti-synthetic: the plan uses the player key, never `switch`, and the replay names things 4 and 47'
+Write-Host 'PASS  events: door0_opened latched after the recorded use; final goal_bin100 = 3'
 
 # 2. The committed oracle. The comparator is the app's own `--route-compare`; exit code is the gate.
 & $Exe --route-compare $PortPath $runA

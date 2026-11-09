@@ -24,13 +24,18 @@ The retail side never touches your real installation: it works on a copy under
 `-Software` forces the 8-bit software path. With no working 3D path the world renders black and
 only the HUD appears — see Troubleshooting.
 
+The dgVoodoo path runs the game in a **borderless 640x480 window** by default instead of its
+fullscreen display mode: a fullscreen capture alt-tabs, flickers and changes the desktop mode. The
+windowed config keeps `CaptureMouse = true`, so the game still receives the injected mouse.
+`-Fullscreen` restores the old display-mode run for diagnosing a wrapper that rejects windowed.
+
 ## Requirements
 
 - Windows 10/11 x64, PowerShell 7 (`pwsh`), `ffmpeg` on `PATH`.
 - A retail **GOG** install of *Star Wars Jedi Knight: Dark Forces II* (the port's normal requirement).
 - The port built: `cargo build --release` (the harness will build it if missing).
-- **Keep hands off the mouse and keyboard while a retail run is in progress** — it is a fullscreen
-  game with the mouse captured, and synthetic input is how the harness drives it.
+- **Keep hands off the mouse and keyboard while a retail run is in progress** — the game captures the
+  mouse, and synthetic input is how the harness drives it.
 
 ## Quick start
 
@@ -188,9 +193,9 @@ Everything below was verified against the GOG build (the harness works on a scra
 - `JK.EXE -devMode` opens a **dev console window** ("Jedi Console", a `#32770` dialog) whose list
   box logs level parses and command output; the harness reads it to know when a level has loaded
   (`parse section things`).
-- The game's menus are **mouse-only** for synthetic input. The 640x480 fullscreen window's screen
-  coordinates equal game coordinates; the two clicks needed are `Single Player (320,195)` and
-  `New Game (304,115)`. The intro film is skipped with `ESC`.
+- The game's menus are **mouse-only** for synthetic input. The 640x480 game window (windowed by
+  default, top-left at `(0,0)`) has screen coordinates equal to game coordinates; the two clicks
+  needed are `Single Player (320,195)` and `New Game (304,115)`. The intro film is skipped with `ESC`.
 - **A menu click commits to that screen.** Once an option is clicked you are inside that submenu and
   the only way out is its own `Ok`/`Cancel`; clicking a main-menu item from inside a submenu does
   nothing. So driving menus must descend one level at a time and commit/leave before the next step —
@@ -235,6 +240,11 @@ measurable (Phase 1 step 3's exit criterion). Three scripts and two fixtures:
 - `retail-capture.ps1 -Shots tools/parity/walk-shots.tsv -Only <name> -WalkTraceMs 2400` - the retail
   half. It warps the body to the leg, then holds the UP arrow (the engine's forward binding) and reads
   `coords` between holds; output `target/parity/trace/<name>-walk.tsv`.
+- Add `-UseAfterWalk <key>` to fire the player's own action binding after the walk and before the
+  post-walk console read (`9` is the profile's ACTIVATE binding; `MOUSEMIDDLE` is its mouse
+  alternative; `-UseKey` changes the route plan's `use` key too). `walk_exitdoor` uses it at the
+  authored placement 174: the walk stops at the shut door, the hold opens it through `00_door.cog`,
+  and `-ConsoleCommands 'cogstatus 0'` records `doorstatus`/`movestatus`.
 - `port-trace.ps1 [-Only <name>]` - the port half: `--warp` to the same pose, `BK_WALK_FORWARD=1`,
   one line per 1/60 s frame, output `target/parity/trace/<name>.tsv`.
 - `trace-compare.ps1 -Name <name> [-Epsilon <units>]` - interpolates the port path to the retail sample
@@ -334,7 +344,7 @@ Files:
 
 | Path | What it is |
 |---|---|
-| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key; the scenario rows take no ticks, so the 600 ms sample grid never moves. There is no `switch` row: retail's `cogstatus 11` reads `doorstatus 0` with that door already open, so the synthetic `activate` it used to send made the port measure a scenario retail never performed. |
+| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `wait <ticks>` stands still (the door leaf needs game time to finish opening before the next hold); `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key. `wait` takes ticks like an input; `seed`/`use`/`switch` take none, so the 600 ms sample grid never moves. There is no `switch` row: retail's `cogstatus 11` reads `doorstatus 0` with that door already open, so the synthetic `activate` it used to send made the port measure a scenario retail never performed. |
 | `tools/parity/routetrace/level1-route-retail.tsv` | Retail-derived reference, one row every 600 ms (36 ticks). Provenance is in the file header. |
 | `tools/parity/routetrace/level1-route-port.tsv` | The port's committed oracle, produced by the replay. |
 | `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), compare to the committed port fixture, reject a trace with one position moved 0.25 units, and match the retail reference within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it for an experiment). |
@@ -345,6 +355,7 @@ The trace format is tab-separated, `#` comments allowed, one header row:
 tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
       door0_status  door0_movestatus  door0_opendoors  door0_closedoors
       switch_status  switch_movestatus  switch_opendoors  switch_closedoors
+      door0_opened  goal_bin100
 ```
 
 - `tick` counts 1/60 s steps; `t_s = tick / 60`. Rows are written at ticks `0, 36, 72, ...`
@@ -359,8 +370,20 @@ tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
   both bars per hold segment, so the committed reference has real values here.
 - `door0_*` and `switch_*` are placed cogs 0 (`00_door.cog`) and 11 (`00_doorswitch.cog`), four
   symbols each (`doorstatus`, `movestatus`, and the script's own open/close variables), read with
-  `cogstatus` after each leg's walk. Level 1 has both cogs, so every field is present; the gate
-  rejects any `-` (the comparator would skip it and measure the position columns only).
+  `cogstatus` at every retail sample and from the running VM in the replay. Level 1 has both cogs, so
+  every field is present; the gate rejects any `-` (the comparator would skip it and measure the
+  position columns only).
+- `door0_opened` and `goal_bin100` are **events**, and the rule is different from the other columns:
+  they are graded **only at the fixture's last row**, as identities, not measurements.
+  `door0_opened` latches 1 once the door's own script reports nonzero `doorstatus`/`movestatus`
+  (`00_door.cog` re-closes it two seconds after `arrived`, so a sample may miss the open frame);
+  `goal_bin100` is inventory bin 100, 1 at the level start and 3 after `01_endlevel.cog`'s `user0:`
+  completes goal 0. A 600 ms retail hold advances a variable number of engine frames while the replay
+  advances exactly 36, so the row either side latches on is not comparable; the final state is. A
+  disagreement on an intermediate row is ignored, a missing cell or a different final value fails.
+  The gate also proves the trigger is real: the plan must press the player's use binding (never the
+  removed synthetic `switch`), the replay log must name things 4 and 47, and `door0_opened` must be 0
+  on every row up to and including the first use tick.
 
 A **leg boundary is a `warp`**, not a walk: the retail reference is four separate per-leg captures
 from the level's own authored placements, so the route is the same four walks. Issue #10 fixed what
@@ -381,6 +404,20 @@ route measures movement and cog state, so the cantina ambush is not part of it: 
 retail's player (100/100 to 0/0 between ticks 180 and 252) while the port survived, which made every
 later bar a guaranteed mismatch. Combat parity is the door encounter's job, and ordinary play keeps
 the AI.
+
+**The exit segment (issue #15)** appends the level's own way to 8t88 to those four legs:
+
+| leg | pose | what it measures |
+|---|---|---|
+| `exit_door` | placement 174, eye `(1.400084, 9.700065, 6.357114)`, yaw 90 | one 36-tick hold walks from the placement to the shut portal (the port stops at `x 1.2775`, sector 76; the door is thing 4 at `(1.200002, 9.650073, 6.35)` in sector 74). The `use` row then presses the binding; from that stop the eye is 0.086 from the door origin, inside the engine's `moveSize + 0.1 = 0.165` sweep. `00_door.cog` flips the sector-74 adjoin and opens the leaf; the next sample is `x 0.890`, sector 210 — the crossing. |
+| `exit_upper` | placement 175 (body `-2.519, 11.001, 6.72`) | the corridor/ramp side of the upper route. |
+| `exit_low` | placement 176 (body `-6.15, 9.65, 4.32`) | the low floor east of the 385 ramp. |
+| `exit_tunnel` | tunnel mouth `(-4.05, 12.0, 4.32)`, sector 407 | `use` on the one-way door (thing 47 at `-4.05, 13.95, 4.375`; `00_1waydoor.cog` opens for a body inside 407), then the hold crosses 407 -> 223 -> 229 -> 215 and the renderer sights 8t88. |
+
+The pose is a door **use**, not a walk-by: the earlier `walk_door0` leg (start `1.30, 9.00`, facing
+north) stops on the portal's west jamb, 0.52 from the door origin and facing away, so it can never
+trigger the script. The exit segment's last hold stays under `01_endlevel.cog`'s 3 s sleep after the
+sighting, so the final sample is still on the landing and the level is still level 1.
 
 The per-sample position tolerance is the **retail harness's**, stated in
 `level1-route-retail.tsv`'s header: a 600 ms sample advances a variable amount of engine time, so

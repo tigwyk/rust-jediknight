@@ -7204,6 +7204,55 @@ impl Runtime {
         sector: i32,
     ) -> Option<usize> {
         let mut best: Option<(usize, f32)> = None;
+        // The sectors holding a thing collision inside the sweep. The sector scope is "a thing in
+        // another room is not in the search unless the sweep reaches the opening into that room"; a
+        // doorway's stub sector has no static portal across it (level 1's one-way door sits in 223
+        // while the body stands in the tunnel, 407), but its leaf is the collision the engine's
+        // sphere sweep hits. A collision that is itself inside the sweep is that opening.
+        let nearby: BTreeSet<i32> = self
+            .solids
+            .as_deref()
+            .map(|solids| {
+                solids
+                    .things()
+                    .iter()
+                    .filter(|solid| Self::thing_solid_within(solid, eye, reach))
+                    .map(|solid| solid.sector as i32)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The level's own adjoin graph from the body's sector, two hops deep. A shut door is still
+        // an adjoin (its flags gate walking, not the use sweep), and a door leaf lives in its own
+        // thin stub sector: level 1's one-way door is 407 -> 240 -> 223, and the script expects the
+        // body inside 407 to reach the leaf in 223. `sithCollision_SearchForCollisions` is called
+        // with stack level 2 for the same reason; the reach and cone still bound what this admits.
+        let adjacent: BTreeSet<i32> = usize::try_from(sector)
+            .ok()
+            .map(|here| {
+                let mut seen = BTreeSet::new();
+                let mut frontier = vec![here];
+                for _ in 0..2 {
+                    let mut next = Vec::new();
+                    for node in frontier.drain(..) {
+                        for (other, _) in self.sector_adjoins.get(node).into_iter().flatten() {
+                            if seen.insert(*other)
+                                && let Ok(other) = usize::try_from(*other)
+                            {
+                                next.push(other);
+                            }
+                        }
+                    }
+                    frontier = next;
+                }
+                seen
+            })
+            .unwrap_or_default();
+        if std::env::var_os("BK_USE_TRACE").is_some() {
+            println!(
+                "use-sector: body {sector} adjoins {:?} nearby {nearby:?}",
+                self.sector_adjoins.get(usize::try_from(sector).unwrap_or(usize::MAX))
+            );
+        }
         for (_, _, target) in &self.thing_links {
             // The engine's activate **skips a weapon (type 3) and an item (type 5)** hit:
             // `sithPlayerActions_Activate` (`0x4fc0a0`) only takes a thing whose type is neither and
@@ -7212,9 +7261,10 @@ impl Runtime {
                 continue;
             }
             let Some(thing) = self.things.get(*target) else { continue };
-            // The same sector scope the surface half has: a thing in another room is not in the search
-            // unless the use sweep reaches the opening into that room.
-            if !self.in_use_search(sector, thing.sector, eye, facing, reach) {
+            if !nearby.contains(&thing.sector)
+                && !adjacent.contains(&thing.sector)
+                && !self.in_use_search(sector, thing.sector, eye, facing, reach)
+            {
                 continue;
             }
             if std::env::var_os("BK_USE_TRACE").is_some() {
@@ -7245,6 +7295,32 @@ impl Runtime {
             }
         }
         Some(target)
+    }
+
+    /// Whether a thing's collision volume is inside the use sweep's sphere around the eye.
+    ///
+    /// `collide::ThingSolid` is the engine's own `size=` collision: a circle or a yawed box in plan,
+    /// with a z span. The sweep's sphere starts at the eye, so the flat distance to the nearest point
+    /// of that volume is what the reach bounds — not the distance to the thing's display origin.
+    fn thing_solid_within(
+        solid: &crate::collide::ThingSolid,
+        eye: [f32; 3],
+        reach: f32,
+    ) -> bool {
+        if eye[2] < solid.z_min - reach || eye[2] > solid.z_max + reach {
+            return false;
+        }
+        let (dx, dy) = (eye[0] - solid.centre[0], eye[1] - solid.centre[1]);
+        match solid.half {
+            Some(half) => {
+                let (sin, cos) = solid.yaw.to_radians().sin_cos();
+                let (lx, ly) = (dx * cos + dy * sin, -dx * sin + dy * cos);
+                let ox = (lx.abs() - half[0]).max(0.0);
+                let oy = (ly.abs() - half[1]).max(0.0);
+                (ox * ox + oy * oy).sqrt() <= reach
+            }
+            None => ((dx * dx + dy * dy).sqrt() - solid.radius).max(0.0) <= reach,
+        }
     }
 
     /// The doorway centres from `from`'s room to the room `want` stands in, for an actor whose straight
@@ -15820,6 +15896,89 @@ mod tests {
             far.use_thing([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 7),
             None,
             "a door half a unit away was used past the engine's 0.16 sweep"
+        );
+    }
+
+    /// The two authored poses level 1's exit route depends on, at their measured positions.
+    ///
+    /// The door piece (`thing 4`, `2x3door`) is at `(1.200002, 9.650073, 6.35)`; the route starts the
+    /// body at the level's own `walkplayer` placement 174 (eye `1.400084, 9.700065, 6.357114`,
+    /// yaw 105 = west) and walks it to the shut portal, where the replay stops at `x 1.2775`
+    /// (sector 76, the door in 74). From there the eye is ~0.086 from the door origin, inside the
+    /// port's `use_reach(0.065) = 0.165`, and the facing dot is 0.84. The old `walk_door0` stop pose
+    /// `(1.30, 9.14)` facing north is 0.52 away and faces away: the pose, not the reach, is why that
+    /// leg never opened the door.
+    ///
+    /// The one-way door (`thing 47`, `00_1waydoor.cog`) is used from the tunnel (`sector 407`); its
+    /// own origin is 0.087-0.116 from the body resting against the shut door (sector 223, the door
+    /// stub), inside the same reach. Neither doorway has a static collision portal across the stub,
+    /// so the level's adjoin graph is the sector scope the engine's sweep uses.
+    #[test]
+    fn the_level_1_door_poses_are_inside_the_use_sweep() {
+        let with_door = |pos: [f32; 3], sector: i32| {
+            let mut rt = door_runtime();
+            let base = rt.things[0].clone();
+            let mut door = base.clone();
+            door.pos = pos;
+            door.sector = sector;
+            rt.things = vec![base, door];
+            rt.templates = vec!["walkplayer".into(), "2x3door".into()];
+            rt.types = vec![10, 0];
+            rt.thing_links.push((0, 0, 1));
+            rt
+        };
+
+        // Door 0 at the recorded stop: `x 1.315` after walking west from placement 174.
+        let mut door0 = with_door([1.200002, 9.650073, 6.35], 74);
+        let used = door0.use_thing([1.315, 9.700065, 6.357114], [-1.0, 0.0], 0.165, 74);
+        assert_eq!(used, Some(1), "the door pose did not reach the linked door: {used:?}");
+        assert!(
+            door0
+                .pending_messages
+                .iter()
+                .any(|(_, label, _, sender)| *label == "activate" && *sender == Some(0)),
+            "the door's script was not messaged: {:?}",
+            door0.pending_messages
+        );
+
+        // The `walk_door0` stop pose (north-facing, 0.52 away) is refused by the same runtime.
+        let mut stop = with_door([1.200002, 9.650073, 6.35], 74);
+        assert_eq!(
+            stop.use_thing([1.30, 9.14, 6.357114], [0.0, 1.0], 0.165, 74),
+            None,
+            "the north-facing stop pose used the door it cannot reach or face"
+        );
+
+        // The one-way door from inside the tunnel, facing north.
+        let mut tunnel = with_door([-4.05, 13.95, 4.375], 407);
+        let used = tunnel.use_thing([-4.05, 13.865, 4.357114], [0.0, 1.0], 0.165, 407);
+        assert_eq!(used, Some(1), "the tunnel pose did not reach the one-way door: {used:?}");
+
+        // The replay's real poses: the body sector is the doorway's neighbour, not the thing's own
+        // sector, and no static collision portal spans the stub. The level's adjoin graph is what
+        // makes the sweep reach it. Without that branch the route's two `use` rows are silent.
+        let mut door0_adjacent = with_door([1.200002, 9.650073, 6.35], 74);
+        door0_adjacent.sector_adjoins = vec![Vec::new(); 77];
+        // The body stops in sector 60 (the retail walk's own reading); the door is in the stub
+        // sector 74, two hop labels away (60 -> 75 -> 74).
+        door0_adjacent.sector_adjoins[60] = vec![(75, 0.0)];
+        door0_adjacent.sector_adjoins[75] = vec![(74, 0.0)];
+        assert_eq!(
+            door0_adjacent.use_thing([1.28, 9.62, 6.357114], [-0.966, -0.259], 0.165, 60),
+            Some(1),
+            "the sector-60 door-stop pose (door in 74) did not use the door"
+        );
+
+        let mut tunnel_adjacent = with_door([-4.05, 13.95, 4.375], 223);
+        tunnel_adjacent.sector_adjoins = vec![Vec::new(); 408];
+        // The level's real chain: the tunnel (407) adjoins the doorway stub (240), which adjoins
+        // the leaf's sector (223). One hop is not enough, which is what the first replay showed.
+        tunnel_adjacent.sector_adjoins[407] = vec![(240, 0.0)];
+        tunnel_adjacent.sector_adjoins[240] = vec![(223, 0.0)];
+        assert_eq!(
+            tunnel_adjacent.use_thing([-4.05, 13.8731, 4.382114], [0.0, 1.0], 0.165, 407),
+            Some(1),
+            "the sector-407 tunnel pose (one-way door in 223) did not use the door"
         );
     }
 

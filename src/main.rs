@@ -12841,7 +12841,9 @@ fn main() {
         .add_systems(
             Update,
             (
-                route_replay.before(walk_player),
+                // `use_key` reads `RouteNow` too: without this edge the `use` row can be published
+                // after the key system ran, and the press is lost for the rest of the replay.
+                route_replay.before(walk_player).before(use_key),
                 goal_probe.after(walk_player).before(cull_sectors),
             )
                 .run_if(no_screen_open),
@@ -16116,11 +16118,19 @@ const ROUTE_COGS: [(usize, [&str; 4]); 2] = [
 /// The trace columns. Every value is a number or `-` (a field the run does not have: no such cog
 /// started, or a retail capture did not record it). The comparator parses the header, so the set
 /// can grow without breaking older fixtures.
-const ROUTE_TRACE_FIELDS: [&str; 19] = [
+const ROUTE_TRACE_FIELDS: [&str; 21] = [
     "tick", "t_s", "x", "y", "z", "sector", "vel_x", "vel_y", "vel_z", "health", "shields",
     "door0_status", "door0_movestatus", "door0_opendoors", "door0_closedoors",
     "switch_status", "switch_movestatus", "switch_opendoors", "switch_closedoors",
+    "door0_opened", "goal_bin100",
 ];
+
+/// Event columns: a latched engine observation the two captures can sample a row apart. Retail's
+/// game clock advances a variable number of frames per 600 ms hold while the replay advances exactly
+/// 36, so a transient state (the door's open frame, the sighting's goal write) may land on a
+/// different sample index on the two sides. These columns are therefore graded on the fixture's
+/// **last row only**; a position, sector, velocity or bar keeps its per-row comparison.
+const ROUTE_EVENT_FIELDS: [&str; 2] = ["door0_opened", "goal_bin100"];
 
 impl RoutePlan {
     fn read(path: &std::path::Path) -> Result<Self, String> {
@@ -16184,6 +16194,21 @@ impl RoutePlan {
                     plan.inputs.push((plan.total, RouteInput { forward, strafe, use_action: false }));
                     plan.total += ticks;
                 }
+                Some("wait") => {
+                    // wait <ticks>: stand still. The door leaf needs game time to finish opening
+                    // before the next hold can cross; a real capture waits the same way.
+                    if f.len() != 2 {
+                        return Err(fail(format!("`wait` needs a tick count, got {} field(s)", f.len())));
+                    }
+                    let ticks: u32 = f[1]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a tick count", f[1])))?;
+                    if ticks == 0 {
+                        return Err(fail("a `wait` row needs at least one tick".to_string()));
+                    }
+                    plan.inputs.push((plan.total, RouteInput::default()));
+                    plan.total += ticks;
+                }
                 Some("use") => {
                     // use
                     if f.len() != 1 {
@@ -16212,7 +16237,7 @@ impl RoutePlan {
                     plan.seed.get_or_insert((plan.total, [vx, vy]));
                 }
                 Some(other) => {
-                    return Err(fail(format!("unknown row kind `{other}` (warp, input, use, switch, seed)")));
+                    return Err(fail(format!("unknown row kind `{other}` (warp, input, wait, use, switch, seed)")));
                 }
                 None => {}
             }
@@ -16324,6 +16349,7 @@ fn compare_route_rows(
     }
     let mut failures = Vec::new();
     let mut compared = 0usize;
+    let last_tick = expected.last().map(|row| row.tick);
     for (want_row, got_row) in expected.iter().zip(actual) {
         let tick = want_row.tick;
         if tick != got_row.tick {
@@ -16331,11 +16357,32 @@ fn compare_route_rows(
             continue;
         }
         for (slot, field) in ROUTE_TRACE_FIELDS.iter().enumerate().skip(1) {
+            let event = ROUTE_EVENT_FIELDS.contains(field);
+            // An event column is a latched state, graded once, at the fixture's last row: the two
+            // captures sample the same 600 ms grid but advance a different amount of engine time
+            // inside it, so the row the latch trips on is not comparable.
+            if event && Some(tick) != last_tick {
+                continue;
+            }
             let (Some(want), Some(got)) = (want_row.values[slot], got_row.values[slot]) else {
+                if event {
+                    failures.push(format!(
+                        "tick {tick} {field}: the fixture or the trace leaves the event as `-`"
+                    ));
+                }
                 continue;
             };
             compared += 1;
             let delta = (want - got).abs();
+            if event {
+                // An event is an identity, not a measurement: the same state or a failure.
+                if want != got {
+                    failures.push(format!(
+                        "tick {tick} {field}: expected {want:.0}, trace has {got:.0}"
+                    ));
+                }
+                continue;
+            }
             if *field == "sector" {
                 if delta > 0.5 {
                     failures.push(format!(
@@ -16396,6 +16443,7 @@ fn write_route_trace_row(
     vel: [f32; 3],
     sim: Option<&Sim>,
     world: Option<&World>,
+    door0_opened: &mut bool,
 ) {
     use std::io::Write;
     let first = tick == 0;
@@ -16427,6 +16475,15 @@ fn write_route_trace_row(
         (Some(world), Some(sim)) => route_cog_values(world, sim),
         _ => [None; 8],
     };
+    // The door's own report, latched: `00_door.cog` closes it again two seconds after `arrived`,
+    // so a sample grid that happens to miss the open frame still records that it opened.
+    if cogs[0].is_some_and(|v| v != 0.0) || cogs[1].is_some_and(|v| v != 0.0) {
+        *door0_opened = true;
+    }
+    // `01_endlevel.cog`'s `user0:` sets goal 0 completed with `SetGoalFlags(player,0,2)`; the
+    // inventory bin (SITHBIN_GOAL00 + 0) reads 1 at the level start and 3 once 8t88 is sighted.
+    let goal_bin100 = sim
+        .map(|sim| f64::from(sim.world.borrow().inv.get(&runtime::GOAL_BIN).copied().unwrap_or(0.0)));
     let number = |value: Option<f64>, places: usize| {
         value
             .map(|v| format!("{v:.places$}"))
@@ -16434,7 +16491,7 @@ fn write_route_trace_row(
     };
     let _ = writeln!(
         file,
-        "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         tick,
         f64::from(tick) / 60.0,
         body.pos.x,
@@ -16454,6 +16511,8 @@ fn write_route_trace_row(
         number(cogs[5], 3),
         number(cogs[6], 3),
         number(cogs[7], 3),
+        if *door0_opened { 1 } else { 0 },
+        number(goal_bin100, 0),
     );
 }
 
@@ -16995,6 +17054,26 @@ input 72 1 0
         assert!(error.contains("input"), "{error}");
     }
 
+    /// A `use` row takes no ticks: it presses the player's use key on the first tick of the input
+    /// that follows it, so the 600 ms sample grid never moves.
+    #[test]
+    fn a_route_use_row_is_a_tick_with_the_use_action() {
+        let plan = RoutePlan::parse("warp door 1.4 9.7 6.357 90\nuse\ninput 36 1 0\n").expect("plan");
+        assert_eq!(plan.uses, vec![0]);
+        assert_eq!(plan.total, 36);
+        assert!(plan.input_at(0).use_action == false, "the raw input row is not the use flag");
+        // A `wait` row holds nothing for its ticks (the door leaf finishes opening); the use stays
+        // on the tick it names and the next input starts after the wait.
+        let plan = RoutePlan::parse("warp door 1.4 9.7 6.357 90\nuse\nwait 36\ninput 36 1 0\n")
+            .expect("plan with wait");
+        assert_eq!(plan.uses, vec![0]);
+        assert_eq!(plan.total, 72);
+        assert_eq!(plan.input_at(0).forward, 0.0);
+        assert_eq!(plan.input_at(36), RouteInput { forward: 1.0, strafe: 0.0, use_action: false });
+        // `route_replay` sets the flag from `plan.uses` on the tick the row names.
+        assert!(plan.uses.contains(&0));
+    }
+
     #[test]
     fn the_committed_route_fixtures_compare_equal_to_themselves() {
         for name in ["level1-route-port.tsv", "level1-route-retail.tsv"] {
@@ -17021,6 +17100,42 @@ input 72 1 0
             compare_route_rows(&expected, &perturbed, 0.30).is_ok(),
             "the tolerance is an absolute bound, so 0.30 accepts it"
         );
+    }
+
+    /// Event columns are latched states, graded once at the fixture's last row. The door can be
+    /// sampled on a different row on the two sides (the holds advance different amounts of engine
+    /// time), so an intermediate disagreement is not a failure; the final state is.
+    #[test]
+    fn event_columns_are_graded_only_on_the_last_row() {
+        let slot = |name: &str| ROUTE_TRACE_FIELDS.iter().position(|f| *f == name).unwrap();
+        let row = |tick: u32, door: Option<f64>, goal: Option<f64>| {
+            let mut values = vec![None; ROUTE_TRACE_FIELDS.len()];
+            values[0] = Some(f64::from(tick));
+            values[slot("door0_opened")] = door;
+            values[slot("goal_bin100")] = goal;
+            RouteTraceRow { tick, values }
+        };
+        let want = vec![row(0, Some(0.0), Some(1.0)), row(36, Some(1.0), Some(1.0)), row(72, Some(1.0), Some(3.0))];
+        // The door opens a row early and the sighting fires a row late: intermediate samples differ.
+        let got = vec![row(0, Some(0.0), Some(1.0)), row(36, Some(1.0), Some(3.0)), row(72, Some(1.0), Some(3.0))];
+        let compared = compare_route_rows(&want, &got, 1e-6).expect("intermediate events are not graded");
+        assert_eq!(compared, 2, "only the two final-row events were compared");
+
+        // The final state is an identity: a door that never opened and a goal that stopped at 2 fail.
+        let mut early = got.clone();
+        early[2].values[slot("door0_opened")] = Some(0.0);
+        let error = compare_route_rows(&want, &early, 1e-6).expect_err("door0_opened 0 at the last row must fail");
+        assert!(error.contains("door0_opened"), "{error}");
+        let mut short = got.clone();
+        short[2].values[slot("goal_bin100")] = Some(2.0);
+        let error = compare_route_rows(&want, &short, 1e-6).expect_err("goal_bin100 2 at the last row must fail");
+        assert!(error.contains("goal_bin100"), "{error}");
+
+        // A missing event cell is a failure, not something the comparator skips.
+        let mut missing = got;
+        missing[2].values[slot("goal_bin100")] = None;
+        let error = compare_route_rows(&want, &missing, 1e-6).expect_err("a `-` event cell must fail");
+        assert!(error.contains("goal_bin100"), "{error}");
     }
 
     #[test]
@@ -22348,18 +22463,22 @@ fn sight_probe(
     state.0 += 1;
     match state.1 {
         0 => {
-            // Let the level settle, then stand on the landing pad facing 8t88 (the pose the port's
-            // forward axis and warp put him in view from).
+            // Let the level settle, then stand on the landing pad facing 8t88. The pose is the one
+            // retail's own `warp` accepts and that ended the level in the round-89 capture:
+            // eye (-5.45, 16.9, 3.865), sector 215, body one eye offset below. The old
+            // (-4.5, 14.0) was sector 230, which has no floor and which retail refuses.
             if state.0 < 30 {
                 return;
             }
-            player.body.yaw = 0.0;
-            sim.world
-                .borrow_mut()
-                .teleport_player(&mut player.body, [-4.5, 14.0, 3.84], Some(230));
+            player.body.yaw = (-136.4f32).to_radians();
+            sim.world.borrow_mut().teleport_player(
+                &mut player.body,
+                [-5.45, 16.9, 3.865 - 0.037],
+                Some(215),
+            );
             state.1 = 1;
             state.0 = 0;
-            println!("sight-live: standing at (-4.5,14.0) facing 8t88");
+            println!("sight-live: standing at (-5.45,16.9) facing 8t88");
         }
         1 => {
             // The draw happens in the render pass; give it frames, then read the goal cog's `done`.
@@ -28203,9 +28322,13 @@ struct RouteCursor {
 
 /// The previous sampled body position and tick, so the trace's velocity columns are the retail
 /// fixture's definition — the position derivative over the 600 ms window — and not the integrated
-/// intent, which a body pinned against a wall keeps reporting.
+/// intent, which a body pinned against a wall keeps reporting. `door0_opened` is the trace's own
+/// latch: the door script re-closes two seconds after it opens, so a sample can miss the open frame.
 #[derive(Resource, Default)]
-struct RoutePrev(Option<([f32; 3], u32)>);
+struct RoutePrev {
+    sample: Option<([f32; 3], u32)>,
+    door0_opened: bool,
+}
 
 /// The route trace's velocity columns: the position derivative over the sample window, in level units
 /// per second. A warp row is a new leg — retail's own warp rows read zero, and the jump between two
@@ -28664,8 +28787,8 @@ fn route_replay(
         && let Some(path) = out.as_deref().and_then(|o| o.0.as_deref())
     {
         let pos = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
-        let vel = route_sample_velocity(prev.0, pos, tick, plan.warp_at(tick).is_some());
-        prev.0 = Some((pos, tick));
+        let vel = route_sample_velocity(prev.sample, pos, tick, plan.warp_at(tick).is_some());
+        prev.sample = Some((pos, tick));
         write_route_trace_row(
             path,
             tick,
@@ -28673,6 +28796,7 @@ fn route_replay(
             vel,
             sim.as_deref(),
             world.as_deref(),
+            &mut prev.door0_opened,
         );
     }
     cursor.tick += 1;

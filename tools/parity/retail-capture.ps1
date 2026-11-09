@@ -7,6 +7,12 @@ param(
   [int]$SeriesFrames = 8,
   [int]$LevelTimeoutSec = 45,
   [switch]$Software,
+  # Run the game in a normal borderless window instead of its fullscreen display mode (dgVoodoo
+  # `FullScreenMode=false`, `WindowedAttributes=borderless`, `CaptureMouse=true`). On by default:
+  # a fullscreen capture alt-tabs/flickers and changes the desktop mode. `-Fullscreen` restores the
+  # old display-mode capture (kept for diagnosing a wrapper that rejects windowed).
+  [switch]$Windowed = $true,
+  [switch]$Fullscreen,
   # Phase 0.5 trace v0, retail half: after the level loads (and any warp) hold the forward key in
   # undisturbed 600 ms segments, reading `coords` in between, and write <name>-walk.tsv into
   # target/parity/trace. 0 keeps the normal screenshot captures.
@@ -70,6 +76,14 @@ param(
   # Hold for an action key in `-KeysAfter`. The retail capture runs under software rendering at a
   # few frames per second; a 40 ms tap can fall between frames and the game never sees the use.
   [int]$ActionHoldMs = 600,
+  # Hold this key after a `-WalkTraceMs` leg and before the post-walk console read (e.g. '9' = the
+  # player's ACTIVATE binding, or 'MOUSEMIDDLE'). The walk's `coords` then show the stop pose and
+  # `cogstatus` shows the door the level's own script opened.
+  [string]$UseAfterWalk = '',
+  # The ACTIVATE binding for `-UseAfterWalk` and for the route plan's `use` rows.
+  [string]$UseKey = '9',
+  # How long the game runs after a use before the next console read freezes it.
+  [int]$UseSettleMs = 900,
   # How long to leave the game running after `-KeysAfter` before the second console read. The
   # default is the level-settle time; a combat level can kill the player inside it, so a trigger
   # probe can shorten it.
@@ -205,7 +219,7 @@ function Read-ShotList([string]$Path) {
   return $rows
 }
 
-function Invoke-JkStaging([string]$Source, [string]$Destination) {
+function Invoke-JkStaging([string]$Source, [string]$Destination, [switch]$Windowed) {
   if (-not (Test-Path -LiteralPath $Destination)) { New-Item -ItemType Directory -Force -Path $Destination | Out-Null }
   Log "staging scratch copy: robocopy '$Source' -> '$Destination' (incremental)"
   & robocopy $Source $Destination /E /R:1 /W:1 /MT:16 /NFL /NDL /NP /NJH /NJS | Out-Null
@@ -222,7 +236,7 @@ function Invoke-JkStaging([string]$Source, [string]$Destination) {
   # The 1997 Direct3D path calls the system D3DIM.DLL, which crashes on Windows 11, so the 16-bit
   # renderer needs dgVoodoo2's DDraw/D3DImm in the copy (see Install-Jk3DWrapper).
   if (-not $Software) {
-    Install-Jk3DWrapper -Destination $Destination -LogPath $script:LogPath
+    Install-Jk3DWrapper -Destination $Destination -LogPath $script:LogPath -Windowed:$Windowed
   }
 
   # The Load screen lists `player\<profile>\*.jks` and **skips names starting `_JKAUTO`**
@@ -561,12 +575,16 @@ function Read-JkPlayerBars {
   if ($inv -le 0) { throw "player bars: the inventory pointer (thing+0x1C0) read $inv" }
   $health = [JkRetail]::ReadFloat($ProcessId, $thing + 0x134)
   $shields = [JkRetail]::ReadFloat($ProcessId, $inv + 0x88 + 60 * 0x18)
-  if ([double]::IsNaN($health) -or [double]::IsNaN($shields)) {
-    throw "player bars: the player bars could not be read (health $health, shields $shields)"
+  # `SITHBIN_GOAL00` (100): `01_endlevel.cog`'s `user0:` ORs bit 2 over `startup`'s bit 1, so the
+  # goal counter reads 1 at the level start and 3 once 8t88 is sighted. Same inventory stride.
+  $goal = [JkRetail]::ReadFloat($ProcessId, $inv + 0x88 + 100 * 0x18)
+  if ([double]::IsNaN($health) -or [double]::IsNaN($shields) -or [double]::IsNaN($goal)) {
+    throw "player bars: the player bars could not be read (health $health, shields $shields, goal $goal)"
   }
   if ($health -lt 0.0 -or $health -gt 1000.0) { throw "player bars: implausible health $health at thing+0x134" }
   if ($shields -lt -0.01 -or $shields -gt 200.01) { throw "player bars: implausible shields $shields at inventory bin 60" }
-  [pscustomobject]@{ Health = $health; Shields = $shields }
+  if ($goal -lt -0.01 -or $goal -gt 65535.0) { throw "player bars: implausible goal counter $goal at inventory bin 100" }
+  [pscustomobject]@{ Health = $health; Shields = $shields; Goal = $goal }
 }
 function Invoke-JkWalkTrace {
   param(
@@ -692,32 +710,98 @@ function Invoke-JkWalkTrace {
   }
   return $path
 }
+# Press the player's ACTIVATE binding. The retail renderer runs at a few frames a second, so a tap
+# can fall between frames; a use is a hold. Mouse bindings need the cursor inside the window first.
+function Invoke-JkUseKey {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [string]$Key = '9',
+    [int]$HoldMs = 600,
+    [int]$SettleMs = 900
+  )
+  $gameWindow = Get-JkWindow -ProcessId $ProcessId
+  if ($gameWindow -ne [IntPtr]::Zero) {
+    Log ("use: focus before '{0}'" -f [JkRetail]::ForegroundTitle())
+    $activated = [JkRetail]::Activate($gameWindow)
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
+      [void][JkRetail]::ShowWindow($gameWindow, 9)
+      [void][JkRetail]::SetForegroundWindow($gameWindow)
+      Start-Sleep -Milliseconds 120
+      if ([JkRetail]::ForegroundTitle() -eq 'Jedi Knight') { break }
+    }
+    # The dev-console dialog is a separate top-level window and often still foreground after a
+    # `coords` read; a click inside the game window is what actually hands it focus (the F12 helper
+    # does the same). It may fire the weapon once, which is harmless with the AI off.
+    $rect = [JkRetail]::WindowRectText($gameWindow)
+    if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
+      Send-JkClick -X ([int](([int]$Matches[1] + [int]$Matches[3]) / 2)) -Y ([int](([int]$Matches[2] + [int]$Matches[4]) / 2))
+    }
+    Start-Sleep -Milliseconds 400
+    Log ("use: activated={0} focus now '{1}'" -f $activated, [JkRetail]::ForegroundTitle())
+  }
+  foreach ($name in @($Key -split ',' | Where-Object { $_ -ne '' })) {
+    if ($name -match '^MOUSE') {
+      $rect = [JkRetail]::WindowRectText((Get-JkWindow -ProcessId $ProcessId))
+      if ($rect -match '\((-?\d+),(-?\d+)\)-\((-?\d+),(-?\d+)\)') {
+        $cx = ([int]$Matches[1] + [int]$Matches[3]) / 2
+        $cy = ([int]$Matches[2] + [int]$Matches[4]) / 2
+        [JkRetail]::MoveTo([int]$cx, [int]$cy)
+        Start-Sleep -Milliseconds 120
+      }
+      Log ("use: pressing {0} for {1} ms" -f $name, $HoldMs)
+      Send-JkMouseButton -Button ($name -replace '^MOUSE', '') -HoldMs $HoldMs
+    } else {
+      Log ("use: holding {0} for {1} ms" -f $name, $HoldMs)
+      Send-JkKeyHold -Name $name -HoldMs $HoldMs
+    }
+    # The engine advances a frame or two in the hold; give the message and the handler a moment
+    # before the next `coords` read freezes the game.
+    Start-Sleep -Milliseconds $SettleMs
+  }
+  $gameWindow = Get-JkWindow -ProcessId $ProcessId
+  if ($gameWindow -ne [IntPtr]::Zero) {
+    [void][JkRetail]::Activate($gameWindow)
+    [void][JkRetail]::SetForegroundWindow($gameWindow)
+  }
+}
+
 # `-RouteWalk`: the retail half of issue #8's scripted route, in ONE game session.
 #
 # The port's replay is one continuous run. Four independent retail leg captures each started from a
 # fresh level load, so their bars carried different pre-warp damage and could not be compared; this
 # runs the same `tools/parity/routes/level1-route.tsv` rows without reloading. A `warp` row runs the
 # console warp at its tick (the body goes one eye offset below the script's camera eye, as retail's
-# `warp` leaves it), an `input` row holds forward for its ticks in 600 ms segments, and the bars are
-# read from memory at every segment end — no console while the fight is live. Cogs are read with
-# `cogstatus` at the start and after each leg, where the plan can change them. `seed` rows are the
-# port's compensation for retail's coast, so they need no action here; `switch`/`use` rows are
-# logged and not synthesized (retail's own links deliver those messages).
+# `warp` leaves it), an `input` row holds forward for its ticks in 600 ms segments, and the bars and
+# positions are read at every segment end — no console while the fight is live. A `use` row plays the
+# player's own ACTIVATE binding (`-UseKey`), so the door opens through the level's script, not a
+# synthetic message. Cogs are read with `cogstatus` at every sample; `seed`/`switch` rows need no
+# action here.
+#
+# The trace is the port's 21-column route schema, including the two event columns:
+# `door0_opened` latches nonzero `doorstatus`/`movestatus` (the door closes again two seconds after
+# it opens), and `goal_bin100` is inventory bin 100 (1 at start, 3 after the sighting).
 function Invoke-JkRouteTrace {
   param(
     [Parameter(Mandatory)][int]$ProcessId,
     [Parameter(Mandatory)][string]$Plan,
     [Parameter(Mandatory)][string]$OutDir,
-    [Parameter(Mandatory)][string]$Name
+    [Parameter(Mandatory)][string]$Name,
+    [string]$UseKey = '9',
+    [int]$UseHoldMs = 600,
+    [int]$UseSettleMs = 900
   )
   $path = Join-Path $OutDir ("{0}.tsv" -f $Name)
-  $lines = New-Object System.Collections.Generic.List[string]
-  $lines.Add((@('tick', 't_s', 'health', 'shields', 'door0_status', 'door0_movestatus', 'door0_opendoors', 'door0_closedoors',
-        'switch_status', 'switch_movestatus', 'switch_opendoors', 'switch_closedoors') -join ([char]9)))
+  $fields = @('tick', 't_s', 'x', 'y', 'z', 'sector', 'vel_x', 'vel_y', 'vel_z', 'health', 'shields',
+    'door0_status', 'door0_movestatus', 'door0_opendoors', 'door0_closedoors',
+    'switch_status', 'switch_movestatus', 'switch_opendoors', 'switch_closedoors',
+    'door0_opened', 'goal_bin100')
+  $rows = New-Object System.Collections.Generic.List[string]
   $cogs = [ordered]@{
     door0_status = $null; door0_movestatus = $null; door0_opendoors = $null; door0_closedoors = $null
     switch_status = $null; switch_movestatus = $null; switch_opendoors = $null; switch_closedoors = $null
   }
+  # A hashed latch: a `$script`-scope scalar assigned inside a scriptblock stays local to it.
+  $state = @{ Door0Opened = $false }
   $wanted = @{
     0  = @{ doorstatus = 'door0_status'; movestatus = 'door0_movestatus'; opendoors = 'door0_opendoors'; closedoors = 'door0_closedoors' }
     11 = @{ doorstatus = 'switch_status'; movestatus = 'switch_movestatus'; open_doors = 'switch_opendoors'; close_doors = 'switch_closedoors' }
@@ -732,17 +816,37 @@ function Invoke-JkRouteTrace {
         }
       }
     }
+    if (($null -ne $cogs['door0_status'] -and [double]$cogs['door0_status'] -ne 0) -or
+        ($null -ne $cogs['door0_movestatus'] -and [double]$cogs['door0_movestatus'] -ne 0)) {
+      $state.Door0Opened = $true
+    }
   }
+  # One trace row. `$Coords` is a `Read-JkCoords` result (body position and tracked sector).
   $addRow = {
-    param([int]$Tick, [double]$Health, [double]$Shields)
-    $cells = @($Tick, ('{0:F4}' -f ($Tick / 60.0)), ('{0:F1}' -f $Health), ('{0:F1}' -f $Shields))
+    param([int]$Tick, $Coords, [double]$VelX, [double]$VelY, [double]$VelZ, [switch]$Replace)
+    $bars = Read-JkPlayerBars -ProcessId $ProcessId
+    $cells = @(
+      $Tick,
+      ('{0:F4}' -f ($Tick / 60.0)),
+      ('{0:F4}' -f [double]$Coords.Pos[0]),
+      ('{0:F4}' -f [double]$Coords.Pos[1]),
+      ('{0:F4}' -f [double]$Coords.Pos[2]),
+      [int]$Coords.Sector,
+      ('{0:F4}' -f $VelX),
+      ('{0:F4}' -f $VelY),
+      ('{0:F4}' -f $VelZ),
+      ('{0:F1}' -f $bars.Health),
+      ('{0:F1}' -f $bars.Shields)
+    )
     foreach ($key in $cogs.Keys) {
       $value = $cogs[$key]
-      $cells += $(if ($null -eq $value) { '-' } else { '{0:F3}' -f $value })
+      $cells += $(if ($null -eq $value) { '-' } else { '{0:F3}' -f [double]$value })
     }
-    $lines.Add(($cells -join ([char]9)))
+    $cells += $(if ($state.Door0Opened) { '1' } else { '0' })
+    $cells += ('{0:F0}' -f $bars.Goal)
+    $line = ($cells -join ([char]9))
+    if ($Replace -and $rows.Count -gt 0) { $rows[$rows.Count - 1] = $line } else { $rows.Add($line) }
   }
-  & $readCogs
   # Both sides measure movement with the AI off: retail's own `-devMode` switches are `disableai`
   # (the port's replay passes `--no-ai`) and `noaishots` (the port skips the AI tick, so no shot is
   # fired at all). Both are **toggles** in the engine, so each is set explicitly with `on`; a warp
@@ -754,44 +858,136 @@ function Invoke-JkRouteTrace {
       }
     }
   }
-  & $disableAi
-  $bars = Read-JkPlayerBars -ProcessId $ProcessId
-  & $addRow 0 $bars.Health $bars.Shields
-  $tick = 0
+  # Parse the plan first: a plan that starts with a pose warp records that pose at tick 0, not the
+  # level's start (the exit-segment capture does this to avoid replaying the earlier legs).
+  $steps = New-Object System.Collections.Generic.List[object]
+  $planTick = 0
   foreach ($line in Get-Content -LiteralPath $Plan) {
     if ($line -match '^\s*(#|$)') { continue }
     $f = $line -split "`t"
     switch ($f[0]) {
       'warp' {
-        $x = $f[3]
-        if ($x -and $x -ne '-') {
-          $bodyZ = [double]$f[5] - $script:JkEyeOffset
+        $pose = $null
+        if ($f[3] -and $f[3] -ne '-') {
+          $pose = [pscustomobject]@{ X = [double]$f[3]; Y = [double]$f[4]; Z = [double]$f[5]; Yaw = [double]$f[6] }
+        }
+        $steps.Add([pscustomobject]@{ Kind = 'warp'; Tick = $planTick; Pose = $pose })
+      }
+      'input' {
+        $steps.Add([pscustomobject]@{
+            Kind = 'input'; Tick = $planTick; Ticks = [int]$f[1]
+            Forward = [double]$f[2]; Strafe = [double]$f[3]
+          })
+        $planTick += [int]$f[1]
+      }
+      'wait' {
+        $steps.Add([pscustomobject]@{ Kind = 'wait'; Tick = $planTick; Ticks = [int]$f[1] })
+        $planTick += [int]$f[1]
+      }
+      'use' { $steps.Add([pscustomobject]@{ Kind = 'use'; Tick = $planTick }) }
+      'switch' { $steps.Add([pscustomobject]@{ Kind = 'switch'; Tick = $planTick }) }
+      'seed' { $steps.Add([pscustomobject]@{ Kind = 'seed'; Tick = $planTick }) }
+      default { throw "route trace: unknown row kind '$($f[0])'" }
+    }
+  }
+  & $disableAi
+  $tick = 0
+  $prevCoords = $null
+  $prevTick = 0
+  $startsWithPose = ($steps.Count -gt 0 -and $steps[0].Kind -eq 'warp' -and $null -ne $steps[0].Pose)
+  if (-not $startsWithPose) {
+    $startCoords = Read-JkCoords -ProcessId $ProcessId
+    if (-not $startCoords) { throw 'route trace: the start pose could not be read from coords' }
+    & $readCogs
+    & $addRow 0 $startCoords 0 0 0
+    $prevCoords = $startCoords
+  }
+  foreach ($step in $steps) {
+    switch ($step.Kind) {
+      'warp' {
+        if ($null -ne $step.Pose) {
+          $bodyZ = $step.Pose.Z - $script:JkEyeOffset
           # `warp x y z pitch yaw roll` (the shots flow's own argument order): passing the route's yaw
           # in the pitch slot left the body facing nowhere and unable to walk.
-          $command = 'warp {0} {1} {2} 0 {3} 0' -f $f[3], $f[4], $bodyZ, $f[6]
+          $command = 'warp {0} {1} {2} 0 {3} 0' -f $step.Pose.X, $step.Pose.Y, $bodyZ, $step.Pose.Yaw
           $reply = @(Invoke-JkDevConsoleCommand -ProcessId $ProcessId -Command $command)
           if ($reply -match 'Position not in world') { throw "route trace: warp failed: $command" }
-          $coords = Read-JkCoords -ProcessId $ProcessId
-          Log ("route: {0} -> {1}" -f $command, $(if ($coords) { $coords.Raw } else { 'coords unavailable' }))
           # The shots flow waits this long after a warp before a walk; the game is still finishing
           # the console/foreground transition and would swallow the first hold.
           Start-Sleep -Milliseconds 900
           & $disableAi
+          $coords = Read-JkCoords -ProcessId $ProcessId
+          if (-not $coords) { throw "route trace: coords unavailable after $command" }
+          Log ("route: {0} -> {1}" -f $command, $coords.Raw)
+          # The port samples the post-warp pose at this tick; replace the previous leg's last row.
+          & $readCogs
+          & $addRow $tick $coords 0 0 0 -Replace
+          $prevCoords = $coords
+          $prevTick = $tick
         }
       }
       'input' {
-        if ([double]$f[3] -ne 0) { throw 'route trace: strafe input is not supported' }
-        $segments = [int]([int]$f[1] / 36)
+        if ($step.Strafe -ne 0) { throw 'route trace: strafe input is not supported' }
+        $segments = [int]($step.Ticks / 36)
         # Like the walk trace: the key goes down before the window is raised, so the frame that
         # resumes the game after a console/foreground wait already sees it (a 600 ms press entirely
         # inside a paused window is one frame or none at the engine's few-fps render rate).
         Send-JkKeyDown -Name 'UP'
+        try {
+          for ($i = 1; $i -le $segments; $i++) {
+            # A console read between segments takes the focus, so DInput only sees the hold after the
+            # game window is raised and foreground (the walk trace's own loop; its body moves).
+            $gameWindow = Get-JkWindow -ProcessId $ProcessId
+            $active = [JkRetail]::Activate($gameWindow)
+            Log ("route: focus activated={0} foreground={1}" -f $active, [JkRetail]::ForegroundTitle())
+            for ($attempt = 0; $attempt -lt 8; $attempt++) {
+              if ($gameWindow -eq [IntPtr]::Zero) { break }
+              [void][JkRetail]::ShowWindow($gameWindow, 9)
+              [void][JkRetail]::SetForegroundWindow($gameWindow)
+              Start-Sleep -Milliseconds 120
+              if ([JkRetail]::ForegroundTitle() -eq 'Jedi Knight') { break }
+            }
+            Send-JkKeyDown -Name 'UP'
+            $clockBefore = Read-JkGameMs -ProcessId $ProcessId
+            Start-Sleep -Milliseconds 600
+            Send-JkKeyUp -Name 'UP'
+            $clockAfter = Read-JkGameMs -ProcessId $ProcessId
+            Log ("route: hold clock {0} -> {1} ms" -f $clockBefore, $clockAfter)
+            $tick += 36
+            # End the segment with a console read like the walk trace: it freezes the game between
+            # holds, so the pre-pressed key cannot move the body during the foreground wait and each
+            # 600 ms sample measures one hold (the committed walk traces' methodology).
+            $coords = Read-JkCoords -ProcessId $ProcessId
+            if (-not $coords) { throw "route trace: coords unavailable at tick $tick" }
+            $window = [double]($tick - $prevTick) / 60.0
+            $vx = if ($window -gt 0) { ([double]$coords.Pos[0] - [double]$prevCoords.Pos[0]) / $window } else { 0.0 }
+            $vy = if ($window -gt 0) { ([double]$coords.Pos[1] - [double]$prevCoords.Pos[1]) / $window } else { 0.0 }
+            $vz = if ($window -gt 0) { ([double]$coords.Pos[2] - [double]$prevCoords.Pos[2]) / $window } else { 0.0 }
+            & $addRow $tick $coords $vx $vy $vz
+            Log ("route: tick {0} ({1} ms held) pos ({2:N2}, {3:N2}, {4:N2}) sector {5}" -f `
+                $tick, ($i * 600), $coords.Pos[0], $coords.Pos[1], $coords.Pos[2], $coords.Sector)
+            $prevCoords = $coords
+            $prevTick = $tick
+          }
+        } finally {
+          Send-JkKeyUp -Name 'UP'
+        }
+        # One cog read per leg (not per 600 ms segment): the engine's dev console is the fragile part
+        # of a long capture, and a per-segment read crashed it once; the door and goal latches only
+        # need a read after the opening step and at the leg ends.
+        & $readCogs
+        $coords = Read-JkCoords -ProcessId $ProcessId
+        if ($coords) { Log ("route: leg end -> " + $coords.Raw) } else { Log 'route: leg end coordinates unavailable' }
+      }
+      'wait' {
+        # Stand still for the ticks, in 600 ms segments, reading the pose between them. The key is up
+        # and the game runs, so a script's door leaf finishes opening before the next hold — the port
+        # sample at this tick is the same standing pose, which keeps the crossing row on both sides
+        # in the same sector.
+        $segments = [int]($step.Ticks / 36)
         for ($i = 1; $i -le $segments; $i++) {
-          # A console read between segments takes the focus, so DInput only sees the hold after the
-          # game window is raised and foreground (the walk trace's own loop; its body moves).
           $gameWindow = Get-JkWindow -ProcessId $ProcessId
-          $active = [JkRetail]::Activate($gameWindow)
-          Log ("route: focus activated={0} foreground={1}" -f $active, [JkRetail]::ForegroundTitle())
+          [void][JkRetail]::Activate($gameWindow)
           for ($attempt = 0; $attempt -lt 8; $attempt++) {
             if ($gameWindow -eq [IntPtr]::Zero) { break }
             [void][JkRetail]::ShowWindow($gameWindow, 9)
@@ -799,29 +995,29 @@ function Invoke-JkRouteTrace {
             Start-Sleep -Milliseconds 120
             if ([JkRetail]::ForegroundTitle() -eq 'Jedi Knight') { break }
           }
-          Send-JkKeyDown -Name 'UP'
           $clockBefore = Read-JkGameMs -ProcessId $ProcessId
           Start-Sleep -Milliseconds 600
-          Send-JkKeyUp -Name 'UP'
           $clockAfter = Read-JkGameMs -ProcessId $ProcessId
-          Log ("route: hold clock {0} -> {1} ms" -f $clockBefore, $clockAfter)
+          Log ("route: wait clock {0} -> {1} ms" -f $clockBefore, $clockAfter)
           $tick += 36
-          $bars = Read-JkPlayerBars -ProcessId $ProcessId
-          & $addRow $tick $bars.Health $bars.Shields
-          # End the segment with a console read like the walk trace: it freezes the game between
-          # holds, so the pre-pressed key cannot move the body during the foreground wait and each
-          # 600 ms sample measures one hold (the committed walk traces' methodology).
-          $holdCoords = Read-JkCoords -ProcessId $ProcessId
-          if ($holdCoords) {
-            Log ("route: tick {0} ({1} ms held) pos ({2:N2}, {3:N2}, {4:N2}) sector {5}; health {6:N1} shields {7:N1}" -f `
-                $tick, ($i * 600), $holdCoords.Pos[0], $holdCoords.Pos[1], $holdCoords.Pos[2], $holdCoords.Sector, $bars.Health, $bars.Shields)
-          } else {
-            Log ("route: tick {0} ({1} ms held) health {2:N1} shields {3:N1} (coords unavailable)" -f $tick, ($i * 600), $bars.Health, $bars.Shields)
-          }
+          $coords = Read-JkCoords -ProcessId $ProcessId
+          if (-not $coords) { throw "route trace: coords unavailable at tick $tick" }
+          $window = [double]($tick - $prevTick) / 60.0
+          $vx = if ($window -gt 0) { ([double]$coords.Pos[0] - [double]$prevCoords.Pos[0]) / $window } else { 0.0 }
+          $vy = if ($window -gt 0) { ([double]$coords.Pos[1] - [double]$prevCoords.Pos[1]) / $window } else { 0.0 }
+          $vz = if ($window -gt 0) { ([double]$coords.Pos[2] - [double]$prevCoords.Pos[2]) / $window } else { 0.0 }
+          & $addRow $tick $coords $vx $vy $vz
+          Log ("route: tick {0} (waited {1} ms) pos ({2:N2}, {3:N2}, {4:N2}) sector {5}" -f `
+              $tick, ($i * 600), $coords.Pos[0], $coords.Pos[1], $coords.Pos[2], $coords.Sector)
+          $prevCoords = $coords
+          $prevTick = $tick
         }
-        Send-JkKeyUp -Name 'UP'
-        $coords = Read-JkCoords -ProcessId $ProcessId
-        if ($coords) { Log ("route: leg end -> " + $coords.Raw) } else { Log 'route: leg end coordinates unavailable' }
+      }
+      'use' {
+        # The player's own ACTIVATE binding. Retail only reports what its own script does with the
+        # message; nothing here sends an `activate` on the script's behalf.
+        Log ("route: use row at tick {0} -- pressing the ACTIVATE binding {1}" -f $tick, $UseKey)
+        Invoke-JkUseKey -ProcessId $ProcessId -Key $UseKey -HoldMs $UseHoldMs -SettleMs $UseSettleMs
         & $readCogs
       }
       'switch' {
@@ -829,12 +1025,23 @@ function Invoke-JkRouteTrace {
         # was removed from the plan; script it here only if retail's own reading ever needs it.
         Log 'route: switch row has no synthetic action'
       }
-      'use' { Log 'route: use row has no synthetic action in this plan' }
       'seed' { }
     }
   }
-  Set-Content -LiteralPath $path -Value $lines -Encoding utf8
-  Log ("route trace: wrote {0} ({1} row(s))" -f $path, ($lines.Count - 1))
+  $out = New-Object System.Collections.Generic.List[string]
+  $out.Add(($fields -join ([char]9)))
+  foreach ($row in $rows) { $out.Add($row) }
+  Set-Content -LiteralPath $path -Value $out -Encoding utf8
+  Log ("route trace: wrote {0} ({1} row(s))" -f $path, ($rows.Count))
+  $finalBars = Read-JkPlayerBars -ProcessId $ProcessId
+  Log ("route trace: final goal bin 100 = {0:F0}, health {1:F1}, shields {2:F1}" -f $finalBars.Goal, $finalBars.Health, $finalBars.Shields)
+  # The level-end tally is retail's level-complete witness: `01_endlevel.cog`'s `user0` sleeps 3 s
+  # after the sighting and calls `jkEndLevel`. Keep the frame; the trace's last row is the state
+  # before the swap.
+  Start-Sleep -Milliseconds 4000
+  $endPng = Join-Path $OutDir ("{0}-end.png" -f $Name)
+  Save-JkWindowPng -ProcessId $ProcessId -Path $endPng
+  Log ("route trace: end-of-route frame {0}" -f $endPng)
   return $path
 }
 # `-AudioRoute`: the retail half of issue #13's audio fixture.
@@ -1728,7 +1935,7 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       if ($null -ne $requestedPose) { throw "route walk '$name' must be a level-start row (no pose), not a warp row" }
       $routeDir = Resolve-FromRepo $RouteOut
       New-Item -ItemType Directory -Force -Path $routeDir | Out-Null
-      $routePath = Invoke-JkRouteTrace -ProcessId $process.Id -Plan (Resolve-FromRepo $RoutePlan) -OutDir $routeDir -Name $RouteName
+      $routePath = Invoke-JkRouteTrace -ProcessId $process.Id -Plan (Resolve-FromRepo $RoutePlan) -OutDir $routeDir -Name $RouteName -UseKey $UseKey -UseHoldMs $ActionHoldMs -UseSettleMs $UseSettleMs
       Log "route trace mode: skipped the screenshot series/reference for '$name' (wrote $routePath)"
       return
     }
@@ -1785,6 +1992,13 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       }
       $tracePath = Invoke-JkWalkTrace -ProcessId $process.Id -Name $name -Milliseconds $WalkTraceMs -Key $WalkTraceKey -SettleMs $(if ($WalkTraceSettleMs -gt 0) { $WalkTraceSettleMs } else { $Row.Settle })
       Log "walk trace mode: skipped the screenshot series/reference for '$name' (wrote $tracePath)"
+      # The trigger fires from the pose the walk stopped at, and the console read after it is the
+      # evidence (`cogstatus 0` then reports the door's own state). This is a real binding press,
+      # not an `activate` on the script's behalf.
+      if ($UseAfterWalk) {
+        Log "walk trace: pressing the use binding '$UseAfterWalk' after the walk, before the console read"
+        Invoke-JkUseKey -ProcessId $process.Id -Key $UseAfterWalk -HoldMs $ActionHoldMs -SettleMs $UseSettleMs
+      }
       if ($ConsoleCommands.Count -gt 0) {
         # After the walk: this is where a trigger's effect shows up (cog state after the trigger).
         $null = Invoke-JkConsoleCapture -ProcessId $process.Id -Name $name -Commands $ConsoleCommands
@@ -1842,6 +2056,10 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
     # opening is a cutscene, say exactly how far into the level the series starts).
     $seriesSettleMs = [int][math]::Round($levelReadyClock.Elapsed.TotalMilliseconds)
     Log "series settle: $seriesSettleMs ms after the level loaded"
+    $gameWindow = Get-JkWindow -ProcessId $ProcessId
+    if ($gameWindow -ne [IntPtr]::Zero) {
+      Log ("game window after load: " + [JkRetail]::WindowRectText($gameWindow) + $(if ($windowedMode) { ' (windowed)' } else { ' (fullscreen)' }))
+    }
     $seriesClock = [Diagnostics.Stopwatch]::StartNew()
     for ($i = 0; $i -lt $SeriesFrames; $i++) {
       $frameStart = Get-Date
@@ -2161,7 +2379,10 @@ Log ("display now: " + [JkDisplay]::Summary())
 Save-JkDisplayState -Path $script:DisplayStatePath | Out-Null
 Log "saved desktop mode baseline: $script:DisplayStatePath"
 
-Invoke-JkStaging -Source $GamePath -Destination $WorkCopy
+$windowedMode = [bool]$Windowed -and -not [bool]$Fullscreen
+Log ("render window: " + $(if ($windowedMode) { 'windowed' } else { 'fullscreen (-Fullscreen)' }))
+Invoke-JkStaging -Source $GamePath -Destination $WorkCopy -Windowed:$windowedMode
+if ($Software -and $windowedMode) { Log 'note: -Windowed only changes the dgVoodoo path; -Software runs the 8-bit renderer' }
 
 $selected = if ($Only.Count -gt 0) {
   @($rows | Where-Object { $Only -contains $_.Name })
