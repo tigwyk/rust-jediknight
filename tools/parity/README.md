@@ -421,6 +421,11 @@ spent the bar). Energy (2) and fire (4) share that branch and saber (16) gets ha
 other kind reaches health with the bar untouched. A fixture where the port's per-hit health rises as
 the bar empties is the script working, not a bug.
 
+The capture runs the `Update` schedule on one executor thread, the same rule #8's replay uses: the
+shared cog LCG is thread-local, so with the default executor two runs of the same fixed step could
+fire a different number of shots. Two captures are therefore byte-identical apart from the file name,
+and the gate's repeatability check reports zero delta.
+
 The gate is the instrument for #11 (AI engagement timing) and #12 (combat timing); until those land its
 default run reports the known AI-timing gap rather than passing.
 
