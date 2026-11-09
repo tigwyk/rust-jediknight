@@ -335,6 +335,12 @@ if ($hitCount -gt 0) {
   if ($hitMax -gt $HitToleranceMs) { Fail ("hit timing delta {0:N0} ms exceeds {1:N0} ms" -f $hitMax, $HitToleranceMs) }
   if ($healthMax -gt $HealthTolerance) { Fail ("per-hit health delta {0:N1} exceeds {1:N1}" -f $healthMax, $HealthTolerance) }
   if ($shieldMax -gt $ShieldsTolerance) { Fail ("per-hit shields delta {0:N1} exceeds {1:N1}" -f $shieldMax, $ShieldsTolerance) }
+  # The combat-damage dimension on its own: the bars after each paired hit, independent of when the
+  # hits landed. A ticket that owns the damage split can read its result here without the AI timing.
+  if ($healthMax -le $HealthTolerance -and $shieldMax -le $ShieldsTolerance) {
+    Write-Host ("PASS  per-hit damage: max dH {0:N1}, dS {1:N1} over {2} paired hit(s) (tolerance {3:N1}/{4:N1})" -f `
+        $healthMax, $shieldMax, $hitCount, $HealthTolerance, $ShieldsTolerance)
+  }
 }
 
 # ---- kill order -------------------------------------------------------------------------------
