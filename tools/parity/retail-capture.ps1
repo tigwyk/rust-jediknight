@@ -722,11 +722,9 @@ function Invoke-JkUseKey {
   )
   $keys = @($Key -split ',' | Where-Object { $_ -ne '' })
   $keyboard = @($keys | Where-Object { $_ -notmatch '^MOUSE' })
-  # A keyboard key pressed **after** the game window becomes active is lost: the engine's DirectInput
-  # only reads a key state it saw go down, and the dev-console dialog was the focus a moment before.
-  # Pre-press the keyboard keys, then hand the window focus, then hold (the walk trace pre-presses
-  # UP the same way). Mouse bindings need the cursor inside the active window, so they press after.
-  foreach ($name in $keyboard) { Send-JkKeyDown -Name $name }
+  # The dev-console dialog usually owns the focus after a `coords` read. The key state must go down
+  # **after** the game window is focused: a pre-press while the console is foreground never reaches
+  # the engine's DirectInput queue, so the use was lost even though the key was held.
   try {
     $gameWindow = Get-JkWindow -ProcessId $ProcessId
     if ($gameWindow -ne [IntPtr]::Zero) {
@@ -760,8 +758,10 @@ function Invoke-JkUseKey {
         Log ("use: pressing {0} for {1} ms" -f $name, $HoldMs)
         Send-JkMouseButton -Button ($name -replace '^MOUSE', '') -HoldMs $HoldMs
       } else {
-        Log ("use: holding {0} for {1} ms (pre-pressed)" -f $name, $HoldMs)
+        Log ("use: holding {0} for {1} ms" -f $name, $HoldMs)
+        Send-JkKeyDown -Name $name
         Start-Sleep -Milliseconds $HoldMs
+        Send-JkKeyUp -Name $name
       }
       # The engine advances a frame or two in the hold; give the message and the handler a moment
       # before the next `coords` read freezes the game.

@@ -7231,7 +7231,9 @@ checks, and even those should be run deliberately.
   (SPACE), so the earlier use key `9` (scancode 0x0A) was the wrong key. Even with SPACE, and with
   the key pre-pressed before the window activation, the retail run's `cogstatus 0` stayed
   `doorstatus 0`, `movestatus 0` and the body did not cross at the door, so **no retail exit trace
-  exists**. The committed retail fixture is the pre-#15 four-leg route: it has no
+  with the door open exists**. A later probe put the keydown *after* the focus handoff (the
+  pre-press was being delivered to the console's input queue) and still read `doorstatus 0`; the
+  full retail route (33 rows) ends at sector 407 with `goal_bin100 = 1`. The committed retail fixture is the pre-#15 four-leg route: it has no
   `door0_opened`/`goal_bin100` columns, and `route-gate.ps1` fails it with
   `line 48: trace header has no 'door0_opened' column`. Ticket #15's retail acceptance is blocked on
   delivering a retail use/ACTIVATE input; do not rerun fullscreen to fix it.
