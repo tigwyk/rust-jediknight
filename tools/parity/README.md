@@ -334,7 +334,7 @@ Files:
 
 | Path | What it is |
 |---|---|
-| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `switch` fires the level's cantina-door switch (the captures began with that door open), `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key; the scenario rows take no ticks, so the 600 ms sample grid never moves. |
+| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key; the scenario rows take no ticks, so the 600 ms sample grid never moves. There is no `switch` row: retail's `cogstatus 11` reads `doorstatus 0` with that door already open, so the synthetic `activate` it used to send made the port measure a scenario retail never performed. |
 | `tools/parity/routetrace/level1-route-retail.tsv` | Retail-derived reference, one row every 600 ms (36 ticks). Provenance is in the file header. |
 | `tools/parity/routetrace/level1-route-port.tsv` | The port's committed oracle, produced by the replay. |
 | `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), compare to the committed port fixture, reject a trace with one position moved 0.25 units, and match the retail reference within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it for an experiment). |
@@ -362,12 +362,22 @@ tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
   `cogstatus` after each leg's walk. Level 1 has both cogs, so every field is present; the gate
   rejects any `-` (the comparator would skip it and measure the position columns only).
 
-A **leg boundary is a `warp`**, not a walk: the retail reference is four separate per-leg captures
-from the level's own authored placements, so the route is the same four walks. Issue #10 fixed what
-each leg exposed — the spawn seat no longer lifts the body onto the cantina's `00table`, the walk
-rate is the engine's `maxthrust*0.7/(surfdrag+0.2)` (0.4375 walk / 0.875 run), a `warp` attaches the
-body at `GetThingHeight` (0.120114, where retail's `coords` holds z), and a low solid model is a step
-the walker climbs — so the legs hold retail's sectors and vertical travel.
+A **leg boundary is a `warp`**, not a walk: the route is the four walks from the level's own authored
+placements. Issue #10 fixed what each leg exposed — the spawn seat no longer lifts the body onto the
+cantina's `00table`, the walk rate is the engine's `maxthrust*0.7/(surfdrag+0.2)` (0.4375 walk /
+0.875 run), a `warp` attaches the body at `GetThingHeight` (0.120114, where retail's `coords` holds
+z), and a low solid model is a step the walker climbs — so the legs hold retail's sectors and
+vertical travel.
+
+The reference's **bars and cogs come from one continuous retail run**, not four independent leg
+captures: `retail-capture.ps1 -Shots tools/parity/shots.tsv -Only spawn -RouteWalk` reads this same
+route script and runs every leg in one game session (a `warp` between legs, a 600 ms forward hold per
+segment), sampling the bars from engine memory at every segment end. Four per-leg runs each started
+from a fresh level load with their own pre-warp damage, so their bars could not be compared with the
+port's continuous replay. Retail does **not** survive that run: the cantina ambush takes the player from
+100/100 to 0/0 between ticks 180 and 252, so the committed reference's later bars are the engine's
+dead-player zeros and its body stops walking (only the warps still move it). The gate reports that
+divergence; it is a retail-vs-port combat difference, not a capture gap.
 
 The per-sample position tolerance is the **retail harness's**, stated in
 `level1-route-retail.tsv`'s header: a 600 ms sample advances a variable amount of engine time, so

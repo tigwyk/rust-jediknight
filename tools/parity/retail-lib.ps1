@@ -194,6 +194,13 @@ public static class JkRetail {
       // in z-order is still covered by whatever the user has open. The engine's fullscreen window
       // covers the whole monitor while it runs; it is closed by the harness afterwards.
       SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040); // TOPMOST | NOSIZE | NOMOVE | SHOWWINDOW
+      // A synthetic ALT tap satisfies the foreground lock's "the process received the last input"
+      // rule, so SetForegroundWindow is allowed to move keyboard focus to the game after a console
+      // dialog raised another window.
+      One(0x38, true, false);
+      System.Threading.Thread.Sleep(15);
+      One(0x38, false, false);
+      System.Threading.Thread.Sleep(15);
       SetForegroundWindow(h);
       SetFocus(h);
       return GetForegroundWindow() == h;
