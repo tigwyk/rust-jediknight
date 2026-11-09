@@ -138,6 +138,15 @@ pub enum EncounterEvent {
         template: String,
         pos: [f32; 3],
     },
+    /// A fired shot that landed on the player: its launch time and shooter, written as the trace's
+    /// `shot` row. Retail's fixture can only see shots through their impact on the player, so this
+    /// is the comparable observation; the plain `Shot` event is the spawn record.
+    ShotLanded {
+        t: f32,
+        owner: usize,
+        template: String,
+        pos: [f32; 3],
+    },
     /// The player was hit: the amount the two bars actually lost, and the bar values after the hit —
     /// the same numbers the retail capture writes from `thing + 0x134` and inventory bin 60.
     Hit {
@@ -1069,6 +1078,9 @@ pub struct Runtime {
     /// `BK_ENCOUNTER_OUT`: shots and landed player hits in time order, drained by the app into the
     /// door-encounter TSV. Empty unless the capture harness sets the variable.
     pub encounter_events: Vec<EncounterEvent>,
+    /// The launch time of every fired projectile by its thing index, so a hit can report the shot
+    /// that produced it (retail's fixture only records shots that landed on the player).
+    pub encounter_shot_time: BTreeMap<usize, f32>,
     /// Whether new events are queued. The capture harness turns it on by setting `BK_ENCOUNTER_OUT`
     /// at launch; tests flip it directly.
     pub encounter_events_enabled: bool,
@@ -2039,6 +2051,7 @@ impl Runtime {
             gravity: level.gravity,
             shots_fired: 0,
             encounter_events: Vec::new(),
+            encounter_shot_time: BTreeMap::new(),
             encounter_events_enabled: encounter_capture(),
             prints: Vec::new(),
             hud_message: None,
@@ -4293,7 +4306,7 @@ impl Runtime {
             // is `vel * dt`), so this is a real but small unstick toward the target.
             t.vel[0] += dir[0] * 0.1;
             t.vel[1] += dir[1] * 0.1;
-            t.yaw = dir[1].atan2(dir[0]).to_degrees();
+            t.yaw = (-dir[0]).atan2(dir[1]).to_degrees();
         }
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} is blocked and nudges toward {goal:?} (jump)");
@@ -4523,6 +4536,20 @@ impl Runtime {
             thing.ai_wait = (thing.ai_wait - dt).max(0.0);
             let ready = thing.ai_wait <= 0.0;
             let (from, yaw, health) = (thing.pos, thing.yaw, thing.health);
+            // `sithAI_sub_4EAD60` builds the sight eye from the thing's model offset, above the
+            // body's origin. An actor standing on a table, a crate or a balcony therefore casts its
+            // sight ray from above that surface, and the ray leaves the solid thing it stands on;
+            // the port's ray started *on* the surface, its leaf was skipped by the solid test, and
+            // level 1's upstairs Greedo saw the player straight through the balcony floor and
+            // turned while retail's actor never moved.
+            let eye = {
+                let radius = self
+                    .template_hit
+                    .get(&ai_template.to_ascii_lowercase())
+                    .map(|(radius, _)| *radius)
+                    .unwrap_or(0.065);
+                [from[0], from[1], from[2] + radius + 0.01]
+            };
             // `talk` (`0x50be20`, the second-most-used instinct after `listen`: 198 classes): idle
             // chatter on the instinct's own clock. Its first number is the interval in milliseconds
             // (`talk 10000.0, 0.10` in most shipped classes, `3000.0, 0.40` in `boc`) and the second
@@ -4593,7 +4620,9 @@ impl Runtime {
             let look = self.ai_look.get(&index).copied();
             // `AISetLookPos` is a standing turn: it decides facing whenever the legs are not carrying
             // the actor somewhere, which is how `00_AIPatrol.cog` reverses at the end of each leg.
-            let look_yaw = look.map(|l| (l[1] - from[1]).atan2(l[0] - from[0]).to_degrees());
+            let look_yaw = look.map(|l| {
+                (-(l[0] - from[0])).atan2(l[1] - from[1]).to_degrees()
+            });
             // No instinct class means no sight and no instincts: a class-less actor still walks a
             // destination a script gave it, but it never spots the player on its own.
             // Sight needs a **clear line**. `Ai::sees` is distance and cone only, so without
@@ -4603,7 +4632,7 @@ impl Runtime {
             let sighted = ai_on
                 && ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target))
                 && self.solids.as_ref().is_none_or(|s| {
-                    !s.segment_blocked(from, target) && !s.segment_thing(from, target)
+                    !s.segment_blocked(eye, target) && !s.segment_thing(eye, target)
                 });
             // `sithAI_CanDetectSightThing` (`0x4ec140`): a clear line is not the same as noticing. The
             // engine rolls its detection chance whenever it refreshes a target; the port rolls it when
@@ -4758,7 +4787,7 @@ impl Runtime {
                 let (sin, cos) = yaw.to_radians().sin_cos();
                 eprintln!(
                     "ai: sees {index} range {range:.2} dot {:.2} ready {ready} yaw {yaw:.1} rate {turn_rate:.1} from {from:?} target {target:?}",
-                    (cos * sx + sin * sy) / range
+                    (cos * sy - sin * sx) / range
                 );
             }
             // `AISetFireTarget`: what this actor shoots at, when a script names it. That replaces the
@@ -4866,6 +4895,17 @@ impl Runtime {
             // its own room and alignment own — that is the reader the stand-in could not express.
             let remembered = self.ai_last_seen.get(&index).copied().or_else(|| {
                 let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
+                // Only a class with a handler consumes the sound record: `listen` (`0x50a6f0`) or
+                // `follow`, whose handler is what walks to an awareness position. `pednarsh.ai`
+                // (the cantina crowd) ships `SenseDanger`, `Flee` and `OpenDoors` only, and its
+                // actors stand still in retail's door series while the port walked them at every
+                // gunshot — the hearing path's default 1.0 ran for classes that cannot hear.
+                let hears = ai.as_ref().is_some_and(|class| {
+                    class.instinct("Listen").is_some() || class.instinct("Follow").is_some()
+                });
+                if !hears {
+                    return None;
+                }
                 // `listen` (`0x50a6f0`): the record is scanned **kind 2, then 1, then 0**, and the handler's own
                 // conditions decide what is heard (`heard_event`: `heardist`, line of sight, and — for
                 // a sound through geometry — nearer than one unit and in front). It then rolls the
@@ -4880,7 +4920,7 @@ impl Runtime {
                     .map(|class| class.heardist)
                     .unwrap_or(f32::INFINITY);
                 let (heard, at, source) =
-                    self.heard_event(sector, here, [yaw.cos(), yaw.sin()], heardist)?;
+                    self.heard_event(sector, here, [-yaw.sin(), yaw.cos()], heardist)?;
                 if let Some((last_at, last_pos, answered)) = self.ai_listen.get(&index).copied()
                     && last_at == at
                     && last_pos == heard
@@ -5081,8 +5121,14 @@ impl Runtime {
                             );
                             let range = (dx * dx + dy * dy + dz * dz).sqrt();
                             let in_cone = ai.as_ref().is_some_and(|ai| ai.sees(thing.0, thing.2, target));
+                            // `sithAI_CheckSightThing` casts its sight ray against the level's
+                            // **collision**, which includes solid things: a railing or a body in the
+                            // way blocks the find exactly as a wall does. The scan tested only the
+                            // world faces, so level 1's door actors standing behind the balcony rail
+                            // acquired the player while retail's never did.
                             let clear = self.solids.as_ref().is_none_or(|s| {
                                 !s.segment_blocked(thing.0, target)
+                                    && !s.segment_thing(thing.0, target)
                             });
                             // The scan is the **acquisition** path: the handler runs
                             // `sithAI_CheckSightThing`, whose detection roll is
@@ -5173,7 +5219,7 @@ impl Runtime {
                         thing.pos = next;
                         thing.ai_target = Some(goal);
                         thing.yaw =
-                            turn_toward(thing.yaw, away[1].atan2(away[0]).to_degrees(), turn_rate, dt);
+                            turn_toward(thing.yaw, (-away[0]).atan2(away[1]).to_degrees(), turn_rate, dt);
                     }
                     self.walked.push(index);
                     let dt = dt.max(1e-4);
@@ -5387,6 +5433,18 @@ impl Runtime {
                         );
                     }
                     let _ = self.emit_ai_event(index, 0x400, None);
+                    // `SetLookFrame` turns toward the goal even when the legs are held by a ledge
+                    // (`SetLookFrame` is the handler's own call), but only when the goal is the
+                    // actor's business: a scripted destination or a target it can see. A roamer's
+                    // blocked random point turned level 1's cantina crowd 78°, where retail's own
+                    // actors keep their placed facing for the whole encounter.
+                    if (scripted.is_some() || sighted)
+                        && (facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4)
+                        && let Some(thing) = self.things.get_mut(index)
+                    {
+                        let wanted = (-facing.0).atan2(facing.1).to_degrees();
+                        thing.yaw = turn_toward(thing.yaw, wanted, turn_rate, dt);
+                    }
                     continue;
                 }
                 if let Some(thing) = self.things.get_mut(index) {
@@ -5394,7 +5452,7 @@ impl Runtime {
                     thing.ai_target = Some(goal);
                 }
                 if facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4 {
-                    want_yaw = facing.1.atan2(facing.0).to_degrees();
+                    want_yaw = (-facing.0).atan2(facing.1).to_degrees();
                 }
                 self.walked.push(index);
                 // A waypoint is a doorway centre the route search found: reaching it pops the list so
@@ -5429,7 +5487,7 @@ impl Runtime {
                 // face the player at level 1's spawn, which is the whole frame's change in the spawn
                 // series (round 307). Without a target the authored facing stands.
                 if sighted && engaged {
-                    want_yaw = (target[1] - from[1]).atan2(target[0] - from[0]).to_degrees();
+                    want_yaw = (-(target[0] - from[0])).atan2(target[1] - from[1]).to_degrees();
                 } else if let Some(yaw) = look_yaw {
                     want_yaw = yaw;
                 }
@@ -5624,14 +5682,15 @@ impl Runtime {
             if aim.is_some()
                 && let Some(thing) = self.things.get_mut(index)
             {
-                thing.yaw = sy.atan2(sx).to_degrees();
+                thing.yaw = (-sx).atan2(sy).to_degrees();
             }
             let yaw = self.things.get(index).map(|t| t.yaw).unwrap_or(yaw);
             // `minDot`: the actor fires only once it is facing the target, which is what makes it
-            // turn before shooting rather than snap.
-            let facing = yaw.to_radians().sin_cos();
+            // turn before shooting rather than snap. The engine's facing is `(-sin yaw, cos yaw)`.
+            let (sin, cos) = yaw.to_radians().sin_cos();
+            let facing = (-sin, cos);
             let dot = if range > 1e-4 {
-                (facing.1 * sx + facing.0 * sy) / range
+                (facing.1 * sy + facing.0 * sx) / range
             } else {
                 1.0
             };
@@ -5659,7 +5718,7 @@ impl Runtime {
             }
             shots.push((index, weapon, error));
             if let Some(thing) = self.things.get_mut(index) {
-                thing.yaw = sy.atan2(sx).to_degrees();
+                thing.yaw = (-sx).atan2(sy).to_degrees();
                 // `sithActor_UpdateAimJoints`: the aim points at the target in **three** dimensions.
                 // Without the elevation an actor shoots level at a player standing on a ledge and the
                 // bolt passes underneath — the bug the player had until round 109.
@@ -5689,7 +5748,10 @@ impl Runtime {
                     thing.ai_wait = burst_ms / 1000.0;
                 } else {
                     thing.ai_burst = (burst - 1.0).max(0.0);
-                    let jitter = 1.2 - 0.2 * crate::cog::pseudo_random() as f32;
+                    // `sithAICmd_PrimaryFire` jitters the shot delay by ±20% (the ledger's figure).
+                    // The asymmetric `1.2 - 0.2 * frand` averaged 1.1 and put the door gunner's
+                    // cadence at ~825 ms, where retail's fixture measures ~750 ms.
+                    let jitter = 1.0 - 0.2 + 0.4 * crate::cog::pseudo_random() as f32;
                     thing.ai_wait = delay_ms / 1000.0 * jitter;
                 }
             }
@@ -6050,7 +6112,18 @@ impl Runtime {
         for actor in std::mem::take(&mut self.walked) {
             let Some(thing) = self.things.get(actor) else { continue };
             let (pos, sector) = (thing.pos, thing.sector.max(0) as usize);
-            let (resolved, _) = solids.resolve_stepped(sector, pos, 0.5);
+            // The body's own collision radius, not the walker's 0.5: a resolved face pushes only
+            // when the body's *feet* are below its top edge, and a 0.5 probe put the feet of a
+            // body standing on a catwalk or a table 0.5 under the surface — so every wall face of
+            // the thing it stood on shoved it sideways (level 1's powerdroid was ejected 0.4 units
+            // off its ledge). The engine collides a thing with its own size.
+            let radius = self
+                .templates
+                .get(actor)
+                .map(|name| name.to_ascii_lowercase())
+                .and_then(|name| self.template_hit.get(&name).map(|(radius, _)| *radius))
+                .unwrap_or(0.065);
+            let (resolved, _) = solids.resolve_stepped(sector, pos, radius);
             let mut next = [resolved[0], resolved[1], pos[2]];
             // The player's own sweep settles the actor: a 0.6-unit downward probe plus the walker's
             // containment and floor rule. `move_body` has no horizontal delta here, so this only
@@ -6160,7 +6233,9 @@ impl Runtime {
         // shot left level, however the player was aiming.
         let pitch = src.pitch;
         let (sin, cos) = yaw.to_radians().sin_cos();
-        let flat = [speed[1] * cos - speed[0] * sin, speed[1] * sin + speed[0] * cos];
+        // The engine's basis is `forward = (-sin yaw, cos yaw)`, `right = (cos yaw, sin yaw)`; the
+        // template velocity is in the shooter's own frame (`x` right, `y` forward).
+        let flat = [speed[0] * cos - speed[1] * sin, speed[0] * sin + speed[1] * cos];
         // Pitch tilts that horizontal aim up or down and the template's own z rides along, so a shot
         // aimed 30 degrees up leaves with `speed * sin(30)` in z. `rotate_by_angles` is the engine's
         // `rdMatrix_Build34`, whose yaw starts at +Y; this world's camera yaw starts at +X, so the
@@ -6185,6 +6260,9 @@ impl Runtime {
                 template: template.clone(),
                 pos,
             });
+            // The projectile's own index, for the hit that ends it: `projectile_hits` reports the
+            // launch time when the bolt lands so retail's hit rows and the port's shots line up.
+            self.encounter_shot_time.insert(self.things.len(), self.time);
         }
         if std::env::var_os("BK_HIT_TRACE").is_some() {
             // The shooter's body and the shot's heading, so a trace can say who hit whom: a bolt's
@@ -6303,6 +6381,10 @@ impl Runtime {
         self.templates.push(template);
         self.types.push(kind);
         let index = self.things.len() - 1;
+        if self.encounter_events_enabled {
+            // The shot's own index now exists; the hit that ends it reports this launch time.
+            self.encounter_shot_time.insert(index, self.time);
+        }
         self.arm_life(index);
         // `sithWeapon_WeaponFireProjectile`'s **player-only pre-sweep**: when the shooter is the local
         // player and the projectile's `typeflags` (the `SITH_WF_*` word, `thing + 0x130`, which
@@ -7655,6 +7737,22 @@ impl Runtime {
     fn invulnerable(&self, index: usize, kind: u32) -> bool {
         kind != DAMAGE_FALL
             && self.actor_flags.get(&index).copied().unwrap_or(0) & AF_INVULNERABLE != 0
+    }
+
+    /// Report the launch of a shot that just landed on the player. Retail's door fixture can only
+    /// observe shots through their impact (its `hit` rows), so the port's `shot` row is the same
+    /// shot's launch; the gate compares the two streams nearest-time, a flight apart. A shot the
+    /// player's invulnerability swallowed is not reported: retail's fixture has no such row.
+    pub fn note_shot_landed(&mut self, shot: usize) {
+        if !self.encounter_events_enabled {
+            return;
+        }
+        let Some(t) = self.encounter_shot_time.remove(&shot) else { return };
+        let Some(thing) = self.things.get(shot) else { return };
+        let owner = thing.owner.unwrap_or(shot);
+        let template = self.templates.get(shot).cloned().unwrap_or_default();
+        let pos = thing.pos;
+        self.encounter_events.push(EncounterEvent::ShotLanded { t, owner, template, pos });
     }
 
     /// The damage this template deals (`damage=`), for a projectile that hits.
@@ -11089,16 +11187,17 @@ mod tests {
         rt.template_vel.insert(bolt.clone(), [0.0, 4.0, 0.0]);
         rt.template_damage.insert(bolt.clone(), 1.0);
 
-        // Level: the template's own heading, z untouched.
+        // Level: the engine's forward at yaw 0 is +Y, z untouched.
         let shot = rt.fire(0, &bolt).expect("projectile");
-        assert!((rt.things[shot].vel[0] - 4.0).abs() < 1e-3, "vel {:?}", rt.things[shot].vel);
+        assert!((rt.things[shot].vel[1] - 4.0).abs() < 1e-3, "vel {:?}", rt.things[shot].vel);
+        assert!(rt.things[shot].vel[0].abs() < 1e-3, "yaw 0 fired off the forward axis: {:?}", rt.things[shot].vel);
         assert!(rt.things[shot].vel[2].abs() < 1e-3, "a level shot rose: {:?}", rt.things[shot].vel);
 
         // Aimed 30 degrees up: the speed splits the way `sin`/`cos` say it must.
         rt.things[0].pitch = 30.0;
         let shot = rt.fire(0, &bolt).expect("projectile");
         let vel = rt.things[shot].vel;
-        assert!((vel[0] - 4.0 * 30f32.to_radians().cos()).abs() < 1e-3, "vel {vel:?}");
+        assert!((vel[1] - 4.0 * 30f32.to_radians().cos()).abs() < 1e-3, "vel {vel:?}");
         assert!((vel[2] - 4.0 * 30f32.to_radians().sin()).abs() < 1e-3, "vel {vel:?}");
 
         // And down again, which is the half a player notices on a ledge.
@@ -11262,10 +11361,10 @@ mod tests {
 
         let shot = rt.fire(0, "+bryarbolt").expect("projectile");
         assert_eq!(rt.things.len(), 2);
-        // Fired along the shooter's facing: yaw 0 faces +X in this world.
-        assert!(rt.things[shot].vel[0] > 0.0, "vel {:?}", rt.things[shot].vel);
+        // Fired along the shooter's facing: the engine's yaw 0 faces +Y (`(-sin yaw, cos yaw)`).
+        assert!(rt.things[shot].vel[1] > 0.0, "vel {:?}", rt.things[shot].vel);
         rt.step(None, 0.5);
-        assert!(rt.things[shot].pos[0] > 1.0, "pos {:?}", rt.things[shot].pos);
+        assert!(rt.things[shot].pos[1] > 1.0, "pos {:?}", rt.things[shot].pos);
 
         // Damage lands, and a killing blow marks the thing destroyed.
         assert_eq!(rt.damage(0, 30.0), 70.0);
@@ -12371,7 +12470,8 @@ mod tests {
         let mut rt = door_runtime();
         let base = rt.things[0].clone();
         let mut actor = base.clone();
-        actor.pos = [0.0, 0.0, 0.0]; // sector 7, facing +x
+        actor.pos = [0.0, 0.0, 0.0]; // sector 7, facing +x (the engine's yaw -90)
+        actor.yaw = -90.0;
         let mut player = base.clone();
         player.pos = [1.0, 0.0, 0.0]; // one unit ahead: inside the 2.0 always-noticed radius
         rt.things = vec![player, actor];
@@ -12516,7 +12616,7 @@ mod tests {
     #[test]
     fn a_sound_through_geometry_is_heard_only_when_close_and_in_front() {
         let from = [0.0, 0.0, 0.0];
-        let ahead = [1.0, 0.0]; // yaw 0 faces +X
+        let ahead = [1.0, 0.0]; // the facing vector the handler passes (+X here)
         let behind = [-1.0, 0.0];
         // Clear line of sight: bearing does not matter, the class's hearing distance does.
         assert!(hearable(from, behind, [2.0, 0.0, 0.0], 3.0, false));
@@ -12750,8 +12850,8 @@ mod tests {
             rt.things[1].vel
         );
         assert!(
-            rt.things[1].yaw.abs() < 1e-3,
-            "the actor did not face its target: yaw {}",
+            (rt.things[1].yaw + 90.0).abs() < 1e-3,
+            "the actor did not face its +X target: yaw {}",
             rt.things[1].yaw
         );
         // The handler's own 2000 ms clock: an immediate second event does nothing.
@@ -12990,7 +13090,8 @@ mod tests {
         let mut rt = door_runtime();
         let base = rt.things[0].clone();
         let mut actor = base.clone();
-        actor.pos = [1.0, 0.0, 0.0]; // sector 7, alignment -1
+        actor.pos = [1.0, 0.0, 0.0]; // sector 7, alignment -1, facing +x (engine yaw -90)
+        actor.yaw = -90.0;
         let mut player = base.clone();
         player.pos = [2.0, 0.0, 0.0]; // one unit ahead: inside sightdist 2.0 and the 90-degree cone
         rt.things = vec![player, actor];
@@ -13052,6 +13153,7 @@ mod tests {
             let base = rt.things[0].clone();
             let mut actor = base.clone();
             actor.pos = [1.0, 0.0, 0.0];
+            actor.yaw = -90.0; // facing +x, where the body stands
             let mut player = base.clone();
             player.pos = [2.0, 0.0, 0.0];
             rt.things = vec![player, actor];
@@ -13206,14 +13308,15 @@ mod tests {
         assert_eq!(sample(0, None), None, "an actor with no instinct dodged");
     }
 
-    /// A runtime for the shot-dodge checks: player thing 0 at the origin facing +X, one actor at
-    /// (2, 0, 0) whose class has `Dodge 0.3, 0.2` (weight 0.3, step 0.2). The template tables hold what
-    /// `fire` needs — the bolt's `vel=(0/7/0)` and its shipped `typeflags=0x20440d` /
+    /// A runtime for the shot-dodge checks: player thing 0 at the origin facing +X (engine yaw -90),
+    /// one actor at (2, 0, 0) whose class has `Dodge 0.3, 0.2` (weight 0.3, step 0.2). The template
+    /// tables hold what `fire` needs — the bolt's `vel=(0/7/0)` and its shipped `typeflags=0x20440d` /
     /// `thingflags=0x20000001` — and the player's muzzle is its own eye (no `fireoffset=`), so the
     /// sweep is a clean +X line.
     fn shot_dodge_runtime(flags: u32, actor_yaw: f32, bolt_typeflags: u32, sightdist: f32) -> Runtime {
         let mut rt = door_runtime();
-        let base = rt.things[0].clone();
+        let mut base = rt.things[0].clone();
+        base.yaw = -90.0;
         let mut actor = base.clone();
         actor.pos = [2.0, 0.0, 0.0];
         actor.yaw = actor_yaw;
@@ -13244,7 +13347,7 @@ mod tests {
     /// arms the latch, nothing ever disarms it, and every later `0x1000` is dropped by the gate.
     #[test]
     fn the_awareness_sweep_re_arms_the_one_shot_dodge_latch() {
-        let mut rt = shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0);
+        let mut rt = shot_dodge_runtime(0x200, 90.0, 0x20440d, 5.0);
         rt.sector_adjoins = vec![Vec::new(); 8]; // both things sit in sector 7 (`door_runtime`)
         // A latched actor drops every event but 2 — the engine's own rate limit.
         rt.actor_flags.insert(1, 0x200 | 0x1000);
@@ -13273,7 +13376,7 @@ mod tests {
     /// direction-to-the-shot rotated by a random 45-90 degrees: a sideways dodge, not a retreat.
     #[test]
     fn a_player_shot_that_would_hit_an_actor_makes_it_dodge_sideways() {
-        let mut rt = shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0);
+        let mut rt = shot_dodge_runtime(0x200, 90.0, 0x20440d, 5.0);
         assert!(rt.fire(0, "+bryarbolt").is_some(), "the shot did not spawn");
         let shot = rt.things.last().expect("a shot thing");
         assert_eq!(shot.flags, 0x20000001, "the shot did not inherit its template's thingflags");
@@ -13302,18 +13405,18 @@ mod tests {
             rt.ai_move.contains_key(&1)
         };
         // Awake, facing the player, and the shipped bolt typeflags: this is the one that dodges.
-        assert!(fires(shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0)));
+        assert!(fires(shot_dodge_runtime(0x200, 90.0, 0x20440d, 5.0)));
         // Not awake: the handler's first gate.
-        assert!(!fires(shot_dodge_runtime(0x0, 180.0, 0x20440d, 5.0)));
+        assert!(!fires(shot_dodge_runtime(0x0, 90.0, 0x20440d, 5.0)));
         // Facing away: `CheckSightThing`'s cone fails.
         assert!(!fires(shot_dodge_runtime(0x200, 0.0, 0x20440d, 5.0)));
         // Too far for the class's sight.
-        assert!(!fires(shot_dodge_runtime(0x200, 180.0, 0x20440d, 0.5)));
+        assert!(!fires(shot_dodge_runtime(0x200, 90.0, 0x20440d, 0.5)));
         // A projectile without the engine's typeflag bit: no pre-sweep, so no event at all.
         assert!(!fires(shot_dodge_runtime(0x200, 180.0, 0x440d, 5.0)));
         // A non-player shooter: the pre-sweep is player-only in `WeaponFireProjectile`.
-        let mut rt = shot_dodge_runtime(0x200, 180.0, 0x20440d, 5.0);
-        rt.things[1].yaw = 180.0;
+        let mut rt = shot_dodge_runtime(0x200, 90.0, 0x20440d, 5.0);
+        rt.things[1].yaw = 90.0;
         assert!(rt.fire(1, "+bryarbolt").is_some(), "the actor's own shot did not spawn");
         assert!(!rt.ai_move.contains_key(&1), "an actor's own shot made somebody dodge");
     }
@@ -13917,6 +14020,7 @@ mod tests {
             flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
+            aiclass: None,
         });
         let mut rt = Runtime::new(&level);
         assert_eq!(rt.things[0].rot_vel, [0.0, 90.0, 0.0], "the template's angvel did not seed rot_vel");
@@ -13946,6 +14050,7 @@ mod tests {
             flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
+            aiclass: None,
         });
         let mut rt = Runtime::new(&level);
         let motion = rt.step(None, 1.0);
@@ -14182,6 +14287,7 @@ mod tests {
             flags: 0,
             frames: Vec::new(),
             vel: [0.0; 3],
+            aiclass: None,
         });
         Runtime::new(&level)
     }
@@ -15066,6 +15172,46 @@ mod tests {
         assert_eq!(quiet.things[1].pos[0], 2.0, "an actor without `ReturnHome` walked away");
     }
 
+    /// The AI's facing is the engine's `(-sin yaw, cos yaw)`, not a math angle from +X. An actor
+    /// already aimed at the player therefore fires on its first tick with its yaw unchanged, and the
+    /// bolt leaves along +Y — which is exactly what retail's own door gunner does (placed at yaw 0,
+    /// firing down +Y, turning the two degrees onto the body instead of a quarter turn).
+    #[test]
+    fn an_actor_already_aimed_at_the_player_fires_on_the_first_tick() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0; // engine forward is +Y
+        let mut player = base.clone();
+        player.pos = [0.0, 1.5, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "reeyeesgun".into()];
+        rt.types = vec![10, 2];
+        rt.template_move.insert("walkplayer".into(), "physics".into());
+        rt.template_weapon.insert("reeyeesgun".into(), "blaster".into());
+        rt.template_vel.insert("blaster".into(), [0.0, 8.0, 0.0]);
+        rt.template_damage.insert("blaster".into(), 10.0);
+        rt.actor_flags.insert(1, 0x200);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\n\
+                 PrimaryFire 750.0, 0.8, 4.0, 0.0, 0.0, 500.0, 0.0, 0.0, 1.0, 0.0\n",
+            ),
+        );
+        let fired = rt.ai_tick(0, 1.0 / 60.0);
+        assert_eq!(fired, 1, "an actor already facing the player did not fire");
+        assert!(
+            rt.things[1].yaw.abs() < 0.5,
+            "the actor turned {} degrees onto a target it was already facing",
+            rt.things[1].yaw
+        );
+        let shot = rt.things.last().expect("a projectile");
+        assert!(shot.vel[1] > 0.0, "the shot left off the +Y axis: {:?}", shot.vel);
+        assert!(shot.vel[0].abs() < 1e-3, "the shot left off the +Y axis: {:?}", shot.vel);
+    }
+
     /// `blindfire` (`0x509b30`) fires at the **remembered** position when the body is out of sight:
     /// the engine tests that spot against the class's cos limit and a fixed 10-unit reach, rolls the
     /// instinct's chance and fires with its spread. The shipped line is
@@ -15527,10 +15673,11 @@ mod tests {
     #[test]
     fn look_for_target_scans_the_class_view_cone() {
         let mut rt = door_runtime();
-        // The body at the origin, an actor two units along +x facing +x (i.e. away from the body).
+        // The body at the origin, an actor two units along +x. The engine's yaw -90 faces +x, which
+        // here is away from the body.
         let mut actor = rt.things[0].clone();
         actor.pos = [2.0, 0.0, 0.0];
-        actor.yaw = 0.0;
+        actor.yaw = -90.0;
         let player = rt.things[0].clone();
         rt.things = vec![player, actor];
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
@@ -15559,7 +15706,7 @@ mod tests {
         // `thingflags & 0x4` is the engine's "plainly visible" bit, which makes the detection roll
         // certain and keeps this a test of the cone, not of the random draw.
         rt.things[0].flags = 0x4;
-        rt.things[1].yaw = 180.0;
+        rt.things[1].yaw = 90.0;
         rt.ai_scan.clear();
         rt.ai_last_seen.clear();
         rt.ai_tick(0, 0.1);

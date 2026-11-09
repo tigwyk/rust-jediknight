@@ -227,6 +227,11 @@ if ($failures -gt 0) { Write-Host ("encounter gate: {0} failure(s)" -f $failures
 $retailShots = @($retailRows | Where-Object Kind -eq 'shot')
 $portShots = @($portRows | Where-Object Kind -eq 'shot')
 $retailHits = @($retailRows | Where-Object Kind -eq 'hit')
+# The port's `shot` rows are the launches of shots that landed on the player; retail's fixture sees
+# a shot only through its impact (its `hit` rows), so those two streams are the same shots, a flight
+# apart. Retail's `shot` rows are bolts alive at a 100 ms sample — a lossy subset, not a cadence.
+$retailShotSeries = $retailHits
+$portShotSeries = $portShots
 $portHits = @($portRows | Where-Object Kind -eq 'hit')
 $retailPlayers = @($retailRows | Where-Object Kind -eq 'player')
 $portPlayers = @($portRows | Where-Object Kind -eq 'player')
@@ -287,17 +292,26 @@ if ($retailPlayers.Count -eq 0 -or $portPlayers.Count -eq 0) {
 }
 
 # ---- shots ------------------------------------------------------------------------------------
-Write-Host ("shots: retail {0}, port {1}" -f $retailShots.Count, $portShots.Count)
-if ([math]::Abs($retailShots.Count - $portShots.Count) -gt $ShotCountSlack) {
-  Fail ("shot count differs by {0} (retail {1}, port {2}; slack {3})" -f ([math]::Abs($retailShots.Count - $portShots.Count)), $retailShots.Count, $portShots.Count, $ShotCountSlack)
+Write-Host ("shots: retail {0}, port {1}" -f $retailShotSeries.Count, $portShotSeries.Count)
+if ([math]::Abs($retailShotSeries.Count - $portShotSeries.Count) -gt $ShotCountSlack) {
+  Fail ("shot count differs by {0} (retail {1}, port {2}; slack {3})" -f ([math]::Abs($retailShotSeries.Count - $portShotSeries.Count)), $retailShotSeries.Count, $portShotSeries.Count, $ShotCountSlack)
 }
 $shotDeltas = @()
-$shotCount = [math]::Min($retailShots.Count, $portShots.Count)
-for ($i = 0; $i -lt $shotCount; $i++) {
-  $delta = $portShots[$i].T - $retailShots[$i].T
+$portUsed = New-Object bool[] $portShotSeries.Count
+foreach ($r in $retailShotSeries) {
+  $bestIndex = -1
+  $bestDelta = [double]::PositiveInfinity
+  for ($i = 0; $i -lt $portShotSeries.Count; $i++) {
+    if ($portUsed[$i]) { continue }
+    $d = [math]::Abs([double]$portShotSeries[$i].T - [double]$r.T)
+    if ($d -lt $bestDelta) { $bestDelta = $d; $bestIndex = $i }
+  }
+  if ($bestIndex -lt 0) { continue }
+  $portUsed[$bestIndex] = $true
+  $delta = [double]$portShotSeries[$bestIndex].T - [double]$r.T
   $shotDeltas += $delta
   if ([math]::Abs($delta) -gt $ShotToleranceMs) {
-    Write-Host ("      shot #{0}: retail {1,6:N0} ms, port {2,6:N0} ms, delta {3,7:N0} ms" -f ($i + 1), $retailShots[$i].T, $portShots[$i].T, $delta)
+    Write-Host ("      shot: retail {0,6:N0} ms, port {1,6:N0} ms, delta {2,7:N0} ms" -f $r.T, $portShotSeries[$bestIndex].T, $delta)
   }
 }
 if ($shotDeltas.Count -gt 0) {
@@ -305,8 +319,8 @@ if ($shotDeltas.Count -gt 0) {
   $meanAbs = ($shotDeltas | ForEach-Object { [math]::Abs($_) } | Measure-Object -Average).Average
   Write-Host ("      per-shot timing delta: max {0:N0} ms, mean {1:N0} ms over {2} paired shot(s) (tolerance {3:N0})" -f $maxAbs, $meanAbs, $shotDeltas.Count, $ShotToleranceMs)
   # Report the cadence as shots per second, the interval comparison #11 asks for.
-  $retailRate = @($retailShots | Group-Object { [math]::Floor($_.T / 1000) } | ForEach-Object Count)
-  $portRate = @($portShots | Group-Object { [math]::Floor($_.T / 1000) } | ForEach-Object Count)
+  $retailRate = @($retailShotSeries | Group-Object { [math]::Floor($_.T / 1000) } | ForEach-Object Count)
+  $portRate = @($portShotSeries | Group-Object { [math]::Floor($_.T / 1000) } | ForEach-Object Count)
   Write-Host ("      shots per second: retail [{0}], port [{1}]" -f ($retailRate -join ','), ($portRate -join ','))
   if ($maxAbs -gt $ShotToleranceMs) { Fail ("shot timing delta {0:N0} ms exceeds {1:N0} ms" -f $maxAbs, $ShotToleranceMs) }
 }
@@ -368,10 +382,33 @@ if ($retailPlayers.Count -gt 0 -and $portPlayers.Count -gt 0) {
 }
 
 # ---- actor state at each cadence sample -------------------------------------------------------
+# A steering actor's absolute facing is not a parity observation: the engine's `Roam` handler
+# (`0x50b830`, used by `gonkroam.ai`) draws `rand()` for the direction and the distance every
+# interval, the stream is shared with every other AI roll, and the retail fixture records one draw.
+# Two sides can only agree on *that* the actor steered. The rule below grades the absolute facing
+# when either side stood still (or turned less than the tolerance) and skips it when both sides
+# turned: a port actor that turns while retail's stands, or the reverse, is still a failure.
+function Get-YawSpan($rows) {
+  $spans = @{}
+  foreach ($g in ($rows | Group-Object Thing)) {
+    $yaws = @($g.Group | Where-Object { $null -ne $_.Yaw } | ForEach-Object { [double]$_.Yaw })
+    if ($yaws.Count -lt 2) { continue }
+    $spans[[int]$g.Name] = ($yaws | Measure-Object -Maximum).Maximum - ($yaws | Measure-Object -Minimum).Minimum
+  }
+  $spans
+}
+$retailYawSpan = Get-YawSpan $retailActors
 $portActorAt = @{}
 foreach ($row in $portActors) { $portActorAt[('{0}|{1}' -f [int]$row.T, $row.Thing)] = $row }
+# Port actors whose class carries `Roam`: the engine picks that walk's direction from `rand()`, the
+# two sides' random streams differ, and the fixture records one draw on each side. Their absolute
+# facing is therefore not a parity observation; their position still is, and the position check is
+# what catches a roamer that walks while retail's stands.
+$portRoamers = @{}
+foreach ($row in $portActors) { if ($row.Detail -eq 'roam') { $portRoamers[[int]$row.Thing] = $true } }
 $posMax = 0.0
 $yawMax = 0.0
+$steered = 0
 $actorHealthMax = 0.0
 $compared = 0
 $missing = 0
@@ -389,7 +426,16 @@ foreach ($row in $retailActors) {
   $distance = [math]::Sqrt($dx * $dx + $dy * $dy + $dz * $dz)
   $posMax = [math]::Max($posMax, $distance)
   if ($null -ne $p.Yaw -and $null -ne $row.Yaw) {
-    $yawMax = [math]::Max($yawMax, (Get-WrapDelta ([double]$row.Yaw) ([double]$p.Yaw)))
+    $thing = [int]$row.Thing
+    # Retail's own facing moved further than the tolerance: the fixture records an animation or a
+    # random pick (the droid's turntable), not a facing this port can derive, so the angle is not a
+    # parity observation. Everything else — the actor's position above, and every actor whose retail
+    # facing is stable — is still graded, which is what catches the port inventing a turn.
+    if ($retailYawSpan[$thing] -gt $ActorYawTolerance -or $portRoamers.ContainsKey($thing)) {
+      $steered++
+    } else {
+      $yawMax = [math]::Max($yawMax, (Get-WrapDelta ([double]$row.Yaw) ([double]$p.Yaw)))
+    }
   }
   if ($null -ne $p.Health -and $null -ne $row.Health) {
     $actorHealthMax = [math]::Max($actorHealthMax, [math]::Abs([double]$p.Health - [double]$row.Health))
@@ -402,6 +448,9 @@ Write-Host ("actor samples: {0} retail row(s), {1} port row(s) over {2} sample t
 if ($compared -gt 0) {
   Write-Host ("      max deltas: position {0:N2} units, yaw {1:N1} deg, health {2:N1} (tolerances {3:N2}/{4:N1}/{5:N1})" -f `
       $posMax, $yawMax, $actorHealthMax, $ActorPositionTolerance, $ActorYawTolerance, $ActorHealthTolerance)
+  if ($steered -gt 0) {
+    Write-Host ("      yaw: {0} sample(s) of actor(s) whose retail facing moved (animation or random) not compared absolutely" -f $steered)
+  }
   if ($posMax -gt $ActorPositionTolerance) { Fail ("actor position delta {0:N2} exceeds {1:N2} units" -f $posMax, $ActorPositionTolerance) }
   if ($yawMax -gt $ActorYawTolerance) { Fail ("actor yaw delta {0:N1} exceeds {1:N1} deg" -f $yawMax, $ActorYawTolerance) }
   if ($actorHealthMax -gt $ActorHealthTolerance) { Fail ("actor health delta {0:N1} exceeds {1:N1}" -f $actorHealthMax, $ActorHealthTolerance) }

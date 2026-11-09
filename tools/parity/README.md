@@ -388,12 +388,23 @@ both builds as one TSV so AI and combat timing can be compared instead of inferr
 t_ms  kind  thing  template  x  y  z  yaw  health  shields  detail
 ```
 
-`kind` is `player`/`actor` at the row's cadence (100 ms here), `shot` when an actor fires, and `hit` when
-a shot lands on the player — the hit row carries the health and shields **after** the hit. Both sides use
-the engine's game clock, not wall time, so the timeline is comparable at different frame rates. The
-retail engine renders a few frames a second, so its `hit` row is the damage that landed since the
-previous sample (two bolts in one frame are one row) and its rows hold that frame's state between
-grid points; the port records every shot and hit at its fixed 60 Hz step.
+`kind` is `player`/`actor` at the row's cadence (100 ms here), `shot` when the port fires a shot that
+lands on the player (the row is that shot's **launch**: time, shooter, template and muzzle), and `hit`
+when a shot's damage lands — the hit row carries the health and shields **after** the hit. Retail can
+only observe a shot through its impact on the player (its memory reader sees a bolt only if it exists
+at a 100 ms sample), so its `shot` rows are a lossy subset of bolts alive at a sample and the port's
+`shot` rows are the landed shots' launches. The gate therefore pairs retail's **`hit`** times with the
+port's `shot` times: the same shots, one flight apart, and both counts are exact instead of a sampling
+race. Both sides use the engine's game clock, not wall time, so the timeline is comparable at
+different frame rates. The port samples **before** the frame's AI tick, so a bolt born and spent inside
+one frame is invisible to retail's 100 ms points; only the impact-driven `shot`/`hit` rows are written
+after the tick. The retail engine renders a few frames a second, so its `hit` row is the damage that
+landed since the previous sample (two bolts in one frame are one row) and its rows
+hold that frame's state between grid points; the port hits are its fixed 60 Hz step.
+
+The trace window is the fixture's own: retail stops at the first sample whose elapsed time reaches
+10 s, so its last row is at 9,900 ms. The port's row runs 594 fixed steps (9.9 s) for the same reason;
+a full 10,000 ms adds a sample (and, at the gunner's cadence, a shot) retail never records.
 
 - Retail: `pwsh -File tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door -EncounterMs 10000 -EncounterCadenceMs 100 -EncounterName door_encounter`
   writes `target/parity/encounter/door_encounter.tsv` (the pose row is `route_door`; `-EncounterName`
@@ -404,8 +415,11 @@ grid points; the port records every shot and hit at its fixed 60 Hz step.
   (`world = 0x008339C8`, count at `+0xBC`, base at `+0xC4`, stride `0x2B0`). The addresses and their
   decompiled sources are in `Invoke-JkEncounterTrace`.
 - Port: `pwsh -File tools/parity/port-encounter.ps1` runs the same pose for the row's fixed 1/60 s
-  frames with `BK_ENCOUNTER_OUT` set; the runtime queues shot/hit events and the app samples the player
-  and the actors within 8 units.
+  frames with `BK_ENCOUNTER_OUT` set; the app samples the player and the actors within 8 units the
+  same way retail does, and writes a `shot` row for every fired shot that lands on the player and a
+  `hit` row for the damage. The capture starts the player damageable: `kyle.cog`'s `init_kyle` freezes
+  the body for 1.5 s after the level loads, and retail's capture begins after the level has settled, so
+  without that the gunner's first two bolts vanish and its first measured hit lands at 817 ms.
 - Gate: `pwsh -File tools/parity/encounter-gate.ps1` seeds the committed retail fixture from
   `tools/parity/encounter/`, records the port twice (and fails if the two runs leave the measured
   run-to-run band: same shape and endpoint, event-timing and actor-state deltas and the same kill
@@ -413,6 +427,23 @@ grid points; the port records every shot and hit at its fixed 60 Hz step.
   order, the settled endpoint, and the actor position/facing/health deltas at every sample. It exits
   non-zero when any of them leaves its tolerance, and its thresholds are parameters with their reasons
   in the script header.
+
+The port samples before the frame's AI tick for its `player`/`actor` rows, matching retail's 100 ms
+points; the `shot`/`hit` rows are written after the tick, evicted from the runtime's event queue, so
+the shot that fires this frame keeps its launch time. A shot writes its `shot` row only when it
+actually damages the player (an invulnerable body produces no retail row), and the row's time is the
+launch recorded when the projectile spawned.
+
+**Facings are graded only where retail's facing is stable.** A retail facing that moves more than
+`ActorYawTolerance` during the encounter is animation or a random pick, not a facing the port can
+derive. The door fixture's powerdroid facing is a model turntable that sweeps ~350° and holds, and the
+canteen pedestrians whose classes carry `Roam` (`0x50b830`) draw the engine's `rand()` (`0x512d00`, a
+single global stream shared with every detection roll and aim error) for the direction and distance
+every interval. The port marks a roamer in the actor row's `detail` column, and the gate compares the
+absolute yaw only when retail's own facing stayed within the tolerance and the port's class is not a
+roamer; every actor's **position** is still graded strictly. A retail moving facing is reported, not
+graded.
+
 
 Kill order is read off the trace: both captures drop a thing once it is gone (the retail reader skips
 an actor at 0 health, the port's trace a destroyed one) and both name an actor by the level's own
@@ -435,8 +466,10 @@ capture (`--shot`, `BK_ENCOUNTER_OUT`, `--replay`): without it the walk traces d
 travelled 2.6 units on one run and 1.0 on the next, because an AI actor driven from the LCG stood in
 the body's path. Play keeps the default executor.
 
-The gate is the instrument for #11 (AI engagement timing) and #12 (combat timing); until those land its
-default run reports the known AI-timing gap rather than passing.
+The gate is the instrument for #11 (AI engagement timing) and #12 (combat timing). #11 measured its
+door-gunner acquisition, cadence and facing against the fixture and fixed the timing differences
+(landed-shot rows, the intro freeze at capture start, the 9.9 s window, the roamer facing exemption);
+its default run passes. #12 (the player's damage split) is still the shipped `item_shields.cog`'s.
 
 ### Retail's cog namespace
 
