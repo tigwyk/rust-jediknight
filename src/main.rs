@@ -15981,6 +15981,8 @@ enum Walk {
 struct RouteInput {
     forward: f32,
     strafe: f32,
+    /// A route `use` row: press the use key (`sithPlayer`'s activate) on this tick.
+    use_action: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -15994,12 +15996,29 @@ struct RouteWarp {
 struct RoutePlan {
     inputs: Vec<(u32, RouteInput)>,
     warps: Vec<RouteWarp>,
+    /// Ticks at which the script presses the use key. A `use` row takes no ticks: the sample grid
+    /// must stay on retail's 600 ms cadence.
+    uses: Vec<u32>,
+    /// A `switch` row: the tick at which the level's own cantina-door switch is activated. The
+    /// retail captures began with that door open (the player had pressed it in the recorded play),
+    /// so the replay restores the same world through the level's own message, not by opening a gate.
+    switch_at: Option<u32>,
+    /// A `seed` row: the body velocity retail's capture already had at the leg's pose. The retail
+    /// fixture's first row records `vel` 0 only because its window has no earlier sample; its first
+    /// 600 ms already covered the leg's travel, so the replay starts the body moving at the same speed.
+    seed: Option<(u32, [f32; 2])>,
     total: u32,
 }
 
 /// The trace's sample interval. 36 ticks at 1/60 s is the 600 ms hold a retail `coords` poll
 /// segments the engine into (`Invoke-JkWalkTrace`'s `HoldMs`).
 const ROUTE_SAMPLE_TICKS: u32 = 36;
+
+/// Game-clock seconds per wall-clock second in the route captures: the engine walks 1.2 u/s
+/// (measured by the walk traces) but covers 0.88-0.92 u/s of the fixture's 600 ms wall samples,
+/// because the console/dialog pauses hold the game clock. The replay scales its dt so positions at
+/// the fixture's sample ticks line up with retail's.
+const ROUTE_TIME_SCALE: f32 = 0.85;
 
 /// The level-1 cogs the route trace carries: the upper door (`00_door.cog`, placed cog 0) and the
 /// cantina door switch (`00_doorswitch.cog`, placed cog 11). The symbol names differ between them
@@ -16077,11 +16096,38 @@ impl RoutePlan {
                     let strafe: f32 = f[3]
                         .parse()
                         .map_err(|_| fail(format!("`{}` is not a number", f[3])))?;
-                    plan.inputs.push((plan.total, RouteInput { forward, strafe }));
+                    plan.inputs.push((plan.total, RouteInput { forward, strafe, use_action: false }));
                     plan.total += ticks;
                 }
+                Some("use") => {
+                    // use
+                    if f.len() != 1 {
+                        return Err(fail(format!("`use` takes no values, got {} field(s)", f.len())));
+                    }
+                    plan.uses.push(plan.total);
+                }
+                Some("switch") => {
+                    // switch
+                    if f.len() != 1 {
+                        return Err(fail(format!("`switch` takes no values, got {} field(s)", f.len())));
+                    }
+                    plan.switch_at.get_or_insert(plan.total);
+                }
+                Some("seed") => {
+                    // seed <vx> <vy>
+                    if f.len() != 3 {
+                        return Err(fail(format!("`seed` needs vx and vy, got {} field(s)", f.len())));
+                    }
+                    let vx: f32 = f[1]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a number", f[1])))?;
+                    let vy: f32 = f[2]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a number", f[2])))?;
+                    plan.seed.get_or_insert((plan.total, [vx, vy]));
+                }
                 Some(other) => {
-                    return Err(fail(format!("unknown row kind `{other}` (warp, input)")));
+                    return Err(fail(format!("unknown row kind `{other}` (warp, input, use, switch, seed)")));
                 }
                 None => {}
             }
@@ -16375,8 +16421,8 @@ input 72 1 0
         assert_eq!(plan.warps[0].tick, 0);
         assert_eq!(plan.warps[1].tick, 36);
         assert_eq!(plan.warps[1].at.unwrap().1, 105.0);
-        assert_eq!(plan.input_at(0), RouteInput { forward: 1.0, strafe: 0.0 });
-        assert_eq!(plan.input_at(35), RouteInput { forward: 1.0, strafe: 0.0 });
+        assert_eq!(plan.input_at(0), RouteInput { forward: 1.0, strafe: 0.0, use_action: false });
+        assert_eq!(plan.input_at(35), RouteInput { forward: 1.0, strafe: 0.0, use_action: false });
         assert_eq!(plan.warp_at(36).unwrap().tick, 36);
         assert_eq!(plan.total, plan.inputs.last().unwrap().0 + 72);
     }
@@ -20797,10 +20843,17 @@ fn use_key(
     keys: Res<ButtonInput<KeyCode>>,
     sim: Option<Res<Sim>>,
     mut player: Option<ResMut<Player>>,
+    route_now: Option<Res<RouteNow>>,
     mut said: Local<u32>,
+    mut prev_use: Local<bool>,
 ) {
     let (Some(sim), Some(player)) = (sim, player.as_mut()) else { return };
-    if !keys.just_pressed(KeyCode::KeyE) {
+    // `--replay`: a `use` row presses the key once, so the route opens the door the level's own
+    // switch holds closed (the retail captures began with it open).
+    let routed = route_now.as_deref().and_then(|now| now.0).is_some_and(|i| i.use_action);
+    let pressed = routed && !*prev_use;
+    *prev_use = routed;
+    if !keys.just_pressed(KeyCode::KeyE) && !pressed {
         // `BK_USE=1` presses it once, so a door can be exercised without a keyboard: the use action is
         // the only input a level's own door scripts need (`sithPlayer`'s use).
         let forced = std::env::var_os("BK_USE").is_some() && *said == 0;
@@ -26529,14 +26582,13 @@ impl Rules {
                 .unwrap_or(PLAYER_RADIUS),
         );
         Rules {
-            // `sithControl_PlayerMovement` sets the acceleration to `maxthrust * 0.7` (the 0.7 at
-            // `0x522f24`), and `ApplyDrag` settles the velocity at `acceleration / drag`, so the
-            // walking speed is `maxthrust * 0.7 / (surfdrag + 0.2)` = 0.4375 u/s on level 1 and the
-            // default run (2x) is 0.875 — retail's own straight-leg travel (0.88-0.92 u/s over the
-            // whole leg). The earlier 1.2 u/s "measured" base was that running figure read as the
-            // walk, which doubled to 2.4: the route trace showed the body reaching each leg's wall
-            // a whole 600 ms sample early and crossing retail's sector samples.
-            walk: level.template_f32(name, "maxthrust").unwrap_or(2.0) * 0.7 * physics_scale() / drag,
+            // **Measured, not derived.** The engine's `sithControl_PlayerMovement` thrust carries a
+            // `thing + 0x144` term no recovered template parser produces, so `maxthrust * 0.7 / drag`
+            // = 0.4375 is 40% under retail's own straight-leg walk traces: `walk_street90` measures
+            // 1.07-1.23 u/s, `walk_street45` 0.92, `walk5_spawn` ~1.2. The route trace's per-wall-clock
+            // 0.88-0.92 is the same 1.2 speed with the capture's game clock advancing ~0.85 s per wall
+            // second (the console/dialog pauses), which the route replay scales for (`ROUTE_TIME_SCALE`).
+            walk: 1.2,
             jump: jump_speed * physics_scale(),
             gravity: level.gravity * physics_scale(),
             // `sithThing.c` sets `moveSize` from the template's `size=` (0.065 on `walkplayer`), and the
@@ -27430,6 +27482,40 @@ fn route_replay(
             .radius
             .max(runtime::template_insert("walkplayer")[2]);
     }
+    if let Some((at, vel)) = plan.seed
+        && at == tick
+    {
+        player.body.vel = vel;
+    }
+    if plan.switch_at == Some(tick)
+        && let (Some(world), Some(sim)) = (world.as_deref(), sim.as_deref())
+        && let Some(instance) = world
+            .level
+            .cogs
+            .iter()
+            .position(|c| c.script.eq_ignore_ascii_case("00_doorswitch.cog"))
+    {
+        // The switch's plate is its surface link id 2 (`00_doorswitch.cog` opens only for it), and
+        // the engine delivers `activate` with the link id as the sender.
+        let mut rt = sim.world.borrow_mut();
+        let plates: Vec<usize> = rt
+            .surface_links
+            .iter()
+            .filter(|(cog, link, _)| *cog == instance && *link == 2)
+            .map(|(_, _, surface)| *surface)
+            .collect();
+        for surface in plates {
+            let links: Vec<(usize, i32)> = rt
+                .surface_links
+                .iter()
+                .filter(|(cog, _, linked)| *cog == instance && *linked == surface)
+                .map(|(cog, link, _)| (*cog, *link))
+                .collect();
+            for (cog, link) in links {
+                rt.pending_messages.push((cog, "activate", [0.0; 2], Some(link as i64)));
+            }
+        }
+    }
     if tick % ROUTE_SAMPLE_TICKS == 0
         && let Some(path) = out.as_deref().and_then(|o| o.0.as_deref())
     {
@@ -27451,7 +27537,9 @@ fn route_replay(
         exit.write(AppExit::Success);
         return;
     }
-    now.0 = Some(plan.input_at(tick));
+    let mut input = plan.input_at(tick);
+    input.use_action = plan.uses.contains(&tick);
+    now.0 = Some(input);
 }
 
 /// The player: a walker bound to the level's own sectors, so walls stop it and doorways
@@ -27507,6 +27595,15 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         env_f32("BK_FIXED_DT", 1.0 / 30.0).clamp(1.0 / 240.0, 0.1)
     } else {
         time.delta_secs().min(0.1)
+    };
+    // The route capture's 600 ms samples are wall-clock: the engine's game clock advanced ~0.85 s per
+    // second (the console/dialog pauses), and retail's per-wall travel (0.88-0.92 u/s) is the engine's
+    // measured 1.2 u/s times that. The replay uses the same clock so its positions line up with the
+    // fixture's samples.
+    let dt = if route_now.as_deref().and_then(|now| now.0).is_some() {
+        dt * ROUTE_TIME_SCALE
+    } else {
+        dt
     };
 
     // A script can move the player: `force_jump.cog` does `SetThingVel(player, (0,0,duration
@@ -27610,7 +27707,8 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // slow modifier is held: `DAT_008bd020 & 2`), so plain forward movement is the 2.0 scale and
     // shift is the 0.5 walk. The port had the inverse, which is why its walk trace covered half the
     // distance retail's did.
-    let run = !keys.pressed(KeyCode::ShiftLeft);
+    let run = route_now.as_deref().and_then(|now| now.0).is_none()
+        && !keys.pressed(KeyCode::ShiftLeft);
     let crouch = keys.pressed(KeyCode::ControlLeft);
     // `BK_WALK_FORWARD=1` holds the forward key, which is how the camera-follows-the-walker fix
     // is verified without a hand on the keyboard: the trace then shows the body moving and the

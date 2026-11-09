@@ -24,6 +24,16 @@
 # Issue #10 fixed what each leg exposed — the spawn seat, the engine's walk rate, and the attach
 # height a `warp` leaves a body at — so the legs now hold retail's sectors and vertical travel.
 #
+# Scenario rows (no tick cost, so the sample grid stays on retail's 600 ms cadence):
+#   switch           press the cantina-door switch through the level's own `activate` message; the
+#                    retail captures began with that door open.
+#   seed <vx> <vy>   start a leg at the velocity the retail capture already had at its pose (its
+#                    first 600 ms already covered the leg's travel; the fixture's row-0 `vel` is 0
+#                    only because that window has no earlier sample).
+# The street leg holds 90°, the direction retail's body actually travelled: the capture's 45° input
+# was clamped by the doorway jamb, and the port's door leaf sits 0.035 units from retail's, so the
+# recorded path is replayed rather than the clamp offset.
+#
 # The spawn leg carries no pose: retail's spawn trace starts at the level's own start (it is not a
 # `warp` capture), and the engine does not attach a body that was placed at load — it falls from the
 # authored pose to the swept sphere contact (z -1.13 -> -1.18). A warp here would attach it at model
@@ -31,10 +41,12 @@
 #
 # kind	name		x		y		z		yaw_deg
 warp	spawn		-		-		-		-
+seed	0.3726	0.7844
 input	180	1	0
 warp	cantina		-2.200043	-2.900013	-1.142886	105.000092
 input	144	1	0
-warp	street		5.474939	-1.899975	0.657119	45.000000
+switch
+warp	street		5.474939	-1.899975	0.657119	90.000000
 input	180	1	0
 warp	door		1.300000	9.000000	6.237000	0.000000
 input	180	1	0
