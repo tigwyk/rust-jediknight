@@ -1,5 +1,11 @@
 # Retail-vs-port parity captures
 
+> **Agents: do not run the retail side** (`retail-capture.ps1`, or any gate flag that captures retail
+> on demand). Only the user starts a retail capture. The decompiled engine in `decomp/` is the spec for
+> mechanics (`docs/porting-roadmap.md`, Principle 1); the retail fixtures committed here are frozen
+> regression data. The port-side scripts and the gates that read committed fixtures are fine to run.
+> Everything below documents how the harness works for those deliberate, user-run sessions.
+
 Screenshot the **real GOG game** and **this port** from the same, known camera poses, then put
 them side by side. Built to answer "does the port draw what the 1997 engine draws?" — the first
 use was level 1's opening, where the port's spawn view looked buried in a prop. That turned out to

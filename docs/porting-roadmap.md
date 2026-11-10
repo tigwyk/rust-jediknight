@@ -82,6 +82,11 @@ One table, per stage, with the **tier** the tier definitions above demand and th
 evidence that earns it. Everything not marked T2 is T1 (implemented and self-consistent, with a gate
 that fails on drift) — which is the point of this table: an internal check is not parity.
 
+**Reading the "next rung" column after 2026-11-09:** a cell that asks for a new retail pair, capture or
+trace is superseded by Principle 1. The next rung for that stage is to transliterate the engine
+functions that own it from `decomp/`; the retail item stays listed only as something the user may
+choose to run.
+
 | stage (`roadmap.md`) | tier | what earns it | next rung |
 |---|---|---|---|
 | 1 sector/portal visibility | **T1** | portal occlusion on, and the **doorway test runs now (round 342)**: `visible_sectors`' `sees` hook was passed `any`, so the walk admitted every room through every visible adjoin; it now projects the doorway's verts and drops a room whose only opening has no vertex in front of the eye (the `w` test) or whose projected corners miss the viewport. The filtered walk runs on the **same seed** the unfiltered one chose and is adopted only when it is usable (a seed and at least one on-screen room), so the drawn set can only shrink — the first cut let a degenerate filtered set trip `use_portals` and draw the whole frustum, which ended level 1 through the renderer's `sighted` link (`--ai-live` timed out; the guard fixed it). Level 1's spawn: **90 of 462 sectors drawn → 84**, and the two captures are **byte-identical** (526,617 bytes), so nothing visible was lost. The earlier A/B (`--no-cull`, 0.000 % over 230,400 samples) still stands | a retail spawn pair that isolates a room drawn through a portal |
@@ -289,6 +294,10 @@ has since outgrown the note. Line numbers drift; the identity is the symbol and 
 
 ### Phase 0.5 — Retail trace v0 (unblocks Phase 1 steps 3–6)
 
+> **Closed, and not to be extended by agents (2026-11-09).** This phase built the retail harness; its
+> fixtures are now frozen regression data (Principle 1). Do not add capture modes, hooks or denser
+> traces. The text below is the record of what was built.
+
 **Exit criteria met (v0, rounds 100–213).** T3 always worked because a screenshot is a complete observation;
 T2/T4 needed a replayable trace and pinned console formats, and both exist now: `port-trace.ps1` replays a
 leg at a fixed 1/60 s step, the walk-trace gate replays 15 retail-derived legs, and the `cogstatus`/`aistatus`
@@ -346,8 +355,13 @@ Do not start Phase 1 step 3 without this.
 
 ### Phase 1 — Level 1 vertical slice (the real work)
 
-Ordered so each step is observable and unblocks the next. Each item ends with a retail fixture and a
-tier, not a checkbox.
+Ordered so each step is observable and unblocks the next. Each item ends with the engine functions it
+was transliterated from (name and address) and a tier, not a checkbox.
+
+> **Superseded where it asks for retail (2026-11-09).** The steps below were written under "retail is
+> the oracle". Wherever one says a retail capture, pair, trace or run is "remaining", "next" or
+> "needed", the work is instead: find the owning function in `decomp/`, transliterate it, test it from
+> its arithmetic. The retail evidence already committed stays as a regression check.
 
 1. **First frame — level 1 done.** The spawn pose is the level's recorded `walkplayer` pose
    (`sithPlayer_NewPlayer`, no floor re-seed), the eye offset is the template's 0.037 in level units,
@@ -542,9 +556,11 @@ in `gaps.md`.
 
 ### Phase 2 — Generalise
 
-Run the Phase 1 harness on levels 2–5, then all 34. Replace "the walker reaches the end" with "the walker
-trace matches a retail trace" for each. Fix by bucket, not by level. Add the retail-trace fixtures to the
-repo so regressions are caught without a retail run.
+Mechanics ported function-for-function are level-independent, so generalising is mostly data: run the
+port's deterministic replay on levels 2–5, then all 34, and fix by bucket, not by level. A level that
+misbehaves points at an engine function not yet transliterated (or a parser gap), found by reading
+`decomp/`, not by capturing that level in retail. (Until 2026-11-09 this phase asked for a retail
+trace per level; the notes below that say so are the record, not the plan.)
 
 *Progress (rounds 153–231).* The walk-trace gate stands at **15 legs, 1 tracked failure**: `walk5_spawn` at 3.43 of
 retail's 3.73 units (92 %, 5 sector mismatches), the "floor-search scope" deviation the ledger names with its retire
@@ -937,7 +953,8 @@ achievable from the shipped artifacts, the decomp and the file probes has been m
 ## What the retail harness already answers
 
 Reviewed `tools/parity/` (retail-capture, retail-lib, port-capture, compare, thresholds, shots.tsv).
-It drives the GOG `JK.EXE -devMode` on a scratch copy, so it is the oracle this roadmap needs. It has
+It drives the GOG `JK.EXE -devMode` on a scratch copy. It was built as this roadmap's oracle; since
+2026-11-09 it is a user-invoked tool and its committed output is regression data (Principle 1). It has
 eight level-1 pairs: the spawn row and two warp-verified spawn poses (0.62–0.65), and five route poses
 (things 167/169/170/171/174), of which three are gated at 0.72–0.74 and two are triage-only because
 retail's reference there is red from the engine's **damage tint**: the port draws that tint and takes
@@ -998,7 +1015,7 @@ The exported decompilation in `decomp/` already settles part of this. Plan for t
    (the harness default through dgVoodoo2) writes a 24-bit BMP instead; `-Software` still produces the
    indexed PCX for a future palette-index metric.
 
-**Not yet done (needs a retail run, available but hands-off and screen-taking):**
+**Not done, and not agent work (each needs a retail run, which only the user starts):**
 
 - Confirm `cogstatus`/`aistatus`/`slowmo` print through the patched build, and record their formats.
 - Decompile the `LAB_` handlers for `coords` (0x4ee960), `cogtrace` (0x4ee170), `coglist` (0x4ee2f0) to
@@ -1096,6 +1113,13 @@ searched, not read end to end, so this is a targeted review rather than a line-b
    they carry no retail level data beyond state before the next release.
 
 ### Where the next session starts
+
+- **Start from the code, not the game (2026-11-09).** Issue #15, then #14: transliterate level 1's
+  exit chain from `decomp/` (`sithPlayerActions_Activate`, the `sithCog_SendMessage` family,
+  `jkMain_EndLevel`). After that, walk the tick top-down and replace re-derived movement and
+  collision with the engine's functions (`sithPhysics_*` 8 of 12 cited in `src/`, `sithCollision_*`
+  5 of 18, `sithControl_*` 2 of 23). The bullets below are earlier sessions' notes; where one ends on
+  "needs a retail run", that item waits for the user and is not the next task.
 
 - **The outside review's `game_ms` re-capture is done and its premise was wrong (round 294).** The
   engine clock tracks wall time (17 019 ms for a 3 000 ms hold), so `held_ms` stays the movement axis and
