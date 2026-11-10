@@ -1435,6 +1435,50 @@ impl LevelGeometry {
     }
 
     /// Whether `other` is in the collision search of a sphere of `radius` swept `left` along `dir` from
+    /// `at` in `sector`, **through every room the sweep reaches**.
+    ///
+    /// `sithCollision_SearchForCollisions` (`0x4e8160`) adds a sector when the sphere reaches one of
+    /// its adjoins, and each added sector adds *its* adjoins to the same search (`uVar8` grows while
+    /// the loop runs), so the scope is the transitive closure over crossed portals. Level 1's door
+    /// leaf sits two portal hops from the body that uses it while the 0.165 use sweep touches every
+    /// portal on the way, which is why one hop is not enough.
+    pub fn in_search_chain(
+        &self,
+        sector: usize,
+        other: usize,
+        at: [f32; 3],
+        dir: [f32; 3],
+        left: f32,
+        radius: f32,
+    ) -> bool {
+        if other == sector {
+            return true;
+        }
+        let mut seen = vec![sector];
+        let mut next = 0;
+        while next < seen.len() {
+            let node = seen[next];
+            next += 1;
+            let Some(portals) = self.portals.get(node) else { continue };
+            for portal in portals {
+                let target = portal.adjoin;
+                if target == other {
+                    return true;
+                }
+                if seen.contains(&target) {
+                    continue;
+                }
+                let now = dot(sub(at, portal.point), portal.normal);
+                let then = now + dot(dir, portal.normal) * left;
+                if now.signum() != then.signum() || now.abs().min(then.abs()) < radius - 1e-4 {
+                    seen.push(target);
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether `other` is in the collision search of a sphere of `radius` swept `left` along `dir` from
     /// `at` in `sector`. `sithCollision_SearchForCollisions` (`0x4e8160`) adds a sector only when the
     /// sweep **reaches one of its adjoins**, so a crate in the next room (or in a trigger sliver inside
     /// this one) collides once the body gets to the opening — while a body resting on a floor opening

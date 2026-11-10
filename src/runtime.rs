@@ -370,6 +370,53 @@ pub const SECTOR_SEEN: u32 = 0x4000;
 pub const TF_CAPTURED: u32 = 0x400;
 /// `SITH_TF_INCAMFOV`: latched the first time the renderer draws the thing.
 pub const TF_INCAMFOV: u32 = 0x100000;
+
+/// The `sourceType`/`senderType` words `sithCog_SendMessageEx` (`0x4dedc0`) stores.
+///
+/// The engine's senders pass 3 for a thing, 5 for a sector and 6 for a surface as the message's
+/// source, and either 0 (the world: sender index -1) or 3 (a thing) as the sender. `GetSenderId()`
+/// answers the link id, not these; `GetSenderType()`/`GetSenderRef()` answer the sender half.
+pub const THING_SOURCE: i32 = 3;
+pub const SECTOR_SOURCE: i32 = 5;
+pub const SURFACE_SOURCE: i32 = 6;
+
+/// What the player's use action hit, in the engine's own two shapes (`sithPlayerActions_Activate`,
+/// `0x4fc0a0`): a linked thing's collision, or a linked surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UseHit {
+    Thing(usize),
+    Surface(usize),
+}
+
+/// The identity `sithCog_SendMessageEx` (`0x4dedc0`) delivers beside a message.
+///
+/// The engine's argument order is `(cog, msg, sourceType, sourceIndex, senderType, senderIndex,
+/// param0, f0..f3)`; it stores `param0` — the **link id** of the link that matched, which is what
+/// `GetSenderId()` reads — at `+0x24`, the source index at `+0x28` with its type at `+0x2c`, and the
+/// sender's index at `+0x30` with its type at `+0x34`. Each `*SendMessageEx` normalises a null
+/// sender to `(-1, 0)` and a thing sender to `(thing index, 3)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceSender {
+    pub source_type: i32,
+    pub source: i32,
+    pub sender_type: i32,
+    pub sender: i32,
+}
+
+impl SourceSender {
+    pub fn new(source_type: i32, source: i32, sender: Option<usize>) -> Self {
+        match sender {
+            Some(thing) => Self {
+                source_type,
+                source,
+                sender_type: THING_SOURCE,
+                sender: thing as i32,
+            },
+            None => Self { source_type, source, sender_type: 0, sender: -1 },
+        }
+    }
+}
+
 /// The JKL `thingflags` difficulty bits: `0x1000` not in Easy, `0x2000` not in Medium, `0x4000`
 /// not in Hard. The loader does not create a placement the active difficulty excludes. The port
 /// runs Medium (`GetDifficulty` answers 1), so a row carrying this bit is not spawned.
@@ -1176,6 +1223,10 @@ pub struct Runtime {
     /// `GetParam(0)`/`GetParam(1)` answer inside the handler — `damaged` carries the amount and the
     /// damage type, which is how `force_absorb.cog` decides how much of it to take.
     pub pending_messages: Vec<(usize, &'static str, [f64; 2], Option<i64>)>,
+    /// `DAT_008554bc`: when the use action last ran, on the world clock. One stamp for the whole
+    /// world — `sithPlayerActions_Activate` (`0x4fc0a0`) writes it before its sweep, and an actor's
+    /// `opendoors` instinct runs the same function, so the two share the 250 ms wait.
+    pub last_activate: f32,
     /// Force mana regeneration per second, and the pool's ceiling. The rate is calibrated: the
     /// engine's own tick is in `jkPlayer.c`, absent here. `force_heal.cog` spends `20 * rank` of bin
     /// 14, so a full pool is 200.
@@ -1602,11 +1653,6 @@ pub struct Runtime {
     /// When each actor's `jump` may nudge again: the handler (`0x50abf0`, event `0x400`) sets its own
     /// next check to `now + the class line's first number` (`jump 2000.0, 3.0, 3.0`).
     pub ai_jump: BTreeMap<usize, f32>,
-    /// When each actor may try the `opendoors` action next. Its handler (`0x50abc0`) calls
-    /// `sithPlayerActions_Activate` — the **player's** use action — on the actor's own body, and that
-    /// function throttles itself to 250 ms. An actor with the instinct opens the door it is walking
-    /// into instead of being trapped behind it.
-    pub ai_opendoors: BTreeMap<usize, f32>,
     /// Each actor's home anchor: where it was placed. `returnhome`'s handler (`0x50bd70`) walks the
     /// actor back to `ai + 0x93` (`SetMoveThing`) and then turns it there (`SetLookFrame`), so the
     /// anchor is the thing's spawn position. Set when the instincts are attached to the live runtime.
@@ -1696,6 +1742,10 @@ pub struct Runtime {
     /// The engine registers the verb as `jkendlevel` (`jkCog.c`), and a level's final script
     /// is what calls it.
     pub level_complete: bool,
+    /// `DAT_0082f0a8`, set by `sithMain_SetEndLevel` (`0x4c4bf0`) and never cleared: the main loop's
+    /// "leave this level" flag. The app clears [`Self::level_complete`] in a capture run to stay in the
+    /// level it booted, so this is the latch a trace reads to show the level's own script finished it.
+    pub end_level_called: bool,
     /// `AutosaveGame()`: a script asked for a checkpoint. The app writes it and clears this — the
     /// runtime does no file I/O. The shipped story levels call it at their own beats (7, 11, 15, 17a,
     /// 17b and 20), so the save happens where retail's does.
@@ -2295,6 +2345,7 @@ impl Runtime {
             last_params: Vec::new(),
             thing_links: Vec::new(),
             pending_messages: Vec::new(),
+            last_activate: f32::NEG_INFINITY,
             solids: None,
             template_min_damage: level
                 .templates
@@ -2489,7 +2540,6 @@ impl Runtime {
             ai_sense: BTreeMap::new(),
             ai_dodge: BTreeMap::new(),
             ai_jump: BTreeMap::new(),
-            ai_opendoors: BTreeMap::new(),
             ai_home: BTreeMap::new(),
             ai_trace_source: BTreeMap::new(),
             ai_flee_until: BTreeMap::new(),
@@ -2506,6 +2556,7 @@ impl Runtime {
             ai_flee: BTreeMap::new(),
             ai_classes: BTreeMap::new(),
             level_complete: false,
+            end_level_called: false,
             autosave: false,
             music: None,
             music_volume: 1.0,
@@ -4646,34 +4697,19 @@ impl Runtime {
                 }
                 continue;
             }
-            // `opendoors` (handler 0x50abc0): the engine runs the **player's activate action**
-            // (`sithPlayerActions_Activate`, 0x4fc0a0) on the actor's own body, throttled to 250 ms,
-            // and that messages the captured thing or cog-linked surface in front with `activated`
-            // (id 1). The port reuses the same two scans the use key drives, so an actor with the
-            // instinct opens the door it is walking into instead of standing behind it. The engine
-            // sweeps a small sphere at the body's leading edge; the use scans are a look-cone
-            // approximation of that, and the **reach is the actor's own**: `Activate` passes
-            // `*(float *)(thing + 0x2c) - _DAT_00523200`, i.e. the body's `movesize` plus 0.1 — the
-            // same rule the player's use key uses (`use_reach`). A fixed 1.5-unit reach here let an
-            // actor open a door it was still a body-length away from, which the player's own use
-            // action refuses (round 257's measured cantina poses).
+            // `opendoors` (handler `0x50abc0`) runs the **player's activate action** on the actor's own
+            // body: `sithPlayerActions_Activate` (`0x4fc0a0`), which is where the 250 ms wait and the
+            // `moveSize + 0.1` reach come from, so the player's press and an actor's instinct share one
+            // clock and one rule. The reach is the actor's own body (`thing + 0x2c`).
             if ai
                 .as_ref()
                 .is_some_and(|class| class.instinct("OpenDoors").is_some())
                 && let Some(body) = self.things.get(index)
             {
-                let (pos, yaw) = (body.pos, body.yaw);
-                let due = self.ai_opendoors.get(&index).copied().unwrap_or(0.0);
-                if self.time >= due {
-                    self.ai_opendoors.insert(index, self.time + 0.25);
-                    let facing = [-yaw.to_radians().sin(), yaw.to_radians().cos()];
-                    // `OpenDoors` runs the same action the player's use does, so it is scoped to the
-                    // actor's own sector too, and reaches as far as its own body does.
-                    let sector = body.sector;
-                    let reach = self.activate_reach(index);
-                    self.activate_near(pos, facing, reach, sector);
-                    self.use_thing(pos, facing, reach, sector);
-                }
+                let (pos, yaw, sector) = (body.pos, body.yaw, body.sector);
+                let reach = self.activate_reach(index);
+                let dir = [-yaw.to_radians().sin(), yaw.to_radians().cos(), 0.0];
+                self.sith_player_actions_activate(index, pos, dir, reach, sector);
             }
             let Some(thing) = self.things.get_mut(index) else { continue };
             if thing.destroyed || self.types.get(index).copied() != Some(2) {
@@ -7046,24 +7082,22 @@ impl Runtime {
         self.ir_mode = on;
     }
 
-    /// The player's use action: `activate` to the cogs linked to the surface nearest the eye.
+    /// Whether sector `other` is in the use action's collision search from `sector`.
     ///
-    /// The engine's rule is a looked-at surface within the player's reach (§16.10); the *reach* and
-    /// the facing cone here are calibrated rather than recovered, because the use action lives in
-    /// `jkPlayer.c`, which this source tree does not carry. What is data-driven is the target: only
-    /// surfaces a script actually linked are candidates.
-    /// Whether sector `other` is in the use action's collision search from `sector`: the engine sweeps
-    /// a 0.025 sphere (`0x3ccccccd`) `reach` along the facing (`sithPlayerActions_Activate`).
-    fn in_use_search(&self, sector: i32, other: i32, eye: [f32; 3], facing: [f32; 2], reach: f32) -> bool {
+    /// `sithCollision_SearchForCollisions` (`0x4e8160`) adds a sector to the sweep only when the
+    /// sphere reaches one of its adjoins, and `sithPlayerActions_Activate` (`0x4fc0a0`) calls it with
+    /// a 0.025 radius (`0x3ccccccd`) along the **look**, so a body standing in the doorway reaches the
+    /// leaf's stub sector and a plate deeper in the next room is not in the search.
+    fn in_use_search(&self, sector: i32, other: i32, eye: [f32; 3], dir: [f32; 3], reach: f32) -> bool {
         if other == sector {
             return true;
         }
         let (Ok(sector), Ok(other)) = (usize::try_from(sector), usize::try_from(other)) else {
             return false;
         };
-        self.solids.as_deref().is_some_and(|solids| {
-            solids.in_search(sector, other, eye, [facing[0], facing[1], 0.0], reach, 0.025)
-        })
+        self.solids
+            .as_deref()
+            .is_some_and(|solids| solids.in_search_chain(sector, other, eye, dir, reach, 0.025))
     }
 
     /// `sithPlayerActions_Activate`'s reach for one body: `movesize + 0.1`
@@ -7083,52 +7117,70 @@ impl Runtime {
             + 0.1
     }
 
-    pub fn activate_near(
+    /// `sithCog_SurfaceSendMessage` (`0x4dfed0`): the three-argument form the world uses, i.e.
+    /// `sithCog_SurfaceSendMessageEx(surface, sender, msg, 0, 0, 0, 0)`.
+    pub fn sith_cog_surface_send_message(
         &mut self,
-        eye: [f32; 3],
-        facing: [f32; 2],
-        reach: f32,
-        sector: i32,
-    ) -> Option<usize> {
-        let mut best: Option<(usize, f32)> = None;
-        for (_, _, surface) in &self.surface_links {
-            // The engine searches **the body's sector's** surfaces (`sithPlayerActions_Activate`,
-            // `0x4fc0a0`: `FindSectorInRadius` then `SearchForCollisions`), plus a neighbour only when
-            // the short use sweep reaches the opening into it. A linked plate deeper in an adjoining
-            // room is not there, which is why retail's cantina switch stays closed.
-            let owner = self.surface_sector.get(*surface).copied().unwrap_or(-1);
-            if !self.in_use_search(sector, owner, eye, facing, reach) {
+        surface: usize,
+        sender: Option<usize>,
+        msg: &'static str,
+    ) -> usize {
+        self.sith_cog_send_message_ex(SURFACE_SOURCE, surface, sender, msg)
+    }
+
+    /// `sithCog_ThingSendMessage` (`0x4dfac0`): `sithCog_ThingSendMessageEx(thing, sender, msg, 0,
+    /// 0, 0, 0)`. Every link to the thing hears it, plus the thing's own two script slots; the port
+    /// has the link tables only (`wire_links`).
+    pub fn sith_cog_thing_send_message(
+        &mut self,
+        thing: usize,
+        sender: Option<usize>,
+        msg: &'static str,
+    ) -> usize {
+        self.sith_cog_send_message_ex(THING_SOURCE, thing, sender, msg)
+    }
+
+    /// `sithCog_SectorSendMessage` (`0x4dfd60`): `sithCog_SectorSendMessageEx(sector, sender, msg,
+    /// 0, 0, 0, 0)`.
+    pub fn sith_cog_sector_send_message(
+        &mut self,
+        sector: usize,
+        sender: Option<usize>,
+        msg: &'static str,
+    ) -> usize {
+        self.sith_cog_send_message_ex(SECTOR_SOURCE, sector, sender, msg)
+    }
+
+    /// `sithCog_SendMessageEx` (`0x4dedc0`), the queue every world sender writes.
+    ///
+    /// The three senders differ only in their `sourceType` and the index they name, and each
+    /// matching link carries its own `param0` — the **link id** that `GetSenderId()` answers — and
+    /// its mask bit. The port's link tables have no mask, so a link hears every message sent to its
+    /// target (`wire_links` records that deviation).
+    fn sith_cog_send_message_ex(
+        &mut self,
+        source_type: i32,
+        source: usize,
+        sender: Option<usize>,
+        msg: &'static str,
+    ) -> usize {
+        // The identity the engine passes down (`SourceSender`); the bus carries the link id only, so
+        // the rest stays explicit here and in its unit test.
+        let _identity = SourceSender::new(source_type, source as i32, sender);
+        let links = match source_type {
+            THING_SOURCE => self.thing_links.clone(),
+            SECTOR_SOURCE => self.sector_links.clone(),
+            _ => self.surface_links.clone(),
+        };
+        let mut sent = 0;
+        for (instance, link, linked) in links {
+            if linked != source {
                 continue;
             }
-            let Some(centre) = self.surfaces.get(*surface).map(|s| s.center) else { continue };
-            let (dx, dy) = (centre[0] - eye[0], centre[1] - eye[1]);
-            let flat = (dx * dx + dy * dy).sqrt();
-            // The use is a **look**, so the reach and ranking are 3D: level 1's death floor sits 17
-            // units below the cantina switch and won the switch's use on flat distance alone (round 200).
-            let dz = centre[2] - eye[2];
-            let dist = (flat * flat + dz * dz).sqrt();
-            if std::env::var_os("BK_USE_TRACE").is_some() {
-                println!("use-candidate: surface {} sector {} centre {:?} dist {:.2} dz {:.2} dot {:.2}", surface, self.surface_sector.get(*surface).copied().unwrap_or(-1), centre, dist, dz, if flat > 0.01 { (dx / flat) * facing[0] + (dy / flat) * facing[1] } else { 1.0 });
-            }
-            if dist > reach {
-                continue;
-            }
-            // Behind the player is not in reach: the engine's use is a look, not a touch.
-            if flat > 0.01 && (dx / flat) * facing[0] + (dy / flat) * facing[1] < 0.3 {
-                continue;
-            }
-            if best.is_none_or(|(_, d)| dist < d) {
-                best = Some((*surface, dist));
-            }
+            self.pending_messages.push((instance, msg, [0.0; 2], Some(link as i64)));
+            sent += 1;
         }
-        let (surface, _) = best?;
-        for (instance, link, linked) in &self.surface_links {
-            if *linked == surface {
-                // `GetSenderId()` is how a switch tells its link ids apart, so the link id is the sender.
-                self.pending_messages.push((*instance, "activate", [0.0; 2], Some(*link as i64)));
-            }
-        }
-        Some(surface)
+        sent
     }
 
 
@@ -7182,7 +7234,15 @@ impl Runtime {
                 let Ok(target) = raw.trim().parse::<usize>() else { continue };
                 let link = symbol.linkid.unwrap_or(0) as i32;
                 match symbol.kind {
-                    crate::cog::SymKind::Thing => self.thing_links.push((index, link, target)),
+                    crate::cog::SymKind::Thing => {
+                        // `sithCog_LinkCog` (`0x4df610`) sets `SITH_TF_CAPTURED` (0x400) on the thing as
+                        // it records the link, and that is the bit `sithRender_RenderThing` (`0x4c8070`)
+                        // and `sithPlayerActions_Activate` (`0x4fc0a0`) test before a thing can answer.
+                        if let Some(thing) = self.things.get_mut(target) {
+                            thing.flags |= TF_CAPTURED;
+                        }
+                        self.thing_links.push((index, link, target));
+                    }
                     crate::cog::SymKind::Surface => self.surface_links.push((index, link, target)),
                     crate::cog::SymKind::Sector => self.sector_links.push((index, link, target)),
                     _ => {}
@@ -7191,136 +7251,111 @@ impl Runtime {
         }
     }
 
-    /// The player's use action on a *thing*: the nearest thing a script links, in front of the eye.
+    /// `sithPlayerActions_Activate` (`0x4fc0a0`): the use key — for the player, and for an actor's
+    /// `opendoors` instinct, which runs this same function on the actor's own body.
     ///
-    /// `sithPlayerActions_Activate` (`0x4fc0a0`) sweeps a 0.1-radius sphere from the eye along the view for
-    /// `moveSize - (-0.1)`, so the reach is `moveSize + 0.1` (**0.16** units for the player) and the
-    /// direction, not a FOV, decides. It answers with the thing it used, if any.
-    pub fn use_thing(
+    /// The order is the engine's:
+    ///
+    /// 1. the 250 ms wait (`DAT_008554bc + 0xfa <= clock`) is stamped **before** the sweep, so a press
+    ///    that finds nothing still starts it; with no master cog (`DAT_00832628 == 0`) there is no wait;
+    /// 2. the eye and the look come off the body: its position (`+0xb8`), its orientation (`+0x88`)
+    ///    pre-rotated by its own PYR (`+0x15c`) for an actor or the player, plus the `+0x168` eye
+    ///    offset. The caller passes the port's equivalents because the player's `PlayerBody` carries
+    ///    the eye height and the pitch that a `ThingState` does not;
+    /// 3. `sithCollision_FindSectorInRadius(sector, eye, eye, 0)` (`0x4e71b0`) answers the sector it
+    ///    is given for a body whose eye is inside it, and that sector is the sweep's start;
+    /// 4. `sithCollision_SearchForCollisions(sector, body, eye, look, moveSize - (-0.1), 0.025, 2)`
+    ///    (`0x4e8160`) sweeps a 0.025 sphere `moveSize + 0.1` along the look. Its collisions pop
+    ///    nearest-first and the **first one that can answer ends the search**: a thing whose type is
+    ///    neither a weapon (3) nor an item (5) and whose flags carry `SITH_TF_COGLINKED` (0x400) gets
+    ///    message id 1 (`activated`) through `sithCog_ThingSendMessage(thing, body, 1)`; a surface
+    ///    whose `+0x10` bit 2 is set gets it through `sithCog_SurfaceSendMessage(surface, body, 1)`.
+    ///    Both halves rank together, because the engine pops one stack.
+    ///
+    /// `ponytail:` the hits are the port's `ThingSolid`/surface-centre geometry (a surface has no
+    /// polygon at runtime), only linked targets are tested (the engine skips an unlinked hit too),
+    /// and the looked-at test stands in for the sweep's direction — the reach is the engine's own.
+    pub fn sith_player_actions_activate(
         &mut self,
+        body: usize,
         eye: [f32; 3],
-        facing: [f32; 2],
+        dir: [f32; 3],
         reach: f32,
         sector: i32,
-    ) -> Option<usize> {
-        let mut best: Option<(usize, f32)> = None;
-        // The sectors holding a thing collision inside the sweep. The sector scope is "a thing in
-        // another room is not in the search unless the sweep reaches the opening into that room"; a
-        // doorway's stub sector has no static portal across it (level 1's one-way door sits in 223
-        // while the body stands in the tunnel, 407), but its leaf is the collision the engine's
-        // sphere sweep hits. A collision that is itself inside the sweep is that opening.
-        let nearby: BTreeSet<i32> = self
-            .solids
-            .as_deref()
-            .map(|solids| {
-                solids
-                    .things()
-                    .iter()
-                    .filter(|solid| Self::thing_solid_within(solid, eye, reach))
-                    .map(|solid| solid.sector as i32)
-                    .collect()
-            })
-            .unwrap_or_default();
-        // The level's own adjoin graph from the body's sector, two hops deep. A shut door is still
-        // an adjoin (its flags gate walking, not the use sweep), and a door leaf lives in its own
-        // thin stub sector: level 1's one-way door is 407 -> 240 -> 223, and the script expects the
-        // body inside 407 to reach the leaf in 223. `sithCollision_SearchForCollisions` is called
-        // with stack level 2 for the same reason; the reach and cone still bound what this admits.
-        let adjacent: BTreeSet<i32> = usize::try_from(sector)
-            .ok()
-            .map(|here| {
-                let mut seen = BTreeSet::new();
-                let mut frontier = vec![here];
-                for _ in 0..2 {
-                    let mut next = Vec::new();
-                    for node in frontier.drain(..) {
-                        for (other, _) in self.sector_adjoins.get(node).into_iter().flatten() {
-                            if seen.insert(*other)
-                                && let Ok(other) = usize::try_from(*other)
-                            {
-                                next.push(other);
-                            }
-                        }
-                    }
-                    frontier = next;
-                }
-                seen
-            })
-            .unwrap_or_default();
-        if std::env::var_os("BK_USE_TRACE").is_some() {
-            println!(
-                "use-sector: body {sector} adjoins {:?} nearby {nearby:?}",
-                self.sector_adjoins.get(usize::try_from(sector).unwrap_or(usize::MAX))
-            );
+    ) -> Option<UseHit> {
+        if self.master_cog.is_some() && self.time < self.last_activate + 0.25 {
+            return None;
         }
-        for (_, _, target) in &self.thing_links {
-            // The engine's activate **skips a weapon (type 3) and an item (type 5)** hit:
-            // `sithPlayerActions_Activate` (`0x4fc0a0`) only takes a thing whose type is neither and
-            // which carries `flags & 0x400` (COG_LINKED). Those two are fired or picked up, not used.
-            if matches!(self.types.get(*target).copied(), Some(3) | Some(5)) {
+        self.last_activate = self.time;
+        let trace = std::env::var_os("BK_USE_TRACE").is_some();
+        // `sithCog_LinkCog` (`0x4df610`) sets `surface + 0x10 |= 2` and `thing |= 0x400` as it records
+        // a link, so the link tables are that flag: a scribed target is a candidate, nothing else is.
+        let mut stack: Vec<(f32, UseHit)> = Vec::new();
+        for (_, _, surface) in self.surface_links.clone() {
+            let owner = self.surface_sector.get(surface).copied().unwrap_or(-1);
+            if !self.in_use_search(sector, owner, eye, dir, reach) {
                 continue;
             }
-            let Some(thing) = self.things.get(*target) else { continue };
-            if !nearby.contains(&thing.sector)
-                && !adjacent.contains(&thing.sector)
-                && !self.in_use_search(sector, thing.sector, eye, facing, reach)
-            {
-                continue;
-            }
-            if std::env::var_os("BK_USE_TRACE").is_some() {
-                println!("use-thing: thing {} sector {} (want {}) pos {:?}", target, thing.sector, sector, thing.pos);
-            }
-            let (dx, dy) = (thing.pos[0] - eye[0], thing.pos[1] - eye[1]);
+            let Some(centre) = self.surfaces.get(surface).map(|s| s.center) else { continue };
+            let (dx, dy, dz) = (centre[0] - eye[0], centre[1] - eye[1], centre[2] - eye[2]);
             let flat = (dx * dx + dy * dy).sqrt();
-            // The use is a **look**, so the reach and ranking are 3D: level 1's death floor sits 17
-            // units below the cantina switch and won the switch's use on flat distance alone (round 200).
-            let dz = thing.pos[2] - eye[2];
             let dist = (flat * flat + dz * dz).sqrt();
-            if dist > reach {
+            let dot = if flat > 0.01 {
+                (dx / flat) * dir[0] + (dy / flat) * dir[1]
+            } else {
+                1.0
+            };
+            if trace {
+                println!(
+                    "use-candidate: surface {surface} sector {owner} centre {centre:?} dist {dist:.2} dot {dot:.2}"
+                );
+            }
+            if dist <= reach && dot >= 0.3 {
+                stack.push((dist, UseHit::Surface(surface)));
+            }
+        }
+        for (_, _, target) in self.thing_links.clone() {
+            // The engine's activate **skips a weapon (type 3) and an item (type 5)** hit: those are
+            // fired or picked up, not used.
+            if matches!(self.types.get(target).copied(), Some(3) | Some(5)) {
                 continue;
             }
-            if flat > 0.01 && (dx / flat) * facing[0] + (dy / flat) * facing[1] < 0.3 {
+            let Some(thing) = self.things.get(target) else { continue };
+            let (pos, thing_sector, flags) = (thing.pos, thing.sector, thing.flags);
+            if flags & TF_CAPTURED == 0 || !self.in_use_search(sector, thing_sector, eye, dir, reach) {
                 continue;
             }
-            if best.is_none_or(|(_, d)| dist < d) {
-                best = Some((*target, dist));
+            let (dx, dy, dz) = (pos[0] - eye[0], pos[1] - eye[1], pos[2] - eye[2]);
+            let flat = (dx * dx + dy * dy).sqrt();
+            let dist = (flat * flat + dz * dz).sqrt();
+            let dot = if flat > 0.01 {
+                (dx / flat) * dir[0] + (dy / flat) * dir[1]
+            } else {
+                1.0
+            };
+            if trace {
+                println!(
+                    "use-thing: thing {target} sector {thing_sector} (want {sector}) pos {pos:?} dist {dist:.2} dot {dot:.2}"
+                );
+            }
+            if dist <= reach && dot >= 0.3 {
+                stack.push((dist, UseHit::Thing(target)));
             }
         }
-        let (target, _) = best?;
-        for (instance, link, linked) in &self.thing_links {
-            if *linked == target {
-                // `activate`, not `used`: no shipped cog declares a `used` label (0 of 540), while 82 of them -- every door, switch and item -- answer `activate`. It is also what the surface half of this action already sends.
-                // `GetSenderId()` is how a switch tells its link ids apart, so the link id is the sender.
-                self.pending_messages.push((*instance, "activate", [0.0; 2], Some(*link as i64)));
+        stack.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (_, hit) = *stack.first()?;
+        match hit {
+            // The message id is 1 (`activated`), which resolves through the cog's message table; the
+            // sender is the body, so `GetSenderRef()` names the thing that used it while
+            // `GetSenderId()` stays the link id (`00_doorswitch.cog` branches on 1 and 2).
+            UseHit::Thing(thing) => {
+                self.sith_cog_thing_send_message(thing, Some(body), "activate");
+            }
+            UseHit::Surface(surface) => {
+                self.sith_cog_surface_send_message(surface, Some(body), "activate");
             }
         }
-        Some(target)
-    }
-
-    /// Whether a thing's collision volume is inside the use sweep's sphere around the eye.
-    ///
-    /// `collide::ThingSolid` is the engine's own `size=` collision: a circle or a yawed box in plan,
-    /// with a z span. The sweep's sphere starts at the eye, so the flat distance to the nearest point
-    /// of that volume is what the reach bounds — not the distance to the thing's display origin.
-    fn thing_solid_within(
-        solid: &crate::collide::ThingSolid,
-        eye: [f32; 3],
-        reach: f32,
-    ) -> bool {
-        if eye[2] < solid.z_min - reach || eye[2] > solid.z_max + reach {
-            return false;
-        }
-        let (dx, dy) = (eye[0] - solid.centre[0], eye[1] - solid.centre[1]);
-        match solid.half {
-            Some(half) => {
-                let (sin, cos) = solid.yaw.to_radians().sin_cos();
-                let (lx, ly) = (dx * cos + dy * sin, -dx * sin + dy * cos);
-                let ox = (lx.abs() - half[0]).max(0.0);
-                let oy = (ly.abs() - half[1]).max(0.0);
-                (ox * ox + oy * oy).sqrt() <= reach
-            }
-            None => ((dx * dx + dy * dy).sqrt() - solid.radius).max(0.0) <= reach,
-        }
+        Some(hit)
     }
 
     /// The doorway centres from `from`'s room to the room `want` stands in, for an actor whose straight
@@ -7455,9 +7490,12 @@ impl Runtime {
         out
     }
 
-    /// The first time the renderer draws a **thing** (`sithRender_RenderThing`, `sithRender.c:2995`):
-    /// `SITH_TF_INCAMFOV` (0x100000) is latched, and a `SITH_TF_CAPTURED` (0x400) thing — one that has
-    /// a cog placed on it — sends `sighted` (id 9) to those cogs. Level 1's goal is exactly this:
+    /// `sithRender_RenderThing` (`0x4c8070`): the first time the renderer draws a **thing**.
+    ///
+    /// `SITH_TF_INCAMFOV` (`0x100000`) is latched, and a thing whose flags carry `SITH_TF_CAPTURED`
+    /// (`0x400` — the bit `sithCog_LinkCog`, `0x4df610`, sets when a cog is placed on it) is sent
+    /// message id 9 (`sighted`) through `sithCog_ThingSendMessage(thing, 0, 9)`: sender 0, i.e. the
+    /// world, which is what `GetSenderId()` reads as 0. Level 1's goal is exactly this —
     /// `01_goal0.cog 204` puts the script on 8t88, so *seeing him* completes "Find 8t88 before he
     /// escapes Nar Shaddaa". The same pass wakes a sleeping actor in the engine, which this port has no
     /// sleep state for.
@@ -7470,20 +7508,15 @@ impl Runtime {
         if t.flags & TF_CAPTURED == 0 {
             return 0;
         }
-        let mut sent = 0;
-        for (instance, _link, target) in &self.thing_links {
-            if *target == thing {
-                self.pending_messages.push((*instance, "sighted", [0.0; 2], None));
-                sent += 1;
-            }
-        }
-        sent
+        self.sith_cog_thing_send_message(thing, None, "sighted")
     }
 
-    /// The first time the renderer draws a sector: `sithRender` latches `SITH_SECTOR_SEEN` (0x4000)
-    /// and, when the sector is `SITH_SECTOR_COGLINKED` (0x4), sends `sighted` (id 9) to the cogs placed
-    /// on it. That is how level 1's goal fires — `01_goal0.cog` sits on the sector that holds 8t88, so
-    /// *seeing* the area completes "Find 8t88 before he escapes Nar Shaddaa".
+    /// `sithRender_BuildVisibleSectorList` (`0x4c6650`): the first time the renderer draws a sector.
+    ///
+    /// `SITH_SECTOR_SEEN` (`0x4000`) is latched, and a sector whose flags carry
+    /// `SITH_SECTOR_COGLINKED` (`0x4` — the bit `sithCog_LinkCog` sets from a `sector` symbol) is sent
+    /// message id 9 (`sighted`) through `sithCog_SectorSendMessage(sector, 0, 9)`, again from the
+    /// world. That is the other half of level 1's goal: `01_goal0.cog` also waits on the room.
     pub fn sector_sighted(&mut self, sector: usize) -> usize {
         let Some(flags) = self.sector_flags.get_mut(sector) else { return 0 };
         if *flags & SECTOR_SEEN != 0 {
@@ -7493,14 +7526,7 @@ impl Runtime {
         if *flags & SECTOR_COGLINKED == 0 {
             return 0;
         }
-        let mut sent = 0;
-        for (instance, _link, target) in &self.sector_links {
-            if *target == sector {
-                self.pending_messages.push((*instance, "sighted", [0.0; 2], None));
-                sent += 1;
-            }
-        }
-        sent
+        self.sith_cog_sector_send_message(sector, None, "sighted")
     }
 
     /// The next track in the current range, wrapping to the range's start: what `stdMci_Play(from,
@@ -8417,6 +8443,16 @@ impl Runtime {
         true
     }
 
+    /// `sithMain_SetEndLevel` (`0x4c4bf0`): `DAT_0082f0a8 = 1`.
+    ///
+    /// The engine's flag has no clear: once a level's own script says it is over, the main loop leaves
+    /// on the next frame and nothing writes the word back. It is the observation a trace can compare
+    /// even when the app stays in the level for a capture.
+    pub fn sith_main_set_end_level(&mut self) {
+        self.end_level_called = true;
+        self.level_complete = true;
+    }
+
     /// End of level: `jkMain_EndLevel` lands the finished level's state before the tally draws it.
     ///
     /// **Nothing is granted here.** Retail's own saves prove it: the level-1 load-time autosave and the
@@ -8776,16 +8812,16 @@ impl Runtime {
                 self.music = None;
                 Value::Nil
             }
-            // `jkEndLevel(flag)`: a level's final script calls this. The flag asks for the
-            // end-of-level screen; this build only records that the level is done, so a
-            // caller can resolve the next one through the episode graph.
+            // `jkEndLevel(flag)`: `jkCog_RegisterVerbs` (`0x40a110`) registers the verb, and the
+            // handler is `sithMain_SetEndLevel` (`0x4c4bf0` — `DAT_0082f0a8 = 1`, unconditional)
+            // followed by `jkMain_EndLevel` (`0x402eb0`), whose arm grant is `jk_main_end_level` here.
+            // The flag rides to the next-level start (`jkMain_StartNextLevelInEpisode(0, flag)`), which
+            // the app does when it swaps the world.
             "jkendlevel" | "endlevel" => {
-                // `BK_LEVEL_TRACE`: name the script that ended the level, so a capture that walks a
-                // level meant to be played does not silently swap worlds midway.
                 if std::env::var_os("BK_LEVEL_TRACE").is_some() {
                     eprintln!("level: `jkEndLevel` from cog {}", self.caller_cog);
                 }
-                self.level_complete = idx(0) != 0 || num(0) != 0.0;
+                self.sith_main_set_end_level();
                 Value::Nil
             }
             // ---- attachments: a thing that rides another thing ----
@@ -15867,15 +15903,21 @@ mod tests {
         let base = rt.things[0].clone();
         let mut bolt = base.clone();
         bolt.pos = [-0.1, 0.0, 0.0]; // nearer, but a weapon: fired, not used
+        bolt.flags |= TF_CAPTURED;
         let mut door = base.clone();
         door.pos = [-0.1, 0.0, 0.0]; // inside the 0.16 sweep
+        door.flags |= TF_CAPTURED; // `sithCog_LinkCog` (`0x4df610`) sets it on every linked thing
         rt.things = vec![base.clone(), bolt, door];
         rt.templates = vec!["walkplayer".into(), "+bryarbolt".into(), "door".into()];
         rt.types = vec![10, 3, 0];
         rt.thing_links.push((0, 1, 1));
         rt.thing_links.push((0, 2, 2));
-        let used = rt.use_thing([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 7);
-        assert_eq!(used, Some(2), "the use action took a weapon instead of the door: {used:?}");
+        let used = rt.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7);
+        assert_eq!(
+            used,
+            Some(UseHit::Thing(2)),
+            "the use action took a weapon instead of the door: {used:?}"
+        );
         assert!(
             rt.pending_messages
                 .iter()
@@ -15888,14 +15930,29 @@ mod tests {
         let mut far = door_runtime();
         let mut door = far.things[0].clone();
         door.pos = [-0.5, 0.0, 0.0];
+        door.flags |= TF_CAPTURED;
         far.things = vec![far.things[0].clone(), door];
         far.templates = vec!["walkplayer".into(), "door".into()];
         far.types = vec![10, 0];
         far.thing_links.push((0, 2, 1));
         assert_eq!(
-            far.use_thing([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 7),
+            far.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7),
             None,
             "a door half a unit away was used past the engine's 0.16 sweep"
+        );
+
+        // A thing without a cog link is not a candidate: `sithCog_LinkCog` never set 0x400 on it.
+        let mut unlinked = door_runtime();
+        let mut door = unlinked.things[0].clone();
+        door.pos = [-0.1, 0.0, 0.0];
+        unlinked.things = vec![unlinked.things[0].clone(), door];
+        unlinked.templates = vec!["walkplayer".into(), "door".into()];
+        unlinked.types = vec![10, 0];
+        unlinked.thing_links.push((0, 2, 1));
+        assert_eq!(
+            unlinked.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7),
+            None,
+            "an unlinked thing answered the use action"
         );
     }
 
@@ -15905,14 +15962,13 @@ mod tests {
     /// body at the level's own `walkplayer` placement 174 (eye `1.400084, 9.700065, 6.357114`,
     /// yaw 105 = west) and walks it to the shut portal, where the replay stops at `x 1.2775`
     /// (sector 76, the door in 74). From there the eye is ~0.086 from the door origin, inside the
-    /// port's `use_reach(0.065) = 0.165`, and the facing dot is 0.84. The old `walk_door0` stop pose
-    /// `(1.30, 9.14)` facing north is 0.52 away and faces away: the pose, not the reach, is why that
-    /// leg never opened the door.
+    /// `moveSize + 0.1 = 0.165` reach (`sithPlayerActions_Activate`, `0x4fc0a0`), and the facing dot
+    /// is 0.84. The old `walk_door0` stop pose `(1.30, 9.14)` facing north is 0.52 away and faces
+    /// away: the pose, not the reach, is why that leg never opened the door.
     ///
     /// The one-way door (`thing 47`, `00_1waydoor.cog`) is used from the tunnel (`sector 407`); its
     /// own origin is 0.087-0.116 from the body resting against the shut door (sector 223, the door
-    /// stub), inside the same reach. Neither doorway has a static collision portal across the stub,
-    /// so the level's adjoin graph is the sector scope the engine's sweep uses.
+    /// stub), inside the same reach.
     #[test]
     fn the_level_1_door_poses_are_inside_the_use_sweep() {
         let with_door = |pos: [f32; 3], sector: i32| {
@@ -15921,6 +15977,7 @@ mod tests {
             let mut door = base.clone();
             door.pos = pos;
             door.sector = sector;
+            door.flags |= TF_CAPTURED;
             rt.things = vec![base, door];
             rt.templates = vec!["walkplayer".into(), "2x3door".into()];
             rt.types = vec![10, 0];
@@ -15930,8 +15987,18 @@ mod tests {
 
         // Door 0 at the recorded stop: `x 1.315` after walking west from placement 174.
         let mut door0 = with_door([1.200002, 9.650073, 6.35], 74);
-        let used = door0.use_thing([1.315, 9.700065, 6.357114], [-1.0, 0.0], 0.165, 74);
-        assert_eq!(used, Some(1), "the door pose did not reach the linked door: {used:?}");
+        let used = door0.sith_player_actions_activate(
+            0,
+            [1.315, 9.700065, 6.357114],
+            [-1.0, 0.0, 0.0],
+            0.165,
+            74,
+        );
+        assert_eq!(
+            used,
+            Some(UseHit::Thing(1)),
+            "the door pose did not reach the linked door: {used:?}"
+        );
         assert!(
             door0
                 .pending_messages
@@ -15944,41 +16011,59 @@ mod tests {
         // The `walk_door0` stop pose (north-facing, 0.52 away) is refused by the same runtime.
         let mut stop = with_door([1.200002, 9.650073, 6.35], 74);
         assert_eq!(
-            stop.use_thing([1.30, 9.14, 6.357114], [0.0, 1.0], 0.165, 74),
+            stop.sith_player_actions_activate(
+                0,
+                [1.30, 9.14, 6.357114],
+                [0.0, 1.0, 0.0],
+                0.165,
+                74
+            ),
             None,
             "the north-facing stop pose used the door it cannot reach or face"
         );
 
         // The one-way door from inside the tunnel, facing north.
         let mut tunnel = with_door([-4.05, 13.95, 4.375], 407);
-        let used = tunnel.use_thing([-4.05, 13.865, 4.357114], [0.0, 1.0], 0.165, 407);
-        assert_eq!(used, Some(1), "the tunnel pose did not reach the one-way door: {used:?}");
-
-        // The replay's real poses: the body sector is the doorway's neighbour, not the thing's own
-        // sector, and no static collision portal spans the stub. The level's adjoin graph is what
-        // makes the sweep reach it. Without that branch the route's two `use` rows are silent.
-        let mut door0_adjacent = with_door([1.200002, 9.650073, 6.35], 74);
-        door0_adjacent.sector_adjoins = vec![Vec::new(); 77];
-        // The body stops in sector 60 (the retail walk's own reading); the door is in the stub
-        // sector 74, two hop labels away (60 -> 75 -> 74).
-        door0_adjacent.sector_adjoins[60] = vec![(75, 0.0)];
-        door0_adjacent.sector_adjoins[75] = vec![(74, 0.0)];
+        let used = tunnel.sith_player_actions_activate(
+            0,
+            [-4.05, 13.865, 4.357114],
+            [0.0, 1.0, 0.0],
+            0.165,
+            407,
+        );
         assert_eq!(
-            door0_adjacent.use_thing([1.28, 9.62, 6.357114], [-0.966, -0.259], 0.165, 60),
-            Some(1),
-            "the sector-60 door-stop pose (door in 74) did not use the door"
+            used,
+            Some(UseHit::Thing(1)),
+            "the tunnel pose did not reach the one-way door: {used:?}"
         );
 
-        let mut tunnel_adjacent = with_door([-4.05, 13.95, 4.375], 223);
-        tunnel_adjacent.sector_adjoins = vec![Vec::new(); 408];
-        // The level's real chain: the tunnel (407) adjoins the doorway stub (240), which adjoins
-        // the leaf's sector (223). One hop is not enough, which is what the first replay showed.
-        tunnel_adjacent.sector_adjoins[407] = vec![(240, 0.0)];
-        tunnel_adjacent.sector_adjoins[240] = vec![(223, 0.0)];
-        assert_eq!(
-            tunnel_adjacent.use_thing([-4.05, 13.8731, 4.382114], [0.0, 1.0], 0.165, 407),
-            Some(1),
-            "the sector-407 tunnel pose (one-way door in 223) did not use the door"
+        // Both halves rank together, because the engine pops one stack: a plate nearer the eye than
+        // the leaf is the one that answers, and the leaf is not messaged.
+        let mut both = with_door([1.200002, 9.650073, 6.35], 74);
+        both.surfaces = vec![SurfaceState {
+            center: [1.36, 9.7, 6.357],
+            cel: 0.0,
+            anim: 0.0,
+            slide: [0.0; 2],
+            next: 0.0,
+            light: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
+        }];
+        both.surface_sector = vec![74];
+        both.surface_links = vec![(0, 2, 0)];
+        let used = both.sith_player_actions_activate(
+            0,
+            [1.28, 9.70, 6.357],
+            [-1.0, 0.0, 0.0],
+            0.165,
+            74,
+        );
+        assert_eq!(used, Some(UseHit::Surface(0)), "the nearer plate did not win: {used:?}");
+        assert!(
+            both.pending_messages.iter().all(|(_, _, _, sender)| *sender == Some(2)),
+            "the leaf was messaged as well as the plate: {:?}",
+            both.pending_messages
         );
     }
 
@@ -16002,8 +16087,8 @@ mod tests {
         near.surface_sector = vec![0, 0];
         near.surface_links = vec![(0, 2, 0), (0, 3, 1)];
         assert_eq!(
-            near.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 0),
-            Some(0),
+            near.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 0),
+            Some(UseHit::Surface(0)),
             "the plate inside the sweep was not used"
         );
         assert!(
@@ -16019,7 +16104,7 @@ mod tests {
         far.surface_sector = vec![0];
         far.surface_links = vec![(0, 3, 0)];
         assert_eq!(
-            far.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 0),
+            far.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 0),
             None,
             "a plate half a unit away was used past the engine's 0.16 sweep"
         );
@@ -16045,15 +16130,117 @@ mod tests {
         rt.surface_links = vec![(0, 2, 0)];
         rt.surface_sector = vec![7];
         assert_eq!(
-            rt.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 260),
+            rt.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 260),
             None,
             "a plate in sector 7 was used from sector 260"
         );
         assert_eq!(
-            rt.activate_near([0.0, 0.0, 0.0], [-1.0, 0.0], 0.16, 7),
-            Some(0),
+            rt.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7),
+            Some(UseHit::Surface(0)),
             "the plate's own sector did not reach it"
         );
+    }
+
+    /// The same wait the engine keeps: `sithPlayerActions_Activate` (`0x4fc0a0`) refuses a second
+    /// press inside `DAT_008554bc + 0xfa` (250 ms), and skips the wait while no master cog exists
+    /// (`DAT_00832628 == 0`). The stamp is written before the sweep.
+    #[test]
+    fn the_use_action_waits_250_ms_once_a_level_has_a_master_cog() {
+        let with_plate = || {
+            let mut rt = door_runtime();
+            rt.surfaces = vec![SurfaceState {
+                center: [-0.1, 0.0, 0.0],
+                cel: 0.0,
+                anim: 0.0,
+                slide: [0.0; 2],
+                next: 0.0,
+                light: 0.0,
+                light_end: 0.0,
+                light_rate: 0.0,
+            }];
+            rt.surface_links = vec![(0, 2, 0)];
+            rt.surface_sector = vec![7];
+            rt
+        };
+        let mut rt = with_plate();
+        assert!(rt.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7).is_some());
+        rt.time = 0.25;
+        assert!(
+            rt.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7).is_none(),
+            "the sweep ran again at the same clock"
+        );
+        rt.time = 0.25 + 0.25 - 0.01;
+        assert!(
+            rt.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7).is_none(),
+            "a press 249 ms after the last was allowed"
+        );
+        rt.time = 0.5;
+        assert!(
+            rt.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7).is_some(),
+            "a press at exactly 250 ms was refused"
+        );
+
+        // With no master cog the engine's `if` is short-circuited and no wait applies.
+        let mut no_master = with_plate();
+        no_master.master_cog = None;
+        no_master.time = 0.0;
+        assert!(no_master.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7).is_some());
+        assert!(
+            no_master
+                .sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7)
+                .is_some(),
+            "a level without a master cog waited"
+        );
+    }
+
+    /// `sithCog_SendMessageEx` (`0x4dedc0`) carries an identity, and the senders differ only in it:
+    /// a thing message names type 3 and the thing, a sector message type 5, a surface message type 6,
+    /// and a world sender is index -1 with type 0. `GetSenderId()` answers the **link id** — the
+    /// plate's `linkid=2` is what `00_doorswitch.cog`'s `activated:` handler compares against.
+    #[test]
+    fn a_message_carries_the_engine_source_and_sender() {
+        assert_eq!(
+            SourceSender::new(THING_SOURCE, 204, None),
+            SourceSender { source_type: 3, source: 204, sender_type: 0, sender: -1 },
+            "a world-sent thing message"
+        );
+        assert_eq!(
+            SourceSender::new(THING_SOURCE, 204, Some(0)),
+            SourceSender { source_type: 3, source: 204, sender_type: 3, sender: 0 },
+            "the player's use action sends from its own thing"
+        );
+        assert_eq!(SourceSender::new(SECTOR_SOURCE, 31, None).source_type, 5);
+        assert_eq!(SourceSender::new(SURFACE_SOURCE, 12, None).source_type, 6);
+
+        let mut rt = door_runtime();
+        rt.surfaces = vec![SurfaceState {
+            center: [-0.1, 0.0, 0.0],
+            cel: 0.0,
+            anim: 0.0,
+            slide: [0.0; 2],
+            next: 0.0,
+            light: 0.0,
+            light_end: 0.0,
+            light_rate: 0.0,
+        }];
+        rt.surface_links = vec![(0, 2, 0)];
+        assert_eq!(rt.sith_cog_surface_send_message(0, None, "sighted"), 1);
+        assert_eq!(
+            rt.pending_messages.pop(),
+            Some((0, "sighted", [0.0; 2], Some(2))),
+            "the plate's link id is what GetSenderId answers"
+        );
+        // `sighted` reaches the thing's links with the world as the sender (0), which is what
+        // `sithRender_RenderThing` (`0x4c8070`) passes; a thing with no link hears nothing.
+        rt.things.push({
+            let mut t = rt.things[0].clone();
+            t.flags |= TF_CAPTURED;
+            t
+        });
+        rt.thing_links = vec![(0, 0, 1)];
+        assert_eq!(rt.sith_cog_thing_send_message(1, None, "sighted"), 1);
+        assert_eq!(rt.pending_messages.pop(), Some((0, "sighted", [0.0; 2], Some(0))));
+        assert_eq!(rt.sith_cog_sector_send_message(5, None, "entered"), 0);
     }
 
     /// A surface crossing carries its own link id as the sender, which is what tells an

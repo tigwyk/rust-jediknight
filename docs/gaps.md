@@ -7219,37 +7219,51 @@ The port-side trigger remains verified headless (`use: activated surface 2403`, 
 retail comparison is **not** to be automated; walk traces and draw parity remain the only windowed
 checks, and even those should be run deliberately.
 
-## Update — round 268 (issue #15: door0 use and the 8t88 exit, port side; retail blocked)
+## Update — issue #15 (door0 use and the 8t88 exit, from the decomp)
 
-- The door0 trigger is the player's own ACTIVATE message. The port's `use_thing` sends it and
-  `00_door.cog` opens the door; the route's exit segment now carries `door0_opened`/`goal_bin100` and
-  the port replay passes: determinism (33 identical rows), required fields, anti-synthetic use
-  (things 4 and 47), events (`door0_opened` shut before the use tick and latched at the end, final
-  `goal_bin100 = 3`), the committed port oracle (596 fields within 1e-6), and the 0.25-unit perturb
-  rejection (`route-gate.ps1 -Perturb`).
+> Rewritten 2026-11-09: the decompiled engine is the spec, so this no longer waits on a retail
+> capture, and no retail run was made for it. The frozen fixtures stay as regression data.
+
+- **The use key is a transliterated function now.** `Runtime::sith_player_actions_activate`
+  (`sithPlayerActions_Activate`, `0x4fc0a0`) keeps the engine's order: the 250 ms wait on one
+  world-wide stamp (`DAT_008554bc + 0xfa`, written before the sweep, and skipped while no master cog
+  exists), the eye and the **look** (the thing's `+0xb8` position and its `+0x88` orientation
+  pre-rotated by `+0x15c`'s PYR, plus `+0x168`), the sector `sithCollision_FindSectorInRadius`
+  (`0x4e71b0`) answers for the eye, and then `sithCollision_SearchForCollisions` (`0x4e8160`)'s
+  0.025-radius sweep for `moveSize + 0.1` (`_DAT_00523200` is -0.1, so 0.165 for the player's 0.065
+  body). Its collisions rank nearest-first and **the first that can answer ends the sweep**: a thing
+  whose type is not 3/5 with `SITH_TF_COGLINKED` (0x400) gets id 1 (`activated`) through
+  `sithCog_ThingSendMessage`, a surface with `+0x10` bit 2 through `sithCog_SurfaceSendMessage`. The
+  earlier port ran the surface scan and then the thing scan, so order and range were its own rule.
+- **The senders are named after the engine's**: `sith_cog_send_message_ex` (`0x4dedc0`) behind
+  `sith_cog_thing_send_message` (`0x4dfac0`/`0x4dfaf0`), `..._sector_send_message`
+  (`0x4dfd60`/`0x4dfd90`) and `..._surface_send_message` (`0x4dfed0`/`0x4dff00`), with the
+  `SourceSender` split the engine stores: source type 3/5/6 with its index, sender type 0 (index -1)
+  for the world or 3 (the thing's index) for a body. `GetSenderId()` is the **link id** — what
+  `00_doorswitch.cog` compares against its own `linkid=1`/`linkid=2` — and `sithCog_LinkCog`
+  (`0x4df610`) also sets the target's flags as it records a link, which `wire_links` now does for
+  things.
+- **`sighted` has its real producer**: `sithRender_RenderThing` (`0x4c8070`) latches
+  `SITH_TF_INCAMFOV` on a thing's first drawn frame and sends id 9 from the world when its flags carry
+  `SITH_TF_CAPTURED`; `sithRender_BuildVisibleSectorList` (`0x4c6650`) does the same per sector
+  (`0x4000`, `SITH_SECTOR_COGLINKED`). Both route through the senders above with sender 0.
+- **Level end has its two functions**: `sith_main_set_end_level` (`0x4c4bf0`) sets the never-cleared
+  `DAT_0082f0a8` latch (`Runtime::end_level_called`), and `jk_main_end_level` (`0x402eb0`) applies the
+  episode row's `lightpow`/`darkpow` arm bins. The route trace's `level_end` column is that latch.
+- **The replay walks the door.** The plan's door leg ends on the retail fixture's own last pose, then
+  `input 36` walks into the shut portal (`00_door.cog`'s `startup` hid the door sector's adjoins, so
+  the body stops there), `use` presses the player's ACTIVATE binding (scancode 0x39 SPACE: the
+  profile's `bind 12 57 0x2`), `wait 72` lets the leaf reach frame 1, and `input 108` walks through
+  the opened doorway — the sector column changes on that hold. The earlier plan warped to the stop
+  pose and warped away without crossing, and its sector scope was two hops of the adjoin graph instead
+  of the search's.
+- **The gate compares only what the frozen retail fixture measured.** That capture predates the exit:
+  19 columns, rows 0-684, ending at the door leg. The comparator now takes its columns and row span
+  from the expected trace, so the retail half stays a regression check on that prefix at its stated
+  1.70 epsilon (sectors exact) and the port's exit rows are port-only, proved by the new `level_end`
+  assert plus the refresh of `level1-route-port.tsv`. No tolerance was widened and no new retail
+  capture is needed.
 - Retail's profile stores **scancodes**: `player/Lee/Lee.plr` has `bind 12 57 0x2` = scancode 0x39
-  (SPACE), so the earlier use key `9` (scancode 0x0A) was the wrong key. Even with SPACE, and with
-  the key pre-pressed before the window activation, the retail run's `cogstatus 0` stayed
-  `doorstatus 0`, `movestatus 0` and the body did not cross at the door, so **no retail exit trace
-  with the door open exists**. A later probe put the keydown *after* the focus handoff (the
-  pre-press was being delivered to the console's input queue) and still read `doorstatus 0`; the
-  full retail route (33 rows) ends at sector 407 with `goal_bin100 = 1`. The committed retail fixture is the pre-#15 four-leg route: it has no
-  `door0_opened`/`goal_bin100` columns, and `route-gate.ps1` fails it with
-  `line 48: trace header has no 'door0_opened' column`. Ticket #15's retail acceptance is blocked on
-  delivering a retail use/ACTIVATE input; do not rerun fullscreen to fix it.
-- `-Windowed` (dgVoodoo `FullScreenMode=false`, borderless, `CaptureMouse=true`, 640x480) was measured
-  live: the window was 640x480, but the user still saw the game take over the whole display on every
-  run. It is opt-in again and the README/log no longer claim a windowed capture.
-- **DxWnd 2.06.16 was tried as the real window layer (2026-11-09).** It does host JK in a 640x480
-  window at `(50,50)` without changing the desktop, and the menu/console path works once clicks are
-  translated by the client origin. Entering a level is not stable: the menu click reaches New Game,
-  then JK exits/crashes in `stdBitmap_ConvertColorFormat` (`JK.EXE` +0x2d4ce, `c0000005`); the 3D
-  attempt also faulted in `dxwnd.dll` +0x7b367. Tried renderer `primary surface`, `none`, and `GDI`,
-  and DirectX `Automatic`/`1-6`; software and dgVoodoo copies both failed. So DxWnd is not a usable
-  capture path for this title; use a VM/isolated display or keep retail captures on the fullscreen
-  path with explicit approval. The experiment was reverted from the harness.
-- The exit-segment plan's four `warp` rows must keep the plan's empty column after the name (the
-  harness reads x/y/z/yaw at fixed indices); a 6-field row shifted them (`warp 9.62 6.357114 104.963`)
-  and aborted the run.
-- `cargo test --release`: 335 passed. `trace-gate.ps1`: 10 legs, 3 failures (`walk6_spawn`,
-  `walk9_spawn`, `walk17_spawn`), none in the use code (the walker is untouched in this change).
+  (SPACE), so the earlier harness key `9` (scancode 0x0A) was the wrong key. Older notes about a
+  windowed capture (dgVoodoo `-Windowed`, DxWnd 2.06.16) stand as measurements of the harness, not as
+  anything this ticket needs: the whole ticket is settled from `decomp/`.

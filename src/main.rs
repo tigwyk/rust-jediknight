@@ -8926,15 +8926,21 @@ fn main() {
                 let eye = [centre[0] - 1.0, centre[1], centre[2] + 1.0];
                 // The engine searches the body's sector: stand in the surface's own room.
                 let sector = rt.surface_sector.get(surface).copied().unwrap_or(-1);
-                let hit = rt.activate_near(eye, [1.0, 0.0], 3.0, sector);
+                let hit = rt.sith_player_actions_activate(0, eye, [1.0, 0.0, 0.0], 3.0, sector);
                 println!("  use at {eye:?} facing +X reached surface {hit:?} (wanted {surface})");
-                assert_eq!(hit, Some(surface), "the use action missed the linked surface");
+                assert_eq!(
+                    hit,
+                    Some(crate::runtime::UseHit::Surface(surface)),
+                    "the use action missed the linked surface"
+                );
                 // Facing away must not reach *that* surface. Another linked surface may legitimately
                 // be behind the player, so the assertion is about this one, not about emptiness.
-                let behind = rt.activate_near(eye, [-1.0, 0.0], 3.0, sector);
+                // The wait is the engine's, so the clock has to move before the second sweep.
+                rt.time += 0.25;
+                let behind = rt.sith_player_actions_activate(0, eye, [-1.0, 0.0, 0.0], 3.0, sector);
                 assert_ne!(
                     behind,
-                    Some(surface),
+                    Some(crate::runtime::UseHit::Surface(surface)),
                     "the use action reached the surface behind the player"
                 );
                 println!("  facing away reached {behind:?}, not {surface}");
@@ -12139,13 +12145,13 @@ fn main() {
             // Look straight at it from one unit away: the use action is a look, not a touch. The reach
             // here is explicit (the live path uses the engine's 0.16 sweep); this check is about the
             // link chain, not the radius.
-            let facing = [-1.0f32, 0.0];
+            let dir = [-1.0f32, 0.0, 0.0];
             let (_used, before) = {
                 let mut rt = handle.borrow_mut();
                 let before = (rt.sector_flags.clone(), rt.adjoin_flags.clone());
                 // Same sector scope the engine's search has: this thing's own room.
                 let sector = rt.things.get(*thing).map(|t| t.sector).unwrap_or(-1);
-                let used = rt.use_thing(eye, facing, 3.0, sector);
+                let used = rt.sith_player_actions_activate(0, eye, dir, 3.0, sector);
                 (used, before)
             };
             // Another linked thing can be nearer than the one this candidate names; what matters is that
@@ -13183,6 +13189,29 @@ fn film_step(cuts: &[String], playing: Option<bool>) -> FilmStep {
     }
 }
 
+/// `jkMain_EndLevel` (`0x402eb0`): the finished level's own grants, before the tally draws them.
+///
+/// The episode row for the level being finished carries two arm bins (`+0x30` light, `+0x34` dark).
+/// Each is granted when `0x13 < bin < 0x23` and the player's declared side allows it — `lightpow` is
+/// skipped for `jkPlayer_GetChoice() == 2` (dark) and `darkpow` for `1` (light) — through
+/// `sithInventory_SetCarries(..., 1)`, which is the same available bit `SetAccessiblePowers` sets.
+/// Nothing else is written: retail's saves carry no rank or star bins from a level's end (the ledger's
+/// *rank and force-point crediting* row).
+fn jk_main_end_level(sim: &Sim, plan: &FlowPlan) {
+    let choice = sim.world.borrow().inv.get(&18).copied().unwrap_or(0.0) as i32;
+    let items = plan
+        .episode
+        .as_ref()
+        .map(|episode| episode.end_level_items(&plan.level, choice))
+        .unwrap_or_default();
+    for (bin, amount) in &items {
+        sim.world.borrow_mut().inv.insert(*bin, *amount);
+    }
+    if !items.is_empty() {
+        println!("endlevel: choice {choice} grants bin(s) {items:?}");
+    }
+}
+
 /// When the level's scripts call `jkEndLevel`, play the graph's films in order and name the level
 /// that follows them. A transition can have more than one film — the campaign's `DECIDE` row sits
 /// between level 15's film and the chosen path's — so this owns a queue, and only reaches
@@ -13235,20 +13264,7 @@ fn watch_level_complete(
     // rank, the secrets and the stars before the film runs. Its rows are filled by `tally_lines` in
     // the draw path already — the screen was simply never shown.
     if plan.phase == FlowPhase::Complete {
-        // `jkMain_EndLevel` (`0x402eb0`): the episode entry's two arm bins are granted here, gated on
-        // `jkPlayer_GetChoice` -- inventory bin 18 -- with `sithInventory_SetCarries(..., 1)`.
-        let choice = sim.world.borrow().inv.get(&18).copied().unwrap_or(0.0) as i32;
-        let items = plan
-            .episode
-            .as_ref()
-            .map(|episode| episode.end_level_items(&plan.level, choice))
-            .unwrap_or_default();
-        for (bin, amount) in &items {
-            sim.world.borrow_mut().inv.insert(*bin, *amount);
-        }
-        if !items.is_empty() {
-            println!("endlevel: choice {choice} grants bin(s) {items:?}");
-        }
+        jk_main_end_level(&sim, &plan);
         // The level's own state lands here, before the tally draws it: `jkMain_EndLevel` raises the
         // rank and credits the stars the tally then repeats, and `jkGuiSingleTally_Show` computes
         // the alignment and stores it (bin 75) as it draws — which is why retail's level-2 autosave
@@ -16086,10 +16102,9 @@ struct RoutePlan {
     /// Ticks at which the script presses the use key. A `use` row takes no ticks: the sample grid
     /// must stay on retail's 600 ms cadence.
     uses: Vec<u32>,
-    /// A `switch` row: the tick at which the level's own cantina-door switch is activated. The
-    /// retail captures began with that door open (the player had pressed it in the recorded play),
-    /// so the replay restores the same world through the level's own message, not by opening a gate.
-    switch_at: Option<u32>,
+    /// Ticks at which the script turns the body: `(tick, degrees)`. A turn takes no ticks, because the
+    /// player's yaw is a mouse input, not movement — the sample grid stays on retail's cadence.
+    yaws: Vec<(u32, f32)>,
     /// A `seed` row: the body velocity retail's capture already had at the leg's pose. The retail
     /// fixture's first row records `vel` 0 only because its window has no earlier sample; its first
     /// 600 ms already covered the leg's travel, so the replay starts the body moving at the same speed.
@@ -16118,11 +16133,11 @@ const ROUTE_COGS: [(usize, [&str; 4]); 2] = [
 /// The trace columns. Every value is a number or `-` (a field the run does not have: no such cog
 /// started, or a retail capture did not record it). The comparator parses the header, so the set
 /// can grow without breaking older fixtures.
-const ROUTE_TRACE_FIELDS: [&str; 21] = [
+const ROUTE_TRACE_FIELDS: [&str; 22] = [
     "tick", "t_s", "x", "y", "z", "sector", "vel_x", "vel_y", "vel_z", "health", "shields",
     "door0_status", "door0_movestatus", "door0_opendoors", "door0_closedoors",
     "switch_status", "switch_movestatus", "switch_opendoors", "switch_closedoors",
-    "door0_opened", "goal_bin100",
+    "door0_opened", "goal_bin100", "level_end",
 ];
 
 /// Event columns: a latched engine observation the two captures can sample a row apart. Retail's
@@ -16130,7 +16145,7 @@ const ROUTE_TRACE_FIELDS: [&str; 21] = [
 /// 36, so a transient state (the door's open frame, the sighting's goal write) may land on a
 /// different sample index on the two sides. These columns are therefore graded on the fixture's
 /// **last row only**; a position, sector, velocity or bar keeps its per-row comparison.
-const ROUTE_EVENT_FIELDS: [&str; 2] = ["door0_opened", "goal_bin100"];
+const ROUTE_EVENT_FIELDS: [&str; 3] = ["door0_opened", "goal_bin100", "level_end"];
 
 impl RoutePlan {
     fn read(path: &std::path::Path) -> Result<Self, String> {
@@ -16216,12 +16231,15 @@ impl RoutePlan {
                     }
                     plan.uses.push(plan.total);
                 }
-                Some("switch") => {
-                    // switch
-                    if f.len() != 1 {
-                        return Err(fail(format!("`switch` takes no values, got {} field(s)", f.len())));
+                Some("yaw") => {
+                    // yaw <degrees>
+                    if f.len() != 2 {
+                        return Err(fail(format!("`yaw` needs degrees, got {} field(s)", f.len())));
                     }
-                    plan.switch_at.get_or_insert(plan.total);
+                    let degrees: f32 = f[1]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a number", f[1])))?;
+                    plan.yaws.push((plan.total, degrees));
                 }
                 Some("seed") => {
                     // seed <vx> <vy>
@@ -16237,7 +16255,7 @@ impl RoutePlan {
                     plan.seed.get_or_insert((plan.total, [vx, vy]));
                 }
                 Some(other) => {
-                    return Err(fail(format!("unknown row kind `{other}` (warp, input, wait, use, switch, seed)")));
+                    return Err(fail(format!("unknown row kind `{other}` (warp, yaw, input, wait, use, seed)")));
                 }
                 None => {}
             }
@@ -16281,9 +16299,22 @@ struct RouteTraceRow {
     values: Vec<Option<f64>>,
 }
 
-fn parse_route_trace(text: &str) -> Result<Vec<RouteTraceRow>, String> {
+/// A parsed route trace: its rows, and which columns its own header measured.
+///
+/// A fixture says what it measured. The committed retail capture predates issue #15 and has no
+/// `door0_opened`/`goal_bin100`/`level_end` columns and no exit segment; that is not a `<-> failure, it
+/// is the coverage the fixture claims, so those columns and the rows past its last tick are not
+/// compared against it.
+#[derive(Debug, Clone)]
+struct RouteTrace {
+    rows: Vec<RouteTraceRow>,
+    /// One flag per [`ROUTE_TRACE_FIELDS`] entry: does this trace's header carry the column?
+    columns: Vec<bool>,
+}
+
+fn parse_route_trace(text: &str) -> Result<RouteTrace, String> {
     let mut rows = Vec::new();
-    let mut columns: Option<Vec<usize>> = None;
+    let mut columns: Option<Vec<Option<usize>>> = None;
     for (line_no, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -16291,17 +16322,14 @@ fn parse_route_trace(text: &str) -> Result<Vec<RouteTraceRow>, String> {
         }
         let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
         if columns.is_none() {
-            let mut order = Vec::with_capacity(ROUTE_TRACE_FIELDS.len());
-            for field in ROUTE_TRACE_FIELDS {
-                match cells.iter().position(|c| *c == field) {
-                    Some(index) => order.push(index),
-                    None => {
-                        return Err(format!(
-                            "line {}: trace header has no `{field}` column",
-                            line_no + 1
-                        ))
-                    }
-                }
+            // A missing column is a column the fixture did not measure, not an error: the frozen
+            // retail capture predates the exit segment's events.
+            let order: Vec<Option<usize>> = ROUTE_TRACE_FIELDS
+                .iter()
+                .map(|field| cells.iter().position(|c| c == field))
+                .collect();
+            if order[0].is_none() {
+                return Err(format!("line {}: trace header has no `tick` column", line_no + 1));
             }
             columns = Some(order);
             continue;
@@ -16309,7 +16337,7 @@ fn parse_route_trace(text: &str) -> Result<Vec<RouteTraceRow>, String> {
         let order = columns.as_ref().expect("header just parsed");
         let mut values = Vec::with_capacity(ROUTE_TRACE_FIELDS.len());
         for (slot, index) in order.iter().enumerate() {
-            let raw = cells.get(*index).copied().unwrap_or("-");
+            let raw = index.and_then(|index| cells.get(index)).copied().unwrap_or("-");
             let value = if raw == "-" || raw.is_empty() {
                 None
             } else {
@@ -16328,35 +16356,47 @@ fn parse_route_trace(text: &str) -> Result<Vec<RouteTraceRow>, String> {
     if rows.is_empty() {
         return Err("the trace has a header but no rows".to_string());
     }
-    Ok(rows)
+    let columns = columns
+        .expect("a trace with rows has a header")
+        .iter()
+        .map(Option::is_some)
+        .collect();
+    Ok(RouteTrace { rows, columns })
 }
 
 /// Compare two route traces field by field. `epsilon` is the absolute tolerance for every numeric
 /// column except `tick` (exact) and `sector` (an integer identity, exact): a sector difference is a
 /// different room, never a rounding error. A field that either side does not have (`-`) is skipped,
 /// and the caller's summary counts how many were actually compared.
+///
+/// The **expected** trace sets the coverage: its columns and its row span are what is graded, so a
+/// fixture taken before a segment existed still checks the part of the route it measured, and the
+/// trace's rows past the fixture's last tick are reported instead of compared.
 fn compare_route_rows(
-    expected: &[RouteTraceRow],
-    actual: &[RouteTraceRow],
+    expected: &RouteTrace,
+    actual: &RouteTrace,
     epsilon: f64,
 ) -> Result<usize, String> {
-    if expected.len() != actual.len() {
+    if actual.rows.len() < expected.rows.len() {
         return Err(format!(
             "route-compare: FAIL {} row(s) expected, {} in the trace",
-            expected.len(),
-            actual.len()
+            expected.rows.len(),
+            actual.rows.len()
         ));
     }
     let mut failures = Vec::new();
     let mut compared = 0usize;
-    let last_tick = expected.last().map(|row| row.tick);
-    for (want_row, got_row) in expected.iter().zip(actual) {
+    let last_tick = expected.rows.last().map(|row| row.tick);
+    for (want_row, got_row) in expected.rows.iter().zip(&actual.rows) {
         let tick = want_row.tick;
         if tick != got_row.tick {
             failures.push(format!("tick {tick}: the trace has tick {}", got_row.tick));
             continue;
         }
         for (slot, field) in ROUTE_TRACE_FIELDS.iter().enumerate().skip(1) {
+            if !expected.columns[slot] {
+                continue;
+            }
             let event = ROUTE_EVENT_FIELDS.contains(field);
             // An event column is a latched state, graded once, at the fixture's last row: the two
             // captures sample the same 600 ms grid but advance a different amount of engine time
@@ -16415,7 +16455,7 @@ fn route_trace_compare(
     actual: &std::path::Path,
     epsilon: f64,
 ) -> Result<(), String> {
-    let read = |path: &std::path::Path| -> Result<Vec<RouteTraceRow>, String> {
+    let read = |path: &std::path::Path| -> Result<RouteTrace, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         parse_route_trace(&text).map_err(|e| format!("{}: {e}", path.display()))
@@ -16423,9 +16463,24 @@ fn route_trace_compare(
     let want = read(expected)?;
     let got = read(actual)?;
     let compared = compare_route_rows(&want, &got, epsilon)?;
+    let unmeasured = want
+        .columns
+        .iter()
+        .zip(ROUTE_TRACE_FIELDS.iter())
+        .filter(|(measured, _)| !**measured)
+        .map(|(_, field)| *field)
+        .collect::<Vec<_>>();
+    let port_only = got.rows.len() - want.rows.len();
     println!(
-        "route-compare: PASS {} row(s), {compared} field(s) within {epsilon}",
-        want.len()
+        "route-compare: PASS {} row(s){} of {}, {compared} field(s) within {epsilon}{}",
+        want.rows.len(),
+        if port_only > 0 { format!(" (+{port_only} beyond the fixture)") } else { String::new() },
+        actual.display(),
+        if unmeasured.is_empty() {
+            String::new()
+        } else {
+            format!("; the fixture does not measure {}", unmeasured.join(", "))
+        }
     );
     Ok(())
 }
@@ -16484,6 +16539,10 @@ fn write_route_trace_row(
     // inventory bin (SITHBIN_GOAL00 + 0) reads 1 at the level start and 3 once 8t88 is sighted.
     let goal_bin100 = sim
         .map(|sim| f64::from(sim.world.borrow().inv.get(&runtime::GOAL_BIN).copied().unwrap_or(0.0)));
+    // `sithMain_SetEndLevel` (`0x4c4bf0`): the level's own script called `jkEndLevel`, so the level
+    // finished. A capture keeps the world it booted (the app clears `level_complete`), which is why
+    // the trace reads the never-cleared latch instead of the app's transition flag.
+    let level_end = sim.map(|sim| i32::from(sim.world.borrow().end_level_called));
     let number = |value: Option<f64>, places: usize| {
         value
             .map(|v| format!("{v:.places$}"))
@@ -16491,7 +16550,7 @@ fn write_route_trace_row(
     };
     let _ = writeln!(
         file,
-        "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         tick,
         f64::from(tick) / 60.0,
         body.pos.x,
@@ -16513,6 +16572,7 @@ fn write_route_trace_row(
         number(cogs[7], 3),
         if *door0_opened { 1 } else { 0 },
         number(goal_bin100, 0),
+        number(level_end.map(f64::from), 0),
     );
 }
 
@@ -17075,22 +17135,48 @@ input 72 1 0
     }
 
     /// The committed port oracle parses, carries the event columns, and compares to itself.
-    ///
-    /// The retail fixture is deliberately not looped here: the only committed retail capture is the
-    /// pre-#15 route (no `door0_opened`/`goal_bin100` columns and no exit segment), so it cannot parse
-    /// against the current header. `route-gate.ps1` is what enforces the retail side and reports that
-    /// blocker; a retail capture is blocked until the harness can run the `use` key.
     #[test]
     fn the_committed_port_route_fixture_parses_and_compares_to_itself() {
         let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("committed fixture");
-        let rows = parse_route_trace(&text).expect("fixture parses");
+        let trace = parse_route_trace(&text).expect("fixture parses");
         let header = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
         for field in ROUTE_EVENT_FIELDS {
             assert!(header.split('\t').any(|cell| cell == field), "fixture has no {field} column");
         }
-        let compared = compare_route_rows(&rows, &rows, 1e-6)
+        let compared = compare_route_rows(&trace, &trace, 1e-6)
             .unwrap_or_else(|e| panic!("the port fixture does not compare to itself: {e}"));
         assert!(compared > 0, "the port fixture compared no fields");
+    }
+
+    /// The frozen retail capture predates the exit segment, so it measures fewer columns and ends
+    /// before the port's route does. The comparator grades exactly what it claims: its own columns,
+    /// its own row span. That is the gate's retail half, and it needs no new retail capture.
+    #[test]
+    fn the_frozen_retail_fixture_covers_the_route_prefix_it_measured() {
+        let slot = |name: &str| ROUTE_TRACE_FIELDS.iter().position(|f| *f == name).unwrap();
+        let retail_text =
+            std::fs::read_to_string(fixture("level1-route-retail.tsv")).expect("retail fixture");
+        let retail = parse_route_trace(&retail_text).expect("the frozen retail fixture parses");
+        for event in ROUTE_EVENT_FIELDS {
+            assert!(
+                !retail.columns[slot(event)],
+                "the frozen fixture predates `{event}`; a column it does not measure cannot be expected"
+            );
+        }
+        assert!(retail.columns[slot("sector")], "the frozen fixture measures sector");
+        assert_eq!(
+            retail.rows.last().map(|row| row.tick),
+            Some(684),
+            "the frozen fixture's own last sample"
+        );
+
+        let port_text =
+            std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("port fixture");
+        let port = parse_route_trace(&port_text).expect("port fixture parses");
+        assert!(
+            port.rows.len() > retail.rows.len(),
+            "the port oracle must carry the exit segment the retail fixture does not"
+        );
     }
 
     #[test]
@@ -17099,7 +17185,7 @@ input 72 1 0
         let expected = parse_route_trace(&text).expect("fixture parses");
         let mut perturbed = expected.clone();
         let x = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "x").unwrap();
-        let value = perturbed[0].values[x].as_mut().expect("the first row has an x");
+        let value = perturbed.rows[0].values[x].as_mut().expect("the first row has an x");
         *value += 0.25;
         let error = compare_route_rows(&expected, &perturbed, 1e-6)
             .expect_err("a 0.25-unit position change must fail");
@@ -17123,27 +17209,51 @@ input 72 1 0
             values[slot("goal_bin100")] = goal;
             RouteTraceRow { tick, values }
         };
-        let want = vec![row(0, Some(0.0), Some(1.0)), row(36, Some(1.0), Some(1.0)), row(72, Some(1.0), Some(3.0))];
+        let want = RouteTrace {
+            rows: vec![
+                row(0, Some(0.0), Some(1.0)),
+                row(36, Some(1.0), Some(1.0)),
+                row(72, Some(1.0), Some(3.0)),
+            ],
+            columns: vec![true; ROUTE_TRACE_FIELDS.len()],
+        };
         // The door opens a row early and the sighting fires a row late: intermediate samples differ.
-        let got = vec![row(0, Some(0.0), Some(1.0)), row(36, Some(1.0), Some(3.0)), row(72, Some(1.0), Some(3.0))];
+        let got = RouteTrace {
+            rows: vec![
+                row(0, Some(0.0), Some(1.0)),
+                row(36, Some(1.0), Some(3.0)),
+                row(72, Some(1.0), Some(3.0)),
+            ],
+            columns: vec![true; ROUTE_TRACE_FIELDS.len()],
+        };
         let compared = compare_route_rows(&want, &got, 1e-6).expect("intermediate events are not graded");
         assert_eq!(compared, 2, "only the two final-row events were compared");
 
         // The final state is an identity: a door that never opened and a goal that stopped at 2 fail.
         let mut early = got.clone();
-        early[2].values[slot("door0_opened")] = Some(0.0);
+        early.rows[2].values[slot("door0_opened")] = Some(0.0);
         let error = compare_route_rows(&want, &early, 1e-6).expect_err("door0_opened 0 at the last row must fail");
         assert!(error.contains("door0_opened"), "{error}");
         let mut short = got.clone();
-        short[2].values[slot("goal_bin100")] = Some(2.0);
+        short.rows[2].values[slot("goal_bin100")] = Some(2.0);
         let error = compare_route_rows(&want, &short, 1e-6).expect_err("goal_bin100 2 at the last row must fail");
         assert!(error.contains("goal_bin100"), "{error}");
 
         // A missing event cell is a failure, not something the comparator skips.
-        let mut missing = got;
-        missing[2].values[slot("goal_bin100")] = None;
+        let mut missing = got.clone();
+        missing.rows[2].values[slot("goal_bin100")] = None;
         let error = compare_route_rows(&want, &missing, 1e-6).expect_err("a `-` event cell must fail");
         assert!(error.contains("goal_bin100"), "{error}");
+
+        // A column the fixture does not measure is not graded; the same disagreement then passes.
+        let mut narrow = want.clone();
+        narrow.columns[slot("goal_bin100")] = false;
+        let mut drifted = got.clone();
+        drifted.rows[2].values[slot("goal_bin100")] = Some(2.0);
+        assert!(
+            compare_route_rows(&narrow, &drifted, 1e-6).is_ok(),
+            "a column the fixture does not measure was graded"
+        );
     }
 
     #[test]
@@ -21644,54 +21754,12 @@ fn ammo_bin_for(world: &World) -> Option<i32> {
 #[derive(Resource, Default)]
 struct AmmoBin(Option<i32>);
 
-/// `sithPlayerActions_Activate`'s throttle (`0x4fc0a0`): `DAT_008554bc + 0xfa <= clock`, i.e. one
-/// activate per **250 ms**. It is stamped before the sweep, so a press that finds nothing still starts
-/// the wait, exactly as the engine's does.
-fn use_allowed(last: f32, now: f32) -> bool {
-    now - last >= 0.25
-}
-
-#[cfg(test)]
-mod use_tests {
-    use super::use_allowed;
-
-    /// The engine's activate throttle is 250 ms (`0x4fc0a0`), not a per-frame gate: the first press
-    /// always passes, a repeat at exactly the interval passes, and anything sooner is refused.
-    #[test]
-    fn the_use_action_is_throttled_to_one_per_250_ms() {
-        assert!(use_allowed(f32::NEG_INFINITY, 0.0), "the first use was refused");
-        assert!(use_allowed(1.0, 1.25), "a use at exactly 250 ms was refused");
-        assert!(!use_allowed(1.0, 1.24), "a use 249 ms after the last was allowed");
-        assert!(!use_allowed(1.0, 1.0), "two uses at the same instant were allowed");
-    }
-}
-
-/// The use key: the engine's activate action (`sithPlayerActions_Activate`, `0x4fc0a0`).
+/// The use key: the engine's activate action, `sithPlayerActions_Activate` (`0x4fc0a0`).
 ///
-/// The sweep starts at the **eye** and reaches `moveSize + 0.1` — 0.16 units for the player —
-/// throttled to one activate per 250 ms, and it takes a linked surface, or a linked thing that is not
-/// a weapon or item. `activate` is the third most common label level 1 declares (x14); the *candidates*
-/// are the surfaces and things a script linked, so a room with nothing wired stays silent.
-/// `sithPlayerActions_Activate`'s reach: `moveSize - _DAT_00523200`, and the constant at `0x523200`
-/// is **-0.1** (`0x4fc0a0`). The player's body is 0.06, so the use action reaches 0.16 units from the
-/// eye — the cantina plate is used at 0.12 and not at 0.93, which retail's own `doorstatus 0` confirms.
-fn use_reach(move_size: f32) -> f32 {
-    move_size + 0.1
-}
-
-#[cfg(test)]
-mod use_reach_tests {
-    use super::*;
-
-    #[test]
-    fn the_use_action_reaches_move_size_plus_the_negated_constant() {
-        assert!((use_reach(0.06) - 0.16).abs() < 1e-6);
-        // The plate's two measured poses: 0.12 inside, 0.93 outside.
-        assert!((use_reach(0.06) - 0.12).abs() < 0.05);
-        assert!(use_reach(0.06) < 0.93);
-    }
-}
-
+/// The function itself lives in the runtime (`Runtime::sith_player_actions_activate`), because it
+/// reads the body's sector, its `moveSize + 0.1` reach and its 250 ms wait. `activate` is the third
+/// most common label level 1 declares (x14) and only the targets a script linked can answer, so a room
+/// with nothing wired stays silent.
 fn use_key(
     keys: Res<ButtonInput<KeyCode>>,
     sim: Option<Res<Sim>>,
@@ -21714,48 +21782,33 @@ fn use_key(
             return;
         }
     }
-    let now = sim.world.borrow().time;
-    if !use_allowed(player.last_use, now) {
-        return;
-    }
     // The body's own thing, for the sector the engine scopes the sweep to.
     let player_thing = sim.world.borrow().player_thing();
-    player.last_use = now;
-    // `sithPlayerActions_Activate` (`0x4fc0a0`) starts the sweep at the **eye** and passes
-    // `*(float *)(thing + 0x2c) - _DAT_00523200` as the radius. The constant at `0x523200` is
-    // **-0.1**, so the reach is `moveSize + 0.1` — 0.16 units for the player's 0.06 body, not the
-    // 0.265 the -0.1 was first read as. Throttle 250 ms (`0xfa`). The old 3.0-unit reach let the
-    // port activate the cantina switch from 0.8 units, where retail's own use action does nothing
-    // (round 257's measurement); the reach is not a harness question, it was the port's over-reach.
-    let use_reach = use_reach(player.rules.radius);
+    // `sithPlayerActions_Activate` (`0x4fc0a0`) reads the eye, the look, the reach and the sector off
+    // the thing, and keeps its own 250 ms wait; the port passes the eye and the pitch from
+    // `PlayerBody`, which carries them where a `ThingState` does not.
     let eye = [player.body.pos.x, player.body.pos.y, player.body.pos.z + player.body.eye];
     // The port's forward axis is `yaw_axes`' `(-sin, cos)` (`sithCamera`'s own frame), not `(cos, sin)`:
-
     // with the wrong axis the use action's cone faced 90 degrees off and every switch was "behind" the
-    // player (`dot` was -0.45 for the cantina switch, round 201).
-    let facing = [-player.body.yaw.sin(), player.body.yaw.cos()];
-    let mut rt = sim.world.borrow_mut();
-    // **Surfaces first.** A switch is a surface link (`00_doorswitch.cog`: `surface switch0 linkid=2`)
-    // while the same script also links its *doors* as things (linkid=1, the lock-sound arm). With
-    // things first a door piece within reach won and the surface was never asked. The engine has no
-    // cone — it sweeps a sphere along the view — so the `dot` test in the scans stands in for the
-    // sweep's direction, not for a FOV.
-    let sector = rt.things.get(player_thing).map(|t| t.sector).unwrap_or(-1);
-    let used_surface = rt.activate_near(eye, facing, use_reach, sector);
-    let used_thing = if used_surface.is_none() {
-        rt.use_thing(eye, facing, use_reach, sector)
-    } else {
-        None
-    };
-    drop(rt);
+    // player (`dot` was -0.45 for the cantina switch, round 201). The pitch rides with it, because the
+    // engine's sweep follows `thing + 0x15c`'s PYR.
+    let (sin, cos) = player.body.yaw.sin_cos();
+    let (pitch_sin, pitch_cos) = player.body.pitch.sin_cos();
+    let dir = [-sin * pitch_cos, cos * pitch_cos, pitch_sin];
+    let reach = sim.world.borrow().activate_reach(player_thing);
+    let sector = sim.world.borrow().things.get(player_thing).map(|t| t.sector).unwrap_or(-1);
+    let used = sim
+        .world
+        .borrow_mut()
+        .sith_player_actions_activate(player_thing, eye, dir, reach, sector);
     *said += 1;
-    if used_thing.is_some() || used_surface.is_some() {
+    if used.is_some() {
         player.use_hits += 1;
     }
-    match (used_thing, used_surface) {
-        (Some(thing), _) => println!("use: activated thing {thing}"),
-        (None, Some(surface)) => println!("use: activated surface {surface}"),
-        (None, None) => println!("use: nothing linked within reach"),
+    match used {
+        Some(runtime::UseHit::Thing(thing)) => println!("use: activated thing {thing}"),
+        Some(runtime::UseHit::Surface(surface)) => println!("use: activated surface {surface}"),
+        None => println!("use: nothing linked within reach"),
     }
 }
 
@@ -27502,7 +27555,6 @@ fn setup(
             rest: body_rest.max(rules.radius),
         },
         extra_speed: 0.0,
-        last_use: f32::NEG_INFINITY,
         use_hits: 0,
         rules,
         health: 100.0,
@@ -27935,10 +27987,6 @@ struct Player {
     /// bolts took off (§16.5). `DamageThing` on the player writes the runtime's copy; this is a
     /// read-only mirror for the interface.
     health: f32,
-    /// The engine's use throttle: `sithPlayerActions_Activate` (`0x4fc0a0`) refuses a second activate
-    /// within 250 ms (`DAT_008554bc + 0xfa <= clock`), stamped before the sweep even when it finds
-    /// nothing. Seconds on the world clock; `−inf` means "never used".
-    last_use: f32,
     /// How many times a use reached a script-visible target. The `--use-live` gate's own witness:
     /// counting script messages is tainted by the teleport firing sector triggers (round 304).
     use_hits: u32,
@@ -28762,33 +28810,10 @@ fn route_replay(
     {
         player.body.vel = vel;
     }
-    if plan.switch_at == Some(tick)
-        && let (Some(world), Some(sim)) = (world.as_deref(), sim.as_deref())
-        && let Some(instance) = world
-            .level
-            .cogs
-            .iter()
-            .position(|c| c.script.eq_ignore_ascii_case("00_doorswitch.cog"))
-    {
-        // The switch's plate is its surface link id 2 (`00_doorswitch.cog` opens only for it), and
-        // the engine delivers `activate` with the link id as the sender.
-        let mut rt = sim.world.borrow_mut();
-        let plates: Vec<usize> = rt
-            .surface_links
-            .iter()
-            .filter(|(cog, link, _)| *cog == instance && *link == 2)
-            .map(|(_, _, surface)| *surface)
-            .collect();
-        for surface in plates {
-            let links: Vec<(usize, i32)> = rt
-                .surface_links
-                .iter()
-                .filter(|(cog, _, linked)| *cog == instance && *linked == surface)
-                .map(|(cog, link, _)| (*cog, *link))
-                .collect();
-            for (cog, link) in links {
-                rt.pending_messages.push((cog, "activate", [0.0; 2], Some(link as i64)));
-            }
+    // A `yaw` row turns the body where it stands (the player's mouse yaw): no position, no tick.
+    for (at, degrees) in &plan.yaws {
+        if *at == tick {
+            player.body.yaw = degrees.to_radians();
         }
     }
     if tick % ROUTE_SAMPLE_TICKS == 0

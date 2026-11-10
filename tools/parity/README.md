@@ -253,8 +253,9 @@ measurable (Phase 1 step 3's exit criterion). Three scripts and two fixtures:
   authored placement 174 with the intent that the walk stops at the shut door and the hold opens it
   through `00_door.cog`, with `-ConsoleCommands 'cogstatus 0'` recording `doorstatus`/`movestatus`.
   That intent is **unverified in retail**: every run so far recorded `doorstatus 0`/`movestatus 0`
-  and no crossing (`docs/gaps.md`, round 268), so no retail trace with the door open exists and
-  issue #15's retail acceptance stays blocked.
+  and no crossing (`docs/gaps.md`), so no retail trace with the door open exists. Issue #15 no longer
+  needs one — the use action, the message it sends and the sighted condition are read from `decomp/`,
+  and the replay's exit segment is the port's own deterministic route.
 - `port-trace.ps1 [-Only <name>]` - the port half: `--warp` to the same pose, `BK_WALK_FORWARD=1`,
   one line per 1/60 s frame, output `target/parity/trace/<name>.tsv`.
 - `trace-compare.ps1 -Name <name> [-Epsilon <units>]` - interpolates the port path to the retail sample
@@ -385,18 +386,25 @@ tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
   from the running VM on every replay row. Level 1 has both cogs, so
   every field is present; the gate rejects any `-` (the comparator would skip it and measure the
   position columns only).
-- `door0_opened` and `goal_bin100` are **events**, and the rule is different from the other columns:
-  they are graded **only at the fixture's last row**, as identities, not measurements.
+- `door0_opened`, `goal_bin100` and `level_end` are **events**, and the rule is different from the
+  other columns: they are graded **only at the fixture's last row**, as identities, not measurements.
   `door0_opened` latches 1 once the door's own script reports nonzero `doorstatus`/`movestatus`
   (`00_door.cog` re-closes it two seconds after `arrived`, so a sample may miss the open frame);
   `goal_bin100` is inventory bin 100, 1 at the level start and 3 after `01_endlevel.cog`'s `user0:`
-  completes goal 0. A 600 ms retail hold advances a variable number of engine frames while the replay
-  advances exactly 36, so the row either side latches on is not comparable; the final state is. A
-  disagreement on an intermediate row is ignored, a missing cell or a different final value fails.
-  The gate also proves the trigger is real: the plan must press the player's use binding (never the
-  removed synthetic `switch`), the replay log must name things 4 and 47, and `door0_opened` must be 0
-  on every row strictly before the first use tick; the use-tick row is sampled before the key press
-  and must also read 0.
+  completes goal 0; `level_end` is `sithMain_SetEndLevel`'s never-cleared latch (`0x4c4bf0`), i.e. the
+  level's own `jkEndLevel` ran — a capture keeps the world it booted, so the app's own transition flag
+  is cleared and is not what the trace reads. A 600 ms retail hold advances a variable number of
+  engine frames while the replay advances exactly 36, so the row either side latches on is not
+  comparable; the final state is. A disagreement on an intermediate row is ignored, a missing cell or
+  a different final value fails. The gate also proves the trigger is real: the plan must press the
+  player's use binding (never a synthetic `activate`), the replay log must name things 4 and 47, and
+  `door0_opened` must be 0 on every row strictly before the first use tick; the use-tick row is
+  sampled before the key press and must also read 0.
+- **The comparator's coverage is the expected fixture's.** Its header names the columns it measured
+  and its rows are the span it covers; a column it omits and the trace's rows past its last tick are
+  not graded (they are reported). That is what lets the frozen retail capture — 19 columns, rows
+  0-684, taken before the exit segment existed — stay a regression check on the route prefix without a
+  new capture and without widening anything.
 
 A **leg boundary is a `warp`**, not a walk: the retail reference is four separate per-leg captures
 from the level's own authored placements, so the route is the same four walks. Issue #10 fixed what
@@ -418,19 +426,21 @@ part of it: it used to kill retail's player (100/100 to 0/0 between ticks 180 an
 port survived, which made every later bar a guaranteed mismatch. Combat parity is the door
 encounter's job, and ordinary play keeps the AI.
 
-**The exit segment (issue #15)** appends the level's own way to 8t88 to those four legs:
+**The exit segment (issue #15)** appends the level's own way to 8t88 to those four legs. It starts at
+tick 684 — the frozen retail fixture's own last sample — so no row the fixture measures changes:
 
 | leg | pose | what it measures |
 |---|---|---|
-| `exit_door` | warp to the retail stop pose `1.280000, 9.620000, 6.357114`, yaw 105 (eye in sector 60; retail's walk from placement 174 stops here) | `use` presses the binding; the eye is 0.086 from the door origin (thing 4 at `(1.200002, 9.650073, 6.35)` in sector 74), inside the engine's `moveSize + 0.1 = 0.165` sweep. `00_door.cog` opens the leaf: `door0_opened` reads 0 at the use tick 684 and 1 from tick 720. The body stays in sector 60 through `wait 72` and `input 72`; the leg ends with the `warp` to `exit_upper` at tick 828 (sector 431). |
+| `exit_door` | the door leg's stop pose, kept (`input 36` walks the last stretch into the shut portal: `00_door.cog`'s `startup` hid the door sector's adjoins, so the body stops there) | `use` presses the player's ACTIVATE binding and `sithPlayerActions_Activate` (`0x4fc0a0`) messages the linked leaf (thing 4 at `(1.200002, 9.650073, 6.35)`) with `activated`; `00_door.cog` reopens the adjoins and runs `OpenDoors`. `wait 72` lets the leaf reach frame 1, then `input 108` **walks through the open doorway** — the sector column changes on that hold. `door0_opened` reads 0 at and before the use tick and 1 after it. |
 | `exit_upper` | placement 175 (body `-2.519, 11.001, 6.72`) | the corridor/ramp side of the upper route. |
 | `exit_low` | placement 176 (body `-6.15, 9.65, 4.32`) | the low floor east of the 385 ramp. |
-| `exit_tunnel` | tunnel mouth `(-4.05, 12.0, 4.32)`, sector 407 | `use` on the one-way door (thing 47 at `-4.05, 13.95, 4.375`; `00_1waydoor.cog` opens for a body inside 407), then the hold crosses 407 -> 223 -> 229 -> 215 and the renderer sights 8t88. |
+| `exit_tunnel` | tunnel mouth `(-4.05, 12.0, 4.32)`, sector 407 | `use` on the one-way door (thing 47 at `-4.05, 13.95, 4.375`; `00_1waydoor.cog` opens for a body inside 407), then the hold crosses 407 -> 223 -> 229 -> 215 and the renderer sights 8t88 (`sithRender_RenderThing`, `0x4c8070`, sends `sighted` to `01_goal0.cog`). |
 
-The pose is a door **use**, not a walk-by: the earlier `walk_door0` leg (start `1.30, 9.00`, facing
-north) stops on the portal's west jamb, 0.52 from the door origin and facing away, so it can never
-trigger the script. The exit segment's last hold stays under `01_endlevel.cog`'s 3 s sleep after the
-sighting, so the final sample is still on the landing and the level is still level 1.
+The door is **used and crossed**, not warped past: the earlier plan warped to the stop pose and
+warped away again, and its use scan reached the leaf through two hops of the adjoin graph instead of
+the engine's search. `01_endlevel.cog`'s `user0` sets goal bin 100 = 3, sleeps 3 s and calls
+`jkEndLevel(1)`, so the plan's trailing `wait 240` outlasts that sleep and the last sample carries
+`level_end` 1.
 
 The per-sample position tolerance is the **retail harness's**, stated in
 `level1-route-retail.tsv`'s header: a 600 ms sample advances a variable amount of engine time, so

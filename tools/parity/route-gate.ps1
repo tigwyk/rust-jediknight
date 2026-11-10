@@ -5,23 +5,36 @@
   the committed route trace.
 
 .DESCRIPTION
-  Issue #8's oracle. `tools/parity/routes/level1-route.tsv` drives the player through the level's own
-  retail-recorded route placements (spawn, cantina, the way up, the upper door) at the fixed 1/60 s
-  capture step; the replay writes `tick t_s x y z sector vel_x vel_y vel_z health shields` plus the
-  door/switch cog state every 600 ms (36 ticks) to a trace in the documented format.
+  Issue #8's oracle, extended by #15 to the level's own exit. `tools/parity/routes/level1-route.tsv`
+  drives the player through the level's own retail-recorded route placements (spawn, cantina, the way
+  up, the upper door), then — after the frozen retail fixture's last sample — walks into the shut
+  `door0`, presses the player's own use key, walks through the opened doorway, and holds the tunnel and
+  landing legs until `01_endlevel.cog` has run. The replay writes
+  `tick t_s x y z sector vel_x vel_y vel_z health shields` plus the door/switch cog state and the
+  latched events every 600 ms (36 ticks).
 
-  The gate checks four things:
+  The gate checks five things:
 
     1. determinism — the same script replayed twice produces byte-identical traces (retail and port
        must produce the same trace from the same inputs, so the port's own repeatability is a
        precondition);
-    2. the committed oracle — a replay matches `tools/parity/routetrace/level1-route-port.tsv`
+    2. the exit's own evidence — the plan presses use at both doors and never sends a synthetic
+       `activate`, the replay's use trace names the linked things (`use: activated thing 4` and
+       `... 47`), `door0_opened` is shut at and before the first use tick and latched after it,
+       `goal_bin100` reaches 3, and `level_end` reaches 1 (the level's script called `jkEndLevel`);
+    3. the committed oracle — a replay matches `tools/parity/routetrace/level1-route-port.tsv`
        field for field;
-    3. self-check — a copy of the trace with one position moved 0.25 units is **rejected** by the
+    4. self-check — a copy of the trace with one position moved 0.25 units is **rejected** by the
        comparator, so the gate is known to fail on a perturbed trace and pass on the unmodified one.
        `-Perturb` runs that check; the gate's normal run compares the unmodified trace;
-    4. retail parity — the replay matches `level1-route-retail.tsv` within the **epsilon the fixture
+    5. retail parity — the replay matches `level1-route-retail.tsv` within the **epsilon the fixture
        states** (`# epsilon <units>` in its header). Sectors stay exact inside the comparator.
+
+  **Coverage is the fixture's own.** The frozen retail capture was taken before #15: it has no
+  `door0_opened`/`goal_bin100`/`level_end` columns and its rows stop at tick 684, at the door leg's
+  stop pose. The comparator grades exactly the columns that fixture's header carries and the rows it
+  spans; the port's exit rows past it are the port-only segment, proved by check 2 and the port
+  oracle. Nothing here needs a new retail capture, and no tolerance is widened.
 
   Before 2-4, every field of both traces must be present: the comparator skips a `-`, so a required
   health, shield or cog column left as `-` would measure parity for the position columns only and
@@ -186,8 +199,9 @@ $traceHeader = @($traceLines[0] -split "`t")
 $tickCol = [Array]::IndexOf($traceHeader, 'tick')
 $doorCol = [Array]::IndexOf($traceHeader, 'door0_opened')
 $goalCol = [Array]::IndexOf($traceHeader, 'goal_bin100')
-if ($tickCol -lt 0 -or $doorCol -lt 0 -or $goalCol -lt 0) {
-  Write-Host 'FAIL  anti-synthetic: the trace has no tick/door0_opened/goal_bin100 column'
+$endCol = [Array]::IndexOf($traceHeader, 'level_end')
+if ($tickCol -lt 0 -or $doorCol -lt 0 -or $goalCol -lt 0 -or $endCol -lt 0) {
+  Write-Host 'FAIL  anti-synthetic: the trace has no tick/door0_opened/goal_bin100/level_end column'
   exit 1
 }
 $firstUse = $planUses[0]
@@ -213,8 +227,15 @@ if ($lastCells[$goalCol] -ne '3') {
   Write-Host ("FAIL  goal: the last row records goal_bin100 {0}, not 3" -f $lastCells[$goalCol])
   exit 1
 }
+# `level_end` is `sithMain_SetEndLevel`'s never-cleared latch (`0x4c4bf0`): `01_endlevel.cog`'s
+# `user0` sets the goal, sleeps 3 s and calls `jkEndLevel(1)`, so the last sample must see it. A run
+# that stops at the sighting fails here, which is why the plan's trailing `wait` outlasts the sleep.
+if ($lastCells[$endCol] -ne '1') {
+  Write-Host ("FAIL  level end: the last row records level_end {0}; the level's `jkEndLevel` never ran" -f $lastCells[$endCol])
+  exit 1
+}
 Write-Host 'PASS  anti-synthetic: the plan uses the player key, never `switch`, and the replay names things 4 and 47'
-Write-Host 'PASS  events: door0_opened latched after the recorded use; final goal_bin100 = 3'
+Write-Host 'PASS  events: door0_opened latched after the recorded use; final goal_bin100 = 3 and level_end = 1'
 
 # 2. The committed oracle. The comparator is the app's own `--route-compare`; exit code is the gate.
 & $Exe --route-compare $PortPath $runA
@@ -277,7 +298,7 @@ if (-not $retailOk) {
   Write-Host ("FAIL  retail: the replay differs from {0} beyond {1}" -f $RetailFixture, $tolerance)
   exit 1
 }
-Write-Host ("PASS  retail: the replay matches {0} within {1}" -f $RetailFixture, $tolerance)
+Write-Host ("PASS  retail: the replay matches {0} within {1} over the rows and columns that fixture measures" -f $RetailFixture, $tolerance)
 
 Write-Host 'route gate: 0 failure(s)'
 exit 0
