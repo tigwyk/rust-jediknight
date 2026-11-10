@@ -1620,15 +1620,28 @@ function Get-JkAiOriginRows {
     [float]$X,
     [float]$Y,
     [double]$Radius = 8.0,
-    [Parameter(Mandatory)][long]$OriginMs
+    [Parameter(Mandatory)][long]$OriginMs,
+    # `(address, count) -> byte[]`. Defaults to the process; `-EngineCaptureSelfCheck` passes a
+    # synthetic memory image instead, so this path is exercised without retail.
+    [scriptblock]$ReadBytes = $null
   )
   $rows = New-Object System.Collections.Generic.List[object]
-  $regPtr = [JkRetail]::ReadU32($ProcessId, 0x0084DE50)
-  $regCount = [JkRetail]::ReadU32($ProcessId, 0x0084DE54)
+  if (-not $ReadBytes) {
+    $ReadBytes = { param([long]$Address, [int]$Count) , [JkRetail]::ReadBytes($ProcessId, $Address, $Count) }
+  }
+  # -1 / NaN on a failed read, like `[JkRetail]::ReadU32` / `ReadFloat`.
+  $readU32 = {
+    param([long]$Address)
+    $bytes = & $ReadBytes $Address 4
+    if ($null -eq $bytes) { return [long]-1 }
+    return [long][BitConverter]::ToUInt32($bytes, 0)
+  }
+  $regPtr = & $readU32 0x0084DE50
+  $regCount = & $readU32 0x0084DE54
   if ($regPtr -le 0 -or $regCount -le 0 -or $regCount -gt 0x20) {
     throw ("engine capture: the instinct registry (0x0084DE50/54) read ptr {0}, count {1}" -f $regPtr, $regCount)
   }
-  $registry = [JkRetail]::ReadBytes($ProcessId, $regPtr, [int]($regCount * 0x30))
+  $registry = & $ReadBytes $regPtr ([int]($regCount * 0x30))
   if ($null -eq $registry) { throw 'engine capture: the instinct registry block could not be read' }
   $byHandler = @{}
   for ($i = 0; $i -lt $regCount; $i++) {
@@ -1638,12 +1651,12 @@ function Get-JkAiOriginRows {
     $name = [System.Text.Encoding]::ASCII.GetString($registry, $at, $end)
     $byHandler[([string][BitConverter]::ToUInt32($registry, $at + 0x20))] = $name
   }
-  $aiTop = [JkRetail]::ReadU32($ProcessId, 0x008B4BE0)
+  $aiTop = & $readU32 0x008B4BE0
   if ($aiTop -lt 0 -or $aiTop -gt 0xFF) {
     Log ("engine capture: no AI instance slots (0x008B4BE0 read {0})" -f $aiTop)
     return @()
   }
-  $instances = [JkRetail]::ReadBytes($ProcessId, 0x0088AFE0, ([int]$aiTop + 1) * 0x29C)
+  $instances = & $ReadBytes 0x0088AFE0 (([int]$aiTop + 1) * 0x29C)
   if ($null -eq $instances) { throw 'engine capture: the AI instance block could not be read' }
   for ($i = 0; $i -le $aiTop; $i++) {
     $at = $i * 0x29C
@@ -1656,7 +1669,7 @@ function Get-JkAiOriginRows {
     $target = [BitConverter]::ToUInt32($instances, $at + 0x1D0)
     $lastTarget = [BitConverter]::ToUInt32($instances, $at + 0x1C0)
     $acquiredAt = [BitConverter]::ToUInt32($instances, $at + 0x204)
-    $thing = [JkRetail]::ReadBytes($ProcessId, $actor, 0x2B0)
+    $thing = & $ReadBytes $actor 0x2B0
     if ($null -eq $thing) { continue }
     if ([BitConverter]::ToInt32($thing, 0x0C) -ne 2) { continue }
     $health = [BitConverter]::ToSingle($thing, 0x134)
@@ -1671,7 +1684,7 @@ function Get-JkAiOriginRows {
     $fire = -1
     $acquire = -1
     if ($class -ne 0 -and $count -gt 0 -and $count -le 0x10) {
-      $classBytes = [JkRetail]::ReadBytes($ProcessId, $class, 0x94C)
+      $classBytes = & $ReadBytes $class 0x94C
       if ($null -ne $classBytes) {
         for ($j = 0; $j -lt $count; $j++) {
           $handler = [string][BitConverter]::ToUInt32($classBytes, 0xB8 + $j * 0x90)
@@ -1698,7 +1711,29 @@ function Get-JkAiOriginRows {
     Log ("engine capture: origin actor {0} template {1} at ({2:N3}, {3:N3}, {4:N3}): flags 0x{5:X} fire_next {6} acquire_next {7} acquired_at {8} next_pass {9} {10}" -f `
         $actor, $template, $ax, $ay, $az, $flags, $fireNext, $acquireNext, $acquiredAt, $nextPass, $detail)
   }
-  return @($rows)
+  # `ToArray()`: an `@()` over a `List[object]` throws "Argument types do not match" on PowerShell 7.6
+  # (`PSEnumerableBinder.MaybeDebase`), which aborted the whole capture at the origin sample.
+  return $rows.ToArray()
+}
+
+# Serves the origin builder's reads from a synthetic memory image (`address -> block of bytes`) for
+# `-EngineCaptureSelfCheck`: `Count` bytes from the block that contains the address, or $null, the way
+# ReadProcessMemory answers. Never used by a retail capture.
+function Read-JkSyntheticMemory {
+  param(
+    [Parameter(Mandatory)][hashtable]$Image,
+    [Parameter(Mandatory)][long]$Address,
+    [int]$Count
+  )
+  foreach ($base in @($Image.Keys)) {
+    $block = $Image[$base]
+    if ($base -le $Address -and ($Address + $Count) -le ($base + $block.Length)) {
+      $slice = New-Object byte[] $Count
+      [Array]::Copy($block, [int]($Address - $base), $slice, 0, $Count)
+      return , $slice
+    }
+  }
+  return $null
 }
 
 function Invoke-JkEngineCapture {
@@ -1910,10 +1945,113 @@ function Invoke-JkEngineCaptureSelfCheck {
   $bad[$playerLine - 1] = ($columns -join "`t").Replace('fire_next_ms', 'next_fire_ms')
   Assert-JkEngineRejected 'a renamed header column' $bad
   Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue
+
+  # --- the origin-row builder (Issue #20) ---
+  # The user-run capture died in this path with "Argument types do not match": `@()` over the
+  # builder's `List[object]` throws on PowerShell 7.6, and no check reached the builder without
+  # retail. `-ReadBytes` serves a synthetic memory image instead of the process, so the call the
+  # capture makes -- `@(Get-JkAiOriginRows ...)` -- runs here.
+  function Set-JkWord([byte[]]$Block, [int]$Offset, [uint32]$Value) {
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Block, $Offset, 4)
+  }
+  function Set-JkFloat([byte[]]$Block, [int]$Offset, [single]$Value) {
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Block, $Offset, 4)
+  }
+  $playerThing = [long]0x50000000
+  $image = @{}
+  $registry = New-Object byte[] 0x30
+  $handlerName = [System.Text.Encoding]::ASCII.GetBytes('primaryfire')
+  [Array]::Copy($handlerName, 0, $registry, 0, $handlerName.Length)
+  Set-JkWord $registry 0x20 ([uint32]0x1111)
+  $image[0x20000000] = $registry                                  # instinct registry block
+  $image[0x0084DE50] = [BitConverter]::GetBytes([uint32]0x20000000) # registry pointer
+  $image[0x0084DE54] = [BitConverter]::GetBytes([uint32]1)         # registry count
+  $image[0x008B4BE0] = [BitConverter]::GetBytes([uint32]1)         # highest AI instance slot
+  $slots = New-Object byte[] (2 * 0x29C)
+  Set-JkWord $slots 0x00 ([uint32]0x30000000)      # slot 0: actor thing
+  Set-JkWord $slots 0x04 ([uint32]0x40000000)      #          AI class
+  Set-JkWord $slots 0x08 ([uint32]0x1004)          #          flag word
+  Set-JkWord $slots 0x10 ([uint32]7000)            #          instinct 0's next run (fire)
+  Set-JkWord $slots 0x18C ([uint32]1)              #          instinct count
+  Set-JkWord $slots 0x190 ([uint32]5000)           #          next pass
+  Set-JkWord $slots 0x1D0 ([uint32]0x50000000)     #          current target = the player
+  Set-JkWord $slots 0x204 ([uint32]1234)           #          last acquisition time
+  Set-JkWord $slots 0x29C ([uint32]0x30000100)     # slot 1: actor far outside the radius
+  $image[0x0088AFE0] = $slots
+  $class = New-Object byte[] 0x94C
+  Set-JkWord $class 0xB8 ([uint32]0x1111)          # instinct 0's handler is `primaryfire`
+  $image[0x40000000] = $class
+  $near = New-Object byte[] 0x2B0
+  Set-JkWord $near 0x04 ([uint32]42)               # template
+  Set-JkWord $near 0x0C ([uint32]2)                # thing type 2 = AI actor
+  Set-JkFloat $near 0x134 ([single]50.0)           # health
+  Set-JkFloat $near 0xB8 ([single]5.0)
+  Set-JkFloat $near 0xBC ([single]9.0)
+  Set-JkFloat $near 0xC0 ([single]6.0)
+  $image[0x30000000] = $near
+  $far = New-Object byte[] 0x2B0
+  Set-JkWord $far 0x0C ([uint32]2)
+  Set-JkFloat $far 0x134 ([single]50.0)
+  Set-JkFloat $far 0xB8 ([single]30.0)             # 29 units away, outside Radius 8
+  Set-JkFloat $far 0xBC ([single]9.0)
+  $image[0x30000100] = $far
+  $readImage = {
+    param([long]$Address, [int]$Count)
+    Read-JkSyntheticMemory -Image $image -Address $Address -Count $Count
+  }.GetNewClosure()
+  function Assert-JkOrigin([string]$Label, [bool]$Ok, [string]$Detail = '') {
+    if ($Ok) {
+      Write-Host ("PASS  self-check: {0}" -f $Label)
+    } else {
+      Write-Host ("FAIL  self-check: {0} ({1})" -f $Label, $Detail)
+      $script:selfCheckFailures++
+    }
+  }
+  # The capture's own call shape: one memory pass over the synthetic image.
+  try {
+    $originRows = @(Get-JkAiOriginRows -ProcessId 0 -PlayerThing $playerThing -X ([single]1.0) -Y ([single]9.0) -Radius 8.0 -OriginMs $origin -ReadBytes $readImage)
+  } catch {
+    Write-Host ("FAIL  self-check: the origin builder threw: {0}" -f $_.Exception.Message)
+    $script:selfCheckFailures++
+    $originRows = @()
+  }
+  Assert-JkOrigin 'the origin builder returns one row for the one in-radius actor' ($originRows.Count -eq 1) ("count $($originRows.Count)")
+  $field = @{}
+  if ($originRows.Count -eq 1) {
+    $values = @($originRows[0])
+    for ($c = 0; $c -lt [math]::Min($columns.Count, $values.Count); $c++) { $field[$columns[$c]] = $values[$c] }
+  }
+  $expected = [ordered]@{
+    t_ms = [string]$origin; kind = 'origin'; thing = '805306368'; template = '42'
+    x = '5.0000'; y = '9.0000'; z = '6.0000'; ai_flags = '4100'
+    fire_next_ms = '7000'; acquire_next_ms = '-1'; acquired_at_ms = '1234'
+    target = '1342177280'; last_target = '0'; next_pass_ms = '5000'
+    detail = 'fire=primaryfire acquire=none target=player'
+  }
+  foreach ($column in @($expected.Keys)) {
+    Assert-JkOrigin ("the origin row's {0} is {1}" -f $column, $expected[$column]) ([string]$field[$column] -eq $expected[$column]) ("read '$($field[$column])'")
+  }
+  $builderPath = Join-Path $dir 'self-check-origin.tsv'
+  $playerRow = New-JkEngineCaptureRow @{ t_ms = [string]$origin; kind = 'player'; thing = '127621528'; template = 'walkplayer'; x = '1.4001'; y = '9.7001'; z = '6.3201'; sector = '60'; vx = '0.0000'; vy = '0.0000'; vz = '0.0000'; bin72 = '0.000'; bin73 = '0.000'; bin75 = '20.000'; rng = '123456789' }
+  $builderRows = @($playerRow, $originRows[0])
+  Write-JkEngineCaptureFile -Path $builderPath -OriginMs $origin -Name 'self-check-origin' -HeaderComments @('rows built from a synthetic memory image; no retail process was involved') -Rows $builderRows
+  $builderErrors = @(Test-JkEngineCaptureRows -Lines @(Get-Content -LiteralPath $builderPath))
+  Assert-JkOrigin 'the builder rows pass the fixture schema' ($builderErrors.Count -eq 0) ($builderErrors -join '; ')
+  Remove-Item -LiteralPath $builderPath -ErrorAction SilentlyContinue
+  # A run with no AI slot must produce no origin rows, not an error.
+  $noSlots = $image.Clone()
+  $noSlots[0x008B4BE0] = [BitConverter]::GetBytes([uint32]0x100)
+  $readNoSlots = {
+    param([long]$Address, [int]$Count)
+    Read-JkSyntheticMemory -Image $noSlots -Address $Address -Count $Count
+  }.GetNewClosure()
+  $emptyRows = @(Get-JkAiOriginRows -ProcessId 0 -PlayerThing $playerThing -X ([single]1.0) -Y ([single]9.0) -Radius 8.0 -OriginMs $origin -ReadBytes $readNoSlots)
+  Assert-JkOrigin 'a run with no AI instance slots returns no origin rows' ($emptyRows.Count -eq 0) ("count $($emptyRows.Count)")
+
   if ($script:selfCheckFailures -gt 0) {
     Write-Host ("engine-capture self-check: {0} failure(s)" -f $script:selfCheckFailures)
   } else {
-    Write-Host 'engine-capture self-check: 1 fixture accepted, 7 malformed fixtures rejected'
+    Write-Host 'engine-capture self-check: 1 fixture accepted, 7 malformed fixtures rejected, origin rows built from a synthetic memory image'
   }
   return $script:selfCheckFailures
 }

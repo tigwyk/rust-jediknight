@@ -725,7 +725,11 @@ pwsh -File tools/parity/retail-capture.ps1 -EngineCaptureSelfCheck
 It writes one synthetic fixture through the real writer, requires it to be accepted, then corrupts it
 seven ways (missing column, non-numeric position, unknown kind, backwards clock, missing origin
 clock, origin row with no next-fire time, renamed header) and requires every corruption to be
-rejected. Exit code 0 is pass.
+rejected. It also runs `Get-JkAiOriginRows` itself over a synthetic memory image (one actor inside the
+radius, one outside, and a run with no AI slots) and requires the rows' fields and the fixture they
+make to be right: that builder is what the first user-run capture died in — `@()` over its
+`List[object]` throws "Argument types do not match" on PowerShell 7.6 — and the schema cases alone did
+not reach it. Exit code 0 is pass.
 
 Addresses, with their decompilation sources, are in `Invoke-JkEngineCapture` and
 `Get-JkAiOriginRows`: the clock is `sithTime_Advance` (`decomp/004dd640`), the sector
