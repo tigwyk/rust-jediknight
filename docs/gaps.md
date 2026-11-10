@@ -7250,19 +7250,22 @@ checks, and even those should be run deliberately.
 - **Level end has its two functions**: `sith_main_set_end_level` (`0x4c4bf0`) sets the never-cleared
   `DAT_0082f0a8` latch (`Runtime::end_level_called`), and `jk_main_end_level` (`0x402eb0`) applies the
   episode row's `lightpow`/`darkpow` arm bins. The route trace's `level_end` column is that latch.
-- **The replay walks the door.** The plan's door leg ends on the retail fixture's own last pose, then
-  `input 36` walks into the shut portal (`00_door.cog`'s `startup` hid the door sector's adjoins, so
-  the body stops there), `use` presses the player's ACTIVATE binding (scancode 0x39 SPACE: the
-  profile's `bind 12 57 0x2`), `wait 72` lets the leaf reach frame 1, and `input 108` walks through
-  the opened doorway — the sector column changes on that hold. The earlier plan warped to the stop
-  pose and warped away without crossing, and its sector scope was two hops of the adjoin graph instead
-  of the search's.
+- **The replay walks the door.** The plan's door leg ends on the retail fixture's own last pose,
+  then warps to the verified use pose — placement 174's eye `(1.28, 9.62, 6.357114)`, sector 60, yaw
+  105 — because the stop pose leaves the linked leaf 0.5 beyond the shut portal, outside the 0.165
+  sweep. `use` presses the player's ACTIVATE binding (scancode 0x39 SPACE: the profile's
+  `bind 12 57 0x2`), `wait 72` lets the leaf reach frame 1, `yaw 0` turns to the doorway, and
+  `input 108` walks through the opened leaf — the trace's y passes 9.650073 (sector 60 spans both
+  sides, so the sector column does not change). The earlier plan warped to the stop pose and warped
+  away without crossing, and its sector scope was two hops of the adjoin graph instead of the
+  search's.
 - **The gate compares only what the frozen retail fixture measured.** That capture predates the exit:
-  19 columns, rows 0-684, ending at the door leg. The comparator now takes its columns and row span
-  from the expected trace, so the retail half stays a regression check on that prefix at its stated
-  1.70 epsilon (sectors exact) and the port's exit rows are port-only, proved by the new `level_end`
-  assert plus the refresh of `level1-route-port.tsv`. No tolerance was widened and no new retail
-  capture is needed.
+  19 columns, rows 0-684, ending at the door leg. The exit segment's first row is the port-only
+  `exit_door` warp at 684, so the gate slices the retail fixture to the rows strictly before that
+  warp (0-648). The comparator takes its columns from the expected trace, so the retail half stays a
+  regression check on that prefix at its stated 1.70 epsilon (sectors exact) and the port's exit rows
+  are port-only, proved by the use/`door0_opened`/crossing/`goal_bin100`/`level_end` asserts plus the
+  refresh of `level1-route-port.tsv`. No tolerance was widened and no new retail capture is needed.
 - Retail's profile stores **scancodes**: `player/Lee/Lee.plr` has `bind 12 57 0x2` = scancode 0x39
   (SPACE), so the earlier harness key `9` (scancode 0x0A) was the wrong key. Older notes about a
   windowed capture (dgVoodoo `-Windowed`, DxWnd 2.06.16) stand as measurements of the harness, not as

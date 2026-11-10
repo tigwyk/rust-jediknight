@@ -358,7 +358,7 @@ Files:
 | `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `wait <ticks>` stands still (the door leaf needs game time to finish opening before the next hold); `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key. `wait` takes ticks like an input; `seed`/`use`/`switch` take none, so the 600 ms sample grid never moves. There is no `switch` row: retail's `cogstatus 11` reads `doorstatus 0` with that door already open, so the synthetic `activate` it used to send made the port measure a scenario retail never performed. |
 | `tools/parity/routetrace/level1-route-retail.tsv` | Retail-derived reference, one row every 600 ms (36 ticks). Provenance is in the file header. |
 | `tools/parity/routetrace/level1-route-port.tsv` | The port's committed oracle, produced by the replay. |
-| `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), compare to the committed port fixture, reject a trace with one position moved 0.25 units, and match the retail reference within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it for an experiment). |
+| `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), check the exit's own events (use names things 4 and 47, `door0_opened` latches after the use, the body crosses the leaf, `goal_bin100` = 3, `level_end` = 1), compare to the committed port fixture, reject a trace with one position moved 0.25 units, and match the retail reference within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it) over the rows **before** the port-only `exit_door` warp. |
 
 The trace format is tab-separated, `#` comments allowed, one header row:
 
@@ -366,7 +366,7 @@ The trace format is tab-separated, `#` comments allowed, one header row:
 tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
       door0_status  door0_movestatus  door0_opendoors  door0_closedoors
       switch_status  switch_movestatus  switch_opendoors  switch_closedoors
-      door0_opened  goal_bin100
+      door0_opened  goal_bin100  level_end
 ```
 
 - `tick` counts 1/60 s steps; `t_s = tick / 60`. Rows are written at ticks `0, 36, 72, ...`
@@ -427,20 +427,20 @@ port survived, which made every later bar a guaranteed mismatch. Combat parity i
 encounter's job, and ordinary play keeps the AI.
 
 **The exit segment (issue #15)** appends the level's own way to 8t88 to those four legs. It starts at
-tick 684 — the frozen retail fixture's own last sample — so no row the fixture measures changes:
+tick 684 — the frozen retail fixture's own last sample — with a port-only warp, so the gate grades
+that fixture only over the rows before the warp and no measured row changes:
 
 | leg | pose | what it measures |
 |---|---|---|
-| `exit_door` | the door leg's stop pose, kept (`input 36` walks the last stretch into the shut portal: `00_door.cog`'s `startup` hid the door sector's adjoins, so the body stops there) | `use` presses the player's ACTIVATE binding and `sithPlayerActions_Activate` (`0x4fc0a0`) messages the linked leaf (thing 4 at `(1.200002, 9.650073, 6.35)`) with `activated`; `00_door.cog` reopens the adjoins and runs `OpenDoors`. `wait 72` lets the leaf reach frame 1, then `input 108` **walks through the open doorway** — the sector column changes on that hold. `door0_opened` reads 0 at and before the use tick and 1 after it. |
+| `exit_door` | the pose retail's walk measured at placement 174: eye `(1.28, 9.62, 6.357114)`, sector 60, yaw 105 | The door leg's stop pose leaves the linked leaf 0.5 beyond the shut portal, outside the 0.165 use sweep (`sithPlayerActions_Activate`, `0x4fc0a0`), so a walk from it never activates the door. The warp starts at the verified use pose. `use` presses the player's ACTIVATE binding and messages the linked leaf (thing 4 at `(1.200002, 9.650073, 6.35)`) with `activated`; `00_door.cog` reopens the adjoins and runs `OpenDoors`. `wait 72` lets the leaf reach frame 1, `yaw 0` turns the body to the doorway, and `input 108` **walks through the open leaf** — the trace's y passes 9.650073 (sector 60 spans both sides, so the sector column does not change). `door0_opened` reads 0 at and before the use tick and 1 after it. |
 | `exit_upper` | placement 175 (body `-2.519, 11.001, 6.72`) | the corridor/ramp side of the upper route. |
 | `exit_low` | placement 176 (body `-6.15, 9.65, 4.32`) | the low floor east of the 385 ramp. |
 | `exit_tunnel` | tunnel mouth `(-4.05, 12.0, 4.32)`, sector 407 | `use` on the one-way door (thing 47 at `-4.05, 13.95, 4.375`; `00_1waydoor.cog` opens for a body inside 407), then the hold crosses 407 -> 223 -> 229 -> 215 and the renderer sights 8t88 (`sithRender_RenderThing`, `0x4c8070`, sends `sighted` to `01_goal0.cog`). |
 
-The door is **used and crossed**, not warped past: the earlier plan warped to the stop pose and
-warped away again, and its use scan reached the leaf through two hops of the adjoin graph instead of
-the engine's search. `01_endlevel.cog`'s `user0` sets goal bin 100 = 3, sleeps 3 s and calls
-`jkEndLevel(1)`, so the plan's trailing `wait 240` outlasts that sleep and the last sample carries
-`level_end` 1.
+The door is **used and crossed**: the warp puts the body inside the use sweep, and the hold after the
+use walks it through the opened leaf instead of warping past it. `01_endlevel.cog`'s `user0` sets goal
+bin 100 = 3, sleeps 3 s and calls `jkEndLevel(1)`, so the plan's trailing `wait 240` outlasts that
+sleep and the last sample carries `level_end` 1.
 
 The per-sample position tolerance is the **retail harness's**, stated in
 `level1-route-retail.tsv`'s header: a 600 ms sample advances a variable amount of engine time, so

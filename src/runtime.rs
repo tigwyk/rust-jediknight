@@ -15958,13 +15958,12 @@ mod tests {
 
     /// The two authored poses level 1's exit route depends on, at their measured positions.
     ///
-    /// The door piece (`thing 4`, `2x3door`) is at `(1.200002, 9.650073, 6.35)`; the route starts the
-    /// body at the level's own `walkplayer` placement 174 (eye `1.400084, 9.700065, 6.357114`,
-    /// yaw 105 = west) and walks it to the shut portal, where the replay stops at `x 1.2775`
-    /// (sector 76, the door in 74). From there the eye is ~0.086 from the door origin, inside the
-    /// `moveSize + 0.1 = 0.165` reach (`sithPlayerActions_Activate`, `0x4fc0a0`), and the facing dot
-    /// is 0.84. The old `walk_door0` stop pose `(1.30, 9.14)` facing north is 0.52 away and faces
-    /// away: the pose, not the reach, is why that leg never opened the door.
+    /// The door piece (`thing 4`, `2x3door`) is at `(1.200002, 9.650073, 6.35)`; the route warps to
+    /// the pose retail's walk measured at `walkplayer` placement 174's stop (eye `1.28, 9.62,
+    /// 6.357114`, sector 60, yaw 105 = west). From there the eye is ~0.086 from the door origin,
+    /// inside the `moveSize + 0.1 = 0.165` reach (`sithPlayerActions_Activate`, `0x4fc0a0`), and the
+    /// facing dot is 0.81. The earlier `walk_door0` stop pose `(1.30, 9.14)` facing north is 0.52
+    /// away: the pose, not the reach, is why that walk never opened the door.
     ///
     /// The one-way door (`thing 47`, `00_1waydoor.cog`) is used from the tunnel (`sector 407`); its
     /// own origin is 0.087-0.116 from the body resting against the shut door (sector 223, the door
@@ -15985,12 +15984,13 @@ mod tests {
             rt
         };
 
-        // Door 0 at the recorded stop: `x 1.315` after walking west from placement 174.
+        // Door 0 from the verified exit warp: eye (1.28, 9.62, 6.357114), yaw 105's `(-sin, cos)`.
         let mut door0 = with_door([1.200002, 9.650073, 6.35], 74);
+        let yaw = 105f32.to_radians();
         let used = door0.sith_player_actions_activate(
             0,
-            [1.315, 9.700065, 6.357114],
-            [-1.0, 0.0, 0.0],
+            [1.28, 9.62, 6.357114],
+            [-yaw.sin(), yaw.cos(), 0.0],
             0.165,
             74,
         );
@@ -16041,7 +16041,7 @@ mod tests {
         // the leaf is the one that answers, and the leaf is not messaged.
         let mut both = with_door([1.200002, 9.650073, 6.35], 74);
         both.surfaces = vec![SurfaceState {
-            center: [1.36, 9.7, 6.357],
+            center: [1.20, 9.70, 6.357],
             cel: 0.0,
             anim: 0.0,
             slide: [0.0; 2],
@@ -16160,21 +16160,21 @@ mod tests {
             }];
             rt.surface_links = vec![(0, 2, 0)];
             rt.surface_sector = vec![7];
+            rt.master_cog = Some(0);
             rt
         };
         let mut rt = with_plate();
         assert!(rt.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7).is_some());
-        rt.time = 0.25;
         assert!(
             rt.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7).is_none(),
             "the sweep ran again at the same clock"
         );
-        rt.time = 0.25 + 0.25 - 0.01;
+        rt.time = 0.249;
         assert!(
             rt.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7).is_none(),
             "a press 249 ms after the last was allowed"
         );
-        rt.time = 0.5;
+        rt.time = 0.25;
         assert!(
             rt.sith_player_actions_activate(0, [0.0; 3], [-1.0, 0.0, 0.0], 0.16, 7).is_some(),
             "a press at exactly 250 ms was refused"
@@ -16441,13 +16441,15 @@ mod tests {
         let base = rt.things[0].clone();
         // Player at the origin, the actor at the origin facing -x (the port's forward is
         // `(-sin, cos)`), and a door thing **0.12** units along -x (the cantina plate's measured
-        // in-reach pose), linked to cog 0 as link 3. The reach is the actor's `movesize + 0.1`,
+        // in-reach pose), linked to cog 0 as link 3. `sithCog_LinkCog` (`0x4df610`) also sets the
+        // thing's captured bit. The reach is the actor's `movesize + 0.1`,
         // the engine's own activate rule, so a door a body-length away is *not* in reach.
         let mut actor = base.clone();
         actor.pos = [0.0, 0.0, 0.0];
         actor.yaw = 90.0;
         let mut door = base.clone();
         door.pos = [-0.12, 0.0, 0.0];
+        door.flags |= TF_CAPTURED;
         rt.things = vec![base, actor, door];
         rt.templates = vec!["walkplayer".into(), "tuskan".into(), "door".into()];
         rt.types = vec![10, 2, 0];
@@ -16477,6 +16479,7 @@ mod tests {
         actor.yaw = 90.0;
         let mut door = base.clone();
         door.pos = [-0.93, 0.0, 0.0];
+        door.flags |= TF_CAPTURED;
         far.things = vec![base, actor, door];
         far.templates = vec!["walkplayer".into(), "tuskan".into(), "door".into()];
         far.types = vec![10, 2, 0];
@@ -16500,6 +16503,7 @@ mod tests {
         actor.yaw = 90.0;
         let mut door = base.clone();
         door.pos = [-1.5, 0.0, 0.0];
+        door.flags |= TF_CAPTURED;
         quiet.things = vec![base, actor, door];
         quiet.templates = vec!["walkplayer".into(), "tuskan".into(), "door".into()];
         quiet.types = vec![10, 2, 0];

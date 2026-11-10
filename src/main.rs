@@ -17202,32 +17202,33 @@ input 72 1 0
     #[test]
     fn event_columns_are_graded_only_on_the_last_row() {
         let slot = |name: &str| ROUTE_TRACE_FIELDS.iter().position(|f| *f == name).unwrap();
-        let row = |tick: u32, door: Option<f64>, goal: Option<f64>| {
+        let row = |tick: u32, door: Option<f64>, goal: Option<f64>, end: Option<f64>| {
             let mut values = vec![None; ROUTE_TRACE_FIELDS.len()];
             values[0] = Some(f64::from(tick));
             values[slot("door0_opened")] = door;
             values[slot("goal_bin100")] = goal;
+            values[slot("level_end")] = end;
             RouteTraceRow { tick, values }
         };
         let want = RouteTrace {
             rows: vec![
-                row(0, Some(0.0), Some(1.0)),
-                row(36, Some(1.0), Some(1.0)),
-                row(72, Some(1.0), Some(3.0)),
+                row(0, Some(0.0), Some(1.0), Some(0.0)),
+                row(36, Some(1.0), Some(1.0), Some(0.0)),
+                row(72, Some(1.0), Some(3.0), Some(1.0)),
             ],
             columns: vec![true; ROUTE_TRACE_FIELDS.len()],
         };
         // The door opens a row early and the sighting fires a row late: intermediate samples differ.
         let got = RouteTrace {
             rows: vec![
-                row(0, Some(0.0), Some(1.0)),
-                row(36, Some(1.0), Some(3.0)),
-                row(72, Some(1.0), Some(3.0)),
+                row(0, Some(0.0), Some(1.0), Some(0.0)),
+                row(36, Some(1.0), Some(3.0), Some(0.0)),
+                row(72, Some(1.0), Some(3.0), Some(1.0)),
             ],
             columns: vec![true; ROUTE_TRACE_FIELDS.len()],
         };
         let compared = compare_route_rows(&want, &got, 1e-6).expect("intermediate events are not graded");
-        assert_eq!(compared, 2, "only the two final-row events were compared");
+        assert_eq!(compared, 3, "only the three final-row events were compared");
 
         // The final state is an identity: a door that never opened and a goal that stopped at 2 fail.
         let mut early = got.clone();
@@ -17238,6 +17239,10 @@ input 72 1 0
         short.rows[2].values[slot("goal_bin100")] = Some(2.0);
         let error = compare_route_rows(&want, &short, 1e-6).expect_err("goal_bin100 2 at the last row must fail");
         assert!(error.contains("goal_bin100"), "{error}");
+        let mut no_end = got.clone();
+        no_end.rows[2].values[slot("level_end")] = Some(0.0);
+        let error = compare_route_rows(&want, &no_end, 1e-6).expect_err("level_end 0 at the last row must fail");
+        assert!(error.contains("level_end"), "{error}");
 
         // A missing event cell is a failure, not something the comparator skips.
         let mut missing = got.clone();

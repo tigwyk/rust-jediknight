@@ -20,8 +20,9 @@
        precondition);
     2. the exit's own evidence — the plan presses use at both doors and never sends a synthetic
        `activate`, the replay's use trace names the linked things (`use: activated thing 4` and
-       `... 47`), `door0_opened` is shut at and before the first use tick and latched after it,
-       `goal_bin100` reaches 3, and `level_end` reaches 1 (the level's script called `jkEndLevel`);
+       `... 47`), `door0_opened` is shut at and before the first use tick and latched after it, the
+       body's y then passes the opened leaf (the walk-through crossing), `goal_bin100` reaches 3, and
+       `level_end` reaches 1 (the level's script called `jkEndLevel`);
     3. the committed oracle — a replay matches `tools/parity/routetrace/level1-route-port.tsv`
        field for field;
     4. self-check — a copy of the trace with one position moved 0.25 units is **rejected** by the
@@ -32,11 +33,12 @@
 
   **Coverage is the fixture's own.** The frozen retail capture was taken before #15: it has no
   `door0_opened`/`goal_bin100`/`level_end` columns and its rows stop at tick 684, at the door leg's
-  stop pose. The comparator grades exactly the columns that fixture's header carries and the rows it
-  spans; the port's exit rows past it are the port-only segment, proved by check 2 and the port
-  oracle. Nothing here needs a new retail capture, and no tolerance is widened.
+  stop pose. The exit segment's first row is the port-only `exit_door` warp at that same tick, so the
+  comparator grades exactly the columns that fixture's header carries and the rows **strictly before**
+  the warp; the port's exit rows are the port-only segment, proved by check 2 and the port oracle.
+  Nothing here needs a new retail capture, and no tolerance is widened.
 
-  Before 2-4, every field of both traces must be present: the comparator skips a `-`, so a required
+  Before 2-5, every field of both traces must be present: the comparator skips a `-`, so a required
   health, shield or cog column left as `-` would measure parity for the position columns only and
   pass. The gate rejects any `-` in either trace.
 
@@ -197,15 +199,17 @@ foreach ($needle in 'use: activated thing 4', 'use: activated thing 47') {
 $traceLines = @(Get-Content -LiteralPath $runA | Where-Object { $_ -notmatch '^\s*(#|$)' })
 $traceHeader = @($traceLines[0] -split "`t")
 $tickCol = [Array]::IndexOf($traceHeader, 'tick')
+$yCol = [Array]::IndexOf($traceHeader, 'y')
 $doorCol = [Array]::IndexOf($traceHeader, 'door0_opened')
 $goalCol = [Array]::IndexOf($traceHeader, 'goal_bin100')
 $endCol = [Array]::IndexOf($traceHeader, 'level_end')
-if ($tickCol -lt 0 -or $doorCol -lt 0 -or $goalCol -lt 0 -or $endCol -lt 0) {
-  Write-Host 'FAIL  anti-synthetic: the trace has no tick/door0_opened/goal_bin100/level_end column'
+if ($tickCol -lt 0 -or $yCol -lt 0 -or $doorCol -lt 0 -or $goalCol -lt 0 -or $endCol -lt 0) {
+  Write-Host 'FAIL  anti-synthetic: the trace has no tick/y/door0_opened/goal_bin100/level_end column'
   exit 1
 }
 $firstUse = $planUses[0]
 $sawOpen = $false
+$sawCross = $false
 $lastCells = $null
 foreach ($line in $traceLines | Select-Object -Skip 1) {
   $cells = @($line -split "`t")
@@ -218,9 +222,18 @@ foreach ($line in $traceLines | Select-Object -Skip 1) {
     exit 1
   }
   if ($cells[$doorCol] -eq '1') { $sawOpen = $true }
+  # The crossing: after the leaf opened, the body's y passes the leaf (thing 4 at y 9.650073), so the
+  # player walked through the doorway the use opened instead of warping past it.
+  if ([int]$cells[$tickCol] -gt $firstUse -and $cells[$doorCol] -eq '1' -and [double]$cells[$yCol] -gt 9.650073) {
+    $sawCross = $true
+  }
 }
 if (-not $sawOpen -or $lastCells[$doorCol] -ne '1') {
   Write-Host 'FAIL  anti-synthetic: door0_opened never latched'
+  exit 1
+}
+if (-not $sawCross) {
+  Write-Host 'FAIL  crossing: no sampled row past the opened door0 leaf (y 9.650073)'
   exit 1
 }
 if ($lastCells[$goalCol] -ne '3') {
@@ -235,7 +248,7 @@ if ($lastCells[$endCol] -ne '1') {
   exit 1
 }
 Write-Host 'PASS  anti-synthetic: the plan uses the player key, never `switch`, and the replay names things 4 and 47'
-Write-Host 'PASS  events: door0_opened latched after the recorded use; final goal_bin100 = 3 and level_end = 1'
+Write-Host 'PASS  events: door0_opened latched after the recorded use, the body crossed the leaf, final goal_bin100 = 3 and level_end = 1'
 
 # 2. The committed oracle. The comparator is the app's own `--route-compare`; exit code is the gate.
 & $Exe --route-compare $PortPath $runA
@@ -287,9 +300,42 @@ $tolerance = if ($Epsilon -gt 0) { $Epsilon } else { $fixtureEpsilon }
 if ($Epsilon -gt 0 -and $Epsilon -ne $fixtureEpsilon) {
   Write-Host ("note: comparing at {0} (the fixture states {1})" -f $Epsilon, $fixtureEpsilon)
 }
+# The frozen fixture stops at the door leg's last sample. The exit segment's first row is the
+# `exit_door` warp at that same tick, so the replay's row there is the port-only pose, not the pose
+# the fixture measured. Grade the fixture over the rows strictly before that warp; the exit rows are
+# the plan/event checks' and the port oracle's subject.
+$exitWarpTick = $null
+$planTick = 0
+foreach ($line in Get-Content -LiteralPath $RoutePath) {
+  if ($line -match '^\s*(#|$)') { continue }
+  $cells = @($line -split "`t" | Where-Object { $_ -ne '' })
+  switch ($cells[0]) {
+    'input' { $planTick += [int]$cells[1] }
+    'wait' { $planTick += [int]$cells[1] }
+    'warp' { if ($null -eq $exitWarpTick -and $cells[1] -eq 'exit_door') { $exitWarpTick = $planTick } }
+  }
+}
+if ($null -eq $exitWarpTick) {
+  Write-Host 'FAIL  retail: the plan has no `exit_door` warp, so its exit segment is not port-only'
+  exit 1
+}
+$retailSlice = Join-Path $OutDir 'level1-route-retail-slice.tsv'
+$sliceHeader = $false
+$sliceRows = New-Object System.Collections.Generic.List[string]
+foreach ($line in Get-Content -LiteralPath $RetailPath) {
+  if ($line -match '^\s*(#|$)') { continue }
+  if (-not $sliceHeader) {
+    $sliceHeader = $true
+    $sliceRows.Add($line)
+    continue
+  }
+  if ([int](($line -split "`t")[0]) -lt $exitWarpTick) { $sliceRows.Add($line) }
+}
+Set-Content -LiteralPath $retailSlice -Value $sliceRows -Encoding utf8
+
 $env:BK_ROUTE_EPSILON = $tolerance.ToString([cultureinfo]::InvariantCulture)
 try {
-  & $Exe --route-compare $RetailPath $runA
+  & $Exe --route-compare $retailSlice $runA
   $retailOk = $LASTEXITCODE -eq 0
 } finally {
   Remove-Item Env:BK_ROUTE_EPSILON -ErrorAction SilentlyContinue
@@ -298,7 +344,7 @@ if (-not $retailOk) {
   Write-Host ("FAIL  retail: the replay differs from {0} beyond {1}" -f $RetailFixture, $tolerance)
   exit 1
 }
-Write-Host ("PASS  retail: the replay matches {0} within {1} over the rows and columns that fixture measures" -f $RetailFixture, $tolerance)
+Write-Host ("PASS  retail: the replay matches {0} within {1} over the {2} row(s) before the exit warp at tick {3}" -f $RetailFixture, $tolerance, ($sliceRows.Count - 1), $exitWarpTick)
 
 Write-Host 'route gate: 0 failure(s)'
 exit 0
