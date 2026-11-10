@@ -479,8 +479,11 @@ t_ms  kind  thing  template  x  y  z  yaw  health  shields  detail
 ```
 
 `kind` is `player`/`actor` at the row's cadence (100 ms here), `shot` when the port fires a shot that
-lands on the player (the row is that shot's **launch**: time, shooter, template and muzzle), and `hit`
-when a shot's damage lands — the hit row carries the health and shields **after** the hit. Retail can
+lands on the player (the row is that shot's **launch**: time, shooter, template and muzzle, with
+`detail` naming the shooter's target and `hit`), `miss` when a fired shot dies without landing on the
+player (geometry or its own `timer=`, with the same target in `detail`), and `hit` when a shot's
+damage lands — the hit row carries the health and shields **after** the hit and the split
+(`amount ... health -... shields -...`). Retail can
 only observe a shot through its impact on the player (its memory reader sees a bolt only if it exists
 at a 100 ms sample), so its `shot` rows are a lossy subset of bolts alive at a sample and the port's
 `shot` rows are the landed shots' launches. The gate therefore pairs retail's **`hit`** times with the
@@ -511,17 +514,18 @@ a full 10,000 ms adds a sample (and, at the gunner's cadence, a shot) retail nev
   the body for 1.5 s after the level loads, and retail's capture begins after the level has settled, so
   without that the gunner's first two bolts vanish and its first measured hit lands at 817 ms.
 - Gate: `pwsh -File tools/parity/encounter-gate.ps1` seeds the committed retail fixture from
-  `tools/parity/encounter/`, records the port twice (and fails if the two runs leave the measured
-  run-to-run band: same shape and endpoint, event-timing and actor-state deltas and the same kill
-  order), and reports the per-shot/per-hit timing deltas, the per-hit health/shield deltas, the kill
+  `tools/parity/encounter/`, records the port twice (the two runs must be **byte-identical**; the
+  capture pins `dt` and runs a single-threaded schedule, so a difference is a nondeterminism bug) and
+  reports the per-shot/per-hit timing deltas, each paired hit's own health/shield split, the kill
   order, the settled endpoint, and the actor position/facing/health deltas at every sample. It exits
   non-zero when any of them leaves its tolerance, and its thresholds are parameters with their reasons
-  in the script header. Fire cadence is graded on consecutive-shot **intervals** (retail's impact and
-  the port's launch of the same shot differ by a constant flight, which intervals cancel). Retail's
-  timing is nondeterministic: `sithAICmd_PrimaryFire` jitters every delay by `(1.2 - 0.2 * rand())`
-  and acquisition is a chance roll, so the gate allows one event in the shot/hit counts and compares
-  the intervals as a **sorted multiset** inside the cadence band rather than in one run's order; the
-  final bars are compared only when the counts match, and every shared hit's damage is always graded.
+  in the script header. Event counts are exact: an extra or missing hit is an unpaired hit and fails.
+  Fire cadence is graded on consecutive-shot **intervals** (retail's impact and the port's launch of
+  the same shot differ by a constant flight, which intervals cancel). Retail's timing is
+  nondeterministic: `sithAICmd_PrimaryFire` jitters every delay by `(1.2 - 0.2 * rand())` and
+  acquisition is a chance roll, so the gate compares the intervals as a **sorted multiset** inside the
+  cadence band rather than in one run's order. The per-hit and settled-bar tolerances are the
+  fixture's own per-hit noise (its per-hit amounts span 11.2-11.4), not a padded band.
   Actor rows are joined by **authored placement** — nearest position at the first sample — because
   retail's `thing` is a slot in the engine's thing pool while the port's is the level's placement
   order. An actor either side reports and the other does not fails; there is no missing-actor

@@ -9,8 +9,10 @@
 
       t_ms  kind  thing  template  x  y  z  yaw  health  shields  detail
 
-  Rows are `player` and `actor` samples on the row's cadence, `shot` when the AI fires, and `hit`
-  when a shot lands on the player. `retail-capture.ps1 -EncounterMs` writes the same shape from the
+  Rows are `player` and `actor` samples on the row's cadence, `shot` at the launch of a shot that
+  lands on the player (`detail` names the shooter's target and `hit`), `miss` for a fired shot that
+  dies without landing on the player, and `hit` at each impact with the bars after it and the split
+  that hit took from each bar. `retail-capture.ps1 -EncounterMs` writes the same shape from the
   retail engine's memory; `encounter-gate.ps1` compares them.
 
   The step is fixed by `--shot` (the capture path pins dt to 1/60 s), the pose is the same

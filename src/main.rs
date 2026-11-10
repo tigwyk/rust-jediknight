@@ -25861,6 +25861,10 @@ fn projectile_hits(
             let (shields, health) = rt.damage_player(damage, kind);
             if rt.player_shields + health < before - 1e-4 {
                 rt.note_shot_landed(shot);
+            } else {
+                // A shot the player's invulnerability swallowed landed no damage; it is not a hit
+                // in the chronology, so the trace says miss.
+                rt.note_shot_lost(shot);
             }
             println!(
                 "hit: the player took {damage:.0}, {shields:.0} shield(s) and {health:.0} health left{suffix}"
@@ -25870,6 +25874,7 @@ fn projectile_hits(
             // The bolt's owner is the thing that fired it (`sithThing`'s owner field), and the
             // engine sends it as the damage message's source: a `killed:` handler's `GetSourceRef()`
             // is how a script knows this death was the player's.
+            rt.note_shot_lost(shot);
             rt.damage_typed_from(target as i64, damage, kind, owner.unwrap_or(0) as i64)
         };
         rt.things[shot].destroyed = true;
@@ -26465,26 +26470,41 @@ impl EncounterTrace {
         for event in std::mem::take(&mut rt.encounter_events) {
             let t_ms = ((event_time(&event) - origin).max(0.0) * 1000.0).round();
             match event {
-                // Only a shot that **landed on the player** is a `shot` row: retail's fixture sees
-                // shots exactly that way (its hit rows), so both sides record the same shots; the
-                // port's row is the launch and retail's is the impact, a flight apart.
+                // The plain spawn record; the `shot` row below is the landing that retail can see.
                 runtime::EncounterEvent::Shot { .. } => {}
-                runtime::EncounterEvent::ShotLanded { owner, template, pos, .. } => {
+                // A shot that landed on the player is the row retail's fixture can pair (its hit
+                // rows): the port's row is the launch and retail's is the impact, a flight apart.
+                // `detail` says what the shooter had as a target and that this shot hit.
+                runtime::EncounterEvent::ShotLanded { owner, template, pos, target, .. } => {
                     let _ = writeln!(
                         file,
-                        "{t_ms:.0}\tshot\t{owner}\t{template}\t{:.4}\t{:.4}\t{:.4}\t\t\t\t",
-                        pos[0], pos[1], pos[2]
+                        "{t_ms:.0}\tshot\t{owner}\t{template}\t{:.4}\t{:.4}\t{:.4}\t\t\t\ttarget {} hit",
+                        pos[0],
+                        pos[1],
+                        pos[2],
+                        target.map(|t| t.to_string()).unwrap_or_else(|| "-".into())
+                    );
+                }
+                // A shot that never landed on the player. Retail's fixture has no counterpart, so
+                // the gate does not pair these; the chronology still says hit or miss for every shot.
+                runtime::EncounterEvent::Miss { owner, template, target, .. } => {
+                    let _ = writeln!(
+                        file,
+                        "{t_ms:.0}\tmiss\t{owner}\t{template}\t\t\t\t\t\t\ttarget {} miss",
+                        target.map(|t| t.to_string()).unwrap_or_else(|| "-".into())
                     );
                 }
                 runtime::EncounterEvent::Hit {
                     amount,
                     shields,
                     health,
+                    health_lost,
+                    shields_lost,
                     ..
                 } => {
                     let _ = writeln!(
                         file,
-                        "{t_ms:.0}\thit\t{player}\t\t\t\t\t\t{health:.1}\t{shields:.1}\tamount {amount:.1}"
+                        "{t_ms:.0}\thit\t{player}\t\t\t\t\t\t{health:.1}\t{shields:.1}\tamount {amount:.1} health -{health_lost:.1} shields -{shields_lost:.1}"
                     );
                 }
             }
@@ -26554,6 +26574,7 @@ fn event_time(event: &runtime::EncounterEvent) -> f32 {
     match event {
         runtime::EncounterEvent::Shot { t, .. }
         | runtime::EncounterEvent::ShotLanded { t, .. }
+        | runtime::EncounterEvent::Miss { t, .. }
         | runtime::EncounterEvent::Hit { t, .. } => *t,
     }
 }

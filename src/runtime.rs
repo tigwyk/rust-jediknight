@@ -151,6 +151,9 @@ pub enum EncounterEvent {
         owner: usize,
         template: String,
         pos: [f32; 3],
+        /// What the shooter was aiming at when it fired: the AI's own target thing, or `None` for a
+        /// shot nothing names (the player's weapon, a scripted `FireProjectile`).
+        target: Option<usize>,
     },
     /// A fired shot that landed on the player: its launch time and shooter, written as the trace's
     /// `shot` row. Retail's fixture can only see shots through their impact on the player, so this
@@ -160,14 +163,27 @@ pub enum EncounterEvent {
         owner: usize,
         template: String,
         pos: [f32; 3],
+        target: Option<usize>,
     },
-    /// The player was hit: the amount the two bars actually lost, and the bar values after the hit —
-    /// the same numbers the retail capture writes from `thing + 0x134` and inventory bin 60.
+    /// A fired shot that died without landing on the player — a wall, an actor, or its own `timer=`.
+    /// Written as the trace's `miss` row, so the chronology says on every shot hit or miss.
+    Miss {
+        t: f32,
+        owner: usize,
+        template: String,
+        target: Option<usize>,
+    },
+    /// The player was hit: the amount the two bars actually lost, the bar values after the hit, and
+    /// the per-hit split the bars took — the same numbers the retail capture writes from
+    /// `thing + 0x134` and inventory bin 60.
     Hit {
         t: f32,
         amount: f32,
         shields: f32,
         health: f32,
+        /// Health and shields this one hit removed (the per-hit split).
+        health_lost: f32,
+        shields_lost: f32,
     },
 }
 
@@ -1143,9 +1159,10 @@ pub struct Runtime {
     /// `BK_ENCOUNTER_OUT`: shots and landed player hits in time order, drained by the app into the
     /// door-encounter TSV. Empty unless the capture harness sets the variable.
     pub encounter_events: Vec<EncounterEvent>,
-    /// The launch time of every fired projectile by its thing index, so a hit can report the shot
-    /// that produced it (retail's fixture only records shots that landed on the player).
-    pub encounter_shot_time: BTreeMap<usize, f32>,
+    /// The launch time and target of every fired projectile by its thing index, so a hit or a miss
+    /// can report the shot that produced it (retail's fixture only records shots that landed on the
+    /// player, so a miss has no counterpart there and the trace writes it as its own row).
+    pub encounter_shot_time: BTreeMap<usize, (f32, Option<usize>)>,
     /// Whether new events are queued. The capture harness turns it on by setting `BK_ENCOUNTER_OUT`
     /// at launch; tests flip it directly.
     pub encounter_events_enabled: bool,
@@ -1948,7 +1965,11 @@ impl Runtime {
         // The engine's collision radius is the template's `movesize=` (every shipped actor carries
         // it, and it is what `getthingmovesize` reads). The port used a 0.6 default, which made a
         // bolt count as a hit on any actor within 0.75 of its path, so a crowd absorbed every shot
-        // aimed at the player. The height is the model height the templates imply.
+        // aimed at the player. The height is the model height the templates imply. No floor: a bolt
+        // ships `movesize=0.001` and `sithIntersect_CheckSphereIntersection` combines it with the
+        // target's radius, so flooring it at 0.02 would make a bolt reach 0.019 units too far. The
+        // projectile **wall** sweep floors it itself (`Runtime::step`), where a zero-radius ray is
+        // what would let a bolt through a jamb.
         let template_hit: BTreeMap<String, (f32, f32)> = level
             .templates
             .iter()
@@ -1957,8 +1978,7 @@ impl Runtime {
                 let radius = level
                     .template_f32(&t.name, "movesize")
                     .or_else(|| level.template_f32(&t.name, "size"))
-                    .unwrap_or(0.065)
-                    .max(0.02);
+                    .unwrap_or(0.065);
                 (name, (radius, radius * 2.8))
             })
             .collect();
@@ -3039,6 +3059,8 @@ impl Runtime {
         for index in expired {
             self.life_left.remove(&index);
             self.life_total.remove(&index);
+            // A projectile whose `timer=` ran out never landed: it is a miss in the chronology.
+            self.note_shot_lost(index);
             if let Some(thing) = self.things.get_mut(index) {
                 thing.destroyed = true;
             }
@@ -3212,6 +3234,9 @@ impl Runtime {
                 )
             })
             .collect();
+        // A projectile that dies on geometry is a miss in the encounter chronology; the call needs
+        // `&mut self`, so the indices are collected in the mutable iteration and reported after it.
+        let mut lost_shots: Vec<usize> = Vec::new();
         for (i, t) in self.things.iter_mut().enumerate() {
             if Some(i) == player_at {
                 // Path moves still run — a script can walk the player along frames — but the body's
@@ -3348,6 +3373,7 @@ impl Runtime {
                         if along >= 0.0 {
                             continue;
                         }
+                        lost_shots.push(i);
                         t.destroyed = true;
                         continue;
                     }
@@ -3368,6 +3394,7 @@ impl Runtime {
                         );
                     }
                     if projectile {
+                        lost_shots.push(i);
                         t.destroyed = true;
                         continue;
                     }
@@ -3405,6 +3432,9 @@ impl Runtime {
                     }
                 }
             }
+        }
+        for index in lost_shots {
+            self.note_shot_lost(index);
         }
         for index in &blocked {
             for instance in self.thing_instances(*index) {
@@ -4680,7 +4710,7 @@ impl Runtime {
         let mut fired = 0;
         self.walked.clear();
         self.walk_vel.clear();
-        let mut shots: Vec<(usize, String, f32)> = Vec::new();
+        let mut shots: Vec<(usize, String, f32, usize)> = Vec::new();
         // Every actor with an instinct class, **plus** any actor a script gave a destination to.
         // `AISetMovePos`/`AISetMoveFrame` are gated on `controlType == SITH_CT_AI` in the engine, which
         // an actor has whether or not its template names an `aiclass=` — level 1's 8t88 has no class but
@@ -5922,7 +5952,10 @@ impl Runtime {
                     self.time
                 );
             }
-            shots.push((index, weapon, error));
+            // What the shot is aimed at: the scripted `AISetFireTarget` thing when one is named,
+            // otherwise the player. That is the engine's own target, not the aim point.
+            let target_thing = self.ai_fire_target.get(&index).copied().unwrap_or(player);
+            shots.push((index, weapon, error, target_thing));
             if let Some(thing) = self.things.get_mut(index) {
                 thing.yaw = (-sx).atan2(sy).to_degrees();
                 // `sithActor_UpdateAimJoints`: the aim points at the target in **three** dimensions.
@@ -5963,8 +5996,11 @@ impl Runtime {
             }
         }
         let mut shooters: Vec<usize> = Vec::new();
-        for (index, weapon, error) in shots {
-            if self.fire_spread(index as i64, &weapon, error).is_some() {
+        for (index, weapon, error, target) in shots {
+            if self
+                .fire_toward(index as i64, &weapon, error, None, Some(target))
+                .is_some()
+            {
                 // The renderer plays a puppet's `fire` track off this: the engine's
                 // `sithPuppet_UpdateThingMove` picks the action track while the actor is shooting.
                 self.last_shot.insert(index, self.time);
@@ -6435,6 +6471,20 @@ impl Runtime {
         error: f32,
         sound: Option<&str>,
     ) -> Option<usize> {
+        self.fire_toward(shooter, template, error, sound, None)
+    }
+
+    /// [`Self::fire_with_spread`] with the thing the shooter has as a target (the AI's own target,
+    /// recorded in the encounter chronology). A shot nothing names — the player's weapon, a scripted
+    /// `FireProjectile` — passes `None`.
+    fn fire_toward(
+        &mut self,
+        shooter: i64,
+        template: &str,
+        error: f32,
+        sound: Option<&str>,
+        target: Option<usize>,
+    ) -> Option<usize> {
         // Every shot the runtime spawns, counted where it is actually spawned. A check that samples
         // live things misses a bolt that dies between two frames, and at 10 fps that is most of them.
         self.shots_fired += 1;
@@ -6475,10 +6525,8 @@ impl Runtime {
                 owner: usize::try_from(shooter).unwrap_or(usize::MAX),
                 template: template.clone(),
                 pos,
+                target,
             });
-            // The projectile's own index, for the hit that ends it: `projectile_hits` reports the
-            // launch time when the bolt lands so retail's hit rows and the port's shots line up.
-            self.encounter_shot_time.insert(self.things.len(), self.time);
         }
         if std::env::var_os("BK_HIT_TRACE").is_some() {
             // The shooter's body and the shot's heading, so a trace can say who hit whom: a bolt's
@@ -6598,8 +6646,9 @@ impl Runtime {
         self.types.push(kind);
         let index = self.things.len() - 1;
         if self.encounter_events_enabled {
-            // The shot's own index now exists; the hit that ends it reports this launch time.
-            self.encounter_shot_time.insert(index, self.time);
+            // The projectile's own index now exists; the hit or miss that ends it reports this
+            // launch time and target.
+            self.encounter_shot_time.insert(index, (self.time, target));
         }
         self.arm_life(index);
         // `sithWeapon_WeaponFireProjectile`'s **player-only pre-sweep**: when the shooter is the local
@@ -7706,8 +7755,9 @@ impl Runtime {
         // `sithActor_DamageActor` tints the local player's palette on damage that lands, before the
         // shields are spent: its call is `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)`.
         add_dynamic_tint(&mut self.tint, [amount * DAMAGE_TINT, 0.0, 0.0]);
-        let before = self.player_shields
-            + self.things.get(player).map(|t| t.health).unwrap_or(0.0);
+        let before_shields = self.player_shields;
+        let before_health = self.things.get(player).map(|t| t.health).unwrap_or(0.0);
+        let before = before_shields + before_health;
         // `item_shields.cog` has branches for energy (2), fire (4) and saber (16) only; any other
         // kind reaches health with the bar untouched, exactly as the script does.
         let mut left = amount;
@@ -7729,13 +7779,16 @@ impl Runtime {
         if self.encounter_events_enabled {
             let health = self.things.get(player).map(|t| t.health).unwrap_or(0.0);
             // The retail capture writes the amount the bars actually lost, net of a recharge, so
-            // the row is the same number on both sides.
+            // the row is the same number on both sides. The split is what one hit took from each
+            // bar; health clamps at zero, so the delta is measured against the clamped value.
             let amount = before - (self.player_shields + health);
             self.encounter_events.push(EncounterEvent::Hit {
                 t: self.time,
                 amount,
                 shields: self.player_shields,
                 health,
+                health_lost: before_health - health,
+                shields_lost: before_shields - self.player_shields,
             });
         }
         (self.player_shields, self.things.get(player).map(|t| t.health).unwrap_or(0.0))
@@ -7813,6 +7866,19 @@ impl Runtime {
         (self.player_shields, health)
     }
 
+    /// The radius a projectile carries into its hit test: its template's own `movesize=` — the
+    /// engine's `sithCollision_MoveThing` sweeps the **moving** thing by its own size, and
+    /// `sithIntersect_CheckSphereIntersection` tests `targetRadius + movingRadius`. `+bryarbolt`
+    /// (and every bolt that inherits it, including `+elaser`) ships `movesize=0.001`, so the
+    /// combined reach is the target's body plus a thousandth of a unit.
+    fn shot_radius(&self, shot: usize) -> f32 {
+        self.templates
+            .get(shot)
+            .map(|name| name.to_ascii_lowercase())
+            .and_then(|name| self.template_hit.get(&name).map(|(radius, _)| *radius))
+            .unwrap_or(0.001)
+    }
+
     /// Whether a shot at `shot` is inside a target's body.
     ///
     /// A thing's position is its **feet**, so testing the distance to it misses a bolt fired at
@@ -7832,6 +7898,7 @@ impl Runtime {
         }
         let name = self.templates.get(target).cloned().unwrap_or_default().to_ascii_lowercase();
         let (radius, height) = self.template_hit.get(&name).copied().unwrap_or((0.065, 0.18));
+        let bolt = self.shot_radius(shot);
         let from = [
             a.pos[0] - a.vel[0] * dt,
             a.pos[1] - a.vel[1] * dt,
@@ -7856,17 +7923,17 @@ impl Runtime {
             eprintln!(
                 "shot trace: shot {shot} -> target {target} ({name}) from {from:?} to {:?} closest flat {flat:.3} (limit {:.3}) cz {cz:.3} body {:.3}..{:.3}",
                 a.pos,
-                radius + 0.15,
+                radius + bolt,
                 b.pos[2],
                 b.pos[2] + height
             );
         }
-        if flat > radius + 0.15 {
+        if flat > radius + bolt {
             return false;
         }
         let low = b.pos[2];
         let high = b.pos[2] + height;
-        cz >= low - 0.15 && cz <= high + 0.15
+        cz >= low - bolt && cz <= high + bolt
     }
 
     pub fn shot_hits(&self, shot: usize, target: usize) -> bool {
@@ -7878,15 +7945,16 @@ impl Runtime {
         // hittable.
         let name = self.templates.get(target).cloned().unwrap_or_default().to_ascii_lowercase();
         let (radius, height) = self.template_hit.get(&name).copied().unwrap_or((0.065, 0.18));
+        // The two spheres touch when the distance is at most the sum of their radii.
+        let bolt = self.shot_radius(shot);
         let (dx, dy) = (a.pos[0] - b.pos[0], a.pos[1] - b.pos[1]);
         let flat = (dx * dx + dy * dy).sqrt();
-        // A bolt has its own small radius; a hit is when the two touch.
-        if flat > radius + 0.15 {
+        if flat > radius + bolt {
             return false;
         }
         let low = b.pos[2];
         let high = b.pos[2] + height;
-        a.pos[2] >= low - 0.15 && a.pos[2] <= high + 0.15
+        a.pos[2] >= low - bolt && a.pos[2] <= high + bolt
     }
 
     /// `DamageThing` as a call, for code that holds no `Value`.
@@ -8083,12 +8151,27 @@ impl Runtime {
         if !self.encounter_events_enabled {
             return;
         }
-        let Some(t) = self.encounter_shot_time.remove(&shot) else { return };
+        let Some((t, target)) = self.encounter_shot_time.remove(&shot) else { return };
         let Some(thing) = self.things.get(shot) else { return };
         let owner = thing.owner.unwrap_or(shot);
         let template = self.templates.get(shot).cloned().unwrap_or_default();
         let pos = thing.pos;
-        self.encounter_events.push(EncounterEvent::ShotLanded { t, owner, template, pos });
+        self.encounter_events
+            .push(EncounterEvent::ShotLanded { t, owner, template, pos, target });
+    }
+
+    /// Report a shot that died without landing on the player — a wall, an actor, or its own `timer=`.
+    /// The chronology then says hit or miss for every shot; retail's fixture can only see impacts,
+    /// so these rows have no counterpart and the gate does not pair them.
+    pub fn note_shot_lost(&mut self, shot: usize) {
+        if !self.encounter_events_enabled {
+            return;
+        }
+        let Some((t, target)) = self.encounter_shot_time.remove(&shot) else { return };
+        let Some(thing) = self.things.get(shot) else { return };
+        let owner = thing.owner.unwrap_or(shot);
+        let template = self.templates.get(shot).cloned().unwrap_or_default();
+        self.encounter_events.push(EncounterEvent::Miss { t, owner, template, target });
     }
 
     /// The damage this template deals (`damage=`), for a projectile that hits.
@@ -11798,14 +11881,50 @@ mod tests {
         rt.fire(0, &bolt).expect("projectile");
         assert_eq!(rt.encounter_events.len(), 1);
         match &rt.encounter_events[0] {
-            EncounterEvent::Shot { t, owner, template, pos } => {
+            EncounterEvent::Shot { t, owner, template, pos, target } => {
                 assert!((t - 2.5).abs() < 1e-5, "event time {t}");
                 assert_eq!(*owner, 0, "the shooter's thing index");
                 assert_eq!(template, "+bryarbolt");
                 assert_eq!(*pos, rt.things[0].pos, "the shot leaves the shooter's own position");
+                assert_eq!(*target, None, "a shot nothing names has no target");
             }
             other => panic!("expected a shot event, got {other:?}"),
         }
+    }
+
+    /// The chronology says hit or miss and what the shooter was aiming at: a landed shot carries the
+    /// AI's target and its launch time, and a shot that dies without landing is a `Miss` with the
+    /// same launch time. The map is keyed by the projectile's own thing index.
+    #[test]
+    fn encounter_telemetry_tells_a_landed_shot_from_a_miss_with_the_shooters_target() {
+        let mut rt = door_runtime();
+        let bolt = "+bryarbolt".to_string();
+        rt.template_vel.insert(bolt.clone(), [0.0, 4.0, 0.0]);
+        rt.template_damage.insert(bolt.clone(), 12.0);
+        rt.encounter_events_enabled = true;
+
+        rt.time = 4.0;
+        let landed = rt.fire_toward(0, &bolt, 0.0, None, Some(9)).expect("projectile");
+        rt.note_shot_landed(landed);
+        match rt.encounter_events.last() {
+            Some(EncounterEvent::ShotLanded { t, target, .. }) => {
+                assert!((t - 4.0).abs() < 1e-5, "the launch time is reported, not the impact's");
+                assert_eq!(*target, Some(9), "the AI's target thing");
+            }
+            other => panic!("expected a landed shot, got {other:?}"),
+        }
+
+        rt.time = 5.0;
+        let missed = rt.fire_toward(0, &bolt, 0.0, None, Some(9)).expect("projectile");
+        rt.note_shot_lost(missed);
+        match rt.encounter_events.last() {
+            Some(EncounterEvent::Miss { t, target, .. }) => {
+                assert!((t - 5.0).abs() < 1e-5, "event time {t}");
+                assert_eq!(*target, Some(9));
+            }
+            other => panic!("expected a miss, got {other:?}"),
+        }
+        assert!(rt.encounter_shot_time.is_empty(), "a resolved shot is not reported twice");
     }
 
     /// The door fixture's own player bars, hit for hit (`tools/parity/encounter/door_encounter.tsv`,
@@ -11877,11 +11996,12 @@ mod tests {
         rt.damage_player(11.3, DAMAGE_ENERGY);
         rt.time = 3.5;
         rt.damage_player(11.3, DAMAGE_ENERGY);
-        let hits: Vec<(f32, f32, f32, f32)> = rt
+        let hits: Vec<(f32, f32, f32, f32, f32, f32)> = rt
             .encounter_events
             .iter()
             .filter_map(|event| match event {
-                EncounterEvent::Hit { t, amount, shields, health } => Some((*t, *amount, *shields, *health)),
+                EncounterEvent::Hit { t, amount, shields, health, health_lost, shields_lost } =>
+                    Some((*t, *amount, *shields, *health, *health_lost, *shields_lost)),
                 _ => None,
             })
             .collect();
@@ -11891,10 +12011,15 @@ mod tests {
         assert!((hits[0].1 - 13.8538).abs() < 1e-3, "amount {}", hits[0].1);
         assert!((hits[0].2 - 38.7).abs() < 1e-3, "shields {}", hits[0].2);
         assert!((hits[0].3 - 97.4462).abs() < 1e-3, "health {}", hits[0].3);
+        // The split: the bar took the whole 11.3, health the rest of the loss.
+        assert!((hits[0].4 - 2.5538).abs() < 1e-3, "health lost {}", hits[0].4);
+        assert!((hits[0].5 - 11.3).abs() < 1e-3, "shields lost {}", hits[0].5);
         // Bar 38.7 -> 27.4, health takes 11.3 * (1 - 27.4/50).
         assert!((hits[1].1 - 16.4076).abs() < 1e-3, "amount {}", hits[1].1);
         assert!((hits[1].2 - 27.4).abs() < 1e-3, "shields {}", hits[1].2);
         assert!((hits[1].3 - 92.3386).abs() < 1e-3, "health {}", hits[1].3);
+        assert!((hits[1].4 - 5.1076).abs() < 1e-3, "health lost {}", hits[1].4);
+        assert!((hits[1].5 - 11.3).abs() < 1e-3, "shields lost {}", hits[1].5);
 
         // A hit the player's invulnerability refuses is not a landed hit and writes no row.
         rt.actor_flags.insert(0, AF_INVULNERABLE);
