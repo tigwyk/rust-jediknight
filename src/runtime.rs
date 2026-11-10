@@ -1630,6 +1630,11 @@ pub struct Runtime {
     /// has the event-`0x100` branch in its mask, and that branch sets
     /// `sithPuppet_SetArmedMode(thing, (ai flags & 0x200) != 0)` and re-arms in 1000 ms.
     pub ai_lobfire: BTreeMap<usize, f32>,
+    /// When each actor's `opendoors` handler may run again. `FUN_0050abc0` calls
+    /// `sithPlayerActions_Activate` only while the AI flag word's bit `0x1` (moved) is set, and
+    /// re-arms itself for `now + 1000 ms`; without the re-arm an actor standing in a doorway
+    /// messaged the linked thing `activated` on every tick.
+    pub ai_opendoors: BTreeMap<usize, f32>,
     /// When each actor may run its `forcepowers` handler next (`0x40ff40`). The handler starts by
     /// setting its own next run to `now + fltArg[0]` (the class line's first number), so the
     /// interval is per class and not global.
@@ -2532,6 +2537,7 @@ impl Runtime {
             ai_talk: BTreeMap::new(),
             ai_turret_down: BTreeMap::new(),
             ai_lobfire: BTreeMap::new(),
+            ai_opendoors: BTreeMap::new(),
             ai_force: BTreeMap::new(),
             ai_force_cool: BTreeMap::new(),
             ai_saber: BTreeMap::new(),
@@ -4700,12 +4706,18 @@ impl Runtime {
             // `opendoors` (handler `0x50abc0`) runs the **player's activate action** on the actor's own
             // body: `sithPlayerActions_Activate` (`0x4fc0a0`), which is where the 250 ms wait and the
             // `moveSize + 0.1` reach come from, so the player's press and an actor's instinct share one
-            // clock and one rule. The reach is the actor's own body (`thing + 0x2c`).
+            // clock and one rule. The handler only calls it while the AI flag word's bit `0x1` (moved)
+            // is set, and writes `now + 1000 ms` into its own state — the instinct's re-arm. Calling it
+            // every tick made an actor standing on a door's link message that link `activated` 60
+            // times a second (level 1's `00_doorswitch.cog` answered each with its lock sound).
             if ai
                 .as_ref()
                 .is_some_and(|class| class.instinct("OpenDoors").is_some())
+                && self.actor_flags.get(&index).copied().unwrap_or(0) & 0x1 != 0
+                && self.time >= self.ai_opendoors.get(&index).copied().unwrap_or(0.0)
                 && let Some(body) = self.things.get(index)
             {
+                self.ai_opendoors.insert(index, self.time + 1.0);
                 let (pos, yaw, sector) = (body.pos, body.yaw, body.sector);
                 let reach = self.activate_reach(index);
                 let dir = [-yaw.to_radians().sin(), yaw.to_radians().cos(), 0.0];
@@ -16461,6 +16473,8 @@ mod tests {
             ),
         );
         rt.thing_links.push((0, 3, 2));
+        // `FUN_0050abc0` runs the activate only while the AI flag word's bit `0x1` (moved) is set.
+        rt.actor_flags.insert(1, 0x1);
 
         rt.ai_tick(0, 0.1);
         assert!(
@@ -16468,6 +16482,28 @@ mod tests {
                 *instance == 0 && *label == "activate" && *sender == Some(3)
             }),
             "the actor did not activate the door in front: {:?}",
+            rt.pending_messages
+        );
+
+        // The handler writes `now + 1000 ms` into its own state (`0x50abc0`), so a moving actor does
+        // not message the same door again inside that window.
+        rt.pending_messages.clear();
+        rt.actor_flags.insert(1, 0x1);
+        rt.time = 0.5;
+        rt.ai_tick(0, 0.1);
+        assert!(
+            rt.pending_messages.is_empty(),
+            "the handler ran again inside its 1000 ms re-arm: {:?}",
+            rt.pending_messages
+        );
+        rt.actor_flags.insert(1, 0x1);
+        rt.time = 1.01;
+        rt.ai_tick(0, 0.1);
+        assert!(
+            rt.pending_messages.iter().any(|(instance, label, _, sender)| {
+                *instance == 0 && *label == "activate" && *sender == Some(3)
+            }),
+            "the handler did not re-arm after its 1000 ms: {:?}",
             rt.pending_messages
         );
 
@@ -16488,6 +16524,7 @@ mod tests {
             crate::ai::parse("alignment=-1.0, rank=0.5, fov=180\n\nOpenDoors\n"),
         );
         far.thing_links.push((0, 3, 2));
+        far.actor_flags.insert(1, 0x1);
         far.ai_tick(0, 0.1);
         assert!(
             far.pending_messages.is_empty(),
@@ -16509,6 +16546,7 @@ mod tests {
         quiet.types = vec![10, 2, 0];
         quiet.ai.insert(1, crate::ai::parse("alignment=-1.0, rank=0.5, fov=180\n\nLookForTarget 500.0\n"));
         quiet.thing_links.push((0, 3, 2));
+        quiet.actor_flags.insert(1, 0x1);
         quiet.ai_tick(0, 0.1);
         assert!(
             quiet.pending_messages.is_empty(),

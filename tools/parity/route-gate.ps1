@@ -10,10 +10,10 @@
   up, the upper door), then — after the frozen retail fixture's last sample — walks into the shut
   `door0`, presses the player's own use key, walks through the opened doorway, and holds the tunnel and
   landing legs until `01_endlevel.cog` has run. The replay writes
-  `tick t_s x y z sector vel_x vel_y vel_z health shields` plus the door/switch cog state and the
-  latched events every 600 ms (36 ticks).
+  `tick t_s x y z sector vel_x vel_y vel_z health shields` plus the door/switch cog state, the
+  latched events and the mixer's audio state every 600 ms (36 ticks).
 
-  The gate checks five things:
+  The gate checks seven things:
 
     1. determinism — the same script replayed twice produces byte-identical traces (retail and port
        must produce the same trace from the same inputs, so the port's own repeatability is a
@@ -29,7 +29,22 @@
        comparator, so the gate is known to fail on a perturbed trace and pass on the unmodified one.
        `-Perturb` runs that check; the gate's normal run compares the unmodified trace;
     5. retail parity — the replay matches `level1-route-retail.tsv` within the **epsilon the fixture
-       states** (`# epsilon <units>` in its header). Sectors stay exact inside the comparator.
+       states** (`# epsilon <units>` in its header). Sectors stay exact inside the comparator;
+    6. mechanic provenance — `tools/parity/routes/level1-route-provenance.tsv` names the engine
+       function and address behind every mechanic the route exercises (walk, floor, collision, use,
+       cog messages, damage, AI fire, audio state, level end). A row still on re-derived code must
+       name its deviation-ledger entry, and an entry the ledger does not carry fails;
+    7. the prerequisite gates — `audio-gate.ps1` (audio state through the same route) and
+       `encounter-gate.ps1` (AI fire, damage and the kill order at the door) must both pass. The
+       route's own replay runs with `--no-ai`, so combat is measured by the encounter stage inside
+       this gate rather than in the same process; `-SkipPrereqs` skips them for iteration and the
+       verdict then does not cover them.
+
+  The trace carries the full spawn-to-level-completion route: 43 samples over 1512 ticks, every
+  one of them recording position, sector, velocity, both bars, both cogs **and the mixer's audio
+  state** — the same columns `--audio-trace` writes, sampled from the same replay tick. No cell is
+  `-`: the gate rejects a `-` in either trace, because the comparator would skip it and measure the
+  remaining columns only.
 
   **Coverage is the fixture's own.** The frozen retail capture was taken before #15: it has no
   `door0_opened`/`goal_bin100`/`level_end` columns and its rows stop at tick 684, at the door leg's
@@ -66,7 +81,9 @@ param(
   [string]$Out = 'target/parity/routetrace',
   # 0 means "use the epsilon the retail fixture states in its header".
   [double]$Epsilon = 0,
-  [switch]$Perturb
+  [switch]$Perturb,
+  # Skip the audio and encounter prerequisite gates (iteration only; the verdict then omits them).
+  [switch]$SkipPrereqs
 )
 
 $ErrorActionPreference = 'Stop'
@@ -250,6 +267,31 @@ if ($lastCells[$endCol] -ne '1') {
 Write-Host 'PASS  anti-synthetic: the plan uses the player key, never `switch`, and the replay names things 4 and 47'
 Write-Host 'PASS  events: door0_opened latched after the recorded use, the body crossed the leaf, final goal_bin100 = 3 and level_end = 1'
 
+# 1d. Full route coverage and the audio state at every sample (issue #14 AC1/AC3). The trace must
+# span the plan from spawn to the final tick (so the extended tail really ran and `jkEndLevel`
+# latched), and it must carry the mixer columns. A `-` in any cell was rejected above.
+$expectedRows = [int][math]::Floor($planTicks / 36) + 1
+# The plan need not end on a sample boundary (the trailing `wait` is a margin), so the last row is
+# the last multiple of 36 at or before the plan's final tick.
+$expectedLastTick = [int][math]::Floor($planTicks / 36) * 36
+$rowCount = $traceLines.Count - 1
+if ($rowCount -ne $expectedRows) {
+  Write-Host ("FAIL  coverage: the route plan is {0} tick(s), so its {1}-tick samples are {2}; the trace has {3}" -f $planTicks, 36, $expectedRows, $rowCount)
+  exit 1
+}
+if ([int]$lastCells[$tickCol] -ne $expectedLastTick) {
+  Write-Host ("FAIL  coverage: the trace's last sample is tick {0}, not the plan's last sample {1} (plan ends at {2})" -f $lastCells[$tickCol], $expectedLastTick, $planTicks)
+  exit 1
+}
+$audioColumns = @('music', 'music_end', 'music_loop', 'music_vol', 'ambient', 'ambient_vol', 'sounds')
+$missingAudio = @($audioColumns | Where-Object { $traceHeader -notcontains $_ })
+if ($missingAudio.Count -gt 0) {
+  Write-Host ("FAIL  audio: the route trace has no {0} column(s)" -f ($missingAudio -join ', '))
+  exit 1
+}
+Write-Host ("PASS  coverage: {0} sample(s) over ticks 0..{1} (spawn to level completion, plan {2} ticks)" -f $rowCount, $expectedLastTick, $planTicks)
+Write-Host 'PASS  audio: every sample carries the song, its volume, the audible loop and the window''s one-shots'
+
 # 2. The committed oracle. The comparator is the app's own `--route-compare`; exit code is the gate.
 & $Exe --route-compare $PortPath $runA
 if ($LASTEXITCODE -ne 0) {
@@ -345,6 +387,91 @@ if (-not $retailOk) {
   exit 1
 }
 Write-Host ("PASS  retail: the replay matches {0} within {1} over the {2} row(s) before the exit warp at tick {3}" -f $RetailFixture, $tolerance, ($sliceRows.Count - 1), $exitWarpTick)
+
+# 5. Mechanic provenance (issue #14 AC2). Every mechanic the route exercises names the engine
+# function it was transliterated from, that function's decomp address and the port symbol. A
+# mechanic still on re-derived code names its deviation-ledger entry, and the entry must really be
+# in the ledger: a deviation cannot be hidden by leaving this file silent about it.
+$ProvenancePath = Resolve-PathUnderRoot 'tools/parity/routes/level1-route-provenance.tsv'
+if (-not (Test-Path -LiteralPath $ProvenancePath)) {
+  Write-Host "FAIL  provenance: missing $ProvenancePath"
+  exit 1
+}
+$RoadmapPath = Resolve-PathUnderRoot 'docs/porting-roadmap.md'
+$RequiredMechanics = @('walk', 'floor', 'collision', 'use', 'cog messages', 'damage', 'ai fire', 'audio state', 'level end')
+$seenMechanics = @{}
+$provenanceRows = 0
+foreach ($line in Get-Content -LiteralPath $ProvenancePath) {
+  if ($line -match '^\s*(#|$)') { continue }
+  $f = @($line -split "`t")
+  while ($f.Count -lt 7) { $f += '' }
+  $mechanic = $f[0].Trim(); $function = $f[1].Trim(); $address = $f[2].Trim()
+  $symbol = $f[3].Trim(); $source = $f[4].Trim(); $status = $f[5].Trim(); $ledger = $f[6].Trim()
+  if ($RequiredMechanics -notcontains $mechanic) {
+    Write-Host ("FAIL  provenance: mechanic '{0}' is not one the route exercises" -f $mechanic)
+    exit 1
+  }
+  $seenMechanics[$mechanic] = $true
+  if (-not $function -or $address -notmatch '^0x[0-9a-fA-F]{6,8}$') {
+    Write-Host ("FAIL  provenance: {0} names no engine function/address ('{1}' '{2}')" -f $mechanic, $function, $address)
+    exit 1
+  }
+  if ($status -eq 'ported') {
+    $sourcePath = Resolve-PathUnderRoot $source
+    if (-not (Test-Path -LiteralPath $sourcePath)) {
+      Write-Host ("FAIL  provenance: {0} names the source {1}, which does not exist" -f $mechanic, $source)
+      exit 1
+    }
+    if (-not (Select-String -LiteralPath $sourcePath -Pattern $symbol -SimpleMatch -Quiet)) {
+      Write-Host ("FAIL  provenance: {0} names `{1}` ({2}) but {3} has no '{4}'" -f $mechanic, $function, $address, $source, $symbol)
+      exit 1
+    }
+  } elseif ($status -eq 'deviated') {
+    if (-not $ledger) {
+      Write-Host ("FAIL  provenance: {0} is deviated but names no ledger entry" -f $mechanic)
+      exit 1
+    }
+    if (-not (Select-String -LiteralPath $RoadmapPath -Pattern $ledger -SimpleMatch -Quiet)) {
+      Write-Host ("FAIL  provenance: {0} deviates to ledger entry '{1}', which docs/porting-roadmap.md does not carry" -f $mechanic, $ledger)
+      exit 1
+    }
+  } else {
+    Write-Host ("FAIL  provenance: {0} has unknown status '{1}' (ported or deviated)" -f $mechanic, $status)
+    exit 1
+  }
+  $provenanceRows++
+}
+foreach ($mechanic in $RequiredMechanics) {
+  if (-not $seenMechanics.ContainsKey($mechanic)) {
+    Write-Host ("FAIL  provenance: the route exercises '{0}' but the provenance file does not name it" -f $mechanic)
+    exit 1
+  }
+}
+Write-Host ("PASS  provenance: {0} row(s) cover the route's {1} mechanics with the engine function and address" -f $provenanceRows, $RequiredMechanics.Count)
+
+# 6. The prerequisite gates. The route replay runs with `--no-ai`, so combat (AI fire, damage, the
+# kill order) and the audio route are measured by their own gates against their own frozen
+# references; this gate's verdict includes them.
+if ($SkipPrereqs) {
+  Write-Host 'SKIP  prerequisites: -SkipPrereqs (the verdict does not cover the audio and encounter gates)'
+} else {
+  $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+  if (-not $pwsh) { $pwsh = (Get-Process -Id $PID).Path }
+  foreach ($gate in @('audio-gate.ps1', 'encounter-gate.ps1')) {
+    $gatePath = Join-Path $PSScriptRoot $gate
+    $gateLog = Join-Path $OutDir (([System.IO.Path]::GetFileNameWithoutExtension($gate)) + '.log')
+    Write-Host ("route gate: running the prerequisite {0}..." -f $gate)
+    & $pwsh -NoProfile -File $gatePath *> $gateLog
+    if ($LASTEXITCODE -ne 0) {
+      $tail = @(Get-Content -LiteralPath $gateLog -ErrorAction SilentlyContinue | Select-Object -Last 12) -join "`n"
+      Write-Host ("FAIL  prerequisite {0} failed (see {1}):" -f $gate, $gateLog)
+      Write-Host $tail
+      exit 1
+    }
+    $passLines = @(Get-Content -LiteralPath $gateLog | Where-Object { $_ -match '^PASS|0 failure' } | Select-Object -Last 3) -join '; '
+    Write-Host ("PASS  prerequisite {0}: {1}" -f $gate, $passLines)
+  }
+}
 
 Write-Host 'route gate: 0 failure(s)'
 exit 0

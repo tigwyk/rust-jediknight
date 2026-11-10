@@ -355,10 +355,11 @@ Files:
 
 | Path | What it is |
 |---|---|
-| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `wait <ticks>` stands still (the door leaf needs game time to finish opening before the next hold); `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key. `wait` takes ticks like an input; `seed`/`use`/`switch` take none, so the 600 ms sample grid never moves. There is no `switch` row: retail's `cogstatus 11` reads `doorstatus 0` with that door already open, so the synthetic `activate` it used to send made the port measure a scenario retail never performed. |
+| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `wait <ticks>` stands still (the door leaf needs game time to finish opening before the next hold); `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key. `wait` takes ticks like an input; `seed`/`use` take none, so the 600 ms sample grid never moves. There is no `switch` row: retail's `cogstatus 11` reads `doorstatus 0` with that door already open, so the synthetic `activate` it used to send made the port measure a scenario retail never performed. |
 | `tools/parity/routetrace/level1-route-retail.tsv` | Retail-derived reference, one row every 600 ms (36 ticks). Provenance is in the file header. |
 | `tools/parity/routetrace/level1-route-port.tsv` | The port's committed oracle, produced by the replay. |
-| `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), check the exit's own events (use names things 4 and 47, `door0_opened` latches after the use, the body crosses the leaf, `goal_bin100` = 3, `level_end` = 1), compare to the committed port fixture, reject a trace with one position moved 0.25 units, and match the retail reference within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it) over the rows **before** the port-only `exit_door` warp. |
+| `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), check the exit's own events (use names things 4 and 47, `door0_opened` latches after the use, the body crosses the leaf, `goal_bin100` = 3, `level_end` = 1), assert the trace spans the whole plan (sample count and final tick) and carries the audio columns with no `-`, compare to the committed port fixture, reject a trace with one position moved 0.25 units, match the retail reference within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it) over the rows **before** the port-only `exit_door` warp, check the mechanic provenance below, and run `audio-gate.ps1` and `encounter-gate.ps1` as prerequisites (`-SkipPrereqs` for iteration). |
+| `tools/parity/routes/level1-route-provenance.tsv` | Issue #14 AC2: every mechanic the route exercises names its engine function, decomp address, port symbol and source. A `deviated` row names its deviation-ledger entry in `docs/porting-roadmap.md`; the gate and the repo test both verify it. |
 
 The trace format is tab-separated, `#` comments allowed, one header row:
 
@@ -367,6 +368,7 @@ tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
       door0_status  door0_movestatus  door0_opendoors  door0_closedoors
       switch_status  switch_movestatus  switch_opendoors  switch_closedoors
       door0_opened  goal_bin100  level_end
+      music  music_end  music_loop  music_vol  ambient  ambient_vol  sounds
 ```
 
 - `tick` counts 1/60 s steps; `t_s = tick / 60`. Rows are written at ticks `0, 36, 72, ...`
@@ -400,6 +402,16 @@ tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
   player's use binding (never a synthetic `activate`), the replay log must name things 4 and 47, and
   `door0_opened` must be 0 on every row strictly before the first use tick; the use-tick row is
   sampled before the key press and must also read 0.
+- `music`/`music_end`/`music_loop`, `music_vol`, `ambient`/`ambient_vol` and `sounds` are the
+  mixer's state at the same sample — the columns `--audio-trace` writes, carried by the one route
+  trace so the route's audio state is measured at the same points as its pose (issue #14).
+  `music`/`music_end`/`music_loop` are `PlaySong`'s track range and loop flag, `music_vol` is
+  `SetMusicVol`'s value, `ambient` is the loudest audible loop with its channel volume, and
+  `sounds` lists every one-shot played since the previous sample as `wav@gain` (the row is
+  sampled before the tick's own step, the point retail's `coords` poll reads, so a sound played in
+  the sampled tick falls in the next window). A **silent** ambience or window is an empty cell, the
+  mixer's no-song state is `0 0 0`, and no audio cell is `-`.
+  `--route-trace` and `--audio-trace` are rejected together because both drain the one-shot log.
 - **The comparator's coverage is the expected fixture's.** Its header names the columns it measured
   and its rows are the span it covers; a column it omits and the trace's rows past its last tick are
   not graded (they are reported). That is what lets the frozen retail capture — 19 columns, rows

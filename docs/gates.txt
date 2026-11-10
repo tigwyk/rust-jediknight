@@ -2758,3 +2758,39 @@ running app.--carry-check --start 01narshadda                        0   level 2
   unmodified base (`5329822`, rebuilt in this worktree), so they are the branch's standing movement
   gaps, not this change; `walk5_spawn` passes.
 
+## Update — issue #14 (full-route integration gate)
+
+- **One replay, the whole route, audio at every sample.** `--route-trace` is 29 columns now and
+  carries the audio trace's mixer state at the same 600 ms sample (`music`, `music_end`,
+  `music_loop`, `music_vol`, `ambient`, `ambient_vol`, `sounds`), from the shared
+  `sample_audio_state`. Silence is an empty `ambient`/`sounds` and the mixer's idle song is
+  `0 0 0`, so no cell is `-`. Both traces drain the one-shot sound log, so `--route-trace` and
+  `--audio-trace` are rejected together (exit 2). The trace runs 43 samples to tick 1512 of a
+  1536-tick plan, byte-identical over two replays; the last rows carry `goal_bin100` 3 and
+  `level_end` 1 (`01_endlevel.cog`'s 3 s sleep then `jkEndLevel`).
+- **Mechanic provenance is data.** `tools/parity/routes/level1-route-provenance.tsv` names the
+  engine function, decomp address, port symbol and source for walk, floor, collision, use, cog
+  messages, damage, AI fire, audio state and level end (26 rows, 9 mechanics). `route-gate.ps1`
+  verifies each `ported` row's symbol exists in its source and each `deviated` row's ledger entry is
+  in `docs/porting-roadmap.md`; `route_tests::every_route_mechanic_names_its_engine_function` does
+  the same in `cargo test`. The two new ledger rows are the replay's `ROUTE_TIME_SCALE` clock fit
+  and the per-thing `sighted` substitution, so neither is hidden by the gate.
+- **The audio route no longer diverges.** Its synthetic `switch` row is gone (it had been
+  unparseable since #15 removed the trigger); the audio plan is the movement route's legs and its
+  port oracle is refreshed from a double run.
+- **AI `opendoors` now matches `FUN_0050abc0`.** The handler calls `sithPlayerActions_Activate` only
+  while the AI flag word's `0x1` (moved) bit is set and re-arms for 1000 ms of game time. The port
+  called it every tick, so an actor standing on a door link messaged it `activated` 60 times a
+  second and level 1's `00_doorswitch.cog` answered each with its lock sound: the audio route showed
+  **583 extra `df_door2-3.wav` events** against the retail reference. After the fix: **0 lock
+  sounds**, 7 one-shot events on the route, retail audio compare passes. The runtime unit check
+  (`an_actor_with_opendoors_activates_the_door_in_front`) now pins the moving bit and the re-arm.
+- **Results.** Route gate **0 failure(s)**: determinism (43 rows), required fields (no `-`), the
+  use/crossing/goal/`level_end` evidence, coverage (43 samples, ticks 0..1512, 7 audio columns),
+  port oracle **1036 fields within 1e-6**, perturb self-check, retail **342 fields within 1.70 over
+  the 19 rows before the `exit_door` warp (684)**, provenance **26 rows / 9 mechanics**, and both
+  prerequisite gates pass. Audio gate **0 failure(s)** (7 sound events on the port oracle, retail
+  within 0.12, door fade worst 0.100). Encounter gate **0 failure(s)** (13 shots / 13 hits, cadence
+  max 117 ms of 250, settled 14.3 vs retail 22.3). `cargo test --release`: **338 passed**.
+- No new retail capture was taken; the frozen retail fixtures were not edited.
+

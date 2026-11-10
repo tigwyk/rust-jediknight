@@ -7270,3 +7270,25 @@ checks, and even those should be run deliberately.
   (SPACE), so the earlier harness key `9` (scancode 0x0A) was the wrong key. Older notes about a
   windowed capture (dgVoodoo `-Windowed`, DxWnd 2.06.16) stand as measurements of the harness, not as
   anything this ticket needs: the whole ticket is settled from `decomp/`.
+
+## Update — issue #14 (full-route integration gate)
+
+- **One replay, the whole route, audio included.** `--route-trace` now writes the mixer's state
+  (`music`, `music_end`, `music_loop`, `music_vol`, `ambient`, `ambient_vol`, `sounds`) on every
+  600 ms sample, from the same tick and the same `sample_audio_state` the audio gate's trace uses.
+  A silent loop or window is an empty cell, the no-song state is `0 0 0`, and no audio cell is `-`.
+  The route runs 43 samples to tick 1512 and the final rows carry `level_end` 1
+  (`01_endlevel.cog`'s 3 s sleep and `jkEndLevel`), so spawn-to-completion is one deterministic run,
+  byte-identical across two replays. Both traces drain the one-shot log, so `--route-trace` and
+  `--audio-trace` are rejected together.
+- **Mechanic provenance is data**: `tools/parity/routes/level1-route-provenance.tsv` names the
+  engine function, decomp address, port symbol and source for walk, floor, collision, use, cog
+  messages, damage, AI fire, audio state and level end. `route_tests::every_route_mechanic_names_its_engine_function`
+  and `route-gate.ps1` both check it; the two mechanics still re-derived (the replay's
+  `ROUTE_TIME_SCALE` clock fit and the per-thing `sighted` substitution) are `deviated` rows
+  pointing at their new ledger entries, so the gate cannot hide them.
+- **The audio route no longer diverges.** Its synthetic `switch` row is gone; the audio plan is the
+  movement route's own legs (the row had become unparseable when #15 removed the synthetic trigger).
+- **Sectors stay exact and the retail fixture stays frozen.** The retail half is still graded over
+  the rows before the port-only `exit_door` warp at its stated 1.70 epsilon; the exit segment has no
+  retail capture and is graded by the port oracle, as #15's note says. No new retail run was made.

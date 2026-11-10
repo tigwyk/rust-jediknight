@@ -1,0 +1,39 @@
+# Level-1 route: mechanic -> engine function provenance (issue #14 AC2).
+#
+# Every mechanic the scripted route exercises names the engine function it was transliterated from,
+# that function's address in the decompile, the port symbol that carries it, and the port source
+# file. `route-gate.ps1` requires the eight mechanics below plus `level end`; the repo test
+# `route_tests::every_route_mechanic_names_its_engine_function` checks each `ported` row's symbol
+# really appears in its source file, so the list cannot rot silently.
+#
+# status=ported    the mechanic is the engine function's transliteration.
+# status=deviated  the mechanic is still re-derived; `ledger` is the exact heading of its row in
+#                  docs/porting-roadmap.md's deviation ledger (verified by the gate and the test).
+#
+# mechanic	engine_function	address	port_symbol	source	status	ledger
+walk	sithControl_PlayerMovement	0x4d8a00	step_player	src/runtime.rs	ported	
+walk	sithPhysics_UpdatePlayerPhysics	0x4f6860	step_player	src/runtime.rs	ported	
+floor	sithPhysics_FindFloor	0x4f5550	floor_under	src/collide.rs	ported	
+collision	sithCollision_MoveThing	0x4e7950	move_body	src/collide.rs	ported	
+collision	sithCollision_SearchForSurfaceCollisions	0x4e86d0	sweep	src/collide.rs	ported	
+collision	sithCollision_SearchForThingCollisions	0x4e8430	sweep_things	src/collide.rs	ported	
+use	sithPlayerActions_Activate	0x4fc0a0	sith_player_actions_activate	src/runtime.rs	ported	
+use	sithPlayerActions_Activate	0x4fc0a0	use_key	src/main.rs	ported	
+cog messages	sithCog_SendMessage	0x4debe0	deliver_cog_messages	src/main.rs	ported	
+cog messages	sithCog_ThingSendMessageEx	0x4dfaf0	deliver_thing_messages	src/main.rs	ported	
+cog messages	sithCog_SectorSendMessageEx	0x4dfd90	sector_messages	src/runtime.rs	ported	
+damage	sithActor_DamageActor	0x4ecc90	damage_typed	src/runtime.rs	ported	
+ai fire	FUN_00509e40	0x509e40	ai_shots	src/main.rs	ported	
+ai fire	sithAI_FireWeapon	0x4eba10	fire_with_spread	src/runtime.rs	ported	
+ai fire	sithAI_CanDetectSightThing	0x4ec140	can_detect	src/runtime.rs	ported	
+ai fire	sithWeapon_WeaponFireProjectile	0x4d45a0	fire_with_spread	src/runtime.rs	ported	
+audio state	sithSoundMixer_PlaySong	0x4dae60	playsong	src/runtime.rs	ported	
+audio state	sithSoundMixer_SetMusicVol	0x4db080	music_follows_scripts	src/main.rs	ported	
+audio state	sithSoundMixer_SetSectorAmbientSound	0x4dd330	ambient_follows_view	src/main.rs	ported	
+audio state	sithSoundMixer_PlaySoundThing	0x4dba60	sample_audio_state	src/main.rs	ported	
+audio state	sithSoundMixer_PlaySoundPos	0x4db880	sample_audio_state	src/main.rs	ported	
+audio state	sithSoundMixer_UpdateSoundPos	0x4dcc00	sample_audio_state	src/main.rs	ported	
+level end	sithMain_SetEndLevel	0x4c4bf0	jkendlevel	src/runtime.rs	ported	
+level end	jkMain_EndLevel	0x402eb0	jk_main_end_level	src/main.rs	ported	
+walk	sithTime_Advance	0x4dd640	ROUTE_TIME_SCALE	src/main.rs	deviated	route replay time scale
+cog messages	sithRender_RenderThing	0x4c8070	cull_sectors	src/main.rs	deviated	per-thing sight approximation
