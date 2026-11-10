@@ -19,7 +19,7 @@ The cause is structural, not a missing feature:
 
 1. **Our checks compare the port with the port.** A gate asserts what we *believe* the engine does
    (`--feel`, `--walk`, `--hit`…). If the belief is wrong, the gate passes and the game is wrong. Only
-   the retail binary can say "right".
+   the engine's own code (`decomp/`) can say "right".
 2. **"Done" means "implemented and self-consistent"**, not "matches retail". The table in `roadmap.md`
    cannot distinguish the two, so it reads finished while the first room is not.
 3. **Work went breadth-first.** Cutscenes, saves, installer, CI, releases and a site were built before
@@ -38,9 +38,15 @@ Everything else (installer, site, extra screens, multiplayer) is downstream of t
 
 ## Principles
 
-1. **Retail is the oracle.** A claim is true when the retail `JK.EXE` produces the same observable
-   result, not when our gate prints PASS. `decomp/` and `tools/ghidra/` give the code;
-   `tools/parity/` gives the running game.
+1. **The engine's code is the spec.** (Changed 2026-11-09; this used to read "Retail is the oracle".)
+   A mechanic is right when the Rust transliterates the named engine function in `decomp/` — same
+   constants, same branches, same order — not when our gate prints PASS and not when a retail capture
+   lands inside a tolerance. Read `decomp/` first; OpenJKDF2's source is the readable cross-reference
+   for struct fields (read it, do not copy it until its licence is checked against GPL-3).
+   **Agents do not launch retail `JK.EXE`.** The harness renders a few frames a second, quantises
+   time by ±25–40 %, draws a shared `rand()` and takes over the desktop: it cannot settle a
+   mechanics question the code already answers. The fixtures under `tools/parity/` are frozen
+   regression data. A new retail run is the user's call, for a named question the code cannot answer.
 2. **Port the function, not the feature.** Name the engine function (`sithPhysics_FindFloor`,
    `jkPlayer_DrawPov`, …), cite its address, keep its inputs, constants and *order of operations*. A
    re-derived behaviour that looks right is how spawn, camera and sweep bugs got in.
@@ -61,7 +67,7 @@ Everything else (installer, site, extra screens, multiplayer) is downstream of t
 |---|---|---|
 | T0 Parsed | The data loads, nothing is dropped | `--audit`, unit tests |
 | T1 Implemented | Runs in the live game | the existing 64 gates |
-| T2 **State parity** | Numbers match retail for the same inputs: position, sector, velocity, health, bins, cog variables | a retail-recorded trace (`coords` and friends, or an instrumented run) diffed against the port |
+| T2 **State parity** | The mechanic is the engine's own: position, sector, velocity, health, bins, cog variables come out of transliterated functions | the engine functions named with addresses, a test derived from their arithmetic, and no regression against the committed retail fixtures |
 | T3 **Visual parity** | Same pose gives the same picture within a stated tolerance | `tools/parity` shot pairs with a per-shot SSIM/diff threshold |
 | T4 **Play parity** | A recorded input script reaches the same end state in both builds | replay script plus end-state diff |
 
@@ -75,6 +81,11 @@ and each row should name the tier it actually reached; most will read T1.
 One table, per stage, with the **tier** the tier definitions above demand and the retail-derived
 evidence that earns it. Everything not marked T2 is T1 (implemented and self-consistent, with a gate
 that fails on drift) — which is the point of this table: an internal check is not parity.
+
+**Reading the "next rung" column after 2026-11-09:** a cell that asks for a new retail pair, capture or
+trace is superseded by Principle 1. The next rung for that stage is to transliterate the engine
+functions that own it from `decomp/`; the retail item stays listed only as something the user may
+choose to run.
 
 | stage (`roadmap.md`) | tier | what earns it | next rung |
 |---|---|---|---|
@@ -96,16 +107,20 @@ The **deviation ledger** above is the per-deviation view of the same state; this
 
 ## How to port one thing (the repeatable loop)
 
-1. **Observe retail first.** Capture the behaviour before writing code: shot pair, `coords` trace,
-   console output, or an instrumented run. Save it under the repo as a fixture (derived numbers and
-   screenshots, never retail assets).
-2. **Find the function.** Locate it in `decomp/`; read callers and callees; note address and
-   constants in `docs/formats.md`.
-3. **Port it with its order.** Same call sequence per tick (the engine ticks at 50 Hz; thing update
-   order matters). Same constants, same data flow.
-4. **Compare, then gate on the retail fixture.** The gate loads the retail-derived number. A gate that
-   computes both sides from our own code does not count.
-5. **Record what still differs** on the ledger with a tier. Update the table.
+1. **Find the function.** Locate it in `decomp/` (`decomp/INDEX.txt`); read callers and callees; note
+   address and constants in `docs/formats.md`. Work top-down from the tick (`sithMain` → thing update
+   → `sithPhysics_*` → `sithCollision_*`), so a callee is ported under the caller that orders it.
+2. **Transliterate it with its order.** One Rust function per engine function, named after it, with
+   its address in the doc comment. Same call sequence per tick, same constants (read from the code or
+   the shipped image, never fitted to a capture), same data flow. Replace the re-derived code it
+   supersedes; do not patch around it.
+3. **Test it from the code.** A unit test whose expected values are worked out from the decompiled
+   arithmetic and the level's own data. Then run the existing gates: the committed retail fixtures
+   stay as regression checks, and a fixture the faithful port now disagrees with is examined as a
+   possible harness artefact before any code is bent to it.
+4. **Record what still differs** on the ledger with a tier. Update the table. If the decomp is
+   ambiguous or looks wrong (Ghidra does err), write the exact question down for the user — that is
+   the only route to a new retail run.
 
 ## Triage: classifying a retail/port discrepancy
 
@@ -279,6 +294,10 @@ has since outgrown the note. Line numbers drift; the identity is the symbol and 
 
 ### Phase 0.5 — Retail trace v0 (unblocks Phase 1 steps 3–6)
 
+> **Closed, and not to be extended by agents (2026-11-09).** This phase built the retail harness; its
+> fixtures are now frozen regression data (Principle 1). Do not add capture modes, hooks or denser
+> traces. The text below is the record of what was built.
+
 **Exit criteria met (v0, rounds 100–213).** T3 always worked because a screenshot is a complete observation;
 T2/T4 needed a replayable trace and pinned console formats, and both exist now: `port-trace.ps1` replays a
 leg at a fixed 1/60 s step, the walk-trace gate replays 15 retail-derived legs, and the `cogstatus`/`aistatus`
@@ -336,8 +355,13 @@ Do not start Phase 1 step 3 without this.
 
 ### Phase 1 — Level 1 vertical slice (the real work)
 
-Ordered so each step is observable and unblocks the next. Each item ends with a retail fixture and a
-tier, not a checkbox.
+Ordered so each step is observable and unblocks the next. Each item ends with the engine functions it
+was transliterated from (name and address) and a tier, not a checkbox.
+
+> **Superseded where it asks for retail (2026-11-09).** The steps below were written under "retail is
+> the oracle". Wherever one says a retail capture, pair, trace or run is "remaining", "next" or
+> "needed", the work is instead: find the owning function in `decomp/`, transliterate it, test it from
+> its arithmetic. The retail evidence already committed stays as a regression check.
 
 1. **First frame — level 1 done.** The spawn pose is the level's recorded `walkplayer` pose
    (`sithPlayer_NewPlayer`, no floor re-seed), the eye offset is the template's 0.037 in level units,
@@ -532,9 +556,11 @@ in `gaps.md`.
 
 ### Phase 2 — Generalise
 
-Run the Phase 1 harness on levels 2–5, then all 34. Replace "the walker reaches the end" with "the walker
-trace matches a retail trace" for each. Fix by bucket, not by level. Add the retail-trace fixtures to the
-repo so regressions are caught without a retail run.
+Mechanics ported function-for-function are level-independent, so generalising is mostly data: run the
+port's deterministic replay on levels 2–5, then all 34, and fix by bucket, not by level. A level that
+misbehaves points at an engine function not yet transliterated (or a parser gap), found by reading
+`decomp/`, not by capturing that level in retail. (Until 2026-11-09 this phase asked for a retail
+trace per level; the notes below that say so are the record, not the plan.)
 
 *Progress (rounds 153–231).* The walk-trace gate stands at **15 legs, 1 tracked failure**: `walk5_spawn` at 3.43 of
 retail's 3.73 units (92 %, 5 sector mismatches), the "floor-search scope" deviation the ledger names with its retire
@@ -916,14 +942,19 @@ achievable from the shipped artifacts, the decomp and the file probes has been m
 ## Rules for the next agent or contributor
 
 - Do not mark a row done without a tier and the fixture that earns it.
-- Do not add a gate that derives its expected value from the port. Take it from retail.
+- Do not add a gate that derives its expected value from the port's own behaviour. Derive it from the
+  decompiled function and the shipped data, or use an already-committed retail fixture.
+- Do not launch retail `JK.EXE` or run `retail-capture.ps1`. New retail captures are user-invoked only.
+- Do not fit a constant to a capture. Read it from `decomp/` or the image and cite the address.
 - Do not widen scope (new screens, packaging, docs sites) while a Phase 1 discrepancy is open.
-- When retail and our reading of the code disagree, retail wins and the reading is corrected.
+- When a retail fixture and the decompiled code disagree, suspect the fixture's timing first, re-read
+  the code second, and escalate to the user third. Do not widen a tolerance to make them agree.
 
 ## What the retail harness already answers
 
 Reviewed `tools/parity/` (retail-capture, retail-lib, port-capture, compare, thresholds, shots.tsv).
-It drives the GOG `JK.EXE -devMode` on a scratch copy, so it is the oracle this roadmap needs. It has
+It drives the GOG `JK.EXE -devMode` on a scratch copy. It was built as this roadmap's oracle; since
+2026-11-09 it is a user-invoked tool and its committed output is regression data (Principle 1). It has
 eight level-1 pairs: the spawn row and two warp-verified spawn poses (0.62–0.65), and five route poses
 (things 167/169/170/171/174), of which three are gated at 0.72–0.74 and two are triage-only because
 retail's reference there is red from the engine's **damage tint**: the port draws that tint and takes
@@ -984,7 +1015,7 @@ The exported decompilation in `decomp/` already settles part of this. Plan for t
    (the harness default through dgVoodoo2) writes a 24-bit BMP instead; `-Software` still produces the
    indexed PCX for a future palette-index metric.
 
-**Not yet done (needs a retail run, available but hands-off and screen-taking):**
+**Not done, and not agent work (each needs a retail run, which only the user starts):**
 
 - Confirm `cogstatus`/`aistatus`/`slowmo` print through the patched build, and record their formats.
 - Decompile the `LAB_` handlers for `coords` (0x4ee960), `cogtrace` (0x4ee170), `coglist` (0x4ee2f0) to
@@ -1082,6 +1113,13 @@ searched, not read end to end, so this is a targeted review rather than a line-b
    they carry no retail level data beyond state before the next release.
 
 ### Where the next session starts
+
+- **Start from the code, not the game (2026-11-09).** Issue #15, then #14: transliterate level 1's
+  exit chain from `decomp/` (`sithPlayerActions_Activate`, the `sithCog_SendMessage` family,
+  `jkMain_EndLevel`). After that, walk the tick top-down and replace re-derived movement and
+  collision with the engine's functions (`sithPhysics_*` 8 of 12 cited in `src/`, `sithCollision_*`
+  5 of 18, `sithControl_*` 2 of 23). The bullets below are earlier sessions' notes; where one ends on
+  "needs a retail run", that item waits for the user and is not the next task.
 
 - **The outside review's `game_ms` re-capture is done and its premise was wrong (round 294).** The
   engine clock tracks wall time (17 019 ms for a 3 000 ms hold), so `held_ms` stays the movement axis and
