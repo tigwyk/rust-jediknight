@@ -652,6 +652,91 @@ ailist fly mem dynamicmem memdump invul cogpause matlist warp activate slowmo ju
 framerate dispstats kill endlevel`. There is **no level-loading command**; `endlevel` does not advance
 the campaign. `cogtrace`/`coglist`/`ailist` are the useful message/AI tracing tools for Phase 1's
 trigger work.
+## Engine-clock route and encounter capture (issue #20)
+
+A memory-sampled fixture for the encounter (#16), route-timing (#17) and carry (#19) slices. It is a
+**user-run** capture: the agent builds and dry-runs it with synthetic data, the user runs it once on
+the retail install, and this harness never launches retail on its own. It is not part of CI.
+
+```powershell
+# the door encounter: the route_door pose, 10 s of engine clock, no input
+pwsh -File tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door -EngineCaptureMs 10000
+```
+
+Writes `target/parity/engine/route_door.tsv` (override with `-EngineCaptureOut` / `-EngineCaptureName`).
+The warped body is the one `door-encounter.tsv` uses (level 1's upper-door `walkplayer` placement), so
+the fixture is the same encounter the committed telemetry covers, with the state the telemetry
+fixture lacks: engine time, body velocity, inventory bins 72/73/75, the AI random stream, and each
+nearby actor's next-fire/acquisition phase at the origin. A route leg uses the same mode with the key
+held for the window:
+
+```powershell
+pwsh -File tools/parity/retail-capture.ps1 -Shots tools/parity/walk-shots.tsv -Only walk_cantina -EngineCaptureMs 2400 -EngineCaptureKey UP
+```
+
+**No console read happens inside the window.** The dev console is a dialog that pauses the engine, so
+polling it would sample a frozen clock and change the fight; the whole window is `ReadProcessMemory`
+reads on a short loop. A row is written whenever the engine clock (`DAT_00836c14`) changes, so the
+time axis is simulation time, not wall or console-poll time. The window ends at the first engine
+instant at or past `-EngineCaptureMs` (retail's frames are 10-500 ms apart), so its last row can be
+one retail frame past the nominal length. The warp (and the level-load console
+reads) happen before the window; the existing 900 ms post-warp wait runs first, so the window does
+not include the console/foreground transition (the first row is the first engine instant the body is
+sampled at, not necessarily the warp's landing frame).
+
+Format (tab separated, `#` comments allowed):
+
+```text
+# engine-clock capture: route_door
+# origin_ms 12000
+# pose x=1.4001 y=9.7001 z=6.3201 sector=60 (first sample)
+# window 10000 ms of engine clock, 20 sample(s), 30 origin actor(s)
+# addresses: clock=0x00836C14 player=0x008319A4 rng=0x0054F750 ai_instances=0x0088AFE0 ai_count=0x008B4BE0
+t_ms  kind  thing  template  x  y  z  sector  vx  vy  vz  bin72  bin73  bin75  rng
+      ai_flags  fire_next_ms  acquire_next_ms  acquired_at_ms  target  last_target
+      next_pass_ms  detail
+```
+
+- `kind = player` rows are the body at one engine instant: `t_ms` is `DAT_00836c14`, `x/y/z` the body
+  position (`thing+0xB8`), `sector` the tracked sector (`*(thing+0x5C)`), `vx/vy/vz` the engine
+  velocity (`thing+0x1D4`), `bin72/73/75` the inventory amounts
+  (`*(thing+0x1C0) + 0x88 + bin*0x18`: kills credit, population credit, alignment), and `rng` the
+  AI random stream state (`0x0054F750`, the LCG `state = state*0x343FD + 0x269EC3` that
+  `sithAI_RandomFireVector`/acquisition rolls share). The AI columns are empty on these rows.
+- `kind = origin` rows exist once, at `origin_ms`, for every AI-instance actor within 8 units of the
+  player. `ai_flags` is the AI instance's flag word (the acquisition-state bits, `instance+0x08`),
+  `fire_next_ms`/`acquire_next_ms` are the next-run times of the actor's `primaryfire` and
+  `lookfortarget` instincts (the registry names matched through the class handler table), and
+  `next_pass_ms` is the instance's next AI pass (`instance+0x190`). `target`/`last_target` are the
+  current and last acquired thing pointers, `acquired_at_ms` the last acquisition's engine time. All
+  are absolute engine ms, so the port can align its first AI update with retail's phase relative to
+  `origin_ms` (the header repeats it). `detail` spells out which instincts were found and whether the
+  target is the player. The player columns are empty on these rows.
+- `thing` is retail's thing-pool slot and `template` its template index, the same convention the
+  encounter trace uses; the reference reader pairs actors by authored position, not by id.
+
+The capture validates its own output with the same schema check the self-check uses, and throws
+instead of leaving a malformed fixture. Run the self-check (no retail install, no launch):
+
+```powershell
+pwsh -File tools/parity/retail-capture.ps1 -EngineCaptureSelfCheck
+```
+
+It writes one synthetic fixture through the real writer, requires it to be accepted, then corrupts it
+seven ways (missing column, non-numeric position, unknown kind, backwards clock, missing origin
+clock, origin row with no next-fire time, renamed header) and requires every corruption to be
+rejected. Exit code 0 is pass.
+
+Addresses, with their decompilation sources, are in `Invoke-JkEngineCapture` and
+`Get-JkAiOriginRows`: the clock is `sithTime_Advance` (`decomp/004dd640`), the sector
+`GetThingSector` (`0x502B80`), velocity `GetThingVel` (`0x503160`), the AI instance array
+`sithAI_Create`/`sithAI_Process` (`0x4E9CB0`/`0x4E9E20`), the instinct slots and next-pass field
+`sithAI_InstinctUpdate` (`0x4E9E90`), the target fields the `primaryfire`/`lookfortarget` handlers
+write (`0x509E40`/`0x50AA80`/`0x50B9B0`), the instinct registry `sithAI_RegisterInstinct`
+(`0x4EA0A0`), and the AI random stream `FUN_00512d00`. The capture changes no gameplay state: it only
+reads memory, and the optional `-EngineCaptureKey` is the same synthetic input the movement traces
+use.
+
 ## Status commands (`cogstatus`, `aistatus`)
 
 Phase 0.5 step 2 pins the two dev-console status formats from the decomp and captures retail output:
