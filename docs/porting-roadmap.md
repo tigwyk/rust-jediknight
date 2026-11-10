@@ -19,7 +19,7 @@ The cause is structural, not a missing feature:
 
 1. **Our checks compare the port with the port.** A gate asserts what we *believe* the engine does
    (`--feel`, `--walk`, `--hit`…). If the belief is wrong, the gate passes and the game is wrong. Only
-   the retail binary can say "right".
+   the engine's own code (`decomp/`) can say "right".
 2. **"Done" means "implemented and self-consistent"**, not "matches retail". The table in `roadmap.md`
    cannot distinguish the two, so it reads finished while the first room is not.
 3. **Work went breadth-first.** Cutscenes, saves, installer, CI, releases and a site were built before
@@ -38,9 +38,15 @@ Everything else (installer, site, extra screens, multiplayer) is downstream of t
 
 ## Principles
 
-1. **Retail is the oracle.** A claim is true when the retail `JK.EXE` produces the same observable
-   result, not when our gate prints PASS. `decomp/` and `tools/ghidra/` give the code;
-   `tools/parity/` gives the running game.
+1. **The engine's code is the spec.** (Changed 2026-11-09; this used to read "Retail is the oracle".)
+   A mechanic is right when the Rust transliterates the named engine function in `decomp/` — same
+   constants, same branches, same order — not when our gate prints PASS and not when a retail capture
+   lands inside a tolerance. Read `decomp/` first; OpenJKDF2's source is the readable cross-reference
+   for struct fields (read it, do not copy it until its licence is checked against GPL-3).
+   **Agents do not launch retail `JK.EXE`.** The harness renders a few frames a second, quantises
+   time by ±25–40 %, draws a shared `rand()` and takes over the desktop: it cannot settle a
+   mechanics question the code already answers. The fixtures under `tools/parity/` are frozen
+   regression data. A new retail run is the user's call, for a named question the code cannot answer.
 2. **Port the function, not the feature.** Name the engine function (`sithPhysics_FindFloor`,
    `jkPlayer_DrawPov`, …), cite its address, keep its inputs, constants and *order of operations*. A
    re-derived behaviour that looks right is how spawn, camera and sweep bugs got in.
@@ -61,7 +67,7 @@ Everything else (installer, site, extra screens, multiplayer) is downstream of t
 |---|---|---|
 | T0 Parsed | The data loads, nothing is dropped | `--audit`, unit tests |
 | T1 Implemented | Runs in the live game | the existing 64 gates |
-| T2 **State parity** | Numbers match retail for the same inputs: position, sector, velocity, health, bins, cog variables | a retail-recorded trace (`coords` and friends, or an instrumented run) diffed against the port |
+| T2 **State parity** | The mechanic is the engine's own: position, sector, velocity, health, bins, cog variables come out of transliterated functions | the engine functions named with addresses, a test derived from their arithmetic, and no regression against the committed retail fixtures |
 | T3 **Visual parity** | Same pose gives the same picture within a stated tolerance | `tools/parity` shot pairs with a per-shot SSIM/diff threshold |
 | T4 **Play parity** | A recorded input script reaches the same end state in both builds | replay script plus end-state diff |
 
@@ -96,16 +102,20 @@ The **deviation ledger** above is the per-deviation view of the same state; this
 
 ## How to port one thing (the repeatable loop)
 
-1. **Observe retail first.** Capture the behaviour before writing code: shot pair, `coords` trace,
-   console output, or an instrumented run. Save it under the repo as a fixture (derived numbers and
-   screenshots, never retail assets).
-2. **Find the function.** Locate it in `decomp/`; read callers and callees; note address and
-   constants in `docs/formats.md`.
-3. **Port it with its order.** Same call sequence per tick (the engine ticks at 50 Hz; thing update
-   order matters). Same constants, same data flow.
-4. **Compare, then gate on the retail fixture.** The gate loads the retail-derived number. A gate that
-   computes both sides from our own code does not count.
-5. **Record what still differs** on the ledger with a tier. Update the table.
+1. **Find the function.** Locate it in `decomp/` (`decomp/INDEX.txt`); read callers and callees; note
+   address and constants in `docs/formats.md`. Work top-down from the tick (`sithMain` → thing update
+   → `sithPhysics_*` → `sithCollision_*`), so a callee is ported under the caller that orders it.
+2. **Transliterate it with its order.** One Rust function per engine function, named after it, with
+   its address in the doc comment. Same call sequence per tick, same constants (read from the code or
+   the shipped image, never fitted to a capture), same data flow. Replace the re-derived code it
+   supersedes; do not patch around it.
+3. **Test it from the code.** A unit test whose expected values are worked out from the decompiled
+   arithmetic and the level's own data. Then run the existing gates: the committed retail fixtures
+   stay as regression checks, and a fixture the faithful port now disagrees with is examined as a
+   possible harness artefact before any code is bent to it.
+4. **Record what still differs** on the ledger with a tier. Update the table. If the decomp is
+   ambiguous or looks wrong (Ghidra does err), write the exact question down for the user — that is
+   the only route to a new retail run.
 
 ## Triage: classifying a retail/port discrepancy
 
@@ -916,9 +926,13 @@ achievable from the shipped artifacts, the decomp and the file probes has been m
 ## Rules for the next agent or contributor
 
 - Do not mark a row done without a tier and the fixture that earns it.
-- Do not add a gate that derives its expected value from the port. Take it from retail.
+- Do not add a gate that derives its expected value from the port's own behaviour. Derive it from the
+  decompiled function and the shipped data, or use an already-committed retail fixture.
+- Do not launch retail `JK.EXE` or run `retail-capture.ps1`. New retail captures are user-invoked only.
+- Do not fit a constant to a capture. Read it from `decomp/` or the image and cite the address.
 - Do not widen scope (new screens, packaging, docs sites) while a Phase 1 discrepancy is open.
-- When retail and our reading of the code disagree, retail wins and the reading is corrected.
+- When a retail fixture and the decompiled code disagree, suspect the fixture's timing first, re-read
+  the code second, and escalate to the user third. Do not widen a tolerance to make them agree.
 
 ## What the retail harness already answers
 
