@@ -444,7 +444,7 @@ that fixture only over the rows before the warp and no measured row changes:
 
 | leg | pose | what it measures |
 |---|---|---|
-| `exit_door` | the pose retail's walk measured at placement 174: eye `(1.28, 9.62, 6.357114)`, sector 60, yaw 105 | The door leg's stop pose leaves the linked leaf 0.5 beyond the shut portal, outside the 0.165 use sweep (`sithPlayerActions_Activate`, `0x4fc0a0`), so a walk from it never activates the door. The warp starts at the verified use pose. `use` presses the player's ACTIVATE binding and messages the linked leaf (thing 4 at `(1.200002, 9.650073, 6.35)`) with `activated`; `00_door.cog` reopens the adjoins and runs `OpenDoors`. `wait 72` lets the leaf reach frame 1, `yaw 0` turns the body to the doorway, and `input 108` **walks through the open leaf** — the trace's y passes 9.650073 (sector 60 spans both sides, so the sector column does not change). `door0_opened` reads 0 at and before the use tick and 1 after it. |
+| `exit_door` | the port's stop pose at the door, derived from the level geometry: eye `(1.28, 9.62, 6.357114)`, sector 60, yaw 105 (placement 174's committed eye is `(1.400084, 9.700065, 6.357114)`, 0.206 from the leaf and outside the reach, and no walktrace of the exit door exists) | The door leg's stop pose leaves the linked leaf 0.5 beyond the shut portal, outside the 0.165 use sweep (`sithPlayerActions_Activate`, `0x4fc0a0`), so a walk from it never activates the door. The warp starts at the derived stop pose, 0.086 from the leaf at a 0.81 facing dot. `use` presses the player's ACTIVATE binding and messages the linked leaf (thing 4 at `(1.200002, 9.650073, 6.35)`) with `activated`; `00_door.cog` reopens the adjoins and runs `OpenDoors`. `wait 72` lets the leaf reach frame 1, `yaw 0` turns the body to the doorway, and `input 108` **walks through the open leaf** — the trace's y passes 9.650073 (sector 60 spans both sides, so the sector column does not change). `door0_opened` reads 0 at and before the use tick and 1 after it. |
 | `exit_upper` | placement 175 (body `-2.519, 11.001, 6.72`) | the corridor/ramp side of the upper route. |
 | `exit_low` | placement 176 (body `-6.15, 9.65, 4.32`) | the low floor east of the 385 ramp. |
 | `exit_tunnel` | tunnel mouth `(-4.05, 12.0, 4.32)`, sector 407 | `use` on the one-way door (thing 47 at `-4.05, 13.95, 4.375`; `00_1waydoor.cog` opens for a body inside 407), then the hold crosses 407 -> 223 -> 229 -> 215 and the renderer sights 8t88 (`sithRender_RenderThing`, `0x4c8070`, sends `sighted` to `01_goal0.cog`). |
@@ -459,8 +459,11 @@ The per-sample position tolerance is the **retail harness's**, stated in
 one sample's travel (at most ~1.4 units at level 1's 2.4 u/s run) is the measurement resolution.
 Sectors are compared exactly and are never tolerated away.
 
-`--route-compare <expected> <actual>` is the comparator the gate uses; `BK_ROUTE_EPSILON=<units>`
-sets an absolute tolerance for every numeric column (sector stays exact, and `-` fields are skipped).
+`--route-compare <expected> <actual> [--events-per-row]` is the comparator the gate uses;
+`BK_ROUTE_EPSILON=<units>` sets an absolute tolerance for every numeric column (sector stays exact,
+and `-` fields are skipped). Without the flag the latched event columns are graded on the expected
+trace's last row only, which is what the frozen retail prefix needs; `--events-per-row` grades them
+on every row, which is the port oracle's rule (the replay and the oracle share the port's fixed grid).
 
 A replay is reproducible by construction: the step is pinned at 1/60 s and the replay runs the Update
 schedule on one executor thread. The AI's shared LCG is thread-local, so with the default

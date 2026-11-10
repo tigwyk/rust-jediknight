@@ -1154,6 +1154,30 @@ impl Vm {
         due.into_iter().map(|(_, id, params)| (id, params)).collect()
     }
 
+    /// Write the message's sender onto this VM, as `sithCog_SendMessageEx` (`0x4dedc0`) does when it
+    /// dispatches: the link id is `senderId` (`+0x24`), and the queued `SourceSender` supplies
+    /// `senderRef` (`+0x30`) and `senderType` (`+0x34`) — the sender thing's index and 3, or `-1`/0
+    /// when the world sent it. A message queued with a link id alone leaves the sender half alone.
+    /// Returns the three fields as they were, for [`Vm::restore_message_sender`] after the handler.
+    pub fn set_message_sender(
+        &mut self,
+        link: Option<i64>,
+        identity: Option<&crate::runtime::SourceSender>,
+    ) -> (i64, i64, i64) {
+        let own = (self.sender, self.sender_ref, self.sender_type);
+        self.sender = link.map_or(0, |s| s);
+        if let Some(identity) = identity {
+            self.sender_ref = identity.sender as i64;
+            self.sender_type = identity.sender_type as i64;
+        }
+        own
+    }
+
+    /// Put back the sender fields a delivery replaced, so the next message does not inherit them.
+    pub fn restore_message_sender(&mut self, own: (i64, i64, i64)) {
+        (self.sender, self.sender_ref, self.sender_type) = own;
+    }
+
     pub fn run_label(&mut self, cog: &Cog, label: &str) -> Result<Value, String> {
         let Some(body) = cog.label(label) else {
             return Err(format!("no label `{label}`"));
@@ -1646,6 +1670,48 @@ mod tests {
         vm.now = 2.0;
         assert_eq!(vm.take_due_timers(), vec![(2, [0.0, 0.0])]);
         assert!(vm.timers.is_empty());
+    }
+
+    /// `sithCog_SendMessageEx` (`0x4dedc0`) writes `senderId`/`senderRef`/`senderType` on the
+    /// receiving cog before the handler runs (`+0x24`, `+0x30`, `+0x34`). The port's pending bus now
+    /// carries the engine's `SourceSender`, so a handler can tell a body's message (the sender thing
+    /// and type 3) from the world's (`-1`/0), while `GetSenderId()` stays the link id.
+    #[test]
+    fn a_thing_and_the_world_are_distinguishable_in_a_handler() {
+        use crate::runtime::{SourceSender, THING_SOURCE};
+        let script = parse(
+            "symbols\nmessage activate\nend\ncode\nactivate:\n\tPrint(GetSenderId());\n\tPrint(GetSenderRef());\n\tPrint(GetSenderType());\n\treturn;\nend\n",
+        )
+        .expect("parses");
+        let mut vm = Vm::new();
+        // A body used the door: link id 2, sender thing 7.
+        let own = vm.set_message_sender(
+            Some(2),
+            Some(&SourceSender::new(THING_SOURCE, 4, Some(7))),
+        );
+        vm.run_label(&script, "activate").expect("the handler runs");
+        assert_eq!(vm.trace.prints, vec!["2", "7", "3"]);
+        vm.restore_message_sender(own);
+        assert_eq!(
+            (vm.sender, vm.sender_ref, vm.sender_type),
+            (0, 0, 0),
+            "the sender fields were not restored after the handler"
+        );
+        // The world sends `sighted` to the same link: no body, so the engine's `(-1, 0)`.
+        let own = vm.set_message_sender(
+            Some(2),
+            Some(&SourceSender::new(THING_SOURCE, 4, None)),
+        );
+        vm.run_label(&script, "activate").expect("the handler runs");
+        assert_eq!(vm.trace.prints[3..], ["2", "-1", "0"]);
+        vm.restore_message_sender(own);
+        assert_eq!((vm.sender, vm.sender_ref, vm.sender_type), (0, 0, 0));
+        // A port push with a link id alone leaves the sender half as it was.
+        vm.sender_ref = 9;
+        let own = vm.set_message_sender(Some(5), None);
+        assert_eq!((vm.sender, vm.sender_ref), (5, 9));
+        vm.restore_message_sender(own);
+        assert_eq!((vm.sender, vm.sender_ref, vm.sender_type), (0, 9, 0));
     }
 
     const DOOR: &str = r#"

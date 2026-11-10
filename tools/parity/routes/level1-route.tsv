@@ -58,12 +58,13 @@ input	180	1	0
 # The `door` leg above ends at tick 684 on the retail walk's own stop pose (1.30, 9.07, sector 328),
 # which is what the frozen retail fixture's last row records. The exit segment does not walk on from
 # there: `00_door.cog`'s `startup` hid the door sector's adjoins, so the walk stops at the portal with
-# the linked leaf 0.5 beyond it — outside the 0.165 use sweep. It warps instead to the
-# pose that retail's own walk measured at placement 174 — eye (1.28, 9.62, 6.357114), sector 60, yaw
-# 105 — where the use action's evidence was captured: the eye is 0.086 from the linked leaf (thing 4 at
-# 1.200002, 9.650073, 6.35). `use` presses the player's ACTIVATE binding (scancode 0x39, SPACE: the
-# profile's `bind 12 57 0x2`; the PLR stores scancodes, so the earlier `9` sent the wrong key), which
-# `sithPlayerActions_Activate` (`0x4fc0a0`) answers by messaging the linked leaf in front with
+# the linked leaf 0.5 beyond it — outside the 0.165 use sweep. It warps instead to the port's stop pose,
+# derived from the level geometry: eye (1.28, 9.62, 6.357114), sector 60, yaw 105, where the eye is 0.086
+# from the linked leaf (thing 4 at 1.200002, 9.650073, 6.35) at a 0.81 facing dot. It is **not**
+# placement 174's eye: committed `walkplayer` placement 174 is (1.400084, 9.700065, 6.357114), 0.206 from
+# the leaf and outside the reach, and there is no walktrace of the exit door. `use` presses the player's
+# ACTIVATE binding (scancode 0x39, SPACE: the profile's `bind 12 57 0x2`; the PLR stores scancodes, so
+# the earlier `9` sent the wrong key), which `sithPlayerActions_Activate` (`0x4fc0a0`) answers by
 # `activated` (id 1); `00_door.cog` reopens the adjoins and runs `OpenDoors`. `wait 72` lets the leaf
 # reach frame 1; `yaw 0` turns the body to the doorway (the door leg's own heading) and `input 108`
 # walks it through the opening — the trace's y passes the leaf's 9.650073 on that hold, which is the

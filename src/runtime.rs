@@ -1219,10 +1219,14 @@ pub struct Runtime {
     /// `sithCog_LinkCogToThing` in tabular form.
     pub thing_links: Vec<(usize, i32, usize)>,
     /// Messages a script has earned but that have not been delivered yet: the runtime holds no VM,
-    /// so it queues `(cog instance, label, params, sender)` and a system drains it. The params are what
-    /// `GetParam(0)`/`GetParam(1)` answer inside the handler — `damaged` carries the amount and the
-    /// damage type, which is how `force_absorb.cog` decides how much of it to take.
-    pub pending_messages: Vec<(usize, &'static str, [f64; 2], Option<i64>)>,
+    /// so it queues `(cog instance, label, params, link id, identity)` and a system drains it. The
+    /// params are what `GetParam(0)`/`GetParam(1)` answer inside the handler — `damaged` carries the
+    /// amount and the damage type, which is how `force_absorb.cog` decides how much of it to take.
+    /// The link id is `GetSenderId()`; the identity is the engine's `SourceSender`, whose `sender`
+    /// and `sender_type` are `GetSenderRef()`/`GetSenderType()` (`-1`/0 from the world, the thing's
+    /// index and 3 from a body). A push that labels itself with a link id alone leaves those two
+    /// fields as they were.
+    pub pending_messages: Vec<(usize, &'static str, [f64; 2], Option<i64>, Option<SourceSender>)>,
     /// `DAT_008554bc`: when the use action last ran, on the world clock. One stamp for the whole
     /// world — `sithPlayerActions_Activate` (`0x4fc0a0`) writes it before its sweep, and an actor's
     /// `opendoors` instinct runs the same function, so the two share the 250 ms wait.
@@ -3050,7 +3054,7 @@ impl Runtime {
         for index in due {
             self.thing_timer.remove(&index);
             for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "timer", [0.0; 2], None));
+                self.pending_messages.push((instance, "timer", [0.0; 2], None, None));
             }
         }
         // Force mana regenerates — but only for a Jedi that has a pool. `kyle.cog`'s class script
@@ -3097,7 +3101,7 @@ impl Runtime {
                 thing.pulse_at = self.time + thing.pulse;
             }
             for instance in self.thing_instances(index) {
-                self.pending_messages.push((instance, "pulse", [0.0; 2], None));
+                self.pending_messages.push((instance, "pulse", [0.0; 2], None, None));
             }
         }
         // Powerups with `respawn=` come back. The countdown runs in the same step as
@@ -3404,7 +3408,7 @@ impl Runtime {
         }
         for index in &blocked {
             for instance in self.thing_instances(*index) {
-                self.pending_messages.push((instance, "blocked", [0.0; 2], None));
+                self.pending_messages.push((instance, "blocked", [0.0; 2], None, None));
             }
         }
         // `RotatePivot`: a thing turning about the pivot its frame names, a whole turn of `seconds`.
@@ -3458,7 +3462,7 @@ impl Runtime {
                 thing.arrived = false;
             }
             for instance in self.thing_instances(*index) {
-                self.pending_messages.push((instance, "arrived", [0.0; 2], None));
+                self.pending_messages.push((instance, "arrived", [0.0; 2], None, None));
             }
         }
         self.update_attachments(&mut moved);
@@ -7176,9 +7180,9 @@ impl Runtime {
         sender: Option<usize>,
         msg: &'static str,
     ) -> usize {
-        // The identity the engine passes down (`SourceSender`); the bus carries the link id only, so
-        // the rest stays explicit here and in its unit test.
-        let _identity = SourceSender::new(source_type, source as i32, sender);
+        // The identity the engine passes down (`SourceSender`): its `sender`/`sender_type` are what
+        // `GetSenderRef`/`GetSenderType` answer inside the handler.
+        let identity = SourceSender::new(source_type, source as i32, sender);
         let links = match source_type {
             THING_SOURCE => self.thing_links.clone(),
             SECTOR_SOURCE => self.sector_links.clone(),
@@ -7189,7 +7193,8 @@ impl Runtime {
             if linked != source {
                 continue;
             }
-            self.pending_messages.push((instance, msg, [0.0; 2], Some(link as i64)));
+            self.pending_messages
+                .push((instance, msg, [0.0; 2], Some(link as i64), Some(identity)));
             sent += 1;
         }
         sent
@@ -7210,7 +7215,8 @@ impl Runtime {
             if linked != surface {
                 continue;
             }
-            self.pending_messages.push((instance, "crossed", [0.0; 2], Some(link as i64)));
+            self.pending_messages
+                .push((instance, "crossed", [0.0; 2], Some(link as i64), None));
             queued += 1;
         }
         queued
@@ -7457,7 +7463,7 @@ impl Runtime {
         let instances = self.thing_instances(thing);
         for instance in &instances {
             self.pending_messages
-                .push((*instance, label, params, Some(thing as i64)));
+                .push((*instance, label, params, Some(thing as i64), None));
         }
         instances.len()
     }
@@ -7976,9 +7982,11 @@ impl Runtime {
         // `GetParam(0)`/`GetParam(1)` read (`force_absorb.cog`, `force_protection.cog`).
         let params = [amount as f64, kind as f64];
         for instance in self.thing_instances(index) {
-            self.pending_messages.push((instance, "damaged", params, Some(source)));
+            self.pending_messages
+                .push((instance, "damaged", params, Some(source), None));
             if died {
-                self.pending_messages.push((instance, "killed", params, Some(source)));
+                self.pending_messages
+                    .push((instance, "killed", params, Some(source), None));
             }
         }
         // What a handler's answer has to amend: the engine applies the amount the `damaged` handler
@@ -11022,21 +11030,21 @@ mod tests {
         let pulses = rt
             .pending_messages
             .iter()
-            .filter(|(instance, label, _, _)| *instance == 7 && *label == "pulse")
+            .filter(|(instance, label, _, _, _)| *instance == 7 && *label == "pulse")
             .count();
         assert_eq!(pulses, 1, "the thing's pulse never reached its script");
         // The timer re-arms rather than firing every frame.
         rt.pending_messages.clear();
         rt.step(None, 1.0 / 30.0);
         assert!(
-            !rt.pending_messages.iter().any(|(_, label, _, _)| *label == "pulse"),
+            !rt.pending_messages.iter().any(|(_, label, _, _, _)| *label == "pulse"),
             "the pulse fired on the very next frame"
         );
         // Zero stops it.
         rt.call("setthingpulse", &[Value::Num(0.0), Value::Num(0.0)]);
         rt.time += 5.0;
         rt.step(None, 1.0 / 30.0);
-        assert!(!rt.pending_messages.iter().any(|(_, label, _, _)| *label == "pulse"));
+        assert!(!rt.pending_messages.iter().any(|(_, label, _, _, _)| *label == "pulse"));
     }
 
     /// `AiGetMode` is the AI's own flag word — the same value `GetActorFlags` answers, which is what
@@ -14097,14 +14105,14 @@ mod tests {
         let queued: Vec<_> = rt
             .pending_messages
             .iter()
-            .filter(|(instance, label, _, _)| *instance == 7 && *label == "user0")
+            .filter(|(instance, label, _, _, _)| *instance == 7 && *label == "user0")
             .collect();
         assert_eq!(queued.len(), 1, "the force power did not reach the actor's script");
         assert_eq!(queued[0].2, [0.0, 1.0], "the message did not carry (victim, ability)");
         // The ability's own cooldown is `fltArg[10]` (12 s), so a second tick queues nothing.
         rt.ai_tick(0, 1.0 / 30.0);
         assert_eq!(
-            rt.pending_messages.iter().filter(|(_, label, _, _)| *label == "user0").count(),
+            rt.pending_messages.iter().filter(|(_, label, _, _, _)| *label == "user0").count(),
             1,
             "the force power ignored its own cooldown"
         );
@@ -15137,7 +15145,7 @@ mod tests {
         assert!(
             rt.pending_messages
                 .iter()
-                .any(|(instance, label, _, _)| *instance == 5 && *label == "arrived"),
+                .any(|(instance, label, _, _, _)| *instance == 5 && *label == "arrived"),
             "the arrival was not queued for the linked cog: {:?}",
             rt.pending_messages
         );
@@ -15148,7 +15156,7 @@ mod tests {
         assert_eq!(
             rt.pending_messages
                 .iter()
-                .filter(|(_, label, _, _)| *label == "arrived")
+                .filter(|(_, label, _, _, _)| *label == "arrived")
                 .count(),
             1,
             "the arrival was queued twice"
@@ -15933,7 +15941,7 @@ mod tests {
         assert!(
             rt.pending_messages
                 .iter()
-                .any(|(_, label, _, sender)| *label == "activate" && *sender == Some(2)),
+                .any(|(_, label, _, sender, _)| *label == "activate" && *sender == Some(2)),
             "the door's script was not messaged: {:?}",
             rt.pending_messages
         );
@@ -15968,43 +15976,72 @@ mod tests {
         );
     }
 
-    /// The two authored poses level 1's exit route depends on, at their measured positions.
+    /// The two poses level 1's exit route depends on, at their measured positions.
     ///
-    /// The door piece (`thing 4`, `2x3door`) is at `(1.200002, 9.650073, 6.35)`; the route warps to
-    /// the pose retail's walk measured at `walkplayer` placement 174's stop (eye `1.28, 9.62,
-    /// 6.357114`, sector 60, yaw 105 = west). From there the eye is ~0.086 from the door origin,
-    /// inside the `moveSize + 0.1 = 0.165` reach (`sithPlayerActions_Activate`, `0x4fc0a0`), and the
-    /// facing dot is 0.81. The earlier `walk_door0` stop pose `(1.30, 9.14)` facing north is 0.52
-    /// away: the pose, not the reach, is why that walk never opened the door.
+    /// The door piece (`thing 4`, `2x3door`) is at `(1.200002, 9.650073, 6.35)`. The route warps to
+    /// eye `(1.28, 9.62, 6.357114)`, sector 60, yaw 105 (west) — a **port stop pose derived from the
+    /// level geometry**, not a retail measurement: committed `walkplayer` placement 174's eye is
+    /// `(1.400084, 9.700065, 6.357114)`, 0.206 from the leaf and outside the reach, and no walktrace
+    /// of the exit door exists. From the derived pose the eye is ~0.086 from the door origin, inside
+    /// the `moveSize + 0.1 = 0.165` reach (`sithPlayerActions_Activate`, `0x4fc0a0`), and the facing
+    /// dot is 0.81. The earlier `walk_door0` stop pose `(1.30, 9.14)` facing north is 0.52 away: the
+    /// pose, not the reach, is why that walk never opened the door.
     ///
-    /// The one-way door (`thing 47`, `00_1waydoor.cog`) is used from the tunnel (`sector 407`); its
-    /// own origin is 0.087-0.116 from the body resting against the shut door (sector 223, the door
-    /// stub), inside the same reach.
+    /// The one-way door (`thing 47`, `00_1waydoor.cog`) is used from the tunnel (sector 407, what the
+    /// script's `inside` symbol names); its own origin is 0.087-0.116 from the body resting against
+    /// the shut leaf in the door's stub (sector 223, the route's next sector), inside the same reach.
+    ///
+    /// Both bodies stand in a **different** sector from their target, so each fixture carries the
+    /// doorway plane the 0.165 sweep crosses: the sector scope here is the engine's search
+    /// (`sithCollision_SearchForCollisions`), not an equality test.
     #[test]
     fn the_level_1_door_poses_are_inside_the_use_sweep() {
-        let with_door = |pos: [f32; 3], sector: i32| {
+        // One doorway plane standing in for the level's own: the sweep from the body's room reaches
+        // `room` only across it, which is the engine's rule.
+        let with_door = |pos: [f32; 3],
+                         room: i32,
+                         body: usize,
+                         normal: [f32; 3],
+                         point: [f32; 3]| {
             let mut rt = door_runtime();
             let base = rt.things[0].clone();
             let mut door = base.clone();
             door.pos = pos;
-            door.sector = sector;
+            door.sector = room;
             door.flags |= TF_CAPTURED;
             rt.things = vec![base, door];
             rt.templates = vec!["walkplayer".into(), "2x3door".into()];
             rt.types = vec![10, 0];
             rt.thing_links.push((0, 0, 1));
+            let mut solids = crate::collide::Solids::default();
+            solids.portals = vec![Vec::new(); 408];
+            solids.portals[body].push(crate::collide::Portal {
+                adjoin: room as usize,
+                link: 0,
+                verts: Vec::new(),
+                normal,
+                point,
+            });
+            rt.solids = Some(std::sync::Arc::new(solids));
             rt
         };
 
-        // Door 0 from the verified exit warp: eye (1.28, 9.62, 6.357114), yaw 105's `(-sin, cos)`.
-        let mut door0 = with_door([1.200002, 9.650073, 6.35], 74);
+        // Door 0 from the exit warp: eye (1.28, 9.62, 6.357114) in sector 60, the leaf in 74, and the
+        // doorway plane half-way along yaw 105's `(-sin, cos)`.
         let yaw = 105f32.to_radians();
+        let look = [-yaw.sin(), yaw.cos(), 0.0];
+        let plane = [
+            1.28 + look[0] * 0.05,
+            9.62 + look[1] * 0.05,
+            6.357114 + look[2] * 0.05,
+        ];
+        let mut door0 = with_door([1.200002, 9.650073, 6.35], 74, 60, look, plane);
         let used = door0.sith_player_actions_activate(
             0,
             [1.28, 9.62, 6.357114],
-            [-yaw.sin(), yaw.cos(), 0.0],
+            look,
             0.165,
-            74,
+            60,
         );
         assert_eq!(
             used,
@@ -16015,27 +16052,33 @@ mod tests {
             door0
                 .pending_messages
                 .iter()
-                .any(|(_, label, _, sender)| *label == "activate" && *sender == Some(0)),
+                .any(|(_, label, _, sender, _)| *label == "activate" && *sender == Some(0)),
             "the door's script was not messaged: {:?}",
             door0.pending_messages
         );
 
         // The `walk_door0` stop pose (north-facing, 0.52 away) is refused by the same runtime.
-        let mut stop = with_door([1.200002, 9.650073, 6.35], 74);
+        let mut stop = with_door([1.200002, 9.650073, 6.35], 74, 60, look, plane);
         assert_eq!(
             stop.sith_player_actions_activate(
                 0,
                 [1.30, 9.14, 6.357114],
                 [0.0, 1.0, 0.0],
                 0.165,
-                74
+                60
             ),
             None,
             "the north-facing stop pose used the door it cannot reach or face"
         );
 
-        // The one-way door from inside the tunnel, facing north.
-        let mut tunnel = with_door([-4.05, 13.95, 4.375], 407);
+        // The one-way door from inside the tunnel: the body in 407, the shut leaf in the stub (223).
+        let mut tunnel = with_door(
+            [-4.05, 13.95, 4.375],
+            223,
+            407,
+            [0.0, 1.0, 0.0],
+            [-4.05, 13.915, 4.357114],
+        );
         let used = tunnel.sith_player_actions_activate(
             0,
             [-4.05, 13.865, 4.357114],
@@ -16051,7 +16094,7 @@ mod tests {
 
         // Both halves rank together, because the engine pops one stack: a plate nearer the eye than
         // the leaf is the one that answers, and the leaf is not messaged.
-        let mut both = with_door([1.200002, 9.650073, 6.35], 74);
+        let mut both = with_door([1.200002, 9.650073, 6.35], 74, 60, look, plane);
         both.surfaces = vec![SurfaceState {
             center: [1.20, 9.70, 6.357],
             cel: 0.0,
@@ -16069,11 +16112,11 @@ mod tests {
             [1.28, 9.70, 6.357],
             [-1.0, 0.0, 0.0],
             0.165,
-            74,
+            60,
         );
         assert_eq!(used, Some(UseHit::Surface(0)), "the nearer plate did not win: {used:?}");
         assert!(
-            both.pending_messages.iter().all(|(_, _, _, sender)| *sender == Some(2)),
+            both.pending_messages.iter().all(|(_, _, _, sender, _)| *sender == Some(2)),
             "the leaf was messaged as well as the plate: {:?}",
             both.pending_messages
         );
@@ -16106,7 +16149,7 @@ mod tests {
         assert!(
             near.pending_messages
                 .iter()
-                .any(|(instance, label, _, sender)| *instance == 0 && *label == "activate" && *sender == Some(2)),
+                .any(|(instance, label, _, sender, _)| *instance == 0 && *label == "activate" && *sender == Some(2)),
             "the plate's script was not messaged: {:?}",
             near.pending_messages
         );
@@ -16237,10 +16280,12 @@ mod tests {
         }];
         rt.surface_links = vec![(0, 2, 0)];
         assert_eq!(rt.sith_cog_surface_send_message(0, None, "sighted"), 1);
+        let (_, _, _, link, identity) = rt.pending_messages.pop().expect("a queued message");
+        assert_eq!(link, Some(2), "the plate's link id is what GetSenderId answers");
         assert_eq!(
-            rt.pending_messages.pop(),
-            Some((0, "sighted", [0.0; 2], Some(2))),
-            "the plate's link id is what GetSenderId answers"
+            identity,
+            Some(SourceSender::new(SURFACE_SOURCE, 0, None)),
+            "the world's message must carry the engine's (-1, 0) sender"
         );
         // `sighted` reaches the thing's links with the world as the sender (0), which is what
         // `sithRender_RenderThing` (`0x4c8070`) passes; a thing with no link hears nothing.
@@ -16251,7 +16296,9 @@ mod tests {
         });
         rt.thing_links = vec![(0, 0, 1)];
         assert_eq!(rt.sith_cog_thing_send_message(1, None, "sighted"), 1);
-        assert_eq!(rt.pending_messages.pop(), Some((0, "sighted", [0.0; 2], Some(0))));
+        let (_, _, _, link, identity) = rt.pending_messages.pop().expect("a queued message");
+        assert_eq!(link, Some(0));
+        assert_eq!(identity, Some(SourceSender::new(THING_SOURCE, 1, None)));
         assert_eq!(rt.sith_cog_sector_send_message(5, None, "entered"), 0);
     }
 
@@ -16266,7 +16313,7 @@ mod tests {
         let senders: Vec<(usize, Option<i64>)> = rt
             .pending_messages
             .iter()
-            .map(|(instance, _, _, sender)| (*instance, *sender))
+            .map(|(instance, _, _, sender, _)| (*instance, *sender))
             .collect();
         assert_eq!(senders, vec![(0, Some(1)), (2, Some(2))], "a crossing lost its link id");
         assert_eq!(rt.crossed_surface(213), 1, "the offAdjoin link was not messaged");
@@ -16478,7 +16525,7 @@ mod tests {
 
         rt.ai_tick(0, 0.1);
         assert!(
-            rt.pending_messages.iter().any(|(instance, label, _, sender)| {
+            rt.pending_messages.iter().any(|(instance, label, _, sender, _)| {
                 *instance == 0 && *label == "activate" && *sender == Some(3)
             }),
             "the actor did not activate the door in front: {:?}",
@@ -16500,7 +16547,7 @@ mod tests {
         rt.time = 1.01;
         rt.ai_tick(0, 0.1);
         assert!(
-            rt.pending_messages.iter().any(|(instance, label, _, sender)| {
+            rt.pending_messages.iter().any(|(instance, label, _, sender, _)| {
                 *instance == 0 && *label == "activate" && *sender == Some(3)
             }),
             "the handler did not re-arm after its 1000 ms: {:?}",

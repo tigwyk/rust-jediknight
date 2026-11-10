@@ -1462,15 +1462,17 @@ impl LevelGeometry {
             let Some(portals) = self.portals.get(node) else { continue };
             for portal in portals {
                 let target = portal.adjoin;
-                if target == other {
-                    return true;
-                }
                 if seen.contains(&target) {
                     continue;
                 }
                 let now = dot(sub(at, portal.point), portal.normal);
                 let then = now + dot(dir, portal.normal) * left;
+                // The engine adds the adjoined sector only when the sphere reaches that portal, so
+                // the target behind it is in the search only on this same crossing test.
                 if now.signum() != then.signum() || now.abs().min(then.abs()) < radius - 1e-4 {
+                    if target == other {
+                        return true;
+                    }
                     seen.push(target);
                 }
             }
@@ -3668,6 +3670,28 @@ mod tests {
         assert!(
             !room.in_search(0, 2, [3.0, 0.0, 1.0], [-1.0, 0.0, 0.0], 0.1, r),
             "a body far from the wall opening searched the next room"
+        );
+    }
+
+    /// A chain hop is taken only when the sweep reaches that **portal**. Two rooms are always
+    /// adjacent once an opening is crossed, so accepting a target on sight made the whole corridor
+    /// visible to a sweep that never touched the second opening.
+    #[test]
+    fn a_chain_hop_is_taken_only_when_its_portal_is_reached() {
+        let room = corridor();
+        let r = 0.025;
+        // Room 0 opens into 1 at y = 0, and 1 into 2 at y = 8. A body in room 0 walking level.
+        assert!(
+            !room.in_search_chain(0, 2, [0.0, -0.5, 0.5], [0.0, 1.0, 0.0], 1.0, r),
+            "a sweep that stops inside room 1 searched the room past its far opening"
+        );
+        assert!(
+            room.in_search_chain(0, 2, [0.0, -0.5, 0.5], [0.0, 1.0, 0.0], 9.0, r),
+            "a sweep that crosses both openings did not search the second room"
+        );
+        assert!(
+            room.in_search_chain(0, 1, [0.0, -0.5, 0.5], [0.0, 1.0, 0.0], 1.0, r),
+            "the first hop's own portal was not reached"
         );
     }
 

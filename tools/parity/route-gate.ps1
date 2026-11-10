@@ -24,7 +24,9 @@
        body's y then passes the opened leaf (the walk-through crossing), `goal_bin100` reaches 3, and
        `level_end` reaches 1 (the level's script called `jkEndLevel`);
     3. the committed oracle — a replay matches `tools/parity/routetrace/level1-route-port.tsv`
-       field for field;
+       field for field, event columns included on **every** row (the oracle and the replay share the
+       port's fixed grid, so an early latch fails); the retail prefix in check 5 keeps the
+       last-row-only event grade;
     4. self-check — a copy of the trace with one position moved 0.25 units is **rejected** by the
        comparator, so the gate is known to fail on a perturbed trace and pass on the unmodified one.
        `-Perturb` runs that check; the gate's normal run compares the unmodified trace;
@@ -293,7 +295,11 @@ Write-Host ("PASS  coverage: {0} sample(s) over ticks 0..{1} (spawn to level com
 Write-Host 'PASS  audio: every sample carries the song, its volume, the audible loop and the window''s one-shots'
 
 # 2. The committed oracle. The comparator is the app's own `--route-compare`; exit code is the gate.
-& $Exe --route-compare $PortPath $runA
+# `--events-per-row` is the oracle's rule: the port fixture and the replay share the port's fixed
+# grid, so a latched event that trips on an earlier row is a different route and fails here. The
+# retail prefix below keeps the last-row-only grade, because its holds advance a variable amount of
+# engine time.
+& $Exe --route-compare $PortPath $runA --events-per-row
 if ($LASTEXITCODE -ne 0) {
   Write-Host 'FAIL  the replay does not match the committed route fixture (route-compare above)'
   exit 1
@@ -320,7 +326,7 @@ foreach ($line in $lines | Select-Object -Skip 1) {
 }
 Set-Content -LiteralPath $perturbed -Value $rows -Encoding utf8
 
-& $Exe --route-compare $PortPath $perturbed 2>&1 | Out-Null
+& $Exe --route-compare $PortPath $perturbed --events-per-row 2>&1 | Out-Null
 if ($LASTEXITCODE -eq 0) {
   Write-Host 'FAIL  self-check: a trace with x moved 0.25 units passed the comparator'
   exit 1

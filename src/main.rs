@@ -937,14 +937,18 @@ fn main() {
             "--route-trace" => {
                 route_trace = arg_value(&args, &mut i).map(std::path::PathBuf::from);
             }
-            // `--route-compare <expected> <actual>`: the route-trace gate. Fails on the first field
-            // outside its tolerance, so a perturbed trace fails and the fixture itself passes.
+            // `--route-compare <expected> <actual> [--events-per-row]`: the route-trace gate. Fails on
+            // the first field outside its tolerance, so a perturbed trace fails and the fixture
+            // itself passes. `--events-per-row` grades the latched event columns on every row (the
+            // port oracle); without it only the fixture's last row is graded (the frozen retail
+            // capture, whose holds advance a variable amount of engine time).
             "--route-compare" => {
                 let expected = args.get(i + 1).cloned();
                 let actual = args.get(i + 2).cloned();
-                i += 2;
+                let events_per_row = args.get(i + 3).is_some_and(|arg| arg == "--events-per-row");
+                i += if events_per_row { 3 } else { 2 };
                 let (Some(expected), Some(actual)) = (expected, actual) else {
-                    println!("usage: --route-compare <expected.tsv> <actual.tsv>");
+                    println!("usage: --route-compare <expected.tsv> <actual.tsv> [--events-per-row]");
                     std::process::exit(2);
                 };
                 let epsilon = std::env::var("BK_ROUTE_EPSILON")
@@ -955,6 +959,7 @@ fn main() {
                     std::path::Path::new(&expected),
                     std::path::Path::new(&actual),
                     epsilon,
+                    events_per_row,
                 ) {
                     Ok(()) => std::process::exit(0),
                     Err(message) => {
@@ -3404,7 +3409,7 @@ fn main() {
             // The queued list is moved out **before** the loop: `World` is an `Arc<Mutex<..>>`, so a
             // guard held by the `for` head would deadlock on the first verb the label calls.
             let pending = std::mem::take(&mut sim_world.borrow_mut().pending_messages);
-            for (instance, label, params, source) in pending {
+            for (instance, label, params, source, _identity) in pending {
                 let Some((script_name, vm)) = vms.get_mut(instance) else { continue };
                 let Some(script) = world.cogs.get(script_name) else { continue };
         // The sender/source rides with the message: `activated` handlers branch on
@@ -4739,7 +4744,7 @@ fn main() {
                         (label.to_string(), Some(link as usize), Some(instance as i32), [0.0; 2])
                     })
                     .collect();
-                for (instance, label, params, _source) in std::mem::take(&mut rt.pending_messages) {
+                for (instance, label, params, _source, _identity) in std::mem::take(&mut rt.pending_messages) {
                     queued.push((label.to_string(), Some(player), Some(instance as i32), params));
                 }
                 rt.ai_tick(player, dt);
@@ -6578,7 +6583,7 @@ fn main() {
             );
             // Drain exactly as `deliver_thing_messages` does, source and all.
             let pending = std::mem::take(&mut sim_world.borrow_mut().pending_messages);
-            for (inst, label, params, source) in pending {
+            for (inst, label, params, source, _identity) in pending {
                 if inst != 0 || script.label(label).is_none() {
                     continue;
                 }
@@ -8909,7 +8914,7 @@ fn main() {
                 let queued = rt
                     .pending_messages
                     .iter()
-                    .filter(|(_, label, _, _)| *label == "arrived")
+                    .filter(|(_, label, _, _, _)| *label == "arrived")
                     .count();
                 println!(
                     "  thing {thing} with {frames} frame(s): {} `arrived` message(s) queued",
@@ -8953,7 +8958,7 @@ fn main() {
                 activated += rt
                     .pending_messages
                     .iter()
-                    .filter(|(_, label, _, _)| *label == "activate")
+                    .filter(|(_, label, _, _, _)| *label == "activate")
                     .count();
             }
         }
@@ -9038,7 +9043,7 @@ fn main() {
             stopped = rt
                 .pending_messages
                 .iter()
-                .filter(|(_, label, _, _)| *label == "blocked")
+                .filter(|(_, label, _, _, _)| *label == "blocked")
                 .count();
             println!(
                 "  thing {thing} flew from {from:?} into a wall: {stopped} `blocked` message(s), now at {:?}",
@@ -12163,12 +12168,12 @@ fn main() {
             // Another linked thing can be nearer than the one this candidate names; what matters is that
             // the use action finds *a* linked thing, and that its script changes the world.
             // Drain exactly as `deliver_thing_messages` does, so this is the real path and not a shortcut.
-            let pending: Vec<(usize, &'static str, [f64; 2], Option<i64>)> = {
+            let pending: Vec<(usize, &'static str, [f64; 2], Option<i64>, Option<runtime::SourceSender>)> = {
                 let mut rt = handle.borrow_mut();
                 std::mem::take(&mut rt.pending_messages)
             };
             let mut ran = 0;
-            for (inst, label, params, _source) in &pending {
+            for (inst, label, params, _source, _identity) in &pending {
                 let Some(data) = world.level.cogs.get(*inst) else { continue };
                 let Some(script) = world.cogs.get(&data.script) else { continue };
                 let Some(vm) = vms.get_mut(*inst).and_then(|v| v.as_mut()) else { continue };
@@ -16335,10 +16340,11 @@ fn parse_route_trace(text: &str) -> Result<RouteTrace, String> {
     let mut rows = Vec::new();
     let mut columns: Option<Vec<Option<usize>>> = None;
     for (line_no, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
+        // `trim()` would eat the trailing tab of a row whose `sounds` cell is empty (a recorded
+        // window with nothing played), turning "silence" into "not recorded".
         let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
         if columns.is_none() {
             // A missing column is a column the fixture did not measure, not an error: the frozen
@@ -16400,10 +16406,16 @@ fn parse_route_trace(text: &str) -> Result<RouteTrace, String> {
 /// The **expected** trace sets the coverage: its columns and its row span are what is graded, so a
 /// fixture taken before a segment existed still checks the part of the route it measured, and the
 /// trace's rows past the fixture's last tick are reported instead of compared.
+///
+/// `events_per_row` says whether the latched event columns are graded on every row. The frozen
+/// retail capture advances a variable amount of engine time per hold, so only its last row is
+/// comparable (the caller passes `false`); the port oracle is the port's own replay on the same
+/// fixed grid, so every row is graded (`true`) and an early latch fails.
 fn compare_route_rows(
     expected: &RouteTrace,
     actual: &RouteTrace,
     epsilon: f64,
+    events_per_row: bool,
 ) -> Result<usize, String> {
     if actual.rows.len() < expected.rows.len() {
         return Err(format!(
@@ -16439,10 +16451,11 @@ fn compare_route_rows(
                 continue;
             }
             let event = ROUTE_EVENT_FIELDS.contains(field);
-            // An event column is a latched state, graded once, at the fixture's last row: the two
-            // captures sample the same 600 ms grid but advance a different amount of engine time
-            // inside it, so the row the latch trips on is not comparable.
-            if event && Some(tick) != last_tick {
+            // An event column is a latched state. The frozen retail capture and the replay advance a
+            // different amount of engine time inside the same 600 ms hold, so the row the latch
+            // trips on is not comparable there and only the fixture's last row is graded. The port
+            // oracle shares the replay's grid, so its events are graded on every row.
+            if event && !events_per_row && Some(tick) != last_tick {
                 continue;
             }
             let (Some(want), Some(got)) = (want_row.values[slot], got_row.values[slot]) else {
@@ -16495,6 +16508,7 @@ fn route_trace_compare(
     expected: &std::path::Path,
     actual: &std::path::Path,
     epsilon: f64,
+    events_per_row: bool,
 ) -> Result<(), String> {
     let read = |path: &std::path::Path| -> Result<RouteTrace, String> {
         let text = std::fs::read_to_string(path)
@@ -16503,7 +16517,7 @@ fn route_trace_compare(
     };
     let want = read(expected)?;
     let got = read(actual)?;
-    let compared = compare_route_rows(&want, &got, epsilon)?;
+    let compared = compare_route_rows(&want, &got, epsilon, events_per_row)?;
     let unmeasured = want
         .columns
         .iter()
@@ -16513,7 +16527,7 @@ fn route_trace_compare(
         .collect::<Vec<_>>();
     let port_only = got.rows.len() - want.rows.len();
     println!(
-        "route-compare: PASS {} row(s){} of {}, {compared} field(s) within {epsilon}{}",
+        "route-compare: PASS {} row(s){} of {}, {compared} field(s) within {epsilon}{}{}",
         want.rows.len(),
         if port_only > 0 { format!(" (+{port_only} beyond the fixture)") } else { String::new() },
         actual.display(),
@@ -16521,7 +16535,8 @@ fn route_trace_compare(
             String::new()
         } else {
             format!("; the fixture does not measure {}", unmeasured.join(", "))
-        }
+        },
+        if events_per_row { "; events graded on every row" } else { "" }
     );
     Ok(())
 }
@@ -17243,7 +17258,8 @@ input 72 1 0
         assert!(plan.uses.contains(&0));
     }
 
-    /// The committed port oracle parses, carries the event columns, and compares to itself.
+    /// The committed port oracle parses, carries the event columns, and compares to itself. Its
+    /// events are graded on every row: the oracle is the replay's own grid, not a retail capture.
     #[test]
     fn the_committed_port_route_fixture_parses_and_compares_to_itself() {
         let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("committed fixture");
@@ -17252,7 +17268,7 @@ input 72 1 0
         for field in ROUTE_EVENT_FIELDS {
             assert!(header.split('\t').any(|cell| cell == field), "fixture has no {field} column");
         }
-        let compared = compare_route_rows(&trace, &trace, 1e-6)
+        let compared = compare_route_rows(&trace, &trace, 1e-6, true)
             .unwrap_or_else(|e| panic!("the port fixture does not compare to itself: {e}"));
         assert!(compared > 0, "the port fixture compared no fields");
     }
@@ -17296,11 +17312,11 @@ input 72 1 0
         let x = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "x").unwrap();
         let value = perturbed.rows[0].values[x].as_mut().expect("the first row has an x");
         *value += 0.25;
-        let error = compare_route_rows(&expected, &perturbed, 1e-6)
+        let error = compare_route_rows(&expected, &perturbed, 1e-6, true)
             .expect_err("a 0.25-unit position change must fail");
         assert!(error.contains("x:"), "{error}");
         assert!(
-            compare_route_rows(&expected, &perturbed, 0.30).is_ok(),
+            compare_route_rows(&expected, &perturbed, 0.30, true).is_ok(),
             "the tolerance is an absolute bound, so 0.30 accepts it"
         );
     }
@@ -17336,27 +17352,27 @@ input 72 1 0
             ],
             columns: vec![true; ROUTE_TRACE_FIELDS.len()],
         };
-        let compared = compare_route_rows(&want, &got, 1e-6).expect("intermediate events are not graded");
+        let compared = compare_route_rows(&want, &got, 1e-6, false).expect("intermediate events are not graded");
         assert_eq!(compared, 3, "only the three final-row events were compared");
 
         // The final state is an identity: a door that never opened and a goal that stopped at 2 fail.
         let mut early = got.clone();
         early.rows[2].values[slot("door0_opened")] = Some(0.0);
-        let error = compare_route_rows(&want, &early, 1e-6).expect_err("door0_opened 0 at the last row must fail");
+        let error = compare_route_rows(&want, &early, 1e-6, false).expect_err("door0_opened 0 at the last row must fail");
         assert!(error.contains("door0_opened"), "{error}");
         let mut short = got.clone();
         short.rows[2].values[slot("goal_bin100")] = Some(2.0);
-        let error = compare_route_rows(&want, &short, 1e-6).expect_err("goal_bin100 2 at the last row must fail");
+        let error = compare_route_rows(&want, &short, 1e-6, false).expect_err("goal_bin100 2 at the last row must fail");
         assert!(error.contains("goal_bin100"), "{error}");
         let mut no_end = got.clone();
         no_end.rows[2].values[slot("level_end")] = Some(0.0);
-        let error = compare_route_rows(&want, &no_end, 1e-6).expect_err("level_end 0 at the last row must fail");
+        let error = compare_route_rows(&want, &no_end, 1e-6, false).expect_err("level_end 0 at the last row must fail");
         assert!(error.contains("level_end"), "{error}");
 
         // A missing event cell is a failure, not something the comparator skips.
         let mut missing = got.clone();
         missing.rows[2].values[slot("goal_bin100")] = None;
-        let error = compare_route_rows(&want, &missing, 1e-6).expect_err("a `-` event cell must fail");
+        let error = compare_route_rows(&want, &missing, 1e-6, false).expect_err("a `-` event cell must fail");
         assert!(error.contains("goal_bin100"), "{error}");
 
         // A column the fixture does not measure is not graded; the same disagreement then passes.
@@ -17365,9 +17381,53 @@ input 72 1 0
         let mut drifted = got.clone();
         drifted.rows[2].values[slot("goal_bin100")] = Some(2.0);
         assert!(
-            compare_route_rows(&narrow, &drifted, 1e-6).is_ok(),
+            compare_route_rows(&narrow, &drifted, 1e-6, false).is_ok(),
             "a column the fixture does not measure was graded"
         );
+    }
+
+    /// The port oracle is the replay's own fixed grid, so its events are graded on **every** row: an
+    /// early latch is a different route, not a sampling artefact, and must fail the oracle.
+    #[test]
+    fn an_early_event_latch_fails_the_port_oracle() {
+        let slot = |name: &str| ROUTE_TRACE_FIELDS.iter().position(|f| *f == name).unwrap();
+        let row = |tick: u32, door: Option<f64>, goal: Option<f64>, end: Option<f64>| {
+            let mut values = vec![None; ROUTE_TRACE_FIELDS.len()];
+            values[0] = Some(f64::from(tick));
+            values[slot("door0_opened")] = door;
+            values[slot("goal_bin100")] = goal;
+            values[slot("level_end")] = end;
+            RouteTraceRow { tick, values, texts: vec![None; ROUTE_TRACE_FIELDS.len()] }
+        };
+        let want = RouteTrace {
+            rows: vec![
+                row(0, Some(0.0), Some(1.0), Some(0.0)),
+                row(36, Some(1.0), Some(1.0), Some(0.0)),
+                row(72, Some(1.0), Some(3.0), Some(1.0)),
+            ],
+            columns: vec![true; ROUTE_TRACE_FIELDS.len()],
+        };
+        // The door latches a row early: the last row agrees, so only the per-row grade sees it.
+        let mut early = want.clone();
+        early.rows[0].values[slot("door0_opened")] = Some(1.0);
+        let error = compare_route_rows(&want, &early, 1e-6, true)
+            .expect_err("an early door latch passed the oracle");
+        assert!(error.contains("door0_opened"), "{error}");
+        assert!(
+            compare_route_rows(&want, &early, 1e-6, false).is_ok(),
+            "the last-row-only grade is the retail prefix's rule, not the oracle's"
+        );
+        // The same for the goal and the level-end latch.
+        let mut goal = want.clone();
+        goal.rows[1].values[slot("goal_bin100")] = Some(3.0);
+        let error = compare_route_rows(&want, &goal, 1e-6, true)
+            .expect_err("an early goal latch passed the oracle");
+        assert!(error.contains("goal_bin100"), "{error}");
+        let mut ended = want.clone();
+        ended.rows[1].values[slot("level_end")] = Some(1.0);
+        let error = compare_route_rows(&want, &ended, 1e-6, true)
+            .expect_err("an early level end passed the oracle");
+        assert!(error.contains("level_end"), "{error}");
     }
 
     #[test]
@@ -17514,13 +17574,40 @@ tick\tt_s\tx\ty\tz\tsector\tvel_x\tvel_y\tvel_z\thealth\tshields\tdoor0_status\t
         let ambient = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "ambient").unwrap();
         assert_eq!(expected.rows[0].texts[ambient].as_deref(), Some("01cantinaband02.wav"));
         assert_eq!(expected.rows[1].texts[ambient].as_deref(), Some(""), "silence is a value");
-        assert!(compare_route_rows(&expected, &expected, 1e-6).is_ok());
+        assert!(compare_route_rows(&expected, &expected, 1e-6, false).is_ok());
 
         let mut moved = expected.clone();
         moved.rows[0].texts[ambient] = Some("00techamb03.wav".to_string());
-        let error = compare_route_rows(&expected, &moved, 1e-6)
+        let error = compare_route_rows(&expected, &moved, 1e-6, false)
             .expect_err("a different ambient loop must fail");
         assert!(error.contains("ambient"), "{error}");
+    }
+
+    /// A silent `sounds` row is a recorded empty cell, not a missing value. Trimming the line ate its
+    /// trailing tab, so "nothing played in this window" parsed as "not recorded" and an extra or a
+    /// missing sound in that window was skipped instead of compared.
+    #[test]
+    fn a_silent_sounds_row_is_compared() {
+        let sounds = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "sounds").unwrap();
+        let want = parse_route_trace("tick\tsounds\n0\t\n36\tpistol-1.wav@0.250\n")
+            .expect("the trace parses");
+        assert_eq!(
+            want.rows[0].texts[sounds].as_deref(),
+            Some(""),
+            "an empty `sounds` cell must parse as recorded silence"
+        );
+        assert!(compare_route_rows(&want, &want, 1e-6, false).is_ok());
+
+        let extra = parse_route_trace("tick\tsounds\n0\trifle-1.wav@0.100\n36\tpistol-1.wav@0.250\n")
+            .expect("the trace parses");
+        let error = compare_route_rows(&want, &extra, 1e-6, false)
+            .expect_err("a sound in a silent row passed the comparator");
+        assert!(error.contains("sounds"), "{error}");
+
+        let missing = parse_route_trace("tick\tsounds\n0\t\n36\t\n").expect("the trace parses");
+        let error = compare_route_rows(&want, &missing, 1e-6, false)
+            .expect_err("a missing sound passed the comparator");
+        assert!(error.contains("sounds"), "{error}");
     }
 
     /// Issue #14 AC2: every mechanic the route exercises names the engine function and address it
@@ -21249,7 +21336,7 @@ fn cull_sectors(
                 continue;
             }
             for instance in rt.awaken_sector(sector as i32) {
-                rt.pending_messages.push((instance, "created", [0.0; 2], None));
+                rt.pending_messages.push((instance, "created", [0.0; 2], None, None));
                 woke += 1;
             }
         }
@@ -22088,7 +22175,7 @@ fn deliver_thing_messages(
     // Which thing each `damaged` instance was for, and the amount the handler allows, so the answer
     // is applied after the last handler on that thing has had its say.
     let mut answers: Vec<(usize, Option<f32>)> = Vec::new();
-    for (instance, label, params, source) in pending {
+    for (instance, label, params, source, identity) in pending {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
         let Some(script) = world.cogs.get(script_name) else { continue };
         // A **message name** resolves through the message-id table (`activate` is `activated`, id 1):
@@ -22105,11 +22192,16 @@ fn deliver_thing_messages(
         if let Some(source) = source {
             vm.source = source;
         }
+        // The queued `SourceSender` is the engine's other sender half: `GetSenderId()` is the link id
+        // and `GetSenderRef()`/`GetSenderType()` name the body that sent it, or `-1`/0 for the world
+        // (`sithCog_SendMessageEx`, `0x4dedc0`). This is the live `activate`/`sighted` pump.
+        let own_sender = vm.set_message_sender(source, identity.as_ref());
         if std::env::var_os("BK_TRIGGER_TRACE").is_some() {
             println!("pending: `{script_name}` runs `{resolved}` (message `{label}`) sender {source:?}");
         }
         let ran = vm.run_label(script, &resolved);
         vm.source = own_source;
+        vm.restore_message_sender(own_sender);
         // `::sleeping` is the sleep unwind, not a failure: the handler is suspended and resumes later.
         if let Err(error) = ran
             && error != cog::SLEEPING
@@ -22169,7 +22261,7 @@ fn deliver_cog_messages(
     // Taken into a local first: a `handle.borrow_mut()` in the `for` header lives for the whole loop,
     // and the `last_params` write inside it would borrow again on the same thread.
     let pending = std::mem::take(&mut handle.borrow_mut().pending_messages);
-    for (instance, label, params, source) in pending {
+    for (instance, label, params, source, identity) in pending {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
         let Some(script) = world.cogs.get(script_name) else { continue };
         // A **message name** resolves through the message-id table (`activate` is `activated`, id 1):
@@ -22178,9 +22270,10 @@ fn deliver_cog_messages(
         handle.borrow_mut().last_params = params.to_vec();
         // The sender id rides with the message: `activated` handlers branch on `GetSenderId()`
         // (`00_doorswitch.cog` opens only for its switch-surface link id 2), and this bus never set it,
-        // so every `activate` arrived with sender 0 and the door stayed shut (round 201).
-        let own_sender = vm.sender;
-        vm.sender = source.map_or(0, |s| s as i64);
+        // so every `activate` arrived with sender 0 and the door stayed shut (round 201). The queued
+        // `SourceSender` is the engine's other half — `GetSenderRef()`/`GetSenderType()` answer the
+        // sender thing, or `-1`/0 when the world sent it — and it is restored after the handler.
+        let own_sender = vm.set_message_sender(source, identity.as_ref());
         match vm.run_label(script, &resolved) {
             Ok(_) => {
                 fired += 1;
@@ -22195,7 +22288,7 @@ fn deliver_cog_messages(
                 }
                 Err(error) => println!("sighted: `{script_name}`'s `{label}` failed: {error}"),
         }
-        vm.sender = own_sender;
+        vm.restore_message_sender(own_sender);
     }
     // A script may answer with another message, so drain until quiet. Bounded, because two scripts
     // that greet each other forever must not wedge a frame.
@@ -30331,6 +30424,94 @@ mod registration_tests {
             !sim.world.borrow().ai_detected.contains(&1),
             "the first AI tick after a level swap saw through the wall: the hand-off ran too late"
         );
+    }
+
+    /// Just enough `World` for a message pump: the real systems read the scripts, and nothing else.
+    fn bare_world(cogs: HashMap<String, cog::Cog>) -> World {
+        World {
+            level: jkl::Level::default(),
+            palette: [[0; 3]; 256],
+            images: HashMap::new(),
+            material_cels: HashMap::new(),
+            item_cogs: std::collections::BTreeMap::new(),
+            item_defs: Vec::new(),
+            carried: None,
+            template_model: HashMap::new(),
+            models: HashMap::new(),
+            model_images: HashMap::new(),
+            template_sprite: HashMap::new(),
+            template_particle: HashMap::new(),
+            sprite_cels: HashMap::new(),
+            ambient: HashMap::new(),
+            cogs,
+            puppets: HashMap::new(),
+            keys: HashMap::new(),
+            ai_classes: HashMap::new(),
+            wav_bytes: HashMap::new(),
+            sound_radii: HashMap::new(),
+            sound_classes: std::collections::BTreeMap::new(),
+            gob_entries: 0,
+        }
+    }
+
+    /// The live `activate`/`sighted` pump. `deliver_thing_messages` is the bus the use action and the
+    /// renderer's `sighted` ride, so the sender identity must reach the handler there — not only in
+    /// `deliver_cog_messages`: a body's message answers `GetSenderRef()` 7 / `GetSenderType()` 3, the
+    /// world's `-1`/0, both restored afterwards so the next message does not inherit them.
+    #[test]
+    fn the_thing_message_pump_delivers_the_sender_identity() {
+        let script = "symbols\nmessage activate\nmessage sighted\nend\ncode\n\
+                      activate:\n\tPrint(GetSenderId());\n\tPrint(GetSenderRef());\n\tPrint(GetSenderType());\n\treturn;\n\
+                      sighted:\n\tPrint(GetSenderId());\n\tPrint(GetSenderRef());\n\tPrint(GetSenderType());\n\treturn;\nend\n";
+        let cogs = HashMap::from([("probe.cog".to_string(), cog::parse(script).expect("parses"))]);
+        let handle = runtime::Runtime::handle(&jkl::Level::default());
+        let mut vm = cog::Vm::new();
+        vm.source = 4; // the instance's own thing, restored by the pump after each handler
+        let sim = Sim {
+            world: handle.clone(),
+            instances: vec![("probe.cog".to_string(), vm)],
+            entities: HashMap::new(),
+            elapsed: 0.0,
+            reported: 0.0,
+            escaped: std::collections::HashSet::new(),
+        };
+        {
+            let mut rt = handle.borrow_mut();
+            // A body used the door: link id 2, sender thing 7.
+            rt.pending_messages.push((
+                0,
+                "activate",
+                [0.0; 2],
+                Some(2),
+                Some(runtime::SourceSender::new(runtime::THING_SOURCE, 4, Some(7))),
+            ));
+            // The renderer sights 8t88: link id 0, world sender.
+            rt.pending_messages.push((
+                0,
+                "sighted",
+                [0.0; 2],
+                Some(0),
+                Some(runtime::SourceSender::new(runtime::THING_SOURCE, 4, None)),
+            ));
+        }
+        let mut app = App::new();
+        app.insert_resource(bare_world(cogs)).insert_resource(sim);
+        app.add_systems(Update, deliver_thing_messages);
+        app.update();
+        let sim = app.world().resource::<Sim>();
+        let (_, vm) = &sim.instances[0];
+        assert_eq!(
+            vm.trace.prints,
+            vec!["2", "7", "3", "0", "-1", "0"],
+            "the thing pump did not deliver the sender identity: {:?}",
+            vm.trace.prints
+        );
+        assert_eq!(
+            (vm.sender, vm.sender_ref, vm.sender_type),
+            (0, 0, 0),
+            "the sender fields were not restored after the handlers"
+        );
+        assert_eq!(vm.source, 4, "the pump did not restore the instance's own source");
     }
 }
 
