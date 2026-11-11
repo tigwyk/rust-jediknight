@@ -29,6 +29,10 @@ param(
   [string]$Out = 'target/parity/encounter',
   # Appended before `.tsv`, so a gate can keep two runs apart for the repeatability check.
   [string]$Suffix = '',
+  # The committed engine capture whose origin block is the encounter's starting AI phase (issue
+  # #16). The runtime adopts its `rand()` word and each door actor's flag/deadline; an empty value
+  # leaves the port's own phase.
+  [string]$Seed = 'tools/parity/engine/route_door.tsv',
   [string[]]$Only = @()
 )
 
@@ -83,11 +87,19 @@ foreach ($row in $rows) {
   $shotAt = '{0},{1}' -f $pose, $row.Pitch
   Write-Host ("port encounter '{0}' level={1} pose=({2}) frames={3} ({4:N1} s)" -f `
       $row.Name, $row.Level, $pose, $row.Frames, ($row.Frames / 60.0))
+  $seedPath = if ($Seed) {
+    if ([System.IO.Path]::IsPathRooted($Seed)) { $Seed } else { Join-Path $Root $Seed }
+  } else { '' }
+  if ($seedPath -and -not (Test-Path -LiteralPath $seedPath)) {
+    throw "missing engine capture $seedPath; the encounter's AI phase is seeded from it"
+  }
   $env:BK_ENCOUNTER_OUT = $trace
+  if ($seedPath) { $env:BK_ENCOUNTER_SEED = $seedPath }
   try {
     & $Exe --start $row.Level --frames $row.Frames --shot $scratch --shot-at $shotAt --warp $pose --mute *> $log
   } finally {
     Remove-Item Env:BK_ENCOUNTER_OUT -ErrorAction SilentlyContinue
+    Remove-Item Env:BK_ENCOUNTER_SEED -ErrorAction SilentlyContinue
   }
   if (-not (Test-Path -LiteralPath $trace)) { throw "the port wrote no encounter trace for $($row.Name); see $log" }
   $lines = @(Get-Content -LiteralPath $trace)

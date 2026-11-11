@@ -17873,6 +17873,38 @@ mod engine_capture_tests {
         }
         assert_eq!(with_instincts, 51, "the actors whose class carries both instincts");
     }
+
+    /// The port starts the encounter from this capture (issue #16): `read_capture_phase` is the one
+    /// reader, and it must carry the origin clock, the AI `rand()` word and the door actors' phase
+    /// through unchanged. The gunner had already acquired the player before the origin and its next
+    /// shot is 104 ms later; the scan-only actors are due 329 ms after it.
+    #[test]
+    fn the_committed_engine_capture_seeds_the_door_encounter_phase() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/parity/engine/route_door.tsv");
+        let seed = super::read_capture_phase(&path)
+            .unwrap_or_else(|| panic!("{} does not carry an origin block", path.display()));
+        assert_eq!(seed.origin_ms, 4200);
+        assert_eq!(seed.rng, 811_474_043, "the AI rand() word at the origin clock");
+        assert_eq!(seed.actors.len(), 57, "one phase per origin actor");
+        let gunner = seed.actors.iter().find(|(thing, _)| *thing == 154).expect("actor 154");
+        assert_eq!(
+            gunner.1,
+            runtime::CapturedPhase { flags: 1586, fire_ms: 4304, acquire_ms: 4550, next_pass_ms: 4304 },
+            "actor 154's phase"
+        );
+        let scanner = seed.actors.iter().find(|(thing, _)| *thing == 151).expect("actor 151");
+        assert_eq!(
+            scanner.1,
+            runtime::CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 4529, next_pass_ms: 4529 },
+            "actor 151's phase"
+        );
+        // The gunners that are not already firing carry no shot of their own.
+        let scheduled = seed.actors.iter().filter(|(_, p)| p.fire_ms > 0).count();
+        assert_eq!(scheduled, 1, "only the engaged gunner has a scheduled shot");
+        let scanning = seed.actors.iter().filter(|(_, p)| p.acquire_ms > 0).count();
+        assert_eq!(scanning, 10, "the armed door actors' scan deadlines");
+    }
 }
 
 
@@ -26592,6 +26624,65 @@ fn billboard_sprites(
     }
 }
 
+/// The origin block of the committed engine capture (`tools/parity/engine/route_door.tsv`, issue
+/// #21): the AI `rand()` word at the encounter clock and every actor's instinct phase from it.
+struct CapturePhase {
+    origin_ms: i64,
+    rng: u32,
+    actors: Vec<(usize, runtime::CapturedPhase)>,
+}
+
+/// Read the capture's origin block. `None` when the file is missing or does not carry the header the
+/// harness writes — a capture that cannot be read is not silently replaced by a guess.
+fn read_capture_phase(path: &std::path::Path) -> Option<CapturePhase> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let origin_ms = text
+        .lines()
+        .find_map(|line| line.strip_prefix("# origin_ms "))?
+        .trim()
+        .parse()
+        .ok()?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty() && !line.starts_with('#'));
+    let header: Vec<&str> = lines.next()?.split('\t').collect();
+    let column = |name: &str| -> Option<usize> { header.iter().position(|cell| *cell == name) };
+    let (template, kind, t_ms) = (
+        column("template")?,
+        column("kind")?,
+        column("t_ms")?,
+    );
+    let (rng, flags) = (column("rng")?, column("ai_flags")?);
+    let (fire, acquire, next_pass) = (
+        column("fire_next_ms")?,
+        column("acquire_next_ms")?,
+        column("next_pass_ms")?,
+    );
+    let mut rng_state = None;
+    let mut actors = Vec::new();
+    for line in lines {
+        let cells: Vec<&str> = line.split('\t').collect();
+        if cells.len() != header.len() || cells[t_ms].parse::<i64>().ok()? != origin_ms {
+            continue;
+        }
+        match cells[kind] {
+            "player" => rng_state = Some(cells[rng].parse::<u32>().ok()?),
+            "origin" => {
+                let number = |cell: &str| cell.parse::<i64>().unwrap_or(0);
+                actors.push((
+                    cells[template].parse::<usize>().ok()?,
+                    runtime::CapturedPhase {
+                        flags: cells[flags].parse::<u32>().ok()?,
+                        fire_ms: number(cells[fire]),
+                        acquire_ms: number(cells[acquire]),
+                        next_pass_ms: number(cells[next_pass]),
+                    },
+                ));
+            }
+            _ => {}
+        }
+    }
+    Some(CapturePhase { origin_ms, rng: rng_state?, actors })
+}
+
 /// `BK_ENCOUNTER_OUT`: the fixed door-encounter timeline (issue #9).
 ///
 /// One TSV carries the same three observations the retail capture samples from the engine's own
@@ -26648,6 +26739,16 @@ impl EncounterTrace {
             }
         }
         self.started = true;
+        // The capture's origin block is the encounter's starting phase (issues #16/#21): the AI
+        // `rand()` word and each door actor's flag/deadline. The warp frame is the origin clock, so
+        // the captured milliseconds are applied as offsets from it. A run without a seed keeps the
+        // port's own phase.
+        if let Some(seed) = std::env::var_os("BK_ENCOUNTER_SEED")
+            .map(std::path::PathBuf::from)
+            .and_then(|path| read_capture_phase(&path))
+        {
+            rt.seed_capture_phase(seed.rng, seed.origin_ms, &seed.actors);
+        }
         // The warp frame's own shot can be stamped a frame before this check passes (the body is
         // still a hair off), so keep the last few frames' events and start the clock at the earliest
         // of them: clearing the whole queue dropped the encounter's first hit.

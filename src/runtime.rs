@@ -187,6 +187,23 @@ pub enum EncounterEvent {
     },
 }
 
+/// One origin actor's AI phase from the retail engine capture (issue #21): the flag word the
+/// engine's AI block held and the instinct deadlines it had already scheduled at the origin clock.
+/// The capture is the only source — a run that names none keeps the port's own defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturedPhase {
+    /// `ai_flags`: the engine's per-actor flag word (`ai + 8`).
+    pub flags: u32,
+    /// `fire_next_ms`: the next legal shot, absolute on the engine clock. `0` means nothing is
+    /// scheduled and `-1` that the class carries no fire instinct.
+    pub fire_ms: i64,
+    /// `acquire_next_ms`: the `LookForTarget` scan's own next run.
+    pub acquire_ms: i64,
+    /// `next_pass_ms`: the instinct scheduler's next pass over this actor — the earliest deadline of
+    /// its instincts, so it is the shot for a gunner already firing and the scan otherwise.
+    pub next_pass_ms: i64,
+}
+
 /// Whether the door-encounter telemetry is on (`BK_ENCOUNTER_OUT`). A process-wide check: the flag
 /// is set once by the capture harness, and queuing an event per shot is only wanted then.
 fn encounter_capture() -> bool {
@@ -4661,6 +4678,44 @@ impl Runtime {
         crate::cog::pseudo_random() < self.detect_chance(actor, target) as f64
     }
 
+    /// Adopt the committed capture's AI phase at the encounter's origin clock.
+    ///
+    /// The engine's `rand()` state (`0x0054F750`) is the capture's own word, so every AI roll after
+    /// this point continues the captured stream; each actor's flag word and scheduled deadlines are
+    /// the values the engine held at that instant, converted to the runtime's clock relative to the
+    /// origin. An actor whose shot the engine had not scheduled (`fire_ms` 0 or -1) keeps whatever
+    /// wait it had: the capture says nothing is pending, and inventing a shot would be a guess.
+    ///
+    /// `next_pass_ms` lands on `ai_detect_at`, the port's own instinct-pass clock: the engine's
+    /// `sithAI_InstinctUpdate` refreshes sight inside a pass, which is why the port already rolls the
+    /// sight test on that clock instead of every frame.
+    pub fn seed_capture_phase(
+        &mut self,
+        rng: u32,
+        origin_ms: i64,
+        phases: &[(usize, CapturedPhase)],
+    ) {
+        crate::cog::set_random_seed(rng);
+        for (index, phase) in phases {
+            let offset = |ms: i64| ((ms - origin_ms) as f32 / 1000.0).max(0.0);
+            if self.types.get(*index).copied() != Some(2) {
+                continue;
+            }
+            self.actor_flags.insert(*index, phase.flags);
+            if phase.fire_ms > 0
+                && let Some(body) = self.things.get_mut(*index)
+            {
+                body.ai_wait = offset(phase.fire_ms);
+            }
+            if phase.acquire_ms > 0 {
+                self.ai_scan.insert(*index, self.time + offset(phase.acquire_ms));
+            }
+            if phase.next_pass_ms > 0 {
+                self.ai_detect_at.insert(*index, self.time + offset(phase.next_pass_ms));
+            }
+        }
+    }
+
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
     /// The engine runs an instinct scheduler over the `.ai` file's weights; this build uses the
@@ -5362,10 +5417,20 @@ impl Runtime {
                             // way blocks the find exactly as a wall does. The scan tested only the
                             // world faces, so level 1's door actors standing behind the balcony rail
                             // acquired the player while retail's never did.
-                            let clear = self.solids.as_ref().is_none_or(|s| {
-                                !s.segment_blocked(thing.0, target)
-                                    && !s.segment_thing(thing.0, target)
-                            });
+                            let (blocked, thing_blocked) = self.solids.as_ref().map_or(
+                                (false, false),
+                                |s| (s.segment_blocked(thing.0, target), s.segment_thing(thing.0, target)),
+                            );
+                            let clear = !blocked && !thing_blocked;
+                            // `BK_AI_TRACE=2`: name which half of the scan's sight test refused, the
+                            // way the fire path names its own gate — the acquisition divergence the
+                            // door fixture grades turns on exactly this pair.
+                            if std::env::var("BK_AI_TRACE").is_ok_and(|v| v == "2") {
+                                eprintln!(
+                                    "ai: {index} `{ai_template}` scan at {:.2} s range {range:.2} cone {in_cone} blocked {blocked} thing {thing_blocked} flags {:#x}",
+                                    self.time, *flags
+                                );
+                            }
                             // The scan is the **acquisition** path: the handler runs
                             // `sithAI_CheckSightThing`, whose detection roll is
                             // `sithAI_CanDetectSightThing` (`0x4ec140`). Writing the memory from the
@@ -11861,6 +11926,91 @@ mod tests {
         rt.things[0].pitch = -45.0;
         let shot = rt.fire(0, &bolt).expect("projectile");
         assert!(rt.things[shot].vel[2] < -2.5, "vel {:?}", rt.things[shot].vel);
+    }
+
+    /// The AI's fire cadence is drawn from the same engine `rand()` stream the capture records, so
+    /// seeding it makes the delay the capture's next draw (issue #16). The first draw after
+    /// 811474043 is 0.5316467, and `sithAICmd_PrimaryFire` jitters the 750 ms delay by
+    /// `0.8 + 0.4 * rand` in this build, i.e. 0.759 s.
+    #[test]
+    fn the_a_i_fire_delay_is_drawn_from_the_captured_rand_stream() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut player = base.clone();
+        player.pos = [0.0, 1.0, 0.0];
+        let mut gunner = base.clone();
+        gunner.pos = [0.0, 0.0, 0.0];
+        gunner.yaw = 0.0;
+        rt.things = vec![player, gunner];
+        rt.templates = vec!["walkplayer".into(), "reeyeesgun".into()];
+        rt.types = vec![10, 2];
+        rt.template_weapon.insert("reeyeesgun".into(), "+elaser".into());
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=200, sightdist=5.0\n\n\
+                 PrimaryFire 750.0, 0.8, 3.5, 0.20, 0.0, 500.0, 0.0, 0.0, 0.0, 0.0\n",
+            ),
+        );
+        // Already engaged, so the sight roll makes no draw of its own: the first draw of the tick is
+        // the shot delay's jitter.
+        rt.ai_detected.insert(1);
+        rt.time = 1.0;
+        rt.seed_capture_phase(
+            811_474_043,
+            0,
+            &[(1, CapturedPhase { flags: 0x232, fire_ms: 0, acquire_ms: 0, next_pass_ms: 0 })],
+        );
+        rt.ai_tick(0, 0.1);
+        assert_eq!(rt.shots_fired, 1, "the gunner did not fire");
+        assert!(
+            (rt.things[1].ai_wait - 0.759_494_0).abs() < 1e-5,
+            "the delay came from another stream: {}",
+            rt.things[1].ai_wait
+        );
+        assert_ne!(crate::cog::random_state(), 811_474_043, "the shot drew nothing from the capture");
+    }
+
+    /// The capture's origin block is the door encounter's starting phase (issue #16): the AI
+    /// `rand()` word it recorded, the flag word each actor held, and the deadlines the engine had
+    /// already scheduled. The actor's own `ai_wait` is the shot delay counted from the origin, the
+    /// scan lands on the runtime clock at the captured offset, and an actor whose shot the capture
+    /// shows as unscheduled (`fire_ms` 0) keeps whatever wait it had.
+    #[test]
+    fn the_door_encounter_starts_from_the_captured_a_i_phase() {
+        let mut rt = door_runtime();
+        let mut gunner = rt.things[0].clone();
+        gunner.pos = [1.4122, 9.3586, 6.3313];
+        rt.things.push(gunner);
+        rt.templates.push("reeyeesgun".into());
+        rt.types.push(2);
+        let mut watcher = rt.things[0].clone();
+        watcher.pos = [4.7624, 10.1534, 6.3313];
+        watcher.ai_wait = 5.0;
+        rt.things.push(watcher);
+        rt.templates.push("reeyeesgun".into());
+        rt.types.push(2);
+        rt.time = 0.4;
+        rt.seed_capture_phase(
+            811_474_043,
+            4200,
+            &[
+                // The capture's gunner: already engaged, next shot 104 ms after the origin.
+                (1, CapturedPhase { flags: 1586, fire_ms: 4304, acquire_ms: 4550, next_pass_ms: 4304 }),
+                // A door actor only scanning: `acquire_next_ms` 4529, no shot scheduled.
+                (2, CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 4529, next_pass_ms: 4529 }),
+            ],
+        );
+        assert_eq!(crate::cog::random_state(), 811_474_043, "the capture's own rand() word");
+        assert_eq!(rt.actor_flags[&1], 1586);
+        assert_eq!(rt.actor_flags[&2], 4);
+        assert!((rt.things[1].ai_wait - 0.104).abs() < 1e-6, "first shot {}", rt.things[1].ai_wait);
+        assert!((rt.ai_scan[&1] - 0.75).abs() < 1e-6, "scan at {}", rt.ai_scan[&1]);
+        assert!((rt.ai_detect_at[&1] - 0.504).abs() < 1e-6);
+        assert!((rt.ai_scan[&2] - 0.729).abs() < 1e-6, "scan at {}", rt.ai_scan[&2]);
+        assert!((rt.things[2].ai_wait - 5.0).abs() < 1e-6, "an unscheduled shot was invented");
+        // The origin clock is the capture's: the offsets are its milliseconds, not a guess.
+        assert!(rt.ai_scan.get(&2).is_some_and(|due| *due > rt.time));
     }
 
     /// `--encounter` telemetry (issue #9): a shot is queued where it leaves the shooter, with the
