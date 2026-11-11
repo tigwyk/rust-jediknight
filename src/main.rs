@@ -17670,6 +17670,211 @@ tick\tt_s\tx\ty\tz\tsector\tvel_x\tvel_y\tvel_z\thealth\tshields\tdoor0_status\t
     }
 }
 
+/// The committed retail engine capture (issue #21). `tools/parity/retail-capture.ps1` writes it on
+/// the user's run; these tests are the only Rust reader, so they hold its contract before the
+/// encounter (#16), route-timing (#17) and carry (#19) comparisons consume it. A missing fixture, a
+/// renamed column or a shifted sample fails here rather than being misread there.
+#[cfg(test)]
+mod engine_capture_tests {
+    use super::*;
+
+    /// The capture schema in write order (`$script:JkEngineCaptureColumns` in
+    /// `tools/parity/retail-capture.ps1`). The file is parsed on other machines, so a renamed,
+    /// reordered or dropped column is a contract change, not a formatting detail.
+    const ENGINE_CAPTURE_COLUMNS: [&str; 23] = [
+        "t_ms", "kind", "thing", "template", "x", "y", "z", "sector", "vx", "vy", "vz", "bin72",
+        "bin73", "bin75", "rng", "ai_flags", "fire_next_ms", "acquire_next_ms", "acquired_at_ms",
+        "target", "last_target", "next_pass_ms", "detail",
+    ];
+
+    fn fixture() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/parity/engine/route_door.tsv");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("the committed engine capture {}: {e}", path.display()))
+    }
+
+    /// The data lines with their 1-based line numbers; comments and blank lines are dropped.
+    fn data_lines(text: &str) -> Vec<(usize, &str)> {
+        text.lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty() && !line.starts_with('#'))
+            .map(|(index, line)| (index + 1, line))
+            .collect()
+    }
+
+    fn column(name: &str) -> usize {
+        ENGINE_CAPTURE_COLUMNS
+            .iter()
+            .position(|column| *column == name)
+            .expect("the column is in the schema")
+    }
+
+    fn cell<'a>(cells: &[&'a str], name: &str) -> &'a str {
+        cells[column(name)]
+    }
+
+    /// The harness's own schema check, `Test-JkEngineCaptureRows`: each kind fills its half and
+    /// leaves the other empty, the clock never goes backwards, and the origin block sits at the
+    /// clock the header repeats.
+    #[test]
+    fn the_committed_engine_capture_meets_the_harness_schema() {
+        let text = fixture();
+        let lines = data_lines(&text);
+        let (header_line, header) = lines[0];
+        assert_eq!(
+            header.split('\t').collect::<Vec<_>>(),
+            ENGINE_CAPTURE_COLUMNS,
+            "line {header_line}: the fixture's header is not the engine-capture schema"
+        );
+        let origin_ms: i64 = text
+            .lines()
+            .find_map(|line| line.strip_prefix("# origin_ms "))
+            .expect("the fixture has an `# origin_ms` line")
+            .trim()
+            .parse()
+            .expect("the `# origin_ms` line is an integer");
+
+        let mut previous = None;
+        for (line_no, line) in &lines[1..] {
+            let cells: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cells.len(), ENGINE_CAPTURE_COLUMNS.len(), "line {line_no}: column count");
+            let ms: i64 = cell(&cells, "t_ms")
+                .parse()
+                .unwrap_or_else(|_| panic!("line {line_no}: t_ms is not an integer"));
+            if let Some(previous) = previous {
+                assert!(ms >= previous, "line {line_no}: t_ms {ms} goes backwards from {previous}");
+            }
+            previous = Some(ms);
+            match cell(&cells, "kind") {
+                "player" => {
+                    for name in ["x", "y", "z", "vx", "vy", "vz", "bin72", "bin73", "bin75"] {
+                        cell(&cells, name).parse::<f64>().unwrap_or_else(|_| {
+                            panic!("line {line_no}: player `{name}` is not a number")
+                        });
+                    }
+                    for name in ["sector", "rng"] {
+                        cell(&cells, name).parse::<i64>().unwrap_or_else(|_| {
+                            panic!("line {line_no}: player `{name}` is not an integer")
+                        });
+                    }
+                    assert_eq!(cell(&cells, "template"), "walkplayer", "line {line_no}");
+                    for name in [
+                        "ai_flags",
+                        "fire_next_ms",
+                        "acquire_next_ms",
+                        "acquired_at_ms",
+                        "target",
+                        "last_target",
+                        "next_pass_ms",
+                    ] {
+                        assert_eq!(cell(&cells, name), "", "line {line_no}: a player row carries `{name}`");
+                    }
+                }
+                "origin" => {
+                    for name in ["x", "y", "z"] {
+                        cell(&cells, name).parse::<f64>().unwrap_or_else(|_| {
+                            panic!("line {line_no}: origin `{name}` is not a number")
+                        });
+                    }
+                    for name in [
+                        "ai_flags",
+                        "fire_next_ms",
+                        "acquire_next_ms",
+                        "acquired_at_ms",
+                        "target",
+                        "last_target",
+                        "next_pass_ms",
+                    ] {
+                        cell(&cells, name).parse::<i64>().unwrap_or_else(|_| {
+                            panic!("line {line_no}: origin `{name}` is not an integer")
+                        });
+                    }
+                    assert_eq!(ms, origin_ms, "line {line_no}: the origin block is not at the origin clock");
+                    for name in ["sector", "vx", "vy", "vz", "bin72", "bin73", "bin75", "rng"] {
+                        assert_eq!(cell(&cells, name), "", "line {line_no}: an origin row carries `{name}`");
+                    }
+                }
+                other => panic!("line {line_no}: unknown kind `{other}`"),
+            }
+        }
+
+        // The first row is the origin instant the header repeats.
+        let (first_line, first) = lines[1];
+        let cells: Vec<&str> = first.split('\t').collect();
+        assert_eq!(
+            cell(&cells, "t_ms").parse::<i64>().ok(),
+            Some(origin_ms),
+            "line {first_line}: the first row is not the origin clock"
+        );
+    }
+
+    /// The values the encounter and route comparisons start from. They are the user's capture, not
+    /// a recomputation: the warp pose `door-encounter.tsv` uses, the bins at the warp, and the
+    /// actors' instinct phase at the origin.
+    #[test]
+    fn route_door_engine_capture_pins_the_door_encounter() {
+        let text = fixture();
+        assert_eq!(text.lines().next(), Some("# engine-clock capture: route_door"));
+        assert!(
+            text.lines().any(|line| line == "# origin_ms 4200"),
+            "the origin clock drifted from the capture's 4200 ms"
+        );
+        let window = text
+            .lines()
+            .find(|line| line.starts_with("# window "))
+            .expect("the fixture has a `# window` summary");
+        assert!(
+            window.contains("395 sample(s), 57 origin actor(s)"),
+            "the window summary does not match the rows: {window}"
+        );
+
+        let rows: Vec<Vec<&str>> = data_lines(&text)
+            .into_iter()
+            .skip(1)
+            .map(|(_, line)| line.split('\t').collect())
+            .collect();
+        let kind = |cells: &Vec<&str>, want: &str| cell(cells, "kind") == want;
+        let players: Vec<&Vec<&str>> = rows.iter().filter(|cells| kind(cells, "player")).collect();
+        let origins: Vec<&Vec<&str>> = rows.iter().filter(|cells| kind(cells, "origin")).collect();
+        assert_eq!(players.len(), 395, "player sample count");
+        assert_eq!(origins.len(), 57, "origin actor count");
+
+        // The first sample is the documented warp pose, 10 s of engine clock from there.
+        let first = players[0];
+        assert_eq!(cell(first, "x"), "1.4002");
+        assert_eq!(cell(first, "y"), "9.7015");
+        assert_eq!(cell(first, "z"), "6.3201");
+        assert_eq!(cell(first, "sector"), "60");
+        assert_eq!(cell(first, "t_ms"), "4200", "the window starts at the origin instant");
+        assert_eq!(cell(players.last().unwrap(), "t_ms"), "14193", "the window's last sample");
+
+        for cells in &players {
+            // The door capture holds no input, so the body's population credit never moves.
+            assert_eq!(cell(cells, "bin73"), "10.500", "the player's population credit");
+            // A zero would mean the read never reached the LCG at 0x0054F750.
+            assert_ne!(cell(cells, "rng").parse::<u32>().expect("rng is a u32"), 0, "a zero AI random state");
+        }
+
+        // Every origin row names its fire and acquisition instincts; the 51 whose class carries both
+        // are the ones the port aligns its first AI update with.
+        let mut with_instincts = 0;
+        for cells in &origins {
+            let detail = cell(cells, "detail");
+            assert!(
+                detail.contains("fire=") && detail.contains("acquire="),
+                "an origin row does not name its instincts: {detail}"
+            );
+            cell(cells, "fire_next_ms").parse::<i64>().expect("the next-fire time");
+            cell(cells, "acquire_next_ms").parse::<i64>().expect("the next-acquisition time");
+            if detail.contains("fire=primaryfire") && detail.contains("acquire=lookfortarget") {
+                with_instincts += 1;
+            }
+        }
+        assert_eq!(with_instincts, 51, "the actors whose class carries both instincts");
+    }
+}
+
 
 /// One level's walk result, so the single-level report and the install-wide sweep say
 /// the same things.

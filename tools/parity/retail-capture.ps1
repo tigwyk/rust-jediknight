@@ -44,6 +44,21 @@ param(
   # File name (without `.tsv`) for the encounter trace. Empty uses the shots row's name; the gate's
   # fixture is `door_encounter`, while the pose row is `route_door`.
   [string]$EncounterName = '',
+  # Issue #20's engine-clock route/encounter capture: after the level loads and the row's warp is
+  # applied, sample the player body/clock/inventory/AI random state from process memory for this many
+  # engine milliseconds and write `<name>.tsv` into -EngineCaptureOut. There is NO dev-console read
+  # inside the window (its dialog pauses the engine, so a poll would sample a frozen clock and
+  # perturb the fight); a row is written whenever `DAT_00836c14` changes. 0 disables the mode.
+  [int]$EngineCaptureMs = 0,
+  # Hold this key down for the whole window, e.g. `UP` (the engine's forward binding) for a route
+  # leg. Empty leaves the body still, which is the door encounter.
+  [string]$EngineCaptureKey = '',
+  [string]$EngineCaptureOut = 'target/parity/engine',
+  # File name (without `.tsv`); empty uses the shots row's name.
+  [string]$EngineCaptureName = '',
+  # Validate the engine-capture row schema on synthetic data and exit. Never resolves or launches
+  # retail; this is the mode's self-check (run it before the user-run capture).
+  [switch]$EngineCaptureSelfCheck,
   # Issue #8's continuous retail route: run every row of `-RoutePlan` in ONE game session and sample
   # the bars on the 600 ms grid the port replays. The selected shots row must be the level's own
   # start (no pose), i.e. `-Only spawn` with `shots.tsv`.
@@ -1437,6 +1452,609 @@ function Invoke-JkEncounterTrace {
   Log ("encounter trace: wrote {0} ({1} sample(s), {2} shot(s), {3} hit(s) over {4} ms of game time)" -f $path, $sampled, $shots, $hits, $Milliseconds)
   return $path
 }
+
+# `-EngineCaptureMs`: issue #20's engine-clock route/encounter capture.
+#
+# One measurement window is sampled from the process on a short loop. The dev console is **not** read
+# inside it: its dialog pauses the engine, so a console poll would sample a frozen clock and change
+# the encounter. A row is written whenever `DAT_00836c14` changes, so the time axis is the engine's
+# own simulation clock, not wall or console-poll time.
+#
+# Addresses (JK.EXE has a fixed 0x400000 base and no relocations, so a decompiled global's address is
+# its runtime address). Every one is either reused from the encounter/audio readers or read from the
+# decompilation:
+#
+#   game clock (ms)        u32 at 0x00836C14          `sithTime_Advance` 0x4DD640
+#   player thing           u32 at 0x008319A4          (the pointer the other readers use)
+#   position               f32x3 at thing+0xB8        `GetThingPos` 0x502EF0
+#   velocity               f32x3 at thing+0x1D4       `GetThingVel` 0x503160 (also
+#                                                     `sithCamera_Update` 0x4C56B0, `jkPlayer_DrawPov`)
+#   sector                 u32 at *(thing+0x5C)       `GetThingSector` 0x502B80
+#   inventory              u32 at thing+0x1C0; bin n's amount is the f32 at inv+0x88+n*0x18
+#                                                     (`sithInventory_SetInventory` 0x4D2000; the
+#                                                     shields reader's bin 60 proves the stride)
+#   AI random state        u32 at 0x0054F750          `FUN_00512d00`: state = state*0x343FD + 0x269EC3
+#   AI instances           base 0x0088AFE0, stride 0x29C, highest slot u32 at 0x008B4BE0
+#                                                     (`sithAI_Create` 0x4E9CB0, `sithAI_Process` 0x4E9E20)
+#   instinct registry      pointer u32 at 0x0084DE50, count u32 at 0x0084DE54, entry stride 0x30,
+#                          name char[0x20] at +0, handler u32 at +0x20
+#                                                     (`sithAI_RegisterInstinct` 0x4EA0A0)
+#
+# AI instance fields (`sithAI_InstinctUpdate` 0x4E9E90 and the handlers):
+#   +0x00 actor thing, +0x04 AI class, +0x08 flag word, +0x18C instinct count, +0x190 next pass (ms),
+#   +0x1C0 last acquired target, +0x1D0 current target, +0x204 last acquisition time (ms);
+#   instinct i's next-run time is at +0x10+i*0x18 (the handler writes it: `param_3+4`), and class
+#   instinct i's handler is at +0xB8+i*0x90. Registry names `primaryfire` (next fire) and
+#   `lookfortarget` (next acquisition roll) therefore name the two slots the encounter reads.
+$script:JkEngineCaptureColumns = @(
+  't_ms', 'kind', 'thing', 'template', 'x', 'y', 'z', 'sector', 'vx', 'vy', 'vz',
+  'bin72', 'bin73', 'bin75', 'rng', 'ai_flags', 'fire_next_ms', 'acquire_next_ms',
+  'acquired_at_ms', 'target', 'last_target', 'next_pass_ms', 'detail'
+)
+
+# The fixture is parsed on other machines, so a comma decimal separator must never reach it.
+function Format-JkEngineNumber {
+  param([double]$Value, [int]$Digits = 4)
+  return $Value.ToString(('F{0}' -f $Digits), [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function New-JkEngineCaptureRow {
+  param([hashtable]$Fields)
+  $row = foreach ($column in $script:JkEngineCaptureColumns) {
+    if ($Fields.ContainsKey($column)) { [string]$Fields[$column] } else { '' }
+  }
+  return ,$row
+}
+
+function Test-JkEngineNumber {
+  param([string]$Text)
+  $value = 0.0
+  return [double]::TryParse($Text, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$value)
+}
+
+function Test-JkEngineInteger {
+  param([string]$Text, [ref]$Value)
+  $number = 0.0
+  if (-not [double]::TryParse($Text, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$number)) { return $false }
+  if ($number -ne [math]::Floor($number)) { return $false }
+  $Value.Value = [long]$number
+  return $true
+}
+
+# Schema check for the engine-capture fixture. Returns one message per problem (an empty list for a
+# well-formed file). The capture runs it on its own output before it claims a fixture, and
+# `-EngineCaptureSelfCheck` runs it against synthetic rows and deliberate corruptions.
+function Test-JkEngineCaptureRows {
+  param([string[]]$Lines)
+  $errors = New-Object System.Collections.Generic.List[string]
+  $columns = $script:JkEngineCaptureColumns
+  $header = $columns -join "`t"
+  $origin = $null
+  $headerSeen = $false
+  $rows = 0
+  $previousMs = $null
+  for ($n = 0; $n -lt $Lines.Count; $n++) {
+    $line = $Lines[$n]
+    $at = $n + 1
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    if ($line.StartsWith('#')) {
+      if ($line -match '^#\s*origin_ms\s+(-?\d+)\s*$') { $origin = [long]$Matches[1] }
+      continue
+    }
+    if (-not $headerSeen) {
+      if ($line -ne $header) { $errors.Add("line ${at}: header is not the engine-capture schema"); return @($errors) }
+      $headerSeen = $true
+      continue
+    }
+    $f = $line -split "`t"
+    if ($f.Count -ne $columns.Count) {
+      $errors.Add("line ${at}: $($f.Count) column(s), expected $($columns.Count)")
+      continue
+    }
+    $field = @{}
+    for ($c = 0; $c -lt $columns.Count; $c++) { $field[$columns[$c]] = $f[$c] }
+    $kind = $field['kind']
+    if ($kind -ne 'player' -and $kind -ne 'origin') { $errors.Add("line ${at}: unknown kind '$kind'"); continue }
+    $ms = [long]0
+    if (-not (Test-JkEngineInteger $field['t_ms'] ([ref]$ms))) { $errors.Add("line ${at}: t_ms is not an integer"); continue }
+    if ($rows -eq 0 -and $null -eq $origin) { $errors.Add("line ${at}: no '# origin_ms' line before the first row") }
+    if ($rows -eq 0 -and $null -ne $origin -and $ms -ne $origin) { $errors.Add("line ${at}: first row t_ms $ms is not the origin clock $origin") }
+    if ($null -ne $previousMs -and $ms -lt $previousMs) { $errors.Add("line ${at}: t_ms $ms goes backwards from $previousMs") }
+    $previousMs = $ms
+    $rows++
+    if ($kind -eq 'player') {
+      foreach ($c in 'x', 'y', 'z', 'vx', 'vy', 'vz', 'bin72', 'bin73', 'bin75') {
+        if (-not (Test-JkEngineNumber $field[$c])) { $errors.Add("line ${at}: player $c is not a number") }
+      }
+      foreach ($c in 'sector', 'rng') {
+        $value = [long]0
+        if (-not (Test-JkEngineInteger $field[$c] ([ref]$value))) { $errors.Add("line ${at}: player $c is not an integer") }
+      }
+      if ($field['template'] -ne 'walkplayer') { $errors.Add("line ${at}: player template is not walkplayer") }
+      foreach ($c in 'ai_flags', 'fire_next_ms', 'acquire_next_ms', 'acquired_at_ms', 'target', 'last_target', 'next_pass_ms') {
+        if ($field[$c] -ne '') { $errors.Add("line ${at}: player row carries $c") }
+      }
+    } else {
+      foreach ($c in 'x', 'y', 'z') {
+        if (-not (Test-JkEngineNumber $field[$c])) { $errors.Add("line ${at}: origin $c is not a number") }
+      }
+      foreach ($c in 'ai_flags', 'fire_next_ms', 'acquire_next_ms', 'acquired_at_ms', 'target', 'last_target', 'next_pass_ms') {
+        $value = [long]0
+        if (-not (Test-JkEngineInteger $field[$c] ([ref]$value))) { $errors.Add("line ${at}: origin $c is not an integer") }
+      }
+      if ($null -ne $origin -and $ms -ne $origin) { $errors.Add("line ${at}: origin row is not at the origin clock $origin") }
+      foreach ($c in 'sector', 'vx', 'vy', 'vz', 'bin72', 'bin73', 'bin75', 'rng') {
+        if ($field[$c] -ne '') { $errors.Add("line ${at}: origin row carries $c") }
+      }
+    }
+  }
+  if (-not $headerSeen) { $errors.Add('no header line') }
+  if ($rows -eq 0) { $errors.Add('no data rows') }
+  return @($errors)
+}
+
+function Write-JkEngineCaptureFile {
+  param(
+    [Parameter(Mandatory)][string]$Path,
+    [Parameter(Mandatory)][long]$OriginMs,
+    [Parameter(Mandatory)][string]$Name,
+    [string[]]$HeaderComments = @(),
+    [object[]]$Rows = @()
+  )
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add(("# engine-clock capture: {0}" -f $Name))
+  $lines.Add(("# origin_ms {0}" -f $OriginMs))
+  foreach ($comment in $HeaderComments) { $lines.Add(("# " + $comment)) }
+  $lines.Add(($script:JkEngineCaptureColumns -join "`t"))
+  foreach ($row in $Rows) { $lines.Add((@($row) -join "`t")) }
+  Set-Content -LiteralPath $Path -Value $lines -Encoding utf8
+}
+
+# The encounter-origin block: every AI-instance actor within `Radius` of the player, with the state
+# that decides when its first shot and next acquisition can happen. Read once, at the origin, so the
+# port can align its first AI update with retail's phase (all times are engine ms, absolute).
+function Get-JkAiOriginRows {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][long]$PlayerThing,
+    [float]$X,
+    [float]$Y,
+    [double]$Radius = 8.0,
+    [Parameter(Mandatory)][long]$OriginMs,
+    # `(address, count) -> byte[]`. Defaults to the process; `-EngineCaptureSelfCheck` passes a
+    # synthetic memory image instead, so this path is exercised without retail.
+    [scriptblock]$ReadBytes = $null
+  )
+  $rows = New-Object System.Collections.Generic.List[object]
+  if (-not $ReadBytes) {
+    $ReadBytes = { param([long]$Address, [int]$Count) , [JkRetail]::ReadBytes($ProcessId, $Address, $Count) }
+  }
+  # -1 / NaN on a failed read, like `[JkRetail]::ReadU32` / `ReadFloat`.
+  $readU32 = {
+    param([long]$Address)
+    $bytes = & $ReadBytes $Address 4
+    if ($null -eq $bytes) { return [long]-1 }
+    return [long][BitConverter]::ToUInt32($bytes, 0)
+  }
+  $regPtr = & $readU32 0x0084DE50
+  $regCount = & $readU32 0x0084DE54
+  if ($regPtr -le 0 -or $regCount -le 0 -or $regCount -gt 0x20) {
+    throw ("engine capture: the instinct registry (0x0084DE50/54) read ptr {0}, count {1}" -f $regPtr, $regCount)
+  }
+  $registry = & $ReadBytes $regPtr ([int]($regCount * 0x30))
+  if ($null -eq $registry) { throw 'engine capture: the instinct registry block could not be read' }
+  $byHandler = @{}
+  for ($i = 0; $i -lt $regCount; $i++) {
+    $at = $i * 0x30
+    $end = 0
+    while ($end -lt 0x20 -and $registry[$at + $end] -ne 0) { $end++ }
+    $name = [System.Text.Encoding]::ASCII.GetString($registry, $at, $end)
+    $byHandler[([string][BitConverter]::ToUInt32($registry, $at + 0x20))] = $name
+  }
+  $aiTop = & $readU32 0x008B4BE0
+  if ($aiTop -lt 0 -or $aiTop -gt 0xFF) {
+    Log ("engine capture: no AI instance slots (0x008B4BE0 read {0})" -f $aiTop)
+    return @()
+  }
+  $instances = & $ReadBytes 0x0088AFE0 (([int]$aiTop + 1) * 0x29C)
+  if ($null -eq $instances) { throw 'engine capture: the AI instance block could not be read' }
+  for ($i = 0; $i -le $aiTop; $i++) {
+    $at = $i * 0x29C
+    $actor = [BitConverter]::ToUInt32($instances, $at)
+    if ($actor -eq 0) { continue }
+    $class = [BitConverter]::ToUInt32($instances, $at + 4)
+    $flags = [BitConverter]::ToUInt32($instances, $at + 8)
+    $count = [BitConverter]::ToUInt32($instances, $at + 0x18C)
+    $nextPass = [BitConverter]::ToUInt32($instances, $at + 0x190)
+    $target = [BitConverter]::ToUInt32($instances, $at + 0x1D0)
+    $lastTarget = [BitConverter]::ToUInt32($instances, $at + 0x1C0)
+    $acquiredAt = [BitConverter]::ToUInt32($instances, $at + 0x204)
+    $thing = & $ReadBytes $actor 0x2B0
+    if ($null -eq $thing) { continue }
+    if ([BitConverter]::ToInt32($thing, 0x0C) -ne 2) { continue }
+    $health = [BitConverter]::ToSingle($thing, 0x134)
+    if ([double]::IsNaN($health) -or $health -le 0.0) { continue }
+    $ax = [BitConverter]::ToSingle($thing, 0xB8)
+    $ay = [BitConverter]::ToSingle($thing, 0xBC)
+    $az = [BitConverter]::ToSingle($thing, 0xC0)
+    $dx = [double]$ax - [double]$X
+    $dy = [double]$ay - [double]$Y
+    if (($dx * $dx + $dy * $dy) -gt ($Radius * $Radius)) { continue }
+    $template = [BitConverter]::ToUInt16($thing, 0x04)
+    $fire = -1
+    $acquire = -1
+    if ($class -ne 0 -and $count -gt 0 -and $count -le 0x10) {
+      $classBytes = & $ReadBytes $class 0x94C
+      if ($null -ne $classBytes) {
+        for ($j = 0; $j -lt $count; $j++) {
+          $handler = [string][BitConverter]::ToUInt32($classBytes, 0xB8 + $j * 0x90)
+          if (-not $byHandler.ContainsKey($handler)) { continue }
+          $name = $byHandler[$handler].ToLowerInvariant()
+          if ($name -eq 'primaryfire' -and $fire -lt 0) { $fire = $j }
+          elseif ($name -eq 'lookfortarget' -and $acquire -lt 0) { $acquire = $j }
+        }
+      }
+    }
+    $fireNext = if ($fire -ge 0) { [long][BitConverter]::ToUInt32($instances, $at + 0x10 + $fire * 0x18) } else { -1 }
+    $acquireNext = if ($acquire -ge 0) { [long][BitConverter]::ToUInt32($instances, $at + 0x10 + $acquire * 0x18) } else { -1 }
+    $targetKind = if ($target -eq 0) { 'none' } elseif ([long]$target -eq $PlayerThing) { 'player' } else { 'other' }
+    $detail = 'fire={0} acquire={1} target={2}' -f `
+      $(if ($fire -ge 0) { 'primaryfire' } else { 'none' }), `
+      $(if ($acquire -ge 0) { 'lookfortarget' } else { 'none' }), $targetKind
+    $rows.Add((New-JkEngineCaptureRow @{
+            t_ms = [string]$OriginMs; kind = 'origin'; thing = [string]$actor; template = [string]$template
+            x = (Format-JkEngineNumber $ax); y = (Format-JkEngineNumber $ay); z = (Format-JkEngineNumber $az)
+            ai_flags = [string]$flags; fire_next_ms = [string]$fireNext; acquire_next_ms = [string]$acquireNext
+            acquired_at_ms = [string]$acquiredAt; target = [string]$target; last_target = [string]$lastTarget
+            next_pass_ms = [string]$nextPass; detail = $detail
+          }))
+    Log ("engine capture: origin actor {0} template {1} at ({2:N3}, {3:N3}, {4:N3}): flags 0x{5:X} fire_next {6} acquire_next {7} acquired_at {8} next_pass {9} {10}" -f `
+        $actor, $template, $ax, $ay, $az, $flags, $fireNext, $acquireNext, $acquiredAt, $nextPass, $detail)
+  }
+  # `ToArray()`: an `@()` over a `List[object]` throws "Argument types do not match" on PowerShell 7.6
+  # (`PSEnumerableBinder.MaybeDebase`), which aborted the whole capture at the origin sample.
+  return $rows.ToArray()
+}
+
+# Serves the origin builder's reads from a synthetic memory image (`address -> block of bytes`) for
+# `-EngineCaptureSelfCheck`: `Count` bytes from the block that contains the address, or $null, the way
+# ReadProcessMemory answers. Never used by a retail capture.
+function Read-JkSyntheticMemory {
+  param(
+    [Parameter(Mandatory)][hashtable]$Image,
+    [Parameter(Mandatory)][long]$Address,
+    [int]$Count
+  )
+  foreach ($base in @($Image.Keys)) {
+    $block = $Image[$base]
+    if ($base -le $Address -and ($Address + $Count) -le ($base + $block.Length)) {
+      $slice = New-Object byte[] $Count
+      [Array]::Copy($block, [int]($Address - $base), $slice, 0, $Count)
+      return , $slice
+    }
+  }
+  return $null
+}
+
+function Invoke-JkEngineCapture {
+  param(
+    [Parameter(Mandatory)][int]$ProcessId,
+    [Parameter(Mandatory)][string]$Name,
+    [int]$Milliseconds = 10000,
+    [string]$Key = '',
+    [double]$Radius = 8.0,
+    [Parameter(Mandatory)][string]$OutDir
+  )
+  $path = Join-Path $OutDir ("{0}.tsv" -f $Name)
+  $player = [JkRetail]::ReadU32($ProcessId, 0x008319A4)
+  if ($player -le 0) { throw "engine capture: the player thing pointer (0x008319A4) read $player" }
+  $health0 = [JkRetail]::ReadFloat($ProcessId, $player + 0x134)
+  if ([double]::IsNaN($health0) -or $health0 -lt 0.0 -or $health0 -gt 1000.0) {
+    throw "engine capture: implausible health $health0 at thing+0x134"
+  }
+  $clock0 = Read-JkGameMs -ProcessId $ProcessId
+  if ($clock0 -lt 0) { throw 'engine capture: the game clock (0x00836C14) could not be read' }
+  if ([JkRetail]::ReadU32($ProcessId, 0x0054F750) -lt 0) {
+    throw 'engine capture: the AI random state (0x0054F750) could not be read'
+  }
+
+  $rows = New-Object System.Collections.Generic.List[object]
+  $originMs = $null
+  $originPose = ''
+  $lastClock = [long]-1
+  $sampleCount = 0
+  $actorCount = 0
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  # A window is a run of simulation time. If the clock stops (a menu, a pause, a lost level) fail
+  # instead of spinning: 4x the window plus 15 s is generous at retail's few frames per second.
+  $deadlineMs = [math]::Max(15000, $Milliseconds * 4)
+  if ($Key) {
+    $gameWindow = Get-JkWindow -ProcessId $ProcessId
+    for ($attempt = 0; $attempt -lt 8; $attempt++) {
+      if ($gameWindow -eq [IntPtr]::Zero) { break }
+      [void][JkRetail]::ShowWindow($gameWindow, 9)
+      [void][JkRetail]::SetForegroundWindow($gameWindow)
+      Start-Sleep -Milliseconds 120
+      if ([JkRetail]::ForegroundTitle() -eq 'Jedi Knight') { break }
+    }
+    Send-JkKeyDown -Name $Key
+    Log ("engine capture: holding {0} for the whole window (foreground {1})" -f $Key, [JkRetail]::ForegroundTitle())
+  }
+  try {
+    while ($true) {
+      $clock = Read-JkGameMs -ProcessId $ProcessId
+      if ($clock -lt 0) { throw 'engine capture: the game clock stopped reading' }
+      if ($clock -eq $lastClock) {
+        if ($watch.ElapsedMilliseconds -gt $deadlineMs) {
+          throw ("engine capture: the game clock stayed at {0} ms for {1} ms of wall time" -f $clock, $watch.ElapsedMilliseconds)
+        }
+        Start-Sleep -Milliseconds 4
+        continue
+      }
+      if ($sampleCount -gt 0 -and ($clock - $clock0) -ge $Milliseconds) { break }
+      $sampleCount++
+      $lastClock = $clock
+
+      $thing = [JkRetail]::ReadBytes($ProcessId, $player, 0x1E0)
+      if ($null -eq $thing) { throw "engine capture: the player thing block (0x008319A4) could not be read at $clock ms" }
+      $px = [BitConverter]::ToSingle($thing, 0xB8)
+      $py = [BitConverter]::ToSingle($thing, 0xBC)
+      $pz = [BitConverter]::ToSingle($thing, 0xC0)
+      $vx = [BitConverter]::ToSingle($thing, 0x1D4)
+      $vy = [BitConverter]::ToSingle($thing, 0x1D8)
+      $vz = [BitConverter]::ToSingle($thing, 0x1DC)
+      $health = [BitConverter]::ToSingle($thing, 0x134)
+      $sectorPtr = [BitConverter]::ToUInt32($thing, 0x5C)
+      $invPtr = [BitConverter]::ToUInt32($thing, 0x1C0)
+      if ($invPtr -eq 0) { throw "engine capture: the player inventory pointer is 0 at $clock ms" }
+      $inventory = [JkRetail]::ReadBytes($ProcessId, $invPtr, 0x88 + 76 * 0x18)
+      if ($null -eq $inventory) { throw "engine capture: the player inventory block could not be read at $clock ms" }
+      $bin72 = [BitConverter]::ToSingle($inventory, 0x88 + 72 * 0x18)
+      $bin73 = [BitConverter]::ToSingle($inventory, 0x88 + 73 * 0x18)
+      $bin75 = [BitConverter]::ToSingle($inventory, 0x88 + 75 * 0x18)
+      $rng = [JkRetail]::ReadU32($ProcessId, 0x0054F750)
+      if ($rng -lt 0) { throw "engine capture: the AI random state could not be read at $clock ms" }
+      $sector = -1
+      if ($sectorPtr -ne 0) {
+        $sectorRead = [JkRetail]::ReadU32($ProcessId, $sectorPtr)
+        if ($sectorRead -ge 0) { $sector = [long]$sectorRead }
+      }
+      foreach ($value in @($px, $py, $pz, $vx, $vy, $vz, $bin72, $bin73, $bin75)) {
+        if ([double]::IsNaN($value)) { throw "engine capture: a sampled float is NaN at $clock ms" }
+      }
+      if ($health -lt 0.0 -or $health -gt 1000.0) { throw "engine capture: implausible health $health at $clock ms" }
+      foreach ($pair in @(@('bin72', $bin72), @('bin73', $bin73), @('bin75', $bin75))) {
+        if ($pair[1] -lt -0.01 -or $pair[1] -gt 65535.0) {
+          throw ("engine capture: implausible {0} {1} at {2} ms" -f $pair[0], $pair[1], $clock)
+        }
+      }
+      if ($sector -lt -1 -or $sector -gt 1000000) { throw "engine capture: implausible sector $sector at $clock ms" }
+
+      $rows.Add((New-JkEngineCaptureRow @{
+              t_ms = [string]$clock; kind = 'player'; thing = [string]$player; template = 'walkplayer'
+              x = (Format-JkEngineNumber $px); y = (Format-JkEngineNumber $py); z = (Format-JkEngineNumber $pz)
+              sector = [string]$sector
+              vx = (Format-JkEngineNumber $vx); vy = (Format-JkEngineNumber $vy); vz = (Format-JkEngineNumber $vz)
+              bin72 = (Format-JkEngineNumber $bin72 3); bin73 = (Format-JkEngineNumber $bin73 3); bin75 = (Format-JkEngineNumber $bin75 3)
+              rng = [string]$rng
+            }))
+      if ($null -eq $originMs) {
+        $originMs = [long]$clock
+        $originPose = ('x={0} y={1} z={2} sector={3}' -f (Format-JkEngineNumber $px), (Format-JkEngineNumber $py), (Format-JkEngineNumber $pz), $sector)
+        foreach ($actor in @(Get-JkAiOriginRows -ProcessId $ProcessId -PlayerThing ([long]$player) -X $px -Y $py -Radius $Radius -OriginMs ([long]$clock))) {
+          $rows.Add($actor)
+          $actorCount++
+        }
+        if ($actorCount -eq 0) {
+          Log ("engine capture: WARNING no live actor within {0} units of the origin; the fixture has no origin actor rows" -f $Radius)
+        }
+      }
+      Log ("engine capture: {0} ms pos ({1:N3}, {2:N3}, {3:N3}) sector {4} vel ({5:N3}, {6:N3}, {7:N3}) bins {8:F3}/{9:F3}/{10:F3} rng {11}" -f `
+          $clock, $px, $py, $pz, $sector, $vx, $vy, $vz, $bin72, $bin73, $bin75, $rng)
+    }
+  } finally {
+    if ($Key) { Send-JkKeyUp -Name $Key }
+  }
+  if ($null -eq $originMs -or $sampleCount -eq 0) { throw 'engine capture: no sample was taken' }
+  $comments = @(
+    ('pose {0} (first sample)' -f $originPose),
+    ('window {0} ms of engine clock, {1} sample(s), {2} origin actor(s)' -f $Milliseconds, $sampleCount, $actorCount),
+    'addresses: clock=0x00836C14 player=0x008319A4 rng=0x0054F750 ai_instances=0x0088AFE0 ai_count=0x008B4BE0'
+  )
+  Write-JkEngineCaptureFile -Path $path -OriginMs $originMs -Name $Name -HeaderComments $comments -Rows $rows
+  $errors = @(Test-JkEngineCaptureRows -Lines @(Get-Content -LiteralPath $path))
+  if ($errors.Count -gt 0) { throw ('engine capture: wrote a malformed fixture: ' + ($errors -join '; ')) }
+  Log ("engine capture: wrote {0} ({1} sample(s), {2} origin actor(s), origin {3} ms, final {4} ms)" -f $path, $sampleCount, $actorCount, $originMs, $lastClock)
+  return $path
+}
+
+# Synthetic self-check for the engine-capture schema. No retail install, no launch: it exercises the
+# same writer and validator the capture uses, then deliberately corrupts the fixture one way at a time
+# and requires each corruption to be rejected. Returns the failure count (0 = pass).
+function Invoke-JkEngineCaptureSelfCheck {
+  $dir = Resolve-FromRepo 'target/parity/engine'
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $path = Join-Path $dir 'self-check.tsv'
+  $origin = [long]12000
+  $rows = @(
+    (New-JkEngineCaptureRow @{ t_ms = '12000'; kind = 'player'; thing = '127621528'; template = 'walkplayer'; x = '1.4001'; y = '9.7001'; z = '6.3201'; sector = '60'; vx = '0.0000'; vy = '0.0000'; vz = '0.0000'; bin72 = '0.000'; bin73 = '0.000'; bin75 = '20.000'; rng = '123456789' }),
+    (New-JkEngineCaptureRow @{ t_ms = '12000'; kind = 'origin'; thing = '42'; template = '42'; x = '5.9941'; y = '9.1052'; z = '5.3563'; ai_flags = '515'; fire_next_ms = '13500'; acquire_next_ms = '12400'; acquired_at_ms = '12000'; target = '127621528'; last_target = '127621528'; next_pass_ms = '12100'; detail = 'fire=primaryfire acquire=lookfortarget target=player' }),
+    (New-JkEngineCaptureRow @{ t_ms = '12120'; kind = 'player'; thing = '127621528'; template = 'walkplayer'; x = '1.4001'; y = '9.7001'; z = '6.3201'; sector = '60'; vx = '0.0000'; vy = '0.0000'; vz = '0.0000'; bin72 = '0.000'; bin73 = '0.500'; bin75 = '20.000'; rng = '456789123' }),
+    (New-JkEngineCaptureRow @{ t_ms = '12500'; kind = 'player'; thing = '127621528'; template = 'walkplayer'; x = '1.4001'; y = '9.7001'; z = '6.3201'; sector = '60'; vx = '0.0000'; vy = '0.0000'; vz = '0.0000'; bin72 = '0.000'; bin73 = '0.500'; bin75 = '20.000'; rng = '789123456' })
+  )
+  Write-JkEngineCaptureFile -Path $path -OriginMs $origin -Name 'self-check' -HeaderComments @('synthetic rows; no retail process was involved') -Rows $rows
+  $lines = @(Get-Content -LiteralPath $path)
+  function Assert-JkEngineAccepted([string]$Label) {
+    $errors = @(Test-JkEngineCaptureRows -Lines $lines)
+    if ($errors.Count -eq 0) {
+      Write-Host ("PASS  self-check: {0} is accepted" -f $Label)
+    } else {
+      Write-Host ("FAIL  self-check: {0} was rejected: {1}" -f $Label, ($errors -join '; '))
+      $script:selfCheckFailures++
+    }
+  }
+  $script:selfCheckFailures = 0
+  Assert-JkEngineAccepted 'a synthetic fixture'
+  # Each case is a distinct malformation the schema must catch; one passing case fails the check.
+  function Assert-JkEngineRejected([string]$Label, [string[]]$Bad) {
+    $errors = @(Test-JkEngineCaptureRows -Lines $Bad)
+    if ($errors.Count -gt 0) {
+      Write-Host ("PASS  self-check: {0} is rejected ({1})" -f $Label, $errors[0])
+    } else {
+      Write-Host ("FAIL  self-check: {0} passed the schema" -f $Label)
+      $script:selfCheckFailures++
+    }
+  }
+  $columns = $script:JkEngineCaptureColumns
+  # first data row: the header's line plus one (comments precede the header)
+  $playerLine = [array]::IndexOf($lines, ($columns -join "`t")) + 1
+  # 1. a missing column
+  $bad = @($lines)
+  $f = $bad[$playerLine] -split "`t"
+  $bad[$playerLine] = (@($f | Select-Object -First ($f.Count - 1)) -join "`t")
+  Assert-JkEngineRejected 'a row with a missing column' $bad
+  # 2. a non-numeric position
+  $bad = @($lines)
+  $f = $bad[$playerLine] -split "`t"
+  $f[4] = '1.4x'
+  $bad[$playerLine] = $f -join "`t"
+  Assert-JkEngineRejected 'a non-numeric x' $bad
+  # 3. an unknown row kind
+  $bad = @($lines)
+  $f = $bad[$playerLine] -split "`t"
+  $f[1] = 'shot'
+  $bad[$playerLine] = $f -join "`t"
+  Assert-JkEngineRejected 'an unknown kind' $bad
+  # 4. a clock that goes backwards
+  $bad = @($lines)
+  $f = $bad[$playerLine + 2] -split "`t"
+  $f[0] = '11000'
+  $bad[$playerLine + 2] = $f -join "`t"
+  Assert-JkEngineRejected 'a backwards clock' $bad
+  # 5. a missing origin clock
+  $bad = @($lines | Where-Object { $_ -notmatch '^#\s*origin_ms\s' })
+  Assert-JkEngineRejected 'a missing origin clock' $bad
+  # 6. an origin row with no next-fire time
+  $bad = @($lines)
+  $f = $bad[$playerLine + 1] -split "`t"
+  $f[[array]::IndexOf($columns, 'fire_next_ms')] = ''
+  $bad[$playerLine + 1] = $f -join "`t"
+  Assert-JkEngineRejected 'an origin row with no next-fire time' $bad
+  # 7. a malformed header
+  $bad = @($lines)
+  $bad[$playerLine - 1] = ($columns -join "`t").Replace('fire_next_ms', 'next_fire_ms')
+  Assert-JkEngineRejected 'a renamed header column' $bad
+  Remove-Item -LiteralPath $path -ErrorAction SilentlyContinue
+
+  # --- the origin-row builder (Issue #20) ---
+  # The user-run capture died in this path with "Argument types do not match": `@()` over the
+  # builder's `List[object]` throws on PowerShell 7.6, and no check reached the builder without
+  # retail. `-ReadBytes` serves a synthetic memory image instead of the process, so the call the
+  # capture makes -- `@(Get-JkAiOriginRows ...)` -- runs here.
+  function Set-JkWord([byte[]]$Block, [int]$Offset, [uint32]$Value) {
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Block, $Offset, 4)
+  }
+  function Set-JkFloat([byte[]]$Block, [int]$Offset, [single]$Value) {
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Block, $Offset, 4)
+  }
+  $playerThing = [long]0x50000000
+  $image = @{}
+  $registry = New-Object byte[] 0x30
+  $handlerName = [System.Text.Encoding]::ASCII.GetBytes('primaryfire')
+  [Array]::Copy($handlerName, 0, $registry, 0, $handlerName.Length)
+  Set-JkWord $registry 0x20 ([uint32]0x1111)
+  $image[0x20000000] = $registry                                  # instinct registry block
+  $image[0x0084DE50] = [BitConverter]::GetBytes([uint32]0x20000000) # registry pointer
+  $image[0x0084DE54] = [BitConverter]::GetBytes([uint32]1)         # registry count
+  $image[0x008B4BE0] = [BitConverter]::GetBytes([uint32]1)         # highest AI instance slot
+  $slots = New-Object byte[] (2 * 0x29C)
+  Set-JkWord $slots 0x00 ([uint32]0x30000000)      # slot 0: actor thing
+  Set-JkWord $slots 0x04 ([uint32]0x40000000)      #          AI class
+  Set-JkWord $slots 0x08 ([uint32]0x1004)          #          flag word
+  Set-JkWord $slots 0x10 ([uint32]7000)            #          instinct 0's next run (fire)
+  Set-JkWord $slots 0x18C ([uint32]1)              #          instinct count
+  Set-JkWord $slots 0x190 ([uint32]5000)           #          next pass
+  Set-JkWord $slots 0x1D0 ([uint32]0x50000000)     #          current target = the player
+  Set-JkWord $slots 0x204 ([uint32]1234)           #          last acquisition time
+  Set-JkWord $slots 0x29C ([uint32]0x30000100)     # slot 1: actor far outside the radius
+  $image[0x0088AFE0] = $slots
+  $class = New-Object byte[] 0x94C
+  Set-JkWord $class 0xB8 ([uint32]0x1111)          # instinct 0's handler is `primaryfire`
+  $image[0x40000000] = $class
+  $near = New-Object byte[] 0x2B0
+  Set-JkWord $near 0x04 ([uint32]42)               # template
+  Set-JkWord $near 0x0C ([uint32]2)                # thing type 2 = AI actor
+  Set-JkFloat $near 0x134 ([single]50.0)           # health
+  Set-JkFloat $near 0xB8 ([single]5.0)
+  Set-JkFloat $near 0xBC ([single]9.0)
+  Set-JkFloat $near 0xC0 ([single]6.0)
+  $image[0x30000000] = $near
+  $far = New-Object byte[] 0x2B0
+  Set-JkWord $far 0x0C ([uint32]2)
+  Set-JkFloat $far 0x134 ([single]50.0)
+  Set-JkFloat $far 0xB8 ([single]30.0)             # 29 units away, outside Radius 8
+  Set-JkFloat $far 0xBC ([single]9.0)
+  $image[0x30000100] = $far
+  $readImage = {
+    param([long]$Address, [int]$Count)
+    Read-JkSyntheticMemory -Image $image -Address $Address -Count $Count
+  }.GetNewClosure()
+  function Assert-JkOrigin([string]$Label, [bool]$Ok, [string]$Detail = '') {
+    if ($Ok) {
+      Write-Host ("PASS  self-check: {0}" -f $Label)
+    } else {
+      Write-Host ("FAIL  self-check: {0} ({1})" -f $Label, $Detail)
+      $script:selfCheckFailures++
+    }
+  }
+  # The capture's own call shape: one memory pass over the synthetic image.
+  try {
+    $originRows = @(Get-JkAiOriginRows -ProcessId 0 -PlayerThing $playerThing -X ([single]1.0) -Y ([single]9.0) -Radius 8.0 -OriginMs $origin -ReadBytes $readImage)
+  } catch {
+    Write-Host ("FAIL  self-check: the origin builder threw: {0}" -f $_.Exception.Message)
+    $script:selfCheckFailures++
+    $originRows = @()
+  }
+  Assert-JkOrigin 'the origin builder returns one row for the one in-radius actor' ($originRows.Count -eq 1) ("count $($originRows.Count)")
+  $field = @{}
+  if ($originRows.Count -eq 1) {
+    $values = @($originRows[0])
+    for ($c = 0; $c -lt [math]::Min($columns.Count, $values.Count); $c++) { $field[$columns[$c]] = $values[$c] }
+  }
+  $expected = [ordered]@{
+    t_ms = [string]$origin; kind = 'origin'; thing = '805306368'; template = '42'
+    x = '5.0000'; y = '9.0000'; z = '6.0000'; ai_flags = '4100'
+    fire_next_ms = '7000'; acquire_next_ms = '-1'; acquired_at_ms = '1234'
+    target = '1342177280'; last_target = '0'; next_pass_ms = '5000'
+    detail = 'fire=primaryfire acquire=none target=player'
+  }
+  foreach ($column in @($expected.Keys)) {
+    Assert-JkOrigin ("the origin row's {0} is {1}" -f $column, $expected[$column]) ([string]$field[$column] -eq $expected[$column]) ("read '$($field[$column])'")
+  }
+  $builderPath = Join-Path $dir 'self-check-origin.tsv'
+  $playerRow = New-JkEngineCaptureRow @{ t_ms = [string]$origin; kind = 'player'; thing = '127621528'; template = 'walkplayer'; x = '1.4001'; y = '9.7001'; z = '6.3201'; sector = '60'; vx = '0.0000'; vy = '0.0000'; vz = '0.0000'; bin72 = '0.000'; bin73 = '0.000'; bin75 = '20.000'; rng = '123456789' }
+  $builderRows = @($playerRow, $originRows[0])
+  Write-JkEngineCaptureFile -Path $builderPath -OriginMs $origin -Name 'self-check-origin' -HeaderComments @('rows built from a synthetic memory image; no retail process was involved') -Rows $builderRows
+  $builderErrors = @(Test-JkEngineCaptureRows -Lines @(Get-Content -LiteralPath $builderPath))
+  Assert-JkOrigin 'the builder rows pass the fixture schema' ($builderErrors.Count -eq 0) ($builderErrors -join '; ')
+  Remove-Item -LiteralPath $builderPath -ErrorAction SilentlyContinue
+  # A run with no AI slot must produce no origin rows, not an error.
+  $noSlots = $image.Clone()
+  $noSlots[0x008B4BE0] = [BitConverter]::GetBytes([uint32]0x100)
+  $readNoSlots = {
+    param([long]$Address, [int]$Count)
+    Read-JkSyntheticMemory -Image $noSlots -Address $Address -Count $Count
+  }.GetNewClosure()
+  $emptyRows = @(Get-JkAiOriginRows -ProcessId 0 -PlayerThing $playerThing -X ([single]1.0) -Y ([single]9.0) -Radius 8.0 -OriginMs $origin -ReadBytes $readNoSlots)
+  Assert-JkOrigin 'a run with no AI instance slots returns no origin rows' ($emptyRows.Count -eq 0) ("count $($emptyRows.Count)")
+
+  if ($script:selfCheckFailures -gt 0) {
+    Write-Host ("engine-capture self-check: {0} failure(s)" -f $script:selfCheckFailures)
+  } else {
+    Write-Host 'engine-capture self-check: 1 fixture accepted, 7 malformed fixtures rejected, origin rows built from a synthetic memory image'
+  }
+  return $script:selfCheckFailures
+}
 # Wait until FFmpeg reports the game window as bright (the Players screen is a bright static frame;
 # the intro movies are dark). Returns the luma average or $null.
 function Wait-JkBrightScreen {
@@ -1941,6 +2559,18 @@ $process = Start-Process -FilePath $exe -ArgumentList $launchArgs -WorkingDirect
       return
     }
 
+    # Issue #20: the engine-clock route/encounter capture. Like the encounter trace it replaces the
+    # screenshot series and runs before any console command or key, so nothing pauses the clock or
+    # perturbs the encounter. Inside the window there is no dev-console traffic at all.
+    if ($EngineCaptureMs -gt 0) {
+      $engineDir = Resolve-FromRepo $EngineCaptureOut
+      New-Item -ItemType Directory -Force -Path $engineDir | Out-Null
+      $engineName = if ($EngineCaptureName) { $EngineCaptureName } else { $name }
+      $enginePath = Invoke-JkEngineCapture -ProcessId $process.Id -Name $engineName -Milliseconds $EngineCaptureMs -Key $EngineCaptureKey -OutDir $engineDir
+      Log "engine capture mode: skipped the screenshot series/reference for '$name' (wrote $enginePath)"
+      return
+    }
+
     # Issue #8: the continuous retail route replaces the screenshot series. The row must be the
     # level's own start — a warp row would make the spawn leg a different measurement.
     if ($RouteWalk) {
@@ -2354,6 +2984,13 @@ if ($ProbeBox) {
             $raw, $box.Text, $box.RowFill, $box.ColFill)
     }
     exit 0
+}
+
+# `-EngineCaptureSelfCheck`: validate issue #20's row schema on synthetic data. Deliberately before
+# the install lookup and the launch path: this mode never starts retail and is safe to run anywhere.
+if ($EngineCaptureSelfCheck) {
+    $selfCheckFailures = Invoke-JkEngineCaptureSelfCheck
+    exit ([int]($selfCheckFailures -gt 0))
 }
 
 Log "=== retail-capture run $(Get-Date -Format o) ==="
