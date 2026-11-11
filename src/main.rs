@@ -114,8 +114,10 @@ struct World {
     ai_classes: HashMap<String, String>,
     /// Lowercase `.wav` name -> raw bytes, for the wavs the shipped `.snd` classes name.
     wav_bytes: HashMap<String, Vec<u8>>,
-    /// Lowercase `.wav` name -> `(minRadius, maxRadius, maxVolume)` from its sound class.
-    sound_radii: HashMap<String, (f32, f32, f32)>,
+    /// Lowercase `.wav` name -> the shipped `.snd` row the mixer uses for it (`minRadius`,
+    /// `maxRadius`, `maxVolume`) plus the class and event that row came from, which is the
+    /// one-shot schedule's data provenance.
+    sound_rows: HashMap<String, SoundRow>,
     /// `.snd` class (lowercase basename) -> sound-mode event name -> `(wav, maxVolume)`. This is what
     /// `talk` picks its mood sounds from (`sithSoundClass_PlayModeRandom`); the runtime has no file
     /// access, so `setup` hands it over.
@@ -124,6 +126,18 @@ struct World {
         std::collections::BTreeMap<String, Vec<(String, f32)>>,
     >,
     gob_entries: usize,
+}
+
+/// One row of a shipped `.snd` class, as the mixer reads it: the fade radii and volume, and the
+/// class basename and event name the row came from. The first row naming a wav wins, which is the
+/// order the level load builds the bank in.
+#[derive(Clone)]
+struct SoundRow {
+    snd: String,
+    event: String,
+    min: f32,
+    max: f32,
+    volume: f32,
 }
 
 /// Accept `03katarn`, `03katarn.jkl` or `jkl\03katarn.jkl` for a level on the command line.
@@ -655,6 +669,12 @@ fn main() {
     let mut no_ai = false;
     let mut audio_trace: Option<std::path::PathBuf> = None;
     let mut audio_compare: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+    // Issue #18: the decomp-derived one-shot schedule, its comparator, its data verifier, and the
+    // check that a trace's windows carry exactly the schedule's events.
+    let mut audio_schedule: Option<std::path::PathBuf> = None;
+    let mut audio_schedule_compare: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+    let mut audio_schedule_verify: Option<std::path::PathBuf> = None;
+    let mut audio_trace_vs_schedule: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
 
     let mut sim = false;
     let mut dump: Option<String> = None;
@@ -1003,6 +1023,45 @@ fn main() {
                 audio_compare = Some((
                     std::path::PathBuf::from(expected),
                     std::path::PathBuf::from(actual),
+                ));
+            }
+            // `--audio-schedule <path>`: the replay's expected one-shot schedule, one row per sound
+            // with its engine time, wav, gain and the engine call and `.snd` row behind it.
+            "--audio-schedule" => {
+                audio_schedule = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--audio-schedule-compare <expected> <actual>`: the one-shot oracle's comparator.
+            "--audio-schedule-compare" => {
+                let expected = args.get(i + 1).cloned();
+                let actual = args.get(i + 2).cloned();
+                i += 2;
+                let (Some(expected), Some(actual)) = (expected, actual) else {
+                    println!("usage: --audio-schedule-compare <expected.tsv> <actual.tsv>");
+                    std::process::exit(2);
+                };
+                audio_schedule_compare = Some((
+                    std::path::PathBuf::from(expected),
+                    std::path::PathBuf::from(actual),
+                ));
+            }
+            // `--audio-schedule-verify <schedule>`: re-derive every row's gain from the shipped
+            // `.snd` classes and check the row's class/event attribution against them.
+            "--audio-schedule-verify" => {
+                audio_schedule_verify = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--audio-trace-vs-schedule <trace> <schedule>`: every scheduled event must land in
+            // the trace's own 600 ms window at the same gain, and nothing else may be there.
+            "--audio-trace-vs-schedule" => {
+                let trace = args.get(i + 1).cloned();
+                let schedule = args.get(i + 2).cloned();
+                i += 2;
+                let (Some(trace), Some(schedule)) = (trace, schedule) else {
+                    println!("usage: --audio-trace-vs-schedule <trace.tsv> <schedule.tsv>");
+                    std::process::exit(2);
+                };
+                audio_trace_vs_schedule = Some((
+                    std::path::PathBuf::from(trace),
+                    std::path::PathBuf::from(schedule),
                 ));
             }
             "--sim" => sim = true,
@@ -1495,6 +1554,10 @@ fn main() {
         eprintln!("--audio-trace needs --replay <path>");
         std::process::exit(2);
     }
+    if audio_schedule.is_some() && route_plan.is_none() {
+        eprintln!("--audio-schedule needs --replay <path>");
+        std::process::exit(2);
+    }
     // `--fixed-dt` is the step of a screenshot/capture run. Play and route replay keep their own
     // fixed steps (the wall clock and 1/60 s), so a step without `--shot` would silently retime them.
     if fixed_dt.is_some() && shot.is_none() {
@@ -1513,6 +1576,28 @@ fn main() {
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(0.02);
         match audio_trace_compare(expected, actual, epsilon) {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    let audio_epsilon = std::env::var("BK_AUDIO_EPSILON")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.02);
+    if let Some((expected, actual)) = audio_schedule_compare.as_ref() {
+        match audio_schedule_compare_files(expected, actual, audio_epsilon) {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some((trace, schedule)) = audio_trace_vs_schedule.as_ref() {
+        match audio_trace_schedule_check(trace, schedule, audio_epsilon) {
             Ok(()) => std::process::exit(0),
             Err(message) => {
                 eprintln!("{message}");
@@ -1593,6 +1678,23 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // `--audio-schedule-verify`: every scheduled event's gain and `.snd` attribution is re-derived
+    // from the shipped classes, with no replay. This is the data half of the one-shot oracle.
+    if let Some(path) = audio_schedule_verify.as_deref() {
+        match audio_schedule_verify_file(&gobs, path) {
+            Ok(rows) => {
+                println!(
+                    "audio schedule: {rows} event(s) re-derived from the shipped .snd classes"
+                );
+                std::process::exit(0);
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // --audit / --episodes / --dump work over the whole install rather than one
     // selected level, so they run before the single-level load.
@@ -12763,6 +12865,7 @@ fn main() {
         .insert_resource(AiDisabled(ai_disabled))
         .insert_resource(RouteTraceOut(route_trace))
         .insert_resource(AudioTraceOut(audio_trace))
+        .insert_resource(AudioScheduleOut(audio_schedule))
         .insert_resource(AudioLog::default())
         .insert_resource(RouteNow::default())
         .insert_resource(RouteCursor::default())
@@ -17025,6 +17128,434 @@ fn audio_trace_compare(
     Ok(())
 }
 
+/// `--audio-schedule`'s columns. `time_s` is the engine clock at the replay's own step; `gain` is
+/// the mixer's attenuated volume; `volume` is the request's base volume and `distance`/`forward` the
+/// listener geometry the gain came from; `min_radius`/`max_radius`/`max_volume` are the shipped
+/// `.snd` row; `snd`/`event` name that row's class and event; `source` names the engine call that
+/// queued the sound. The row is therefore checkable against the shipped data with no replay
+/// (`--audio-schedule-verify`) and against a replay's trace (`--audio-trace-vs-schedule`).
+const AUDIO_SCHEDULE_FIELDS: [&str; 13] = [
+    "tick", "time_s", "wav", "gain", "volume", "distance", "forward", "min_radius", "max_radius",
+    "max_volume", "snd", "event", "source",
+];
+
+/// Write one expected-schedule row. The first row truncates the file (a schedule is one run's
+/// events, not an append across runs).
+fn write_audio_schedule_row(
+    path: &std::path::Path,
+    started: &mut bool,
+    sound: &PlayedSound,
+) {
+    use std::io::Write;
+    let first = !*started;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true);
+    if first {
+        options.truncate(true);
+    } else {
+        options.append(true);
+    }
+    let Ok(mut file) = options.open(path) else { return };
+    if first {
+        let _ = writeln!(file, "{}", AUDIO_SCHEDULE_FIELDS.join("\t"));
+    }
+    let _ = writeln!(
+        file,
+        "{}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}",
+        sound.tick,
+        sound.time_s,
+        sound.wav,
+        sound.gain,
+        sound.volume,
+        sound.distance,
+        sound.forward,
+        sound.min,
+        sound.max,
+        sound.max_volume,
+        sound.snd,
+        sound.event,
+        sound.source,
+    );
+    *started = true;
+}
+
+/// One parsed expected-schedule row. The numbers are `f64` so a row's gain can be recomputed from
+/// its own geometry and the shipped `.snd` row without leaning on the producer's `f32` rounding.
+#[derive(Clone, Debug, PartialEq)]
+struct AudioScheduleRow {
+    tick: u32,
+    time_s: f64,
+    wav: String,
+    gain: f64,
+    volume: f64,
+    distance: f64,
+    forward: f64,
+    min_radius: f64,
+    max_radius: f64,
+    max_volume: f64,
+    snd: String,
+    event: String,
+    source: String,
+}
+
+fn parse_audio_schedule(text: &str) -> Result<Vec<AudioScheduleRow>, String> {
+    let mut rows = Vec::new();
+    let mut columns: Option<Vec<usize>> = None;
+    for (line_no, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
+        if columns.is_none() {
+            let mut order = Vec::with_capacity(AUDIO_SCHEDULE_FIELDS.len());
+            for field in AUDIO_SCHEDULE_FIELDS {
+                match cells.iter().position(|c| *c == field) {
+                    Some(index) => order.push(index),
+                    None => {
+                        return Err(format!(
+                            "line {}: the schedule header has no `{field}` column",
+                            line_no + 1
+                        ))
+                    }
+                }
+            }
+            columns = Some(order);
+            continue;
+        }
+        let order = columns.as_ref().expect("header just parsed");
+        let cell = |slot: usize| -> &str {
+            order
+                .get(slot)
+                .and_then(|index| cells.get(*index))
+                .copied()
+                .unwrap_or("")
+        };
+        let number = |slot: usize, field: &str| -> Result<f64, String> {
+            cell(slot)
+                .parse::<f64>()
+                .map_err(|_| format!("line {}: `{}` is not a number ({field})", line_no + 1, cell(slot)))
+        };
+        rows.push(AudioScheduleRow {
+            tick: number(0, "tick")? as u32,
+            time_s: number(1, "time_s")?,
+            wav: cell(2).to_string(),
+            gain: number(3, "gain")?,
+            volume: number(4, "volume")?,
+            distance: number(5, "distance")?,
+            forward: number(6, "forward")?,
+            min_radius: number(7, "min_radius")?,
+            max_radius: number(8, "max_radius")?,
+            max_volume: number(9, "max_volume")?,
+            snd: cell(10).to_string(),
+            event: cell(11).to_string(),
+            source: cell(12).to_string(),
+        });
+    }
+    if rows.is_empty() {
+        return Err("the schedule has a header but no events".to_string());
+    }
+    Ok(rows)
+}
+
+/// Compare an expected schedule with a replay's schedule. Every event pairs by exact engine tick and
+/// wav, and differs in four ways:
+///
+/// * **missing** — the expected schedule has it and the replay did not play it;
+/// * **extra** — the replay played it and the expected schedule does not have it;
+/// * **mistimed** — the same wav exists at another tick (the engine clock moved, not the sound);
+/// * **attenuated** — same tick, same wav, different gain;
+///
+/// plus `data:` (the base volume, radii or class row changed) and `source:` (a different engine call
+/// or `.snd` row produced it). The tick is exact: this is the event list under the 600 ms trace, so
+/// a sound in another tick is reported rather than quietly accepted.
+fn compare_audio_schedule(
+    expected: &[AudioScheduleRow],
+    actual: &[AudioScheduleRow],
+    epsilon: f64,
+) -> Result<(usize, usize), String> {
+    let mut want_used = vec![false; expected.len()];
+    let mut got_used = vec![false; actual.len()];
+    let mut events = 0usize;
+    let mut differences: Vec<String> = Vec::new();
+    // Same tick and wav.
+    for (wi, want) in expected.iter().enumerate() {
+        let Some(gi) = actual
+            .iter()
+            .enumerate()
+            .position(|(gi, got)| !got_used[gi] && got.tick == want.tick && got.wav == want.wav)
+        else {
+            continue;
+        };
+        got_used[gi] = true;
+        want_used[wi] = true;
+        events += 1;
+        let got = &actual[gi];
+        if (want.gain - got.gain).abs() > epsilon {
+            differences.push(format!(
+                "attenuated: {} at tick {} gain {:.3} expected, {:.3} trace (delta {:.3})",
+                want.wav,
+                want.tick,
+                want.gain,
+                got.gain,
+                (want.gain - got.gain).abs()
+            ));
+        }
+        if (want.volume - got.volume).abs() > 1e-3
+            || (want.max_volume - got.max_volume).abs() > 1e-3
+            || (want.min_radius - got.min_radius).abs() > 1e-3
+            || (want.max_radius - got.max_radius).abs() > 1e-3
+        {
+            differences.push(format!(
+                "data: {} at tick {} base volume/radii {:.3}/{:.3}/{:.3}/{:.3} expected, {:.3}/{:.3}/{:.3}/{:.3} trace",
+                want.wav,
+                want.tick,
+                want.volume,
+                want.min_radius,
+                want.max_radius,
+                want.max_volume,
+                got.volume,
+                got.min_radius,
+                got.max_radius,
+                got.max_volume
+            ));
+        }
+        if want.source != got.source || want.snd != got.snd || want.event != got.event {
+            differences.push(format!(
+                "source: {} at tick {} `{}` ({}/{} ) expected, `{}` ({}/{}) trace",
+                want.wav, want.tick, want.source, want.snd, want.event, got.source, got.snd, got.event
+            ));
+        }
+        if (want.time_s - got.time_s).abs() > 1e-3 {
+            differences.push(format!(
+                "time: {} at tick {} engine {:.4}s expected, {:.4}s trace",
+                want.wav, want.tick, want.time_s, got.time_s
+            ));
+        }
+    }
+    // The same wav in another tick: mistimed, not missing plus extra.
+    for (wi, want) in expected.iter().enumerate() {
+        if want_used[wi] {
+            continue;
+        }
+        let Some(gi) = actual
+            .iter()
+            .enumerate()
+            .position(|(gi, got)| !got_used[gi] && got.wav == want.wav)
+        else {
+            continue;
+        };
+        got_used[gi] = true;
+        want_used[wi] = true;
+        events += 1;
+        let got = &actual[gi];
+        differences.push(format!(
+            "mistimed: {} expected tick {}, trace tick {} ({} tick(s) off)",
+            want.wav,
+            want.tick,
+            got.tick,
+            got.tick as i64 - want.tick as i64
+        ));
+    }
+    for (wi, want) in expected.iter().enumerate() {
+        if !want_used[wi] {
+            events += 1;
+            differences.push(format!(
+                "missing: {} at tick {} (gain {:.3})",
+                want.wav, want.tick, want.gain
+            ));
+        }
+    }
+    for (gi, got) in actual.iter().enumerate() {
+        if !got_used[gi] {
+            events += 1;
+            differences.push(format!(
+                "extra: {} at tick {} (gain {:.3})",
+                got.wav, got.tick, got.gain
+            ));
+        }
+    }
+    if differences.is_empty() {
+        Ok((events, differences.len()))
+    } else {
+        let shown = differences.iter().take(16).cloned().collect::<Vec<_>>().join("\n  ");
+        Err(format!(
+            "audio-schedule-compare: FAIL {events} event(s), {} difference(s):\n  {shown}",
+            differences.len()
+        ))
+    }
+}
+
+/// `--audio-schedule-compare`: parse both schedules and apply [`compare_audio_schedule`].
+fn audio_schedule_compare_files(
+    expected: &std::path::Path,
+    actual: &std::path::Path,
+    epsilon: f64,
+) -> Result<(), String> {
+    let read = |path: &std::path::Path| -> Result<Vec<AudioScheduleRow>, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        parse_audio_schedule(&text).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let want = read(expected)?;
+    let got = read(actual)?;
+    let (events, _) = compare_audio_schedule(&want, &got, epsilon)?;
+    println!("audio-schedule-compare: PASS {events} one-shot event(s) within {epsilon}");
+    Ok(())
+}
+
+/// The 600 ms sample window a replay tick belongs to: the trace writes a row on every 36th tick and
+/// drains the events since the previous row, so a request logged on tick `t` appears in the row at
+/// the first multiple of 36 at or after `t`. Tick 0's frame is the first row itself.
+fn audio_window_tick(tick: u32) -> u32 {
+    match tick {
+        0 => 0,
+        _ => tick.div_ceil(ROUTE_SAMPLE_TICKS) * ROUTE_SAMPLE_TICKS,
+    }
+}
+
+/// `--audio-trace-vs-schedule`: the trace's sounds column must carry exactly the schedule's events,
+/// window by window, at the schedule's gains. This is the seam between the oracle (events with
+/// engine times) and the sampled mixer state the rest of the gate compares.
+fn audio_trace_schedule_check(
+    trace_path: &std::path::Path,
+    schedule_path: &std::path::Path,
+    epsilon: f64,
+) -> Result<(), String> {
+    let trace_text = std::fs::read_to_string(trace_path)
+        .map_err(|e| format!("{}: {e}", trace_path.display()))?;
+    let trace = parse_audio_trace(&trace_text)
+        .map_err(|e| format!("{}: {e}", trace_path.display()))?;
+    if trace.iter().any(|row| row.sounds.is_none()) {
+        return Err(format!(
+            "{}: a `-` sounds cell is a window the trace did not record; the replay trace must record its events",
+            trace_path.display()
+        ));
+    }
+    let schedule_text = std::fs::read_to_string(schedule_path)
+        .map_err(|e| format!("{}: {e}", schedule_path.display()))?;
+    let schedule = parse_audio_schedule(&schedule_text)
+        .map_err(|e| format!("{}: {e}", schedule_path.display()))?;
+    let mut expected: Vec<AudioTraceRow> = Vec::with_capacity(trace.len());
+    for row in &trace {
+        let sounds: Vec<(String, f64)> = schedule
+            .iter()
+            .filter(|event| audio_window_tick(event.tick) == row.tick)
+            .map(|event| (event.wav.clone(), event.gain))
+            .collect();
+        expected.push(AudioTraceRow { sounds: Some(sounds), ..row.clone() });
+    }
+    let (states, sounds) = compare_audio_rows(&expected, &trace, epsilon)
+        .map_err(|e| format!("audio-trace-vs-schedule: {e}"))?;
+    println!(
+        "audio-trace-vs-schedule: PASS {states} window(s), {sounds} event(s) at their windows within {epsilon}"
+    );
+    Ok(())
+}
+
+/// `--audio-schedule-verify`: re-derive the schedule from the shipped data. Each row's `snd`/`event`
+/// must name a real `.snd` row with that wav and those radii/volume, and the row's `gain` must be
+/// what the mixer's own formula gives from that row, the row's base volume and its listener
+/// geometry (worked out again here, not read from the producer).
+///
+/// This is the data half of the oracle: it fails if a schedule row names a class or a fade radius
+/// the install does not carry, or if the gain does not follow from them. What it cannot judge is the
+/// engine **time** — that is the replay's clock, checked by comparing against the committed schedule.
+fn audio_schedule_verify_file(
+    gobs: &gob::GobSet,
+    path: &std::path::Path,
+) -> Result<usize, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let rows = parse_audio_schedule(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut classes: HashMap<String, Vec<snd::Entry>> = HashMap::new();
+    for name in gobs.names() {
+        if !name.to_ascii_lowercase().ends_with(".snd") {
+            continue;
+        }
+        let Some(raw) = gobs.read(&name) else { continue };
+        classes
+            .entry(runtime::sound_class_key(&name))
+            .or_default()
+            .extend(snd::parse(&String::from_utf8_lossy(&raw)));
+    }
+    let mut failures: Vec<String> = Vec::new();
+    for row in &rows {
+        let Some(entries) = classes.get(&row.snd) else {
+            failures.push(format!(
+                "{} at tick {}: the install has no `.snd` class `{}`",
+                row.wav, row.tick, row.snd
+            ));
+            continue;
+        };
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.event == row.event && entry.wav.eq_ignore_ascii_case(&row.wav))
+        else {
+            failures.push(format!(
+                "{} at tick {}: `{}` has no `{}` row naming it",
+                row.wav, row.tick, row.snd, row.event
+            ));
+            continue;
+        };
+        let close = |value: f64, shipped: f32| (value - f64::from(shipped)).abs() <= 1e-4;
+        if !close(row.min_radius, entry.min_radius)
+            || !close(row.max_radius, entry.max_radius)
+            || !close(row.max_volume, entry.max_volume)
+        {
+            failures.push(format!(
+                "{} at tick {}: the row carries radii {:.3}/{:.3} volume {:.3}, `{}` ships {:.3}/{:.3} volume {:.3}",
+                row.wav,
+                row.tick,
+                row.min_radius,
+                row.max_radius,
+                row.max_volume,
+                row.snd,
+                entry.min_radius,
+                entry.max_radius,
+                entry.max_volume
+            ));
+            continue;
+        }
+        // The gain, worked out again from the shipped row and the decomp's mixer formula rather than
+        // calling `snd::volume`: `sithSoundMixer_UpdateSoundPos` (`0x4dcc00`) fades the base volume
+        // linearly from `minRadius` to `maxRadius` (a zero-width span never fades), pulls a sound
+        // behind the listener by `1 - |dot| * 0.3`, clamps to [0, 1] and writes `* 0.75`.
+        let span = f64::from(entry.max_radius - entry.min_radius);
+        let fade = if span <= 0.0 {
+            0.0
+        } else {
+            ((row.distance - f64::from(entry.min_radius)) / span).clamp(0.0, 1.0)
+        };
+        let mut base = f64::from(entry.max_volume) * row.volume;
+        if row.forward < 0.0 {
+            base *= 1.0 + row.forward * f64::from(snd::REAR_PAN);
+        }
+        base *= 1.0 - fade;
+        let recomputed = base.clamp(0.0, 1.0) * f64::from(snd::FINAL_SCALE);
+        if (recomputed - row.gain).abs() > 1e-3 {
+            failures.push(format!(
+                "{} at tick {}: gain {:.4} but the shipped row and its geometry give {:.4}",
+                row.wav, row.tick, row.gain, recomputed
+            ));
+        }
+        if !row.time_s.is_finite() || row.time_s < 0.0 {
+            failures.push(format!(
+                "{} at tick {}: engine time {:.4} is not a clock reading",
+                row.wav, row.tick, row.time_s
+            ));
+        }
+    }
+    if failures.is_empty() {
+        Ok(rows.len())
+    } else {
+        let shown = failures.iter().take(16).cloned().collect::<Vec<_>>().join("\n  ");
+        Err(format!(
+            "audio-schedule-verify: FAIL {} of {} event(s):\n  {shown}",
+            failures.len(),
+            rows.len()
+        ))
+    }
+}
+
 /// One audio-trace line. See [`AUDIO_TRACE_FIELDS`] for the columns and
 /// [`audio_trace_sample`] for what fills them.
 fn write_audio_trace_row(
@@ -17166,7 +17697,12 @@ fn sample_audio_state(
     }
     let sounds: Vec<(u32, String, f32)> = log
         .as_mut()
-        .map(|log| std::mem::take(&mut log.played))
+        .map(|log| {
+            std::mem::take(&mut log.played)
+                .into_iter()
+                .map(|played| (played.tick, played.wav, played.gain))
+                .collect()
+        })
         .unwrap_or_default();
     SampledAudio { music, music_volume, ambient, sounds }
 }
@@ -17613,6 +18149,175 @@ tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
             let rows = parse_audio_trace(&text).expect("fixture parses");
             compare_audio_rows(&rows, &rows, 0.02)
                 .unwrap_or_else(|e| panic!("{name} does not compare to itself: {e}"));
+        }
+    }
+
+    /// The one-shot oracle's comparator must name the four ways a schedule can drift, because the
+    /// gate proves each one with a perturbed copy of the replay's own schedule.
+    #[test]
+    fn the_one_shot_schedule_names_missing_extra_mistimed_and_attenuated_events() {
+        let event = |tick: u32, wav: &str, gain: f64| AudioScheduleRow {
+            tick,
+            time_s: f64::from(tick) / 60.0,
+            wav: wav.to_string(),
+            gain,
+            volume: 1.0,
+            distance: 0.0,
+            forward: 1.0,
+            min_radius: -1.0,
+            max_radius: -1.0,
+            max_volume: 1.0,
+            snd: "test.snd".to_string(),
+            event: "create".to_string(),
+            source: "cog PlaySoundThing -> sithSoundMixer_PlaySoundThing (0x4dba60)".to_string(),
+        };
+        let want = vec![
+            event(0, "a.wav", 0.75),
+            event(0, "b.wav", 0.5),
+            event(0, "c.wav", 0.25),
+            event(0, "d.wav", 0.5),
+            event(36, "e.wav", 0.5),
+        ];
+        let got = vec![
+            // `a.wav` quiet, `b.wav` missing, `g.wav` extra.
+            event(0, "a.wav", 0.4),
+            event(0, "d.wav", 0.5),
+            event(0, "g.wav", 0.5),
+            // `c.wav` a window late, `e.wav` never played and `h.wav` is extra.
+            event(36, "c.wav", 0.25),
+            event(36, "h.wav", 0.5),
+        ];
+        let error = compare_audio_schedule(&want, &got, 0.02)
+            .expect_err("a changed schedule must fail");
+        for expected in [
+            "attenuated: a.wav at tick 0",
+            "missing: b.wav at tick 0",
+            "extra: g.wav at tick 0",
+            "mistimed: c.wav expected tick 0",
+            "missing: e.wav at tick 36",
+            "extra: h.wav at tick 36",
+        ] {
+            assert!(error.contains(expected), "the gate did not report `{expected}`:\n{error}");
+        }
+        // The same schedule compares clean, and a changed class row is its own difference.
+        assert!(compare_audio_schedule(&want, &want, 0.02).is_ok());
+        let mut rerouted = want.clone();
+        rerouted[0].source = "sithSoundClass_PlayModeRandom (0x4e6b70)".to_string();
+        let error = compare_audio_schedule(&want, &rerouted, 0.02)
+            .expect_err("a different engine call must be reported");
+        assert!(error.contains("source: a.wav at tick 0"), "{error}");
+        // ... and a changed base volume/radius is a data difference, not a silent gain match.
+        let mut retuned = want.clone();
+        retuned[0].max_volume = 0.5;
+        retuned[0].gain = 0.375;
+        let error = compare_audio_schedule(&want, &retuned, 0.02)
+            .expect_err("a different .snd row must be reported");
+        assert!(error.contains("data: a.wav at tick 0"), "{error}");
+    }
+
+    /// A schedule event belongs to the 600 ms window the replay's trace drains it in.
+    #[test]
+    fn a_schedule_event_lands_in_its_sample_window() {
+        assert_eq!(audio_window_tick(0), 0);
+        assert_eq!(audio_window_tick(1), 36);
+        assert_eq!(audio_window_tick(35), 36);
+        assert_eq!(audio_window_tick(36), 36);
+        assert_eq!(audio_window_tick(37), 72);
+        assert_eq!(audio_window_tick(72), 72);
+    }
+
+    /// Writing a schedule row and parsing it back must preserve every column the verifier reads.
+    #[test]
+    fn a_written_schedule_row_round_trips() {
+        let dir = std::env::temp_dir().join(format!("bk-audio-schedule-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("schedule.tsv");
+        let played = PlayedSound {
+            tick: 30,
+            time_s: 0.5,
+            wav: "reeyee02.wav".to_string(),
+            gain: 0.75,
+            volume: 1.5,
+            distance: 12.5,
+            forward: -0.25,
+            snd: "01cantina.snd".to_string(),
+            event: "create".to_string(),
+            min: -1.0,
+            max: -1.0,
+            max_volume: 1.0,
+            source: "cog PlaySoundThing -> sithSoundMixer_PlaySoundThing (0x4dba60)",
+        };
+        let mut started = false;
+        write_audio_schedule_row(&path, &mut started, &played);
+        write_audio_schedule_row(&path, &mut started, &played);
+        let text = std::fs::read_to_string(&path).expect("the schedule was written");
+        let rows = parse_audio_schedule(&text).expect("the schedule parses");
+        assert_eq!(rows.len(), 2, "the writer appended, not truncated");
+        assert_eq!(rows[0].tick, 30);
+        assert!((rows[0].time_s - 0.5).abs() < 1e-6);
+        assert_eq!(rows[0].wav, "reeyee02.wav");
+        assert!((rows[0].gain - 0.75).abs() < 1e-6);
+        assert_eq!(rows[0].snd, "01cantina.snd");
+        assert_eq!(rows[0].event, "create");
+        assert_eq!(rows[0].source, played.source);
+        // The same row compares clean and the site's own file is removed again.
+        assert!(compare_audio_schedule(&rows, &rows, 0.02).is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The committed oracle is a fixture like the traces: it must parse, name a source for every
+    /// event, and carry a real engine clock.
+    #[test]
+    fn the_committed_one_shot_schedule_parses() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/parity/audiotrace/level1-audio-schedule.tsv");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let rows = parse_audio_schedule(&text).expect("the committed schedule parses");
+        assert!(!rows.is_empty(), "the committed schedule has no events");
+        for row in &rows {
+            assert!(!row.wav.is_empty(), "an event names no wav");
+            assert!(!row.source.is_empty(), "{} names no engine call", row.wav);
+            assert!(!row.snd.is_empty() && row.snd != "-", "{} names no class", row.wav);
+            assert!(row.time_s >= 0.0, "{} has no engine clock", row.wav);
+        }
+    }
+
+    /// The trace's sounds column must carry exactly the schedule's events, window by window.
+    #[test]
+    fn a_trace_matches_the_schedule_that_produced_it() {
+        let dir = std::env::temp_dir().join(format!("bk-audio-vs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let trace_path = dir.join("trace.tsv");
+        let schedule_path = dir.join("schedule.tsv");
+        std::fs::write(
+            &trace_path,
+            "tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds\n\
+             0\t0.0000\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\t\n\
+             36\t0.6000\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\treeyee02.wav@0.750\n",
+        )
+        .expect("trace written");
+        std::fs::write(
+            &schedule_path,
+            "tick\ttime_s\twav\tgain\tvolume\tdistance\tforward\tmin_radius\tmax_radius\tmax_volume\tsnd\tevent\tsource\n\
+             30\t0.5000\treeyee02.wav\t0.750\t1.500\t0.000\t1.000\t-1.000\t-1.000\t1.000\t01cantina.snd\tcreate\tcog PlaySoundThing\n",
+        )
+        .expect("schedule written");
+        audio_trace_schedule_check(&trace_path, &schedule_path, 0.02)
+            .expect("the trace carries the scheduled event");
+        // A trace that lost the sound fails, and it is reported as missing.
+        std::fs::write(
+            &trace_path,
+            "tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds\n\
+             0\t0.0000\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\t\n\
+             36\t0.6000\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\t\n",
+        )
+        .expect("trace rewritten");
+        let error = audio_trace_schedule_check(&trace_path, &schedule_path, 0.02)
+            .expect_err("a trace without the event must fail");
+        assert!(error.contains("missing") && error.contains("reeyee02.wav"), "{error}");
+        for path in [&trace_path, &schedule_path] {
+            let _ = std::fs::remove_file(path);
         }
     }
 
@@ -19410,7 +20115,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
     // The sound classes: what each shipped `.snd` names, and the fade radii it gives. Only
     // the wavs a class mentions are read, so this is a few hundred kilobytes each at most.
     let mut wav_bytes: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut sound_radii: HashMap<String, (f32, f32, f32)> = HashMap::new();
+    let mut sound_rows: HashMap<String, SoundRow> = HashMap::new();
     let mut sound_classes: std::collections::BTreeMap<
         String,
         std::collections::BTreeMap<String, Vec<(String, f32)>>,
@@ -19423,9 +20128,13 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         let class = runtime::sound_class_key(&name);
         for entry in snd::parse(&String::from_utf8_lossy(&raw)) {
             let wav = entry.wav.to_ascii_lowercase();
-            sound_radii
-                .entry(wav.clone())
-                .or_insert((entry.min_radius, entry.max_radius, entry.max_volume));
+            sound_rows.entry(wav.clone()).or_insert(SoundRow {
+                snd: class.clone(),
+                event: entry.event.clone(),
+                min: entry.min_radius,
+                max: entry.max_radius,
+                volume: entry.max_volume,
+            });
             // `sithSoundClass_LoadEntry` keys each row's first column (the engine's mode name, e.g.
             // `happy`) through the sound-mode table and keeps the row in that mode's list.
             sound_classes
@@ -19654,7 +20363,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         keys,
         ai_classes,
         wav_bytes,
-        sound_radii,
+        sound_rows,
         sound_classes,
         gob_entries: gobs.len(),
     })
@@ -22219,6 +22928,7 @@ fn play_menu_wav(name: &str, sim: &Option<Res<Sim>>, bank: &Option<Res<SoundBank
             pos: None,
             channel,
             pitch: 1.0,
+            source: "GUI sound -> sithSoundMixer_PlaySound (0x4db4f0)",
         });
     }
 }
@@ -26547,7 +27257,10 @@ fn play_requested_sounds(
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
     bank: Option<Res<SoundBank>>,
+    world: Option<Res<World>>,
     cursor: Option<Res<RouteCursor>>,
+    schedule: Option<Res<AudioScheduleOut>>,
+    mut schedule_started: Local<bool>,
     mut log: Option<ResMut<AudioLog>>,
 ) {
     let (Some(sim), Some(player), Some(bank)) = (sim, player, bank) else { return };
@@ -26608,11 +27321,37 @@ fn play_requested_sounds(
             },
         ));
         played += 1;
+        // The replay's tick, not wall time: a trace is a function of the script. `route_replay`
+        // has already advanced the cursor for this frame, so the frame's own tick is one back.
+        let tick = cursor.as_ref().map_or(0, |c| c.tick.saturating_sub(1));
+        // The engine instant is `tick` steps of the replay's own clock (`RouteCursor::engine_s`
+        // accumulates the same step `sim_dt` hands the simulation).
+        let time_s = cursor.as_ref().map_or(0.0, |c| {
+            c.engine_s * f64::from(tick) / f64::from(c.tick.max(1))
+        });
+        let row = world.as_ref().and_then(|w| w.sound_rows.get(&wav));
+        let record = PlayedSound {
+            tick,
+            time_s,
+            wav,
+            gain,
+            volume: request.volume,
+            distance,
+            forward,
+            snd: row.map(|r| r.snd.clone()).unwrap_or_else(|| "-".to_string()),
+            event: row.map(|r| r.event.clone()).unwrap_or_else(|| "-".to_string()),
+            min: *min,
+            max: *max,
+            max_volume: *volume,
+            source: request.source,
+        };
+        if let Some(out) = schedule.as_deref()
+            && let Some(path) = out.0.as_deref()
+        {
+            write_audio_schedule_row(path, &mut schedule_started, &record);
+        }
         if let Some(log) = log.as_mut() {
-            // The replay's tick, not wall time: a trace is a function of the script. `route_replay`
-            // has already advanced the cursor for this frame, so the frame's own tick is one back.
-            let tick = cursor.as_ref().map_or(0, |c| c.tick.saturating_sub(1));
-            log.played.push((tick, wav, gain));
+            log.played.push(record);
         }
     }
     if played > 0 {
@@ -27232,13 +27971,13 @@ fn setup(
     // The sound classes' clips: every wav they name, with the class's own fade radii and
     // volume, so a script's `PlaySoundThing` can be played with distance attenuation.
     let mut bank = SoundBank::default();
-    for (wav, (min, max, volume)) in &world.sound_radii {
+    for (wav, row) in &world.sound_rows {
         if bank.clips.contains_key(wav) {
             continue;
         }
         let Some(bytes) = world.wav_bytes.get(wav) else { continue };
         let source = audio.add(AudioSource { bytes: bytes.clone().into() });
-        bank.clips.insert(wav.clone(), (source, *min, *max, *volume));
+        bank.clips.insert(wav.clone(), (source, row.min, row.max, row.volume));
     }
     println!("sound bank: {} clips with fade radii", bank.clips.len());
     commands.insert_resource(bank);
@@ -29064,13 +29803,38 @@ struct RouteTraceOut(Option<std::path::PathBuf>);
 #[derive(Resource, Default)]
 struct AudioTraceOut(Option<std::path::PathBuf>);
 
-/// The one-shot sounds that actually played since the last audio-trace sample: `(replay tick, wav,
-/// gain)`. `gain` is the mixer's attenuated volume (`snd::volume`), so a sound 10 units away and one
-/// at the listener are different numbers, which is what "differently attenuated" means.
+/// One played sound: the replay tick and engine instant, the wav, the gain `snd::volume` produced,
+/// and the request data the schedule re-derives that gain from. `snd`, `event`, `min`, `max` and
+/// `max_volume` are the shipped `.snd` row, so a schedule row says which engine call asked for the
+/// sound and which data shaped it.
+#[derive(Clone, Debug, PartialEq)]
+struct PlayedSound {
+    tick: u32,
+    time_s: f64,
+    wav: String,
+    gain: f32,
+    volume: f32,
+    distance: f32,
+    forward: f32,
+    snd: String,
+    event: String,
+    min: f32,
+    max: f32,
+    max_volume: f32,
+    source: &'static str,
+}
+
+/// The one-shot sounds that actually played since the last audio-trace sample.
 #[derive(Resource, Default)]
 struct AudioLog {
-    played: Vec<(u32, String, f32)>,
+    played: Vec<PlayedSound>,
 }
+
+/// `--audio-schedule <path>`: the expected one-shot schedule for the replay, written as each sound
+/// plays. `--audio-trace` samples the log into 600 ms windows; this is the event list beneath it,
+/// with the engine function and the shipped `.snd` row that produced every event.
+#[derive(Resource, Default)]
+struct AudioScheduleOut(Option<std::path::PathBuf>);
 
 /// The script's input for the tick `route_replay` is on, read by `walk_player`. `None` outside a
 /// replay and on the final tick.
@@ -30890,7 +31654,7 @@ mod registration_tests {
             keys: HashMap::new(),
             ai_classes: HashMap::new(),
             wav_bytes: HashMap::new(),
-            sound_radii: HashMap::new(),
+            sound_rows: HashMap::new(),
             sound_classes: std::collections::BTreeMap::new(),
             gob_entries: 0,
         }

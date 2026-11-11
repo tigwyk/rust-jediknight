@@ -603,6 +603,42 @@ tick  t_s  music  music_end  music_loop  music_vol  ambient  ambient_vol  sounds
   out of the pass/fail, while a route-controlled sound (door/switch/fade/script) still compares. The
   classifier's four categories are exercised by the self-check and the port oracle.
 
+### One-shot schedule (issue #18)
+
+The audio trace samples the mixer every 600 ms; the one-shot oracle is the **event list** beneath it.
+`--audio-schedule <path>` (needs `--replay`) writes one row per played one-shot:
+
+```text
+tick  time_s  wav  gain  volume  distance  forward  min_radius  max_radius  max_volume  snd  event  source
+```
+
+- `tick`/`time_s` are the replay's own tick and engine clock (`sithTime_Advance`'s step) — the time
+  the engine played it, not a wall clock.
+- `gain` is the mixer's attenuated volume (`snd::volume`); `volume` is the request's base volume and
+  `distance`/`forward` the listener geometry it was computed from, so the gain can be re-derived.
+- `min_radius`/`max_radius`/`max_volume`, `snd` and `event` are the **shipped `.snd` row** the bank
+  loaded for that wav (class basename and event name), so every event names the data behind it.
+- `source` is the engine call that queued it, with its address: `sithSoundClass_PlayModeRandom`
+  (`0x4e6b70`) for AI chatter and hurt cries, `sithWeapon_WeaponFireProjectile` (`0x4d45a0`) ->
+  `sithSoundMixer_PlaySoundThing` (`0x4dba60`) for shots, and the cog `PlaySoundThing`/`PlaySoundPos`/
+  `PlaySoundLocal` verbs through `sithSoundMixer_PlaySoundThing` (`0x4dba60`) /
+  `sithSoundMixer_PlaySoundPos` (`0x4db880`) / `sithSoundMixer_PlaySound` (`0x4db4f0`).
+
+The committed `level1-audio-schedule.tsv` is the route's expected schedule. The gate compares a fresh
+replay against it (`--audio-schedule-compare`), re-derives every row from the install's `.snd` classes
+with no replay (`--audio-schedule-verify`: the row's class/event must exist with that wav and those
+radii and volume, and the mixer's own fade formula over them — worked out again in the verifier, not
+`snd::volume` — must give the row's gain), and checks that the trace's windows carry exactly those
+events (`--audio-trace-vs-schedule`). It then perturbs the replay's own schedule four ways — one row
+dropped, one added, one moved a 600 ms window, one gain moved 0.25 — and requires
+`missing`/`extra`/`mistimed`/`attenuated` respectively.
+
+This replaces the retail side of `sounds` as the one-shot oracle: the retail capture's one-shots are
+its own AI/body events on a different clock, so they stay evidence, and the schedule's **event times**
+come from the port's decomp-derived engine clock and AI phase, with no retail capture. What the
+schedule cannot show by itself is gameplay behaviour: an AI that fires at the wrong moment changes the
+schedule, and that is what the committed fixture catches.
+
 ```powershell
 pwsh -NoProfile -File tools/parity/audio-gate.ps1            # determinism + port oracle + retail + door
 pwsh -NoProfile -File tools/parity/audio-gate.ps1 -Perturb   # ... and prove a 0.25 gain change fails
@@ -624,6 +660,7 @@ Files:
 | `tools/parity/routes/level1-audio-route-door.tsv` | The doorway alone, captured in a **fresh process** (`retail-capture.ps1 -Only route_door -AudioRoute … -AudioRouteOut …`). In a fresh process retail crosses: `bar_in` reaches `y -5.187` by tick 36 and `bar_out` fires `crossed`, taking `currvol` 0.25 at tick 288, 0.50 at 324 (0.75 at the script's end). In the full four-leg process retail's body wedges on the elevator car's shut leaf and never crosses, so the door leg's state is only measurable from a fresh process. |
 | `tools/parity/audiotrace/level1-audio-retail.tsv` | **Captured from retail** by `retail-capture.ps1 -AudioRoute tools/parity/routes/level1-audio-route.tsv -AudioRouteOut tools/parity/audiotrace/level1-audio-retail.tsv`: the harness boots level 1 with `-devMode`, applies each route leg's `warp` through the dev console, holds forward for the leg, and reads the engine's own state at every 600 ms of route game time — song range and loop flag (0x008BBC74/0x008BBC70/0x00835FCC), `SetMusicVol`'s value (f32 0x0054A678), and the 32-entry mixer table at 0x00835FE8 (sound name from the sound struct's own char[32], loop bit 0x1, volume, radii, distance) for the ambience loop and the one-shots. Capture instrumentation only: no shipping behavior changes. |
 | `tools/parity/audiotrace/level1-audio-port.tsv` | The port's committed oracle, produced by the replay. |
+| `tools/parity/audiotrace/level1-audio-schedule.tsv` | Issue #18's expected one-shot schedule for `level1-audio-route.tsv`: one row per played one-shot with its engine time, wav, gain, the listener geometry and shipped `.snd` row behind it, and the engine call that queued it. The gate compares a fresh replay against it and re-derives every row from the install's `.snd` classes without a replay. |
 | `tools/parity/audio-gate.ps1` | The gate above. |
 | `tools/parity/audiotrace/level1-audio-door-port.tsv` / `-door-retail.tsv` | The bar doorway captured on its own in a **fresh process** (`level1-audio-route-door.tsv`), where retail crosses: `bar_in` reaches `y -5.187` by tick 36, `bar_out` fires `crossed`, and `currvol` takes 0.15 at tick 252 and 0.40 at 288. The port fades from tick 216 (0.05/0.35/0.65): the fade curve is ~0.2 ahead of retail's (phase -36 ticks). The gate compares this pair event-aligned (first fade change from 0, not raw tick numbers): 2 aligned samples, worst delta 0.100 within 0.12, and it passes. |
 

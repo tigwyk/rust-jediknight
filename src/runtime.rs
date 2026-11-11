@@ -105,6 +105,9 @@ pub struct SoundRequest {
     pub channel: usize,
     /// `ChangeSoundPitch`'s multiplier for this channel (`sithSoundMixer_SetPitch`).
     pub pitch: f32,
+    /// The engine call that queued it, with its address: the one-shot schedule's `source` column.
+    /// It names the function that owns the sound, not the port's plumbing.
+    pub source: &'static str,
 }
 
 /// A positional/ambient **loop** a script started (`PlaySoundThing`/`PlaySoundPos` with a loop or
@@ -4046,6 +4049,7 @@ impl Runtime {
             pos: Some(at),
             channel,
             pitch: 1.0,
+            source: "sithSoundClass_PlayModeRandom (0x4e6b70) -> sithSoundMixer_PlaySoundThing (0x4dba60)",
         });
     }
     /// `dodge`'s damage path (`0x50b360`, event 1): an actor whose class carries the instinct and is
@@ -6773,7 +6777,14 @@ impl Runtime {
         let channel = self.sound_volume.len();
         self.sound_volume.push(1.0);
         self.sound_pitch.push(1.0);
-        self.sounds.push(SoundRequest { name: wav, volume: 1.0, pos: Some(at), channel, pitch: 1.0 });
+        self.sounds.push(SoundRequest {
+            name: wav,
+            volume: 1.0,
+            pos: Some(at),
+            channel,
+            pitch: 1.0,
+            source: "sithWeapon_WeaponFireProjectile (0x4d45a0) -> sithSoundMixer_PlaySoundThing (0x4dba60)",
+        });
     }
 
     /// `TakeItem(item, player)`: the item leaves the world and the player's inventory bin
@@ -10773,6 +10784,12 @@ impl Runtime {
                     let channel = self.sound_volume.len();
                     self.sound_volume.push(volume);
                     self.sound_pitch.push(1.0);
+                    let source = match lower.as_str() {
+                        "playsoundlocal" => "cog PlaySoundLocal -> sithSoundMixer_PlaySound (0x4db4f0)",
+                        "playsoundpos" => "cog PlaySoundPos -> sithSoundMixer_PlaySoundPos (0x4db880)",
+                        "playsound" => "cog PlaySound -> sithSoundMixer_PlaySoundThing (0x4dba60)",
+                        _ => "cog PlaySoundThing -> sithSoundMixer_PlaySoundThing (0x4dba60)",
+                    };
                     if flags & 0x1 != 0 {
                         // The engine's ambient installs re-issue the same request every 0.5 s; the
                         // mixer holds one loop per name and place, so refresh instead of stacking.
@@ -10796,7 +10813,7 @@ impl Runtime {
                             });
                         }
                     } else {
-                        self.sounds.push(SoundRequest { name, volume, pos, channel, pitch: 1.0 });
+                        self.sounds.push(SoundRequest { name, volume, pos, channel, pitch: 1.0, source });
                     }
                     Value::Num(channel as f64)
                 } else {
