@@ -15,10 +15,17 @@
   sector's own `SOUND` loop (or a script's `SectorSound`). `sounds` lists every one-shot the window
   played as `wav@gain`, the gain being the mixer's attenuated volume.
 
-  The gate checks four things:
+  The gate checks five things:
 
     1. determinism — two replays of the same route produce identical traces;
     2. the committed port oracle — the replay matches `tools/parity/audiotrace/level1-audio-port.tsv`;
+    2b. the one-shot oracle (issue #18) — `--audio-schedule` writes every played one-shot as
+        `tick  time_s  wav  gain  volume  distance  forward  min_radius  max_radius  max_volume
+        snd  event  source`: the replay's event list must match the committed
+        `level1-audio-schedule.tsv`, every row must re-derive from the shipped `.snd` classes
+        (`--audio-schedule-verify`, no replay), the trace's windows must carry exactly those events
+        (`--audio-trace-vs-schedule`), and a copy with one event dropped, one added, one moved a
+        600 ms window or one gain moved 0.25 must be rejected as missing/extra/mistimed/attenuated;
     3. self-check — a copy of the trace with one sound's gain moved 0.25 is **rejected**, and the
        comparator names it `attenuated` (`-Perturb` runs that check explicitly);
     4. retail — `--audio-compare` against `level1-audio-retail.tsv`, whose header documents the
@@ -38,6 +45,7 @@ param(
   [string]$Level = '01narshadda',
   [string]$Route = 'tools/parity/routes/level1-audio-route.tsv',
   [string]$PortFixture = 'tools/parity/audiotrace/level1-audio-port.tsv',
+  [string]$ScheduleFixture = 'tools/parity/audiotrace/level1-audio-schedule.tsv',
   [string]$RetailFixture = 'tools/parity/audiotrace/level1-audio-retail.tsv',
   [string]$DoorRoute = 'tools/parity/routes/level1-audio-route-door.tsv',
   [string]$DoorPortFixture = 'tools/parity/audiotrace/level1-audio-door-port.tsv',
@@ -59,6 +67,7 @@ function Resolve-PathUnderRoot([string]$Path) {
 
 $RoutePath = Resolve-PathUnderRoot $Route
 $PortPath = Resolve-PathUnderRoot $PortFixture
+$SchedulePath = Resolve-PathUnderRoot $ScheduleFixture
 $RetailPath = Resolve-PathUnderRoot $RetailFixture
 $DoorRoutePath = Resolve-PathUnderRoot $DoorRoute
 $DoorPortPath = Resolve-PathUnderRoot $DoorPortFixture
@@ -75,23 +84,27 @@ if (-not (Test-Path -LiteralPath $PortPath)) {
 if (-not (Test-Path -LiteralPath $RetailPath)) {
   throw "missing the retail-derived fixture $RetailPath"
 }
+if (-not (Test-Path -LiteralPath $SchedulePath)) {
+  throw "missing the decomp-derived one-shot schedule $SchedulePath"
+}
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $runA = Join-Path $OutDir 'level1-audio-a.tsv'
 $runB = Join-Path $OutDir 'level1-audio-b.tsv'
 $log = Join-Path $OutDir 'level1-audio-port.log'
 
-function Invoke-Replay([string]$Trace, [string]$Route = $RoutePath) {
+function Invoke-Replay([string]$Trace, [string]$Route = $RoutePath, [string]$Kind = 'trace') {
   if (Test-Path -LiteralPath $Trace) { Remove-Item -LiteralPath $Trace -Force }
   $env:BK_HEADLESS = '1'
   try {
-    $arguments = @('--start', $Level, '--replay', $Route, '--audio-trace', $Trace, '--mute')
+    $flag = if ($Kind -eq 'schedule') { '--audio-schedule' } else { '--audio-trace' }
+    $arguments = @('--start', $Level, '--replay', $Route, $flag, $Trace, '--mute')
     if ($Game) { $arguments = @('--game', $Game) + $arguments }
     & $Exe @arguments *> $log
   } finally {
     Remove-Item Env:BK_HEADLESS -ErrorAction SilentlyContinue
   }
-  if (-not (Test-Path -LiteralPath $Trace)) { throw "the replay wrote no trace ($Trace); see $log" }
+  if (-not (Test-Path -LiteralPath $Trace)) { throw "the replay wrote no $Kind ($Trace); see $log" }
 }
 
 Write-Host 'audio gate: replaying the scripted route twice...'
@@ -113,6 +126,121 @@ if ($LASTEXITCODE -ne 0) {
   exit 1
 }
 Write-Host ("PASS  oracle: the replay matches {0}" -f $PortFixture)
+
+# 2b. The one-shot oracle (issue #18). `--audio-schedule` writes the replay's event list: every
+# one-shot with its engine time, wav, gain, and the engine call and shipped `.snd` row behind it.
+# The gate checks it four ways:
+#   * the replay's schedule matches the committed expected schedule;
+#   * every event is re-derived from the shipped `.snd` classes with no replay
+#     (`--audio-schedule-verify`);
+#   * the trace's 600 ms windows carry exactly those events (`--audio-trace-vs-schedule`);
+#   * a schedule with one event dropped, one added, one moved a window, or one gain moved 0.25 is
+#     rejected, each naming its own class.
+Write-Host 'audio gate: replaying the scripted route for its one-shot schedule...'
+$schedule = Join-Path $OutDir 'level1-audio-schedule.tsv'
+Invoke-Replay $schedule $RoutePath 'schedule'
+
+& $Exe --audio-schedule-compare $SchedulePath $schedule
+if ($LASTEXITCODE -ne 0) {
+  Write-Host ("FAIL  one-shot oracle: the replay does not match {0}" -f $ScheduleFixture)
+  exit 1
+}
+Write-Host ("PASS  one-shot oracle: the replay matches {0}" -f $ScheduleFixture)
+
+$verifyArguments = @('--audio-schedule-verify', $SchedulePath)
+if ($Game) { $verifyArguments = @('--game', $Game) + $verifyArguments }
+& $Exe @verifyArguments
+if ($LASTEXITCODE -ne 0) {
+  Write-Host 'FAIL  one-shot oracle: the scheduled wav/gain does not follow from the shipped .snd classes'
+  exit 1
+}
+Write-Host 'PASS  one-shot oracle: every event re-derives from the shipped .snd classes'
+
+& $Exe --audio-trace-vs-schedule $runA $schedule
+if ($LASTEXITCODE -ne 0) {
+  Write-Host 'FAIL  one-shot oracle: the trace windows do not carry the scheduled events'
+  exit 1
+}
+Write-Host 'PASS  one-shot oracle: the trace carries the scheduled events window by window'
+
+# The four perturbations run against the replay's own schedule (the observed side), so each names
+# what a broken mixer would do. One wav that occurs exactly once is chosen, so the classification
+# is unambiguous.
+$scheduleLines = Get-Content -LiteralPath $schedule
+$scheduleHeader = @($scheduleLines[0] -split "`t")
+$scheduleBody = @($scheduleLines | Select-Object -Skip 1 | Where-Object { $_.Trim() -ne '' })
+if ($scheduleBody.Count -eq 0) { throw 'the replay wrote an empty one-shot schedule' }
+$tickColumn = [Array]::IndexOf($scheduleHeader, 'tick')
+$timeColumn = [Array]::IndexOf($scheduleHeader, 'time_s')
+$wavColumn = [Array]::IndexOf($scheduleHeader, 'wav')
+$gainColumn = [Array]::IndexOf($scheduleHeader, 'gain')
+foreach ($column in @($tickColumn, $timeColumn, $wavColumn, $gainColumn)) {
+  if ($column -lt 0) { throw 'the one-shot schedule has no tick/time_s/wav/gain column' }
+}
+$wavCounts = @{}
+foreach ($line in $scheduleBody) {
+  $name = (@($line -split "`t")[$wavColumn]).ToLowerInvariant()
+  if ($wavCounts.ContainsKey($name)) { $wavCounts[$name] = $wavCounts[$name] + 1 } else { $wavCounts[$name] = 1 }
+}
+$uniqueIndex = -1
+for ($i = 0; $i -lt $scheduleBody.Count; $i++) {
+  $name = (@($scheduleBody[$i] -split "`t")[$wavColumn]).ToLowerInvariant()
+  if ($wavCounts[$name] -eq 1) { $uniqueIndex = $i; break }
+}
+if ($uniqueIndex -lt 0) { throw 'every scheduled wav repeats; the schedule cannot be perturbed unambiguously' }
+
+function Save-Schedule([string]$Path, [string[]]$Rows) {
+  Set-Content -LiteralPath $Path -Value (@($scheduleLines[0]) + $Rows) -Encoding utf8
+}
+
+function Assert-ScheduleRejected([string]$Path, [string]$Word, [string]$What) {
+  $out = & $Exe --audio-schedule-compare $SchedulePath $Path 2>&1
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host ("FAIL  self-check: {0} passed the one-shot comparator" -f $What)
+    exit 1
+  }
+  if (-not (($out -join "`n") -match $Word)) {
+    Write-Host ("FAIL  self-check: {0} was not reported as {1}" -f $What, $Word)
+    $out | Write-Host
+    exit 1
+  }
+  Write-Host ("PASS  self-check: {0} is rejected as {1}" -f $What, $Word.TrimEnd(':'))
+}
+
+$missingRows = @()
+for ($i = 0; $i -lt $scheduleBody.Count; $i++) {
+  if ($i -ne $uniqueIndex) { $missingRows += $scheduleBody[$i] }
+}
+$missingPath = Join-Path $OutDir 'level1-audio-schedule-missing.tsv'
+Save-Schedule $missingPath $missingRows
+Assert-ScheduleRejected $missingPath 'missing:' 'a skipped one-shot'
+
+$extraCells = @($scheduleBody[$uniqueIndex] -split "`t")
+$extraCells[$wavColumn] = 'zz-schedule-extra.wav'
+$extraCells[$tickColumn] = [string]([int]$extraCells[$tickColumn] + 216)
+$extraCells[$timeColumn] = ([double]$extraCells[$timeColumn] + 3.6).ToString('0.0000', [cultureinfo]::InvariantCulture)
+$extraPath = Join-Path $OutDir 'level1-audio-schedule-extra.tsv'
+Save-Schedule $extraPath (@($scheduleBody) + (($extraCells -join "`t")))
+Assert-ScheduleRejected $extraPath 'extra:' 'a sound the route never played'
+
+$shiftedCells = @($scheduleBody[$uniqueIndex] -split "`t")
+$shiftedCells[$tickColumn] = [string]([int]$shiftedCells[$tickColumn] + 36)
+$shiftedCells[$timeColumn] = ([double]$shiftedCells[$timeColumn] + 0.6).ToString('0.0000', [cultureinfo]::InvariantCulture)
+$shiftedRows = @($scheduleBody)
+$shiftedRows[$uniqueIndex] = ($shiftedCells -join "`t")
+$shiftedPath = Join-Path $OutDir 'level1-audio-schedule-shifted.tsv'
+Save-Schedule $shiftedPath $shiftedRows
+Assert-ScheduleRejected $shiftedPath 'mistimed:' 'a one-shot one window late'
+
+$quietCells = @($scheduleBody[$uniqueIndex] -split "`t")
+$quietCells[$gainColumn] = ([double]$quietCells[$gainColumn] + 0.25).ToString('0.0000', [cultureinfo]::InvariantCulture)
+$quietRows = @($scheduleBody)
+$quietRows[$uniqueIndex] = ($quietCells -join "`t")
+$quietPath = Join-Path $OutDir 'level1-audio-schedule-attenuated.tsv'
+Save-Schedule $quietPath $quietRows
+Assert-ScheduleRejected $quietPath 'attenuated:' 'a one-shot moved 0.25 in gain'
+
+Write-Host ("PASS  one-shot oracle: {0} event(s), every failure class rejected" -f $scheduleBody.Count)
 
 # 3. The comparator must reject a trace whose mix changed. Move the gain of the first recorded
 # sound by 0.25: that is an attenuation difference, and the comparator must call it one.
