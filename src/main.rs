@@ -16150,12 +16150,6 @@ struct RoutePlan {
 /// segments the engine into (`Invoke-JkWalkTrace`'s `HoldMs`).
 const ROUTE_SAMPLE_TICKS: u32 = 36;
 
-/// Game-clock seconds per wall-clock second in the route captures: the engine walks 1.2 u/s
-/// (measured by the walk traces) but covers 0.88-0.92 u/s of the fixture's 600 ms wall samples,
-/// because the console/dialog pauses hold the game clock. The replay scales its dt so positions at
-/// the fixture's sample ticks line up with retail's.
-const ROUTE_TIME_SCALE: f32 = 0.85;
-
 /// The level-1 cogs the route trace carries: the upper door (`00_door.cog`, placed cog 0) and the
 /// cantina door switch (`00_doorswitch.cog`, placed cog 11). The symbol names differ between them
 /// (`opendoors`/`closedoors` vs `open_doors`/`close_doors`), which is why each has its own row.
@@ -16422,9 +16416,11 @@ fn parse_route_trace(text: &str) -> Result<RouteTrace, String> {
 }
 
 /// Compare two route traces field by field. `epsilon` is the absolute tolerance for every numeric
-/// column except `tick` (exact) and `sector` (an integer identity, exact): a sector difference is a
-/// different room, never a rounding error. A field that either side does not have (`-`) is skipped,
-/// and the caller's summary counts how many were actually compared.
+/// column except `tick` (exact), `t_s` (exact: the engine clock is an identity, so a sample taken at
+/// a different engine instant is a different measurement, not a rounding error) and `sector` (an
+/// integer identity, exact): a sector difference is a different room, never a rounding error. A field
+/// that either side does not have (`-`) is skipped, and the caller's summary counts how many were
+/// actually compared.
 ///
 /// The **expected** trace sets the coverage: its columns and its row span are what is graded, so a
 /// fixture taken before a segment existed still checks the part of the route it measured, and the
@@ -16508,6 +16504,16 @@ fn compare_route_rows(
                 }
                 continue;
             }
+            // The engine clock is an identity (issue #17): two samples at different engine instants
+            // are different measurements, so no position tolerance may excuse one.
+            if *field == "t_s" {
+                if want != got {
+                    failures.push(format!(
+                        "tick {tick} t_s: expected {want:.4}, trace has {got:.4} (engine instants differ)"
+                    ));
+                }
+                continue;
+            }
             if !delta.is_finite() || delta > epsilon {
                 failures.push(format!(
                     "tick {tick} {field}: expected {want:.4}, trace has {got:.4} (delta {delta:.4})"
@@ -16564,15 +16570,18 @@ fn route_trace_compare(
     Ok(())
 }
 
-/// One route-trace line. `x/y/z` are the player **body** position — the value retail's `coords`
-/// prints (the camera rides one `eyeOffset` above it, so a `shots.tsv` eye is 0.037 higher) — and a
-/// retail capture and this trace therefore name the same point. `vel_x`/`vel_y`/`vel_z` are the
-/// position derivative over the 600 ms sample window, in level units per second — the retail
-/// fixture's own definition. A field the run does not have is `-`: a level without the two route
-/// cogs, or a retail capture that did not record health.
+/// One route-trace line. `t_s` is the engine clock the row was sampled at (issue #17): the
+/// simulation's own accumulated time, so a body that ran on a different clock cannot declare one.
+/// `x/y/z` are the player **body** position — the value retail's `coords` prints (the camera rides
+/// one `eyeOffset` above it, so a `shots.tsv` eye is 0.037 higher) — and a retail capture and this
+/// trace therefore name the same point. `vel_x`/`vel_y`/`vel_z` are the position derivative over the
+/// sample window, in level units per second — the retail fixture's own definition. A field the run
+/// does not have is `-`: a level without the two route cogs, or a retail capture that did not record
+/// health.
 fn write_route_trace_row(
     path: &std::path::Path,
     tick: u32,
+    engine_s: f64,
     body: &runtime::PlayerBody,
     vel: [f32; 3],
     audio: &SampledAudio,
@@ -16651,7 +16660,7 @@ fn write_route_trace_row(
         file,
         "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{music}\t{music_end}\t{music_loop}\t{:.3}\t{ambient}\t{ambient_volume}\t{sounds}",
         tick,
-        f64::from(tick) / 60.0,
+        engine_s,
         body.pos.x,
         body.pos.y,
         body.pos.z,
@@ -17021,6 +17030,7 @@ fn audio_trace_compare(
 fn write_audio_trace_row(
     path: &std::path::Path,
     tick: u32,
+    engine_s: f64,
     music: Option<(i32, i32, i32)>,
     music_volume: f32,
     ambient: Option<&(String, f32)>,
@@ -17055,8 +17065,7 @@ fn write_audio_trace_row(
         .join(" ");
     let _ = writeln!(
         file,
-        "{tick}\t{:.4}\t{music}\t{end}\t{loops}\t{music_volume:.3}\t{ambient_name}\t{ambient_volume}\t{sounds}",
-        f64::from(tick) / 60.0,
+        "{tick}\t{engine_s:.4}\t{music}\t{end}\t{loops}\t{music_volume:.3}\t{ambient_name}\t{ambient_volume}\t{sounds}",
     );
 }
 
@@ -17172,6 +17181,7 @@ fn sample_audio_state(
 fn audio_trace_sample(
     replay: Option<Res<RouteReplay>>,
     out: Option<Res<AudioTraceOut>>,
+    capture: Option<Res<CaptureDt>>,
     cursor: Option<Res<RouteCursor>>,
     player: Option<Res<Player>>,
     sim: Option<Res<Sim>>,
@@ -17213,6 +17223,9 @@ fn audio_trace_sample(
     write_audio_trace_row(
         path,
         tick,
+        // The audio rows sit on the route's engine clock too: the sample tick times the step the
+        // replay pinned, never an assumed 1/60.
+        f64::from(tick) * f64::from(capture.as_deref().and_then(|c| c.0).unwrap_or(1.0 / 60.0)),
         state.music,
         state.music_volume,
         state.ambient.as_ref(),
@@ -17325,6 +17338,40 @@ input 72 1 0
             port.rows.len() > retail.rows.len(),
             "the port oracle must carry the exit segment the retail fixture does not"
         );
+    }
+
+    /// Issue #17: the trace's `t_s` is the engine clock, so it is an identity like `tick`, not a
+    /// measured quantity. A replay that ran its body on a scaled capture clock records a different
+    /// engine instant at the same sample and must fail here — the position tolerances must not be
+    /// the way back in.
+    #[test]
+    fn engine_time_is_graded_exactly() {
+        let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("fixture");
+        let expected = parse_route_trace(&text).expect("fixture parses");
+        let t_s = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "t_s").unwrap();
+        let mut late = expected.clone();
+        // One sample 10 ms off the engine instant: inside the position epsilon, not inside the clock.
+        *late.rows[1].values[t_s].as_mut().expect("the second row has a t_s") += 0.01;
+        let error = compare_route_rows(&expected, &late, 1e-6, true)
+            .expect_err("a sample off the engine instant must fail");
+        assert!(error.contains("t_s"), "{error}");
+        assert!(
+            compare_route_rows(&expected, &late, 1.0, true).is_err(),
+            "a wider position tolerance must not excuse a different engine instant"
+        );
+    }
+
+    /// The replay's clock is the simulation's own accumulated time (`sithTime_Advance`'s frame delta
+    /// for a pinned capture step), so 36 ticks is 0.6000 s of engine time — never the wall-clock hold
+    /// the fixture rows were polled on.
+    #[test]
+    fn the_replay_clock_is_the_simulations_own_step() {
+        let mut cursor = RouteCursor::default();
+        for _ in 0..36 {
+            cursor.advance_engine_clock(1.0 / 60.0);
+        }
+        assert_eq!(cursor.tick, 36);
+        assert!((cursor.engine_s - 0.6).abs() < 1e-6, "the clock read {} after 36 ticks", cursor.engine_s);
     }
 
     #[test]
@@ -17570,17 +17617,19 @@ tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
     }
 
     /// The trace's velocity is the retail fixture's quantity — the position derivative over the
-    /// 600 ms window — so a body pinned against a wall reads zero, not the velocity it kept asking
-    /// for, and a warp row is a new leg rather than the jump between two rooms.
+    /// sample window's **engine** time — so a body pinned against a wall reads zero, not the velocity
+    /// it kept asking for, and a warp row is a new leg rather than the jump between two rooms.
     #[test]
     fn the_route_trace_velocity_is_the_position_derivative() {
-        let before = Some(([0.0, 0.0, -1.0], 0));
-        let moved = route_sample_velocity(before, [1.2, -0.6, -1.06], 36, false);
+        let before = Some(([0.0, 0.0, -1.0], 0.0));
+        let moved = route_sample_velocity(before, [1.2, -0.6, -1.06], 0.6, false);
         assert!((moved[0] - 2.0).abs() < 1e-5, "x velocity {moved:?}");
         assert!((moved[1] + 1.0).abs() < 1e-5, "y velocity {moved:?}");
         assert!((moved[2] + 0.1).abs() < 1e-5, "z velocity {moved:?}");
-        assert_eq!(route_sample_velocity(before, [9.0, 9.0, 9.0], 36, true), [0.0; 3]);
-        assert_eq!(route_sample_velocity(None, [1.0, 2.0, 3.0], 36, false), [0.0; 3]);
+        assert_eq!(route_sample_velocity(before, [9.0, 9.0, 9.0], 0.6, true), [0.0; 3]);
+        assert_eq!(route_sample_velocity(None, [1.0, 2.0, 3.0], 0.6, false), [0.0; 3]);
+        // A window whose engine clock did not advance cannot divide by zero.
+        assert_eq!(route_sample_velocity(before, [9.0, 9.0, 9.0], 0.0, false), [0.0; 3]);
     }
 
     /// The route trace's audio columns are text where the mixer names a wav (`ambient`, `sounds`)
@@ -28538,7 +28587,8 @@ impl Rules {
             // = 0.4375 is 40% under retail's own straight-leg walk traces: `walk_street90` measures
             // 1.07-1.23 u/s, `walk_street45` 0.92, `walk5_spawn` ~1.2. The route trace's per-wall-clock
             // 0.88-0.92 is the same 1.2 speed with the capture's game clock advancing ~0.85 s per wall
-            // second (the console/dialog pauses), which the route replay scales for (`ROUTE_TIME_SCALE`).
+            // second under the console/dialog pauses. The replay no longer scales for that (issue
+            // #17): it runs the engine's own clock, so its samples are at engine instants.
             walk: 1.2,
             jump: jump_speed * physics_scale(),
             gravity: level.gravity * physics_scale(),
@@ -29027,34 +29077,52 @@ struct AudioLog {
 #[derive(Resource, Default)]
 struct RouteNow(Option<RouteInput>);
 
-/// Where the replay is in its script, in ticks.
+/// Where the replay is in its script, in ticks, and the simulation's own clock.
+///
+/// `engine_s` is the engine clock — `sithTime_Advance`'s (`0x4dd640`) frame delta accumulated over
+/// the replay: for a pinned capture step that is the step itself, inside the function's [10, 500] ms
+/// clamp. It is advanced by the same `dt` the simulation systems were handed, so the trace's `t_s`
+/// is the time the body actually moved, not the wall-clock hold the fixture row was polled on.
 #[derive(Resource, Default)]
 struct RouteCursor {
     tick: u32,
+    engine_s: f64,
 }
 
-/// The previous sampled body position and tick, so the trace's velocity columns are the retail
-/// fixture's definition — the position derivative over the 600 ms window — and not the integrated
-/// intent, which a body pinned against a wall keeps reporting. `door0_opened` is the trace's own
-/// latch: the door script re-closes two seconds after it opens, so a sample can miss the open frame.
+impl RouteCursor {
+    /// Advance one replay tick. `step` is `CaptureDt`, the value `sim_dt` and `walk_player` hand the
+    /// engine that frame, so the clock and the simulation cannot disagree.
+    fn advance_engine_clock(&mut self, step: f32) {
+        self.tick += 1;
+        self.engine_s += f64::from(step);
+    }
+}
+
+/// The previous sampled body position and engine instant, so the trace's velocity columns are the
+/// retail fixture's definition — the position derivative over the sample window — and not the
+/// integrated intent, which a body pinned against a wall keeps reporting. `door0_opened` is the
+/// trace's own latch: the door script re-closes two seconds after it opens, so a sample can miss the
+/// open frame.
 #[derive(Resource, Default)]
 struct RoutePrev {
-    sample: Option<([f32; 3], u32)>,
+    sample: Option<([f32; 3], f64)>,
     door0_opened: bool,
 }
 
 /// The route trace's velocity columns: the position derivative over the sample window, in level units
 /// per second. A warp row is a new leg — retail's own warp rows read zero, and the jump between two
-/// rooms is not a velocity.
+/// rooms is not a velocity. The window is the engine clock's, so a sample whose engine instant moved
+/// (a different capture step, or a hold that did not advance the clock) cannot hide in a 600 ms
+/// wall-clock denominator.
 fn route_sample_velocity(
-    prev: Option<([f32; 3], u32)>,
+    prev: Option<([f32; 3], f64)>,
     pos: [f32; 3],
-    tick: u32,
+    engine_s: f64,
     warped: bool,
 ) -> [f32; 3] {
     match prev {
-        Some((before, before_tick)) if !warped && tick > before_tick => {
-            let window = (tick - before_tick) as f32 / 60.0;
+        Some((before, before_engine)) if !warped && engine_s > before_engine => {
+            let window = (engine_s - before_engine) as f32;
             [
                 (pos[0] - before[0]) / window,
                 (pos[1] - before[1]) / window,
@@ -29422,6 +29490,7 @@ fn sky_follows_camera(
 fn route_replay(
     plan: Option<Res<RouteReplay>>,
     out: Option<Res<RouteTraceOut>>,
+    capture: Option<Res<CaptureDt>>,
     mut cursor: ResMut<RouteCursor>,
     mut prev: ResMut<RoutePrev>,
     mut now: ResMut<RouteNow>,
@@ -29484,8 +29553,9 @@ fn route_replay(
         && let Some(path) = out.as_deref().and_then(|o| o.0.as_deref())
     {
         let pos = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
-        let vel = route_sample_velocity(prev.sample, pos, tick, plan.warp_at(tick).is_some());
-        prev.sample = Some((pos, tick));
+        let engine_s = cursor.engine_s;
+        let vel = route_sample_velocity(prev.sample, pos, engine_s, plan.warp_at(tick).is_some());
+        prev.sample = Some((pos, engine_s));
         let audio = match sim.as_deref() {
             Some(sim) => sample_audio_state(
                 sim,
@@ -29507,6 +29577,7 @@ fn route_replay(
         write_route_trace_row(
             path,
             tick,
+            engine_s,
             &player.body,
             vel,
             &audio,
@@ -29515,7 +29586,11 @@ fn route_replay(
             &mut prev.door0_opened,
         );
     }
-    cursor.tick += 1;
+    // The clock advances by the step the simulation was handed this frame (`sim_dt`/`walk_player`),
+    // so sample `k` records `k` steps of engine time — the same instants the retail fixture's holds
+    // were polled at, and never a wall-clock one.
+    let step = capture.as_deref().and_then(|c| c.0).unwrap_or(1.0 / 60.0);
+    cursor.advance_engine_clock(step);
     if tick == plan.total {
         now.0 = None;
         exit.write(AppExit::Success);
@@ -29584,15 +29659,10 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     } else {
         time.delta_secs().min(0.1)
     };
-    // The route capture's 600 ms samples are wall-clock: the engine's game clock advanced ~0.85 s per
-    // second (the console/dialog pauses), and retail's per-wall travel (0.88-0.92 u/s) is the engine's
-    // measured 1.2 u/s times that. The replay uses the same clock so its positions line up with the
-    // fixture's samples.
-    let dt = if route_now.as_deref().and_then(|now| now.0).is_some() {
-        dt * ROUTE_TIME_SCALE
-    } else {
-        dt
-    };
+    // The replay runs the engine's own clock (issue #17): a pinned step is `sithTime_Advance`'s
+    // frame delta for that frame — inside its [10, 500] ms clamp — so the walker, the scripts and
+    // the trace's `t_s` all advance by the same time. A capture-clock scale here used to make the
+    // body move less than a row claimed, which no position tolerance should have to hide.
 
     // A script can move the player: `force_jump.cog` does `SetThingVel(player, (0,0,duration
     // + 2.5))`; the runtime step consumes that one-shot impulse. The force-speed term is script

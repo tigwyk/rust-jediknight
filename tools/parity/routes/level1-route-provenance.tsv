@@ -35,5 +35,5 @@ audio state	sithSoundMixer_PlaySoundPos	0x4db880	sample_audio_state	src/main.rs	
 audio state	sithSoundMixer_UpdateSoundPos	0x4dcc00	sample_audio_state	src/main.rs	ported	
 level end	sithMain_SetEndLevel	0x4c4bf0	jkendlevel	src/runtime.rs	ported	
 level end	jkMain_EndLevel	0x402eb0	jk_main_end_level	src/main.rs	ported	
-walk	sithTime_Advance	0x4dd640	ROUTE_TIME_SCALE	src/main.rs	deviated	route replay time scale
+walk	sithTime_Advance	0x4dd640	advance_engine_clock	src/main.rs	ported	
 cog messages	sithRender_RenderThing	0x4c8070	cull_sectors	src/main.rs	deviated	per-thing sight approximation

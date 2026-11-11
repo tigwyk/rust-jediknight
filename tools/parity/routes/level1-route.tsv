@@ -11,6 +11,12 @@
 # A leg's length is its retail trace's held-key window (600 ms per retail sample), so the port's
 # 600 ms samples fall on the same ticks as the retail capture's `held_ms` samples.
 #
+# Issue #17: a tick is the engine's own step (`sithTime_Advance`'s dt for the pinned capture frame),
+# not a wall-clock hold. Every row's `t_s` is the replay's accumulated engine clock, the velocity
+# columns are the position derivative over that clock, and the comparator grades `t_s` as an
+# identity — so the port's samples are compared at the retail prefix's engine instants. A `warp` row
+# is the only position jump the trace allows inside the route; the gate fails on any other.
+#
 #   leg      ticks  retail source
 #   spawn     180   tools/parity/walktrace/spawn-walk.tsv  (5 x 600 ms; retaken from retail's
 #                   recorded spawn pose; the level's own start is the same pose)
