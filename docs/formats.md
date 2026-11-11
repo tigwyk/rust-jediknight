@@ -605,6 +605,13 @@ Measured honestly, with "sector visibility" lines as the frame proxy: **1727 fra
 runtime collider and 1690 with it** — no regression from §16.10's `blocked` work. To bound a run, pass
 `--shot` with `--frames`, or kill the process on a timer.
 
+**`--fixed-dt <seconds>` (with `--shot`) pins the step a capture advances the simulation by** instead of
+the capture's 1/60 s, for the walker as well as scripts, AI and combat. `tools/parity/port-encounter.ps1`
+passes the door encounter's 1/30 s engine frame — a model of the frozen encounter, whose cadence
+intervals are whole frames of it (500/600/700/800/900 ms = 15/18/21/24/27; the 667..900 ladder is
+20..27), which the gate validates — while `route_door.tsv`'s ~25 ms samples are a different run. Play
+and route replay keep the wall clock and 1/60 s.
+
 Two probes came out of this and are kept: `BK_COG_TRACE=1` names any label costing more than 5 ms, and
 `BK_NO_SOLIDS=1` switches the runtime collider off for an A/B.
 
@@ -3722,6 +3729,17 @@ clamped to ±100 (and short-circuited to ±100 by bin 18). That is why retail's 
 carries `72=0, 73=10.5, 75=20`: ten and a half "population units" woke up during level 1, none of
 them killed through a script that credits a pedestrian, so the ratio term is zero and the tally's
 stored alignment is the neutral 20.
+
+The carry is the engine's bin table, written as one `sithDSS_Inventory` (`0x4f9900`) record per bin
+in `sithGamesave_SaveCurrentWorld` (`0x4da770`)'s order — 82 records of 28 bytes. `jks::ENGINE_BINS`
+is that table, and `jks::inventory_sections` writes it; the reader parses it back word for word.
+The 10.5 comes from `sithOpenPostProcess` (`0x4c4880`) sending `created` to every thing's class cog
+at level load: the actors' `created:` labels arm a 1 s timer, and the handlers credit 1.0 for a
+civilian and 0.5 for a droid. The two `actor_fn.cog` actors arm `SetTimer(1.0, 1, 0, 0)`, the
+engine's **single** cog timer, which delivers `timer` with sender id 0 (`sithCog_ProcessCog`,
+`0x4e0300`), so their id-1 credit never runs (12.5 − 2.0). `tools/parity/carry-gate.ps1` plays the
+level-1 route, boots level 2 with that carry, and compares level 2's autosave with retail's
+`jkauto-02narshadda.jks` bin for bin.
 
 `SetCurInvWeapon(thing, bin)` and `SelectWeapon(thing, bin)` both arm a weapon by that number
 (the port's `sithCogFunction_SelectWeapon` and `sithCogFunctionThing_SetCurInvWeapon` do the

@@ -30,13 +30,19 @@ The retail side never touches your real installation: it works on a copy under
 `-Software` forces the 8-bit software path. With no working 3D path the world renders black and
 only the HUD appears — see Troubleshooting.
 
+`-Windowed` writes dgVoodoo's windowed config (`FullScreenMode=false`, borderless, `CaptureMouse=true`,
+640x480). **It does not make a retail capture non-invasive on this machine**: the window becomes
+640x480 borderless, but the user still saw the game take over the whole display on every run
+(2026-11-09), so retail runs remain invasive and are opt-in. Do not call a capture windowed on the
+strength of the config alone.
+
 ## Requirements
 
 - Windows 10/11 x64, PowerShell 7 (`pwsh`), `ffmpeg` on `PATH`.
 - A retail **GOG** install of *Star Wars Jedi Knight: Dark Forces II* (the port's normal requirement).
 - The port built: `cargo build --release` (the harness will build it if missing).
-- **Keep hands off the mouse and keyboard while a retail run is in progress** — it is a fullscreen
-  game with the mouse captured, and synthetic input is how the harness drives it.
+- **Keep hands off the mouse and keyboard while a retail run is in progress** — the game captures the
+  mouse, and synthetic input is how the harness drives it.
 
 ## Quick start
 
@@ -194,8 +200,8 @@ Everything below was verified against the GOG build (the harness works on a scra
 - `JK.EXE -devMode` opens a **dev console window** ("Jedi Console", a `#32770` dialog) whose list
   box logs level parses and command output; the harness reads it to know when a level has loaded
   (`parse section things`).
-- The game's menus are **mouse-only** for synthetic input. The 640x480 fullscreen window's screen
-  coordinates equal game coordinates; the two clicks needed are `Single Player (320,195)` and
+- The game's menus are **mouse-only** for synthetic input. The 640x480 game view has screen
+  coordinates equal to game coordinates; the two clicks needed are `Single Player (320,195)` and
   `New Game (304,115)`. The intro film is skipped with `ESC`.
 - **A menu click commits to that screen.** Once an option is clicked you are inside that submenu and
   the only way out is its own `Ok`/`Cancel`; clicking a main-menu item from inside a submenu does
@@ -241,6 +247,15 @@ measurable (Phase 1 step 3's exit criterion). Three scripts and two fixtures:
 - `retail-capture.ps1 -Shots tools/parity/walk-shots.tsv -Only <name> -WalkTraceMs 2400` - the retail
   half. It warps the body to the leg, then holds the UP arrow (the engine's forward binding) and reads
   `coords` between holds; output `target/parity/trace/<name>-walk.tsv`.
+- Add `-UseAfterWalk <key>` to fire the player's own action binding after the walk and before the
+  post-walk console read (`SPACE` is the profile's ACTIVATE binding; `MOUSEMIDDLE` is its mouse
+  alternative; `-UseKey` changes the route plan's `use` key too). `walk_exitdoor` uses it at the
+  authored placement 174 with the intent that the walk stops at the shut door and the hold opens it
+  through `00_door.cog`, with `-ConsoleCommands 'cogstatus 0'` recording `doorstatus`/`movestatus`.
+  That intent is **unverified in retail**: every run so far recorded `doorstatus 0`/`movestatus 0`
+  and no crossing (`docs/gaps.md`), so no retail trace with the door open exists. Issue #15 no longer
+  needs one — the use action, the message it sends and the sighted condition are read from `decomp/`,
+  and the replay's exit segment is the port's own deterministic route.
 - `port-trace.ps1 [-Only <name>]` - the port half: `--warp` to the same pose, `BK_WALK_FORWARD=1`,
   one line per 1/60 s frame, output `target/parity/trace/<name>.tsv`.
 - `trace-compare.ps1 -Name <name> [-Epsilon <units>]` - interpolates the port path to the retail sample
@@ -340,10 +355,11 @@ Files:
 
 | Path | What it is |
 |---|---|
-| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key; the scenario rows take no ticks, so the 600 ms sample grid never moves. There is no `switch` row: retail's `cogstatus 11` reads `doorstatus 0` with that door already open, so the synthetic `activate` it used to send made the port measure a scenario retail never performed. |
+| `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `wait <ticks>` stands still (the door leaf needs game time to finish opening before the next hold); `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key. `wait` takes ticks like an input; `seed`/`use` take none, so the 600 ms sample grid never moves. There is no `switch` row: retail's `cogstatus 11` reads `doorstatus 0` with that door already open, so the synthetic `activate` it used to send made the port measure a scenario retail never performed. |
 | `tools/parity/routetrace/level1-route-retail.tsv` | Retail-derived reference, one row every 600 ms (36 ticks). Provenance is in the file header. |
 | `tools/parity/routetrace/level1-route-port.tsv` | The port's committed oracle, produced by the replay. |
-| `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), compare to the committed port fixture, reject a trace with one position moved 0.25 units, and match the retail reference within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it for an experiment). |
+| `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), check the exit's own events (use names things 4 and 47, `door0_opened` latches after the use, the body crosses the leaf, `goal_bin100` = 3, `level_end` = 1), assert the trace spans the whole plan (sample count and final tick) and carries the audio columns with no `-`, compare to the committed port fixture, reject a trace with one position moved 0.25 units, match the retail reference within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it) over the rows **before** the port-only `exit_door` warp, check the mechanic provenance below, and run `audio-gate.ps1` and `encounter-gate.ps1` as prerequisites (`-SkipPrereqs` for iteration). |
+| `tools/parity/routes/level1-route-provenance.tsv` | Issue #14 AC2: every mechanic the route exercises names its engine function, decomp address, port symbol and source. A `deviated` row names its deviation-ledger entry in `docs/porting-roadmap.md`; the gate and the repo test both verify it. |
 
 The trace format is tab-separated, `#` comments allowed, one header row:
 
@@ -351,6 +367,8 @@ The trace format is tab-separated, `#` comments allowed, one header row:
 tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
       door0_status  door0_movestatus  door0_opendoors  door0_closedoors
       switch_status  switch_movestatus  switch_opendoors  switch_closedoors
+      door0_opened  goal_bin100  level_end
+      music  music_end  music_loop  music_vol  ambient  ambient_vol  sounds
 ```
 
 - `tick` counts 1/60 s steps; `t_s = tick / 60`. Rows are written at ticks `0, 36, 72, ...`
@@ -365,8 +383,40 @@ tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
   both bars per hold segment, so the committed reference has real values here.
 - `door0_*` and `switch_*` are placed cogs 0 (`00_door.cog`) and 11 (`00_doorswitch.cog`), four
   symbols each (`doorstatus`, `movestatus`, and the script's own open/close variables), read with
-  `cogstatus` after each leg's walk. Level 1 has both cogs, so every field is present; the gate
-  rejects any `-` (the comparator would skip it and measure the position columns only).
+  `cogstatus` once per leg end in the retail capture (plus after every `warp`; the dev-console read
+  is the fragile part of a long capture, so the rows between reads carry the last leg-end value) and
+  from the running VM on every replay row. Level 1 has both cogs, so
+  every field is present; the gate rejects any `-` (the comparator would skip it and measure the
+  position columns only).
+- `door0_opened`, `goal_bin100` and `level_end` are **events**, and the rule is different from the
+  other columns: they are graded **only at the fixture's last row**, as identities, not measurements.
+  `door0_opened` latches 1 once the door's own script reports nonzero `doorstatus`/`movestatus`
+  (`00_door.cog` re-closes it two seconds after `arrived`, so a sample may miss the open frame);
+  `goal_bin100` is inventory bin 100, 1 at the level start and 3 after `01_endlevel.cog`'s `user0:`
+  completes goal 0; `level_end` is `sithMain_SetEndLevel`'s never-cleared latch (`0x4c4bf0`), i.e. the
+  level's own `jkEndLevel` ran — a capture keeps the world it booted, so the app's own transition flag
+  is cleared and is not what the trace reads. A 600 ms retail hold advances a variable number of
+  engine frames while the replay advances exactly 36, so the row either side latches on is not
+  comparable; the final state is. A disagreement on an intermediate row is ignored, a missing cell or
+  a different final value fails. The gate also proves the trigger is real: the plan must press the
+  player's use binding (never a synthetic `activate`), the replay log must name things 4 and 47, and
+  `door0_opened` must be 0 on every row strictly before the first use tick; the use-tick row is
+  sampled before the key press and must also read 0.
+- `music`/`music_end`/`music_loop`, `music_vol`, `ambient`/`ambient_vol` and `sounds` are the
+  mixer's state at the same sample — the columns `--audio-trace` writes, carried by the one route
+  trace so the route's audio state is measured at the same points as its pose (issue #14).
+  `music`/`music_end`/`music_loop` are `PlaySong`'s track range and loop flag, `music_vol` is
+  `SetMusicVol`'s value, `ambient` is the loudest audible loop with its channel volume, and
+  `sounds` lists every one-shot played since the previous sample as `wav@gain` (the row is
+  sampled before the tick's own step, the point retail's `coords` poll reads, so a sound played in
+  the sampled tick falls in the next window). A **silent** ambience or window is an empty cell, the
+  mixer's no-song state is `0 0 0`, and no audio cell is `-`.
+  `--route-trace` and `--audio-trace` are rejected together because both drain the one-shot log.
+- **The comparator's coverage is the expected fixture's.** Its header names the columns it measured
+  and its rows are the span it covers; a column it omits and the trace's rows past its last tick are
+  not graded (they are reported). That is what lets the frozen retail capture — 19 columns, rows
+  0-684, taken before the exit segment existed — stay a regression check on the route prefix without a
+  new capture and without widening anything.
 
 A **leg boundary is a `warp`**, not a walk: the retail reference is four separate per-leg captures
 from the level's own authored placements, so the route is the same four walks. Issue #10 fixed what
@@ -378,23 +428,42 @@ the walker climbs — so the legs hold retail's sectors and vertical travel.
 The reference's **bars and cogs come from one continuous retail run**, not four independent leg
 captures: `retail-capture.ps1 -Shots tools/parity/shots.tsv -Only spawn -RouteWalk` reads this same
 route script and runs every leg in one game session (a `warp` between legs, a 600 ms forward hold per
-segment), sampling the bars from engine memory at every segment end. Four per-leg runs each started
-from a fresh level load with their own pre-warp damage, so their bars could not be compared with the
-port's continuous replay. **Both sides capture with the AI off**: the retail walk sets the
-`-devMode` toggles `disableai on` and `noaishots on` (explicitly, and again after every warp, since
-they toggle), and the port's replay passes `--no-ai` (a capture switch that requires `--replay`). The
-route measures movement and cog state, so the cantina ambush is not part of it: it used to kill
-retail's player (100/100 to 0/0 between ticks 180 and 252) while the port survived, which made every
-later bar a guaranteed mismatch. Combat parity is the door encounter's job, and ordinary play keeps
-the AI.
+segment), sampling the bars from engine memory on every row and the cogs once per leg end. Four
+per-leg runs each started from a fresh level load with their own pre-warp damage, so their bars could
+not be compared with the port's continuous replay. **Both sides capture with the AI off**: the
+retail walk sets the `-devMode` toggles `disableai on` and `noaishots on` (explicitly, and again
+after every warp, since they toggle), and the port's replay passes `--no-ai` (a capture switch
+that requires `--replay`). The route measures movement and cog state, so the cantina ambush is not
+part of it: it used to kill retail's player (100/100 to 0/0 between ticks 180 and 252) while the
+port survived, which made every later bar a guaranteed mismatch. Combat parity is the door
+encounter's job, and ordinary play keeps the AI.
+
+**The exit segment (issue #15)** appends the level's own way to 8t88 to those four legs. It starts at
+tick 684 — the frozen retail fixture's own last sample — with a port-only warp, so the gate grades
+that fixture only over the rows before the warp and no measured row changes:
+
+| leg | pose | what it measures |
+|---|---|---|
+| `exit_door` | the port's stop pose at the door, derived from the level geometry: eye `(1.28, 9.62, 6.357114)`, sector 60, yaw 105 (placement 174's committed eye is `(1.400084, 9.700065, 6.357114)`, 0.206 from the leaf and outside the reach, and no walktrace of the exit door exists) | The door leg's stop pose leaves the linked leaf 0.5 beyond the shut portal, outside the 0.165 use sweep (`sithPlayerActions_Activate`, `0x4fc0a0`), so a walk from it never activates the door. The warp starts at the derived stop pose, 0.086 from the leaf at a 0.81 facing dot. `use` presses the player's ACTIVATE binding and messages the linked leaf (thing 4 at `(1.200002, 9.650073, 6.35)`) with `activated`; `00_door.cog` reopens the adjoins and runs `OpenDoors`. `wait 72` lets the leaf reach frame 1, `yaw 0` turns the body to the doorway, and `input 108` **walks through the open leaf** — the trace's y passes 9.650073 (sector 60 spans both sides, so the sector column does not change). `door0_opened` reads 0 at and before the use tick and 1 after it. |
+| `exit_upper` | placement 175 (body `-2.519, 11.001, 6.72`) | the corridor/ramp side of the upper route. |
+| `exit_low` | placement 176 (body `-6.15, 9.65, 4.32`) | the low floor east of the 385 ramp. |
+| `exit_tunnel` | tunnel mouth `(-4.05, 12.0, 4.32)`, sector 407 | `use` on the one-way door (thing 47 at `-4.05, 13.95, 4.375`; `00_1waydoor.cog` opens for a body inside 407), then the hold crosses 407 -> 223 -> 229 -> 215 and the renderer sights 8t88 (`sithRender_RenderThing`, `0x4c8070`, sends `sighted` to `01_goal0.cog`). |
+
+The door is **used and crossed**: the warp puts the body inside the use sweep, and the hold after the
+use walks it through the opened leaf instead of warping past it. `01_endlevel.cog`'s `user0` sets goal
+bin 100 = 3, sleeps 3 s and calls `jkEndLevel(1)`, so the plan's trailing `wait 240` outlasts that
+sleep and the last sample carries `level_end` 1.
 
 The per-sample position tolerance is the **retail harness's**, stated in
 `level1-route-retail.tsv`'s header: a 600 ms sample advances a variable amount of engine time, so
 one sample's travel (at most ~1.4 units at level 1's 2.4 u/s run) is the measurement resolution.
 Sectors are compared exactly and are never tolerated away.
 
-`--route-compare <expected> <actual>` is the comparator the gate uses; `BK_ROUTE_EPSILON=<units>`
-sets an absolute tolerance for every numeric column (sector stays exact, and `-` fields are skipped).
+`--route-compare <expected> <actual> [--events-per-row]` is the comparator the gate uses;
+`BK_ROUTE_EPSILON=<units>` sets an absolute tolerance for every numeric column (sector stays exact,
+and `-` fields are skipped). Without the flag the latched event columns are graded on the expected
+trace's last row only, which is what the frozen retail prefix needs; `--events-per-row` grades them
+on every row, which is the port oracle's rule (the replay and the oracle share the port's fixed grid).
 
 A replay is reproducible by construction: the step is pinned at 1/60 s and the replay runs the Update
 schedule on one executor thread. The AI's shared LCG is thread-local, so with the default
@@ -410,8 +479,11 @@ t_ms  kind  thing  template  x  y  z  yaw  health  shields  detail
 ```
 
 `kind` is `player`/`actor` at the row's cadence (100 ms here), `shot` when the port fires a shot that
-lands on the player (the row is that shot's **launch**: time, shooter, template and muzzle), and `hit`
-when a shot's damage lands — the hit row carries the health and shields **after** the hit. Retail can
+lands on the player (the row is that shot's **launch**: time, shooter, template and muzzle, with
+`detail` naming the shooter's target and `hit`), `miss` when a fired shot dies without landing on the
+player (geometry or its own `timer=`, with the same target in `detail`), and `hit` when a shot's
+damage lands — the hit row carries the health and shields **after** the hit and the split
+(`amount ... health -... shields -...`). Retail can
 only observe a shot through its impact on the player (its memory reader sees a bolt only if it exists
 at a 100 ms sample), so its `shot` rows are a lossy subset of bolts alive at a sample and the port's
 `shot` rows are the landed shots' launches. The gate therefore pairs retail's **`hit`** times with the
@@ -442,17 +514,18 @@ a full 10,000 ms adds a sample (and, at the gunner's cadence, a shot) retail nev
   the body for 1.5 s after the level loads, and retail's capture begins after the level has settled, so
   without that the gunner's first two bolts vanish and its first measured hit lands at 817 ms.
 - Gate: `pwsh -File tools/parity/encounter-gate.ps1` seeds the committed retail fixture from
-  `tools/parity/encounter/`, records the port twice (and fails if the two runs leave the measured
-  run-to-run band: same shape and endpoint, event-timing and actor-state deltas and the same kill
-  order), and reports the per-shot/per-hit timing deltas, the per-hit health/shield deltas, the kill
+  `tools/parity/encounter/`, records the port twice (the two runs must be **byte-identical**; the
+  capture pins `dt` and runs a single-threaded schedule, so a difference is a nondeterminism bug) and
+  reports the per-shot/per-hit timing deltas, each paired hit's own health/shield split, the kill
   order, the settled endpoint, and the actor position/facing/health deltas at every sample. It exits
   non-zero when any of them leaves its tolerance, and its thresholds are parameters with their reasons
-  in the script header. Fire cadence is graded on consecutive-shot **intervals** (retail's impact and
-  the port's launch of the same shot differ by a constant flight, which intervals cancel). Retail's
-  timing is nondeterministic: `sithAICmd_PrimaryFire` jitters every delay by `(1.2 - 0.2 * rand())`
-  and acquisition is a chance roll, so the gate allows one event in the shot/hit counts and compares
-  the intervals as a **sorted multiset** inside the cadence band rather than in one run's order; the
-  final bars are compared only when the counts match, and every shared hit's damage is always graded.
+  in the script header. Event counts are exact: an extra or missing hit is an unpaired hit and fails.
+  Fire cadence is graded on consecutive-shot **intervals** (retail's impact and the port's launch of
+  the same shot differ by a constant flight, which intervals cancel). Retail's timing is
+  nondeterministic: `sithAICmd_PrimaryFire` jitters every delay by `(1.2 - 0.2 * rand())` and
+  acquisition is a chance roll, so the gate compares the intervals as a **sorted multiset** inside the
+  cadence band rather than in one run's order. The per-hit and settled-bar tolerances are the
+  fixture's own per-hit noise (its per-hit amounts span 11.2-11.4), not a padded band.
   Actor rows are joined by **authored placement** — nearest position at the first sample — because
   retail's `thing` is a slot in the engine's thing pool while the port's is the level's placement
   order. An actor either side reports and the other does not fails; there is no missing-actor
@@ -530,6 +603,42 @@ tick  t_s  music  music_end  music_loop  music_vol  ambient  ambient_vol  sounds
   out of the pass/fail, while a route-controlled sound (door/switch/fade/script) still compares. The
   classifier's four categories are exercised by the self-check and the port oracle.
 
+### One-shot schedule (issue #18)
+
+The audio trace samples the mixer every 600 ms; the one-shot oracle is the **event list** beneath it.
+`--audio-schedule <path>` (needs `--replay`) writes one row per played one-shot:
+
+```text
+tick  time_s  wav  gain  volume  distance  forward  min_radius  max_radius  max_volume  snd  event  source
+```
+
+- `tick`/`time_s` are the replay's own tick and engine clock (`sithTime_Advance`'s step) — the time
+  the engine played it, not a wall clock.
+- `gain` is the mixer's attenuated volume (`snd::volume`); `volume` is the request's base volume and
+  `distance`/`forward` the listener geometry it was computed from, so the gain can be re-derived.
+- `min_radius`/`max_radius`/`max_volume`, `snd` and `event` are the **shipped `.snd` row** the bank
+  loaded for that wav (class basename and event name), so every event names the data behind it.
+- `source` is the engine call that queued it, with its address: `sithSoundClass_PlayModeRandom`
+  (`0x4e6b70`) for AI chatter and hurt cries, `sithWeapon_WeaponFireProjectile` (`0x4d45a0`) ->
+  `sithSoundMixer_PlaySoundThing` (`0x4dba60`) for shots, and the cog `PlaySoundThing`/`PlaySoundPos`/
+  `PlaySoundLocal` verbs through `sithSoundMixer_PlaySoundThing` (`0x4dba60`) /
+  `sithSoundMixer_PlaySoundPos` (`0x4db880`) / `sithSoundMixer_PlaySound` (`0x4db4f0`).
+
+The committed `level1-audio-schedule.tsv` is the route's expected schedule. The gate compares a fresh
+replay against it (`--audio-schedule-compare`), re-derives every row from the install's `.snd` classes
+with no replay (`--audio-schedule-verify`: the row's class/event must exist with that wav and those
+radii and volume, and the mixer's own fade formula over them — worked out again in the verifier, not
+`snd::volume` — must give the row's gain), and checks that the trace's windows carry exactly those
+events (`--audio-trace-vs-schedule`). It then perturbs the replay's own schedule four ways — one row
+dropped, one added, one moved a 600 ms window, one gain moved 0.25 — and requires
+`missing`/`extra`/`mistimed`/`attenuated` respectively.
+
+This replaces the retail side of `sounds` as the one-shot oracle: the retail capture's one-shots are
+its own AI/body events on a different clock, so they stay evidence, and the schedule's **event times**
+come from the port's decomp-derived engine clock and AI phase, with no retail capture. What the
+schedule cannot show by itself is gameplay behaviour: an AI that fires at the wrong moment changes the
+schedule, and that is what the committed fixture catches.
+
 ```powershell
 pwsh -NoProfile -File tools/parity/audio-gate.ps1            # determinism + port oracle + retail + door
 pwsh -NoProfile -File tools/parity/audio-gate.ps1 -Perturb   # ... and prove a 0.25 gain change fails
@@ -551,6 +660,7 @@ Files:
 | `tools/parity/routes/level1-audio-route-door.tsv` | The doorway alone, captured in a **fresh process** (`retail-capture.ps1 -Only route_door -AudioRoute … -AudioRouteOut …`). In a fresh process retail crosses: `bar_in` reaches `y -5.187` by tick 36 and `bar_out` fires `crossed`, taking `currvol` 0.25 at tick 288, 0.50 at 324 (0.75 at the script's end). In the full four-leg process retail's body wedges on the elevator car's shut leaf and never crosses, so the door leg's state is only measurable from a fresh process. |
 | `tools/parity/audiotrace/level1-audio-retail.tsv` | **Captured from retail** by `retail-capture.ps1 -AudioRoute tools/parity/routes/level1-audio-route.tsv -AudioRouteOut tools/parity/audiotrace/level1-audio-retail.tsv`: the harness boots level 1 with `-devMode`, applies each route leg's `warp` through the dev console, holds forward for the leg, and reads the engine's own state at every 600 ms of route game time — song range and loop flag (0x008BBC74/0x008BBC70/0x00835FCC), `SetMusicVol`'s value (f32 0x0054A678), and the 32-entry mixer table at 0x00835FE8 (sound name from the sound struct's own char[32], loop bit 0x1, volume, radii, distance) for the ambience loop and the one-shots. Capture instrumentation only: no shipping behavior changes. |
 | `tools/parity/audiotrace/level1-audio-port.tsv` | The port's committed oracle, produced by the replay. |
+| `tools/parity/audiotrace/level1-audio-schedule.tsv` | Issue #18's expected one-shot schedule for `level1-audio-route.tsv`: one row per played one-shot with its engine time, wav, gain, the listener geometry and shipped `.snd` row behind it, and the engine call that queued it. The gate compares a fresh replay against it and re-derives every row from the install's `.snd` classes without a replay. |
 | `tools/parity/audio-gate.ps1` | The gate above. |
 | `tools/parity/audiotrace/level1-audio-door-port.tsv` / `-door-retail.tsv` | The bar doorway captured on its own in a **fresh process** (`level1-audio-route-door.tsv`), where retail crosses: `bar_in` reaches `y -5.187` by tick 36, `bar_out` fires `crossed`, and `currvol` takes 0.15 at tick 252 and 0.40 at 288. The port fades from tick 216 (0.05/0.35/0.65): the fade curve is ~0.2 ahead of retail's (phase -36 ticks). The gate compares this pair event-aligned (first fade change from 0, not raw tick numbers): 2 aligned samples, worst delta 0.100 within 0.12, and it passes. |
 
@@ -583,6 +693,95 @@ ailist fly mem dynamicmem memdump invul cogpause matlist warp activate slowmo ju
 framerate dispstats kill endlevel`. There is **no level-loading command**; `endlevel` does not advance
 the campaign. `cogtrace`/`coglist`/`ailist` are the useful message/AI tracing tools for Phase 1's
 trigger work.
+## Engine-clock route and encounter capture (issue #20)
+
+A memory-sampled fixture for the encounter (#16), route-timing (#17) and carry (#19) slices. It is a
+**user-run** capture: the agent builds and dry-runs it with synthetic data, the user runs it once on
+the retail install, and this harness never launches retail on its own. It is not part of CI.
+
+```powershell
+# the door encounter: the route_door pose, 10 s of engine clock, no input
+pwsh -File tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door -EngineCaptureMs 10000
+```
+
+Writes `target/parity/engine/route_door.tsv` (override with `-EngineCaptureOut` / `-EngineCaptureName`).
+The warped body is the one `door-encounter.tsv` uses (level 1's upper-door `walkplayer` placement), so
+the fixture is the same encounter the committed telemetry covers, with the state the telemetry
+fixture lacks: engine time, body velocity, inventory bins 72/73/75, the AI random stream, and each
+nearby actor's next-fire/acquisition phase at the origin. A route leg uses the same mode with the key
+held for the window:
+
+```powershell
+pwsh -File tools/parity/retail-capture.ps1 -Shots tools/parity/walk-shots.tsv -Only walk_cantina -EngineCaptureMs 2400 -EngineCaptureKey UP
+```
+
+**No console read happens inside the window.** The dev console is a dialog that pauses the engine, so
+polling it would sample a frozen clock and change the fight; the whole window is `ReadProcessMemory`
+reads on a short loop. A row is written whenever the engine clock (`DAT_00836c14`) changes, so the
+time axis is simulation time, not wall or console-poll time. The window ends at the first engine
+instant at or past `-EngineCaptureMs` (retail's frames are 10-500 ms apart), so its last row can be
+one retail frame past the nominal length. The warp (and the level-load console
+reads) happen before the window; the existing 900 ms post-warp wait runs first, so the window does
+not include the console/foreground transition (the first row is the first engine instant the body is
+sampled at, not necessarily the warp's landing frame).
+
+Format (tab separated, `#` comments allowed):
+
+```text
+# engine-clock capture: route_door
+# origin_ms 12000
+# pose x=1.4001 y=9.7001 z=6.3201 sector=60 (first sample)
+# window 10000 ms of engine clock, 20 sample(s), 30 origin actor(s)
+# addresses: clock=0x00836C14 player=0x008319A4 rng=0x0054F750 ai_instances=0x0088AFE0 ai_count=0x008B4BE0
+t_ms  kind  thing  template  x  y  z  sector  vx  vy  vz  bin72  bin73  bin75  rng
+      ai_flags  fire_next_ms  acquire_next_ms  acquired_at_ms  target  last_target
+      next_pass_ms  detail
+```
+
+- `kind = player` rows are the body at one engine instant: `t_ms` is `DAT_00836c14`, `x/y/z` the body
+  position (`thing+0xB8`), `sector` the tracked sector (`*(thing+0x5C)`), `vx/vy/vz` the engine
+  velocity (`thing+0x1D4`), `bin72/73/75` the inventory amounts
+  (`*(thing+0x1C0) + 0x88 + bin*0x18`: kills credit, population credit, alignment), and `rng` the
+  AI random stream state (`0x0054F750`, the LCG `state = state*0x343FD + 0x269EC3` that
+  `sithAI_RandomFireVector`/acquisition rolls share). The AI columns are empty on these rows.
+- `kind = origin` rows exist once, at `origin_ms`, for every AI-instance actor within 8 units of the
+  player. `ai_flags` is the AI instance's flag word (the acquisition-state bits, `instance+0x08`),
+  `fire_next_ms`/`acquire_next_ms` are the next-run times of the actor's `primaryfire` and
+  `lookfortarget` instincts (the registry names matched through the class handler table), and
+  `next_pass_ms` is the instance's next AI pass (`instance+0x190`). `target`/`last_target` are the
+  current and last acquired thing pointers, `acquired_at_ms` the last acquisition's engine time. All
+  are absolute engine ms, so the port can align its first AI update with retail's phase relative to
+  `origin_ms` (the header repeats it). `detail` spells out which instincts were found and whether the
+  target is the player. The player columns are empty on these rows.
+- `thing` is retail's thing-pool slot and `template` its template index, the same convention the
+  encounter trace uses; the reference reader pairs actors by authored position, not by id.
+
+The capture validates its own output with the same schema check the self-check uses, and throws
+instead of leaving a malformed fixture. Run the self-check (no retail install, no launch):
+
+```powershell
+pwsh -File tools/parity/retail-capture.ps1 -EngineCaptureSelfCheck
+```
+
+It writes one synthetic fixture through the real writer, requires it to be accepted, then corrupts it
+seven ways (missing column, non-numeric position, unknown kind, backwards clock, missing origin
+clock, origin row with no next-fire time, renamed header) and requires every corruption to be
+rejected. It also runs `Get-JkAiOriginRows` itself over a synthetic memory image (one actor inside the
+radius, one outside, and a run with no AI slots) and requires the rows' fields and the fixture they
+make to be right: that builder is what the first user-run capture died in — `@()` over its
+`List[object]` throws "Argument types do not match" on PowerShell 7.6 — and the schema cases alone did
+not reach it. Exit code 0 is pass.
+
+Addresses, with their decompilation sources, are in `Invoke-JkEngineCapture` and
+`Get-JkAiOriginRows`: the clock is `sithTime_Advance` (`decomp/004dd640`), the sector
+`GetThingSector` (`0x502B80`), velocity `GetThingVel` (`0x503160`), the AI instance array
+`sithAI_Create`/`sithAI_Process` (`0x4E9CB0`/`0x4E9E20`), the instinct slots and next-pass field
+`sithAI_InstinctUpdate` (`0x4E9E90`), the target fields the `primaryfire`/`lookfortarget` handlers
+write (`0x509E40`/`0x50AA80`/`0x50B9B0`), the instinct registry `sithAI_RegisterInstinct`
+(`0x4EA0A0`), and the AI random stream `FUN_00512d00`. The capture changes no gameplay state: it only
+reads memory, and the optional `-EngineCaptureKey` is the same synthetic input the movement traces
+use.
+
 ## Status commands (`cogstatus`, `aistatus`)
 
 Phase 0.5 step 2 pins the two dev-console status formats from the decomp and captures retail output:
@@ -598,9 +797,13 @@ Phase 0.5 step 2 pins the two dev-console status formats from the decomp and cap
   then `Current instincts:` and one row per instinct:
   `Instinct %d: Params: %f/%f/%f/%f, nextUpdate=%d, mask=0x%x, mode=0x%x.`
   **Row i is the class `.ai` file's i-th instinct line** (verified: eleven lines in `ai\tuproddefault.ai` ↔ eleven
-  rows for a `tuskan`; read any class with `bevi-knight --asset ai\<name>.ai`), and `mask`/`mode` are the two bit
-  words `sithAI_RegisterInstinct` stored - `sithAICmd_Startup` registers each instinct with them (`lookfortarget` is
-  handler `0x50aa80` with `0x204`, matching row 1 of that file). `Params` are the four per-instance numbers, 0 on an
+  rows for a `tuskan`; read any class with `bevi-knight --asset ai\<name>.ai`), and the two words are the
+  registration's event mask and accept word: `mask` is the **events** whose dispatch invokes the handler
+  (`sithAI_RegisterInstinct`'s fifth argument, `Follow` = `0xe00`), and `mode` is the **accept word** the
+  scheduler tests against the AI flag word (`mode & flags != 0`; `Follow` = `2`). `sithAI_InstinctUpdate`
+  also tests a third, undisplayed **reject** word that must be clear (`Follow` = `0x800`). `sithAICmd_Startup`
+  registers each handler with them (`lookfortarget` is handler `0x50aa80`, accept `0x204`, reject `0`, events
+  `0x1f00`). `Params` are the four per-instance numbers, 0 on an
   idle actor. Example rows for a brown Tusken: Jump `mask 0x604`, LookForTarget `mode 0x204`, PrimaryFire
   `mask 0x100 mode 2`, Follow `mask 0xe00 mode 2`, Flee `mask 0xf05 mode 0x800`, Talk `mode 0xffff`.
 

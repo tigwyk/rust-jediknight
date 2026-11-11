@@ -114,8 +114,10 @@ struct World {
     ai_classes: HashMap<String, String>,
     /// Lowercase `.wav` name -> raw bytes, for the wavs the shipped `.snd` classes name.
     wav_bytes: HashMap<String, Vec<u8>>,
-    /// Lowercase `.wav` name -> `(minRadius, maxRadius, maxVolume)` from its sound class.
-    sound_radii: HashMap<String, (f32, f32, f32)>,
+    /// Lowercase `.wav` name -> the shipped `.snd` row the mixer uses for it (`minRadius`,
+    /// `maxRadius`, `maxVolume`) plus the class and event that row came from, which is the
+    /// one-shot schedule's data provenance.
+    sound_rows: HashMap<String, SoundRow>,
     /// `.snd` class (lowercase basename) -> sound-mode event name -> `(wav, maxVolume)`. This is what
     /// `talk` picks its mood sounds from (`sithSoundClass_PlayModeRandom`); the runtime has no file
     /// access, so `setup` hands it over.
@@ -124,6 +126,18 @@ struct World {
         std::collections::BTreeMap<String, Vec<(String, f32)>>,
     >,
     gob_entries: usize,
+}
+
+/// One row of a shipped `.snd` class, as the mixer reads it: the fade radii and volume, and the
+/// class basename and event name the row came from. The first row naming a wav wins, which is the
+/// order the level load builds the bank in.
+#[derive(Clone)]
+struct SoundRow {
+    snd: String,
+    event: String,
+    min: f32,
+    max: f32,
+    volume: f32,
 }
 
 /// Accept `03katarn`, `03katarn.jkl` or `jkl\03katarn.jkl` for a level on the command line.
@@ -633,6 +647,10 @@ fn main() {
     let mut stand: Option<String> = None;
     let mut shot: Option<String> = None;
     let mut shot_frame = 30u32;
+    // `--fixed-dt <seconds>`: the step a capture advances the simulation by, instead of the capture's
+    // 1/60 s. The door encounter measures the engine's own frame, which is not 1/60 (see
+    // `tools/parity/port-encounter.ps1`); play and route replay keep their fixed steps.
+    let mut fixed_dt: Option<f32> = None;
     let mut muted_flag = false;
     let mut sound_on = false;
     let mut audio_state = false;
@@ -646,11 +664,22 @@ fn main() {
     // samples every 36 ticks (600 ms), the cadence a retail `coords` poll keeps.
     let mut replay: Option<std::path::PathBuf> = None;
     let mut route_trace: Option<std::path::PathBuf> = None;
+    // `--carry-in <save>`: adopt that save's engine bin table as the carried player inventory.
+    // `--carry-out <save>`: write the carry (bins and state) when the level completes, or on the
+    // first frames of a plain boot.
+    let mut carry_in: Option<std::path::PathBuf> = None;
+    let mut carry_out: Option<std::path::PathBuf> = None;
     // `--no-ai`: a capture switch for the route replay, so the scripted movement is measured
     // without the cantina ambush (retail's `-devMode` `disableai`). Ordinary play keeps the AI.
     let mut no_ai = false;
     let mut audio_trace: Option<std::path::PathBuf> = None;
     let mut audio_compare: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+    // Issue #18: the decomp-derived one-shot schedule, its comparator, its data verifier, and the
+    // check that a trace's windows carry exactly the schedule's events.
+    let mut audio_schedule: Option<std::path::PathBuf> = None;
+    let mut audio_schedule_compare: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+    let mut audio_schedule_verify: Option<std::path::PathBuf> = None;
+    let mut audio_trace_vs_schedule: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
 
     let mut sim = false;
     let mut dump: Option<String> = None;
@@ -880,6 +909,19 @@ fn main() {
     "--par" => par_probe = arg_value(&args, &mut i).cloned(),
             "--grep-assets" => grep_assets = arg_value(&args, &mut i).cloned(),
             "--shot" => shot = arg_value(&args, &mut i).cloned(),
+            "--fixed-dt" => {
+                // Same bounds as `BK_FIXED_DT` (`walker_step` clamps it): a non-finite or
+                // non-positive value would poison every `dt` consumer.
+                match arg_value(&args, &mut i).and_then(|v| v.parse::<f32>().ok()) {
+                    Some(step) if step.is_finite() && step > 0.0 => {
+                        fixed_dt = Some(step.clamp(1.0 / 240.0, 0.1));
+                    }
+                    _ => {
+                        eprintln!("--fixed-dt needs a finite, positive number of seconds (clamped to 1/240..0.1)");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--fall" => fall_check = true,
         "--falldeath" => falldeath_check = true,
         "--door" => door_check = true,
@@ -937,14 +979,42 @@ fn main() {
             "--route-trace" => {
                 route_trace = arg_value(&args, &mut i).map(std::path::PathBuf::from);
             }
-            // `--route-compare <expected> <actual>`: the route-trace gate. Fails on the first field
-            // outside its tolerance, so a perturbed trace fails and the fixture itself passes.
-            "--route-compare" => {
+            // `--carry-in <save>` / `--carry-out <save>`: the level-change carry's engine bin table.
+            // The gate boots level 2 with level 1's carried save and writes the level-2 autosave.
+            "--carry-in" => carry_in = arg_value(&args, &mut i).map(std::path::PathBuf::from),
+            "--carry-out" => carry_out = arg_value(&args, &mut i).map(std::path::PathBuf::from),
+            // `--carry-compare <expected.jks> <actual.jks>`: every engine bin value must match.
+            "--carry-compare" => {
                 let expected = args.get(i + 1).cloned();
                 let actual = args.get(i + 2).cloned();
                 i += 2;
                 let (Some(expected), Some(actual)) = (expected, actual) else {
-                    println!("usage: --route-compare <expected.tsv> <actual.tsv>");
+                    println!("usage: --carry-compare <expected.jks> <actual.jks>");
+                    std::process::exit(2);
+                };
+                std::process::exit(match carry_bins_compare(
+                    std::path::Path::new(&expected),
+                    std::path::Path::new(&actual),
+                ) {
+                    Ok(()) => 0,
+                    Err(message) => {
+                        eprintln!("{message}");
+                        1
+                    }
+                });
+            }
+            // `--route-compare <expected> <actual> [--events-per-row]`: the route-trace gate. Fails on
+            // the first field outside its tolerance, so a perturbed trace fails and the fixture
+            // itself passes. `--events-per-row` grades the latched event columns on every row (the
+            // port oracle); without it only the fixture's last row is graded (the frozen retail
+            // capture, whose holds advance a variable amount of engine time).
+            "--route-compare" => {
+                let expected = args.get(i + 1).cloned();
+                let actual = args.get(i + 2).cloned();
+                let events_per_row = args.get(i + 3).is_some_and(|arg| arg == "--events-per-row");
+                i += if events_per_row { 3 } else { 2 };
+                let (Some(expected), Some(actual)) = (expected, actual) else {
+                    println!("usage: --route-compare <expected.tsv> <actual.tsv> [--events-per-row]");
                     std::process::exit(2);
                 };
                 let epsilon = std::env::var("BK_ROUTE_EPSILON")
@@ -955,6 +1025,7 @@ fn main() {
                     std::path::Path::new(&expected),
                     std::path::Path::new(&actual),
                     epsilon,
+                    events_per_row,
                 ) {
                     Ok(()) => std::process::exit(0),
                     Err(message) => {
@@ -981,6 +1052,45 @@ fn main() {
                 audio_compare = Some((
                     std::path::PathBuf::from(expected),
                     std::path::PathBuf::from(actual),
+                ));
+            }
+            // `--audio-schedule <path>`: the replay's expected one-shot schedule, one row per sound
+            // with its engine time, wav, gain and the engine call and `.snd` row behind it.
+            "--audio-schedule" => {
+                audio_schedule = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--audio-schedule-compare <expected> <actual>`: the one-shot oracle's comparator.
+            "--audio-schedule-compare" => {
+                let expected = args.get(i + 1).cloned();
+                let actual = args.get(i + 2).cloned();
+                i += 2;
+                let (Some(expected), Some(actual)) = (expected, actual) else {
+                    println!("usage: --audio-schedule-compare <expected.tsv> <actual.tsv>");
+                    std::process::exit(2);
+                };
+                audio_schedule_compare = Some((
+                    std::path::PathBuf::from(expected),
+                    std::path::PathBuf::from(actual),
+                ));
+            }
+            // `--audio-schedule-verify <schedule>`: re-derive every row's gain from the shipped
+            // `.snd` classes and check the row's class/event attribution against them.
+            "--audio-schedule-verify" => {
+                audio_schedule_verify = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--audio-trace-vs-schedule <trace> <schedule>`: every scheduled event must land in
+            // the trace's own 600 ms window at the same gain, and nothing else may be there.
+            "--audio-trace-vs-schedule" => {
+                let trace = args.get(i + 1).cloned();
+                let schedule = args.get(i + 2).cloned();
+                i += 2;
+                let (Some(trace), Some(schedule)) = (trace, schedule) else {
+                    println!("usage: --audio-trace-vs-schedule <trace.tsv> <schedule.tsv>");
+                    std::process::exit(2);
+                };
+                audio_trace_vs_schedule = Some((
+                    std::path::PathBuf::from(trace),
+                    std::path::PathBuf::from(schedule),
                 ));
             }
             "--sim" => sim = true,
@@ -1473,12 +1583,50 @@ fn main() {
         eprintln!("--audio-trace needs --replay <path>");
         std::process::exit(2);
     }
+    if audio_schedule.is_some() && route_plan.is_none() {
+        eprintln!("--audio-schedule needs --replay <path>");
+        std::process::exit(2);
+    }
+    // `--fixed-dt` is the step of a screenshot/capture run. Play and route replay keep their own
+    // fixed steps (the wall clock and 1/60 s), so a step without `--shot` would silently retime them.
+    if fixed_dt.is_some() && shot.is_none() {
+        eprintln!("--fixed-dt needs --shot <file>: it sets a capture's step");
+        std::process::exit(2);
+    }
+    // Both traces sample the same one-shot log and draining it is what makes each window's sounds
+    // exactly once; two writers would split every window. The route trace carries the audio state.
+    if route_trace.is_some() && audio_trace.is_some() {
+        eprintln!("--route-trace and --audio-trace both drain the replay's sound log; pass one");
+        std::process::exit(2);
+    }
     if let Some((expected, actual)) = audio_compare.as_ref() {
         let epsilon = std::env::var("BK_AUDIO_EPSILON")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(0.02);
         match audio_trace_compare(expected, actual, epsilon) {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    let audio_epsilon = std::env::var("BK_AUDIO_EPSILON")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.02);
+    if let Some((expected, actual)) = audio_schedule_compare.as_ref() {
+        match audio_schedule_compare_files(expected, actual, audio_epsilon) {
+            Ok(()) => std::process::exit(0),
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some((trace, schedule)) = audio_trace_vs_schedule.as_ref() {
+        match audio_trace_schedule_check(trace, schedule, audio_epsilon) {
             Ok(()) => std::process::exit(0),
             Err(message) => {
                 eprintln!("{message}");
@@ -1559,6 +1707,23 @@ fn main() {
             std::process::exit(1);
         }
     };
+
+    // `--audio-schedule-verify`: every scheduled event's gain and `.snd` attribution is re-derived
+    // from the shipped classes, with no replay. This is the data half of the one-shot oracle.
+    if let Some(path) = audio_schedule_verify.as_deref() {
+        match audio_schedule_verify_file(&gobs, path) {
+            Ok(rows) => {
+                println!(
+                    "audio schedule: {rows} event(s) re-derived from the shipped .snd classes"
+                );
+                std::process::exit(0);
+            }
+            Err(message) => {
+                eprintln!("{message}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // --audit / --episodes / --dump work over the whole install rather than one
     // selected level, so they run before the single-level load.
@@ -2439,13 +2604,24 @@ fn main() {
         std::process::exit(if boot_gate(&gobs, &menus) { 0 } else { 1 });
     }
 
-    let world = match load(&gobs, &level_name) {
+    let mut world = match load(&gobs, &level_name) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("fatal: {e}");
             std::process::exit(1);
         }
     };
+    // `--carry-in`: the gate boots a level with the previous level's carried bin table, exactly as a
+    // level change hands it over.
+    if let Some(path) = &carry_in {
+        match carry_from_save(path) {
+            Ok(carry) => world.carried = Some(carry),
+            Err(message) => {
+                eprintln!("fatal: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // `--scale`: how big the models really are against the level they are placed in. Both references
     // are the level's own geometry, so this answers "is the model scale right" without trusting it.
@@ -3398,7 +3574,7 @@ fn main() {
             // The queued list is moved out **before** the loop: `World` is an `Arc<Mutex<..>>`, so a
             // guard held by the `for` head would deadlock on the first verb the label calls.
             let pending = std::mem::take(&mut sim_world.borrow_mut().pending_messages);
-            for (instance, label, params, source) in pending {
+            for (instance, label, params, source, _identity) in pending {
                 let Some((script_name, vm)) = vms.get_mut(instance) else { continue };
                 let Some(script) = world.cogs.get(script_name) else { continue };
         // The sender/source rides with the message: `activated` handlers branch on
@@ -4733,7 +4909,7 @@ fn main() {
                         (label.to_string(), Some(link as usize), Some(instance as i32), [0.0; 2])
                     })
                     .collect();
-                for (instance, label, params, _source) in std::mem::take(&mut rt.pending_messages) {
+                for (instance, label, params, _source, _identity) in std::mem::take(&mut rt.pending_messages) {
                     queued.push((label.to_string(), Some(player), Some(instance as i32), params));
                 }
                 rt.ai_tick(player, dt);
@@ -6422,18 +6598,18 @@ fn main() {
     }
 
     if activation_check {
-        // Dormancy, held to retail's own two autosaves: level 1's *load-time* save carries no
-        // population bin (73 = 0) and level 2's carries 10.5 after the level was played, so a thing's
-        // class cog is sent `created` when its sector is first drawn -- not at level load. The port
-        // used to wake every placed thing at load. This check builds the class instances the way
-        // `setup` does, asserts the load state is dormant, wakes one sector the way `cull_sectors`
-        // does, and ticks the armed timer the way `run_pulses_and_timers` does.
+        // `sithOpenPostProcess` (`0x4c4880`) sends `created` to every thing's class cog at level
+        // load, in thing order. The load-time autosave is written in the same function, before the
+        // 1 s `created:` timers fire — so retail's level-1 save reads bin 73 = 0 and its level-2 save
+        // (after level 1 was played) reads 10.5. This check builds the class instances the way
+        // `setup` does, sends `created`, ticks the armed timers the way `run_pulses_and_timers`
+        // does, and requires the population sum to be retail's 10.5. `SetTimer` is a **single slot**
+        // with no sender id, which is why the two `actor_fn.cog` actors credit nothing.
         let sim_world = runtime::Runtime::handle(&world.level);
         let player = sim_world.borrow().player_thing();
         let mut scripts: Vec<(usize, String, cog::Vm)> = Vec::new();
-        let mut target: Option<(usize, i32, String, String)> = None;
         for (index, thing) in world.level.things.iter().enumerate() {
-            if index == player {
+            if index == player || is_local_player(&thing.template) {
                 continue;
             }
             let Some(name) = world
@@ -6444,8 +6620,7 @@ fn main() {
                 continue;
             };
             let Some(script) = world.cogs.get(&name) else { continue };
-            // Only a script that arms a `timer` from `created:` measures the wake: its handler is
-            // where the actor scripts credit the population bin.
+            // Only a script that arms a `timer` from `created:` can credit the population bin.
             if script.label("created").is_none() || script.label("timer").is_none() {
                 continue;
             }
@@ -6460,71 +6635,36 @@ fn main() {
                 rt.class_skill.insert(scripts.len() as i32, script.skill_answers());
                 rt.thing_links.push((scripts.len(), 0, index));
             }
-            if target.is_none() {
-                target = Some((index, thing.sector, thing.template.clone(), name.clone()));
-            }
             scripts.push((index, name, vm));
         }
-        let Some((thing, sector, template, name)) = target else {
-            eprintln!("activation: no class script arms a timer from `created:`");
-            std::process::exit(1);
-        };
         let population = |rt: &runtime::Runtime| rt.inv.get(&73).copied().unwrap_or(0.0);
         assert_eq!(
             population(&sim_world.borrow()),
             0.0,
-            "a civilian was awake at load; retail's level-1 autosave has bin 73 = 0"
+            "the population bin moved before `created` was sent"
         );
-        // Not every `created:` timer is a civilian's: a crane or a lamp arms one too, so wake
-        // candidates until one credits the population bin, the way the engine's own pass would.
-        let mut credited: Option<(usize, i32, String, String, f32)> = None;
-        for slot in 0..scripts.len() {
-            let (thing_index, _name, _) = &scripts[slot];
-            let thing_index = *thing_index;
-            let sector = world.level.things[thing_index].sector;
-            let before = population(&sim_world.borrow());
-            let woke = sim_world.borrow_mut().awaken_sector(sector);
-            if woke.is_empty() {
-                continue;
-            }
-            for &instance in &woke {
-                let Some((_, script_name, vm)) = scripts.get_mut(instance) else { continue };
-                let Some(script) = world.cogs.get(script_name) else { continue };
-                sim_world.borrow_mut().last_params = vec![0.0, 0.0];
-                let _ = vm.run_label(script, "created");
-                // The timer `created:` armed, ticked the way the app's pulse system ticks it.
-                vm.now += 2.0;
-                if let Some((_, id, params)) = vm
-                    .timers
-                    .iter()
-                    .copied()
-                    .filter(|(due, _, _)| vm.now >= *due)
-                    .min_by(|a, b| a.0.total_cmp(&b.0))
-                {
-                    vm.timers.retain(|(due, _, _)| vm.now < *due);
-                    vm.sender = id;
-                    sim_world.borrow_mut().last_params = params.to_vec();
-                    let _ = vm.run_label(script, "timer");
-                }
-            }
-            let after = population(&sim_world.borrow());
-            if after > before {
-                let template = world.level.things[thing_index].template.clone();
-                let name = scripts[slot].1.clone();
-                credited = Some((thing_index, sector, template, name, after));
-                break;
+        for (_, name, vm) in &mut scripts {
+            let Some(script) = world.cogs.get(name) else { continue };
+            sim_world.borrow_mut().last_params = vec![0.0, 0.0];
+            let _ = vm.run_label(script, "created");
+        }
+        for (_, name, vm) in &mut scripts {
+            let Some(script) = world.cogs.get(name) else { continue };
+            vm.now += 2.0;
+            for (id, params) in vm.take_due_timers() {
+                vm.sender = id;
+                sim_world.borrow_mut().last_params = params.to_vec();
+                let _ = vm.run_label(script, "timer");
             }
         }
-        let Some((thing, sector, template, name, after)) = credited else {
-            eprintln!("activation: no woken class script credited the population bin");
-            std::process::exit(1);
-        };
+        let after = population(&sim_world.borrow());
         assert!(
-            sim_world.borrow_mut().awaken_sector(sector).is_empty(),
-            "a sector woke its things twice"
+            (after - 10.5).abs() < 1e-4,
+            "the load-time population credit is {after}, retail's level-2 autosave says 10.5"
         );
         println!(
-            "activation: load is dormant (bin 73 = 0, retail's level-1 autosave); thing {thing} (`{template}`, `{name}`) in sector {sector} woke and credited bin 73 by {after:.1}; waking the sector again is a no-op"
+            "activation: `created` sent at load to {} class script(s); their timers credit bin 73 = {after:.1} (retail's level-2 autosave), with the `SetTimer` actors contributing nothing",
+            scripts.len()
         );
         println!("--- activation check passed ---");
         return;
@@ -6572,7 +6712,7 @@ fn main() {
             );
             // Drain exactly as `deliver_thing_messages` does, source and all.
             let pending = std::mem::take(&mut sim_world.borrow_mut().pending_messages);
-            for (inst, label, params, source) in pending {
+            for (inst, label, params, source, _identity) in pending {
                 if inst != 0 || script.label(label).is_none() {
                     continue;
                 }
@@ -8903,7 +9043,7 @@ fn main() {
                 let queued = rt
                     .pending_messages
                     .iter()
-                    .filter(|(_, label, _, _)| *label == "arrived")
+                    .filter(|(_, label, _, _, _)| *label == "arrived")
                     .count();
                 println!(
                     "  thing {thing} with {frames} frame(s): {} `arrived` message(s) queued",
@@ -8926,22 +9066,28 @@ fn main() {
                 let eye = [centre[0] - 1.0, centre[1], centre[2] + 1.0];
                 // The engine searches the body's sector: stand in the surface's own room.
                 let sector = rt.surface_sector.get(surface).copied().unwrap_or(-1);
-                let hit = rt.activate_near(eye, [1.0, 0.0], 3.0, sector);
+                let hit = rt.sith_player_actions_activate(0, eye, [1.0, 0.0, 0.0], 3.0, sector);
                 println!("  use at {eye:?} facing +X reached surface {hit:?} (wanted {surface})");
-                assert_eq!(hit, Some(surface), "the use action missed the linked surface");
+                assert_eq!(
+                    hit,
+                    Some(crate::runtime::UseHit::Surface(surface)),
+                    "the use action missed the linked surface"
+                );
                 // Facing away must not reach *that* surface. Another linked surface may legitimately
                 // be behind the player, so the assertion is about this one, not about emptiness.
-                let behind = rt.activate_near(eye, [-1.0, 0.0], 3.0, sector);
+                // The wait is the engine's, so the clock has to move before the second sweep.
+                rt.time += 0.25;
+                let behind = rt.sith_player_actions_activate(0, eye, [-1.0, 0.0, 0.0], 3.0, sector);
                 assert_ne!(
                     behind,
-                    Some(surface),
+                    Some(crate::runtime::UseHit::Surface(surface)),
                     "the use action reached the surface behind the player"
                 );
                 println!("  facing away reached {behind:?}, not {surface}");
                 activated += rt
                     .pending_messages
                     .iter()
-                    .filter(|(_, label, _, _)| *label == "activate")
+                    .filter(|(_, label, _, _, _)| *label == "activate")
                     .count();
             }
         }
@@ -9026,7 +9172,7 @@ fn main() {
             stopped = rt
                 .pending_messages
                 .iter()
-                .filter(|(_, label, _, _)| *label == "blocked")
+                .filter(|(_, label, _, _, _)| *label == "blocked")
                 .count();
             println!(
                 "  thing {thing} flew from {from:?} into a wall: {stopped} `blocked` message(s), now at {:?}",
@@ -12139,24 +12285,24 @@ fn main() {
             // Look straight at it from one unit away: the use action is a look, not a touch. The reach
             // here is explicit (the live path uses the engine's 0.16 sweep); this check is about the
             // link chain, not the radius.
-            let facing = [-1.0f32, 0.0];
+            let dir = [-1.0f32, 0.0, 0.0];
             let (_used, before) = {
                 let mut rt = handle.borrow_mut();
                 let before = (rt.sector_flags.clone(), rt.adjoin_flags.clone());
                 // Same sector scope the engine's search has: this thing's own room.
                 let sector = rt.things.get(*thing).map(|t| t.sector).unwrap_or(-1);
-                let used = rt.use_thing(eye, facing, 3.0, sector);
+                let used = rt.sith_player_actions_activate(0, eye, dir, 3.0, sector);
                 (used, before)
             };
             // Another linked thing can be nearer than the one this candidate names; what matters is that
             // the use action finds *a* linked thing, and that its script changes the world.
             // Drain exactly as `deliver_thing_messages` does, so this is the real path and not a shortcut.
-            let pending: Vec<(usize, &'static str, [f64; 2], Option<i64>)> = {
+            let pending: Vec<(usize, &'static str, [f64; 2], Option<i64>, Option<runtime::SourceSender>)> = {
                 let mut rt = handle.borrow_mut();
                 std::mem::take(&mut rt.pending_messages)
             };
             let mut ran = 0;
-            for (inst, label, params, _source) in &pending {
+            for (inst, label, params, _source, _identity) in &pending {
                 let Some(data) = world.level.cogs.get(*inst) else { continue };
                 let Some(script) = world.cogs.get(&data.script) else { continue };
                 let Some(vm) = vms.get_mut(*inst).and_then(|v| v.as_mut()) else { continue };
@@ -12714,7 +12860,7 @@ fn main() {
         .insert_resource(PulseCount::default())
         .insert_resource(CaptureDt(
             shot.as_ref()
-                .and_then(|s| (!s.is_empty()).then_some(1.0 / 60.0))
+                .and_then(|s| (!s.is_empty()).then_some(fixed_dt.unwrap_or(1.0 / 60.0)))
                 // A replay pins the step even without `--shot`: its comparability is exactly the
                 // fixed 1/60 s tick the route trace samples (see `RoutePlan`).
                 .or_else(|| route_plan.is_some().then_some(1.0 / 60.0)),
@@ -12722,7 +12868,9 @@ fn main() {
         .insert_resource(RouteReplay(route_plan))
         .insert_resource(AiDisabled(ai_disabled))
         .insert_resource(RouteTraceOut(route_trace))
+        .insert_resource(CarryOut(carry_out))
         .insert_resource(AudioTraceOut(audio_trace))
+        .insert_resource(AudioScheduleOut(audio_schedule))
         .insert_resource(AudioLog::default())
         .insert_resource(RouteNow::default())
         .insert_resource(RouteCursor::default())
@@ -12807,7 +12955,10 @@ fn main() {
                     // (level 1's door gunner 155 and `reeyeesbhgun` 153). A level swap installs a
                     // fresh runtime, which is why the hand-off itself runs after `swap_level`: the
                     // chain swap -> share -> AI is what makes the new level's first tick see walls.
-                    ai_shots.after(share_collider),
+                    // `encounter.arm` must see the frame's warped body *before* the AI tick: the
+                    // runtime reads the pose `walk_player` publishes, and a tick ahead of the warp
+                    // made the first sample a moved actor (the encounter trace lost actor 272).
+                    ai_shots.after(share_collider).after(walk_player),
                     play_requested_sounds,
                     music_follows_scripts,
                     show_taken,
@@ -12841,9 +12992,17 @@ fn main() {
         .add_systems(
             Update,
             (
-                route_replay.before(walk_player),
+                // `use_key` reads `RouteNow` too: without this edge the `use` row can be published
+                // after the key system ran, and the press is lost for the rest of the replay.
+                route_replay.before(walk_player).before(use_key),
                 goal_probe.after(walk_player).before(cull_sectors),
             )
+                .run_if(no_screen_open),
+        )
+        .add_systems(
+            Update,
+            carry_out_probe
+                .before(watch_level_complete)
                 .run_if(no_screen_open),
         )
         .add_systems(Update, (play_script_loops.after(play_requested_sounds),).run_if(no_screen_open))
@@ -13181,6 +13340,29 @@ fn film_step(cuts: &[String], playing: Option<bool>) -> FilmStep {
     }
 }
 
+/// `jkMain_EndLevel` (`0x402eb0`): the finished level's own grants, before the tally draws them.
+///
+/// The episode row for the level being finished carries two arm bins (`+0x30` light, `+0x34` dark).
+/// Each is granted when `0x13 < bin < 0x23` and the player's declared side allows it — `lightpow` is
+/// skipped for `jkPlayer_GetChoice() == 2` (dark) and `darkpow` for `1` (light) — through
+/// `sithInventory_SetCarries(..., 1)`, which is the same available bit `SetAccessiblePowers` sets.
+/// Nothing else is written: retail's saves carry no rank or star bins from a level's end (the ledger's
+/// *rank and force-point crediting* row).
+fn jk_main_end_level(sim: &Sim, plan: &FlowPlan) {
+    let choice = sim.world.borrow().inv.get(&18).copied().unwrap_or(0.0) as i32;
+    let items = plan
+        .episode
+        .as_ref()
+        .map(|episode| episode.end_level_items(&plan.level, choice))
+        .unwrap_or_default();
+    for (bin, amount) in &items {
+        sim.world.borrow_mut().inv.insert(*bin, *amount);
+    }
+    if !items.is_empty() {
+        println!("endlevel: choice {choice} grants bin(s) {items:?}");
+    }
+}
+
 /// When the level's scripts call `jkEndLevel`, play the graph's films in order and name the level
 /// that follows them. A transition can have more than one film — the campaign's `DECIDE` row sits
 /// between level 15's film and the chosen path's — so this owns a queue, and only reaches
@@ -13233,20 +13415,7 @@ fn watch_level_complete(
     // rank, the secrets and the stars before the film runs. Its rows are filled by `tally_lines` in
     // the draw path already — the screen was simply never shown.
     if plan.phase == FlowPhase::Complete {
-        // `jkMain_EndLevel` (`0x402eb0`): the episode entry's two arm bins are granted here, gated on
-        // `jkPlayer_GetChoice` -- inventory bin 18 -- with `sithInventory_SetCarries(..., 1)`.
-        let choice = sim.world.borrow().inv.get(&18).copied().unwrap_or(0.0) as i32;
-        let items = plan
-            .episode
-            .as_ref()
-            .map(|episode| episode.end_level_items(&plan.level, choice))
-            .unwrap_or_default();
-        for (bin, amount) in &items {
-            sim.world.borrow_mut().inv.insert(*bin, *amount);
-        }
-        if !items.is_empty() {
-            println!("endlevel: choice {choice} grants bin(s) {items:?}");
-        }
+        jk_main_end_level(&sim, &plan);
         // The level's own state lands here, before the tally draws it: `jkMain_EndLevel` raises the
         // rank and credits the stars the tally then repeats, and `jkGuiSingleTally_Show` computes
         // the alignment and stores it (bin 75) as it draws — which is why retail's level-2 autosave
@@ -13640,6 +13809,96 @@ enum SaveLoad {
 /// level, and this system puts it back once that level exists.
 #[derive(Resource, Default)]
 struct PendingRestore(Option<runtime::Snapshot>);
+
+/// `--carry-out`: where to write the carry's engine bin table.
+#[derive(Resource, Default)]
+struct CarryOut(Option<PathBuf>);
+
+/// `--carry-out`'s writer. A route replay writes at its level's completion (after the tally's
+/// alignment store, as a play does); a plain boot of the next level writes on its first frames,
+/// before the 1 s `created:` timers, which is when the engine's own level-load autosave is written.
+fn carry_out_probe(
+    out: Option<Res<CarryOut>>,
+    sim: Option<Res<Sim>>,
+    replay: Option<Res<RouteReplay>>,
+    plan: Option<Res<FlowPlan>>,
+    mut frames: Local<u32>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Some(out) = out else { return };
+    let Some(path) = out.0.as_deref() else { return };
+    let Some(sim) = sim else { return };
+    *frames += 1;
+    let replayed = replay.as_ref().is_some_and(|replay| replay.0.is_some());
+    let complete = replayed && sim.world.borrow().level_complete;
+    if replayed && !complete {
+        return;
+    }
+    if !replayed && *frames < 2 {
+        return;
+    }
+    let mut rt = sim.world.borrow_mut();
+    if complete {
+        rt.finish_level();
+        rt.calc_alignment();
+    }
+    let level = plan.as_ref().map(|p| p.level.clone()).unwrap_or_default();
+    match write_snapshot(path, &level, &rt) {
+        Ok(bytes) => println!(
+            "carry-out: wrote {bytes} bytes to `{}` with {} bin(s)",
+            path.display(),
+            rt.inv.len()
+        ),
+        Err(e) => {
+            eprintln!("carry-out: {e}");
+            std::process::exit(1);
+        }
+    }
+    exit.write(AppExit::Success);
+}
+
+/// `--carry-compare`: the level-change carry is the engine's 82-bin table, so every bin's value must
+/// match. Names the first drifting bins instead of stopping at the first.
+fn carry_bins_compare(expected: &std::path::Path, actual: &std::path::Path) -> Result<(), String> {
+    let read = |path: &std::path::Path| -> Result<jks::Save, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        jks::Save::read(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let want = read(expected)?;
+    let got = read(actual)?;
+    let drift = jks::bin_value_drift(&want, &got);
+    if drift.is_empty() {
+        println!(
+            "carry-compare: PASS {} bin(s) match {}",
+            want.bins().len(),
+            actual.display()
+        );
+        Ok(())
+    } else {
+        Err(format!("carry-compare: FAIL {}\n  {}", actual.display(), drift.join("\n  ")))
+    }
+}
+
+/// `--carry-in`: the carried player state a savegame's engine bin records hold. A save without them
+/// is not a carry.
+fn carry_from_save(path: &std::path::Path) -> Result<runtime::CarryOver, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let save = jks::Save::read(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bins = save.bins();
+    if bins.is_empty() {
+        return Err(format!("{}: no engine inventory records", path.display()));
+    }
+    Ok(runtime::CarryOver {
+        inv: bins.iter().map(|bin| (bin.bin as i32, bin.value())).collect(),
+        weapon: None,
+        cur_bin: 0,
+        saber: None,
+        jk_flags: 0,
+        // The bin table is the part the autosave format keeps; the bars match retail's autosaves.
+        health: 100.0,
+        shields: 100.0,
+    })
+}
 
 /// Read a savegame's level name and state payload.
 fn read_save(path: &std::path::Path) -> Option<(String, runtime::Snapshot)> {
@@ -16084,10 +16343,9 @@ struct RoutePlan {
     /// Ticks at which the script presses the use key. A `use` row takes no ticks: the sample grid
     /// must stay on retail's 600 ms cadence.
     uses: Vec<u32>,
-    /// A `switch` row: the tick at which the level's own cantina-door switch is activated. The
-    /// retail captures began with that door open (the player had pressed it in the recorded play),
-    /// so the replay restores the same world through the level's own message, not by opening a gate.
-    switch_at: Option<u32>,
+    /// Ticks at which the script turns the body: `(tick, degrees)`. A turn takes no ticks, because the
+    /// player's yaw is a mouse input, not movement — the sample grid stays on retail's cadence.
+    yaws: Vec<(u32, f32)>,
     /// A `seed` row: the body velocity retail's capture already had at the leg's pose. The retail
     /// fixture's first row records `vel` 0 only because its window has no earlier sample; its first
     /// 600 ms already covered the leg's travel, so the replay starts the body moving at the same speed.
@@ -16098,12 +16356,6 @@ struct RoutePlan {
 /// The trace's sample interval. 36 ticks at 1/60 s is the 600 ms hold a retail `coords` poll
 /// segments the engine into (`Invoke-JkWalkTrace`'s `HoldMs`).
 const ROUTE_SAMPLE_TICKS: u32 = 36;
-
-/// Game-clock seconds per wall-clock second in the route captures: the engine walks 1.2 u/s
-/// (measured by the walk traces) but covers 0.88-0.92 u/s of the fixture's 600 ms wall samples,
-/// because the console/dialog pauses hold the game clock. The replay scales its dt so positions at
-/// the fixture's sample ticks line up with retail's.
-const ROUTE_TIME_SCALE: f32 = 0.85;
 
 /// The level-1 cogs the route trace carries: the upper door (`00_door.cog`, placed cog 0) and the
 /// cantina door switch (`00_doorswitch.cog`, placed cog 11). The symbol names differ between them
@@ -16116,11 +16368,29 @@ const ROUTE_COGS: [(usize, [&str; 4]); 2] = [
 /// The trace columns. Every value is a number or `-` (a field the run does not have: no such cog
 /// started, or a retail capture did not record it). The comparator parses the header, so the set
 /// can grow without breaking older fixtures.
-const ROUTE_TRACE_FIELDS: [&str; 19] = [
+///
+/// The audio columns are the audio trace's mixer state at the same sample (issue #14): the song's
+/// track range and loop flag, `SetMusicVol`'s value, the loudest audible ambient loop and its
+/// volume, and every one-shot played since the previous sample. A trace never writes `-` here:
+/// silence is an empty `ambient`, an empty `sounds`, and `0 0 0` for the mixer's "no song" state.
+const ROUTE_TRACE_FIELDS: [&str; 29] = [
     "tick", "t_s", "x", "y", "z", "sector", "vel_x", "vel_y", "vel_z", "health", "shields",
     "door0_status", "door0_movestatus", "door0_opendoors", "door0_closedoors",
     "switch_status", "switch_movestatus", "switch_opendoors", "switch_closedoors",
+    "door0_opened", "goal_bin100", "level_end",
+    "music", "music_end", "music_loop", "music_vol", "ambient", "ambient_vol", "sounds",
 ];
+
+/// The route trace's text columns: a wav name and a `wav@gain` list. They are compared exactly,
+/// and an empty cell is a recorded silence, not a missing value.
+const ROUTE_TEXT_FIELDS: [&str; 2] = ["ambient", "sounds"];
+
+/// Event columns: a latched engine observation the two captures can sample a row apart. Retail's
+/// game clock advances a variable number of frames per 600 ms hold while the replay advances exactly
+/// 36, so a transient state (the door's open frame, the sighting's goal write) may land on a
+/// different sample index on the two sides. These columns are therefore graded on the fixture's
+/// **last row only**; a position, sector, velocity or bar keeps its per-row comparison.
+const ROUTE_EVENT_FIELDS: [&str; 3] = ["door0_opened", "goal_bin100", "level_end"];
 
 impl RoutePlan {
     fn read(path: &std::path::Path) -> Result<Self, String> {
@@ -16184,6 +16454,21 @@ impl RoutePlan {
                     plan.inputs.push((plan.total, RouteInput { forward, strafe, use_action: false }));
                     plan.total += ticks;
                 }
+                Some("wait") => {
+                    // wait <ticks>: stand still. The door leaf needs game time to finish opening
+                    // before the next hold can cross; a real capture waits the same way.
+                    if f.len() != 2 {
+                        return Err(fail(format!("`wait` needs a tick count, got {} field(s)", f.len())));
+                    }
+                    let ticks: u32 = f[1]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a tick count", f[1])))?;
+                    if ticks == 0 {
+                        return Err(fail("a `wait` row needs at least one tick".to_string()));
+                    }
+                    plan.inputs.push((plan.total, RouteInput::default()));
+                    plan.total += ticks;
+                }
                 Some("use") => {
                     // use
                     if f.len() != 1 {
@@ -16191,12 +16476,15 @@ impl RoutePlan {
                     }
                     plan.uses.push(plan.total);
                 }
-                Some("switch") => {
-                    // switch
-                    if f.len() != 1 {
-                        return Err(fail(format!("`switch` takes no values, got {} field(s)", f.len())));
+                Some("yaw") => {
+                    // yaw <degrees>
+                    if f.len() != 2 {
+                        return Err(fail(format!("`yaw` needs degrees, got {} field(s)", f.len())));
                     }
-                    plan.switch_at.get_or_insert(plan.total);
+                    let degrees: f32 = f[1]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a number", f[1])))?;
+                    plan.yaws.push((plan.total, degrees));
                 }
                 Some("seed") => {
                     // seed <vx> <vy>
@@ -16212,7 +16500,7 @@ impl RoutePlan {
                     plan.seed.get_or_insert((plan.total, [vx, vy]));
                 }
                 Some(other) => {
-                    return Err(fail(format!("unknown row kind `{other}` (warp, input, use, switch, seed)")));
+                    return Err(fail(format!("unknown row kind `{other}` (warp, yaw, input, wait, use, seed)")));
                 }
                 None => {}
             }
@@ -16250,41 +16538,63 @@ impl RoutePlan {
 }
 
 /// One parsed route-trace row: the tick plus one `Option<f64>` per [`ROUTE_TRACE_FIELDS`] entry.
+/// A [`ROUTE_TEXT_FIELDS`] slot leaves its numeric value `None` and uses `texts` instead; an empty
+/// text cell is the recorded silence.
 #[derive(Debug, Clone)]
 struct RouteTraceRow {
     tick: u32,
     values: Vec<Option<f64>>,
+    texts: Vec<Option<String>>,
 }
 
-fn parse_route_trace(text: &str) -> Result<Vec<RouteTraceRow>, String> {
+/// A parsed route trace: its rows, and which columns its own header measured.
+///
+/// A fixture says what it measured. The committed retail capture predates issue #15 and has no
+/// `door0_opened`/`goal_bin100`/`level_end` columns and no exit segment; that is not a `<-> failure, it
+/// is the coverage the fixture claims, so those columns and the rows past its last tick are not
+/// compared against it.
+#[derive(Debug, Clone)]
+struct RouteTrace {
+    rows: Vec<RouteTraceRow>,
+    /// One flag per [`ROUTE_TRACE_FIELDS`] entry: does this trace's header carry the column?
+    columns: Vec<bool>,
+}
+
+fn parse_route_trace(text: &str) -> Result<RouteTrace, String> {
     let mut rows = Vec::new();
-    let mut columns: Option<Vec<usize>> = None;
+    let mut columns: Option<Vec<Option<usize>>> = None;
     for (line_no, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
+        // `trim()` would eat the trailing tab of a row whose `sounds` cell is empty (a recorded
+        // window with nothing played), turning "silence" into "not recorded".
         let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
         if columns.is_none() {
-            let mut order = Vec::with_capacity(ROUTE_TRACE_FIELDS.len());
-            for field in ROUTE_TRACE_FIELDS {
-                match cells.iter().position(|c| *c == field) {
-                    Some(index) => order.push(index),
-                    None => {
-                        return Err(format!(
-                            "line {}: trace header has no `{field}` column",
-                            line_no + 1
-                        ))
-                    }
-                }
+            // A missing column is a column the fixture did not measure, not an error: the frozen
+            // retail capture predates the exit segment's events.
+            let order: Vec<Option<usize>> = ROUTE_TRACE_FIELDS
+                .iter()
+                .map(|field| cells.iter().position(|c| c == field))
+                .collect();
+            if order[0].is_none() {
+                return Err(format!("line {}: trace header has no `tick` column", line_no + 1));
             }
             columns = Some(order);
             continue;
         }
         let order = columns.as_ref().expect("header just parsed");
         let mut values = Vec::with_capacity(ROUTE_TRACE_FIELDS.len());
+        let mut texts = Vec::with_capacity(ROUTE_TRACE_FIELDS.len());
         for (slot, index) in order.iter().enumerate() {
-            let raw = cells.get(*index).copied().unwrap_or("-");
+            let raw = index.and_then(|index| cells.get(index)).copied().unwrap_or("-");
+            if ROUTE_TEXT_FIELDS.contains(&ROUTE_TRACE_FIELDS[slot]) {
+                // An empty cell is a recorded silence (`sounds` with nothing played); `-` is the
+                // column the trace does not have.
+                values.push(None);
+                texts.push(if raw == "-" { None } else { Some(raw.to_string()) });
+                continue;
+            }
             let value = if raw == "-" || raw.is_empty() {
                 None
             } else {
@@ -16295,51 +16605,118 @@ fn parse_route_trace(text: &str) -> Result<Vec<RouteTraceRow>, String> {
                 )
             };
             values.push(value);
+            texts.push(None);
         }
         let tick = values[0]
             .ok_or_else(|| format!("line {}: the tick is `-`", line_no + 1))? as u32;
-        rows.push(RouteTraceRow { tick, values });
+        rows.push(RouteTraceRow { tick, values, texts });
     }
     if rows.is_empty() {
         return Err("the trace has a header but no rows".to_string());
     }
-    Ok(rows)
+    let columns = columns
+        .expect("a trace with rows has a header")
+        .iter()
+        .map(Option::is_some)
+        .collect();
+    Ok(RouteTrace { rows, columns })
 }
 
 /// Compare two route traces field by field. `epsilon` is the absolute tolerance for every numeric
-/// column except `tick` (exact) and `sector` (an integer identity, exact): a sector difference is a
-/// different room, never a rounding error. A field that either side does not have (`-`) is skipped,
-/// and the caller's summary counts how many were actually compared.
+/// column except `tick` (exact), `t_s` (exact: the engine clock is an identity, so a sample taken at
+/// a different engine instant is a different measurement, not a rounding error) and `sector` (an
+/// integer identity, exact): a sector difference is a different room, never a rounding error. A field
+/// that either side does not have (`-`) is skipped, and the caller's summary counts how many were
+/// actually compared.
+///
+/// The **expected** trace sets the coverage: its columns and its row span are what is graded, so a
+/// fixture taken before a segment existed still checks the part of the route it measured, and the
+/// trace's rows past the fixture's last tick are reported instead of compared.
+///
+/// `events_per_row` says whether the latched event columns are graded on every row. The frozen
+/// retail capture advances a variable amount of engine time per hold, so only its last row is
+/// comparable (the caller passes `false`); the port oracle is the port's own replay on the same
+/// fixed grid, so every row is graded (`true`) and an early latch fails.
 fn compare_route_rows(
-    expected: &[RouteTraceRow],
-    actual: &[RouteTraceRow],
+    expected: &RouteTrace,
+    actual: &RouteTrace,
     epsilon: f64,
+    events_per_row: bool,
 ) -> Result<usize, String> {
-    if expected.len() != actual.len() {
+    if actual.rows.len() < expected.rows.len() {
         return Err(format!(
             "route-compare: FAIL {} row(s) expected, {} in the trace",
-            expected.len(),
-            actual.len()
+            expected.rows.len(),
+            actual.rows.len()
         ));
     }
     let mut failures = Vec::new();
     let mut compared = 0usize;
-    for (want_row, got_row) in expected.iter().zip(actual) {
+    let last_tick = expected.rows.last().map(|row| row.tick);
+    for (want_row, got_row) in expected.rows.iter().zip(&actual.rows) {
         let tick = want_row.tick;
         if tick != got_row.tick {
             failures.push(format!("tick {tick}: the trace has tick {}", got_row.tick));
             continue;
         }
         for (slot, field) in ROUTE_TRACE_FIELDS.iter().enumerate().skip(1) {
+            if !expected.columns[slot] {
+                continue;
+            }
+            if ROUTE_TEXT_FIELDS.contains(field) {
+                let (Some(want), Some(got)) = (want_row.texts[slot].as_deref(), got_row.texts[slot].as_deref())
+                else {
+                    continue;
+                };
+                compared += 1;
+                if want != got {
+                    failures.push(format!(
+                        "tick {tick} {field}: expected `{want}`, trace has `{got}`"
+                    ));
+                }
+                continue;
+            }
+            let event = ROUTE_EVENT_FIELDS.contains(field);
+            // An event column is a latched state. The frozen retail capture and the replay advance a
+            // different amount of engine time inside the same 600 ms hold, so the row the latch
+            // trips on is not comparable there and only the fixture's last row is graded. The port
+            // oracle shares the replay's grid, so its events are graded on every row.
+            if event && !events_per_row && Some(tick) != last_tick {
+                continue;
+            }
             let (Some(want), Some(got)) = (want_row.values[slot], got_row.values[slot]) else {
+                if event {
+                    failures.push(format!(
+                        "tick {tick} {field}: the fixture or the trace leaves the event as `-`"
+                    ));
+                }
                 continue;
             };
             compared += 1;
             let delta = (want - got).abs();
+            if event {
+                // An event is an identity, not a measurement: the same state or a failure.
+                if want != got {
+                    failures.push(format!(
+                        "tick {tick} {field}: expected {want:.0}, trace has {got:.0}"
+                    ));
+                }
+                continue;
+            }
             if *field == "sector" {
                 if delta > 0.5 {
                     failures.push(format!(
                         "tick {tick} sector: expected {want:.0}, trace has {got:.0}"
+                    ));
+                }
+                continue;
+            }
+            // The engine clock is an identity (issue #17): two samples at different engine instants
+            // are different measurements, so no position tolerance may excuse one.
+            if *field == "t_s" {
+                if want != got {
+                    failures.push(format!(
+                        "tick {tick} t_s: expected {want:.4}, trace has {got:.4} (engine instants differ)"
                     ));
                 }
                 continue;
@@ -16367,35 +16744,57 @@ fn route_trace_compare(
     expected: &std::path::Path,
     actual: &std::path::Path,
     epsilon: f64,
+    events_per_row: bool,
 ) -> Result<(), String> {
-    let read = |path: &std::path::Path| -> Result<Vec<RouteTraceRow>, String> {
+    let read = |path: &std::path::Path| -> Result<RouteTrace, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         parse_route_trace(&text).map_err(|e| format!("{}: {e}", path.display()))
     };
     let want = read(expected)?;
     let got = read(actual)?;
-    let compared = compare_route_rows(&want, &got, epsilon)?;
+    let compared = compare_route_rows(&want, &got, epsilon, events_per_row)?;
+    let unmeasured = want
+        .columns
+        .iter()
+        .zip(ROUTE_TRACE_FIELDS.iter())
+        .filter(|(measured, _)| !**measured)
+        .map(|(_, field)| *field)
+        .collect::<Vec<_>>();
+    let port_only = got.rows.len() - want.rows.len();
     println!(
-        "route-compare: PASS {} row(s), {compared} field(s) within {epsilon}",
-        want.len()
+        "route-compare: PASS {} row(s){} of {}, {compared} field(s) within {epsilon}{}{}",
+        want.rows.len(),
+        if port_only > 0 { format!(" (+{port_only} beyond the fixture)") } else { String::new() },
+        actual.display(),
+        if unmeasured.is_empty() {
+            String::new()
+        } else {
+            format!("; the fixture does not measure {}", unmeasured.join(", "))
+        },
+        if events_per_row { "; events graded on every row" } else { "" }
     );
     Ok(())
 }
 
-/// One route-trace line. `x/y/z` are the player **body** position — the value retail's `coords`
-/// prints (the camera rides one `eyeOffset` above it, so a `shots.tsv` eye is 0.037 higher) — and a
-/// retail capture and this trace therefore name the same point. `vel_x`/`vel_y`/`vel_z` are the
-/// position derivative over the 600 ms sample window, in level units per second — the retail
-/// fixture's own definition. A field the run does not have is `-`: a level without the two route
-/// cogs, or a retail capture that did not record health.
+/// One route-trace line. `t_s` is the engine clock the row was sampled at (issue #17): the
+/// simulation's own accumulated time, so a body that ran on a different clock cannot declare one.
+/// `x/y/z` are the player **body** position — the value retail's `coords` prints (the camera rides
+/// one `eyeOffset` above it, so a `shots.tsv` eye is 0.037 higher) — and a retail capture and this
+/// trace therefore name the same point. `vel_x`/`vel_y`/`vel_z` are the position derivative over the
+/// sample window, in level units per second — the retail fixture's own definition. A field the run
+/// does not have is `-`: a level without the two route cogs, or a retail capture that did not record
+/// health.
 fn write_route_trace_row(
     path: &std::path::Path,
     tick: u32,
+    engine_s: f64,
     body: &runtime::PlayerBody,
     vel: [f32; 3],
+    audio: &SampledAudio,
     sim: Option<&Sim>,
     world: Option<&World>,
+    door0_opened: &mut bool,
 ) {
     use std::io::Write;
     let first = tick == 0;
@@ -16427,16 +16826,48 @@ fn write_route_trace_row(
         (Some(world), Some(sim)) => route_cog_values(world, sim),
         _ => [None; 8],
     };
+    // The door's own report, latched: `00_door.cog` closes it again two seconds after `arrived`,
+    // so a sample grid that happens to miss the open frame still records that it opened.
+    if cogs[0].is_some_and(|v| v != 0.0) || cogs[1].is_some_and(|v| v != 0.0) {
+        *door0_opened = true;
+    }
+    // `01_endlevel.cog`'s `user0:` sets goal 0 completed with `SetGoalFlags(player,0,2)`; the
+    // inventory bin (SITHBIN_GOAL00 + 0) reads 1 at the level start and 3 once 8t88 is sighted.
+    let goal_bin100 = sim
+        .map(|sim| f64::from(sim.world.borrow().inv.get(&runtime::GOAL_BIN).copied().unwrap_or(0.0)));
+    // `sithMain_SetEndLevel` (`0x4c4bf0`): the level's own script called `jkEndLevel`, so the level
+    // finished. A capture keeps the world it booted (the app clears `level_complete`), which is why
+    // the trace reads the never-cleared latch instead of the app's transition flag.
+    let level_end = sim.map(|sim| i32::from(sim.world.borrow().end_level_called));
     let number = |value: Option<f64>, places: usize| {
         value
             .map(|v| format!("{v:.places$}"))
             .unwrap_or_else(|| "-".to_string())
     };
+    // The mixer's state at this sample. No song is the engine's idle state (0 0 0); silence is an
+    // empty `ambient`/`sounds`, so an audio cell is never `-`.
+    let (music, music_end, music_loop) = audio
+        .music
+        .map(|(start, end, loops)| {
+            (start.to_string(), end.to_string(), u8::from(loops != 0).to_string())
+        })
+        .unwrap_or_else(|| ("0".to_string(), "0".to_string(), "0".to_string()));
+    let (ambient, ambient_volume) = audio
+        .ambient
+        .as_ref()
+        .map(|(name, volume)| (name.clone(), format!("{volume:.3}")))
+        .unwrap_or_else(|| (String::new(), "0.000".to_string()));
+    let sounds = audio
+        .sounds
+        .iter()
+        .map(|(_, name, gain)| format!("{name}@{gain:.3}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     let _ = writeln!(
         file,
-        "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{music}\t{music_end}\t{music_loop}\t{:.3}\t{ambient}\t{ambient_volume}\t{sounds}",
         tick,
-        f64::from(tick) / 60.0,
+        engine_s,
         body.pos.x,
         body.pos.y,
         body.pos.z,
@@ -16454,6 +16885,10 @@ fn write_route_trace_row(
         number(cogs[5], 3),
         number(cogs[6], 3),
         number(cogs[7], 3),
+        if *door0_opened { 1 } else { 0 },
+        number(goal_bin100, 0),
+        number(level_end.map(f64::from), 0),
+        audio.music_volume,
     );
 }
 
@@ -16797,11 +17232,440 @@ fn audio_trace_compare(
     Ok(())
 }
 
+/// `--audio-schedule`'s columns. `time_s` is the engine clock at the replay's own step; `gain` is
+/// the mixer's attenuated volume; `volume` is the request's base volume and `distance`/`forward` the
+/// listener geometry the gain came from; `min_radius`/`max_radius`/`max_volume` are the shipped
+/// `.snd` row; `snd`/`event` name that row's class and event; `source` names the engine call that
+/// queued the sound. The row is therefore checkable against the shipped data with no replay
+/// (`--audio-schedule-verify`) and against a replay's trace (`--audio-trace-vs-schedule`).
+const AUDIO_SCHEDULE_FIELDS: [&str; 13] = [
+    "tick", "time_s", "wav", "gain", "volume", "distance", "forward", "min_radius", "max_radius",
+    "max_volume", "snd", "event", "source",
+];
+
+/// Write one expected-schedule row. The first row truncates the file (a schedule is one run's
+/// events, not an append across runs).
+fn write_audio_schedule_row(
+    path: &std::path::Path,
+    started: &mut bool,
+    sound: &PlayedSound,
+) {
+    use std::io::Write;
+    let first = !*started;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true);
+    if first {
+        options.truncate(true);
+    } else {
+        options.append(true);
+    }
+    let Ok(mut file) = options.open(path) else { return };
+    if first {
+        let _ = writeln!(file, "{}", AUDIO_SCHEDULE_FIELDS.join("\t"));
+    }
+    let _ = writeln!(
+        file,
+        "{}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}",
+        sound.tick,
+        sound.time_s,
+        sound.wav,
+        sound.gain,
+        sound.volume,
+        sound.distance,
+        sound.forward,
+        sound.min,
+        sound.max,
+        sound.max_volume,
+        sound.snd,
+        sound.event,
+        sound.source,
+    );
+    *started = true;
+}
+
+/// One parsed expected-schedule row. The numbers are `f64` so a row's gain can be recomputed from
+/// its own geometry and the shipped `.snd` row without leaning on the producer's `f32` rounding.
+#[derive(Clone, Debug, PartialEq)]
+struct AudioScheduleRow {
+    tick: u32,
+    time_s: f64,
+    wav: String,
+    gain: f64,
+    volume: f64,
+    distance: f64,
+    forward: f64,
+    min_radius: f64,
+    max_radius: f64,
+    max_volume: f64,
+    snd: String,
+    event: String,
+    source: String,
+}
+
+fn parse_audio_schedule(text: &str) -> Result<Vec<AudioScheduleRow>, String> {
+    let mut rows = Vec::new();
+    let mut columns: Option<Vec<usize>> = None;
+    for (line_no, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
+        if columns.is_none() {
+            let mut order = Vec::with_capacity(AUDIO_SCHEDULE_FIELDS.len());
+            for field in AUDIO_SCHEDULE_FIELDS {
+                match cells.iter().position(|c| *c == field) {
+                    Some(index) => order.push(index),
+                    None => {
+                        return Err(format!(
+                            "line {}: the schedule header has no `{field}` column",
+                            line_no + 1
+                        ))
+                    }
+                }
+            }
+            columns = Some(order);
+            continue;
+        }
+        let order = columns.as_ref().expect("header just parsed");
+        let cell = |slot: usize| -> &str {
+            order
+                .get(slot)
+                .and_then(|index| cells.get(*index))
+                .copied()
+                .unwrap_or("")
+        };
+        let number = |slot: usize, field: &str| -> Result<f64, String> {
+            cell(slot)
+                .parse::<f64>()
+                .map_err(|_| format!("line {}: `{}` is not a number ({field})", line_no + 1, cell(slot)))
+        };
+        rows.push(AudioScheduleRow {
+            tick: number(0, "tick")? as u32,
+            time_s: number(1, "time_s")?,
+            wav: cell(2).to_string(),
+            gain: number(3, "gain")?,
+            volume: number(4, "volume")?,
+            distance: number(5, "distance")?,
+            forward: number(6, "forward")?,
+            min_radius: number(7, "min_radius")?,
+            max_radius: number(8, "max_radius")?,
+            max_volume: number(9, "max_volume")?,
+            snd: cell(10).to_string(),
+            event: cell(11).to_string(),
+            source: cell(12).to_string(),
+        });
+    }
+    if rows.is_empty() {
+        return Err("the schedule has a header but no events".to_string());
+    }
+    Ok(rows)
+}
+
+/// Compare an expected schedule with a replay's schedule. Every event pairs by exact engine tick and
+/// wav, and differs in four ways:
+///
+/// * **missing** — the expected schedule has it and the replay did not play it;
+/// * **extra** — the replay played it and the expected schedule does not have it;
+/// * **mistimed** — the same wav exists at another tick (the engine clock moved, not the sound);
+/// * **attenuated** — same tick, same wav, different gain;
+///
+/// plus `data:` (the base volume, radii or class row changed) and `source:` (a different engine call
+/// or `.snd` row produced it). The tick is exact: this is the event list under the 600 ms trace, so
+/// a sound in another tick is reported rather than quietly accepted.
+fn compare_audio_schedule(
+    expected: &[AudioScheduleRow],
+    actual: &[AudioScheduleRow],
+    epsilon: f64,
+) -> Result<(usize, usize), String> {
+    let mut want_used = vec![false; expected.len()];
+    let mut got_used = vec![false; actual.len()];
+    let mut events = 0usize;
+    let mut differences: Vec<String> = Vec::new();
+    // Same tick and wav.
+    for (wi, want) in expected.iter().enumerate() {
+        let Some(gi) = actual
+            .iter()
+            .enumerate()
+            .position(|(gi, got)| !got_used[gi] && got.tick == want.tick && got.wav == want.wav)
+        else {
+            continue;
+        };
+        got_used[gi] = true;
+        want_used[wi] = true;
+        events += 1;
+        let got = &actual[gi];
+        if (want.gain - got.gain).abs() > epsilon {
+            differences.push(format!(
+                "attenuated: {} at tick {} gain {:.3} expected, {:.3} trace (delta {:.3})",
+                want.wav,
+                want.tick,
+                want.gain,
+                got.gain,
+                (want.gain - got.gain).abs()
+            ));
+        }
+        if (want.volume - got.volume).abs() > 1e-3
+            || (want.max_volume - got.max_volume).abs() > 1e-3
+            || (want.min_radius - got.min_radius).abs() > 1e-3
+            || (want.max_radius - got.max_radius).abs() > 1e-3
+        {
+            differences.push(format!(
+                "data: {} at tick {} base volume/radii {:.3}/{:.3}/{:.3}/{:.3} expected, {:.3}/{:.3}/{:.3}/{:.3} trace",
+                want.wav,
+                want.tick,
+                want.volume,
+                want.min_radius,
+                want.max_radius,
+                want.max_volume,
+                got.volume,
+                got.min_radius,
+                got.max_radius,
+                got.max_volume
+            ));
+        }
+        if want.source != got.source || want.snd != got.snd || want.event != got.event {
+            differences.push(format!(
+                "source: {} at tick {} `{}` ({}/{} ) expected, `{}` ({}/{}) trace",
+                want.wav, want.tick, want.source, want.snd, want.event, got.source, got.snd, got.event
+            ));
+        }
+        if (want.time_s - got.time_s).abs() > 1e-3 {
+            differences.push(format!(
+                "time: {} at tick {} engine {:.4}s expected, {:.4}s trace",
+                want.wav, want.tick, want.time_s, got.time_s
+            ));
+        }
+    }
+    // The same wav in another tick: mistimed, not missing plus extra.
+    for (wi, want) in expected.iter().enumerate() {
+        if want_used[wi] {
+            continue;
+        }
+        let Some(gi) = actual
+            .iter()
+            .enumerate()
+            .position(|(gi, got)| !got_used[gi] && got.wav == want.wav)
+        else {
+            continue;
+        };
+        got_used[gi] = true;
+        want_used[wi] = true;
+        events += 1;
+        let got = &actual[gi];
+        differences.push(format!(
+            "mistimed: {} expected tick {}, trace tick {} ({} tick(s) off)",
+            want.wav,
+            want.tick,
+            got.tick,
+            got.tick as i64 - want.tick as i64
+        ));
+    }
+    for (wi, want) in expected.iter().enumerate() {
+        if !want_used[wi] {
+            events += 1;
+            differences.push(format!(
+                "missing: {} at tick {} (gain {:.3})",
+                want.wav, want.tick, want.gain
+            ));
+        }
+    }
+    for (gi, got) in actual.iter().enumerate() {
+        if !got_used[gi] {
+            events += 1;
+            differences.push(format!(
+                "extra: {} at tick {} (gain {:.3})",
+                got.wav, got.tick, got.gain
+            ));
+        }
+    }
+    if differences.is_empty() {
+        Ok((events, differences.len()))
+    } else {
+        let shown = differences.iter().take(16).cloned().collect::<Vec<_>>().join("\n  ");
+        Err(format!(
+            "audio-schedule-compare: FAIL {events} event(s), {} difference(s):\n  {shown}",
+            differences.len()
+        ))
+    }
+}
+
+/// `--audio-schedule-compare`: parse both schedules and apply [`compare_audio_schedule`].
+fn audio_schedule_compare_files(
+    expected: &std::path::Path,
+    actual: &std::path::Path,
+    epsilon: f64,
+) -> Result<(), String> {
+    let read = |path: &std::path::Path| -> Result<Vec<AudioScheduleRow>, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        parse_audio_schedule(&text).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let want = read(expected)?;
+    let got = read(actual)?;
+    let (events, _) = compare_audio_schedule(&want, &got, epsilon)?;
+    println!("audio-schedule-compare: PASS {events} one-shot event(s) within {epsilon}");
+    Ok(())
+}
+
+/// The 600 ms sample window a replay tick belongs to: the trace writes a row on every 36th tick and
+/// drains the events since the previous row, so a request logged on tick `t` appears in the row at
+/// the first multiple of 36 at or after `t`. Tick 0's frame is the first row itself.
+fn audio_window_tick(tick: u32) -> u32 {
+    match tick {
+        0 => 0,
+        _ => tick.div_ceil(ROUTE_SAMPLE_TICKS) * ROUTE_SAMPLE_TICKS,
+    }
+}
+
+/// `--audio-trace-vs-schedule`: the trace's sounds column must carry exactly the schedule's events,
+/// window by window, at the schedule's gains. This is the seam between the oracle (events with
+/// engine times) and the sampled mixer state the rest of the gate compares.
+fn audio_trace_schedule_check(
+    trace_path: &std::path::Path,
+    schedule_path: &std::path::Path,
+    epsilon: f64,
+) -> Result<(), String> {
+    let trace_text = std::fs::read_to_string(trace_path)
+        .map_err(|e| format!("{}: {e}", trace_path.display()))?;
+    let trace = parse_audio_trace(&trace_text)
+        .map_err(|e| format!("{}: {e}", trace_path.display()))?;
+    if trace.iter().any(|row| row.sounds.is_none()) {
+        return Err(format!(
+            "{}: a `-` sounds cell is a window the trace did not record; the replay trace must record its events",
+            trace_path.display()
+        ));
+    }
+    let schedule_text = std::fs::read_to_string(schedule_path)
+        .map_err(|e| format!("{}: {e}", schedule_path.display()))?;
+    let schedule = parse_audio_schedule(&schedule_text)
+        .map_err(|e| format!("{}: {e}", schedule_path.display()))?;
+    let mut expected: Vec<AudioTraceRow> = Vec::with_capacity(trace.len());
+    for row in &trace {
+        let sounds: Vec<(String, f64)> = schedule
+            .iter()
+            .filter(|event| audio_window_tick(event.tick) == row.tick)
+            .map(|event| (event.wav.clone(), event.gain))
+            .collect();
+        expected.push(AudioTraceRow { sounds: Some(sounds), ..row.clone() });
+    }
+    let (states, sounds) = compare_audio_rows(&expected, &trace, epsilon)
+        .map_err(|e| format!("audio-trace-vs-schedule: {e}"))?;
+    println!(
+        "audio-trace-vs-schedule: PASS {states} window(s), {sounds} event(s) at their windows within {epsilon}"
+    );
+    Ok(())
+}
+
+/// `--audio-schedule-verify`: re-derive the schedule from the shipped data. Each row's `snd`/`event`
+/// must name a real `.snd` row with that wav and those radii/volume, and the row's `gain` must be
+/// what the mixer's own formula gives from that row, the row's base volume and its listener
+/// geometry (worked out again here, not read from the producer).
+///
+/// This is the data half of the oracle: it fails if a schedule row names a class or a fade radius
+/// the install does not carry, or if the gain does not follow from them. What it cannot judge is the
+/// engine **time** — that is the replay's clock, checked by comparing against the committed schedule.
+fn audio_schedule_verify_file(
+    gobs: &gob::GobSet,
+    path: &std::path::Path,
+) -> Result<usize, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let rows = parse_audio_schedule(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut classes: HashMap<String, Vec<snd::Entry>> = HashMap::new();
+    for name in gobs.names() {
+        if !name.to_ascii_lowercase().ends_with(".snd") {
+            continue;
+        }
+        let Some(raw) = gobs.read(&name) else { continue };
+        classes
+            .entry(runtime::sound_class_key(&name))
+            .or_default()
+            .extend(snd::parse(&String::from_utf8_lossy(&raw)));
+    }
+    let mut failures: Vec<String> = Vec::new();
+    for row in &rows {
+        let Some(entries) = classes.get(&row.snd) else {
+            failures.push(format!(
+                "{} at tick {}: the install has no `.snd` class `{}`",
+                row.wav, row.tick, row.snd
+            ));
+            continue;
+        };
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.event == row.event && entry.wav.eq_ignore_ascii_case(&row.wav))
+        else {
+            failures.push(format!(
+                "{} at tick {}: `{}` has no `{}` row naming it",
+                row.wav, row.tick, row.snd, row.event
+            ));
+            continue;
+        };
+        let close = |value: f64, shipped: f32| (value - f64::from(shipped)).abs() <= 1e-4;
+        if !close(row.min_radius, entry.min_radius)
+            || !close(row.max_radius, entry.max_radius)
+            || !close(row.max_volume, entry.max_volume)
+        {
+            failures.push(format!(
+                "{} at tick {}: the row carries radii {:.3}/{:.3} volume {:.3}, `{}` ships {:.3}/{:.3} volume {:.3}",
+                row.wav,
+                row.tick,
+                row.min_radius,
+                row.max_radius,
+                row.max_volume,
+                row.snd,
+                entry.min_radius,
+                entry.max_radius,
+                entry.max_volume
+            ));
+            continue;
+        }
+        // The gain, worked out again from the shipped row and the decomp's mixer formula rather than
+        // calling `snd::volume`: `sithSoundMixer_UpdateSoundPos` (`0x4dcc00`) fades the base volume
+        // linearly from `minRadius` to `maxRadius` (a zero-width span never fades), pulls a sound
+        // behind the listener by `1 - |dot| * 0.3`, clamps to [0, 1] and writes `* 0.75`.
+        let span = f64::from(entry.max_radius - entry.min_radius);
+        let fade = if span <= 0.0 {
+            0.0
+        } else {
+            ((row.distance - f64::from(entry.min_radius)) / span).clamp(0.0, 1.0)
+        };
+        let mut base = f64::from(entry.max_volume) * row.volume;
+        if row.forward < 0.0 {
+            base *= 1.0 + row.forward * f64::from(snd::REAR_PAN);
+        }
+        base *= 1.0 - fade;
+        let recomputed = base.clamp(0.0, 1.0) * f64::from(snd::FINAL_SCALE);
+        if (recomputed - row.gain).abs() > 1e-3 {
+            failures.push(format!(
+                "{} at tick {}: gain {:.4} but the shipped row and its geometry give {:.4}",
+                row.wav, row.tick, row.gain, recomputed
+            ));
+        }
+        if !row.time_s.is_finite() || row.time_s < 0.0 {
+            failures.push(format!(
+                "{} at tick {}: engine time {:.4} is not a clock reading",
+                row.wav, row.tick, row.time_s
+            ));
+        }
+    }
+    if failures.is_empty() {
+        Ok(rows.len())
+    } else {
+        let shown = failures.iter().take(16).cloned().collect::<Vec<_>>().join("\n  ");
+        Err(format!(
+            "audio-schedule-verify: FAIL {} of {} event(s):\n  {shown}",
+            failures.len(),
+            rows.len()
+        ))
+    }
+}
+
 /// One audio-trace line. See [`AUDIO_TRACE_FIELDS`] for the columns and
 /// [`audio_trace_sample`] for what fills them.
 fn write_audio_trace_row(
     path: &std::path::Path,
     tick: u32,
+    engine_s: f64,
     music: Option<(i32, i32, i32)>,
     music_volume: f32,
     ambient: Option<&(String, f32)>,
@@ -16836,9 +17700,115 @@ fn write_audio_trace_row(
         .join(" ");
     let _ = writeln!(
         file,
-        "{tick}\t{:.4}\t{music}\t{end}\t{loops}\t{music_volume:.3}\t{ambient_name}\t{ambient_volume}\t{sounds}",
-        f64::from(tick) / 60.0,
+        "{tick}\t{engine_s:.4}\t{music}\t{end}\t{loops}\t{music_volume:.3}\t{ambient_name}\t{ambient_volume}\t{sounds}",
     );
+}
+
+/// One sample of the mixer's state, as both traces record it.
+struct SampledAudio {
+    music: Option<(i32, i32, i32)>,
+    music_volume: f32,
+    /// The loudest audible loop: `(wav, channel volume)`.
+    ambient: Option<(String, f32)>,
+    /// `(tick, wav, gain)` for every one-shot the sample window played.
+    sounds: Vec<(u32, String, f32)>,
+}
+
+/// The mixer state at one sample. `leaving` is the sector the sample names — the one the body was
+/// in before this frame's warp, which is the room retail's console `warp` row still reports.
+///
+/// Retail's capture reads the mixer's loop channels: a sector `SOUND` loop the body has entered,
+/// and the positional loops scripts start (`00_PlayAmbient.cog`'s `00rumbleamb01.wav`). It reports
+/// the loudest by mixer gain, `volume * (1 - fade) * 0.75`, and the channel's own volume.
+///
+/// The one-shot log is drained here, so exactly one trace may consume it: `--route-trace` and
+/// `--audio-trace` are rejected together (each would read half of every window).
+#[allow(clippy::too_many_arguments)]
+fn sample_audio_state(
+    sim: &Sim,
+    body: &runtime::PlayerBody,
+    leaving: usize,
+    ambience: Option<&Ambience>,
+    collisions: Option<&Collision>,
+    world: Option<&World>,
+    cams: &Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+    log: &mut Option<ResMut<AudioLog>>,
+) -> SampledAudio {
+    let (music, music_volume, loops) = {
+        let rt = sim.world.borrow();
+        (rt.music, rt.music_volume, rt.sound_loops.clone())
+    };
+    let listener = [
+        body.pos.x,
+        body.pos.y,
+        body.pos.z + PLAYER_RADIUS,
+    ];
+    // Retail mixes a 3D sound only while its source is in the active sector set: the bar's
+    // `00rumbleamb01` (a positional loop on thing 220) is silent at the level start and audible once
+    // the player reaches the bar. Portal reachability from the player's sector is that set's safe half.
+    let visible: Option<Vec<usize>> = collisions.map(|c| {
+        let rt = sim.world.borrow();
+        drawn_sectors(&c.0, rt.gates(), body.sector, cams)
+    });
+    let mut ambient: Option<(String, f32)> = None;
+    // Retail starts from a zero gain and only replaces it when a loop is **audible**; a positional
+    // loop beyond its `maxDist` is silent and does not name the ambience (`00rumbleamb01` at spawn).
+    let mut best = 0.0f32;
+    if let Some((name, volume, _)) = ambience.and_then(|a| a.playing.clone()) {
+        let gain = volume.clamp(0.0, 1.0) * 0.75;
+        if gain > best {
+            best = gain;
+            ambient = Some((name, volume));
+        }
+    }
+    for l in &loops {
+        if let (Some(visible), Some(p)) = (visible.as_ref(), l.pos) {
+            let source = collisions.and_then(|c| c.0.sector_at(p, 0.2));
+            if !source.is_some_and(|s| visible.contains(&s)) {
+                continue;
+            }
+        }
+        let fade = match l.pos {
+            Some(p) if l.max_radius > l.min_radius => {
+                let d = ((p[0] - listener[0]).powi(2)
+                    + (p[1] - listener[1]).powi(2)
+                    + (p[2] - listener[2]).powi(2))
+                .sqrt();
+                ((d - l.min_radius) / (l.max_radius - l.min_radius)).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        let gain = (l.volume * (1.0 - fade)).clamp(0.0, 1.0) * 0.75;
+        if gain > best {
+            best = gain;
+            ambient = Some((l.name.clone(), l.volume));
+        }
+    }
+    if ambient.is_none()
+        && let Some(world) = world
+    {
+        let declared = sim.world.borrow().sector_ambient.get(&(leaving as i32)).cloned();
+        let declared = declared.or_else(|| {
+            world
+                .level
+                .sectors
+                .get(leaving)
+                .and_then(|s| s.sound.clone())
+        });
+        if let Some((name, volume)) = declared {
+            ambient = Some((name, volume));
+        }
+    }
+    let sounds: Vec<(u32, String, f32)> = log
+        .as_mut()
+        .map(|log| {
+            std::mem::take(&mut log.played)
+                .into_iter()
+                .map(|played| (played.tick, played.wav, played.gain))
+                .collect()
+        })
+        .unwrap_or_default();
+    SampledAudio { music, music_volume, ambient, sounds }
 }
 
 /// `--audio-trace`: write the audio state every 600 ms of the replay.
@@ -16851,6 +17821,7 @@ fn write_audio_trace_row(
 fn audio_trace_sample(
     replay: Option<Res<RouteReplay>>,
     out: Option<Res<AudioTraceOut>>,
+    capture: Option<Res<CaptureDt>>,
     cursor: Option<Res<RouteCursor>>,
     player: Option<Res<Player>>,
     sim: Option<Res<Sim>>,
@@ -16875,83 +17846,31 @@ fn audio_trace_sample(
     if tick % ROUTE_SAMPLE_TICKS != 0 {
         return;
     }
-    let (music, music_volume, loops) = {
-        let rt = sim.world.borrow();
-        (rt.music, rt.music_volume, rt.sound_loops.clone())
-    };
-    // Retail's capture reads the mixer's loop channels: a sector `SOUND` loop the body has entered,
-    // and the positional loops scripts start (`00_PlayAmbient.cog`'s `00rumbleamb01.wav`). It reports
-    // the loudest by mixer gain, `volume * (1 - fade) * 0.75`, and the channel's own volume.
-    let listener = [
-        player.body.pos.x,
-        player.body.pos.y,
-        player.body.pos.z + PLAYER_RADIUS,
-    ];
     // The sample grid lands one frame after a console `warp`; retail's row on that grid point still
     // names the room being left, so this sample uses the *previous* frame's sector.
     let leaving = last_sector.unwrap_or(player.body.sector);
     *last_sector = Some(player.body.sector);
-    // Retail mixes a 3D sound only while its source is in the active sector set: the bar's
-    // `00rumbleamb01` (a positional loop on thing 220) is silent at the level start and audible once
-    // the player reaches the bar. Portal reachability from the player's sector is that set's safe half.
-    let visible: Option<Vec<usize>> = collisions.as_ref().map(|c| {
-        let rt = sim.world.borrow();
-        drawn_sectors(&c.0, rt.gates(), player.body.sector, &cams)
-    });
-    let mut ambient: Option<(String, f32)> = None;
-    // Retail starts from a zero gain and only replaces it when a loop is **audible**; a positional
-    // loop beyond its `maxDist` is silent and does not name the ambience (`00rumbleamb01` at spawn).
-    let mut best = 0.0f32;
-    if let Some((name, volume, _)) = ambience.as_ref().and_then(|a| a.playing.clone()) {
-        let gain = volume.clamp(0.0, 1.0) * 0.75;
-        if gain > best {
-            best = gain;
-            ambient = Some((name, volume));
-        }
-    }
-    for l in &loops {
-        if let (Some(visible), Some(p)) = (visible.as_ref(), l.pos) {
-            let source = collisions.as_ref().and_then(|c| c.0.sector_at(p, 0.2));
-            if !source.is_some_and(|s| visible.contains(&s)) {
-                continue;
-            }
-        }
-        let fade = match l.pos {
-            Some(p) if l.max_radius > l.min_radius => {
-                let d = ((p[0] - listener[0]).powi(2)
-                    + (p[1] - listener[1]).powi(2)
-                    + (p[2] - listener[2]).powi(2))
-                .sqrt();
-                ((d - l.min_radius) / (l.max_radius - l.min_radius)).clamp(0.0, 1.0)
-            }
-            _ => 0.0,
-        };
-        let gain = (l.volume * (1.0 - fade)).clamp(0.0, 1.0) * 0.75;
-        if gain > best {
-            best = gain;
-            ambient = Some((l.name.clone(), l.volume));
-        }
-    }
-    if ambient.is_none()
-        && let Some(world) = world.as_ref()
-    {
-        let declared = sim.world.borrow().sector_ambient.get(&(leaving as i32)).cloned();
-        let declared = declared.or_else(|| {
-            world
-                .level
-                .sectors
-                .get(leaving)
-                .and_then(|s| s.sound.clone())
-        });
-        if let Some((name, volume)) = declared {
-            ambient = Some((name, volume));
-        }
-    }
-    let sounds: Vec<(u32, String, f32)> = log
-        .as_mut()
-        .map(|log| std::mem::take(&mut log.played))
-        .unwrap_or_default();
-    write_audio_trace_row(path, tick, music, music_volume, ambient.as_ref(), &sounds);
+    let state = sample_audio_state(
+        &sim,
+        &player.body,
+        leaving,
+        ambience.as_deref(),
+        collisions.as_deref(),
+        world.as_deref(),
+        &cams,
+        &mut log,
+    );
+    write_audio_trace_row(
+        path,
+        tick,
+        // The audio rows sit on the route's engine clock too: the sample tick times the step the
+        // replay pinned, never an assumed 1/60.
+        f64::from(tick) * f64::from(capture.as_deref().and_then(|c| c.0).unwrap_or(1.0 / 60.0)),
+        state.music,
+        state.music_volume,
+        state.ambient.as_ref(),
+        &state.sounds,
+    );
 }
 
 #[cfg(test)]
@@ -16995,15 +17914,104 @@ input 72 1 0
         assert!(error.contains("input"), "{error}");
     }
 
+    /// A `use` row takes no ticks: it presses the player's use key on the first tick of the input
+    /// that follows it, so the 600 ms sample grid never moves.
     #[test]
-    fn the_committed_route_fixtures_compare_equal_to_themselves() {
-        for name in ["level1-route-port.tsv", "level1-route-retail.tsv"] {
-            let text = std::fs::read_to_string(fixture(name)).expect("committed fixture");
-            let rows = parse_route_trace(&text).expect("fixture parses");
-            let compared = compare_route_rows(&rows, &rows, 1e-6)
-                .unwrap_or_else(|e| panic!("{name} does not compare to itself: {e}"));
-            assert!(compared > 0, "{name} compared no fields");
+    fn a_route_use_row_is_a_tick_with_the_use_action() {
+        let plan = RoutePlan::parse("warp door 1.4 9.7 6.357 90\nuse\ninput 36 1 0\n").expect("plan");
+        assert_eq!(plan.uses, vec![0]);
+        assert_eq!(plan.total, 36);
+        assert!(plan.input_at(0).use_action == false, "the raw input row is not the use flag");
+        // A `wait` row holds nothing for its ticks (the door leaf finishes opening); the use stays
+        // on the tick it names and the next input starts after the wait.
+        let plan = RoutePlan::parse("warp door 1.4 9.7 6.357 90\nuse\nwait 36\ninput 36 1 0\n")
+            .expect("plan with wait");
+        assert_eq!(plan.uses, vec![0]);
+        assert_eq!(plan.total, 72);
+        assert_eq!(plan.input_at(0).forward, 0.0);
+        assert_eq!(plan.input_at(36), RouteInput { forward: 1.0, strafe: 0.0, use_action: false });
+        // `route_replay` sets the flag from `plan.uses` on the tick the row names.
+        assert!(plan.uses.contains(&0));
+    }
+
+    /// The committed port oracle parses, carries the event columns, and compares to itself. Its
+    /// events are graded on every row: the oracle is the replay's own grid, not a retail capture.
+    #[test]
+    fn the_committed_port_route_fixture_parses_and_compares_to_itself() {
+        let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("committed fixture");
+        let trace = parse_route_trace(&text).expect("fixture parses");
+        let header = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
+        for field in ROUTE_EVENT_FIELDS {
+            assert!(header.split('\t').any(|cell| cell == field), "fixture has no {field} column");
         }
+        let compared = compare_route_rows(&trace, &trace, 1e-6, true)
+            .unwrap_or_else(|e| panic!("the port fixture does not compare to itself: {e}"));
+        assert!(compared > 0, "the port fixture compared no fields");
+    }
+
+    /// The frozen retail capture predates the exit segment, so it measures fewer columns and ends
+    /// before the port's route does. The comparator grades exactly what it claims: its own columns,
+    /// its own row span. That is the gate's retail half, and it needs no new retail capture.
+    #[test]
+    fn the_frozen_retail_fixture_covers_the_route_prefix_it_measured() {
+        let slot = |name: &str| ROUTE_TRACE_FIELDS.iter().position(|f| *f == name).unwrap();
+        let retail_text =
+            std::fs::read_to_string(fixture("level1-route-retail.tsv")).expect("retail fixture");
+        let retail = parse_route_trace(&retail_text).expect("the frozen retail fixture parses");
+        for event in ROUTE_EVENT_FIELDS {
+            assert!(
+                !retail.columns[slot(event)],
+                "the frozen fixture predates `{event}`; a column it does not measure cannot be expected"
+            );
+        }
+        assert!(retail.columns[slot("sector")], "the frozen fixture measures sector");
+        assert_eq!(
+            retail.rows.last().map(|row| row.tick),
+            Some(684),
+            "the frozen fixture's own last sample"
+        );
+
+        let port_text =
+            std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("port fixture");
+        let port = parse_route_trace(&port_text).expect("port fixture parses");
+        assert!(
+            port.rows.len() > retail.rows.len(),
+            "the port oracle must carry the exit segment the retail fixture does not"
+        );
+    }
+
+    /// Issue #17: the trace's `t_s` is the engine clock, so it is an identity like `tick`, not a
+    /// measured quantity. A replay that ran its body on a scaled capture clock records a different
+    /// engine instant at the same sample and must fail here — the position tolerances must not be
+    /// the way back in.
+    #[test]
+    fn engine_time_is_graded_exactly() {
+        let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("fixture");
+        let expected = parse_route_trace(&text).expect("fixture parses");
+        let t_s = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "t_s").unwrap();
+        let mut late = expected.clone();
+        // One sample 10 ms off the engine instant: inside the position epsilon, not inside the clock.
+        *late.rows[1].values[t_s].as_mut().expect("the second row has a t_s") += 0.01;
+        let error = compare_route_rows(&expected, &late, 1e-6, true)
+            .expect_err("a sample off the engine instant must fail");
+        assert!(error.contains("t_s"), "{error}");
+        assert!(
+            compare_route_rows(&expected, &late, 1.0, true).is_err(),
+            "a wider position tolerance must not excuse a different engine instant"
+        );
+    }
+
+    /// The replay's clock is the simulation's own accumulated time (`sithTime_Advance`'s frame delta
+    /// for a pinned capture step), so 36 ticks is 0.6000 s of engine time — never the wall-clock hold
+    /// the fixture rows were polled on.
+    #[test]
+    fn the_replay_clock_is_the_simulations_own_step() {
+        let mut cursor = RouteCursor::default();
+        for _ in 0..36 {
+            cursor.advance_engine_clock(1.0 / 60.0);
+        }
+        assert_eq!(cursor.tick, 36);
+        assert!((cursor.engine_s - 0.6).abs() < 1e-6, "the clock read {} after 36 ticks", cursor.engine_s);
     }
 
     #[test]
@@ -17012,15 +18020,124 @@ input 72 1 0
         let expected = parse_route_trace(&text).expect("fixture parses");
         let mut perturbed = expected.clone();
         let x = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "x").unwrap();
-        let value = perturbed[0].values[x].as_mut().expect("the first row has an x");
+        let value = perturbed.rows[0].values[x].as_mut().expect("the first row has an x");
         *value += 0.25;
-        let error = compare_route_rows(&expected, &perturbed, 1e-6)
+        let error = compare_route_rows(&expected, &perturbed, 1e-6, true)
             .expect_err("a 0.25-unit position change must fail");
         assert!(error.contains("x:"), "{error}");
         assert!(
-            compare_route_rows(&expected, &perturbed, 0.30).is_ok(),
+            compare_route_rows(&expected, &perturbed, 0.30, true).is_ok(),
             "the tolerance is an absolute bound, so 0.30 accepts it"
         );
+    }
+
+    /// Event columns are latched states, graded once at the fixture's last row. The door can be
+    /// sampled on a different row on the two sides (the holds advance different amounts of engine
+    /// time), so an intermediate disagreement is not a failure; the final state is.
+    #[test]
+    fn event_columns_are_graded_only_on_the_last_row() {
+        let slot = |name: &str| ROUTE_TRACE_FIELDS.iter().position(|f| *f == name).unwrap();
+        let row = |tick: u32, door: Option<f64>, goal: Option<f64>, end: Option<f64>| {
+            let mut values = vec![None; ROUTE_TRACE_FIELDS.len()];
+            values[0] = Some(f64::from(tick));
+            values[slot("door0_opened")] = door;
+            values[slot("goal_bin100")] = goal;
+            values[slot("level_end")] = end;
+            RouteTraceRow { tick, values, texts: vec![None; ROUTE_TRACE_FIELDS.len()] }
+        };
+        let want = RouteTrace {
+            rows: vec![
+                row(0, Some(0.0), Some(1.0), Some(0.0)),
+                row(36, Some(1.0), Some(1.0), Some(0.0)),
+                row(72, Some(1.0), Some(3.0), Some(1.0)),
+            ],
+            columns: vec![true; ROUTE_TRACE_FIELDS.len()],
+        };
+        // The door opens a row early and the sighting fires a row late: intermediate samples differ.
+        let got = RouteTrace {
+            rows: vec![
+                row(0, Some(0.0), Some(1.0), Some(0.0)),
+                row(36, Some(1.0), Some(3.0), Some(0.0)),
+                row(72, Some(1.0), Some(3.0), Some(1.0)),
+            ],
+            columns: vec![true; ROUTE_TRACE_FIELDS.len()],
+        };
+        let compared = compare_route_rows(&want, &got, 1e-6, false).expect("intermediate events are not graded");
+        assert_eq!(compared, 3, "only the three final-row events were compared");
+
+        // The final state is an identity: a door that never opened and a goal that stopped at 2 fail.
+        let mut early = got.clone();
+        early.rows[2].values[slot("door0_opened")] = Some(0.0);
+        let error = compare_route_rows(&want, &early, 1e-6, false).expect_err("door0_opened 0 at the last row must fail");
+        assert!(error.contains("door0_opened"), "{error}");
+        let mut short = got.clone();
+        short.rows[2].values[slot("goal_bin100")] = Some(2.0);
+        let error = compare_route_rows(&want, &short, 1e-6, false).expect_err("goal_bin100 2 at the last row must fail");
+        assert!(error.contains("goal_bin100"), "{error}");
+        let mut no_end = got.clone();
+        no_end.rows[2].values[slot("level_end")] = Some(0.0);
+        let error = compare_route_rows(&want, &no_end, 1e-6, false).expect_err("level_end 0 at the last row must fail");
+        assert!(error.contains("level_end"), "{error}");
+
+        // A missing event cell is a failure, not something the comparator skips.
+        let mut missing = got.clone();
+        missing.rows[2].values[slot("goal_bin100")] = None;
+        let error = compare_route_rows(&want, &missing, 1e-6, false).expect_err("a `-` event cell must fail");
+        assert!(error.contains("goal_bin100"), "{error}");
+
+        // A column the fixture does not measure is not graded; the same disagreement then passes.
+        let mut narrow = want.clone();
+        narrow.columns[slot("goal_bin100")] = false;
+        let mut drifted = got.clone();
+        drifted.rows[2].values[slot("goal_bin100")] = Some(2.0);
+        assert!(
+            compare_route_rows(&narrow, &drifted, 1e-6, false).is_ok(),
+            "a column the fixture does not measure was graded"
+        );
+    }
+
+    /// The port oracle is the replay's own fixed grid, so its events are graded on **every** row: an
+    /// early latch is a different route, not a sampling artefact, and must fail the oracle.
+    #[test]
+    fn an_early_event_latch_fails_the_port_oracle() {
+        let slot = |name: &str| ROUTE_TRACE_FIELDS.iter().position(|f| *f == name).unwrap();
+        let row = |tick: u32, door: Option<f64>, goal: Option<f64>, end: Option<f64>| {
+            let mut values = vec![None; ROUTE_TRACE_FIELDS.len()];
+            values[0] = Some(f64::from(tick));
+            values[slot("door0_opened")] = door;
+            values[slot("goal_bin100")] = goal;
+            values[slot("level_end")] = end;
+            RouteTraceRow { tick, values, texts: vec![None; ROUTE_TRACE_FIELDS.len()] }
+        };
+        let want = RouteTrace {
+            rows: vec![
+                row(0, Some(0.0), Some(1.0), Some(0.0)),
+                row(36, Some(1.0), Some(1.0), Some(0.0)),
+                row(72, Some(1.0), Some(3.0), Some(1.0)),
+            ],
+            columns: vec![true; ROUTE_TRACE_FIELDS.len()],
+        };
+        // The door latches a row early: the last row agrees, so only the per-row grade sees it.
+        let mut early = want.clone();
+        early.rows[0].values[slot("door0_opened")] = Some(1.0);
+        let error = compare_route_rows(&want, &early, 1e-6, true)
+            .expect_err("an early door latch passed the oracle");
+        assert!(error.contains("door0_opened"), "{error}");
+        assert!(
+            compare_route_rows(&want, &early, 1e-6, false).is_ok(),
+            "the last-row-only grade is the retail prefix's rule, not the oracle's"
+        );
+        // The same for the goal and the level-end latch.
+        let mut goal = want.clone();
+        goal.rows[1].values[slot("goal_bin100")] = Some(3.0);
+        let error = compare_route_rows(&want, &goal, 1e-6, true)
+            .expect_err("an early goal latch passed the oracle");
+        assert!(error.contains("goal_bin100"), "{error}");
+        let mut ended = want.clone();
+        ended.rows[1].values[slot("level_end")] = Some(1.0);
+        let error = compare_route_rows(&want, &ended, 1e-6, true)
+            .expect_err("an early level end passed the oracle");
+        assert!(error.contains("level_end"), "{error}");
     }
 
     #[test]
@@ -17139,18 +18256,552 @@ tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
         }
     }
 
+    /// The one-shot oracle's comparator must name the four ways a schedule can drift, because the
+    /// gate proves each one with a perturbed copy of the replay's own schedule.
+    #[test]
+    fn the_one_shot_schedule_names_missing_extra_mistimed_and_attenuated_events() {
+        let event = |tick: u32, wav: &str, gain: f64| AudioScheduleRow {
+            tick,
+            time_s: f64::from(tick) / 60.0,
+            wav: wav.to_string(),
+            gain,
+            volume: 1.0,
+            distance: 0.0,
+            forward: 1.0,
+            min_radius: -1.0,
+            max_radius: -1.0,
+            max_volume: 1.0,
+            snd: "test.snd".to_string(),
+            event: "create".to_string(),
+            source: "cog PlaySoundThing -> sithSoundMixer_PlaySoundThing (0x4dba60)".to_string(),
+        };
+        let want = vec![
+            event(0, "a.wav", 0.75),
+            event(0, "b.wav", 0.5),
+            event(0, "c.wav", 0.25),
+            event(0, "d.wav", 0.5),
+            event(36, "e.wav", 0.5),
+        ];
+        let got = vec![
+            // `a.wav` quiet, `b.wav` missing, `g.wav` extra.
+            event(0, "a.wav", 0.4),
+            event(0, "d.wav", 0.5),
+            event(0, "g.wav", 0.5),
+            // `c.wav` a window late, `e.wav` never played and `h.wav` is extra.
+            event(36, "c.wav", 0.25),
+            event(36, "h.wav", 0.5),
+        ];
+        let error = compare_audio_schedule(&want, &got, 0.02)
+            .expect_err("a changed schedule must fail");
+        for expected in [
+            "attenuated: a.wav at tick 0",
+            "missing: b.wav at tick 0",
+            "extra: g.wav at tick 0",
+            "mistimed: c.wav expected tick 0",
+            "missing: e.wav at tick 36",
+            "extra: h.wav at tick 36",
+        ] {
+            assert!(error.contains(expected), "the gate did not report `{expected}`:\n{error}");
+        }
+        // The same schedule compares clean, and a changed class row is its own difference.
+        assert!(compare_audio_schedule(&want, &want, 0.02).is_ok());
+        let mut rerouted = want.clone();
+        rerouted[0].source = "sithSoundClass_PlayModeRandom (0x4e6b70)".to_string();
+        let error = compare_audio_schedule(&want, &rerouted, 0.02)
+            .expect_err("a different engine call must be reported");
+        assert!(error.contains("source: a.wav at tick 0"), "{error}");
+        // ... and a changed base volume/radius is a data difference, not a silent gain match.
+        let mut retuned = want.clone();
+        retuned[0].max_volume = 0.5;
+        retuned[0].gain = 0.375;
+        let error = compare_audio_schedule(&want, &retuned, 0.02)
+            .expect_err("a different .snd row must be reported");
+        assert!(error.contains("data: a.wav at tick 0"), "{error}");
+    }
+
+    /// A schedule event belongs to the 600 ms window the replay's trace drains it in.
+    #[test]
+    fn a_schedule_event_lands_in_its_sample_window() {
+        assert_eq!(audio_window_tick(0), 0);
+        assert_eq!(audio_window_tick(1), 36);
+        assert_eq!(audio_window_tick(35), 36);
+        assert_eq!(audio_window_tick(36), 36);
+        assert_eq!(audio_window_tick(37), 72);
+        assert_eq!(audio_window_tick(72), 72);
+    }
+
+    /// Writing a schedule row and parsing it back must preserve every column the verifier reads.
+    #[test]
+    fn a_written_schedule_row_round_trips() {
+        let dir = std::env::temp_dir().join(format!("bk-audio-schedule-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("schedule.tsv");
+        let played = PlayedSound {
+            tick: 30,
+            time_s: 0.5,
+            wav: "reeyee02.wav".to_string(),
+            gain: 0.75,
+            volume: 1.5,
+            distance: 12.5,
+            forward: -0.25,
+            snd: "01cantina.snd".to_string(),
+            event: "create".to_string(),
+            min: -1.0,
+            max: -1.0,
+            max_volume: 1.0,
+            source: "cog PlaySoundThing -> sithSoundMixer_PlaySoundThing (0x4dba60)",
+        };
+        let mut started = false;
+        write_audio_schedule_row(&path, &mut started, &played);
+        write_audio_schedule_row(&path, &mut started, &played);
+        let text = std::fs::read_to_string(&path).expect("the schedule was written");
+        let rows = parse_audio_schedule(&text).expect("the schedule parses");
+        assert_eq!(rows.len(), 2, "the writer appended, not truncated");
+        assert_eq!(rows[0].tick, 30);
+        assert!((rows[0].time_s - 0.5).abs() < 1e-6);
+        assert_eq!(rows[0].wav, "reeyee02.wav");
+        assert!((rows[0].gain - 0.75).abs() < 1e-6);
+        assert_eq!(rows[0].snd, "01cantina.snd");
+        assert_eq!(rows[0].event, "create");
+        assert_eq!(rows[0].source, played.source);
+        // The same row compares clean and the site's own file is removed again.
+        assert!(compare_audio_schedule(&rows, &rows, 0.02).is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The committed oracle is a fixture like the traces: it must parse, name a source for every
+    /// event, and carry a real engine clock.
+    #[test]
+    fn the_committed_one_shot_schedule_parses() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/parity/audiotrace/level1-audio-schedule.tsv");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let rows = parse_audio_schedule(&text).expect("the committed schedule parses");
+        assert!(!rows.is_empty(), "the committed schedule has no events");
+        for row in &rows {
+            assert!(!row.wav.is_empty(), "an event names no wav");
+            assert!(!row.source.is_empty(), "{} names no engine call", row.wav);
+            assert!(!row.snd.is_empty() && row.snd != "-", "{} names no class", row.wav);
+            assert!(row.time_s >= 0.0, "{} has no engine clock", row.wav);
+        }
+    }
+
+    /// The trace's sounds column must carry exactly the schedule's events, window by window.
+    #[test]
+    fn a_trace_matches_the_schedule_that_produced_it() {
+        let dir = std::env::temp_dir().join(format!("bk-audio-vs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let trace_path = dir.join("trace.tsv");
+        let schedule_path = dir.join("schedule.tsv");
+        std::fs::write(
+            &trace_path,
+            "tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds\n\
+             0\t0.0000\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\t\n\
+             36\t0.6000\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\treeyee02.wav@0.750\n",
+        )
+        .expect("trace written");
+        std::fs::write(
+            &schedule_path,
+            "tick\ttime_s\twav\tgain\tvolume\tdistance\tforward\tmin_radius\tmax_radius\tmax_volume\tsnd\tevent\tsource\n\
+             30\t0.5000\treeyee02.wav\t0.750\t1.500\t0.000\t1.000\t-1.000\t-1.000\t1.000\t01cantina.snd\tcreate\tcog PlaySoundThing\n",
+        )
+        .expect("schedule written");
+        audio_trace_schedule_check(&trace_path, &schedule_path, 0.02)
+            .expect("the trace carries the scheduled event");
+        // A trace that lost the sound fails, and it is reported as missing.
+        std::fs::write(
+            &trace_path,
+            "tick\tt_s\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds\n\
+             0\t0.0000\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\t\n\
+             36\t0.6000\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\t\n",
+        )
+        .expect("trace rewritten");
+        let error = audio_trace_schedule_check(&trace_path, &schedule_path, 0.02)
+            .expect_err("a trace without the event must fail");
+        assert!(error.contains("missing") && error.contains("reeyee02.wav"), "{error}");
+        for path in [&trace_path, &schedule_path] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     /// The trace's velocity is the retail fixture's quantity — the position derivative over the
-    /// 600 ms window — so a body pinned against a wall reads zero, not the velocity it kept asking
-    /// for, and a warp row is a new leg rather than the jump between two rooms.
+    /// sample window's **engine** time — so a body pinned against a wall reads zero, not the velocity
+    /// it kept asking for, and a warp row is a new leg rather than the jump between two rooms.
     #[test]
     fn the_route_trace_velocity_is_the_position_derivative() {
-        let before = Some(([0.0, 0.0, -1.0], 0));
-        let moved = route_sample_velocity(before, [1.2, -0.6, -1.06], 36, false);
+        let before = Some(([0.0, 0.0, -1.0], 0.0));
+        let moved = route_sample_velocity(before, [1.2, -0.6, -1.06], 0.6, false);
         assert!((moved[0] - 2.0).abs() < 1e-5, "x velocity {moved:?}");
         assert!((moved[1] + 1.0).abs() < 1e-5, "y velocity {moved:?}");
         assert!((moved[2] + 0.1).abs() < 1e-5, "z velocity {moved:?}");
-        assert_eq!(route_sample_velocity(before, [9.0, 9.0, 9.0], 36, true), [0.0; 3]);
-        assert_eq!(route_sample_velocity(None, [1.0, 2.0, 3.0], 36, false), [0.0; 3]);
+        assert_eq!(route_sample_velocity(before, [9.0, 9.0, 9.0], 0.6, true), [0.0; 3]);
+        assert_eq!(route_sample_velocity(None, [1.0, 2.0, 3.0], 0.6, false), [0.0; 3]);
+        // A window whose engine clock did not advance cannot divide by zero.
+        assert_eq!(route_sample_velocity(before, [9.0, 9.0, 9.0], 0.0, false), [0.0; 3]);
+    }
+
+    /// The route trace's audio columns are text where the mixer names a wav (`ambient`, `sounds`)
+    /// and numbers elsewhere; an empty text cell is a recorded silence, compared exactly, and a
+    /// different loop or one-shot is a failure.
+    #[test]
+    fn the_route_trace_compares_audio_text_exactly() {
+        let text = "\
+tick\tt_s\tx\ty\tz\tsector\tvel_x\tvel_y\tvel_z\thealth\tshields\tdoor0_status\tdoor0_movestatus\tdoor0_opendoors\tdoor0_closedoors\tswitch_status\tswitch_movestatus\tswitch_opendoors\tswitch_closedoors\tdoor0_opened\tgoal_bin100\tlevel_end\tmusic\tmusic_end\tmusic_loop\tmusic_vol\tambient\tambient_vol\tsounds
+0\t0.0000\t0\t0\t0\t1\t0\t0\t0\t100.0\t100.0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t1\t0\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\t
+36\t0.6000\t0\t0\t0\t1\t0\t0\t0\t100.0\t100.0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t1\t0\t12\t13\t1\t0.000\t\t0.000\tpistol-1.wav@0.750
+";
+        let expected = parse_route_trace(text).expect("the trace parses");
+        let ambient = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "ambient").unwrap();
+        assert_eq!(expected.rows[0].texts[ambient].as_deref(), Some("01cantinaband02.wav"));
+        assert_eq!(expected.rows[1].texts[ambient].as_deref(), Some(""), "silence is a value");
+        assert!(compare_route_rows(&expected, &expected, 1e-6, false).is_ok());
+
+        let mut moved = expected.clone();
+        moved.rows[0].texts[ambient] = Some("00techamb03.wav".to_string());
+        let error = compare_route_rows(&expected, &moved, 1e-6, false)
+            .expect_err("a different ambient loop must fail");
+        assert!(error.contains("ambient"), "{error}");
+    }
+
+    /// A silent `sounds` row is a recorded empty cell, not a missing value. Trimming the line ate its
+    /// trailing tab, so "nothing played in this window" parsed as "not recorded" and an extra or a
+    /// missing sound in that window was skipped instead of compared.
+    #[test]
+    fn a_silent_sounds_row_is_compared() {
+        let sounds = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "sounds").unwrap();
+        let want = parse_route_trace("tick\tsounds\n0\t\n36\tpistol-1.wav@0.250\n")
+            .expect("the trace parses");
+        assert_eq!(
+            want.rows[0].texts[sounds].as_deref(),
+            Some(""),
+            "an empty `sounds` cell must parse as recorded silence"
+        );
+        assert!(compare_route_rows(&want, &want, 1e-6, false).is_ok());
+
+        let extra = parse_route_trace("tick\tsounds\n0\trifle-1.wav@0.100\n36\tpistol-1.wav@0.250\n")
+            .expect("the trace parses");
+        let error = compare_route_rows(&want, &extra, 1e-6, false)
+            .expect_err("a sound in a silent row passed the comparator");
+        assert!(error.contains("sounds"), "{error}");
+
+        let missing = parse_route_trace("tick\tsounds\n0\t\n36\t\n").expect("the trace parses");
+        let error = compare_route_rows(&want, &missing, 1e-6, false)
+            .expect_err("a missing sound passed the comparator");
+        assert!(error.contains("sounds"), "{error}");
+    }
+
+    /// Issue #14 AC2: every mechanic the route exercises names the engine function and address it
+    /// was transliterated from. A `ported` row's port symbol must exist in the named source, and a
+    /// `deviated` row must name a deviation-ledger entry the roadmap really carries — the data-only
+    /// half of the gate, so CI catches drift without a window.
+    #[test]
+    fn every_route_mechanic_names_its_engine_function() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(root.join("tools/parity/routes/level1-route-provenance.tsv"))
+            .expect("committed provenance file");
+        let roadmap = std::fs::read_to_string(root.join("docs/porting-roadmap.md"))
+            .expect("the deviation ledger");
+        let mut seen: Vec<&str> = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
+            let [mechanic, function, address, symbol, source, status, ledger @ ..] = cells.as_slice()
+            else {
+                panic!("not a 7-column provenance row: {line}");
+            };
+            assert!(
+                address.starts_with("0x") && address.len() >= 8,
+                "{mechanic}: `{address}` is not a decomp address"
+            );
+            assert!(!function.is_empty(), "{mechanic}: names no engine function");
+            match *status {
+                "ported" => {
+                    let code = std::fs::read_to_string(root.join(source))
+                        .unwrap_or_else(|e| panic!("{mechanic}: {source}: {e}"));
+                    assert!(
+                        code.contains(symbol),
+                        "{mechanic}: {source} has no `{symbol}` for `{function}` ({address})"
+                    );
+                }
+                "deviated" => {
+                    let entry = ledger.join("\t");
+                    assert!(!entry.is_empty(), "{mechanic}: deviated without a ledger entry");
+                    assert!(
+                        roadmap.contains(&entry),
+                        "{mechanic}: the roadmap has no `{entry}` ledger entry"
+                    );
+                }
+                other => panic!("{mechanic}: unknown status `{other}`"),
+            }
+            seen.push(mechanic);
+        }
+        for mechanic in [
+            "walk", "floor", "collision", "use", "cog messages", "damage", "ai fire", "audio state",
+            "level end",
+        ] {
+            assert!(
+                seen.contains(&mechanic),
+                "the provenance file does not name the route's `{mechanic}` mechanic"
+            );
+        }
+    }
+}
+
+/// The committed retail engine capture (issue #21). `tools/parity/retail-capture.ps1` writes it on
+/// the user's run; these tests are the only Rust reader, so they hold its contract before the
+/// encounter (#16), route-timing (#17) and carry (#19) comparisons consume it. A missing fixture, a
+/// renamed column or a shifted sample fails here rather than being misread there.
+#[cfg(test)]
+mod engine_capture_tests {
+    use super::*;
+
+    /// The capture schema in write order (`$script:JkEngineCaptureColumns` in
+    /// `tools/parity/retail-capture.ps1`). The file is parsed on other machines, so a renamed,
+    /// reordered or dropped column is a contract change, not a formatting detail.
+    const ENGINE_CAPTURE_COLUMNS: [&str; 23] = [
+        "t_ms", "kind", "thing", "template", "x", "y", "z", "sector", "vx", "vy", "vz", "bin72",
+        "bin73", "bin75", "rng", "ai_flags", "fire_next_ms", "acquire_next_ms", "acquired_at_ms",
+        "target", "last_target", "next_pass_ms", "detail",
+    ];
+
+    fn fixture() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/parity/engine/route_door.tsv");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("the committed engine capture {}: {e}", path.display()))
+    }
+
+    /// The data lines with their 1-based line numbers; comments and blank lines are dropped.
+    fn data_lines(text: &str) -> Vec<(usize, &str)> {
+        text.lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty() && !line.starts_with('#'))
+            .map(|(index, line)| (index + 1, line))
+            .collect()
+    }
+
+    fn column(name: &str) -> usize {
+        ENGINE_CAPTURE_COLUMNS
+            .iter()
+            .position(|column| *column == name)
+            .expect("the column is in the schema")
+    }
+
+    fn cell<'a>(cells: &[&'a str], name: &str) -> &'a str {
+        cells[column(name)]
+    }
+
+    /// The harness's own schema check, `Test-JkEngineCaptureRows`: each kind fills its half and
+    /// leaves the other empty, the clock never goes backwards, and the origin block sits at the
+    /// clock the header repeats.
+    #[test]
+    fn the_committed_engine_capture_meets_the_harness_schema() {
+        let text = fixture();
+        let lines = data_lines(&text);
+        let (header_line, header) = lines[0];
+        assert_eq!(
+            header.split('\t').collect::<Vec<_>>(),
+            ENGINE_CAPTURE_COLUMNS,
+            "line {header_line}: the fixture's header is not the engine-capture schema"
+        );
+        let origin_ms: i64 = text
+            .lines()
+            .find_map(|line| line.strip_prefix("# origin_ms "))
+            .expect("the fixture has an `# origin_ms` line")
+            .trim()
+            .parse()
+            .expect("the `# origin_ms` line is an integer");
+
+        let mut previous = None;
+        for (line_no, line) in &lines[1..] {
+            let cells: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cells.len(), ENGINE_CAPTURE_COLUMNS.len(), "line {line_no}: column count");
+            let ms: i64 = cell(&cells, "t_ms")
+                .parse()
+                .unwrap_or_else(|_| panic!("line {line_no}: t_ms is not an integer"));
+            if let Some(previous) = previous {
+                assert!(ms >= previous, "line {line_no}: t_ms {ms} goes backwards from {previous}");
+            }
+            previous = Some(ms);
+            match cell(&cells, "kind") {
+                "player" => {
+                    for name in ["x", "y", "z", "vx", "vy", "vz", "bin72", "bin73", "bin75"] {
+                        cell(&cells, name).parse::<f64>().unwrap_or_else(|_| {
+                            panic!("line {line_no}: player `{name}` is not a number")
+                        });
+                    }
+                    for name in ["sector", "rng"] {
+                        cell(&cells, name).parse::<i64>().unwrap_or_else(|_| {
+                            panic!("line {line_no}: player `{name}` is not an integer")
+                        });
+                    }
+                    assert_eq!(cell(&cells, "template"), "walkplayer", "line {line_no}");
+                    for name in [
+                        "ai_flags",
+                        "fire_next_ms",
+                        "acquire_next_ms",
+                        "acquired_at_ms",
+                        "target",
+                        "last_target",
+                        "next_pass_ms",
+                    ] {
+                        assert_eq!(cell(&cells, name), "", "line {line_no}: a player row carries `{name}`");
+                    }
+                }
+                "origin" => {
+                    for name in ["x", "y", "z"] {
+                        cell(&cells, name).parse::<f64>().unwrap_or_else(|_| {
+                            panic!("line {line_no}: origin `{name}` is not a number")
+                        });
+                    }
+                    for name in [
+                        "ai_flags",
+                        "fire_next_ms",
+                        "acquire_next_ms",
+                        "acquired_at_ms",
+                        "target",
+                        "last_target",
+                        "next_pass_ms",
+                    ] {
+                        cell(&cells, name).parse::<i64>().unwrap_or_else(|_| {
+                            panic!("line {line_no}: origin `{name}` is not an integer")
+                        });
+                    }
+                    assert_eq!(ms, origin_ms, "line {line_no}: the origin block is not at the origin clock");
+                    for name in ["sector", "vx", "vy", "vz", "bin72", "bin73", "bin75", "rng"] {
+                        assert_eq!(cell(&cells, name), "", "line {line_no}: an origin row carries `{name}`");
+                    }
+                }
+                other => panic!("line {line_no}: unknown kind `{other}`"),
+            }
+        }
+
+        // The first row is the origin instant the header repeats.
+        let (first_line, first) = lines[1];
+        let cells: Vec<&str> = first.split('\t').collect();
+        assert_eq!(
+            cell(&cells, "t_ms").parse::<i64>().ok(),
+            Some(origin_ms),
+            "line {first_line}: the first row is not the origin clock"
+        );
+    }
+
+    /// The values the encounter and route comparisons start from. They are the user's capture, not
+    /// a recomputation: the warp pose `door-encounter.tsv` uses, the bins at the warp, and the
+    /// actors' instinct phase at the origin.
+    #[test]
+    fn route_door_engine_capture_pins_the_door_encounter() {
+        let text = fixture();
+        assert_eq!(text.lines().next(), Some("# engine-clock capture: route_door"));
+        assert!(
+            text.lines().any(|line| line == "# origin_ms 4200"),
+            "the origin clock drifted from the capture's 4200 ms"
+        );
+        let window = text
+            .lines()
+            .find(|line| line.starts_with("# window "))
+            .expect("the fixture has a `# window` summary");
+        assert!(
+            window.contains("395 sample(s), 57 origin actor(s)"),
+            "the window summary does not match the rows: {window}"
+        );
+
+        let rows: Vec<Vec<&str>> = data_lines(&text)
+            .into_iter()
+            .skip(1)
+            .map(|(_, line)| line.split('\t').collect())
+            .collect();
+        let kind = |cells: &Vec<&str>, want: &str| cell(cells, "kind") == want;
+        let players: Vec<&Vec<&str>> = rows.iter().filter(|cells| kind(cells, "player")).collect();
+        let origins: Vec<&Vec<&str>> = rows.iter().filter(|cells| kind(cells, "origin")).collect();
+        assert_eq!(players.len(), 395, "player sample count");
+        assert_eq!(origins.len(), 57, "origin actor count");
+
+        // The first sample is the documented warp pose, 10 s of engine clock from there.
+        let first = players[0];
+        assert_eq!(cell(first, "x"), "1.4002");
+        assert_eq!(cell(first, "y"), "9.7015");
+        assert_eq!(cell(first, "z"), "6.3201");
+        assert_eq!(cell(first, "sector"), "60");
+        assert_eq!(cell(first, "t_ms"), "4200", "the window starts at the origin instant");
+        assert_eq!(cell(players.last().unwrap(), "t_ms"), "14193", "the window's last sample");
+
+        for cells in &players {
+            // The door capture holds no input, so the body's population credit never moves.
+            assert_eq!(cell(cells, "bin73"), "10.500", "the player's population credit");
+            // A zero would mean the read never reached the LCG at 0x0054F750.
+            assert_ne!(cell(cells, "rng").parse::<u32>().expect("rng is a u32"), 0, "a zero AI random state");
+        }
+
+        // Every origin row names its fire and acquisition instincts; the 51 whose class carries both
+        // are the ones the port aligns its first AI update with.
+        let mut with_instincts = 0;
+        for cells in &origins {
+            let detail = cell(cells, "detail");
+            assert!(
+                detail.contains("fire=") && detail.contains("acquire="),
+                "an origin row does not name its instincts: {detail}"
+            );
+            cell(cells, "fire_next_ms").parse::<i64>().expect("the next-fire time");
+            cell(cells, "acquire_next_ms").parse::<i64>().expect("the next-acquisition time");
+            if detail.contains("fire=primaryfire") && detail.contains("acquire=lookfortarget") {
+                with_instincts += 1;
+            }
+        }
+        assert_eq!(with_instincts, 51, "the actors whose class carries both instincts");
+    }
+
+    /// The port starts the encounter from this capture (issue #16): `read_capture_phase` is the one
+    /// reader, and it must carry the origin clock, the AI `rand()` word and the door actors' phase
+    /// through unchanged. The gunner had already acquired the player before the origin and its next
+    /// shot is 104 ms later; the scan-only actors are due 329 ms after it.
+    #[test]
+    fn the_committed_engine_capture_seeds_the_door_encounter_phase() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/parity/engine/route_door.tsv");
+        let seed = super::read_capture_phase(&path)
+            .unwrap_or_else(|| panic!("{} does not carry an origin block", path.display()));
+        assert_eq!(seed.origin_ms, 4200);
+        assert_eq!(seed.rng, 811_474_043, "the AI rand() word at the origin clock");
+        assert_eq!(seed.actors.len(), 57, "one phase per origin actor");
+        let gunner = seed.actors.iter().find(|(thing, _)| *thing == 154).expect("actor 154");
+        assert_eq!(
+            gunner.1,
+            runtime::CapturedPhase { flags: 1586, fire_ms: 4304, acquire_ms: 4550, next_pass_ms: 4304 },
+            "actor 154's phase"
+        );
+        let scanner = seed.actors.iter().find(|(thing, _)| *thing == 151).expect("actor 151");
+        assert_eq!(
+            scanner.1,
+            runtime::CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 4529, next_pass_ms: 4529 },
+            "actor 151's phase"
+        );
+        // The gunners that are not already firing carry no shot of their own.
+        let scheduled = seed.actors.iter().filter(|(_, p)| p.fire_ms > 0).count();
+        assert_eq!(scheduled, 1, "only the engaged gunner has a scheduled shot");
+        let scanning = seed.actors.iter().filter(|(_, p)| p.acquire_ms > 0).count();
+        assert_eq!(scanning, 10, "the armed door actors' scan deadlines");
+    }
+
+    /// A deadline the capture did not write as an integer is refused, not read as zero: 0 is the
+    /// engine's own "due now", so defaulting one would seed a pass the engine never scheduled.
+    #[test]
+    fn a_non_integer_origin_deadline_is_refused_not_seeded_as_zero() {
+        let path = std::env::temp_dir().join(format!("bk-capture-{}.tsv", std::process::id()));
+        let text = "# origin_ms 4200\n\
+                    t_ms\tkind\ttemplate\trng\tai_flags\tfire_next_ms\tacquire_next_ms\tnext_pass_ms\n\
+                    4200\tplayer\t0\t7\t0\t0\t0\t0\n\
+                    4200\torigin\t154\t0\t1586\t-\t4550\t4304\n\
+                    4200\torigin\t151\t0\t4\t0\t4529\t4529\n";
+        std::fs::write(&path, text).expect("temp capture");
+        let seed = super::read_capture_phase(&path).expect("the origin block is still read");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(seed.actors.len(), 1, "the malformed row was seeded");
+        assert_eq!(seed.actors[0].0, 151, "the well-formed row was dropped");
     }
 }
 
@@ -18585,7 +20236,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
     // The sound classes: what each shipped `.snd` names, and the fade radii it gives. Only
     // the wavs a class mentions are read, so this is a few hundred kilobytes each at most.
     let mut wav_bytes: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut sound_radii: HashMap<String, (f32, f32, f32)> = HashMap::new();
+    let mut sound_rows: HashMap<String, SoundRow> = HashMap::new();
     let mut sound_classes: std::collections::BTreeMap<
         String,
         std::collections::BTreeMap<String, Vec<(String, f32)>>,
@@ -18598,9 +20249,13 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         let class = runtime::sound_class_key(&name);
         for entry in snd::parse(&String::from_utf8_lossy(&raw)) {
             let wav = entry.wav.to_ascii_lowercase();
-            sound_radii
-                .entry(wav.clone())
-                .or_insert((entry.min_radius, entry.max_radius, entry.max_volume));
+            sound_rows.entry(wav.clone()).or_insert(SoundRow {
+                snd: class.clone(),
+                event: entry.event.clone(),
+                min: entry.min_radius,
+                max: entry.max_radius,
+                volume: entry.max_volume,
+            });
             // `sithSoundClass_LoadEntry` keys each row's first column (the engine's mode name, e.g.
             // `happy`) through the sound-mode table and keeps the row in that mode's list.
             sound_classes
@@ -18829,7 +20484,7 @@ fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
         keys,
         ai_classes,
         wav_bytes,
-        sound_radii,
+        sound_rows,
         sound_classes,
         gob_entries: gobs.len(),
     })
@@ -20810,23 +22465,8 @@ fn cull_sectors(
                 rt.sector_sighted(sector);
             }
         }
-        // A thing's class cog is sent `created` when its sector is **first drawn**, not at level
-        // load: retail's level-1 autosave (written at load) carries no population bin 73, and its
-        // level-2 autosave (after the level was played) carries 10.5. `awaken_sector` is idempotent,
-        // so this only fires once per thing however many frames the room stays in view.
-        let mut woke = 0usize;
-        for (sector, &visible) in wanted.iter().enumerate() {
-            if !visible {
-                continue;
-            }
-            for instance in rt.awaken_sector(sector as i32) {
-                rt.pending_messages.push((instance, "created", [0.0; 2], None));
-                woke += 1;
-            }
-        }
-        if woke > 0 && std::env::var_os("BK_CULL_TRACE").is_some() {
-            println!("wake: {woke} class script(s) woke with their sector");
-        }
+        // `created` is sent at level load (`sithOpenPostProcess`, `0x4c4880`), not here: the
+        // engine's class scripts arm their wake-up timers before the first frame is drawn.
         // A thing counts as drawn when its own sector is visible and its body is inside the frustum.
         // That is coarser than the engine's per-thing clip (no per-triangle test), so it can fire a
         // frame early for something in the same room behind a pillar.
@@ -21394,6 +23034,7 @@ fn play_menu_wav(name: &str, sim: &Option<Res<Sim>>, bank: &Option<Res<SoundBank
             pos: None,
             channel,
             pitch: 1.0,
+            source: "GUI sound -> sithSoundMixer_PlaySound (0x4db4f0)",
         });
     }
 }
@@ -21521,54 +23162,12 @@ fn ammo_bin_for(world: &World) -> Option<i32> {
 #[derive(Resource, Default)]
 struct AmmoBin(Option<i32>);
 
-/// `sithPlayerActions_Activate`'s throttle (`0x4fc0a0`): `DAT_008554bc + 0xfa <= clock`, i.e. one
-/// activate per **250 ms**. It is stamped before the sweep, so a press that finds nothing still starts
-/// the wait, exactly as the engine's does.
-fn use_allowed(last: f32, now: f32) -> bool {
-    now - last >= 0.25
-}
-
-#[cfg(test)]
-mod use_tests {
-    use super::use_allowed;
-
-    /// The engine's activate throttle is 250 ms (`0x4fc0a0`), not a per-frame gate: the first press
-    /// always passes, a repeat at exactly the interval passes, and anything sooner is refused.
-    #[test]
-    fn the_use_action_is_throttled_to_one_per_250_ms() {
-        assert!(use_allowed(f32::NEG_INFINITY, 0.0), "the first use was refused");
-        assert!(use_allowed(1.0, 1.25), "a use at exactly 250 ms was refused");
-        assert!(!use_allowed(1.0, 1.24), "a use 249 ms after the last was allowed");
-        assert!(!use_allowed(1.0, 1.0), "two uses at the same instant were allowed");
-    }
-}
-
-/// The use key: the engine's activate action (`sithPlayerActions_Activate`, `0x4fc0a0`).
+/// The use key: the engine's activate action, `sithPlayerActions_Activate` (`0x4fc0a0`).
 ///
-/// The sweep starts at the **eye** and reaches `moveSize + 0.1` — 0.16 units for the player —
-/// throttled to one activate per 250 ms, and it takes a linked surface, or a linked thing that is not
-/// a weapon or item. `activate` is the third most common label level 1 declares (x14); the *candidates*
-/// are the surfaces and things a script linked, so a room with nothing wired stays silent.
-/// `sithPlayerActions_Activate`'s reach: `moveSize - _DAT_00523200`, and the constant at `0x523200`
-/// is **-0.1** (`0x4fc0a0`). The player's body is 0.06, so the use action reaches 0.16 units from the
-/// eye — the cantina plate is used at 0.12 and not at 0.93, which retail's own `doorstatus 0` confirms.
-fn use_reach(move_size: f32) -> f32 {
-    move_size + 0.1
-}
-
-#[cfg(test)]
-mod use_reach_tests {
-    use super::*;
-
-    #[test]
-    fn the_use_action_reaches_move_size_plus_the_negated_constant() {
-        assert!((use_reach(0.06) - 0.16).abs() < 1e-6);
-        // The plate's two measured poses: 0.12 inside, 0.93 outside.
-        assert!((use_reach(0.06) - 0.12).abs() < 0.05);
-        assert!(use_reach(0.06) < 0.93);
-    }
-}
-
+/// The function itself lives in the runtime (`Runtime::sith_player_actions_activate`), because it
+/// reads the body's sector, its `moveSize + 0.1` reach and its 250 ms wait. `activate` is the third
+/// most common label level 1 declares (x14) and only the targets a script linked can answer, so a room
+/// with nothing wired stays silent.
 fn use_key(
     keys: Res<ButtonInput<KeyCode>>,
     sim: Option<Res<Sim>>,
@@ -21591,48 +23190,33 @@ fn use_key(
             return;
         }
     }
-    let now = sim.world.borrow().time;
-    if !use_allowed(player.last_use, now) {
-        return;
-    }
     // The body's own thing, for the sector the engine scopes the sweep to.
     let player_thing = sim.world.borrow().player_thing();
-    player.last_use = now;
-    // `sithPlayerActions_Activate` (`0x4fc0a0`) starts the sweep at the **eye** and passes
-    // `*(float *)(thing + 0x2c) - _DAT_00523200` as the radius. The constant at `0x523200` is
-    // **-0.1**, so the reach is `moveSize + 0.1` — 0.16 units for the player's 0.06 body, not the
-    // 0.265 the -0.1 was first read as. Throttle 250 ms (`0xfa`). The old 3.0-unit reach let the
-    // port activate the cantina switch from 0.8 units, where retail's own use action does nothing
-    // (round 257's measurement); the reach is not a harness question, it was the port's over-reach.
-    let use_reach = use_reach(player.rules.radius);
+    // `sithPlayerActions_Activate` (`0x4fc0a0`) reads the eye, the look, the reach and the sector off
+    // the thing, and keeps its own 250 ms wait; the port passes the eye and the pitch from
+    // `PlayerBody`, which carries them where a `ThingState` does not.
     let eye = [player.body.pos.x, player.body.pos.y, player.body.pos.z + player.body.eye];
     // The port's forward axis is `yaw_axes`' `(-sin, cos)` (`sithCamera`'s own frame), not `(cos, sin)`:
-
     // with the wrong axis the use action's cone faced 90 degrees off and every switch was "behind" the
-    // player (`dot` was -0.45 for the cantina switch, round 201).
-    let facing = [-player.body.yaw.sin(), player.body.yaw.cos()];
-    let mut rt = sim.world.borrow_mut();
-    // **Surfaces first.** A switch is a surface link (`00_doorswitch.cog`: `surface switch0 linkid=2`)
-    // while the same script also links its *doors* as things (linkid=1, the lock-sound arm). With
-    // things first a door piece within reach won and the surface was never asked. The engine has no
-    // cone — it sweeps a sphere along the view — so the `dot` test in the scans stands in for the
-    // sweep's direction, not for a FOV.
-    let sector = rt.things.get(player_thing).map(|t| t.sector).unwrap_or(-1);
-    let used_surface = rt.activate_near(eye, facing, use_reach, sector);
-    let used_thing = if used_surface.is_none() {
-        rt.use_thing(eye, facing, use_reach, sector)
-    } else {
-        None
-    };
-    drop(rt);
+    // player (`dot` was -0.45 for the cantina switch, round 201). The pitch rides with it, because the
+    // engine's sweep follows `thing + 0x15c`'s PYR.
+    let (sin, cos) = player.body.yaw.sin_cos();
+    let (pitch_sin, pitch_cos) = player.body.pitch.sin_cos();
+    let dir = [-sin * pitch_cos, cos * pitch_cos, pitch_sin];
+    let reach = sim.world.borrow().activate_reach(player_thing);
+    let sector = sim.world.borrow().things.get(player_thing).map(|t| t.sector).unwrap_or(-1);
+    let used = sim
+        .world
+        .borrow_mut()
+        .sith_player_actions_activate(player_thing, eye, dir, reach, sector);
     *said += 1;
-    if used_thing.is_some() || used_surface.is_some() {
+    if used.is_some() {
         player.use_hits += 1;
     }
-    match (used_thing, used_surface) {
-        (Some(thing), _) => println!("use: activated thing {thing}"),
-        (None, Some(surface)) => println!("use: activated surface {surface}"),
-        (None, None) => println!("use: nothing linked within reach"),
+    match used {
+        Some(runtime::UseHit::Thing(thing)) => println!("use: activated thing {thing}"),
+        Some(runtime::UseHit::Surface(surface)) => println!("use: activated surface {surface}"),
+        None => println!("use: nothing linked within reach"),
     }
 }
 
@@ -21716,7 +23300,7 @@ fn deliver_thing_messages(
     // Which thing each `damaged` instance was for, and the amount the handler allows, so the answer
     // is applied after the last handler on that thing has had its say.
     let mut answers: Vec<(usize, Option<f32>)> = Vec::new();
-    for (instance, label, params, source) in pending {
+    for (instance, label, params, source, identity) in pending {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
         let Some(script) = world.cogs.get(script_name) else { continue };
         // A **message name** resolves through the message-id table (`activate` is `activated`, id 1):
@@ -21733,11 +23317,16 @@ fn deliver_thing_messages(
         if let Some(source) = source {
             vm.source = source;
         }
+        // The queued `SourceSender` is the engine's other sender half: `GetSenderId()` is the link id
+        // and `GetSenderRef()`/`GetSenderType()` name the body that sent it, or `-1`/0 for the world
+        // (`sithCog_SendMessageEx`, `0x4dedc0`). This is the live `activate`/`sighted` pump.
+        let own_sender = vm.set_message_sender(source, identity.as_ref());
         if std::env::var_os("BK_TRIGGER_TRACE").is_some() {
             println!("pending: `{script_name}` runs `{resolved}` (message `{label}`) sender {source:?}");
         }
         let ran = vm.run_label(script, &resolved);
         vm.source = own_source;
+        vm.restore_message_sender(own_sender);
         // `::sleeping` is the sleep unwind, not a failure: the handler is suspended and resumes later.
         if let Err(error) = ran
             && error != cog::SLEEPING
@@ -21797,7 +23386,7 @@ fn deliver_cog_messages(
     // Taken into a local first: a `handle.borrow_mut()` in the `for` header lives for the whole loop,
     // and the `last_params` write inside it would borrow again on the same thread.
     let pending = std::mem::take(&mut handle.borrow_mut().pending_messages);
-    for (instance, label, params, source) in pending {
+    for (instance, label, params, source, identity) in pending {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
         let Some(script) = world.cogs.get(script_name) else { continue };
         // A **message name** resolves through the message-id table (`activate` is `activated`, id 1):
@@ -21806,9 +23395,10 @@ fn deliver_cog_messages(
         handle.borrow_mut().last_params = params.to_vec();
         // The sender id rides with the message: `activated` handlers branch on `GetSenderId()`
         // (`00_doorswitch.cog` opens only for its switch-surface link id 2), and this bus never set it,
-        // so every `activate` arrived with sender 0 and the door stayed shut (round 201).
-        let own_sender = vm.sender;
-        vm.sender = source.map_or(0, |s| s as i64);
+        // so every `activate` arrived with sender 0 and the door stayed shut (round 201). The queued
+        // `SourceSender` is the engine's other half — `GetSenderRef()`/`GetSenderType()` answer the
+        // sender thing, or `-1`/0 when the world sent it — and it is restored after the handler.
+        let own_sender = vm.set_message_sender(source, identity.as_ref());
         match vm.run_label(script, &resolved) {
             Ok(_) => {
                 fired += 1;
@@ -21823,7 +23413,7 @@ fn deliver_cog_messages(
                 }
                 Err(error) => println!("sighted: `{script_name}`'s `{label}` failed: {error}"),
         }
-        vm.sender = own_sender;
+        vm.restore_message_sender(own_sender);
     }
     // A script may answer with another message, so drain until quiet. Bounded, because two scripts
     // that greet each other forever must not wedge a frame.
@@ -22037,9 +23627,9 @@ fn run_pulses_and_timers(capture: Option<Res<CaptureDt>>,
         for (id, params) in vm.take_due_timers() {
             {
                 if script.label("timer").is_some() {
-                    // The engine sends the message with the timer's own id as the sender
-                    // (`sithCogFunction_SetTimerEx`'s second argument) and its two words as the
-                    // handler's parameters: the actor scripts branch on `GetSenderId()`.
+                    // `SetTimerEx` sends its own id as the sender and its two words as the handler's
+                    // parameters; `SetTimer`'s single slot sends 0/0/0 (`sithCog_ProcessCog`), which
+                    // is the branch `actor_fn.cog` takes. The actor scripts read `GetSenderId()`.
                     vm.sender = id;
                     handle.borrow_mut().last_params = params.to_vec();
                     let result = vm.run_label(script, "timer");
@@ -22348,18 +23938,22 @@ fn sight_probe(
     state.0 += 1;
     match state.1 {
         0 => {
-            // Let the level settle, then stand on the landing pad facing 8t88 (the pose the port's
-            // forward axis and warp put him in view from).
+            // Let the level settle, then stand on the landing pad facing 8t88. The pose is the one
+            // retail's own `warp` accepts and that ended the level in the round-89 capture:
+            // eye (-5.45, 16.9, 3.865), sector 215, body one eye offset below. The old
+            // (-4.5, 14.0) was sector 230, which has no floor and which retail refuses.
             if state.0 < 30 {
                 return;
             }
-            player.body.yaw = 0.0;
-            sim.world
-                .borrow_mut()
-                .teleport_player(&mut player.body, [-4.5, 14.0, 3.84], Some(230));
+            player.body.yaw = (-136.4f32).to_radians();
+            sim.world.borrow_mut().teleport_player(
+                &mut player.body,
+                [-5.45, 16.9, 3.865 - 0.037],
+                Some(215),
+            );
             state.1 = 1;
             state.0 = 0;
-            println!("sight-live: standing at (-4.5,14.0) facing 8t88");
+            println!("sight-live: standing at (-5.45,16.9) facing 8t88");
         }
         1 => {
             // The draw happens in the render pass; give it frames, then read the goal cog's `done`.
@@ -23648,7 +25242,7 @@ fn live_check(
     let armed = sim
         .instances
         .iter()
-        .filter(|(_, vm)| vm.pulse.is_some() || !vm.timers.is_empty())
+        .filter(|(_, vm)| vm.pulse.is_some() || vm.timer.is_some() || !vm.timers.is_empty())
         .count();
     let pulses = pulses.as_ref().map(|p| p.0).unwrap_or(0);
     say(
@@ -24033,6 +25627,10 @@ fn write_snapshot(
     rt: &runtime::Runtime,
 ) -> std::io::Result<usize> {
     let mut save = jks::Save::new(level_name);
+    // The engine's own carry: one fixed record per bin in the player's table, so the file a level
+    // writes and the next level's reader see the same bins retail's autosave carries.
+    save.sections
+        .extend(jks::inventory_sections(&rt.inv, rt.player_thing() as u16));
     save.sections.push(jks::Section::new(runtime::SAVE_SECTION, rt.snapshot().to_bytes()));
     let bytes = save.write();
     if let Some(dir) = path.parent() {
@@ -25392,6 +26990,10 @@ fn projectile_hits(
             let (shields, health) = rt.damage_player(damage, kind);
             if rt.player_shields + health < before - 1e-4 {
                 rt.note_shot_landed(shot);
+            } else {
+                // A shot the player's invulnerability swallowed landed no damage; it is not a hit
+                // in the chronology, so the trace says miss.
+                rt.note_shot_lost(shot);
             }
             println!(
                 "hit: the player took {damage:.0}, {shields:.0} shield(s) and {health:.0} health left{suffix}"
@@ -25401,6 +27003,7 @@ fn projectile_hits(
             // The bolt's owner is the thing that fired it (`sithThing`'s owner field), and the
             // engine sends it as the damage message's source: a `killed:` handler's `GetSourceRef()`
             // is how a script knows this death was the player's.
+            rt.note_shot_lost(shot);
             rt.damage_typed_from(target as i64, damage, kind, owner.unwrap_or(0) as i64)
         };
         rt.things[shot].destroyed = true;
@@ -25764,7 +27367,10 @@ fn play_requested_sounds(
     sim: Option<Res<Sim>>,
     player: Option<Res<Player>>,
     bank: Option<Res<SoundBank>>,
+    world: Option<Res<World>>,
     cursor: Option<Res<RouteCursor>>,
+    schedule: Option<Res<AudioScheduleOut>>,
+    mut schedule_started: Local<bool>,
     mut log: Option<ResMut<AudioLog>>,
 ) {
     let (Some(sim), Some(player), Some(bank)) = (sim, player, bank) else { return };
@@ -25825,11 +27431,37 @@ fn play_requested_sounds(
             },
         ));
         played += 1;
+        // The replay's tick, not wall time: a trace is a function of the script. `route_replay`
+        // has already advanced the cursor for this frame, so the frame's own tick is one back.
+        let tick = cursor.as_ref().map_or(0, |c| c.tick.saturating_sub(1));
+        // The engine instant is `tick` steps of the replay's own clock (`RouteCursor::engine_s`
+        // accumulates the same step `sim_dt` hands the simulation).
+        let time_s = cursor.as_ref().map_or(0.0, |c| {
+            c.engine_s * f64::from(tick) / f64::from(c.tick.max(1))
+        });
+        let row = world.as_ref().and_then(|w| w.sound_rows.get(&wav));
+        let record = PlayedSound {
+            tick,
+            time_s,
+            wav,
+            gain,
+            volume: request.volume,
+            distance,
+            forward,
+            snd: row.map(|r| r.snd.clone()).unwrap_or_else(|| "-".to_string()),
+            event: row.map(|r| r.event.clone()).unwrap_or_else(|| "-".to_string()),
+            min: *min,
+            max: *max,
+            max_volume: *volume,
+            source: request.source,
+        };
+        if let Some(out) = schedule.as_deref()
+            && let Some(path) = out.0.as_deref()
+        {
+            write_audio_schedule_row(path, &mut schedule_started, &record);
+        }
         if let Some(log) = log.as_mut() {
-            // The replay's tick, not wall time: a trace is a function of the script. `route_replay`
-            // has already advanced the cursor for this frame, so the frame's own tick is one back.
-            let tick = cursor.as_ref().map_or(0, |c| c.tick.saturating_sub(1));
-            log.played.push((tick, wav, gain));
+            log.played.push(record);
         }
     }
     if played > 0 {
@@ -25913,6 +27545,93 @@ fn billboard_sprites(
     }
 }
 
+/// The origin block of the committed engine capture (`tools/parity/engine/route_door.tsv`, issue
+/// #21): the AI `rand()` word at the encounter clock and every actor's instinct phase from it.
+struct CapturePhase {
+    origin_ms: i64,
+    rng: u32,
+    actors: Vec<(usize, runtime::CapturedPhase)>,
+}
+
+/// Read the capture's origin block. `None` when the file is missing or does not carry the header the
+/// harness writes — a capture that cannot be read is not silently replaced by a guess.
+fn read_capture_phase(path: &std::path::Path) -> Option<CapturePhase> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let origin_ms = text
+        .lines()
+        .find_map(|line| line.strip_prefix("# origin_ms "))?
+        .trim()
+        .parse()
+        .ok()?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty() && !line.starts_with('#'));
+    let header: Vec<&str> = lines.next()?.split('\t').collect();
+    let column = |name: &str| -> Option<usize> { header.iter().position(|cell| *cell == name) };
+    let (template, kind, t_ms) = (
+        column("template")?,
+        column("kind")?,
+        column("t_ms")?,
+    );
+    let (rng, flags) = (column("rng")?, column("ai_flags")?);
+    let (fire, acquire, next_pass) = (
+        column("fire_next_ms")?,
+        column("acquire_next_ms")?,
+        column("next_pass_ms")?,
+    );
+    let mut rng_state = None;
+    let mut actors = Vec::new();
+    for line in lines {
+        let cells: Vec<&str> = line.split('\t').collect();
+        let Some(ms) = cells.get(t_ms).and_then(|c| c.parse::<i64>().ok()) else {
+            eprintln!("encounter: malformed capture row (no t_ms): {line}");
+            continue;
+        };
+        if cells.len() != header.len() || ms != origin_ms {
+            continue;
+        }
+        match cells[kind] {
+            "player" => match cells[rng].parse::<u32>() {
+                Ok(state) => rng_state = Some(state),
+                Err(_) => {
+                    eprintln!("encounter: malformed player row (rng {:?}): {line}", cells[rng]);
+                    return None;
+                }
+            },
+            "origin" => {
+                // A deadline cell that is not an integer is a malformed capture, not a zero: 0 is
+                // the engine's own "due now", so defaulting one would seed a shot or a scan the
+                // engine never had. The row is refused and named instead.
+                let index = cells[template].parse::<usize>().ok();
+                let flag_word = cells[flags].parse::<u32>().ok();
+                let deadline = |cell: &str| cell.trim().parse::<i64>().ok();
+                match (
+                    index,
+                    flag_word,
+                    deadline(cells[fire]),
+                    deadline(cells[acquire]),
+                    deadline(cells[next_pass]),
+                ) {
+                    (Some(index), Some(flags), Some(fire_ms), Some(acquire_ms), Some(next_pass_ms)) => {
+                        actors.push((
+                            index,
+                            runtime::CapturedPhase { flags, fire_ms, acquire_ms, next_pass_ms },
+                        ))
+                    }
+                    _ => eprintln!(
+                        "encounter: malformed origin row (template {:?}, ai_flags {:?}, fire {:?}, acquire {:?}, next pass {:?}): {line}",
+                        cells[template],
+                        cells[flags],
+                        cells[fire],
+                        cells[acquire],
+                        cells[next_pass]
+                    ),
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(CapturePhase { origin_ms, rng: rng_state?, actors })
+}
+
 /// `BK_ENCOUNTER_OUT`: the fixed door-encounter timeline (issue #9).
 ///
 /// One TSV carries the same three observations the retail capture samples from the engine's own
@@ -25969,17 +27688,28 @@ impl EncounterTrace {
             }
         }
         self.started = true;
-        // The warp frame's own shot can be stamped a frame before this check passes (the body is
-        // still a hair off), so keep the last few frames' events and start the clock at the earliest
-        // of them: clearing the whole queue dropped the encounter's first hit.
+        // The capture's origin block is the encounter's starting phase (issues #16/#21): the AI
+        // `rand()` word and each door actor's flag/deadline. The warp frame is the origin clock, so
+        // the captured milliseconds are applied as offsets from it. A run without a seed keeps the
+        // port's own phase.
+        if let Some(path) = std::env::var_os("BK_ENCOUNTER_SEED").map(std::path::PathBuf::from) {
+            match read_capture_phase(&path) {
+                Some(seed) => rt.seed_capture_phase(seed.rng, seed.origin_ms, &seed.actors),
+                // A named seed that cannot be read is a broken capture, not a licence to start
+                // from the port's own phase without saying so.
+                None => eprintln!(
+                    "encounter: cannot read the AI phase from {}; the port's own phase is used",
+                    path.display()
+                ),
+            }
+        }
+        // The warp frame is the origin clock. It must not be derived from the shot queue: whether a
+        // pre-warp bolt was stamped in the last tenth of a second depends on which system published
+        // the body first, and deriving the origin from it made two identical runs end 100 ms apart
+        // (one extra actor sample). Pre-arm events are kept and clamp to t = 0 in `record`.
         rt.encounter_events
             .retain(|event| event_time(event) >= rt.time - 0.1);
-        self.origin = Some(
-            rt.encounter_events
-                .iter()
-                .map(event_time)
-                .fold(rt.time, f32::min),
-        );
+        self.origin = Some(rt.time);
         true
     }
 
@@ -25996,26 +27726,41 @@ impl EncounterTrace {
         for event in std::mem::take(&mut rt.encounter_events) {
             let t_ms = ((event_time(&event) - origin).max(0.0) * 1000.0).round();
             match event {
-                // Only a shot that **landed on the player** is a `shot` row: retail's fixture sees
-                // shots exactly that way (its hit rows), so both sides record the same shots; the
-                // port's row is the launch and retail's is the impact, a flight apart.
+                // The plain spawn record; the `shot` row below is the landing that retail can see.
                 runtime::EncounterEvent::Shot { .. } => {}
-                runtime::EncounterEvent::ShotLanded { owner, template, pos, .. } => {
+                // A shot that landed on the player is the row retail's fixture can pair (its hit
+                // rows): the port's row is the launch and retail's is the impact, a flight apart.
+                // `detail` says what the shooter had as a target and that this shot hit.
+                runtime::EncounterEvent::ShotLanded { owner, template, pos, target, .. } => {
                     let _ = writeln!(
                         file,
-                        "{t_ms:.0}\tshot\t{owner}\t{template}\t{:.4}\t{:.4}\t{:.4}\t\t\t\t",
-                        pos[0], pos[1], pos[2]
+                        "{t_ms:.0}\tshot\t{owner}\t{template}\t{:.4}\t{:.4}\t{:.4}\t\t\t\ttarget {} hit",
+                        pos[0],
+                        pos[1],
+                        pos[2],
+                        target.map(|t| t.to_string()).unwrap_or_else(|| "-".into())
+                    );
+                }
+                // A shot that never landed on the player. Retail's fixture has no counterpart, so
+                // the gate does not pair these; the chronology still says hit or miss for every shot.
+                runtime::EncounterEvent::Miss { owner, template, target, .. } => {
+                    let _ = writeln!(
+                        file,
+                        "{t_ms:.0}\tmiss\t{owner}\t{template}\t\t\t\t\t\t\ttarget {} miss",
+                        target.map(|t| t.to_string()).unwrap_or_else(|| "-".into())
                     );
                 }
                 runtime::EncounterEvent::Hit {
                     amount,
                     shields,
                     health,
+                    health_lost,
+                    shields_lost,
                     ..
                 } => {
                     let _ = writeln!(
                         file,
-                        "{t_ms:.0}\thit\t{player}\t\t\t\t\t\t{health:.1}\t{shields:.1}\tamount {amount:.1}"
+                        "{t_ms:.0}\thit\t{player}\t\t\t\t\t\t{health:.1}\t{shields:.1}\tamount {amount:.1} health -{health_lost:.1} shields -{shields_lost:.1}"
                     );
                 }
             }
@@ -26085,6 +27830,7 @@ fn event_time(event: &runtime::EncounterEvent) -> f32 {
     match event {
         runtime::EncounterEvent::Shot { t, .. }
         | runtime::EncounterEvent::ShotLanded { t, .. }
+        | runtime::EncounterEvent::Miss { t, .. }
         | runtime::EncounterEvent::Hit { t, .. } => *t,
     }
 }
@@ -26346,13 +28092,13 @@ fn setup(
     // The sound classes' clips: every wav they name, with the class's own fade radii and
     // volume, so a script's `PlaySoundThing` can be played with distance attenuation.
     let mut bank = SoundBank::default();
-    for (wav, (min, max, volume)) in &world.sound_radii {
+    for (wav, row) in &world.sound_rows {
         if bank.clips.contains_key(wav) {
             continue;
         }
         let Some(bytes) = world.wav_bytes.get(wav) else { continue };
         let source = audio.add(AudioSource { bytes: bytes.clone().into() });
-        bank.clips.insert(wav.clone(), (source, *min, *max, *volume));
+        bank.clips.insert(wav.clone(), (source, row.min, row.max, row.volume));
     }
     println!("sound bank: {} clips with fade radii", bank.clips.len());
     commands.insert_resource(bank);
@@ -26695,8 +28441,8 @@ fn setup(
             rt.thing_class_cog.insert(index, instance as i32);
             rt.class_skill.insert(instance as i32, script.skill_answers());
             class_links.push((instance, index));
-            // `created:` is *not* sent here: the engine sends it when the thing's sector is first
-            // drawn (`cull_sectors` wakes the room), which is what retail's load-time autosave shows.
+            // `created:` is queued after `wire_links`, below: the engine sends it at level load
+            // (`sithOpenPostProcess`), not when a sector is first drawn.
             started += 1;
         }
         if started > 0 {
@@ -26801,6 +28547,14 @@ fn setup(
             // placed instances once and bails if the tables are already populated.
             for (instance, thing) in class_links.drain(..) {
                 rt.thing_links.push((instance, 0, thing));
+                // `sithOpenPostProcess` (`0x4c4880`) sends `created` (message 15) to every thing's
+                // class cog **at level load**, in thing order, with the thing as the sender — after
+                // the `startup` broadcast and before the autosave. It is not a sector-draw wake: the
+                // level-1 autosave is written in the same function before the 1 s `created:` timers
+                // fire, which is why that save reads bin 73 = 0 while level 2's (after level 1 was
+                // played) reads 10.5.
+                rt.pending_messages
+                    .push((instance, "created", [0.0; 2], Some(thing as i64), None));
             }
         }
     }
@@ -27375,7 +29129,6 @@ fn setup(
             rest: body_rest.max(rules.radius),
         },
         extra_speed: 0.0,
-        last_use: f32::NEG_INFINITY,
         use_hits: 0,
         rules,
         health: 100.0,
@@ -27702,7 +29455,8 @@ impl Rules {
             // = 0.4375 is 40% under retail's own straight-leg walk traces: `walk_street90` measures
             // 1.07-1.23 u/s, `walk_street45` 0.92, `walk5_spawn` ~1.2. The route trace's per-wall-clock
             // 0.88-0.92 is the same 1.2 speed with the capture's game clock advancing ~0.85 s per wall
-            // second (the console/dialog pauses), which the route replay scales for (`ROUTE_TIME_SCALE`).
+            // second under the console/dialog pauses. The replay no longer scales for that (issue
+            // #17): it runs the engine's own clock, so its samples are at engine instants.
             walk: 1.2,
             jump: jump_speed * physics_scale(),
             gravity: level.gravity * physics_scale(),
@@ -27808,10 +29562,6 @@ struct Player {
     /// bolts took off (§16.5). `DamageThing` on the player writes the runtime's copy; this is a
     /// read-only mirror for the interface.
     health: f32,
-    /// The engine's use throttle: `sithPlayerActions_Activate` (`0x4fc0a0`) refuses a second activate
-    /// within 250 ms (`DAT_008554bc + 0xfa <= clock`), stamped before the sweep even when it finds
-    /// nothing. Seconds on the world clock; `−inf` means "never used".
-    last_use: f32,
     /// How many times a use reached a script-visible target. The `--use-live` gate's own witness:
     /// counting script messages is tainted by the teleport firing sector triggers (round 304).
     use_hits: u32,
@@ -28182,43 +29932,90 @@ struct RouteTraceOut(Option<std::path::PathBuf>);
 #[derive(Resource, Default)]
 struct AudioTraceOut(Option<std::path::PathBuf>);
 
-/// The one-shot sounds that actually played since the last audio-trace sample: `(replay tick, wav,
-/// gain)`. `gain` is the mixer's attenuated volume (`snd::volume`), so a sound 10 units away and one
-/// at the listener are different numbers, which is what "differently attenuated" means.
+/// One played sound: the replay tick and engine instant, the wav, the gain `snd::volume` produced,
+/// and the request data the schedule re-derives that gain from. `snd`, `event`, `min`, `max` and
+/// `max_volume` are the shipped `.snd` row, so a schedule row says which engine call asked for the
+/// sound and which data shaped it.
+#[derive(Clone, Debug, PartialEq)]
+struct PlayedSound {
+    tick: u32,
+    time_s: f64,
+    wav: String,
+    gain: f32,
+    volume: f32,
+    distance: f32,
+    forward: f32,
+    snd: String,
+    event: String,
+    min: f32,
+    max: f32,
+    max_volume: f32,
+    source: &'static str,
+}
+
+/// The one-shot sounds that actually played since the last audio-trace sample.
 #[derive(Resource, Default)]
 struct AudioLog {
-    played: Vec<(u32, String, f32)>,
+    played: Vec<PlayedSound>,
 }
+
+/// `--audio-schedule <path>`: the expected one-shot schedule for the replay, written as each sound
+/// plays. `--audio-trace` samples the log into 600 ms windows; this is the event list beneath it,
+/// with the engine function and the shipped `.snd` row that produced every event.
+#[derive(Resource, Default)]
+struct AudioScheduleOut(Option<std::path::PathBuf>);
 
 /// The script's input for the tick `route_replay` is on, read by `walk_player`. `None` outside a
 /// replay and on the final tick.
 #[derive(Resource, Default)]
 struct RouteNow(Option<RouteInput>);
 
-/// Where the replay is in its script, in ticks.
+/// Where the replay is in its script, in ticks, and the simulation's own clock.
+///
+/// `engine_s` is the engine clock — `sithTime_Advance`'s (`0x4dd640`) frame delta accumulated over
+/// the replay: for a pinned capture step that is the step itself, inside the function's [10, 500] ms
+/// clamp. It is advanced by the same `dt` the simulation systems were handed, so the trace's `t_s`
+/// is the time the body actually moved, not the wall-clock hold the fixture row was polled on.
 #[derive(Resource, Default)]
 struct RouteCursor {
     tick: u32,
+    engine_s: f64,
 }
 
-/// The previous sampled body position and tick, so the trace's velocity columns are the retail
-/// fixture's definition — the position derivative over the 600 ms window — and not the integrated
-/// intent, which a body pinned against a wall keeps reporting.
+impl RouteCursor {
+    /// Advance one replay tick. `step` is `CaptureDt`, the value `sim_dt` and `walk_player` hand the
+    /// engine that frame, so the clock and the simulation cannot disagree.
+    fn advance_engine_clock(&mut self, step: f32) {
+        self.tick += 1;
+        self.engine_s += f64::from(step);
+    }
+}
+
+/// The previous sampled body position and engine instant, so the trace's velocity columns are the
+/// retail fixture's definition — the position derivative over the sample window — and not the
+/// integrated intent, which a body pinned against a wall keeps reporting. `door0_opened` is the
+/// trace's own latch: the door script re-closes two seconds after it opens, so a sample can miss the
+/// open frame.
 #[derive(Resource, Default)]
-struct RoutePrev(Option<([f32; 3], u32)>);
+struct RoutePrev {
+    sample: Option<([f32; 3], f64)>,
+    door0_opened: bool,
+}
 
 /// The route trace's velocity columns: the position derivative over the sample window, in level units
 /// per second. A warp row is a new leg — retail's own warp rows read zero, and the jump between two
-/// rooms is not a velocity.
+/// rooms is not a velocity. The window is the engine clock's, so a sample whose engine instant moved
+/// (a different capture step, or a hold that did not advance the clock) cannot hide in a 600 ms
+/// wall-clock denominator.
 fn route_sample_velocity(
-    prev: Option<([f32; 3], u32)>,
+    prev: Option<([f32; 3], f64)>,
     pos: [f32; 3],
-    tick: u32,
+    engine_s: f64,
     warped: bool,
 ) -> [f32; 3] {
     match prev {
-        Some((before, before_tick)) if !warped && tick > before_tick => {
-            let window = (tick - before_tick) as f32 / 60.0;
+        Some((before, before_engine)) if !warped && engine_s > before_engine => {
+            let window = (engine_s - before_engine) as f32;
             [
                 (pos[0] - before[0]) / window,
                 (pos[1] - before[1]) / window,
@@ -28582,9 +30379,11 @@ fn sky_follows_camera(
 /// writes the sampled trace row before the step, the same point in the tick a retail `coords` poll
 /// records: tick 0 is the leg's start pose, and every 36th tick is that many 1/60 s steps later.
 /// The route's final tick has no input; its row is the last sampled state and the run ends.
+#[allow(clippy::too_many_arguments)]
 fn route_replay(
     plan: Option<Res<RouteReplay>>,
     out: Option<Res<RouteTraceOut>>,
+    capture: Option<Res<CaptureDt>>,
     mut cursor: ResMut<RouteCursor>,
     mut prev: ResMut<RoutePrev>,
     mut now: ResMut<RouteNow>,
@@ -28592,6 +30391,9 @@ fn route_replay(
     sim: Option<Res<Sim>>,
     mut player: Option<ResMut<Player>>,
     solids: Option<Res<Collision>>,
+    ambience: Option<Res<Ambience>>,
+    cams: Query<(&Camera, &GlobalTransform, &Projection), With<Camera3d>>,
+    mut log: Option<ResMut<AudioLog>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(plan) = plan.as_deref().and_then(|p| p.0.as_ref()) else { return };
@@ -28601,6 +30403,9 @@ fn route_replay(
         now.0 = None;
         return;
     }
+    // The sector a sample on this frame's grid point names: retail's `coords` row on a warp still
+    // reports the room being left, so the audio state is sampled against the pre-warp sector.
+    let sector_before = player.body.sector;
     if let Some(warp) = plan.warp_at(tick)
         && let Some((at, yaw)) = warp.at
     {
@@ -28631,51 +30436,54 @@ fn route_replay(
     {
         player.body.vel = vel;
     }
-    if plan.switch_at == Some(tick)
-        && let (Some(world), Some(sim)) = (world.as_deref(), sim.as_deref())
-        && let Some(instance) = world
-            .level
-            .cogs
-            .iter()
-            .position(|c| c.script.eq_ignore_ascii_case("00_doorswitch.cog"))
-    {
-        // The switch's plate is its surface link id 2 (`00_doorswitch.cog` opens only for it), and
-        // the engine delivers `activate` with the link id as the sender.
-        let mut rt = sim.world.borrow_mut();
-        let plates: Vec<usize> = rt
-            .surface_links
-            .iter()
-            .filter(|(cog, link, _)| *cog == instance && *link == 2)
-            .map(|(_, _, surface)| *surface)
-            .collect();
-        for surface in plates {
-            let links: Vec<(usize, i32)> = rt
-                .surface_links
-                .iter()
-                .filter(|(cog, _, linked)| *cog == instance && *linked == surface)
-                .map(|(cog, link, _)| (*cog, *link))
-                .collect();
-            for (cog, link) in links {
-                rt.pending_messages.push((cog, "activate", [0.0; 2], Some(link as i64)));
-            }
+    // A `yaw` row turns the body where it stands (the player's mouse yaw): no position, no tick.
+    for (at, degrees) in &plan.yaws {
+        if *at == tick {
+            player.body.yaw = degrees.to_radians();
         }
     }
     if tick % ROUTE_SAMPLE_TICKS == 0
         && let Some(path) = out.as_deref().and_then(|o| o.0.as_deref())
     {
         let pos = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
-        let vel = route_sample_velocity(prev.0, pos, tick, plan.warp_at(tick).is_some());
-        prev.0 = Some((pos, tick));
+        let engine_s = cursor.engine_s;
+        let vel = route_sample_velocity(prev.sample, pos, engine_s, plan.warp_at(tick).is_some());
+        prev.sample = Some((pos, engine_s));
+        let audio = match sim.as_deref() {
+            Some(sim) => sample_audio_state(
+                sim,
+                &player.body,
+                sector_before,
+                ambience.as_deref(),
+                Some(solids),
+                world.as_deref(),
+                &cams,
+                &mut log,
+            ),
+            None => SampledAudio {
+                music: None,
+                music_volume: 0.0,
+                ambient: None,
+                sounds: Vec::new(),
+            },
+        };
         write_route_trace_row(
             path,
             tick,
+            engine_s,
             &player.body,
             vel,
+            &audio,
             sim.as_deref(),
             world.as_deref(),
+            &mut prev.door0_opened,
         );
     }
-    cursor.tick += 1;
+    // The clock advances by the step the simulation was handed this frame (`sim_dt`/`walk_player`),
+    // so sample `k` records `k` steps of engine time — the same instants the retail fixture's holds
+    // were polled at, and never a wall-clock one.
+    let step = capture.as_deref().and_then(|c| c.0).unwrap_or(1.0 / 60.0);
+    cursor.advance_engine_clock(step);
     if tick == plan.total {
         now.0 = None;
         exit.write(AppExit::Success);
@@ -28733,22 +30541,21 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // ranges from 0.008 s to the 0.1 clamp depending on the level's weight, so 30 frames is anywhere
     // from a quarter second to three. A fixed step makes a check depend on the code, not the machine —
     // and it is what exposed the jump that never lands (`BK_FIXED_DT=0.0333`, level 1).
-    let dt = if overview.capture {
+    let dt = if let Some(step) = capture.as_deref().and_then(|c| c.0) {
+        // A `--fixed-dt` capture advances **every** system at that step: `sim_dt` pins scripts, AI
+        // and combat, and the walker has to follow or the player body runs on a second clock.
+        step
+    } else if overview.capture {
         1.0 / 60.0
     } else if std::env::var_os("BK_FIXED_DT").is_some() {
         env_f32("BK_FIXED_DT", 1.0 / 30.0).clamp(1.0 / 240.0, 0.1)
     } else {
         time.delta_secs().min(0.1)
     };
-    // The route capture's 600 ms samples are wall-clock: the engine's game clock advanced ~0.85 s per
-    // second (the console/dialog pauses), and retail's per-wall travel (0.88-0.92 u/s) is the engine's
-    // measured 1.2 u/s times that. The replay uses the same clock so its positions line up with the
-    // fixture's samples.
-    let dt = if route_now.as_deref().and_then(|now| now.0).is_some() {
-        dt * ROUTE_TIME_SCALE
-    } else {
-        dt
-    };
+    // The replay runs the engine's own clock (issue #17): a pinned step is `sithTime_Advance`'s
+    // frame delta for that frame — inside its [10, 500] ms clamp — so the walker, the scripts and
+    // the trace's `t_s` all advance by the same time. A capture-clock scale here used to make the
+    // body move less than a row claimed, which no position tolerance should have to hide.
 
     // A script can move the player: `force_jump.cog` does `SetThingVel(player, (0,0,duration
     // + 2.5))`; the runtime step consumes that one-shot impulse. The force-speed term is script
@@ -29829,8 +31636,8 @@ mod registration_tests {
             "the collider hand-off is unordered with a level swap: the swap's fresh runtime reaches the AI tick with no geometry"
         );
         assert!(
-            source.contains("ai_shots.after(share_collider)"),
-            "ai_shots is unordered with share_collider: the first AI tick of a level tests sight against no geometry"
+            source.contains("ai_shots.after(share_collider).after(walk_player)"),
+            "ai_shots is unordered with walk_player: the encounter's arm can read a body one tick before the warp, so the trace origin and sample count drift between runs"
         );
     }
 
@@ -29952,6 +31759,94 @@ mod registration_tests {
             !sim.world.borrow().ai_detected.contains(&1),
             "the first AI tick after a level swap saw through the wall: the hand-off ran too late"
         );
+    }
+
+    /// Just enough `World` for a message pump: the real systems read the scripts, and nothing else.
+    fn bare_world(cogs: HashMap<String, cog::Cog>) -> World {
+        World {
+            level: jkl::Level::default(),
+            palette: [[0; 3]; 256],
+            images: HashMap::new(),
+            material_cels: HashMap::new(),
+            item_cogs: std::collections::BTreeMap::new(),
+            item_defs: Vec::new(),
+            carried: None,
+            template_model: HashMap::new(),
+            models: HashMap::new(),
+            model_images: HashMap::new(),
+            template_sprite: HashMap::new(),
+            template_particle: HashMap::new(),
+            sprite_cels: HashMap::new(),
+            ambient: HashMap::new(),
+            cogs,
+            puppets: HashMap::new(),
+            keys: HashMap::new(),
+            ai_classes: HashMap::new(),
+            wav_bytes: HashMap::new(),
+            sound_rows: HashMap::new(),
+            sound_classes: std::collections::BTreeMap::new(),
+            gob_entries: 0,
+        }
+    }
+
+    /// The live `activate`/`sighted` pump. `deliver_thing_messages` is the bus the use action and the
+    /// renderer's `sighted` ride, so the sender identity must reach the handler there — not only in
+    /// `deliver_cog_messages`: a body's message answers `GetSenderRef()` 7 / `GetSenderType()` 3, the
+    /// world's `-1`/0, both restored afterwards so the next message does not inherit them.
+    #[test]
+    fn the_thing_message_pump_delivers_the_sender_identity() {
+        let script = "symbols\nmessage activate\nmessage sighted\nend\ncode\n\
+                      activate:\n\tPrint(GetSenderId());\n\tPrint(GetSenderRef());\n\tPrint(GetSenderType());\n\treturn;\n\
+                      sighted:\n\tPrint(GetSenderId());\n\tPrint(GetSenderRef());\n\tPrint(GetSenderType());\n\treturn;\nend\n";
+        let cogs = HashMap::from([("probe.cog".to_string(), cog::parse(script).expect("parses"))]);
+        let handle = runtime::Runtime::handle(&jkl::Level::default());
+        let mut vm = cog::Vm::new();
+        vm.source = 4; // the instance's own thing, restored by the pump after each handler
+        let sim = Sim {
+            world: handle.clone(),
+            instances: vec![("probe.cog".to_string(), vm)],
+            entities: HashMap::new(),
+            elapsed: 0.0,
+            reported: 0.0,
+            escaped: std::collections::HashSet::new(),
+        };
+        {
+            let mut rt = handle.borrow_mut();
+            // A body used the door: link id 2, sender thing 7.
+            rt.pending_messages.push((
+                0,
+                "activate",
+                [0.0; 2],
+                Some(2),
+                Some(runtime::SourceSender::new(runtime::THING_SOURCE, 4, Some(7))),
+            ));
+            // The renderer sights 8t88: link id 0, world sender.
+            rt.pending_messages.push((
+                0,
+                "sighted",
+                [0.0; 2],
+                Some(0),
+                Some(runtime::SourceSender::new(runtime::THING_SOURCE, 4, None)),
+            ));
+        }
+        let mut app = App::new();
+        app.insert_resource(bare_world(cogs)).insert_resource(sim);
+        app.add_systems(Update, deliver_thing_messages);
+        app.update();
+        let sim = app.world().resource::<Sim>();
+        let (_, vm) = &sim.instances[0];
+        assert_eq!(
+            vm.trace.prints,
+            vec!["2", "7", "3", "0", "-1", "0"],
+            "the thing pump did not deliver the sender identity: {:?}",
+            vm.trace.prints
+        );
+        assert_eq!(
+            (vm.sender, vm.sender_ref, vm.sender_type),
+            (0, 0, 0),
+            "the sender fields were not restored after the handlers"
+        );
+        assert_eq!(vm.source, 4, "the pump did not restore the instance's own source");
     }
 }
 

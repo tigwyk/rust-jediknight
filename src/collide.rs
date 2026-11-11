@@ -1435,6 +1435,52 @@ impl LevelGeometry {
     }
 
     /// Whether `other` is in the collision search of a sphere of `radius` swept `left` along `dir` from
+    /// `at` in `sector`, **through every room the sweep reaches**.
+    ///
+    /// `sithCollision_SearchForCollisions` (`0x4e8160`) adds a sector when the sphere reaches one of
+    /// its adjoins, and each added sector adds *its* adjoins to the same search (`uVar8` grows while
+    /// the loop runs), so the scope is the transitive closure over crossed portals. Level 1's door
+    /// leaf sits two portal hops from the body that uses it while the 0.165 use sweep touches every
+    /// portal on the way, which is why one hop is not enough.
+    pub fn in_search_chain(
+        &self,
+        sector: usize,
+        other: usize,
+        at: [f32; 3],
+        dir: [f32; 3],
+        left: f32,
+        radius: f32,
+    ) -> bool {
+        if other == sector {
+            return true;
+        }
+        let mut seen = vec![sector];
+        let mut next = 0;
+        while next < seen.len() {
+            let node = seen[next];
+            next += 1;
+            let Some(portals) = self.portals.get(node) else { continue };
+            for portal in portals {
+                let target = portal.adjoin;
+                if seen.contains(&target) {
+                    continue;
+                }
+                let now = dot(sub(at, portal.point), portal.normal);
+                let then = now + dot(dir, portal.normal) * left;
+                // The engine adds the adjoined sector only when the sphere reaches that portal, so
+                // the target behind it is in the search only on this same crossing test.
+                if now.signum() != then.signum() || now.abs().min(then.abs()) < radius - 1e-4 {
+                    if target == other {
+                        return true;
+                    }
+                    seen.push(target);
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether `other` is in the collision search of a sphere of `radius` swept `left` along `dir` from
     /// `at` in `sector`. `sithCollision_SearchForCollisions` (`0x4e8160`) adds a sector only when the
     /// sweep **reaches one of its adjoins**, so a crate in the next room (or in a trigger sliver inside
     /// this one) collides once the body gets to the opening — while a body resting on a floor opening
@@ -3624,6 +3670,28 @@ mod tests {
         assert!(
             !room.in_search(0, 2, [3.0, 0.0, 1.0], [-1.0, 0.0, 0.0], 0.1, r),
             "a body far from the wall opening searched the next room"
+        );
+    }
+
+    /// A chain hop is taken only when the sweep reaches that **portal**. Two rooms are always
+    /// adjacent once an opening is crossed, so accepting a target on sight made the whole corridor
+    /// visible to a sweep that never touched the second opening.
+    #[test]
+    fn a_chain_hop_is_taken_only_when_its_portal_is_reached() {
+        let room = corridor();
+        let r = 0.025;
+        // Room 0 opens into 1 at y = 0, and 1 into 2 at y = 8. A body in room 0 walking level.
+        assert!(
+            !room.in_search_chain(0, 2, [0.0, -0.5, 0.5], [0.0, 1.0, 0.0], 1.0, r),
+            "a sweep that stops inside room 1 searched the room past its far opening"
+        );
+        assert!(
+            room.in_search_chain(0, 2, [0.0, -0.5, 0.5], [0.0, 1.0, 0.0], 9.0, r),
+            "a sweep that crosses both openings did not search the second room"
+        );
+        assert!(
+            room.in_search_chain(0, 1, [0.0, -0.5, 0.5], [0.0, 1.0, 0.0], 1.0, r),
+            "the first hop's own portal was not reached"
         );
     }
 

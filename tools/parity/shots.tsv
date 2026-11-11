@@ -27,6 +27,11 @@ route_lower	01narshadda	4.074969	-6.875029	0.257114	0	15.000092
 route_street	01narshadda	5.474939	-1.899975	0.657119	0	-134.988342
 route_catwalk	01narshadda	7.749950	-1.175000	2.857114	0	0
 route_door	01narshadda	1.400084	9.700065	6.357114	0	105.000092
+# goal_sight: the only retail-warp-verified 8t88 vantage (round 89) — eye (-5.45, 16.9, 3.865) on
+# the sector-215 landing, facing 8t88 at (-4.476, 15.877, 3.840): yaw = atan2(-(dx), dy) for the
+# engine's `(-sin, cos)` basis. That warp sighted 8t88 and ended the level in retail. The older
+# port probe stood at (-4.5, 14.0), which is sector 230 and has no floor; retail's `warp` refuses it.
+goal_sight	01narshadda	-5.450000	16.900000	3.865000	0	-136.400000
 
 # switch_cantina: warp beside the cantina door switch (thing 56 -> cog 11 00_doorswitch.cog,
 # surface switch0 at -4.29,-3.88). The port's forward axis is (-sin yaw, cos yaw), so the

@@ -14,6 +14,14 @@
 # cantina leg already disagree by 0.18 units and by a sector at 1.8 s.
 # epsilon 1.70
 #
+# Issue #17: the rows are the **key-down engine instants** of the retail walk (`held_ms`, the span
+# the key was down and the engine integrated), not an assumption that 600 ms of wall clock is 600 ms
+# of engine time. The replay now samples on its own engine clock at exactly these instants (`t_s` is
+# graded as an identity, not at this epsilon), so the residual this epsilon covers is the ±1-frame
+# quantisation of a hold — the engine runs 2-4 frames per 600 ms wall segment — plus velocity being a
+# difference of two such samples. The position and velocity bounds are unchanged; only the axis the
+# rows were polled on is stated.
+#
 # Provenance: the retail half of issue #8's scripted route, captured in ONE game session by
 # `retail-capture.ps1 -RouteWalk` (2026-11-09, then again with the AI off). Four independent leg
 # captures each started from a fresh level load, so their bars carried different pre-warp damage and

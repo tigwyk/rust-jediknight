@@ -1,10 +1,12 @@
 # Level-1 audio route (issue #13): the exact merged movement-parity route
 # (`tools/parity/routes/level1-route.tsv`, issue #10) plus the bar's door crossing.
 #
-# The four walk legs, the poses, the `seed` rows and the switch are the merged route's own,
-# unchanged; the audio trace samples the same 600 ms grid. The bar doorway is **not** here: retail
-# crosses it only in a fresh process, so it lives in `level1-audio-route-door.tsv` and the gate
-# compares that segment separately.
+# The four walk legs, the poses and the `seed` rows are the merged route's own, unchanged; the audio
+# trace samples the same 600 ms grid. There is no `switch` row: the merged route removed the
+# synthetic `activate` (retail's own `cogstatus 11` reads `doorstatus 0` with that door already
+# open), and the player's use key is the only way a route opens a door. The bar doorway is **not**
+# here: retail crosses it only in a fresh process, so it lives in `level1-audio-route-door.tsv` and
+# the gate compares that segment separately.
 #
 # Door geometry, from `--collide --surfaces-at -8,-5,-1.05` (level data, not a guess):
 #   surface 206  sector 19, adjoin 73, y = -5.00, x -8.10..-7.90, z -1.150..-0.700,
@@ -20,7 +22,6 @@ seed	0.3726	0.7844
 input	180	1	0
 warp	cantina		-2.200043	-2.900013	-1.142886	105.000092
 input	144	1	0
-switch
 warp	street		5.474939	-1.899975	0.657119	90.000000
 input	180	1	0
 warp	door		1.300000	9.000000	6.237000	0.000000

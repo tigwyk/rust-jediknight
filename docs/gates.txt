@@ -2758,3 +2758,65 @@ running app.--carry-check --start 01narshadda                        0   level 2
   unmodified base (`5329822`, rebuilt in this worktree), so they are the branch's standing movement
   gaps, not this change; `walk5_spawn` passes.
 
+## Update — issue #14 (full-route integration gate)
+
+- **One replay, the whole route, audio at every sample.** `--route-trace` is 29 columns now and
+  carries the audio trace's mixer state at the same 600 ms sample (`music`, `music_end`,
+  `music_loop`, `music_vol`, `ambient`, `ambient_vol`, `sounds`), from the shared
+  `sample_audio_state`. Silence is an empty `ambient`/`sounds` and the mixer's idle song is
+  `0 0 0`, so no cell is `-`. Both traces drain the one-shot sound log, so `--route-trace` and
+  `--audio-trace` are rejected together (exit 2). The trace runs 43 samples to tick 1512 of a
+  1536-tick plan, byte-identical over two replays; the last rows carry `goal_bin100` 3 and
+  `level_end` 1 (`01_endlevel.cog`'s 3 s sleep then `jkEndLevel`).
+- **Mechanic provenance is data.** `tools/parity/routes/level1-route-provenance.tsv` names the
+  engine function, decomp address, port symbol and source for walk, floor, collision, use, cog
+  messages, damage, AI fire, audio state and level end (26 rows, 9 mechanics). `route-gate.ps1`
+  verifies each `ported` row's symbol exists in its source and each `deviated` row's ledger entry is
+  in `docs/porting-roadmap.md`; `route_tests::every_route_mechanic_names_its_engine_function` does
+  the same in `cargo test`. The replay's `ROUTE_TIME_SCALE` clock fit was a `deviated` row until
+  issue #17 retired it (the ledger row says so); the per-thing `sighted` substitution remains
+  `deviated`, so the gate cannot hide it.
+- **The audio route no longer diverges.** Its synthetic `switch` row is gone (it had been
+  unparseable since #15 removed the trigger); the audio plan is the movement route's legs and its
+  port oracle is refreshed from a double run.
+- **AI `opendoors` now matches `FUN_0050abc0`.** The handler calls `sithPlayerActions_Activate` only
+  while the AI flag word's `0x1` (moved) bit is set and re-arms for 1000 ms of game time. The port
+  called it every tick, so an actor standing on a door link messaged it `activated` 60 times a
+  second and level 1's `00_doorswitch.cog` answered each with its lock sound: the audio route showed
+  **583 extra `df_door2-3.wav` events** against the retail reference. After the fix: **0 lock
+  sounds**, 7 one-shot events on the route, retail audio compare passes. The runtime unit check
+  (`an_actor_with_opendoors_activates_the_door_in_front`) now pins the moving bit and the re-arm.
+- **Results.** Route gate **0 failure(s)**: determinism (43 rows), required fields (no `-`), the
+  use/crossing/goal/`level_end` evidence, coverage (43 samples, ticks 0..1512, 7 audio columns),
+  port oracle **1036 fields within 1e-6**, perturb self-check, retail **342 fields within 1.70 over
+  the 19 rows before the `exit_door` warp (684)**, provenance **26 rows / 9 mechanics**, and both
+  prerequisite gates pass. Audio gate **0 failure(s)** (7 sound events on the port oracle, retail
+  within 0.12, door fade worst 0.100). Encounter gate **0 failure(s)** (13 shots / 13 hits, cadence
+  max 117 ms of 250, settled 14.3 vs retail 22.3). `cargo test --release`: **338 passed**.
+- No new retail capture was taken; the frozen retail fixtures were not edited.
+
+
+## Issue #19 — the level-2 carry is retail's autosave bin for bin
+
+- **`created` is a load-time message, not a sector-draw wake.** `sithOpenPostProcess` (`0x4c4880`)
+  sends `created` (15) to every thing's class cog after the `startup` broadcast and before it writes
+  the load-time autosave. Round 107's sector wake was the wrong reading of the same two saves: the
+  level-1 save is written there before the 1 s `created:` timers fire (73 = 0), and level 2's is
+  written after level 1 was played (73 = 10.5). `setup` now queues `created` for every class
+  instance after `wire_links`; `Runtime::awaken_sector`/`awakened` are gone.
+- **`SetTimer` is the cog's single slot, `SetTimerEx` the event queue.** `sithCogFunction_SetTimer`
+  (`FUN_00506340`) pops one value and sets the cog's one due time; `sithCog_ProcessCog` (`0x4e0300`)
+  sends `timer` with sender id 0 and no parameters. The port had treated it as `SetTimerEx`, so
+  level 1's two `actor_fn.cog` actors credited the population bin they should not: 12.5 → **10.5**,
+  retail's level-2 number, with no fitted constant. `--activation` sends `created`, ticks the
+  timers and asserts 10.5.
+- **The carry is the engine's own bin table.** `jks::ENGINE_BINS` is the 82 bins
+  `sithGamesave_SaveCurrentWorld` (`0x4da770`) walks; `jks::inventory_sections` writes one 28-byte
+  `sithDSS_Inventory` (`0x4f9900`) record per bin, and `write_snapshot` puts them in every save, so
+  the reader gets the same bins back. The goal counters (100–115) are per level
+  (`sithInventory_ResetInventory`'s flag-0x40 bins), so `adopt` zeroes them before the new level's
+  scripts: level 1 ends with goal 0 = 3, level 2's `02_endlevel.cog` startup sets 1 and goal 2 = 1.
+- **Gate.** New `tools/parity/carry-gate.ps1`: level 1's scripted route with `--carry-out`, then a
+  level-2 boot with `--carry-in`/`--carry-out`, then `--carry-compare` against
+  `tools/parity/jkauto-02narshadda.jks` — **82 bins match**, including 73 = 10.5. The gate perturbs
+  bin 73 in a copy and requires the comparator to reject it and name the bin. No retail launch.

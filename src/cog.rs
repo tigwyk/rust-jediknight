@@ -1026,6 +1026,11 @@ pub struct Vm {
     /// This cog's pulse, as the engine keeps it (`SITH_COG_PULSE_SET`): `SetPulse(seconds)` sets
     /// the interval and the next due time, and every cog tick that is due sends the `pulse` message.
     pub pulse: Option<(f32, f32)>,
+    /// `sithCogFunction_SetTimer` (`FUN_00506340`): the cog's **single** timer slot at `+0x20`, due
+    /// at `now + seconds`, cleared when it fires by `sithCog_ProcessCog` (`0x4e0300`) and sent as
+    /// message 4 with no sender id or parameters. A later `SetTimer` overwrites it. Scripts that need
+    /// an id or parameters use `SetTimerEx`, which queues an event instead.
+    pub timer: Option<f32>,
     /// This cog's one-shot timers (`SITH_COG_TIMER_SET`), each firing the `timer` message once when
     /// due. `SetTimerEx(seconds, id, val, val2)` also stores the id the handler reads back through
     /// `GetSenderId()` and the two parameter words — the shipped actor scripts branch on exactly
@@ -1100,6 +1105,7 @@ impl Vm {
             cog_index: -1,
             script_name: String::new(),
             pulse: None,
+            timer: None,
             timers: Vec::new(),
             now: 0.0,
             sleep_until: 0.0,
@@ -1145,13 +1151,46 @@ impl Vm {
     /// deadline order -- a handler that re-arms sees the later timers still pending.
     pub fn take_due_timers(&mut self) -> Vec<(i64, [f64; 2])> {
         let now = self.now;
-        if !self.timers.iter().any(|(due, _, _)| now >= *due) {
-            return Vec::new();
+        let mut due: Vec<(f32, i64, [f64; 2])> = Vec::new();
+        // `SetTimer`'s single slot fires with no sender id or parameters
+        // (`sithCog_ProcessCog` sends `SendMessage(cog, 4, 0, 0, 0, 0, 0)`), so a handler that reads
+        // `GetSenderId()` sees 0 — `actor_fn.cog`'s `timer:` takes its id-0 branch and credits nothing.
+        if let Some(at) = self.timer
+            && now >= at
+        {
+            due.push((at, 0, [0.0; 2]));
+            self.timer = None;
         }
-        let (mut due, pending): (Vec<_>, Vec<_>) = self.timers.drain(..).partition(|(at, _, _)| now >= *at);
+        let (fired, pending): (Vec<_>, Vec<_>) =
+            self.timers.drain(..).partition(|(at, _, _)| now >= *at);
         self.timers = pending;
+        due.extend(fired);
         due.sort_by(|a, b| a.0.total_cmp(&b.0));
         due.into_iter().map(|(_, id, params)| (id, params)).collect()
+    }
+
+    /// Write the message's sender onto this VM, as `sithCog_SendMessageEx` (`0x4dedc0`) does when it
+    /// dispatches: the link id is `senderId` (`+0x24`), and the queued `SourceSender` supplies
+    /// `senderRef` (`+0x30`) and `senderType` (`+0x34`) — the sender thing's index and 3, or `-1`/0
+    /// when the world sent it. A message queued with a link id alone leaves the sender half alone.
+    /// Returns the three fields as they were, for [`Vm::restore_message_sender`] after the handler.
+    pub fn set_message_sender(
+        &mut self,
+        link: Option<i64>,
+        identity: Option<&crate::runtime::SourceSender>,
+    ) -> (i64, i64, i64) {
+        let own = (self.sender, self.sender_ref, self.sender_type);
+        self.sender = link.map_or(0, |s| s);
+        if let Some(identity) = identity {
+            self.sender_ref = identity.sender as i64;
+            self.sender_type = identity.sender_type as i64;
+        }
+        own
+    }
+
+    /// Put back the sender fields a delivery replaced, so the next message does not inherit them.
+    pub fn restore_message_sender(&mut self, own: (i64, i64, i64)) {
+        (self.sender, self.sender_ref, self.sender_type) = own;
     }
 
     pub fn run_label(&mut self, cog: &Cog, label: &str) -> Result<Value, String> {
@@ -1485,8 +1524,9 @@ impl Vm {
         // and inventory the script is talking about. The pure builtins below run
         // when the runtime does not implement the verb.
         // Pulse and timer state belongs to the *cog*, not the world (§16.10): `SetPulse(seconds)`
-        // arms an interval that sends this cog's `pulse` message, `SetTimer(seconds)` arms a
-        // one-shot `timer`. `sithCogFunction.c` keeps both on the cog struct.
+        // arms an interval that sends this cog's `pulse` message, `SetTimer(seconds)` arms the
+        // single-slot `timer`, and `SetTimerEx` queues a timer event with an id and two parameters.
+        // `sithCogFunction.c` keeps all three on the cog struct.
         match name.to_ascii_lowercase().as_str() {
             "setpulse" => {
                 let value = args.first().map(|v| v.num()).unwrap_or(0.0) as f32;
@@ -1515,7 +1555,14 @@ impl Vm {
                 self.suspended = true;
                 return Value::Nil;
             }
-            "settimer" | "settimerex" => {
+            // `sithCogFunction_SetTimer` (`FUN_00506340`) pops one value and arms the cog's single
+            // timer slot; it carries no id or parameters (`sithCog_ProcessCog` `0x4e0300`).
+            "settimer" => {
+                let value = args.first().map(|v| v.num()).unwrap_or(0.0) as f32;
+                self.timer = (value > 0.0).then(|| self.now + value);
+                return Value::Nil;
+            }
+            "settimerex" => {
                 let value = args.first().map(|v| v.num()).unwrap_or(0.0) as f32;
                 let id = args.get(1).map(|v| v.num() as i64).unwrap_or(0);
                 let params = [
@@ -1610,26 +1657,70 @@ enum Flow {
     Break,
 }
 
-/// Deterministic stand-in for the engine's RNG: scripts call `Rand()` to pick
-/// variants, and reproducible runs are worth more than true randomness here.
+thread_local! {
+    static SEED_STATE: std::cell::Cell<u32> = const { std::cell::Cell::new(0x1234_5678) };
+}
+
+/// The engine's `rand()`, which is one 32-bit LCG state at **`0x0054F750`**
+/// (`sithCog_g_pRandomSeed`): every AI roll and every script `Rand()` draws from it. The retail
+/// capture records that word at each sample (`route_door.tsv`'s `rng` column), so the port can start
+/// a run from the engine's own state instead of a made-up seed.
 pub fn pseudo_random() -> f64 {
-    use std::cell::Cell;
-    thread_local! {
-        static SEED: Cell<u32> = const { Cell::new(0x1234_5678) };
-    }
-    SEED.with(|s| {
-        let mut x = s.get();
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
+    SEED_STATE.with(|s| {
+        let x = s.get().wrapping_mul(214_013).wrapping_add(2_531_011);
         s.set(x);
-        (x % 10_000) as f64 / 10_000.0
+        // `rand()` returns `(state >> 16) & 0x7fff`; the engine's callers divide by `_DAT_0052307c`
+        // (32768). `frandom()` is that divided by the same constant.
+        f64::from((x >> 16) & 0x7fff) / 32_768.0
     })
+}
+
+/// Set the engine's `rand()` state (the captured word at `0x0054F750`). `jitter_aim` and the AI
+/// cadence read the same stream the retail engine advanced, so a seeded run continues the captured
+/// sequence rather than inventing one.
+pub fn set_random_seed(state: u32) {
+    SEED_STATE.with(|s| s.set(state));
+}
+
+/// The engine's current `rand()` state: what the capture's `rng` column reads.
+pub fn random_state() -> u32 {
+    SEED_STATE.with(|s| s.get())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The engine's `rand()` is the LCG at `0x0054F750`, and the committed capture records its word
+    /// at the door origin (811474043) and at every later sample. Stepping that state six times has
+    /// to reach 1423890337, the next word the capture wrote, or the port is not advancing the
+    /// engine's stream at all.
+    #[test]
+    fn the_a_i_random_stream_is_the_captures_lcg() {
+        set_random_seed(811_474_043);
+        let mut states = Vec::new();
+        for _ in 0..6 {
+            pseudo_random();
+            states.push(random_state());
+        }
+        assert_eq!(
+            states,
+            vec![
+                3_289_249_106,
+                1_226_606_285,
+                1_292_271_196,
+                1_303_876_527,
+                2_504_482_742,
+                1_423_890_337,
+            ],
+            "the AI random stream is not the engine's LCG at 0x0054F750"
+        );
+        // The draw is `(state >> 16) & 0x7fff` over 32768, the engine's `rand()`/32768.
+        set_random_seed(811_474_043);
+        assert_eq!(pseudo_random(), f64::from((3_289_249_106u32 >> 16) & 0x7fff) / 32_768.0);
+        // Leave the shared stream where every other test expects it.
+        set_random_seed(0x1234_5678);
+    }
 
     /// `kyle.cog` arms two timers in one frame — the 1.5 s respawn-invulnerability clear (id 1) and
     /// the bubbles check (id 2) — and with a single slot the startup's write erased the clear, which
@@ -1646,6 +1737,69 @@ mod tests {
         vm.now = 2.0;
         assert_eq!(vm.take_due_timers(), vec![(2, [0.0, 0.0])]);
         assert!(vm.timers.is_empty());
+    }
+
+    /// `SetTimer` (`FUN_00506340`) arms the cog's one slot, not a list entry: a later call overwrites
+    /// it, and `sithCog_ProcessCog` (`0x4e0300`) sends `timer` with no sender id. Level 1's two
+    /// `nwoman1` actors arm `SetTimer(1.0, 1, 0, 0)` from `created:`; the engine's handler reads id 0
+    /// and credits nothing, which is why retail's population bin is 10.5 and not 12.5.
+    #[test]
+    fn set_timer_is_one_slot_and_fires_without_a_sender_id() {
+        let mut vm = Vm::new();
+        vm.call_verb("SetTimer", vec![Value::Num(2.0)]);
+        vm.call_verb("SetTimer", vec![Value::Num(1.0)]);
+        assert!(vm.take_due_timers().is_empty(), "a timer fired before it was due");
+        vm.now = 1.5;
+        assert_eq!(vm.take_due_timers(), vec![(0, [0.0, 0.0])]);
+        assert!(vm.timer.is_none(), "the fired timer was not cleared");
+        // A cancel and an overwrite both leave at most one slot.
+        vm.call_verb("SetTimer", vec![Value::Num(2.0)]);
+        vm.call_verb("SetTimer", vec![Value::Num(0.0)]);
+        assert!(vm.timer.is_none(), "a negative time did not cancel the timer");
+        vm.now = 10.0;
+        assert!(vm.take_due_timers().is_empty());
+    }
+
+    /// `sithCog_SendMessageEx` (`0x4dedc0`) writes `senderId`/`senderRef`/`senderType` on the
+    /// receiving cog before the handler runs (`+0x24`, `+0x30`, `+0x34`). The port's pending bus now
+    /// carries the engine's `SourceSender`, so a handler can tell a body's message (the sender thing
+    /// and type 3) from the world's (`-1`/0), while `GetSenderId()` stays the link id.
+    #[test]
+    fn a_thing_and_the_world_are_distinguishable_in_a_handler() {
+        use crate::runtime::{SourceSender, THING_SOURCE};
+        let script = parse(
+            "symbols\nmessage activate\nend\ncode\nactivate:\n\tPrint(GetSenderId());\n\tPrint(GetSenderRef());\n\tPrint(GetSenderType());\n\treturn;\nend\n",
+        )
+        .expect("parses");
+        let mut vm = Vm::new();
+        // A body used the door: link id 2, sender thing 7.
+        let own = vm.set_message_sender(
+            Some(2),
+            Some(&SourceSender::new(THING_SOURCE, 4, Some(7))),
+        );
+        vm.run_label(&script, "activate").expect("the handler runs");
+        assert_eq!(vm.trace.prints, vec!["2", "7", "3"]);
+        vm.restore_message_sender(own);
+        assert_eq!(
+            (vm.sender, vm.sender_ref, vm.sender_type),
+            (0, 0, 0),
+            "the sender fields were not restored after the handler"
+        );
+        // The world sends `sighted` to the same link: no body, so the engine's `(-1, 0)`.
+        let own = vm.set_message_sender(
+            Some(2),
+            Some(&SourceSender::new(THING_SOURCE, 4, None)),
+        );
+        vm.run_label(&script, "activate").expect("the handler runs");
+        assert_eq!(vm.trace.prints[3..], ["2", "-1", "0"]);
+        vm.restore_message_sender(own);
+        assert_eq!((vm.sender, vm.sender_ref, vm.sender_type), (0, 0, 0));
+        // A port push with a link id alone leaves the sender half as it was.
+        vm.sender_ref = 9;
+        let own = vm.set_message_sender(Some(5), None);
+        assert_eq!((vm.sender, vm.sender_ref), (5, 9));
+        vm.restore_message_sender(own);
+        assert_eq!((vm.sender, vm.sender_ref, vm.sender_type), (0, 9, 0));
     }
 
     const DOOR: &str = r#"

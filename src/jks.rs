@@ -127,6 +127,63 @@ impl InventoryBin {
     }
 }
 
+/// The engine's whole bin table, in the order `sithGamesave_SaveCurrentWorld` (`0x4da770`) walks
+/// `DAT_008bd1c0` and sends one `sithDSS_Inventory` (`0x4f9900`) record per set entry. The ranges
+/// are the engine's own registered types (weapons, force powers, items, shields, goals, scores…);
+/// both shipped autosaves carry exactly these 82 bins, so this is frozen data, not a guess.
+pub const ENGINE_BINS: [u16; 82] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32, 33, 34, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 60, 61, 62,
+    63, 64, 65, 66, 70, 71, 72, 73, 74, 75, 80, 81, 82, 83, 84, 99, 100, 101, 102, 103, 104,
+    105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 150,
+];
+
+/// One `sithDSS_Inventory` record per engine bin, with the player's amount in the value word.
+///
+/// The payload is fixed at 28 bytes (see [`INVENTORY_PAYLOAD`]). The engine's other five words are
+/// its bin-record fields (carries/minimums/flags and a `-1.0` unset sentinel); this writer writes the
+/// value and the sentinel, and leaves the four middle words zero, because the fields are not
+/// recovered. The **values** are what the level-2 carry is compared on.
+pub fn inventory_sections(inv: &std::collections::BTreeMap<i32, f32>, player: u16) -> Vec<Section> {
+    ENGINE_BINS
+        .iter()
+        .map(|&bin| {
+            let mut data = vec![0u8; INVENTORY_PAYLOAD];
+            data[0..2].copy_from_slice(&player.to_le_bytes());
+            data[2..4].copy_from_slice(&bin.to_le_bytes());
+            let value = inv.get(&(bin as i32)).copied().unwrap_or(0.0);
+            data[4..8].copy_from_slice(&value.to_bits().to_le_bytes());
+            // Payload +0x18 is the sixth word, `bin record +0x14`: `-1.0` in every shipped record
+            // (`0xbf800000` in both autosaves), not its negative-infinity neighbour.
+            data[0x18..0x1C].copy_from_slice(&(-1.0f32).to_bits().to_le_bytes());
+            Section::new(INVENTORY_RECORD, data)
+        })
+        .collect()
+}
+
+/// Every bin-value difference between two savegame bin tables, sorted by bin: a changed value, and
+/// a bin either side is missing. Empty means the two carries are the same table.
+pub fn bin_value_drift(expected: &Save, actual: &Save) -> Vec<String> {
+    let table = |save: &Save| -> std::collections::BTreeMap<u16, f32> {
+        save.bins().into_iter().map(|bin| (bin.bin, bin.value())).collect()
+    };
+    let (want, got) = (table(expected), table(actual));
+    let mut drift = Vec::new();
+    for (bin, value) in &want {
+        match got.get(bin) {
+            None => drift.push(format!("bin {bin}: missing (expected {value})")),
+            Some(actual) if (actual - value).abs() > 1e-4 => {
+                drift.push(format!("bin {bin}: {actual}, expected {value}"))
+            }
+            Some(_) => {}
+        }
+    }
+    for bin in got.keys().filter(|bin| !want.contains_key(bin)) {
+        drift.push(format!("bin {bin}: unexpected"));
+    }
+    drift
+}
+
 /// A savegame: the recovered prefix plus typed records.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Save {
@@ -694,6 +751,55 @@ mod tests {
             assert_eq!(again.sections.len(), save.sections.len(), "{name}: rewrite lost records");
             assert_eq!(again.sections[0], save.sections[0], "{name}: rewrite changed record 0");
         }
+    }
+
+    /// The carry is the engine's own 82-bin table: one fixed 28-byte record per bin, in the engine's
+    /// order, and every word survives the writer and reader unchanged.
+    #[test]
+    fn a_carry_bin_table_round_trips_through_the_engine_records() {
+        let inv: std::collections::BTreeMap<i32, f32> =
+            [(1, 1.0), (2, 1.0), (73, 10.5), (75, 20.0)].into_iter().collect();
+        let mut save = Save::new("02narshadda.jkl");
+        save.sections.extend(inventory_sections(&inv, 0));
+        let bins = save.bins();
+        assert_eq!(bins.len(), ENGINE_BINS.len(), "the carry is not the engine's bin table");
+        assert_eq!(bins.iter().map(|b| b.bin).collect::<Vec<_>>(), ENGINE_BINS);
+        assert_eq!(
+            bins[0].words[5],
+            (-1.0f32).to_bits(),
+            "the sixth word is the shipped -1.0 sentinel, not another negative value"
+        );
+        let population = bins.iter().find(|b| b.bin == 73).expect("bin 73");
+        assert_eq!(population.value(), 10.5);
+        let back = Save::read(&save.write()).expect("the written carry reads back");
+        assert_eq!(back.bins(), bins, "a bin record changed in the round trip");
+        assert_eq!(bin_value_drift(&save, &back), Vec::<String>::new());
+        // Drift of any kind is named by its bin: a changed value, a missing bin, an extra one.
+        let mut other = back.clone();
+        other.sections.extend(inventory_sections(&[(73, 9.0)].into_iter().collect(), 0));
+        assert!(bin_value_drift(&save, &other).iter().any(|line| line.starts_with("bin 73:")));
+        assert!(bin_value_drift(&save, &save).is_empty());
+    }
+
+    /// The level-2 autosave's bin values are the target the port's carry is written and compared to;
+    /// that file holds retail's `73 = 10.5`, the route's population credit.
+    #[test]
+    fn the_retail_level2_autosave_pins_the_carry_bin_values() {
+        let Some(bytes) = fixture("jkauto-02narshadda.jks") else { return };
+        let retail = Save::read(&bytes).expect("level 2's autosave");
+        let bins = retail.bins();
+        assert_eq!(bins.len(), ENGINE_BINS.len());
+        // The sixth word the writer has to reproduce: retail's own -1.0, not -inf.
+        assert_eq!(bins[0].words[5], (-1.0f32).to_bits(), "retail's sentinel word");
+        let value = |bin: u16| bins.iter().find(|b| b.bin == bin).map(|b| b.value()).unwrap_or(0.0);
+        assert_eq!(value(73), 10.5, "the population bin");
+        assert_eq!(value(75), 20.0, "the tally's stored alignment");
+        // Writing those values back matches the same table.
+        let inv: std::collections::BTreeMap<i32, f32> =
+            bins.iter().map(|b| (b.bin as i32, b.value())).collect();
+        let mut carry = Save::new("02narshadda.jkl");
+        carry.sections.extend(inventory_sections(&inv, 0));
+        assert_eq!(bin_value_drift(&retail, &carry), Vec::<String>::new());
     }
 
     /// What the engine carries from level 1 to level 2, measured on its own two autosaves. The

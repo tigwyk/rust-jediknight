@@ -588,7 +588,7 @@ $script:DgVoodooVersion = '2.87.6'
 $script:DgVoodooUrl = 'https://github.com/dege-diosg/dgVoodoo2/releases/download/2.87.6/dgVoodoo2_87_6.zip'
 $script:DgVoodooSha256 = '9AFA493396FEEC7108F42A2D97661EEF96BBAAC5ADDF0DFB5CFBC3001CD76A0A'
 function Install-Jk3DWrapper {
-  param([Parameter(Mandatory)][string]$Destination, [string]$LogPath = $null)
+  param([Parameter(Mandatory)][string]$Destination, [string]$LogPath = $null, [switch]$Windowed)
   $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
   $cache = Join-Path $repo 'target/parity/wrapper'
   $x86 = Join-Path $cache 'x/MS/x86'
@@ -615,11 +615,23 @@ function Install-Jk3DWrapper {
   }
   # Tuned config: point filtering (no smoothing, so texture detail matches the software renderer)
   # and no watermark. Also re-enable Alt+Enter so the windowed/display-mode behaviour is normal.
-  $confCache = Join-Path $cache 'dgVoodoo.conf'
+  $confCache = Join-Path $cache $(if ($Windowed) { 'dgVoodoo-windowed.conf' } else { 'dgVoodoo.conf' })
   if (-not (Test-Path $confCache)) {
     $conf = Get-Content -LiteralPath (Join-Path $cache 'x/dgVoodoo.conf') -Raw
     $conf = $conf -replace '(?m)^Filtering\s*=\s*appdriven', 'Filtering                           = pointsampled'
     $conf = $conf -replace '(?m)^dgVoodooWatermark\s*=\s*true', 'dgVoodooWatermark                   = false'
+    if ($Windowed) {
+      # dgVoodoo's windowed config. Measured 2026-11-09: the window became 640x480 borderless, but the
+      # game still took over the whole display (the user saw it fullscreen on every run), so this is
+      # **not** a non-invasive capture for this DirectDraw title. `CaptureMouse` stays true so the
+      # game still receives the injected mouse.
+      $conf = $conf -replace '(?m)^FullScreenMode\s*=\s*true', 'FullScreenMode                       = false'
+      $conf = $conf -replace '(?m)^WindowedAttributes\s*=\s*$', 'WindowedAttributes                   = borderless'
+      $conf = $conf -replace '(?m)^CaptureMouse\s*=\s*false', 'CaptureMouse                         = true'
+      # Without a forced size the game asks for the desktop and even a windowed wrapper covers the
+      # whole screen. 640x480 is the game's own 3D mode; the windowed capture is then a real window.
+      $conf = $conf -replace '(?m)^Resolution\s*=\s*unforced', 'Resolution                          = 640x480'
+    }
     Set-Content -LiteralPath $confCache -Value $conf -Encoding ascii
   }
   Copy-Item -LiteralPath (Join-Path $x86 'D3DImm.dll') -Destination (Join-Path $Destination 'D3DImm.dll') -Force
@@ -631,6 +643,7 @@ function Install-Jk3DWrapper {
       throw "3D wrapper stage failed: $path is missing or too small"
     }
   }
-  Write-JkLog -Message '3D wrapper staged in the scratch copy (D3DImm.dll, DDraw.dll, dgVoodoo.conf; point filtering, no watermark)' -LogPath $LogPath
+  $mode = if ($Windowed) { 'windowed config (FullScreenMode=false, borderless, CaptureMouse=true; the title still took over the display)' } else { 'fullscreen' }
+  Write-JkLog -Message ("3D wrapper staged in the scratch copy (D3DImm.dll, DDraw.dll, dgVoodoo.conf; point filtering, no watermark; {0})" -f $mode) -LogPath $LogPath
 }
 
