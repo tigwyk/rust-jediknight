@@ -633,6 +633,10 @@ fn main() {
     let mut stand: Option<String> = None;
     let mut shot: Option<String> = None;
     let mut shot_frame = 30u32;
+    // `--fixed-dt <seconds>`: the step a capture advances the simulation by, instead of the capture's
+    // 1/60 s. The door encounter measures the engine's own frame, which is not 1/60 (see
+    // `tools/parity/port-encounter.ps1`); play and route replay keep their fixed steps.
+    let mut fixed_dt: Option<f32> = None;
     let mut muted_flag = false;
     let mut sound_on = false;
     let mut audio_state = false;
@@ -880,6 +884,13 @@ fn main() {
     "--par" => par_probe = arg_value(&args, &mut i).cloned(),
             "--grep-assets" => grep_assets = arg_value(&args, &mut i).cloned(),
             "--shot" => shot = arg_value(&args, &mut i).cloned(),
+            "--fixed-dt" => {
+                fixed_dt = arg_value(&args, &mut i).and_then(|v| v.parse().ok());
+                if fixed_dt.is_none_or(|step| step <= 0.0) {
+                    eprintln!("--fixed-dt needs a positive number of seconds");
+                    std::process::exit(2);
+                }
+            }
             "--fall" => fall_check = true,
         "--falldeath" => falldeath_check = true,
         "--door" => door_check = true,
@@ -1476,6 +1487,12 @@ fn main() {
     }
     if audio_trace.is_some() && route_plan.is_none() {
         eprintln!("--audio-trace needs --replay <path>");
+        std::process::exit(2);
+    }
+    // `--fixed-dt` is the step of a screenshot/capture run. Play and route replay keep their own
+    // fixed steps (the wall clock and 1/60 s), so a step without `--shot` would silently retime them.
+    if fixed_dt.is_some() && shot.is_none() {
+        eprintln!("--fixed-dt needs --shot <file>: it sets a capture's step");
         std::process::exit(2);
     }
     // Both traces sample the same one-shot log and draining it is what makes each window's sounds
@@ -12731,7 +12748,7 @@ fn main() {
         .insert_resource(PulseCount::default())
         .insert_resource(CaptureDt(
             shot.as_ref()
-                .and_then(|s| (!s.is_empty()).then_some(1.0 / 60.0))
+                .and_then(|s| (!s.is_empty()).then_some(fixed_dt.unwrap_or(1.0 / 60.0)))
                 // A replay pins the step even without `--shot`: its comparability is exactly the
                 // fixed 1/60 s tick the route trace samples (see `RoutePlan`).
                 .or_else(|| route_plan.is_some().then_some(1.0 / 60.0)),

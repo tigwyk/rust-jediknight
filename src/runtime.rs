@@ -4689,6 +4689,12 @@ impl Runtime {
     /// `next_pass_ms` lands on `ai_detect_at`, the port's own instinct-pass clock: the engine's
     /// `sithAI_InstinctUpdate` refreshes sight inside a pass, which is why the port already rolls the
     /// sight test on that clock instead of every frame.
+    ///
+    /// A captured deadline of 0 is **no scheduled pass** (`sithAI_InstinctUpdate` initialises its
+    /// earliest slot to `now + 5000` and only writes a time for a slot it runs), so it seeds the
+    /// clock to never due instead of leaving the map empty: an absent entry reads as 0.0 and the
+    /// port would run the pass on the origin frame. 46 of the door capture's 57 actors carry 0 in
+    /// both clocks and stand still in retail; the port rolled their sight and scanned on frame 0.
     pub fn seed_capture_phase(
         &mut self,
         rng: u32,
@@ -4698,6 +4704,9 @@ impl Runtime {
         crate::cog::set_random_seed(rng);
         for (index, phase) in phases {
             let offset = |ms: i64| ((ms - origin_ms) as f32 / 1000.0).max(0.0);
+            let armed = |ms: i64, now: f32| {
+                if ms > 0 { now + offset(ms) } else { f32::INFINITY }
+            };
             if self.types.get(*index).copied() != Some(2) {
                 continue;
             }
@@ -4707,12 +4716,8 @@ impl Runtime {
             {
                 body.ai_wait = offset(phase.fire_ms);
             }
-            if phase.acquire_ms > 0 {
-                self.ai_scan.insert(*index, self.time + offset(phase.acquire_ms));
-            }
-            if phase.next_pass_ms > 0 {
-                self.ai_detect_at.insert(*index, self.time + offset(phase.next_pass_ms));
-            }
+            self.ai_scan.insert(*index, armed(phase.acquire_ms, self.time));
+            self.ai_detect_at.insert(*index, armed(phase.next_pass_ms, self.time));
         }
     }
 
@@ -5186,15 +5191,16 @@ impl Runtime {
             // its own room and alignment own — that is the reader the stand-in could not express.
             let remembered = self.ai_last_seen.get(&index).copied().or_else(|| {
                 let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
-                // Only a class with a handler consumes the sound record: `listen` (`0x50a6f0`) or
-                // `follow`, whose handler is what walks to an awareness position. `pednarsh.ai`
-                // (the cantina crowd) ships `SenseDanger`, `Flee` and `OpenDoors` only, and its
-                // actors stand still in retail's door series while the port walked them at every
-                // gunshot — the hearing path's default 1.0 ran for classes that cannot hear.
-                let hears = ai.as_ref().is_some_and(|class| {
-                    class.instinct("Listen").is_some() || class.instinct("Follow").is_some()
-                });
-                if !hears {
+                // A sound record moves the body only through `follow`, and the engine's scheduler
+                // (`sithAI_InstinctUpdate`, `0x4e9e90`) runs an instinct only while its registered
+                // word accepts the AI flag word: `Follow`'s is **`0x2`**
+                // (`tools/parity/aistatus-01narshadda.txt`, the `rydefault.ai` row 5), the bit
+                // `FUN_0050aa80`'s acquisition word (`0x232`) sets. `listen` alone never walks: it is
+                // event-driven, and the one event that carries a source thing is **damage**. So an
+                // awake actor that has not acquired anything stands at its authored facing, which is
+                // what retail's own door series shows for `greedo` 236.
+                let follows = ai.as_ref().is_some_and(|class| class.instinct("Follow").is_some());
+                if !follows || self.actor_flags.get(&index).copied().unwrap_or(0) & 0x2 == 0 {
                     return None;
                 }
                 // `listen` (`0x50a6f0`): the record is scanned **kind 2, then 1, then 0**, and the handler's own
@@ -5405,13 +5411,25 @@ impl Runtime {
                     if self.time >= due && *flags & 0x4 != 0 {
                         self.ai_scan.insert(index, self.time + interval);
                         if let Some(thing) = self.things.get(index).map(|t| (t.pos, t.sector, t.yaw)) {
+                            // `sithAI_sub_4EAD60` builds the sight eye from the thing's model offset
+                            // (`rdMatrix_TransformVector34` over `thing + 0x17c`) above its origin,
+                            // and `sithAI_CheckSightThing` measures from that eye and subtracts the
+                            // target's own radius (`param_3[0xc]`) from the distance it returns. The
+                            // scan used the thing origin, so a door actor on a balcony had a clear
+                            // line the engine's elevated eye does not.
+                            let player_radius = self
+                                .templates
+                                .get(player)
+                                .and_then(|name| self.template_hit.get(&name.to_ascii_lowercase()))
+                                .map(|(radius, _)| *radius)
+                                .unwrap_or(0.065);
                             let (dx, dy, dz) = (
-                                target[0] - thing.0[0],
-                                target[1] - thing.0[1],
-                                target[2] - thing.0[2],
+                                target[0] - eye[0],
+                                target[1] - eye[1],
+                                target[2] - eye[2],
                             );
-                            let range = (dx * dx + dy * dy + dz * dz).sqrt();
-                            let in_cone = ai.as_ref().is_some_and(|ai| ai.sees(thing.0, thing.2, target));
+                            let range = ((dx * dx + dy * dy + dz * dz).sqrt() - player_radius).max(0.0);
+                            let in_cone = ai.as_ref().is_some_and(|ai| ai.sees(eye, thing.2, target));
                             // `sithAI_CheckSightThing` casts its sight ray against the level's
                             // **collision**, which includes solid things: a railing or a body in the
                             // way blocks the find exactly as a wall does. The scan tested only the
@@ -5419,7 +5437,7 @@ impl Runtime {
                             // acquired the player while retail's never did.
                             let (blocked, thing_blocked) = self.solids.as_ref().map_or(
                                 (false, false),
-                                |s| (s.segment_blocked(thing.0, target), s.segment_thing(thing.0, target)),
+                                |s| (s.segment_blocked(eye, target), s.segment_thing(eye, target)),
                             );
                             let clear = !blocked && !thing_blocked;
                             // `BK_AI_TRACE=2`: name which half of the scan's sight test refused, the
@@ -13246,9 +13264,13 @@ mod tests {
         rt.ai.insert(
             1,
             crate::ai::parse(
-                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen 1.0\n",
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen 1.0\nFollow 0.5, 0.1\n",
             ),
         );
+        // The engine's scheduler (`sithAI_InstinctUpdate`) runs `Follow` only while its word `0x2`,
+        // the bit `LookForTarget`'s acquisition sets, is in the AI flags; a sound moves an actor that
+        // has already registered a target.
+        rt.actor_flags.insert(1, 0x2);
         // Newest first: a fresh shot 5 units along +x (out of earshot), an older one 1.5 units along
         // +y (inside it). The guard must walk toward the one it can hear.
         // Kind 2 is the listener's first slot; the older kind-1 record is the fallback.
@@ -13284,11 +13306,12 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "tuskan".into(), "door".into()];
         rt.types = vec![10, 2, 0];
         rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.actor_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
         rt.sector_adjoins = vec![Vec::new(); 8];
         rt.ai.insert(
             1,
             crate::ai::parse(
-                "alignment=1.0, rank=0.5, fov=90, sightdist=2.0, heardist=4.0\n\nListen 1.0\n",
+                "alignment=1.0, rank=0.5, fov=90, sightdist=2.0, heardist=4.0\n\nListen 1.0\nFollow 0.5, 0.1\n",
             ),
         );
         rt.transmit_awareness(7, 1, [-1.2, 0.0, 0.0], super::AI_AWARE_SHOT, Some(2));
@@ -13412,10 +13435,11 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
         rt.types = vec![10, 2];
         rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.actor_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
         rt.ai.insert(
             1,
             crate::ai::parse(
-                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen 1.0\n",
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen 1.0\nFollow 0.5, 0.1\n",
             ),
         );
         // A shot five units away: outside the two-unit hearing, so the guard must not react.
@@ -13460,9 +13484,10 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
         rt.types = vec![10, 2];
         rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.actor_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
         let class = |chance: &str| {
             crate::ai::parse(&format!(
-                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen {chance}\n"
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen {chance}\nFollow 0.5, 0.1\n"
             ))
         };
         rt.ai.insert(1, class("0.0"));
@@ -16926,5 +16951,91 @@ mod tests {
             rt.ai_last_seen.contains_key(&1),
             "the scan did not acquire a body inside the class's view cone"
         );
+    }
+
+    /// `sithAI_sub_4EAD60` builds the sight eye from the thing's model offset above its origin
+    /// (`rdMatrix_TransformVector34` over `thing + 0x17c`), and `sithAI_CheckSightThing` casts from
+    /// that eye. The door encounter's `greedo` 236 stands behind the balcony rail: the origin-to-origin
+    /// line is clear while the eye's line crosses the rail, and retail's actor never acquires the body.
+    #[test]
+    fn the_scan_casts_from_the_models_eye_point() {
+        let mut rt = door_runtime();
+        let mut solids = crate::collide::test_room();
+        // A rail between the two at 0.52..0.58 above the floor: the thing-origin ray (z 0.5) passes
+        // under it, the eye ray (z 0.575 -> 0.5) crosses it, which is the balcony the door gunner
+        // stands behind.
+        solids.walls.push(crate::collide::Face {
+            normal: [0.0, -1.0, 0.0],
+            point: [0.0, 1.0, 0.0],
+            verts: vec![
+                [-1.0, 1.0, 0.52],
+                [1.0, 1.0, 0.52],
+                [1.0, 1.0, 0.58],
+                [-1.0, 1.0, 0.58],
+            ],
+            surface: 9,
+        });
+        rt.solids = Some(std::sync::Arc::new(solids));
+        let mut actor = rt.things[0].clone();
+        actor.pos = [0.0, 0.0, 0.5];
+        actor.yaw = 0.0;
+        let mut player = rt.things[0].clone();
+        player.pos = [0.0, 2.0, 0.5];
+        player.flags = 0x4;
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "greedo".into()];
+        rt.types = vec![10, 2];
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=200, maxstep=0.6, sightdist=5.0, heardist=2.0, accuracy=0.25\n\n\
+                 LookForTarget 500.0, 50000.0\n",
+            ),
+        );
+        // Awake (the scan's own gate) and `0x200`, which holds `sithAI_CanDetectSightThing`'s chance
+        // at 1.0 — this grades the sight ray, not the random draw.
+        rt.actor_flags.insert(1, 0x204);
+        assert!(
+            !rt.solids.as_ref().unwrap().segment_blocked([0.0, 0.0, 0.5], [0.0, 2.0, 0.5]),
+            "the fixture must leave the thing-origin line clear"
+        );
+        rt.ai_tick(0, 0.1);
+        assert!(
+            !rt.ai_last_seen.contains_key(&1),
+            "the scan saw through the rail: it cast from the thing origin, not the model's eye"
+        );
+    }
+
+    /// A captured deadline of 0 means the engine has **no pass scheduled** for that actor
+    /// (`sithAI_InstinctUpdate` only writes a slot it runs). Leaving the port's clock absent made it
+    /// default to 0.0, so the actor ran its scan on the origin frame; 46 of the door capture's 57
+    /// actors carry 0 in both clocks and stand still in retail's series.
+    #[test]
+    fn a_captured_actor_with_no_scheduled_pass_never_runs_one() {
+        let mut rt = door_runtime();
+        rt.time = 4.2;
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.seed_capture_phase(
+            1,
+            4200,
+            &[(
+                1,
+                CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 0, next_pass_ms: 0 },
+            )],
+        );
+        assert_eq!(rt.ai_scan.get(&1), Some(&f32::INFINITY), "an unscheduled scan must not be due");
+        assert_eq!(rt.ai_detect_at.get(&1), Some(&f32::INFINITY), "an unscheduled pass must not be due");
+        // A captured deadline is relative to the capture's own origin.
+        rt.seed_capture_phase(
+            1,
+            4200,
+            &[(
+                1,
+                CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 4304, next_pass_ms: 4529 },
+            )],
+        );
+        assert!((rt.ai_scan[&1] - 4.304).abs() < 1e-4, "the scan waited {:?}", rt.ai_scan[&1]);
+        assert!((rt.ai_detect_at[&1] - 4.529).abs() < 1e-4, "the pass waited {:?}", rt.ai_detect_at[&1]);
     }
 }

@@ -50,6 +50,12 @@
   runs to be **byte-identical** — the capture pins `dt` and runs a single-threaded executor, so a
   difference is a nondeterminism bug, not a tolerance.
 
+  The port half runs at the encounter's **1/30 s** step (`port-encounter.ps1 -Step`, passed as
+  `--fixed-dt`), the representative engine frame in the committed capture (395 samples over 10 s,
+  ~25 ms each): `sithWeapon_Update` applies every bolt's damage decay once per frame, so the 1/60 s
+  screenshot step spent an extra decay on each bolt in flight. Play and the route replay keep their
+  own steps.
+
   Tolerances are parameters with measured defaults. The per-hit and settled-bar tolerances are the
   fixture's own per-hit noise (its per-hit amounts span 11.2-11.4); they are not a padded band that
   hides a systematic per-hit divergence, and a change to them has to be measured, not widened.
@@ -233,9 +239,11 @@ $retailActors = @($retailRows | Where-Object Kind -eq 'actor')
 $portActors = @($portRows | Where-Object Kind -eq 'actor')
 
 # ---- repeatability: two port runs of the same fixed step --------------------------------------
-# Byte identity. The capture pins `dt` at 1/60 s and runs the schedule on a single-threaded executor
-# (`main`), so the AI, the combat clock and the trace are a function of the level and the pose. A
-# difference between the two runs is a nondeterminism bug, not a tolerance.
+# Byte identity. The capture pins `dt` at 1/30 s (the engine's own frame is ~25 ms; the port's 1/60 s
+# screenshot step spent an extra `sithWeapon_Update` damage decay on every bolt in flight) and runs the
+# schedule on a single-threaded executor (`main`), so the AI, the combat clock and the trace are a
+# function of the level and the pose. A difference between the two runs is a nondeterminism bug, not a
+# tolerance.
 if ($repeatPath) {
   $hashA = (Get-FileHash -LiteralPath $portPath -Algorithm SHA256).Hash
   $hashB = (Get-FileHash -LiteralPath $repeatPath -Algorithm SHA256).Hash

@@ -15,7 +15,8 @@
   that hit took from each bar. `retail-capture.ps1 -EncounterMs` writes the same shape from the
   retail engine's memory; `encounter-gate.ps1` compares them.
 
-  The step is fixed by `--shot` (the capture path pins dt to 1/60 s), the pose is the same
+  The step is fixed by `--shot` with `--fixed-dt` (the capture path pins dt otherwise to 1/60 s) and
+  defaults to the encounter's 1/30 s engine-frame representative, the pose is the same
   `--warp`/`--shot-at` pair the screenshot captures use, and no input is injected, so two runs of
   the same command produce the same file.
 
@@ -33,6 +34,13 @@ param(
   # #16). The runtime adopts its `rand()` word and each door actor's flag/deadline; an empty value
   # leaves the port's own phase.
   [string]$Seed = 'tools/parity/engine/route_door.tsv',
+  # The step the port advances the encounter by. Retail's engine frame in the committed capture is
+  # ~25 ms (395 samples over 10 s), and `sithWeapon_Update` decays a bolt's damage once per frame, so
+  # the 1/60 s screenshot step spends an extra decay on every bolt in flight. 1/30 s is the step that
+  # reproduces the fixture's per-hit bars and its 13-shot cadence (see `encounter-gate.ps1`). The
+  # row's `frames` column is the 1/60 s count, so the run is framed at this step for the same game
+  # time. Play and route replay keep their own steps.
+  [double]$Step = 1.0 / 30.0,
   [string[]]$Only = @()
 )
 
@@ -80,13 +88,16 @@ if ($only) { $rows = @($rows | Where-Object { $only -contains $_.Name }) }
 if ($rows.Count -eq 0) { throw "no encounter rows matched in $RowsPath" }
 
 foreach ($row in $rows) {
+  if ($Step -le 0) { throw "Step must be positive seconds, got $Step" }
+  $frames = [int][math]::Round(($row.Frames / 60.0) / $Step)
+  $stepText = $Step.ToString('R', [System.Globalization.CultureInfo]::InvariantCulture)
   $trace = Join-Path $OutDir ("{0}{1}.tsv" -f $row.Name, $Suffix)
   $scratch = Join-Path $OutDir ("{0}{1}-shot.png" -f $row.Name, $Suffix)
   $log = Join-Path $OutDir ("{0}{1}-port.log" -f $row.Name, $Suffix)
   $pose = '{0},{1},{2},{3}' -f $row.X, $row.Y, $row.Z, $row.Yaw
   $shotAt = '{0},{1}' -f $pose, $row.Pitch
-  Write-Host ("port encounter '{0}' level={1} pose=({2}) frames={3} ({4:N1} s)" -f `
-      $row.Name, $row.Level, $pose, $row.Frames, ($row.Frames / 60.0))
+  Write-Host ("port encounter '{0}' level={1} pose=({2}) frames={3} at {4} s ({5:N1} s)" -f `
+      $row.Name, $row.Level, $pose, $frames, $stepText, ($frames * $Step))
   $seedPath = if ($Seed) {
     if ([System.IO.Path]::IsPathRooted($Seed)) { $Seed } else { Join-Path $Root $Seed }
   } else { '' }
@@ -96,7 +107,7 @@ foreach ($row in $rows) {
   $env:BK_ENCOUNTER_OUT = $trace
   if ($seedPath) { $env:BK_ENCOUNTER_SEED = $seedPath }
   try {
-    & $Exe --start $row.Level --frames $row.Frames --shot $scratch --shot-at $shotAt --warp $pose --mute *> $log
+    & $Exe --start $row.Level --frames $frames --fixed-dt $stepText --shot $scratch --shot-at $shotAt --warp $pose --mute *> $log
   } finally {
     Remove-Item Env:BK_ENCOUNTER_OUT -ErrorAction SilentlyContinue
     Remove-Item Env:BK_ENCOUNTER_SEED -ErrorAction SilentlyContinue
