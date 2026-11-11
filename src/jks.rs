@@ -153,8 +153,9 @@ pub fn inventory_sections(inv: &std::collections::BTreeMap<i32, f32>, player: u1
             data[2..4].copy_from_slice(&bin.to_le_bytes());
             let value = inv.get(&(bin as i32)).copied().unwrap_or(0.0);
             data[4..8].copy_from_slice(&value.to_bits().to_le_bytes());
-            // Payload +0x18 is the sixth word, `bin record +0x14`: `-1.0` in every shipped record.
-            data[0x18..0x1C].copy_from_slice(&f32::NEG_INFINITY.to_bits().to_le_bytes());
+            // Payload +0x18 is the sixth word, `bin record +0x14`: `-1.0` in every shipped record
+            // (`0xbf800000` in both autosaves), not its negative-infinity neighbour.
+            data[0x18..0x1C].copy_from_slice(&(-1.0f32).to_bits().to_le_bytes());
             Section::new(INVENTORY_RECORD, data)
         })
         .collect()
@@ -763,6 +764,11 @@ mod tests {
         let bins = save.bins();
         assert_eq!(bins.len(), ENGINE_BINS.len(), "the carry is not the engine's bin table");
         assert_eq!(bins.iter().map(|b| b.bin).collect::<Vec<_>>(), ENGINE_BINS);
+        assert_eq!(
+            bins[0].words[5],
+            (-1.0f32).to_bits(),
+            "the sixth word is the shipped -1.0 sentinel, not another negative value"
+        );
         let population = bins.iter().find(|b| b.bin == 73).expect("bin 73");
         assert_eq!(population.value(), 10.5);
         let back = Save::read(&save.write()).expect("the written carry reads back");
@@ -783,6 +789,8 @@ mod tests {
         let retail = Save::read(&bytes).expect("level 2's autosave");
         let bins = retail.bins();
         assert_eq!(bins.len(), ENGINE_BINS.len());
+        // The sixth word the writer has to reproduce: retail's own -1.0, not -inf.
+        assert_eq!(bins[0].words[5], (-1.0f32).to_bits(), "retail's sentinel word");
         let value = |bin: u16| bins.iter().find(|b| b.bin == bin).map(|b| b.value()).unwrap_or(0.0);
         assert_eq!(value(73), 10.5, "the population bin");
         assert_eq!(value(75), 20.0, "the tally's stored alignment");
