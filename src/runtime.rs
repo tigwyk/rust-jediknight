@@ -4690,11 +4690,10 @@ impl Runtime {
     /// `sithAI_InstinctUpdate` refreshes sight inside a pass, which is why the port already rolls the
     /// sight test on that clock instead of every frame.
     ///
-    /// A captured deadline of 0 is **no scheduled pass** (`sithAI_InstinctUpdate` initialises its
-    /// earliest slot to `now + 5000` and only writes a time for a slot it runs), so it seeds the
-    /// clock to never due instead of leaving the map empty: an absent entry reads as 0.0 and the
-    /// port would run the pass on the origin frame. 46 of the door capture's 57 actors carry 0 in
-    /// both clocks and stand still in retail; the port rolled their sight and scanned on frame 0.
+    /// A captured deadline of 0 is **due now**, not "never": `sithAI_Process` calls
+    /// `sithAI_InstinctUpdate` when `instance + 0x190 <= now`, and the update always writes a fresh
+    /// deadline (`now + 5000` at the earliest), so a captured 0 is a fresh instance whose first pass
+    /// is due on the next tick. Seeding the clocks from the row's own offset keeps that.
     pub fn seed_capture_phase(
         &mut self,
         rng: u32,
@@ -4704,9 +4703,7 @@ impl Runtime {
         crate::cog::set_random_seed(rng);
         for (index, phase) in phases {
             let offset = |ms: i64| ((ms - origin_ms) as f32 / 1000.0).max(0.0);
-            let armed = |ms: i64, now: f32| {
-                if ms > 0 { now + offset(ms) } else { f32::INFINITY }
-            };
+            let due = |ms: i64, now: f32| now + offset(ms);
             if self.types.get(*index).copied() != Some(2) {
                 continue;
             }
@@ -4716,8 +4713,8 @@ impl Runtime {
             {
                 body.ai_wait = offset(phase.fire_ms);
             }
-            self.ai_scan.insert(*index, armed(phase.acquire_ms, self.time));
-            self.ai_detect_at.insert(*index, armed(phase.next_pass_ms, self.time));
+            self.ai_scan.insert(*index, due(phase.acquire_ms, self.time));
+            self.ai_detect_at.insert(*index, due(phase.next_pass_ms, self.time));
         }
     }
 
@@ -5429,7 +5426,14 @@ impl Runtime {
                                 target[2] - eye[2],
                             );
                             let range = ((dx * dx + dy * dy + dz * dz).sqrt() - player_radius).max(0.0);
-                            let in_cone = ai.as_ref().is_some_and(|ai| ai.sees(eye, thing.2, target));
+                            // `sithAI_CheckSightThing`'s two gates: the class's cone, then
+                            // `sightdist < distance - target radius` → too far. The distance it
+                            // returns (`param_8`) is that radius-subtracted value, so `range` is the
+                            // number the range gate compares.
+                            let in_cone = ai
+                                .as_ref()
+                                .is_some_and(|ai| ai.cone(eye, thing.2, target))
+                                && ai.as_ref().is_some_and(|ai| range <= ai.sightdist);
                             // `sithAI_CheckSightThing` casts its sight ray against the level's
                             // **collision**, which includes solid things: a railing or a body in the
                             // way blocks the find exactly as a wall does. The scan tested only the
@@ -7167,7 +7171,7 @@ impl Runtime {
                     continue;
                 }
 
-                if self.shot_hits_swept(index, other, dt) {
+                if self.shot_hit_fraction(index, other, dt).is_some() {
                     impacts.push((index, other, shot.damage));
                     break;
                 }
@@ -7973,12 +7977,20 @@ impl Runtime {
     /// tested, so a fast bolt cannot step over a body between frames. `dt` is the frame it moved in;
     /// zero keeps the sample-at-the-end behaviour the callers of [`Self::shot_hits`] rely on.
     pub fn shot_hits_swept(&self, shot: usize, target: usize, dt: f32) -> bool {
-        let (Some(a), Some(b)) = (self.things.get(shot), self.things.get(target)) else {
-            return false;
-        };
+        self.shot_hit_fraction(shot, target, dt).is_some()
+    }
+
+    /// Where along this frame's move the shot first touches `target`, as a 0..1 fraction of `dt`;
+    /// `None` when it does not. [`Self::shot_hits_swept`] is this test's yes/no form. An
+    /// impact-time damage correction keyed on the fraction was measured against the fixture and
+    /// overshoots it (`encounter-gate.ps1`), so the damage stays the projectile's own value.
+    pub fn shot_hit_fraction(&self, shot: usize, target: usize, dt: f32) -> Option<f32> {
         if dt <= 0.0 {
-            return self.shot_hits(shot, target);
+            return self.shot_hits(shot, target).then_some(1.0);
         }
+        let (Some(a), Some(b)) = (self.things.get(shot), self.things.get(target)) else {
+            return None;
+        };
         let name = self.templates.get(target).cloned().unwrap_or_default().to_ascii_lowercase();
         let (radius, height) = self.template_hit.get(&name).copied().unwrap_or((0.065, 0.18));
         let bolt = self.shot_radius(shot);
@@ -8012,11 +8024,11 @@ impl Runtime {
             );
         }
         if flat > radius + bolt {
-            return false;
+            return None;
         }
         let low = b.pos[2];
         let high = b.pos[2] + height;
-        cz >= low - bolt && cz <= high + bolt
+        (cz >= low - bolt && cz <= high + bolt).then_some(closest)
     }
 
     pub fn shot_hits(&self, shot: usize, target: usize) -> bool {
@@ -12093,6 +12105,28 @@ mod tests {
             other => panic!("expected a miss, got {other:?}"),
         }
         assert!(rt.encounter_shot_time.is_empty(), "a resolved shot is not reported twice");
+    }
+
+    /// The chronology's `Miss` is driven by the runtime, not only the reporting helper: a projectile
+    /// whose `timer=` expires before it lands writes the row and is destroyed
+    /// (`sithThing_DestroyDyingThing`, `life_left`).
+    #[test]
+    fn a_bolt_that_times_out_is_reported_as_a_miss() {
+        let mut rt = door_runtime();
+        let bolt = "+bryarbolt".to_string();
+        rt.template_vel.insert(bolt.clone(), [0.0, 4.0, 0.0]);
+        rt.template_damage.insert(bolt.clone(), 12.0);
+        rt.encounter_events_enabled = true;
+        rt.time = 4.0;
+        let shot = rt.fire_toward(0, &bolt, 0.0, None, Some(9)).expect("projectile");
+        rt.life_left.insert(shot, 0.01);
+        rt.step(None, 1.0 / 60.0);
+        let miss = rt.encounter_events.iter().any(|event| {
+            matches!(event, EncounterEvent::Miss { owner, target, .. } if *owner == 0 && *target == Some(9))
+        });
+        assert!(miss, "an expired projectile must be a miss: {:?}", rt.encounter_events);
+        assert!(rt.things[shot].destroyed, "the expired projectile is destroyed");
+        assert!(!rt.encounter_shot_time.contains_key(&shot), "a resolved shot is not reported twice");
     }
 
     /// The door fixture's own player bars, hit for hit (`tools/parity/encounter/door_encounter.tsv`,
@@ -17006,12 +17040,46 @@ mod tests {
         );
     }
 
-    /// A captured deadline of 0 means the engine has **no pass scheduled** for that actor
-    /// (`sithAI_InstinctUpdate` only writes a slot it runs). Leaving the port's clock absent made it
-    /// default to 0.0, so the actor ran its scan on the origin frame; 46 of the door capture's 57
-    /// actors carry 0 in both clocks and stand still in retail's series.
+    /// The scan's range gate is `sithAI_CheckSightThing`'s **radius-subtracted** distance, not
+    /// `Ai::sees`'s plain `sightdist`: a body whose edge is inside the class's range is visible even
+    /// when its centre is outside it. `Ai::sees` refuses this target (5.05 > 5.0); the scan accepts it
+    /// because 5.05 - 0.065 <= 5.0.
     #[test]
-    fn a_captured_actor_with_no_scheduled_pass_never_runs_one() {
+    fn the_scan_accepts_a_body_edge_inside_sightdist() {
+        let mut rt = door_runtime();
+        let mut actor = rt.things[0].clone();
+        actor.pos = [0.0, 0.0, 0.5];
+        actor.yaw = 0.0;
+        let mut player = rt.things[0].clone();
+        player.pos = [0.0, 5.05, 0.5];
+        player.flags = 0x4;
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "greedo".into()];
+        rt.types = vec![10, 2];
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=200, maxstep=0.6, sightdist=5.0, heardist=2.0, accuracy=0.25\n\n\
+                 LookForTarget 500.0, 50000.0\n",
+            ),
+        );
+        let ai = rt.ai[&1].clone();
+        // The plain range test the scan used to apply refuses this body...
+        assert!(!ai.sees([0.0, 0.0, 0.575], 0.0, [0.0, 5.05, 0.5]), "sanity: centre is out of range");
+        rt.actor_flags.insert(1, 0x204);
+        rt.ai_last_seen.clear();
+        rt.ai_tick(0, 0.1);
+        assert!(
+            rt.ai_last_seen.contains_key(&1),
+            "the scan must accept a body whose edge is inside sightdist"
+        );
+    }
+
+    /// A captured deadline of 0 is **due now**: `sithAI_Process` calls the instinct update when
+    /// `instance + 0x190 <= now`, and `sithAI_InstinctUpdate` always arms its slots before writing
+    /// the next pass, so a fresh instance's 0 is a pass for the next tick, not "never".
+    #[test]
+    fn a_captured_zero_deadline_is_due_now_and_a_set_one_is_offset_from_the_origin() {
         let mut rt = door_runtime();
         rt.time = 4.2;
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
@@ -17024,8 +17092,8 @@ mod tests {
                 CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 0, next_pass_ms: 0 },
             )],
         );
-        assert_eq!(rt.ai_scan.get(&1), Some(&f32::INFINITY), "an unscheduled scan must not be due");
-        assert_eq!(rt.ai_detect_at.get(&1), Some(&f32::INFINITY), "an unscheduled pass must not be due");
+        assert_eq!(rt.ai_scan[&1], 4.2, "a captured 0 scan must be due now");
+        assert_eq!(rt.ai_detect_at[&1], 4.2, "a captured 0 pass must be due now");
         // A captured deadline is relative to the capture's own origin.
         rt.seed_capture_phase(
             1,

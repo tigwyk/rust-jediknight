@@ -760,9 +760,13 @@ Phase 0.5 step 2 pins the two dev-console status formats from the decomp and cap
   then `Current instincts:` and one row per instinct:
   `Instinct %d: Params: %f/%f/%f/%f, nextUpdate=%d, mask=0x%x, mode=0x%x.`
   **Row i is the class `.ai` file's i-th instinct line** (verified: eleven lines in `ai\tuproddefault.ai` ↔ eleven
-  rows for a `tuskan`; read any class with `bevi-knight --asset ai\<name>.ai`), and `mask`/`mode` are the two bit
-  words `sithAI_RegisterInstinct` stored - `sithAICmd_Startup` registers each instinct with them (`lookfortarget` is
-  handler `0x50aa80` with `0x204`, matching row 1 of that file). `Params` are the four per-instance numbers, 0 on an
+  rows for a `tuskan`; read any class with `bevi-knight --asset ai\<name>.ai`), and the two words are the
+  registration's event mask and accept word: `mask` is the **events** whose dispatch invokes the handler
+  (`sithAI_RegisterInstinct`'s fifth argument, `Follow` = `0xe00`), and `mode` is the **accept word** the
+  scheduler tests against the AI flag word (`mode & flags != 0`; `Follow` = `2`). `sithAI_InstinctUpdate`
+  also tests a third, undisplayed **reject** word that must be clear (`Follow` = `0x800`). `sithAICmd_Startup`
+  registers each handler with them (`lookfortarget` is handler `0x50aa80`, accept `0x204`, reject `0`, events
+  `0x1f00`). `Params` are the four per-instance numbers, 0 on an
   idle actor. Example rows for a brown Tusken: Jump `mask 0x604`, LookForTarget `mode 0x204`, PrimaryFire
   `mask 0x100 mode 2`, Follow `mask 0xe00 mode 2`, Flee `mask 0xf05 mode 0x800`, Talk `mode 0xffff`.
 

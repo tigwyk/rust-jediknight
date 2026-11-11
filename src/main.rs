@@ -885,10 +885,16 @@ fn main() {
             "--grep-assets" => grep_assets = arg_value(&args, &mut i).cloned(),
             "--shot" => shot = arg_value(&args, &mut i).cloned(),
             "--fixed-dt" => {
-                fixed_dt = arg_value(&args, &mut i).and_then(|v| v.parse().ok());
-                if fixed_dt.is_none_or(|step| step <= 0.0) {
-                    eprintln!("--fixed-dt needs a positive number of seconds");
-                    std::process::exit(2);
+                // Same bounds as `BK_FIXED_DT` (`walker_step` clamps it): a non-finite or
+                // non-positive value would poison every `dt` consumer.
+                match arg_value(&args, &mut i).and_then(|v| v.parse::<f32>().ok()) {
+                    Some(step) if step.is_finite() && step > 0.0 => {
+                        fixed_dt = Some(step.clamp(1.0 / 240.0, 0.1));
+                    }
+                    _ => {
+                        eprintln!("--fixed-dt needs a finite, positive number of seconds (clamped to 1/240..0.1)");
+                        std::process::exit(2);
+                    }
                 }
             }
             "--fall" => fall_check = true,
@@ -26677,22 +26683,40 @@ fn read_capture_phase(path: &std::path::Path) -> Option<CapturePhase> {
     let mut actors = Vec::new();
     for line in lines {
         let cells: Vec<&str> = line.split('\t').collect();
-        if cells.len() != header.len() || cells[t_ms].parse::<i64>().ok()? != origin_ms {
+        let Some(ms) = cells.get(t_ms).and_then(|c| c.parse::<i64>().ok()) else {
+            eprintln!("encounter: malformed capture row (no t_ms): {line}");
+            continue;
+        };
+        if cells.len() != header.len() || ms != origin_ms {
             continue;
         }
         match cells[kind] {
-            "player" => rng_state = Some(cells[rng].parse::<u32>().ok()?),
+            "player" => match cells[rng].parse::<u32>() {
+                Ok(state) => rng_state = Some(state),
+                Err(_) => {
+                    eprintln!("encounter: malformed player row (rng {:?}): {line}", cells[rng]);
+                    return None;
+                }
+            },
             "origin" => {
                 let number = |cell: &str| cell.parse::<i64>().unwrap_or(0);
-                actors.push((
-                    cells[template].parse::<usize>().ok()?,
-                    runtime::CapturedPhase {
-                        flags: cells[flags].parse::<u32>().ok()?,
-                        fire_ms: number(cells[fire]),
-                        acquire_ms: number(cells[acquire]),
-                        next_pass_ms: number(cells[next_pass]),
-                    },
-                ));
+                let index = cells[template].parse::<usize>().ok();
+                let flag_word = cells[flags].parse::<u32>().ok();
+                match (index, flag_word) {
+                    (Some(index), Some(flags)) => actors.push((
+                        index,
+                        runtime::CapturedPhase {
+                            flags,
+                            fire_ms: number(cells[fire]),
+                            acquire_ms: number(cells[acquire]),
+                            next_pass_ms: number(cells[next_pass]),
+                        },
+                    )),
+                    _ => eprintln!(
+                        "encounter: malformed origin row (template {:?}, ai_flags {:?}): {line}",
+                        cells[template], cells[flags]
+                    ),
+                }
             }
             _ => {}
         }
@@ -29549,7 +29573,11 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // ranges from 0.008 s to the 0.1 clamp depending on the level's weight, so 30 frames is anywhere
     // from a quarter second to three. A fixed step makes a check depend on the code, not the machine —
     // and it is what exposed the jump that never lands (`BK_FIXED_DT=0.0333`, level 1).
-    let dt = if overview.capture {
+    let dt = if let Some(step) = capture.as_deref().and_then(|c| c.0) {
+        // A `--fixed-dt` capture advances **every** system at that step: `sim_dt` pins scripts, AI
+        // and combat, and the walker has to follow or the player body runs on a second clock.
+        step
+    } else if overview.capture {
         1.0 / 60.0
     } else if std::env::var_os("BK_FIXED_DT").is_some() {
         env_f32("BK_FIXED_DT", 1.0 / 30.0).clamp(1.0 / 240.0, 0.1)

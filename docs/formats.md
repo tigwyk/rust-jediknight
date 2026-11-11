@@ -606,8 +606,8 @@ runtime collider and 1690 with it** — no regression from §16.10's `blocked` w
 `--shot` with `--frames`, or kill the process on a timer.
 
 **`--fixed-dt <seconds>` (with `--shot`) pins the step a capture advances the simulation by** instead of
-the capture's 1/60 s. `tools/parity/port-encounter.ps1` passes the door encounter's 1/30 s engine-frame
-representative; play and route replay keep the wall clock and 1/60 s.
+the capture's 1/60 s, for the walker as well as scripts, AI and combat. `tools/parity/port-encounter.ps1`
+passes the door encounter's 1/30 s engine frame; play and route replay keep the wall clock and 1/60 s.
 
 Two probes came out of this and are kept: `BK_COG_TRACE=1` names any label costing more than 5 ms, and
 `BK_NO_SOLIDS=1` switches the runtime collider off for an A/B.

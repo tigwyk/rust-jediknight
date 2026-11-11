@@ -16,7 +16,7 @@
   retail engine's memory; `encounter-gate.ps1` compares them.
 
   The step is fixed by `--shot` with `--fixed-dt` (the capture path pins dt otherwise to 1/60 s) and
-  defaults to the encounter's 1/30 s engine-frame representative, the pose is the same
+  defaults to the encounter's 1/30 s engine frame, the pose is the same
   `--warp`/`--shot-at` pair the screenshot captures use, and no input is injected, so two runs of
   the same command produce the same file.
 
@@ -34,12 +34,11 @@ param(
   # #16). The runtime adopts its `rand()` word and each door actor's flag/deadline; an empty value
   # leaves the port's own phase.
   [string]$Seed = 'tools/parity/engine/route_door.tsv',
-  # The step the port advances the encounter by. Retail's engine frame in the committed capture is
-  # ~25 ms (395 samples over 10 s), and `sithWeapon_Update` decays a bolt's damage once per frame, so
-  # the 1/60 s screenshot step spends an extra decay on every bolt in flight. 1/30 s is the step that
-  # reproduces the fixture's per-hit bars and its 13-shot cadence (see `encounter-gate.ps1`). The
-  # row's `frames` column is the 1/60 s count, so the run is framed at this step for the same game
-  # time. Play and route replay keep their own steps.
+  # The step the port advances the encounter by. `sithWeapon_Update` decays a bolt's damage once per
+  # engine tick, so the per-hit value depends on the ticks flown; at 1/30 s the port's per-hit bars
+  # are exactly the fixture's (delta 0.0), at 1/60 s it deals 1.5 health more over the 13 hits. This
+  # is a parameter of the gate, not a fitted tolerance. Play and route replay keep the wall clock
+  # and 1/60 s.
   [double]$Step = 1.0 / 30.0,
   [string[]]$Only = @()
 )
