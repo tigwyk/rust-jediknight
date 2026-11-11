@@ -18786,6 +18786,23 @@ mod engine_capture_tests {
         let scanning = seed.actors.iter().filter(|(_, p)| p.acquire_ms > 0).count();
         assert_eq!(scanning, 10, "the armed door actors' scan deadlines");
     }
+
+    /// A deadline the capture did not write as an integer is refused, not read as zero: 0 is the
+    /// engine's own "due now", so defaulting one would seed a pass the engine never scheduled.
+    #[test]
+    fn a_non_integer_origin_deadline_is_refused_not_seeded_as_zero() {
+        let path = std::env::temp_dir().join(format!("bk-capture-{}.tsv", std::process::id()));
+        let text = "# origin_ms 4200\n\
+                    t_ms\tkind\ttemplate\trng\tai_flags\tfire_next_ms\tacquire_next_ms\tnext_pass_ms\n\
+                    4200\tplayer\t0\t7\t0\t0\t0\t0\n\
+                    4200\torigin\t154\t0\t1586\t-\t4550\t4304\n\
+                    4200\torigin\t151\t0\t4\t0\t4529\t4529\n";
+        std::fs::write(&path, text).expect("temp capture");
+        let seed = super::read_capture_phase(&path).expect("the origin block is still read");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(seed.actors.len(), 1, "the malformed row was seeded");
+        assert_eq!(seed.actors[0].0, 151, "the well-formed row was dropped");
+    }
 }
 
 
@@ -27580,22 +27597,32 @@ fn read_capture_phase(path: &std::path::Path) -> Option<CapturePhase> {
                 }
             },
             "origin" => {
-                let number = |cell: &str| cell.parse::<i64>().unwrap_or(0);
+                // A deadline cell that is not an integer is a malformed capture, not a zero: 0 is
+                // the engine's own "due now", so defaulting one would seed a shot or a scan the
+                // engine never had. The row is refused and named instead.
                 let index = cells[template].parse::<usize>().ok();
                 let flag_word = cells[flags].parse::<u32>().ok();
-                match (index, flag_word) {
-                    (Some(index), Some(flags)) => actors.push((
-                        index,
-                        runtime::CapturedPhase {
-                            flags,
-                            fire_ms: number(cells[fire]),
-                            acquire_ms: number(cells[acquire]),
-                            next_pass_ms: number(cells[next_pass]),
-                        },
-                    )),
+                let deadline = |cell: &str| cell.trim().parse::<i64>().ok();
+                match (
+                    index,
+                    flag_word,
+                    deadline(cells[fire]),
+                    deadline(cells[acquire]),
+                    deadline(cells[next_pass]),
+                ) {
+                    (Some(index), Some(flags), Some(fire_ms), Some(acquire_ms), Some(next_pass_ms)) => {
+                        actors.push((
+                            index,
+                            runtime::CapturedPhase { flags, fire_ms, acquire_ms, next_pass_ms },
+                        ))
+                    }
                     _ => eprintln!(
-                        "encounter: malformed origin row (template {:?}, ai_flags {:?}): {line}",
-                        cells[template], cells[flags]
+                        "encounter: malformed origin row (template {:?}, ai_flags {:?}, fire {:?}, acquire {:?}, next pass {:?}): {line}",
+                        cells[template],
+                        cells[flags],
+                        cells[fire],
+                        cells[acquire],
+                        cells[next_pass]
                     ),
                 }
             }
@@ -27665,11 +27692,16 @@ impl EncounterTrace {
         // `rand()` word and each door actor's flag/deadline. The warp frame is the origin clock, so
         // the captured milliseconds are applied as offsets from it. A run without a seed keeps the
         // port's own phase.
-        if let Some(seed) = std::env::var_os("BK_ENCOUNTER_SEED")
-            .map(std::path::PathBuf::from)
-            .and_then(|path| read_capture_phase(&path))
-        {
-            rt.seed_capture_phase(seed.rng, seed.origin_ms, &seed.actors);
+        if let Some(path) = std::env::var_os("BK_ENCOUNTER_SEED").map(std::path::PathBuf::from) {
+            match read_capture_phase(&path) {
+                Some(seed) => rt.seed_capture_phase(seed.rng, seed.origin_ms, &seed.actors),
+                // A named seed that cannot be read is a broken capture, not a licence to start
+                // from the port's own phase without saying so.
+                None => eprintln!(
+                    "encounter: cannot read the AI phase from {}; the port's own phase is used",
+                    path.display()
+                ),
+            }
         }
         // The warp frame is the origin clock. It must not be derived from the shot queue: whether a
         // pre-warp bolt was stamped in the last tenth of a second depends on which system published
