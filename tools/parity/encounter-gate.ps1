@@ -11,21 +11,31 @@
   `retail-capture.ps1 -EncounterMs` samples the retail engine's own memory (player thing health,
   inventory bin 60 shields, the thing array for actors and projectiles, the engine game clock);
   `port-encounter.ps1` runs the port's runtime and writes its own timeline. This gate reports the
-  timing delta of every shot and hit, the per-hit health/shield delta, the kill order, and the actor
-  state delta at each cadence sample, then exits non-zero when any of them leaves its tolerance. It
-  is the instrument tickets #11 (AI timing) and #12 (combat timing) measure against.
+  timing delta of every shot and hit, each paired hit's own health/shield split, the kill order, and
+  the actor state delta at each cadence sample, then exits non-zero when any of them leaves its
+  tolerance. It is the instrument tickets #11 (AI timing) and #12 (combat timing) measure against.
+
+  The chronology says **hit or miss for every shot**: the port writes a `shot` row at the launch of
+  a shot that lands on the player (`detail: target <thing> hit`), a `miss` row for one that dies
+  without landing on the player (`detail: target <thing> miss`), and a `hit` row at each impact
+  carrying the bars after it and the split (`amount 11.3 health -2.6 shields -11.3`). Retail's
+  fixture can only observe hits (its `hit` rows) plus whatever bolts happen to be alive at a 100 ms
+  sample (its lossy `shot` rows), so the paired streams are: port `shot` launches vs retail hit
+  impacts for cadence, and port hit rows vs retail hit rows for the per-hit damage and split. A
+  `miss` row has no retail counterpart and is not paired.
+
+  Every paired event is graded: the event count must match exactly (an unpaired hit fails), the
+  shot-interval multiset must stay inside `-ShotCadenceToleranceMs`, and each paired hit's health
+  delta, shield delta and bars after it must stay inside `-HealthTolerance`/`-ShieldsTolerance`.
 
   Fire cadence is graded on the **interval** sequence: the two sides observe the same shots a flight
   apart (retail's impact, the port's launch), so consecutive-shot intervals are comparable even
   though absolute times are not. Retail's cadence is nondeterministic: `sithAICmd_PrimaryFire`
   draws every delay from `rand()` (`(1.2 - 0.2 * rand()) * fltArg[0]`), and acquisition is a chance
-  roll, so which shot falls inside the 9.9 s window and in what order is one realisation. Production
-  shot/hit counts therefore allow one event (`-ShotCountSlack`/`-HitCountSlack` 1) and the interval
-  sequences are compared as a **sorted multiset** over the shared count inside
-  `-ShotCadenceToleranceMs`; the final bars are compared only when the counts match (the per-hit
-  damage is graded on every shared hit). This is the distribution retail guarantees, not one run's
-  ordering. Actor facing for a `Roam`-class actor and the absolute time of a shot are the other
-  `rand()` consumers.
+  roll, so the **order** of the intervals is one realisation and the two sides' sequences are
+  compared as a **sorted multiset** over the shared count inside `-ShotCadenceToleranceMs`. This is
+  the distribution retail guarantees, not one run's ordering. Actor facing for a `Roam`-class actor
+  and the absolute time of a shot are the other `rand()` consumers.
 
   Actor rows are joined by **authored placement**, not by the `thing` number: retail's number is a
   slot in the engine's thing pool and the port's is the level's placement order, and the two only
@@ -36,13 +46,21 @@
   missing-actor fraction.
 
   The retail fixture is committed under `tools/parity/encounter/`; a fresh capture in
-  `target/parity/encounter/` takes precedence. The gate records the port twice and fails when the
-  two runs leave the measured run-to-run band (shape, endpoint, event timing, actor state, kill
-  order), so "the fixture is repeatable" is checked rather than assumed.
+  `target/parity/encounter/` takes precedence. The gate records the port twice and requires the two
+  runs to be **byte-identical** — the capture pins `dt` and runs a single-threaded executor, so a
+  difference is a nondeterminism bug, not a tolerance.
 
-  Tolerances are parameters with measured defaults. The port's AI is not on retail's timeline yet
-  (#11/#12), so the default run is expected to report deltas; the gate still fails on them, which is
-  the contract. A structural change (missing rows, a non-repeatable run, a fixture edit) fails too.
+  The port half runs at the encounter's **1/30 s** frame (`-Step`, passed to `port-encounter.ps1`
+  and on as `--fixed-dt`). That is a model of the frozen encounter, not a tuning knob: the retail
+  cadence's intervals are whole numbers of that frame (500/600/700/800/900 ms = 15/18/21/24/27
+  frames; the 667..900 ladder is 20..27), and the gate validates every retail interval against the
+  step and fails if the fixture is off the quantum. `route_door.tsv`'s 395 samples over 10 s are a
+  **different run** (~25 ms samples) and are not this gate's frame evidence. Play and the route
+  replay keep 1/60 s.
+
+  Tolerances are parameters with measured defaults. The per-hit and settled-bar tolerances are the
+  fixture's own per-hit noise (its per-hit amounts span 11.2-11.4); they are not a padded band that
+  hides a systematic per-hit divergence, and a change to them has to be measured, not widened.
 
 .EXAMPLE
   pwsh -File tools/parity/encounter-gate.ps1
@@ -64,15 +82,19 @@ param(
   # The retail engine renders a few frames a second, so its last cadence sample can sit up to one
   # frame (500 ms, the engine's dt clamp) before the port's last fixed-step sample.
   [double]$DurationToleranceMs = 600,
-  # Event-count band: |port - retail| allowed before the count itself is a failure. The engine's
-  # per-shot delay is `(1.2 - 0.2*rand())*fltArg[0]` and acquisition is a chance roll, so which shot
-  # falls inside the 9.9 s window is a random draw: one event is the reproducible band.
-  [int]$ShotCountSlack = 1,
-  [int]$HitCountSlack = 1,
+  # Event counts are exact: an event retail saw and the port did not (or the reverse) is a
+  # divergence, which is what "unpaired hit" means here.
+  [int]$ShotCountSlack = 0,
+  [int]$HitCountSlack = 0,
   [double]$ShotToleranceMs = 1000,
+  # A hit's own timing is a flight apart on the two sides, so the absolute time is only a smoke
+  # check; the cadence check below is the real timing grade.
   [double]$HitToleranceMs = 1000,
-  [double]$HealthTolerance = 10,
-  [double]$ShieldsTolerance = 10,
+  # The fixture's own per-hit noise: its thirteen hit amounts span 11.2-11.4, and its bars are written
+  # with one decimal. These grade each paired hit's health/shield deltas and bars after it, and the
+  # settled endpoint, so a systematic per-hit divergence cannot hide in a wide band.
+  [double]$HealthTolerance = 0.5,
+  [double]$ShieldsTolerance = 0.5,
   [double]$ActorPositionTolerance = 1.5,
   [double]$ActorYawTolerance = 30,
   [double]$ActorHealthTolerance = 15,
@@ -81,6 +103,12 @@ param(
   # at the first sample; this is the distance below which two rows are the same authored placement
   # (actors both builds place agree to 0.004 units). An actor with no counterpart fails.
   [double]$ActorIdentityTolerance = 0.5,
+  # The encounter's comparison frame, in seconds. The frozen encounter's cadence is on the engine
+  # frame: its intervals (500/600/700/800/900 ms) are 15/18/21/24/27 whole frames at 1/30 s (the
+  # 667/700/733/767/800/833/866/900 ladder is 20..27). The gate validates the retail intervals
+  # against this step and fails if the fixture is off the quantum. It is passed to the port as
+  # `--fixed-dt`, not used as a tolerance: play and route replay keep 1/60 s.
+  [double]$Step = 1.0 / 30.0,
   # Consecutive-shot interval band. Retail's impacts are quantised by its 100 ms sample grid, so one
   # interval can differ by that grid plus a frame; measured max on the door fixture is 234 ms.
   [double]$ShotCadenceToleranceMs = 250
@@ -104,6 +132,22 @@ function Num([string]$Text) {
   $value = 0.0
   if ([double]::TryParse($Text, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value)) { return $value }
   return $null
+}
+# An interval is on the frame quantum when it is within 1 ms of a whole number of steps. The frozen
+# encounter's cadence is quantised by its 100 ms sample grid, and 100 ms is itself a whole number of
+# 1/30 s frames, so the grid cannot hide an off-quantum frame. This is the gate's `-Step` evidence
+# (the encounter frame), never a tolerance.
+function Test-CadenceQuantum([double[]]$Intervals, [double]$Step) {
+  # A List, not an array: PowerShell unrolls an empty or single-element array into $null / a scalar,
+  # which makes "no bad intervals" indistinguishable from "one".
+  $bad = [System.Collections.Generic.List[double]]::new()
+  if ($Step -le 0) { $bad.Add(-1.0); return $bad }
+  foreach ($iv in @($Intervals)) {
+    $seconds = $iv / 1000.0
+    $n = [math]::Round($seconds / $Step)
+    if ($n -lt 1 -or [math]::Abs($seconds - $n * $Step) -gt 0.001) { $bad.Add($iv) }
+  }
+  return $bad
 }
 function Read-Trace([string]$Path) {
   $rows = [System.Collections.Generic.List[object]]::new()
@@ -137,59 +181,6 @@ function Get-WrapDelta([double]$A, [double]$B) {
   return [math]::Abs($d)
 }
 
-# Per-cadence actor-state deltas. Both traces key an actor by (sample time, thing id): the ids are
-# the level's own placement order on both builds, which is why the retail fixture and the port's
-# runtime name the same actor by the same number.
-function Get-ActorDeltas($BaseRows, $OtherRows) {
-  $other = @{}
-  $extra = @{}
-  foreach ($row in @($OtherRows | Where-Object Kind -eq 'actor')) {
-    $key = '{0}|{1}' -f [int]$row.T, $row.Thing
-    $other[$key] = $row
-    $extra[$key] = $true
-  }
-  $position = 0.0; $yaw = 0.0; $health = 0.0; $compared = 0; $missing = 0
-  foreach ($row in @($BaseRows | Where-Object Kind -eq 'actor')) {
-    $key = '{0}|{1}' -f [int]$row.T, $row.Thing
-    $extra.Remove($key)
-    if (-not $other.ContainsKey($key)) { $missing++; continue }
-    $p = $other[$key]
-    if ($null -eq $p.X -or $null -eq $row.X) { continue }
-    $dx = [double]$p.X - [double]$row.X
-    $dy = [double]$p.Y - [double]$row.Y
-    $dz = [double]$p.Z - [double]$row.Z
-    $position = [math]::Max($position, [math]::Sqrt($dx * $dx + $dy * $dy + $dz * $dz))
-    if ($null -ne $p.Yaw -and $null -ne $row.Yaw) {
-      $yaw = [math]::Max($yaw, (Get-WrapDelta ([double]$row.Yaw) ([double]$p.Yaw)))
-    }
-    if ($null -ne $p.Health -and $null -ne $row.Health) {
-      $health = [math]::Max($health, [math]::Abs([double]$p.Health - [double]$row.Health))
-    }
-    $compared++
-  }
-  return [pscustomobject]@{
-    Compared = $compared
-    Missing  = $missing
-    Extra    = $extra.Count
-    Position = $position
-    Yaw      = $yaw
-    Health   = $health
-  }
-}
-
-# Pair nth events and report the absolute timing delta. Events are in time order on both sides.
-function Get-EventDeltas($BaseEvents, $OtherEvents) {
-  $count = [math]::Min($BaseEvents.Count, $OtherEvents.Count)
-  $max = 0.0; $sum = 0.0
-  for ($i = 0; $i -lt $count; $i++) {
-    $delta = [math]::Abs([double]$OtherEvents[$i].T - [double]$BaseEvents[$i].T)
-    $max = [math]::Max($max, $delta)
-    $sum += $delta
-  }
-  $mean = if ($count -gt 0) { $sum / $count } else { 0.0 }
-  return [pscustomobject]@{ Count = $count; Max = $max; Mean = $mean }
-}
-
 # The order things died in, which is what a no-input encounter can say about kill order.
 #
 # Both captures drop a thing from the trace once it is gone — the retail reader skips an actor whose
@@ -214,20 +205,15 @@ function Get-KillOrder($Rows) {
 
 
 
-# ---- retail fixture: committed, with a fresh capture taking precedence -------------------------
-$retailPath = $Retail
-if (-not $retailPath) {
-  $retailPath = Join-Path $OutDir ("{0}.tsv" -f $Only)
-  if (-not (Test-Path -LiteralPath $retailPath)) {
-    $fixture = Join-Path $FixtureDir ("{0}.tsv" -f $Only)
-    if (-not (Test-Path -LiteralPath $fixture)) {
-      Fail "no retail fixture for '$Only' (looked for $fixture); capture it with tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door -EncounterMs 10000 -EncounterCadenceMs 100"
-      Write-Host ("encounter gate: {0} failure(s)" -f $failures)
-      exit 1
-    }
-    Copy-Item -LiteralPath $fixture -Destination $retailPath
-    Write-Host ("seeded {0} from the committed retail fixture" -f $retailPath)
-  }
+# ---- retail fixture: the committed file is the retail side --------------------------------------
+# Never cache it under `$OutDir`: that directory also holds the port runs, and `port-encounter.ps1`
+# writes `<name>.tsv` there, so a cached "retail" copy can silently become a port run and the gate
+# then compares the port against itself. A fresh retail capture is passed explicitly with `-Retail`.
+$retailPath = if ($Retail) { $Retail } else { Join-Path $FixtureDir ("{0}.tsv" -f $Only) }
+if (-not (Test-Path -LiteralPath $retailPath)) {
+  Fail "no retail fixture for '$Only' (looked for $retailPath); capture it with tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door -EncounterMs 10000 -EncounterCadenceMs 100"
+  Write-Host ("encounter gate: {0} failure(s)" -f $failures)
+  exit 1
 }
 if (-not (Test-Path -LiteralPath $retailPath)) { Fail "missing retail trace $retailPath"; Write-Host ("encounter gate: {0} failure(s)" -f $failures); exit 1 }
 
@@ -237,9 +223,9 @@ $repeatPath = ''
 if (-not $portPath) {
   $portPath = Join-Path $OutDir ("{0}-a.tsv" -f $Only)
   if (-not $SkipCapture) {
-    & pwsh -NoProfile -File tools/parity/port-encounter.ps1 -Encounters $Encounters -Out $OutDir -Only $Only -Suffix '-a'
+    & pwsh -NoProfile -File tools/parity/port-encounter.ps1 -Encounters $Encounters -Out $OutDir -Only $Only -Suffix '-a' -Step $Step
     if (-not $NoRepeat) {
-      & pwsh -NoProfile -File tools/parity/port-encounter.ps1 -Encounters $Encounters -Out $OutDir -Only $Only -Suffix '-b'
+      & pwsh -NoProfile -File tools/parity/port-encounter.ps1 -Encounters $Encounters -Out $OutDir -Only $Only -Suffix '-b' -Step $Step
       $repeatPath = Join-Path $OutDir ("{0}-b.tsv" -f $Only)
       if (-not (Test-Path -LiteralPath $repeatPath)) { $repeatPath = '' }
     }
@@ -262,49 +248,31 @@ $retailHits = @($retailRows | Where-Object Kind -eq 'hit')
 $retailShotSeries = $retailHits
 $portShotSeries = $portShots
 $portHits = @($portRows | Where-Object Kind -eq 'hit')
+# Shots that died without landing on the player. Retail's fixture cannot see those (it reads bar
+# drops, and its `shot` rows are only bolts alive at a 100 ms sample), so they are printed and not
+# paired; the chronology still names hit or miss for every shot.
+$portMisses = @($portRows | Where-Object Kind -eq 'miss')
 $retailPlayers = @($retailRows | Where-Object Kind -eq 'player')
 $portPlayers = @($portRows | Where-Object Kind -eq 'player')
 $retailActors = @($retailRows | Where-Object Kind -eq 'actor')
 $portActors = @($portRows | Where-Object Kind -eq 'actor')
 
 # ---- repeatability: two port runs of the same fixed step --------------------------------------
-# Not byte identity: the AI scheduler consumes Bevy's system order and the cog RNG, so a run can
-# differ by a frame. The fixture is repeatable when the shape and endpoint hold and every timeline
-# delta stays inside the measured run-to-run band (shot 783 ms, hit 300 ms, actor 1.25 units/3.3 deg
-# on the capture that set these defaults).
+# Byte identity. The capture pins `dt` at the measured engine frame and runs the schedule on a
+# single-threaded executor (`main`), so the AI, the combat clock and the trace are a function of the
+# level and the pose. A difference between the two runs is a nondeterminism bug, not a tolerance.
 if ($repeatPath) {
-  $bRows = Read-Trace $repeatPath
-  $bShots = @($bRows | Where-Object Kind -eq 'shot')
-  $bHits = @($bRows | Where-Object Kind -eq 'hit')
-  $bPlayers = @($bRows | Where-Object Kind -eq 'player')
-  $repeatOk = $true
-  if ($bPlayers.Count -ne $portPlayers.Count) { Fail ("repeat run has {0} player sample(s), the first {1}" -f $bPlayers.Count, $portPlayers.Count); $repeatOk = $false }
-  if ([math]::Abs($bShots.Count - $portShots.Count) -gt 5) { Fail ("repeat run has {0} shot(s), the first {1} (slack 5)" -f $bShots.Count, $portShots.Count); $repeatOk = $false }
-  if ([math]::Abs($bHits.Count - $portHits.Count) -gt 4) { Fail ("repeat run has {0} hit(s), the first {1} (slack 4)" -f $bHits.Count, $portHits.Count); $repeatOk = $false }
-  $shotRepeat = Get-EventDeltas $portShots $bShots
-  $hitRepeat = Get-EventDeltas $portHits $bHits
-  $actorRepeat = Get-ActorDeltas $portRows $bRows
-  $portKills = @(Get-KillOrder $portRows)
-  $bKills = @(Get-KillOrder $bRows)
-  if (($portKills -join ',') -ne ($bKills -join ',')) {
-    Fail ("repeat run's kill order [{0}] differs from the first run's [{1}]" -f ($bKills -join ','), ($portKills -join ','))
-    $repeatOk = $false
-  }
-  if ($shotRepeat.Max -gt 4000) { Fail ("repeat shot timing delta {0:N0} ms exceeds 4000 ms" -f $shotRepeat.Max); $repeatOk = $false }
-  if ($hitRepeat.Max -gt 5000) { Fail ("repeat hit timing delta {0:N0} ms exceeds 5000 ms" -f $hitRepeat.Max); $repeatOk = $false }
-  if ($actorRepeat.Position -gt 2.0) { Fail ("repeat actor position delta {0:N2} exceeds 2.00 units" -f $actorRepeat.Position); $repeatOk = $false }
-  # The AI can turn a different way at the same sample between runs (hash-order/RNG), so a yaw delta
-  # of up to a half turn is not a fixture-shape change; the position/health checks carry this check.
-  if ($actorRepeat.Health -gt 5) { Fail ("repeat actor health delta {0:N1} exceeds 5" -f $actorRepeat.Health); $repeatOk = $false }
-  if ($portPlayers.Count -gt 0 -and $bPlayers.Count -gt 0) {
-    $endHealth = [math]::Abs([double]$bPlayers[-1].Health - [double]$portPlayers[-1].Health)
-    $endShields = [math]::Abs([double]$bPlayers[-1].Shields - [double]$portPlayers[-1].Shields)
-    if ($endHealth -gt 10) { Fail ("repeat endpoint health delta {0:N1} exceeds 10" -f $endHealth); $repeatOk = $false }
-    if ($endShields -gt 5) { Fail ("repeat endpoint shields delta {0:N1} exceeds 5" -f $endShields); $repeatOk = $false }
-  }
-  if ($repeatOk) {
-    Write-Host ("PASS  repeatability: {0} vs {1} player sample(s), shots {2}, hits {3}; max deltas shot {4:N0} ms, hit {5:N0} ms, actor {6:N2} units/{7:N1} deg" -f `
-        $portPlayers.Count, $bPlayers.Count, $portShots.Count, $portHits.Count, $shotRepeat.Max, $hitRepeat.Max, $actorRepeat.Position, $actorRepeat.Yaw)
+  $hashA = (Get-FileHash -LiteralPath $portPath -Algorithm SHA256).Hash
+  $hashB = (Get-FileHash -LiteralPath $repeatPath -Algorithm SHA256).Hash
+  if ($hashA -ne $hashB) {
+    Fail ("two port runs differ ({0} vs {1}); the encounter must be deterministic" -f $hashA, $hashB)
+  } else {
+    $repeatRows = Read-Trace $repeatPath
+    $bPlayers = @($repeatRows | Where-Object Kind -eq 'player')
+    $bShots = @($repeatRows | Where-Object Kind -eq 'shot')
+    $bHits = @($repeatRows | Where-Object Kind -eq 'hit')
+    Write-Host ("PASS  determinism: two port runs are byte-identical ({0} player sample(s), shots {1}, hits {2})" -f `
+        $bPlayers.Count, $bShots.Count, $bHits.Count)
   }
 }
 
@@ -321,9 +289,10 @@ if ($retailPlayers.Count -eq 0 -or $portPlayers.Count -eq 0) {
 }
 
 # ---- shots ------------------------------------------------------------------------------------
-Write-Host ("shots: retail {0}, port {1}" -f $retailShotSeries.Count, $portShotSeries.Count)
-if ([math]::Abs($retailShotSeries.Count - $portShotSeries.Count) -gt $ShotCountSlack) {
-  Fail ("shot count differs by {0} (retail {1}, port {2}; slack {3})" -f ([math]::Abs($retailShotSeries.Count - $portShotSeries.Count)), $retailShotSeries.Count, $portShotSeries.Count, $ShotCountSlack)
+Write-Host ("shots: retail {0}, port {1} (port misses {2})" -f $retailShotSeries.Count, $portShotSeries.Count, $portMisses.Count)
+if ($retailShotSeries.Count -ne $portShotSeries.Count) {
+  Fail ("shot count differs (retail {0}, port {1}): {2} unpaired shot(s)" -f `
+      $retailShotSeries.Count, $portShotSeries.Count, [math]::Abs($retailShotSeries.Count - $portShotSeries.Count))
 }
 $shotDeltas = @()
 $portUsed = New-Object bool[] $portShotSeries.Count
@@ -354,11 +323,36 @@ if ($shotDeltas.Count -gt 0) {
   # starts with — and index-pairing the launch and impact series is the mixed comparison the gate is
   # not allowed to make. Intervals cancel a constant flight, so the two series compare by interval.
   # The engine draws every delay from `rand()` (`sithAICmd_PrimaryFire`'s ±20 % jitter), so the
-  # *order* of the intervals is not reproducible and one extra event is allowed by the count band:
-  # compare the interval multiset, sorted, over the shared count. That is the cadence distribution
-  # retail actually guarantees, not one realisation's ordering.
+  # *order* of the intervals is one realisation; compare the interval multiset, sorted, over the
+  # shared count (the counts are already required to match). That is the cadence distribution retail
+  # actually guarantees, not one run's ordering.
   $retailIntervals = @(for ($i = 1; $i -lt $retailShotSeries.Count; $i++) { [double]$retailShotSeries[$i].T - [double]$retailShotSeries[$i - 1].T }) | Sort-Object
   $portIntervals = @(for ($i = 1; $i -lt $portShotSeries.Count; $i++) { [double]$portShotSeries[$i].T - [double]$portShotSeries[$i - 1].T }) | Sort-Object
+
+  # ---- the encounter frame model: the frozen cadence is whole frames ---------------------------
+  # Positive and negative controls first: the model's own 20..27-frame ladder must validate and a
+  # 2 ms off-quantum interval must not, so the check cannot pass by accepting everything.
+  $ladder = @(20..27 | ForEach-Object { $_ * $Step * 1000.0 })
+  if ((Test-CadenceQuantum $ladder $Step).Count -ne 0) {
+    Fail ("cadence quantum self-check: the 20..27 x {0:N4} s ladder was rejected" -f $Step)
+  } elseif ((Test-CadenceQuantum @($ladder[0] + 2.0) $Step).Count -eq 0) {
+    Fail ("cadence quantum self-check: a 2 ms off-quantum interval was accepted at {0:N4} s" -f $Step)
+  } else {
+    Write-Host ("      frame self-check: 20..27 x {0:N4} s accepted, +2 ms rejected" -f $Step)
+  }
+  $badQuantum = Test-CadenceQuantum $retailIntervals $Step
+  if ($badQuantum.Count -gt 0) {
+    Fail ("the frozen encounter's cadence is not on the {0:N4} s frame: interval(s) {1} ms are not whole frames" -f $Step, (($badQuantum | ForEach-Object { '{0:N0}' -f $_ }) -join ','))
+  } else {
+    $multiples = @($retailIntervals | ForEach-Object { [math]::Round(($_ / 1000.0) / $Step) })
+    $worstQuantum = 0.0
+    foreach ($iv in $retailIntervals) {
+      $seconds = $iv / 1000.0
+      $n = [math]::Round($seconds / $Step)
+      $worstQuantum = [math]::Max($worstQuantum, [math]::Abs($seconds - $n * $Step) * 1000.0)
+    }
+    Write-Host ("PASS  encounter frame: the retail cadence is {0} whole frame(s) of {1:N4} s (worst {2:N2} ms off the quantum)" -f ($multiples -join ','), $Step, $worstQuantum)
+  }
   $cadenceCount = [math]::Min($retailIntervals.Count, $portIntervals.Count)
   if ($cadenceCount -eq 0) {
     Write-Host '      cadence intervals: not enough events to compare'
@@ -379,33 +373,56 @@ if ($shotDeltas.Count -gt 0) {
 
 # ---- hits -------------------------------------------------------------------------------------
 Write-Host ("hits: retail {0}, port {1}" -f $retailHits.Count, $portHits.Count)
-if ([math]::Abs($retailHits.Count - $portHits.Count) -gt $HitCountSlack) {
-  Fail ("hit count differs by {0} (retail {1}, port {2}; slack {3})" -f ([math]::Abs($retailHits.Count - $portHits.Count)), $retailHits.Count, $portHits.Count, $HitCountSlack)
+if ($retailHits.Count -ne $portHits.Count) {
+  Fail ("hit count differs (retail {0}, port {1}): {2} unpaired hit(s)" -f `
+      $retailHits.Count, $portHits.Count, [math]::Abs($retailHits.Count - $portHits.Count))
 }
 $hitCount = [math]::Min($retailHits.Count, $portHits.Count)
+# The baseline both sides' per-hit deltas start from: the player's bars at the first cadence sample
+# (the fixture and the port both start the encounter at 100/100).
+$retailBase = if ($retailPlayers.Count -gt 0) { @([double]$retailPlayers[0].Health, [double]$retailPlayers[0].Shields) } else { @(100.0, 100.0) }
+$portBase = if ($portPlayers.Count -gt 0) { @([double]$portPlayers[0].Health, [double]$portPlayers[0].Shields) } else { @(100.0, 100.0) }
+$retailPrev = $retailBase.Clone()
+$portPrev = $portBase.Clone()
 $hitMax = 0.0
 $healthMax = 0.0
 $shieldMax = 0.0
+$splitHealthMax = 0.0
+$splitShieldMax = 0.0
 for ($i = 0; $i -lt $hitCount; $i++) {
   $r = $retailHits[$i]; $p = $portHits[$i]
   $delta = $p.T - $r.T
   $dHealth = [math]::Abs([double]$p.Health - [double]$r.Health)
   $dShields = [math]::Abs([double]$p.Shields - [double]$r.Shields)
+  # This hit's own split: what it took from each bar, independent of the running totals.
+  $rHealthLost = $retailPrev[0] - [double]$r.Health
+  $rShieldsLost = $retailPrev[1] - [double]$r.Shields
+  $pHealthLost = $portPrev[0] - [double]$p.Health
+  $pShieldsLost = $portPrev[1] - [double]$p.Shields
+  $dSplitHealth = [math]::Abs($pHealthLost - $rHealthLost)
+  $dSplitShields = [math]::Abs($pShieldsLost - $rShieldsLost)
+  $retailPrev = @([double]$r.Health, [double]$r.Shields)
+  $portPrev = @([double]$p.Health, [double]$p.Shields)
   $hitMax = [math]::Max($hitMax, [math]::Abs($delta))
   $healthMax = [math]::Max($healthMax, $dHealth)
   $shieldMax = [math]::Max($shieldMax, $dShields)
-  Write-Host ("      hit #{0}: retail {1,6:N0} ms ({2}/{3}), port {4,6:N0} ms ({5}/{6}), dt {7,7:N0} ms, dH {8:N1}, dS {9:N1}" -f `
-      ($i + 1), $r.T, $r.Health, $r.Shields, $p.T, $p.Health, $p.Shields, $delta, $dHealth, $dShields)
+  $splitHealthMax = [math]::Max($splitHealthMax, $dSplitHealth)
+  $splitShieldMax = [math]::Max($splitShieldMax, $dSplitShields)
+  Write-Host ("      hit #{0}: retail {1,6:N0} ms ({2}/{3}, -{4:N1}H -{5:N1}S), port {6,6:N0} ms ({7}/{8}, -{9:N1}H -{10:N1}S), dt {11,7:N0} ms, dH {12:N1}, dS {13:N1}, dsplit {14:N1}H/{15:N1}S" -f `
+      ($i + 1), $r.T, $r.Health, $r.Shields, $rHealthLost, $rShieldsLost, $p.T, $p.Health, $p.Shields, $pHealthLost, $pShieldsLost, $delta, $dHealth, $dShields, $dSplitHealth, $dSplitShields)
 }
 if ($hitCount -gt 0) {
   if ($hitMax -gt $HitToleranceMs) { Fail ("hit timing delta {0:N0} ms exceeds {1:N0} ms" -f $hitMax, $HitToleranceMs) }
-  if ($healthMax -gt $HealthTolerance) { Fail ("per-hit health delta {0:N1} exceeds {1:N1}" -f $healthMax, $HealthTolerance) }
-  if ($shieldMax -gt $ShieldsTolerance) { Fail ("per-hit shields delta {0:N1} exceeds {1:N1}" -f $shieldMax, $ShieldsTolerance) }
-  # The combat-damage dimension on its own: the bars after each paired hit, independent of when the
-  # hits landed. A ticket that owns the damage split can read its result here without the AI timing.
-  if ($healthMax -le $HealthTolerance -and $shieldMax -le $ShieldsTolerance) {
-    Write-Host ("PASS  per-hit damage: max dH {0:N1}, dS {1:N1} over {2} paired hit(s) (tolerance {3:N1}/{4:N1})" -f `
-        $healthMax, $shieldMax, $hitCount, $HealthTolerance, $ShieldsTolerance)
+  if ($healthMax -gt $HealthTolerance) { Fail ("per-hit health bar delta {0:N1} exceeds {1:N1}" -f $healthMax, $HealthTolerance) }
+  if ($shieldMax -gt $ShieldsTolerance) { Fail ("per-hit shields bar delta {0:N1} exceeds {1:N1}" -f $shieldMax, $ShieldsTolerance) }
+  if ($splitHealthMax -gt $HealthTolerance) { Fail ("per-hit health split delta {0:N1} exceeds {1:N1}" -f $splitHealthMax, $HealthTolerance) }
+  if ($splitShieldMax -gt $ShieldsTolerance) { Fail ("per-hit shield split delta {0:N1} exceeds {1:N1}" -f $splitShieldMax, $ShieldsTolerance) }
+  # The combat-damage dimension on its own: every paired hit's split and the bars after it,
+  # independent of when the hits landed.
+  if ($healthMax -le $HealthTolerance -and $shieldMax -le $ShieldsTolerance -and `
+      $splitHealthMax -le $HealthTolerance -and $splitShieldMax -le $ShieldsTolerance) {
+    Write-Host ("PASS  per-hit damage: max bar delta dH {0:N1}/dS {1:N1}, split delta {2:N1}H/{3:N1}S over {4} paired hit(s) (tolerance {5:N1}/{6:N1})" -f `
+        $healthMax, $shieldMax, $splitHealthMax, $splitShieldMax, $hitCount, $HealthTolerance, $ShieldsTolerance)
   }
 }
 
@@ -425,19 +442,15 @@ if (($retailKills -join ',') -ne ($portKills -join ',')) {
 # ---- settled endpoint -------------------------------------------------------------------------
 if ($retailPlayers.Count -gt 0 -and $portPlayers.Count -gt 0) {
   $r = $retailPlayers[-1]; $p = $portPlayers[-1]
-  # The final bars are the sum of the hits that landed. With the allowed one-event band the two
-  # sides can end one hit apart, and then the totals are not the same observation; the per-hit
-  # damage above already grades every shared hit. Compare the totals only when the event counts match.
-  if ($retailHits.Count -ne $portHits.Count) {
-    Write-Host ("      settled endpoint: {0} unpaired hit(s); final bars not compared (per-hit damage graded above)" -f [math]::Abs($retailHits.Count - $portHits.Count))
-  } else {
-    $dHealth = [math]::Abs([double]$p.Health - [double]$r.Health)
-    $dShields = [math]::Abs([double]$p.Shields - [double]$r.Shields)
-    if ($dHealth -gt $HealthTolerance) { Fail ("settled health {0:N1} vs retail {1:N1} (delta {2:N1})" -f $p.Health, $r.Health, $dHealth) }
-    else { Write-Host ("PASS  settled health: port {0:N1}, retail {1:N1}" -f $p.Health, $r.Health) }
-    if ($dShields -gt $ShieldsTolerance) { Fail ("settled shields {0:N1} vs retail {1:N1} (delta {2:N1})" -f $p.Shields, $r.Shields, $dShields) }
-    else { Write-Host ("PASS  settled shields: port {0:N1}, retail {1:N1}" -f $p.Shields, $r.Shields) }
-  }
+  # The final bars are the sum of the hits that landed, so they are compared only now that the two
+  # sides are known to have the same number of hits: a count mismatch already failed above, and its
+  # per-hit detail is in the hit list.
+  $dHealth = [math]::Abs([double]$p.Health - [double]$r.Health)
+  $dShields = [math]::Abs([double]$p.Shields - [double]$r.Shields)
+  if ($dHealth -gt $HealthTolerance) { Fail ("settled health {0:N1} vs retail {1:N1} (delta {2:N1} exceeds {3:N1})" -f $p.Health, $r.Health, $dHealth, $HealthTolerance) }
+  else { Write-Host ("PASS  settled health: port {0:N1}, retail {1:N1} (delta {2:N1})" -f $p.Health, $r.Health, $dHealth) }
+  if ($dShields -gt $ShieldsTolerance) { Fail ("settled shields {0:N1} vs retail {1:N1} (delta {2:N1} exceeds {3:N1})" -f $p.Shields, $r.Shields, $dShields, $ShieldsTolerance) }
+  else { Write-Host ("PASS  settled shields: port {0:N1}, retail {1:N1} (delta {2:N1})" -f $p.Shields, $r.Shields, $dShields) }
 }
 
 # ---- actor state at each cadence sample -------------------------------------------------------

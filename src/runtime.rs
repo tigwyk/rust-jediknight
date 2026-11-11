@@ -151,6 +151,9 @@ pub enum EncounterEvent {
         owner: usize,
         template: String,
         pos: [f32; 3],
+        /// What the shooter was aiming at when it fired: the AI's own target thing, or `None` for a
+        /// shot nothing names (the player's weapon, a scripted `FireProjectile`).
+        target: Option<usize>,
     },
     /// A fired shot that landed on the player: its launch time and shooter, written as the trace's
     /// `shot` row. Retail's fixture can only see shots through their impact on the player, so this
@@ -160,15 +163,45 @@ pub enum EncounterEvent {
         owner: usize,
         template: String,
         pos: [f32; 3],
+        target: Option<usize>,
     },
-    /// The player was hit: the amount the two bars actually lost, and the bar values after the hit —
-    /// the same numbers the retail capture writes from `thing + 0x134` and inventory bin 60.
+    /// A fired shot that died without landing on the player — a wall, an actor, or its own `timer=`.
+    /// Written as the trace's `miss` row, so the chronology says on every shot hit or miss.
+    Miss {
+        t: f32,
+        owner: usize,
+        template: String,
+        target: Option<usize>,
+    },
+    /// The player was hit: the amount the two bars actually lost, the bar values after the hit, and
+    /// the per-hit split the bars took — the same numbers the retail capture writes from
+    /// `thing + 0x134` and inventory bin 60.
     Hit {
         t: f32,
         amount: f32,
         shields: f32,
         health: f32,
+        /// Health and shields this one hit removed (the per-hit split).
+        health_lost: f32,
+        shields_lost: f32,
     },
+}
+
+/// One origin actor's AI phase from the retail engine capture (issue #21): the flag word the
+/// engine's AI block held and the instinct deadlines it had already scheduled at the origin clock.
+/// The capture is the only source — a run that names none keeps the port's own defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapturedPhase {
+    /// `ai_flags`: the engine's per-actor flag word (`ai + 8`).
+    pub flags: u32,
+    /// `fire_next_ms`: the next legal shot, absolute on the engine clock. `0` means nothing is
+    /// scheduled and `-1` that the class carries no fire instinct.
+    pub fire_ms: i64,
+    /// `acquire_next_ms`: the `LookForTarget` scan's own next run.
+    pub acquire_ms: i64,
+    /// `next_pass_ms`: the instinct scheduler's next pass over this actor — the earliest deadline of
+    /// its instincts, so it is the shot for a gunner already firing and the scan otherwise.
+    pub next_pass_ms: i64,
 }
 
 /// Whether the door-encounter telemetry is on (`BK_ENCOUNTER_OUT`). A process-wide check: the flag
@@ -1143,9 +1176,10 @@ pub struct Runtime {
     /// `BK_ENCOUNTER_OUT`: shots and landed player hits in time order, drained by the app into the
     /// door-encounter TSV. Empty unless the capture harness sets the variable.
     pub encounter_events: Vec<EncounterEvent>,
-    /// The launch time of every fired projectile by its thing index, so a hit can report the shot
-    /// that produced it (retail's fixture only records shots that landed on the player).
-    pub encounter_shot_time: BTreeMap<usize, f32>,
+    /// The launch time and target of every fired projectile by its thing index, so a hit or a miss
+    /// can report the shot that produced it (retail's fixture only records shots that landed on the
+    /// player, so a miss has no counterpart there and the trace writes it as its own row).
+    pub encounter_shot_time: BTreeMap<usize, (f32, Option<usize>)>,
     /// Whether new events are queued. The capture harness turns it on by setting `BK_ENCOUNTER_OUT`
     /// at launch; tests flip it directly.
     pub encounter_events_enabled: bool,
@@ -1948,7 +1982,11 @@ impl Runtime {
         // The engine's collision radius is the template's `movesize=` (every shipped actor carries
         // it, and it is what `getthingmovesize` reads). The port used a 0.6 default, which made a
         // bolt count as a hit on any actor within 0.75 of its path, so a crowd absorbed every shot
-        // aimed at the player. The height is the model height the templates imply.
+        // aimed at the player. The height is the model height the templates imply. No floor: a bolt
+        // ships `movesize=0.001` and `sithIntersect_CheckSphereIntersection` combines it with the
+        // target's radius, so flooring it at 0.02 would make a bolt reach 0.019 units too far. The
+        // projectile **wall** sweep floors it itself (`Runtime::step`), where a zero-radius ray is
+        // what would let a bolt through a jamb.
         let template_hit: BTreeMap<String, (f32, f32)> = level
             .templates
             .iter()
@@ -1957,8 +1995,7 @@ impl Runtime {
                 let radius = level
                     .template_f32(&t.name, "movesize")
                     .or_else(|| level.template_f32(&t.name, "size"))
-                    .unwrap_or(0.065)
-                    .max(0.02);
+                    .unwrap_or(0.065);
                 (name, (radius, radius * 2.8))
             })
             .collect();
@@ -3039,6 +3076,8 @@ impl Runtime {
         for index in expired {
             self.life_left.remove(&index);
             self.life_total.remove(&index);
+            // A projectile whose `timer=` ran out never landed: it is a miss in the chronology.
+            self.note_shot_lost(index);
             if let Some(thing) = self.things.get_mut(index) {
                 thing.destroyed = true;
             }
@@ -3212,6 +3251,9 @@ impl Runtime {
                 )
             })
             .collect();
+        // A projectile that dies on geometry is a miss in the encounter chronology; the call needs
+        // `&mut self`, so the indices are collected in the mutable iteration and reported after it.
+        let mut lost_shots: Vec<usize> = Vec::new();
         for (i, t) in self.things.iter_mut().enumerate() {
             if Some(i) == player_at {
                 // Path moves still run — a script can walk the player along frames — but the body's
@@ -3348,6 +3390,7 @@ impl Runtime {
                         if along >= 0.0 {
                             continue;
                         }
+                        lost_shots.push(i);
                         t.destroyed = true;
                         continue;
                     }
@@ -3368,6 +3411,7 @@ impl Runtime {
                         );
                     }
                     if projectile {
+                        lost_shots.push(i);
                         t.destroyed = true;
                         continue;
                     }
@@ -3405,6 +3449,9 @@ impl Runtime {
                     }
                 }
             }
+        }
+        for index in lost_shots {
+            self.note_shot_lost(index);
         }
         for index in &blocked {
             for instance in self.thing_instances(*index) {
@@ -4631,6 +4678,46 @@ impl Runtime {
         crate::cog::pseudo_random() < self.detect_chance(actor, target) as f64
     }
 
+    /// Adopt the committed capture's AI phase at the encounter's origin clock.
+    ///
+    /// The engine's `rand()` state (`0x0054F750`) is the capture's own word, so every AI roll after
+    /// this point continues the captured stream; each actor's flag word and scheduled deadlines are
+    /// the values the engine held at that instant, converted to the runtime's clock relative to the
+    /// origin. An actor whose shot the engine had not scheduled (`fire_ms` 0 or -1) keeps whatever
+    /// wait it had: the capture says nothing is pending, and inventing a shot would be a guess.
+    ///
+    /// `next_pass_ms` lands on `ai_detect_at`, the port's own instinct-pass clock: the engine's
+    /// `sithAI_InstinctUpdate` refreshes sight inside a pass, which is why the port already rolls the
+    /// sight test on that clock instead of every frame.
+    ///
+    /// A captured deadline of 0 is **due now**, not "never": `sithAI_Process` calls
+    /// `sithAI_InstinctUpdate` when `instance + 0x190 <= now`, and the update always writes a fresh
+    /// deadline (`now + 5000` at the earliest), so a captured 0 is a fresh instance whose first pass
+    /// is due on the next tick. Seeding the clocks from the row's own offset keeps that.
+    pub fn seed_capture_phase(
+        &mut self,
+        rng: u32,
+        origin_ms: i64,
+        phases: &[(usize, CapturedPhase)],
+    ) {
+        crate::cog::set_random_seed(rng);
+        for (index, phase) in phases {
+            let offset = |ms: i64| ((ms - origin_ms) as f32 / 1000.0).max(0.0);
+            let due = |ms: i64, now: f32| now + offset(ms);
+            if self.types.get(*index).copied() != Some(2) {
+                continue;
+            }
+            self.actor_flags.insert(*index, phase.flags);
+            if phase.fire_ms > 0
+                && let Some(body) = self.things.get_mut(*index)
+            {
+                body.ai_wait = offset(phase.fire_ms);
+            }
+            self.ai_scan.insert(*index, due(phase.acquire_ms, self.time));
+            self.ai_detect_at.insert(*index, due(phase.next_pass_ms, self.time));
+        }
+    }
+
     /// One AI tick: every actor that can see the player fires its own `weapon=`.
     ///
     /// The engine runs an instinct scheduler over the `.ai` file's weights; this build uses the
@@ -4680,7 +4767,7 @@ impl Runtime {
         let mut fired = 0;
         self.walked.clear();
         self.walk_vel.clear();
-        let mut shots: Vec<(usize, String, f32)> = Vec::new();
+        let mut shots: Vec<(usize, String, f32, usize)> = Vec::new();
         // Every actor with an instinct class, **plus** any actor a script gave a destination to.
         // `AISetMovePos`/`AISetMoveFrame` are gated on `controlType == SITH_CT_AI` in the engine, which
         // an actor has whether or not its template names an `aiclass=` — level 1's 8t88 has no class but
@@ -5101,15 +5188,16 @@ impl Runtime {
             // its own room and alignment own — that is the reader the stand-in could not express.
             let remembered = self.ai_last_seen.get(&index).copied().or_else(|| {
                 let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
-                // Only a class with a handler consumes the sound record: `listen` (`0x50a6f0`) or
-                // `follow`, whose handler is what walks to an awareness position. `pednarsh.ai`
-                // (the cantina crowd) ships `SenseDanger`, `Flee` and `OpenDoors` only, and its
-                // actors stand still in retail's door series while the port walked them at every
-                // gunshot — the hearing path's default 1.0 ran for classes that cannot hear.
-                let hears = ai.as_ref().is_some_and(|class| {
-                    class.instinct("Listen").is_some() || class.instinct("Follow").is_some()
-                });
-                if !hears {
+                // A sound record moves the body only through `follow`, and the engine's scheduler
+                // (`sithAI_InstinctUpdate`, `0x4e9e90`) runs an instinct only while its registered
+                // word accepts the AI flag word: `Follow`'s is **`0x2`**
+                // (`tools/parity/aistatus-01narshadda.txt`, the `rydefault.ai` row 5), the bit
+                // `FUN_0050aa80`'s acquisition word (`0x232`) sets. `listen` alone never walks: it is
+                // event-driven, and the one event that carries a source thing is **damage**. So an
+                // awake actor that has not acquired anything stands at its authored facing, which is
+                // what retail's own door series shows for `greedo` 236.
+                let follows = ai.as_ref().is_some_and(|class| class.instinct("Follow").is_some());
+                if !follows || self.actor_flags.get(&index).copied().unwrap_or(0) & 0x2 == 0 {
                     return None;
                 }
                 // `listen` (`0x50a6f0`): the record is scanned **kind 2, then 1, then 0**, and the handler's own
@@ -5320,22 +5408,51 @@ impl Runtime {
                     if self.time >= due && *flags & 0x4 != 0 {
                         self.ai_scan.insert(index, self.time + interval);
                         if let Some(thing) = self.things.get(index).map(|t| (t.pos, t.sector, t.yaw)) {
+                            // `sithAI_sub_4EAD60` builds the sight eye from the thing's model offset
+                            // (`rdMatrix_TransformVector34` over `thing + 0x17c`) above its origin,
+                            // and `sithAI_CheckSightThing` measures from that eye and subtracts the
+                            // target's own radius (`param_3[0xc]`) from the distance it returns. The
+                            // scan used the thing origin, so a door actor on a balcony had a clear
+                            // line the engine's elevated eye does not.
+                            let player_radius = self
+                                .templates
+                                .get(player)
+                                .and_then(|name| self.template_hit.get(&name.to_ascii_lowercase()))
+                                .map(|(radius, _)| *radius)
+                                .unwrap_or(0.065);
                             let (dx, dy, dz) = (
-                                target[0] - thing.0[0],
-                                target[1] - thing.0[1],
-                                target[2] - thing.0[2],
+                                target[0] - eye[0],
+                                target[1] - eye[1],
+                                target[2] - eye[2],
                             );
-                            let range = (dx * dx + dy * dy + dz * dz).sqrt();
-                            let in_cone = ai.as_ref().is_some_and(|ai| ai.sees(thing.0, thing.2, target));
+                            let range = ((dx * dx + dy * dy + dz * dz).sqrt() - player_radius).max(0.0);
+                            // `sithAI_CheckSightThing`'s two gates: the class's cone, then
+                            // `sightdist < distance - target radius` → too far. The distance it
+                            // returns (`param_8`) is that radius-subtracted value, so `range` is the
+                            // number the range gate compares.
+                            let in_cone = ai
+                                .as_ref()
+                                .is_some_and(|ai| ai.cone(eye, thing.2, target))
+                                && ai.as_ref().is_some_and(|ai| range <= ai.sightdist);
                             // `sithAI_CheckSightThing` casts its sight ray against the level's
                             // **collision**, which includes solid things: a railing or a body in the
                             // way blocks the find exactly as a wall does. The scan tested only the
                             // world faces, so level 1's door actors standing behind the balcony rail
                             // acquired the player while retail's never did.
-                            let clear = self.solids.as_ref().is_none_or(|s| {
-                                !s.segment_blocked(thing.0, target)
-                                    && !s.segment_thing(thing.0, target)
-                            });
+                            let (blocked, thing_blocked) = self.solids.as_ref().map_or(
+                                (false, false),
+                                |s| (s.segment_blocked(eye, target), s.segment_thing(eye, target)),
+                            );
+                            let clear = !blocked && !thing_blocked;
+                            // `BK_AI_TRACE=2`: name which half of the scan's sight test refused, the
+                            // way the fire path names its own gate — the acquisition divergence the
+                            // door fixture grades turns on exactly this pair.
+                            if std::env::var("BK_AI_TRACE").is_ok_and(|v| v == "2") {
+                                eprintln!(
+                                    "ai: {index} `{ai_template}` scan at {:.2} s range {range:.2} cone {in_cone} blocked {blocked} thing {thing_blocked} flags {:#x}",
+                                    self.time, *flags
+                                );
+                            }
                             // The scan is the **acquisition** path: the handler runs
                             // `sithAI_CheckSightThing`, whose detection roll is
                             // `sithAI_CanDetectSightThing` (`0x4ec140`). Writing the memory from the
@@ -5922,7 +6039,10 @@ impl Runtime {
                     self.time
                 );
             }
-            shots.push((index, weapon, error));
+            // What the shot is aimed at: the scripted `AISetFireTarget` thing when one is named,
+            // otherwise the player. That is the engine's own target, not the aim point.
+            let target_thing = self.ai_fire_target.get(&index).copied().unwrap_or(player);
+            shots.push((index, weapon, error, target_thing));
             if let Some(thing) = self.things.get_mut(index) {
                 thing.yaw = (-sx).atan2(sy).to_degrees();
                 // `sithActor_UpdateAimJoints`: the aim points at the target in **three** dimensions.
@@ -5963,8 +6083,11 @@ impl Runtime {
             }
         }
         let mut shooters: Vec<usize> = Vec::new();
-        for (index, weapon, error) in shots {
-            if self.fire_spread(index as i64, &weapon, error).is_some() {
+        for (index, weapon, error, target) in shots {
+            if self
+                .fire_toward(index as i64, &weapon, error, None, Some(target))
+                .is_some()
+            {
                 // The renderer plays a puppet's `fire` track off this: the engine's
                 // `sithPuppet_UpdateThingMove` picks the action track while the actor is shooting.
                 self.last_shot.insert(index, self.time);
@@ -6435,6 +6558,20 @@ impl Runtime {
         error: f32,
         sound: Option<&str>,
     ) -> Option<usize> {
+        self.fire_toward(shooter, template, error, sound, None)
+    }
+
+    /// [`Self::fire_with_spread`] with the thing the shooter has as a target (the AI's own target,
+    /// recorded in the encounter chronology). A shot nothing names — the player's weapon, a scripted
+    /// `FireProjectile` — passes `None`.
+    fn fire_toward(
+        &mut self,
+        shooter: i64,
+        template: &str,
+        error: f32,
+        sound: Option<&str>,
+        target: Option<usize>,
+    ) -> Option<usize> {
         // Every shot the runtime spawns, counted where it is actually spawned. A check that samples
         // live things misses a bolt that dies between two frames, and at 10 fps that is most of them.
         self.shots_fired += 1;
@@ -6475,10 +6612,8 @@ impl Runtime {
                 owner: usize::try_from(shooter).unwrap_or(usize::MAX),
                 template: template.clone(),
                 pos,
+                target,
             });
-            // The projectile's own index, for the hit that ends it: `projectile_hits` reports the
-            // launch time when the bolt lands so retail's hit rows and the port's shots line up.
-            self.encounter_shot_time.insert(self.things.len(), self.time);
         }
         if std::env::var_os("BK_HIT_TRACE").is_some() {
             // The shooter's body and the shot's heading, so a trace can say who hit whom: a bolt's
@@ -6598,8 +6733,9 @@ impl Runtime {
         self.types.push(kind);
         let index = self.things.len() - 1;
         if self.encounter_events_enabled {
-            // The shot's own index now exists; the hit that ends it reports this launch time.
-            self.encounter_shot_time.insert(index, self.time);
+            // The projectile's own index now exists; the hit or miss that ends it reports this
+            // launch time and target.
+            self.encounter_shot_time.insert(index, (self.time, target));
         }
         self.arm_life(index);
         // `sithWeapon_WeaponFireProjectile`'s **player-only pre-sweep**: when the shooter is the local
@@ -7035,7 +7171,7 @@ impl Runtime {
                     continue;
                 }
 
-                if self.shot_hits_swept(index, other, dt) {
+                if self.shot_hit_fraction(index, other, dt).is_some() {
                     impacts.push((index, other, shot.damage));
                     break;
                 }
@@ -7706,8 +7842,9 @@ impl Runtime {
         // `sithActor_DamageActor` tints the local player's palette on damage that lands, before the
         // shields are spent: its call is `sithPlayer_AddDynamicTint(damage * 0.04, 0, 0)`.
         add_dynamic_tint(&mut self.tint, [amount * DAMAGE_TINT, 0.0, 0.0]);
-        let before = self.player_shields
-            + self.things.get(player).map(|t| t.health).unwrap_or(0.0);
+        let before_shields = self.player_shields;
+        let before_health = self.things.get(player).map(|t| t.health).unwrap_or(0.0);
+        let before = before_shields + before_health;
         // `item_shields.cog` has branches for energy (2), fire (4) and saber (16) only; any other
         // kind reaches health with the bar untouched, exactly as the script does.
         let mut left = amount;
@@ -7729,13 +7866,16 @@ impl Runtime {
         if self.encounter_events_enabled {
             let health = self.things.get(player).map(|t| t.health).unwrap_or(0.0);
             // The retail capture writes the amount the bars actually lost, net of a recharge, so
-            // the row is the same number on both sides.
+            // the row is the same number on both sides. The split is what one hit took from each
+            // bar; health clamps at zero, so the delta is measured against the clamped value.
             let amount = before - (self.player_shields + health);
             self.encounter_events.push(EncounterEvent::Hit {
                 t: self.time,
                 amount,
                 shields: self.player_shields,
                 health,
+                health_lost: before_health - health,
+                shields_lost: before_shields - self.player_shields,
             });
         }
         (self.player_shields, self.things.get(player).map(|t| t.health).unwrap_or(0.0))
@@ -7813,6 +7953,19 @@ impl Runtime {
         (self.player_shields, health)
     }
 
+    /// The radius a projectile carries into its hit test: its template's own `movesize=` — the
+    /// engine's `sithCollision_MoveThing` sweeps the **moving** thing by its own size, and
+    /// `sithIntersect_CheckSphereIntersection` tests `targetRadius + movingRadius`. `+bryarbolt`
+    /// (and every bolt that inherits it, including `+elaser`) ships `movesize=0.001`, so the
+    /// combined reach is the target's body plus a thousandth of a unit.
+    fn shot_radius(&self, shot: usize) -> f32 {
+        self.templates
+            .get(shot)
+            .map(|name| name.to_ascii_lowercase())
+            .and_then(|name| self.template_hit.get(&name).map(|(radius, _)| *radius))
+            .unwrap_or(0.001)
+    }
+
     /// Whether a shot at `shot` is inside a target's body.
     ///
     /// A thing's position is its **feet**, so testing the distance to it misses a bolt fired at
@@ -7824,14 +7977,23 @@ impl Runtime {
     /// tested, so a fast bolt cannot step over a body between frames. `dt` is the frame it moved in;
     /// zero keeps the sample-at-the-end behaviour the callers of [`Self::shot_hits`] rely on.
     pub fn shot_hits_swept(&self, shot: usize, target: usize, dt: f32) -> bool {
-        let (Some(a), Some(b)) = (self.things.get(shot), self.things.get(target)) else {
-            return false;
-        };
+        self.shot_hit_fraction(shot, target, dt).is_some()
+    }
+
+    /// Where along this frame's move the shot first touches `target`, as a 0..1 fraction of `dt`;
+    /// `None` when it does not. [`Self::shot_hits_swept`] is this test's yes/no form. An
+    /// impact-time damage correction keyed on the fraction was measured against the fixture and
+    /// overshoots it (`encounter-gate.ps1`), so the damage stays the projectile's own value.
+    pub fn shot_hit_fraction(&self, shot: usize, target: usize, dt: f32) -> Option<f32> {
         if dt <= 0.0 {
-            return self.shot_hits(shot, target);
+            return self.shot_hits(shot, target).then_some(1.0);
         }
+        let (Some(a), Some(b)) = (self.things.get(shot), self.things.get(target)) else {
+            return None;
+        };
         let name = self.templates.get(target).cloned().unwrap_or_default().to_ascii_lowercase();
         let (radius, height) = self.template_hit.get(&name).copied().unwrap_or((0.065, 0.18));
+        let bolt = self.shot_radius(shot);
         let from = [
             a.pos[0] - a.vel[0] * dt,
             a.pos[1] - a.vel[1] * dt,
@@ -7856,17 +8018,17 @@ impl Runtime {
             eprintln!(
                 "shot trace: shot {shot} -> target {target} ({name}) from {from:?} to {:?} closest flat {flat:.3} (limit {:.3}) cz {cz:.3} body {:.3}..{:.3}",
                 a.pos,
-                radius + 0.15,
+                radius + bolt,
                 b.pos[2],
                 b.pos[2] + height
             );
         }
-        if flat > radius + 0.15 {
-            return false;
+        if flat > radius + bolt {
+            return None;
         }
         let low = b.pos[2];
         let high = b.pos[2] + height;
-        cz >= low - 0.15 && cz <= high + 0.15
+        (cz >= low - bolt && cz <= high + bolt).then_some(closest)
     }
 
     pub fn shot_hits(&self, shot: usize, target: usize) -> bool {
@@ -7878,15 +8040,16 @@ impl Runtime {
         // hittable.
         let name = self.templates.get(target).cloned().unwrap_or_default().to_ascii_lowercase();
         let (radius, height) = self.template_hit.get(&name).copied().unwrap_or((0.065, 0.18));
+        // The two spheres touch when the distance is at most the sum of their radii.
+        let bolt = self.shot_radius(shot);
         let (dx, dy) = (a.pos[0] - b.pos[0], a.pos[1] - b.pos[1]);
         let flat = (dx * dx + dy * dy).sqrt();
-        // A bolt has its own small radius; a hit is when the two touch.
-        if flat > radius + 0.15 {
+        if flat > radius + bolt {
             return false;
         }
         let low = b.pos[2];
         let high = b.pos[2] + height;
-        a.pos[2] >= low - 0.15 && a.pos[2] <= high + 0.15
+        a.pos[2] >= low - bolt && a.pos[2] <= high + bolt
     }
 
     /// `DamageThing` as a call, for code that holds no `Value`.
@@ -8083,12 +8246,27 @@ impl Runtime {
         if !self.encounter_events_enabled {
             return;
         }
-        let Some(t) = self.encounter_shot_time.remove(&shot) else { return };
+        let Some((t, target)) = self.encounter_shot_time.remove(&shot) else { return };
         let Some(thing) = self.things.get(shot) else { return };
         let owner = thing.owner.unwrap_or(shot);
         let template = self.templates.get(shot).cloned().unwrap_or_default();
         let pos = thing.pos;
-        self.encounter_events.push(EncounterEvent::ShotLanded { t, owner, template, pos });
+        self.encounter_events
+            .push(EncounterEvent::ShotLanded { t, owner, template, pos, target });
+    }
+
+    /// Report a shot that died without landing on the player — a wall, an actor, or its own `timer=`.
+    /// The chronology then says hit or miss for every shot; retail's fixture can only see impacts,
+    /// so these rows have no counterpart and the gate does not pair them.
+    pub fn note_shot_lost(&mut self, shot: usize) {
+        if !self.encounter_events_enabled {
+            return;
+        }
+        let Some((t, target)) = self.encounter_shot_time.remove(&shot) else { return };
+        let Some(thing) = self.things.get(shot) else { return };
+        let owner = thing.owner.unwrap_or(shot);
+        let template = self.templates.get(shot).cloned().unwrap_or_default();
+        self.encounter_events.push(EncounterEvent::Miss { t, owner, template, target });
     }
 
     /// The damage this template deals (`damage=`), for a projectile that hits.
@@ -11780,6 +11958,91 @@ mod tests {
         assert!(rt.things[shot].vel[2] < -2.5, "vel {:?}", rt.things[shot].vel);
     }
 
+    /// The AI's fire cadence is drawn from the same engine `rand()` stream the capture records, so
+    /// seeding it makes the delay the capture's next draw (issue #16). The first draw after
+    /// 811474043 is 0.5316467, and `sithAICmd_PrimaryFire` jitters the 750 ms delay by
+    /// `0.8 + 0.4 * rand` in this build, i.e. 0.759 s.
+    #[test]
+    fn the_a_i_fire_delay_is_drawn_from_the_captured_rand_stream() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut player = base.clone();
+        player.pos = [0.0, 1.0, 0.0];
+        let mut gunner = base.clone();
+        gunner.pos = [0.0, 0.0, 0.0];
+        gunner.yaw = 0.0;
+        rt.things = vec![player, gunner];
+        rt.templates = vec!["walkplayer".into(), "reeyeesgun".into()];
+        rt.types = vec![10, 2];
+        rt.template_weapon.insert("reeyeesgun".into(), "+elaser".into());
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=200, sightdist=5.0\n\n\
+                 PrimaryFire 750.0, 0.8, 3.5, 0.20, 0.0, 500.0, 0.0, 0.0, 0.0, 0.0\n",
+            ),
+        );
+        // Already engaged, so the sight roll makes no draw of its own: the first draw of the tick is
+        // the shot delay's jitter.
+        rt.ai_detected.insert(1);
+        rt.time = 1.0;
+        rt.seed_capture_phase(
+            811_474_043,
+            0,
+            &[(1, CapturedPhase { flags: 0x232, fire_ms: 0, acquire_ms: 0, next_pass_ms: 0 })],
+        );
+        rt.ai_tick(0, 0.1);
+        assert_eq!(rt.shots_fired, 1, "the gunner did not fire");
+        assert!(
+            (rt.things[1].ai_wait - 0.759_494_0).abs() < 1e-5,
+            "the delay came from another stream: {}",
+            rt.things[1].ai_wait
+        );
+        assert_ne!(crate::cog::random_state(), 811_474_043, "the shot drew nothing from the capture");
+    }
+
+    /// The capture's origin block is the door encounter's starting phase (issue #16): the AI
+    /// `rand()` word it recorded, the flag word each actor held, and the deadlines the engine had
+    /// already scheduled. The actor's own `ai_wait` is the shot delay counted from the origin, the
+    /// scan lands on the runtime clock at the captured offset, and an actor whose shot the capture
+    /// shows as unscheduled (`fire_ms` 0) keeps whatever wait it had.
+    #[test]
+    fn the_door_encounter_starts_from_the_captured_a_i_phase() {
+        let mut rt = door_runtime();
+        let mut gunner = rt.things[0].clone();
+        gunner.pos = [1.4122, 9.3586, 6.3313];
+        rt.things.push(gunner);
+        rt.templates.push("reeyeesgun".into());
+        rt.types.push(2);
+        let mut watcher = rt.things[0].clone();
+        watcher.pos = [4.7624, 10.1534, 6.3313];
+        watcher.ai_wait = 5.0;
+        rt.things.push(watcher);
+        rt.templates.push("reeyeesgun".into());
+        rt.types.push(2);
+        rt.time = 0.4;
+        rt.seed_capture_phase(
+            811_474_043,
+            4200,
+            &[
+                // The capture's gunner: already engaged, next shot 104 ms after the origin.
+                (1, CapturedPhase { flags: 1586, fire_ms: 4304, acquire_ms: 4550, next_pass_ms: 4304 }),
+                // A door actor only scanning: `acquire_next_ms` 4529, no shot scheduled.
+                (2, CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 4529, next_pass_ms: 4529 }),
+            ],
+        );
+        assert_eq!(crate::cog::random_state(), 811_474_043, "the capture's own rand() word");
+        assert_eq!(rt.actor_flags[&1], 1586);
+        assert_eq!(rt.actor_flags[&2], 4);
+        assert!((rt.things[1].ai_wait - 0.104).abs() < 1e-6, "first shot {}", rt.things[1].ai_wait);
+        assert!((rt.ai_scan[&1] - 0.75).abs() < 1e-6, "scan at {}", rt.ai_scan[&1]);
+        assert!((rt.ai_detect_at[&1] - 0.504).abs() < 1e-6);
+        assert!((rt.ai_scan[&2] - 0.729).abs() < 1e-6, "scan at {}", rt.ai_scan[&2]);
+        assert!((rt.things[2].ai_wait - 5.0).abs() < 1e-6, "an unscheduled shot was invented");
+        // The origin clock is the capture's: the offsets are its milliseconds, not a guess.
+        assert!(rt.ai_scan.get(&2).is_some_and(|due| *due > rt.time));
+    }
+
     /// `--encounter` telemetry (issue #9): a shot is queued where it leaves the shooter, with the
     /// runtime's own clock and the shooter's id, so the port's timeline can be compared with the
     /// retail fixture. The queue is off unless the capture harness asks (no cost in live play).
@@ -11798,14 +12061,72 @@ mod tests {
         rt.fire(0, &bolt).expect("projectile");
         assert_eq!(rt.encounter_events.len(), 1);
         match &rt.encounter_events[0] {
-            EncounterEvent::Shot { t, owner, template, pos } => {
+            EncounterEvent::Shot { t, owner, template, pos, target } => {
                 assert!((t - 2.5).abs() < 1e-5, "event time {t}");
                 assert_eq!(*owner, 0, "the shooter's thing index");
                 assert_eq!(template, "+bryarbolt");
                 assert_eq!(*pos, rt.things[0].pos, "the shot leaves the shooter's own position");
+                assert_eq!(*target, None, "a shot nothing names has no target");
             }
             other => panic!("expected a shot event, got {other:?}"),
         }
+    }
+
+    /// The chronology says hit or miss and what the shooter was aiming at: a landed shot carries the
+    /// AI's target and its launch time, and a shot that dies without landing is a `Miss` with the
+    /// same launch time. The map is keyed by the projectile's own thing index.
+    #[test]
+    fn encounter_telemetry_tells_a_landed_shot_from_a_miss_with_the_shooters_target() {
+        let mut rt = door_runtime();
+        let bolt = "+bryarbolt".to_string();
+        rt.template_vel.insert(bolt.clone(), [0.0, 4.0, 0.0]);
+        rt.template_damage.insert(bolt.clone(), 12.0);
+        rt.encounter_events_enabled = true;
+
+        rt.time = 4.0;
+        let landed = rt.fire_toward(0, &bolt, 0.0, None, Some(9)).expect("projectile");
+        rt.note_shot_landed(landed);
+        match rt.encounter_events.last() {
+            Some(EncounterEvent::ShotLanded { t, target, .. }) => {
+                assert!((t - 4.0).abs() < 1e-5, "the launch time is reported, not the impact's");
+                assert_eq!(*target, Some(9), "the AI's target thing");
+            }
+            other => panic!("expected a landed shot, got {other:?}"),
+        }
+
+        rt.time = 5.0;
+        let missed = rt.fire_toward(0, &bolt, 0.0, None, Some(9)).expect("projectile");
+        rt.note_shot_lost(missed);
+        match rt.encounter_events.last() {
+            Some(EncounterEvent::Miss { t, target, .. }) => {
+                assert!((t - 5.0).abs() < 1e-5, "event time {t}");
+                assert_eq!(*target, Some(9));
+            }
+            other => panic!("expected a miss, got {other:?}"),
+        }
+        assert!(rt.encounter_shot_time.is_empty(), "a resolved shot is not reported twice");
+    }
+
+    /// The chronology's `Miss` is driven by the runtime, not only the reporting helper: a projectile
+    /// whose `timer=` expires before it lands writes the row and is destroyed
+    /// (`sithThing_DestroyDyingThing`, `life_left`).
+    #[test]
+    fn a_bolt_that_times_out_is_reported_as_a_miss() {
+        let mut rt = door_runtime();
+        let bolt = "+bryarbolt".to_string();
+        rt.template_vel.insert(bolt.clone(), [0.0, 4.0, 0.0]);
+        rt.template_damage.insert(bolt.clone(), 12.0);
+        rt.encounter_events_enabled = true;
+        rt.time = 4.0;
+        let shot = rt.fire_toward(0, &bolt, 0.0, None, Some(9)).expect("projectile");
+        rt.life_left.insert(shot, 0.01);
+        rt.step(None, 1.0 / 60.0);
+        let miss = rt.encounter_events.iter().any(|event| {
+            matches!(event, EncounterEvent::Miss { owner, target, .. } if *owner == 0 && *target == Some(9))
+        });
+        assert!(miss, "an expired projectile must be a miss: {:?}", rt.encounter_events);
+        assert!(rt.things[shot].destroyed, "the expired projectile is destroyed");
+        assert!(!rt.encounter_shot_time.contains_key(&shot), "a resolved shot is not reported twice");
     }
 
     /// The door fixture's own player bars, hit for hit (`tools/parity/encounter/door_encounter.tsv`,
@@ -11877,11 +12198,12 @@ mod tests {
         rt.damage_player(11.3, DAMAGE_ENERGY);
         rt.time = 3.5;
         rt.damage_player(11.3, DAMAGE_ENERGY);
-        let hits: Vec<(f32, f32, f32, f32)> = rt
+        let hits: Vec<(f32, f32, f32, f32, f32, f32)> = rt
             .encounter_events
             .iter()
             .filter_map(|event| match event {
-                EncounterEvent::Hit { t, amount, shields, health } => Some((*t, *amount, *shields, *health)),
+                EncounterEvent::Hit { t, amount, shields, health, health_lost, shields_lost } =>
+                    Some((*t, *amount, *shields, *health, *health_lost, *shields_lost)),
                 _ => None,
             })
             .collect();
@@ -11891,10 +12213,15 @@ mod tests {
         assert!((hits[0].1 - 13.8538).abs() < 1e-3, "amount {}", hits[0].1);
         assert!((hits[0].2 - 38.7).abs() < 1e-3, "shields {}", hits[0].2);
         assert!((hits[0].3 - 97.4462).abs() < 1e-3, "health {}", hits[0].3);
+        // The split: the bar took the whole 11.3, health the rest of the loss.
+        assert!((hits[0].4 - 2.5538).abs() < 1e-3, "health lost {}", hits[0].4);
+        assert!((hits[0].5 - 11.3).abs() < 1e-3, "shields lost {}", hits[0].5);
         // Bar 38.7 -> 27.4, health takes 11.3 * (1 - 27.4/50).
         assert!((hits[1].1 - 16.4076).abs() < 1e-3, "amount {}", hits[1].1);
         assert!((hits[1].2 - 27.4).abs() < 1e-3, "shields {}", hits[1].2);
         assert!((hits[1].3 - 92.3386).abs() < 1e-3, "health {}", hits[1].3);
+        assert!((hits[1].4 - 5.1076).abs() < 1e-3, "health lost {}", hits[1].4);
+        assert!((hits[1].5 - 11.3).abs() < 1e-3, "shields lost {}", hits[1].5);
 
         // A hit the player's invulnerability refuses is not a landed hit and writes no row.
         rt.actor_flags.insert(0, AF_INVULNERABLE);
@@ -12971,9 +13298,13 @@ mod tests {
         rt.ai.insert(
             1,
             crate::ai::parse(
-                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen 1.0\n",
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen 1.0\nFollow 0.5, 0.1\n",
             ),
         );
+        // The engine's scheduler (`sithAI_InstinctUpdate`) runs `Follow` only while its word `0x2`,
+        // the bit `LookForTarget`'s acquisition sets, is in the AI flags; a sound moves an actor that
+        // has already registered a target.
+        rt.actor_flags.insert(1, 0x2);
         // Newest first: a fresh shot 5 units along +x (out of earshot), an older one 1.5 units along
         // +y (inside it). The guard must walk toward the one it can hear.
         // Kind 2 is the listener's first slot; the older kind-1 record is the fallback.
@@ -13009,11 +13340,12 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "tuskan".into(), "door".into()];
         rt.types = vec![10, 2, 0];
         rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.actor_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
         rt.sector_adjoins = vec![Vec::new(); 8];
         rt.ai.insert(
             1,
             crate::ai::parse(
-                "alignment=1.0, rank=0.5, fov=90, sightdist=2.0, heardist=4.0\n\nListen 1.0\n",
+                "alignment=1.0, rank=0.5, fov=90, sightdist=2.0, heardist=4.0\n\nListen 1.0\nFollow 0.5, 0.1\n",
             ),
         );
         rt.transmit_awareness(7, 1, [-1.2, 0.0, 0.0], super::AI_AWARE_SHOT, Some(2));
@@ -13137,10 +13469,11 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
         rt.types = vec![10, 2];
         rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.actor_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
         rt.ai.insert(
             1,
             crate::ai::parse(
-                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen 1.0\n",
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen 1.0\nFollow 0.5, 0.1\n",
             ),
         );
         // A shot five units away: outside the two-unit hearing, so the guard must not react.
@@ -13185,9 +13518,10 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
         rt.types = vec![10, 2];
         rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.actor_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
         let class = |chance: &str| {
             crate::ai::parse(&format!(
-                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen {chance}\n"
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen {chance}\nFollow 0.5, 0.1\n"
             ))
         };
         rt.ai.insert(1, class("0.0"));
@@ -16651,5 +16985,125 @@ mod tests {
             rt.ai_last_seen.contains_key(&1),
             "the scan did not acquire a body inside the class's view cone"
         );
+    }
+
+    /// `sithAI_sub_4EAD60` builds the sight eye from the thing's model offset above its origin
+    /// (`rdMatrix_TransformVector34` over `thing + 0x17c`), and `sithAI_CheckSightThing` casts from
+    /// that eye. The door encounter's `greedo` 236 stands behind the balcony rail: the origin-to-origin
+    /// line is clear while the eye's line crosses the rail, and retail's actor never acquires the body.
+    #[test]
+    fn the_scan_casts_from_the_models_eye_point() {
+        let mut rt = door_runtime();
+        let mut solids = crate::collide::test_room();
+        // A rail between the two at 0.52..0.58 above the floor: the thing-origin ray (z 0.5) passes
+        // under it, the eye ray (z 0.575 -> 0.5) crosses it, which is the balcony the door gunner
+        // stands behind.
+        solids.walls.push(crate::collide::Face {
+            normal: [0.0, -1.0, 0.0],
+            point: [0.0, 1.0, 0.0],
+            verts: vec![
+                [-1.0, 1.0, 0.52],
+                [1.0, 1.0, 0.52],
+                [1.0, 1.0, 0.58],
+                [-1.0, 1.0, 0.58],
+            ],
+            surface: 9,
+        });
+        rt.solids = Some(std::sync::Arc::new(solids));
+        let mut actor = rt.things[0].clone();
+        actor.pos = [0.0, 0.0, 0.5];
+        actor.yaw = 0.0;
+        let mut player = rt.things[0].clone();
+        player.pos = [0.0, 2.0, 0.5];
+        player.flags = 0x4;
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "greedo".into()];
+        rt.types = vec![10, 2];
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=200, maxstep=0.6, sightdist=5.0, heardist=2.0, accuracy=0.25\n\n\
+                 LookForTarget 500.0, 50000.0\n",
+            ),
+        );
+        // Awake (the scan's own gate) and `0x200`, which holds `sithAI_CanDetectSightThing`'s chance
+        // at 1.0 — this grades the sight ray, not the random draw.
+        rt.actor_flags.insert(1, 0x204);
+        assert!(
+            !rt.solids.as_ref().unwrap().segment_blocked([0.0, 0.0, 0.5], [0.0, 2.0, 0.5]),
+            "the fixture must leave the thing-origin line clear"
+        );
+        rt.ai_tick(0, 0.1);
+        assert!(
+            !rt.ai_last_seen.contains_key(&1),
+            "the scan saw through the rail: it cast from the thing origin, not the model's eye"
+        );
+    }
+
+    /// The scan's range gate is `sithAI_CheckSightThing`'s **radius-subtracted** distance, not
+    /// `Ai::sees`'s plain `sightdist`: a body whose edge is inside the class's range is visible even
+    /// when its centre is outside it. `Ai::sees` refuses this target (5.05 > 5.0); the scan accepts it
+    /// because 5.05 - 0.065 <= 5.0.
+    #[test]
+    fn the_scan_accepts_a_body_edge_inside_sightdist() {
+        let mut rt = door_runtime();
+        let mut actor = rt.things[0].clone();
+        actor.pos = [0.0, 0.0, 0.5];
+        actor.yaw = 0.0;
+        let mut player = rt.things[0].clone();
+        player.pos = [0.0, 5.05, 0.5];
+        player.flags = 0x4;
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "greedo".into()];
+        rt.types = vec![10, 2];
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=200, maxstep=0.6, sightdist=5.0, heardist=2.0, accuracy=0.25\n\n\
+                 LookForTarget 500.0, 50000.0\n",
+            ),
+        );
+        let ai = rt.ai[&1].clone();
+        // The plain range test the scan used to apply refuses this body...
+        assert!(!ai.sees([0.0, 0.0, 0.575], 0.0, [0.0, 5.05, 0.5]), "sanity: centre is out of range");
+        rt.actor_flags.insert(1, 0x204);
+        rt.ai_last_seen.clear();
+        rt.ai_tick(0, 0.1);
+        assert!(
+            rt.ai_last_seen.contains_key(&1),
+            "the scan must accept a body whose edge is inside sightdist"
+        );
+    }
+
+    /// A captured deadline of 0 is **due now**: `sithAI_Process` calls the instinct update when
+    /// `instance + 0x190 <= now`, and `sithAI_InstinctUpdate` always arms its slots before writing
+    /// the next pass, so a fresh instance's 0 is a pass for the next tick, not "never".
+    #[test]
+    fn a_captured_zero_deadline_is_due_now_and_a_set_one_is_offset_from_the_origin() {
+        let mut rt = door_runtime();
+        rt.time = 4.2;
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.seed_capture_phase(
+            1,
+            4200,
+            &[(
+                1,
+                CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 0, next_pass_ms: 0 },
+            )],
+        );
+        assert_eq!(rt.ai_scan[&1], 4.2, "a captured 0 scan must be due now");
+        assert_eq!(rt.ai_detect_at[&1], 4.2, "a captured 0 pass must be due now");
+        // A captured deadline is relative to the capture's own origin.
+        rt.seed_capture_phase(
+            1,
+            4200,
+            &[(
+                1,
+                CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 4304, next_pass_ms: 4529 },
+            )],
+        );
+        assert!((rt.ai_scan[&1] - 4.304).abs() < 1e-4, "the scan waited {:?}", rt.ai_scan[&1]);
+        assert!((rt.ai_detect_at[&1] - 4.529).abs() < 1e-4, "the pass waited {:?}", rt.ai_detect_at[&1]);
     }
 }

@@ -1634,26 +1634,70 @@ enum Flow {
     Break,
 }
 
-/// Deterministic stand-in for the engine's RNG: scripts call `Rand()` to pick
-/// variants, and reproducible runs are worth more than true randomness here.
+thread_local! {
+    static SEED_STATE: std::cell::Cell<u32> = const { std::cell::Cell::new(0x1234_5678) };
+}
+
+/// The engine's `rand()`, which is one 32-bit LCG state at **`0x0054F750`**
+/// (`sithCog_g_pRandomSeed`): every AI roll and every script `Rand()` draws from it. The retail
+/// capture records that word at each sample (`route_door.tsv`'s `rng` column), so the port can start
+/// a run from the engine's own state instead of a made-up seed.
 pub fn pseudo_random() -> f64 {
-    use std::cell::Cell;
-    thread_local! {
-        static SEED: Cell<u32> = const { Cell::new(0x1234_5678) };
-    }
-    SEED.with(|s| {
-        let mut x = s.get();
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
+    SEED_STATE.with(|s| {
+        let x = s.get().wrapping_mul(214_013).wrapping_add(2_531_011);
         s.set(x);
-        (x % 10_000) as f64 / 10_000.0
+        // `rand()` returns `(state >> 16) & 0x7fff`; the engine's callers divide by `_DAT_0052307c`
+        // (32768). `frandom()` is that divided by the same constant.
+        f64::from((x >> 16) & 0x7fff) / 32_768.0
     })
+}
+
+/// Set the engine's `rand()` state (the captured word at `0x0054F750`). `jitter_aim` and the AI
+/// cadence read the same stream the retail engine advanced, so a seeded run continues the captured
+/// sequence rather than inventing one.
+pub fn set_random_seed(state: u32) {
+    SEED_STATE.with(|s| s.set(state));
+}
+
+/// The engine's current `rand()` state: what the capture's `rng` column reads.
+pub fn random_state() -> u32 {
+    SEED_STATE.with(|s| s.get())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The engine's `rand()` is the LCG at `0x0054F750`, and the committed capture records its word
+    /// at the door origin (811474043) and at every later sample. Stepping that state six times has
+    /// to reach 1423890337, the next word the capture wrote, or the port is not advancing the
+    /// engine's stream at all.
+    #[test]
+    fn the_a_i_random_stream_is_the_captures_lcg() {
+        set_random_seed(811_474_043);
+        let mut states = Vec::new();
+        for _ in 0..6 {
+            pseudo_random();
+            states.push(random_state());
+        }
+        assert_eq!(
+            states,
+            vec![
+                3_289_249_106,
+                1_226_606_285,
+                1_292_271_196,
+                1_303_876_527,
+                2_504_482_742,
+                1_423_890_337,
+            ],
+            "the AI random stream is not the engine's LCG at 0x0054F750"
+        );
+        // The draw is `(state >> 16) & 0x7fff` over 32768, the engine's `rand()`/32768.
+        set_random_seed(811_474_043);
+        assert_eq!(pseudo_random(), f64::from((3_289_249_106u32 >> 16) & 0x7fff) / 32_768.0);
+        // Leave the shared stream where every other test expects it.
+        set_random_seed(0x1234_5678);
+    }
 
     /// `kyle.cog` arms two timers in one frame — the 1.5 s respawn-invulnerability clear (id 1) and
     /// the bubbles check (id 2) — and with a single slot the startup's write erased the clear, which

@@ -633,6 +633,10 @@ fn main() {
     let mut stand: Option<String> = None;
     let mut shot: Option<String> = None;
     let mut shot_frame = 30u32;
+    // `--fixed-dt <seconds>`: the step a capture advances the simulation by, instead of the capture's
+    // 1/60 s. The door encounter measures the engine's own frame, which is not 1/60 (see
+    // `tools/parity/port-encounter.ps1`); play and route replay keep their fixed steps.
+    let mut fixed_dt: Option<f32> = None;
     let mut muted_flag = false;
     let mut sound_on = false;
     let mut audio_state = false;
@@ -880,6 +884,19 @@ fn main() {
     "--par" => par_probe = arg_value(&args, &mut i).cloned(),
             "--grep-assets" => grep_assets = arg_value(&args, &mut i).cloned(),
             "--shot" => shot = arg_value(&args, &mut i).cloned(),
+            "--fixed-dt" => {
+                // Same bounds as `BK_FIXED_DT` (`walker_step` clamps it): a non-finite or
+                // non-positive value would poison every `dt` consumer.
+                match arg_value(&args, &mut i).and_then(|v| v.parse::<f32>().ok()) {
+                    Some(step) if step.is_finite() && step > 0.0 => {
+                        fixed_dt = Some(step.clamp(1.0 / 240.0, 0.1));
+                    }
+                    _ => {
+                        eprintln!("--fixed-dt needs a finite, positive number of seconds (clamped to 1/240..0.1)");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--fall" => fall_check = true,
         "--falldeath" => falldeath_check = true,
         "--door" => door_check = true,
@@ -1476,6 +1493,12 @@ fn main() {
     }
     if audio_trace.is_some() && route_plan.is_none() {
         eprintln!("--audio-trace needs --replay <path>");
+        std::process::exit(2);
+    }
+    // `--fixed-dt` is the step of a screenshot/capture run. Play and route replay keep their own
+    // fixed steps (the wall clock and 1/60 s), so a step without `--shot` would silently retime them.
+    if fixed_dt.is_some() && shot.is_none() {
+        eprintln!("--fixed-dt needs --shot <file>: it sets a capture's step");
         std::process::exit(2);
     }
     // Both traces sample the same one-shot log and draining it is what makes each window's sounds
@@ -12731,7 +12754,7 @@ fn main() {
         .insert_resource(PulseCount::default())
         .insert_resource(CaptureDt(
             shot.as_ref()
-                .and_then(|s| (!s.is_empty()).then_some(1.0 / 60.0))
+                .and_then(|s| (!s.is_empty()).then_some(fixed_dt.unwrap_or(1.0 / 60.0)))
                 // A replay pins the step even without `--shot`: its comparability is exactly the
                 // fixed 1/60 s tick the route trace samples (see `RoutePlan`).
                 .or_else(|| route_plan.is_some().then_some(1.0 / 60.0)),
@@ -17872,6 +17895,38 @@ mod engine_capture_tests {
             }
         }
         assert_eq!(with_instincts, 51, "the actors whose class carries both instincts");
+    }
+
+    /// The port starts the encounter from this capture (issue #16): `read_capture_phase` is the one
+    /// reader, and it must carry the origin clock, the AI `rand()` word and the door actors' phase
+    /// through unchanged. The gunner had already acquired the player before the origin and its next
+    /// shot is 104 ms later; the scan-only actors are due 329 ms after it.
+    #[test]
+    fn the_committed_engine_capture_seeds_the_door_encounter_phase() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/parity/engine/route_door.tsv");
+        let seed = super::read_capture_phase(&path)
+            .unwrap_or_else(|| panic!("{} does not carry an origin block", path.display()));
+        assert_eq!(seed.origin_ms, 4200);
+        assert_eq!(seed.rng, 811_474_043, "the AI rand() word at the origin clock");
+        assert_eq!(seed.actors.len(), 57, "one phase per origin actor");
+        let gunner = seed.actors.iter().find(|(thing, _)| *thing == 154).expect("actor 154");
+        assert_eq!(
+            gunner.1,
+            runtime::CapturedPhase { flags: 1586, fire_ms: 4304, acquire_ms: 4550, next_pass_ms: 4304 },
+            "actor 154's phase"
+        );
+        let scanner = seed.actors.iter().find(|(thing, _)| *thing == 151).expect("actor 151");
+        assert_eq!(
+            scanner.1,
+            runtime::CapturedPhase { flags: 4, fire_ms: 0, acquire_ms: 4529, next_pass_ms: 4529 },
+            "actor 151's phase"
+        );
+        // The gunners that are not already firing carry no shot of their own.
+        let scheduled = seed.actors.iter().filter(|(_, p)| p.fire_ms > 0).count();
+        assert_eq!(scheduled, 1, "only the engaged gunner has a scheduled shot");
+        let scanning = seed.actors.iter().filter(|(_, p)| p.acquire_ms > 0).count();
+        assert_eq!(scanning, 10, "the armed door actors' scan deadlines");
     }
 }
 
@@ -26066,6 +26121,10 @@ fn projectile_hits(
             let (shields, health) = rt.damage_player(damage, kind);
             if rt.player_shields + health < before - 1e-4 {
                 rt.note_shot_landed(shot);
+            } else {
+                // A shot the player's invulnerability swallowed landed no damage; it is not a hit
+                // in the chronology, so the trace says miss.
+                rt.note_shot_lost(shot);
             }
             println!(
                 "hit: the player took {damage:.0}, {shields:.0} shield(s) and {health:.0} health left{suffix}"
@@ -26075,6 +26134,7 @@ fn projectile_hits(
             // The bolt's owner is the thing that fired it (`sithThing`'s owner field), and the
             // engine sends it as the damage message's source: a `killed:` handler's `GetSourceRef()`
             // is how a script knows this death was the player's.
+            rt.note_shot_lost(shot);
             rt.damage_typed_from(target as i64, damage, kind, owner.unwrap_or(0) as i64)
         };
         rt.things[shot].destroyed = true;
@@ -26587,6 +26647,83 @@ fn billboard_sprites(
     }
 }
 
+/// The origin block of the committed engine capture (`tools/parity/engine/route_door.tsv`, issue
+/// #21): the AI `rand()` word at the encounter clock and every actor's instinct phase from it.
+struct CapturePhase {
+    origin_ms: i64,
+    rng: u32,
+    actors: Vec<(usize, runtime::CapturedPhase)>,
+}
+
+/// Read the capture's origin block. `None` when the file is missing or does not carry the header the
+/// harness writes — a capture that cannot be read is not silently replaced by a guess.
+fn read_capture_phase(path: &std::path::Path) -> Option<CapturePhase> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let origin_ms = text
+        .lines()
+        .find_map(|line| line.strip_prefix("# origin_ms "))?
+        .trim()
+        .parse()
+        .ok()?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty() && !line.starts_with('#'));
+    let header: Vec<&str> = lines.next()?.split('\t').collect();
+    let column = |name: &str| -> Option<usize> { header.iter().position(|cell| *cell == name) };
+    let (template, kind, t_ms) = (
+        column("template")?,
+        column("kind")?,
+        column("t_ms")?,
+    );
+    let (rng, flags) = (column("rng")?, column("ai_flags")?);
+    let (fire, acquire, next_pass) = (
+        column("fire_next_ms")?,
+        column("acquire_next_ms")?,
+        column("next_pass_ms")?,
+    );
+    let mut rng_state = None;
+    let mut actors = Vec::new();
+    for line in lines {
+        let cells: Vec<&str> = line.split('\t').collect();
+        let Some(ms) = cells.get(t_ms).and_then(|c| c.parse::<i64>().ok()) else {
+            eprintln!("encounter: malformed capture row (no t_ms): {line}");
+            continue;
+        };
+        if cells.len() != header.len() || ms != origin_ms {
+            continue;
+        }
+        match cells[kind] {
+            "player" => match cells[rng].parse::<u32>() {
+                Ok(state) => rng_state = Some(state),
+                Err(_) => {
+                    eprintln!("encounter: malformed player row (rng {:?}): {line}", cells[rng]);
+                    return None;
+                }
+            },
+            "origin" => {
+                let number = |cell: &str| cell.parse::<i64>().unwrap_or(0);
+                let index = cells[template].parse::<usize>().ok();
+                let flag_word = cells[flags].parse::<u32>().ok();
+                match (index, flag_word) {
+                    (Some(index), Some(flags)) => actors.push((
+                        index,
+                        runtime::CapturedPhase {
+                            flags,
+                            fire_ms: number(cells[fire]),
+                            acquire_ms: number(cells[acquire]),
+                            next_pass_ms: number(cells[next_pass]),
+                        },
+                    )),
+                    _ => eprintln!(
+                        "encounter: malformed origin row (template {:?}, ai_flags {:?}): {line}",
+                        cells[template], cells[flags]
+                    ),
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(CapturePhase { origin_ms, rng: rng_state?, actors })
+}
+
 /// `BK_ENCOUNTER_OUT`: the fixed door-encounter timeline (issue #9).
 ///
 /// One TSV carries the same three observations the retail capture samples from the engine's own
@@ -26643,6 +26780,16 @@ impl EncounterTrace {
             }
         }
         self.started = true;
+        // The capture's origin block is the encounter's starting phase (issues #16/#21): the AI
+        // `rand()` word and each door actor's flag/deadline. The warp frame is the origin clock, so
+        // the captured milliseconds are applied as offsets from it. A run without a seed keeps the
+        // port's own phase.
+        if let Some(seed) = std::env::var_os("BK_ENCOUNTER_SEED")
+            .map(std::path::PathBuf::from)
+            .and_then(|path| read_capture_phase(&path))
+        {
+            rt.seed_capture_phase(seed.rng, seed.origin_ms, &seed.actors);
+        }
         // The warp frame's own shot can be stamped a frame before this check passes (the body is
         // still a hair off), so keep the last few frames' events and start the clock at the earliest
         // of them: clearing the whole queue dropped the encounter's first hit.
@@ -26670,26 +26817,41 @@ impl EncounterTrace {
         for event in std::mem::take(&mut rt.encounter_events) {
             let t_ms = ((event_time(&event) - origin).max(0.0) * 1000.0).round();
             match event {
-                // Only a shot that **landed on the player** is a `shot` row: retail's fixture sees
-                // shots exactly that way (its hit rows), so both sides record the same shots; the
-                // port's row is the launch and retail's is the impact, a flight apart.
+                // The plain spawn record; the `shot` row below is the landing that retail can see.
                 runtime::EncounterEvent::Shot { .. } => {}
-                runtime::EncounterEvent::ShotLanded { owner, template, pos, .. } => {
+                // A shot that landed on the player is the row retail's fixture can pair (its hit
+                // rows): the port's row is the launch and retail's is the impact, a flight apart.
+                // `detail` says what the shooter had as a target and that this shot hit.
+                runtime::EncounterEvent::ShotLanded { owner, template, pos, target, .. } => {
                     let _ = writeln!(
                         file,
-                        "{t_ms:.0}\tshot\t{owner}\t{template}\t{:.4}\t{:.4}\t{:.4}\t\t\t\t",
-                        pos[0], pos[1], pos[2]
+                        "{t_ms:.0}\tshot\t{owner}\t{template}\t{:.4}\t{:.4}\t{:.4}\t\t\t\ttarget {} hit",
+                        pos[0],
+                        pos[1],
+                        pos[2],
+                        target.map(|t| t.to_string()).unwrap_or_else(|| "-".into())
+                    );
+                }
+                // A shot that never landed on the player. Retail's fixture has no counterpart, so
+                // the gate does not pair these; the chronology still says hit or miss for every shot.
+                runtime::EncounterEvent::Miss { owner, template, target, .. } => {
+                    let _ = writeln!(
+                        file,
+                        "{t_ms:.0}\tmiss\t{owner}\t{template}\t\t\t\t\t\t\ttarget {} miss",
+                        target.map(|t| t.to_string()).unwrap_or_else(|| "-".into())
                     );
                 }
                 runtime::EncounterEvent::Hit {
                     amount,
                     shields,
                     health,
+                    health_lost,
+                    shields_lost,
                     ..
                 } => {
                     let _ = writeln!(
                         file,
-                        "{t_ms:.0}\thit\t{player}\t\t\t\t\t\t{health:.1}\t{shields:.1}\tamount {amount:.1}"
+                        "{t_ms:.0}\thit\t{player}\t\t\t\t\t\t{health:.1}\t{shields:.1}\tamount {amount:.1} health -{health_lost:.1} shields -{shields_lost:.1}"
                     );
                 }
             }
@@ -26759,6 +26921,7 @@ fn event_time(event: &runtime::EncounterEvent) -> f32 {
     match event {
         runtime::EncounterEvent::Shot { t, .. }
         | runtime::EncounterEvent::ShotLanded { t, .. }
+        | runtime::EncounterEvent::Miss { t, .. }
         | runtime::EncounterEvent::Hit { t, .. } => *t,
     }
 }
@@ -29410,7 +29573,11 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // ranges from 0.008 s to the 0.1 clamp depending on the level's weight, so 30 frames is anywhere
     // from a quarter second to three. A fixed step makes a check depend on the code, not the machine —
     // and it is what exposed the jump that never lands (`BK_FIXED_DT=0.0333`, level 1).
-    let dt = if overview.capture {
+    let dt = if let Some(step) = capture.as_deref().and_then(|c| c.0) {
+        // A `--fixed-dt` capture advances **every** system at that step: `sim_dt` pins scripts, AI
+        // and combat, and the walker has to follow or the player body runs on a second clock.
+        step
+    } else if overview.capture {
         1.0 / 60.0
     } else if std::env::var_os("BK_FIXED_DT").is_some() {
         env_f32("BK_FIXED_DT", 1.0 / 30.0).clamp(1.0 / 240.0, 0.1)

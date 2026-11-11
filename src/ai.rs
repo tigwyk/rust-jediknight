@@ -92,7 +92,18 @@ impl Ai {
         if reach <= 0.001 || reach > self.sightdist.max(0.001) {
             return false;
         }
-        // `sithAI_CheckSightThing` (`0x4eb090`) applies the cone only when its angle argument is
+        self.cone(from, yaw, to)
+    }
+
+    /// The class's horizontal view cone alone, no range test.
+    ///
+    /// `sithAI_CheckSightThing` (`0x4eb090`) applies the cone and the range as separate gates: the
+    /// range is compared against the distance **after the target's own radius is removed**, which is
+    /// why the scan cannot use [`Self::sees`]'s plain `sightdist` test.
+    pub fn cone(&self, from: [f32; 3], yaw: f32, to: [f32; 3]) -> bool {
+        let dx = to[0] - from[0];
+        let dy = to[1] - from[1];
+        // `sithAI_CheckSightThing` applies the cone only when its angle argument is
         // **positive**, and that argument is the cosine of the half angle: a class whose `fov=` is
         // 180 has `cos 90 = 0` and is therefore not coned at all. A point-blank actor facing away
         // (level 1's `reeyeesgun` at 0.34 units, cone `false`, `off 107`) sees the body in retail.
