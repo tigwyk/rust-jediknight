@@ -13,30 +13,38 @@
   `tick t_s x y z sector vel_x vel_y vel_z health shields` plus the door/switch cog state, the
   latched events and the mixer's audio state every 600 ms (36 ticks).
 
-  The gate checks seven things:
+  The gate checks eight things:
 
     1. determinism — the same script replayed twice produces byte-identical traces (retail and port
        must produce the same trace from the same inputs, so the port's own repeatability is a
        precondition);
-    2. the exit's own evidence — the plan presses use at both doors and never sends a synthetic
+    2. engine time (issue #17) — every sample carries the engine clock: its `t_s` is its tick at the
+       pinned step, the position delta of each window is exactly velocity × engine time, and the only
+       windows exempt from that identity are the plan's own `warp` rows (the retail leg boundaries).
+       A warp inside a leg would be a zero-velocity jump the plan does not name and fails; every plan
+       warp must land on a sample row, so a boundary cannot hide between samples. The comparator
+       grades `t_s` as an identity, so a replay running its body on a fitted capture clock fails here
+       instead of hiding inside the position epsilon; the retail prefix's rows must name these same
+       instants;
+    3. the exit's own evidence — the plan presses use at both doors and never sends a synthetic
        `activate`, the replay's use trace names the linked things (`use: activated thing 4` and
        `... 47`), `door0_opened` is shut at and before the first use tick and latched after it, the
        body's y then passes the opened leaf (the walk-through crossing), `goal_bin100` reaches 3, and
        `level_end` reaches 1 (the level's script called `jkEndLevel`);
-    3. the committed oracle — a replay matches `tools/parity/routetrace/level1-route-port.tsv`
+    4. the committed oracle — a replay matches `tools/parity/routetrace/level1-route-port.tsv`
        field for field, event columns included on **every** row (the oracle and the replay share the
-       port's fixed grid, so an early latch fails); the retail prefix in check 5 keeps the
+       port's fixed grid, so an early latch fails); the retail prefix in check 6 keeps the
        last-row-only event grade;
-    4. self-check — a copy of the trace with one position moved 0.25 units is **rejected** by the
+    5. self-check — a copy of the trace with one position moved 0.25 units is **rejected** by the
        comparator, so the gate is known to fail on a perturbed trace and pass on the unmodified one.
        `-Perturb` runs that check; the gate's normal run compares the unmodified trace;
-    5. retail parity — the replay matches `level1-route-retail.tsv` within the **epsilon the fixture
+    6. retail parity — the replay matches `level1-route-retail.tsv` within the **epsilon the fixture
        states** (`# epsilon <units>` in its header). Sectors stay exact inside the comparator;
-    6. mechanic provenance — `tools/parity/routes/level1-route-provenance.tsv` names the engine
+    7. mechanic provenance — `tools/parity/routes/level1-route-provenance.tsv` names the engine
        function and address behind every mechanic the route exercises (walk, floor, collision, use,
        cog messages, damage, AI fire, audio state, level end). A row still on re-derived code must
        name its deviation-ledger entry, and an entry the ledger does not carry fails;
-    7. the prerequisite gates — `audio-gate.ps1` (audio state through the same route) and
+    8. the prerequisite gates — `audio-gate.ps1` (audio state through the same route) and
        `encounter-gate.ps1` (AI fire, damage and the kill order at the door) must both pass. The
        route's own replay runs with `--no-ai`, so combat is measured by the encounter stage inside
        this gate rather than in the same process; `-SkipPrereqs` skips them for iteration and the
@@ -186,6 +194,7 @@ Write-Host 'PASS  required fields: health, shields and both cog states are recor
 # produce either line.
 $planTicks = 0
 $planUses = New-Object System.Collections.Generic.List[int]
+$planWarps = New-Object System.Collections.Generic.List[int]
 $planSwitch = $false
 foreach ($line in Get-Content -LiteralPath $RoutePath) {
   if ($line -match '^\s*(#|$)') { continue }
@@ -194,6 +203,7 @@ foreach ($line in Get-Content -LiteralPath $RoutePath) {
     'input' { $planTicks += [int]$f[1] }
     'wait' { $planTicks += [int]$f[1] }
     'use' { $planUses.Add($planTicks) }
+    'warp' { $planWarps.Add($planTicks) }
     'switch' { $planSwitch = $true }
   }
 }
@@ -293,6 +303,140 @@ if ($missingAudio.Count -gt 0) {
 }
 Write-Host ("PASS  coverage: {0} sample(s) over ticks 0..{1} (spawn to level completion, plan {2} ticks)" -f $rowCount, $expectedLastTick, $planTicks)
 Write-Host 'PASS  audio: every sample carries the song, its volume, the audible loop and the window''s one-shots'
+
+# 1e. Engine time (issue #17). Every sample carries the engine clock, and that clock is the one the
+# body moved on:
+#   * the row's `t_s` is its tick at the pinned step (36 ticks = 0.6000 s of engine time), so a
+#     replay that ran its body on a fitted capture clock records a different instant and fails;
+#   * on every window, the position delta is exactly velocity x engine time — the trace is its own
+#     proof that the clock moved the body;
+#   * the only windows that are exempt are the leg boundaries, and those are the plan's own `warp`
+#     rows. A warp inside a leg is a row the plan does not name, so its zero-velocity jump fails the
+#     identity: no warp can cover an intra-leg timing gap;
+#   * every plan warp lands on a sample row, so a boundary can never hide between two samples.
+#   * the frozen retail prefix's rows sit at these same engine instants (the retail half of AC1).
+$t_sCol = [Array]::IndexOf($traceHeader, 't_s')
+$xCol = [Array]::IndexOf($traceHeader, 'x')
+$zCol = [Array]::IndexOf($traceHeader, 'z')
+$velCols = @(0, 1, 2) | ForEach-Object { [Array]::IndexOf($traceHeader, @('vel_x', 'vel_y', 'vel_z')[$_]) }
+$xyzCols = @($xCol, $yCol, $zCol)
+if ($t_sCol -lt 0 -or @($xyzCols | Where-Object { $_ -lt 0 }).Count -gt 0 -or @($velCols | Where-Object { $_ -lt 0 }).Count -gt 0) {
+  Write-Host 'FAIL  engine clock: the trace has no t_s/x/y/z/vel_x/vel_y/vel_z column'
+  exit 1
+}
+$warpRows = @{}
+foreach ($warpTick in $planWarps) {
+  if ($warpTick % 36 -ne 0) {
+    Write-Host ("FAIL  engine clock: the plan's warp at tick {0} is not on a sample row, so its gap would be invisible" -f $warpTick)
+    exit 1
+  }
+  $warpRows[$warpTick] = $true
+}
+# The clock check is arithmetic over the trace, so it is a function and it is its own self-check:
+# a trace with one row's position moved (the same 0.25 units the comparator's self-check uses, and
+# the signature of a warp the plan does not name) must fail it.
+function Test-EngineClock([string[]]$Lines, [hashtable]$BoundaryRows) {
+  # Tick 0 is the first leg's start (the plan's opening `warp`), so it is a boundary even though no
+  # window precedes it.
+  $result = [pscustomobject]@{
+    Error = $null
+    Checked = 0
+    Boundaries = if ($BoundaryRows.ContainsKey(0)) { 1 } else { 0 }
+  }
+  $prev = $null
+  $prevTs = 0.0
+  foreach ($line in $Lines | Select-Object -Skip 1) {
+    $cells = @($line -split "`t")
+    $tick = [int]$cells[$tickCol]
+    $t_s = [double]$cells[$t_sCol]
+    $grid = $tick / 60.0
+    if ([math]::Abs($t_s - $grid) -gt 0.00005) {
+      $result.Error = "tick $tick was sampled at $($t_s.ToString('N4', [cultureinfo]::InvariantCulture)) s, not the engine's own $($grid.ToString('N4', [cultureinfo]::InvariantCulture)) s"
+      return $result
+    }
+    if ($null -ne $prev) {
+      $window = $t_s - $prevTs
+      if ($window -le 0) {
+        $result.Error = "tick $tick does not advance the clock past $($prevTs.ToString('N4', [cultureinfo]::InvariantCulture)) s"
+        return $result
+      }
+      if ($BoundaryRows.ContainsKey($tick)) {
+        $result.Boundaries++
+      } else {
+        for ($axis = 0; $axis -lt 3; $axis++) {
+          $moved = [double]$cells[$xyzCols[$axis]] - [double]$prev[$xyzCols[$axis]]
+          $want = [double]$cells[$velCols[$axis]] * $window
+          if ([math]::Abs($moved - $want) -gt 0.002) {
+            $axisName = @('x', 'y', 'z')[$axis]
+            $result.Error = "tick $tick $axisName moved $($moved.ToString('N4', [cultureinfo]::InvariantCulture)) but its velocity says $($want.ToString('N4', [cultureinfo]::InvariantCulture)); only a plan warp may jump inside the trace"
+            return $result
+          }
+        }
+      }
+    }
+    $prev = $cells
+    $prevTs = $t_s
+    $result.Checked++
+  }
+  return $result
+}
+
+$clock = Test-EngineClock $traceLines $warpRows
+if ($clock.Error) {
+  Write-Host ("FAIL  engine clock: {0}" -f $clock.Error)
+  exit 1
+}
+if ($clock.Boundaries -ne $planWarps.Count) {
+  Write-Host ("FAIL  engine clock: the trace has {0} leg boundary row(s) but the plan names {1} warp(s)" -f $clock.Boundaries, $planWarps.Count)
+  exit 1
+}
+$clockMoved = New-Object System.Collections.Generic.List[string]
+$clockMoved.Add($traceLines[0])
+$movedOnce = $false
+foreach ($line in $traceLines | Select-Object -Skip 1) {
+  $cells = @($line -split "`t")
+  if (-not $movedOnce -and $cells[$tickCol] -ne '0') {
+    $cells[$xCol] = ([double]$cells[$xCol] + 0.25).ToString('0.0000', [cultureinfo]::InvariantCulture)
+    $movedOnce = $true
+  }
+  $clockMoved.Add(($cells -join "`t"))
+}
+if (-not $movedOnce -or -not (Test-EngineClock $clockMoved.ToArray() $warpRows).Error) {
+  Write-Host 'FAIL  engine clock: a position moved 0.25 units inside a leg passed the clock check'
+  exit 1
+}
+
+# The retail prefix is the frozen reference for these engine instants: a retail row and the replay's
+# row at the same tick must name the same instant, or the comparison is between different times.
+$retailHeader = @(Get-Content -LiteralPath $RetailPath | Where-Object { $_ -match '^\s*tick\b' } | Select-Object -First 1) -split "`t"
+$retailTsCol = [Array]::IndexOf($retailHeader, 't_s')
+if ($retailTsCol -lt 0) {
+  Write-Host ("FAIL  engine clock: {0} has no t_s column" -f $RetailFixture)
+  exit 1
+}
+$replayTs = @{}
+foreach ($line in $traceLines | Select-Object -Skip 1) {
+  $cells = @($line -split "`t")
+  $replayTs[[int]$cells[$tickCol]] = $cells[$t_sCol]
+}
+$retailInstants = 0
+foreach ($line in Get-Content -LiteralPath $RetailPath) {
+  if ($line -match '^\s*(#|$)') { continue }
+  $cells = @($line -split "`t")
+  if ($cells[0] -eq 'tick') { continue }
+  $tick = [int]$cells[0]
+  if (-not $replayTs.ContainsKey($tick)) {
+    Write-Host ("FAIL  engine clock: the retail prefix samples tick {0}, which the replay does not" -f $tick)
+    exit 1
+  }
+  if ($replayTs[$tick] -ne $cells[$retailTsCol]) {
+    Write-Host ("FAIL  engine clock: tick {0} is {1} s in the retail prefix and {2} s in the replay" -f $tick, $cells[$retailTsCol], $replayTs[$tick])
+    exit 1
+  }
+  $retailInstants++
+}
+Write-Host ("PASS  engine clock: {0} sample(s) at the engine's own instants, {1} leg boundary row(s) (the plan's warps), velocity x engine time on every other window, and the retail prefix's {2} row(s) sampled at the same instants; a 0.25-unit move inside a leg is rejected" -f $clock.Checked, $clock.Boundaries, $retailInstants)
+
 
 # 2. The committed oracle. The comparator is the app's own `--route-compare`; exit code is the gate.
 # `--events-per-row` is the oracle's rule: the port fixture and the replay share the port's fixed

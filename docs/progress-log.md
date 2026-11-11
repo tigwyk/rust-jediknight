@@ -6454,3 +6454,40 @@ port oracles (the RNG stream loses the blocked actors' detection rolls: the door
 shot sounds). `route-gate.ps1`: determinism, the committed oracle and the self-check pass; the
 retail comparison still reports 29 fields beyond 1.7 (28 before — the port's route body survives
 where retail's fixture dies, which is the pre-existing divergence, not this fix's).
+
+### Round 434: issue #17 — the route trace runs on the engine clock, not a fitted capture clock
+
+The route replay carried `ROUTE_TIME_SCALE` (0.85), which multiplied the walker's `dt` so its fixed
+600 ms samples lined up with the retail capture's wall-clock holds: the body advanced 0.85 s of
+motion per wall second while every row declared 1/60 s per tick. That is a capture-clock fit, and it
+made `t_s` a wall-clock label on an engine-time column — the row's `t_s` was computed from the tick
+count, never from the clock the simulation ran on, so the two could disagree by 15 % and no gate
+could see it. The retail fixture's position tolerance was carrying the difference.
+
+The clock is now at source. `RouteCursor` owns `engine_s`, advanced by `advance_engine_clock` with
+the same `CaptureDt` step `sim_dt` and `walk_player` hand the engine each frame (`sithTime_Advance`'s
+frame delta for the pinned capture frame, inside its [10, 500] ms clamp). `ROUTE_TIME_SCALE` is
+deleted, the walker and the scripts share one clock, `t_s` is written from `engine_s`, and the
+velocity columns divide by the engine-clock window (`RoutePrev` stores the engine instant, not the
+tick). The comparator now grades `t_s` as an **identity** like `tick` and `sector`: a replay whose
+body ran on a scaled clock records a different engine instant at the same sample and fails, so no
+position tolerance can excuse one again.
+
+`route-gate.ps1` gained the engine-time check (eight checks now): every row's `t_s` must be its tick
+at the pinned step; on every window the position delta must equal velocity × engine time; the only
+exempt windows are the plan's own `warp` rows, and every plan warp must land on a sample row — so a
+warp inside a leg is a zero-velocity jump the plan does not name, and fails. The check is a function
+and carries its own negative: a copy of the trace with one position moved 0.25 units inside a leg is
+rejected, so the gate is known to fail on the intra-leg jump it forbids. The gate also requires the
+frozen retail prefix's rows to name the same engine instants the replay sampled.
+
+Measured (`route-gate.ps1`, no retail run): the port oracle was refreshed after the source changed;
+28 of 43 rows moved, and only in x/y/z/vel_x/vel_y/vel_z (and one tunnel sector transition) — the
+audio columns, bars, cogs and latched events are byte-identical. Against the frozen retail prefix at
+its stated 1.70, the port's large deviations **shrank**: max |Δx| 1.0293 → 0.8727 and max |Δvel_x|
+1.5772 → 1.4546, with every column inside the unchanged bound. Two replays remain byte-identical,
+and the route still reaches the exit through the door and level-end path (`door0_opened` 1,
+`goal_bin100` 3, `level_end` 1 at tick 1512).
+
+The deviation-ledger row *route replay time scale* is retired; the provenance row now names
+`sithTime_Advance` (`0x4dd640`) → `advance_engine_clock` (`src/main.rs`) as `ported`.
