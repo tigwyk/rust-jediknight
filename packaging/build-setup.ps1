@@ -55,9 +55,11 @@ try {
         if (-not (Test-Path -LiteralPath $path)) { throw "missing reference $path" }
     }
 
-    # Icon: the retail main menu, centre-cropped, as the setup's window icon.
+    # Icon: the retail main menu, centre-cropped, as the setup's window icon. The capture is not
+    # committed (the parity recapture removed it), so build without a custom icon rather than fail.
     $icon = Join-Path $dist 'app.ico'
     $sourceIcon = Join-Path $repo 'docs\menu-main.png'
+    $iconArg = @()
     if (Test-Path -LiteralPath $sourceIcon) {
         Add-Type -AssemblyName System.Drawing
         $image = [System.Drawing.Image]::FromFile($sourceIcon)
@@ -76,9 +78,10 @@ try {
         $ico.Save($stream)
         $stream.Close()
         $bitmap.Dispose()
+        $iconArg = @("/win32icon:$icon")
         Write-Host "==> icon from docs\menu-main.png"
     } else {
-        throw 'docs\menu-main.png is needed for the setup icon'
+        Write-Warning 'no docs\menu-main.png; compiling the setup and uninstaller without a custom icon'
     }
 
     # Payload: the game, the film helper and the player-facing docs, zipped into the setup.
@@ -105,7 +108,7 @@ try {
 
     Write-Host '==> compiling the uninstaller'
     $uninstaller = Join-Path $payload 'bevi-knight-uninstall.exe'
-    & $csc /nologo /target:winexe /optimize+ /platform:anycpu "/win32icon:$icon" "/out:$uninstaller" $refs (Join-Path $PSScriptRoot 'Uninstall.cs')
+    & $csc /nologo /target:winexe /optimize+ /platform:anycpu $iconArg "/out:$uninstaller" $refs (Join-Path $PSScriptRoot 'Uninstall.cs')
     if ($LASTEXITCODE -ne 0) { throw 'the uninstaller did not compile' }
 
     Write-Host '==> packing the payload'
@@ -118,7 +121,7 @@ try {
         "static class BuildInfo { public const string Version = `"$version`"; }`r`n")
     $setup = Join-Path $dist "bevi-knight-$version-setup.exe"
     if (Test-Path -LiteralPath $setup) { Remove-Item -LiteralPath $setup -Force }
-    & $csc /nologo /target:winexe /optimize+ /platform:anycpu "/win32icon:$icon" "/out:$setup" `
+    & $csc /nologo /target:winexe /optimize+ /platform:anycpu $iconArg "/out:$setup" `
         "/resource:$zip,payload.zip" $refs $zipRefs (Join-Path $PSScriptRoot 'Setup.cs') $buildInfo
     if ($LASTEXITCODE -ne 0) { throw 'the setup did not compile' }
 
