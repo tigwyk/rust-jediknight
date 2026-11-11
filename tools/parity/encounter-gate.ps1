@@ -50,12 +50,13 @@
   runs to be **byte-identical** — the capture pins `dt` and runs a single-threaded executor, so a
   difference is a nondeterminism bug, not a tolerance.
 
-  The port half runs at the encounter's **1/30 s** step (`port-encounter.ps1 -Step`, passed as
-  `--fixed-dt`): `sithWeapon_Update` decays a bolt's damage once per engine tick, so the per-hit
-  value depends on how many ticks the bolt flew. The fixture's own per-hit bars are reproduced
-  exactly at 1/30 s (measurement below); at 1/60 s the port deals 1.5 health more over the 13 hits,
-  and an impact-fraction decay correction was tried and overshot (20.5 vs 22.0). The step is a test
-  parameter, not a fitted tolerance. Play and the route replay keep their own steps.
+  The port half runs at the encounter's **1/30 s** frame (`-Step`, passed to `port-encounter.ps1`
+  and on as `--fixed-dt`). That is a model of the frozen encounter, not a tuning knob: the retail
+  cadence's intervals are whole numbers of that frame (500/600/700/800/900 ms = 15/18/21/24/27
+  frames; the 667..900 ladder is 20..27), and the gate validates every retail interval against the
+  step and fails if the fixture is off the quantum. `route_door.tsv`'s 395 samples over 10 s are a
+  **different run** (~25 ms samples) and are not this gate's frame evidence. Play and the route
+  replay keep 1/60 s.
 
   Tolerances are parameters with measured defaults. The per-hit and settled-bar tolerances are the
   fixture's own per-hit noise (its per-hit amounts span 11.2-11.4); they are not a padded band that
@@ -102,6 +103,12 @@ param(
   # at the first sample; this is the distance below which two rows are the same authored placement
   # (actors both builds place agree to 0.004 units). An actor with no counterpart fails.
   [double]$ActorIdentityTolerance = 0.5,
+  # The encounter's comparison frame, in seconds. The frozen encounter's cadence is on the engine
+  # frame: its intervals (500/600/700/800/900 ms) are 15/18/21/24/27 whole frames at 1/30 s (the
+  # 667/700/733/767/800/833/866/900 ladder is 20..27). The gate validates the retail intervals
+  # against this step and fails if the fixture is off the quantum. It is passed to the port as
+  # `--fixed-dt`, not used as a tolerance: play and route replay keep 1/60 s.
+  [double]$Step = 1.0 / 30.0,
   # Consecutive-shot interval band. Retail's impacts are quantised by its 100 ms sample grid, so one
   # interval can differ by that grid plus a frame; measured max on the door fixture is 234 ms.
   [double]$ShotCadenceToleranceMs = 250
@@ -125,6 +132,22 @@ function Num([string]$Text) {
   $value = 0.0
   if ([double]::TryParse($Text, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value)) { return $value }
   return $null
+}
+# An interval is on the frame quantum when it is within 1 ms of a whole number of steps. The frozen
+# encounter's cadence is quantised by its 100 ms sample grid, and 100 ms is itself a whole number of
+# 1/30 s frames, so the grid cannot hide an off-quantum frame. This is the gate's `-Step` evidence
+# (the encounter frame), never a tolerance.
+function Test-CadenceQuantum([double[]]$Intervals, [double]$Step) {
+  # A List, not an array: PowerShell unrolls an empty or single-element array into $null / a scalar,
+  # which makes "no bad intervals" indistinguishable from "one".
+  $bad = [System.Collections.Generic.List[double]]::new()
+  if ($Step -le 0) { $bad.Add(-1.0); return $bad }
+  foreach ($iv in @($Intervals)) {
+    $seconds = $iv / 1000.0
+    $n = [math]::Round($seconds / $Step)
+    if ($n -lt 1 -or [math]::Abs($seconds - $n * $Step) -gt 0.001) { $bad.Add($iv) }
+  }
+  return $bad
 }
 function Read-Trace([string]$Path) {
   $rows = [System.Collections.Generic.List[object]]::new()
@@ -182,20 +205,15 @@ function Get-KillOrder($Rows) {
 
 
 
-# ---- retail fixture: committed, with a fresh capture taking precedence -------------------------
-$retailPath = $Retail
-if (-not $retailPath) {
-  $retailPath = Join-Path $OutDir ("{0}.tsv" -f $Only)
-  if (-not (Test-Path -LiteralPath $retailPath)) {
-    $fixture = Join-Path $FixtureDir ("{0}.tsv" -f $Only)
-    if (-not (Test-Path -LiteralPath $fixture)) {
-      Fail "no retail fixture for '$Only' (looked for $fixture); capture it with tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door -EncounterMs 10000 -EncounterCadenceMs 100"
-      Write-Host ("encounter gate: {0} failure(s)" -f $failures)
-      exit 1
-    }
-    Copy-Item -LiteralPath $fixture -Destination $retailPath
-    Write-Host ("seeded {0} from the committed retail fixture" -f $retailPath)
-  }
+# ---- retail fixture: the committed file is the retail side --------------------------------------
+# Never cache it under `$OutDir`: that directory also holds the port runs, and `port-encounter.ps1`
+# writes `<name>.tsv` there, so a cached "retail" copy can silently become a port run and the gate
+# then compares the port against itself. A fresh retail capture is passed explicitly with `-Retail`.
+$retailPath = if ($Retail) { $Retail } else { Join-Path $FixtureDir ("{0}.tsv" -f $Only) }
+if (-not (Test-Path -LiteralPath $retailPath)) {
+  Fail "no retail fixture for '$Only' (looked for $retailPath); capture it with tools/parity/retail-capture.ps1 -Shots tools/parity/shots.tsv -Only route_door -EncounterMs 10000 -EncounterCadenceMs 100"
+  Write-Host ("encounter gate: {0} failure(s)" -f $failures)
+  exit 1
 }
 if (-not (Test-Path -LiteralPath $retailPath)) { Fail "missing retail trace $retailPath"; Write-Host ("encounter gate: {0} failure(s)" -f $failures); exit 1 }
 
@@ -205,9 +223,9 @@ $repeatPath = ''
 if (-not $portPath) {
   $portPath = Join-Path $OutDir ("{0}-a.tsv" -f $Only)
   if (-not $SkipCapture) {
-    & pwsh -NoProfile -File tools/parity/port-encounter.ps1 -Encounters $Encounters -Out $OutDir -Only $Only -Suffix '-a'
+    & pwsh -NoProfile -File tools/parity/port-encounter.ps1 -Encounters $Encounters -Out $OutDir -Only $Only -Suffix '-a' -Step $Step
     if (-not $NoRepeat) {
-      & pwsh -NoProfile -File tools/parity/port-encounter.ps1 -Encounters $Encounters -Out $OutDir -Only $Only -Suffix '-b'
+      & pwsh -NoProfile -File tools/parity/port-encounter.ps1 -Encounters $Encounters -Out $OutDir -Only $Only -Suffix '-b' -Step $Step
       $repeatPath = Join-Path $OutDir ("{0}-b.tsv" -f $Only)
       if (-not (Test-Path -LiteralPath $repeatPath)) { $repeatPath = '' }
     }
@@ -310,6 +328,31 @@ if ($shotDeltas.Count -gt 0) {
   # actually guarantees, not one run's ordering.
   $retailIntervals = @(for ($i = 1; $i -lt $retailShotSeries.Count; $i++) { [double]$retailShotSeries[$i].T - [double]$retailShotSeries[$i - 1].T }) | Sort-Object
   $portIntervals = @(for ($i = 1; $i -lt $portShotSeries.Count; $i++) { [double]$portShotSeries[$i].T - [double]$portShotSeries[$i - 1].T }) | Sort-Object
+
+  # ---- the encounter frame model: the frozen cadence is whole frames ---------------------------
+  # Positive and negative controls first: the model's own 20..27-frame ladder must validate and a
+  # 2 ms off-quantum interval must not, so the check cannot pass by accepting everything.
+  $ladder = @(20..27 | ForEach-Object { $_ * $Step * 1000.0 })
+  if ((Test-CadenceQuantum $ladder $Step).Count -ne 0) {
+    Fail ("cadence quantum self-check: the 20..27 x {0:N4} s ladder was rejected" -f $Step)
+  } elseif ((Test-CadenceQuantum @($ladder[0] + 2.0) $Step).Count -eq 0) {
+    Fail ("cadence quantum self-check: a 2 ms off-quantum interval was accepted at {0:N4} s" -f $Step)
+  } else {
+    Write-Host ("      frame self-check: 20..27 x {0:N4} s accepted, +2 ms rejected" -f $Step)
+  }
+  $badQuantum = Test-CadenceQuantum $retailIntervals $Step
+  if ($badQuantum.Count -gt 0) {
+    Fail ("the frozen encounter's cadence is not on the {0:N4} s frame: interval(s) {1} ms are not whole frames" -f $Step, (($badQuantum | ForEach-Object { '{0:N0}' -f $_ }) -join ','))
+  } else {
+    $multiples = @($retailIntervals | ForEach-Object { [math]::Round(($_ / 1000.0) / $Step) })
+    $worstQuantum = 0.0
+    foreach ($iv in $retailIntervals) {
+      $seconds = $iv / 1000.0
+      $n = [math]::Round($seconds / $Step)
+      $worstQuantum = [math]::Max($worstQuantum, [math]::Abs($seconds - $n * $Step) * 1000.0)
+    }
+    Write-Host ("PASS  encounter frame: the retail cadence is {0} whole frame(s) of {1:N4} s (worst {2:N2} ms off the quantum)" -f ($multiples -join ','), $Step, $worstQuantum)
+  }
   $cadenceCount = [math]::Min($retailIntervals.Count, $portIntervals.Count)
   if ($cadenceCount -eq 0) {
     Write-Host '      cadence intervals: not enough events to compare'

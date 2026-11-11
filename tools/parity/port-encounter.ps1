@@ -34,11 +34,11 @@ param(
   # #16). The runtime adopts its `rand()` word and each door actor's flag/deadline; an empty value
   # leaves the port's own phase.
   [string]$Seed = 'tools/parity/engine/route_door.tsv',
-  # The step the port advances the encounter by. `sithWeapon_Update` decays a bolt's damage once per
-  # engine tick, so the per-hit value depends on the ticks flown; at 1/30 s the port's per-hit bars
-  # are exactly the fixture's (delta 0.0), at 1/60 s it deals 1.5 health more over the 13 hits. This
-  # is a parameter of the gate, not a fitted tolerance. Play and route replay keep the wall clock
-  # and 1/60 s.
+  # The step the port advances the encounter by: the encounter's own engine frame model, 1/30 s. The
+  # frozen encounter's cadence intervals are whole frames of it (500/600/700/800/900 ms =
+  # 15/18/21/24/27), and `encounter-gate.ps1` validates that and passes this value. It is not a fitted
+  # tolerance. `route_door.tsv`'s ~25 ms samples are a different run, not this gate's frame evidence.
+  # Play and route replay keep the wall clock and 1/60 s.
   [double]$Step = 1.0 / 30.0,
   [string[]]$Only = @()
 )
