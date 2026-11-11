@@ -27671,17 +27671,13 @@ impl EncounterTrace {
         {
             rt.seed_capture_phase(seed.rng, seed.origin_ms, &seed.actors);
         }
-        // The warp frame's own shot can be stamped a frame before this check passes (the body is
-        // still a hair off), so keep the last few frames' events and start the clock at the earliest
-        // of them: clearing the whole queue dropped the encounter's first hit.
+        // The warp frame is the origin clock. It must not be derived from the shot queue: whether a
+        // pre-warp bolt was stamped in the last tenth of a second depends on which system published
+        // the body first, and deriving the origin from it made two identical runs end 100 ms apart
+        // (one extra actor sample). Pre-arm events are kept and clamp to t = 0 in `record`.
         rt.encounter_events
             .retain(|event| event_time(event) >= rt.time - 0.1);
-        self.origin = Some(
-            rt.encounter_events
-                .iter()
-                .map(event_time)
-                .fold(rt.time, f32::min),
-        );
+        self.origin = Some(rt.time);
         true
     }
 
@@ -31608,8 +31604,8 @@ mod registration_tests {
             "the collider hand-off is unordered with a level swap: the swap's fresh runtime reaches the AI tick with no geometry"
         );
         assert!(
-            source.contains("ai_shots.after(share_collider)"),
-            "ai_shots is unordered with share_collider: the first AI tick of a level tests sight against no geometry"
+            source.contains("ai_shots.after(share_collider).after(walk_player)"),
+            "ai_shots is unordered with walk_player: the encounter's arm can read a body one tick before the warp, so the trace origin and sample count drift between runs"
         );
     }
 
