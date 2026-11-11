@@ -1,0 +1,9 @@
+tick	time_s	wav	gain	volume	distance	forward	min_radius	max_radius	max_volume	snd	event	source
+29	0.4833	reeyee02.wav	0.7500	1.5000	0.3159	-0.9266	0.0000	0.0000	1.0000	rystr.snd	alert	cog PlaySoundThing -> sithSoundMixer_PlaySoundThing (0x4dba60)
+70	1.1667	trprsht1.wav	0.5688	1.0000	1.4173	-0.3971	1.0000	4.0000	1.0000	io.snd	fire1	sithWeapon_WeaponFireProjectile (0x4d45a0) -> sithSoundMixer_PlaySoundThing (0x4dba60)
+141	2.3500	trprsht1.wav	0.5688	1.0000	1.4173	-0.3971	1.0000	4.0000	1.0000	io.snd	fire1	sithWeapon_WeaponFireProjectile (0x4d45a0) -> sithSoundMixer_PlaySoundThing (0x4dba60)
+218	3.6333	trprsht1.wav	0.7500	1.0000	0.2664	0.8207	1.0000	4.0000	1.0000	io.snd	fire1	sithWeapon_WeaponFireProjectile (0x4d45a0) -> sithSoundMixer_PlaySoundThing (0x4dba60)
+280	4.6667	trprsht1.wav	0.7367	1.0000	1.0530	0.0459	1.0000	4.0000	1.0000	io.snd	fire1	sithWeapon_WeaponFireProjectile (0x4d45a0) -> sithSoundMixer_PlaySoundThing (0x4dba60)
+319	5.3167	trprsht1.wav	0.5421	1.0000	1.8314	0.0483	1.0000	4.0000	1.0000	io.snd	fire1	sithWeapon_WeaponFireProjectile (0x4d45a0) -> sithSoundMixer_PlaySoundThing (0x4dba60)
+466	7.7667	trprsht1.wav	0.5090	1.0000	1.1407	-0.9599	1.0000	4.0000	1.0000	io.snd	fire1	sithWeapon_WeaponFireProjectile (0x4d45a0) -> sithSoundMixer_PlaySoundThing (0x4dba60)
+474	7.9000	trprsht1.wav	0.6015	1.0000	1.2738	-0.3915	1.0000	4.0000	1.0000	io.snd	fire1	sithWeapon_WeaponFireProjectile (0x4d45a0) -> sithSoundMixer_PlaySoundThing (0x4dba60)
