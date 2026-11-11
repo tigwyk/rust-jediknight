@@ -2773,8 +2773,9 @@ running app.--carry-check --start 01narshadda                        0   level 2
   messages, damage, AI fire, audio state and level end (26 rows, 9 mechanics). `route-gate.ps1`
   verifies each `ported` row's symbol exists in its source and each `deviated` row's ledger entry is
   in `docs/porting-roadmap.md`; `route_tests::every_route_mechanic_names_its_engine_function` does
-  the same in `cargo test`. The two new ledger rows are the replay's `ROUTE_TIME_SCALE` clock fit
-  and the per-thing `sighted` substitution, so neither is hidden by the gate.
+  the same in `cargo test`. The replay's `ROUTE_TIME_SCALE` clock fit was a `deviated` row until
+  issue #17 retired it (the ledger row says so); the per-thing `sighted` substitution remains
+  `deviated`, so the gate cannot hide it.
 - **The audio route no longer diverges.** Its synthetic `switch` row is gone (it had been
   unparseable since #15 removed the trigger); the audio plan is the movement route's legs and its
   port oracle is refreshed from a double run.

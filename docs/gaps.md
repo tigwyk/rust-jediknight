@@ -7288,9 +7288,10 @@ checks, and even those should be run deliberately.
 - **Mechanic provenance is data**: `tools/parity/routes/level1-route-provenance.tsv` names the
   engine function, decomp address, port symbol and source for walk, floor, collision, use, cog
   messages, damage, AI fire, audio state and level end. `route_tests::every_route_mechanic_names_its_engine_function`
-  and `route-gate.ps1` both check it; the two mechanics still re-derived (the replay's
-  `ROUTE_TIME_SCALE` clock fit and the per-thing `sighted` substitution) are `deviated` rows
-  pointing at their new ledger entries, so the gate cannot hide them.
+  and `route-gate.ps1` both check it. The replay's `ROUTE_TIME_SCALE` clock fit was a `deviated`
+  row until issue #17 retired it (its ledger row says `retired`); the one remaining re-derived
+  mechanic, the per-thing `sighted` substitution, is a `deviated` row pointing at the ledger, so
+  the gate cannot hide it.
 - **The audio route no longer diverges.** Its synthetic `switch` row is gone; the audio plan is the
   movement route's own legs (the row had become unparseable when #15 removed the synthetic trigger).
 - **Sectors stay exact and the retail fixture stays frozen.** The retail half is still graded over
