@@ -1502,12 +1502,6 @@ pub struct Runtime {
     /// `SkillTarget` returns the victim's class script's answer, which is where a force power's
     /// damage actually lives (`actor_pm.cog`: 10 for grip, 5 for deadly sight).
     pub class_skill: BTreeMap<i32, Vec<(i32, f32)>>,
-    /// Things the engine has woken. `sithRender` latches `SITH_SECTOR_SEEN` the first time a sector is
-    /// drawn, and a thing's class cog is sent `created` when its thing is woken — **not** at level
-    /// load. Retail's own saves show it: level 1's load-time autosave carries no population bin
-    /// (73 = 0), while level 2's carries 10.5 after the level was played. Every placed thing used to
-    /// wake at load here, so level 1's population read 12.5 before the player had moved.
-    pub awakened: std::collections::BTreeSet<usize>,
     /// `jkEnableSaber`/`jkDisableSaber`, and the saber camera the scripts switch to.
     pub saber_enabled: bool,
     pub saber_cam: i32,
@@ -2289,7 +2283,6 @@ impl Runtime {
             thing_class_cog: BTreeMap::new(),
             thing_capture_cog: BTreeMap::new(),
             class_skill: BTreeMap::new(),
-            awakened: std::collections::BTreeSet::new(),
             saber_enabled: true,
             saber_cam: 0,
             item_cog: BTreeMap::new(),
@@ -7555,28 +7548,6 @@ impl Runtime {
         None
     }
 
-    /// Wake every thing standing in `sector` and answer the class instances that should be sent
-    /// `created`. A thing wakes once: the second call for the same sector answers nothing, which is
-    /// what makes the wake idempotent across frames.
-    pub fn awaken_sector(&mut self, sector: i32) -> Vec<usize> {
-        let things: Vec<usize> = self
-            .things
-            .iter()
-            .enumerate()
-            .filter(|(_, thing)| thing.sector == sector && !thing.destroyed)
-            .map(|(index, _)| index)
-            .collect();
-        let mut woke = Vec::new();
-        for thing in things {
-            if !self.awakened.insert(thing) {
-                continue;
-            }
-            if let Some(instance) = self.thing_class_cog.get(&thing).copied() {
-                woke.push(instance as usize);
-            }
-        }
-        woke
-    }
     /// Which instances are linked to `thing`, so a damage or death can message them.
     pub fn thing_instances(&self, thing: usize) -> Vec<usize> {
         let mut out: Vec<usize> = self
@@ -8725,6 +8696,15 @@ impl Runtime {
     /// Put [`Self::carry`]'s state onto this (freshly built) level's player.
     pub fn adopt(&mut self, carry: &CarryOver) {
         self.inv = carry.inv.clone();
+        // The goal counters are per level. `sithInventory_ResetInventory` (`0x4d2560`) zeroes the
+        // bins whose table flag carries `0x40` at level load, before the level's scripts run;
+        // `SetGoalFlags`/`ClearGoalFlags` (`0x4e0c40`/`0x4e0cc0`) then write the new level's own
+        // objective state. Retail's level-2 autosave proves it: level 1 finished with goal 0 = 3
+        // (`01_endlevel.cog`'s `SetGoalFlags(player, 0, 2)`), and level 2's save reads 1, written by
+        // `02_endlevel.cog`'s startup — not the carried 3.
+        for bin in 100..=115 {
+            self.inv.insert(bin, 0.0);
+        }
         self.weapon = carry.weapon.clone();
         self.cur_bin = carry.cur_bin;
         if let Some(blade) = &carry.saber {
@@ -12734,6 +12714,7 @@ mod tests {
         let mut leaving = door_runtime();
         leaving.call("SetInv", &[Value::Num(0.0), Value::Num(2.0), Value::Num(3.0)]);
         leaving.call("SetInv", &[Value::Num(0.0), Value::Num(14.0), Value::Num(50.0)]);
+        leaving.call("SetInv", &[Value::Num(0.0), Value::Num(100.0), Value::Num(3.0)]);
         leaving.weapon = Some("+bryarbolt".to_string());
         leaving.cur_bin = 2;
         leaving.call(
@@ -12756,6 +12737,11 @@ mod tests {
         arriving.adopt(&carry);
         assert_eq!(arriving.inv.get(&2).copied(), Some(3.0), "the inventory did not carry");
         assert_eq!(arriving.inv.get(&14).copied(), Some(50.0), "the force mana did not carry");
+        assert_eq!(
+            arriving.inv.get(&100).copied(),
+            Some(0.0),
+            "the previous level's goal counter carried"
+        );
         assert_eq!(arriving.weapon.as_deref(), Some("+bryarbolt"), "the weapon did not carry");
         assert_eq!(arriving.cur_bin, 2, "the armed bin did not carry");
         let blade = arriving.saber.get(&arriving.player_thing()).cloned().unwrap_or_default();
