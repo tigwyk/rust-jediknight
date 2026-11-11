@@ -2794,3 +2794,28 @@ running app.--carry-check --start 01narshadda                        0   level 2
   max 117 ms of 250, settled 14.3 vs retail 22.3). `cargo test --release`: **338 passed**.
 - No new retail capture was taken; the frozen retail fixtures were not edited.
 
+
+## Issue #19 — the level-2 carry is retail's autosave bin for bin
+
+- **`created` is a load-time message, not a sector-draw wake.** `sithOpenPostProcess` (`0x4c4880`)
+  sends `created` (15) to every thing's class cog after the `startup` broadcast and before it writes
+  the load-time autosave. Round 107's sector wake was the wrong reading of the same two saves: the
+  level-1 save is written there before the 1 s `created:` timers fire (73 = 0), and level 2's is
+  written after level 1 was played (73 = 10.5). `setup` now queues `created` for every class
+  instance after `wire_links`; `Runtime::awaken_sector`/`awakened` are gone.
+- **`SetTimer` is the cog's single slot, `SetTimerEx` the event queue.** `sithCogFunction_SetTimer`
+  (`FUN_00506340`) pops one value and sets the cog's one due time; `sithCog_ProcessCog` (`0x4e0300`)
+  sends `timer` with sender id 0 and no parameters. The port had treated it as `SetTimerEx`, so
+  level 1's two `actor_fn.cog` actors credited the population bin they should not: 12.5 → **10.5**,
+  retail's level-2 number, with no fitted constant. `--activation` sends `created`, ticks the
+  timers and asserts 10.5.
+- **The carry is the engine's own bin table.** `jks::ENGINE_BINS` is the 82 bins
+  `sithGamesave_SaveCurrentWorld` (`0x4da770`) walks; `jks::inventory_sections` writes one 28-byte
+  `sithDSS_Inventory` (`0x4f9900`) record per bin, and `write_snapshot` puts them in every save, so
+  the reader gets the same bins back. The goal counters (100–115) are per level
+  (`sithInventory_ResetInventory`'s flag-0x40 bins), so `adopt` zeroes them before the new level's
+  scripts: level 1 ends with goal 0 = 3, level 2's `02_endlevel.cog` startup sets 1 and goal 2 = 1.
+- **Gate.** New `tools/parity/carry-gate.ps1`: level 1's scripted route with `--carry-out`, then a
+  level-2 boot with `--carry-in`/`--carry-out`, then `--carry-compare` against
+  `tools/parity/jkauto-02narshadda.jks` — **82 bins match**, including 73 = 10.5. The gate perturbs
+  bin 73 in a copy and requires the comparator to reject it and name the bin. No retail launch.

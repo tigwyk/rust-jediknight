@@ -1026,6 +1026,11 @@ pub struct Vm {
     /// This cog's pulse, as the engine keeps it (`SITH_COG_PULSE_SET`): `SetPulse(seconds)` sets
     /// the interval and the next due time, and every cog tick that is due sends the `pulse` message.
     pub pulse: Option<(f32, f32)>,
+    /// `sithCogFunction_SetTimer` (`FUN_00506340`): the cog's **single** timer slot at `+0x20`, due
+    /// at `now + seconds`, cleared when it fires by `sithCog_ProcessCog` (`0x4e0300`) and sent as
+    /// message 4 with no sender id or parameters. A later `SetTimer` overwrites it. Scripts that need
+    /// an id or parameters use `SetTimerEx`, which queues an event instead.
+    pub timer: Option<f32>,
     /// This cog's one-shot timers (`SITH_COG_TIMER_SET`), each firing the `timer` message once when
     /// due. `SetTimerEx(seconds, id, val, val2)` also stores the id the handler reads back through
     /// `GetSenderId()` and the two parameter words — the shipped actor scripts branch on exactly
@@ -1100,6 +1105,7 @@ impl Vm {
             cog_index: -1,
             script_name: String::new(),
             pulse: None,
+            timer: None,
             timers: Vec::new(),
             now: 0.0,
             sleep_until: 0.0,
@@ -1145,11 +1151,20 @@ impl Vm {
     /// deadline order -- a handler that re-arms sees the later timers still pending.
     pub fn take_due_timers(&mut self) -> Vec<(i64, [f64; 2])> {
         let now = self.now;
-        if !self.timers.iter().any(|(due, _, _)| now >= *due) {
-            return Vec::new();
+        let mut due: Vec<(f32, i64, [f64; 2])> = Vec::new();
+        // `SetTimer`'s single slot fires with no sender id or parameters
+        // (`sithCog_ProcessCog` sends `SendMessage(cog, 4, 0, 0, 0, 0, 0)`), so a handler that reads
+        // `GetSenderId()` sees 0 — `actor_fn.cog`'s `timer:` takes its id-0 branch and credits nothing.
+        if let Some(at) = self.timer
+            && now >= at
+        {
+            due.push((at, 0, [0.0; 2]));
+            self.timer = None;
         }
-        let (mut due, pending): (Vec<_>, Vec<_>) = self.timers.drain(..).partition(|(at, _, _)| now >= *at);
+        let (fired, pending): (Vec<_>, Vec<_>) =
+            self.timers.drain(..).partition(|(at, _, _)| now >= *at);
         self.timers = pending;
+        due.extend(fired);
         due.sort_by(|a, b| a.0.total_cmp(&b.0));
         due.into_iter().map(|(_, id, params)| (id, params)).collect()
     }
@@ -1509,8 +1524,9 @@ impl Vm {
         // and inventory the script is talking about. The pure builtins below run
         // when the runtime does not implement the verb.
         // Pulse and timer state belongs to the *cog*, not the world (§16.10): `SetPulse(seconds)`
-        // arms an interval that sends this cog's `pulse` message, `SetTimer(seconds)` arms a
-        // one-shot `timer`. `sithCogFunction.c` keeps both on the cog struct.
+        // arms an interval that sends this cog's `pulse` message, `SetTimer(seconds)` arms the
+        // single-slot `timer`, and `SetTimerEx` queues a timer event with an id and two parameters.
+        // `sithCogFunction.c` keeps all three on the cog struct.
         match name.to_ascii_lowercase().as_str() {
             "setpulse" => {
                 let value = args.first().map(|v| v.num()).unwrap_or(0.0) as f32;
@@ -1539,7 +1555,14 @@ impl Vm {
                 self.suspended = true;
                 return Value::Nil;
             }
-            "settimer" | "settimerex" => {
+            // `sithCogFunction_SetTimer` (`FUN_00506340`) pops one value and arms the cog's single
+            // timer slot; it carries no id or parameters (`sithCog_ProcessCog` `0x4e0300`).
+            "settimer" => {
+                let value = args.first().map(|v| v.num()).unwrap_or(0.0) as f32;
+                self.timer = (value > 0.0).then(|| self.now + value);
+                return Value::Nil;
+            }
+            "settimerex" => {
                 let value = args.first().map(|v| v.num()).unwrap_or(0.0) as f32;
                 let id = args.get(1).map(|v| v.num() as i64).unwrap_or(0);
                 let params = [
@@ -1714,6 +1737,27 @@ mod tests {
         vm.now = 2.0;
         assert_eq!(vm.take_due_timers(), vec![(2, [0.0, 0.0])]);
         assert!(vm.timers.is_empty());
+    }
+
+    /// `SetTimer` (`FUN_00506340`) arms the cog's one slot, not a list entry: a later call overwrites
+    /// it, and `sithCog_ProcessCog` (`0x4e0300`) sends `timer` with no sender id. Level 1's two
+    /// `nwoman1` actors arm `SetTimer(1.0, 1, 0, 0)` from `created:`; the engine's handler reads id 0
+    /// and credits nothing, which is why retail's population bin is 10.5 and not 12.5.
+    #[test]
+    fn set_timer_is_one_slot_and_fires_without_a_sender_id() {
+        let mut vm = Vm::new();
+        vm.call_verb("SetTimer", vec![Value::Num(2.0)]);
+        vm.call_verb("SetTimer", vec![Value::Num(1.0)]);
+        assert!(vm.take_due_timers().is_empty(), "a timer fired before it was due");
+        vm.now = 1.5;
+        assert_eq!(vm.take_due_timers(), vec![(0, [0.0, 0.0])]);
+        assert!(vm.timer.is_none(), "the fired timer was not cleared");
+        // A cancel and an overwrite both leave at most one slot.
+        vm.call_verb("SetTimer", vec![Value::Num(2.0)]);
+        vm.call_verb("SetTimer", vec![Value::Num(0.0)]);
+        assert!(vm.timer.is_none(), "a negative time did not cancel the timer");
+        vm.now = 10.0;
+        assert!(vm.take_due_timers().is_empty());
     }
 
     /// `sithCog_SendMessageEx` (`0x4dedc0`) writes `senderId`/`senderRef`/`senderType` on the

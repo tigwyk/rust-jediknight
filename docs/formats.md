@@ -3730,6 +3730,17 @@ carries `72=0, 73=10.5, 75=20`: ten and a half "population units" woke up during
 them killed through a script that credits a pedestrian, so the ratio term is zero and the tally's
 stored alignment is the neutral 20.
 
+The carry is the engine's bin table, written as one `sithDSS_Inventory` (`0x4f9900`) record per bin
+in `sithGamesave_SaveCurrentWorld` (`0x4da770`)'s order — 82 records of 28 bytes. `jks::ENGINE_BINS`
+is that table, and `jks::inventory_sections` writes it; the reader parses it back word for word.
+The 10.5 comes from `sithOpenPostProcess` (`0x4c4880`) sending `created` to every thing's class cog
+at level load: the actors' `created:` labels arm a 1 s timer, and the handlers credit 1.0 for a
+civilian and 0.5 for a droid. The two `actor_fn.cog` actors arm `SetTimer(1.0, 1, 0, 0)`, the
+engine's **single** cog timer, which delivers `timer` with sender id 0 (`sithCog_ProcessCog`,
+`0x4e0300`), so their id-1 credit never runs (12.5 − 2.0). `tools/parity/carry-gate.ps1` plays the
+level-1 route, boots level 2 with that carry, and compares level 2's autosave with retail's
+`jkauto-02narshadda.jks` bin for bin.
+
 `SetCurInvWeapon(thing, bin)` and `SelectWeapon(thing, bin)` both arm a weapon by that number
 (the port's `sithCogFunction_SelectWeapon` and `sithCogFunctionThing_SetCurInvWeapon` do the
 same `sithWeapon_SelectWeapon`), and `GetCurInvWeapon` reads it back. All three were stubbed —

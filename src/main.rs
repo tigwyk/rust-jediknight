@@ -650,6 +650,11 @@ fn main() {
     // samples every 36 ticks (600 ms), the cadence a retail `coords` poll keeps.
     let mut replay: Option<std::path::PathBuf> = None;
     let mut route_trace: Option<std::path::PathBuf> = None;
+    // `--carry-in <save>`: adopt that save's engine bin table as the carried player inventory.
+    // `--carry-out <save>`: write the carry (bins and state) when the level completes, or on the
+    // first frames of a plain boot.
+    let mut carry_in: Option<std::path::PathBuf> = None;
+    let mut carry_out: Option<std::path::PathBuf> = None;
     // `--no-ai`: a capture switch for the route replay, so the scripted movement is measured
     // without the cantina ambush (retail's `-devMode` `disableai`). Ordinary play keeps the AI.
     let mut no_ai = false;
@@ -953,6 +958,30 @@ fn main() {
             // shields and the level-1 door/switch cog state), one row every 600 ms.
             "--route-trace" => {
                 route_trace = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--carry-in <save>` / `--carry-out <save>`: the level-change carry's engine bin table.
+            // The gate boots level 2 with level 1's carried save and writes the level-2 autosave.
+            "--carry-in" => carry_in = arg_value(&args, &mut i).map(std::path::PathBuf::from),
+            "--carry-out" => carry_out = arg_value(&args, &mut i).map(std::path::PathBuf::from),
+            // `--carry-compare <expected.jks> <actual.jks>`: every engine bin value must match.
+            "--carry-compare" => {
+                let expected = args.get(i + 1).cloned();
+                let actual = args.get(i + 2).cloned();
+                i += 2;
+                let (Some(expected), Some(actual)) = (expected, actual) else {
+                    println!("usage: --carry-compare <expected.jks> <actual.jks>");
+                    std::process::exit(2);
+                };
+                std::process::exit(match carry_bins_compare(
+                    std::path::Path::new(&expected),
+                    std::path::Path::new(&actual),
+                ) {
+                    Ok(()) => 0,
+                    Err(message) => {
+                        eprintln!("{message}");
+                        1
+                    }
+                });
             }
             // `--route-compare <expected> <actual> [--events-per-row]`: the route-trace gate. Fails on
             // the first field outside its tolerance, so a perturbed trace fails and the fixture
@@ -2473,13 +2502,24 @@ fn main() {
         std::process::exit(if boot_gate(&gobs, &menus) { 0 } else { 1 });
     }
 
-    let world = match load(&gobs, &level_name) {
+    let mut world = match load(&gobs, &level_name) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("fatal: {e}");
             std::process::exit(1);
         }
     };
+    // `--carry-in`: the gate boots a level with the previous level's carried bin table, exactly as a
+    // level change hands it over.
+    if let Some(path) = &carry_in {
+        match carry_from_save(path) {
+            Ok(carry) => world.carried = Some(carry),
+            Err(message) => {
+                eprintln!("fatal: {message}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // `--scale`: how big the models really are against the level they are placed in. Both references
     // are the level's own geometry, so this answers "is the model scale right" without trusting it.
@@ -6456,18 +6496,18 @@ fn main() {
     }
 
     if activation_check {
-        // Dormancy, held to retail's own two autosaves: level 1's *load-time* save carries no
-        // population bin (73 = 0) and level 2's carries 10.5 after the level was played, so a thing's
-        // class cog is sent `created` when its sector is first drawn -- not at level load. The port
-        // used to wake every placed thing at load. This check builds the class instances the way
-        // `setup` does, asserts the load state is dormant, wakes one sector the way `cull_sectors`
-        // does, and ticks the armed timer the way `run_pulses_and_timers` does.
+        // `sithOpenPostProcess` (`0x4c4880`) sends `created` to every thing's class cog at level
+        // load, in thing order. The load-time autosave is written in the same function, before the
+        // 1 s `created:` timers fire — so retail's level-1 save reads bin 73 = 0 and its level-2 save
+        // (after level 1 was played) reads 10.5. This check builds the class instances the way
+        // `setup` does, sends `created`, ticks the armed timers the way `run_pulses_and_timers`
+        // does, and requires the population sum to be retail's 10.5. `SetTimer` is a **single slot**
+        // with no sender id, which is why the two `actor_fn.cog` actors credit nothing.
         let sim_world = runtime::Runtime::handle(&world.level);
         let player = sim_world.borrow().player_thing();
         let mut scripts: Vec<(usize, String, cog::Vm)> = Vec::new();
-        let mut target: Option<(usize, i32, String, String)> = None;
         for (index, thing) in world.level.things.iter().enumerate() {
-            if index == player {
+            if index == player || is_local_player(&thing.template) {
                 continue;
             }
             let Some(name) = world
@@ -6478,8 +6518,7 @@ fn main() {
                 continue;
             };
             let Some(script) = world.cogs.get(&name) else { continue };
-            // Only a script that arms a `timer` from `created:` measures the wake: its handler is
-            // where the actor scripts credit the population bin.
+            // Only a script that arms a `timer` from `created:` can credit the population bin.
             if script.label("created").is_none() || script.label("timer").is_none() {
                 continue;
             }
@@ -6494,71 +6533,36 @@ fn main() {
                 rt.class_skill.insert(scripts.len() as i32, script.skill_answers());
                 rt.thing_links.push((scripts.len(), 0, index));
             }
-            if target.is_none() {
-                target = Some((index, thing.sector, thing.template.clone(), name.clone()));
-            }
             scripts.push((index, name, vm));
         }
-        let Some((thing, sector, template, name)) = target else {
-            eprintln!("activation: no class script arms a timer from `created:`");
-            std::process::exit(1);
-        };
         let population = |rt: &runtime::Runtime| rt.inv.get(&73).copied().unwrap_or(0.0);
         assert_eq!(
             population(&sim_world.borrow()),
             0.0,
-            "a civilian was awake at load; retail's level-1 autosave has bin 73 = 0"
+            "the population bin moved before `created` was sent"
         );
-        // Not every `created:` timer is a civilian's: a crane or a lamp arms one too, so wake
-        // candidates until one credits the population bin, the way the engine's own pass would.
-        let mut credited: Option<(usize, i32, String, String, f32)> = None;
-        for slot in 0..scripts.len() {
-            let (thing_index, _name, _) = &scripts[slot];
-            let thing_index = *thing_index;
-            let sector = world.level.things[thing_index].sector;
-            let before = population(&sim_world.borrow());
-            let woke = sim_world.borrow_mut().awaken_sector(sector);
-            if woke.is_empty() {
-                continue;
-            }
-            for &instance in &woke {
-                let Some((_, script_name, vm)) = scripts.get_mut(instance) else { continue };
-                let Some(script) = world.cogs.get(script_name) else { continue };
-                sim_world.borrow_mut().last_params = vec![0.0, 0.0];
-                let _ = vm.run_label(script, "created");
-                // The timer `created:` armed, ticked the way the app's pulse system ticks it.
-                vm.now += 2.0;
-                if let Some((_, id, params)) = vm
-                    .timers
-                    .iter()
-                    .copied()
-                    .filter(|(due, _, _)| vm.now >= *due)
-                    .min_by(|a, b| a.0.total_cmp(&b.0))
-                {
-                    vm.timers.retain(|(due, _, _)| vm.now < *due);
-                    vm.sender = id;
-                    sim_world.borrow_mut().last_params = params.to_vec();
-                    let _ = vm.run_label(script, "timer");
-                }
-            }
-            let after = population(&sim_world.borrow());
-            if after > before {
-                let template = world.level.things[thing_index].template.clone();
-                let name = scripts[slot].1.clone();
-                credited = Some((thing_index, sector, template, name, after));
-                break;
+        for (_, name, vm) in &mut scripts {
+            let Some(script) = world.cogs.get(name) else { continue };
+            sim_world.borrow_mut().last_params = vec![0.0, 0.0];
+            let _ = vm.run_label(script, "created");
+        }
+        for (_, name, vm) in &mut scripts {
+            let Some(script) = world.cogs.get(name) else { continue };
+            vm.now += 2.0;
+            for (id, params) in vm.take_due_timers() {
+                vm.sender = id;
+                sim_world.borrow_mut().last_params = params.to_vec();
+                let _ = vm.run_label(script, "timer");
             }
         }
-        let Some((thing, sector, template, name, after)) = credited else {
-            eprintln!("activation: no woken class script credited the population bin");
-            std::process::exit(1);
-        };
+        let after = population(&sim_world.borrow());
         assert!(
-            sim_world.borrow_mut().awaken_sector(sector).is_empty(),
-            "a sector woke its things twice"
+            (after - 10.5).abs() < 1e-4,
+            "the load-time population credit is {after}, retail's level-2 autosave says 10.5"
         );
         println!(
-            "activation: load is dormant (bin 73 = 0, retail's level-1 autosave); thing {thing} (`{template}`, `{name}`) in sector {sector} woke and credited bin 73 by {after:.1}; waking the sector again is a no-op"
+            "activation: `created` sent at load to {} class script(s); their timers credit bin 73 = {after:.1} (retail's level-2 autosave), with the `SetTimer` actors contributing nothing",
+            scripts.len()
         );
         println!("--- activation check passed ---");
         return;
@@ -12762,6 +12766,7 @@ fn main() {
         .insert_resource(RouteReplay(route_plan))
         .insert_resource(AiDisabled(ai_disabled))
         .insert_resource(RouteTraceOut(route_trace))
+        .insert_resource(CarryOut(carry_out))
         .insert_resource(AudioTraceOut(audio_trace))
         .insert_resource(AudioLog::default())
         .insert_resource(RouteNow::default())
@@ -12847,7 +12852,10 @@ fn main() {
                     // (level 1's door gunner 155 and `reeyeesbhgun` 153). A level swap installs a
                     // fresh runtime, which is why the hand-off itself runs after `swap_level`: the
                     // chain swap -> share -> AI is what makes the new level's first tick see walls.
-                    ai_shots.after(share_collider),
+                    // `encounter.arm` must see the frame's warped body *before* the AI tick: the
+                    // runtime reads the pose `walk_player` publishes, and a tick ahead of the warp
+                    // made the first sample a moved actor (the encounter trace lost actor 272).
+                    ai_shots.after(share_collider).after(walk_player),
                     play_requested_sounds,
                     music_follows_scripts,
                     show_taken,
@@ -12886,6 +12894,12 @@ fn main() {
                 route_replay.before(walk_player).before(use_key),
                 goal_probe.after(walk_player).before(cull_sectors),
             )
+                .run_if(no_screen_open),
+        )
+        .add_systems(
+            Update,
+            carry_out_probe
+                .before(watch_level_complete)
                 .run_if(no_screen_open),
         )
         .add_systems(Update, (play_script_loops.after(play_requested_sounds),).run_if(no_screen_open))
@@ -13692,6 +13706,96 @@ enum SaveLoad {
 /// level, and this system puts it back once that level exists.
 #[derive(Resource, Default)]
 struct PendingRestore(Option<runtime::Snapshot>);
+
+/// `--carry-out`: where to write the carry's engine bin table.
+#[derive(Resource, Default)]
+struct CarryOut(Option<PathBuf>);
+
+/// `--carry-out`'s writer. A route replay writes at its level's completion (after the tally's
+/// alignment store, as a play does); a plain boot of the next level writes on its first frames,
+/// before the 1 s `created:` timers, which is when the engine's own level-load autosave is written.
+fn carry_out_probe(
+    out: Option<Res<CarryOut>>,
+    sim: Option<Res<Sim>>,
+    replay: Option<Res<RouteReplay>>,
+    plan: Option<Res<FlowPlan>>,
+    mut frames: Local<u32>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Some(out) = out else { return };
+    let Some(path) = out.0.as_deref() else { return };
+    let Some(sim) = sim else { return };
+    *frames += 1;
+    let replayed = replay.as_ref().is_some_and(|replay| replay.0.is_some());
+    let complete = replayed && sim.world.borrow().level_complete;
+    if replayed && !complete {
+        return;
+    }
+    if !replayed && *frames < 2 {
+        return;
+    }
+    let mut rt = sim.world.borrow_mut();
+    if complete {
+        rt.finish_level();
+        rt.calc_alignment();
+    }
+    let level = plan.as_ref().map(|p| p.level.clone()).unwrap_or_default();
+    match write_snapshot(path, &level, &rt) {
+        Ok(bytes) => println!(
+            "carry-out: wrote {bytes} bytes to `{}` with {} bin(s)",
+            path.display(),
+            rt.inv.len()
+        ),
+        Err(e) => {
+            eprintln!("carry-out: {e}");
+            std::process::exit(1);
+        }
+    }
+    exit.write(AppExit::Success);
+}
+
+/// `--carry-compare`: the level-change carry is the engine's 82-bin table, so every bin's value must
+/// match. Names the first drifting bins instead of stopping at the first.
+fn carry_bins_compare(expected: &std::path::Path, actual: &std::path::Path) -> Result<(), String> {
+    let read = |path: &std::path::Path| -> Result<jks::Save, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        jks::Save::read(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    let want = read(expected)?;
+    let got = read(actual)?;
+    let drift = jks::bin_value_drift(&want, &got);
+    if drift.is_empty() {
+        println!(
+            "carry-compare: PASS {} bin(s) match {}",
+            want.bins().len(),
+            actual.display()
+        );
+        Ok(())
+    } else {
+        Err(format!("carry-compare: FAIL {}\n  {}", actual.display(), drift.join("\n  ")))
+    }
+}
+
+/// `--carry-in`: the carried player state a savegame's engine bin records hold. A save without them
+/// is not a carry.
+fn carry_from_save(path: &std::path::Path) -> Result<runtime::CarryOver, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let save = jks::Save::read(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bins = save.bins();
+    if bins.is_empty() {
+        return Err(format!("{}: no engine inventory records", path.display()));
+    }
+    Ok(runtime::CarryOver {
+        inv: bins.iter().map(|bin| (bin.bin as i32, bin.value())).collect(),
+        weapon: None,
+        cur_bin: 0,
+        saber: None,
+        jk_flags: 0,
+        // The bin table is the part the autosave format keeps; the bars match retail's autosaves.
+        health: 100.0,
+        shields: 100.0,
+    })
+}
 
 /// Read a savegame's level name and state payload.
 fn read_save(path: &std::path::Path) -> Option<(String, runtime::Snapshot)> {
@@ -21635,23 +21739,8 @@ fn cull_sectors(
                 rt.sector_sighted(sector);
             }
         }
-        // A thing's class cog is sent `created` when its sector is **first drawn**, not at level
-        // load: retail's level-1 autosave (written at load) carries no population bin 73, and its
-        // level-2 autosave (after the level was played) carries 10.5. `awaken_sector` is idempotent,
-        // so this only fires once per thing however many frames the room stays in view.
-        let mut woke = 0usize;
-        for (sector, &visible) in wanted.iter().enumerate() {
-            if !visible {
-                continue;
-            }
-            for instance in rt.awaken_sector(sector as i32) {
-                rt.pending_messages.push((instance, "created", [0.0; 2], None, None));
-                woke += 1;
-            }
-        }
-        if woke > 0 && std::env::var_os("BK_CULL_TRACE").is_some() {
-            println!("wake: {woke} class script(s) woke with their sector");
-        }
+        // `created` is sent at level load (`sithOpenPostProcess`, `0x4c4880`), not here: the
+        // engine's class scripts arm their wake-up timers before the first frame is drawn.
         // A thing counts as drawn when its own sector is visible and its body is inside the frustum.
         // That is coarser than the engine's per-thing clip (no per-triangle test), so it can fire a
         // frame early for something in the same room behind a pillar.
@@ -22811,9 +22900,9 @@ fn run_pulses_and_timers(capture: Option<Res<CaptureDt>>,
         for (id, params) in vm.take_due_timers() {
             {
                 if script.label("timer").is_some() {
-                    // The engine sends the message with the timer's own id as the sender
-                    // (`sithCogFunction_SetTimerEx`'s second argument) and its two words as the
-                    // handler's parameters: the actor scripts branch on `GetSenderId()`.
+                    // `SetTimerEx` sends its own id as the sender and its two words as the handler's
+                    // parameters; `SetTimer`'s single slot sends 0/0/0 (`sithCog_ProcessCog`), which
+                    // is the branch `actor_fn.cog` takes. The actor scripts read `GetSenderId()`.
                     vm.sender = id;
                     handle.borrow_mut().last_params = params.to_vec();
                     let result = vm.run_label(script, "timer");
@@ -24426,7 +24515,7 @@ fn live_check(
     let armed = sim
         .instances
         .iter()
-        .filter(|(_, vm)| vm.pulse.is_some() || !vm.timers.is_empty())
+        .filter(|(_, vm)| vm.pulse.is_some() || vm.timer.is_some() || !vm.timers.is_empty())
         .count();
     let pulses = pulses.as_ref().map(|p| p.0).unwrap_or(0);
     say(
@@ -24811,6 +24900,10 @@ fn write_snapshot(
     rt: &runtime::Runtime,
 ) -> std::io::Result<usize> {
     let mut save = jks::Save::new(level_name);
+    // The engine's own carry: one fixed record per bin in the player's table, so the file a level
+    // writes and the next level's reader see the same bins retail's autosave carries.
+    save.sections
+        .extend(jks::inventory_sections(&rt.inv, rt.player_thing() as u16));
     save.sections.push(jks::Section::new(runtime::SAVE_SECTION, rt.snapshot().to_bytes()));
     let bytes = save.write();
     if let Some(dir) = path.parent() {
@@ -27581,8 +27674,8 @@ fn setup(
             rt.thing_class_cog.insert(index, instance as i32);
             rt.class_skill.insert(instance as i32, script.skill_answers());
             class_links.push((instance, index));
-            // `created:` is *not* sent here: the engine sends it when the thing's sector is first
-            // drawn (`cull_sectors` wakes the room), which is what retail's load-time autosave shows.
+            // `created:` is queued after `wire_links`, below: the engine sends it at level load
+            // (`sithOpenPostProcess`), not when a sector is first drawn.
             started += 1;
         }
         if started > 0 {
@@ -27687,6 +27780,14 @@ fn setup(
             // placed instances once and bails if the tables are already populated.
             for (instance, thing) in class_links.drain(..) {
                 rt.thing_links.push((instance, 0, thing));
+                // `sithOpenPostProcess` (`0x4c4880`) sends `created` (message 15) to every thing's
+                // class cog **at level load**, in thing order, with the thing as the sender — after
+                // the `startup` broadcast and before the autosave. It is not a sector-draw wake: the
+                // level-1 autosave is written in the same function before the 1 s `created:` timers
+                // fire, which is why that save reads bin 73 = 0 while level 2's (after level 1 was
+                // played) reads 10.5.
+                rt.pending_messages
+                    .push((instance, "created", [0.0; 2], Some(thing as i64), None));
             }
         }
     }
