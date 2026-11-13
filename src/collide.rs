@@ -2226,6 +2226,9 @@ impl LevelGeometry {
         // centre, a placement reaches the plane query's own tolerance above it.
         let ceiling = if lift { pos[2] + 0.05 } else { pos[2] - radius + 1e-3 };
         let mut best: Option<Rest> = None;
+        // `sithPhysics_FindFloor` casts a ray first, then a sphere for a player/actor thing when the
+        // ray missed (`decomp/004f5550_sithPhysics_FindFloor.c`); the port's sphere pass covers both
+        // for a body, so the edge a sphere overlaps still has a floor.
         for (floor, travelled, _owner, raw, surface) in
             self.floor_candidates(sector, pos, reach + radius, radius)
         {
@@ -2550,9 +2553,10 @@ impl LevelGeometry {
     ///
     /// Two parts, in the engine's order. First the sector's collide box (`HASCOLLIDEBOX`, flag
     /// `0x1000`): if the sphere fits inside it the answer is **yes**, without testing a single
-    /// surface. Only a sphere outside that box is tested against the sector's bounding planes, where
-    /// a distance below the radius means outside. `sithCollision_MoveThing` calls this with radius 0
-    /// to decide whether to undo a move.
+    /// surface. Only a sphere outside that box is tested against the sector's **surface planes**
+    /// (`sector + 0x4c` in the decomp), where a distance below the radius means outside; an adjoin
+    /// with MOVE is an opening, so its plane is not tested. `sithCollision_MoveThing` calls this
+    /// with radius 0 to decide whether to undo a move.
     pub fn inside_sector(&self, sector: usize, pos: [f32; 3], radius: f32) -> bool {
         if let Some(Some((lo, hi))) = self.boxes.get(sector) {
             let fits = (0..3).all(|k| pos[k] - radius >= lo[k] && pos[k] + radius <= hi[k]);
@@ -2560,15 +2564,96 @@ impl LevelGeometry {
                 return true;
             }
         }
-        self.clearance(sector, pos).is_none_or(|c| {
-            // `sithIntersect_IsSphereInSector` snaps a plane distance within `1e-5` of zero to zero
-            // (`_DAT_00523288` is 1e-5, `_DAT_00523284` is 0) before the radius test, so a body
-            // resting exactly on its own floor is inside it. Without the band, `floor + radius` as
-            // f32 lands a ten-millionth below the plane and the containment check rejects a body
-            // standing on solid ground (`18Ascend`'s spawn did exactly that, every frame).
-            let c = if c.abs() <= 1e-5 { 0.0 } else { c };
-            c >= radius
-        })
+        let inside_plane = |plane: &Plane| {
+            let d = -dot(sub(pos, plane.point), plane.normal);
+            let d = if d.abs() <= 1e-5 { 0.0 } else { d };
+            d >= radius
+        };
+        self.sectors.get(sector).is_none_or(|planes| planes.iter().all(inside_plane))
+            && self.portals.get(sector).is_none_or(|portals| {
+                portals.iter().all(|portal| {
+                    !self
+                        .adjoin_flags
+                        .get(portal.link)
+                        .is_some_and(|flags| flags & ADJOIN_MOVE != 0)
+                        || inside_plane(&Plane {
+                            normal: portal.normal,
+                            point: portal.point,
+                            surface: usize::MAX,
+                        })
+                })
+            })
+    }
+
+    /// `sithCollision_MoveThing` (`0x4f4290`) -> `sithCollision_SearchForSurfaceCollisions`:
+    /// a lift that crosses an open adjoin moves the sector (`sithCollision_MoveThing` calls
+    /// `ExitSector`/`EnterSector` when the path passes one); one that stays inside the room does
+    /// not.
+    pub fn sector_after_lift(
+        &self,
+        sector: usize,
+        from: [f32; 3],
+        to: [f32; 3],
+        gates: Gates<'_>,
+    ) -> usize {
+        let mut here = sector;
+        // A lift is short; a handful of adjoins is already implausible, the bound is for safety.
+        for _ in 0..4 {
+            let Some(portals) = self.portals.get(here) else { break };
+            let mut next = None;
+            for portal in portals {
+                if !gates.passable(here, portal.adjoin, portal.link) {
+                    continue;
+                }
+                // An opening's normal points out of the room, so the inside is the negative side.
+                // The engine's portal hit sets the adjoin's target sector directly
+                // (`sithThing_SetSector`, `decomp/004e7950_sithCollision_MoveThing.c:174`), with no
+                // sphere test on the destination - but only after the sweep actually hits the opening's
+                // polygon, so the crossing point must lie inside the portal, not merely cross its plane.
+                // shortcut: the authored normal's sign is trusted here; the engine's sweep turns it
+                // toward the query. Make this a sign change once the t = 0 portal case is fixed.
+                let before = dot(sub(from, portal.point), portal.normal);
+                let after = dot(sub(to, portal.point), portal.normal);
+                if before <= 0.0 && after > 0.0 {
+                    let t = before / (before - after);
+                    let at = [
+                        from[0] + (to[0] - from[0]) * t,
+                        from[1] + (to[1] - from[1]) * t,
+                        from[2] + (to[2] - from[2]) * t,
+                    ];
+                    let mouth = Face {
+                        normal: portal.normal,
+                        point: portal.point,
+                        verts: portal.verts.clone(),
+                        surface: usize::MAX,
+                    };
+                    if sphere_face(at, 0.0, &mouth) {
+                        next = Some(portal.adjoin);
+                        break;
+                    }
+                }
+            }
+            match next {
+                Some(room) => {
+                    if std::env::var_os("BK_SECTOR_TRACE").is_some() {
+                        eprintln!(
+                            "sector trace: lift {here} -> {room} {from:?} -> {to:?}"
+                        );
+                    }
+                    here = room
+                }
+                None => break,
+            }
+        }
+        here
+    }
+
+    /// `sithCommand_Warp` (`0x4eea40`): a warp lands in the **first** sector in file order whose
+    /// radius-0 `IsSphereInSector` accepts the point. Not the best-clearance one: stacked rooms both
+    /// contain the point and the engine takes the lower index, looping the sector array until one
+    /// answers and failing the warp when none does.
+    pub fn sector_first_containing(&self, pos: [f32; 3]) -> Option<usize> {
+        (0..self.sectors.len()).find(|sector| self.inside_sector(*sector, pos, 0.0))
     }
 
     /// The sector a *body* of `radius` should start in.

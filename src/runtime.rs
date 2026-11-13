@@ -1071,6 +1071,10 @@ pub struct PlayerBody {
     /// 0.120114) for one a `warp` attached: retail's warped route poses read `coords` z at exactly
     /// `floor + 0.120114` and hold it while walking, where the sphere contact is 0.055 lower.
     pub rest: f32,
+    /// Whether the placement seat has run. The seat's adjoin crossing is a placement event
+    /// (`sithCommand_Warp` detaches and the physics pass re-attaches); an idle re-seat must not
+    /// toggle the sector every frame.
+    pub seated: bool,
 }
 
 impl Default for PlayerBody {
@@ -1093,6 +1097,7 @@ impl Default for PlayerBody {
             pitch: 0.0,
             eye: crate::PLAYER_EYE,
             rest: crate::PLAYER_RADIUS,
+            seated: false,
         }
     }
 }
@@ -6193,7 +6198,22 @@ impl Runtime {
             && body.vy <= 0.0
             && !(input.jump && body.grounded)
         {
+            let before = [body.pos.x, body.pos.y, body.pos.z];
             body.pos.z = rest.height + body.rest;
+            // A lift that crosses an opening is an adjoin contact and moves the sector
+            // (`sithCollision_MoveThing` calls `ExitSector`/`EnterSector` when the path passes one);
+            // a seat that stays inside its room does not re-resolve it. Level 2's spawn warp lifts
+            // the body 2.983 -> 3.0201 across a 29->22 adjoin, and retail reports 22. Once per seat:
+            // an idle re-seat must not toggle the sector every frame.
+            if !body.seated {
+                body.sector = solids.sector_after_lift(
+                    body.sector,
+                    before,
+                    [body.pos.x, body.pos.y, body.pos.z],
+                    gates,
+                );
+                body.seated = true;
+            }
             body.vy = 0.0;
             body.grounded = true;
         }
@@ -7899,6 +7919,8 @@ impl Runtime {
         body.vy = 0.0;
         body.vel = [0.0; 2];
         body.grounded = true;
+        // A warp detaches and the physics pass re-attaches: the next seat is a new placement.
+        body.seated = false;
         if let Some(sector) = sector {
             body.sector = sector;
         }
@@ -11418,6 +11440,7 @@ mod tests {
             pitch: 0.0,
             eye: crate::PLAYER_EYE,
             rest: crate::PLAYER_RADIUS,
+            seated: false,
         }
     }
 

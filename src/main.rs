@@ -18969,6 +18969,7 @@ fn walker_step(
     // the walker exercises (`--walk all` is sensitive to it), and a level whose kerb is taller than
     // `STEP_UP` wedges a walking body against it. Default stays the engine's `moveSize + 0.01`.
     let step_up = env_f32("BK_STEP", STEP_UP);
+    let sector_before_move = *sector;
     let (moved_to, crossed_to, mut blocked) = solids.move_body(*sector, *pos, delta, radius, step_up, gates);
     if std::env::var_os("BK_WALK_TRACE").is_some() {
         let dm = ((moved_to[0] - pos[0]).powi(2) + (moved_to[1] - pos[1]).powi(2)).sqrt();
@@ -18980,9 +18981,19 @@ fn walker_step(
     // Read before the sector is adopted: comparing after the assignment made this false for ever, so
     // the walk summary's "sector crossings" was pinned at whatever the docs had last observed.
     let crossed = crossed_to != *sector;
+    if crossed && std::env::var_os("BK_SECTOR_TRACE").is_some() {
+        eprintln!("walk trace: crossed into sector {crossed_to} from {sector} at {before:?}");
+    }
     *pos = moved_to;
     if crossed {
         *sector = crossed_to;
+    }
+    // `MoveThing` crosses an adjoin along the frame's whole 3D path, vertical included: a fall
+    // crosses a doorway on its way down, and a step up onto a new room's floor crosses the opening
+    // that floor is (level 2's spawn walk leaves 22 for 23 at the riser, then drops into 39 at the
+    // seam). A placement seat has already resolved its own sector, so it is not re-crossed here.
+    if *pos != frame_start {
+        *sector = solids.sector_after_lift(*sector, frame_start, *pos, gates);
     }
     // The step-up the engine allows: a body may climb `moveSize + 0.01` above its feet, which is why a
     // low ledge is walkable. `move_body` already tried the raised sweep; this only records that the
@@ -19002,23 +19013,19 @@ fn walker_step(
     //     }
     //
     // The position, the direction and the sector all come back. `Solids::inside_sector` is that
-    // function, box short-circuit included, and `hull` is the surface set it walks.
+    // function, box short-circuit included, and `sectors` is the surface set it walks.
     //
-    // `MoveThing` queries `thing + 0xb8` directly; do the same while the body only settles
-    // vertically, so a fall that leaves its sector is re-resolved from its centre rather than
-    // from a feet point. Lateral movement keeps the feet probe: it is what every walk leg was
-    // measured against, and the centre query regressed walk5, walk4 and walk13.
-    // shortcut: lateral containment uses feet; use the centre once portal transitions are corrected.
-    let origin = if delta[0].abs() < 1e-6 && delta[1].abs() < 1e-6 {
-        *pos
-    } else {
-        [pos[0], pos[1], pos[2] - radius]
-    };
+    // `MoveThing` queries `thing + 0xb8` directly: the body's centre, regardless of how it moved.
+    // shortcut: the decomp restores the saved position and sector; the port re-resolves the room
+    // instead, because `sweep_rooms` can skip a portal whose plane the sphere already overlaps at
+    // t <= 0 and the saved sector would then be stale every frame (walk11/3/exitdoor lock). Fix
+    // the t = 0 crossing in `sweep_rooms` (centre segment, not sphere contact), then restore.
+    let origin = *pos;
     if !solids.inside_sector(*sector, origin, 0.0) {
         let found = solids.sector_at(origin, 0.05);
         if std::env::var_os("BK_CONTAIN_TRACE").is_some() {
             eprintln!(
-                "contain: sector {} rejected origin {origin:?}; resolver {found:?}; crossed_to {crossed_to}",
+                "contain: sector {} rejected origin {origin:?}; resolver {found:?}; saved {sector_before_move} at {before:?}",
                 *sector
             );
         }
@@ -19087,7 +19094,7 @@ fn walk_level(
         ),
     };
     let mut pos = [base[0], base[1], base[2] + EYE];
-    let Some(mut sector) = recorded.or_else(|| solids.sector_for_body(pos)) else {
+    let Some(mut sector) = recorded.or_else(|| solids.sector_first_containing(pos)) else {
         if !quiet {
             println!("walkplayer start {base:?} is outside every sector");
         }
@@ -29007,12 +29014,20 @@ fn setup(
         body_rest = body_rest.max(runtime::template_insert("walkplayer")[2]);
     }
     if let Some((at, yaw)) = WARP.get().copied() {
-        start = warp_body(at, derived_eye);
-        sector = solids.sector_for_body(start).unwrap_or(sector);
-        player_yaw = yaw.to_radians();
-        println!(
-            "walker: warped the player to {start:?} (eye {at:?}) facing {yaw:.1} deg, sector {sector}"
-        );
+        let body = warp_body(at, derived_eye);
+        // `sithCommand_Warp` (`0x4eea40`) takes the **first** sector in file order whose radius-0
+        // `IsSphereInSector` accepts the point; when none does it prints "Position not in world"
+        // and returns before `SetPositionAndOrient`, so the body is not moved either.
+        if let Some(room) = solids.sector_first_containing(body) {
+            start = body;
+            sector = room;
+            player_yaw = yaw.to_radians();
+            println!(
+                "walker: warped the player to {start:?} (eye {at:?}) facing {yaw:.1} deg, sector {sector}"
+            );
+        } else {
+            println!("walker: warp position {body:?} is outside every sector; warp refused");
+        }
         // `BK_WARP_TRACE=1`: what is placed around the warped body, with the top of each solid thing's
         // model — the surface a body would stand on.
         if std::env::var_os("BK_WARP_TRACE").is_some() {
@@ -29127,6 +29142,7 @@ fn setup(
             pitch: 0.0,
             eye: eye_height,
             rest: body_rest.max(rules.radius),
+            seated: false,
         },
         extra_speed: 0.0,
         use_hits: 0,
@@ -30410,7 +30426,7 @@ fn route_replay(
         && let Some((at, yaw)) = warp.at
     {
         let body_at = warp_body(at, player.body.eye);
-        let sector = solids.0.sector_for_body(body_at);
+        let sector = solids.0.sector_first_containing(body_at);
         if let Some(sim) = sim.as_deref() {
             sim.world
                 .borrow_mut()

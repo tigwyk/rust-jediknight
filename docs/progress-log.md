@@ -6491,3 +6491,48 @@ and the route still reaches the exit through the door and level-end path (`door0
 
 The deviation-ledger row *route replay time scale* is retired; the provenance row now names
 `sithTime_Advance` (`0x4dd640`) → `advance_engine_clock` (`src/main.rs`) as `ported`.
+
+### Round 435: issue #26 -- the warp and adjoin crossings are the engine's; level 2 walks 98% and the last sector is the blocker
+
+Level 2's spawn walk moved from **1.79 of 2.82 units (63%, 5 of 6 sector samples wrong)** to
+**2.75 of 2.82 (98%, 3 of 6)**. The default walk gate (10 legs) and the 30-leg preflight are
+byte-identical to HEAD on this machine (preflight 1 fail, walk18; gate 3 fails, walk6/walk9/walk17
+-- those three also fail at clean HEAD, so they are the machine's baseline, not this change). The
+full unit suite is 365 passed.
+
+The changes are engine-cited, in the collision layer:
+
+- `sithCommand_Warp` (`0x4eea40`) lands the body in the **first** sector in file order whose
+  radius-0 `IsSphereInSector` accepts the point (`Solids::sector_first_containing`), not the
+  best-clearance room. It is used by the `--warp` setup, the headless `--walk` start, and the
+  trace replay's `warp_at`; a warp with no containing sector is refused without moving the body.
+- `sithIntersect_IsSphereInSector` (`0x507f30`) tests the sector's **surface plane list** (box
+  short-circuit first), not the bounding hull; the hull rejected the level-2 warp body at 3.0201
+  and flipped it back to 29 (`Solids::inside_sector`).
+- `sithCollision_MoveThing` (`0x4f4290`) crosses an open adjoin along the frame's whole 3D path
+  (`Solids::sector_after_lift`). The placement seat uses it once (the warp lifts 2.983 -> 3.0201
+  across 29->22 and retail reports 22), and the walker uses it after its own move, so a step onto
+  a new room's floor crosses that floor's opening and a fall crosses a doorway on the way down.
+  `teleport_player` clears the one-shot latch: a warp is a new placement.
+- `inside_sector` takes the body's centre (the decomp queries `thing + 0xb8`). The containment
+  still **re-resolves** the room after a rejection: restoring the saved sector, as
+  `decomp/004e7950_sithCollision_MoveThing.c:251` does, locked 11 preflight legs because
+  `sweep_rooms` can skip a portal the sphere already overlaps at `t <= 0`; the resolver carries
+  that defect until the sweep is fixed (a `shortcut:` note records it). `sector_after_lift` keeps
+  the authored-normal direction: a sign-free test regressed level 2 from 2.75 to 1.79, measured,
+  and was reverted.
+
+Remaining blocker, measured: the port's sector is 22 for the whole walk and its body stops at
+y=-14.685 against surface 189 (a wall at y=-14.75, normal +y). Retail's sector column reads
+22,22,23,23,22,39 and its last sample is y=-14.69, z=1.92 in 39, i.e. it dropped at the walkway's
+edge. The port's floor query still finds the walkway face with the sphere pass (`FindFloor` casts a
+ray, then a sphere for a player thing -- `decomp/004f5550_sithPhysics_FindFloor.c`), so the body
+never leaves the floor; a ray-only probe was tried and did not change the gate (and would drop the
+engine's sphere pass), so it was reverted.
+
+Question for the user, since the decomp is ambiguous: at the level-2 seam the retail body crosses
+from 22 to 23 (and later 39) with no change in its sector surface set -- is that crossing driven by
+`sithCollision_MoveThing`'s portal-polygon hit at the walkway edge (surface 189 or the adjoin at
+z=2.4), or by `sithThing_SetSector` in the fall? I did not launch retail; the answer decides whether
+the port needs the adjoin plane swept at the body's feet in `move_body` or the sector taken from
+the floor found by `FindFloor`.
