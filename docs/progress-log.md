@@ -6620,3 +6620,33 @@ lift=true)` returns a floor that is not in 35 when the warp height is 0.22. That
 single change to test, before any further crossing work.
 
 `walk4_spawn` (52%, sectors 0) and `walk_exitdoor`/`walk15_spawn` were not probed individually yet.
+
+### Round 438: issue #26 -- `IsSphereInSector`'s exact plane set and the walk5 stall
+
+The engine's containment test is now read in full (`decomp/00507f30_sithIntersect_IsSphereInSector.c`):
+it walks the sector's surface list and tests a surface when it carries `HAS_COLLISION` (0x4) **or**
+its adjoin row carries `MOVE` (0x2). The arithmetic is
+`dot(position - plane_point, plane_normal) >= radius`, with the 1e-5 snap to zero; a smaller value
+returns 0. So the engine's stored normals point **into** the sector, and both collision faces and
+MOVE adjoins are tested.
+
+The `walk5_spawn` stall on the pair build was traced to exactly that test. Sector 34's copy of the
+34<->35 adjoin (link 140, normal +z) rejects the body at `[10.1917, 14.5218, 0.1067]` by
+`d = -0.0066`; 127 consecutive lateral moves were restored. The port's `inside_sector` negates the
+dot product (`-dot(pos - point, normal)`), which is only right for outward-stored normals. The
+engine's positive dot accepts this point, and retail's own walk5 trace confirms the room change is
+real: `35, 33, 34, 33, 33, 24` at 0.6 s intervals, z near 0. The port's route after the crossings
+(35 -> 34 -> 33) matches retail's first three rooms; the shortfall is the stall, not the route.
+
+Two containment variants were measured on the pair and rejected (tree back at `79cda6d`):
+1. Engine sign (`+dot`) with normals turned toward the sector's **bounding-sphere centre**: 20 of
+   30 preflight legs fail. The bounding centre is not a valid interior point for non-convex sectors.
+2. Portal plane removed from the test: 8 preflight fails, walk2 down to 0.03 units. The MOVE-adjoin
+   plane is load-bearing, exactly as the decomp says.
+
+Next step, one change: store an **engine-oriented (inward) normal per sector plane at build time**.
+The build already computes `own` (outward from the sector) for `hull_planes`; keep the inward twin
+next to `normal` in `planes` and test `dot(pos - point, inward) >= radius`. The adjoin entries need
+the same treatment (the `own` used for the hull is inward for the far side, outward for this one).
+Then re-gate the pair and re-check the pinned-doorway crossing count (13,151 over 34 levels) that
+was the original reason for the `t = 0` skip.
