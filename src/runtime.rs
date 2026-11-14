@@ -6177,23 +6177,26 @@ impl Runtime {
         }
         let radius = rules.radius;
         // A body placed with its feet below the current floor needs the same initial seat as the
-        // landing sweep. That is `resting_floor`, at the probe the old `floor_surface` seat used —
-        // one radius above the body; `lift` is the one option a placement needs, because a seat may
-        // raise the body where a landing never would, and its reach is unbounded for the same reason.
-        // Keep the height correction, but do not re-resolve the sector: `sithThing_SetSector`
-        // belongs to an adjoin contact, not an idle containment query. Only a floor above the current
-        // feet seats — this never lowers.
-        if let Some(rest) = solids.resting_floor(
+        // landing sweep. Keep that height correction, but do not re-resolve the sector:
+        // `sithThing_SetSector` belongs to an adjoin contact, not an idle containment query.
+        //
+        // Round 429 (`9d7bca7`) rebuilt this block on `resting_floor(.., lift)`, whose unbounded
+        // cross-room search re-seated level 17's warped start from sector 485 at z -8.135 (the
+        // recorded spawn) onto 505 at z -10.845 — the walk-trace regression bisected to that commit.
+        // The engine's placement never runs a seat at all: `sithCommand_Warp` (`0x4eea40`) sets the
+        // position and leaves it. The seat is the port's own repair for a body that has fallen
+        // below its floor, so it reads `floor_surface` — the body's own sector only — and compares
+        // against the sphere contact (`radius`), which a start at either rest convention never
+        // trips. The write uses the body's own `rest`, the height the settle below holds: a fallen
+        // body returns to its sphere contact, a warped one to `GetThingHeight`.
+        if let Some((floor, _)) = solids.floor_surface(
             body.sector,
             [body.pos.x, body.pos.y, body.pos.z + radius],
-            f32::INFINITY,
-            radius,
-            true,
-        ) && rest.height > body.pos.z - body.rest
+        ) && body.pos.z - radius < floor - 0.01
             && body.vy <= 0.0
             && !(input.jump && body.grounded)
         {
-            body.pos.z = rest.height + body.rest;
+            body.pos.z = floor + body.rest;
             body.vy = 0.0;
             body.grounded = true;
         }
@@ -6302,7 +6305,12 @@ impl Runtime {
         // leaves it at the authored pose. The sweep lands it at `floor + radius` every frame; while a
         // floor is inside the attached body's reach (`GetThingHeight * 1.1`, `0x523184`), put it back on
         // the attach height. Retail's warped route poses read `coords` z at exactly that height and hold
-        // it while walking (the route trace measures the 0.055 the sphere contact was short by).
+        // it while walking (the route trace measures the 0.055 the sphere contact is short by).
+        // `shortcut: this hold rides a 40-degree face up at `09fuelstation`'s pit mouth and the
+        // body walks into the shaft — `walk9_spawn`'s residual failure. Which rule of the engine's
+        // search rejects that face (the reach, or the per-hit acceptance behind
+        // `sithCollision_SearchForCollisions`'s `0x2802` masks) is the open decomp question on
+        // issue #23.`
         if body.rest > radius + 1e-4 && vy <= 0.0 {
             let reach = (body.rest - radius) * 1.1 + 0.02;
             if let Some(rest) =
