@@ -6591,3 +6591,32 @@ Level 2's remaining blocker is not the sector write: the port's body reaches y=-
 surface 189 (a wall at y=-14.75) before crossing any portal, and its sector stays 22. Retail's
 22->23 samples need the crossing at the riser, where the port's step-up raises the body inside
 `move_body` (`top + radius`) without a swept portal hit.
+
+### Round 437: issue #26 -- the engine pair (t=0 crossing, per-segment containment, vertical-first) is built and measured; the remaining failures are the spawn seat's floor
+
+The decomp pair from round 436 was implemented as one unit, then reverted to `922a5cb`:
+
+- `sweep_rooms` no longer skips an adjoin at `t == 0` (the engine's
+  `LAB_004e8816`/`CheckSphereFaceIntersection` crossing).
+- The containment moved **into `move_body`** and restores the last sub-step's start and sector
+  (`segment start`/`segment sector`, reloaded each bounce) instead of the frame start. The
+  `sector_at` resolver is gone from `walker_step`.
+- The walker crosses the **vertical sub-step before** the lateral sweep
+  (`sector_after_lift(sector, frame_start, pos)`), and the post-move crossing pass is retired.
+  Without that vertical crossing the sweep-only build fails 7 preflight legs and blocks walk2.
+
+Measured with the pair (no retail run): preflight 3 fail (`walk_exitdoor`, `walk15`, `walk18`),
+default gate 3 (`walk4`, `walk5`, `walk17`); `walk6` and `walk9` pass (both were failing at HEAD);
+`walk4` sectors are now correct (0 off) but it travels 52%; walk2 unchanged at 2.75/98%, 3 sectors
+off. The same three preflight legs failed with the frame-level restore, so the per-segment restore
+changed no leg outcome by itself: the regressions are in the crossing/floor interaction.
+
+Direct probe of `walk5_spawn` on the pair build (`06abarons`, pose `10.58,14.91,0.22,134.99`, 90
+frames): the seat lands the body at z 0.107 in sector 35 while the floor it found is at -0.013, a
+lower room. The vertical crossings then correctly take it 35 -> 34 -> 33, where it slides down a
+water slope at about 0.1 units/s: 0.69 units against retail's 3.73, 56 frames on water. So the pair
+**exposes a spawn-seat floor defect** rather than causing the shortfall: `resting_floor(35,
+lift=true)` returns a floor that is not in 35 when the warp height is 0.22. That seat is the next
+single change to test, before any further crossing work.
+
+`walk4_spawn` (52%, sectors 0) and `walk_exitdoor`/`walk15_spawn` were not probed individually yet.
