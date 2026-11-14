@@ -19016,10 +19016,11 @@ fn walker_step(
     // function, box short-circuit included, and `sectors` is the surface set it walks.
     //
     // `MoveThing` queries `thing + 0xb8` directly: the body's centre, regardless of how it moved.
-    // shortcut: the decomp restores the saved position and sector; the port re-resolves the room
-    // instead, because `sweep_rooms` can skip a portal whose plane the sphere already overlaps at
-    // t <= 0 and the saved sector would then be stale every frame (walk11/3/exitdoor lock). Fix
-    // the t = 0 crossing in `sweep_rooms` (centre segment, not sphere contact), then restore.
+    // shortcut: the decomp restores the **last sub-step's** position and sector (`local_24/20/1c`
+    // and `param_2` reload from `thing+0x2e..0x30`/`+0x17` at the top of every `MoveThing` loop
+    // iteration), not the frame start. The port re-resolves the room instead: restoring the
+    // frame-level `before` over-reverts multi-segment moves (measured: 11 preflight legs locked).
+    // Untested fix: have `move_body` return its last segment's start and sector and restore those.
     let origin = *pos;
     if !solids.inside_sector(*sector, origin, 0.0) {
         let found = solids.sector_at(origin, 0.05);

@@ -6551,10 +6551,11 @@ The question left open in round 435 is answered from the shipped decomp. No reta
 - `sithSector_TransitionMovingThing` (`0x4f5440`) is a caller helper for an interpolated moving
   thing: a short segment damps the position deltas, a long one snaps and `SetSector`s.
 - `sithCollision_SearchForSurfaceCollisions` (`0x4e86d0`) reports an adjoin whose sphere already
-  touches it: `LAB_004e89d8` tests the end point within the radius of the plane, runs
-  `CheckSphereFaceIntersectionEx`, and requires `Dot3(moveNorm, pushVel) < 0`. A crossing at
-  distance 0 is therefore engine behaviour, so the port's `if t <= 0.0 { continue; }` in
-  `sweep_rooms` is a port defect, not the engine's rule.
+  touches it: the adjoin branch at `LAB_004e8816` runs `CheckSphereFaceIntersection` (sphere vs
+  polygon) and pushes the crossing flag `0x20`, which `MoveThing` turns into `SetSector`.
+  `LAB_004e89d8` is the plain-surface path, not the adjoin one. A crossing at distance 0 is
+  therefore engine behaviour, so the port's `if t <= 0.0 { continue; }` in `sweep_rooms` is a
+  port defect, not the engine's rule.
 
 Consequence: the port must cross in its `MoveThing` port (`sweep_rooms`/`move_body`) and its walker
 pass `sector_after_lift` is a stand-in for that skipped crossing. The sector is not taken from the
@@ -6573,6 +6574,18 @@ Three port variants were measured, then reverted to `922a5cb`:
 The t=0 crossing is engine-correct but its interaction with the port's `doorway_advance` (a full
 radius past the plane) and the containment is unsettled: each variant moves the failures between
 legs. The next step is one dedicated pass on that pair, not more stacked edits.
+
+The decomp-faithful containment restore was **not** tested: `MoveThing` reloads `local_24/20/1c`
+and the saved sector from `thing+0x2e..0x30`/`+0x17` at the top of every sub-step, so a failure
+undoes only the last segment. Every variant above paired the t=0 crossing with either the
+`sector_at` resolver or a frame-level `before` restore, and the latter over-reverts every
+multi-segment move (the likely cause of the 11 locked preflight legs). The next experiment is to
+have `move_body` return its last segment's start and sector and restore exactly those, then re-gate
+`walk4`, `walk5`, `walk11`, `walk15`, `walk_exitdoor` and `walk2_spawn` one change at a time.
+Note for the probe: `walk-preflight.ps1` captures the child's stderr, so `contain:` counts must be
+read by running `bevi-knight.exe --walk ... --warp ... 2>&1` directly. The skip's original reason
+(the pinned-doorway count, 13,151 crossings over 34 levels) was not re-measured under any variant;
+that count belongs in the same gate as the per-segment restore.
 
 Level 2's remaining blocker is not the sector write: the port's body reaches y=-14.685 and stops on
 surface 189 (a wall at y=-14.75) before crossing any portal, and its sector stays 22. Retail's
