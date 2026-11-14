@@ -218,6 +218,13 @@ pub struct LevelGeometry {
     /// adjoin on both sides) still needs containment geometry for floor reachability.
     pub portal_faces: Vec<(usize, Face)>,
     pub surface_owner: Vec<usize>,
+    /// The level's surface flag words by surface id. `sithPhysics_FindFloor` sets its search's
+    /// `0x10` bit for a thing without physflag `0x80` — the `walkplayer` inherits `_actor`'s
+    /// `physflags=0x4a4f`, which has `0x80` clear — so the player's floor search counts only
+    /// surfaces with flag bit 1 (`sithCollision_SearchForSurfaceCollisions`, `0x4e86d0` lines
+    /// 125-126). Wall-only faces carry `0x4` without the bit and are never floors:
+    /// `09fuelstation`'s 40-degree pit-mouth face (surface 9278, flags `0x4`).
+    pub surface_flags: Vec<u32>,
     /// `World adjoins` flags by link id. Fixtures that do not provide them default to passable.
     pub adjoin_flags: Vec<u16>,
     /// Every sector that claims each surface, derived once with the collision build. Drawing needs
@@ -773,6 +780,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     // volume shares the room's floor), so the first claimant is enough for reachability; it is not a
     // statement about who draws it. The old floor probe repeated this scan for every candidate face.
     let mut surface_owner = vec![usize::MAX; level.surfaces.len()];
+    let surface_flags: Vec<u32> = level.surfaces.iter().map(|s| s.surfflags).collect();
     for (room, planes) in sectors.iter().enumerate() {
         for plane in planes {
             if plane.surface != usize::MAX && surface_owner[plane.surface] == usize::MAX {
@@ -815,6 +823,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         face_of,
         portal_faces,
         surface_owner,
+        surface_flags,
         adjoin_flags: level.adjoins.iter().map(|a| a.flags).collect(),
         surface_claims,
         surface_sectors,
@@ -2138,6 +2147,19 @@ impl LevelGeometry {
                 }
                 // A vertical face is not a floor, and a downward one is a ceiling.
                 if face.normal[2].abs() < 0.2 {
+                    continue;
+                }
+                // The engine's floor search counts only floor-flagged surfaces: `FindFloor` sets
+                // the search's `0x10` bit for a thing without physflag `0x80` (the `walkplayer`
+                // inherits `_actor`'s `0x4a4f`), and `SearchForSurfaceCollisions` then requires
+                // `surfflags & 1` (`0x4e86d0` lines 125-126). A wall-only face — `09fuelstation`'s
+                // 40-degree pit-mouth 9278, flags `0x4` — is never a floor. A surface the table
+                // does not know (a fixture face without a level surface) still passes.
+                if self
+                    .surface_flags
+                    .get(face.surface)
+                    .is_some_and(|flags| flags & 1 == 0)
+                {
                     continue;
                 }
                 // `.jkl` plane normals point **out of the room**, while
