@@ -6688,3 +6688,37 @@ Remaining level-2 blocker: the walk2 start/23-mismatch is the crossing's sector 
 restore (the `t=0`/per-segment pair), which was measured against the *old* containment; it must be
 re-derived against this one. `walk6` (119 %, 5 off), `walk9` (280 %, z 20.7) and `walk17` (23 %)
 are the other open gate legs. Issue #26's first acceptance criterion is still unmet.
+
+### Round 440: retraction -- round 439's table was not a same-build comparison; the containment change is inert
+
+Round 439 compared the `c47b55e` build against values measured on earlier, different trees (the pair
+and the pre-435 builds), so its "before" column does not belong to 79cda6d. A same-build A/B settles
+it. The baseline was built in a separate worktree (`git worktree add` at 79cda6d, its own
+`target\release\bevi-knight.exe`, md5 `fc256e23...`) and run through the same scripts as `c47b55e`
+(md5 `8d1f3693...`):
+
+| Check | 79cda6d | c47b55e |
+|---|---|---|
+| walk preflight | 1 of 30 (`walk18_spawn`) | 1 of 30 (`walk18_spawn`) |
+| default gate | 3 of 10 | 3 of 10, every leg's numbers identical |
+| `walk2_spawn` | 2.75 / 2.82, 3 off | 2.75 / 2.82, 3 off |
+
+The per-leg numbers are identical to the decimal on all ten legs (walk5 3.39/3.73 PASS, walk4
+1.11/1.11 PASS, walk6 119 % / 5 off, walk9 280 % / 4 off / z 20.707, walk17 23 % / 6 off). Why the
+claimant rule changes nothing: `surface_owner[plane.surface] == sector` for every plane in every
+sector's `sectors` list on the shipped levels, so the owner branch reproduces HEAD's `-dot` exactly;
+the non-owner branch never runs. The hunk was reverted (the engine's authored surface normal with
+`+dot` is the port's `-dot` on a single-claimed list); the `--faces-at` `inside` probe stays.
+
+`walk9`'s z 20.707 is **not** this change: both builds' `--walk all` abort at
+`jkl\09fuelstation.jkl dropped 0.32 against the recorded 21.13` (`off_edge`'s assertion in
+`src/main.rs`). The recorded walk-off is stale on 79cda6d itself, so the pinned-doorway count
+(13,151 crossings over 34 levels) cannot be reproduced on either build: `--walk all` stops after 17
+crossings at level 09. The walk9 trace comparison is fixture-limited in the same way -- retail's
+fixture samples only 0-3 s at z 0.07 and stops before the level's recorded walk-off, while the port's
+trace continues into it. Both are pre-existing.
+
+Next open work, in order: (a) the stale `off_edge` drop for `09fuelstation` -- the walk now drops
+0.32, so either the walker stopped falling where it must fall or the recorded number needs its reason
+written; (b) `walk2_spawn`'s three sector mismatches, the actual issue #26 blocker, which the
+containment does not touch.

@@ -2553,16 +2553,10 @@ impl LevelGeometry {
     ///
     /// Two parts, in the engine's order. First the sector's collide box (`HASCOLLIDEBOX`, flag
     /// `0x1000`): if the sphere fits inside it the answer is **yes**, without testing a single
-    /// surface. Only a sphere outside that box is tested against every surface whose flags carry
-    /// `HAS_COLLISION` or whose adjoin row carries `MOVE` (`decomp/00507f30:29`), with the engine's
-    /// `dot(pos - point, normal) >= radius` and the `1e-5` snap to zero.
-    ///
-    /// The port stores each plane's **outward** normal (the file's inward one negated), so the sign
-    /// must be settled per surface: the first claimant (`surface_owner`) keeps the stored outward
-    /// orientation, so its inward normal is the negation; a sector that only claims the surface is
-    /// on the other side and keeps the stored normal. Portal entries are already outward for the
-    /// sector that holds them (the mirror pass negates the far side's copy).
-    /// `sithCollision_MoveThing` calls this with radius 0 to decide whether to undo a move.
+    /// surface. Only a sphere outside that box is tested against the sector's **surface planes**
+    /// (`sector + 0x4c` in the decomp), where a distance below the radius means outside; an adjoin
+    /// with MOVE is an opening, so its plane is not tested. `sithCollision_MoveThing` calls this
+    /// with radius 0 to decide whether to undo a move.
     pub fn inside_sector(&self, sector: usize, pos: [f32; 3], radius: f32) -> bool {
         if let Some(Some((lo, hi))) = self.boxes.get(sector) {
             let fits = (0..3).all(|k| pos[k] - radius >= lo[k] && pos[k] + radius <= hi[k]);
@@ -2570,38 +2564,25 @@ impl LevelGeometry {
                 return true;
             }
         }
-        let inside_plane = |normal: [f32; 3], point: [f32; 3]| {
-            let d = dot(sub(pos, point), normal);
+        let inside_plane = |plane: &Plane| {
+            let d = -dot(sub(pos, plane.point), plane.normal);
             let d = if d.abs() <= 1e-5 { 0.0 } else { d };
             d >= radius
         };
-        let solids = self.sectors.get(sector).is_none_or(|planes| {
-            planes.iter().all(|plane| {
-                let owner = self.surface_owner.get(plane.surface).copied();
-                let inward = match owner {
-                    // The stored normal is outward. The sector the surface is authored for (its
-                    // first claimant) sees the inward side, and a synthetic plane with no owner
-                    // table is stored the same way, so both keep the negation. Only a sector that
-                    // merely claims someone else's surface is on the other side of it.
-                    Some(owner) if owner != sector => plane.normal,
-                    _ => [-plane.normal[0], -plane.normal[1], -plane.normal[2]],
-                };
-                inside_plane(inward, plane.point)
+        self.sectors.get(sector).is_none_or(|planes| planes.iter().all(inside_plane))
+            && self.portals.get(sector).is_none_or(|portals| {
+                portals.iter().all(|portal| {
+                    !self
+                        .adjoin_flags
+                        .get(portal.link)
+                        .is_some_and(|flags| flags & ADJOIN_MOVE != 0)
+                        || inside_plane(&Plane {
+                            normal: portal.normal,
+                            point: portal.point,
+                            surface: usize::MAX,
+                        })
+                })
             })
-        });
-        let portals = self.portals.get(sector).is_none_or(|portals| {
-            portals.iter().all(|portal| {
-                !self
-                    .adjoin_flags
-                    .get(portal.link)
-                    .is_some_and(|flags| flags & ADJOIN_MOVE != 0)
-                    || inside_plane(
-                        [-portal.normal[0], -portal.normal[1], -portal.normal[2]],
-                        portal.point,
-                    )
-            })
-        });
-        solids && portals
     }
 
     /// `sithCollision_MoveThing` (`0x4f4290`) -> `sithCollision_SearchForSurfaceCollisions`:
