@@ -6756,3 +6756,37 @@ from the adjoin on the hit (`decomp/004e7950_sithCollision_MoveThing.c:172`) and
 Next: transliterate the `FindFloor` adjoin descent over the body's footprint (the port's scoped
 `room_contains` tests the point; the engine's floor search carries the body radius), then re-gate
 `walk2_spawn` against its committed fixture with no tolerance change.
+
+### Round 442: the seam's lateral stall, measured; the `mag < 0.2` cut stays; walk9 is a real gap
+
+Round 441's diagnosis was too quick. The move trace at the walk2 stop is
+`end at == from` with `blocked true` every frame: the body is stopped **sideways** at
+`(10.324, -14.685, 3.1185)` by a head-on contact (surface 189, wall `y = -14.750`, `mag` 0.173) and the
+port's own `mag < 0.2 || bounce == 2` rule in `move_body` breaks instead of the engine's slide. Retail
+slides at that contact: `y` pins at -14.69 while `x` keeps falling, 10.25 -> 10.13 -> 10.02, about
+0.12 per 600 ms, and the slide is what reaches the drop into 39. The floor at retail's final XY reads
+**3.0** in this port (`--faces-at "10.25,-14.69,3.12"`), not 1.92, so the 22/39 descent is real but
+has not been reached yet.
+
+Removing the `mag < 0.2` cut alone was measured and reverted. It is not the engine's slide:
+
+| gate | kept | cut removed |
+|---|---|---|
+| `walk2_spawn` | 2.75 / 2.82, 3 off | comparison produced no travel/sector lines |
+| `walk13_spawn` | 1.27 / 1.30, 0 off, PASS | 1.26 / 1.30, 4 off, FAIL |
+| `walk_cantina`, `walk_street90` | PASS | no travel/sector lines |
+| default gate | 3 of 10 fail | 6 of 9 fail |
+| `--walk all` | 32/34 contained, 58 crossings | 14/34 contained, 64 crossings |
+
+The threshold is load-bearing because the port's slide is not the engine's: `sithCollision_MoveThing`
+(`decomp/004e7950`) re-normalizes the residual velocity (`0x9a..0x9c` via `rdVector_Normalize3`,
+continuing while its length exceeds `_DAT_0052300c`) and `sithCollision_HandleThingHitSurface`
+(`0x4e8b40`, 46 lines) has no grazing test at all. The fix is to transliterate that hit/residual
+arithmetic, not to drop the guard.
+
+`09fuelstation` (**walk9**) is **not** fixture-limited, correcting round 440: retail's fixture holds at
+`(-0.29, 6.45, 0.07)` for the last two samples (2.4 s and 3.0 s) -- something stops it -- while the
+port passes that point, walks to `(-1.04, 7.35)` and drops to z -20.64 at 2.13 s. Probes at the pose:
+the nearby faces include +y walls at `y = 6.050` (surfaces 2501/2509); `--move-at
+"-0.29,6.45,0.07,-0.819,0.574,0.065,120"` steps to `z = 1.052` on step 0 and blocks, so the pose's
+floor/step differs as well. Recorded here as an open collision discrepancy, separate from issue #26.
