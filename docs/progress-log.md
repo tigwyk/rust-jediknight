@@ -6650,3 +6650,41 @@ next to `normal` in `planes` and test `dot(pos - point, inward) >= radius`. The 
 the same treatment (the `own` used for the hull is inward for the far side, outward for this one).
 Then re-gate the pair and re-check the pinned-doorway crossing count (13,151 over 34 levels) that
 was the original reason for the `t = 0` skip.
+
+### Round 439: issue #26 -- `IsSphereInSector` with the surfaces' own orientation
+
+`inside_sector` now tests the set the decomp names (`decomp/00507f30:29`): every plane in
+`Solids.sectors` (the collision faces) plus every MOVE adjoin, with the engine's
+`dot(position - point, normal) >= radius` and the 1e-5 snap. The sign is settled per surface from
+`surface_owner`, the first sector that claims it: that sector reads the stored outward normal
+negated, a sector that only claims the surface reads it as stored (the mirrored side). Synthetic
+planes with no owner table keep the old stored-outward negation, which is why the fixture suite still
+passes.
+
+Measured on the committed baseline plus this change alone (no other WIP; `trace-gate.ps1`, no retail):
+
+| Check | Before | After |
+|---|---|---|
+| walk preflight | 10 of 30 fail | **1 of 30** (`walk18_spawn`) |
+| default gate | 8 of 13 fail | **3 of 10** (`walk6`, `walk9`, `walk17`) |
+| `walk5_spawn` | 2.76 / 3.73, 3 off | **3.39 / 3.73 (91 %), PASS**, 2 off |
+| `walk4_spawn` | 0.48 / 1.11, FAIL | **1.11 / 1.11, PASS** |
+| `walk_cantina` | 2.40 / 2.59 | 2.65 / 2.59 (102 %), PASS |
+| `walk2_spawn` | 2.75 / 2.82, 3 off | 2.75 / 2.82, 3 off (unchanged) |
+
+The hand probe (`--faces-at` now prints the containment) checked the two points the round named:
+level 2's spawn body at `(10.324, -14.74, 3.0201)` is `inside true` in 22 (and `false` at the
+pre-seat 2.983, correctly: that is inside the floor slab, and the seat lifts it); `06abarons`'
+walk5 stall point is `inside true` in 35 and `false` in 34 by 0.0066, because the port's walker is
+at 35's floor level (0.1067) where retail's sector-34 samples are at z ~ 0. The stall is therefore
+not the containment: the crossing keeps assigning 34 to a centre that is above the 34/35 plane.
+
+A non-engine re-pick was written and removed: `sithCollision_MoveThing`
+(`decomp/004e7950_sithCollision_MoveThing.c:251-262`) restores the start position and
+`sithThing_SetSector(thing, param_2, 0)`, returning to the *original* sector; it never scans for
+another one. The port's restore stays the engine's.
+
+Remaining level-2 blocker: the walk2 start/23-mismatch is the crossing's sector assignment and
+restore (the `t=0`/per-segment pair), which was measured against the *old* containment; it must be
+re-derived against this one. `walk6` (119 %, 5 off), `walk9` (280 %, z 20.7) and `walk17` (23 %)
+are the other open gate legs. Issue #26's first acceptance criterion is still unmet.

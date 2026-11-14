@@ -2770,7 +2770,8 @@ fn main() {
                 .map(|portal| portal.adjoin)
                 .collect();
             println!(
-                "  sector {sector}: clearance {:?} floor_below {:?} adjoins {adjoins:?}",
+                "  sector {sector}: inside {} clearance {:?} floor_below {:?} adjoins {adjoins:?}",
+                solids.inside_sector(sector, at, 0.0),
                 solids.clearance(sector, at),
                 solids.floor_below(sector, at)
             );
