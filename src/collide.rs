@@ -2585,7 +2585,7 @@ impl LevelGeometry {
             })
     }
 
-    /// `sithCollision_MoveThing` (`0x4f4290`) -> `sithCollision_SearchForSurfaceCollisions`:
+    /// `sithCollision_MoveThing` (`0x4e7950`) -> `sithCollision_SearchForSurfaceCollisions`:
     /// a lift that crosses an open adjoin moves the sector (`sithCollision_MoveThing` calls
     /// `ExitSector`/`EnterSector` when the path passes one); one that stays inside the room does
     /// not.
