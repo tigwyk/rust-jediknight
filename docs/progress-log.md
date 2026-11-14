@@ -6536,3 +6536,45 @@ from 22 to 23 (and later 39) with no change in its sector surface set -- is that
 z=2.4), or by `sithThing_SetSector` in the fall? I did not launch retail; the answer decides whether
 the port needs the adjoin plane swept at the body's feet in `move_body` or the sector taken from
 the floor found by `FindFloor`.
+
+### Round 436: issue #26 -- the seam sector is `MoveThing`'s adjoin hit, never `FindFloor` (decomp resolved)
+
+The question left open in round 435 is answered from the shipped decomp. No retail launch.
+
+- `sithCollision_MoveThing` (`0x4e7950`) is the sector writer during movement. On a collision
+  stack entry whose flag has bit `0x20` (an adjoin hit) it calls
+  `sithThing_SetSector(thing, adjoin->target, 0)` (`:172`). Its containment check at `:253-260`
+  restores the saved position and the saved sector (`param_2`) after `IsSphereInSector` fails; it
+  never searches for a new room.
+- `sithPhysics_FindFloor` (`0x4f5550`) never writes the sector. It attaches the thing to a surface
+  (`AttachThingToSurface`), to a thing face (`AttachThingToThingFace`), or detaches it.
+- `sithSector_TransitionMovingThing` (`0x4f5440`) is a caller helper for an interpolated moving
+  thing: a short segment damps the position deltas, a long one snaps and `SetSector`s.
+- `sithCollision_SearchForSurfaceCollisions` (`0x4e86d0`) reports an adjoin whose sphere already
+  touches it: `LAB_004e89d8` tests the end point within the radius of the plane, runs
+  `CheckSphereFaceIntersectionEx`, and requires `Dot3(moveNorm, pushVel) < 0`. A crossing at
+  distance 0 is therefore engine behaviour, so the port's `if t <= 0.0 { continue; }` in
+  `sweep_rooms` is a port defect, not the engine's rule.
+
+Consequence: the port must cross in its `MoveThing` port (`sweep_rooms`/`move_body`) and its walker
+pass `sector_after_lift` is a stand-in for that skipped crossing. The sector is not taken from the
+floor search, and sweeping adjoin planes at the feet is not the engine path.
+
+Three port variants were measured, then reverted to `922a5cb`:
+
+1. t=0 crossing with the port's radius advance, plus the decomp containment restore: preflight 3
+   fail (`walk_exitdoor`, `walk15`, `walk18`), gate 3 (`walk4`, `walk5`, `walk17`); `walk6` passed
+   (was failing), `walk9` dropped 4.96 -> 1.68 units but still failed, walk2 unchanged.
+2. The same with a zero advance and a crossing-wins tie: preflight 5, gate 4. Rejected.
+3. t=0 crossing with the radius advance and the current containment resolver: preflight 2
+   (`walk_exitdoor`, `walk18`), gate 3 (`walk4`, `walk9`, `walk17`), `walk6` passed.
+4. Zero advance with the current tie: preflight 3, gate 4. Rejected.
+
+The t=0 crossing is engine-correct but its interaction with the port's `doorway_advance` (a full
+radius past the plane) and the containment is unsettled: each variant moves the failures between
+legs. The next step is one dedicated pass on that pair, not more stacked edits.
+
+Level 2's remaining blocker is not the sector write: the port's body reaches y=-14.685 and stops on
+surface 189 (a wall at y=-14.75) before crossing any portal, and its sector stays 22. Retail's
+22->23 samples need the crossing at the riser, where the port's step-up raises the body inside
+`move_body` (`top + radius`) without a swept portal hit.
