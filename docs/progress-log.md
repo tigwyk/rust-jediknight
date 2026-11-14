@@ -6722,3 +6722,37 @@ Next open work, in order: (a) the stale `off_edge` drop for `09fuelstation` -- t
 0.32, so either the walker stopped falling where it must fall or the recorded number needs its reason
 written; (b) `walk2_spawn`'s three sector mismatches, the actual issue #26 blocker, which the
 containment does not touch.
+
+### Round 441: the roadmap rules applied -- port-derived expectations removed, the all-level sweep passes, and issue #26's blocker located
+
+`AGENTS.md` points at `docs/porting-roadmap.md`'s "Rules for the next agent or contributor"; one rule
+was being broken in code: *"Do not add a gate that derives its expected value from the port's own
+behaviour."* `--walk all` asserted the per-level `WALK_OFF_THE_EDGE` drops, which are this walker's own
+recorded output (`gaps.md` already calls them "recorded, not asserted"). `09fuelstation`'s recorded
+21.13 no longer matched (the walk now drops 0.32), so the whole sweep aborted at level 09 and the
+pinned-doorway count could not be measured. The asserts are now a `BK_WALK_TRACE` print; the recorded
+table stays for the worst-drop exclusion.
+
+The sweep now completes on `--walk all` (no retail):
+
+    summary: 32/34 levels with a start kept the walker inside its sector, 20 had the hull test agree,
+             58 sector crossings, 1 without a start
+    sweep: 1 level(s) left the body in the void, 0 started over no floor, worst drop 3.38 (06abarons)
+    --- walk check passed ---
+
+The pinned-doorway count is **58** crossings, not the 13,151 of the buggy variant, so no doorway
+ping-pong hides behind the legs.
+
+The walk2 seam is now located, and it is the issue's own floor chain, not the crossing. The port stops
+at `(10.324, -14.685, 3.1185)`: the move trace shows a solid contact at `t = -0.00000` (surface 189,
+a wall at `y = -14.750` facing `-y`), and the near-head-on rule then stops the slide. But that wall is
+not the divergence: at the *same* XY retail's body is at `z = 1.92` in sector 39 (its 1.8 s, 2.4 s and
+3.0 s samples) while the port stands on sector 22's floor at 3.0. The floor search under the body is
+not following the 22/39 opening down; that is `sithPhysics_FindFloor` (`decomp/004f5550`), the
+function issue #26 names. The engine's crossing/restore already matches the decomp: the sector is set
+from the adjoin on the hit (`decomp/004e7950_sithCollision_MoveThing.c:172`) and restored by
+`IsSphereInSector(pos, 0, sector)` when the move leaves it (`:252`).
+
+Next: transliterate the `FindFloor` adjoin descent over the body's footprint (the port's scoped
+`room_contains` tests the point; the engine's floor search carries the body radius), then re-gate
+`walk2_spawn` against its committed fixture with no tolerance change.

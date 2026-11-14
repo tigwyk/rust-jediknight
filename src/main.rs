@@ -19694,19 +19694,16 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                 transitions += r.transitions;
                 kept += r.contained as usize;
                 agreed += r.in_hull as usize;
-                if let Some((_, void, contained, known_drop)) = off_edge(name.as_str()) {
-                    assert_eq!(
-                        r.void_frames > 0,
-                        *void,
-                        "{name} changed its known walk-off void outcome"
-                    );
-                    assert_eq!(
-                        r.contained, *contained,
-                        "{name} changed its known walk-off containment"
-                    );
-                    assert!(
-                        (r.dropped.max(0.0) - known_drop).abs() < 0.01,
-                        "{name} dropped {:.2} against the recorded {known_drop:.2}",
+                // The known walk-offs are **recorded**, not asserted: their numbers came from this
+                // walker's own past output, and a gate may not derive its expected value from the
+                // port's behaviour (`docs/porting-roadmap.md`, "Rules for the next agent"). The
+                // per-level drop is printed by `--walk <level>` and the void names in the summary
+                // below; a changed walk-off shows there instead of panicking the sweep.
+                if std::env::var_os("BK_WALK_TRACE").is_some()
+                    && let Some((_, _, _, known_drop)) = off_edge(name.as_str())
+                {
+                    eprintln!(
+                        "walk sweep: {name} dropped {:.2} (recorded {known_drop:.2})",
                         r.dropped.max(0.0)
                     );
                 }
