@@ -774,6 +774,10 @@ fn main() {
     // the normal the landing probe would orient. `--surfaces-at` lists the level's own surfaces; a face
     // missing here is a face the floor probe cannot see at all.
     let mut faces_probe: Option<String> = None;
+    // `--waypoints A;B`: the doorway centres `Collide::route` walks between two places (the AI's
+    // adjoin-graph route, every authored opening passable, heights not judged), for authoring a
+    // `--replay` plan. Each end is `x,y,z` or `s<sector>` (a thing's own sector from the `.jkl`).
+    let mut waypoints_probe: Option<String> = None;
     let mut controls_check = false;
     let mut move_check = false;
     let mut winding_check = false;
@@ -1283,6 +1287,7 @@ fn main() {
         "--key" => key_probe = arg_value(&args, &mut i).cloned(),
         "--tex" => tex_probe = arg_value(&args, &mut i).cloned(),
         "--faces-at" => faces_probe = arg_value(&args, &mut i).cloned(),
+        "--waypoints" => waypoints_probe = arg_value(&args, &mut i).cloned(),
         "--surfaces-at" => {
                 surfaces_at = arg_value(&args, &mut i).and_then(|s| {
                     let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
@@ -2650,6 +2655,39 @@ fn main() {
         }
     }
 
+    if let Some(text) = waypoints_probe.as_deref() {
+        let solids = collide::build(&world.level);
+        let ends: Vec<Vec<usize>> = text
+            .split(';')
+            .map(|p| match p.trim().strip_prefix('s') {
+                Some(sector) => sector.parse().into_iter().collect(),
+                None => {
+                    let v: Vec<f32> = p.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+                    <[f32; 3]>::try_from(v).map(|at| solids.sectors_around(at)).unwrap_or_default()
+                }
+            })
+            .collect();
+        let (Some(starts), Some(goals)) = (ends.first(), ends.get(1)) else {
+            println!("waypoints: expected A;B, each x,y,z or s<sector>");
+            return;
+        };
+        let route = starts.iter().find_map(|&start| {
+            goals.iter().find_map(|&goal| {
+                solids.route(start, goal, collide::Gates::default()).map(|r| (start, goal, r))
+            })
+        });
+        match route {
+            Some((start, goal, centres)) => {
+                println!("waypoints: sector {start} -> {goal}, {} opening(s)", centres.len());
+                for c in centres {
+                    let sector = solids.sector_for_body(c).map_or("-".to_string(), |s| s.to_string());
+                    println!("  {:.3}\t{:.3}\t{:.3}\tsector {sector}", c[0], c[1], c[2]);
+                }
+            }
+            None => println!("waypoints: no route"),
+        }
+        return;
+    }
     // `--scale`: how big the models really are against the level they are placed in. Both references
     // are the level's own geometry, so this answers "is the model scale right" without trusting it.
     // `--faces-at x,y,z`: the **collision** faces near a point, plus `floor_under`'s answer there with
@@ -16357,6 +16395,9 @@ struct RouteInput {
     strafe: f32,
     /// A route `use` row: press the use key (`sithPlayer`'s activate) on this tick.
     use_action: bool,
+    /// A route `fire` row: press the fire trigger on this tick (the left mouse button's path,
+    /// `fire_player`), so a route can kill what a level's script counts.
+    fire: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -16376,6 +16417,11 @@ struct RoutePlan {
     /// Ticks at which the script turns the body: `(tick, degrees)`. A turn takes no ticks, because the
     /// player's yaw is a mouse input, not movement — the sample grid stays on retail's cadence.
     yaws: Vec<(u32, f32)>,
+    /// Ticks at which the script presses the fire trigger. Like `use`, a `fire` row takes no ticks.
+    fires: Vec<u32>,
+    /// Ticks at which the script pitches the view: `(tick, degrees)`, the mouse's other axis. The
+    /// shot leaves along the body's yaw and pitch (`fire_player`).
+    pitches: Vec<(u32, f32)>,
     /// A `seed` row: the body velocity retail's capture already had at the leg's pose. The retail
     /// fixture's first row records `vel` 0 only because its window has no earlier sample; its first
     /// 600 ms already covered the leg's travel, so the replay starts the body moving at the same speed.
@@ -16595,7 +16641,7 @@ impl RoutePlan {
                     let strafe: f32 = f[3]
                         .parse()
                         .map_err(|_| fail(format!("`{}` is not a number", f[3])))?;
-                    plan.inputs.push((plan.total, RouteInput { forward, strafe, use_action: false }));
+                    plan.inputs.push((plan.total, RouteInput { forward, strafe, ..RouteInput::default() }));
                     plan.total += ticks;
                 }
                 Some("wait") => {
@@ -16619,6 +16665,23 @@ impl RoutePlan {
                         return Err(fail(format!("`use` takes no values, got {} field(s)", f.len())));
                     }
                     plan.uses.push(plan.total);
+                }
+                Some("fire") => {
+                    // fire
+                    if f.len() != 1 {
+                        return Err(fail(format!("`fire` takes no values, got {} field(s)", f.len())));
+                    }
+                    plan.fires.push(plan.total);
+                }
+                Some("pitch") => {
+                    // pitch <degrees>
+                    if f.len() != 2 {
+                        return Err(fail(format!("`pitch` needs degrees, got {} field(s)", f.len())));
+                    }
+                    let degrees: f32 = f[1]
+                        .parse()
+                        .map_err(|_| fail(format!("`{}` is not a number", f[1])))?;
+                    plan.pitches.push((plan.total, degrees));
                 }
                 Some("yaw") => {
                     // yaw <degrees>
@@ -16644,7 +16707,9 @@ impl RoutePlan {
                     plan.seed.get_or_insert((plan.total, [vx, vy]));
                 }
                 Some(other) => {
-                    return Err(fail(format!("unknown row kind `{other}` (warp, yaw, input, wait, use, seed)")));
+                    return Err(fail(format!(
+                        "unknown row kind `{other}` (warp, yaw, pitch, input, wait, use, fire, seed)"
+                    )));
                 }
                 None => {}
             }
@@ -18085,8 +18150,8 @@ input 72 1 0
         assert_eq!(plan.warps[0].tick, 0);
         assert_eq!(plan.warps[1].tick, 36);
         assert_eq!(plan.warps[1].at.unwrap().1, 105.0);
-        assert_eq!(plan.input_at(0), RouteInput { forward: 1.0, strafe: 0.0, use_action: false });
-        assert_eq!(plan.input_at(35), RouteInput { forward: 1.0, strafe: 0.0, use_action: false });
+        assert_eq!(plan.input_at(0), RouteInput { forward: 1.0, strafe: 0.0, ..RouteInput::default() });
+        assert_eq!(plan.input_at(35), RouteInput { forward: 1.0, strafe: 0.0, ..RouteInput::default() });
         assert_eq!(plan.warp_at(36).unwrap().tick, 36);
         assert_eq!(plan.total, plan.inputs.last().unwrap().0 + 72);
     }
@@ -18114,9 +18179,21 @@ input 72 1 0
         assert_eq!(plan.uses, vec![0]);
         assert_eq!(plan.total, 72);
         assert_eq!(plan.input_at(0).forward, 0.0);
-        assert_eq!(plan.input_at(36), RouteInput { forward: 1.0, strafe: 0.0, use_action: false });
+        assert_eq!(plan.input_at(36), RouteInput { forward: 1.0, strafe: 0.0, ..RouteInput::default() });
         // `route_replay` sets the flag from `plan.uses` on the tick the row names.
         assert!(plan.uses.contains(&0));
+    }
+
+    /// `fire` and `pitch` take no ticks, like `use` and `yaw`: a kill a level script counts can be
+    /// scripted without moving the 600 ms sample grid.
+    #[test]
+    fn route_fire_and_pitch_rows_name_their_tick() {
+        let plan = RoutePlan::parse("warp - - - - -\ninput 36 1 0\npitch -10\nfire\nwait 12\nfire\ninput 36 1 0\n")
+            .expect("plan");
+        assert_eq!(plan.pitches, vec![(36, -10.0)]);
+        assert_eq!(plan.fires, vec![36, 48]);
+        assert_eq!(plan.total, 84);
+        assert!(RoutePlan::parse("warp - - - - -\nfire 2\ninput 1 0 0\n").is_err(), "`fire` takes no value");
     }
 
     /// The committed port oracle parses, carries the event columns, and compares to itself. Its
@@ -25800,6 +25877,7 @@ fn fire_player(
     buttons: Res<ButtonInput<MouseButton>>,
     overview: Option<Res<Overview>>,
     demo: Option<Res<FireDemo>>,
+    route_now: Option<Res<RouteNow>>,
     mut frame: Local<u32>,
     player: Option<Res<Player>>,
     gun: Option<Res<Gun>>,
@@ -25814,7 +25892,9 @@ fn fire_player(
     // A capture takes no live input: a click delivered during a headless run fired a bolt into every
     // `--shot` frame it was in, which is a different picture on every run.
     let capture = overview.as_deref().is_some_and(|o| o.capture);
-    if (!buttons.just_pressed(MouseButton::Left) || capture) && !demo_shot {
+    // `--replay`: a `fire` row presses the trigger on its tick, through the same path as a click.
+    let routed = route_now.as_deref().and_then(|now| now.0).is_some_and(|i| i.fire);
+    if (!buttons.just_pressed(MouseButton::Left) || capture) && !demo_shot && !routed {
         return;
     }
     let (Some(player), Some(gun), Some(sim)) = (player, gun, sim) else { return };
@@ -30743,6 +30823,11 @@ fn route_replay(
             player.body.yaw = degrees.to_radians();
         }
     }
+    for (at, degrees) in &plan.pitches {
+        if *at == tick {
+            player.body.pitch = degrees.to_radians();
+        }
+    }
     if tick % ROUTE_SAMPLE_TICKS == 0
         && let Some((path, manifest)) = out.as_deref().and_then(|o| o.0.as_ref())
     {
@@ -30793,6 +30878,7 @@ fn route_replay(
     }
     let mut input = plan.input_at(tick);
     input.use_action = plan.uses.contains(&tick);
+    input.fire = plan.fires.contains(&tick);
     now.0 = Some(input);
 }
 
