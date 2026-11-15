@@ -6667,3 +6667,32 @@ byte-identical, `--cog-check` stays at 0 errors, `--tour` passes, 376 unit tests
 
 The heading sweep from level 2's spawn also showed the `walk2_spawn` ledge hang is not a blocker: the
 port reaches sector 39 at yaw 105 (and strafing at 75/135). It stays a #31 re-measure note.
+
+## Issue #38: the cog VM reads operands the way `sithCogExec_Execute` pops them
+
+Audit of the port VM (`src/cog.rs`) against `sithCogExec_Execute` (`0x4e1f60`), `IntererOps`
+(`0x4e3630`), `FloatOps` (`0x4e3870`), `PopInt` and `PopFlex`:
+
+| Engine | Port before | Now |
+|---|---|---|
+| `if`/`while`/`for`/`do` jump on `PopInt` == 0 (flex `ROUND`ed) | `n != 0.0` | `Value::int() != 0` |
+| `!` (0xd): `PopInt == 0` | `v == 0.0` | `int() == 0` |
+| `&& \|\| != & \| ^` (0x14-0x19): rounded ints, both operands evaluated | truthy / exact float / truncation | `int()` |
+| `+ - * / %`, `== < <= > >=` (8-0x13): 32-bit floats, `/ 0` gives 0 | `f64` | `Value::flex()` (`f32`) |
+| `-x` (0xe): `-PopFlex` | `f64` | `f32` |
+| non-numeric operand: `PopInt` -1, `PopFlex` `_DAT_00522fb4` | vector x / string parse | -1 / `0.0f` (read from `JK.EXE` `.rdata`) |
+| `call` (0x1f) skipped once the call stack holds 4 frames | error past depth 24 | skipped at `depth > 4` |
+| no `<< >> ~` opcodes | evaluated | kept for the parser, on `int()` |
+
+`ROUND` is taken as the x87 default (half to even): `stdStartup` (`0x426bb0`) saves the startup control
+word and only prepares round-up/round-down/truncate variants. Their users are not in the decomp set;
+if one of them is loaded for the whole frame, `int()` is wrong for every fractional operand.
+Unchanged and matching: assignment stores the value as popped, the stack is 64 entries, `== < > <= >=`
+return ints. Not audited further: precedence (the grammar is yacc tables, not in the decomp).
+
+Same-build A/B (`main` 6993dc9 against this branch): a temporary trace that printed every condition or
+operator whose result changed fired 0 times over `--cog-check` (34 levels), the level-1 route and 600
+idle ticks on levels 2, 3, 4 and 6 (it fired on the unit test's script, so it was live). The level-1
+route trace is byte-identical, `--cog-check` and `--tour` output is identical, 378 unit tests pass. The
+fix changes no decision in the scripts exercised so far; it closes the fractional cases the engine
+defines before #39 builds chain tests on the VM.

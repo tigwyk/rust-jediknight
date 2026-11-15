@@ -940,12 +940,28 @@ impl Value {
         }
     }
 
-    fn truthy(&self) -> bool {
+    /// `sithCogExec_PopInt` (`0x4e25c0`), which every condition, `!` and the integer operators
+    /// (`sithCogExec_IntererOps`, `0x4e3630`) read their operands through: a flex is `ROUND`ed to
+    /// the nearest integer, an int passes, any other value is `0xffffffff` (-1). `ROUND` is the x87
+    /// default (round half to even): `stdStartup` (`0x426bb0`) keeps the startup control word and
+    /// only prepares round-up/round-down/truncate variants for explicit use. `Nil` (a symbol or verb
+    /// result this VM does not have) stays 0. Kept in `i64` like the rest of this VM's integers, so a
+    /// bit-31 flag keeps its bits instead of saturating.
+    fn int(&self) -> i64 {
         match self {
-            Value::Num(n) => *n != 0.0,
-            Value::Nil => false,
-            Value::Str(s) => !s.is_empty(),
-            Value::Vec(_) => true,
+            Value::Num(n) => n.round_ties_even() as i64,
+            Value::Nil => 0,
+            Value::Str(_) | Value::Vec(_) => -1,
+        }
+    }
+
+    /// `sithCogExec_PopFlex` (`0x4e24f0`), the arithmetic and comparison operands
+    /// (`sithCogExec_FloatOps`, `0x4e3870`): a 32-bit float; anything that is not a number reads
+    /// `_DAT_00522fb4`, which is `0.0f` in `JK.EXE`'s `.rdata`.
+    fn flex(&self) -> f32 {
+        match self {
+            Value::Num(n) => *n as f32,
+            Value::Nil | Value::Str(_) | Value::Vec(_) => 0.0,
         }
     }
 }
@@ -1358,7 +1374,7 @@ impl Vm {
             }
             Stmt::If(cond, then, els) => {
                 let c = self.eval(cog, cond)?;
-                if c.truthy() {
+                if c.int() != 0 {
                     if let Some(last) = self.path.last_mut() {
                         last.1 = 1;
                     }
@@ -1374,7 +1390,7 @@ impl Vm {
             }
             Stmt::While(cond, body) => {
                 for _ in 0..LOOP_BUDGET {
-                    if !self.eval(cog, cond)?.truthy() {
+                    if self.eval(cog, cond)?.int() == 0 {
                         return Ok(Flow::Next);
                     }
                     match self.exec(cog, body)? {
@@ -1388,7 +1404,7 @@ impl Vm {
             Stmt::For(init, cond, step, body) => {
                 self.exec(cog, init)?;
                 for _ in 0..LOOP_BUDGET {
-                    if !self.eval(cog, cond)?.truthy() {
+                    if self.eval(cog, cond)?.int() == 0 {
                         return Ok(Flow::Next);
                     }
                     match self.exec(cog, body)? {
@@ -1407,7 +1423,7 @@ impl Vm {
                         Flow::Break => return Ok(Flow::Next),
                         done => return Ok(done),
                     }
-                    if !self.eval(cog, cond)?.truthy() {
+                    if self.eval(cog, cond)?.int() == 0 {
                         return Ok(Flow::Next);
                     }
                 }
@@ -1422,7 +1438,12 @@ impl Vm {
             }
             Stmt::Break => Ok(Flow::Break),
             Stmt::Gosub(label) => {
-                self.run_label(cog, label)?;
+                // `0x4e1f60` opcode 0x1f: a `call` pushes a frame only while the cog's call stack is
+                // below 4 (`param_1[0x24] < 4`), and is skipped otherwise. This VM's `depth` counts
+                // the running label too, so the engine's stack depth is `depth - 1`.
+                if self.depth <= 4 {
+                    self.run_label(cog, label)?;
+                }
                 Ok(Flow::Next)
             }
         }
@@ -1445,11 +1466,14 @@ impl Vm {
                 self.call_verb(name, vals)
             }
             Expr::Un(op, e) => {
-                let v = self.eval(cog, e)?.num();
+                let v = self.eval(cog, e)?;
                 match op {
-                    UnOp::Neg => Value::Num(-v),
-                    UnOp::Not => Value::Num((v == 0.0) as u8 as f64),
-                    UnOp::BitNot => Value::Num(!(v as i64) as f64),
+                    // `0x4e1f60` opcode 0xe: `-PopFlex`, a flex.
+                    UnOp::Neg => Value::Num(f64::from(-v.flex())),
+                    // Opcode 0xd: `PopInt == 0`.
+                    UnOp::Not => Value::Num(f64::from(u8::from(v.int() == 0))),
+                    // No engine opcode; kept for the parser's sake.
+                    UnOp::BitNot => Value::Num(!v.int() as f64),
                 }
             }
             Expr::Assign(name, value) => {
@@ -1458,47 +1482,36 @@ impl Vm {
                 v
             }
             Expr::Bin(op, a, b) => {
+                // Both operands are evaluated: the engine pushes both and the operator pops them.
                 let x = self.eval(cog, a)?;
                 let y = self.eval(cog, b)?;
-                // `&&`/`||` short-circuit, which scripts rely on to guard calls.
-                if *op == BinOp::And {
-                    return Ok(Value::Num((x.truthy() && y.truthy()) as u8 as f64));
+                let int = |v: bool| Value::Num(f64::from(u8::from(v)));
+                // `sithCogExec_IntererOps` (`0x4e3630`, opcodes 0x14-0x19): rounded integer operands.
+                let (i, j) = (x.int(), y.int());
+                // `sithCogExec_FloatOps` (`0x4e3870`, opcodes 8-0x13): 32-bit float operands.
+                let (a, b) = (x.flex(), y.flex());
+                match op {
+                    BinOp::And => int(i != 0 && j != 0),
+                    BinOp::Or => int(i != 0 || j != 0),
+                    BinOp::Ne => int(i != j),
+                    BinOp::BitAnd => Value::Num((i & j) as f64),
+                    BinOp::BitOr => Value::Num((i | j) as f64),
+                    BinOp::BitXor => Value::Num((i ^ j) as f64),
+                    BinOp::Add => Value::Num(f64::from(a + b)),
+                    BinOp::Sub => Value::Num(f64::from(a - b)),
+                    BinOp::Mul => Value::Num(f64::from(a * b)),
+                    BinOp::Div => Value::Num(f64::from(if b == 0.0 { 0.0 } else { a / b })),
+                    // Opcode 0xc calls the CRT's `fmod` (`FUN_0051504a`); a zero divisor stays 0 here.
+                    BinOp::Mod => Value::Num(f64::from(if b == 0.0 { 0.0 } else { a % b })),
+                    BinOp::Eq => int(a == b),
+                    BinOp::Lt => int(a < b),
+                    BinOp::Le => int(a <= b),
+                    BinOp::Gt => int(a > b),
+                    BinOp::Ge => int(a >= b),
+                    // No engine opcode; kept for the parser's sake.
+                    BinOp::Shl => Value::Num(i.wrapping_shl(j as u32) as f64),
+                    BinOp::Shr => Value::Num(i.wrapping_shr(j as u32) as f64),
                 }
-                if *op == BinOp::Or {
-                    return Ok(Value::Num((x.truthy() || y.truthy()) as u8 as f64));
-                }
-                let (a, b) = (x.num(), y.num());
-                Value::Num(match op {
-                    BinOp::Add => a + b,
-                    BinOp::Sub => a - b,
-                    BinOp::Mul => a * b,
-                    BinOp::Div => {
-                        if b == 0.0 {
-                            0.0
-                        } else {
-                            a / b
-                        }
-                    }
-                    BinOp::Mod => {
-                        if b == 0.0 {
-                            0.0
-                        } else {
-                            a % b
-                        }
-                    }
-                    BinOp::Eq => (a == b) as u8 as f64,
-                    BinOp::Ne => (a != b) as u8 as f64,
-                    BinOp::Lt => (a < b) as u8 as f64,
-                    BinOp::Le => (a <= b) as u8 as f64,
-                    BinOp::Gt => (a > b) as u8 as f64,
-                    BinOp::Ge => (a >= b) as u8 as f64,
-                    BinOp::BitAnd => ((a as i64) & (b as i64)) as f64,
-                    BinOp::BitOr => ((a as i64) | (b as i64)) as f64,
-                    BinOp::BitXor => ((a as i64) ^ (b as i64)) as f64,
-                    BinOp::Shl => ((a as i64) << (b as u32 & 63)) as f64,
-                    BinOp::Shr => ((a as i64) >> (b as u32 & 63)) as f64,
-                    BinOp::And | BinOp::Or => unreachable!(),
-                })
             }
         })
     }
@@ -1995,5 +2008,24 @@ end
         cog.bind(&mut vm, &[]);
         vm.run_label(&cog, "startup").expect("runs");
         assert_eq!(vm.var("countyees").num(), 4.0);
+    }
+
+    /// Each line's expected value is the engine's (`0x4e1f60`/`0x4e3630`/`0x4e3870`): conditions, `!`
+    /// and `!= && || & | ^` read rounded integers (`PopInt`, half to even), and arithmetic and the
+    /// other comparisons run in 32-bit floats. The port's old rules gave the opposite on every line.
+    #[test]
+    fn operators_read_operands_the_way_the_engine_pops_them() {
+        let cog = parse(
+            "symbols\nmessage startup\nflex r0 local\nflex r1 local\nflex r2 local\nflex r3 local\n\
+             flex r4 local\nflex r5 local\nflex r6 local\nend\ncode\nstartup:\n\
+             \tif (0.4) r0 = 1; else r0 = 2;\n\tr1 = !0.4;\n\tr2 = 0.4 != 0;\n\tr3 = 0.6 & 1;\n\
+             \tr4 = 2.5 != 2;\n\tr5 = 0.1 * 3 == 0.3;\n\tr6 = 0.4 && 1;\n\treturn;\nend\n",
+        )
+        .expect("parses");
+        let mut vm = Vm::new();
+        cog.bind(&mut vm, &[]);
+        vm.run_label(&cog, "startup").expect("runs");
+        let got: Vec<f64> = (0..7).map(|k| vm.var(&format!("r{k}")).num()).collect();
+        assert_eq!(got, vec![2.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
     }
 }
