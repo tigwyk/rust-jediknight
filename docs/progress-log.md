@@ -6829,3 +6829,13 @@ A/B, `main` `0e07448e` against this slice `2ecb788d`, same session:
 
 The test that pinned the step (`a_low_solid_model_is_a_step_not_a_wall`) became
 `a_solid_model_blocks_a_body_at_any_height`.
+
+## Issue #31 (slice 2): no push out of things, and the dead hull movers are gone
+
+`move_body` ended with `push_out_of_things`, a radial push out of any solid model the body overlapped.
+`sithCollision_MoveThing` (`0x4e7950`) has nothing like it: after its loop it only runs the
+`IsSphereInSector` restore and `FindFloor`. With slice 1's thing records the push no longer changed
+anything: the level-1 retail slice, the trace gate and `--walk all` were identical to slice 1 (`nopush`
+`d801c608`). The push, its function and its test assertion are deleted.
+
+`advance` and `resolve` (hull projection through a portal) had no callers on `main` already; deleted.
