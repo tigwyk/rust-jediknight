@@ -17,7 +17,8 @@
   is held by `BK_WALK_FORWARD=1` rather than the keyboard, so two runs of the same command are
   identical - the same policy `port-capture.ps1` states.
 
-  This script NEVER launches the retail game; it waits for a running JK.EXE like port-capture does.
+  This script runs the port without a window (`BK_HEADLESS=1`) and never launches the retail game.
+  It fails a leg whose log shows a window was created, so a windowed run cannot pass as headless.
 
 .EXAMPLE
   pwsh -File tools/parity/port-trace.ps1
@@ -42,15 +43,6 @@ $Exe = Join-Path $Root 'target\release\bevi-knight.exe'
 
 if (-not (Test-Path -LiteralPath $Exe)) { throw "missing $Exe; run cargo build --release first" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-
-# Wait for the retail side to finish: a running JK.EXE owns the display, and the port's windowed run
-# must not fight it for the desktop (the same rule port-capture.ps1 states).
-$deadline = (Get-Date).AddSeconds(120)
-while (Get-Process JK -ErrorAction SilentlyContinue) {
-  if ((Get-Date) -gt $deadline) { throw 'JK.EXE is still running after 120 s; aborting the port trace' }
-  Write-Host 'JK.EXE is running (retail trace/capture in progress); waiting...'
-  Start-Sleep -Seconds 3
-}
 
 # Parse the legs file: '#' comments, then name/level/x/y/z/pitch/yaw separated by tabs.
 $legRows = [System.Collections.Generic.List[object]]::new()
@@ -89,13 +81,21 @@ foreach ($leg in $legRows) {
   $settle = [double]$leg.Settle
   $frames = [int][math]::Round(($settle + $totalMs) / 1000.0 * 60.0)
   Write-Host ("port trace '{0}' level={1} pose=({2}) frames={3} ({4} ms held after {5} ms idle)" -f $leg.Name, $leg.Level, $pose, $frames, $totalMs, $settle)
+  $env:BK_HEADLESS = '1'
   $env:BK_WALK_FORWARD = '1'
   if ($settle -gt 0) { $env:BK_WALK_HOLD_AFTER = "$settle" } else { Remove-Item Env:BK_WALK_HOLD_AFTER -ErrorAction SilentlyContinue }
+  $log = Join-Path $OutDir ("{0}-port.log" -f $leg.Name)
+  # `--shot` keeps capture mode's fixed 1/60 s step; `--exit-after` ends the run before the shot frame.
   try {
-    & $Exe --start $leg.Level --frames $frames --shot $scratch --shot-at $shotAt --warp $pose --trace-out $trace --mute *> (Join-Path $OutDir ("{0}-port.log" -f $leg.Name))
+    & $Exe --start $leg.Level --frames ($frames + 1) --exit-after $frames --shot $scratch --shot-at $shotAt --warp $pose --trace-out $trace --mute *> $log
   } finally {
     Remove-Item Env:BK_WALK_FORWARD -ErrorAction SilentlyContinue
     Remove-Item Env:BK_WALK_HOLD_AFTER -ErrorAction SilentlyContinue
+    Remove-Item Env:BK_HEADLESS -ErrorAction SilentlyContinue
+  }
+  if (-not (Select-String -LiteralPath $log -SimpleMatch 'mode: headless' -Quiet) -or
+      (Select-String -LiteralPath $log -SimpleMatch 'Creating new window' -Quiet)) {
+    throw "$($leg.Name): the port opened a window; see $log"
   }
   $lines = @(Get-Content -LiteralPath $trace)
   # The settle frames are not part of the comparison: drop them and rebase the clock to 0.

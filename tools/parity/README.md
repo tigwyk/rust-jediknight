@@ -256,8 +256,9 @@ measurable (Phase 1 step 3's exit criterion). Three scripts and two fixtures:
   and no crossing (`docs/gaps.md`), so no retail trace with the door open exists. Issue #15 no longer
   needs one — the use action, the message it sends and the sighted condition are read from `decomp/`,
   and the replay's exit segment is the port's own deterministic route.
-- `port-trace.ps1 [-Only <name>]` - the port half: `--warp` to the same pose, `BK_WALK_FORWARD=1`,
-  one line per 1/60 s frame, output `target/parity/trace/<name>.tsv`.
+- `port-trace.ps1 [-Only <name>]` - the port half: runs without a window (`BK_HEADLESS=1`, and a leg
+  whose log shows a created window fails), `--warp` to the same pose, `BK_WALK_FORWARD=1`, one line per
+  1/60 s frame, output `target/parity/trace/<name>.tsv`.
 - `trace-compare.ps1 -Name <name> [-Epsilon <units>]` - interpolates the port path to the retail sample
   times and prints per-sample `d_xy`/`d_z` plus the sector sequence; without `-Epsilon` it reports, with
   it the exit code is the verdict.

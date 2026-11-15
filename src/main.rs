@@ -12751,7 +12751,8 @@ fn main() {
     // exits before this point is headless and never creates a window, and everything that reaches here
     // names the screen it opens on.
     println!(
-        "mode: window, {}",
+        "mode: {}, {}",
+        if std::env::var_os("BK_HEADLESS").is_some() { "headless" } else { "window" },
         match (&boot_menu, capture) {
             (Some(screen), _) => format!("screen `{screen}` open"),
             (None, true) => "no screen (capture)".to_string(),
@@ -29854,12 +29855,19 @@ fn engine_fov(
 /// The engine runs windowed with the mouse captured during play and hands the pointer back to the
 /// interface otherwise (`stdControl` captures on window activation, the GUI frees it). Without a grab the
 /// deltas stop at the window edge and the look jams in one direction.
-fn grab_cursor(overlay: Option<Res<Overlay>>, mut cursors: Query<&mut CursorOptions>) {
+fn grab_cursor(
+    overlay: Option<Res<Overlay>>,
+    capture: Option<Res<CaptureMode>>,
+    mut cursors: Query<&mut CursorOptions>,
+) {
     // A headless run must not take the pointer: there is no window to hold it, and a sweep that
     // locked the mouse would be unusable while it ran. `BK_NO_GRAB=1` is the same courtesy for the
     // live gates, which do need a window but have no use for the pointer — they drive the input
-    // themselves.
-    if std::env::var_os("BK_HEADLESS").is_some() || std::env::var_os("BK_NO_GRAB").is_some() {
+    // themselves. Scripted captures drive their own input too, so they leave the pointer alone.
+    if std::env::var_os("BK_HEADLESS").is_some()
+        || std::env::var_os("BK_NO_GRAB").is_some()
+        || capture.is_some_and(|c| c.0)
+    {
         return;
     }
     let playing = overlay.as_deref().is_none_or(|o| o.menu.is_none());
