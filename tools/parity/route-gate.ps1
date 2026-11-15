@@ -1,17 +1,19 @@
 #requires -Version 7
 <#
 .SYNOPSIS
-  The level-1 scripted-route gate: the port's fixed-step replay must be deterministic and must match
-  the committed route trace.
+  A level's scripted-route gate: the port's fixed-step replay must be deterministic, must carry its
+  own evidence, and must match the committed route trace. The level is a manifest (issue #24).
 
 .DESCRIPTION
-  Issue #8's oracle, extended by #15 to the level's own exit. `tools/parity/routes/level1-route.tsv`
-  drives the player through the level's own retail-recorded route placements (spawn, cantina, the way
-  up, the upper door), then — after the frozen retail fixture's last sample — walks into the shut
-  `door0`, presses the player's own use key, walks through the opened doorway, and holds the tunnel and
-  landing legs until `01_endlevel.cog` has run. The replay writes
-  `tick t_s x y z sector vel_x vel_y vel_z health shields` plus the door/switch cog state, the
-  latched events and the mixer's audio state every 600 ms (36 ticks).
+  Issue #8's oracle, extended by #15 to level 1's own exit and made data-driven by #24. A manifest
+  (`tools/parity/routes/<level>-manifest.tsv`; the level-1 file's header documents every key) names
+  the level, its input plan, the cog variables and events the trace watches, the exit evidence, the
+  port oracle, an optional retail prefix, the provenance file and the prerequisite gates. This
+  script and the app hold no level literal: the replay reads the manifest for its trace columns
+  (`--route-manifest`) and the comparator reads it for the event columns (`--route-compare`).
+
+  The replay writes `tick t_s x y z sector vel_x vel_y vel_z health shields`, the manifest's
+  watched cog variables and latched events, and the mixer's audio state every 600 ms (36 ticks).
 
   The gate checks eight things:
 
@@ -20,79 +22,66 @@
        precondition);
     2. engine time (issue #17) — every sample carries the engine clock: its `t_s` is its tick at the
        pinned step, the position delta of each window is exactly velocity × engine time, and the only
-       windows exempt from that identity are the plan's own `warp` rows (the retail leg boundaries).
-       A warp inside a leg would be a zero-velocity jump the plan does not name and fails; every plan
-       warp must land on a sample row, so a boundary cannot hide between samples. The comparator
-       grades `t_s` as an identity, so a replay running its body on a fitted capture clock fails here
-       instead of hiding inside the position epsilon; the retail prefix's rows must name these same
+       windows exempt from that identity are the plan's own `warp` rows (the leg boundaries). A warp
+       inside a leg would be a zero-velocity jump the plan does not name and fails; every plan warp
+       must land on a sample row, so a boundary cannot hide between samples. The comparator grades
+       `t_s` as an identity, so a replay running its body on a fitted capture clock fails here
+       instead of hiding inside the position epsilon; a retail prefix's rows must name these same
        instants;
-    3. the exit's own evidence — the plan presses use at both doors and never sends a synthetic
-       `activate`, the replay's use trace names the linked things (`use: activated thing 4` and
-       `... 47`), `door0_opened` is shut at and before the first use tick and latched after it, the
-       body's y then passes the opened leaf (the walk-through crossing), `goal_bin100` reaches 3, and
-       `level_end` reaches 1 (the level's script called `jkEndLevel`);
-    4. the committed oracle — a replay matches `tools/parity/routetrace/level1-route-port.tsv`
-       field for field, event columns included on **every** row (the oracle and the replay share the
-       port's fixed grid, so an early latch fails); the retail prefix in check 6 keeps the
-       last-row-only event grade;
+    3. the route's own evidence — the plan never sends the removed synthetic `switch`; for each
+       manifest `use <thing>` the plan presses use and the replay's use trace names that linked
+       thing; an `after_use` event is shut at and before the first use tick and latched after it; a
+       `cross` row's axis passes its value after its event latched (the body walked through); and
+       every `final` column carries its value on the last row;
+    4. the committed oracle — a replay matches the manifest's `port` fixture field for field, event
+       columns included on **every** row (the oracle and the replay share the port's fixed grid, so
+       an early latch fails); a retail prefix in check 6 keeps the last-row-only event grade;
     5. self-check — a copy of the trace with one position moved 0.25 units is **rejected** by the
        comparator, so the gate is known to fail on a perturbed trace and pass on the unmodified one.
        `-Perturb` runs that check; the gate's normal run compares the unmodified trace;
-    6. retail parity — the replay matches `level1-route-retail.tsv` within the **epsilon the fixture
-       states** (`# epsilon <units>` in its header). Sectors stay exact inside the comparator;
-    7. mechanic provenance — `tools/parity/routes/level1-route-provenance.tsv` names the engine
-       function and address behind every mechanic the route exercises (walk, floor, collision, use,
-       cog messages, damage, AI fire, audio state, level end). A row still on re-derived code must
-       name its deviation-ledger entry, and an entry the ledger does not carry fails;
-    8. the prerequisite gates — `audio-gate.ps1` (audio state through the same route) and
-       `encounter-gate.ps1` (AI fire, damage and the kill order at the door) must both pass. The
-       route's own replay runs with `--no-ai`, so combat is measured by the encounter stage inside
-       this gate rather than in the same process; `-SkipPrereqs` skips them for iteration and the
-       verdict then does not cover them.
+    6. retail parity — when the manifest names a `retail` prefix, the replay matches it within the
+       **epsilon the fixture states** (`# epsilon <units>` in its header), over the rows before the
+       plan's warp the manifest names (the port-only segment starts there). Sectors stay exact inside
+       the comparator. A level without a retail prefix says so (`SKIP`); its port oracle is
+       port-side evidence, not parity;
+    7. mechanic provenance — the manifest's `provenance` file names the engine function and address
+       behind every mechanic its `mechanics` row lists. A row still on re-derived code must name its
+       deviation-ledger entry, and an entry the ledger does not carry fails;
+    8. the prerequisite gates — each manifest `prereq` gate must pass. `-SkipPrereqs` skips them for
+       iteration and the verdict then does not cover them.
 
-  The trace carries the full spawn-to-level-completion route: 43 samples over 1512 ticks, every
-  one of them recording position, sector, velocity, both bars, both cogs **and the mixer's audio
-  state** — the same columns `--audio-trace` writes, sampled from the same replay tick. No cell is
-  `-`: the gate rejects a `-` in either trace, because the comparator would skip it and measure the
-  remaining columns only.
-
-  **Coverage is the fixture's own.** The frozen retail capture was taken before #15: it has no
-  `door0_opened`/`goal_bin100`/`level_end` columns and its rows stop at tick 684, at the door leg's
-  stop pose. The exit segment's first row is the port-only `exit_door` warp at that same tick, so the
-  comparator grades exactly the columns that fixture's header carries and the rows **strictly before**
-  the warp; the port's exit rows are the port-only segment, proved by check 2 and the port oracle.
-  Nothing here needs a new retail capture, and no tolerance is widened.
-
-  Before 2-5, every field of both traces must be present: the comparator skips a `-`, so a required
+  Before 2-5, every field of the traces must be present: the comparator skips a `-`, so a required
   health, shield or cog column left as `-` would measure parity for the position columns only and
-  pass. The gate rejects any `-` in either trace.
+  pass. The gate rejects any `-` in the replay and in the retail prefix.
+
+  **Coverage is the fixture's own.** Level 1's frozen retail capture was taken before #15: it has no
+  event columns and its rows stop at tick 684, the door leg's stop pose. The exit segment's first row
+  is the port-only `exit_door` warp at that same tick, so the comparator grades exactly the columns
+  that fixture's header carries and the rows **strictly before** the warp. Nothing here needs a new
+  retail capture, and no tolerance is widened.
 
   Both sides capture with the AI **off**: the replay passes `--no-ai` (a capture switch that
   requires `--replay`), and `retail-capture.ps1 -RouteWalk` sets the `-devMode` toggles
-  `disableai on` and `noaishots on` (both are toggles, so the capture sets them explicitly and
-  re-applies them after every warp). The route's subject is movement and cog state; the cantina
-  ambush used to kill retail's player while the port survived, so the bars could never match.
-  Combat parity has its own gate (the door encounter).
+  `disableai on` and `noaishots on`. The route's subject is movement and cog state; combat parity has
+  its own gate (level 1's door encounter, a prerequisite in its manifest).
 
   `-Epsilon` overrides the fixture's stated value for an experiment; the gate's verdict is the
   fixture's.
 
 .EXAMPLE
   pwsh -File tools/parity/route-gate.ps1
+  pwsh -File tools/parity/route-gate.ps1 -Manifest tools/parity/routes/level2-manifest.tsv
   pwsh -File tools/parity/route-gate.ps1 -Perturb
   pwsh -File tools/parity/route-gate.ps1 -Epsilon 0.5
 #>
 [CmdletBinding()]
 param(
-  [string]$Route = 'tools/parity/routes/level1-route.tsv',
-  [string]$Level = '01narshadda',
-  [string]$PortFixture = 'tools/parity/routetrace/level1-route-port.tsv',
-  [string]$RetailFixture = 'tools/parity/routetrace/level1-route-retail.tsv',
+  [string]$Manifest = 'tools/parity/routes/level1-manifest.tsv',
   [string]$Out = 'target/parity/routetrace',
   # 0 means "use the epsilon the retail fixture states in its header".
   [double]$Epsilon = 0,
   [switch]$Perturb,
-  # Skip the audio and encounter prerequisite gates (iteration only; the verdict then omits them).
+  # Skip the prerequisite gates (iteration only; the verdict then omits them).
   [switch]$SkipPrereqs
 )
 
@@ -105,9 +94,47 @@ function Resolve-PathUnderRoot([string]$Path) {
   Join-Path $Root $Path
 }
 
-$RoutePath = Resolve-PathUnderRoot $Route
-$PortPath = Resolve-PathUnderRoot $PortFixture
-$RetailPath = Resolve-PathUnderRoot $RetailFixture
+# The manifest's gate rows. The app reads the same file for `watch`/`latch`/`bin`/`level_end` and
+# refuses a key neither side knows, so a typo fails the replay instead of dropping a check.
+function Read-RouteManifest([string]$Path) {
+  $m = [pscustomobject]@{
+    Level = $null; Plan = $null; Port = $null; Retail = $null; RetailWarp = $null; Provenance = $null
+    Mechanics = @(); Prereqs = @(); Uses = @(); AfterUse = $null; Cross = $null; Finals = @()
+  }
+  foreach ($line in Get-Content -LiteralPath $Path) {
+    if ($line -match '^\s*(#|$)') { continue }
+    $f = @($line -split "`t" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    switch ($f[0]) {
+      'level' { $m.Level = $f[1] }
+      'plan' { $m.Plan = $f[1] }
+      'port' { $m.Port = $f[1] }
+      'retail' { $m.Retail = $f[1]; $m.RetailWarp = $f[2] }
+      'provenance' { $m.Provenance = $f[1] }
+      'mechanics' { $m.Mechanics = @($f | Select-Object -Skip 1) }
+      'prereq' { $m.Prereqs += $f[1] }
+      'use' { $m.Uses += $f[1] }
+      'after_use' { $m.AfterUse = $f[1] }
+      'cross' { $m.Cross = [pscustomobject]@{ Column = $f[1]; Axis = $f[2]; Value = [double]$f[3]; Text = $f[3] } }
+      'final' { $m.Finals += [pscustomobject]@{ Column = $f[1]; Value = $f[2] } }
+    }
+  }
+  foreach ($key in 'Level', 'Plan', 'Port', 'Provenance') {
+    if (-not $m.$key) { throw ("{0} names no '{1}' row" -f $Path, $key.ToLowerInvariant()) }
+  }
+  if ($m.Retail -and -not $m.RetailWarp) { throw "$Path's 'retail' row names no warp where the port-only segment starts" }
+  if ($m.Mechanics.Count -eq 0) { throw "$Path names no 'mechanics' row" }
+  if ($m.Cross -and $m.Cross.Axis -notin 'x', 'y', 'z') { throw "$Path's 'cross' axis must be x, y or z" }
+  return $m
+}
+
+$ManifestPath = Resolve-PathUnderRoot $Manifest
+if (-not (Test-Path -LiteralPath $ManifestPath)) { throw "missing the route manifest $ManifestPath" }
+$man = Read-RouteManifest $ManifestPath
+# `level1-manifest.tsv` -> `level1`: the name of every file this run writes.
+$Name = [System.IO.Path]::GetFileNameWithoutExtension($ManifestPath) -replace '-manifest$', ''
+$RoutePath = Resolve-PathUnderRoot $man.Plan
+$PortPath = Resolve-PathUnderRoot $man.Port
+$RetailPath = if ($man.Retail) { Resolve-PathUnderRoot $man.Retail } else { $null }
 $OutDir = Resolve-PathUnderRoot $Out
 $Exe = Join-Path $Root 'target\release\bevi-knight.exe'
 
@@ -119,22 +146,21 @@ if (-not (Test-Path -LiteralPath $PortPath)) {
 }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-$runA = Join-Path $OutDir 'level1-route-a.tsv'
-$runB = Join-Path $OutDir 'level1-route-b.tsv'
-$log = Join-Path $OutDir 'level1-route-port.log'
+$runA = Join-Path $OutDir "$Name-route-a.tsv"
+$runB = Join-Path $OutDir "$Name-route-b.tsv"
+$log = Join-Path $OutDir "$Name-route-port.log"
 
 function Invoke-Replay([string]$Trace) {
   if (Test-Path -LiteralPath $Trace) { Remove-Item -LiteralPath $Trace -Force }
   $env:BK_HEADLESS = '1'
   # `BK_USE_TRACE=1` makes the use key name the linked thing it activated (`use: activated thing N`).
-  # The anti-synthetic checks below require that line for both level-1 doors: a plan that reached the
-  # cog state some other way cannot produce it.
+  # The evidence checks below require that line for each manifest `use` thing: a plan that reached
+  # the cog state some other way cannot produce it.
   $env:BK_USE_TRACE = '1'
   try {
     # `--no-ai`: the route measures movement, not combat. Retail runs the same route under its
-    # `-devMode` `disableai` (see `retail-capture.ps1 -RouteWalk`), so both sides fight nothing and
-    # the cantina ambush cannot kill one side and not the other.
-    & $Exe --start $Level --replay $RoutePath --route-trace $Trace --no-ai --mute *> $log
+    # `-devMode` `disableai` (see `retail-capture.ps1 -RouteWalk`), so both sides fight nothing.
+    & $Exe --start $man.Level --replay $RoutePath --route-trace $Trace --route-manifest $ManifestPath --no-ai --mute *> $log
   } finally {
     Remove-Item Env:BK_HEADLESS -ErrorAction SilentlyContinue
     Remove-Item Env:BK_USE_TRACE -ErrorAction SilentlyContinue
@@ -142,7 +168,7 @@ function Invoke-Replay([string]$Trace) {
   if (-not (Test-Path -LiteralPath $Trace)) { throw "the replay wrote no trace ($Trace); see $log" }
 }
 
-Write-Host 'route gate: replaying the scripted route twice...'
+Write-Host ("route gate: replaying {0}'s scripted route twice..." -f $man.Level)
 Invoke-Replay $runA
 Invoke-Replay $runB
 
@@ -155,13 +181,8 @@ if ($hashA -ne $hashB) {
 Write-Host ("PASS  determinism: two replays are identical ({0} rows)" -f ((Get-Content -LiteralPath $runA).Count - 1))
 
 # 1b. Required fields. A `-` is a field the comparator would skip, so the gate rejects it before any
-# comparison: health, shields and the two cogs are the trace's required fields, and level 1 has both
-# cogs. Leaving any of them `-` would measure parity for the position columns only (issue #8 shipped
-# that way).
-if (-not (Test-Path -LiteralPath $RetailPath)) {
-  Write-Host "FAIL  retail: missing $RetailPath"
-  exit 1
-}
+# comparison: leaving a bar or a watched cog `-` would measure parity for the position columns only
+# (issue #8 shipped that way).
 function Find-MissingField([string]$Path) {
   $header = $null
   $lineNo = 0
@@ -176,22 +197,28 @@ function Find-MissingField([string]$Path) {
   }
   return $null
 }
-$retailMissing = Find-MissingField $RetailPath
-if ($retailMissing) {
-  Write-Host ("FAIL  retail: {0} leaves a required field as '-' ({1})" -f $RetailFixture, $retailMissing)
-  exit 1
+if ($RetailPath) {
+  if (-not (Test-Path -LiteralPath $RetailPath)) {
+    Write-Host "FAIL  retail: missing $RetailPath"
+    exit 1
+  }
+  $retailMissing = Find-MissingField $RetailPath
+  if ($retailMissing) {
+    Write-Host ("FAIL  retail: {0} leaves a required field as '-' ({1})" -f $man.Retail, $retailMissing)
+    exit 1
+  }
 }
 $portMissing = Find-MissingField $runA
 if ($portMissing) {
   Write-Host ("FAIL  port: the replay leaves a required field as '-' ({0})" -f $portMissing)
   exit 1
 }
-Write-Host 'PASS  required fields: health, shields and both cog states are recorded on both sides'
+Write-Host ('PASS  required fields: every column is recorded in the replay{0}' -f $(if ($RetailPath) { ' and the retail prefix' } else { '' }))
 
-# 1c. The door opens through the player's own use binding, not a synthetic `activate`. The plan must
-# press use (door 0 and the one-way door 47), never send the removed synthetic `switch`, and the
-# replay's own use trace must name both linked things. A shortcut that set the cog state cannot
-# produce either line.
+# 1c. The route's own evidence. A door opens through the player's own use binding, not a synthetic
+# `activate`: the plan never sends the removed `switch`, presses use at least once per manifest `use`
+# thing, and the replay's own use trace names each linked thing. A shortcut that set the cog state
+# cannot produce those lines.
 $planTicks = 0
 $planUses = New-Object System.Collections.Generic.List[int]
 $planWarps = New-Object System.Collections.Generic.List[int]
@@ -211,77 +238,94 @@ if ($planSwitch) {
   Write-Host 'FAIL  anti-synthetic: the plan contains a `switch` row (the removed synthetic activate)'
   exit 1
 }
-if ($planUses.Count -lt 2) {
-  Write-Host ('FAIL  anti-synthetic: the plan has {0} use row(s); door0 and the one-way door need the player own use key' -f $planUses.Count)
+if ($planUses.Count -lt $man.Uses.Count) {
+  Write-Host ('FAIL  anti-synthetic: the plan has {0} use row(s); the manifest names {1} thing(s) the player must use' -f $planUses.Count, $man.Uses.Count)
   exit 1
 }
 $logText = Get-Content -LiteralPath $log -Raw
-foreach ($needle in 'use: activated thing 4', 'use: activated thing 47') {
-  if ($logText -notmatch [regex]::Escape($needle)) {
-    Write-Host ("FAIL  anti-synthetic: the replay log has no '{0}' line; the door did not open through the use key" -f $needle)
+foreach ($thing in $man.Uses) {
+  $needle = "use: activated thing $thing"
+  if ($logText -notmatch ([regex]::Escape($needle) + '(\D|$)')) {
+    Write-Host ("FAIL  anti-synthetic: the replay log has no '{0}' line; the thing was not used through the use key" -f $needle)
     exit 1
   }
 }
-# The trace's own shape: the door is shut on every row strictly before the first use tick, and the
-# use-tick row is sampled before the key press so it must read shut too; the run ends with both
-# events complete.
 $traceLines = @(Get-Content -LiteralPath $runA | Where-Object { $_ -notmatch '^\s*(#|$)' })
 $traceHeader = @($traceLines[0] -split "`t")
 $tickCol = [Array]::IndexOf($traceHeader, 'tick')
 $yCol = [Array]::IndexOf($traceHeader, 'y')
-$doorCol = [Array]::IndexOf($traceHeader, 'door0_opened')
-$goalCol = [Array]::IndexOf($traceHeader, 'goal_bin100')
-$endCol = [Array]::IndexOf($traceHeader, 'level_end')
-if ($tickCol -lt 0 -or $yCol -lt 0 -or $doorCol -lt 0 -or $goalCol -lt 0 -or $endCol -lt 0) {
-  Write-Host 'FAIL  anti-synthetic: the trace has no tick/y/door0_opened/goal_bin100/level_end column'
+function Get-Column([string]$Column) {
+  $index = [Array]::IndexOf($traceHeader, $Column)
+  if ($index -lt 0) {
+    Write-Host ("FAIL  evidence: the trace has no '{0}' column (check the manifest's watch/latch/bin/level_end rows)" -f $Column)
+    exit 1
+  }
+  return $index
+}
+$afterCol = if ($man.AfterUse) { Get-Column $man.AfterUse } else { -1 }
+if ($man.AfterUse -and $planUses.Count -eq 0) {
+  Write-Host ("FAIL  evidence: '{0}' must latch after a use, but the plan has no use row" -f $man.AfterUse)
   exit 1
 }
-$firstUse = $planUses[0]
+$crossCol = if ($man.Cross) { Get-Column $man.Cross.Column } else { -1 }
+$crossAxis = if ($man.Cross) { Get-Column $man.Cross.Axis } else { -1 }
+$finalCols = @($man.Finals | ForEach-Object { Get-Column $_.Column })
+$firstUse = if ($planUses.Count -gt 0) { $planUses[0] } else { -1 }
 $sawOpen = $false
 $sawCross = $false
 $lastCells = $null
 foreach ($line in $traceLines | Select-Object -Skip 1) {
   $cells = @($line -split "`t")
   $lastCells = $cells
-  # The use-tick row is sampled before the key press, so it must also read shut; every row strictly
-  # before it must be shut. A synthetic trigger that set the cog state early shows `1` at or before
-  # the use tick and fails here.
-  if ([int]$cells[$tickCol] -le $firstUse -and $cells[$doorCol] -ne '0') {
-    Write-Host ("FAIL  anti-synthetic: door0_opened is {0} at tick {1}, at or before the use tick {2}" -f $cells[$doorCol], $cells[$tickCol], $firstUse)
-    exit 1
+  if ($afterCol -ge 0) {
+    # The use-tick row is sampled before the key press, so it must also read shut; every row strictly
+    # before it must be shut. A synthetic trigger that set the cog state early shows `1` at or before
+    # the use tick and fails here.
+    if ([int]$cells[$tickCol] -le $firstUse -and $cells[$afterCol] -ne '0') {
+      Write-Host ("FAIL  anti-synthetic: {0} is {1} at tick {2}, at or before the use tick {3}" -f $man.AfterUse, $cells[$afterCol], $cells[$tickCol], $firstUse)
+      exit 1
+    }
+    if ($cells[$afterCol] -eq '1') { $sawOpen = $true }
   }
-  if ($cells[$doorCol] -eq '1') { $sawOpen = $true }
-  # The crossing: after the leaf opened, the body's y passes the leaf (thing 4 at y 9.650073), so the
-  # player walked through the doorway the use opened instead of warping past it.
-  if ([int]$cells[$tickCol] -gt $firstUse -and $cells[$doorCol] -eq '1' -and [double]$cells[$yCol] -gt 9.650073) {
+  # The crossing: after the event latched, the body passes the value on the axis, so the player walked
+  # through the opening instead of warping past it.
+  if ($crossCol -ge 0 -and [int]$cells[$tickCol] -gt $firstUse -and $cells[$crossCol] -eq '1' -and [double]$cells[$crossAxis] -gt $man.Cross.Value) {
     $sawCross = $true
   }
 }
-if (-not $sawOpen -or $lastCells[$doorCol] -ne '1') {
-  Write-Host 'FAIL  anti-synthetic: door0_opened never latched'
+if ($afterCol -ge 0 -and -not $sawOpen) {
+  Write-Host ("FAIL  anti-synthetic: {0} never latched" -f $man.AfterUse)
   exit 1
 }
-if (-not $sawCross) {
-  Write-Host 'FAIL  crossing: no sampled row past the opened door0 leaf (y 9.650073)'
+if ($crossCol -ge 0 -and -not $sawCross) {
+  Write-Host ("FAIL  crossing: no sampled row past {0} {1} after {2} latched" -f $man.Cross.Axis, $man.Cross.Text, $man.Cross.Column)
   exit 1
 }
-if ($lastCells[$goalCol] -ne '3') {
-  Write-Host ("FAIL  goal: the last row records goal_bin100 {0}, not 3" -f $lastCells[$goalCol])
-  exit 1
+for ($k = 0; $k -lt $man.Finals.Count; $k++) {
+  # A `level_end` final is `sithMain_SetEndLevel`'s never-cleared latch (`0x4c4bf0`): a run that stops
+  # before the level's script calls `jkEndLevel` fails here, which is why a plan's trailing `wait`
+  # outlasts the script's own sleep.
+  if ($lastCells[$finalCols[$k]] -ne $man.Finals[$k].Value) {
+    Write-Host ("FAIL  final: the last row records {0} {1}, not {2}" -f $man.Finals[$k].Column, $lastCells[$finalCols[$k]], $man.Finals[$k].Value)
+    exit 1
+  }
 }
-# `level_end` is `sithMain_SetEndLevel`'s never-cleared latch (`0x4c4bf0`): `01_endlevel.cog`'s
-# `user0` sets the goal, sleeps 3 s and calls `jkEndLevel(1)`, so the last sample must see it. A run
-# that stops at the sighting fails here, which is why the plan's trailing `wait` outlasts the sleep.
-if ($lastCells[$endCol] -ne '1') {
-  Write-Host ("FAIL  level end: the last row records level_end {0}; the level's `jkEndLevel` never ran" -f $lastCells[$endCol])
-  exit 1
+if ($man.Uses.Count -gt 0) {
+  Write-Host ("PASS  anti-synthetic: the plan uses the player key, never ``switch``, and the replay names things {0}" -f ($man.Uses -join ' and '))
+} else {
+  Write-Host 'PASS  anti-synthetic: the plan never sends `switch`'
 }
-Write-Host 'PASS  anti-synthetic: the plan uses the player key, never `switch`, and the replay names things 4 and 47'
-Write-Host 'PASS  events: door0_opened latched after the recorded use, the body crossed the leaf, final goal_bin100 = 3 and level_end = 1'
+$evidence = @()
+if ($man.AfterUse) { $evidence += ('{0} latched after the recorded use' -f $man.AfterUse) }
+if ($man.Cross) { $evidence += ('the body passed {0} {1} after {2} latched' -f $man.Cross.Axis, $man.Cross.Text, $man.Cross.Column) }
+if ($man.Finals.Count -gt 0) { $evidence += ('final ' + (($man.Finals | ForEach-Object { '{0} = {1}' -f $_.Column, $_.Value }) -join ', ')) }
+if ($evidence.Count -gt 0) {
+  Write-Host ('PASS  events: ' + ($evidence -join '; '))
+}
 
 # 1d. Full route coverage and the audio state at every sample (issue #14 AC1/AC3). The trace must
-# span the plan from spawn to the final tick (so the extended tail really ran and `jkEndLevel`
-# latched), and it must carry the mixer columns. A `-` in any cell was rejected above.
+# span the plan from spawn to the final tick (so the extended tail really ran), and it must carry the
+# mixer columns. A `-` in any cell was rejected above.
 $expectedRows = [int][math]::Floor($planTicks / 36) + 1
 # The plan need not end on a sample boundary (the trailing `wait` is a margin), so the last row is
 # the last multiple of 36 at or before the plan's final tick.
@@ -301,7 +345,7 @@ if ($missingAudio.Count -gt 0) {
   Write-Host ("FAIL  audio: the route trace has no {0} column(s)" -f ($missingAudio -join ', '))
   exit 1
 }
-Write-Host ("PASS  coverage: {0} sample(s) over ticks 0..{1} (spawn to level completion, plan {2} ticks)" -f $rowCount, $expectedLastTick, $planTicks)
+Write-Host ("PASS  coverage: {0} sample(s) over ticks 0..{1} (the whole plan, {2} ticks)" -f $rowCount, $expectedLastTick, $planTicks)
 Write-Host 'PASS  audio: every sample carries the song, its volume, the audible loop and the window''s one-shots'
 
 # 1e. Engine time (issue #17). Every sample carries the engine clock, and that clock is the one the
@@ -314,7 +358,7 @@ Write-Host 'PASS  audio: every sample carries the song, its volume, the audible 
 #     rows. A warp inside a leg is a row the plan does not name, so its zero-velocity jump fails the
 #     identity: no warp can cover an intra-leg timing gap;
 #   * every plan warp lands on a sample row, so a boundary can never hide between two samples.
-#   * the frozen retail prefix's rows sit at these same engine instants (the retail half of AC1).
+#   * a retail prefix's rows sit at these same engine instants (the retail half of AC1).
 $t_sCol = [Array]::IndexOf($traceHeader, 't_s')
 $xCol = [Array]::IndexOf($traceHeader, 'x')
 $zCol = [Array]::IndexOf($traceHeader, 'z')
@@ -406,53 +450,55 @@ if (-not $movedOnce -or -not (Test-EngineClock $clockMoved.ToArray() $warpRows).
   exit 1
 }
 
-# The retail prefix is the frozen reference for these engine instants: a retail row and the replay's
+# A retail prefix is the frozen reference for these engine instants: a retail row and the replay's
 # row at the same tick must name the same instant, or the comparison is between different times.
-$retailHeader = @(Get-Content -LiteralPath $RetailPath | Where-Object { $_ -match '^\s*tick\b' } | Select-Object -First 1) -split "`t"
-$retailTsCol = [Array]::IndexOf($retailHeader, 't_s')
-if ($retailTsCol -lt 0) {
-  Write-Host ("FAIL  engine clock: {0} has no t_s column" -f $RetailFixture)
-  exit 1
-}
-$replayTs = @{}
-foreach ($line in $traceLines | Select-Object -Skip 1) {
-  $cells = @($line -split "`t")
-  $replayTs[[int]$cells[$tickCol]] = $cells[$t_sCol]
-}
 $retailInstants = 0
-foreach ($line in Get-Content -LiteralPath $RetailPath) {
-  if ($line -match '^\s*(#|$)') { continue }
-  $cells = @($line -split "`t")
-  if ($cells[0] -eq 'tick') { continue }
-  $tick = [int]$cells[0]
-  if (-not $replayTs.ContainsKey($tick)) {
-    Write-Host ("FAIL  engine clock: the retail prefix samples tick {0}, which the replay does not" -f $tick)
+if ($RetailPath) {
+  $retailHeader = @(Get-Content -LiteralPath $RetailPath | Where-Object { $_ -match '^\s*tick\b' } | Select-Object -First 1) -split "`t"
+  $retailTsCol = [Array]::IndexOf($retailHeader, 't_s')
+  if ($retailTsCol -lt 0) {
+    Write-Host ("FAIL  engine clock: {0} has no t_s column" -f $man.Retail)
     exit 1
   }
-  if ($replayTs[$tick] -ne $cells[$retailTsCol]) {
-    Write-Host ("FAIL  engine clock: tick {0} is {1} s in the retail prefix and {2} s in the replay" -f $tick, $cells[$retailTsCol], $replayTs[$tick])
-    exit 1
+  $replayTs = @{}
+  foreach ($line in $traceLines | Select-Object -Skip 1) {
+    $cells = @($line -split "`t")
+    $replayTs[[int]$cells[$tickCol]] = $cells[$t_sCol]
   }
-  $retailInstants++
+  foreach ($line in Get-Content -LiteralPath $RetailPath) {
+    if ($line -match '^\s*(#|$)') { continue }
+    $cells = @($line -split "`t")
+    if ($cells[0] -eq 'tick') { continue }
+    $tick = [int]$cells[0]
+    if (-not $replayTs.ContainsKey($tick)) {
+      Write-Host ("FAIL  engine clock: the retail prefix samples tick {0}, which the replay does not" -f $tick)
+      exit 1
+    }
+    if ($replayTs[$tick] -ne $cells[$retailTsCol]) {
+      Write-Host ("FAIL  engine clock: tick {0} is {1} s in the retail prefix and {2} s in the replay" -f $tick, $cells[$retailTsCol], $replayTs[$tick])
+      exit 1
+    }
+    $retailInstants++
+  }
 }
 Write-Host ("PASS  engine clock: {0} sample(s) at the engine's own instants, {1} leg boundary row(s) (the plan's warps), velocity x engine time on every other window, and the retail prefix's {2} row(s) sampled at the same instants; a 0.25-unit move inside a leg is rejected" -f $clock.Checked, $clock.Boundaries, $retailInstants)
 
 
-# 2. The committed oracle. The comparator is the app's own `--route-compare`; exit code is the gate.
-# `--events-per-row` is the oracle's rule: the port fixture and the replay share the port's fixed
-# grid, so a latched event that trips on an earlier row is a different route and fails here. The
-# retail prefix below keeps the last-row-only grade, because its holds advance a variable amount of
-# engine time.
-& $Exe --route-compare $PortPath $runA --events-per-row
+# 2. The committed oracle. The comparator is the app's own `--route-compare`, reading both traces
+# against the manifest; exit code is the gate. `--events-per-row` is the oracle's rule: the port
+# fixture and the replay share the port's fixed grid, so a latched event that trips on an earlier row
+# is a different route and fails here. A retail prefix below keeps the last-row-only grade, because
+# its holds advance a variable amount of engine time.
+& $Exe --route-compare $ManifestPath $PortPath $runA --events-per-row
 if ($LASTEXITCODE -ne 0) {
   Write-Host 'FAIL  the replay does not match the committed route fixture (route-compare above)'
   exit 1
 }
-Write-Host ("PASS  oracle: the replay matches {0}" -f $PortFixture)
+Write-Host ("PASS  oracle: the replay matches {0}" -f $man.Port)
 
 # 3. The comparator must reject a trace with one field moved. `-Perturb` is the explicit proof; it is
 # also what the roadmap's acceptance asks the gate to demonstrate.
-$perturbed = Join-Path $OutDir 'level1-route-perturbed.tsv'
+$perturbed = Join-Path $OutDir "$Name-route-perturbed.tsv"
 $lines = Get-Content -LiteralPath $runA
 $header = @($lines[0] -split "`t")
 $xColumn = [Array]::IndexOf($header, 'x')
@@ -470,7 +516,7 @@ foreach ($line in $lines | Select-Object -Skip 1) {
 }
 Set-Content -LiteralPath $perturbed -Value $rows -Encoding utf8
 
-& $Exe --route-compare $PortPath $perturbed --events-per-row 2>&1 | Out-Null
+& $Exe --route-compare $ManifestPath $PortPath $perturbed --events-per-row 2>&1 | Out-Null
 if ($LASTEXITCODE -eq 0) {
   Write-Host 'FAIL  self-check: a trace with x moved 0.25 units passed the comparator'
   exit 1
@@ -482,73 +528,77 @@ if ($Perturb) {
 
 # 4. Retail parity, at the epsilon the fixture states. The fixture is the oracle, so the tolerance is
 # part of it: `# epsilon <units>` is the harness's own resolution (see the file's header).
-$stated = Select-String -LiteralPath $RetailPath -Pattern '^\s*#\s*epsilon\s+([0-9.]+)' | Select-Object -First 1
-if (-not $stated) {
-  Write-Host "FAIL  retail: $RetailFixture states no '# epsilon <units>' tolerance"
-  exit 1
-}
-$fixtureEpsilon = [double]$stated.Matches[0].Groups[1].Value
-$tolerance = if ($Epsilon -gt 0) { $Epsilon } else { $fixtureEpsilon }
-if ($Epsilon -gt 0 -and $Epsilon -ne $fixtureEpsilon) {
-  Write-Host ("note: comparing at {0} (the fixture states {1})" -f $Epsilon, $fixtureEpsilon)
-}
-# The frozen fixture stops at the door leg's last sample. The exit segment's first row is the
-# `exit_door` warp at that same tick, so the replay's row there is the port-only pose, not the pose
-# the fixture measured. Grade the fixture over the rows strictly before that warp; the exit rows are
-# the plan/event checks' and the port oracle's subject.
-$exitWarpTick = $null
-$planTick = 0
-foreach ($line in Get-Content -LiteralPath $RoutePath) {
-  if ($line -match '^\s*(#|$)') { continue }
-  $cells = @($line -split "`t" | Where-Object { $_ -ne '' })
-  switch ($cells[0]) {
-    'input' { $planTick += [int]$cells[1] }
-    'wait' { $planTick += [int]$cells[1] }
-    'warp' { if ($null -eq $exitWarpTick -and $cells[1] -eq 'exit_door') { $exitWarpTick = $planTick } }
+if (-not $RetailPath) {
+  Write-Host ("SKIP  retail: {0} names no retail prefix; the port oracle above is port-side evidence, not parity" -f $Manifest)
+} else {
+  $stated = Select-String -LiteralPath $RetailPath -Pattern '^\s*#\s*epsilon\s+([0-9.]+)' | Select-Object -First 1
+  if (-not $stated) {
+    Write-Host ("FAIL  retail: {0} states no '# epsilon <units>' tolerance" -f $man.Retail)
+    exit 1
   }
-}
-if ($null -eq $exitWarpTick) {
-  Write-Host 'FAIL  retail: the plan has no `exit_door` warp, so its exit segment is not port-only'
-  exit 1
-}
-$retailSlice = Join-Path $OutDir 'level1-route-retail-slice.tsv'
-$sliceHeader = $false
-$sliceRows = New-Object System.Collections.Generic.List[string]
-foreach ($line in Get-Content -LiteralPath $RetailPath) {
-  if ($line -match '^\s*(#|$)') { continue }
-  if (-not $sliceHeader) {
-    $sliceHeader = $true
-    $sliceRows.Add($line)
-    continue
+  $fixtureEpsilon = [double]$stated.Matches[0].Groups[1].Value
+  $tolerance = if ($Epsilon -gt 0) { $Epsilon } else { $fixtureEpsilon }
+  if ($Epsilon -gt 0 -and $Epsilon -ne $fixtureEpsilon) {
+    Write-Host ("note: comparing at {0} (the fixture states {1})" -f $Epsilon, $fixtureEpsilon)
   }
-  if ([int](($line -split "`t")[0]) -lt $exitWarpTick) { $sliceRows.Add($line) }
-}
-Set-Content -LiteralPath $retailSlice -Value $sliceRows -Encoding utf8
+  # The retail prefix stops where the port-only segment starts: the plan's first warp the manifest
+  # names. That warp's row is the port-only pose, not the pose the fixture measured, so the fixture is
+  # graded over the rows strictly before it; the rows after are the evidence checks' and the port
+  # oracle's subject.
+  $cutTick = $null
+  $planTick = 0
+  foreach ($line in Get-Content -LiteralPath $RoutePath) {
+    if ($line -match '^\s*(#|$)') { continue }
+    $cells = @($line -split "`t" | Where-Object { $_ -ne '' })
+    switch ($cells[0]) {
+      'input' { $planTick += [int]$cells[1] }
+      'wait' { $planTick += [int]$cells[1] }
+      'warp' { if ($null -eq $cutTick -and $cells[1] -eq $man.RetailWarp) { $cutTick = $planTick } }
+    }
+  }
+  if ($null -eq $cutTick) {
+    Write-Host ("FAIL  retail: the plan has no ``{0}`` warp, so its port-only segment has no start" -f $man.RetailWarp)
+    exit 1
+  }
+  $retailSlice = Join-Path $OutDir "$Name-route-retail-slice.tsv"
+  $sliceHeader = $false
+  $sliceRows = New-Object System.Collections.Generic.List[string]
+  foreach ($line in Get-Content -LiteralPath $RetailPath) {
+    if ($line -match '^\s*(#|$)') { continue }
+    if (-not $sliceHeader) {
+      $sliceHeader = $true
+      $sliceRows.Add($line)
+      continue
+    }
+    if ([int](($line -split "`t")[0]) -lt $cutTick) { $sliceRows.Add($line) }
+  }
+  Set-Content -LiteralPath $retailSlice -Value $sliceRows -Encoding utf8
 
-$env:BK_ROUTE_EPSILON = $tolerance.ToString([cultureinfo]::InvariantCulture)
-try {
-  & $Exe --route-compare $retailSlice $runA
-  $retailOk = $LASTEXITCODE -eq 0
-} finally {
-  Remove-Item Env:BK_ROUTE_EPSILON -ErrorAction SilentlyContinue
+  $env:BK_ROUTE_EPSILON = $tolerance.ToString([cultureinfo]::InvariantCulture)
+  try {
+    & $Exe --route-compare $ManifestPath $retailSlice $runA
+    $retailOk = $LASTEXITCODE -eq 0
+  } finally {
+    Remove-Item Env:BK_ROUTE_EPSILON -ErrorAction SilentlyContinue
+  }
+  if (-not $retailOk) {
+    Write-Host ("FAIL  retail: the replay differs from {0} beyond {1}" -f $man.Retail, $tolerance)
+    exit 1
+  }
+  Write-Host ("PASS  retail: the replay matches {0} within {1} over the {2} row(s) before the {3} warp at tick {4}" -f $man.Retail, $tolerance, ($sliceRows.Count - 1), $man.RetailWarp, $cutTick)
 }
-if (-not $retailOk) {
-  Write-Host ("FAIL  retail: the replay differs from {0} beyond {1}" -f $RetailFixture, $tolerance)
-  exit 1
-}
-Write-Host ("PASS  retail: the replay matches {0} within {1} over the {2} row(s) before the exit warp at tick {3}" -f $RetailFixture, $tolerance, ($sliceRows.Count - 1), $exitWarpTick)
 
 # 5. Mechanic provenance (issue #14 AC2). Every mechanic the route exercises names the engine
 # function it was transliterated from, that function's decomp address and the port symbol. A
 # mechanic still on re-derived code names its deviation-ledger entry, and the entry must really be
 # in the ledger: a deviation cannot be hidden by leaving this file silent about it.
-$ProvenancePath = Resolve-PathUnderRoot 'tools/parity/routes/level1-route-provenance.tsv'
+$ProvenancePath = Resolve-PathUnderRoot $man.Provenance
 if (-not (Test-Path -LiteralPath $ProvenancePath)) {
   Write-Host "FAIL  provenance: missing $ProvenancePath"
   exit 1
 }
 $RoadmapPath = Resolve-PathUnderRoot 'docs/porting-roadmap.md'
-$RequiredMechanics = @('walk', 'floor', 'collision', 'use', 'cog messages', 'damage', 'ai fire', 'audio state', 'level end')
+$RequiredMechanics = $man.Mechanics
 $seenMechanics = @{}
 $provenanceRows = 0
 foreach ($line in Get-Content -LiteralPath $ProvenancePath) {
@@ -599,15 +649,17 @@ foreach ($mechanic in $RequiredMechanics) {
 }
 Write-Host ("PASS  provenance: {0} row(s) cover the route's {1} mechanics with the engine function and address" -f $provenanceRows, $RequiredMechanics.Count)
 
-# 6. The prerequisite gates. The route replay runs with `--no-ai`, so combat (AI fire, damage, the
-# kill order) and the audio route are measured by their own gates against their own frozen
-# references; this gate's verdict includes them.
-if ($SkipPrereqs) {
-  Write-Host 'SKIP  prerequisites: -SkipPrereqs (the verdict does not cover the audio and encounter gates)'
+# 6. The prerequisite gates. A route replay runs with `--no-ai`, so combat and the audio route are
+# measured by their own gates against their own frozen references; this gate's verdict includes the
+# ones the manifest names.
+if ($man.Prereqs.Count -eq 0) {
+  Write-Host 'PASS  prerequisites: the manifest names none'
+} elseif ($SkipPrereqs) {
+  Write-Host ('SKIP  prerequisites: -SkipPrereqs (the verdict does not cover {0})' -f ($man.Prereqs -join ', '))
 } else {
   $pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
   if (-not $pwsh) { $pwsh = (Get-Process -Id $PID).Path }
-  foreach ($gate in @('audio-gate.ps1', 'encounter-gate.ps1')) {
+  foreach ($gate in $man.Prereqs) {
     $gatePath = Join-Path $PSScriptRoot $gate
     $gateLog = Join-Path $OutDir (([System.IO.Path]::GetFileNameWithoutExtension($gate)) + '.log')
     Write-Host ("route gate: running the prerequisite {0}..." -f $gate)
