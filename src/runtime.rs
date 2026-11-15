@@ -1056,6 +1056,9 @@ pub struct PlayerBody {
     pub gravity: f32,
     pub water: bool,
     pub vel: [f32; 2],
+    /// Frames the forward key has been held: the engine's key-to-axis ramp
+    /// (`stdControl_ReadKeyAsAxis`, `held * 0.064765`).
+    pub held_frames: u32,
     pub step_rollover: f32,
     pub last_move: f32,
     pub fall_killed: bool,
@@ -1082,6 +1085,7 @@ impl Default for PlayerBody {
             vy: 0.0,
             sector: 0,
             grounded: false,
+            held_frames: 0,
             gravity: 0.0,
             water: false,
             vel: [0.0; 2],
@@ -6200,8 +6204,18 @@ impl Runtime {
             body.vy = 0.0;
             body.grounded = true;
         }
+        // The engine's key-to-axis conversion ramps: `stdControl_ReadKeyAsAxis` returns
+        // `held_frames * _DAT_0053eee4` (0.064765 from the shipped image), so a held key
+        // reaches full axis in ~15 frames (~0.26 s) and releases instantly. `PlayerMovement`
+        // thrusts by that axis (`0x4d8a00:63-65`), so the walk accelerates with it.
+        body.held_frames = if input.forward != 0.0 { body.held_frames.saturating_add(1) } else { 0 };
+        let axis = if input.forward != 0.0 {
+            input.forward * ((body.held_frames as f32) * 0.064_765).min(1.0)
+        } else {
+            0.0
+        };
         let [along, across] = rules.speed(
-            input.forward,
+            axis,
             input.strafe,
             input.run,
             input.crouch,
@@ -11431,6 +11445,7 @@ mod tests {
             vy: 0.0,
             sector: 0,
             grounded: true,
+            held_frames: 0,
             gravity: 4.0,
             water: false,
             vel: [0.0; 2],
