@@ -774,6 +774,10 @@ fn main() {
     // the normal the landing probe would orient. `--surfaces-at` lists the level's own surfaces; a face
     // missing here is a face the floor probe cannot see at all.
     let mut faces_probe: Option<String> = None;
+    // `--waypoints A;B`: the doorway centres `Collide::route` walks between two places (the AI's
+    // adjoin-graph route, every authored opening passable, heights not judged), for authoring a
+    // `--replay` plan. Each end is `x,y,z` or `s<sector>` (a thing's own sector from the `.jkl`).
+    let mut waypoints_probe: Option<String> = None;
     let mut controls_check = false;
     let mut move_check = false;
     let mut winding_check = false;
@@ -1283,6 +1287,7 @@ fn main() {
         "--key" => key_probe = arg_value(&args, &mut i).cloned(),
         "--tex" => tex_probe = arg_value(&args, &mut i).cloned(),
         "--faces-at" => faces_probe = arg_value(&args, &mut i).cloned(),
+        "--waypoints" => waypoints_probe = arg_value(&args, &mut i).cloned(),
         "--surfaces-at" => {
                 surfaces_at = arg_value(&args, &mut i).and_then(|s| {
                     let v: Vec<f32> = s.split(',').filter_map(|n| n.trim().parse().ok()).collect();
@@ -2650,6 +2655,39 @@ fn main() {
         }
     }
 
+    if let Some(text) = waypoints_probe.as_deref() {
+        let solids = collide::build(&world.level);
+        let ends: Vec<Vec<usize>> = text
+            .split(';')
+            .map(|p| match p.trim().strip_prefix('s') {
+                Some(sector) => sector.parse().into_iter().collect(),
+                None => {
+                    let v: Vec<f32> = p.split(',').filter_map(|n| n.trim().parse().ok()).collect();
+                    <[f32; 3]>::try_from(v).map(|at| solids.sectors_around(at)).unwrap_or_default()
+                }
+            })
+            .collect();
+        let (Some(starts), Some(goals)) = (ends.first(), ends.get(1)) else {
+            println!("waypoints: expected A;B, each x,y,z or s<sector>");
+            return;
+        };
+        let route = starts.iter().find_map(|&start| {
+            goals.iter().find_map(|&goal| {
+                solids.route(start, goal, collide::Gates::default()).map(|r| (start, goal, r))
+            })
+        });
+        match route {
+            Some((start, goal, centres)) => {
+                println!("waypoints: sector {start} -> {goal}, {} opening(s)", centres.len());
+                for c in centres {
+                    let sector = solids.sector_for_body(c).map_or("-".to_string(), |s| s.to_string());
+                    println!("  {:.3}\t{:.3}\t{:.3}\tsector {sector}", c[0], c[1], c[2]);
+                }
+            }
+            None => println!("waypoints: no route"),
+        }
+        return;
+    }
     // `--scale`: how big the models really are against the level they are placed in. Both references
     // are the level's own geometry, so this answers "is the model scale right" without trusting it.
     // `--faces-at x,y,z`: the **collision** faces near a point, plus `floor_under`'s answer there with
