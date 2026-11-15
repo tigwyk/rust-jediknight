@@ -964,7 +964,7 @@ impl LevelGeometry {
         radius: f32,
         gates: Gates<'_>,
     ) -> Option<Sweep> {
-        self.sweep_rooms(sector, start, dir, dist, radius, gates).0
+        self.sweep_rooms(sector, start, dir, dist, radius, gates, &mut Vec::new()).0
     }
 
     /// [`Self::sweep`], and the sector the walk ended in.
@@ -989,6 +989,7 @@ impl LevelGeometry {
         dist: f32,
         radius: f32,
         gates: Gates<'_>,
+        records: &mut Vec<Sweep>,
     ) -> (Option<Sweep>, usize, [f32; 3]) {
         let mut sector = sector;
         let mut from = start;
@@ -1054,6 +1055,18 @@ impl LevelGeometry {
                         top: face.verts.iter().map(|v| v[2]).fold(f32::MIN, f32::max),
                     });
                 }
+                // The engine's search pushes EVERY face the sphere touches
+                // (`SearchForSurfaceCollisions` fills a record stack, and `MoveThing`'s pop
+                // loop walks them nearest-first — `0x4e7950:104-127`); the move path consumes
+                // the whole set so a corner's second wall folds in the same move.
+                records.push(Sweep {
+                    distance: t,
+                    surface: face.surface,
+                    normal,
+                    sector,
+                    point: at,
+                    top: face.verts.iter().map(|v| v[2]).fold(f32::MIN, f32::max),
+                });
             }
 
             // A shut opening's own sector **is** the door leaf: the level's scripts closed it
@@ -1607,7 +1620,27 @@ impl LevelGeometry {
             if std::env::var_os("BK_MOVE_TRACE").is_some() {
                 eprintln!("move: loop {bounce} at {:?} dir {:?} left {left:.5}", at, [dir[0], dir[1]]);
             }
-            let room = self.sweep_rooms(here, at, dir, left, radius, gates);
+            // The engine's pop loop walks the record stack nearest-first and skips a record the
+            // response does not accept (`0x4e7950:104-205`: advance to the hit, run the handler,
+            // `while (uVar9 == 0)` pops the next). A tangent record (`d_into <= deadzone`) is
+            // skipped for the next-nearest, not treated as the move's end.
+            let mut records = Vec::new();
+            let room = self.sweep_rooms(here, at, dir, left, radius, gates, &mut records);
+            records.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+            let room = if let (Some(nearest), far, end) = room {
+                let accepted = records
+                    .iter()
+                    .find(|r| {
+                        let d = -(dir[0] * left * r.normal[0]
+                            + dir[1] * left * r.normal[1]
+                            + dir[2] * left * r.normal[2]);
+                        d.abs() > 1e-5 && d > 0.0
+                    })
+                    .copied();
+                (accepted.or(Some(nearest)), far, end)
+            } else {
+                room
+            };
             // A solid model is a contact like a wall: whichever comes first stops the move. A body that
             // walks into a crate stops against it (retail does: `walk3_spawn` and `walk6_spawn` both
             // halt at props), and the radial normal makes the slide round it.
@@ -2008,7 +2041,7 @@ impl LevelGeometry {
             return (want, None);
         }
         let dir = [delta[0] / len, delta[1] / len, delta[2] / len];
-        match self.sweep_rooms(sector, focus, dir, len, radius, Gates::default()).0 {
+        match self.sweep_rooms(sector, focus, dir, len, radius, Gates::default(), &mut Vec::new()).0 {
             // `Sweep::point` is where the sphere's centre contacts the plane, which is exactly where
             // the engine puts the camera — it does not back off by the radius again.
             Some(hit) => {
@@ -3792,7 +3825,7 @@ mod tests {
         // Passable: the body crosses into 1; the wall there is its own room's, so it is a contact too.
         // Shut: the *leaf's* faces stop it before the crossing is taken.
         let dir = [0.0, 1.0, 0.0];
-        let before = room.sweep_rooms(0, [0.0, -0.2, 0.0], dir, 0.5, r, shut);
+        let before = room.sweep_rooms(0, [0.0, -0.2, 0.0], dir, 0.5, r, shut, &mut Vec::new());
         let leaf_hit = before.0.map(|hit| hit.point[1]);
         assert!(
             leaf_hit.is_some_and(|y| y <= 0.1),
