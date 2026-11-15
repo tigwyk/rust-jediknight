@@ -6648,3 +6648,22 @@ same results (oracle FAIL 1204/99 against the stale committed fixture, retail sl
 epsilon 1.70, self PASS 1204), and the gate log differs only in four message wordings. The gate
 still stops at the port oracle, as on `main` (#30). Level 2 (`level2-manifest.tsv`: spawn walk,
 door cog 2, no retail prefix) passes the gate end to end; its oracle is port-side evidence.
+
+## Issue #35: a cog array index is the declaration slot (level 2 can end)
+
+`#28`'s first level-2 probe found `02_endlevel.cog`'s `countYees` at 0: `countYees =
+numYeesEasy[GetDifficulty()]` resolved `numYeesEasy1` by name, found nothing and read nil, so
+`deadYees == countYees` could never hold after a kill and the level could not end.
+`sithCogExec_Execute` (`0x4e1f60`) opcode 4 pushes the base symbol's ID plus the index, and
+`sithCogParse_AddSymbol` (`0x4fd260`) numbers symbols in declaration order, so `Cog::indexed_name`
+now returns the symbol declared `index` slots after the base. The name/link-id rule is gone.
+
+Same-build A/B over every level's scripts (`BK_INDEX_TRACE=1 --cog-check`): the difficulty tables
+(`creepRate`, `healAmount`, `healInt`, `meditate`, `move`, `numYees`, `sleep`, `speed`), the two-digit
+arrays (`face00`, `flash00`, `light00`, `light01`, `vec00`), `ghost[0]`, `lamp[0]`, `sign[0]` and
+`lowConvey0[4..7]` read nil before and read their elements now; `stopAt1[i]` and `stop1switch[i]` were
+one element off and are not now. Level 2's `countyees` reads 4 (medium). Level 1's route trace is
+byte-identical, `--cog-check` stays at 0 errors, `--tour` passes, 376 unit tests pass.
+
+The heading sweep from level 2's spawn also showed the `walk2_spawn` ledge hang is not a blocker: the
+port reaches sector 39 at yaw 105 (and strafing at 75/135). It stays a #31 re-measure note.
