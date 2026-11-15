@@ -35,8 +35,11 @@ powershell -NoProfile -File tools/parity/trace-gate.ps1
 #    units** of retail's turn point, and the port's own sweeps from that point are open
 #    (`--move-at "-0.86,-3.32,-0.29,0,1"` walks 1.07 into sector 412). The round-123 "stops against a
 #    model at (-0.77,-3.60)" reading was wrong for the same reason; both halves stay open.
-#  * walk5_spawn: joined in round 125 (81 % with 2 of 6 sectors) once the model footprint replaced the
-#    template cylinder; the slab-ramp sector difference is within the gate's allowance.
+#  * walk5_spawn: out of the default set since issue #23. The port now swims (0x4f6d80, the
+#    FindFloor surface hold) and collides `collide=3` things as their faces (0x5080d0). Travel is
+#    104 %, but 3 of 6 sector samples miss. Retail swims over the `waterpump` (sector 33, top
+#    z -0.012) with its centre at z -0.01, 0.06 inside the pump's top. The port's pump faces deflect
+#    the body south, and it leaves the pool at the rim. Which shape retail collides there is open.
 #  * walk2_spawn: added in the round-359 retail window; the fixture is retail's own trace of the
 #    quarter-turn pose (yaw -189.98, sectors 22 -> 39, travel 2.82) and the port blocks at the 0.2-high
 #    lip at (10.447,-13.727,3.065) after 1.78 units, so the leg fails on travel and on all six sector
@@ -46,7 +49,7 @@ powershell -NoProfile -File tools/parity/trace-gate.ps1
 # The default set is every leg the preflight **walks** among those with a committed retail trace. `walk_door0`,
 # `walk7_spawn`, `walk14_spawn`, `walk19_spawn` and `walk26_spawn` are retail script holds (their own capture
 # measured no walk), so they are runnable with `-Only` but not part of the default comparison.
-param([string[]]$Only = @('walk_street45', 'walk_street90', 'walk_cantina', 'walk4_spawn', 'walk5_spawn', 'walk6_spawn', 'walk9_spawn', 'walk12_spawn', 'walk13_spawn', 'walk17_spawn'))
+param([string[]]$Only = @('walk_street45', 'walk_street90', 'walk_cantina', 'walk4_spawn', 'walk6_spawn', 'walk9_spawn', 'walk12_spawn', 'walk13_spawn', 'walk17_spawn'))
 
 # `-Only a,b,c` arrives as **one** element from `pwsh -File`, so the leg that exists is never matched and the
 # caller gets "every requested walk leg is blocked" (round 288). Split every element, then drop blanks.

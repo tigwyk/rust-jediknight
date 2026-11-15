@@ -19516,29 +19516,23 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     // Every level that walked out of its own sector after a drop. One global `worst` said nothing about
     // the others: `11gorc` falling 739 units masked `08escape88`'s 2.92 outright.
     let mut stray: Vec<String> = Vec::new();
-    // The levels where the synthetic spawn-yaw walk leaves the level's geometry. Each records the
-    // outcome it has today — `(level, void, contained, drop)` — so none of them can change silently
-    // while the worst-drop/stray checks skip the list. The first six are the authored walk-off lines;
-    // `10cargo` joins them because the shared floor answer seats the body on the ramp's face contact
-    // rather than the sector plane the old seat lifted to, and its line then walks off too. The
-    // walker is not changed to avoid them.
-    // The round-428 record (roadmap's sweep row) is the expectation this table freezes: only
-    // `09fuelstation` carries a recorded walk-off drop (21.13), `02narshadda` 11.22 contained,
-    // `07yun` 0.00, and `17asarris`/`m_boss17` 2.90 named as back in the world outside their
-    // start sector. The round-429 commit (`9d7bca7`) added this table carrying its own regressed
-    // seat's outcomes — `10cargo`/`11gorc` in the void (680.75/627.51) and the sarris pair
-    // 2.77-contained — and those rows are retired with the seat fix that restores the documented
-    // numbers (issue #23). `10cargo` stays out of this table (its 333->332, 0.00 is not a
-    // walk-off drop); `11gorc`'s row keeps the documented in-world state, with its 0.24 drop
-    // port-measured (the record gives no number).
+    // The levels where the synthetic spawn-yaw walk leaves the level's geometry, or (`10cargo`)
+    // cannot walk it. Each records the outcome it has today — `(level, void, contained, drop)` —
+    // so none of them can change silently while the worst-drop/stray checks skip the list. No
+    // retail trace exists for any of these lines; the rows are port measurements.
+    // Re-recorded on issue #23's collision chain. The fall now sweeps every face and
+    // `CollideHurt` slides it (`0x4e7950`/`0x4e9090`), and every vertical move crosses adjoins.
+    // So `11gorc` (0.22) and the sarris pair (2.77) end inside the sector the sweep carries them
+    // into, where the round-428 record had them outside it (gorc 0.24, sarris 2.90). `10cargo`'s
+    // line wedges at (-6.89, 15.17, 1.42) in sector 333, between wall 3132, the 45° overhang 3125
+    // and floor 3133.
     const WALK_OFF_THE_EDGE: &[(&str, bool, bool, f32)] = &[
         ("jkl\\02narshadda.jkl", false, true, 11.22),
         ("jkl\\07yun.jkl", false, true, 0.00),
-    // Port-measured drop (the round-428 record only names gorc as back in the world).
-    ("jkl\\11gorc.jkl", false, false, 0.24),
-        // The round-428 record's own 2.90 (the chain measures the same without the ramp).
-        ("jkl\\17asarris.jkl", false, false, 2.90),
-        ("jkl\\m_boss17.jkl", false, false, 2.90),
+        ("jkl\\10cargo.jkl", false, true, 0.13),
+        ("jkl\\11gorc.jkl", false, true, 0.22),
+        ("jkl\\17asarris.jkl", false, true, 2.77),
+        ("jkl\\m_boss17.jkl", false, true, 2.77),
     ];
     let off_edge = |name: &str| WALK_OFF_THE_EDGE.iter().find(|(level, ..)| *level == name);
     // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
