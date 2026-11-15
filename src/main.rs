@@ -19479,18 +19479,19 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     // rather than the sector plane the old seat lifted to, and its line then walks off too. The
     // walker is not changed to avoid them.
     // The round-428 record (roadmap's sweep row) is the expectation this table freezes: only
-    // `09fuelstation` leaves the world's floors (its 21.13-unit walk-off), `02narshadda` 11.22
-    // contained, `07yun` 0.00, and `17asarris`/`m_boss17` 2.90 back in the world outside their
+    // `09fuelstation` carries a recorded walk-off drop (21.13), `02narshadda` 11.22 contained,
+    // `07yun` 0.00, and `17asarris`/`m_boss17` 2.90 named as back in the world outside their
     // start sector. The round-429 commit (`9d7bca7`) added this table carrying its own regressed
     // seat's outcomes — `10cargo`/`11gorc` in the void (680.75/627.51) and the sarris pair
     // 2.77-contained — and those rows are retired with the seat fix that restores the documented
-    // numbers (issue #23).
+    // numbers (issue #23). `10cargo` stays out of this table (its 333->332, 0.00 is not a
+    // walk-off drop); `11gorc`'s row keeps the documented in-world state, with its 0.24 drop
+    // port-measured (the record gives no number).
     const WALK_OFF_THE_EDGE: &[(&str, bool, bool, f32)] = &[
         ("jkl\\02narshadda.jkl", false, true, 11.22),
         ("jkl\\07yun.jkl", false, true, 0.00),
         ("jkl\\09fuelstation.jkl", false, false, 21.13),
-        // A former walk-off the round-428 record names as back in the world; its 0.24 drop is the
-        // fixed build's measurement of that documented state.
+        // Port-measured drop (the round-428 record only names gorc as back in the world).
         ("jkl\\11gorc.jkl", false, false, 0.24),
         ("jkl\\17asarris.jkl", false, false, 2.90),
         ("jkl\\m_boss17.jkl", false, false, 2.90),
