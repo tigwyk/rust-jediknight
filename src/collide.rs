@@ -1559,59 +1559,20 @@ impl LevelGeometry {
             } else {
                 room
             };
-            // A solid model is a contact like a wall: whichever comes first stops the move. A body that
-            // walks into a crate stops against it (retail does: `walk3_spawn` and `walk6_spawn` both
-            // halt at props), and the radial normal makes the slide round it.
+            // A solid model is a contact like a wall: whichever comes first stops the move. For a
+            // physics mover against a non-physics thing, `sithCollision_ThingCollisionHandler`
+            // (`0x4e8c50`) answers with the same `sithCollision_CollideHurt` (`0x4e9090`) a surface
+            // gets, off the record's normal and distance, so the thing record joins the surface branch
+            // below. It is never a step: `MoveThing` has none.
             let body = self.sweep_things(at, dir, left, radius, here);
-            if let Some((travel, normal, top)) = body
-                && room.0.is_none_or(|hit| travel < hit.distance)
-            {
-                // A low model is a **step**, not a wall: `sithCollision_MoveThing` climbs anything
-                // within `moveSize + 0.01` of the feet. Level 1's spawn body meets the cantina's
-                // 0.081-high `00table` while it is still a few centimetres above the floor; the engine
-                // steps onto it, crosses and drops off the far edge, which is why retail's spawn leg
-                // walks to sector 349 while the port's body wedged against the tabletop.
-                // (0.081 for the cantina's `00table`, 0.075 by `moveSize + 0.01`), so allow the 0.02
-                // lip; the level's 0.2-high crates stay solid.
-                // shortcut: the exact engine step is unread, upgrade when the mesh sweep is recovered.
-                if top - (at[2] - radius) <= step + 0.02 {
-                    if std::env::var_os("BK_MOVE_TRACE").is_some() {
-                        eprintln!(
-                            "move: stepping over a low model at {:?} top {top:.3} feet {:.3}",
-                            [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2]],
-                            at[2] - radius
-                        );
-                    }
-                    // The lift crosses adjoins like any vertical move (`0x4e7950`): stepping onto
-                    // `06abarons`' waterpump lifts the swimmer out of the pool into sector 34.
-                    let lift = top + radius + 1e-3 - at[2];
-                    if lift > 0.0 {
-                        here = self.sweep_rooms(here, at, [0.0, 0.0, 1.0], lift, radius, gates, &mut Vec::new()).1;
-                    }
-                    at[2] += lift;
-                    continue;
+            let room = match body {
+                Some((travel, normal, _top)) if room.0.is_none_or(|hit| travel < hit.distance) => {
+                    let point = [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2] + dir[2] * travel];
+                    let hit = Sweep { distance: travel, surface: usize::MAX, normal, sector: here, point, top: f32::MAX, kind: 4 };
+                    (Some(hit), here, room.2)
                 }
-                blocked = true;
-                if std::env::var_os("BK_MOVE_TRACE").is_some() {
-                    eprintln!(
-                        "move: blocked by a solid model at {:?} normal {:?} after {travel:.3} of {left:.3}",
-                        [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2]],
-                        normal
-                    );
-                }
-                at = [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2]];
-                left -= travel.max(0.0);
-                if left < 1e-4 {
-                    break;
-                }
-                let slide = Self::slide_along(dir, normal);
-                let mag = (slide[0] * slide[0] + slide[1] * slide[1] + slide[2] * slide[2]).sqrt();
-                if mag < 1e-4 || bounce == 2 {
-                    break;
-                }
-                dir = [slide[0] / mag, slide[1] / mag, slide[2] / mag];
-                continue;
-            }
+                _ => room,
+            };
             match room {
 
                 (Some(hit), far, _) => {
@@ -3131,13 +3092,10 @@ mod tests {
             land.height
         );
     }
-    /// A low solid model is a **step**, not a wall: a body still falling onto the floor meets the
-    /// model's top within the engine's `moveSize + 0.01` allowance and climbs it. Level 1's spawn
-    /// body reaches the cantina's 0.081-high `00table` while still a few centimetres above the floor;
-    /// retail steps on the table and drops off its far edge (its spawn leg reaches sector 349),
-    /// while a body already at floor height would be stopped by it.
+    /// A solid model is a wall at any height: `sithCollision_MoveThing` (`0x4e7950`) has no step, and
+    /// a thing contact is answered by `sithCollision_CollideHurt` (`0x4e9090`) like a surface.
     #[test]
-    fn a_low_solid_model_is_a_step_not_a_wall() {
+    fn a_solid_model_blocks_a_body_at_any_height() {
         let mut room = seam_floor();
         room.set_things(vec![ThingSolid {
             centre: [0.0, 0.3, 0.0],
@@ -3151,20 +3109,13 @@ mod tests {
         }]);
         let radius = 0.065f32;
         let step = 0.066f32;
-        // Feet at 0.030, model top at 0.080: 0.050 is inside the step allowance.
-        let (moved, _, _) =
-            room.move_body(0, [0.0, -0.3, 0.095], [0.0, 0.5, 0.0], radius, step, Gates::default(), &mut [0.0; 3]);
-        assert!(moved[1] > 0.0, "the body never got over the low model: {moved:?}");
-        assert!(
-            (moved[2] - (0.08 + radius)).abs() < 0.01,
-            "the body did not step onto the model's top: {moved:?}"
-        );
-        // A body already on the floor meets an over-tall model as a wall, unchanged.
-        room.things.write().expect("things lock")[0].z_max = 0.3;
-        let (stopped, _, blocked) =
-            room.move_body(0, [0.0, -0.3, radius], [0.0, 1.0, 0.0], radius, step, Gates::default(), &mut [0.0; 3]);
-        assert!(blocked, "a tall model did not block the body");
-        assert!(stopped[1] < 0.2, "the body walked through a tall model: {stopped:?}");
+        for top in [0.08f32, 0.3] {
+            room.things.write().expect("things lock")[0].z_max = top;
+            let (stopped, _, blocked) =
+                room.move_body(0, [0.0, -0.3, 0.095], [0.0, 1.0, 0.0], radius, step, Gates::default(), &mut [0.0; 3]);
+            assert!(blocked, "a model {top} high did not block the body");
+            assert!(stopped[1] <= 0.2 - radius + 1e-4, "the body passed a model {top} high: {stopped:?}");
+        }
     }
 
     /// Two rooms joined by one opening, and a third room reachable only through the second.
