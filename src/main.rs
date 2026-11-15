@@ -19500,11 +19500,12 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     const WALK_OFF_THE_EDGE: &[(&str, bool, bool, f32)] = &[
         ("jkl\\02narshadda.jkl", false, true, 11.22),
         ("jkl\\07yun.jkl", false, true, 0.00),
-        ("jkl\\09fuelstation.jkl", false, false, 21.13),
-        // Port-measured drop (the round-428 record only names gorc as back in the world).
-        ("jkl\\11gorc.jkl", false, false, 0.24),
-        ("jkl\\17asarris.jkl", false, false, 2.90),
-        ("jkl\\m_boss17.jkl", false, false, 2.90),
+    // Port-measured drop (the round-428 record only names gorc as back in the world; 0.22 on
+    // the CollideHurt chain, 0.24 on the seat-only build).
+    ("jkl\\11gorc.jkl", false, false, 0.22),
+        // 2.89 on the CollideHurt chain (the round-428 record reads 2.90).
+        ("jkl\\17asarris.jkl", false, false, 2.89),
+        ("jkl\\m_boss17.jkl", false, false, 2.89),
     ];
     let off_edge = |name: &str| WALK_OFF_THE_EDGE.iter().find(|(level, ..)| *level == name);
     // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
@@ -19796,6 +19797,10 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
         "jkl\\04escapehouse.jkl",
         "jkl\\08escape88.jkl",
         "jkl\\19b.jkl",
+        // The CollideHurt chain: 14tower's body grinds to retail's stop and drops 0.28 at it;
+        // 17bsarris mirrors the sarris pair's in-world drop.
+        "jkl\\14tower.jkl",
+        "jkl\\17bsarris.jkl",
     ];
     let new_stray: Vec<&String> = stray.iter().filter(|n| !WALK_STRAY.contains(&n.as_str())).collect();
     assert!(new_stray.is_empty(), "levels newly dropped and left their sector: {new_stray:?}");
