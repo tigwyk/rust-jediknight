@@ -952,6 +952,9 @@ achievable from the shipped artifacts, the decomp and the file probes has been m
 - Do not widen scope (new screens, packaging, docs sites) while a Phase 1 discrepancy is open.
 - When a retail fixture and the decompiled code disagree, suspect the fixture's timing first, re-read
   the code second, and escalate to the user third. Do not widen a tolerance to make them agree.
+- Rank open work by what a player meets: first what stops a level being finished, then what a player
+  can see or hear, then position drift. The walk-trace legs are regression checks: a leg that moves is
+  examined against the decomp, never tuned back inside its tolerance (issue #23).
 
 ## What the retail harness already answers
 
