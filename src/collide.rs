@@ -1489,21 +1489,6 @@ impl LevelGeometry {
         }
         best
     }
-    /// The component of `dir` that runs **along** the surface, kept in 3D.
-    ///
-    /// `sithCollision_MoveThing` slides the body along the plane it hit, so a walk into a ramp is
-    /// carried *up* the ramp. Dropping the vertical part made every 45° ramp a wall: the body stayed
-    /// flush with the plane and re-hit it at distance 0 every bounce (`16aEscapeShip`'s spawn ramp
-    /// wedged after 0.09 units while retail walked 1.56).
-    fn slide_along(dir: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
-        let into = dir[0] * normal[0] + dir[1] * normal[1] + dir[2] * normal[2];
-        [
-            dir[0] - normal[0] * into,
-            dir[1] - normal[1] * into,
-            dir[2] - normal[2] * into,
-        ]
-    }
-
     pub fn move_body(
         &self,
         sector: usize,
@@ -1559,59 +1544,20 @@ impl LevelGeometry {
             } else {
                 room
             };
-            // A solid model is a contact like a wall: whichever comes first stops the move. A body that
-            // walks into a crate stops against it (retail does: `walk3_spawn` and `walk6_spawn` both
-            // halt at props), and the radial normal makes the slide round it.
+            // A solid model is a contact like a wall: whichever comes first stops the move. For a
+            // physics mover against a non-physics thing, `sithCollision_ThingCollisionHandler`
+            // (`0x4e8c50`) answers with the same `sithCollision_CollideHurt` (`0x4e9090`) a surface
+            // gets, off the record's normal and distance, so the thing record joins the surface branch
+            // below. It is never a step: `MoveThing` has none.
             let body = self.sweep_things(at, dir, left, radius, here);
-            if let Some((travel, normal, top)) = body
-                && room.0.is_none_or(|hit| travel < hit.distance)
-            {
-                // A low model is a **step**, not a wall: `sithCollision_MoveThing` climbs anything
-                // within `moveSize + 0.01` of the feet. Level 1's spawn body meets the cantina's
-                // 0.081-high `00table` while it is still a few centimetres above the floor; the engine
-                // steps onto it, crosses and drops off the far edge, which is why retail's spawn leg
-                // walks to sector 349 while the port's body wedged against the tabletop.
-                // (0.081 for the cantina's `00table`, 0.075 by `moveSize + 0.01`), so allow the 0.02
-                // lip; the level's 0.2-high crates stay solid.
-                // shortcut: the exact engine step is unread, upgrade when the mesh sweep is recovered.
-                if top - (at[2] - radius) <= step + 0.02 {
-                    if std::env::var_os("BK_MOVE_TRACE").is_some() {
-                        eprintln!(
-                            "move: stepping over a low model at {:?} top {top:.3} feet {:.3}",
-                            [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2]],
-                            at[2] - radius
-                        );
-                    }
-                    // The lift crosses adjoins like any vertical move (`0x4e7950`): stepping onto
-                    // `06abarons`' waterpump lifts the swimmer out of the pool into sector 34.
-                    let lift = top + radius + 1e-3 - at[2];
-                    if lift > 0.0 {
-                        here = self.sweep_rooms(here, at, [0.0, 0.0, 1.0], lift, radius, gates, &mut Vec::new()).1;
-                    }
-                    at[2] += lift;
-                    continue;
+            let room = match body {
+                Some((travel, normal, _top)) if room.0.is_none_or(|hit| travel < hit.distance) => {
+                    let point = [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2] + dir[2] * travel];
+                    let hit = Sweep { distance: travel, surface: usize::MAX, normal, sector: here, point, top: f32::MAX, kind: 4 };
+                    (Some(hit), here, room.2)
                 }
-                blocked = true;
-                if std::env::var_os("BK_MOVE_TRACE").is_some() {
-                    eprintln!(
-                        "move: blocked by a solid model at {:?} normal {:?} after {travel:.3} of {left:.3}",
-                        [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2]],
-                        normal
-                    );
-                }
-                at = [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2]];
-                left -= travel.max(0.0);
-                if left < 1e-4 {
-                    break;
-                }
-                let slide = Self::slide_along(dir, normal);
-                let mag = (slide[0] * slide[0] + slide[1] * slide[1] + slide[2] * slide[2]).sqrt();
-                if mag < 1e-4 || bounce == 2 {
-                    break;
-                }
-                dir = [slide[0] / mag, slide[1] / mag, slide[2] / mag];
-                continue;
-            }
+                _ => room,
+            };
             match room {
 
                 (Some(hit), far, _) => {
@@ -1808,49 +1754,6 @@ impl LevelGeometry {
         // No hull projection here: `advance` snaps the body onto a sector plane, which can *lower* it
         // through the floor it is standing on. The sweep already walked any doorway, so `here` is the
         // sector the body ended in.
-        //
-        // The placed models come last because they are not sector planes: a `_structure` column or a
-        // `_walkstruct` table is a body-sized cylinder the sweep knows nothing about, and pushing out
-        // of it after the walls keeps the two solvers from fighting over the same step.
-        // A solid model's cylinder is resolved **after** the walls, and the radial push it computes can
-        // carry a body through the wall beside it — then every later slide is blocked and the body
-        // wedges in the corner (level 4's `table2` against the doorway panel: the port stopped at
-        // (-4.41, 1.885) where retail walks through the open half of the same doorway). So the push is
-        // applied only where geometry allows: straight out first, then tangentially (which slides the
-        // body along whatever it is pressed against), and not at all when every direction is blocked.
-        let at = if std::env::var_os("BK_NO_THINGS").is_some() {
-            at
-        } else {
-            let pushed = self.push_out_of_things(at, radius, here);
-            if pushed == at {
-                at
-            } else {
-                let out = [pushed[0] - at[0], pushed[1] - at[1]];
-                let len = (out[0] * out[0] + out[1] * out[1]).sqrt();
-                if len < 1e-6 {
-                    at
-                } else {
-                    let unit = [out[0] / len, out[1] / len];
-                    let clear = |dir: [f32; 2]| {
-                        self.sweep(here, at, [dir[0], dir[1], 0.0], len, radius, gates).is_none()
-                    };
-                    // The push must not run **against** the frame's movement. A body squeezing past a
-                    // model's cylinder gets a radial push that is mostly backwards along its own motion
-                    // (level 4: two pieces of furniture either side of the spawn pushed the walking body
-                    // straight back to where it started, every frame, for the whole leg); the engine's
-                    // contact slides the body instead. So only pushes with a forward or sideways
-                    // component are applied, and only where geometry is clear.
-                    let want = [delta[0], delta[1]];
-                    let want_len = (want[0] * want[0] + want[1] * want[1]).sqrt();
-                    let forward = if want_len > 1e-6 {
-                        (unit[0] * want[0] + unit[1] * want[1]) / want_len
-                    } else {
-                        1.0
-                    };
-                    if forward >= -0.1 && clear(unit) { pushed } else { at }
-                }
-            }
-        };
         // `sithCollision_MoveThing` (0x4e7950) restores the last search's position and sector
         // when the final centre fails `IsSphereInSector`; it does not resolve another sector.
         let (at, here) = if self.inside_sector_with_gates(here, at, 0.0, gates) { (at, here) } else { saved };
@@ -1858,75 +1761,6 @@ impl LevelGeometry {
             eprintln!("move: end at {:?} here {here} blocked {} from {:?}", at, blocked, pos);
         }
         (at, here, blocked || at != pos)
-    }
-
-    /// Push a body out of any solid model it has ended up inside.
-    ///
-    /// A `collide=3` thing pushes out through its model box's nearest face; the rest use the
-    /// template's own `size=` cylinder, the engine`s movement-sphere rule.
-    fn push_out_of_things(&self, mut at: [f32; 3], radius: f32, sector: usize) -> [f32; 3] {
-        let things = self.things();
-        for thing in things.iter() {
-            if !self.in_search(sector, thing.sector, at, [0.0; 3], 0.0, radius) {
-                continue;
-            }
-            // The engine pushes nothing out of a mesh; its sweep stops the body at the faces.
-            if thing.mesh.is_some() {
-                continue;
-            }
-            // The body's own radius against the thing's model span: a table blocks a walking body, a
-            // lamp above head height does not.
-            if at[2] + radius < thing.z_min || at[2] - radius > thing.z_max {
-                continue;
-            }
-            if let Some(half) = thing.half {
-                let local = thing.local([at[0], at[1]]);
-                let ext = [half[0] + radius, half[1] + radius];
-                let (px, py) = (ext[0] - local[0].abs(), ext[1] - local[1].abs());
-                if px <= 0.0 || py <= 0.0 {
-                    continue;
-                }
-                let normal = if px <= py {
-                    [if local[0] >= 0.0 { 1.0 } else { -1.0 }, 0.0]
-                } else {
-                    [0.0, if local[1] >= 0.0 { 1.0 } else { -1.0 }]
-                };
-                let n = thing.to_world(normal);
-                at[0] += n[0] * px.min(py);
-                at[1] += n[1] * px.min(py);
-                if std::env::var_os("BK_MOVE_TRACE").is_some() {
-                    eprintln!(
-                        "move: pushed out of the model box at {:?} half {half:?} yaw {:.3} to {:?}",
-                        thing.centre, thing.yaw, [at[0], at[1], at[2]]
-                    );
-                }
-                continue;
-            }
-            let (dx, dy) = (at[0] - thing.centre[0], at[1] - thing.centre[1]);
-            let apart = (dx * dx + dy * dy).sqrt();
-            let least = thing.radius + radius;
-            if apart >= least {
-                continue;
-            }
-            if apart > 1e-5 {
-                let scale = least / apart;
-                at[0] = thing.centre[0] + dx * scale;
-                at[1] = thing.centre[1] + dy * scale;
-            } else {
-                // Dead centre: pick a direction rather than divide by zero.
-                at[0] = thing.centre[0] + least;
-            }
-            // `BK_MOVE_TRACE`: a body pushed out of a solid thing every frame is a body walking
-            // inside a model — `move_body` reports `blocked` only because of this push, which is why
-            // the sweep said "nothing ahead" while the walker crawled.
-            if std::env::var_os("BK_MOVE_TRACE").is_some() {
-                eprintln!(
-                    "move: pushed out of the collision cylinder at {:?} radius {:.3} (z {:.2}..{:.2}) to {:?}",
-                    thing.centre, thing.radius, thing.z_min, thing.z_max, [at[0], at[1], at[2]]
-                );
-            }
-        }
-        at
     }
 
     /// `sithCamera_SearchSectorInRadius` (0x4c6050): pull a camera in to the first thing between it and
@@ -2755,42 +2589,6 @@ impl LevelGeometry {
         }
         out
     }
-    /// Step the walker through a doorway if it has reached one. Returns the new sector.
-    ///
-    /// The walker stays in its sector until it crosses one of that sector's portals. That
-    /// matters because sector hulls overlap (level 1 has 462 sectors, many of them thin
-    /// trigger slivers), so "which hull am I inside" is not a reliable way to move — the
-    /// level's own `adjoin` links are.
-    pub fn advance(&self, sector: usize, pos: [f32; 3], radius: f32, gates: Gates<'_>) -> (usize, [f32; 3]) {
-        for portal in self.portals.get(sector).into_iter().flatten() {
-            if !gates.passable(sector, portal.adjoin, portal.link) {
-                continue;
-            }
-            // The walker is at the opening when it is within its own radius of the
-            // portal's plane. The sign is not trusted: `adjoin` gives the direction the
-            // level intends, and a door is passed in both directions anyway.
-            let d = dot(sub(pos, portal.point), portal.normal);
-            if d.abs() > radius + 0.3 {
-                continue;
-            }
-            if in_polygon(&portal.verts, portal.normal, pos) {
-                let (resolved, _) = self.resolve(portal.adjoin, pos, radius);
-                return (portal.adjoin, resolved);
-            }
-        }
-        (sector, pos)
-    }
-
-    /// Push `pos` out of every solid plane of `sector` within `radius`. Returns the
-    /// corrected position and whether anything was touched.
-    /// Lateral collision against the sector's planes, exactly as before faces existed.
-    ///
-    /// This is the baseline the `--walk` sweeps measure (34/34 levels, 1077 crossings), so it
-    /// stays available unchanged; [`Self::resolve_stepped`] is the variant the window uses.
-    pub fn resolve(&self, sector: usize, pos: [f32; 3], radius: f32) -> ([f32; 3], bool) {
-        self.resolve_with(sector, pos, radius, false)
-    }
-
     /// Lateral collision that lets a body pass a face once its feet are above that face's top
     /// edge and it is standing beside it. The engine's rule, and what makes step-up possible.
     pub fn resolve_stepped(&self, sector: usize, pos: [f32; 3], radius: f32) -> ([f32; 3], bool) {
@@ -3131,13 +2929,10 @@ mod tests {
             land.height
         );
     }
-    /// A low solid model is a **step**, not a wall: a body still falling onto the floor meets the
-    /// model's top within the engine's `moveSize + 0.01` allowance and climbs it. Level 1's spawn
-    /// body reaches the cantina's 0.081-high `00table` while still a few centimetres above the floor;
-    /// retail steps on the table and drops off its far edge (its spawn leg reaches sector 349),
-    /// while a body already at floor height would be stopped by it.
+    /// A solid model is a wall at any height: `sithCollision_MoveThing` (`0x4e7950`) has no step, and
+    /// a thing contact is answered by `sithCollision_CollideHurt` (`0x4e9090`) like a surface.
     #[test]
-    fn a_low_solid_model_is_a_step_not_a_wall() {
+    fn a_solid_model_blocks_a_body_at_any_height() {
         let mut room = seam_floor();
         room.set_things(vec![ThingSolid {
             centre: [0.0, 0.3, 0.0],
@@ -3151,20 +2946,13 @@ mod tests {
         }]);
         let radius = 0.065f32;
         let step = 0.066f32;
-        // Feet at 0.030, model top at 0.080: 0.050 is inside the step allowance.
-        let (moved, _, _) =
-            room.move_body(0, [0.0, -0.3, 0.095], [0.0, 0.5, 0.0], radius, step, Gates::default(), &mut [0.0; 3]);
-        assert!(moved[1] > 0.0, "the body never got over the low model: {moved:?}");
-        assert!(
-            (moved[2] - (0.08 + radius)).abs() < 0.01,
-            "the body did not step onto the model's top: {moved:?}"
-        );
-        // A body already on the floor meets an over-tall model as a wall, unchanged.
-        room.things.write().expect("things lock")[0].z_max = 0.3;
-        let (stopped, _, blocked) =
-            room.move_body(0, [0.0, -0.3, radius], [0.0, 1.0, 0.0], radius, step, Gates::default(), &mut [0.0; 3]);
-        assert!(blocked, "a tall model did not block the body");
-        assert!(stopped[1] < 0.2, "the body walked through a tall model: {stopped:?}");
+        for top in [0.08f32, 0.3] {
+            room.things.write().expect("things lock")[0].z_max = top;
+            let (stopped, _, blocked) =
+                room.move_body(0, [0.0, -0.3, 0.095], [0.0, 1.0, 0.0], radius, step, Gates::default(), &mut [0.0; 3]);
+            assert!(blocked, "a model {top} high did not block the body");
+            assert!(stopped[1] <= 0.2 - radius + 1e-4, "the body passed a model {top} high: {stopped:?}");
+        }
     }
 
     /// Two rooms joined by one opening, and a third room reachable only through the second.
@@ -3733,22 +3521,8 @@ mod tests {
         assert_eq!(room.sector_at([0.0, 0.0, 0.0], 0.05), Some(0));
         assert_eq!(room.sector_at([9.0, 0.0, 0.0], 0.05), None);
 
-        // Walking into +X: the point is held one radius inside the wall at x = 2.
-        let (out, hit) = room.resolve(0, [1.9, 0.5, 0.0], 0.3);
-        assert!(hit);
-        assert!((out[0] - 1.7).abs() < 1e-4, "x = {}", out[0]);
-
-        // `resolve` is the plane baseline and still lifts the body off the floor; `support` is
-        // what the walker uses for standing, and it reports the same floor.
-        let (out, hit) = room.resolve(0, [0.0, 0.0, -0.95], 0.3);
-        assert!(hit);
-        assert!((out[2] + 0.7).abs() < 1e-4, "z = {}", out[2]);
+        // `support` is what the walker uses for standing.
         assert_eq!(room.support([0.0, 0.0, -0.5], 0.3, 1.0), Some(-1.0));
-
-        // Away from every plane, nothing moves.
-        let (out, hit) = room.resolve(0, [0.0, 0.0, 0.0], 0.3);
-        assert!(!hit);
-        assert_eq!(out, [0.0, 0.0, 0.0]);
 
         // The floor is the only downward-facing plane, at z = -1.
         let floor = room.floor_below(0, [0.0, 0.0, 0.5]).unwrap();
@@ -4027,13 +3801,6 @@ mod tests {
             .expect("the turned leaf did not stop the body");
         assert!((travel - 0.2225).abs() < 1e-4, "the turned leaf stopped at {travel}");
         assert!(normal[0] > 0.99, "the turned leaf's normal was {normal:?}");
-        // A body inside the leaf's inflated box is pushed out through the thin face.
-        room.things.write().expect("things lock")[0].yaw = 0.0;
-        let pushed = room.push_out_of_things([1.0, 0.0, -0.5], r, 0);
-        assert!(
-            (pushed[1].abs() - 0.0775).abs() < 1e-4,
-            "the push put the body at {pushed:?}"
-        );
         // Sight and shots use the same box.
         assert!(
             room.segment_thing([1.0, -0.3, -0.5], [1.0, 0.3, -0.5]),

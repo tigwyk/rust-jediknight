@@ -6809,3 +6809,33 @@ The first fixture sample (every 0.6 s) that shows each level's end:
 
 Campaign level 5 is `06abarons` (`episode.jk` line 51), so these four chains are #39's levels 2-5. The
 gate files keep the map number (`level6-chain-*`).
+
+## Issue #31 (slice 1): a thing contact gets `CollideHurt`, and no step
+
+For a physics mover against a non-physics thing, `sithCollision_ThingCollisionHandler` (`0x4e8c50`)
+answers with `sithCollision_CollideHurt` (`0x4e9090`) off the record's normal and distance, the same
+response a surface gets. `move_body` had its own thing response: a pure projection (`slide_along`) with no
+1.0001 restitution, no velocity projection, no crease fold and a `bounce == 2` cut-off. It also had a
+"low model is a step" lift. The engine's `MoveThing` has no step. A thing contact now becomes a record in
+the same `CollideHurt` branch as a wall.
+
+A/B, `main` `0e07448e` against this slice `2ecb788d`, same session:
+
+| check | main | slice |
+|---|---|---|
+| level-1 retail slice (#30, epsilon 1.70) | 2 mismatches (ticks 108, 144) | 1 mismatch (tick 144: 361, retail 349) |
+| trace gate | 9/9 | 9/9; `walk12_spawn` xy 1.076 -> 1.285, `walk17_spawn` 0.006 -> 0.004, rest identical |
+| `--walk all` | passed | byte-identical output |
+
+The test that pinned the step (`a_low_solid_model_is_a_step_not_a_wall`) became
+`a_solid_model_blocks_a_body_at_any_height`.
+
+## Issue #31 (slice 2): no push out of things, and the dead hull movers are gone
+
+`move_body` ended with `push_out_of_things`, a radial push out of any solid model the body overlapped.
+`sithCollision_MoveThing` (`0x4e7950`) has nothing like it: after its loop it only runs the
+`IsSphereInSector` restore and `FindFloor`. With slice 1's thing records the push no longer changed
+anything: the level-1 retail slice, the trace gate and `--walk all` were identical to slice 1 (`nopush`
+`d801c608`). The push, its function and its test assertion are deleted.
+
+`advance` and `resolve` (hull projection through a portal) had no callers on `main` already; deleted.
