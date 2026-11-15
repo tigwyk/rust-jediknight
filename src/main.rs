@@ -23655,16 +23655,17 @@ fn deliver_thing_messages(
         if let Some(source) = source {
             vm.source = source;
         }
-        // The queued `SourceSender` is the engine's other sender half: `GetSenderId()` is the link id
-        // and `GetSenderRef()`/`GetSenderType()` name the body that sent it, or `-1`/0 for the world
-        // (`sithCog_SendMessageEx`, `0x4dedc0`). This is the live `activate`/`sighted` pump.
+        // The queued `SourceSender` is the engine's identity (`sithCog_SendMessageEx`, `0x4dedc0`):
+        // `GetSenderId()` is the link id, `GetSenderRef()`/`GetSenderType()` the object the link names,
+        // and `GetSourceRef()` the body that caused it (-1 for the world). This is the live
+        // `activate`/`sighted` pump.
         let own_sender = vm.set_message_sender(source, identity.as_ref());
         if std::env::var_os("BK_TRIGGER_TRACE").is_some() {
             println!("pending: `{script_name}` runs `{resolved}` (message `{label}`) sender {source:?}");
         }
         let ran = vm.run_label(script, &resolved);
-        vm.source = own_source;
         vm.restore_message_sender(own_sender);
+        vm.source = own_source;
         // `::sleeping` is the sleep unwind, not a failure: the handler is suspended and resumes later.
         if let Err(error) = ran
             && error != cog::SLEEPING
@@ -23734,8 +23735,8 @@ fn deliver_cog_messages(
         // The sender id rides with the message: `activated` handlers branch on `GetSenderId()`
         // (`00_doorswitch.cog` opens only for its switch-surface link id 2), and this bus never set it,
         // so every `activate` arrived with sender 0 and the door stayed shut (round 201). The queued
-        // `SourceSender` is the engine's other half — `GetSenderRef()`/`GetSenderType()` answer the
-        // sender thing, or `-1`/0 when the world sent it — and it is restored after the handler.
+        // `SourceSender` is the engine's identity — `GetSenderRef()`/`GetSenderType()` the object the
+        // link names, `GetSourceRef()` the body that caused it — and it is restored after the handler.
         let own_sender = vm.set_message_sender(source, identity.as_ref());
         match vm.run_label(script, &resolved) {
             Ok(_) => {
@@ -23821,14 +23822,21 @@ fn deliver_sector_triggers(
     for (instance, label, link) in messages {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
         let Some(script) = world.cogs.get(script_name) else { continue };
-        // The link id is the sender id the engine passes to `entered`/`exited`.
-        vm.sender = link as i64;
+        // `sithCog_SectorSendMessageEx` (`0x4dfd90`): the link id is `GetSenderId()`, the sector is
+        // `GetSenderRef()` (type 5), and the body is `GetSourceRef()`. `03_goals.cog` matches the
+        // sector by ref.
+        let at = if label == "entered" { sector } else { previous.unwrap_or(sector) };
+        let identity = runtime::SourceSender::new(runtime::SECTOR_SOURCE, at as i32, Some(thing));
+        let own = vm.set_message_sender(Some(link as i64), Some(&identity));
         if script.label(label).is_none() {
+            vm.restore_message_sender(own);
             continue;
         }
         // A label that runs and **errors** has not been delivered, and counting it as delivered hides
         // the reason a level cannot progress. 21ajerec's `21_JerecAI.cog` entry failed here silently.
-        match vm.run_label(script, label) {
+        let ran = vm.run_label(script, label);
+        vm.restore_message_sender(own);
+        match ran {
             Ok(_) => fired += 1,
             Err(error) => println!(
                 "trigger: `{script_name}`'s `{label}` failed entering sector {sector}: {error}"
@@ -32179,13 +32187,14 @@ mod registration_tests {
 
     /// The live `activate`/`sighted` pump. `deliver_thing_messages` is the bus the use action and the
     /// renderer's `sighted` ride, so the sender identity must reach the handler there — not only in
-    /// `deliver_cog_messages`: a body's message answers `GetSenderRef()` 7 / `GetSenderType()` 3, the
-    /// world's `-1`/0, both restored afterwards so the next message does not inherit them.
+    /// `deliver_cog_messages`: `GetSenderRef()`/`GetSenderType()` name the linked thing (4, type 3)
+    /// and `GetSourceRef()` the body that used it (7) or -1 for the world, all restored afterwards so
+    /// the next message does not inherit them.
     #[test]
     fn the_thing_message_pump_delivers_the_sender_identity() {
         let script = "symbols\nmessage activate\nmessage sighted\nend\ncode\n\
-                      activate:\n\tPrint(GetSenderId());\n\tPrint(GetSenderRef());\n\tPrint(GetSenderType());\n\treturn;\n\
-                      sighted:\n\tPrint(GetSenderId());\n\tPrint(GetSenderRef());\n\tPrint(GetSenderType());\n\treturn;\nend\n";
+                      activate:\n\tPrint(GetSenderId());\n\tPrint(GetSenderRef());\n\tPrint(GetSenderType());\n\tPrint(GetSourceRef());\n\treturn;\n\
+                      sighted:\n\tPrint(GetSenderId());\n\tPrint(GetSenderRef());\n\tPrint(GetSenderType());\n\tPrint(GetSourceRef());\n\treturn;\nend\n";
         let cogs = HashMap::from([("probe.cog".to_string(), cog::parse(script).expect("parses"))]);
         let handle = runtime::Runtime::handle(&jkl::Level::default());
         let mut vm = cog::Vm::new();
@@ -32225,7 +32234,7 @@ mod registration_tests {
         let (_, vm) = &sim.instances[0];
         assert_eq!(
             vm.trace.prints,
-            vec!["2", "7", "3", "0", "-1", "0"],
+            vec!["2", "4", "3", "7", "0", "4", "3", "-1"],
             "the thing pump did not deliver the sender identity: {:?}",
             vm.trace.prints
         );

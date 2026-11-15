@@ -9486,10 +9486,11 @@ impl Runtime {
             // The id is carried as `#N` and resolved against the receiving script's `message:` list,
             // as before; a negative cog (an unset master) broadcasts, which is the only delivery the
             // shipped start-of-level scripts have until every level's endlevel startup has run.
-            // `SendMessageEx(cog, message, senderType, senderRef, p0, p1)`: the same bus with the
-            // message's two parameters. The shipped callers pass zeros (`03_goals.cog` and friends
-            // telling the master cog which objective finished), but the parameters are what the
-            // receiver's `GetParam(0)`/`GetParam(1)` read, so they are carried.
+            // `SendMessageEx(cog, message, param0, param1, param2, param3)`: the verb at `0x5068a0`
+            // pops four flex for `param3..param0`, the message id and the cog, then calls
+            // `sithCog_SendMessageEx(cog, message, 9, self, …, param0..param3)`. `03_goals.cog`'s
+            // `SendMessageEx(GetMasterCOG(), user0, 2, 0, 0, 0)` is `user0` with `GetParam(0) == 2`.
+            // This bus carries `param0`/`param1`.
             "sendmessageex" => {
                 let cog = (idx(0) >= 0).then(|| idx(0) as i32);
                 let name = match args.get(1) {
@@ -9498,7 +9499,7 @@ impl Runtime {
                     None => "message 0".to_string(),
                 };
                 let sender = (self.caller_cog >= 0).then_some(self.caller_cog as usize);
-                let params = [num(4), num(5)];
+                let params = [num(2), num(3)];
                 self.messages.push((name, sender, cog, params));
                 self.messages_sent += 1;
                 Value::Nil
@@ -11212,6 +11213,18 @@ mod tests {
         assert_eq!(rt.sector_messages(None, Some(0), Some(1)), vec![(0, "entered", 1)]);
         rt.link_masks.insert((SECTOR_SOURCE, 0, 1, 0), u32::MAX);
         assert_eq!(rt.sector_messages(None, Some(0), Some(0)), vec![(0, "entered", 1)]);
+    }
+
+    /// The `SendMessageEx` verb (`0x5068a0`) is `(cog, message, param0, param1, param2, param3)`:
+    /// `03_goals.cog`'s `SendMessageEx(GetMasterCOG(), user0, 2, 0, 0, 0)` reaches the master's
+    /// `user0:` with `GetParam(0) == 2`, the branch that ends level 3.
+    #[test]
+    fn send_message_ex_carries_its_third_and_fourth_arguments() {
+        let mut rt = door_runtime();
+        let args = [5.0, 27.0, 2.0, 7.0, 0.0, 0.0].map(Value::Num);
+        rt.call("sendmessageex", &args);
+        let (name, _, cog, params) = rt.messages.last().expect("a queued message").clone();
+        assert_eq!((name.as_str(), cog, params), ("#27", Some(5), [2.0, 7.0]));
     }
 
     /// `SetMapModeFlags`/`GetMapModeFlags`: `force_pull` writes the word and reads it back.
