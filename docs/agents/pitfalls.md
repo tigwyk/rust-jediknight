@@ -106,6 +106,11 @@ pwsh -NoProfile -File tools/parity/trace-compare.ps1 -Name walk2_spawn
 The second command prints the per-sample table. The port's sector for each frame is column 6 of
 `target/parity/trace/<leg>.tsv`.
 
+Decomp's `ROUND(x)` does not say which rounding it uses. The engine sets the x87 rounding mode around
+each conversion: `fldcw [0x860802]` (round down), `[0x860804]` (truncate), `[0x860806]` (round up), then
+`fldcw [0x860800]` (the default) again. Read the bytes before the `fistp` in `JK.EXE`. The cog
+`PopInt` floors (#38 follow-up); it is not round-to-nearest.
+
 ## 6. Tool traps
 
 - `tools/parity/walk-preflight.ps1` captures the child's stderr. To see the `contain:` counts, run
@@ -124,6 +129,9 @@ The second command prints the per-sample table. The port's sector for each frame
   <leg>` for the table.
 - The trace gate and the preflight start only the port. They do not start retail.
 - `rg` is not on PATH on this machine. Use the Grep tool.
+- A shell can keep `CARGO_TARGET_DIR` from an earlier worktree. Then `target/release` in your worktree
+  is missing or stale, and an A/B can compare a missing or identical binary. Compare the `sha256sum`
+  of both binaries before you compare their output.
 
 ## 7. When the decomp does not answer the question
 

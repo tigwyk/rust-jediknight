@@ -941,15 +941,15 @@ impl Value {
     }
 
     /// `sithCogExec_PopInt` (`0x4e25c0`), which every condition, `!` and the integer operators
-    /// (`sithCogExec_IntererOps`, `0x4e3630`) read their operands through: a flex is `ROUND`ed to
-    /// the nearest integer, an int passes, any other value is `0xffffffff` (-1). `ROUND` is the x87
-    /// default (round half to even): `stdStartup` (`0x426bb0`) keeps the startup control word and
-    /// only prepares round-up/round-down/truncate variants for explicit use. `Nil` (a symbol or verb
-    /// result this VM does not have) stays 0. Kept in `i64` like the rest of this VM's integers, so a
-    /// bit-31 flag keeps its bits instead of saturating.
+    /// (`sithCogExec_IntererOps`, `0x4e3630`) read their operands through: a flex is floored, an int
+    /// passes, any other value is `0xffffffff` (-1). Decomp's `ROUND` hides the mode: each site in
+    /// `JK.EXE` is `fldcw [0x860802]; fld; fistp; fldcw [0x860800]`, and `stdStartup` (`0x426bb0`)
+    /// builds `0x860802` with high byte 7 (RC=01, round down). `Nil` (a symbol or verb result this
+    /// VM does not have) stays 0. Kept in `i64` like the rest of this VM's integers, so a bit-31 flag
+    /// keeps its bits instead of saturating.
     fn int(&self) -> i64 {
         match self {
-            Value::Num(n) => n.round_ties_even() as i64,
+            Value::Num(n) => n.floor() as i64,
             Value::Nil => 0,
             Value::Str(_) | Value::Vec(_) => -1,
         }
@@ -2011,15 +2011,15 @@ end
     }
 
     /// Each line's expected value is the engine's (`0x4e1f60`/`0x4e3630`/`0x4e3870`): conditions, `!`
-    /// and `!= && || & | ^` read rounded integers (`PopInt`, half to even), and arithmetic and the
-    /// other comparisons run in 32-bit floats. The port's old rules gave the opposite on every line.
+    /// and `!= && || & | ^` read floored integers (`PopInt`), and arithmetic and the other
+    /// comparisons run in 32-bit floats. Truncation or round-to-nearest give the opposite on every line.
     #[test]
     fn operators_read_operands_the_way_the_engine_pops_them() {
         let cog = parse(
             "symbols\nmessage startup\nflex r0 local\nflex r1 local\nflex r2 local\nflex r3 local\n\
              flex r4 local\nflex r5 local\nflex r6 local\nend\ncode\nstartup:\n\
-             \tif (0.4) r0 = 1; else r0 = 2;\n\tr1 = !0.4;\n\tr2 = 0.4 != 0;\n\tr3 = 0.6 & 1;\n\
-             \tr4 = 2.5 != 2;\n\tr5 = 0.1 * 3 == 0.3;\n\tr6 = 0.4 && 1;\n\treturn;\nend\n",
+             \tif (0.9) r0 = 1; else r0 = 2;\n\tr1 = !0.9;\n\tr2 = 0.9 != 0;\n\tr3 = -0.4 & 1;\n\
+             \tr4 = 1.6 != 1;\n\tr5 = 0.1 * 3 == 0.3;\n\tr6 = 0.9 && 1;\n\treturn;\nend\n",
         )
         .expect("parses");
         let mut vm = Vm::new();
