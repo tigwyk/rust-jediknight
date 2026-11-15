@@ -6763,3 +6763,17 @@ entry.
 
 After the fix, `endthelevel` stays 1 and `level_end` latches at 19 s. The regression test
 `a_sleep_inside_an_else_if_arm_resumes_in_that_arm` fails with the old `exec` arms (the first arm runs).
+
+## Issue #51: item pickup reach is the item's `size` (level 2's disk)
+
+Level 2's first goal is the data disk (thing 15, sector 109). A body placed on it, 0.133 from its centre,
+never took it. `collect_items` added the item's `movesize` (0.01 for every `_powerup`) to the player's
+radius. The engine's sweep (`sithIntersect_CheckSphereThingIntersection`, `0x5080d0`) adds the mover's
+`movesize` (+0x2c) to the target's `size` (+0x30, 0.1). The engine reach is 0.165, and the disk is taken
+at 0.6 s.
+
+Still not ported: the gates of the item handler (`0x4fbe10`). Those are line of sight, a 500 ms re-touch
+time, and a touch only while the body moves. They are rank 3.
+
+A/B against `main` d827ae1: the level-1 route trace, idles on levels 2/3/4/6, `--cog-check` and `--tour`
+are identical.

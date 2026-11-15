@@ -27448,8 +27448,9 @@ fn collect_items(
         return;
     };
     let body = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
-    // Contact, not proximity: the engine collects a thing when its collide volume meets the player's,
-    // so the reach is the two templates' `movesize` radii. The flat 1.0 that stood here swept up
+    // Contact, not proximity: the engine collects a thing when its collide volume meets the player's.
+    // `sithIntersect_CheckSphereThingIntersection` (0x5080d0) adds the mover's `movesize` (+0x2c) to
+    // the target's `size` (+0x30): `_powerup` ships size 0.1, movesize 0.01 (#51). The flat 1.0 that stood here swept up
     // everything in a unit — level 1 starts the body beside a `shieldrecharge`, and the port took it
     // (and, before the `taken` fix, took it again every frame) while retail's own save reads 100.
     let radius_of = |name: &str| {
@@ -27472,7 +27473,9 @@ fn collect_items(
             + (thing.pos[1] - body[1]).powi(2)
             + (thing.pos[2] - body[2]).powi(2))
         .sqrt();
-        let reach = reach_body + radius_of(&rt.templates.get(other).cloned().unwrap_or_default());
+        let item = rt.templates.get(other).cloned().unwrap_or_default();
+        let size = world.as_deref().and_then(|w| w.level.template_f32(&item, "size"));
+        let reach = reach_body + size.unwrap_or_else(|| radius_of(&item));
         if d < reach {
             taken.push(other);
         }
