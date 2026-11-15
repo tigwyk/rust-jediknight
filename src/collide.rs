@@ -1489,21 +1489,6 @@ impl LevelGeometry {
         }
         best
     }
-    /// The component of `dir` that runs **along** the surface, kept in 3D.
-    ///
-    /// `sithCollision_MoveThing` slides the body along the plane it hit, so a walk into a ramp is
-    /// carried *up* the ramp. Dropping the vertical part made every 45° ramp a wall: the body stayed
-    /// flush with the plane and re-hit it at distance 0 every bounce (`16aEscapeShip`'s spawn ramp
-    /// wedged after 0.09 units while retail walked 1.56).
-    fn slide_along(dir: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
-        let into = dir[0] * normal[0] + dir[1] * normal[1] + dir[2] * normal[2];
-        [
-            dir[0] - normal[0] * into,
-            dir[1] - normal[1] * into,
-            dir[2] - normal[2] * into,
-        ]
-    }
-
     pub fn move_body(
         &self,
         sector: usize,
