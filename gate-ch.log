@@ -1,0 +1,21 @@
+seeded walk_cantina from the committed retail fixture
+seeded walk_street45 from the committed retail fixture
+seeded walk_street90 from the committed retail fixture
+seeded walk5_spawn from the committed retail fixture
+seeded walk4_spawn from the committed retail fixture
+seeded walk6_spawn from the committed retail fixture
+seeded walk12_spawn from the committed retail fixture
+seeded walk13_spawn from the committed retail fixture
+seeded walk17_spawn from the committed retail fixture
+recording port traces...
+PASS  walk_cantina   port  2.65 / retail  2.59 units (  102%)  sectors off 2  travel-ok True sectors-ok True  xy 0.496 z 0.000
+PASS  walk_street45  port  2.21 / retail  2.20 units (  100%)  sectors off 1  travel-ok True sectors-ok True  xy 0.415 z 0.000
+PASS  walk_street90  port  2.21 / retail  2.21 units (  100%)  sectors off 1  travel-ok True sectors-ok True  xy 0.428 z 0.000
+PASS  walk5_spawn    port  3.34 / retail  3.73 units (   90%)  sectors off 2  travel-ok True sectors-ok True  xy 1.309 z 0.118
+PASS  walk4_spawn    port  1.11 / retail  1.11 units (  100%)  sectors off 1  travel-ok True sectors-ok True  xy 0.347 z 0.000
+FAIL  walk6_spawn    port  1.67 / retail  1.08 units (  155%)  sectors off 5  travel-ok False sectors-ok False  xy 0.958 z 0.120
+FAIL  walk9_spawn    port  1.71 / retail  1.68 units (  102%)  sectors off 4  travel-ok True sectors-ok False  xy 1.045 z 0.166
+PASS  walk12_spawn   port  5.03 / retail  3.95 units (  127%)  sectors off 0  travel-ok True sectors-ok True  xy 1.076 z 0.000
+FAIL  walk13_spawn   port  2.86 / retail  1.30 units (  220%)  sectors off 1  travel-ok False sectors-ok True  xy 0.362 z 0.284
+PASS  walk17_spawn   port  0.70 / retail  0.70 units (  100%)  sectors off 0  travel-ok True sectors-ok True  xy 0.005 z 0.020
+trace gate: 10 leg(s), 3 failure(s)

@@ -1,0 +1,22 @@
+route gate: replaying the scripted route twice...
+PASS  determinism: two replays are identical (43 rows)
+PASS  required fields: health, shields and both cog states are recorded on both sides
+PASS  anti-synthetic: the plan uses the player key, never `switch`, and the replay names things 4 and 47
+PASS  events: door0_opened latched after the recorded use, the body crossed the leaf, final goal_bin100 = 3 and level_end = 1
+PASS  coverage: 43 sample(s) over ticks 0..1512 (spawn to level completion, plan 1536 ticks)
+PASS  audio: every sample carries the song, its volume, the audible loop and the window's one-shots
+PASS  engine clock: 43 sample(s) at the engine's own instants, 8 leg boundary row(s) (the plan's warps), velocity x engine time on every other window, and the retail prefix's 20 row(s) sampled at the same instants; a 0.25-unit move inside a leg is rejected
+route-compare: FAIL 1204 compared field(s), 28 mismatch(es):
+  tick 36 x: expected -10.1652, trace has -10.3501 (delta 0.1849)
+  tick 36 y: expected -4.8879, trace has -5.1318 (delta 0.2439)
+  tick 36 z: expected -1.2350, trace has -1.1850 (delta 0.0500)
+  tick 36 sector: expected 349, trace has 343
+  tick 36 vel_x: expected 0.4637, trace has 0.1556 (delta 0.3081)
+  tick 36 vel_y: expected 0.9453, trace has 0.5387 (delta 0.4066)
+  tick 36 vel_z: expected -0.1752, trace has -0.0919 (delta 0.0833)
+  tick 36 ambient: expected `01cantinaband02.wav`, trace has ``
+  tick 36 ambient_vol: expected 0.4000, trace has 0.0000 (delta 0.4000)
+  tick 72 x: expected -9.7650, trace has -10.0583 (delta 0.2933)
+  tick 72 y: expected -4.7150, trace has -4.8299 (delta 0.1149)
+  tick 72 z: expected -1.1303, trace has -1.2350 (delta 0.1047)
+FAIL  the replay does not match the committed route fixture (route-compare above)

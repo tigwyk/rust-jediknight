@@ -1,0 +1,4 @@
+seeded walk9_spawn from the committed retail fixture
+recording port traces...
+FAIL  walk9_spawn    port  1.71 / retail  1.68 units (  102%)  sectors off 4  travel-ok True sectors-ok False  xy 1.045 z 0.166
+trace gate: 1 leg(s), 1 failure(s)

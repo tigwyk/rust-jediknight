@@ -1586,8 +1586,14 @@ impl LevelGeometry {
         let mut left = len;
         let mut blocked = false;
         let mut dir = [delta[0] / len, delta[1] / len, 0.0];
+        // `sithCollision_MoveThing`'s residual loop runs at most four searches (`3 < local_34`
+        // bails, `0x4e7950:93,231`), the next along the deflected remainder
+        // (`rdVector_Normalize3` over the `0x9a..0x9c` delta, `0x4e7950:223-229`). The crease
+        // normal the engine keeps in the global at `0x8b4bf0` — reset per move at `0x4e7950:89` —
+        // is this loop's `crease`.
+        let mut crease: Option<[f32; 3]> = None;
 
-        for bounce in 0..3 {
+        for bounce in 0..4 {
             if std::env::var_os("BK_MOVE_TRACE").is_some() {
                 eprintln!("move: loop {bounce} at {:?} dir {:?} left {left:.5}", at, [dir[0], dir[1]]);
             }
@@ -1655,38 +1661,6 @@ impl LevelGeometry {
                     }
                     let travelled = (hit.point[0] - at[0]) * dir[0] + (hit.point[1] - at[1]) * dir[1];
                     at = hit.point;
-                    // The contact point is `plane + normal * radius` in 3D, so a **steep** face leaves only
-                    // `radius * |normal_xy|` clearance in plan (the cantina ramp's xy normal is 0.45 long,
-                    // so the body sat 0.45 of a radius clear and crept through it a sub-step at a time).
-                    // Horizontal motion needs a full radius of plan clearance: push the contact out along
-                    // the horizontal normal by the shortfall. Vertical walls (|n_xy| ~ 1) need no push,
-                    // floors (|n_xy| ~ 0) are skipped.
-                    let nl = (hit.normal[0] * hit.normal[0] + hit.normal[1] * hit.normal[1]).sqrt();
-                    // Only **steep** faces need it: a shallow slope (|n_xy| near 1) is what the step-up
-                    // path climbs, and pushing there fights it - `walk_street90` crawled at 0.14 u/s
-                    // past a shallow face at x 3.9 with an unbounded push. The cantina ramp is 0.45.
-                    // ...but only when the push carries the body **along** its motion. An up-facing ramp's
-                    // normal has a downhill plan component, so on a slope the same push that gives a steep
-                    // wall its plan clearance shoves the body backwards: level 6's surface 2831 (a sloped
-                    // floor, normal (−0.365, 0.183, 0.913), `nl` 0.41) pushed it 0.094 downhill — the
-                    // measured 23.1509 → 23.1165 rewind against a +x move — and the body then slid away from
-                    // the ramp mouth. A push opposite the motion is never a clearance, it is a rewind.
-                    if nl > 1e-4 && nl < 0.6 {
-                        let push = radius * (1.0 - nl) / nl;
-                        let (mut px, mut py) = (hit.normal[0] * push, hit.normal[1] * push);
-                        // Keep the push's *clearance* (its sideways component) but never its backwards
-                        // part: an up-facing ramp's normal carries a downhill plan component, so on a
-                        // slope the same push shoves the body back along its own motion — level 6's
-                        // surface 2831 (normal (−0.365, 0.183, 0.913), `nl` 0.41) rewound it 0.094 against
-                        // a +x move, and the body slid away from the ramp mouth instead of entering it.
-                        // A plan push opposite the motion is never a clearance, it is a rewind.
-                        let along = px * dir[0] + py * dir[1];
-                        if along < 0.0 {
-                            px -= dir[0] * along;
-                            py -= dir[1] * along;
-                        }
-                        at = [at[0] + px, at[1] + py, at[2]];
-                    }
                     here = far;
                     left -= travelled.max(0.0);
                     if left < 1e-4 {
@@ -1768,25 +1742,54 @@ impl LevelGeometry {
                             at = raised;
                             continue;
                         }
-                    }                    // Slide: drop the velocity component that ran into the surface.
-                    let slide = Self::slide_along(dir, hit.normal);
-                    let mag = (slide[0] * slide[0] + slide[1] * slide[1] + slide[2] * slide[2]).sqrt();
-                    if std::env::var_os("BK_MOVE_TRACE").is_some() {
-                        eprintln!(
-                            "move: bounce {bounce} hit t {travelled:.5} left {left:.5} dir {:?} slide {:?} mag {mag:.3} at {:?}",
-                            [dir[0], dir[1], dir[2]], [slide[0], slide[1], slide[2]], at
-                        );
                     }
-                    // A **near-head-on** hit has almost no tangential component, and creeping along it is
-                    // how a body rounds a wall the engine stops it at: level 13's wall (surface 2125,
-                    // normal (−0.42, −0.91)) is hit at ~8° by the walking direction, so the slide is a few
-                    // thousandths per frame — over a second it walks the body past the wall's left edge and
-                    // off the ledge (health 72.6 from the fall). `mag` is `|dir × normal|` (the sine of the
-                    // grazing angle), so a small `mag` is a head-on hit: stop rather than slide.
-                    if mag < 0.2 || bounce == 2 {
+                    // `sithCollision_CollideHurt` (`0x4e9090`) — the player's move response
+                    // (physicsType 1, no `0x20` type flag, so the restitution multiplier is
+                    // `1.0001`). The engine projects the thing's remaining move (`0x268`, this
+                    // loop's `dir * left`) and its velocity (`0x1d4`, inert for an input-driven
+                    // walk, which re-sets its velocity from input each frame) off the face; a
+                    // second face in the same move folds both into the crease normal at
+                    // `0x8b4bf0` and projects the remainder off that (`0x4e9090:88-111`). The
+                    // deadzone `1e-5` is the shipped image's `_DAT_0052300c` (`0x4e9090:32`);
+                    // the outward delta **is** the pushout — the next search starts at the
+                    // contact and carries it, so there is no separate plan push.
+                    let n = hit.normal;
+                    let d_into = -(dir[0] * left * n[0] + dir[1] * left * n[1] + dir[2] * left * n[2]);
+                    let d_into = if d_into.abs() <= 1e-5 { 0.0 } else { d_into };
+                    if d_into <= 0.0 {
                         break;
                     }
-                    dir = [slide[0] / mag, slide[1] / mag, slide[2] / mag];
+                    let rem = if crease.is_none() {
+                        crease = Some(n);
+                        let m = 1.0001 * d_into;
+                        [dir[0] * left + n[0] * m, dir[1] * left + n[1] * m, dir[2] * left + n[2] * m]
+                    } else {
+                        let mut rem =
+                            [dir[0] * left + n[0] * d_into, dir[1] * left + n[1] * d_into, dir[2] * left + n[2] * d_into];
+                        let c0 = crease.unwrap();
+                        let fold = -(c0[0] * n[0] + c0[1] * n[1] + c0[2] * n[2]);
+                        let c = [c0[0] + n[0] * fold, c0[1] + n[1] * fold, c0[2] + n[2] * fold];
+                        let clen = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
+                        if clen > 1e-6 {
+                            let c = [c[0] / clen, c[1] / clen, c[2] / clen];
+                            let cd = -(rem[0] * c[0] + rem[1] * c[1] + rem[2] * c[2]);
+                            if cd > 0.0 {
+                                rem = [rem[0] + c[0] * cd, rem[1] + c[1] * cd, rem[2] + c[2] * cd];
+                            }
+                        }
+                        rem
+                    };
+                    let mag = (rem[0] * rem[0] + rem[1] * rem[1] + rem[2] * rem[2]).sqrt();
+                    if std::env::var_os("BK_MOVE_TRACE").is_some() {
+                        eprintln!(
+                            "move: collide_hurt bounce {bounce} into {d_into:.5} rem {mag:.5} crease {crease:?} at {at:?}",
+                        );
+                    }
+                    if mag <= 1e-5 {
+                        break;
+                    }
+                    dir = [rem[0] / mag, rem[1] / mag, rem[2] / mag];
+                    left = mag;
                 }
                 (None, far, end) => {
                     // A doorway's crossing advance runs past the plane by a radius, and that step is not
