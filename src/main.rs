@@ -19500,12 +19500,11 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     const WALK_OFF_THE_EDGE: &[(&str, bool, bool, f32)] = &[
         ("jkl\\02narshadda.jkl", false, true, 11.22),
         ("jkl\\07yun.jkl", false, true, 0.00),
-    // Port-measured drop (the round-428 record only names gorc as back in the world; 0.22 on
-    // the CollideHurt chain, 0.24 on the seat-only build).
-    ("jkl\\11gorc.jkl", false, false, 0.22),
-        // 2.89 on the CollideHurt chain (the round-428 record reads 2.90).
-        ("jkl\\17asarris.jkl", false, false, 2.89),
-        ("jkl\\m_boss17.jkl", false, false, 2.89),
+    // Port-measured drop (the round-428 record only names gorc as back in the world).
+    ("jkl\\11gorc.jkl", false, false, 0.24),
+        // The round-428 record's own 2.90 (the chain measures the same without the ramp).
+        ("jkl\\17asarris.jkl", false, false, 2.90),
+        ("jkl\\m_boss17.jkl", false, false, 2.90),
     ];
     let off_edge = |name: &str| WALK_OFF_THE_EDGE.iter().find(|(level, ..)| *level == name);
     // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
@@ -19797,8 +19796,9 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
         "jkl\\04escapehouse.jkl",
         "jkl\\08escape88.jkl",
         "jkl\\19b.jkl",
-        // The CollideHurt chain: 14tower's body grinds to retail's stop and drops 0.28 at it;
-        // 17bsarris mirrors the sarris pair's in-world drop.
+        // The CollideHurt chain: 14tower's body grinds to retail's stop and drops at it;
+        // 17bsarris mirrors the sarris pair's in-world drop. (Drops measured without the
+        // ramp: 14tower 1.57, 17bsarris 0.38.)
         "jkl\\14tower.jkl",
         "jkl\\17bsarris.jkl",
     ];
