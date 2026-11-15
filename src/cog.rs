@@ -153,6 +153,11 @@ pub struct Symbol {
     /// `linkid=N`: which element of a linked array this symbol is. In a script,
     /// `door0[i]` means "the symbol of this array whose linkid is i".
     pub linkid: Option<u32>,
+    /// `mask=`: the thing types whose messages reach this link, one bit per type
+    /// (`sithCogParse_ParseSymbolRef`, `0x4fdae0`: default `0x401`, the world and the player).
+    pub mask: u32,
+    /// `nolink`: link id -1, which `sithCog_LinkCog` (`0x4df610`) never records.
+    pub nolink: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,13 +511,28 @@ fn parse_symbol_line(line: &str, cog: &mut Cog) -> Result<(), String> {
         Some((n, v)) => (n, Some(v.to_string())),
         None => (decl, None),
     };
-    let local = parts.any(|p| p.eq_ignore_ascii_case("local"));
-    let linkid = line
-        .split_whitespace()
-        .find_map(|p| p.strip_prefix("linkid="))
-        .and_then(|v| v.parse().ok());
-    cog.symbols.push(Symbol { kind, name: name.to_ascii_lowercase(), init, local, linkid });
+    // `stdConffile_ReadArgsFromStr` (`0x431550`) splits on `", \t\n\r"`, so `mask=0x8,linkid=0` is
+    // two arguments.
+    let ext: Vec<&str> = parts.flat_map(|p| p.split(',')).filter(|p| !p.is_empty()).collect();
+    let local = ext.iter().any(|p| p.eq_ignore_ascii_case("local"));
+    let flag = |key: &str| ext.iter().find_map(|p| p.strip_prefix(key));
+    let linkid = flag("linkid=").and_then(|v| v.parse().ok());
+    let nolink = ext.iter().any(|p| p.eq_ignore_ascii_case("nolink"));
+    let mask = flag("mask=").and_then(scanf_hex).unwrap_or(0x401);
+    cog.symbols.push(Symbol { kind, name: name.to_ascii_lowercase(), init, local, linkid, mask, nolink });
     Ok(())
+}
+
+/// `sscanf("%x")`, which `ParseSymbolRef` reads `mask=` with: an optional sign and `0x`, then hex
+/// digits; a negative value wraps (`mask=-1` is every type).
+fn scanf_hex(text: &str) -> Option<u32> {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let digits = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")).unwrap_or(digits);
+    let value = u32::from_str_radix(digits, 16).ok()?;
+    Some(if negative { value.wrapping_neg() } else { value })
 }
 
 fn parse_stmt(tokens: &[Tok], i: &mut usize) -> Result<Stmt, String> {
@@ -1975,6 +1995,23 @@ end
         let mut vm = Vm::new();
         vm.run_label(&cog, "startup").expect("runs");
         assert_eq!(vm.trace.prints, vec!["door shut".to_string()]);
+    }
+
+    /// `sithCogParse_ParseSymbolRef` (`0x4fdae0`): mask `0x401` unless `mask=` (read with `%x`, so
+    /// `-1` is every type) says otherwise; `nolink` is link id -1.
+    #[test]
+    fn a_symbol_reads_its_mask_and_nolink() {
+        let cog = parse(
+            "symbols\nsector a\nthing b mask=-1\nsurface c mask=0x4\nsector d nolink\n\
+             surface e mask=0x8,linkid=3\nend\ncode\nstartup:\n\treturn;\nend\n",
+        )
+        .expect("parses");
+        let got: Vec<(u32, bool, Option<u32>)> =
+            cog.symbols.iter().map(|s| (s.mask, s.nolink, s.linkid)).collect();
+        assert_eq!(
+            got,
+            vec![(0x401, false, None), (u32::MAX, false, None), (0x4, false, None), (0x401, true, None), (0x8, false, Some(3))]
+        );
     }
 
     /// `array[index]` is the symbol declared `index` slots after the base (`0x4e1f60` opcode 4). The

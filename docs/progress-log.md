@@ -6706,3 +6706,23 @@ and `stdStartup` (`0x426bb0`) builds `0x860802` with high byte 7 (RC=01, round d
 functions in `JK.EXE` that load a non-default control word load the default again before they return,
 so the cog VM always starts from the default and converts with floor. `Value::int` now floors:
 `if (0.9)` is false, `if (-0.4)` is true (-1), `-0.4 & 1` is 1.
+
+## Issue #43: cog links honour the symbol mask and `nolink`
+
+Found while tracing #39's exit chains. `sithCogParse_ParseSymbolRef` (`0x4fdae0`) gives a symbol link
+id 0 and mask `0x401`. It reads `mask=` with `%x`, so `-1` is every type. `nolink` is link id -1, which
+`sithCog_LinkCog` (`0x4df610`) does not record. `stdConffile_ReadArgsFromStr` (`0x431550`) splits
+arguments on `", \t\n\r"`. `sithCog_SectorSendMessageEx` (`0x4dfd90`) and its thing and surface twins
+deliver only when `(1 << sender.type) & mask` is non-zero (bit 0 with no sender). The port delivered to
+every link. `Symbol` now carries `mask`/`nolink`, `wire_links` skips `nolink`, `Runtime::link_masks`
+keeps each non-default mask, and `link_hears` filters `sith_cog_send_message_ex`, `sector_messages` and
+`crossed_surface`.
+
+Level 3's `03_goals.cog` and level 4's `04_EndLevel.cog` use the default mask, so only the player's
+entry fires their goals. Level 2's ReeYee links are `mask=-1`, so any killer counts. The shipped door
+cogs are `mask=0x405`, so actors still open them.
+
+Same-build A/B (`main` b71fb57 against this branch): `--triggers` link counts drop where scripts use
+`nolink` (level 1: 37 to 36 thing links; level 2: 70 to 37 surface links and 47 to 40 thing links;
+level 3: 27 to 24 sector links). The level-1 route trace, the 600-tick idles on levels 2/3/4/6,
+`--cog-check` and `--tour` are identical. 380 unit tests pass.

@@ -1401,6 +1401,10 @@ pub struct Runtime {
     /// `(cog instance, link id, sector)` for every `sector` symbol a level's scripts declare:
     /// `sithCog_LinkCogToSector` in tabular form, so a sector's `entered`/`exited` can find its cogs.
     pub sector_links: Vec<(usize, i32, usize)>,
+    /// The mask of each link whose symbol is not the default `0x401`, keyed by `(source type,
+    /// instance, link id, target)`; `link_hears` reads it. Kept beside the link tables rather than in
+    /// them so the many readers of those tuples stay unchanged.
+    pub link_masks: std::collections::HashMap<(i32, usize, i32, usize), u32>,
 
 
     /// The actors that walked on the last `ai_tick`; `settle_walked` consumes the list.
@@ -2370,6 +2374,7 @@ impl Runtime {
             walked: Vec::new(),
             walk_vel: BTreeMap::new(),
             sector_links: Vec::new(),
+            link_masks: Default::default(),
             surface_links: Vec::new(),
             mana_regen: MANA_REGEN,
             mana_max: MANA_MAX,
@@ -7407,7 +7412,7 @@ impl Runtime {
         };
         let mut sent = 0;
         for (instance, link, linked) in links {
-            if linked != source {
+            if linked != source || !self.link_hears(source_type, instance, link, source, sender) {
                 continue;
             }
             self.pending_messages
@@ -7426,10 +7431,13 @@ impl Runtime {
     /// `linkid=0` (`offAdjoin`), so a message without it always chose the down branch and the
     /// soundtrack never became audible (round: issue #13).
     pub fn crossed_surface(&mut self, surface: usize) -> usize {
+        // `sithCollision_MoveThing` (`0x4e7950`) sends `crossed` with the moving body as the sender;
+        // this port delivers it for the player's body only.
+        let player = Some(self.player_thing());
         let links = self.surface_links.clone();
         let mut queued = 0;
         for (instance, link, linked) in links {
-            if linked != surface {
+            if linked != surface || !self.link_hears(SURFACE_SOURCE, instance, link, surface, player) {
                 continue;
             }
             self.pending_messages
@@ -7447,9 +7455,8 @@ impl Runtime {
     /// tables declared, initialised empty and read, with nothing ever writing to them, so no message
     /// from the world reached a script. Fills them once, in table order.
     ///
-    /// `ponytail:` the link **id** is carried (it is what `GetSenderId` returns) but the engine's message
-    /// mask is not, so every link to that target hears the message — the same simplification
-    /// `sector_messages` documents.
+    /// A `nolink` symbol is not linked (`sithCog_LinkCog`, `0x4df610`, skips link id -1), and a
+    /// symbol's `mask=` is recorded in `link_masks` for `link_hears`.
     pub fn wire_links(
         &mut self,
         cogs: &[crate::jkl::CogInstance],
@@ -7467,7 +7474,18 @@ impl Runtime {
                 }
                 let Some(raw) = values.next() else { break };
                 let Ok(target) = raw.trim().parse::<usize>() else { continue };
+                if symbol.nolink {
+                    continue;
+                }
                 let link = symbol.linkid.unwrap_or(0) as i32;
+                let source_type = match symbol.kind {
+                    crate::cog::SymKind::Thing => THING_SOURCE,
+                    crate::cog::SymKind::Surface => SURFACE_SOURCE,
+                    _ => SECTOR_SOURCE,
+                };
+                if symbol.mask != 0x401 {
+                    self.link_masks.insert((source_type, index, link, target), symbol.mask);
+                }
                 match symbol.kind {
                     crate::cog::SymKind::Thing => {
                         // `sithCog_LinkCog` (`0x4df610`) sets `SITH_TF_CAPTURED` (0x400) on the thing as
@@ -7484,6 +7502,15 @@ impl Runtime {
                 }
             }
         }
+    }
+
+    /// The mask test in `sithCog_SectorSendMessageEx` (`0x4dfd90`) and its thing and surface twins:
+    /// a link hears a message only when its mask has the sender's type bit (`1 << type`), or bit 0
+    /// when the message has no sender.
+    fn link_hears(&self, source_type: i32, instance: usize, link: i32, target: usize, sender: Option<usize>) -> bool {
+        let bit = sender.map_or(1, |s| 1u32 << (self.types.get(s).copied().unwrap_or(0) as u32 & 31));
+        let mask = self.link_masks.get(&(source_type, instance, link, target)).copied().unwrap_or(0x401);
+        mask & bit != 0
     }
 
     /// `sithPlayerActions_Activate` (`0x4fc0a0`): the use key — for the player, and for an actor's
@@ -7666,8 +7693,8 @@ impl Runtime {
     /// Which cog instances a move from one sector to another messages.
     ///
     /// `sithThing_EnterSector` sends `entered` to the sector's links and `sithThing_LeaveSector`
-    /// sends `exited` (§16.10). The link id and mask are carried but not filtered on, which is a
-    /// documented simplification: every link to that sector hears the message.
+    /// sends `exited` (§16.10), each with the moving thing as the sender, so a link's mask decides
+    /// whether that body's type is heard (`link_hears`).
     pub fn sector_messages(
         &self,
         old: Option<usize>,
@@ -7688,7 +7715,7 @@ impl Runtime {
         };
         let mut out = Vec::new();
         for (instance, link, sector) in &self.sector_links {
-            if !watched(*sector) {
+            if !watched(*sector) || !self.link_hears(SECTOR_SOURCE, *instance, *link, *sector, thing) {
                 continue;
             }
             if Some(*sector) == new {
@@ -11170,6 +11197,21 @@ mod tests {
         rt.things[0].flags = 0x80000;
         assert!(rt.sector_messages(None, Some(0), Some(0)).is_empty());
         assert_eq!(rt.sector_messages(None, Some(0), None), vec![(0, "entered", 1)]);
+    }
+
+    /// `sithCog_SectorSendMessageEx` (`0x4dfd90`): a default-mask (`0x401`) link hears the player
+    /// (type 10) and the world, not an actor (type 2); `mask=-1` hears every type. An AI walking into
+    /// `03_goals.cog`'s goal sector must not end level 3.
+    #[test]
+    fn a_sector_link_hears_only_the_types_in_its_mask() {
+        let mut rt = door_runtime();
+        rt.sector_flags = vec![0x04];
+        rt.sector_links = vec![(0, 1, 0)];
+        rt.types = vec![2, 10];
+        assert!(rt.sector_messages(None, Some(0), Some(0)).is_empty(), "an actor is not heard");
+        assert_eq!(rt.sector_messages(None, Some(0), Some(1)), vec![(0, "entered", 1)]);
+        rt.link_masks.insert((SECTOR_SOURCE, 0, 1, 0), u32::MAX);
+        assert_eq!(rt.sector_messages(None, Some(0), Some(0)), vec![(0, "entered", 1)]);
     }
 
     /// `SetMapModeFlags`/`GetMapModeFlags`: `force_pull` writes the word and reads it back.
@@ -16936,6 +16978,9 @@ mod tests {
             ),
         );
         rt.thing_links.push((0, 3, 2));
+        // `00_door.cog` declares its doors `mask=0x405` (world, actor, player): the default `0x401`
+        // would not hear an actor's activate.
+        rt.link_masks.insert((THING_SOURCE, 0, 3, 2), 0x405);
         // `FUN_0050abc0` runs the activate only while the AI flag word's bit `0x1` (moved) is set.
         rt.actor_flags.insert(1, 0x1);
 
