@@ -6491,3 +6491,145 @@ and the route still reaches the exit through the door and level-end path (`door0
 
 The deviation-ledger row *route replay time scale* is retired; the provenance row now names
 `sithTime_Advance` (`0x4dd640`) → `advance_engine_clock` (`src/main.rs`) as `ported`.
+
+### Issue #23: collision-chain investigation
+
+The uncommitted collision search work expands touched sectors from the original sweep and records
+centre crossings separately. It is not a complete port of `sithCollision_MoveThing` (`0x4e7950`):
+vertical and horizontal motion remain separate, thing collisions remain approximate, and sector
+callbacks and the floor pass still need their engine ordering. Do not treat this worktree as a fix.
+
+The baseline `cb7980e` and the uncommitted candidate were built in separate worktrees in the same
+session. `walk6_spawn` changed from 155% travel with five sector mismatches to 107% with five
+mismatches. The latest candidate's full trace gate excluded `walk_street45` in preflight and failed
+two of nine recorded legs (`walk5_spawn` and `walk6_spawn`). The all-level sweep reached `11gorc`
+and stopped at its existing containment assertion; levels after it were not checked. The collision
+unit suite passed 28 tests after the equal-distance ordering change below. No retail executable was
+launched and no fixture or tolerance was changed.
+
+Static winding check against `Episode/JK1.GOB`: every authored surface normal agreed with its
+polygon winding in `01narshadda` (4,595), `04escapehouse` (8,591), `06bbarons` (7,661), and
+`09fuelstation` (10,183). No surface opposed its authored normal or was unparsed in those levels.
+
+`sithCommand_Warp` (`0x4eea40`) calls `DetachThing`, `ExitSector`,
+`SetPositionAndOrient`, then `EnterSector`; it does not call `FindFloor`. The current
+`step_player` comment and approximation that a warp attaches the player are not engine evidence.
+`FindFloor` still runs later when its own call conditions are met. A complete port needs persistent
+attachment state and one ordered 3D collision search, including thing contacts and sector callbacks.
+
+The latest local change preserves insertion order between a solid contact and an equal-distance
+sector crossing. Its regression test fails without the change and passes with it, but the separate
+surface and thing searches still cannot implement the engine's complete ordered collision stack.
+
+The engine stores attachment identity and support state across frames. Its collision search visits
+things before surfaces in each sector, and mesh contacts use authored 3DO geometry and full
+orientation. The current plan-box approximation cannot establish parity. The walker is useful for
+regression coverage, but changing the walker alone cannot fix these missing engine behaviors.
+
+The release binary was rebuilt after that change. In the same session, baseline `cb7980e` completed
+`--walk all`: 25 of 34 starts contained, 53 sector crossings, and no body in the void. The current
+uncommitted worktree stopped at the `11gorc` containment assertion; it did not check later levels.
+These results compare the whole worktree with the baseline, not the ordering change in isolation.
+
+In the same session, the baseline trace gate checked 10 legs and failed one (`walk6_spawn`).
+The rebuilt worktree excluded `walk_street45` at preflight and failed two of nine recorded legs
+(`walk5_spawn`, `walk6_spawn`). Both failing legs had five sector mismatches; their travel was
+105% and 107%, respectively. This compares the whole uncommitted worktree, not the ordering
+change alone. The frozen fixtures and gate tolerances were unchanged.
+
+The same-session route gate failed at the committed port oracle in both worktrees: 23 mismatched
+fields of 1,204 on baseline `cb7980e`, and 112 of 1,204 on the uncommitted worktree. Both replays
+were deterministic, passed the engine-clock check, and reached the level-end event. Neither gate
+reached its later retail comparison or prerequisite gates. No route fixture was refreshed.
+
+The collision stack now retains face, edge, vertex and crossing record types. Its pop order follows
+`sithCollision_PopStack` (`0x4e7120`): at equal distance a face replaces an edge or vertex, but not
+a preceding crossing. The collision unit suite passes 29 tests, including an ordering regression.
+The 3DO parser now preserves authored face normals, explicit geoset/mesh numbers and the model-header
+radius; its six tests pass. The normals are not yet wired into thing collision.
+
+The player attachment port needs an ordered collision search that returns thing identity and model
+face data as well as surface records. `FindFloor` requires the point pass followed by its radius
+pass, including hits without a model face. Attached physics needs the retained support plane and
+parent transform before the combined 3D move. The existing floor and walker interfaces cannot
+represent that contract; no partial attachment implementation was added. The release gates have
+not been rerun after the latest parser and collision-stack changes.
+
+`port-trace.ps1` now runs the port with `BK_HEADLESS=1` and fails a leg whose log does not say
+`mode: headless` or shows `Creating new window`; the startup line now names the headless mode. The
+earlier "headless" runs were windowed (the edit had landed in another worktree) and are void.
+
+`walk5_spawn` (`06abarons`) cause: sector 35's floor is a ring of floor pieces at z 0.1 around an
+18-vertex adjoin (surface 433) into the pool sector 34. `floor_surface` tested the ring's infinite
+plane, so the seat held the body over the opening. It now requires the point to be over the face's
+polygon (`sithPhysics_FindFloor` `0x4f5550` searches faces through `0x4e86d0`). The walker's vertical
+fall and rise now go through `sweep_rooms`, so a body crosses a floor adjoin as `MoveThing`
+(`0x4e7950`) does. Unit tests: 373 passed.
+
+That exposed `walk17_spawn` (`18Ascend`, 0 %, fell 2.9): the pose is over a shaft of adjoins
+(surfaces 5620/5749/5756) with no floor polygon within 0.15. Retail stands on things 323 and 324,
+two `4x4door` leaves laid flat (pitch -89.88, roll ~89.4, z -8.2375). The engine collides them as
+mesh under the full orientation (`0x5080d0`); the port's yaw-only plan box cannot. Trace gate on
+this build: 8 legs, 2 failures (walk6 108 %, walk17 0 %); walk5 is excluded by the preflight and
+is not yet diagnosed past the pool crossing. Next: oriented `collide=3` mesh faces in the floor
+search and the sweep.
+
+`collide=3` things now collide as their geoset-0 faces placed under the thing's full pitch/yaw/roll
+(`sithIntersect_CheckSphereThingIntersection` `0x5080d0`): the sweep uses each face through
+`face_contact`, the floor search uses an upward face the body is over, and a mesh is never pushed
+out of. `walk17_spawn` passes (0.70 / 0.70, 0 sectors off). A mesh hit takes no step-over; the body
+slides on the face.
+
+`MoveThing`'s pop loop (`0x4e7950:104-205`) skips a record the response does not accept. The port
+returned the nearest record anyway, so a tangent floor under `walk_street45` ended every move
+(0.05 units). `sweep_rooms` now skips a solid record whose into-distance is within the `1e-5`
+deadzone and keeps popping crossings. `walk_street45` passes again (100 %).
+
+Vertical moves now cross adjoins everywhere the walker changes z: the landing, the step lift, the
+model step-over and the attach-height hold all sweep `sweep_rooms` and adopt its sector. The
+pre-move seat is removed: it compared the feet with a plane's perpendicular foot and lifted a body
+resting on `06abarons`' 39° pool bowl out of the water. A perpendicular-distance seat was tried and
+changed nothing measurable, so the deletion stands.
+
+Water, vertical half only: `sithPhysics_UpdateUnderwaterThingPhysics` (`0x4f6d80`) with buoyancy 0
+(`walkplayer` sets none; `sithThing_Reset` `0x4cd190` zeroes `+0x224`), drag `airdrag * 4`, and the
+surface hold (`0x100000`, depth `0.01`, rate `dt * 0.2`) from `FindFloor`'s water branch
+(`0x4f5550`, 0.05 up, after a move with vz in [-2, 0.2]). `EnterWater` (`0x4cd370`) keeps a quarter
+of vz and ends the warp's attach height. No step-up while swimming. Constants read from JK.EXE's
+image: `0x5231b4` 4.0, `0x5231b8` 0.01, `0x5231bc` 0.2, `0x523018` -2.0, `0x52301c` 0.2,
+`0x522e8c` 0.25.
+
+Same-session results (headless; no window in any log). Trace gate: 10 legs, 2 failures.
+`walk5_spawn` 105 % travel but 3 of 6 sectors off (limit 2); `walk6_spawn` 107 %, 5 off,
+unchanged. `--walk all`: 32/34 contained (baseline `cb7980e` 25/34), 0 void, 101 crossings
+(baseline 53). It fails on the walk-off table: `11gorc`, `17asarris` and `m_boss17` are now
+contained. New strays: `03katarn` (travel 4.1 to 0.0, 599 blocked) and `06bbarons`; `10cargo`
+travel 9.7 to 0.2. Those three are not diagnosed.
+
+Open question for `walk5_spawn`: retail swims across the `waterpump` (thing in sector 33,
+`collide=3`, top z -0.012, centre (9.23, 13.54)) at centre z -0.01 along y 13.6. That is 0.06 into
+the pump's top. The port, colliding the pump's geoset-0 faces, is pushed south and leaves the pool
+at the rim. Whether retail's pump collides with another shape, or whether a cog moves it, is not
+settled by the decomp read so far.
+
+The fall is now a `MoveThing` against every face (`0x4e7950`; `CollideHurt` `0x4e9090`, 1.0001).
+`resting_floor` follows `FindFloor` and counts floor-flagged faces only, so `03katarn`'s start, on
+surface 3386 (a 57° slope, flags `0x2004`), fell through it into no sector. Every later move then
+failed `IsSphereInSector` and was undone. The fall now sweeps first; a face above the landing stops
+it and projects the rest of the drop and the velocity off the face. The centre's sector is the
+sweep's `far`, as in `move_body`. `--walk all` now matches baseline on `03katarn` (4.1, 405->412),
+`06bbarons` (318->315, contained), `06abarons` (35->514, 3.38) and `08escape88` (399->339, 2.92).
+Still different: `10cargo` 0.2 units (baseline 9.7, out of its sector), `11gorc` contained,
+`17asarris`/`m_boss17` 2.77 contained (table: 2.90 out). 0 void; trace gate unchanged (walk5 3
+sectors off, walk6 5 off).
+
+`walk6_spawn`: retail stops at (23.31, 38.85, z 1.14) in sector 315. The port slides along wall
+2830/2578 (y 38.847) and climbs about 0.01 per frame on edge and vertex contacts with slopes
+2832/2577 (normal z 0.6-0.78). It ends at (23.49, 38.85, 1.23) in sector 290.
+
+Cause: `CollideHurt` turns the walk into the slopes into upward speed (vy 0.68). The warp's attach
+hold required `vy <= 0`, so it let go, and the next frame rose. `sithPhysics_UpdateAttachedThingPhysics`
+(`0x4f7430`) removes the velocity's component along the attached floor's normal every tick, and only
+a jump or a failed `FindFloor` detaches. The hold now also applies to a body that was grounded at
+the frame's start and did not jump. `walk6_spawn` passes (1.06 / 1.08, 98 %, 2 sectors off). Trace
+gate: 10 legs, 1 failure (`walk5_spawn`, the waterpump). `--walk all` is unchanged.

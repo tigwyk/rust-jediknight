@@ -34,7 +34,7 @@ pub struct Plane {
 /// `half` is `Some` only for a `collide=3` thing with a loaded model: the model's bounds give the
 /// leaves a thickness the template `size=` does not. Otherwise the engine's movement sphere applies,
 /// whose radius the caller already tightens to the model's plan footprint for furniture.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ThingSolid {
     /// Collision centre in plan, and the thing's own z for the span's origin.
     pub centre: [f32; 3],
@@ -45,6 +45,10 @@ pub struct ThingSolid {
     pub half: Option<[f32; 2]>,
     /// Degrees, the engine's `rdMatrix_Build34` yaw.
     pub yaw: f32,
+    /// `collide=3`: the model's collision faces in world space (outward normals), placed under the
+    /// thing's full pitch/yaw/roll. `sithIntersect_CheckSphereThingIntersection` (`0x5080d0`) sweeps
+    /// these instead of a sphere, so a door leaf laid flat (`18Ascend` things 323/324) is a floor.
+    pub mesh: Option<std::sync::Arc<[Face]>>,
 }
 
 impl ThingSolid {
@@ -171,6 +175,8 @@ pub struct LevelGeometry {
     /// them. `sectors` carries every claimed surface's plane, because a wall patch inside the room
     /// still has to stop a body; only this list may answer "is the body inside", which is what
     /// `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`) asks.
+    /// Correction: engine containment tests all collision-flagged surfaces and movable adjoins, not
+    /// only this derived hull; `inside_sector_with_gates` performs that test.
     pub hull: Vec<Vec<Plane>>,
     /// Per sector, its `HASCOLLIDEBOX` bounds (`SITH_SECTOR_HASCOLLIDEBOX`, sector flag `0x1000`),
     /// from the file's `COLLIDEBOX` row (not the enclosing `BOUNDBOX`). `IsSphereInSector`
@@ -218,6 +224,13 @@ pub struct LevelGeometry {
     /// adjoin on both sides) still needs containment geometry for floor reachability.
     pub portal_faces: Vec<(usize, Face)>,
     pub surface_owner: Vec<usize>,
+    /// The level's surface flag words by surface id. `sithPhysics_FindFloor` sets its search's
+    /// `0x10` bit for a thing without physflag `0x80` — the `walkplayer` inherits `_actor`'s
+    /// `physflags=0x4a4f`, which has `0x80` clear — so the player's floor search counts only
+    /// surfaces with flag bit 1 (`sithCollision_SearchForSurfaceCollisions`, `0x4e86d0` lines
+    /// 125-126). Wall-only faces carry `0x4` without the bit and are never floors:
+    /// `09fuelstation`'s 40-degree pit-mouth face (surface 9278, flags `0x4`).
+    pub surface_flags: Vec<u32>,
     /// `World adjoins` flags by link id. Fixtures that do not provide them default to passable.
     pub adjoin_flags: Vec<u16>,
     /// Every sector that claims each surface, derived once with the collision build. Drawing needs
@@ -257,7 +270,7 @@ impl LevelGeometry {
 /// A sector's planes are infinite, which is why a wall blocks at every height and why a sector
 /// that merely *shares an edge* with the floor cannot be told from one that is above it. The
 /// polygon is the only thing that answers "is the body over this face".
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Face {
     pub normal: [f32; 3],
     pub point: [f32; 3],
@@ -623,20 +636,15 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
             // reads a second block after the surface rows — one `idx: nx ny nz` line each — into
             // `face.normal`, and every engine consumer uses that field. The file's normals point
             // *into* the room (surface 3275 on level 1 is the floor slab at `z = -1.300` and ships
-            // `(0, 0, 1)`, up), while this port's solver was built on the opposite, *outward*
-            // convention, so the authored one is only used here to settle the **sign** — the plane
-            // itself still comes from the polygon, which is what the collision code expects, and the
-            // vertices are what a degenerate or missing block leaves as the fallback.
+            // `(0, 0, 1)`, up). This port stores the opposite, outward convention.
+            // Fixtures without normals fall back to their polygon.
             let normal = {
-                let Some(mut normal) = polygon_normal(&pts) else {
-                    continue;
-                };
                 if dot(surface.normal, surface.normal) > 0.25 {
-                    // Outward is the negation of the file's inward normal.
-                    if dot(normal, [-surface.normal[0], -surface.normal[1], -surface.normal[2]]) < 0.0 {
-                        normal = [-normal[0], -normal[1], -normal[2]];
-                    }
+                    [-surface.normal[0], -surface.normal[1], -surface.normal[2]]
                 } else {
+                    let Some(mut normal) = polygon_normal(&pts) else {
+                        continue;
+                    };
                     // No shipped normal: majority vote of the sector's vertices, where this face's
                     // own vertices lie on the plane and do not vote and almost everything else is
                     // behind.
@@ -652,8 +660,8 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
                     if front > behind {
                         normal = [-normal[0], -normal[1], -normal[2]];
                     }
+                    normal
                 }
-                normal
             };
             // The hull's own orientation: a plane bounds a cell when the cell's inside is behind it,
             // so the normal is taken outward *from this sector's centre*. The authored normal is
@@ -675,7 +683,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
                     // `sithIntersect_IsSphereInSector` (`decomp/00507f30:29`) counts a surface into
                     // the hull when it has `HAS_COLLISION` **or** is an adjoin whose link allows
                     // movement (`pAdjoin->flags & 2`) — a body in a doorway is inside both sectors.
-                    if level.adjoins.get(link).is_some_and(|a| a.flags & 0x2 != 0) {
+                    if surface.surfflags & 0x4 != 0 || level.adjoins.get(link).is_some_and(|a| a.flags & 0x2 != 0) {
                         hull_planes.push(Plane { normal: own, point, surface: *surface_of });
                     }
                     // The row that governs this side's crossing: the one this surface names.
@@ -746,7 +754,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
                     .get(portal.link)
                     .and_then(|a| usize::try_from(a.mirror).ok())
                     .unwrap_or(portal.link),
-                verts: portal.verts.clone(),
+                verts: portal.verts.iter().rev().copied().collect(),
                 normal: [-portal.normal[0], -portal.normal[1], -portal.normal[2]],
                 point: portal.point,
             });
@@ -773,6 +781,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     // volume shares the room's floor), so the first claimant is enough for reachability; it is not a
     // statement about who draws it. The old floor probe repeated this scan for every candidate face.
     let mut surface_owner = vec![usize::MAX; level.surfaces.len()];
+    let surface_flags: Vec<u32> = level.surfaces.iter().map(|s| s.surfflags).collect();
     for (room, planes) in sectors.iter().enumerate() {
         for plane in planes {
             if plane.surface != usize::MAX && surface_owner[plane.surface] == usize::MAX {
@@ -815,6 +824,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         face_of,
         portal_faces,
         surface_owner,
+        surface_flags,
         adjoin_flags: level.adjoins.iter().map(|a| a.flags).collect(),
         surface_claims,
         surface_sectors,
@@ -843,9 +853,50 @@ pub struct Sweep {
     /// high is not a step, whatever height its contact point happens to sit at. Without this the step
     /// test can only ask about the contact point, which cannot tell a riser from a wall.
     pub top: f32,
+    kind: u32,
 }
 
-/// `sithIntersect_CheckSphereHit`: the travel distance at which a sphere first meets a plane.
+#[derive(Clone, Copy)]
+enum CollisionRecord {
+    Solid(Sweep),
+    Crossing { distance: f32, sector: usize },
+}
+
+impl CollisionRecord {
+    fn distance(self) -> f32 {
+        match self {
+            Self::Solid(hit) => hit.distance,
+            Self::Crossing { distance, .. } => distance,
+        }
+    }
+
+    fn kind(self) -> u32 {
+        match self {
+            Self::Solid(hit) => hit.kind,
+            Self::Crossing { .. } => 0x20,
+        }
+    }
+}
+
+/// `sithCollision_PopStack` (0x4e7120): nearest first, preferring a face over an edge or vertex on a tie.
+fn pop_collision(records: &mut [Option<CollisionRecord>]) -> Option<CollisionRecord> {
+    let mut best: Option<usize> = None;
+    for (index, candidate) in records.iter().enumerate() {
+        let Some(candidate) = candidate else { continue };
+        if best.is_none_or(|previous| {
+            let current = records[previous].unwrap();
+            candidate.distance() < current.distance()
+                || (candidate.distance() == current.distance()
+                    && current.kind() & 0x18 != 0
+                    && candidate.kind() & 4 != 0)
+        }) {
+            best = Some(index);
+        }
+    }
+    records[best?].take()
+}
+
+/// `sithIntersect_CheckSphereHit` (0x508be0): the travel distance at which a sphere first meets a plane.
 ///
 /// A body already closer than its radius (`gap < 0`) is touching, so the answer is `0`. A body moving
 /// away from the plane never hits it. This is the engine's routine line for line, including the
@@ -858,7 +909,9 @@ fn sphere_plane(
     normal: [f32; 3],
     point: [f32; 3],
 ) -> Option<f32> {
-    let above = dot(sub(start, point), normal);
+    let p = sub(start, point);
+    let above = p[0] * normal[0] + p[2] * normal[2] + p[1] * normal[1];
+    let above = if above.abs() <= 1e-5 { 0.0 } else { above };
     if above < 0.0 {
         return None;
     }
@@ -869,7 +922,7 @@ fn sphere_plane(
     if gap < 0.0 {
         return Some(0.0);
     }
-    let approach = -dot(dir, normal);
+    let approach = -(dir[0] * normal[0] + dir[2] * normal[2] + dir[1] * normal[1]);
     if approach <= 0.0 || approach * dist < gap {
         return None;
     }
@@ -883,18 +936,22 @@ fn sphere_plane(
 /// `.jkl` winding cannot be trusted, this asks the polygon's own centre which side is inside and
 /// then measures how far outside the sphere reaches — the same test with no winding assumption.
 fn sphere_face(pos: [f32; 3], radius: f32, face: &Face) -> bool {
-    let n = face.verts.len();
+    sphere_face_parts(pos, radius, face.normal, &face.verts)
+}
+
+fn sphere_face_parts(pos: [f32; 3], radius: f32, normal: [f32; 3], verts: &[[f32; 3]]) -> bool {
+    let n = verts.len();
     if n < 3 {
         return false;
     }
     let mut centre = [0.0f32; 3];
-    for v in &face.verts {
+    for v in verts {
         centre = [centre[0] + v[0], centre[1] + v[1], centre[2] + v[2]];
     }
     let centre = [centre[0] / n as f32, centre[1] / n as f32, centre[2] / n as f32];
     // The two axes to work in: drop the one the normal is largest on.
     let axis = {
-        let n = face.normal;
+        let n = normal;
         let (ax, ay, az) = (n[0].abs(), n[1].abs(), n[2].abs());
         if ax >= ay && ax >= az {
             0
@@ -915,8 +972,8 @@ fn sphere_face(pos: [f32; 3], radius: f32, face: &Face) -> bool {
     let c = flat(centre);
     let mut outside = 0.0f32;
     for i in 0..n {
-        let a = flat(face.verts[i]);
-        let b = flat(face.verts[(i + 1) % n]);
+        let a = flat(verts[i]);
+        let b = flat(verts[(i + 1) % n]);
         let edge = [b[0] - a[0], b[1] - a[1]];
         let len = (edge[0] * edge[0] + edge[1] * edge[1]).sqrt();
         if len < 1e-6 {
@@ -930,22 +987,41 @@ fn sphere_face(pos: [f32; 3], radius: f32, face: &Face) -> bool {
             outside = gap;
         }
     }
-    outside <= radius + 1e-5
+    outside <= radius
+}
+
+/// `sithIntersect_TestSphereFaceHit` (0x508750): return the outside-edge mask.
+fn face_edge_mask(pos: [f32; 3], radius: f32, inward: [f32; 3], verts: &[[f32; 3]]) -> Option<u32> {
+    let abs = [inward[0].abs(), inward[1].abs(), inward[2].abs()];
+    let axis = if abs[0] <= abs[1] {
+        if abs[2] < abs[1] { 1 } else { 2 }
+    } else if abs[2] < abs[0] {
+        0
+    } else {
+        2
+    };
+    let axes = [[2, 1], [0, 2], [1, 0]][axis];
+    let (x, y) = if inward[axis] <= 0.0 { (axes[1], axes[0]) } else { (axes[0], axes[1]) };
+    let mut mask = 0u32;
+    for (i, a) in verts.iter().enumerate() {
+        let b = verts[(i + 1) % verts.len()];
+        let edge = [b[x] - a[x], b[y] - a[y]];
+        let cross = (pos[x] - a[x]) * edge[1] - (pos[y] - a[y]) * edge[0];
+        if cross < 0.0 {
+            let length = (edge[0] * edge[0] + edge[1] * edge[1]).sqrt();
+            if radius == 0.0
+                || (pos[x] - a[x]) * (edge[1] / length) - (pos[y] - a[y]) * (edge[0] / length) < -radius
+            {
+                return None;
+            }
+            mask |= 1u32.checked_shl(i as u32).unwrap_or(0);
+        }
+    }
+    Some(mask)
 }
 
 impl LevelGeometry {
-    /// The engine's collision search: sweep a sphere from `start` along `dir` for `dist`, walking
-    /// through adjoins, and report the first solid surface it meets.
-    ///
-    /// `sithCollision_SearchForSurfaceCollisions` does exactly this — for each surface of the sector it
-    /// tests the swept sphere against the polygon (`CheckSphereFaceIntersection`) and, when the surface
-    /// is an adjoin the movement is allowed through, it *recurse*s into the sector on the other side
-    /// with the remaining distance. The first solid hit stops the walk. This is the same shape with an
-    /// explicit visited list, which the engine keeps in `apSearchedSectors`.
-    ///
-    /// `ponytail:` the depth limit and the "already searched" rule stop a sweep bouncing between two
-    /// rooms; a chain of more than 24 adjoins in a straight line would report no hit rather than the
-    /// far one, which no shipped level does.
+    /// Search touched sectors and return the nearest solid contact.
     pub fn sweep(
         &self,
         sector: usize,
@@ -955,23 +1031,11 @@ impl LevelGeometry {
         radius: f32,
         gates: Gates<'_>,
     ) -> Option<Sweep> {
-        self.sweep_rooms(sector, start, dir, dist, radius, gates).0
+        self.sweep_rooms(sector, start, dir, dist, radius, gates, &mut Vec::new()).0
     }
 
-    /// [`Self::sweep`], and the sector the walk ended in.
-    ///
-    /// The second value is not decoration: a sweep that walks *through* a doorway and hits nothing
-    /// returns no contact, and the caller still has to know it is now in the next room. Asking again
-    /// afterwards (by polygon or by distance to the plane) cannot answer it — each room's doorway carries
-    /// its own outward normal, so both rooms claim the same doorway space and a body sitting in one was
-    /// swapped back and forth every frame (17,651 crossings over 34 levels, 97 units walked).
-    /// [`Self::sweep`], and the sector and position the walk ended at.
-    ///
-    /// The extra values are not decoration: a sweep that walks *through* a doorway and hits nothing
-    /// returns no contact, and the caller still has to know it is now in the next room — and where. The
-    /// position matters as much as the room: the crossing advance is what carries the origin past the far
-    /// room's doorway plane, and discarding it left the body a radius short, refused by the containment
-    /// rule on every frame (523 refusals in 700).
+    /// Search touched sectors, then return the nearest contact and the sector reached before it.
+    /// `sithCollision_SearchForCollisions` (0x4e8160) uses the original sweep for every sector.
     pub fn sweep_rooms(
         &self,
         sector: usize,
@@ -980,351 +1044,206 @@ impl LevelGeometry {
         dist: f32,
         radius: f32,
         gates: Gates<'_>,
+        records: &mut Vec<Sweep>,
     ) -> (Option<Sweep>, usize, [f32; 3]) {
-        let mut sector = sector;
-        let mut from = start;
-        let mut left = dist;
-        let mut visited: Vec<usize> = Vec::new();
-        // The nearest solid contact found *before* a doorway that was nearer still. If the walk dead-ends
-        // through an opening, this is what stops the body — the engine's stack does the same, keeping a
-        // wall hit from a room it passed through.
-        let mut closest: Option<Sweep> = None;
-        for _ in 0..24 {
-            if visited.contains(&sector) {
-                return (closest, sector, [from[0] + dir[0] * left, from[1] + dir[1] * left, from[2]]);
+        // `SearchForCollisions` (0x4e8160) expands touched sectors against the original sweep.
+        // `SearchForSurfaceCollisions` (0x4e86d0) records sphere touches separately from
+        // centre crossings; only the latter change the mover's sector.
+        let mut searched = [sector; 64];
+        let mut searched_len = 1;
+        let mut pending = [sector; 129];
+        let mut pending_len = 1;
+        let mut stack = [None; 128];
+        let mut record_count = 0;
+        let mut next = 0;
+        let end = [start[0] + dir[0] * dist, start[1] + dir[1] * dist, start[2] + dir[2] * dist];
+        while next < pending_len {
+            let here = pending[next];
+            if next != 0 {
+                if searched[..searched_len].contains(&here) || searched_len == searched.len() {
+                    next += 1;
+                    continue;
+                }
+                searched[searched_len] = here;
+                searched_len += 1;
             }
-            visited.push(sector);
-            let mut wall: Option<Sweep> = None;
-            let mut door: Option<(f32, usize)> = None;
-
-            let Some(planes_here) = self.sectors.get(sector) else { return (closest, sector, [from[0] + dir[0] * left, from[1] + dir[1] * left, from[2]]) };
-            for plane in planes_here {
-                let face = self
-                    .face_of
-                    .get(&plane.surface)
-                    .and_then(|i| self.faces.get(*i))
-                    .or_else(|| self.floor_of.get(&plane.surface).and_then(|i| self.floors.get(*i)))
-                    .or_else(|| self.wall_of.get(&plane.surface).and_then(|i| self.walls.get(*i)));
-                let Some(face) = face else {
-                    continue;
-                };
-                // This codebase's face normals were built for the walker's own queries, not "out of the
-                // solid"; flip toward the sweep so the engine's arithmetic applies.
-                let normal = if dot(sub(from, face.point), face.normal) < 0.0 {
-                    [-face.normal[0], -face.normal[1], -face.normal[2]]
-                } else {
-                    face.normal
-                };
-                // The engine only records a surface it is moving *into*: `SearchForSurfaceCollisions`
-                // tests `Dot3(moveNorm, pushVel) < 0` before pushing the hit. Without that, a body flush
-                // against a face reports a zero-distance hit for every direction — including the slide
-                // along the wall — and the move wedges. This is the guard that makes sliding work.
-                // `>= -1e-4`, not `>= 0`: a body resting *flush* against a face has a normal with a few
-                // millionths of tangential dust, so a slide along that face reads as `dot = -6e-6` and
-                // the face blocks it at distance 0 — the body could never slide out of a corner it was
-                // touching (level 4's doorway panel plus the portal beside it). The engine's
-                // `Dot3(moveNorm, pushVel) < 0` test carries the same intent; the tolerance keeps
-                // floating-point dust from turning "tangent" into "into".
-                if dot(dir, normal) >= -1e-4 {
-                    continue;
-                }
-                let Some(t) = sphere_plane(from, dir, left, radius, normal, face.point) else {
-                    continue;
-                };
-                let at = [from[0] + dir[0] * t, from[1] + dir[1] * t, from[2] + dir[2] * t];
-                if !sphere_face(at, radius, face) {
-                    continue;
-                }
-                if wall.is_none_or(|w| t < w.distance) {
-                    wall = Some(Sweep {
-                        distance: t,
-                        surface: face.surface,
-                        normal,
-                        sector,
-                        point: at,
-                        top: face.verts.iter().map(|v| v[2]).fold(f32::MIN, f32::max),
-                    });
-                }
+            next += 1;
+            if self.boxes.get(here).is_some_and(|bounds| {
+                bounds.is_some_and(|(lo, hi)| (0..3).all(|k| end[k] - radius > lo[k] && end[k] + radius < hi[k]))
+            }) {
+                continue;
             }
-
-            // A shut opening's own sector **is** the door leaf: the level's scripts closed it
-            // (`00_door.cog`'s `startup` calls `SectorAdjoins(doorsector, 0)`), and the leaf's faces are
-            // what retail stops the body at -- 11gorc's sector 9 leaf between 15 and 14 is the shipped
-            // case (retail stops at y 13.19). The walkable passage is often a different sector beside
-            // the leaf, so refusing the crossing alone still lets the body through the leaf's space;
-            // its faces are tested here as walls, inside the opening they seal.
-            for portal in self.portals.get(sector).into_iter().flatten() {
-                if gates.passable(sector, portal.adjoin, portal.link) {
-                    continue;
-                }
-                let Some(leaf) = self.sectors.get(portal.adjoin) else { continue };
-                let mouth = Face {
-                    normal: portal.normal,
-                    point: portal.point,
-                    verts: portal.verts.clone(),
-                    surface: usize::MAX,
-                };
-                for plane in leaf {
-                    let face = self
-                        .face_of
-                        .get(&plane.surface)
-                        .and_then(|i| self.faces.get(*i))
+            let planes = self.sectors.get(here).map_or(&[][..], Vec::as_slice);
+            let portals = self.portals.get(here).map_or(&[][..], Vec::as_slice);
+            let (mut pi, mut ai) = (0, 0);
+            while pi < planes.len() || ai < portals.len() {
+                let portal_surface = portals.get(ai)
+                    .and_then(|portal| self.adjoin_surface.get(portal.link))
+                    .copied().unwrap_or(usize::MAX);
+                if pi < planes.len() && (ai == portals.len() || planes[pi].surface <= portal_surface) {
+                    let plane = &planes[pi];
+                    pi += 1;
+                    let face = self.face_of.get(&plane.surface).and_then(|i| self.faces.get(*i))
                         .or_else(|| self.floor_of.get(&plane.surface).and_then(|i| self.floors.get(*i)))
                         .or_else(|| self.wall_of.get(&plane.surface).and_then(|i| self.walls.get(*i)));
-                    let Some(face) = face else { continue };
-                    if let Some(hit) = self.face_contact(face, from, dir, left, radius, sector) {
-                        // The leaf's face stands *behind* the opening, so compare it with the mouth
-                        // projected onto the opening's own plane -- not the raw 3D point.
-                        let off = dot(sub(hit.point, portal.point), portal.normal);
-                        let flat = [
-                            hit.point[0] - portal.normal[0] * off,
-                            hit.point[1] - portal.normal[1] * off,
-                            hit.point[2] - portal.normal[2] * off,
-                        ];
-                        if sphere_face(flat, radius, &mouth) && wall.is_none_or(|w| hit.distance < w.distance) {
-                            wall = Some(hit);
-                        }
+                    if record_count < 128 && let Some(hit) = face.and_then(|face| Self::face_contact(
+                        face.normal, face.point, &face.verts, face.surface, start, dir, dist, radius, here,
+                    )) {
+                        stack[record_count] = Some(CollisionRecord::Solid(hit));
+                        records.push(hit);
+                        record_count += 1;
+                    }
+                    continue;
+                }
+                let portal = &portals[ai];
+                ai += 1;
+                if self.surface_claims.get(portal_surface).is_some_and(|claims| !claims.contains(&here)) {
+                    continue;
+                }
+                if !gates.passable(here, portal.adjoin, portal.link) {
+                    if record_count < 128 && let Some(hit) = Self::face_contact(
+                        portal.normal, portal.point, &portal.verts, portal_surface, start, dir, dist, radius, here,
+                    ) {
+                        stack[record_count] = Some(CollisionRecord::Solid(hit));
+                        records.push(hit);
+                        record_count += 1;
+                    }
+                    continue;
+                }
+                let normal = [-portal.normal[0], -portal.normal[1], -portal.normal[2]];
+                if sphere_plane(start, dir, dist, radius, normal, portal.point).is_none() {
+                    continue;
+                }
+                if record_count < 128 && !searched[..searched_len].contains(&portal.adjoin) {
+                    pending[pending_len] = portal.adjoin;
+                    pending_len += 1;
+                    record_count += 1;
+                }
+                if record_count < 128 && let Some(t) = sphere_plane(start, dir, dist, 0.0, normal, portal.point) {
+                    let point = [start[0] + dir[0] * t, start[1] + dir[1] * t, start[2] + dir[2] * t];
+                    if face_edge_mask(point, 0.0, normal, &portal.verts).is_some() {
+                        stack[record_count] = Some(CollisionRecord::Crossing { distance: t, sector: portal.adjoin });
+                        record_count += 1;
                     }
                 }
-            }
-
-            // Adjoins are openings, never contacts: the sweep goes through them. A doorway behind the
-            // direction of travel, or one leading back into a room already searched, is not taken.
-            for portal in self.portals.get(sector).into_iter().flatten() {
-                if visited.contains(&portal.adjoin) {
-                    continue;
-                }
-                let face = Face {
-                    normal: portal.normal,
-                    point: portal.point,
-                    verts: portal.verts.clone(),
-                    surface: usize::MAX,
-                };
-                let normal = if dot(sub(from, face.point), face.normal) < 0.0 {
-                    [-face.normal[0], -face.normal[1], -face.normal[2]]
-                } else {
-                    face.normal
-                };
-                // `>= -1e-4`, not `>= 0`: a body resting *flush* against a face has a normal with a few
-                // millionths of tangential dust, so a slide along that face reads as `dot = -6e-6` and
-                // the face blocks it at distance 0 — the body could never slide out of a corner it was
-                // touching (level 4's doorway panel plus the portal beside it). The engine's
-                // `Dot3(moveNorm, pushVel) < 0` test carries the same intent; the tolerance keeps
-                // floating-point dust from turning "tangent" into "into".
-                if dot(dir, normal) >= -1e-4 {
-                    continue;
-                }
-                let Some(t) = sphere_plane(from, dir, left, radius, normal, face.point) else {
-                    continue;
-                };
-                let at = [from[0] + dir[0] * t, from[1] + dir[1] * t, from[2] + dir[2] * t];
-                if !sphere_face(at, radius, &face) {
-                    continue;
-                }
-                // A body *already* at the opening's plane crossed it on the frame it arrived. Counting
-                // that as a crossing again makes a body pinned in a doorway swap rooms every frame
-                // (13,151 crossings over 34 levels). Only a crossing that advances through the plane
-                // counts, which is also the engine's reading: the contact pushes the body on.
-                if t <= 0.0 {
-                    continue;
-                }
-                // A closed opening is not an opening: `SearchForSurfaceCollisions` falls through to
-                // its plain-surface test when the adjoin's MOVE bit is clear (or the sector's adjoins
-                // are hidden), so a force field stops a body exactly like a wall does.
-                //
-                // An opening whose far side cannot hold the body is a wall too. A door's *slab* is a
-                // sector like any other, and a closed one is thinner than the body's radius (level 1's
-                // `337` is 0.05 wide against 0.065), so no origin position inside it is legal: crossing
-                // in put the body outside its own sector, `MoveThing`'s restore undid it, and the body
-                // re-crossed on the next frame — 713 times in 700.
-                let advance = self.doorway_advance(from, dir, t, radius, portal.adjoin);
-                let lands_inside = gates.passable(sector, portal.adjoin, portal.link) && advance.is_some();
-                if std::env::var_os("BK_SECTOR_TRACE").is_some() && t < 0.5 {
-                    // *Every* portal evaluated, not just the accepted ones: each room keeps its own copy
-                    // of a doorway's plane, and a rejected copy that becomes a wall is otherwise silent.
-                    eprintln!(
-                        "sector trace: portal into {} from sector {sector} t {t:.6} dir {dir:?} \
-                         normal ({:.4},{:.4},{:.4}) point ({:.4},{:.4},{:.4}) advance {advance:?} inside {lands_inside}",
-                        portal.adjoin,
-                        normal[0], normal[1], normal[2],
-                        face.point[0], face.point[1], face.point[2]
-                    );
-                }
-                if lands_inside {
-                    if door.is_none_or(|(dt, _)| t < dt) {
-                        door = Some((t, portal.adjoin));
-                    }
-                } else if wall.is_none_or(|w| t < w.distance) {
-                    wall = Some(Sweep { distance: t, surface: usize::MAX, normal, sector, point: at, top: f32::MAX });
-                }
-            }
-
-            match (wall, door) {
-                (Some(hit), Some((dt, _))) if hit.distance <= dt => return (Some(hit), sector, from),
-                (Some(hit), None) => return (Some(hit), sector, from),
-                (Some(hit), Some((dt, adjoin))) => {
-                    closest.get_or_insert(hit);
-                    // Step to the far side of the opening's plane, not just past the sphere's contact
-                    // point. `IsSphereInSector` is an infinite-plane test at the body's *origin*, and the
-                    // far room's own copy of the doorway sits on that plane: an origin left a radius short
-                    // of it is outside the far room, so `MoveThing`'s restore undoes the crossing and the
-                    // body re-crosses for ever (level 1: 524 refused frames in 700, 0.35 units walked).
-                    //
-                    // The advance is *not* capped by the remaining distance. A crossing is a sector
-                    // transition, and the origin has to clear the far room's plane even when the step has
-                    // almost run out — measured: with the cap the body came to rest 0.009 past the contact
-                    // point, still 0.056 short of the plane, and was refused on every frame. Clearing one
-                    // radius is below the collision radius, so it cannot put the body through anything.
-                    let advance = self.doorway_advance_logged(from, dir, dt, radius, adjoin).unwrap_or(dt + 1e-4);
-                    from = [from[0] + dir[0] * advance, from[1] + dir[1] * advance, from[2] + dir[2] * advance];
-                    left = (left - dt).max(0.0);
-                    sector = adjoin;
-                }
-                (None, Some((dt, adjoin))) => {
-                    let advance = self.doorway_advance_logged(from, dir, dt, radius, adjoin).unwrap_or(dt + 1e-4);
-                    from = [from[0] + dir[0] * advance, from[1] + dir[1] * advance, from[2] + dir[2] * advance];
-                    left = (left - dt).max(0.0);
-                    sector = adjoin;
-                }
-                (None, None) => return (closest, sector, [from[0] + dir[0] * left, from[1] + dir[1] * left, from[2]]),
             }
         }
-        (closest, sector, [from[0] + dir[0] * left, from[1] + dir[1] * left, from[2]])
+        let mut here = sector;
+        let hit = loop {
+            match pop_collision(&mut stack[..record_count]) {
+                Some(CollisionRecord::Crossing { sector, .. }) => here = sector,
+                // `MoveThing`'s pop loop (`0x4e7950:104-205`) skips a record the response does not
+                // accept — a face the move only grazes (into-distance within the `1e-5` deadzone) —
+                // and keeps popping, so a tangent floor under a walking body neither stops the move
+                // nor hides the crossings past it.
+                Some(CollisionRecord::Solid(hit))
+                    if -(dir[0] * hit.normal[0] + dir[1] * hit.normal[1] + dir[2] * hit.normal[2]) * dist <= 1e-5 => {}
+                Some(CollisionRecord::Solid(hit)) => break Some(hit),
+                None => break None,
+            }
+        };
+        (hit, here, [start[0] + dir[0] * dist, start[1] + dir[1] * dist, start[2] + dir[2] * dist])
     }
+
+    /// `sithPhysics_FindFloor`'s water branch (`0x4f5550`): from a centre in an underwater sector, search
+    /// 0.05 straight up (`0x3d4ccccd`, radius 0) and take the nearest adjoin crossing whose far sector is
+    /// dry. The distance is `thing+0x48`, the depth the underwater update holds the body at; `None`
+    /// clears physflag `0x100000`.
+    pub fn water_surface(&self, sector: usize, pos: [f32; 3], gates: Gates<'_>, dry: impl Fn(usize) -> bool) -> Option<f32> {
+        const UP: [f32; 3] = [0.0, 0.0, 1.0];
+        let mut searched = vec![sector];
+        let mut here = sector;
+        loop {
+            let nearest = self
+                .portals
+                .get(here)?
+                .iter()
+                .filter(|portal| !searched.contains(&portal.adjoin) && gates.passable(here, portal.adjoin, portal.link))
+                .filter_map(|portal| {
+                    let normal = [-portal.normal[0], -portal.normal[1], -portal.normal[2]];
+                    let t = sphere_plane(pos, UP, 0.05, 0.0, normal, portal.point)?;
+                    face_edge_mask([pos[0], pos[1], pos[2] + t], 0.0, normal, &portal.verts)?;
+                    Some((t, portal.adjoin))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))?;
+            if dry(nearest.1) {
+                return Some(nearest.0);
+            }
+            searched.push(nearest.1);
+            here = nearest.1;
+        }
+    }
+
     /// One surface's contact for a sphere of `radius` sweeping `dir` over `left` from `from`.
+    #[allow(clippy::too_many_arguments)]
     fn face_contact(
-        &self,
-        face: &Face,
+        face_normal: [f32; 3],
+        point: [f32; 3],
+        verts: &[[f32; 3]],
+        surface: usize,
         from: [f32; 3],
         dir: [f32; 3],
         left: f32,
         radius: f32,
         sector: usize,
     ) -> Option<Sweep> {
-        let normal = if dot(sub(from, face.point), face.normal) < 0.0 {
-            [-face.normal[0], -face.normal[1], -face.normal[2]]
-        } else {
-            face.normal
-        };
-        if dot(dir, normal) >= -1e-4 {
+        let normal = [-face_normal[0], -face_normal[1], -face_normal[2]];
+        if dir[0] * normal[0] + dir[2] * normal[2] + dir[1] * normal[1] >= 0.0 {
             return None;
         }
-        let t = sphere_plane(from, dir, left, radius, normal, face.point)?;
+        let t = sphere_plane(from, dir, left, radius, normal, point)?;
         let at = [from[0] + dir[0] * t, from[1] + dir[1] * t, from[2] + dir[2] * t];
-        if !sphere_face(at, radius, face) {
+        let distance = dot(sub(at, point), normal);
+        let distance = if distance.abs() <= 1e-5 { 0.0 } else { distance };
+        let projected = [at[0] - normal[0] * distance, at[1] - normal[1] * distance, at[2] - normal[2] * distance];
+        let mask = face_edge_mask(projected, radius, normal, verts)?;
+        let (normal, kind) = if mask == 0 {
+            (normal, 4)
+        } else {
+            // `sithIntersect_CheckSphereFaceHitVerticesIntersection` (0x508990).
+            let mut nearest = radius + 1.0;
+            let mut closest = None;
+            for (i, a) in verts.iter().enumerate() {
+                if mask & 1u32.checked_shl(i as u32).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let edge = sub(verts[(i + 1) % verts.len()], *a);
+                let length = dot(edge, edge).sqrt();
+                if length == 0.0 {
+                    continue;
+                }
+                let unit = [edge[0] / length, edge[1] / length, edge[2] / length];
+                let along = dot(sub(projected, *a), unit);
+                if along < -radius || along - radius > length {
+                    continue;
+                }
+                let kind = if (0.0..=length).contains(&along) { 8 } else { 0x10 };
+                let along = along.clamp(0.0, length);
+                let point = [a[0] + unit[0] * along, a[1] + unit[1] * along, a[2] + unit[2] * along];
+                let separation = sub(projected, point);
+                let distance = dot(separation, separation).sqrt();
+                if distance <= radius && distance < nearest {
+                    nearest = distance;
+                    closest = Some((point, kind));
+                }
+            }
+            let (point, kind) = closest?;
+            (normalize(sub(from, point))?, kind)
+        };
+        if dir[0] * normal[0] + dir[2] * normal[2] + dir[1] * normal[1] >= 0.0 {
             return None;
         }
         Some(Sweep {
             distance: t,
-            surface: face.surface,
+            surface,
             normal,
             sector,
             point: at,
-            top: face.verts.iter().map(|v| v[2]).fold(f32::MIN, f32::max),
+            top: verts.iter().map(|v| v[2]).fold(f32::MIN, f32::max),
+            kind,
         })
     }
 
-    /// How far to step a body that is crossing a doorway, from its contact point.
-    ///
-    /// Two constraints, and they disagree on thin geometry:
-    /// * the origin has to end up **past** the doorway's plane, because `IsSphereInSector` is an
-    ///   infinite-plane test and a radius short of it is "outside" — that wants `radius`;
-    /// * the origin has to end up **inside** the far room, and a door sector can be thinner than the
-    ///   body's radius (level 1's `sector 337` is `0.05` wide against a `0.065` radius, so the contact
-    ///   point is already past its far face) — that wants no more than half the room's depth.
-    ///
-    /// So: clear the plane, but never more than halfway into a shallow room where the two would
-    /// otherwise contradict. And because each room keeps its **own copy** of the opening's plane —
-    /// level 1's copies differ by 3 mm — a couple of longer reaches are tried before the opening is
-    /// called unusable.
-    ///
-    /// `None` means nowhere the body can stand: a closed door's slab, thinner than the body's radius.
-    /// The caller treats such an opening as a wall (see `sweep_rooms`).
-    fn doorway_advance(
-        &self,
-        from: [f32; 3],
-        dir: [f32; 3],
-        contact: f32,
-        radius: f32,
-        adjoin: usize,
-    ) -> Option<f32> {
-        // The doorway plane sits one radius beyond the contact point.
-        let plane = [
-            from[0] + dir[0] * (contact + radius),
-            from[1] + dir[1] * (contact + radius),
-            from[2] + dir[2] * (contact + radius),
-        ];
-        // The far room's nearest plane ahead of that point is its far wall (or the other side of a door
-        // slab): travelling toward a plane means moving along its outward normal.
-        let mut depth = f32::INFINITY;
-        for plane_of in self.sectors.get(adjoin).into_iter().flatten() {
-            let along = dot(dir, plane_of.normal);
-            if along <= 1e-4 {
-                continue;
-            }
-            let to_plane = -dot(sub(plane, plane_of.point), plane_of.normal) / along;
-            if to_plane > 1e-4 {
-                depth = depth.min(to_plane);
-            }
-        }
-        // A room shallower than the body cannot hold it, however legal its origin's position looks: a
-        // closed door's slab is exactly that (level 1's `337` is 0.05 deep against a 0.13 body). Such an
-        // opening is a wall — otherwise the body stands *inside the door*.
-        //
-        // Relaxing this to the engine's rule (adopt the far sector and re-search from the contact) was
-        // measured: `--walk all` containment went 27 -> 29 of 34 and crossings 59 -> 78, but `walk18_spawn`
-        // wedged — its 0.103-deep doorway 721 let the body 0.023 short of the far plane, where the sweep
-        // stops it (0.27 units against retail's 0.88). The engine's crossing sets the sector **at the
-        // contact** and re-searches; this path advances the body a radius past the plane, so a slab needs
-        // that through-move before the depth test can be relaxed.
-        if std::env::var_os("BK_SECTOR_TRACE").is_some() {
-            eprintln!(
-                "sector trace: doorway {adjoin} depth {depth:.4} (needs {:.4}) radius {radius:.3}",
-                2.0 * radius
-            );
-        }
-        if depth < 2.0 * radius {
-            return None;
-        }
-        let base = contact + (radius + 1e-3).min(depth * 0.5);
-        for extra in [0.0f32, 0.01, radius] {
-            let advance = base + extra;
-            let landing = [
-                from[0] + dir[0] * advance,
-                from[1] + dir[1] * advance,
-                from[2] + dir[2] * advance,
-            ];
-            // The body may stand one **step** higher on the far side. This port's level data tiles the
-            // ground with slanted triangles whose floors differ slightly at the seams: level 3's doorway
-            // into sector 369 has its floor ~0.02 *above* the body's feet, so the strict test called the
-            // opening a wall and the body slid along a seam it should walk over. The engine re-tests the
-            // hull after the move and its floor pass steps the body up, so a step's worth of rise is legal
-            // here — the same allowance `move_body` uses (`moveSize + 0.01`).
-            const STEP: f32 = 0.07;
-            let inside = self.inside_sector(adjoin, [landing[0], landing[1], landing[2] - radius], 0.0);
-            let stepped = self.inside_sector(adjoin, [landing[0], landing[1], landing[2] - radius + STEP], 0.0);
-            if std::env::var_os("BK_SECTOR_TRACE").is_some() {
-                eprintln!(
-                    "sector trace:   advance {advance:.4} landing {landing:?} inside {inside} stepped {stepped}"
-                );
-            }
-            if inside || stepped {
-                return Some(advance);
-            }
-        }
-        None
-    }
-
-    /// [`Self::doorway_advance`], with a trace on `BK_SECTOR_TRACE`.
-    fn doorway_advance_logged(&self, from: [f32; 3], dir: [f32; 3], contact: f32, radius: f32, adjoin: usize) -> Option<f32> {
-        let advance = self.doorway_advance(from, dir, contact, radius, adjoin);
-        if std::env::var_os("BK_SECTOR_TRACE").is_some() {
-            eprintln!(
-                "sector trace: doorway into {adjoin} from {from:?} dir {dir:?} contact {contact:.4} -> advance {advance:?}"
-            );
-        }
-        advance
-    }
 
     /// `sithCollision_MoveThing` for a walking body: sweep horizontally, slide along what was hit, and
     /// lift over a low step.
@@ -1544,6 +1463,23 @@ impl LevelGeometry {
             if at[2] + radius < thing.z_min || at[2] - radius >= thing.z_max - 1e-4 {
                 continue;
             }
+            if let Some(faces) = &thing.mesh {
+                // Model normals point out of the solid; `face_contact` takes the level's into-solid
+                // convention, so each face is handed over turned around.
+                for face in faces.iter() {
+                    let into = [-face.normal[0], -face.normal[1], -face.normal[2]];
+                    let Some(hit) =
+                        Self::face_contact(into, face.point, &face.verts, usize::MAX, at, dir, left, radius, sector)
+                    else {
+                        continue;
+                    };
+                    if best.is_none_or(|(near, _, _)| hit.distance < near) {
+                        // No model top: a mesh is faces, and `CollideHurt` slides along the one hit.
+                        best = Some((hit.distance, hit.normal, f32::INFINITY));
+                    }
+                }
+                continue;
+            }
             let Some((t, normal)) = thing.sweep_plan(at, dir, left, radius) else {
                 continue;
             };
@@ -1576,6 +1512,7 @@ impl LevelGeometry {
         radius: f32,
         step: f32,
         gates: Gates<'_>,
+        vel: &mut [f32; 3],
     ) -> ([f32; 3], usize, bool) {
         let len = (delta[0] * delta[0] + delta[1] * delta[1]).sqrt();
         if len < 1e-6 {
@@ -1586,12 +1523,42 @@ impl LevelGeometry {
         let mut left = len;
         let mut blocked = false;
         let mut dir = [delta[0] / len, delta[1] / len, 0.0];
+        // `sithCollision_MoveThing`'s residual loop runs at most four searches (`3 < local_34`
+        // bails, `0x4e7950:93,231`), the next along the deflected remainder
+        // (`rdVector_Normalize3` over the `0x9a..0x9c` delta, `0x4e7950:223-229`). The crease
+        // normal the engine keeps in the global at `0x8b4bf0` — reset per move at `0x4e7950:89` —
+        // is this loop's `crease`.
+        let mut crease: Option<[f32; 3]> = None;
+        let mut saved = (at, here);
 
-        for bounce in 0..3 {
+        for bounce in 0..4 {
+            saved = (at, here);
             if std::env::var_os("BK_MOVE_TRACE").is_some() {
                 eprintln!("move: loop {bounce} at {:?} dir {:?} left {left:.5}", at, [dir[0], dir[1]]);
             }
-            let room = self.sweep_rooms(here, at, dir, left, radius, gates);
+            // The engine's pop loop walks the record stack nearest-first and skips a record the
+            // response does not accept (`0x4e7950:104-205`: advance to the hit, run the handler,
+            // `while (uVar9 == 0)` pops the next). A tangent record (`d_into <= deadzone`) is
+            // skipped for the next-nearest, not treated as the move's end.
+            let mut records = Vec::new();
+            let room = self.sweep_rooms(here, at, dir, left, radius, gates, &mut records);
+            records.sort_by(|a, b| {
+                a.distance.total_cmp(&b.distance).then_with(|| (b.kind == 4).cmp(&(a.kind == 4)))
+            });
+            let room = if let (Some(nearest), far, end) = room {
+                let accepted = records
+                    .iter()
+                    .find(|r| {
+                        let d = -(dir[0] * left * r.normal[0]
+                            + dir[1] * left * r.normal[1]
+                            + dir[2] * left * r.normal[2]);
+                        d.abs() > 1e-5 && d > 0.0
+                    })
+                    .copied();
+                (accepted.or(Some(nearest)), far, end)
+            } else {
+                room
+            };
             // A solid model is a contact like a wall: whichever comes first stops the move. A body that
             // walks into a crate stops against it (retail does: `walk3_spawn` and `walk6_spawn` both
             // halt at props), and the radial normal makes the slide round it.
@@ -1615,7 +1582,13 @@ impl LevelGeometry {
                             at[2] - radius
                         );
                     }
-                    at[2] = top + radius + 1e-3;
+                    // The lift crosses adjoins like any vertical move (`0x4e7950`): stepping onto
+                    // `06abarons`' waterpump lifts the swimmer out of the pool into sector 34.
+                    let lift = top + radius + 1e-3 - at[2];
+                    if lift > 0.0 {
+                        here = self.sweep_rooms(here, at, [0.0, 0.0, 1.0], lift, radius, gates, &mut Vec::new()).1;
+                    }
+                    at[2] += lift;
                     continue;
                 }
                 blocked = true;
@@ -1655,38 +1628,6 @@ impl LevelGeometry {
                     }
                     let travelled = (hit.point[0] - at[0]) * dir[0] + (hit.point[1] - at[1]) * dir[1];
                     at = hit.point;
-                    // The contact point is `plane + normal * radius` in 3D, so a **steep** face leaves only
-                    // `radius * |normal_xy|` clearance in plan (the cantina ramp's xy normal is 0.45 long,
-                    // so the body sat 0.45 of a radius clear and crept through it a sub-step at a time).
-                    // Horizontal motion needs a full radius of plan clearance: push the contact out along
-                    // the horizontal normal by the shortfall. Vertical walls (|n_xy| ~ 1) need no push,
-                    // floors (|n_xy| ~ 0) are skipped.
-                    let nl = (hit.normal[0] * hit.normal[0] + hit.normal[1] * hit.normal[1]).sqrt();
-                    // Only **steep** faces need it: a shallow slope (|n_xy| near 1) is what the step-up
-                    // path climbs, and pushing there fights it - `walk_street90` crawled at 0.14 u/s
-                    // past a shallow face at x 3.9 with an unbounded push. The cantina ramp is 0.45.
-                    // ...but only when the push carries the body **along** its motion. An up-facing ramp's
-                    // normal has a downhill plan component, so on a slope the same push that gives a steep
-                    // wall its plan clearance shoves the body backwards: level 6's surface 2831 (a sloped
-                    // floor, normal (−0.365, 0.183, 0.913), `nl` 0.41) pushed it 0.094 downhill — the
-                    // measured 23.1509 → 23.1165 rewind against a +x move — and the body then slid away from
-                    // the ramp mouth. A push opposite the motion is never a clearance, it is a rewind.
-                    if nl > 1e-4 && nl < 0.6 {
-                        let push = radius * (1.0 - nl) / nl;
-                        let (mut px, mut py) = (hit.normal[0] * push, hit.normal[1] * push);
-                        // Keep the push's *clearance* (its sideways component) but never its backwards
-                        // part: an up-facing ramp's normal carries a downhill plan component, so on a
-                        // slope the same push shoves the body back along its own motion — level 6's
-                        // surface 2831 (normal (−0.365, 0.183, 0.913), `nl` 0.41) rewound it 0.094 against
-                        // a +x move, and the body slid away from the ramp mouth instead of entering it.
-                        // A plan push opposite the motion is never a clearance, it is a rewind.
-                        let along = px * dir[0] + py * dir[1];
-                        if along < 0.0 {
-                            px -= dir[0] * along;
-                            py -= dir[1] * along;
-                        }
-                        at = [at[0] + px, at[1] + py, at[2]];
-                    }
                     here = far;
                     left -= travelled.max(0.0);
                     if left < 1e-4 {
@@ -1758,60 +1699,107 @@ impl LevelGeometry {
                         // me", pass, and walk the body out of the room — the engine never does this,
                         // because its step lives in the floor pass and `MoveThing` re-tests the hull
                         // afterwards (`decomp/004e7950_sithCollision_MoveThing.c:251`).
-                        let inside = self.inside_sector(here, [raised[0], raised[1], raised[2] - radius], 0.0);
+                        let inside = self.inside_sector_with_gates(here, [raised[0], raised[1], raised[2] - radius], 0.0, gates);
 
     let advance = clears(self.sweep(here, raised, dir, left, radius, gates));
     if std::env::var_os("BK_WALK_TRACE").is_some() {
         eprintln!("walk trace:   step predicates clear {clear} lands {lands} inside {inside} advance {advance}");
     }
     if clear && lands && inside && advance {
+                            // The lift is a vertical move through the same search (`0x4e7950`): a body
+                            // stepping out of `06abarons`' pool rises through the water's adjoin into 34.
+                            here = self.sweep_rooms(here, at, [0.0, 0.0, 1.0], step, radius, gates, &mut Vec::new()).1;
                             at = raised;
                             continue;
                         }
-                    }                    // Slide: drop the velocity component that ran into the surface.
-                    let slide = Self::slide_along(dir, hit.normal);
-                    let mag = (slide[0] * slide[0] + slide[1] * slide[1] + slide[2] * slide[2]).sqrt();
+                    }
+                    // `sithCollision_CollideHurt` (`0x4e9090`) — the player's move response
+                    // (physicsType 1, no `0x20` type flag, so the restitution multiplier is
+                    // `1.0001`). The engine projects the thing's remaining move (`0x268`, this
+                    // loop's `dir * left`) and its velocity (`0x1d4`, inert for an input-driven
+                    // walk, which re-sets its velocity from input each frame) off the face; a
+                    // second face in the same move folds both into the crease normal at
+                    // `0x8b4bf0` and projects the remainder off that (`0x4e9090:88-111`). The
+                    // deadzone `1e-5` is the shipped image's `_DAT_0052300c` (`0x4e9090:32`);
+                    // the outward delta **is** the pushout — the next search starts at the
+                    // contact and carries it, so there is no separate plan push.
+                    let n = hit.normal;
+                    let d_into = -(dir[0] * left * n[0] + dir[1] * left * n[1] + dir[2] * left * n[2]);
+                    let d_into = if d_into.abs() <= 1e-5 { 0.0 } else { d_into };
+                    if d_into <= 0.0 {
+                        break;
+                    }
+                    // `sithCollision_CollideHurt` (`0x4e9090`) — the player's move response
+                    // (physicsType 1, no `0x20` type flag: restitution `1.0001`). The engine
+                    // projects BOTH the remaining move (`0x268`) and the persisted velocity
+                    // (`0x1d4`); the branch gate is its own (`0x4e9090:42`): a hit at a
+                    // non-zero distance re-takes the first-contact branch, and only a
+                    // zero-distance repeat hit takes the fold — which first folds the crease
+                    // normal (`88-92`), then projects the velocity (`93-101`) and the delta
+                    // (`102-111`) off the FOLDED crease. Deadzone `1e-5` = `_DAT_0052300c`;
+                    // the outward delta is the pushout, so there is no separate plan push.
+                    let v_into = -(vel[0] * n[0] + vel[1] * n[1] + vel[2] * n[2]);
+                    let rem;
+                    if travelled != 0.0 || crease.is_none() {
+                        crease = Some(n);
+                        if v_into > 0.0 {
+                            let m = 1.0001 * v_into;
+                            *vel = [vel[0] + n[0] * m, vel[1] + n[1] * m, vel[2] + n[2] * m];
+                        }
+                        let m = 1.0001 * d_into;
+                        rem = [
+                            dir[0] * left + n[0] * m,
+                            dir[1] * left + n[1] * m,
+                            dir[2] * left + n[2] * m,
+                        ];
+                    } else {
+                        if v_into > 0.0 {
+                            *vel = [
+                                vel[0] + n[0] * v_into,
+                                vel[1] + n[1] * v_into,
+                                vel[2] + n[2] * v_into,
+                            ];
+                        }
+                        let mut r = [
+                            dir[0] * left + n[0] * d_into,
+                            dir[1] * left + n[1] * d_into,
+                            dir[2] * left + n[2] * d_into,
+                        ];
+                        let c0 = crease.unwrap();
+                        let fold = -(c0[0] * n[0] + c0[1] * n[1] + c0[2] * n[2]);
+                        let c = [c0[0] + n[0] * fold, c0[1] + n[1] * fold, c0[2] + n[2] * fold];
+                        let clen = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
+                        if clen > 1e-6 {
+                            let c = [c[0] / clen, c[1] / clen, c[2] / clen];
+                            // The folded crease is written back (`89-92`) and BOTH projections
+                            // use it: velocity first (`93-101`), then the delta (`102-111`).
+                            crease = Some(c);
+                            let cv = -(vel[0] * c[0] + vel[1] * c[1] + vel[2] * c[2]);
+                            if cv > 0.0 {
+                                *vel = [vel[0] + c[0] * cv, vel[1] + c[1] * cv, vel[2] + c[2] * cv];
+                            }
+                            let cd = -(r[0] * c[0] + r[1] * c[1] + r[2] * c[2]);
+                            if cd > 0.0 {
+                                r = [r[0] + c[0] * cd, r[1] + c[1] * cd, r[2] + c[2] * cd];
+                            }
+                        }
+                        rem = r;
+                    }
+                    let mag = (rem[0] * rem[0] + rem[1] * rem[1] + rem[2] * rem[2]).sqrt();
                     if std::env::var_os("BK_MOVE_TRACE").is_some() {
                         eprintln!(
-                            "move: bounce {bounce} hit t {travelled:.5} left {left:.5} dir {:?} slide {:?} mag {mag:.3} at {:?}",
-                            [dir[0], dir[1], dir[2]], [slide[0], slide[1], slide[2]], at
+                            "move: collide_hurt bounce {bounce} into {d_into:.5} rem {mag:.5} crease {crease:?} at {at:?}",
                         );
                     }
-                    // A **near-head-on** hit has almost no tangential component, and creeping along it is
-                    // how a body rounds a wall the engine stops it at: level 13's wall (surface 2125,
-                    // normal (−0.42, −0.91)) is hit at ~8° by the walking direction, so the slide is a few
-                    // thousandths per frame — over a second it walks the body past the wall's left edge and
-                    // off the ledge (health 72.6 from the fall). `mag` is `|dir × normal|` (the sine of the
-                    // grazing angle), so a small `mag` is a head-on hit: stop rather than slide.
-                    if mag < 0.2 || bounce == 2 {
+                    if mag <= 1e-5 {
                         break;
                     }
-                    dir = [slide[0] / mag, slide[1] / mag, slide[2] / mag];
+                    dir = [rem[0] / mag, rem[1] / mag, rem[2] / mag];
+                    left = mag;
                 }
                 (None, far, end) => {
-                    // A doorway's crossing advance runs past the plane by a radius, and that step is not
-                    // a wall test: a solid standing *in* the opening (level 1's cantina leaves, two
-                    // portal hops out) would be stepped over and the body would end up in the doorway's
-                    // own sector, past the leaf it should stop at. The advance is clamped by the first
-                    // solid contact along it.
-                    let advanced = ((end[0] - at[0]).powi(2) + (end[1] - at[1]).powi(2)).sqrt();
-                    if advanced > 1e-6
-                        && let Some((travel, _, _)) = self.sweep_things(at, dir, advanced, radius, far)
-                    {
-                        blocked = true;
-                        at = [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2] + dir[2] * travel];
-                        break;
-                    }
-                    // `sweep_rooms` reports its end point in plan and drops the vertical part; a slide
-                    // along a ramp carries the body up, so the height is restored here — only on this
-                    // path, because the vertical probes rely on the plan-only end.
-                    at = [end[0], end[1], at[2] + dir[2] * left];
-                    // Nothing was hit, but the sweep may have crossed a doorway and `far` is the room the
-                    // body is standing in. This was rejected earlier and is right now: with the crossing
-                    // advance uncapped, a body only reaches here after its origin has cleared the far
-                    // room's doorway plane, so it is genuinely in that room. (With the capped advance the
-                    // body stopped a radius short of the plane and adopting the room flipped it back and
-                    // forth — 584 crossings became 13,151.)
+                    // No accepted contact: `MoveThing` finishes the original search segment.
+                    at = end;
                     here = far;
                     break;
                 }
@@ -1863,6 +1851,9 @@ impl LevelGeometry {
                 }
             }
         };
+        // `sithCollision_MoveThing` (0x4e7950) restores the last search's position and sector
+        // when the final centre fails `IsSphereInSector`; it does not resolve another sector.
+        let (at, here) = if self.inside_sector_with_gates(here, at, 0.0, gates) { (at, here) } else { saved };
         if std::env::var_os("BK_MOVE_TRACE").is_some() {
             eprintln!("move: end at {:?} here {here} blocked {} from {:?}", at, blocked, pos);
         }
@@ -1877,6 +1868,10 @@ impl LevelGeometry {
         let things = self.things();
         for thing in things.iter() {
             if !self.in_search(sector, thing.sector, at, [0.0; 3], 0.0, radius) {
+                continue;
+            }
+            // The engine pushes nothing out of a mesh; its sweep stops the body at the faces.
+            if thing.mesh.is_some() {
                 continue;
             }
             // The body's own radius against the thing's model span: a table blocks a walking body, a
@@ -1959,7 +1954,7 @@ impl LevelGeometry {
             return (want, None);
         }
         let dir = [delta[0] / len, delta[1] / len, delta[2] / len];
-        match self.sweep_rooms(sector, focus, dir, len, radius, Gates::default()).0 {
+        match self.sweep_rooms(sector, focus, dir, len, radius, Gates::default(), &mut Vec::new()).0 {
             // `Sweep::point` is where the sphere's centre contacts the plane, which is exactly where
             // the engine puts the camera — it does not back off by the radius again.
             Some(hit) => {
@@ -2140,6 +2135,19 @@ impl LevelGeometry {
                 if face.normal[2].abs() < 0.2 {
                     continue;
                 }
+                // The engine's floor search counts only floor-flagged surfaces: `FindFloor` sets
+                // the search's `0x10` bit for a thing without physflag `0x80` (the `walkplayer`
+                // inherits `_actor`'s `0x4a4f`), and `SearchForSurfaceCollisions` then requires
+                // `surfflags & 1` (`0x4e86d0` lines 125-126). A wall-only face — `09fuelstation`'s
+                // 40-degree pit-mouth 9278, flags `0x4` — is never a floor. A surface the table
+                // does not know (a fixture face without a level surface) still passes.
+                if self
+                    .surface_flags
+                    .get(face.surface)
+                    .is_some_and(|flags| flags & 1 == 0)
+                {
+                    continue;
+                }
                 // `.jkl` plane normals point **out of the room**, while
                 // `sithCollision_SearchForSurfaceCollisions` tests into-room normals
                 // (`dot(search_dir, normal) < 0` accepts a floor for a downward sweep). Flipping the
@@ -2318,6 +2326,24 @@ impl LevelGeometry {
         let feet = pos[2] - radius;
         let mut best: Option<f32> = None;
         for thing in self.things().iter() {
+            if let Some(faces) = &thing.mesh {
+                // An upward face the body is over is a floor at the face's height under the body.
+                for face in faces.iter().filter(|f| f.normal[2] > 0.7) {
+                    if !over_face(face, pos, radius) {
+                        continue;
+                    }
+                    let top = face.point[2]
+                        - (face.normal[0] * (pos[0] - face.point[0]) + face.normal[1] * (pos[1] - face.point[1]))
+                            / face.normal[2];
+                    if top > feet + 0.02 || feet - top > reach + 1e-3 {
+                        continue;
+                    }
+                    if best.is_none_or(|near| top > near) {
+                        best = Some(top);
+                    }
+                }
+                continue;
+            }
             let over = match thing.half {
                 Some(half) => {
                     let local = thing.local([pos[0], pos[1]]);
@@ -2512,11 +2538,23 @@ impl LevelGeometry {
     /// The walker needs the surface itself, not just the height: the surface flags say
     /// whether the player is standing on water (`0x20000`), deep water (`0x100000`), earth
     /// or metal, which the engine uses for movement speed and landing sounds.
+    ///
+    /// A floor counts only where `pos` is over its polygon: `sithPhysics_FindFloor` (`0x4f5550`) finds
+    /// floors through `sithCollision_SearchForSurfaceCollisions` (`0x4e86d0`), which tests each face's
+    /// polygon, not its infinite plane. `06abarons` sector 35 is a ring of floor pieces at z 0.1 around
+    /// an adjoin (surface 433) into the pool below; the ring's plane under that opening held the body
+    /// up where retail drops through. A plane with no registered face (a plane-only fixture) still counts.
     pub fn floor_surface(&self, sector: usize, pos: [f32; 3]) -> Option<(f32, usize)> {
         let planes = self.sectors.get(sector)?;
         planes
             .iter()
             .filter(|p| p.normal[2] < -0.7)
+            .filter(|p| {
+                self.floor_of
+                    .get(&p.surface)
+                    .and_then(|&i| self.floors.get(i))
+                    .is_none_or(|face| over_face(face, pos, 0.0))
+            })
             .map(|p| {
                 let d = dot(sub(pos, p.point), p.normal);
                 (pos[2] - p.normal[2] * d, p.surface)
@@ -2554,13 +2592,19 @@ impl LevelGeometry {
     /// a distance below the radius means outside. `sithCollision_MoveThing` calls this with radius 0
     /// to decide whether to undo a move.
     pub fn inside_sector(&self, sector: usize, pos: [f32; 3], radius: f32) -> bool {
+        self.inside_sector_with_gates(sector, pos, radius, Gates::default())
+    }
+
+    fn inside_sector_with_gates(&self, sector: usize, pos: [f32; 3], radius: f32, gates: Gates<'_>) -> bool {
         if let Some(Some((lo, hi))) = self.boxes.get(sector) {
-            let fits = (0..3).all(|k| pos[k] - radius >= lo[k] && pos[k] + radius <= hi[k]);
+            let fits = (0..3).all(|k| pos[k] - radius > lo[k] && pos[k] + radius < hi[k]);
             if fits {
                 return true;
             }
         }
-        self.clearance(sector, pos).is_none_or(|c| {
+        let inside = |normal: [f32; 3], point| {
+            let d = sub(pos, point);
+            let c = -(d[2] * normal[2] + d[1] * normal[1] + d[0] * normal[0]);
             // `sithIntersect_IsSphereInSector` snaps a plane distance within `1e-5` of zero to zero
             // (`_DAT_00523288` is 1e-5, `_DAT_00523284` is 0) before the radius test, so a body
             // resting exactly on its own floor is inside it. Without the band, `floor + radius` as
@@ -2568,7 +2612,18 @@ impl LevelGeometry {
             // standing on solid ground (`18Ascend`'s spawn did exactly that, every frame).
             let c = if c.abs() <= 1e-5 { 0.0 } else { c };
             c >= radius
-        })
+        };
+        self.sectors.get(sector).is_none_or(|planes| planes.iter().all(|plane| inside(plane.normal, plane.point)))
+            && self.portals.get(sector).is_none_or(|portals| portals.iter().all(|portal| {
+                let surface = self.adjoin_surface.get(portal.link).copied().unwrap_or(usize::MAX);
+                if self.surface_claims.get(surface).is_some_and(|claims| !claims.contains(&sector)) {
+                    return true;
+                }
+                let flags = self.surface_flags.get(surface).copied().unwrap_or(0);
+                let adjoin = gates.adjoins.get(portal.link).copied()
+                    .or_else(|| self.adjoin_flags.get(portal.link).copied()).unwrap_or(ADJOIN_MOVE);
+                (flags & 4 == 0 && adjoin & ADJOIN_MOVE == 0) || inside(portal.normal, portal.point)
+            }))
     }
 
     /// The sector a *body* of `radius` should start in.
@@ -3053,6 +3108,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            mesh: None,
         }]);
         let radius = 0.065f32;
         // The seat probes one radius above the body's centre (0.12), which puts the tabletop below
@@ -3091,12 +3147,13 @@ mod tests {
             sector: 0,
             half: Some([0.1, 0.1]),
             yaw: 0.0,
+            mesh: None,
         }]);
         let radius = 0.065f32;
         let step = 0.066f32;
         // Feet at 0.030, model top at 0.080: 0.050 is inside the step allowance.
         let (moved, _, _) =
-            room.move_body(0, [0.0, -0.3, 0.095], [0.0, 0.5, 0.0], radius, step, Gates::default());
+            room.move_body(0, [0.0, -0.3, 0.095], [0.0, 0.5, 0.0], radius, step, Gates::default(), &mut [0.0; 3]);
         assert!(moved[1] > 0.0, "the body never got over the low model: {moved:?}");
         assert!(
             (moved[2] - (0.08 + radius)).abs() < 0.01,
@@ -3105,7 +3162,7 @@ mod tests {
         // A body already on the floor meets an over-tall model as a wall, unchanged.
         room.things.write().expect("things lock")[0].z_max = 0.3;
         let (stopped, _, blocked) =
-            room.move_body(0, [0.0, -0.3, radius], [0.0, 1.0, 0.0], radius, step, Gates::default());
+            room.move_body(0, [0.0, -0.3, radius], [0.0, 1.0, 0.0], radius, step, Gates::default(), &mut [0.0; 3]);
         assert!(blocked, "a tall model did not block the body");
         assert!(stopped[1] < 0.2, "the body walked through a tall model: {stopped:?}");
     }
@@ -3133,13 +3190,76 @@ mod tests {
             portals: vec![
                 vec![Portal { adjoin: 1, link: 0, verts: quad(0.0), normal: [0.0, 1.0, 0.0], point: [0.0, 0.0, 0.0] }],
                 vec![
-                    Portal { adjoin: 0, link: 1, verts: quad(0.0), normal: [0.0, -1.0, 0.0], point: [0.0, 0.0, 0.0] },
+                    Portal { adjoin: 0, link: 1, verts: quad(0.0).into_iter().rev().collect(), normal: [0.0, -1.0, 0.0], point: [0.0, 0.0, 0.0] },
                     Portal { adjoin: 2, link: 2, verts: quad(8.0), normal: [0.0, 1.0, 0.0], point: [0.0, 8.0, 0.0] },
                 ],
-                vec![Portal { adjoin: 1, link: 3, verts: quad(8.0), normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0] }],
+                vec![Portal { adjoin: 1, link: 3, verts: quad(8.0).into_iter().rev().collect(), normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0] }],
             ],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_portal_changes_sector_only_when_the_centre_crosses() {
+        let room = corridor();
+        let sweep = |y, distance| {
+            room.sweep_rooms(0, [0.0, y, 0.5], [0.0, 1.0, 0.0], distance, 0.1, Gates::default(), &mut Vec::new())
+        };
+        let (_, touching, end) = sweep(-0.05, 0.02);
+        assert_eq!(touching, 0);
+        assert!((end[1] + 0.03).abs() < 1e-6);
+        assert_eq!(sweep(-0.05, 0.1).1, 1);
+        assert_eq!(sweep(0.0, 0.02).1, 1);
+    }
+
+    #[test]
+    fn a_solid_contact_before_an_equal_distance_crossing_keeps_the_sector() {
+        let mut room = corridor();
+        let portal = &room.portals[0][0];
+        room.faces.push(Face {
+            normal: portal.normal,
+            point: portal.point,
+            verts: portal.verts.clone(),
+            surface: 0,
+        });
+        room.sectors[0].push(Plane { normal: portal.normal, point: portal.point, surface: 0 });
+        room.face_of.insert(0, 0);
+        room.adjoin_surface = vec![1, 2, 3, 4];
+        let (hit, sector, _) = room.sweep_rooms(
+            0, [0.0, -1.0, 0.5], [0.0, 1.0, 0.0], 2.0, 0.0, Gates::default(), &mut Vec::new(),
+        );
+        assert_eq!(hit.unwrap().surface, 0);
+        assert_eq!(sector, 0);
+    }
+
+    #[test]
+    fn collision_stack_prefers_a_face_over_an_equal_distance_edge_but_not_a_crossing() {
+        let solid = |kind| CollisionRecord::Solid(Sweep {
+            distance: 1.0,
+            surface: kind as usize,
+            normal: [0.0, 0.0, 1.0],
+            sector: 0,
+            point: [0.0; 3],
+            top: 0.0,
+            kind,
+        });
+        let crossing = CollisionRecord::Crossing { distance: 1.0, sector: 1 };
+        let mut edge_cross_face = [Some(solid(8)), Some(crossing), Some(solid(4))];
+        assert!(matches!(pop_collision(&mut edge_cross_face), Some(CollisionRecord::Solid(hit)) if hit.kind == 4));
+        let mut cross_edge_face = [Some(crossing), Some(solid(8)), Some(solid(4))];
+        assert!(matches!(pop_collision(&mut cross_edge_face), Some(CollisionRecord::Crossing { sector: 1, .. })));
+        let mut vertex_face = [Some(solid(0x10)), Some(solid(4))];
+        assert!(matches!(pop_collision(&mut vertex_face), Some(CollisionRecord::Solid(hit)) if hit.kind == 4));
+    }
+
+    #[test]
+    fn sector_containment_uses_current_adjoin_movement_flags() {
+        let room = corridor();
+        let outside = [0.0, 0.1, 0.5];
+        let open = Gates { sectors: &[], adjoins: &[ADJOIN_MOVE] };
+        let closed = Gates { sectors: &[], adjoins: &[0] };
+        assert!(!room.inside_sector_with_gates(0, outside, 0.0, open));
+        assert!(room.inside_sector_with_gates(0, outside, 0.0, closed));
     }
 
     /// The engine's door rule, on a body rather than on flags: a doorway a script has **shut** is a wall
@@ -3160,19 +3280,19 @@ mod tests {
         let links = [ADJOIN_MOVE | ADJOIN_VISIBLE; 4];
 
         let shut = Gates { sectors: &[SECTOR_ADJOINS_OFF, 0, 0], adjoins: &links };
-        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, shut);
+        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, shut, &mut [0.0; 3]);
         assert_eq!(sector, 0, "a shut doorway must leave the body in its own room");
         assert!(blocked, "the body should report the contact that stopped it");
 
         let open = Gates { sectors: &[0, 0, 0], adjoins: &links };
-        let (pos, sector, _) = solids.move_body(0, start, step, radius, 0.066, open);
+        let (pos, sector, _) = solids.move_body(0, start, step, radius, 0.066, open, &mut [0.0; 3]);
         assert_eq!(sector, 1, "an open doorway must let the body into the next room, ended at {pos:?}");
         assert!(pos[1] > start[1], "the body should be past the opening, not at it: {pos:?}");
 
         // And the other side of the same rule: an opening a script shut with `ClearAdjoinFlags(x, 2)`.
         let no_move = [ADJOIN_VISIBLE; 4];
         let barred = Gates { sectors: &[0, 0, 0], adjoins: &no_move };
-        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, barred);
+        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, barred, &mut [0.0; 3]);
         assert_eq!(sector, 0, "an opening without `ADJOIN_MOVE` must stop the body");
         assert!(blocked, "a force field should report the contact");
     }
@@ -3194,7 +3314,7 @@ mod tests {
             surface,
         };
         let walls = vec![
-            side([1.0, 0.0, 0.0], [x, 0.0, 0.0], vec![[x, -y, -z], [x, y, -z], [x, y, z], [x, -y, z]], 1),
+            side([1.0, 0.0, 0.0], [x, 0.0, 0.0], vec![[x, -y, z], [x, y, z], [x, y, -z], [x, -y, -z]], 1),
             side([-1.0, 0.0, 0.0], [-x, 0.0, 0.0], vec![[-x, -y, -z], [-x, y, -z], [-x, y, z], [-x, -y, z]], 2),
         ];
         let mut sectors = vec![Vec::new()];
@@ -3361,6 +3481,44 @@ mod tests {
         assert!((height + 1.0).abs() < 1e-4, "height {height}");
     }
 
+    /// A floor plane counts only over its polygon: `06abarons` sector 35's ring floor surrounds an
+    /// adjoin into the pool, and the ring's plane must not hold up a body over that opening.
+    #[test]
+    fn a_floor_plane_is_not_a_floor_outside_its_polygon() {
+        let mut room = boxed();
+        room.floors[0].verts = vec![[1.0, -2.0, -1.0], [2.0, -2.0, -1.0], [2.0, 2.0, -1.0], [1.0, 2.0, -1.0]];
+        assert!(room.floor_surface(0, [1.5, 0.0, -0.95]).is_some(), "over the strip");
+        assert!(room.floor_surface(0, [0.0, 0.0, -0.95]).is_none(), "beside the strip, over its plane");
+    }
+
+    /// A `collide=3` mesh is collided as its faces: a door leaf laid flat (`18Ascend` things 323/324)
+    /// holds a body up where its upward face is, and nowhere else, whatever its upright bounds were.
+    #[test]
+    fn a_flat_mesh_leaf_is_a_floor_over_its_face_only() {
+        let leaf = Face {
+            normal: [0.0, 0.0, 1.0],
+            point: [0.0, 0.0, 1.0],
+            verts: vec![[-0.5, -0.5, 1.0], [0.5, -0.5, 1.0], [0.5, 0.5, 1.0], [-0.5, 0.5, 1.0]],
+            surface: usize::MAX,
+        };
+        let solids = Solids::default();
+        solids.set_things(vec![ThingSolid {
+            centre: [0.0, 0.0, 1.0],
+            radius: 0.2,
+            z_min: 0.99,
+            z_max: 1.0,
+            sector: 0,
+            // The upright bounds a yaw-only box would use: thin and tall, nothing like the leaf.
+            half: Some([0.0125, 2.0]),
+            yaw: 0.0,
+            mesh: Some(vec![leaf].into()),
+        }]);
+        let r = 0.065;
+        let on = solids.resting_floor(0, [0.3, 0.3, 1.0 + r], 0.1, r, false).expect("the leaf's top");
+        assert!((on.height - 1.0).abs() < 1e-5, "height {}", on.height);
+        assert!(solids.resting_floor(0, [1.0, 0.0, 1.0 + r], 0.1, r, false).is_none(), "beside the leaf");
+    }
+
     /// The one floor rule answers the same resting height for the four shapes the motion callers
     /// used to resolve with different queries: a sector whose floor is only its plane, a walkway
     /// that is only a face, a ramp, and a solid thing's model top. The same body, at the same pose,
@@ -3444,6 +3602,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            mesh: None,
         }]);
         let top = rest(&prop).expect("a solid thing's top is a floor");
         assert_eq!(top.height, 0.0);
@@ -3536,7 +3695,7 @@ mod tests {
         let gates = Gates { sectors: &[], adjoins: &[] };
         // The +x wall is x = 2 and the body is one radius (0.3) clear of it at x = 1.7.
         let (pos, _sector, blocked) =
-            room.move_body(0, [1.7, 0.0, -0.5], [0.0, 1.0, 0.0], 0.3, 0.066, gates);
+            room.move_body(0, [1.7, 0.0, -0.5], [0.0, 1.0, 0.0], 0.3, 0.066, gates, &mut [0.0; 3]);
         assert!(
             pos[1] > 0.5,
             "a body touching a wall did not slide along it: y {} (blocked {blocked})",
@@ -3553,9 +3712,9 @@ mod tests {
         let h = std::f32::consts::FRAC_1_SQRT_2;
         // The sweep resolves each hull plane's `surface` through `face_of`/`floor_of`/`wall_of`, so the
         // ramp needs both its plane and its polygon, the way the loader registers a level face.
-        room.sectors[0].push(Plane { normal: [0.0, -h, h], point: [0.0, 1.0, 0.0], surface: 9 });
+        room.sectors[0].push(Plane { normal: [0.0, h, -h], point: [0.0, 1.0, 0.0], surface: 9 });
         room.faces.push(Face {
-            normal: [0.0, -h, h],
+            normal: [0.0, h, -h],
             point: [0.0, 1.0, 0.0],
             verts: vec![[-1.0, 0.2, -0.8], [1.0, 0.2, -0.8], [1.0, 1.4, 0.4], [-1.0, 1.4, 0.4]],
             surface: 9,
@@ -3563,7 +3722,7 @@ mod tests {
         room.face_of.insert(9, room.faces.len() - 1);
         let gates = Gates { sectors: &[], adjoins: &[] };
         let (pos, _sector, _blocked) =
-            room.move_body(0, [0.0, 0.3, 0.0], [0.0, 1.0, 0.0], 0.1, 0.066, gates);
+            room.move_body(0, [0.0, 0.3, 0.0], [0.0, 1.0, 0.0], 0.1, 0.066, gates, &mut [0.0; 3]);
         assert!(pos[1] > 0.9, "the body did not advance up the ramp: {pos:?}");
         assert!(pos[2] > 0.05, "the body did not climb the ramp: {pos:?}");
     }
@@ -3730,7 +3889,7 @@ mod tests {
         // Passable: the body crosses into 1; the wall there is its own room's, so it is a contact too.
         // Shut: the *leaf's* faces stop it before the crossing is taken.
         let dir = [0.0, 1.0, 0.0];
-        let before = room.sweep_rooms(0, [0.0, -0.2, 0.0], dir, 0.5, r, shut);
+        let before = room.sweep_rooms(0, [0.0, -0.2, 0.0], dir, 0.5, r, shut, &mut Vec::new());
         let leaf_hit = before.0.map(|hit| hit.point[1]);
         assert!(
             leaf_hit.is_some_and(|y| y <= 0.1),
@@ -3769,6 +3928,7 @@ mod tests {
             sector: 2,
             half: None,
             yaw: 0.0,
+            mesh: None,
         }]);
         let r = 0.065;
         let dir = [0.0, 1.0, 0.0];
@@ -3799,6 +3959,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            mesh: None,
         }]);
         assert!(
             room.segment_thing([0.0, 0.0, -0.5], [2.0, 0.0, -0.5]),
@@ -3843,6 +4004,7 @@ mod tests {
             sector: 0,
             half: Some([0.2, 0.0125]),
             yaw: 0.0,
+            mesh: None,
         }]);
         let r = 0.065;
         // Broad side at y = -0.025: the body stops at 0.0125 + 0.065 from the centre, where the
@@ -3939,6 +4101,7 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            mesh: None,
         }]);
         assert_eq!(geometry.things().len(), 1, "the geometry copy did not share its things");
     }

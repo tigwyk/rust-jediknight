@@ -502,10 +502,10 @@ summary: 26/34 levels with a start kept the walker inside its sector,
          24 had the hull test agree, 52 sector crossings, 1 without a start
 ```
 
-`contained` holds on 26 of the 34 levels with a start. The eight that leave are named in the
-table, and every one but the recorded walk-off (`09fuelstation`, 21.13 units down) drops less
-than three units — the sector they end in is a neighbouring sliver the body was pushed into,
-not a doorway it walked through; `m10`'s thrust sector now keeps the body contained. What the
+`contained` holds on 32 of the 34 levels with a start. Only `16aescapeship` and `16bescapeship`
+leave (407->408, no drop): the sector they end in is a neighbouring sliver the body was pushed
+into, not a doorway it walked through. `09fuelstation` no longer walks off since issue #23's
+fall sweep; `m10`'s thrust sector keeps the body contained. What the
 gate *asserts* is narrower and holds everywhere: **no level leaves the body in the void, and
 the worst-drop walk stayed inside its sector** — its last two lines are `sweep: 0 level(s) left
 the body in the void, 0 started over no floor, worst drop 3.26 (jkl\06abarons.jkl)`, and those
@@ -784,7 +784,7 @@ the summary, is what each check prints:
 | --- | --- | --- |
 | jump physics agrees with the rules | `--rules` | `apex 0.26 / 0.28 closed form` |
 | a wall stops a body beside it, not past its end | `--rules` | `pushed true … 27 past its end is pushed false` |
-| the walker stays legal on every level | `--walk all` | `26/34 levels` with a start stay inside their sector; 52 sector crossings; `0` left in the void, worst *contained* drop 3.26 (`06abarons`); only `09fuelstation` ends outside its sector after its recorded 21.13-unit walk-off |
+| the walker stays legal on every level | `--walk all` | `32/34 levels` with a start stay inside their sector; 113 sector crossings; `0` left in the void, worst drop 3.38 (`06abarons`); only `16aescapeship`/`16bescapeship` end outside their sector (407->408) |
 | portal occlusion | `--audit` + `--shot` A/B | `21 of 462 sectors in view`, **0.000%** different from `--no-cull` |
 | the colormap material matches the CPU path | `--shot` A/B | **0.00%** of pixels differ, two levels |
 | every label a level waits on | `--cog-check`, `--triggers` | `startup/arrived/timer/pulse/entered/exited/damaged/killed/activate/crossed/blocked` |

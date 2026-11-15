@@ -12,6 +12,12 @@ same order, its address in the doc comment.
 The full rules are in `docs/porting-roadmap.md` (Principles, "How to port one thing", "Rules for the
 next agent or contributor").
 
+## Before you start an open issue
+
+Read `docs/agents/pitfalls.md`, then the issue's latest handoff comment
+(`gh issue view <n> --comments`). Do not read `docs/progress-log.md`, `docs/gaps.md` or the roadmap in
+full. When you stop, post a new handoff comment.
+
 ## Agent skills
 
 ### Issue tracker
