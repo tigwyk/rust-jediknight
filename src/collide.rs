@@ -3126,7 +3126,7 @@ mod tests {
         let step = 0.066f32;
         // Feet at 0.030, model top at 0.080: 0.050 is inside the step allowance.
         let (moved, _, _) =
-            room.move_body(0, [0.0, -0.3, 0.095], [0.0, 0.5, 0.0], radius, step, Gates::default());
+            room.move_body(0, [0.0, -0.3, 0.095], [0.0, 0.5, 0.0], radius, step, Gates::default(), &mut [0.0; 3]);
         assert!(moved[1] > 0.0, "the body never got over the low model: {moved:?}");
         assert!(
             (moved[2] - (0.08 + radius)).abs() < 0.01,
@@ -3135,7 +3135,7 @@ mod tests {
         // A body already on the floor meets an over-tall model as a wall, unchanged.
         room.things.write().expect("things lock")[0].z_max = 0.3;
         let (stopped, _, blocked) =
-            room.move_body(0, [0.0, -0.3, radius], [0.0, 1.0, 0.0], radius, step, Gates::default());
+            room.move_body(0, [0.0, -0.3, radius], [0.0, 1.0, 0.0], radius, step, Gates::default(), &mut [0.0; 3]);
         assert!(blocked, "a tall model did not block the body");
         assert!(stopped[1] < 0.2, "the body walked through a tall model: {stopped:?}");
     }
@@ -3190,19 +3190,19 @@ mod tests {
         let links = [ADJOIN_MOVE | ADJOIN_VISIBLE; 4];
 
         let shut = Gates { sectors: &[SECTOR_ADJOINS_OFF, 0, 0], adjoins: &links };
-        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, shut);
+        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, shut, &mut [0.0; 3]);
         assert_eq!(sector, 0, "a shut doorway must leave the body in its own room");
         assert!(blocked, "the body should report the contact that stopped it");
 
         let open = Gates { sectors: &[0, 0, 0], adjoins: &links };
-        let (pos, sector, _) = solids.move_body(0, start, step, radius, 0.066, open);
+        let (pos, sector, _) = solids.move_body(0, start, step, radius, 0.066, open, &mut [0.0; 3]);
         assert_eq!(sector, 1, "an open doorway must let the body into the next room, ended at {pos:?}");
         assert!(pos[1] > start[1], "the body should be past the opening, not at it: {pos:?}");
 
         // And the other side of the same rule: an opening a script shut with `ClearAdjoinFlags(x, 2)`.
         let no_move = [ADJOIN_VISIBLE; 4];
         let barred = Gates { sectors: &[0, 0, 0], adjoins: &no_move };
-        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, barred);
+        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, barred, &mut [0.0; 3]);
         assert_eq!(sector, 0, "an opening without `ADJOIN_MOVE` must stop the body");
         assert!(blocked, "a force field should report the contact");
     }
@@ -3566,7 +3566,7 @@ mod tests {
         let gates = Gates { sectors: &[], adjoins: &[] };
         // The +x wall is x = 2 and the body is one radius (0.3) clear of it at x = 1.7.
         let (pos, _sector, blocked) =
-            room.move_body(0, [1.7, 0.0, -0.5], [0.0, 1.0, 0.0], 0.3, 0.066, gates);
+            room.move_body(0, [1.7, 0.0, -0.5], [0.0, 1.0, 0.0], 0.3, 0.066, gates, &mut [0.0; 3]);
         assert!(
             pos[1] > 0.5,
             "a body touching a wall did not slide along it: y {} (blocked {blocked})",
@@ -3593,7 +3593,7 @@ mod tests {
         room.face_of.insert(9, room.faces.len() - 1);
         let gates = Gates { sectors: &[], adjoins: &[] };
         let (pos, _sector, _blocked) =
-            room.move_body(0, [0.0, 0.3, 0.0], [0.0, 1.0, 0.0], 0.1, 0.066, gates);
+            room.move_body(0, [0.0, 0.3, 0.0], [0.0, 1.0, 0.0], 0.1, 0.066, gates, &mut [0.0; 3]);
         assert!(pos[1] > 0.9, "the body did not advance up the ramp: {pos:?}");
         assert!(pos[2] > 0.05, "the body did not climb the ramp: {pos:?}");
     }
