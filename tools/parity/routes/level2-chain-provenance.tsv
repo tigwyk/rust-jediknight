@@ -1,0 +1,20 @@
+# Level-2 exit chain (issue #39): mechanic -> engine function provenance. Same columns and statuses as
+# `level1-route-provenance.tsv`.
+#
+# The chain: the data disk's touch (`pow_datadisk.cog` touched -> TakeItem -> taken -> user0(0) to the
+# master `02_endlevel.cog`), four ReeYee deaths (`killed`, the fourth sends user0(1)), then `Sleep(8)` and
+# `jkEndLevel(1)`.
+#
+# mechanic	engine_function	address	port_symbol	source	status	ledger
+pickup	sithIntersect_CheckSphereThingIntersection	0x5080d0	collect_items	src/main.rs	ported	
+pickup	sithItem_SetItemTaken	0x4fbea0	take_item_with_script	src/main.rs	ported	
+pickup	FUN_004fbe10	0x4fbe10	collect_items	src/main.rs	deviated	item touch gates
+fire	sithWeapon_WeaponFireProjectile	0x4d45a0	fire_with_spread	src/runtime.rs	ported	
+damage	sithActor_DamageActor	0x4ecc90	damage_typed	src/runtime.rs	ported	
+damage	sithActor_KillActor	0x4ecfe0	damage_typed_from	src/runtime.rs	ported	
+cog messages	sithCog_ThingSendMessageEx	0x4dfaf0	deliver_thing_messages	src/main.rs	ported	
+cog messages	sithCog_SendMessage	0x4debe0	deliver_cog_messages	src/main.rs	ported	
+sleep	sithCogExec_Execute	0x4e1f60	run_path	src/cog.rs	ported	
+sleep	sithCog_ProcessCog	0x4e0300	resume_sleeping_labels	src/main.rs	ported	
+level end	sithMain_SetEndLevel	0x4c4bf0	jkendlevel	src/runtime.rs	ported	
+level end	jkMain_EndLevel	0x402eb0	jk_main_end_level	src/main.rs	ported	

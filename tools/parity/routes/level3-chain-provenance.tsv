@@ -1,0 +1,18 @@
+# Level-3 exit chain (issue #39): mechanic -> engine function provenance. Same columns and statuses as
+# `level1-route-provenance.tsv`.
+#
+# The chain: the body enters goal sector 232 (`03_goals.cog` entered, GetSenderRef == goal2sector0), which
+# sends user0(2) to the master cog; the master sleeps and calls `jkEndLevel(1)`.
+#
+# mechanic	engine_function	address	port_symbol	source	status	ledger
+walk	sithControl_PlayerMovement	0x4d8a00	step_player	src/runtime.rs	ported	
+walk	sithPhysics_UpdatePlayerPhysics	0x4f6860	step_player	src/runtime.rs	ported	
+floor	sithPhysics_FindFloor	0x4f5550	floor_under	src/collide.rs	ported	
+collision	sithCollision_MoveThing	0x4e7950	move_body	src/collide.rs	ported	
+collision	sithCollision_SearchForSurfaceCollisions	0x4e86d0	sweep	src/collide.rs	ported	
+cog messages	sithCog_SectorSendMessageEx	0x4dfd90	sector_messages	src/runtime.rs	ported	
+cog messages	sithCog_SendMessage	0x4debe0	deliver_cog_messages	src/main.rs	ported	
+sleep	sithCogExec_Execute	0x4e1f60	run_path	src/cog.rs	ported	
+sleep	sithCog_ProcessCog	0x4e0300	resume_sleeping_labels	src/main.rs	ported	
+level end	sithMain_SetEndLevel	0x4c4bf0	jkendlevel	src/runtime.rs	ported	
+level end	jkMain_EndLevel	0x402eb0	jk_main_end_level	src/main.rs	ported	

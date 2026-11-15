@@ -1,0 +1,20 @@
+# Level-2 exit chain manifest (issue #39). The keys are documented in `level1-manifest.tsv`.
+#
+# No `retail` row: no retail capture of this chain exists. The `port` fixture is port-side evidence.
+
+level	02narshadda
+plan	tools/parity/routes/level2-chain-route.tsv
+port	tools/parity/routetrace/level2-chain-port.tsv
+provenance	tools/parity/routes/level2-chain-provenance.tsv
+mechanics	pickup	fire	damage	cog messages	sleep	level end
+
+# `02_endlevel.cog` is placed cog 44; the data disk fills inventory bin 45.
+watch	gotdisk	44	gotdisk
+watch	deadyees	44	deadyees
+bin	disk	45
+level_end	level_end
+
+final	disk	1
+final	gotdisk	1.000
+final	deadyees	4.000
+final	level_end	1
