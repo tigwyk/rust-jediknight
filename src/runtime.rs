@@ -6269,13 +6269,17 @@ impl Runtime {
         let mut crossed = false;
         let mut step_vel = [dir[0], dir[1], vy];
         for _ in 0..steps {
+            // Each sub-step moves by the projected velocity, the way the engine re-copies the
+            // accumulated `0x234` into the move: a deflection inside one sub-step steers the
+            // next, instead of every sub-step re-pushing into the wall at the frame's input.
+            let sub_dir = [step_vel[0], step_vel[1]];
             let (len, cross, step_landed) = crate::walker_step(
                 solids,
                 gates,
                 &mut sector,
                 &mut pos,
                 &mut vy,
-                dir,
+                sub_dir,
                 &mut step_vel,
                 1.0 / 50.0,
                 radius,

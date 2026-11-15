@@ -1760,52 +1760,62 @@ impl LevelGeometry {
                     if d_into <= 0.0 {
                         break;
                     }
-                    // The engine projects the thing's persisted velocity (`0x1d4`) with the same
-                    // branch arithmetic as the delta: first contact with restitution, gated on
-                    // `v_into > 0` (`0x4e9090:49-55`); the fold with its own crease projection
-                    // (`0x4e9090:78-87,93-101`). Without this the next frame re-enters the wall at
-                    // full speed and the grind never decays.
+                    // `sithCollision_CollideHurt` (`0x4e9090`) — the player's move response
+                    // (physicsType 1, no `0x20` type flag: restitution `1.0001`). The engine
+                    // projects BOTH the remaining move (`0x268`) and the persisted velocity
+                    // (`0x1d4`); the branch gate is its own (`0x4e9090:42`): a hit at a
+                    // non-zero distance re-takes the first-contact branch, and only a
+                    // zero-distance repeat hit takes the fold — which first folds the crease
+                    // normal (`88-92`), then projects the velocity (`93-101`) and the delta
+                    // (`102-111`) off the FOLDED crease. Deadzone `1e-5` = `_DAT_0052300c`;
+                    // the outward delta is the pushout, so there is no separate plan push.
                     let v_into = -(vel[0] * n[0] + vel[1] * n[1] + vel[2] * n[2]);
+                    let rem;
                     if travelled != 0.0 || crease.is_none() {
+                        crease = Some(n);
                         if v_into > 0.0 {
                             let m = 1.0001 * v_into;
                             *vel = [vel[0] + n[0] * m, vel[1] + n[1] * m, vel[2] + n[2] * m];
                         }
-                    } else if v_into > 0.0 {
-                        *vel = [vel[0] + n[0] * v_into, vel[1] + n[1] * v_into, vel[2] + n[2] * v_into];
-                        if let Some(c) = crease {
-                            let cv = -(vel[0] * c[0] + vel[1] * c[1] + vel[2] * c[2]);
-                            if cv > 0.0 {
-                                *vel = [vel[0] + c[0] * cv, vel[1] + c[1] * cv, vel[2] + c[2] * cv];
-                            }
-                        }
-                    }
-                    // Branch on the engine's own gate (`0x4e9090:42`): any hit at a non-zero
-                    // distance re-takes the first-contact branch (restitution, crease = n); only a
-                    // zero-distance repeat hit — already flush against this face — takes the fold.
-                    let rem = if travelled != 0.0 || crease.is_none() {
-                        crease = Some(n);
                         let m = 1.0001 * d_into;
-                        [dir[0] * left + n[0] * m, dir[1] * left + n[1] * m, dir[2] * left + n[2] * m]
+                        rem = [
+                            dir[0] * left + n[0] * m,
+                            dir[1] * left + n[1] * m,
+                            dir[2] * left + n[2] * m,
+                        ];
                     } else {
-                        let mut rem =
-                            [dir[0] * left + n[0] * d_into, dir[1] * left + n[1] * d_into, dir[2] * left + n[2] * d_into];
+                        if v_into > 0.0 {
+                            *vel = [
+                                vel[0] + n[0] * v_into,
+                                vel[1] + n[1] * v_into,
+                                vel[2] + n[2] * v_into,
+                            ];
+                        }
+                        let mut r = [
+                            dir[0] * left + n[0] * d_into,
+                            dir[1] * left + n[1] * d_into,
+                            dir[2] * left + n[2] * d_into,
+                        ];
                         let c0 = crease.unwrap();
                         let fold = -(c0[0] * n[0] + c0[1] * n[1] + c0[2] * n[2]);
                         let c = [c0[0] + n[0] * fold, c0[1] + n[1] * fold, c0[2] + n[2] * fold];
                         let clen = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
                         if clen > 1e-6 {
-                            // The folded crease is written back (`0x4e9090:89-92`): a third
-                            // face folds from the updated crease, not the first normal.
                             let c = [c[0] / clen, c[1] / clen, c[2] / clen];
+                            // The folded crease is written back (`89-92`) and BOTH projections
+                            // use it: velocity first (`93-101`), then the delta (`102-111`).
                             crease = Some(c);
-                            let cd = -(rem[0] * c[0] + rem[1] * c[1] + rem[2] * c[2]);
+                            let cv = -(vel[0] * c[0] + vel[1] * c[1] + vel[2] * c[2]);
+                            if cv > 0.0 {
+                                *vel = [vel[0] + c[0] * cv, vel[1] + c[1] * cv, vel[2] + c[2] * cv];
+                            }
+                            let cd = -(r[0] * c[0] + r[1] * c[1] + r[2] * c[2]);
                             if cd > 0.0 {
-                                rem = [rem[0] + c[0] * cd, rem[1] + c[1] * cd, rem[2] + c[2] * cd];
+                                r = [r[0] + c[0] * cd, r[1] + c[1] * cd, r[2] + c[2] * cd];
                             }
                         }
-                        rem
-                    };
+                        rem = r;
+                    }
                     let mag = (rem[0] * rem[0] + rem[1] * rem[1] + rem[2] * rem[2]).sqrt();
                     if std::env::var_os("BK_MOVE_TRACE").is_some() {
                         eprintln!(
