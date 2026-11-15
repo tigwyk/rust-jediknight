@@ -6626,3 +6626,10 @@ sectors off, walk6 5 off).
 `walk6_spawn`: retail stops at (23.31, 38.85, z 1.14) in sector 315. The port slides along wall
 2830/2578 (y 38.847) and climbs about 0.01 per frame on edge and vertex contacts with slopes
 2832/2577 (normal z 0.6-0.78). It ends at (23.49, 38.85, 1.23) in sector 290.
+
+Cause: `CollideHurt` turns the walk into the slopes into upward speed (vy 0.68). The warp's attach
+hold required `vy <= 0`, so it let go, and the next frame rose. `sithPhysics_UpdateAttachedThingPhysics`
+(`0x4f7430`) removes the velocity's component along the attached floor's normal every tick, and only
+a jump or a failed `FindFloor` detaches. The hold now also applies to a body that was grounded at
+the frame's start and did not jump. `walk6_spawn` passes (1.06 / 1.08, 98 %, 2 sectors off). Trace
+gate: 10 legs, 1 failure (`walk5_spawn`, the waterpump). `--walk all` is unchanged.

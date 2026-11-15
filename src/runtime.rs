@@ -6201,6 +6201,8 @@ impl Runtime {
         let target = walk_target(along * force, across * force, input.yaw);
         let drag = if body.grounded { rules.drag } else { rules.air_drag };
         let steps = integrate_walk(&mut body.vel, target, drag, dt, &mut body.step_rollover);
+        // Attached for this frame: only a jump detaches a standing body before its move.
+        let attached = body.grounded && !input.jump;
         if input.jump && body.grounded {
             body.vy = rules.jump_velocity(input.crouch);
             body.grounded = false;
@@ -6367,7 +6369,10 @@ impl Runtime {
         // search rejects that face (the reach, or the per-hit acceptance behind
         // `sithCollision_SearchForCollisions`'s `0x2802` masks) is the open decomp question on
         // issue #23.`
-        if body.rest > radius + 1e-4 && vy <= 0.0 {
+        // An attached body keeps its hold even when `CollideHurt` turned its walk into a slope into
+        // upward speed: `sithPhysics_UpdateAttachedThingPhysics` (`0x4f7430`) removes the velocity's
+        // component along the attached floor's normal every tick (`walk6_spawn`'s 2832/2577 corner).
+        if body.rest > radius + 1e-4 && (vy <= 0.0 || attached) {
             let reach = (body.rest - radius) * 1.1 + 0.02;
             if let Some(rest) =
                 solids.resting_floor(sector, [pos[0], pos[1], pos[2]], reach, radius, false)
