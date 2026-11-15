@@ -18904,9 +18904,62 @@ fn walker_step(
         // sector's own plane where the data has no face, and a solid thing's model top. The chain
         // of three queries that used to live here each guessed at the same thing.
         let land = solids.resting_floor(*sector, *pos, -drop, radius, false);
-        match land {
+        // The fall is a `MoveThing` (`0x4e7950`) against every face, not only floor-flagged ones: a
+        // non-floor face above the landing stops the sphere, and `sithCollision_CollideHurt`
+        // (`0x4e9090`, restitution `1.0001` for the player) projects the rest of the drop and the
+        // velocity off it. `03katarn`'s start rests on surface 3386, a 57° slope without the floor bit;
+        // the old fall went through it into no sector, where retail slides down it.
+        let reach = land.as_ref().map_or(-drop, |r| (pos[2] - (r.height + radius)).max(-drop));
+        let blocker = (!probe)
+            .then(|| {
+                let (hit, far, _) = solids.sweep_rooms(*sector, *pos, [0.0, 0.0, -1.0], reach, radius, gates, &mut Vec::new());
+                hit.map(|hit| (hit, far))
+            })
+            .flatten()
+            .filter(|(hit, _)| land.as_ref().is_none_or(|r| hit.point[2] > r.height + radius + 1e-4));
+        let slid = blocker.is_some();
+        // The centre's sector is the crossings popped before the contact (`far`), not the sector that
+        // owns the face, as in `move_body`.
+        if let Some((hit, far)) = blocker {
+            let n = hit.normal;
+            let left = -drop - (pos[2] - hit.point[2]).max(0.0);
+            *pos = hit.point;
+            *sector = far;
+            vel[2] = *vy;
+            let v_into = -(vel[0] * n[0] + vel[1] * n[1] + vel[2] * n[2]);
+            if v_into > 0.0 {
+                for k in 0..3 {
+                    vel[k] += n[k] * v_into * 1.0001;
+                }
+            }
+            *vy = vel[2];
+            let mut rest = [0.0, 0.0, -left.max(0.0)];
+            let d_into = -(rest[0] * n[0] + rest[1] * n[1] + rest[2] * n[2]);
+            if d_into > 1e-5 {
+                for k in 0..3 {
+                    rest[k] += n[k] * d_into * 1.0001;
+                }
+            }
+            let len = (rest[0] * rest[0] + rest[1] * rest[1] + rest[2] * rest[2]).sqrt();
+            if len > 1e-6 {
+                let dir = [rest[0] / len, rest[1] / len, rest[2] / len];
+                let (stop, far, end) = solids.sweep_rooms(*sector, *pos, dir, len, radius, gates, &mut Vec::new());
+                *pos = stop.map_or(end, |stop| stop.point);
+                *sector = far;
+            }
+            if std::env::var_os("BK_WALK_TRACE").is_some() {
+                eprintln!("walk trace:     fall stopped by surface {} and slid to {:?}", hit.surface, *pos);
+            }
+        }
+        match if slid { None } else { land } {
             Some(rest) => {
-                pos[2] = rest.height + radius;
+                // The landing is the same swept move (`0x4e7950`): settling onto `06abarons`' pool
+                // bowl below the water's adjoin puts the body in sector 33, not 34.
+                let to = rest.height + radius;
+                if to < pos[2] && !probe {
+                    *sector = solids.sweep_rooms(*sector, *pos, [0.0, 0.0, -1.0], pos[2] - to, radius, gates, &mut Vec::new()).1;
+                }
+                pos[2] = to;
                 if std::env::var_os("BK_WALK_TRACE").is_some() {
                     eprintln!("walk trace:     landed on {:.3} after {:.3}", pos[2], -drop);
                 }
@@ -18941,7 +18994,13 @@ fn walker_step(
                 landed = true;
             }
             None => {
-                if !probe {
+                if !probe && !slid {
+                    // `sithCollision_MoveThing` (`0x4e7950`) sweeps the gravity step through the same
+                    // search as the walk, so a fall through a floor adjoin (`06abarons` sector 35's
+                    // opening into the pool, sector 34) changes the body's sector at the crossing.
+                    let (_, below, _) =
+                        solids.sweep_rooms(*sector, *pos, [0.0, 0.0, -1.0], -drop, radius, gates, &mut Vec::new());
+                    *sector = below;
                     pos[2] += drop;
                 }
             }
@@ -18959,7 +19018,16 @@ fn walker_step(
                 pos[2] = z;
                 *vy = 0.0;
             }
-            None => pos[2] += drop,
+            None => {
+                // The rise crosses adjoins the same way the fall does (`0x4e7950`): a body the water
+                // lifts through `06abarons`' pool surface leaves sector 33 for 34.
+                if drop > 0.0 {
+                    let (_, above, _) =
+                        solids.sweep_rooms(*sector, *pos, [0.0, 0.0, 1.0], drop, radius, gates, &mut Vec::new());
+                    *sector = above;
+                }
+                pos[2] += drop;
+            }
         }
     }
     // Lateral: the engine's own move — sweep, slide along whatever was hit, step over anything low.
@@ -18974,7 +19042,9 @@ fn walker_step(
     // `BK_STEP` is the experiment hook the constants file documents: the step allowance is a scale
     // the walker exercises (`--walk all` is sensitive to it), and a level whose kerb is taller than
     // `STEP_UP` wedges a walking body against it. Default stays the engine's `moveSize + 0.01`.
-    let step_up = env_f32("BK_STEP", STEP_UP);
+    // No allowance when the caller says so: a swimming body is detached, and the step belongs to the
+    // attached floor's search.
+    let step_up = if allow_step { env_f32("BK_STEP", STEP_UP) } else { 0.0 };
     // `vel` is the frame's persisted velocity ([x, y, z]); `CollideHurt`'s projection inside
     // `move_body` writes it back (`0x1d4`), so the caller's state survives the hit.
     vel[2] = *vy;
@@ -19000,43 +19070,6 @@ fn walker_step(
     // height came from there, and the vertical sweep next frame settles the body on the step.
     if !allow_step {
         blocked = false;
-    }
-    // The engine's containment guarantee, transcribed from `sithCollision_MoveThing`
-    // (`decomp/004e7950_sithCollision_MoveThing.c:251`):
-    //
-    //     if (thing->field_28 != 0 && thing->physicsType == 1) {
-    //         if (!sithIntersect_IsSphereInSector(&thing->position, 0, thing->sector)) {
-    //             thing->position = savedPosition;
-    //             direction       = savedDirection;
-    //             sithThing_SetSector(thing, savedSector, 0);
-    //         }
-    //     }
-    //
-    // The position, the direction and the sector all come back. `Solids::inside_sector` is that
-    // function, box short-circuit included, and `hull` is the surface set it walks.
-    //
-    // `MoveThing` queries `thing + 0xb8` directly; do the same while the body only settles
-    // vertically, so a fall that leaves its sector is re-resolved from its centre rather than
-    // from a feet point. Lateral movement keeps the feet probe: it is what every walk leg was
-    // measured against, and the centre query regressed walk5, walk4 and walk13.
-    // shortcut: lateral containment uses feet; use the centre once portal transitions are corrected.
-    let origin = if delta[0].abs() < 1e-6 && delta[1].abs() < 1e-6 {
-        *pos
-    } else {
-        [pos[0], pos[1], pos[2] - radius]
-    };
-    if !solids.inside_sector(*sector, origin, 0.0) {
-        let found = solids.sector_at(origin, 0.05);
-        if std::env::var_os("BK_CONTAIN_TRACE").is_some() {
-            eprintln!(
-                "contain: sector {} rejected origin {origin:?}; resolver {found:?}; crossed_to {crossed_to}",
-                *sector
-            );
-        }
-        match found {
-            Some(found) => *sector = found,
-            None => {}
-        }
     }
     let moved = ((pos[0] - before[0]).powi(2) + (pos[1] - before[1]).powi(2)).sqrt();
 
@@ -20004,6 +20037,42 @@ fn bounds(model: &tdo::Model, pose: &[tdo::Xform]) -> ([f32; 3], [f32; 3]) {
         }
     }
     (lo, hi)
+}
+
+/// A `collide=3` model's collision faces in model space: geoset 0's meshes, raw vertex pools and
+/// authored face normals. `sithIntersect_CheckSphereMeshIntersection` (`0x508400`) sweeps each mesh's
+/// stored vertices directly — no hierarchy pose and no insert offset — and
+/// `CheckSphereFaceIntersectionEx` (`0x508d20`) uses the authored normal. A face without one falls back
+/// to its polygon's winding.
+fn collision_faces(model: &tdo::Model) -> Vec<collide::Face> {
+    let scale = model_scale();
+    let mut out = Vec::new();
+    for mesh in model.meshes.iter().filter(|mesh| mesh.geoset == 0) {
+        for face in &mesh.faces {
+            let verts: Vec<[f32; 3]> = face
+                .verts
+                .iter()
+                .filter_map(|(v, _)| mesh.vertices.get(*v as usize))
+                .map(|v| [v[0] * scale, v[1] * scale, v[2] * scale])
+                .collect();
+            if verts.len() < 3 {
+                continue;
+            }
+            let normal = face.normal.unwrap_or_else(|| {
+                let mut n = [0.0f32; 3];
+                for (i, a) in verts.iter().enumerate() {
+                    let b = verts[(i + 1) % verts.len()];
+                    n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+                    n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+                    n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+                }
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-9);
+                [n[0] / len, n[1] / len, n[2] / len]
+            });
+            out.push(collide::Face { normal, point: verts[0], verts, surface: usize::MAX });
+        }
+    }
+    out
 }
 
 fn load(gobs: &gob::GobSet, level_name: &str) -> Result<World, String> {
@@ -26270,21 +26339,46 @@ fn solid_things(world: &World, solids: &collide::Solids) -> Vec<collide::ThingSo
             .level
             .things
             .iter()
-            .map(|thing| (thing.pos, thing.sector.max(0) as usize, thing.yaw)),
+            .map(|thing| (thing.pos, thing.sector.max(0) as usize, [thing.pitch, thing.yaw, thing.roll])),
     )
 }
 
-/// Every level thing the walker collides with, placed at the positions, sectors and yaws given.
+/// Every level thing the walker collides with, placed at the positions, sectors and orientations
+/// (`[pitch, yaw, roll]`, degrees) given.
 fn solid_things_at(
     shapes: &[Option<SolidShape>],
-    placed: impl Iterator<Item = ([f32; 3], usize, f32)>,
+    placed: impl Iterator<Item = ([f32; 3], usize, [f32; 3])>,
 ) -> Vec<collide::ThingSolid> {
     shapes
         .iter()
         .zip(placed)
-        .filter_map(|(shape, (pos, sector, yaw))| {
+        .filter_map(|(shape, (pos, sector, [pitch, yaw, roll]))| {
             let shape = shape.as_ref()?;
             let (lo, hi) = (shape.lo, shape.hi);
+            // `collide=3`: the collision faces under the thing's full matrix (`0x5080d0`), and the
+            // span they actually occupy once turned.
+            let mesh = shape.mesh.as_ref().map(|faces| {
+                let place = |v: [f32; 3]| {
+                    let w = crate::runtime::rotate_by_angles(v, pitch, yaw, roll);
+                    [w[0] + pos[0], w[1] + pos[1], w[2] + pos[2]]
+                };
+                faces
+                    .iter()
+                    .map(|face| collide::Face {
+                        normal: crate::runtime::rotate_by_angles(face.normal, pitch, yaw, roll),
+                        point: place(face.point),
+                        verts: face.verts.iter().map(|v| place(*v)).collect(),
+                        surface: face.surface,
+                    })
+                    .collect::<std::sync::Arc<[collide::Face]>>()
+            });
+            let (z_min, z_max) = match &mesh {
+                Some(faces) => faces
+                    .iter()
+                    .flat_map(|face| face.verts.iter().map(|v| v[2]))
+                    .fold((f32::MAX, f32::MIN), |(lo, hi), z| (lo.min(z), hi.max(z))),
+                None => (pos[2] + lo[2], pos[2] + hi[2]),
+            };
             if let Some(half) = shape.half {
                 let (sin, cos) = yaw.to_radians().sin_cos();
                 let (mx, my) = ((lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5);
@@ -26295,21 +26389,23 @@ fn solid_things_at(
                         pos[2],
                     ],
                     radius: shape.radius,
-                    z_min: pos[2] + lo[2],
-                    z_max: pos[2] + hi[2],
+                    z_min,
+                    z_max,
                     sector,
                     half: Some(half),
                     yaw,
+                    mesh,
                 })
             } else {
                 Some(collide::ThingSolid {
                     centre: pos,
                     radius: shape.radius,
-                    z_min: pos[2] + lo[2],
-                    z_max: pos[2] + hi[2],
+                    z_min,
+                    z_max,
                     sector,
                     half: None,
                     yaw,
+                    mesh,
                 })
             }
         })
@@ -26323,12 +26419,14 @@ fn solid_things_at(
 /// two elevator leaves, and a frozen copy of their closed pose pinned the body there for the whole
 /// leg). A `collide=3` thing keeps the model's own bounds; the engine collides it as mesh, so its
 /// plan extents are the door leaf's thickness (0.0125), not the template's 0.2 body radius.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct SolidShape {
     radius: f32,
     lo: [f32; 3],
     hi: [f32; 3],
     half: Option<[f32; 2]>,
+    /// `collide=3`: geoset 0's faces in model space (see [`collision_faces`]).
+    mesh: Option<std::sync::Arc<[collide::Face]>>,
 }
 
 #[derive(Resource)]
@@ -26368,15 +26466,15 @@ impl SolidShapes {
                 .template_param(&thing.template, "collide")
                 .and_then(|value| value.trim().parse::<i32>().ok())
                 == Some(3);
-            let model = world
+            let loaded = world
                 .template_model
                 .get(&thing.template.to_ascii_lowercase())
-                .and_then(|name| world.models.get(name))
-                .map(|model| {
-                    let pose = tdo::pose_nodes(model, None, 0.0);
-                    let (lo, hi) = bounds(model, &pose);
-                    (lo, hi)
-                });
+                .and_then(|name| world.models.get(name));
+            let model = loaded.map(|model| {
+                let pose = tdo::pose_nodes(model, None, 0.0);
+                let (lo, hi) = bounds(model, &pose);
+                (lo, hi)
+            });
             let shape = match model {
                 Some((lo, hi)) if mesh && hi[2] > lo[2] => SolidShape {
                     radius,
@@ -26386,6 +26484,7 @@ impl SolidShapes {
                         (hi[0] - lo[0]).abs() * 0.5,
                         (hi[1] - lo[1]).abs() * 0.5,
                     ]),
+                    mesh: loaded.map(|model| collision_faces(model).into()),
                 },
                 _ => {
                     let span = model
@@ -26407,6 +26506,7 @@ impl SolidShapes {
                         lo: [-radius, -radius, span.0],
                         hi: [radius, radius, span.1],
                         half: None,
+                        mesh: None,
                     }
                 }
             };
@@ -26438,7 +26538,7 @@ impl SolidShapes {
             things
                 .iter()
                 .take(self.0.len())
-                .map(|thing| (thing.pos, thing.sector.max(0) as usize, thing.yaw)),
+                .map(|thing| (thing.pos, thing.sector.max(0) as usize, [thing.pitch, thing.yaw, thing.roll])),
         )
     }
 }
@@ -29115,7 +29215,7 @@ fn setup(
             .level
             .things
             .iter()
-            .map(|thing| (thing.pos, thing.sector.max(0) as usize, thing.yaw)),
+            .map(|thing| (thing.pos, thing.sector.max(0) as usize, [thing.pitch, thing.yaw, thing.roll])),
     ));
     commands.insert_resource(Collision(std::sync::Arc::new(geometry)));
     commands.insert_resource(SectorView { by_sector });
@@ -29152,6 +29252,7 @@ fn setup(
             pitch: 0.0,
             eye: eye_height,
             rest: body_rest.max(rules.radius),
+            water_surface: None,
         },
         extra_speed: 0.0,
         use_hits: 0,
@@ -32194,6 +32295,7 @@ mod walker_tests {
             sector: 0,
             half: None,
             yaw: 0.0,
+            mesh: None,
         }]);
         let (mut sector, mut vy) = (0usize, 0.0f32);
         let mut pos = [0.5f32, 0.0, RISER + PLAYER_RADIUS + 0.1];

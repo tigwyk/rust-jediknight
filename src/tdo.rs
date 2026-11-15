@@ -35,6 +35,8 @@ pub struct Face {
     /// whose normal points away when `(face->flags & 1) != 0`, so it is the model's two-sided bit.
     pub flags: u32,
     pub verts: Vec<(u32, i32)>,
+    /// Authored face normal, absent when the model provides no valid normal row.
+    pub normal: Option<[f32; 3]>,
 }
 
 /// One mesh's private vertex pool and faces.
@@ -375,12 +377,17 @@ pub fn parse(text: &str) -> Model {
     // names aligned with mesh indices (they were off by one, which also mispaired every
     // keyframe node).
     let mut pending_name = String::new();
+    let mut geoset = 0;
+    let mut mesh_index = None;
+    let mut in_mesh = false;
+    let mut pending_mesh = false;
+    let mut face_slots = Vec::new();
 
     while i < lines.len() {
         let line = lines[i].trim();
         let lower = line.to_ascii_lowercase();
 
-        if lower.starts_with("radius ") {
+        if lower.starts_with("radius ") && !in_mesh {
             if let Some(v) = floats_in(line, 1, 1).first() {
                 model.radius = *v;
             }
@@ -418,9 +425,7 @@ pub fn parse(text: &str) -> Model {
             }
             // `MESH n` comes before its `VERTICES`; `NAME` may come either side, so the
             // name is filled in below when it appears.
-            let per = model.meshes_per_geoset;
-            let index = if per > 0 { model.meshes.len() % per } else { model.meshes.len() };
-            let geoset = if per > 0 { model.meshes.len() / per } else { 0 };
+            let index = mesh_index.unwrap_or(model.meshes.len());
             model.meshes.push(Mesh {
                 name: std::mem::take(&mut pending_name),
                 vertices,
@@ -428,10 +433,24 @@ pub fn parse(text: &str) -> Model {
                 index,
                 ..Default::default()
             });
+            pending_mesh = false;
             continue;
         }
         if lower.starts_with("geosets ") {
             model.geosets = count_after(line);
+            i += 1;
+            continue;
+        }
+        if lower.starts_with("geoset ") {
+            geoset = count_after(line);
+            i += 1;
+            continue;
+        }
+        if lower.starts_with("mesh ") {
+            mesh_index = Some(count_after(line));
+            in_mesh = true;
+            pending_mesh = true;
+            pending_name.clear();
             i += 1;
             continue;
         }
@@ -443,7 +462,7 @@ pub fn parse(text: &str) -> Model {
         }
         if lower.starts_with("name ") {
             if let Some(name) = fields(line).get(1) {
-                match model.meshes.last_mut() {
+                match model.meshes.last_mut().filter(|_| !pending_mesh) {
                     // `NAME` after a still-unnamed pool belongs to the mesh already pushed.
                     Some(mesh) if mesh.name.is_empty() && !mesh.vertices.is_empty() => {
                         mesh.name = name.to_string()
@@ -503,14 +522,32 @@ pub fn parse(text: &str) -> Model {
         if lower.starts_with("faces ") {
             let n = count_after(line);
             i += 1;
+            face_slots.clear();
             let mut faces = Vec::with_capacity(n);
             for row in read_rows(&lines, &mut i, n) {
                 if let Some(face) = parse_face(row) {
+                    face_slots.push(Some(faces.len()));
                     faces.push(face);
+                } else {
+                    face_slots.push(None);
                 }
             }
             if let Some(mesh) = model.meshes.last_mut() {
                 mesh.faces = faces;
+            }
+            continue;
+        }
+        if lower.starts_with("face normals") {
+            i += 1;
+            if !face_slots.is_empty() {
+                for (slot, row) in face_slots.iter().zip(read_rows(&lines, &mut i, face_slots.len())) {
+                    let f = floats_in(row, 1, 3);
+                    if let (Some(index), Some(mesh)) = (slot, model.meshes.last_mut()) {
+                        if f.len() == 3 {
+                            mesh.faces[*index].normal = Some([f[0], f[1], f[2]]);
+                        }
+                    }
+                }
             }
             continue;
         }
@@ -550,12 +587,93 @@ fn parse_face(line: &str) -> Option<Face> {
         .chunks_exact(2)
         .map(|p| (p[0].max(0) as u32, p[1]))
         .collect();
-    Some(Face { material, flags, verts })
+    Some(Face { material, flags, verts, normal: None })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_mesh_geometry_normals_and_distinct_geoset_sizes() {
+        let model = parse(r#"
+SECTION: GEOMETRYDEF
+RADIUS 4.5
+INSERT OFFSET 0 0 0
+GEOSETS 2
+GEOSET 0
+MESHES 1
+MESH 0
+NAME first
+RADIUS 1.25
+VERTICES 3
+0: 0 0 0 0
+1: 1 0 0 0
+2: 0 1 0 0
+TEXTURE VERTICES 3
+0: 0 0
+1: 1 0
+2: 0 1
+VERTEX NORMALS
+0: 0 0 1
+1: 0 0 1
+2: 0 0 1
+FACES 2
+0: 0 0x0 4 3 1 0 3 0, 0 1, 1 2, 2
+1: 0 0x0 4 3 1 0 3 2, 2 1, 1 0, 0
+FACE NORMALS
+0: 0 0 -1
+1: 0.5 0.25 0.75
+GEOSET 1
+MESHES 2
+MESH 0
+NAME second
+RADIUS 2
+VERTICES 1
+0: 2 3 4 0
+FACES 1
+0: 0 0x0 4 3 1 0 1 0, 0
+FACE NORMALS
+0: 1 0 0
+MESH 1
+NAME third
+RADIUS 3
+VERTICES 1
+0: 5 6 7 0
+FACES 1
+0: 0 0x0 4 3 1 0 1 0, 0
+"#);
+        assert_eq!(model.radius, 4.5);
+        assert_eq!(model.geosets, 2);
+        assert_eq!(model.meshes_per_geoset, 1);
+        assert_eq!(model.meshes.iter().map(|m| (m.geoset, m.index, m.name.as_str())).collect::<Vec<_>>(),
+            vec![(0, 0, "first"), (1, 0, "second"), (1, 1, "third")]);
+        assert_eq!(model.meshes[0].vertices[1], [1.0, 0.0, 0.0]);
+        assert_eq!(model.meshes[0].texverts[2], [0.0, 1.0]);
+        assert_eq!(model.meshes[0].faces[0].verts, vec![(0, 0), (1, 1), (2, 2)]);
+        assert_eq!(model.meshes[0].faces[0].normal, Some([0.0, 0.0, -1.0]));
+        assert_eq!(model.meshes[0].faces[1].normal, Some([0.5, 0.25, 0.75]));
+        assert_eq!(model.meshes[1].faces[0].normal, Some([1.0, 0.0, 0.0]));
+        assert_eq!(model.meshes[2].faces[0].normal, None);
+    }
+
+    #[test]
+    fn malformed_faces_do_not_shift_following_authored_normals() {
+        let model = parse(r#"
+MESH 7
+VERTICES 1
+0: 0 0 0 0
+FACES 2
+0: invalid
+1: 0 0x0 4 3 1 0 1 0, 0
+FACE NORMALS
+0: 1 0 0
+1: 0 1 0
+"#);
+        assert_eq!(model.meshes[0].index, 7);
+        assert_eq!(model.meshes[0].faces.len(), 1);
+        assert_eq!(model.meshes[0].faces[0].normal, Some([0.0, 1.0, 0.0]));
+    }
 
     /// The head-joint pitch is a post-multiplied local rotation: a 90-degree pitch about the
     /// node's local X takes the node's +Y to +Z (the engine applies `SetHeadPYR` as a joint angle).
