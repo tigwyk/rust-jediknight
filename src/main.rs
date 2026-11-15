@@ -29141,7 +29141,6 @@ fn setup(
             // is replaced by the first frame's landing.
             grounded: !authored_spawn,
             gravity: rules.gravity.max(1.0),
-            held_frames: 0,
             water: false,
             vel: [0.0; 2],
             step_rollover: 0.0,
