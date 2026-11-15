@@ -6696,3 +6696,13 @@ idle ticks on levels 2, 3, 4 and 6 (it fired on the unit test's script, so it wa
 route trace is byte-identical, `--cog-check` and `--tour` output is identical, 378 unit tests pass. The
 fix changes no decision in the scripts exercised so far; it closes the fractional cases the engine
 defines before #39 builds chain tests on the VM.
+
+## Issue #38 follow-up: `PopInt` floors
+
+The #38 entry above took decomp's `ROUND` as the x87 default (round to nearest). The shipped image
+says otherwise: `PopInt` (`0x4e25c0`), the typed `Pop*` functions and both operands of `IntererOps`
+(`0x4e3630`) are each `fldcw [0x860802]; fld dword [ebp-0xc]; fistp dword [ebp+8]; fldcw [0x860800]`,
+and `stdStartup` (`0x426bb0`) builds `0x860802` with high byte 7 (RC=01, round down). All 240
+functions in `JK.EXE` that load a non-default control word load the default again before they return,
+so the cog VM always starts from the default and converts with floor. `Value::int` now floors:
+`if (0.9)` is false, `if (-0.4)` is true (-1), `-0.4 & 1` is 1.
