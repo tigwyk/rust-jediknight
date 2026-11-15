@@ -6745,3 +6745,21 @@ chain:
   On level 2 the same bug set `gotdisk` from the "got to the top" message.
 
 With the three fixes, the walk latches `done2` at 1.6 s and `level_end` 6 s later.
+
+## Issue #49: a sleep in an `else if` arm resumes in that arm (level 4 ends)
+
+#39's level-4 chain:
+1. Use switch surface 5738 (`04_garage.cog` `activate:`). Garage door thing 19 opens and sector 650's
+   adjoins come back.
+2. Walk 636 -> 650 -> 652. `04_EndLevel.cog` `entered:` sets `endthelevel = 1` for 650 (link id 3) and
+   runs a 13.5 s sequence for 652 (link id 2) that ends in `setpulse(1)`.
+3. `pulse:` calls `jkEndLevel(1)` while `endthelevel == 1`.
+
+With a body placed at the switch and then in 636, the chain ran up to step 3, but `endthelevel` read 0.
+The 652 arm is the third arm of an `else if` chain and sleeps. `Vm::exec` ran an unbraced arm in place,
+so the nested `if` wrote its branch into the parent's path entry, and the resume descended into the first
+arm (`endthelevel = 0`). `block_of` now treats an unbraced arm as a one-statement block with its own path
+entry.
+
+After the fix, `endthelevel` stays 1 and `level_end` latches at 19 s. The regression test
+`a_sleep_inside_an_else_if_arm_resumes_in_that_arm` fails with the old `exec` arms (the first arm runs).
