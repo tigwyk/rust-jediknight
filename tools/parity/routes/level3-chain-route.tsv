@@ -1,0 +1,13 @@
+# Level-3 exit chain (issue #39). `03_goals.cog` (placed cog 39) sends `user0(2)` to the master cog
+# when the body enters goal sector 232; the master sleeps and calls `jkEndLevel(1)`.
+#
+# The body is placed in sector 250 and walks 250 -> 249 -> 232. A warp straight into 232 would send no
+# `entered` (`sithThing_EnterSector` `0x4cd2c0` messages only a move, not a placement).
+#
+# kind	name	x	y	z	yaw_deg
+warp	goal2	-3.148	5.21	1.15	224
+wait	30
+input	50	1	0
+yaw	181
+input	40	1	0
+wait	1200

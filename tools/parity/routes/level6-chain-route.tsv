@@ -1,0 +1,11 @@
+# Level-6 exit chain (issue #39). `06_endpart1.cog` (placed cog 26) ends part 1 when the body enters
+# sector 418 or 419 (link id 1): it sleeps 1.5 + 1.2 + 0.6 s, arms `SetTimer(0.5)`, and `timer:` calls
+# `jkEndLevel(1)`.
+#
+# The body is placed in sector 409 and walks into 418.
+#
+# kind	name	x	y	z	yaw_deg
+warp	end	22.403	38.428	1.85	237
+wait	30
+input	60	1	0
+wait	480

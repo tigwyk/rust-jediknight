@@ -1,0 +1,132 @@
+# Level-2 exit chain (issue #39). `02_endlevel.cog` (placed cog 44) ends the level from `user0:` once
+# it has the data disk (`gotdisk`) and `countYees` linked ReeYees are dead (4 at medium difficulty).
+#
+# 1. The body is placed on the data disk (thing 15, sector 109). The item touch takes it:
+#    `pow_datadisk.cog` `touched:` -> `TakeItem` -> `taken:` -> `SendMessageEx(master, user0, 0)`.
+# 2. The body is placed in sector 622, north of the floor pit (sector 626), and fires the bryar at each
+#    linked ReeYee. Each death sends `killed`; the fourth sends `user0(1)`, which sleeps 8 s and calls
+#    `jkEndLevel(1)`.
+#
+# The second warp lands on the 36-tick sample grid (tick 144), as the gate requires.
+#
+# kind	name	x	y	z	yaw_deg
+warp	disc	9.065	-11.20	-0.20	0
+wait	144
+warp	reeyees	-6.6	-11.8	3.53	0
+wait	30
+# ReeYee thing 249 at (-7.3614, -13.455966)
+yaw	155.3
+wait	10
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+# ReeYee thing 251 at (-7.7, -13.650034)
+yaw	149.3
+wait	10
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+# ReeYee thing 347 at (-7.37461, -13.780007)
+yaw	158.6
+wait	10
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+# ReeYee thing 252 at (-7.912834, -11.400324)
+yaw	73.1
+wait	10
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+# ReeYee thing 348 at (-7.860941, -11.536717)
+yaw	78.2
+wait	10
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+# ReeYee thing 250 at (-5.202273, -12.311378)
+yaw	249.9
+wait	10
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+fire
+wait	40
+# The 8 s sleep in `user0:`, then `jkEndLevel`.
+wait	900

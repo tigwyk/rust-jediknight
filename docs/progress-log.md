@@ -6777,3 +6777,35 @@ time, and a touch only while the body moves. They are rank 3.
 
 A/B against `main` d827ae1: the level-1 route trace, idles on levels 2/3/4/6, `--cog-check` and `--tour`
 are identical.
+
+## Issue #39: the exit chains of levels 2-5 end their levels
+
+Each level has a chain gate under `tools/parity/routes/level<N>-chain-*.tsv`: a plan, a manifest with
+`final level_end 1`, a provenance file and a port oracle (`tools/parity/routetrace/level<N>-chain-port.tsv`).
+`route-gate.ps1 -Manifest tools/parity/routes/level<N>-chain-manifest.tsv` replays it with `--no-ai`.
+Each plan places the body (warp), then drives the chain with real input: walk, `use` and `fire`. No plan
+sets a cog variable or sends a message.
+
+| level | condition | message | engine function (address) | port symbol | status |
+|---|---|---|---|---|---|
+| 2 | the body touches the data disk | `touched` -> `taken` -> `user0(0)` | `sithIntersect_CheckSphereThingIntersection` (`0x5080d0`), `sithItem_SetItemTaken` (`0x4fbea0`) | `collect_items`, `take_item_with_script` | ported (#51); handler gates `0x4fbe10` deviated (#53, rank 3) |
+| 2 | 4 linked ReeYees die (medium) | `killed` x4 -> `user0(1)` | `sithActor_DamageActor` (`0x4ecc90`), `sithActor_KillActor` (`0x4ecfe0`) | `damage_typed_from` | ported |
+| 2 | `Sleep(8)`, then `jkEndLevel(1)` | - | `sithCogExec_Execute` (`0x4e1f60`), `sithMain_SetEndLevel` (`0x4c4bf0`) | `run_path`, `jkendlevel` | ported |
+| 3 | the body enters goal sector 232 | `entered` -> `user0(2)` to the master | `sithThing_EnterSector` (`0x4cd2c0`), `sithCog_SectorSendMessageEx` (`0x4dfd90`) | `sector_messages` | ported (#43, #45-#47) |
+| 4 | use on switch surface 5738 | `activated` (`04_garage.cog`) | `sithPlayerActions_Activate` (`0x4fc0a0`) | `sith_player_actions_activate` | ported |
+| 4 | the body enters 650, then 652 | `entered` (link ids 3, 2) | `sithCog_SectorSendMessageEx` (`0x4dfd90`) | `sector_messages` | ported |
+| 4 | the 652 sequence sleeps, then `setpulse(1)`; `pulse:` ends | `pulse` | `sithCogExec_Execute` (`0x4e1f60`), `sithCog_ProcessCog` (`0x4e0300`) | `run_path`, `run_pulses_and_timers` | ported (#49) |
+| 5 (`06abarons`) | the body enters sector 418 | `entered` (link id 1) | `sithCog_SectorSendMessageEx` (`0x4dfd90`) | `sector_messages` | ported |
+| 5 (`06abarons`) | sleeps 3.3 s, `SetTimer(0.5)`; `timer:` ends | `timer` | `sithCog_ProcessCog` (`0x4e0300`) | `run_pulses_and_timers` | ported |
+
+The first fixture sample (every 0.6 s) that shows each level's end:
+
+| level | `level_end` first sampled | trace length |
+|---|---|---|
+| 02narshadda | 40.2 s | 50.4 s |
+| 03katarn | 7.8 s | 21.6 s |
+| 04escapehouse | 18.6 s | 24.0 s |
+| 06abarons | 5.4 s | 9.0 s |
+
+Campaign level 5 is `06abarons` (`episode.jk` line 51), so these four chains are #39's levels 2-5. The
+gate files keep the map number (`level6-chain-*`).

@@ -1,0 +1,19 @@
+# Level-4 exit chain (issue #39). `04_EndLevel.cog` (placed cog 4) ends the level from `pulse:` once
+# `endthelevel` is 1 and the 652 sequence armed the pulse.
+#
+# 1. The body is placed on the upper floor (sector 643) facing switch surface 5738 and presses use:
+#    `04_garage.cog` (placed cog 3) opens garage door thing 19 and sector 650's adjoins.
+# 2. The body is placed in sector 636 and walks 636 -> 650 -> 652. 650 (link id 3) sets
+#    `endthelevel = 1`; 652 (link id 2) runs the 13.5 s sequence that ends in `setpulse(1)`.
+#
+# The second warp lands on the 36-tick sample grid (tick 144), as the gate requires.
+#
+# kind	name	x	y	z	yaw_deg
+warp	switch	21.55	-37.975	-11.95	270
+wait	36
+use
+wait	108
+warp	door	19.6	-38.8	-12.30	180
+wait	30
+input	90	1	0
+wait	1200
