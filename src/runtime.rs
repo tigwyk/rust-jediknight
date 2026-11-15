@@ -6267,6 +6267,7 @@ impl Runtime {
         let mut achieved_len = 0.0f32;
         let mut landed = false;
         let mut crossed = false;
+        let mut step_vel = [dir[0], dir[1], vy];
         for _ in 0..steps {
             let (len, cross, step_landed) = crate::walker_step(
                 solids,
@@ -6275,6 +6276,7 @@ impl Runtime {
                 &mut pos,
                 &mut vy,
                 dir,
+                &mut step_vel,
                 1.0 / 50.0,
                 radius,
                 gravity,
@@ -6285,6 +6287,15 @@ impl Runtime {
             crossed |= cross;
             landed |= step_landed;
         }
+        // `CollideHurt`'s projection lands on the frame velocity (`0x1d4`); the persisted walk
+        // state is the frame velocity minus this frame's non-persisted carry and thrust adds
+        // (the engine folds scroll and thrust into the velocity itself; the port re-reads them
+        // each frame, so they are stripped on the way back out).
+        body.vel = [
+            step_vel[0] - carry[0] - thrust[0] * dt,
+            step_vel[1] - carry[1] - thrust[1] * dt,
+        ];
+        vy = step_vel[2];
         // A moving elevator's top rises into the body. This is a carry rule, not a floor choice:
         // `resting_floor` already seats the body on a lift's top, while a platform that rises into
         // it has to lift the body, which is what `sithPhysics_UpdateAttachedThingPhysics` does.
@@ -6471,6 +6482,7 @@ impl Runtime {
                 &mut next,
                 &mut vy,
                 [0.0, 0.0],
+                &mut [0.0; 3],
                 1.0,
                 0.5,
                 0.0,

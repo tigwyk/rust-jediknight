@@ -7994,7 +7994,9 @@ fn main() {
         );
         for step in 0..steps {
             let before = pos;
-            let (moved, now, blocked) = solids.move_body(sector, pos, delta, radius, 0.25, gates);
+            let mut probe_vel = [delta[0], delta[1], 0.0];
+            let (moved, now, blocked) =
+                solids.move_body(sector, pos, delta, radius, 0.25, gates, &mut probe_vel);
             let walked = ((moved[0] - before[0]).powi(2) + (moved[1] - before[1]).powi(2)).sqrt();
             // `blocked` alone is not a signal: the step-up test sets it on most frames while the
             // body still covers its full step. Distance lost is the measurable event.
@@ -12131,7 +12133,7 @@ fn main() {
         let mut vy = 0.0f32;
         let dt = 1.0 / 30.0;
         for _ in 0..60 {
-            walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false, false);
+            walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], &mut [0.0; 3], dt, rules.radius, rules.gravity, false, false);
         }
         // Drop from the roomiest place the level has, not from the spawn: level 1's walkplayer stands in a
         // crawlspace 0.3 units tall, and a body lifted above its own ceiling is *outside its sector*, which
@@ -12169,7 +12171,7 @@ fn main() {
             // the old `before < 0` test then never fired at all.
             let mut peak = 0.0f32;
             for _ in 0..900 {
-                walker_step(&solids, collide::Gates::default(), &mut sector, &mut p2, &mut v2, [0.0, 0.0], dt, rules.radius, rules.gravity, false, false);
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut p2, &mut v2, [0.0, 0.0], &mut [0.0; 3], dt, rules.radius, rules.gravity, false, false);
                 peak = peak.max(-v2);
                 if v2 == 0.0 && peak > 0.0 {
                     break;
@@ -12570,7 +12572,7 @@ fn main() {
             // Settle on the floor first: the thing's origin is at the level's walkplayer
             // point, which is not necessarily a radius above the floor.
             for _ in 0..30 {
-                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false, false);
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], &mut [0.0; 3], dt, rules.radius, rules.gravity, false, false);
             }
             let base = pos[2];
             let mut airetime = 0.0f32;
@@ -12579,7 +12581,7 @@ fn main() {
             vy = rules.jump;
             let trace = std::env::var_os("BK_JUMP_TRACE").is_some();
             for frame in 0..300 {
-                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, rules.radius, rules.gravity, false, false);
+                walker_step(&solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], &mut [0.0; 3], dt, rules.radius, rules.gravity, false, false);
                 if trace && (frame < 6 || (18..28).contains(&frame) || (60..64).contains(&frame)) {
                     eprintln!(
                         "jump trace {frame}: z {:.3} base {base:.3} vy {vy:.2} support {:?} floor {:?}",
@@ -18861,6 +18863,9 @@ fn walker_step(
     // World-space horizontal velocity in level units a second, not a direction: the engine integrates
     // velocity and moves by it (`sithPhysics_UpdateThingPhysics`), so the speed lives here.
     move_dir: [f32; 2],
+    // The frame's full velocity `[x, y, z]`, mutated in place by the collision response
+    // (`sithCollision_CollideHurt`'s `0x1d4` write, through `move_body`).
+    vel: &mut [f32; 3],
     dt: f32,
     radius: f32,
     gravity: f32,
@@ -18969,7 +18974,12 @@ fn walker_step(
     // the walker exercises (`--walk all` is sensitive to it), and a level whose kerb is taller than
     // `STEP_UP` wedges a walking body against it. Default stays the engine's `moveSize + 0.01`.
     let step_up = env_f32("BK_STEP", STEP_UP);
-    let (moved_to, crossed_to, mut blocked) = solids.move_body(*sector, *pos, delta, radius, step_up, gates);
+    // `vel` is the frame's persisted velocity ([x, y, z]); `CollideHurt`'s projection inside
+    // `move_body` writes it back (`0x1d4`), so the caller's state survives the hit.
+    vel[2] = *vy;
+    let (moved_to, crossed_to, mut blocked) =
+        solids.move_body(*sector, *pos, delta, radius, step_up, gates, vel);
+    *vy = vel[2];
     if std::env::var_os("BK_WALK_TRACE").is_some() {
         let dm = ((moved_to[0] - pos[0]).powi(2) + (moved_to[1] - pos[1]).powi(2)).sqrt();
         eprintln!(
@@ -30064,7 +30074,7 @@ mod rise_tests {
         let dt = 1.0 / 60.0;
         let mut highest = f32::MIN;
         for _ in 0..180 {
-            walker_step(&room, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], dt, radius, 4.0, false, false);
+            walker_step(&room, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], &mut [0.0; 3], dt, radius, 4.0, false, false);
             highest = highest.max(pos[2]);
             let ceiling = room.ceiling_above(sector, pos).expect("the room has a ceiling");
             assert!(pos[2] + radius <= ceiling + 1e-3, "the head went through the ceiling: centre {:.3} + radius {radius} > {ceiling:.3}", pos[2]);
@@ -32110,7 +32120,7 @@ mod walker_tests {
         // One body radius: the same pair `setup` and `walk_level` start a body from.
         let (mut sector, mut pos, mut vy) = (0usize, [0.5f32, 0.0, PLAYER_RADIUS], 0.0f32);
         for _ in 0..60 {
-            walker_step(solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [1.0, 0.0], 1.0 / 30.0, PLAYER_RADIUS, 0.0, true, false);
+            walker_step(solids, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [1.0, 0.0], &mut [0.0; 3], 1.0 / 30.0, PLAYER_RADIUS, 0.0, true, false);
         }
         (sector, pos)
     }
@@ -32144,7 +32154,7 @@ mod walker_tests {
         let (mut sector, mut vy) = (0usize, 0.0f32);
         let mut pos = [0.5f32, 0.0, PLAYER_RADIUS + 0.055];
         for _ in 0..60 {
-            walker_step(&synced, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], 1.0 / 30.0, PLAYER_RADIUS, 4.0, false, false);
+            walker_step(&synced, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], &mut [0.0; 3], 1.0 / 30.0, PLAYER_RADIUS, 4.0, false, false);
         }
         assert!(
             (pos[2] - PLAYER_RADIUS).abs() < 1e-3,
@@ -32175,7 +32185,7 @@ mod walker_tests {
         let (mut sector, mut vy) = (0usize, 0.0f32);
         let mut pos = [0.5f32, 0.0, RISER + PLAYER_RADIUS + 0.1];
         for _ in 0..90 {
-            walker_step(&synced, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], 1.0 / 30.0, PLAYER_RADIUS, 4.0, false, false);
+            walker_step(&synced, collide::Gates::default(), &mut sector, &mut pos, &mut vy, [0.0, 0.0], &mut [0.0; 3], 1.0 / 30.0, PLAYER_RADIUS, 4.0, false, false);
         }
         assert!(
             (pos[2] - (RISER + PLAYER_RADIUS)).abs() < 1e-3,

@@ -1576,6 +1576,7 @@ impl LevelGeometry {
         radius: f32,
         step: f32,
         gates: Gates<'_>,
+        vel: &mut [f32; 3],
     ) -> ([f32; 3], usize, bool) {
         let len = (delta[0] * delta[0] + delta[1] * delta[1]).sqrt();
         if len < 1e-6 {
@@ -1758,6 +1759,26 @@ impl LevelGeometry {
                     let d_into = if d_into.abs() <= 1e-5 { 0.0 } else { d_into };
                     if d_into <= 0.0 {
                         break;
+                    }
+                    // The engine projects the thing's persisted velocity (`0x1d4`) with the same
+                    // branch arithmetic as the delta: first contact with restitution, gated on
+                    // `v_into > 0` (`0x4e9090:49-55`); the fold with its own crease projection
+                    // (`0x4e9090:78-87,93-101`). Without this the next frame re-enters the wall at
+                    // full speed and the grind never decays.
+                    let v_into = -(vel[0] * n[0] + vel[1] * n[1] + vel[2] * n[2]);
+                    if travelled != 0.0 || crease.is_none() {
+                        if v_into > 0.0 {
+                            let m = 1.0001 * v_into;
+                            *vel = [vel[0] + n[0] * m, vel[1] + n[1] * m, vel[2] + n[2] * m];
+                        }
+                    } else if v_into > 0.0 {
+                        *vel = [vel[0] + n[0] * v_into, vel[1] + n[1] * v_into, vel[2] + n[2] * v_into];
+                        if let Some(c) = crease {
+                            let cv = -(vel[0] * c[0] + vel[1] * c[1] + vel[2] * c[2]);
+                            if cv > 0.0 {
+                                *vel = [vel[0] + c[0] * cv, vel[1] + c[1] * cv, vel[2] + c[2] * cv];
+                            }
+                        }
                     }
                     // Branch on the engine's own gate (`0x4e9090:42`): any hit at a non-zero
                     // distance re-takes the first-contact branch (restitution, crease = n); only a
