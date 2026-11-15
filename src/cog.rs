@@ -1093,17 +1093,19 @@ pub const SLEEPING: &str = "::sleeping";
 fn descent(stmt: &Stmt, branch: u8) -> Option<&[Stmt]> {
     match (stmt, branch) {
         (Stmt::Block(body), 0) => Some(body),
-        (Stmt::If(_, then, _), 1) => block_of(then),
-        (Stmt::If(_, _, Some(els)), 2) => block_of(els),
+        (Stmt::If(_, then, _), 1) => Some(block_of(then)),
+        (Stmt::If(_, _, Some(els)), 2) => Some(block_of(els)),
         _ => None,
     }
 }
 
-/// The statements of a block body; a branch written without braces (`if (x) Sleep(1);`) is not one.
-fn block_of(stmt: &Stmt) -> Option<&[Stmt]> {
+/// The statements of an `if` arm. A branch written without braces (`if (x) Sleep(1);`, or the `if` of
+/// an `else if`) is a one-statement block, so it gets its own path entry: run in place, a nested `if`
+/// overwrote its parent's branch and a resume took the wrong arm (`04_EndLevel.cog`'s `entered:`).
+fn block_of(stmt: &Stmt) -> &[Stmt] {
     match stmt {
-        Stmt::Block(body) => Some(body),
-        _ => None,
+        Stmt::Block(body) => body,
+        other => std::slice::from_ref(other),
     }
 }
 
@@ -1408,12 +1410,12 @@ impl Vm {
                     if let Some(last) = self.path.last_mut() {
                         last.1 = 1;
                     }
-                    self.exec(cog, then)
+                    self.run_from(cog, block_of(then), 0)
                 } else if let Some(e) = els {
                     if let Some(last) = self.path.last_mut() {
                         last.1 = 2;
                     }
-                    self.exec(cog, e)
+                    self.run_from(cog, block_of(e), 0)
                 } else {
                     Ok(Flow::Next)
                 }
@@ -1905,6 +1907,24 @@ end
         vm.run_label(&cog, "startup").expect("resumes");
         assert_eq!(vm.var("n"), Value::Num(1.0), "the branch prefix ran twice");
         assert_eq!(vm.var("flag"), Value::Num(1.0), "the wait resumed at the wrong statement");
+    }
+
+    /// `04_EndLevel.cog`'s `entered:` sleeps in the third arm of an `else if` chain. The resume must
+    /// come back to that arm: it ran the first one (`endthelevel = 0`) and level 4 never ended (#49).
+    #[test]
+    fn a_sleep_inside_an_else_if_arm_resumes_in_that_arm() {
+        let cog = parse(
+            "symbols\nmessage startup\nend\ncode\nstartup:\n\tid = 2; x = 1; y = 0;\n\
+             \tif (id == 1) { x = 0; } else if (id == 3) { x = 2; } else if (id == 2) { Sleep(0.5); y = 1; }\n\
+             \treturn;\nend\n",
+        )
+        .expect("parses");
+        let mut vm = Vm::new();
+        vm.run_label(&cog, "startup").expect("reaches the sleep");
+        assert!(vm.sleeping(), "`sleep` did not suspend the label");
+        vm.now += 1.0;
+        vm.run_label(&cog, "startup").expect("resumes");
+        assert_eq!((vm.var("x"), vm.var("y")), (Value::Num(1.0), Value::Num(1.0)));
     }
 
     /// A `sleep` inside a `call`ed label resumes inside that label: the caller's own position must not
