@@ -1759,7 +1759,10 @@ impl LevelGeometry {
                     if d_into <= 0.0 {
                         break;
                     }
-                    let rem = if crease.is_none() {
+                    // Branch on the engine's own gate (`0x4e9090:42`): any hit at a non-zero
+                    // distance re-takes the first-contact branch (restitution, crease = n); only a
+                    // zero-distance repeat hit — already flush against this face — takes the fold.
+                    let rem = if travelled != 0.0 || crease.is_none() {
                         crease = Some(n);
                         let m = 1.0001 * d_into;
                         [dir[0] * left + n[0] * m, dir[1] * left + n[1] * m, dir[2] * left + n[2] * m]
@@ -1771,7 +1774,10 @@ impl LevelGeometry {
                         let c = [c0[0] + n[0] * fold, c0[1] + n[1] * fold, c0[2] + n[2] * fold];
                         let clen = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
                         if clen > 1e-6 {
+                            // The folded crease is written back (`0x4e9090:89-92`): a third
+                            // face folds from the updated crease, not the first normal.
                             let c = [c[0] / clen, c[1] / clen, c[2] / clen];
+                            crease = Some(c);
                             let cd = -(rem[0] * c[0] + rem[1] * c[1] + rem[2] * c[2]);
                             if cd > 0.0 {
                                 rem = [rem[0] + c[0] * cd, rem[1] + c[1] * cd, rem[2] + c[2] * cd];
