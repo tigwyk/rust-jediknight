@@ -6726,3 +6726,22 @@ Same-build A/B (`main` b71fb57 against this branch): `--triggers` link counts dr
 `nolink` (level 1: 37 to 36 thing links; level 2: 70 to 37 surface links and 47 to 40 thing links;
 level 3: 27 to 24 sector links). The level-1 route trace, the 600-tick idles on levels 2/3/4/6,
 `--cog-check` and `--tour` are identical. 380 unit tests pass.
+
+## Issues #45, #46, #47: level 3's exit chain runs end to end
+
+#39's level-3 chain is: the player enters sector 232; `03_goals.cog` `entered:` sends
+`SendMessageEx(GetMasterCOG(), user0, 2, 0, 0, 0)`; `03_endlevel.cog` `user0:` runs `Sleep(6)` and
+`jkEndLevel(1)`. A body walking 250 -> 249 -> 232 got `entered` delivered, but three bugs stopped the
+chain:
+
+- #45: `GetSenderRef` returned the causing thing. The verb bodies in `JK.EXE` (`0x505cb0..0x505d30`)
+  read `+0x24` link id, `+0x28`/`+0x2c` the linked object and its type, and `+0x30`/`+0x34` the thing
+  that caused it, as `sithCog_SendMessageEx` (`0x4dedc0`) stores them. `Vm::set_message_sender` now
+  maps them that way. `deliver_sector_triggers` passes the sector identity (it set the link id only).
+- #46: an undeclared message name (`user0` in `03_goals.cog`) read nil. `Vm::var` now falls back to
+  `sithCog_Startup`'s global message ids.
+- #47: the `SendMessageEx` verb (`0x5068a0`, disassembled) is `(cog, message, param0..param3)`. The
+  port read the params from arguments 5 and 6, so `user0(2)` arrived as `user0(0)` and completed goal 0.
+  On level 2 the same bug set `gotdisk` from the "got to the top" message.
+
+With the three fixes, the walk latches `done2` at 1.6 s and `level_end` 6 s later.
