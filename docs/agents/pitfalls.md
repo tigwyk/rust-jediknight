@@ -28,9 +28,11 @@ Since #23, the default walk **gate** passes 9 of 9 **legs** and `--walk all` is 
 leg by leg with the baseline build. Do not tune code to move one leg back inside its tolerance.
 
 Every open issue has the label `ready-for-agent`, so the label does not tell you which issue to start.
-The blockers do. The order is #24, then #25, then #28. #30 (level-1 route) and #31 (collision chain as
-one unit) can run in parallel with them. #26 and #27 were closed into #31: they were per-leg
-collision buckets, and per-leg fixes only moved failures to other legs.
+The blockers do. #24 is done, and #25 was closed into #28, so #28 (the levels 2-5 routes) is next.
+#30 (level-1 route) and #31 (collision chain as one unit) can run in parallel with it. #26 and #27
+were closed into #31: they were per-leg collision buckets, and per-leg fixes only moved failures to
+other legs. #28 files each blocker its routes hit as its own ticket before it continues; it does not
+route around one.
 
 - Before you start an issue, count its open blockers. Start only when the count is 0:
   `gh api repos/{owner}/{repo}/issues/<n> --jq .issue_dependencies_summary.blocked_by`
