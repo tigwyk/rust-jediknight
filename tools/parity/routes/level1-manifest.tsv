@@ -1,0 +1,66 @@
+# Level-1 route manifest (issue #24). One file per level drives `route-gate.ps1` and the replay's
+# `--route-trace` columns; the gate and the app hold no level literal of their own.
+#
+# Rows are tab-separated: a key, then its values. `#` starts a comment.
+#
+# Read by the gate:
+#   level <name>                     the level the replay boots (`--start`)
+#   plan <path>                      the input plan (`--replay`)
+#   port <path>                      the committed port-side oracle (graded on every row)
+#   retail <path> <warp>             optional retail prefix, graded on the rows before the plan's
+#                                    first warp named <warp> (the port-only segment starts there)
+#   provenance <path>                mechanic -> engine function file
+#   mechanics <name>...              the mechanics the provenance file must cover
+#   prereq <gate.ps1>                a gate that must pass before this verdict counts
+#   use <thing>                      the replay's use trace must name this linked thing
+#   after_use <column>               the event reads 0 at and before the plan's first use tick
+#   cross <column> <axis> <value>    after the event latched, some sample past the first use has
+#                                    <axis> greater than <value> (the body walked through)
+#   final <column> <value>           the trace's last row carries this value
+#
+# Read by the app (`--route-manifest`), in trace-column order after `health`/`shields`:
+#   watch <column> <cog> <symbol>    placed cog <cog>'s variable <symbol>, `-` until the cog starts
+#   latch <column> <watch>...        1 from the first sample where any named watch reads non-zero
+#   bin <column> <bin>               the player's inventory bin
+#   level_end <column>               `sithMain_SetEndLevel`'s never-cleared latch (`0x4c4bf0`)
+#
+# Every `latch`/`bin`/`level_end` column is a latched event: the retail prefix grades it on its last
+# row only, the port oracle on every row.
+
+level	01narshadda
+plan	tools/parity/routes/level1-route.tsv
+port	tools/parity/routetrace/level1-route-port.tsv
+retail	tools/parity/routetrace/level1-route-retail.tsv	exit_door
+provenance	tools/parity/routes/level1-route-provenance.tsv
+mechanics	walk	floor	collision	use	cog messages	damage	ai fire	audio state	level end
+prereq	audio-gate.ps1
+prereq	encounter-gate.ps1
+
+# The upper door (`00_door.cog`, placed cog 0) and the cantina door switch (`00_doorswitch.cog`,
+# placed cog 11). Their symbol names differ (`opendoors` vs `open_doors`).
+watch	door0_status	0	doorstatus
+watch	door0_movestatus	0	movestatus
+watch	door0_opendoors	0	opendoors
+watch	door0_closedoors	0	closedoors
+watch	switch_status	11	doorstatus
+watch	switch_movestatus	11	movestatus
+watch	switch_opendoors	11	open_doors
+watch	switch_closedoors	11	close_doors
+
+# The door re-closes two seconds after it opens, so the trace latches that it opened.
+latch	door0_opened	door0_status	door0_movestatus
+# `01_endlevel.cog`'s `user0:` sets goal 0 completed (bin 100 reads 1 at the start, 3 once 8t88 is
+# sighted).
+bin	goal_bin100	100
+level_end	level_end
+
+# The exit's own evidence: both doors open through the player's use key (door 0 is thing 4, the
+# one-way door thing 47), the body walks past door 0's leaf (thing 4 at y 9.650073), and the level's
+# script ends the level.
+use	4
+use	47
+after_use	door0_opened
+cross	door0_opened	y	9.650073
+final	door0_opened	1
+final	goal_bin100	3
+final	level_end	1

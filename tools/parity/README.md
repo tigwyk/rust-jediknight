@@ -342,14 +342,18 @@ each round rather than this snapshot.
 
 ## Scripted route replay (issue #8)
 
-The shared level-1 oracle for the movement, telemetry and integration slices. `--replay` drives the
+The shared route oracle for the movement, telemetry and integration slices. `--replay` drives the
 port from a committed input script at the fixed 1/60 s capture step, and `--route-trace` writes the
-comparable trace.
+comparable trace with the columns its `--route-manifest` names. A level is one manifest
+(issue #24): `tools/parity/routes/<level>-manifest.tsv` names the level, plan, watched cogs,
+latched events, exit evidence, port oracle, optional retail prefix, provenance and prerequisite
+gates; `level1-manifest.tsv`'s header documents every key. The gate and the app hold no level literal.
 
 ```powershell
 cargo build --release
-pwsh -NoProfile -File tools/parity/route-gate.ps1            # determinism + committed-fixture gate
+pwsh -NoProfile -File tools/parity/route-gate.ps1            # level 1: determinism + committed-fixture gate
 pwsh -NoProfile -File tools/parity/route-gate.ps1 -Perturb   # ... and prove a perturbed trace fails
+pwsh -NoProfile -File tools/parity/route-gate.ps1 -Manifest tools/parity/routes/level2-manifest.tsv
 ```
 
 Files:
@@ -359,16 +363,18 @@ Files:
 | `tools/parity/routes/level1-route.tsv` | The route script. `warp <name> x y z yaw` rows are the level's own retail-recorded route placements (`shots.tsv`'s `route_*` rows and `walk-shots.tsv`'s legs); `input <ticks> forward strafe` holds that intent. A tick is 1/60 s. `wait <ticks>` stands still (the door leaf needs game time to finish opening before the next hold); `seed <vx> <vy>` starts a leg at the speed the retail capture already had at its pose, and `use` presses the player's use key. `wait` takes ticks like an input; `seed`/`use` take none, so the 600 ms sample grid never moves. There is no `switch` row: retail's `cogstatus 11` reads `doorstatus 0` with that door already open, so the synthetic `activate` it used to send made the port measure a scenario retail never performed. |
 | `tools/parity/routetrace/level1-route-retail.tsv` | Retail-derived reference, one row every 600 ms (36 ticks). Provenance is in the file header. |
 | `tools/parity/routetrace/level1-route-port.tsv` | The port's committed oracle, produced by the replay. |
-| `tools/parity/route-gate.ps1` | The gate: replay twice (identical bytes), check the exit's own events (use names things 4 and 47, `door0_opened` latches after the use, the body crosses the leaf, `goal_bin100` = 3, `level_end` = 1), assert the trace spans the whole plan (sample count and final tick) and carries the audio columns with no `-`, compare to the committed port fixture, reject a trace with one position moved 0.25 units, match the retail reference within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it) over the rows **before** the port-only `exit_door` warp, check the mechanic provenance below, and run `audio-gate.ps1` and `encounter-gate.ps1` as prerequisites (`-SkipPrereqs` for iteration). |
+| `tools/parity/routes/level1-manifest.tsv` | Level 1's route manifest: the trace's cog watches and events, the exit evidence below, both fixtures, the provenance file and the prerequisite gates. |
+| `tools/parity/routes/level2-manifest.tsv`, `level2-route.tsv`, `level2-route-provenance.tsv`, `routetrace/level2-route-port.tsv` | Level 2's spawn walk (watches door cog 2). No retail prefix, so its oracle is port-side evidence and the gate prints `SKIP  retail`. |
+| `tools/parity/route-gate.ps1` | The gate, driven by `-Manifest` (default level 1): replay twice (identical bytes), check the manifest's own evidence (level 1: use names things 4 and 47, `door0_opened` latches after the use, the body crosses the leaf, `goal_bin100` = 3, `level_end` = 1), assert the trace spans the whole plan (sample count and final tick) and carries the audio columns with no `-`, compare to the committed port fixture, reject a trace with one position moved 0.25 units, match a retail prefix (when the manifest names one) within the epsilon **the fixture states** (`# epsilon <units>`; `-Epsilon` overrides it) over the rows **before** the manifest's port-only warp (level 1: `exit_door`), check the mechanic provenance below, and run the manifest's prerequisite gates (level 1: `audio-gate.ps1` and `encounter-gate.ps1`; `-SkipPrereqs` for iteration). |
 | `tools/parity/routes/level1-route-provenance.tsv` | Issue #14 AC2: every mechanic the route exercises names its engine function, decomp address, port symbol and source. A `deviated` row names its deviation-ledger entry in `docs/porting-roadmap.md`; the gate and the repo test both verify it. |
 
-The trace format is tab-separated, `#` comments allowed, one header row:
+The trace format is tab-separated, `#` comments allowed, one header row. Level 1's:
 
 ```text
 tick  t_s  x  y  z  sector  vel_x  vel_y  vel_z  health  shields
-      door0_status  door0_movestatus  door0_opendoors  door0_closedoors
+      door0_status  door0_movestatus  door0_opendoors  door0_closedoors      (manifest `watch` rows)
       switch_status  switch_movestatus  switch_opendoors  switch_closedoors
-      door0_opened  goal_bin100  level_end
+      door0_opened  goal_bin100  level_end                                    (`latch`/`bin`/`level_end`)
       music  music_end  music_loop  music_vol  ambient  ambient_vol  sounds
 ```
 
@@ -460,8 +466,9 @@ The per-sample position tolerance is the **retail harness's**, stated in
 one sample's travel (at most ~1.4 units at level 1's 2.4 u/s run) is the measurement resolution.
 Sectors are compared exactly and are never tolerated away.
 
-`--route-compare <expected> <actual> [--events-per-row]` is the comparator the gate uses;
-`BK_ROUTE_EPSILON=<units>` sets an absolute tolerance for every numeric column (sector stays exact,
+`--route-compare <manifest> <expected> <actual> [--events-per-row]` is the comparator the gate uses;
+the manifest names the event columns. `BK_ROUTE_EPSILON=<units>` sets an absolute tolerance for
+every numeric column (sector stays exact,
 and `-` fields are skipped). Without the flag the latched event columns are graded on the expected
 trace's last row only, which is what the frozen retail prefix needs; `--events-per-row` grades them
 on every row, which is the port oracle's rule (the replay and the oracle share the port's fixed grid).

@@ -1,0 +1,8 @@
+# Level-2 scripted route (issue #24): the level's own start, then a held-forward walk. It exists to
+# run `route-gate.ps1` on a second manifest (`level2-manifest.tsv`); it is not a retail route and
+# has no retail capture. A `warp spawn` with no pose keeps the level's own start (see level 1's plan).
+#
+# kind	name		x		y		z		yaw_deg
+warp	spawn		-		-		-		-
+input	180	1	0
+wait	36

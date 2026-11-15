@@ -6633,3 +6633,18 @@ hold required `vy <= 0`, so it let go, and the next frame rose. `sithPhysics_Upd
 a jump or a failed `FindFloor` detaches. The hold now also applies to a body that was grounded at
 the frame's start and did not jump. `walk6_spawn` passes (1.06 / 1.08, 98 %, 2 sectors off). Trace
 gate: 10 legs, 1 failure (`walk5_spawn`, the waterpump). `--walk all` is unchanged.
+
+## Issue #24: the route gate reads a per-level manifest
+
+`route-gate.ps1`, `--route-trace` and `--route-compare` no longer hold level-1 literals. A level is
+`tools/parity/routes/<level>-manifest.tsv`: the level, plan, port oracle, optional retail prefix
+(with the warp where the port-only segment starts), provenance file, mechanics, prerequisite gates,
+cog `watch` columns, `latch`/`bin`/`level_end` events and the exit evidence (`use`, `after_use`,
+`cross`, `final`). The replay takes `--route-manifest`; the comparator takes the manifest first.
+Unknown keys fail the replay, so a typo cannot drop a check.
+
+Level 1 is unchanged: the replay trace is byte-identical to `main`'s, the comparator prints the
+same results (oracle FAIL 1204/99 against the stale committed fixture, retail slice FAIL 342/2 at
+epsilon 1.70, self PASS 1204), and the gate log differs only in four message wordings. The gate
+still stops at the port oracle, as on `main` (#30). Level 2 (`level2-manifest.tsv`: spawn walk,
+door cog 2, no retail prefix) passes the gate end to end; its oracle is port-side evidence.

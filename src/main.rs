@@ -660,10 +660,12 @@ fn main() {
     // `--warp "x,y,z,yaw"`: the *player's* eye pose, not the camera's (see `setup`).
     let mut warp: Option<([f32; 3], f32)> = None;
     // `--replay <path>`: the fixed-step scripted route (see `RoutePlan`), and `--route-trace <path>`:
-    // its sampled trace. A replay pins the step at 1/60 s exactly as `--shot` does, and the trace
-    // samples every 36 ticks (600 ms), the cadence a retail `coords` poll keeps.
+    // its sampled trace, with the level's columns from `--route-manifest <path>`. A replay pins the
+    // step at 1/60 s exactly as `--shot` does, and the trace samples every 36 ticks (600 ms), the
+    // cadence a retail `coords` poll keeps.
     let mut replay: Option<std::path::PathBuf> = None;
     let mut route_trace: Option<std::path::PathBuf> = None;
+    let mut route_manifest: Option<std::path::PathBuf> = None;
     // `--carry-in <save>`: adopt that save's engine bin table as the carried player inventory.
     // `--carry-out <save>`: write the carry (bins and state) when the level completes, or on the
     // first frames of a plain boot.
@@ -975,9 +977,13 @@ fn main() {
             // replay check below rejects it everywhere else.
             "--no-ai" => no_ai = true,
             // `--route-trace <path>`: the replay's sampled trace (position, sector, velocity, health,
-            // shields and the level-1 door/switch cog state), one row every 600 ms.
+            // shields, the manifest's watched cogs and events, the mixer), one row every 600 ms.
             "--route-trace" => {
                 route_trace = arg_value(&args, &mut i).map(std::path::PathBuf::from);
+            }
+            // `--route-manifest <path>`: the level's route manifest (`RouteManifest`).
+            "--route-manifest" => {
+                route_manifest = arg_value(&args, &mut i).map(std::path::PathBuf::from);
             }
             // `--carry-in <save>` / `--carry-out <save>`: the level-change carry's engine bin table.
             // The gate boots level 2 with level 1's carried save and writes the level-2 autosave.
@@ -1003,18 +1009,20 @@ fn main() {
                     }
                 });
             }
-            // `--route-compare <expected> <actual> [--events-per-row]`: the route-trace gate. Fails on
-            // the first field outside its tolerance, so a perturbed trace fails and the fixture
-            // itself passes. `--events-per-row` grades the latched event columns on every row (the
-            // port oracle); without it only the fixture's last row is graded (the frozen retail
-            // capture, whose holds advance a variable amount of engine time).
+            // `--route-compare <manifest> <expected> <actual> [--events-per-row]`: the route-trace
+            // gate, reading both traces against the level's manifest. Fails on the first field
+            // outside its tolerance, so a perturbed trace fails and the fixture itself passes.
+            // `--events-per-row` grades the latched event columns on every row (the port oracle);
+            // without it only the fixture's last row is graded (a retail capture, whose holds
+            // advance a variable amount of engine time).
             "--route-compare" => {
-                let expected = args.get(i + 1).cloned();
-                let actual = args.get(i + 2).cloned();
-                let events_per_row = args.get(i + 3).is_some_and(|arg| arg == "--events-per-row");
-                i += if events_per_row { 3 } else { 2 };
-                let (Some(expected), Some(actual)) = (expected, actual) else {
-                    println!("usage: --route-compare <expected.tsv> <actual.tsv> [--events-per-row]");
+                let manifest = args.get(i + 1).cloned();
+                let expected = args.get(i + 2).cloned();
+                let actual = args.get(i + 3).cloned();
+                let events_per_row = args.get(i + 4).is_some_and(|arg| arg == "--events-per-row");
+                i += if events_per_row { 4 } else { 3 };
+                let (Some(manifest), Some(expected), Some(actual)) = (manifest, expected, actual) else {
+                    println!("usage: --route-compare <manifest.tsv> <expected.tsv> <actual.tsv> [--events-per-row]");
                     std::process::exit(2);
                 };
                 let epsilon = std::env::var("BK_ROUTE_EPSILON")
@@ -1022,6 +1030,7 @@ fn main() {
                     .and_then(|v| v.parse::<f64>().ok())
                     .unwrap_or(1e-6);
                 match route_trace_compare(
+                    std::path::Path::new(&manifest),
                     std::path::Path::new(&expected),
                     std::path::Path::new(&actual),
                     epsilon,
@@ -1579,6 +1588,24 @@ fn main() {
         eprintln!("--route-trace needs --replay <path>");
         std::process::exit(2);
     }
+    // A trace's level columns come only from its manifest, so a trace without one is refused rather
+    // than written with the core columns alone.
+    let route_trace = match (route_trace, route_manifest.as_deref().map(RouteManifest::read)) {
+        (Some(path), Some(Ok(manifest))) => Some((path, manifest)),
+        (_, Some(Err(message))) => {
+            eprintln!("--route-manifest: {message}");
+            std::process::exit(2);
+        }
+        (Some(_), None) => {
+            eprintln!("--route-trace needs --route-manifest <path>");
+            std::process::exit(2);
+        }
+        (None, Some(Ok(_))) => {
+            eprintln!("--route-manifest needs --route-trace <path>");
+            std::process::exit(2);
+        }
+        (None, None) => None,
+    };
     if audio_trace.is_some() && route_plan.is_none() {
         eprintln!("--audio-trace needs --replay <path>");
         std::process::exit(2);
@@ -16323,7 +16350,7 @@ enum Walk {
 /// The trace samples every 36 ticks (600 ms) — the cadence a retail `coords` poll keeps — and
 /// records the body position (the value retail's `coords` prints; the camera eye is one `eyeOffset`
 /// above it), the tracked sector, the body velocity in world units/s, health, shields and the
-/// level-1 door/switch cog variables.
+/// level's own watched cog variables and events ([`RouteManifest`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct RouteInput {
     forward: f32,
@@ -16360,40 +16387,154 @@ struct RoutePlan {
 /// segments the engine into (`Invoke-JkWalkTrace`'s `HoldMs`).
 const ROUTE_SAMPLE_TICKS: u32 = 36;
 
-/// The level-1 cogs the route trace carries: the upper door (`00_door.cog`, placed cog 0) and the
-/// cantina door switch (`00_doorswitch.cog`, placed cog 11). The symbol names differ between them
-/// (`opendoors`/`closedoors` vs `open_doors`/`close_doors`), which is why each has its own row.
-const ROUTE_COGS: [(usize, [&str; 4]); 2] = [
-    (0, ["doorstatus", "movestatus", "opendoors", "closedoors"]),
-    (11, ["doorstatus", "movestatus", "open_doors", "close_doors"]),
-];
+/// The trace columns every route carries before the level's own: the sample, the body and the bars.
+const ROUTE_CORE_FIELDS: [&str; 11] =
+    ["tick", "t_s", "x", "y", "z", "sector", "vel_x", "vel_y", "vel_z", "health", "shields"];
 
-/// The trace columns. Every value is a number or `-` (a field the run does not have: no such cog
-/// started, or a retail capture did not record it). The comparator parses the header, so the set
-/// can grow without breaking older fixtures.
-///
-/// The audio columns are the audio trace's mixer state at the same sample (issue #14): the song's
-/// track range and loop flag, `SetMusicVol`'s value, the loudest audible ambient loop and its
-/// volume, and every one-shot played since the previous sample. A trace never writes `-` here:
-/// silence is an empty `ambient`, an empty `sounds`, and `0 0 0` for the mixer's "no song" state.
-const ROUTE_TRACE_FIELDS: [&str; 29] = [
-    "tick", "t_s", "x", "y", "z", "sector", "vel_x", "vel_y", "vel_z", "health", "shields",
-    "door0_status", "door0_movestatus", "door0_opendoors", "door0_closedoors",
-    "switch_status", "switch_movestatus", "switch_opendoors", "switch_closedoors",
-    "door0_opened", "goal_bin100", "level_end",
-    "music", "music_end", "music_loop", "music_vol", "ambient", "ambient_vol", "sounds",
-];
+/// The audio columns every route carries after the level's own: the audio trace's mixer state at
+/// the same sample (issue #14). The song's track range and loop flag, `SetMusicVol`'s value, the
+/// loudest audible ambient loop and its volume, and every one-shot played since the previous sample.
+/// A trace never writes `-` here: silence is an empty `ambient`, an empty `sounds`, and `0 0 0` for
+/// the mixer's "no song" state.
+const ROUTE_AUDIO_FIELDS: [&str; 7] =
+    ["music", "music_end", "music_loop", "music_vol", "ambient", "ambient_vol", "sounds"];
 
 /// The route trace's text columns: a wav name and a `wav@gain` list. They are compared exactly,
 /// and an empty cell is a recorded silence, not a missing value.
 const ROUTE_TEXT_FIELDS: [&str; 2] = ["ambient", "sounds"];
 
-/// Event columns: a latched engine observation the two captures can sample a row apart. Retail's
+/// The manifest rows `route-gate.ps1` reads and the app accepts without using.
+const ROUTE_GATE_KEYS: [&str; 11] = [
+    "level", "plan", "port", "retail", "provenance", "mechanics", "prereq", "use", "after_use",
+    "cross", "final",
+];
+
+/// A level's route manifest (`tools/parity/routes/<level>-manifest.tsv`, issue #24): the cog
+/// variables and events the trace records for that level, so neither the trace writer nor the
+/// comparator carries a level's literals. The gate reads the same file for the plan, the fixtures
+/// and the evidence rows (see the level-1 file's header for every key).
+///
+/// The trace's columns are [`ROUTE_CORE_FIELDS`], then each `watch` and each event in file order,
+/// then [`ROUTE_AUDIO_FIELDS`]. Every value is a number or `-` (a field the run does not have: no
+/// such cog started, or a retail capture did not record it). The comparator parses the header, so
+/// an older fixture that lacks a column is graded on the columns it has.
+#[derive(Debug, Clone, Default)]
+struct RouteManifest {
+    /// `watch <column> <placed cog> <symbol>`: a cog variable sampled into its own column.
+    watches: Vec<(String, usize, String)>,
+    /// The latched event columns, in trace order.
+    events: Vec<(String, RouteEvent)>,
+}
+
+/// Event columns are latched engine observations the two captures can sample a row apart. Retail's
 /// game clock advances a variable number of frames per 600 ms hold while the replay advances exactly
-/// 36, so a transient state (the door's open frame, the sighting's goal write) may land on a
-/// different sample index on the two sides. These columns are therefore graded on the fixture's
-/// **last row only**; a position, sector, velocity or bar keeps its per-row comparison.
-const ROUTE_EVENT_FIELDS: [&str; 3] = ["door0_opened", "goal_bin100", "level_end"];
+/// 36, so a transient state (a door's open frame, a goal write) may land on a different sample index
+/// on the two sides. The retail prefix grades them on its **last row only**; a position, sector,
+/// velocity or bar keeps its per-row comparison.
+#[derive(Debug, Clone, PartialEq)]
+enum RouteEvent {
+    /// `latch <column> <watch>...`: 1 from the first sample where any named watch reads non-zero
+    /// (indices into [`RouteManifest::watches`]). A door script that re-closes still reads opened.
+    Latch(Vec<usize>),
+    /// `bin <column> <bin>`: the player's inventory bin.
+    Bin(i32),
+    /// `level_end <column>`: `sithMain_SetEndLevel`'s (`0x4c4bf0`) never-cleared latch. A capture
+    /// keeps the world it booted (the app clears `level_complete`), so the trace reads this latch.
+    LevelEnd,
+}
+
+impl RouteManifest {
+    fn read(path: &std::path::Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Self::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    fn parse(text: &str) -> Result<Self, String> {
+        let mut manifest = RouteManifest::default();
+        let mut columns: Vec<String> = Vec::new();
+        for (line_no, line) in text.lines().enumerate() {
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                continue;
+            }
+            let f: Vec<&str> = line.split('\t').map(str::trim).filter(|v| !v.is_empty()).collect();
+            let fail = |what: String| format!("line {}: {what}", line_no + 1);
+            let column = |at: usize| -> Result<String, String> {
+                let name = f.get(at).ok_or_else(|| fail(format!("`{}` needs a column name", f[0])))?;
+                if ROUTE_CORE_FIELDS.contains(name)
+                    || ROUTE_AUDIO_FIELDS.contains(name)
+                    || columns.iter().any(|c| c == name)
+                {
+                    return Err(fail(format!("column `{name}` is declared twice")));
+                }
+                Ok((*name).to_string())
+            };
+            match f[0] {
+                "watch" => {
+                    if f.len() != 4 {
+                        return Err(fail("`watch` needs a column, a placed cog and a symbol".to_string()));
+                    }
+                    let name = column(1)?;
+                    let cog = f[2].parse().map_err(|_| fail(format!("`{}` is not a cog index", f[2])))?;
+                    columns.push(name.clone());
+                    manifest.watches.push((name, cog, f[3].to_string()));
+                }
+                "latch" => {
+                    if f.len() < 3 {
+                        return Err(fail("`latch` needs a column and at least one watch".to_string()));
+                    }
+                    let name = column(1)?;
+                    let sources = f[2..]
+                        .iter()
+                        .map(|watch| {
+                            manifest
+                                .watches
+                                .iter()
+                                .position(|(w, ..)| w == watch)
+                                .ok_or_else(|| fail(format!("`{watch}` is not a watch declared above")))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    columns.push(name.clone());
+                    manifest.events.push((name, RouteEvent::Latch(sources)));
+                }
+                "bin" => {
+                    if f.len() != 3 {
+                        return Err(fail("`bin` needs a column and a bin".to_string()));
+                    }
+                    let name = column(1)?;
+                    let bin = f[2].parse().map_err(|_| fail(format!("`{}` is not a bin", f[2])))?;
+                    columns.push(name.clone());
+                    manifest.events.push((name, RouteEvent::Bin(bin)));
+                }
+                "level_end" => {
+                    if f.len() != 2 {
+                        return Err(fail("`level_end` needs a column".to_string()));
+                    }
+                    let name = column(1)?;
+                    columns.push(name.clone());
+                    manifest.events.push((name, RouteEvent::LevelEnd));
+                }
+                key if ROUTE_GATE_KEYS.contains(&key) => {}
+                other => return Err(fail(format!("unknown manifest row `{other}`"))),
+            }
+        }
+        Ok(manifest)
+    }
+
+    /// Every trace column, in order.
+    fn fields(&self) -> Vec<String> {
+        ROUTE_CORE_FIELDS
+            .iter()
+            .map(|f| (*f).to_string())
+            .chain(self.watches.iter().map(|(name, ..)| name.clone()))
+            .chain(self.events.iter().map(|(name, _)| name.clone()))
+            .chain(ROUTE_AUDIO_FIELDS.iter().map(|f| (*f).to_string()))
+            .collect()
+    }
+
+    fn is_event(&self, field: &str) -> bool {
+        self.events.iter().any(|(name, _)| name == field)
+    }
+}
 
 impl RoutePlan {
     fn read(path: &std::path::Path) -> Result<Self, String> {
@@ -16540,7 +16681,7 @@ impl RoutePlan {
     }
 }
 
-/// One parsed route-trace row: the tick plus one `Option<f64>` per [`ROUTE_TRACE_FIELDS`] entry.
+/// One parsed route-trace row: the tick plus one `Option<f64>` per [`RouteTrace::fields`] entry.
 /// A [`ROUTE_TEXT_FIELDS`] slot leaves its numeric value `None` and uses `texts` instead; an empty
 /// text cell is the recorded silence.
 #[derive(Debug, Clone)]
@@ -16552,18 +16693,23 @@ struct RouteTraceRow {
 
 /// A parsed route trace: its rows, and which columns its own header measured.
 ///
-/// A fixture says what it measured. The committed retail capture predates issue #15 and has no
-/// `door0_opened`/`goal_bin100`/`level_end` columns and no exit segment; that is not a `<-> failure, it
-/// is the coverage the fixture claims, so those columns and the rows past its last tick are not
-/// compared against it.
+/// A fixture says what it measured. Level 1's committed retail capture predates issue #15 and has
+/// no event columns (`door0_opened`/`goal_bin100`/`level_end`) and no exit segment; that is not a
+/// `-` failure, it is the coverage the fixture claims, so those columns and the rows past its last
+/// tick are not compared against it.
 #[derive(Debug, Clone)]
 struct RouteTrace {
     rows: Vec<RouteTraceRow>,
-    /// One flag per [`ROUTE_TRACE_FIELDS`] entry: does this trace's header carry the column?
+    /// One flag per [`RouteTrace::fields`] entry: does this trace's header carry the column?
     columns: Vec<bool>,
+    /// The manifest's columns ([`RouteManifest::fields`]) this trace is read against.
+    fields: Vec<String>,
+    /// One flag per field: is it a latched event column ([`RouteEvent`])?
+    events: Vec<bool>,
 }
 
-fn parse_route_trace(text: &str) -> Result<RouteTrace, String> {
+fn parse_route_trace(text: &str, manifest: &RouteManifest) -> Result<RouteTrace, String> {
+    let fields = manifest.fields();
     let mut rows = Vec::new();
     let mut columns: Option<Vec<Option<usize>>> = None;
     for (line_no, line) in text.lines().enumerate() {
@@ -16576,7 +16722,7 @@ fn parse_route_trace(text: &str) -> Result<RouteTrace, String> {
         if columns.is_none() {
             // A missing column is a column the fixture did not measure, not an error: the frozen
             // retail capture predates the exit segment's events.
-            let order: Vec<Option<usize>> = ROUTE_TRACE_FIELDS
+            let order: Vec<Option<usize>> = fields
                 .iter()
                 .map(|field| cells.iter().position(|c| c == field))
                 .collect();
@@ -16587,11 +16733,11 @@ fn parse_route_trace(text: &str) -> Result<RouteTrace, String> {
             continue;
         }
         let order = columns.as_ref().expect("header just parsed");
-        let mut values = Vec::with_capacity(ROUTE_TRACE_FIELDS.len());
-        let mut texts = Vec::with_capacity(ROUTE_TRACE_FIELDS.len());
+        let mut values = Vec::with_capacity(fields.len());
+        let mut texts = Vec::with_capacity(fields.len());
         for (slot, index) in order.iter().enumerate() {
             let raw = index.and_then(|index| cells.get(index)).copied().unwrap_or("-");
-            if ROUTE_TEXT_FIELDS.contains(&ROUTE_TRACE_FIELDS[slot]) {
+            if ROUTE_TEXT_FIELDS.contains(&fields[slot].as_str()) {
                 // An empty cell is a recorded silence (`sounds` with nothing played); `-` is the
                 // column the trace does not have.
                 values.push(None);
@@ -16604,7 +16750,7 @@ fn parse_route_trace(text: &str) -> Result<RouteTrace, String> {
                 Some(
                     raw.parse::<f64>()
                         .map_err(|_| format!("line {}: `{raw}` is not a number ({} column)",
-                            line_no + 1, ROUTE_TRACE_FIELDS[slot]))?,
+                            line_no + 1, fields[slot]))?,
                 )
             };
             values.push(value);
@@ -16622,7 +16768,8 @@ fn parse_route_trace(text: &str) -> Result<RouteTrace, String> {
         .iter()
         .map(Option::is_some)
         .collect();
-    Ok(RouteTrace { rows, columns })
+    let events = fields.iter().map(|field| manifest.is_event(field)).collect();
+    Ok(RouteTrace { rows, columns, fields, events })
 }
 
 /// Compare two route traces field by field. `epsilon` is the absolute tolerance for every numeric
@@ -16662,11 +16809,11 @@ fn compare_route_rows(
             failures.push(format!("tick {tick}: the trace has tick {}", got_row.tick));
             continue;
         }
-        for (slot, field) in ROUTE_TRACE_FIELDS.iter().enumerate().skip(1) {
+        for (slot, field) in expected.fields.iter().enumerate().skip(1) {
             if !expected.columns[slot] {
                 continue;
             }
-            if ROUTE_TEXT_FIELDS.contains(field) {
+            if ROUTE_TEXT_FIELDS.contains(&field.as_str()) {
                 let (Some(want), Some(got)) = (want_row.texts[slot].as_deref(), got_row.texts[slot].as_deref())
                 else {
                     continue;
@@ -16679,7 +16826,7 @@ fn compare_route_rows(
                 }
                 continue;
             }
-            let event = ROUTE_EVENT_FIELDS.contains(field);
+            let event = expected.events[slot];
             // An event column is a latched state. The frozen retail capture and the replay advance a
             // different amount of engine time inside the same 600 ms hold, so the row the latch
             // trips on is not comparable there and only the fixture's last row is graded. The port
@@ -16706,7 +16853,7 @@ fn compare_route_rows(
                 }
                 continue;
             }
-            if *field == "sector" {
+            if field == "sector" {
                 if delta > 0.5 {
                     failures.push(format!(
                         "tick {tick} sector: expected {want:.0}, trace has {got:.0}"
@@ -16716,7 +16863,7 @@ fn compare_route_rows(
             }
             // The engine clock is an identity (issue #17): two samples at different engine instants
             // are different measurements, so no position tolerance may excuse one.
-            if *field == "t_s" {
+            if field == "t_s" {
                 if want != got {
                     failures.push(format!(
                         "tick {tick} t_s: expected {want:.4}, trace has {got:.4} (engine instants differ)"
@@ -16742,17 +16889,20 @@ fn compare_route_rows(
     }
 }
 
-/// `--route-compare`: parse both traces and apply [`compare_route_rows`] at `epsilon`.
+/// `--route-compare`: parse both traces against the level's manifest and apply
+/// [`compare_route_rows`] at `epsilon`.
 fn route_trace_compare(
+    manifest: &std::path::Path,
     expected: &std::path::Path,
     actual: &std::path::Path,
     epsilon: f64,
     events_per_row: bool,
 ) -> Result<(), String> {
+    let manifest = RouteManifest::read(manifest)?;
     let read = |path: &std::path::Path| -> Result<RouteTrace, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        parse_route_trace(&text).map_err(|e| format!("{}: {e}", path.display()))
+        parse_route_trace(&text, &manifest).map_err(|e| format!("{}: {e}", path.display()))
     };
     let want = read(expected)?;
     let got = read(actual)?;
@@ -16760,9 +16910,9 @@ fn route_trace_compare(
     let unmeasured = want
         .columns
         .iter()
-        .zip(ROUTE_TRACE_FIELDS.iter())
+        .zip(want.fields.iter())
         .filter(|(measured, _)| !**measured)
-        .map(|(_, field)| *field)
+        .map(|(_, field)| field.as_str())
         .collect::<Vec<_>>();
     let port_only = got.rows.len() - want.rows.len();
     println!(
@@ -16786,10 +16936,12 @@ fn route_trace_compare(
 /// one `eyeOffset` above it, so a `shots.tsv` eye is 0.037 higher) — and a retail capture and this
 /// trace therefore name the same point. `vel_x`/`vel_y`/`vel_z` are the position derivative over the
 /// sample window, in level units per second — the retail fixture's own definition. A field the run
-/// does not have is `-`: a level without the two route cogs, or a retail capture that did not record
-/// health.
+/// does not have is `-`: a watched cog that has not started, or a retail capture that did not record
+/// health. `latched` carries each `latch` event's state between samples ([`RouteEvent::Latch`]).
+#[allow(clippy::too_many_arguments)]
 fn write_route_trace_row(
     path: &std::path::Path,
+    manifest: &RouteManifest,
     tick: u32,
     engine_s: f64,
     body: &runtime::PlayerBody,
@@ -16797,7 +16949,7 @@ fn write_route_trace_row(
     audio: &SampledAudio,
     sim: Option<&Sim>,
     world: Option<&World>,
-    door0_opened: &mut bool,
+    latched: &mut Vec<bool>,
 ) {
     use std::io::Write;
     let first = tick == 0;
@@ -16813,7 +16965,7 @@ fn write_route_trace_row(
     };
     let Ok(mut file) = open() else { return };
     if first {
-        let _ = writeln!(file, "{}", ROUTE_TRACE_FIELDS.join("\t"));
+        let _ = writeln!(file, "{}", manifest.fields().join("\t"));
     }
     let (health, shields) = sim
         .map(|sim| {
@@ -16825,28 +16977,29 @@ fn write_route_trace_row(
             )
         })
         .unwrap_or((None, None));
-    let cogs = match (world, sim) {
-        (Some(world), Some(sim)) => route_cog_values(world, sim),
-        _ => [None; 8],
+    let watched = match (world, sim) {
+        (Some(world), Some(sim)) => route_watch_values(manifest, world, sim),
+        _ => vec![None; manifest.watches.len()],
     };
-    // The door's own report, latched: `00_door.cog` closes it again two seconds after `arrived`,
-    // so a sample grid that happens to miss the open frame still records that it opened.
-    if cogs[0].is_some_and(|v| v != 0.0) || cogs[1].is_some_and(|v| v != 0.0) {
-        *door0_opened = true;
-    }
-    // `01_endlevel.cog`'s `user0:` sets goal 0 completed with `SetGoalFlags(player,0,2)`; the
-    // inventory bin (SITHBIN_GOAL00 + 0) reads 1 at the level start and 3 once 8t88 is sighted.
-    let goal_bin100 = sim
-        .map(|sim| f64::from(sim.world.borrow().inv.get(&runtime::GOAL_BIN).copied().unwrap_or(0.0)));
-    // `sithMain_SetEndLevel` (`0x4c4bf0`): the level's own script called `jkEndLevel`, so the level
-    // finished. A capture keeps the world it booted (the app clears `level_complete`), which is why
-    // the trace reads the never-cleared latch instead of the app's transition flag.
-    let level_end = sim.map(|sim| i32::from(sim.world.borrow().end_level_called));
     let number = |value: Option<f64>, places: usize| {
         value
             .map(|v| format!("{v:.places$}"))
             .unwrap_or_else(|| "-".to_string())
     };
+    latched.resize(manifest.events.len(), false);
+    let events = manifest.events.iter().zip(latched.iter_mut()).map(|((_, event), latch)| match event {
+        RouteEvent::Latch(sources) => {
+            if sources.iter().any(|&w| watched[w].is_some_and(|v| v != 0.0)) {
+                *latch = true;
+            }
+            u8::from(*latch).to_string()
+        }
+        RouteEvent::Bin(bin) => number(
+            sim.map(|sim| f64::from(sim.world.borrow().inv.get(bin).copied().unwrap_or(0.0))),
+            0,
+        ),
+        RouteEvent::LevelEnd => number(sim.map(|sim| f64::from(i32::from(sim.world.borrow().end_level_called))), 0),
+    });
     // The mixer's state at this sample. No song is the engine's idle state (0 0 0); silence is an
     // empty `ambient`/`sounds`, so an audio cell is never `-`.
     let (music, music_end, music_loop) = audio
@@ -16866,55 +17019,39 @@ fn write_route_trace_row(
         .map(|(_, name, gain)| format!("{name}@{gain:.3}"))
         .collect::<Vec<_>>()
         .join(" ");
-    let _ = writeln!(
-        file,
-        "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{music}\t{music_end}\t{music_loop}\t{:.3}\t{ambient}\t{ambient_volume}\t{sounds}",
-        tick,
-        engine_s,
-        body.pos.x,
-        body.pos.y,
-        body.pos.z,
-        body.sector,
-        vel[0],
-        vel[1],
-        vel[2],
+    let cells: Vec<String> = [
+        tick.to_string(),
+        format!("{engine_s:.4}"),
+        format!("{:.4}", body.pos.x),
+        format!("{:.4}", body.pos.y),
+        format!("{:.4}", body.pos.z),
+        body.sector.to_string(),
+        format!("{:.4}", vel[0]),
+        format!("{:.4}", vel[1]),
+        format!("{:.4}", vel[2]),
         number(health, 1),
         number(shields, 1),
-        number(cogs[0], 3),
-        number(cogs[1], 3),
-        number(cogs[2], 3),
-        number(cogs[3], 3),
-        number(cogs[4], 3),
-        number(cogs[5], 3),
-        number(cogs[6], 3),
-        number(cogs[7], 3),
-        if *door0_opened { 1 } else { 0 },
-        number(goal_bin100, 0),
-        number(level_end.map(f64::from), 0),
-        audio.music_volume,
-    );
+    ]
+    .into_iter()
+    .chain(watched.iter().map(|v| number(*v, 3)))
+    .chain(events)
+    .chain([music, music_end, music_loop, format!("{:.3}", audio.music_volume), ambient, ambient_volume, sounds])
+    .collect();
+    let _ = writeln!(file, "{}", cells.join("\t"));
 }
 
-/// The eight route cog values ([`ROUTE_COGS`], four symbols each). A cog that has not started —
-/// or a level with fewer cogs — reads `None` for its row.
-fn route_cog_values(world: &World, sim: &Sim) -> [Option<f64>; 8] {
-    let mut out = [None; 8];
-    for (row, (index, symbols)) in ROUTE_COGS.iter().enumerate() {
-        if world.level.cogs.get(*index).is_none() {
-            continue;
-        }
-        let Some((_, vm)) = sim
-            .instances
-            .iter()
-            .find(|(_, vm)| vm.cog_index == *index as i32)
-        else {
-            continue;
-        };
-        for (slot, name) in symbols.iter().enumerate() {
-            out[row * 4 + slot] = Some(vm.var(name).num());
-        }
-    }
-    out
+/// The manifest's watched cog variables, in `watch` order. A cog the level does not place, or one
+/// that has not started, reads `None`.
+fn route_watch_values(manifest: &RouteManifest, world: &World, sim: &Sim) -> Vec<Option<f64>> {
+    manifest
+        .watches
+        .iter()
+        .map(|(_, index, symbol)| {
+            world.level.cogs.get(*index)?;
+            let (_, vm) = sim.instances.iter().find(|(_, vm)| vm.cog_index == *index as i32)?;
+            Some(vm.var(symbol).num())
+        })
+        .collect()
 }
 
 /// The audio trace's columns, sampled on the route trace's 600 ms cadence.
@@ -17888,6 +18025,51 @@ mod route_tests {
             .join(name)
     }
 
+    /// Level 1's committed route manifest: the columns and events every level-1 fixture carries.
+    fn level1() -> RouteManifest {
+        RouteManifest::read(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/parity/routes/level1-manifest.tsv"),
+        )
+        .expect("the level-1 manifest parses")
+    }
+
+    /// A level-1 column's index in the trace.
+    fn slot(name: &str) -> usize {
+        level1().fields().iter().position(|f| f == name).unwrap_or_else(|| panic!("no `{name}` column"))
+    }
+
+    /// A hand-built level-1 trace that measures every column.
+    fn measured(rows: Vec<RouteTraceRow>) -> RouteTrace {
+        let manifest = level1();
+        let fields = manifest.fields();
+        let events = fields.iter().map(|f| manifest.is_event(f)).collect();
+        RouteTrace { rows, columns: vec![true; fields.len()], fields, events }
+    }
+
+    /// The manifest is the trace's column contract: level 1's manifest must name exactly the columns
+    /// of its committed port oracle, in order, so that fixture stays readable unchanged (issue #24).
+    #[test]
+    fn the_level1_manifest_names_the_committed_oracle_columns() {
+        let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("committed fixture");
+        let header = text.lines().find(|l| !l.trim().is_empty() && !l.starts_with('#')).unwrap_or_default();
+        assert_eq!(level1().fields().join("\t"), header);
+        let events: Vec<_> = level1().events.into_iter().map(|(name, _)| name).collect();
+        assert_eq!(events, ["door0_opened", "goal_bin100", "level_end"]);
+    }
+
+    /// A manifest row the app and the gate do not know, a latch on an undeclared watch and a column
+    /// declared twice are refused, so a typo cannot silently drop or move a column.
+    #[test]
+    fn a_malformed_route_manifest_is_refused() {
+        assert!(RouteManifest::parse("wach\tdoor\t0\tdoorstatus\n").is_err());
+        assert!(RouteManifest::parse("latch\topened\tdoor\n").is_err());
+        assert!(RouteManifest::parse("watch\tdoor\t0\ta\nwatch\tdoor\t0\tb\n").is_err());
+        assert!(RouteManifest::parse("bin\tsector\t100\n").is_err(), "a core column cannot be redeclared");
+        let ok = RouteManifest::parse("level\tx\nwatch\tdoor\t0\ta\nlatch\topened\tdoor\nfinal\topened\t1\n")
+            .expect("gate rows are accepted");
+        assert_eq!(ok.events, vec![("opened".to_string(), RouteEvent::Latch(vec![0]))]);
+    }
+
     #[test]
     fn a_route_script_parses_its_legs_and_inputs() {
         let text = "\
@@ -17942,9 +18124,9 @@ input 72 1 0
     #[test]
     fn the_committed_port_route_fixture_parses_and_compares_to_itself() {
         let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("committed fixture");
-        let trace = parse_route_trace(&text).expect("fixture parses");
+        let trace = parse_route_trace(&text, &level1()).expect("fixture parses");
         let header = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
-        for field in ROUTE_EVENT_FIELDS {
+        for (field, _) in level1().events {
             assert!(header.split('\t').any(|cell| cell == field), "fixture has no {field} column");
         }
         let compared = compare_route_rows(&trace, &trace, 1e-6, true)
@@ -17957,11 +18139,11 @@ input 72 1 0
     /// its own row span. That is the gate's retail half, and it needs no new retail capture.
     #[test]
     fn the_frozen_retail_fixture_covers_the_route_prefix_it_measured() {
-        let slot = |name: &str| ROUTE_TRACE_FIELDS.iter().position(|f| *f == name).unwrap();
         let retail_text =
             std::fs::read_to_string(fixture("level1-route-retail.tsv")).expect("retail fixture");
-        let retail = parse_route_trace(&retail_text).expect("the frozen retail fixture parses");
-        for event in ROUTE_EVENT_FIELDS {
+        let retail = parse_route_trace(&retail_text, &level1()).expect("the frozen retail fixture parses");
+        for (event, _) in level1().events {
+            let event = event.as_str();
             assert!(
                 !retail.columns[slot(event)],
                 "the frozen fixture predates `{event}`; a column it does not measure cannot be expected"
@@ -17976,7 +18158,7 @@ input 72 1 0
 
         let port_text =
             std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("port fixture");
-        let port = parse_route_trace(&port_text).expect("port fixture parses");
+        let port = parse_route_trace(&port_text, &level1()).expect("port fixture parses");
         assert!(
             port.rows.len() > retail.rows.len(),
             "the port oracle must carry the exit segment the retail fixture does not"
@@ -17990,8 +18172,8 @@ input 72 1 0
     #[test]
     fn engine_time_is_graded_exactly() {
         let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("fixture");
-        let expected = parse_route_trace(&text).expect("fixture parses");
-        let t_s = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "t_s").unwrap();
+        let expected = parse_route_trace(&text, &level1()).expect("fixture parses");
+        let t_s = slot("t_s");
         let mut late = expected.clone();
         // One sample 10 ms off the engine instant: inside the position epsilon, not inside the clock.
         *late.rows[1].values[t_s].as_mut().expect("the second row has a t_s") += 0.01;
@@ -18020,9 +18202,9 @@ input 72 1 0
     #[test]
     fn a_perturbed_route_trace_fails_the_gate() {
         let text = std::fs::read_to_string(fixture("level1-route-port.tsv")).expect("fixture");
-        let expected = parse_route_trace(&text).expect("fixture parses");
+        let expected = parse_route_trace(&text, &level1()).expect("fixture parses");
         let mut perturbed = expected.clone();
-        let x = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "x").unwrap();
+        let x = slot("x");
         let value = perturbed.rows[0].values[x].as_mut().expect("the first row has an x");
         *value += 0.25;
         let error = compare_route_rows(&expected, &perturbed, 1e-6, true)
@@ -18039,32 +18221,26 @@ input 72 1 0
     /// time), so an intermediate disagreement is not a failure; the final state is.
     #[test]
     fn event_columns_are_graded_only_on_the_last_row() {
-        let slot = |name: &str| ROUTE_TRACE_FIELDS.iter().position(|f| *f == name).unwrap();
+        let width = level1().fields().len();
         let row = |tick: u32, door: Option<f64>, goal: Option<f64>, end: Option<f64>| {
-            let mut values = vec![None; ROUTE_TRACE_FIELDS.len()];
+            let mut values = vec![None; width];
             values[0] = Some(f64::from(tick));
             values[slot("door0_opened")] = door;
             values[slot("goal_bin100")] = goal;
             values[slot("level_end")] = end;
-            RouteTraceRow { tick, values, texts: vec![None; ROUTE_TRACE_FIELDS.len()] }
+            RouteTraceRow { tick, values, texts: vec![None; width] }
         };
-        let want = RouteTrace {
-            rows: vec![
-                row(0, Some(0.0), Some(1.0), Some(0.0)),
-                row(36, Some(1.0), Some(1.0), Some(0.0)),
-                row(72, Some(1.0), Some(3.0), Some(1.0)),
-            ],
-            columns: vec![true; ROUTE_TRACE_FIELDS.len()],
-        };
+        let want = measured(vec![
+            row(0, Some(0.0), Some(1.0), Some(0.0)),
+            row(36, Some(1.0), Some(1.0), Some(0.0)),
+            row(72, Some(1.0), Some(3.0), Some(1.0)),
+        ]);
         // The door opens a row early and the sighting fires a row late: intermediate samples differ.
-        let got = RouteTrace {
-            rows: vec![
-                row(0, Some(0.0), Some(1.0), Some(0.0)),
-                row(36, Some(1.0), Some(3.0), Some(0.0)),
-                row(72, Some(1.0), Some(3.0), Some(1.0)),
-            ],
-            columns: vec![true; ROUTE_TRACE_FIELDS.len()],
-        };
+        let got = measured(vec![
+            row(0, Some(0.0), Some(1.0), Some(0.0)),
+            row(36, Some(1.0), Some(3.0), Some(0.0)),
+            row(72, Some(1.0), Some(3.0), Some(1.0)),
+        ]);
         let compared = compare_route_rows(&want, &got, 1e-6, false).expect("intermediate events are not graded");
         assert_eq!(compared, 3, "only the three final-row events were compared");
 
@@ -18103,23 +18279,20 @@ input 72 1 0
     /// early latch is a different route, not a sampling artefact, and must fail the oracle.
     #[test]
     fn an_early_event_latch_fails_the_port_oracle() {
-        let slot = |name: &str| ROUTE_TRACE_FIELDS.iter().position(|f| *f == name).unwrap();
+        let width = level1().fields().len();
         let row = |tick: u32, door: Option<f64>, goal: Option<f64>, end: Option<f64>| {
-            let mut values = vec![None; ROUTE_TRACE_FIELDS.len()];
+            let mut values = vec![None; width];
             values[0] = Some(f64::from(tick));
             values[slot("door0_opened")] = door;
             values[slot("goal_bin100")] = goal;
             values[slot("level_end")] = end;
-            RouteTraceRow { tick, values, texts: vec![None; ROUTE_TRACE_FIELDS.len()] }
+            RouteTraceRow { tick, values, texts: vec![None; width] }
         };
-        let want = RouteTrace {
-            rows: vec![
-                row(0, Some(0.0), Some(1.0), Some(0.0)),
-                row(36, Some(1.0), Some(1.0), Some(0.0)),
-                row(72, Some(1.0), Some(3.0), Some(1.0)),
-            ],
-            columns: vec![true; ROUTE_TRACE_FIELDS.len()],
-        };
+        let want = measured(vec![
+            row(0, Some(0.0), Some(1.0), Some(0.0)),
+            row(36, Some(1.0), Some(1.0), Some(0.0)),
+            row(72, Some(1.0), Some(3.0), Some(1.0)),
+        ]);
         // The door latches a row early: the last row agrees, so only the per-row grade sees it.
         let mut early = want.clone();
         early.rows[0].values[slot("door0_opened")] = Some(1.0);
@@ -18454,8 +18627,8 @@ tick\tt_s\tx\ty\tz\tsector\tvel_x\tvel_y\tvel_z\thealth\tshields\tdoor0_status\t
 0\t0.0000\t0\t0\t0\t1\t0\t0\t0\t100.0\t100.0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t1\t0\t12\t13\t1\t0.000\t01cantinaband02.wav\t0.300\t
 36\t0.6000\t0\t0\t0\t1\t0\t0\t0\t100.0\t100.0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t1\t0\t12\t13\t1\t0.000\t\t0.000\tpistol-1.wav@0.750
 ";
-        let expected = parse_route_trace(text).expect("the trace parses");
-        let ambient = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "ambient").unwrap();
+        let expected = parse_route_trace(text, &level1()).expect("the trace parses");
+        let ambient = slot("ambient");
         assert_eq!(expected.rows[0].texts[ambient].as_deref(), Some("01cantinaband02.wav"));
         assert_eq!(expected.rows[1].texts[ambient].as_deref(), Some(""), "silence is a value");
         assert!(compare_route_rows(&expected, &expected, 1e-6, false).is_ok());
@@ -18472,8 +18645,8 @@ tick\tt_s\tx\ty\tz\tsector\tvel_x\tvel_y\tvel_z\thealth\tshields\tdoor0_status\t
     /// missing sound in that window was skipped instead of compared.
     #[test]
     fn a_silent_sounds_row_is_compared() {
-        let sounds = ROUTE_TRACE_FIELDS.iter().position(|f| *f == "sounds").unwrap();
-        let want = parse_route_trace("tick\tsounds\n0\t\n36\tpistol-1.wav@0.250\n")
+        let sounds = slot("sounds");
+        let want = parse_route_trace("tick\tsounds\n0\t\n36\tpistol-1.wav@0.250\n", &level1())
             .expect("the trace parses");
         assert_eq!(
             want.rows[0].texts[sounds].as_deref(),
@@ -18482,13 +18655,13 @@ tick\tt_s\tx\ty\tz\tsector\tvel_x\tvel_y\tvel_z\thealth\tshields\tdoor0_status\t
         );
         assert!(compare_route_rows(&want, &want, 1e-6, false).is_ok());
 
-        let extra = parse_route_trace("tick\tsounds\n0\trifle-1.wav@0.100\n36\tpistol-1.wav@0.250\n")
+        let extra = parse_route_trace("tick\tsounds\n0\trifle-1.wav@0.100\n36\tpistol-1.wav@0.250\n", &level1())
             .expect("the trace parses");
         let error = compare_route_rows(&want, &extra, 1e-6, false)
             .expect_err("a sound in a silent row passed the comparator");
         assert!(error.contains("sounds"), "{error}");
 
-        let missing = parse_route_trace("tick\tsounds\n0\t\n36\t\n").expect("the trace parses");
+        let missing = parse_route_trace("tick\tsounds\n0\t\n36\t\n", &level1()).expect("the trace parses");
         let error = compare_route_rows(&want, &missing, 1e-6, false)
             .expect_err("a missing sound passed the comparator");
         assert!(error.contains("sounds"), "{error}");
@@ -30049,9 +30222,10 @@ fn no_ai_capture_switch(no_ai: bool, replaying: bool) -> Result<bool, &'static s
     }
 }
 
-/// `--route-trace <path>`: where the replay writes its sampled trace.
+/// `--route-trace <path>` and its `--route-manifest`: where the replay writes its sampled trace,
+/// and the level's columns.
 #[derive(Resource, Default)]
-struct RouteTraceOut(Option<std::path::PathBuf>);
+struct RouteTraceOut(Option<(std::path::PathBuf, RouteManifest)>);
 
 /// `--audio-trace <path>`: where the replay writes its **audio** trace — the music selection and
 /// volume, the sector ambience, and the one-shot sounds the scripts and actors played, sampled on
@@ -30120,13 +30294,13 @@ impl RouteCursor {
 
 /// The previous sampled body position and engine instant, so the trace's velocity columns are the
 /// retail fixture's definition — the position derivative over the sample window — and not the
-/// integrated intent, which a body pinned against a wall keeps reporting. `door0_opened` is the
-/// trace's own latch: the door script re-closes two seconds after it opens, so a sample can miss the
-/// open frame.
+/// integrated intent, which a body pinned against a wall keeps reporting. `latched` holds the
+/// manifest's `latch` events: a door script re-closes two seconds after it opens, so a sample can
+/// miss the open frame.
 #[derive(Resource, Default)]
 struct RoutePrev {
     sample: Option<([f32; 3], f64)>,
-    door0_opened: bool,
+    latched: Vec<bool>,
 }
 
 /// The route trace's velocity columns: the position derivative over the sample window, in level units
@@ -30570,7 +30744,7 @@ fn route_replay(
         }
     }
     if tick % ROUTE_SAMPLE_TICKS == 0
-        && let Some(path) = out.as_deref().and_then(|o| o.0.as_deref())
+        && let Some((path, manifest)) = out.as_deref().and_then(|o| o.0.as_ref())
     {
         let pos = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
         let engine_s = cursor.engine_s;
@@ -30596,6 +30770,7 @@ fn route_replay(
         };
         write_route_trace_row(
             path,
+            manifest,
             tick,
             engine_s,
             &player.body,
@@ -30603,7 +30778,7 @@ fn route_replay(
             &audio,
             sim.as_deref(),
             world.as_deref(),
-            &mut prev.door0_opened,
+            &mut prev.latched,
         );
     }
     // The clock advances by the step the simulation was handed this frame (`sim_dt`/`walk_player`),
