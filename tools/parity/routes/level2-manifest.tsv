@@ -1,0 +1,19 @@
+# Level-2 route manifest (issue #24). The keys are documented in `level1-manifest.tsv`.
+#
+# No `retail` row: there is no retail capture of this route, so the `port` fixture is port-side
+# evidence (the replay is deterministic and keeps its own columns), not parity.
+
+level	02narshadda
+plan	tools/parity/routes/level2-route.tsv
+port	tools/parity/routetrace/level2-route-port.tsv
+provenance	tools/parity/routes/level2-route-provenance.tsv
+mechanics	walk	floor	collision	audio state
+
+# The first door (`00_door.cog`, placed cog 2, door thing 50 in the level's `cogs` section).
+watch	door2_status	2	doorstatus
+watch	door2_movestatus	2	movestatus
+latch	door2_opened	door2_status	door2_movestatus
+level_end	level_end
+
+# The walk does not reach the level's end.
+final	level_end	0
