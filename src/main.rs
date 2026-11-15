@@ -19478,14 +19478,22 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     // `10cargo` joins them because the shared floor answer seats the body on the ramp's face contact
     // rather than the sector plane the old seat lifted to, and its line then walks off too. The
     // walker is not changed to avoid them.
+    // The round-428 record (roadmap's sweep row) is the expectation this table freezes: only
+    // `09fuelstation` leaves the world's floors (its 21.13-unit walk-off), `02narshadda` 11.22
+    // contained, `07yun` 0.00, and `17asarris`/`m_boss17` 2.90 back in the world outside their
+    // start sector. The round-429 commit (`9d7bca7`) added this table carrying its own regressed
+    // seat's outcomes — `10cargo`/`11gorc` in the void (680.75/627.51) and the sarris pair
+    // 2.77-contained — and those rows are retired with the seat fix that restores the documented
+    // numbers (issue #23).
     const WALK_OFF_THE_EDGE: &[(&str, bool, bool, f32)] = &[
         ("jkl\\02narshadda.jkl", false, true, 11.22),
         ("jkl\\07yun.jkl", false, true, 0.00),
         ("jkl\\09fuelstation.jkl", false, false, 21.13),
-        ("jkl\\10cargo.jkl", true, false, 680.75),
-        ("jkl\\11gorc.jkl", true, false, 627.51),
-        ("jkl\\17asarris.jkl", false, true, 2.77),
-        ("jkl\\m_boss17.jkl", false, true, 2.77),
+        // A former walk-off the round-428 record names as back in the world; its 0.24 drop is the
+        // fixed build's measurement of that documented state.
+        ("jkl\\11gorc.jkl", false, false, 0.24),
+        ("jkl\\17asarris.jkl", false, false, 2.90),
+        ("jkl\\m_boss17.jkl", false, false, 2.90),
     ];
     let off_edge = |name: &str| WALK_OFF_THE_EDGE.iter().find(|(level, ..)| *level == name);
     // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
