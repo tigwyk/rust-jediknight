@@ -7289,3 +7289,58 @@ readings were wrong; the wrapper conclusion does not depend on either.
   which searches an adjoined sector's thing list. The `flags & 8`, `flags & 0x10` and `flags & 0x2000`
   filters in `SearchForThingCollisions` (`0x4e8430:37-43`) are all still off, so every colliding thing in
   the searched sectors is tested.
+
+## Issue #31: same-session A/B, and the walk6 boundary
+
+Two binaries, one session: `main55` (`770602dc`, `f092df1`) against the branch (`91d3a1acd5`). This table
+supersedes earlier columns that mixed recorded values with new ones (the `fbcd6ad` log row listed
+`walk6_spawn` failing on both sides; today main passes it, so that column was not a same-session read).
+
+| check | main | branch |
+|---|---|---|
+| `cargo test --release` | 405 pass | 405 pass |
+| default trace gate | 9/9 | 8/9, `walk6_spawn` off 5 |
+| `walk6_spawn` alone | off 2 (pass), xy 0.512, z 0.122 | off 5 (fail), xy 0.521, z 0.130 |
+| frozen level-1 slice (684 / 1.70) | 1 field: tick 144, sector 349 -> 361 | 2 fields: ticks 36/72, sector 349 -> 339 |
+| `--walk all` | passes, worst drop 3.38 | fails: `02narshadda` 11.17 vs 11.22, then `07yun` 1.50 vs 0.00 |
+
+The slice mismatch moved: the branch clears main's tick-144 sample and introduces two earlier ones. It is
+not a superset, so "closer" is not a count question.
+
+`walk6_spawn`: the path is identical; the first divergent sample is tick 124 at (23.32, 38.85, 1.15), where
+the branch has entered sector 290 while main and retail are in 315 at z 1.14. The branch's body rises
+0.008 after stopping and the boundary sits between the two heights.
+
+Decomp reads that close the two candidate causes:
+
+- `sithPhysics_GetThingHeight` (`0x4f6210`) is `max(model insert-offset z, size - 0.005)`; for the player
+  that is `0.120114`, the port's `height`. Matches.
+- `0x4f7430` forms `local_68 = dot(pos - attach.point, normal)` and divides it by
+  `dot(normal, world_up)` when physflag `0x800` is set (`0x4f7430:76-86`). The port's `d` and `d /= c` are
+  the same arithmetic, and the `0.5 * dt` clamp (`0x523198`) is applied to the displacement, as written.
+- `0x4e7950:283` gates the floor tail on `+0x34` (attach flags), not on the attach pointer. The port's
+  `finish_body` ORs `attach.is_some()` because a physics attach does not write `+0x34`; the player has
+  physflag `0x40` and resting `vz` inside [-2, 0.2], so both readings take the same FindFloor branch with
+  the same range. No behaviour difference for this body.
+
+The decomp therefore does not show the branch violating the hold or the search gate. What differs is which
+floor face is chosen. The fixture's two-decimal z cannot separate 1.1417 from 1.1501, and selecting a side
+by it is what Principles and pitfalls §2/§7 forbid.
+
+Rejected variant: re-recording `WALK_OFF_THE_EDGE` rows one at a time. `02narshadda` at 11.17 is explained
+by the attached hold (the walk-off is 0.05 shallower), but re-recording it advanced the run to `07yun`
+(1.50 against a recorded 0.00), which has no engine reason yet. Reverted. The rows are port measurements,
+and a partial re-record is a gate chase, not a transliteration.
+
+Added: `BK_FLOOR_TRACE` now prints each `find_floor` attach (surface, normal, point, pos, range, friction).
+The branch had no emitter there, so a floor choice could not be read at all.
+
+Question for the user (pitfall §7): the `walk6_spawn` fixture records z to two decimals. Does the body rest
+at 1.1417 or 1.1501 on that ramp, and does it enter sector 290? A capture with three or more decimals would
+settle which of the two resting models is the engine's. Do not answer it from the current fixture.
+
+Next single static step: the sector change itself. Only `MoveThing` writes the sector during movement, on a
+collision entry carrying flag `0x20`; read the crossing record that produced 290 in `search_for_collisions`
+and whether an attached body's raised pose can reach that portal plane without an engine crossing.
+
+Retail was not executed; no graphical playthrough was performed. The branch remains unmergeable.
