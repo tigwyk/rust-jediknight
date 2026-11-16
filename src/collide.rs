@@ -1446,8 +1446,8 @@ impl LevelGeometry {
     /// - the mesh list is `model+0x24` count / `model+0x28` base (`0x5080d0:75`), and `rdModel3_LoadEntry`
     ///   (`0x443e80:125-135`) stores one count/pointer pair per **geoset**, so this reads geoset 0 only;
     ///   each mesh's faces are `+0x40` stride `0x40`, count `+0x50`, vertices `+0x30` (`0x508400`);
-    /// - the mesh branch needs `local_4c`, which also requires a `collide=3` partner (`+0x28`). The
-    ///   shipped `walkplayer` has no `collide=` row, so the player is `collide=0` and the reverse branch
+    /// - the mesh branch needs `local_4c`, which also requires a `collide=3` partner (`+0x28`). The shipped
+    ///   `walkplayer` inherits `collide=1` from `_actor`, so the player is never 3 and the reverse branch
     ///   (the *mover*'s own mesh, `bVar14`, which negates the normal) cannot run for a walking body.
     fn check_sphere_thing_intersection(
         thing: &ThingSolid,

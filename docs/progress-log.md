@@ -7269,3 +7269,23 @@ Next single static step: `sithThing_UpdateMove` (`0x4cc4c0`) and the attached-ph
 a body wedged between the table side and the wall, one engine function at a time. No trace was used to
 select a change. Retail was not executed; no graphical playthrough was performed. The branch remains
 unmergeable.
+
+### Correction: the player's `collide=` and movement search flags
+
+The entry above states the player is `collide=0` and that the movement search flags are `0x245`. Both
+readings were wrong; the wrapper conclusion does not depend on either.
+
+- `_actor` carries `collide=1` (`type=actor collide=1 move=physics`), and `walkplayer` inherits it through
+  the `Based On:` chain (`Level::template_param`), so the player's `collide` is **1**.
+- The wrapper stays out of its reverse branch anyway: `local_4c` needs `collide == 3`, and 1 is not 3.
+- The player's movement flags are **`0xA40`**, not `0x245`: `sithCollision_MoveThing` (`0x4e7950:47-56`)
+  starts from the caller's `0x40`, adds `5` only when `collide == 0` (not here), adds `0x200` for
+  `kind == 10`, and adds `0x800` because bit 0 is still clear.
+- The port derives **`0xA00`**: it passes base `0` instead of `0x40` because the only reader of `0x40`
+  in `MoveThing` is the trailing `FindFloor` at `0x4e7950:283`, which `finish_body` performs separately.
+  No other `flags & 0x40` consumer exists in the collision path, and every search-relevant bit (`0x800`
+  set; `1`, `4`, `8`, `0x10`, `0x2000` clear) is identical.
+- `0x800` is live: it is the adjacent-thing expansion at the end of `search_for_collisions` (`0x4e8160`),
+  which searches an adjoined sector's thing list. The `flags & 8`, `flags & 0x10` and `flags & 0x2000`
+  filters in `SearchForThingCollisions` (`0x4e8430:37-43`) are all still off, so every colliding thing in
+  the searched sectors is tested.
