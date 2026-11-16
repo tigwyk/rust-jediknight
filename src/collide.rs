@@ -1559,38 +1559,30 @@ impl LevelGeometry {
             // response does not accept (`0x4e7950:104-205`: advance to the hit, run the handler,
             // `while (uVar9 == 0)` pops the next). A tangent record (`d_into <= deadzone`) is
             // skipped for the next-nearest, not treated as the move's end.
+            // A solid model is a record like a wall: for a physics mover against a non-physics thing,
+            // `sithCollision_ThingCollisionHandler` (`0x4e8c50`) answers with the same
+            // `sithCollision_CollideHurt` (`0x4e9090`) a surface gets. Both kinds share one stack, so a
+            // refused record of either kind gives way to the next accepted one, and none accepted
+            // finishes the move. It is never a step: `MoveThing` has none.
             let mut records = Vec::new();
             let room = self.sweep_rooms(here, at, dir, left, radius, gates, &mut records);
+            self.thing_contacts(at, dir, left, radius, here, |_, t, normal, _, _| {
+                let point = [at[0] + dir[0] * t, at[1] + dir[1] * t, at[2] + dir[2] * t];
+                records.push(Sweep { distance: t, surface: usize::MAX, normal, sector: here, point, kind: 4 });
+            });
             records.sort_by(|a, b| {
                 a.distance.total_cmp(&b.distance).then_with(|| (b.kind == 4).cmp(&(a.kind == 4)))
             });
-            let room = if let (Some(nearest), far, end) = room {
-                let accepted = records
-                    .iter()
-                    .find(|r| {
-                        let d = -(dir[0] * left * r.normal[0]
-                            + dir[1] * left * r.normal[1]
-                            + dir[2] * left * r.normal[2]);
-                        d.abs() > 1e-5 && d > 0.0
-                    })
-                    .copied();
-                (accepted.or(Some(nearest)), far, end)
-            } else {
-                room
-            };
-            // A solid model is a contact like a wall: whichever comes first stops the move. For a
-            // physics mover against a non-physics thing, `sithCollision_ThingCollisionHandler`
-            // (`0x4e8c50`) answers with the same `sithCollision_CollideHurt` (`0x4e9090`) a surface
-            // gets, off the record's normal and distance, so the thing record joins the surface branch
-            // below. It is never a step: `MoveThing` has none.
-            let body = self.sweep_things(at, dir, left, radius, here);
-            let room = match body {
-                Some((travel, normal)) if room.0.is_none_or(|hit| travel < hit.distance) => {
-                    let point = [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2] + dir[2] * travel];
-                    let hit = Sweep { distance: travel, surface: usize::MAX, normal, sector: here, point, kind: 4 };
-                    (Some(hit), here, room.2)
-                }
-                _ => room,
+            let accepted = records
+                .iter()
+                .find(|r| {
+                    let d = -dot(r.normal, dir) * left;
+                    d.abs() > 1e-5 && d > 0.0
+                })
+                .copied();
+            let room = match accepted {
+                Some(hit) if hit.surface == usize::MAX => (Some(hit), here, room.2),
+                hit => (hit, room.1, room.2),
             };
             match room {
 
