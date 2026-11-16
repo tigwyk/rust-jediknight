@@ -7095,3 +7095,34 @@ writes zero. These exercise final position and velocity, not implementation text
 The previous `PopStack` cutover already preserves plain-sphere/face ties; no face-first sort remains
 in movement or floor search. World-space versus engine-local-space mesh testing remains a known
 separate deviation; this correction does not claim that the entire thing intersection is faithful.
+
+### Verification of `3091b29`: shared distance protocol
+
+`cargo test --release`: 396 passed, 0 failed; the release build succeeds with 47 warnings.
+Repeated the same-session comparisons against `e9cd976`, not just the preceding selector build.
+
+- Baseline `e9cd976.exe`: SHA-256
+  `7e011abace8bf9de1ca16d9c8523dd0f7e96f54a74ce699c80e1d07079edae2c`.
+- `3091b29`, `distance.exe`: SHA-256
+  `02f43767dab8ba5ad0ea624592bd5641843c6892f3a6cf10e3b54a8a03d0098f`.
+
+| Check | `e9cd976` | `3091b29` |
+|---|---|---|
+| Default trace gate | 9 compared, `walk6_spawn` fails | Identical printed metrics on all 9 legs |
+| Level-1 slice, cut684, epsilon1.70 | 2 sector mismatches: ticks36/72, expected349 versus339 | Same |
+| `walk2_spawn` | PASS; travel2.90, off0, xy0.559, z0.355 | Same |
+| `walk3_spawn` | FAIL; travel3.37, off4, xy1.654, z0.052 | FAIL; travel3.30, off4, xy1.585, z0.053 |
+| `walk5_spawn` | FAIL; travel1.75, off2, xy2.179, z0.081 | FAIL; travel1.75, off2, xy2.182, z0.081 |
+| `--walk all`, level1 | travel1.1, blocked545, final349, contained, hull differs, drop0.11 | Same |
+| `--walk all`, level2 | Stops: drop11.17 against recorded11.22 | Same assertion; later levels unmeasured |
+
+The earlier `44b61c9` travel gain on `walk5_spawn` does not survive the correct distance protocol.
+That gain was not evidence for the selected-distance implementation. The final leg returns to
+baseline travel and sector mismatch counts, with xy error worse by 0.003. Keep the engine's shared
+output slot; do not restore the cleaner-looking selected `(distance, normal, face)` tuple to
+recover a route result. No frozen fixtures, constants, routes, cadence or gate bands changed.
+Retail was not executed. This correction leaves the branch unmergeable.
+
+The next static step remains the shared solid/adjoin search and movement stack described above,
+with sector changes applied only when crossing records are popped. World-space mesh tests and
+the other recorded deviations remain explicit; the new tests do not establish full retail parity.
