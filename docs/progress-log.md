@@ -6997,3 +6997,44 @@ fails. This is not evidence of complete retail table-slide parity, and issue #31
 The next isolated static correction is `0x508400` candidate reduction: retain selected mesh/face
 identity and feature kind, emit one thing record, and use that same selected record in movement
 and floor eligibility. Do not use an upward collision normal as a substitute for attachment evidence.
+
+## Issue #31: selected mesh contacts through movement and floor search
+
+Continued from `e9cd976` by reading the selected-contact chain, not by choosing a variant from route
+results. Ghidra independently confirms `sithIntersect_CheckSphereMeshIntersection` (`0x508400`):
+REA evidence `ev_e1a976dcc1ec1ee510bd3928a95e7b20702775e8675df85eb42c8c6110f79e5e`,
+with no unresolved calls, on the same static retail EXE SHA-256
+`12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44`.
+
+The port now preserves geoset-0 mesh boundaries instead of flattening all model faces. The selector
+transliterates `0x508400`'s shrinking distance, face-over-feature preference and authored-normal
+alignment tie rule. `0x5080d0:76-104` then reduces meshes to one thing contact; a later successful
+mesh at the shortened distance replaces the previous mesh. Thing, mesh and face indices survive
+that reduction, and contacts retain face/edge/vertex feature bits (`5/9/17` for thing hits).
+The thing index is the original level/runtime index, before the solid list filters placements.
+
+`CheckSphereFaceIntersectionEx` (`0x508d20:111-117`) returns an edge/vertex normal even when the
+movement handler will refuse it. The port no longer culls that generated normal inside the shared
+face test. Surface search retains its own returned-normal cull; thing selection finishes first,
+then `MoveThing` may refuse the selected contact. Refusal cannot expose an alternative face from
+the same thing. Both movement and floor search now use the existing `PopStack` transliteration,
+not a sort that accidentally promotes a face ahead of an equal-distance plain sphere record.
+Thing records are inserted before surface records.
+
+`FindFloor` applies eligibility only to each thing's selected face. It cannot reject a side and
+attach to a farther top from that same mesh. A record with no mesh/face returns without changing
+attachment (`0x4f5550:79-82`); only exhausting both ray and radius passes detaches. Its API now
+updates the existing attachment directly, preserving KEEP without an invented fallback.
+Selected thing/mesh/face identity is stored in the attachment. The placed-thing read guard remains
+held while floor search consumes that identity.
+
+`cargo test --release`: 394 passed, 0 failed. The six new regressions exercise equal-distance mesh
+selection, refusing a tangent edge without exposing another face, per-mesh versus flattened
+selection, side-before-top floor eligibility, faceless KEEP, and attachment identity on a
+thing/surface tie. The existing stack regression also covers plain-sphere/face and thing-edge/face
+ties. The solid-top settling fixture now uses an actual mesh face; a faceless sphere cannot
+manufacture that attachment. The release build completed with the existing 47 warnings.
+
+This does not change the retained 0.02 s cadence, model-space versus world-space face testing,
+searched-sector/adjoin handling, parent velocity bookkeeping or the floor tail's travel criterion.
+Retail was not executed. Frozen fixtures, routes, authored constants and gate bands remain unchanged.

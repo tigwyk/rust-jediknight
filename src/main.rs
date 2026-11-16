@@ -20046,10 +20046,11 @@ fn bounds(model: &tdo::Model, pose: &[tdo::Xform]) -> ([f32; 3], [f32; 3]) {
 /// stored vertices directly — no hierarchy pose and no insert offset — and
 /// `CheckSphereFaceIntersectionEx` (`0x508d20`) uses the authored normal. A face without one falls back
 /// to its polygon's winding.
-fn collision_faces(model: &tdo::Model) -> Vec<collide::Face> {
+fn collision_faces(model: &tdo::Model) -> Vec<Vec<collide::Face>> {
     let scale = model_scale();
     let mut out = Vec::new();
     for mesh in model.meshes.iter().filter(|mesh| mesh.geoset == 0) {
+        let mut faces = Vec::new();
         for face in &mesh.faces {
             let verts: Vec<[f32; 3]> = face
                 .verts
@@ -20071,8 +20072,9 @@ fn collision_faces(model: &tdo::Model) -> Vec<collide::Face> {
                 let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-9);
                 [n[0] / len, n[1] / len, n[2] / len]
             });
-            out.push(collide::Face { normal, point: verts[0], verts, surface: usize::MAX });
+            faces.push(collide::Face { normal, point: verts[0], verts, surface: usize::MAX });
         }
+        out.push(faces);
     }
     out
 }
@@ -26365,29 +26367,30 @@ fn solid_things_at(
     shapes
         .iter()
         .zip(placed)
-        .filter_map(|(shape, (pos, sector, [pitch, yaw, roll]))| {
+        .enumerate()
+        .filter_map(|(index, (shape, (pos, sector, [pitch, yaw, roll])))| {
             let shape = shape.as_ref()?;
             let (lo, hi) = (shape.lo, shape.hi);
             // `collide=3`: the collision faces under the thing's full matrix (`0x5080d0`), and the
             // span they actually occupy once turned.
-            let mesh = shape.mesh.as_ref().map(|faces| {
+            let mesh = shape.mesh.as_ref().map(|meshes| {
                 let place = |v: [f32; 3]| {
                     let w = crate::runtime::rotate_by_angles(v, pitch, yaw, roll);
                     [w[0] + pos[0], w[1] + pos[1], w[2] + pos[2]]
                 };
-                faces
+                meshes
                     .iter()
-                    .map(|face| collide::Face {
+                    .map(|faces| faces.iter().map(|face| collide::Face {
                         normal: crate::runtime::rotate_by_angles(face.normal, pitch, yaw, roll),
                         point: place(face.point),
                         verts: face.verts.iter().map(|v| place(*v)).collect(),
                         surface: face.surface,
-                    })
-                    .collect::<std::sync::Arc<[collide::Face]>>()
+                    }).collect())
+                    .collect::<std::sync::Arc<[Vec<collide::Face>]>>()
             });
             let (z_min, z_max) = match &mesh {
-                Some(faces) => faces
-                    .iter()
+                Some(meshes) => meshes
+                    .iter().flatten()
                     .flat_map(|face| face.verts.iter().map(|v| v[2]))
                     .fold((f32::MAX, f32::MIN), |(lo, hi), z| (lo.min(z), hi.max(z))),
                 None => (pos[2] + lo[2], pos[2] + hi[2]),
@@ -26396,6 +26399,7 @@ fn solid_things_at(
                 let (sin, cos) = yaw.to_radians().sin_cos();
                 let (mx, my) = ((lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5);
                 Some(collide::ThingSolid {
+                    index,
                     origin: pos,
                     centre: [
                         pos[0] + mx * cos - my * sin,
@@ -26413,6 +26417,7 @@ fn solid_things_at(
                 })
             } else {
                 Some(collide::ThingSolid {
+                    index,
                     centre: pos,
                     origin: pos,
                     radius: shape.radius,
@@ -26443,7 +26448,7 @@ struct SolidShape {
     hi: [f32; 3],
     half: Option<[f32; 2]>,
     /// `collide=3`: geoset 0's faces in model space (see [`collision_faces`]).
-    mesh: Option<std::sync::Arc<[collide::Face]>>,
+    mesh: Option<std::sync::Arc<[Vec<collide::Face>]>>,
     /// A cog-type thing with thingflag `0x40`: `FindFloor` may attach a body to it.
     floor: bool,
 }
@@ -32154,12 +32159,12 @@ mod walker_tests {
             lo: [0.0, -0.1, -0.1],
             hi: [1.0, 0.1, 0.1],
             half: Some([0.5, 0.1]),
-            mesh: Some(vec![collide::Face {
+            mesh: Some(vec![vec![collide::Face {
                 normal: [-1.0, 0.0, 0.0],
                 point: [0.05, 0.0, 0.0],
                 verts: vec![[0.05, -0.1, -0.1], [0.05, -0.1, 0.1], [0.05, 0.1, 0.1], [0.05, 0.1, -0.1]],
                 surface: usize::MAX,
-            }].into()),
+            }]].into()),
             floor: false,
         };
         let solids = collide::Solids::default();
@@ -32318,6 +32323,7 @@ mod walker_tests {
         synced.faces.extend(synced.walls.iter().cloned());
         // Over the lower floor, at the ledge's own height.
         synced.set_things(vec![collide::ThingSolid {
+            index: 0,
             centre: [0.5, 0.0, 0.0],
             origin: [0.5, 0.0, 0.0],
             radius: 0.4,
@@ -32326,7 +32332,12 @@ mod walker_tests {
             sector: 0,
             half: None,
             yaw: 0.0,
-            mesh: None,
+            mesh: Some(vec![vec![collide::Face {
+                normal: [0.0, 0.0, 1.0],
+                point: [0.5, 0.0, RISER],
+                verts: vec![[0.1, -0.4, RISER], [0.9, -0.4, RISER], [0.9, 0.4, RISER], [0.1, 0.4, RISER]],
+                surface: usize::MAX,
+            }]].into()),
             floor: true,
         }]);
         let mut sector = 0usize;

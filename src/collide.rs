@@ -36,6 +36,8 @@ pub struct Plane {
 /// whose radius the caller already tightens to the model's plan footprint for furniture.
 #[derive(Clone, Debug)]
 pub struct ThingSolid {
+    /// Index in the level/runtime thing array, before filtering non-solid things.
+    pub index: usize,
     /// Collision centre in plan, and the thing's own z for the span's origin.
     pub centre: [f32; 3],
     /// Authored thing position (`+0xb8`), independent of the plan box's offset centre.
@@ -50,7 +52,7 @@ pub struct ThingSolid {
     /// `collide=3`: the model's collision faces in world space (outward normals), placed under the
     /// thing's full pitch/yaw/roll. `sithIntersect_CheckSphereThingIntersection` (`0x5080d0`) sweeps
     /// these instead of a sphere, so a door leaf laid flat (`18Ascend` things 323/324) is a floor.
-    pub mesh: Option<std::sync::Arc<[Face]>>,
+    pub mesh: Option<std::sync::Arc<[Vec<Face>]>>,
     /// `sithPhysics_FindFloor`'s thing search (`0x10 | 0x2000`, `0x4e8430`) admits only a cog-type
     /// thing carrying thingflag `0x40`: the ones a body can attach to.
     pub floor: bool,
@@ -877,7 +879,15 @@ pub struct Attach {
     pub normal: [f32; 3],
     pub point: [f32; 3],
     pub surface: Option<usize>,
+    pub thing: Option<ThingHit>,
     pub friction: f32,
+}
+
+/// The selected target and its optional mesh/face (`sithCollision` record `+4/+0xc/+0x10`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThingHit {
+    pub thing: usize,
+    pub mesh_face: Option<(usize, usize)>,
 }
 
 /// One swept-sphere contact: where a body of `radius` first touches, in the direction it moved.
@@ -895,6 +905,7 @@ pub struct Sweep {
     /// spends part of its distance there, so this — not `distance` — is what a caller can place a body by.
     pub point: [f32; 3],
     kind: u32,
+    thing: Option<ThingHit>,
 }
 
 #[derive(Clone, Copy)]
@@ -1117,7 +1128,7 @@ impl LevelGeometry {
 
     /// Search touched sectors, then return the nearest contact and the sector reached before it.
     /// `sithCollision_SearchForCollisions` (0x4e8160) uses the original sweep for every sector.
-    pub fn sweep_rooms(
+    fn sweep_rooms(
         &self,
         sector: usize,
         start: [f32; 3],
@@ -1125,7 +1136,7 @@ impl LevelGeometry {
         dist: f32,
         radius: f32,
         gates: Gates<'_>,
-        records: &mut Vec<Sweep>,
+        records: &mut Vec<Option<CollisionRecord>>,
     ) -> (Option<Sweep>, usize, [f32; 3]) {
         // `SearchForCollisions` (0x4e8160) expands touched sectors against the original sweep.
         // `SearchForSurfaceCollisions` (0x4e86d0) records sphere touches separately from
@@ -1169,9 +1180,9 @@ impl LevelGeometry {
                         .or_else(|| self.wall_of.get(&plane.surface).and_then(|i| self.walls.get(*i)));
                     if record_count < 128 && let Some(hit) = face.and_then(|face| Self::face_contact(
                         face.normal, face.point, &face.verts, face.surface, start, dir, dist, radius, here,
-                    )) {
+                    )).filter(|hit| dot(dir, hit.normal) < 0.0) {
                         stack[record_count] = Some(CollisionRecord::Solid(hit));
-                        records.push(hit);
+                        records.push(Some(CollisionRecord::Solid(hit)));
                         record_count += 1;
                     }
                     continue;
@@ -1184,9 +1195,9 @@ impl LevelGeometry {
                 if !gates.passable(here, portal.adjoin, portal.link) {
                     if record_count < 128 && let Some(hit) = Self::face_contact(
                         portal.normal, portal.point, &portal.verts, portal_surface, start, dir, dist, radius, here,
-                    ) {
+                    ).filter(|hit| dot(dir, hit.normal) < 0.0) {
                         stack[record_count] = Some(CollisionRecord::Solid(hit));
-                        records.push(hit);
+                        records.push(Some(CollisionRecord::Solid(hit)));
                         record_count += 1;
                     }
                     continue;
@@ -1311,9 +1322,6 @@ impl LevelGeometry {
             let (point, kind) = closest?;
             (normalize(sub(from, point))?, kind)
         };
-        if dir[0] * normal[0] + dir[2] * normal[2] + dir[1] * normal[1] >= 0.0 {
-            return None;
-        }
         Some(Sweep {
             distance: t,
             surface,
@@ -1321,7 +1329,29 @@ impl LevelGeometry {
             sector,
             point: at,
             kind,
+            thing: None,
         })
+    }
+
+    /// `sithIntersect_CheckSphereMeshIntersection` (0x508400): one face per mesh, shrinking travel.
+    fn sphere_mesh_intersection(
+        faces: &[Face], at: [f32; 3], dir: [f32; 3], mut left: f32, radius: f32, sector: usize,
+    ) -> Option<(Sweep, usize)> {
+        let (mut kind, mut alignment) = (0, 1.0);
+        let mut selected = None;
+        for (index, face) in faces.iter().enumerate() {
+            let into = [-face.normal[0], -face.normal[1], -face.normal[2]];
+            if let Some(hit) = Self::face_contact(into, face.point, &face.verts, usize::MAX, at, dir, left, radius, sector) {
+                let facing = face.normal[0] * dir[0] + face.normal[1] * dir[1] + face.normal[2] * dir[2];
+                if hit.distance < left || (kind != 4 && hit.kind == 4) || facing < alignment {
+                    left = hit.distance;
+                    kind = hit.kind;
+                    alignment = face.normal[0] * dir[0] + face.normal[2] * dir[2] + face.normal[1] * dir[1];
+                    selected = Some((hit, index));
+                }
+            }
+        }
+        selected
     }
 
     /// Whether a segment crosses a **solid thing** — the bar counter, a crate, a column.
@@ -1493,18 +1523,18 @@ impl LevelGeometry {
     }
 
     /// Every placed solid model a moving body meets (`sithCollision_SearchForThingCollisions`,
-    /// `0x4e8430`): `each(thing, travel, contact normal, face normal, point on the face)`. The face is
-    /// the model face touched (outward normal), a box or cylinder's flat top, or the plan side hit.
+    /// `0x4e8430`): `each(thing, selected contact)`. Mesh/face identity and feature kind survive the
+    /// per-mesh and per-thing reductions; a non-mesh contact has no face.
     fn thing_contacts(
         &self,
+        things: &[ThingSolid],
         at: [f32; 3],
         dir: [f32; 3],
         left: f32,
         radius: f32,
         sector: usize,
-        mut each: impl FnMut(&ThingSolid, f32, [f32; 3], [f32; 3], [f32; 3]),
+        mut each: impl FnMut(&ThingSolid, Sweep),
     ) {
-        let things = self.things();
         for thing in things.iter() {
             // `SearchForThingCollisions` walks the sector lists of the sectors the sweep reaches: a
             // crate in the room next door is not a contact until the body gets to the opening.
@@ -1527,11 +1557,15 @@ impl LevelGeometry {
             }
             if thing.mesh.is_none() && at[2] - radius >= thing.z_max - 1e-4 {
                 if let Some((t, normal)) = thing.sweep_top(at, dir, left, radius) {
-                    each(thing, t, normal, normal, [thing.centre[0], thing.centre[1], thing.z_max]);
+                    let point = [at[0] + dir[0] * t, at[1] + dir[1] * t, at[2] + dir[2] * t];
+                    each(thing, Sweep {
+                        distance: t, normal, point, sector, surface: usize::MAX, kind: 1,
+                        thing: Some(ThingHit { thing: thing.index, mesh_face: None }),
+                    });
                 }
                 continue;
             }
-            if let Some(faces) = &thing.mesh {
+            if let Some(meshes) = &thing.mesh {
                 // `CheckSphereThingIntersection` (0x5080d0:41-46) gates the mesh with the thing's
                 // authored size sphere, even when model vertices extend beyond that sphere.
                 if sphere_intersection(at, dir, left, radius, thing.origin, thing.radius, true, 0).is_none() {
@@ -1539,19 +1573,29 @@ impl LevelGeometry {
                 }
                 // Model normals point out of the solid; `face_contact` takes the level's into-solid
                 // convention, so each face is handed over turned around.
-                for face in faces.iter() {
-                    let into = [-face.normal[0], -face.normal[1], -face.normal[2]];
-                    if let Some(hit) =
-                        Self::face_contact(into, face.point, &face.verts, usize::MAX, at, dir, left, radius, sector)
-                    {
-                        each(thing, hit.distance, hit.normal, face.normal, face.point);
+                // `CheckSphereThingIntersection` (0x5080d0:76-104) keeps the last successful mesh
+                // at the current shortened distance, not every face that can intersect the ray.
+                let mut selected = None;
+                let mut distance = left;
+                for (mesh, faces) in meshes.iter().enumerate() {
+                    if let Some((mut hit, face)) = Self::sphere_mesh_intersection(faces, at, dir, distance, radius, sector) {
+                        distance = hit.distance;
+                        hit.kind |= 1;
+                        hit.thing = Some(ThingHit { thing: thing.index, mesh_face: Some((mesh, face)) });
+                        selected = Some(hit);
                     }
+                }
+                if let Some(hit) = selected {
+                    each(thing, hit);
                 }
                 continue;
             }
             if let Some((t, normal)) = thing.sweep_plan(at, dir, left, radius) {
-                let point = [at[0] + dir[0] * t - normal[0] * radius, at[1] + dir[1] * t - normal[1] * radius, at[2] + dir[2] * t];
-                each(thing, t, normal, normal, point);
+                let point = [at[0] + dir[0] * t, at[1] + dir[1] * t, at[2] + dir[2] * t];
+                each(thing, Sweep {
+                    distance: t, normal, point, sector, surface: usize::MAX, kind: 1,
+                    thing: Some(ThingHit { thing: thing.index, mesh_face: None }),
+                });
             }
         }
     }
@@ -1559,9 +1603,9 @@ impl LevelGeometry {
     /// The nearest placed solid model a moving body meets: the travel to the contact and its normal.
     fn sweep_things(&self, at: [f32; 3], dir: [f32; 3], left: f32, radius: f32, sector: usize) -> Option<(f32, [f32; 3])> {
         let mut best: Option<(f32, [f32; 3])> = None;
-        self.thing_contacts(at, dir, left, radius, sector, |_, t, normal, _, _| {
-            if best.is_none_or(|(near, _)| t < near) {
-                best = Some((t, normal));
+        self.thing_contacts(&self.things(), at, dir, left, radius, sector, |_, hit| {
+            if best.is_none_or(|(near, _)| hit.distance < near) {
+                best = Some((hit.distance, hit.normal));
             }
         });
         best
@@ -1612,23 +1656,22 @@ impl LevelGeometry {
             // refused record of either kind gives way to the next accepted one, and none accepted
             // finishes the move. It is never a step: `MoveThing` has none.
             let mut records = Vec::new();
+            self.thing_contacts(&self.things(), at, dir, left, radius, here, |_, hit| records.push(Some(CollisionRecord::Solid(hit))));
             let room = self.sweep_rooms(here, at, dir, left, radius, gates, &mut records);
-            self.thing_contacts(at, dir, left, radius, here, |_, t, normal, _, _| {
-                let point = [at[0] + dir[0] * t, at[1] + dir[1] * t, at[2] + dir[2] * t];
-                records.push(Sweep { distance: t, surface: usize::MAX, normal, sector: here, point, kind: 4 });
-            });
-            records.sort_by(|a, b| {
-                a.distance.total_cmp(&b.distance).then_with(|| (b.kind == 4).cmp(&(a.kind == 4)))
-            });
-            let accepted = records
-                .iter()
-                .find(|r| {
-                    let d = -dot(r.normal, dir) * left;
-                    d.abs() > 1e-5 && d > 0.0
-                })
-                .copied();
+            let accepted = loop {
+                match pop_collision(&mut records) {
+                    Some(CollisionRecord::Solid(hit)) => {
+                        let d = -dot(hit.normal, dir) * left;
+                        if d.abs() > 1e-5 && d > 0.0 {
+                            break Some(hit);
+                        }
+                    }
+                    Some(CollisionRecord::Crossing { .. }) => {}
+                    None => break None,
+                }
+            };
             let room = match accepted {
-                Some(hit) if hit.surface == usize::MAX => (Some(hit), here, room.2),
+                Some(hit) if hit.thing.is_some() => (Some(hit), here, room.2),
                 hit => (hit, room.1, room.2),
             };
             match room {
@@ -1761,20 +1804,42 @@ impl LevelGeometry {
     /// actors and players take), and attach to the first record popped. The search carries `0x10`, so
     /// only floor-flagged surfaces (`surfflags & 1`) and thingflag-`0x40` cog things count; a thing
     /// record attaches when its **face** normal's z is at least 0.6 (`0x523190`), to that face
-    /// (`sithThing_AttachThingToThingFace`). `None` detaches.
-    pub fn find_floor(&self, sector: usize, pos: [f32; 3], radius: f32, range: f32, gates: Gates<'_>) -> Option<Attach> {
+    /// (`sithThing_AttachThingToThingFace`). A record with no mesh/face preserves the existing attach;
+    /// only exhausting both passes detaches (`0x4f5550:79-104`).
+    pub fn find_floor(
+        &self, sector: usize, pos: [f32; 3], radius: f32, range: f32, gates: Gates<'_>, attach: &mut Option<Attach>,
+    ) {
         const DOWN: [f32; 3] = [0.0, 0.0, -1.0];
+        let things = self.things();
         for r in [0.0, radius] {
             let mut records = Vec::new();
+            self.thing_contacts(&things, pos, DOWN, range, r, sector, |solid, hit| {
+                if solid.floor {
+                    records.push(Some(CollisionRecord::Solid(hit)));
+                }
+            });
             self.sweep_rooms(sector, pos, DOWN, range, r, gates, &mut records);
-            let surface = records
-                .iter()
-                .filter(|hit| self.surface_flags.get(hit.surface).is_none_or(|flags| flags & 1 != 0))
-                .min_by(|a, b| a.distance.total_cmp(&b.distance))
-                .and_then(|hit| {
-                    let face = self.face_of.get(&hit.surface).and_then(|i| self.faces.get(*i))
-                        .or_else(|| self.floor_of.get(&hit.surface).and_then(|i| self.floors.get(*i)))
-                        .or_else(|| self.wall_of.get(&hit.surface).and_then(|i| self.walls.get(*i)))?;
+            while let Some(record) = pop_collision(&mut records) {
+                let CollisionRecord::Solid(hit) = record else { continue };
+                if let Some(target) = hit.thing {
+                    let Some((mesh, face)) = target.mesh_face else { return };
+                    let solid = things.iter().find(|solid| solid.index == target.thing).unwrap();
+                    let face = &solid.mesh.as_ref().unwrap()[mesh][face];
+                    if face.normal[2] < 0.6 {
+                        continue;
+                    }
+                    *attach = Some(Attach {
+                        normal: face.normal, point: face.point, surface: None, thing: Some(target), friction: 1.0,
+                    });
+                    return;
+                }
+                if self.surface_flags.get(hit.surface).is_some_and(|flags| flags & 1 == 0) {
+                    continue;
+                }
+                if let Some(face) = self.face_of.get(&hit.surface).and_then(|i| self.faces.get(*i))
+                    .or_else(|| self.floor_of.get(&hit.surface).and_then(|i| self.floors.get(*i)))
+                    .or_else(|| self.wall_of.get(&hit.surface).and_then(|i| self.walls.get(*i)))
+                {
                     // The attach normal (`+0x44`) points into the room, toward the body standing on it.
                     let normal = if dot(sub(pos, face.point), face.normal) < 0.0 {
                         [-face.normal[0], -face.normal[1], -face.normal[2]]
@@ -1784,23 +1849,12 @@ impl LevelGeometry {
                     let flags = self.surface_flags.get(hit.surface).copied().unwrap_or(0);
                     // `0x4f7430`: surface flags `0x1000` and `0x2000` scale the drag to 0.3 and 0.1.
                     let friction = if flags & 0x3000 == 0 { 1.0 } else if flags & 0x2000 == 0 { 0.3 } else { 0.1 };
-                    Some((hit.distance, Attach { normal, point: face.point, surface: Some(hit.surface), friction }))
-                });
-            let mut thing: Option<(f32, Attach)> = None;
-            self.thing_contacts(pos, DOWN, range, r, sector, |solid, t, _, face, point| {
-                if solid.floor && face[2] >= 0.6 && thing.is_none_or(|(near, _)| t < near) {
-                    thing = Some((t, Attach { normal: face, point, surface: None, friction: 1.0 }));
+                    *attach = Some(Attach { normal, point: face.point, surface: Some(hit.surface), thing: None, friction });
+                    return;
                 }
-            });
-            let nearest = match (surface, thing) {
-                (Some(s), Some(t)) => Some(if t.0 < s.0 { t } else { s }),
-                (s, t) => s.or(t),
-            };
-            if let Some((_, attach)) = nearest {
-                return Some(attach);
             }
         }
-        None
+        *attach = None;
     }
 
     /// One physics step of a body: `sithPhysics_UpdateAttachedThingPhysics` (`0x4f7430`) while it is
@@ -1883,7 +1937,7 @@ impl LevelGeometry {
         if !wet && moved > 1e-5 && (attach.is_some() || (-2.0..=0.2).contains(&vel[2])) {
             let range = if attach.is_some() { height * 2.0 } else { radius + 0.005 };
             let was = attach.is_some();
-            *attach = self.find_floor(*sector, *pos, radius, range, gates);
+            self.find_floor(*sector, *pos, radius, range, gates, attach);
             landed = !was && attach.is_some();
         }
         let flat = ((to[0] - start[0]).powi(2) + (to[1] - start[1]).powi(2)).sqrt();
@@ -2287,9 +2341,9 @@ impl LevelGeometry {
         let feet = pos[2] - radius;
         let mut best: Option<f32> = None;
         for thing in self.things().iter() {
-            if let Some(faces) = &thing.mesh {
+            if let Some(meshes) = &thing.mesh {
                 // An upward face the body is over is a floor at the face's height under the body.
-                for face in faces.iter().filter(|f| f.normal[2] > 0.7) {
+                for face in meshes.iter().flatten().filter(|f| f.normal[2] > 0.7) {
                     if !over_face(face, pos, radius) {
                         continue;
                     }
@@ -3027,6 +3081,7 @@ mod tests {
     fn a_placement_seat_ignores_a_prop_top_but_a_landing_takes_it() {
         let mut room = seam_floor();
         room.set_things(vec![ThingSolid {
+            index: 0,
             centre: [0.5, 0.0, 0.0],
             origin: [0.5, 0.0, 0.0],
             radius: 0.3,
@@ -3065,6 +3120,7 @@ mod tests {
     fn a_solid_model_blocks_a_body_at_any_height() {
         let mut room = seam_floor();
         room.set_things(vec![ThingSolid {
+            index: 0,
             centre: [0.0, 0.3, 0.0],
             origin: [0.0, 0.3, 0.0],
             radius: 0.1,
@@ -3160,6 +3216,7 @@ mod tests {
             sector: 0,
             point: [0.0; 3],
             kind,
+            thing: None,
         });
         let crossing = CollisionRecord::Crossing { distance: 1.0, sector: 1 };
         let mut edge_cross_face = [Some(solid(8)), Some(crossing), Some(solid(4))];
@@ -3168,6 +3225,10 @@ mod tests {
         assert!(matches!(pop_collision(&mut cross_edge_face), Some(CollisionRecord::Crossing { sector: 1, .. })));
         let mut vertex_face = [Some(solid(0x10)), Some(solid(4))];
         assert!(matches!(pop_collision(&mut vertex_face), Some(CollisionRecord::Solid(hit)) if hit.kind == 4));
+        let mut sphere_face = [Some(solid(1)), Some(solid(5))];
+        assert!(matches!(pop_collision(&mut sphere_face), Some(CollisionRecord::Solid(hit)) if hit.kind == 1));
+        let mut thing_edge_face = [Some(solid(9)), Some(solid(5))];
+        assert!(matches!(pop_collision(&mut thing_edge_face), Some(CollisionRecord::Solid(hit)) if hit.kind == 5));
     }
 
     #[test]
@@ -3421,6 +3482,7 @@ mod tests {
         };
         let solids = Solids::default();
         solids.set_things(vec![ThingSolid {
+            index: 0,
             centre: [0.0, 0.0, 1.0],
             origin: [0.0, 0.0, 1.0],
             radius: 0.2,
@@ -3430,7 +3492,7 @@ mod tests {
             // The upright bounds a yaw-only box would use: thin and tall, nothing like the leaf.
             half: Some([0.0125, 2.0]),
             yaw: 0.0,
-            mesh: Some(vec![leaf].into()),
+            mesh: Some(vec![vec![leaf]].into()),
             floor: false,
         }]);
         let r = 0.065;
@@ -3515,6 +3577,7 @@ mod tests {
         // 4. Solid prop: no level geometry at all, only the thing's model top.
         let prop = Solids::default();
         prop.set_things(vec![ThingSolid {
+            index: 0,
             centre: [0.0; 3],
             origin: [0.0; 3],
             radius: 0.5,
@@ -3829,6 +3892,7 @@ mod tests {
         ];
         room.spheres = vec![([0.0, 0.0, 0.0], 8.0), ([0.0, 0.5, 0.0], 8.0), ([0.0, 1.0, 0.0], 8.0)];
         room.set_things(vec![ThingSolid {
+            index: 0,
             centre: [0.0, 0.3, -0.5],
             origin: [0.0, 0.3, -0.5],
             radius: 0.2,
@@ -3862,6 +3926,7 @@ mod tests {
     fn a_solid_thing_blocks_the_sight_segment_but_not_from_inside_it() {
         let mut room = seam_floor();
         room.set_things(vec![ThingSolid {
+            index: 0,
             centre: [1.0, 0.0, -0.5],
             origin: [1.0, 0.0, -0.5],
             radius: 0.5,
@@ -3909,6 +3974,7 @@ mod tests {
     fn a_thin_model_leaf_collides_as_its_box() {
         let mut room = seam_floor();
         room.set_things(vec![ThingSolid {
+            index: 0,
             centre: [1.0, 0.0, -0.5],
             origin: [1.0, 0.0, -0.5],
             radius: 0.2,
@@ -4001,6 +4067,7 @@ mod tests {
         // `set_things` is the one mutable slice; a clone of the record sees it without a deep clone.
         let shared = geometry.clone();
         shared.set_things(vec![ThingSolid {
+            index: 0,
             centre: [1.0, 2.0, 3.0],
             origin: [1.0, 2.0, 3.0],
             radius: 0.2,
@@ -4068,6 +4135,7 @@ mod tests {
     fn a_mesh_outside_its_size_sphere_cannot_deflect_the_body() {
         let solids = Solids::default();
         solids.set_things(vec![ThingSolid {
+            index: 0,
             centre: [0.0; 3],
             origin: [0.0; 3],
             radius: 0.5,
@@ -4076,12 +4144,12 @@ mod tests {
             sector: 0,
             half: Some([1.0; 2]),
             yaw: 0.0,
-            mesh: Some(vec![Face {
+            mesh: Some(vec![vec![Face {
                 normal: [-1.0, 0.0, 0.0],
                 point: [0.0; 3],
                 verts: vec![[0.0, -1.0, -1.0], [0.0, -1.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, -1.0]],
                 surface: usize::MAX,
-            }].into()),
+            }]].into()),
             floor: false,
         }]);
         let mut vel = [1.0, 0.0, 0.0];
@@ -4120,7 +4188,120 @@ mod tests {
         ), None, "the later wall/table crease must not receive a table record either");
     }
 
-    const FLAT: Attach = Attach { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, -1.0], surface: Some(0), friction: 1.0 };
+    fn contact_face(normal: [f32; 3], point: [f32; 3]) -> Face {
+        let u = if normal[2].abs() < 0.9 { [0.0, 0.0, 1.0] } else { [0.0, 1.0, 0.0] };
+        let v = [
+            normal[1] * u[2] - normal[2] * u[1],
+            normal[2] * u[0] - normal[0] * u[2],
+            normal[0] * u[1] - normal[1] * u[0],
+        ];
+        let verts = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .into_iter()
+            .map(|(a, b)| [
+                point[0] + a * u[0] + b * v[0],
+                point[1] + a * u[1] + b * v[1],
+                point[2] + a * u[2] + b * v[2],
+            ]).collect();
+        Face { normal, point, verts, surface: usize::MAX }
+    }
+
+    fn contact_model(meshes: Vec<Vec<Face>>) -> ThingSolid {
+        ThingSolid {
+            index: 77, centre: [0.0; 3], origin: [0.0; 3], radius: 4.0,
+            z_min: -4.0, z_max: 4.0, sector: 0, half: None, yaw: 0.0,
+            mesh: Some(meshes.into()), floor: true,
+        }
+    }
+
+    #[test]
+    fn mesh_selection_prefers_a_face_then_authored_alignment_on_equal_travel() {
+        let face = contact_face([-1.0, 0.0, 0.0], [0.0; 3]);
+        let mut edge = face.clone();
+        for vertex in &mut edge.verts {
+            if vertex[1] < 0.0 { vertex[1] = 0.05; }
+        }
+        let (hit, index) = Solids::sphere_mesh_intersection(
+            &[edge, face.clone()], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], 2.0, 0.1, 0,
+        ).unwrap();
+        assert_eq!((hit.kind, index), (4, 1), "the equal-distance face must replace the edge");
+        let angled = contact_face([-0.6, 0.8, 0.0], [0.0; 3]);
+        let (_, index) = Solids::sphere_mesh_intersection(
+            &[face.clone(), angled.clone()], [-0.05, 0.0, 0.0], [1.0, 0.0, 0.0], 0.2, 0.1, 0,
+        ).unwrap();
+        assert_eq!(index, 0, "equal feature kinds retain the more opposing authored normal");
+        let (_, index) = Solids::sphere_mesh_intersection(
+            &[angled, face], [-0.05, 0.0, 0.0], [1.0, 0.0, 0.0], 0.2, 0.1, 0,
+        ).unwrap();
+        assert_eq!(index, 1);
+    }
+
+    #[test]
+    fn a_refused_selected_edge_does_not_expose_the_same_things_farther_face() {
+        let mut edge = contact_face([-1.0, 0.0, 0.0], [0.0; 3]);
+        for vertex in &mut edge.verts {
+            if vertex[1] < 0.0 { vertex[1] = 0.0; }
+        }
+        let farther = contact_face([-1.0, 0.0, 0.0], [0.1, 0.0, 0.0]);
+        let solids = Solids::default();
+        solids.set_things(vec![contact_model(vec![vec![edge, farther]])]);
+        let mut vel = [1.0, -1.0, 0.0];
+        let (end, _, _) = solids.move_body(
+            0, [-0.05, -0.05, 0.0], [0.2, -0.2, 0.0], 0.1, Gates::default(), &mut vel,
+        );
+        assert!((end[0] - 0.15).abs() < 1e-6 && (end[1] + 0.25).abs() < 1e-6, "a hidden alternative stopped the body: {end:?}");
+        assert_eq!(vel, [1.0, -1.0, 0.0], "the selected tangent edge must be refused before response");
+    }
+
+    #[test]
+    fn floor_eligibility_uses_the_last_selected_mesh_not_a_flattened_face_search() {
+        let top = contact_face([0.0, 0.0, 1.0], [0.0; 3]);
+        let side = contact_face([0.8660254, 0.0, 0.5], [0.0; 3]);
+        let solids = Solids::default();
+        solids.set_things(vec![contact_model(vec![vec![top], vec![side]])]);
+        let mut attach = Some(FLAT);
+        solids.find_floor(0, [0.0, 0.0, 0.05], 0.065, 1.0, Gates::default(), &mut attach);
+        assert_eq!(attach, None, "the later mesh wins its equal-distance hit, then fails floor eligibility");
+    }
+
+    #[test]
+    fn floor_search_cannot_choose_a_farther_top_face_of_the_same_mesh() {
+        let side = contact_face([0.8660254, 0.0, 0.5], [0.0; 3]);
+        let top = contact_face([0.0, 0.0, 1.0], [0.0, 0.0, -0.1]);
+        let solids = Solids::default();
+        solids.set_things(vec![contact_model(vec![vec![side, top]])]);
+        let mut attach = Some(FLAT);
+        solids.find_floor(0, [0.0, 0.0, 0.5], 0.065, 1.0, Gates::default(), &mut attach);
+        assert_eq!(attach, None, "rejecting the selected side must not reveal another face of that mesh");
+    }
+
+    #[test]
+    fn a_faceless_floor_record_keeps_attachment_instead_of_finding_a_lower_floor() {
+        let solids = room();
+        let mut sphere = contact_model(Vec::new());
+        sphere.mesh = None;
+        sphere.z_max = 0.2;
+        solids.set_things(vec![sphere]);
+        let mut attach = Some(FLAT);
+        solids.find_floor(0, [0.0, 0.0, 0.3], 0.065, 2.0, Gates::default(), &mut attach);
+        assert_eq!(attach, Some(FLAT), "a faceless thing preserves the existing attachment");
+        attach = None;
+        solids.find_floor(0, [0.0, 0.0, 0.3], 0.065, 2.0, Gates::default(), &mut attach);
+        assert_eq!(attach, None, "a faceless thing must not invent a top-face attachment");
+    }
+
+    #[test]
+    fn floor_ties_keep_the_selected_things_mesh_face_identity() {
+        let solids = room();
+        solids.set_things(vec![contact_model(vec![vec![contact_face([0.0, 0.0, 1.0], [0.0, 0.0, -1.0])]])]);
+        let mut attach = None;
+        solids.find_floor(0, [0.0; 3], 0.065, 2.0, Gates::default(), &mut attach);
+        let attach = attach.expect("the selected mesh face is a floor");
+        assert_eq!(attach.thing, Some(ThingHit { thing: 77, mesh_face: Some((0, 0)) }));
+        assert_eq!(attach.surface, None, "the earlier thing face wins a tie with the sector floor");
+        assert_eq!(attach.normal, [0.0, 0.0, 1.0]);
+    }
+
+    const FLAT: Attach = Attach { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, -1.0], surface: Some(0), thing: None, friction: 1.0 };
 
     /// `0x4f7430`: the hold moves an attached body toward `GetThingHeight` by at most `0.5 * dt`
     /// (`0x523198`) a step, and the velocity loses its component along the floor normal.
@@ -4144,13 +4325,18 @@ mod tests {
     fn find_floor_reaches_by_attach_state_and_takes_only_floors() {
         let mut solids = room();
         let pos = [0.0f32, 0.0, -1.0 + 0.2];
-        assert_eq!(solids.find_floor(0, pos, 0.065, 0.065 + 0.005, Gates::default()), None, "0.2 is past the unattached reach");
-        let floor = solids.find_floor(0, pos, 0.065, 0.12 * 2.0, Gates::default()).expect("the attached reach finds the floor");
+        let mut attach = None;
+        solids.find_floor(0, pos, 0.065, 0.065 + 0.005, Gates::default(), &mut attach);
+        assert_eq!(attach, None, "0.2 is past the unattached reach");
+        solids.find_floor(0, pos, 0.065, 0.12 * 2.0, Gates::default(), &mut attach);
+        let floor = attach.expect("the attached reach finds the floor");
         assert_eq!(floor.normal, [0.0, 0.0, 1.0]);
         assert_eq!(floor.surface, Some(0));
         solids.surface_flags = vec![0x4];
-        assert_eq!(solids.find_floor(0, pos, 0.065, 0.24, Gates::default()), None, "a surface without flag 1 attached");
+        solids.find_floor(0, pos, 0.065, 0.24, Gates::default(), &mut attach);
+        assert_eq!(attach, None, "a surface without flag 1 attached");
         solids.surface_flags = vec![0x2001];
-        assert_eq!(solids.find_floor(0, pos, 0.065, 0.24, Gates::default()).map(|a| a.friction), Some(0.1));
+        solids.find_floor(0, pos, 0.065, 0.24, Gates::default(), &mut attach);
+        assert_eq!(attach.map(|a| a.friction), Some(0.1));
     }
 }
