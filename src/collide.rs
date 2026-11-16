@@ -1179,7 +1179,7 @@ impl LevelGeometry {
                         .or_else(|| self.floor_of.get(&plane.surface).and_then(|i| self.floors.get(*i)))
                         .or_else(|| self.wall_of.get(&plane.surface).and_then(|i| self.walls.get(*i)));
                     if record_count < 128 && let Some(hit) = face.and_then(|face| Self::face_contact(
-                        face.normal, face.point, &face.verts, face.surface, start, dir, dist, radius, here,
+                        face.normal, face.point, &face.verts, face.surface, start, dir, dist, radius, here, &mut 0.0,
                     )).filter(|hit| dot(dir, hit.normal) < 0.0) {
                         stack[record_count] = Some(CollisionRecord::Solid(hit));
                         records.push(Some(CollisionRecord::Solid(hit)));
@@ -1194,7 +1194,7 @@ impl LevelGeometry {
                 }
                 if !gates.passable(here, portal.adjoin, portal.link) {
                     if record_count < 128 && let Some(hit) = Self::face_contact(
-                        portal.normal, portal.point, &portal.verts, portal_surface, start, dir, dist, radius, here,
+                        portal.normal, portal.point, &portal.verts, portal_surface, start, dir, dist, radius, here, &mut 0.0,
                     ).filter(|hit| dot(dir, hit.normal) < 0.0) {
                         stack[record_count] = Some(CollisionRecord::Solid(hit));
                         records.push(Some(CollisionRecord::Solid(hit)));
@@ -1278,12 +1278,14 @@ impl LevelGeometry {
         left: f32,
         radius: f32,
         sector: usize,
+        out_distance: &mut f32,
     ) -> Option<Sweep> {
         let normal = [-face_normal[0], -face_normal[1], -face_normal[2]];
+        let t = sphere_plane(from, dir, left, radius, normal, point)?;
+        *out_distance = t;
         if dir[0] * normal[0] + dir[2] * normal[2] + dir[1] * normal[1] >= 0.0 {
             return None;
         }
-        let t = sphere_plane(from, dir, left, radius, normal, point)?;
         let at = [from[0] + dir[0] * t, from[1] + dir[1] * t, from[2] + dir[2] * t];
         let distance = dot(sub(at, point), normal);
         let distance = if distance.abs() <= 1e-5 { 0.0 } else { distance };
@@ -1336,17 +1338,19 @@ impl LevelGeometry {
     /// `sithIntersect_CheckSphereMeshIntersection` (0x508400): one face per mesh, shrinking travel.
     fn sphere_mesh_intersection(
         faces: &[Face], at: [f32; 3], dir: [f32; 3], mut left: f32, radius: f32, sector: usize,
+        out_distance: &mut f32,
     ) -> Option<(Sweep, usize)> {
         let (mut kind, mut alignment) = (0, 1.0);
         let mut selected = None;
         for (index, face) in faces.iter().enumerate() {
             let into = [-face.normal[0], -face.normal[1], -face.normal[2]];
-            if let Some(hit) = Self::face_contact(into, face.point, &face.verts, usize::MAX, at, dir, left, radius, sector) {
-                let facing = face.normal[0] * dir[0] + face.normal[1] * dir[1] + face.normal[2] * dir[2];
-                if hit.distance < left || (kind != 4 && hit.kind == 4) || facing < alignment {
+            if let Some(hit) = Self::face_contact(into, face.point, &face.verts, usize::MAX, at, dir, left, radius, sector, out_distance) {
+                if hit.distance < left || (kind != 4 && hit.kind == 4)
+                    || face.normal[0] * dir[0] + face.normal[1] * dir[1] + face.normal[2] * dir[2] < alignment
+                {
                     left = hit.distance;
                     kind = hit.kind;
-                    alignment = face.normal[0] * dir[0] + face.normal[2] * dir[2] + face.normal[1] * dir[1];
+                    alignment = face.normal[0] * dir[0] + face.normal[1] * dir[1] + face.normal[2] * dir[2];
                     selected = Some((hit, index));
                 }
             }
@@ -1576,16 +1580,20 @@ impl LevelGeometry {
                 // `CheckSphereThingIntersection` (0x5080d0:76-104) keeps the last successful mesh
                 // at the current shortened distance, not every face that can intersect the ray.
                 let mut selected = None;
-                let mut distance = left;
+                let mut limit = left;
+                // Rejected faces still overwrite the shared plane distance (0x508400 -> 0x508d20).
+                let mut distance = 0.0;
                 for (mesh, faces) in meshes.iter().enumerate() {
-                    if let Some((mut hit, face)) = Self::sphere_mesh_intersection(faces, at, dir, distance, radius, sector) {
-                        distance = hit.distance;
+                    if let Some((mut hit, face)) = Self::sphere_mesh_intersection(faces, at, dir, limit, radius, sector, &mut distance) {
+                        limit = distance;
                         hit.kind |= 1;
                         hit.thing = Some(ThingHit { thing: thing.index, mesh_face: Some((mesh, face)) });
                         selected = Some(hit);
                     }
                 }
-                if let Some(hit) = selected {
+                if let Some(mut hit) = selected {
+                    hit.distance = distance;
+                    hit.point = [at[0] + dir[0] * distance, at[1] + dir[1] * distance, at[2] + dir[2] * distance];
                     each(thing, hit);
                 }
                 continue;
@@ -4221,18 +4229,53 @@ mod tests {
             if vertex[1] < 0.0 { vertex[1] = 0.05; }
         }
         let (hit, index) = Solids::sphere_mesh_intersection(
-            &[edge, face.clone()], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], 2.0, 0.1, 0,
+            &[edge, face.clone()], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], 2.0, 0.1, 0, &mut 0.0,
         ).unwrap();
         assert_eq!((hit.kind, index), (4, 1), "the equal-distance face must replace the edge");
         let angled = contact_face([-0.6, 0.8, 0.0], [0.0; 3]);
         let (_, index) = Solids::sphere_mesh_intersection(
-            &[face.clone(), angled.clone()], [-0.05, 0.0, 0.0], [1.0, 0.0, 0.0], 0.2, 0.1, 0,
+            &[face.clone(), angled.clone()], [-0.05, 0.0, 0.0], [1.0, 0.0, 0.0], 0.2, 0.1, 0, &mut 0.0,
         ).unwrap();
         assert_eq!(index, 0, "equal feature kinds retain the more opposing authored normal");
         let (_, index) = Solids::sphere_mesh_intersection(
-            &[angled, face], [-0.05, 0.0, 0.0], [1.0, 0.0, 0.0], 0.2, 0.1, 0,
+            &[angled, face], [-0.05, 0.0, 0.0], [1.0, 0.0, 0.0], 0.2, 0.1, 0, &mut 0.0,
         ).unwrap();
         assert_eq!(index, 1);
+    }
+
+    #[test]
+    fn rejected_polygon_planes_still_set_the_things_movement_distance() {
+        let selected = contact_face([-1.0, 0.0, 0.0], [0.0; 3]);
+        let missed = contact_face([-1.0, 0.0, 0.0], [-0.5, 2.0, 0.0]);
+        let farther = contact_face([-0.6, 0.8, 0.0], [-0.1, 0.0, 0.0]);
+        for meshes in [
+            vec![vec![selected.clone(), missed.clone()]],
+            vec![vec![selected.clone()], vec![missed.clone()]],
+            vec![vec![selected, missed], vec![farther]],
+        ] {
+            let solids = Solids::default();
+            solids.set_things(vec![contact_model(meshes)]);
+            let mut vel = [1.0, 0.0, 0.0];
+            let (end, _, _) = solids.move_body(
+                0, [-1.0, 0.0, 0.0], [2.0, 0.0, 0.0], 0.1, Gates::default(), &mut vel,
+            );
+            assert!((-0.61..-0.59).contains(&end[0]), "the last plane distance must survive polygon/mesh rejection: {end:?}");
+            assert!(vel[0].abs() < 0.001 && vel[1] == 0.0, "the normal must remain the selected face's: {vel:?}");
+        }
+    }
+
+    #[test]
+    fn an_overlapping_backface_writes_distance_before_facing_rejection() {
+        let selected = contact_face([-1.0, 0.0, 0.0], [0.2, 0.0, 0.0]);
+        let backface = contact_face([1.0, 0.0, 0.0], [-0.05, 0.0, 0.0]);
+        let solids = Solids::default();
+        solids.set_things(vec![contact_model(vec![vec![selected, backface]])]);
+        let mut vel = [1.0, 0.0, 0.0];
+        let (end, _, _) = solids.move_body(
+            0, [0.0; 3], [0.3, 0.0, 0.0], 0.1, Gates::default(), &mut vel,
+        );
+        assert!(end[0].abs() < 0.001, "the rejected overlapping plane must overwrite travel with zero: {end:?}");
+        assert!(vel[0].abs() < 0.001, "the retained face must still stop forward movement: {vel:?}");
     }
 
     #[test]

@@ -7068,3 +7068,30 @@ Next single static step: replace the split room/thing movement result with the s
 `SearchForCollisions` (`0x4e8160`) record stack. `MoveThing` must consume solid and adjoin records in
 pop order, applying `SetSector` only when it pops a crossing, rather than borrowing the sector
 precomputed by the room-only sweep. Preserve the current frozen checks and report every leg.
+
+## Issue #31: correction to the shared mesh distance output
+
+Static review found an output-parameter detail missing from `44b61c9`. The face, mesh and thing
+functions do not return a coherent selected `(distance, normal, face)` tuple. `CheckSphereHit`
+(`0x508be0:35-55`) writes distance as soon as a plane intersects. `CheckSphereFaceIntersectionEx`
+(`0x508d20:33-45`) can subsequently reject facing or polygon eligibility without restoring it.
+`CheckSphereMeshIntersection` (`0x508400:33-55`) passes the same output slot to every face and
+shrinks its input limit only when selection succeeds. `CheckSphereThingIntersection`
+(`0x5080d0:83-94`) passes that slot through every mesh, shortening the next mesh's limit from its
+current value only after a successful mesh. A later missed mesh can still overwrite the final
+distance without replacing the previously selected kind, face, mesh or normal.
+
+The previous Rust selector returned the selected face's original distance and discarded those
+partial writes. The correction threads one mutable distance slot through all face and mesh calls,
+keeps input limits separate, and emits the final slot alongside the selected contact identity and
+normal. The plane test now runs before facing rejection, preserving zero-distance writes from an
+overlapping backface. Surface callers discard the unused output slot. No allocation is added.
+The saved alignment expression also now uses x+y+z, matching both the decomp and the retained
+Ghidra pseudocode; the previous x+z+y ordering was a transcription error.
+
+Added movement regressions for a rejected polygon in the selected mesh, a later entirely missed
+mesh, shortening the next mesh from the last plane write, and facing rejection after an overlap
+writes zero. These exercise final position and velocity, not implementation text or call counts.
+The previous `PopStack` cutover already preserves plain-sphere/face ties; no face-first sort remains
+in movement or floor search. World-space versus engine-local-space mesh testing remains a known
+separate deviation; this correction does not claim that the entire thing intersection is faithful.
