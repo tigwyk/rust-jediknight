@@ -19754,7 +19754,8 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
         levels.len() - no_start
     );
     // The assertions: containment varies for reasons the table shows, but a body must never be left
-    // in the void and must never fall further than a step. Without these the sweep asserted nothing.
+    // in the void, and a drop that leaves its sector must be a recorded one. Without these the sweep
+    // asserted nothing.
     // The walk is the level's own spawn yaw, straight forward. Nine lines descend off the level's
     // authored path; each records its exact outcome (void, containment, drop) in
     // `WALK_OFF_THE_EDGE` above and is asserted there, so none can change silently. All nine stay
