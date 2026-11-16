@@ -7344,3 +7344,29 @@ collision entry carrying flag `0x20`; read the crossing record that produced 290
 and whether an attached body's raised pose can reach that portal plane without an engine crossing.
 
 Retail was not executed; no graphical playthrough was performed. The branch remains unmergeable.
+
+## Issue #31: option 1 — fall rows re-recorded in one pass, boundary ledgered
+
+User decision: merge the chain with a deviation-ledger entry rather than hold "unchanged or better"
+on the 0.008 rest-height question; #31 is the last open blocker on #28 (levels 2-5 campaign gate).
+
+The re-record was one pass. Every level's drop was collected first (`BK_WALK_ONLY` per level on the
+unchanged binary): every pinned row that kept its descent shape moved by the same −0.05
+(11.17/0.08/0.17/2.72/2.72) — the attached hold riding `GetThingHeight` above each floor — and
+`07yun` gained a contained, hull-agreeing 1.50 descent, a slope the walker now enters.
+
+The same full-table diff (`walk-main.tsv` vs `walk-branch.tsv`) then surfaced three descents beyond
+that signature, which the first `--walk all` pass hid behind the sweep line: `m10` 2.12→2.86 (end
+sector 40 instead of 2), and `15maw` 1.84→58.86 / `m_boss15` 0.12→58.86. `BK_FLOOR_TRACE` on `15maw`
+settled the cause: main's global floor fallback rests the body mid-shaft on faces owned by other
+sectors (161/owner 13 at z 28.2, then 551/owner 46 at z 26.5 — the ledger's floor-scope row), while
+the chain's own-sector hold walks 432→430→507 (z 28.2→−30.6) and ends in sector 41, the sector both
+binaries name. All three pinned as new `WALK_OFF_THE_EDGE` rows with that reason; four levels' hull
+column flipped agrees→differs (`01narshadda`, `03katarn`, `09fuelstation`, `m5`), and
+`01narshadda`'s walk end sector 361→349 is the same 349/361 boundary the slice row names. The ledger
+row "attached rest face at a sector boundary (#31)" in `docs/porting-roadmap.md` carries all of it
+with retirement conditions.
+
+End state: tests 405, `--walk all` green with 9 pinned rows, trace gate 8/9 (`walk6_spawn` only,
+ledgered), slice 2 fields (ticks 36/72, ledgered). The 0.008 boundary and the three fall rows retire
+on a user-run retail capture (z at 3+ dp for the boundary; any trace for the falls).

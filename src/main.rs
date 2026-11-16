@@ -19471,19 +19471,26 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     // cannot walk it. Each records the outcome it has today — `(level, void, contained, drop)` —
     // so none of them can change silently while the worst-drop/stray checks skip the list. No
     // retail trace exists for any of these lines; the rows are port measurements.
-    // Re-recorded on issue #23's collision chain. The fall now sweeps every face and
-    // `CollideHurt` slides it (`0x4e7950`/`0x4e9090`), and every vertical move crosses adjoins.
-    // So `11gorc` (0.22) and the sarris pair (2.77) end inside the sector the sweep carries them
-    // into, where the round-428 record had them outside it (gorc 0.24, sarris 2.90). `10cargo`'s
-    // line wedges at (-6.89, 15.17, 1.42) in sector 333, between wall 3132, the 45° overhang 3125
-    // and floor 3133.
+    // Re-recorded on issue #31's collision chain, one pass: the attached hold
+    // (`PrepareBody` `0x4f7430` with physflag `0x800` clear, `GetThingHeight` `0x4f6210`) rides the
+    // body `height` above each floor, so every row that kept its descent shape is 0.05 shallower
+    // (11.17/0.08/0.17/2.72/2.72) and `07yun` gains a contained, hull-agreeing 1.50 descent it
+    // could not enter before. Three descents changed shape: `m10` walks deeper (2.86 vs 2.12), and
+    // `15maw`/`m_boss15` (its boss arena) fall a contained 58.86. `BK_FLOOR_TRACE` on `15maw`
+    // shows why: main's global floor fallback rests mid-shaft on faces owned by other sectors
+    // (161/owner 13, 551/owner 46, z 28.2 -> 26.5), while the chain's own-sector hold walks
+    // 432 -> 430 -> 507 (z 28.2 -> -30.6) and ends in sector 41, the sector both binaries name.
+    // No retail trace exists for these lines either; pinned with the rest.
     const WALK_OFF_THE_EDGE: &[(&str, bool, bool, f32)] = &[
-        ("jkl\\02narshadda.jkl", false, true, 11.22),
-        ("jkl\\07yun.jkl", false, true, 0.00),
-        ("jkl\\10cargo.jkl", false, true, 0.13),
-        ("jkl\\11gorc.jkl", false, true, 0.22),
-        ("jkl\\17asarris.jkl", false, true, 2.77),
-        ("jkl\\m_boss17.jkl", false, true, 2.77),
+        ("jkl\\02narshadda.jkl", false, true, 11.17),
+        ("jkl\\07yun.jkl", false, true, 1.50),
+        ("jkl\\10cargo.jkl", false, true, 0.08),
+        ("jkl\\11gorc.jkl", false, true, 0.17),
+        ("jkl\\15maw.jkl", false, true, 58.86),
+        ("jkl\\17asarris.jkl", false, true, 2.72),
+        ("jkl\\m10.jkl", false, true, 2.86),
+        ("jkl\\m_boss15.jkl", false, true, 58.86),
+        ("jkl\\m_boss17.jkl", false, true, 2.72),
     ];
     let off_edge = |name: &str| WALK_OFF_THE_EDGE.iter().find(|(level, ..)| *level == name);
     // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
