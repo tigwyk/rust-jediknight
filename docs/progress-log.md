@@ -7232,3 +7232,40 @@ Current modeled movement, floor and camera callers do not set `0x400`.
 The next single static step is the complete thing-intersection wrapper at `0x5080d0`, especially
 its model-local transforms and mesh ordering. Do not tune the table's authored sphere radius.
 Retail was not executed; no graphical playthrough was performed. The branch remains unmergeable.
+
+## Issue #31: thing-intersection wrapper named and the narrowphase closed
+
+`thing_contacts` was the last place an engine function stood inline. It is now its own function, named
+after the engine, with the verified facts in its doc comment:
+
+- `sithIntersect_CheckSphereThingIntersection` (`0x5080d0`) -> `LevelGeometry::check_sphere_thing_intersection`.
+- Behaviour is unchanged. 405 release tests pass; the frozen level-1 slice and the trace gate report the
+  same values before and after the extraction.
+
+Facts read this round, none of which needed a code change:
+
+- The mesh list at `model+0x24` count / `model+0x28` base is **geoset 0 only**.
+  `rdModel3_LoadEntry` (`0x443e80:125-135`) allocates one count/pointer pair per `GEOSET` row starting at
+  the model's `+0x24`, and the wrapper reads that first pair. `main::collision_faces`' geoset-0 filter is
+  therefore the engine's list, not a shortcut.
+- Mesh records: faces at `+0x40`, stride `0x40`, count `+0x50`, vertices at `+0x30`. The face test is
+  handed the mesh's vertex base (`0x508400`), which each ported `Face` carries itself.
+- The wrapper's branches are gated by `local_4c = (flags & 0x80) == 0 && collide(mover or target) == 3`.
+  The only unimplemented branch, `bVar14` (the mover's own mesh against another thing's `size=` sphere,
+  which negates the returned normal), needs a `collide=3` mover. The shipped `walkplayer` row carries no
+  `collide=` and neither does `_actor`, so the player is `collide=0` and the branch cannot run for a
+  walking body. Port script movers do not collide with things at all (recorded deviation).
+- Movement search flags: `sithCollision_MoveThing` (`0x4e7950:47-56`) adds `5` when `collide==0`, `4`
+  for `move_type==2`, `0x200` for `kind==10`, and `0x800` only while bit 0 is clear. For the player that
+  is `0x245`, so the `flags & 8`, `flags & 0x10` and `flags & 0x2000` filters in
+  `SearchForThingCollisions` (`0x4e8430:37-43`) are all off: every colliding thing in the search is
+  tested, the cantina table included. `MoveState::search_flags` already matches that derivation.
+
+Consequence: the thing narrowphase is not where the table divergence lives. The remaining frozen
+level-1 sector samples (ticks `36`/`72`, expected `349`, trace `339`, cutoff `684`, epsilon `1.70`)
+diverge after the contact, in the response/containment step.
+
+Next single static step: `sithThing_UpdateMove` (`0x4cc4c0`) and the attached-physics step's handling of
+a body wedged between the table side and the wall, one engine function at a time. No trace was used to
+select a change. Retail was not executed; no graphical playthrough was performed. The branch remains
+unmergeable.

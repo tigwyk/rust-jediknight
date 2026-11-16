@@ -1432,6 +1432,53 @@ impl LevelGeometry {
         })
     }
 
+    /// `sithIntersect_CheckSphereThingIntersection` (0x5080d0): one thing's contact for a swept sphere —
+    /// the authored sphere gate, then the model-mesh test, reduced to the single nearest contact.
+    ///
+    /// The engine transforms the sweep into the thing's own frame, tests model-space faces, and rotates
+    /// the normal back (`rdMatrix_InvertOrtho34` 0x43fae0, `rdMatrix_TransformPoint34Acc` 0x4421d0).
+    /// This port pre-bakes the faces under the same matrix (`main::solid_things_at`), so the identical
+    /// arithmetic runs in world space; the rotation is orthonormal, so distances and normals agree.
+    ///
+    /// Engine facts the shape depends on:
+    /// - the gate is the thing's `size=` sphere at `+0xb8` with radius `+0x30` (`0x5080d0:41-46`), even
+    ///   when model vertices reach outside it;
+    /// - the mesh list is `model+0x24` count / `model+0x28` base (`0x5080d0:75`), and `rdModel3_LoadEntry`
+    ///   (`0x443e80:125-135`) stores one count/pointer pair per **geoset**, so this reads geoset 0 only;
+    ///   each mesh's faces are `+0x40` stride `0x40`, count `+0x50`, vertices `+0x30` (`0x508400`);
+    /// - the mesh branch needs `local_4c`, which also requires a `collide=3` partner (`+0x28`). The
+    ///   shipped `walkplayer` has no `collide=` row, so the player is `collide=0` and the reverse branch
+    ///   (the *mover*'s own mesh, `bVar14`, which negates the normal) cannot run for a walking body.
+    fn check_sphere_thing_intersection(
+        thing: &ThingSolid,
+        meshes: &[Vec<Face>],
+        at: [f32; 3],
+        dir: [f32; 3],
+        left: f32,
+        radius: f32,
+        sector: usize,
+    ) -> Option<Sweep> {
+        sphere_intersection(at, dir, left, radius, thing.origin, thing.radius, true, 0)?;
+        // `0x5080d0:76-104` keeps the last successful mesh at the current shortened distance, not every
+        // face that can intersect the ray.
+        let mut selected = None;
+        let mut limit = left;
+        // Rejected faces still overwrite the shared plane distance (0x508400 -> 0x508d20).
+        let mut distance = 0.0;
+        for (mesh, faces) in meshes.iter().enumerate() {
+            if let Some((mut hit, face)) = Self::sphere_mesh_intersection(faces, at, dir, limit, radius, sector, &mut distance) {
+                limit = distance;
+                hit.kind |= 1;
+                hit.thing = Some(ThingHit { thing: thing.index, mesh_face: Some((mesh, face)) });
+                selected = Some(hit);
+            }
+        }
+        let mut hit = selected?;
+        hit.distance = distance;
+        hit.point = [at[0] + dir[0] * distance, at[1] + dir[1] * distance, at[2] + dir[2] * distance];
+        Some(hit)
+    }
+
     /// `sithIntersect_CheckSphereMeshIntersection` (0x508400): one face per mesh, shrinking travel.
     fn sphere_mesh_intersection(
         faces: &[Face], at: [f32; 3], dir: [f32; 3], mut left: f32, radius: f32, sector: usize,
@@ -1656,30 +1703,7 @@ impl LevelGeometry {
                 continue;
             }
             if let Some(meshes) = &thing.mesh {
-                // `CheckSphereThingIntersection` (0x5080d0:41-46) gates the mesh with the thing's
-                // authored size sphere, even when model vertices extend beyond that sphere.
-                if sphere_intersection(at, dir, left, radius, thing.origin, thing.radius, true, 0).is_none() {
-                    continue;
-                }
-                // Model normals point out of the solid; `face_contact` takes the level's into-solid
-                // convention, so each face is handed over turned around.
-                // `CheckSphereThingIntersection` (0x5080d0:76-104) keeps the last successful mesh
-                // at the current shortened distance, not every face that can intersect the ray.
-                let mut selected = None;
-                let mut limit = left;
-                // Rejected faces still overwrite the shared plane distance (0x508400 -> 0x508d20).
-                let mut distance = 0.0;
-                for (mesh, faces) in meshes.iter().enumerate() {
-                    if let Some((mut hit, face)) = Self::sphere_mesh_intersection(faces, at, dir, limit, radius, sector, &mut distance) {
-                        limit = distance;
-                        hit.kind |= 1;
-                        hit.thing = Some(ThingHit { thing: thing.index, mesh_face: Some((mesh, face)) });
-                        selected = Some(hit);
-                    }
-                }
-                if let Some(mut hit) = selected {
-                    hit.distance = distance;
-                    hit.point = [at[0] + dir[0] * distance, at[1] + dir[1] * distance, at[2] + dir[2] * distance];
+                if let Some(hit) = Self::check_sphere_thing_intersection(thing, meshes, at, dir, left, radius, sector) {
                     each(thing, hit);
                 }
                 continue;
