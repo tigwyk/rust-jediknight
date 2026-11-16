@@ -6839,3 +6839,534 @@ anything: the level-1 retail slice, the trace gate and `--walk all` were identic
 `d801c608`). The push, its function and its test assertion are deleted.
 
 `advance` and `resolve` (hull projection through a portal) had no callers on `main` already; deleted.
+
+## Issue #31 (main step, branch `fix/31-movething-3d`, not merged): attached physics, 3D `MoveThing`, `FindFloor`
+
+`walker_step` (main.rs) is gone. `Solids::step_body` (collide.rs) runs one sub-step as the engine does:
+
+- attached: `sithPhysics_UpdateAttachedThingPhysics` (`0x4f7430`) steps 5-7, i.e. the player slope pull,
+  the velocity projected onto the floor plane, and the hold toward `GetThingHeight` clamped to
+  `0.5 * dt` (`0x523198`);
+- unattached: gravity into `vel.z`;
+- one 3D `sithCollision_MoveThing` (`move_body`, the step-up branch deleted) and its `FindFloor` tail.
+
+`find_floor` transliterates `0x4f5550`: a ray pass, then a `moveSize` pass, with reach `moveSize + 0.005`
+unattached and `2 * GetThingHeight` attached. It takes floor-flagged surfaces and thingflag-`0x40` cog
+things whose face normal z is at least 0.6. `PlayerBody::rest`, the warp-only hold, `slope_step` and
+`STEP_UP` are deleted. `step_player` carries `PlayerBody::attach`.
+
+A/B, `main` `f092df1` (`main55.exe`, sha256 `770602dc…`) against `mt3d.exe` (`2443312c…`), same session:
+
+| check | main | branch |
+|---|---|---|
+| level-1 retail slice | 1 mismatch (tick 144) | 4 mismatches (ticks 36-144: 339, retail 349) |
+| trace gate | 9/9 | 8 compared, all pass; `walk17_spawn` excluded by preflight (travel 0.18) |
+| `walk_cantina` z | 0.054 | 0.000 |
+| `walk6_spawn` xy / z | 0.512 / 0.122 | 0.506 / 0.116 |
+| `--walk all` | passed | stops at the `02narshadda` walk-off row: drop 11.17 against the recorded 11.22 |
+
+Leg movement, reported and not tuned:
+
+- **Level-1 slice.** The held body (z -1.13) meets `00table`'s top edge (model top -1.169). The edge
+  normal is about (0,-0.8,0.6), so `CollideHurt` turns the walk up the edge and the hold pulls it back
+  down: the body stalls in 339. Retail's 600 ms sample moves (+0.19, +0.40) while facing yaw -60. That
+  is a slide along the table's side. Which face retail met is the open question on #31.
+- **`walk17_spawn`.** The warp pose is over the elevator shaft in `18Ascend`, covered only by door leaves
+  323/324. `walk_level` (the preflight's `--walk`) never calls `set_things`, so the body falls 3 units.
+  The baseline passed through `resting_floor`'s edge reach.
+- **`02narshadda` walk-off row.** The rows are port measurements. 0.05 is the hold height
+  (0.120114 against the old 0.065 contact). Re-record once the chain is in.
+
+The table above is from `mt3d.exe`, which came before the thing-face `find_floor`, the `floor` flag and
+`thing_contacts`. Only the level-1 slice was rerun on the committed tree (`mt3d2.exe`, `6380a663…`), with
+the same 4 mismatches. The trace gate and `--walk all` have not been rerun on `9eab093`.
+
+## Issue #31 follow-up: table confirmation and velocity persistence
+
+The user confirms that the retail cantina table is solid and Kyle slides along its edge. This
+supersedes the static-read comment's claim that retail shows no table contact. The fixture is not
+grounds for removing the table or changing frozen captures.
+
+Commit `86a7d34` merges thing and surface records before the acceptance pass, removing the refused
+nearest-surface fallback. The level-1 slice on `mt3d4.exe` (SHA-256
+`58608db789eb3b08a2e3a496f8313497a8f43217a1ca52e41cc6aa53bcb4fcb2`) still reports four sector
+mismatches at ticks 36, 72, 108 and 144. The table/wall-3311 wedge persists. All 383 tests passed
+before the next correction.
+
+Static comparison then found a separate velocity-persistence mismatch in `Runtime::step_player`:
+after `CollideHurt` projects the velocity, the runtime could replace it with achieved displacement
+divided by frame time. `sithThing_UpdateMove` (`0x4cc4c0:49-51`) stores movement distance at `+0x264`;
+it does not use that distance to overwrite velocity at `+0x1d4`. The displacement-feedback block is
+deleted. A regression uses zero drag and a 0.03 s frame: one 0.02 s physics step moves 0.02 units,
+but velocity must remain 1 unit/s rather than falling to 2/3 unit/s.
+
+Verification: `cargo test --release step_player_` passed all 10 selected tests (374 filtered).
+No route or gate rerun after the velocity correction; its effect on the table wedge is unmeasured.
+The branch remains work in progress. The hold tail at `0x4f7430:491-534` adds the clamped correction
+to the same movement vector, not a separate move; that static read does not establish the wedge's cause.
+
+### Same-session regression verification of `afbe4bf` against `86a7d34`
+
+`cargo test --release`: 384 passed, 0 failed. Release build completed.
+Compared both binaries in this session using the existing `ab.sh`:
+
+- `86a7d34`, `mt3d4.exe`: SHA-256
+  `58608db789eb3b08a2e3a496f8313497a8f43217a1ca52e41cc6aa53bcb4fcb2`.
+- `afbe4bf`, `afbe4bf.exe`: SHA-256
+  `0a9859925a4b7c0685cf906a205d18a8366238c851924cfb364a6c34c2e58dd5`.
+
+| Check | `86a7d34` | `afbe4bf` |
+|---|---|---|
+| Level-1 slice | 4 sector mismatches, ticks 36/72/108/144 | Same 4 mismatches |
+| Trace gate | 8 compared, 0 failures; `walk17_spawn` excluded by preflight | 9 compared, 1 failure: `walk6_spawn` |
+| `walk6_spawn` | travel 1.06, sectors off 2, xy 0.506, z 0.116 | travel 1.08, sectors off 4, xy 0.612, z 0.217 |
+| `walk17_spawn` | Excluded | PASS: travel 0.70, sectors off 0, xy 0.004, z 0.005 |
+| `--walk all`, level 1 | travel 1.4, blocked 471, sector 361, contained, hull agrees, drop 0.14 | travel 1.1, blocked 545, sector 349, contained, hull differs, drop 0.11 |
+| `--walk all`, level 2 | Stops: drop 11.17 against recorded 11.22 | Same assertion |
+
+The other seven compared trace legs have identical printed metrics. These results supersede the
+unmeasured status above. Velocity persistence changes the later level-1 walk, but does not resolve
+the slice's four sector mismatches. `walk17_spawn` passing does not prove that the headless walk has
+the app's solid-thing list. `walk6_spawn` regresses; no constants, fixtures or routes were changed.
+The level-2 assertion prevents measurement of later `--walk all` levels. Issue #31 remains incomplete
+and the branch remains unmergeable. Continue static comparison of the floor/attach path before
+another behavioral change; do not tune the regressed leg.
+
+## Issue #31: static collision-chain diagnosis and the missing mesh gate
+
+Read the movement, collision-search, thing-intersection, response, floor and attachment chains before
+changing behavior. Ghidra independently confirms `sithIntersect_CheckSphereIntersection` at
+`0x508540`; REA evidence `ev_ec490bab2a637ce259d5ab0198aa746b6d224fa417191ae5d6da32c9206febdb`
+has no unresolved calls. Static target SHA-256:
+`12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44`.
+Retail was not executed and frozen fixtures were not changed.
+
+`CheckSphereThingIntersection` (`0x5080d0:35-46`) always gates the target mesh against the authored
+thing-position sphere. Mesh admission ignores the sphere entry distance and uses the original
+movement length for the face search. The port skipped that gate and tested model faces directly.
+Level-1 thing210, `00table`, is at `(-10.349864,-5.350090,-1.209447)` in sector339, with authored
+`size=movesize=0.070420`; adding the player's 0.065 gives 0.135420. The table's raw bounds midpoint
+equals its origin, so the off-centre-model correction is not the explanation for this table.
+
+The first two table records in the existing `mv4.txt` trace pass the engine gate. The next search,
+line19, starts at `(-10.431544,-5.433699,-1.1222925)`, direction
+`(0.583979,-0.7167128,-0.3811709)`, length 0.001417. Its perpendicular distance from the table origin
+is 0.14428146, greater than 0.135420: the engine rejects it before looking at any face. The port
+instead accepts another table record at line20 and changes the crease, residual movement and
+velocity. The later wall/table contact at line161 independently fails the gate
+(perpendicular distance 0.13565071). These are impossible table responses at the supplied states;
+they do not establish the engine's later path after the first divergent response.
+
+The correction transliterates `0x508540`, including strict tangency rejection, mesh initial-overlap
+fallback, and successful out-of-range ray roots returning distance zero. Mesh contacts now use that
+gate before face iteration. Mesh sphere centres use the separately stored placed thing origin, not
+the model bounds' midpoint. Legacy sight/shot boxes retain their offset centres. Authored radii,
+mesh travel, non-mesh box placement and the chosen 0.02 s port cadence remain unchanged. Regressions
+cover the gate branches, the real table search values, rejected
+deflection versus an admitted solid contact, and an off-centre model's collision at its true origin.
+
+The static audit also establishes separate remaining differences, not grounds for claiming complete
+engine parity: one selected engine thing contact versus all port faces; lost feature/face identity;
+world-space versus model-space face tests; searched-sector admission; floor KEEP/attach/detach
+outcomes and parent velocity bookkeeping; traveled distance versus net displacement for the floor
+tail; and frame cadence/integration order. The retained cadence is an explicit port deviation.
+The trace contains no attachment-selection records, so an upward collision normal is not proof
+that `FindFloor` attached the player to the tabletop. No radius, insert offset or gate tolerance
+was fitted to a capture.
+
+### Verification of the origin-preserving sphere-gate build
+
+`cargo test --release`: 388 passed, 0 failed, including all four new regressions.
+`cargo build --release` completed. Same-session comparison used the existing parity commands,
+without changing captures, routes, thresholds or gate bands:
+
+- Baseline `afbe4bf.exe`: SHA-256
+  `0a9859925a4b7c0685cf906a205d18a8366238c851924cfb364a6c34c2e58dd5`.
+- Final `spherefinal.exe`: SHA-256
+  `7e011abace8bf9de1ca16d9c8523dd0f7e96f54a74ce699c80e1d07079edae2c`.
+
+| Check | Baseline | Sphere gate with separate origin |
+|---|---|---|
+| Level-1 slice, cut684, epsilon1.70 | 4 sector mismatches: ticks36/72/108/144 | 2 sector mismatches: ticks36/72 |
+| Trace gate | 9 compared, 1 failure: `walk6_spawn` | Identical printed results on all 9 legs |
+| `--walk all`, level1 | travel1.1, blocked545, final349, contained, hull differs, drop0.11 | Same |
+| `--walk all`, level2 | Stops: drop11.17 against recorded11.22 | Same assertion; later levels unmeasured |
+
+The gate removes statically impossible table responses and improves the slice, but the slice still
+fails. This is not evidence of complete retail table-slide parity, and issue #31 remains open.
+The next isolated static correction is `0x508400` candidate reduction: retain selected mesh/face
+identity and feature kind, emit one thing record, and use that same selected record in movement
+and floor eligibility. Do not use an upward collision normal as a substitute for attachment evidence.
+
+## Issue #31: selected mesh contacts through movement and floor search
+
+Continued from `e9cd976` by reading the selected-contact chain, not by choosing a variant from route
+results. Ghidra independently confirms `sithIntersect_CheckSphereMeshIntersection` (`0x508400`):
+REA evidence `ev_e1a976dcc1ec1ee510bd3928a95e7b20702775e8675df85eb42c8c6110f79e5e`,
+with no unresolved calls, on the same static retail EXE SHA-256
+`12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44`.
+
+The port now preserves geoset-0 mesh boundaries instead of flattening all model faces. The selector
+transliterates `0x508400`'s shrinking distance, face-over-feature preference and authored-normal
+alignment tie rule. `0x5080d0:76-104` then reduces meshes to one thing contact; a later successful
+mesh at the shortened distance replaces the previous mesh. Thing, mesh and face indices survive
+that reduction, and contacts retain face/edge/vertex feature bits (`5/9/17` for thing hits).
+The thing index is the original level/runtime index, before the solid list filters placements.
+
+`CheckSphereFaceIntersectionEx` (`0x508d20:111-117`) returns an edge/vertex normal even when the
+movement handler will refuse it. The port no longer culls that generated normal inside the shared
+face test. Surface search retains its own returned-normal cull; thing selection finishes first,
+then `MoveThing` may refuse the selected contact. Refusal cannot expose an alternative face from
+the same thing. Both movement and floor search now use the existing `PopStack` transliteration,
+not a sort that accidentally promotes a face ahead of an equal-distance plain sphere record.
+Thing records are inserted before surface records.
+
+`FindFloor` applies eligibility only to each thing's selected face. It cannot reject a side and
+attach to a farther top from that same mesh. A record with no mesh/face returns without changing
+attachment (`0x4f5550:79-82`); only exhausting both ray and radius passes detaches. Its API now
+updates the existing attachment directly, preserving KEEP without an invented fallback.
+Selected thing/mesh/face identity is stored in the attachment. The placed-thing read guard remains
+held while floor search consumes that identity.
+
+`cargo test --release`: 394 passed, 0 failed. The six new regressions exercise equal-distance mesh
+selection, refusing a tangent edge without exposing another face, per-mesh versus flattened
+selection, side-before-top floor eligibility, faceless KEEP, and attachment identity on a
+thing/surface tie. The existing stack regression also covers plain-sphere/face and thing-edge/face
+ties. The solid-top settling fixture now uses an actual mesh face; a faceless sphere cannot
+manufacture that attachment. The release build completed with 47 warnings.
+
+This does not change the retained 0.02 s cadence, model-space versus world-space face testing,
+searched-sector/adjoin handling, parent velocity bookkeeping or the floor tail's travel criterion.
+Retail was not executed. Frozen fixtures, routes, authored constants and gate bands remain unchanged.
+
+### Same-session A/B: `e9cd976` against `44b61c9`
+
+Ran the default trace gate, the level-1 slice, `--walk all`, and the explicit
+`walk2_spawn,walk3_spawn,walk5_spawn` gate set against both binaries in this session.
+
+- Baseline `e9cd976.exe`: SHA-256
+  `7e011abace8bf9de1ca16d9c8523dd0f7e96f54a74ce699c80e1d07079edae2c`.
+- `44b61c9`, `selection.exe`: SHA-256
+  `dd50e807ffca7f2e1f7552feccc084ca1f8184a4119ee1a6f0032726713cc330`.
+
+| Check | `e9cd976` | `44b61c9` |
+|---|---|---|
+| Default trace gate | 9 compared, `walk6_spawn` fails | Identical printed results on all 9 legs |
+| Level-1 slice, cut684, epsilon1.70 | 2 sector mismatches: ticks36/72 | Same |
+| `walk2_spawn` | PASS; travel2.90, off0, xy0.559, z0.355 | Same |
+| `walk3_spawn` | FAIL; travel3.37, off4, xy1.654, z0.052 | FAIL; travel3.30, off4, xy1.585, z0.053 |
+| `walk5_spawn` | FAIL; travel1.75, off2, xy2.179, z0.081 | FAIL; travel3.66, off3, xy1.325, z0.122 |
+| `--walk all`, level1 | travel1.1, blocked545, final349, contained, hull differs, drop0.11 | Same |
+| `--walk all`, level2 | Stops: drop11.17 against recorded11.22 | Same assertion; later levels unmeasured |
+
+For `walk5_spawn`, retail travel is 3.73: travel now enters its band, but sector samples regress
+from two mismatches to three, so the leg still fails. The selected-contact correction is justified
+by the engine branches and regressions, not by that route improvement. It does not resolve the
+cantina slice, and the branch remains unmergeable.
+
+Next single static step: replace the split room/thing movement result with the shared
+`SearchForCollisions` (`0x4e8160`) record stack. `MoveThing` must consume solid and adjoin records in
+pop order, applying `SetSector` only when it pops a crossing, rather than borrowing the sector
+precomputed by the room-only sweep. Preserve the current frozen checks and report every leg.
+
+## Issue #31: correction to the shared mesh distance output
+
+Static review found an output-parameter detail missing from `44b61c9`. The face, mesh and thing
+functions do not return a coherent selected `(distance, normal, face)` tuple. `CheckSphereHit`
+(`0x508be0:35-55`) writes distance as soon as a plane intersects. `CheckSphereFaceIntersectionEx`
+(`0x508d20:33-45`) can subsequently reject facing or polygon eligibility without restoring it.
+`CheckSphereMeshIntersection` (`0x508400:33-55`) passes the same output slot to every face and
+shrinks its input limit only when selection succeeds. `CheckSphereThingIntersection`
+(`0x5080d0:83-94`) passes that slot through every mesh, shortening the next mesh's limit from its
+current value only after a successful mesh. A later missed mesh can still overwrite the final
+distance without replacing the previously selected kind, face, mesh or normal.
+
+The previous Rust selector returned the selected face's original distance and discarded those
+partial writes. The correction threads one mutable distance slot through all face and mesh calls,
+keeps input limits separate, and emits the final slot alongside the selected contact identity and
+normal. The plane test now runs before facing rejection, preserving zero-distance writes from an
+overlapping backface. Surface callers discard the unused output slot. No allocation is added.
+The saved alignment expression also now uses x+y+z, matching both the decomp and the retained
+Ghidra pseudocode; the previous x+z+y ordering was a transcription error.
+
+Added movement regressions for a rejected polygon in the selected mesh, a later entirely missed
+mesh, shortening the next mesh from the last plane write, and facing rejection after an overlap
+writes zero. These exercise final position and velocity, not implementation text or call counts.
+The previous `PopStack` cutover already preserves plain-sphere/face ties; no face-first sort remains
+in movement or floor search. World-space versus engine-local-space mesh testing remains a known
+separate deviation; this correction does not claim that the entire thing intersection is faithful.
+
+### Verification of `3091b29`: shared distance protocol
+
+`cargo test --release`: 396 passed, 0 failed; the release build succeeds with 47 warnings.
+Repeated the same-session comparisons against `e9cd976`, not just the preceding selector build.
+
+- Baseline `e9cd976.exe`: SHA-256
+  `7e011abace8bf9de1ca16d9c8523dd0f7e96f54a74ce699c80e1d07079edae2c`.
+- `3091b29`, `distance.exe`: SHA-256
+  `02f43767dab8ba5ad0ea624592bd5641843c6892f3a6cf10e3b54a8a03d0098f`.
+
+| Check | `e9cd976` | `3091b29` |
+|---|---|---|
+| Default trace gate | 9 compared, `walk6_spawn` fails | Identical printed metrics on all 9 legs |
+| Level-1 slice, cut684, epsilon1.70 | 2 sector mismatches: ticks36/72, expected349 versus339 | Same |
+| `walk2_spawn` | PASS; travel2.90, off0, xy0.559, z0.355 | Same |
+| `walk3_spawn` | FAIL; travel3.37, off4, xy1.654, z0.052 | FAIL; travel3.30, off4, xy1.585, z0.053 |
+| `walk5_spawn` | FAIL; travel1.75, off2, xy2.179, z0.081 | FAIL; travel1.75, off2, xy2.182, z0.081 |
+| `--walk all`, level1 | travel1.1, blocked545, final349, contained, hull differs, drop0.11 | Same |
+| `--walk all`, level2 | Stops: drop11.17 against recorded11.22 | Same assertion; later levels unmeasured |
+
+The earlier `44b61c9` travel gain on `walk5_spawn` does not survive the correct distance protocol.
+That gain was not evidence for the selected-distance implementation. The final leg returns to
+baseline travel and sector mismatch counts, with xy error worse by 0.003. Keep the engine's shared
+output slot; do not restore the cleaner-looking selected `(distance, normal, face)` tuple to
+recover a route result. No frozen fixtures, constants, routes, cadence or gate bands changed.
+Retail was not executed. This correction leaves the branch unmergeable.
+
+The next static step remains the shared solid/adjoin search and movement stack described above,
+with sector changes applied only when crossing records are popped. World-space mesh tests and
+the other recorded deviations remain explicit; the new tests do not establish full retail parity.
+
+## Issue #31: shared collision search and synchronous movement dispatch
+
+Continued from `ca7b126` on `fix/31-movething-3d`. The port now uses one fixed collision stack
+for the represented physics-mover/placed-solid path, rather than separately resolving thing
+contacts and a pre-consumed room sweep.
+
+### Static source and implementation
+
+- `sithCollision_SearchForCollisions` (`0x4e8160`): 128 records, 64 searched sectors, growing
+  discovery traversal, and the `0x800` adjacent-thing pass over the original searched-count
+  snapshot. Discovery records consume capacity even after being marked used.
+- `sithCollision_SearchForSurfaceCollisions` (`0x4e86d0`): authored surface order, engine
+  adjoin eligibility, separate `0x40` discovery and `0x20` crossing records. Static assembly
+  resolved both dropped helper calls: discovery passes the sphere radius; crossing passes zero.
+  `CheckSphereFaceIntersection` (`0x5090b0`) tests only the infinite plane for a nonzero radius,
+  but tests polygon coverage at radius zero. A failed traversable-adjoin test does not become a wall.
+- `SearchForThingCollisions` (`0x4e8430`) now enumerates the sector being searched instead of
+  inventing its own one-/two-hop reachability. Retail Startup (`0x4e6d90`) installs no distance
+  reduction predicates, so recorded thing hits do not shorten the remaining search.
+- `sithCollision_MoveThing` (`0x4e7950`): advance before response refusal, calculate the remainder
+  before dispatch, continue popping refused records, apply sector changes only at popped
+  crossings, compare position bits after callbacks, accumulate traveled distance, and restore the
+  last search's saved pose/sector on failed containment. Tiny initial moves still occur even when
+  the returned travel snaps to zero. Four accepted rounds reset velocity/remainder, including a
+  fourth round that leaves no remainder.
+- `sithCollision_CollideHurt` (`0x4e9090`): remainder-based acceptance, engine arithmetic order,
+  restitution from physflag `0x20`, and normalization of every nonzero folded crease; removed
+  the invented `1e-6` crease cutoff.
+- Floor and camera queries use the shared stack. The floor tail uses accumulated travel rather
+  than endpoint displacement. Player `0x200` searches honor AI-only adjoins; untyped queries do
+  not. Sector visibility flag `0x80` alone does not make a movable adjoin solid.
+- `Runtime::step_player` releases its world borrow before running contact scripts. Crossing
+  dispatch publishes contact pose/velocity, runs `crossed`, then SetSector's exit/water/entry
+  phases synchronously. Each phase preserves script changes; searches and containment read fresh
+  gates. Untouched eye/body coordinates retain their bits. Endpoint crossing/sector inference
+  was removed; startup, teleport and respawn keep explicit notifications.
+- Water transitions use static `0x4cd370`/`0x4cd480` branch order, sounds and puppet movement
+  rows. Retail constants are entry fast-speed threshold `-1.0`, vertical damping `0.25`, and exit
+  fast-speed threshold `1.0`; no captured value supplied a constant.
+
+Updated route provenance to the actual search/movement symbols and removed its source-text
+assertion test. Frozen inputs, expected traces, cadence, constants and gate bands were not edited.
+
+Post-review static corrections:
+
+- The floor tail requires physics flag `0x40` and vertical velocity in `[-2, 0.2]` for an
+  unattached mover or attachment flag `0x8`. Ordinary attachments bypass that predicate.
+  Added a regression covering all three attachment cases.
+- `SetSectorAdjoins` now applies `sithSurface_HideSectorAdjoin` (`0x4e5a10`) /
+  `ShowSectorAdjoin` (`0x4e5a30`) to the sector's owned rows, as the sector wrappers
+  (`0x4f8de0` / `0x4f8e10`) require. Visibility uses marker `0x20`; MOVE, other sectors and
+  originally invisible unmarked rows remain unchanged. Added a hide/re-hide/restore regression.
+- Migrated the remaining level-2/3/4/6 provenance rows and retired-test documentation.
+
+### Verification
+
+The initial full release test run had 400 passes and four failures: two obsolete collision
+expectations/fixtures, an incomplete new VM fixture, and the source-text provenance test.
+After correcting those cases and the post-review branches, all 405 release tests pass.
+The actual-VM crossing regression checks contact-time sender identity, exit-before-entry despite
+reversed link order, script warps, water damping, gate changes and untouched eye/body position bits.
+The final release build passed with 47 warnings.
+
+Fresh baseline and shared-stack executable measurements used the same frozen harness in this session,
+before the post-review corrections above. The table below measures `fbcd6ad`, not the final correction.
+Baseline executable SHA-256: `02f43767dab8ba5ad0ea624592bd5641843c6892f3a6cf10e3b54a8a03d0098f`.
+New executable SHA-256: `354bb3a4c303a979808c0ba667e27a0a7eb865d01826319aa5f4984735d93609`.
+
+| Check | Baseline `ca7b126` code | Shared-stack `fbcd6ad` code |
+| --- | --- | --- |
+| Default trace gate | 8/9 pass; `walk6_spawn` fails | 8/9 pass; `walk6_spawn` fails |
+| `walk6_spawn` | travel1.08, off4, xy0.612, z0.217 | travel1.07, off5, xy0.521, z0.130 |
+| `walk2_spawn` | PASS; travel2.90, off0, xy0.559, z0.355 | Same |
+| `walk3_spawn` | FAIL; travel3.30, off4, xy1.585, z0.053 | Same |
+| `walk5_spawn` | FAIL; travel1.75, off2, xy2.182, z0.081 | FAIL; travel3.68, off3, xy1.337, z0.150 |
+| Frozen level-1 slice, cutoff684, epsilon1.70 | 342 fields; sector mismatches at ticks36/72, expected349/actual339 | Same |
+| `--walk all`, level1 | travel1.1, blocked545, final349, contained, hull differs, drop0.11 | Same |
+| `--walk all`, level2 | Stops: drop11.17 against recorded11.22 | Same; later levels unmeasured |
+
+`walk5_spawn` now meets travel tolerance but fails sector tolerance. `walk6_spawn` has one more
+sector mismatch despite smaller position errors. These are not passes or proof of retail parity.
+Keep the source-derived behavior; do not restore invented search rules to recover a gate result.
+
+The final correction reran the frozen level-1 slice at cutoff `684` and fixture epsilon `1.70`:
+342 compared fields, the same two sector mismatches at ticks `36`/`72` (expected `349`, actual `339`).
+Other frozen measurements above remain the `fbcd6ad` results; they were not rerun for the correction.
+
+### Remaining limits and next static step
+
+This is not byte-identical Rust/x86 code or a complete port of generic engine collision handlers.
+The existing model-world-space tests, non-mesh approximations, child carry/push and other recorded
+subsystem deviations remain. Nested `TeleportThing` notifications drain after its current COG
+handler returns, not inside the verb; generic nested VM callback timing is not claimed.
+Legacy `Gates::passable` consumers still treat sector `0x80` as impassable; complete collision parity
+is not claimed.
+
+Exact open question for overlapping `0x400` surface queries: what caller-provided scratch value
+should represent retail's initially uninitialized `local_30`? Assembly reads the previous output
+and adds the radius; no unique finite constant matches stack residue. The plane helper preserves
+that protocol for a supplied value. Surface search marks initially unknown scratch as NaN.
+Current modeled movement, floor and camera callers do not set `0x400`.
+
+The next single static step is the complete thing-intersection wrapper at `0x5080d0`, especially
+its model-local transforms and mesh ordering. Do not tune the table's authored sphere radius.
+Retail was not executed; no graphical playthrough was performed. The branch remains unmergeable.
+
+## Issue #31: thing-intersection wrapper named and the narrowphase closed
+
+`thing_contacts` was the last place an engine function stood inline. It is now its own function, named
+after the engine, with the verified facts in its doc comment:
+
+- `sithIntersect_CheckSphereThingIntersection` (`0x5080d0`) -> `LevelGeometry::check_sphere_thing_intersection`.
+- Behaviour is unchanged. 405 release tests pass; the frozen level-1 slice and the trace gate report the
+  same values before and after the extraction.
+
+Facts read this round, none of which needed a code change:
+
+- The mesh list at `model+0x24` count / `model+0x28` base is **geoset 0 only**.
+  `rdModel3_LoadEntry` (`0x443e80:125-135`) allocates one count/pointer pair per `GEOSET` row starting at
+  the model's `+0x24`, and the wrapper reads that first pair. `main::collision_faces`' geoset-0 filter is
+  therefore the engine's list, not a shortcut.
+- Mesh records: faces at `+0x40`, stride `0x40`, count `+0x50`, vertices at `+0x30`. The face test is
+  handed the mesh's vertex base (`0x508400`), which each ported `Face` carries itself.
+- The wrapper's branches are gated by `local_4c = (flags & 0x80) == 0 && collide(mover or target) == 3`.
+  The only unimplemented branch, `bVar14` (the mover's own mesh against another thing's `size=` sphere,
+  which negates the returned normal), needs a `collide=3` mover. The shipped `walkplayer` row carries no
+  `collide=` and neither does `_actor`, so the player is `collide=0` and the branch cannot run for a
+  walking body. Port script movers do not collide with things at all (recorded deviation).
+- Movement search flags: `sithCollision_MoveThing` (`0x4e7950:47-56`) adds `5` when `collide==0`, `4`
+  for `move_type==2`, `0x200` for `kind==10`, and `0x800` only while bit 0 is clear. For the player that
+  is `0x245`, so the `flags & 8`, `flags & 0x10` and `flags & 0x2000` filters in
+  `SearchForThingCollisions` (`0x4e8430:37-43`) are all off: every colliding thing in the search is
+  tested, the cantina table included. `MoveState::search_flags` already matches that derivation.
+
+Consequence: the thing narrowphase is not where the table divergence lives. The remaining frozen
+level-1 sector samples (ticks `36`/`72`, expected `349`, trace `339`, cutoff `684`, epsilon `1.70`)
+diverge after the contact, in the response/containment step.
+
+Next single static step: `sithThing_UpdateMove` (`0x4cc4c0`) and the attached-physics step's handling of
+a body wedged between the table side and the wall, one engine function at a time. No trace was used to
+select a change. Retail was not executed; no graphical playthrough was performed. The branch remains
+unmergeable.
+
+### Correction: the player's `collide=` and movement search flags
+
+The entry above states the player is `collide=0` and that the movement search flags are `0x245`. Both
+readings were wrong; the wrapper conclusion does not depend on either.
+
+- `_actor` carries `collide=1` (`type=actor collide=1 move=physics`), and `walkplayer` inherits it through
+  the `Based On:` chain (`Level::template_param`), so the player's `collide` is **1**.
+- The wrapper stays out of its reverse branch anyway: `local_4c` needs `collide == 3`, and 1 is not 3.
+- The player's movement flags are **`0xA40`**, not `0x245`: `sithCollision_MoveThing` (`0x4e7950:47-56`)
+  starts from the caller's `0x40`, adds `5` only when `collide == 0` (not here), adds `0x200` for
+  `kind == 10`, and adds `0x800` because bit 0 is still clear.
+- The port derives **`0xA00`**: it passes base `0` instead of `0x40` because the only reader of `0x40`
+  in `MoveThing` is the trailing `FindFloor` at `0x4e7950:283`, which `finish_body` performs separately.
+  No other `flags & 0x40` consumer exists in the collision path, and every search-relevant bit (`0x800`
+  set; `1`, `4`, `8`, `0x10`, `0x2000` clear) is identical.
+- `0x800` is live: it is the adjacent-thing expansion at the end of `search_for_collisions` (`0x4e8160`),
+  which searches an adjoined sector's thing list. The `flags & 8`, `flags & 0x10` and `flags & 0x2000`
+  filters in `SearchForThingCollisions` (`0x4e8430:37-43`) are all still off, so every colliding thing in
+  the searched sectors is tested.
+
+## Issue #31: same-session A/B, and the walk6 boundary
+
+Two binaries, one session: `main55` (`770602dc`, `f092df1`) against the branch (`91d3a1acd5`). This table
+supersedes earlier columns that mixed recorded values with new ones (the `fbcd6ad` log row listed
+`walk6_spawn` failing on both sides; today main passes it, so that column was not a same-session read).
+
+| check | main | branch |
+|---|---|---|
+| `cargo test --release` | 405 pass | 405 pass |
+| default trace gate | 9/9 | 8/9, `walk6_spawn` off 5 |
+| `walk6_spawn` alone | off 2 (pass), xy 0.512, z 0.122 | off 5 (fail), xy 0.521, z 0.130 |
+| frozen level-1 slice (684 / 1.70) | 1 field: tick 144, sector 349 -> 361 | 2 fields: ticks 36/72, sector 349 -> 339 |
+| `--walk all` | passes, worst drop 3.38 | fails: `02narshadda` 11.17 vs 11.22, then `07yun` 1.50 vs 0.00 |
+
+The slice mismatch moved: the branch clears main's tick-144 sample and introduces two earlier ones. It is
+not a superset, so "closer" is not a count question.
+
+`walk6_spawn`: the path is identical; the first divergent sample is tick 124 at (23.32, 38.85, 1.15), where
+the branch has entered sector 290 while main and retail are in 315 at z 1.14. The branch's body rises
+0.008 after stopping and the boundary sits between the two heights.
+
+Decomp reads that close the two candidate causes:
+
+- `sithPhysics_GetThingHeight` (`0x4f6210`) is `max(model insert-offset z, size - 0.005)`; for the player
+  that is `0.120114`, the port's `height`. Matches.
+- `0x4f7430` forms `local_68 = dot(pos - attach.point, normal)` and divides it by
+  `dot(normal, world_up)` when physflag `0x800` is set (`0x4f7430:76-86`). The port's `d` and `d /= c` are
+  the same arithmetic, and the `0.5 * dt` clamp (`0x523198`) is applied to the displacement, as written.
+- `0x4e7950:283` gates the floor tail on `+0x34` (attach flags), not on the attach pointer. The port's
+  `finish_body` ORs `attach.is_some()` because a physics attach does not write `+0x34`; the player has
+  physflag `0x40` and resting `vz` inside [-2, 0.2], so both readings take the same FindFloor branch with
+  the same range. No behaviour difference for this body.
+
+The decomp therefore does not show the branch violating the hold or the search gate. What differs is which
+floor face is chosen. The fixture's two-decimal z cannot separate 1.1417 from 1.1501, and selecting a side
+by it is what Principles and pitfalls §2/§7 forbid.
+
+Rejected variant: re-recording `WALK_OFF_THE_EDGE` rows one at a time. `02narshadda` at 11.17 is explained
+by the attached hold (the walk-off is 0.05 shallower), but re-recording it advanced the run to `07yun`
+(1.50 against a recorded 0.00), which has no engine reason yet. Reverted. The rows are port measurements,
+and a partial re-record is a gate chase, not a transliteration.
+
+Added: `BK_FLOOR_TRACE` now prints each `find_floor` attach (surface, normal, point, pos, range, friction).
+The branch had no emitter there, so a floor choice could not be read at all.
+
+Question for the user (pitfall §7): the `walk6_spawn` fixture records z to two decimals. Does the body rest
+at 1.1417 or 1.1501 on that ramp, and does it enter sector 290? A capture with three or more decimals would
+settle which of the two resting models is the engine's. Do not answer it from the current fixture.
+
+Next single static step: the sector change itself. Only `MoveThing` writes the sector during movement, on a
+collision entry carrying flag `0x20`; read the crossing record that produced 290 in `search_for_collisions`
+and whether an attached body's raised pose can reach that portal plane without an engine crossing.
+
+Retail was not executed; no graphical playthrough was performed. The branch remains unmergeable.
+
+## Issue #31: option 1 — fall rows re-recorded in one pass, boundary ledgered
+
+User decision: merge the chain with a deviation-ledger entry rather than hold "unchanged or better"
+on the 0.008 rest-height question; #31 is the last open blocker on #28 (levels 2-5 campaign gate).
+
+The re-record was one pass. Every level's drop was collected first (`BK_WALK_ONLY` per level on the
+unchanged binary): every pinned row that kept its descent shape moved by the same −0.05
+(11.17/0.08/0.17/2.72/2.72) — the attached hold riding `GetThingHeight` above each floor — and
+`07yun` gained a contained, hull-agreeing 1.50 descent, a slope the walker now enters.
+
+The same full-table diff (`walk-main.tsv` vs `walk-branch.tsv`) then surfaced three descents beyond
+that signature, which the first `--walk all` pass hid behind the sweep line: `m10` 2.12→2.86 (end
+sector 40 instead of 2), and `15maw` 1.84→58.86 / `m_boss15` 0.12→58.86. `BK_FLOOR_TRACE` on `15maw`
+settled the cause: main's global floor fallback rests the body mid-shaft on faces owned by other
+sectors (161/owner 13 at z 28.2, then 551/owner 46 at z 26.5 — the ledger's floor-scope row), while
+the chain's own-sector hold walks 432→430→507 (z 28.2→−30.6) and ends in sector 41, the sector both
+binaries name. All three pinned as new `WALK_OFF_THE_EDGE` rows with that reason; four levels' hull
+column flipped agrees→differs (`01narshadda`, `03katarn`, `09fuelstation`, `m5`), and
+`01narshadda`'s walk end sector 361→349 is the same 349/361 boundary the slice row names. The ledger
+row "attached rest face at a sector boundary (#31)" in `docs/porting-roadmap.md` carries all of it
+with retirement conditions.
+
+End state: tests 405, `--walk all` green with 9 pinned rows, trace gate 8/9 (`walk6_spawn` only,
+ledgered), slice 2 fields (ticks 36/72, ledgered). The 0.008 boundary and the three fall rows retire
+on a user-run retail capture (z at 3+ dp for the boundary; any trace for the falls).

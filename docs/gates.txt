@@ -2772,8 +2772,8 @@ running app.--carry-check --start 01narshadda                        0   level 2
   engine function, decomp address, port symbol and source for walk, floor, collision, use, cog
   messages, damage, AI fire, audio state and level end (26 rows, 9 mechanics). `route-gate.ps1`
   verifies each `ported` row's symbol exists in its source and each `deviated` row's ledger entry is
-  in `docs/porting-roadmap.md`; `route_tests::every_route_mechanic_names_its_engine_function` does
-  the same in `cargo test`. The replay's `ROUTE_TIME_SCALE` clock fit was a `deviated` row until
+  in `docs/porting-roadmap.md`. Issue #31 retired the duplicate source-text unit test; provenance
+  validation remains in the route gate. The replay's `ROUTE_TIME_SCALE` clock fit was a `deviated` row until
   issue #17 retired it (the ledger row says so); the per-thing `sighted` substitution remains
   `deviated`, so the gate cannot hide it.
 - **The audio route no longer diverges.** Its synthetic `switch` row is gone (it had been
