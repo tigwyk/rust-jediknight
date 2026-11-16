@@ -6839,3 +6839,40 @@ anything: the level-1 retail slice, the trace gate and `--walk all` were identic
 `d801c608`). The push, its function and its test assertion are deleted.
 
 `advance` and `resolve` (hull projection through a portal) had no callers on `main` already; deleted.
+
+## Issue #31 (main step, branch `fix/31-movething-3d`, not merged): attached physics, 3D `MoveThing`, `FindFloor`
+
+`walker_step` (main.rs) is gone. `Solids::step_body` (collide.rs) runs one sub-step as the engine does:
+
+- attached: `sithPhysics_UpdateAttachedThingPhysics` (`0x4f7430`) steps 5-7, i.e. the player slope pull,
+  the velocity projected onto the floor plane, and the hold toward `GetThingHeight` clamped to
+  `0.5 * dt` (`0x523198`);
+- unattached: gravity into `vel.z`;
+- one 3D `sithCollision_MoveThing` (`move_body`, the step-up branch deleted) and its `FindFloor` tail.
+
+`find_floor` transliterates `0x4f5550`: a ray pass, then a `moveSize` pass, with reach `moveSize + 0.005`
+unattached and `2 * GetThingHeight` attached. It takes floor-flagged surfaces and thingflag-`0x40` cog
+things whose face normal z is at least 0.6. `PlayerBody::rest`, the warp-only hold, `slope_step` and
+`STEP_UP` are deleted. `step_player` carries `PlayerBody::attach`.
+
+A/B, `main` `f092df1` (`main55.exe`, sha256 `770602dc…`) against `mt3d.exe` (`2443312c…`), same session:
+
+| check | main | branch |
+|---|---|---|
+| level-1 retail slice | 1 mismatch (tick 144) | 4 mismatches (ticks 36-144: 339, retail 349) |
+| trace gate | 9/9 | 8 compared, all pass; `walk17_spawn` excluded by preflight (travel 0.18) |
+| `walk_cantina` z | 0.054 | 0.000 |
+| `walk6_spawn` xy / z | 0.512 / 0.122 | 0.506 / 0.116 |
+| `--walk all` | passed | stops at the `02narshadda` walk-off row: drop 11.17 against the recorded 11.22 |
+
+Leg movement, reported and not tuned:
+
+- **Level-1 slice.** The held body (z -1.13) meets `00table`'s top edge (model top -1.169). The edge
+  normal is about (0,-0.8,0.6), so `CollideHurt` turns the walk up the edge and the hold pulls it back
+  down: the body stalls in 339. Retail's 600 ms sample moves (+0.19, +0.40) while facing yaw -60. That
+  is a slide along the table's side. Which face retail met is the open question on #31.
+- **`walk17_spawn`.** The warp pose is over the elevator shaft in `18Ascend`, covered only by door leaves
+  323/324. `walk_level` (the preflight's `--walk`) never calls `set_things`, so the body falls 3 units.
+  The baseline passed through `resting_floor`'s edge reach.
+- **`02narshadda` walk-off row.** The rows are port measurements. 0.05 is the hold height
+  (0.120114 against the old 0.065 contact). Re-record once the chain is in.

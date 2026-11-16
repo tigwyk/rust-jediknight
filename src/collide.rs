@@ -49,6 +49,9 @@ pub struct ThingSolid {
     /// thing's full pitch/yaw/roll. `sithIntersect_CheckSphereThingIntersection` (`0x5080d0`) sweeps
     /// these instead of a sphere, so a door leaf laid flat (`18Ascend` things 323/324) is a floor.
     pub mesh: Option<std::sync::Arc<[Face]>>,
+    /// `sithPhysics_FindFloor`'s thing search (`0x10 | 0x2000`, `0x4e8430`) admits only a cog-type
+    /// thing carrying thingflag `0x40`: the ones a body can attach to.
+    pub floor: bool,
 }
 
 impl ThingSolid {
@@ -83,6 +86,8 @@ impl ThingSolid {
         let Some(half) = self.half else {
             let span = self.radius + radius;
             let (dx, dy) = (at[0] - self.centre[0], at[1] - self.centre[1]);
+            // `t` runs along the 3D `dir`, so the plan quadratic's `a` is the horizontal part squared.
+            let a = dir[0] * dir[0] + dir[1] * dir[1];
             let b = 2.0 * (dir[0] * dx + dir[1] * dy);
             let c = dx * dx + dy * dy - span * span;
             // Already overlapping. A body walking *out* -- the escape direction -- is left free;
@@ -95,11 +100,14 @@ impl ThingSolid {
                 }
                 return None;
             }
-            let disc = b * b - 4.0 * c;
+            if a < 1e-8 {
+                return None;
+            }
+            let disc = b * b - 4.0 * a * c;
             if disc < 0.0 {
                 return None;
             }
-            let t = (-b - disc.sqrt()) / 2.0;
+            let t = (-b - disc.sqrt()) / (2.0 * a);
             if !(0.0..=left).contains(&t) {
                 return None;
             }
@@ -164,6 +172,31 @@ impl ThingSolid {
         }
         let n = self.to_world(normal);
         Some((near, [n[0], n[1], 0.0]))
+    }
+
+    /// Whether `p` is over the thing's plan footprint: the model's plan box, or the cylinder's disc.
+    fn over(&self, p: [f32; 3]) -> bool {
+        match self.half {
+            Some(half) => {
+                let local = self.local([p[0], p[1]]);
+                local[0].abs() <= half[0] && local[1].abs() <= half[1]
+            }
+            None => {
+                let (dx, dy) = (p[0] - self.centre[0], p[1] - self.centre[1]);
+                dx * dx + dy * dy <= self.radius * self.radius
+            }
+        }
+    }
+
+    /// A sphere moving down onto the thing's flat top: the travel along `dir` at which the sphere's
+    /// bottom meets `z_max` over the footprint, with the top's normal.
+    fn sweep_top(&self, at: [f32; 3], dir: [f32; 3], left: f32, radius: f32) -> Option<(f32, [f32; 3])> {
+        if dir[2] >= 0.0 {
+            return None;
+        }
+        let t = ((at[2] - radius - self.z_max) / -dir[2]).max(0.0);
+        let p = [at[0] + dir[0] * t, at[1] + dir[1] * t, at[2] + dir[2] * t];
+        (t <= left && self.over(p)).then_some((t, [0.0, 0.0, 1.0]))
     }
 }
 
@@ -834,6 +867,17 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     }
 }
 
+/// What a body is attached to (`sithThing` `+0x34`/`+0x38`/`+0x44`): the floor's into-room normal and a
+/// point on its plane, the surface when it is one (a thing face has none), and the drag scale its surface
+/// flags give (`0x4f7430`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Attach {
+    pub normal: [f32; 3],
+    pub point: [f32; 3],
+    pub surface: Option<usize>,
+    pub friction: f32,
+}
+
 /// One swept-sphere contact: where a body of `radius` first touches, in the direction it moved.
 #[derive(Clone, Copy, Debug)]
 pub struct Sweep {
@@ -848,11 +892,6 @@ pub struct Sweep {
     /// Where the sphere's centre is at the contact, in world space. A sweep that crossed a doorway
     /// spends part of its distance there, so this — not `distance` — is what a caller can place a body by.
     pub point: [f32; 3],
-    /// The touched face's highest vertex. A step-up may lift the body over a face whose **top edge** is
-    /// within the step allowance — a stair riser's top is the next tread — while a wall whose top is
-    /// high is not a step, whatever height its contact point happens to sit at. Without this the step
-    /// test can only ask about the contact point, which cannot tell a riser from a wall.
-    pub top: f32,
     kind: u32,
 }
 
@@ -1239,29 +1278,10 @@ impl LevelGeometry {
             normal,
             sector,
             point: at,
-            top: verts.iter().map(|v| v[2]).fold(f32::MIN, f32::max),
             kind,
         })
     }
 
-
-    /// `sithCollision_MoveThing` for a walking body: sweep horizontally, slide along what was hit, and
-    /// lift over a low step.
-    ///
-    /// The engine's loop pops a collision, lets a handler decide (a wall stops, a doorway is entered,
-    /// a thing is pushed) and then re-sweeps the remaining distance at the angle the hit allows. Three
-    /// bounces is enough for a corner; a fourth would only re-find the same wall.
-    ///
-    /// A step is tried as the engine does it — the same sweep from a raised start, see
-    /// `sithPhysics_FindFloor`'s second pass at `range = moveSize` — and the vertical sweep then settles
-    /// the body onto whatever it landed on.
-    /// The nearest **solid model** the body would run into: `(travel, normal)` in plan.
-    ///
-    /// `sithCollision` treats a collidable thing's model as solid surfaces, so a walking body is
-    /// **blocked** by a crate or a table and slides along it. A `collide=3` thing is its model's
-    /// oriented bounds box, and the rest are cylinders sized from the model's own plan footprint
-    /// (see `solid_things`): the circle test solves `|P + d t - C| = R + r`, while the box test sweeps
-    /// the sphere in the thing's own frame. Both return the face normal as the slide frame.
     /// Whether a segment crosses a **solid thing** — the bar counter, a crate, a column.
     ///
     /// The engine's sight and shot rays go through the collision search, so a table between two
@@ -1430,18 +1450,18 @@ impl LevelGeometry {
         })
     }
 
-    /// Sweep a walking body against the placed solid models. The third value is the contacted
-    /// thing's model top (`z_max`), which is what tells `move_body` whether the contact is a low
-    /// obstruction the body can step over or a wall.
-    fn sweep_things(
+    /// Every placed solid model a moving body meets (`sithCollision_SearchForThingCollisions`,
+    /// `0x4e8430`): `each(thing, travel, contact normal, face normal, point on the face)`. The face is
+    /// the model face touched (outward normal), a box or cylinder's flat top, or the plan side hit.
+    fn thing_contacts(
         &self,
         at: [f32; 3],
         dir: [f32; 3],
         left: f32,
         radius: f32,
         sector: usize,
-    ) -> Option<(f32, [f32; 3], f32)> {
-        let mut best: Option<(f32, [f32; 3], f32)> = None;
+        mut each: impl FnMut(&ThingSolid, f32, [f32; 3], [f32; 3], [f32; 3]),
+    ) {
         let things = self.things();
         for thing in things.iter() {
             // `SearchForThingCollisions` walks the sector lists of the sectors the sweep reaches: a
@@ -1459,8 +1479,14 @@ impl LevelGeometry {
             if !reachable {
                 continue;
             }
-            // A body whose feet are on or above the model's top stands on it; it is not a wall.
-            if at[2] + radius < thing.z_min || at[2] - radius >= thing.z_max - 1e-4 {
+            // A body whose feet are on or above the model's top can only meet the top, moving down.
+            if at[2] + radius < thing.z_min {
+                continue;
+            }
+            if thing.mesh.is_none() && at[2] - radius >= thing.z_max - 1e-4 {
+                if let Some((t, normal)) = thing.sweep_top(at, dir, left, radius) {
+                    each(thing, t, normal, normal, [thing.centre[0], thing.centre[1], thing.z_max]);
+                }
                 continue;
             }
             if let Some(faces) = &thing.mesh {
@@ -1468,46 +1494,54 @@ impl LevelGeometry {
                 // convention, so each face is handed over turned around.
                 for face in faces.iter() {
                     let into = [-face.normal[0], -face.normal[1], -face.normal[2]];
-                    let Some(hit) =
+                    if let Some(hit) =
                         Self::face_contact(into, face.point, &face.verts, usize::MAX, at, dir, left, radius, sector)
-                    else {
-                        continue;
-                    };
-                    if best.is_none_or(|(near, _, _)| hit.distance < near) {
-                        // No model top: a mesh is faces, and `CollideHurt` slides along the one hit.
-                        best = Some((hit.distance, hit.normal, f32::INFINITY));
+                    {
+                        each(thing, hit.distance, hit.normal, face.normal, face.point);
                     }
                 }
                 continue;
             }
-            let Some((t, normal)) = thing.sweep_plan(at, dir, left, radius) else {
-                continue;
-            };
-            if best.is_none_or(|(near, _, _)| t < near) {
-                best = Some((t, normal, thing.z_max));
+            if let Some((t, normal)) = thing.sweep_plan(at, dir, left, radius) {
+                let point = [at[0] + dir[0] * t - normal[0] * radius, at[1] + dir[1] * t - normal[1] * radius, at[2] + dir[2] * t];
+                each(thing, t, normal, normal, point);
             }
         }
+    }
+
+    /// The nearest placed solid model a moving body meets: the travel to the contact and its normal.
+    fn sweep_things(&self, at: [f32; 3], dir: [f32; 3], left: f32, radius: f32, sector: usize) -> Option<(f32, [f32; 3])> {
+        let mut best: Option<(f32, [f32; 3])> = None;
+        self.thing_contacts(at, dir, left, radius, sector, |_, t, normal, _, _| {
+            if best.is_none_or(|(near, _)| t < near) {
+                best = Some((t, normal));
+            }
+        });
         best
     }
+
+    /// `sithCollision_MoveThing` (`0x4e7950`): move a sphere of `radius` by the 3D `delta`, popping the
+    /// collision records nearest-first and answering each with `sithCollision_CollideHurt`
+    /// (`0x4e9090`), for at most four searches. There is no step: a riser is a wall, and a body passes
+    /// over a low ledge only because the attached hold keeps it `GetThingHeight` above its floor.
     pub fn move_body(
         &self,
         sector: usize,
         pos: [f32; 3],
         delta: [f32; 3],
         radius: f32,
-        step: f32,
         gates: Gates<'_>,
         vel: &mut [f32; 3],
     ) -> ([f32; 3], usize, bool) {
-        let len = (delta[0] * delta[0] + delta[1] * delta[1]).sqrt();
-        if len < 1e-6 {
+        let len = dot(delta, delta).sqrt();
+        if len <= 1e-5 {
             return (pos, sector, false);
         }
         let mut at = pos;
         let mut here = sector;
         let mut left = len;
         let mut blocked = false;
-        let mut dir = [delta[0] / len, delta[1] / len, 0.0];
+        let mut dir = [delta[0] / len, delta[1] / len, delta[2] / len];
         // `sithCollision_MoveThing`'s residual loop runs at most four searches (`3 < local_34`
         // bails, `0x4e7950:93,231`), the next along the deflected remainder
         // (`rdVector_Normalize3` over the `0x9a..0x9c` delta, `0x4e7950:223-229`). The crease
@@ -1519,7 +1553,7 @@ impl LevelGeometry {
         for bounce in 0..4 {
             saved = (at, here);
             if std::env::var_os("BK_MOVE_TRACE").is_some() {
-                eprintln!("move: loop {bounce} at {:?} dir {:?} left {left:.5}", at, [dir[0], dir[1]]);
+                eprintln!("move: loop {bounce} at {:?} dir {:?} left {left:.5}", at, dir);
             }
             // The engine's pop loop walks the record stack nearest-first and skips a record the
             // response does not accept (`0x4e7950:104-205`: advance to the hit, run the handler,
@@ -1551,9 +1585,9 @@ impl LevelGeometry {
             // below. It is never a step: `MoveThing` has none.
             let body = self.sweep_things(at, dir, left, radius, here);
             let room = match body {
-                Some((travel, normal, _top)) if room.0.is_none_or(|hit| travel < hit.distance) => {
+                Some((travel, normal)) if room.0.is_none_or(|hit| travel < hit.distance) => {
                     let point = [at[0] + dir[0] * travel, at[1] + dir[1] * travel, at[2] + dir[2] * travel];
-                    let hit = Sweep { distance: travel, surface: usize::MAX, normal, sector: here, point, top: f32::MAX, kind: 4 };
+                    let hit = Sweep { distance: travel, surface: usize::MAX, normal, sector: here, point, kind: 4 };
                     (Some(hit), here, room.2)
                 }
                 _ => room,
@@ -1572,92 +1606,12 @@ impl LevelGeometry {
                             hit.surface, hit.point, hit.normal, hit.distance, left, at
                         );
                     }
-                    let travelled = (hit.point[0] - at[0]) * dir[0] + (hit.point[1] - at[1]) * dir[1];
+                    let travelled = dot(sub(hit.point, at), dir);
                     at = hit.point;
                     here = far;
                     left -= travelled.max(0.0);
-                    if left < 1e-4 {
+                    if left < 1e-5 {
                         break;
-                    }
-                    // A low obstruction is a step rather than a wall: retry the rest of the move from
-                    // one step up. `hit.point` is the centre at contact, so the feet are `radius` below.
-                    // A step candidate needs the *face itself* to be climbable, not just its contact point.
-                    // A tall ledge's contact is at the body's feet (the body is standing at its base), so
-                    // the contact-height test alone called it "low" and the walker could step up against
-                    // it frame after frame — level 9's body climbed 0.34 up a 0.55-high ledge while retail
-                    // simply stopped at its base. `Sweep::top` is the face's highest vertex; the step
-                    // allowance is measured against that.
-                    let low = hit.point[2] - radius < pos[2] - radius + step
-                        && hit.top <= pos[2] - radius + step + 1e-3;
-                    if std::env::var_os("BK_WALK_TRACE").is_some() {
-                        eprintln!(
-                            "walk trace:   step candidate low {low} contact z {:.3} feet {:.3} step {step:.3}",
-                            hit.point[2],
-                            pos[2] - radius
-                        );
-                    }
-                    if low {
-                        let raised = [at[0], at[1], at[2] + step];
-                        // Retry the move one step up, the way `FindFloor` re-sweeps at `range = moveSize`.
-                        // The destination's floor may be a frame away (a ledge whose top edge starts just
-                        // past the body), so this cannot require a higher floor *here* — it lifts, and the
-                        // vertical sweep settles the body onto whatever it ends up over. The four-way
-                        // check is what keeps a lift from planting the body inside a wall.
-    // `ponytail:` the four-way test rejects a body that merely *touches* the riser it was blocked by
-    // (the sweep reports a hit at distance 0, and the contact is at exactly the body radius), so a step
-    // only succeeds when the lift clears the riser's polygon top outright. The upgrade is to test the
-    // rise against the polygon's own top edge rather than a swept sphere at the raised height.
-    // A **stair riser** is the case this test used to reject: after the lift the body is still flush
-    // against the *next* step, so a swept sphere at the raised height reports a hit at distance 0 and the
-    // step fails on every stair (level 6: the port stopped at the foot of a staircase, z 1.020, while
-    // retail climbed it). The old `ponytail:` note named the upgrade — judge the rise against the face's
-    // own top edge: a stair riser's top is the next tread (`<= raised feet + step`), a wall's is high.
-    let raised_feet = raised[2] - radius;
-    let clears = |hit: Option<Sweep>| match hit {
-        None => true,
-        Some(h) => h.distance > radius * 0.5 || h.top <= raised_feet + step,
-    };
-    let clear = [[1.0f32, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]]
-        .iter()
-        .all(|d| {
-            let hit = self.sweep(here, raised, *d, radius * 2.0, radius, gates);
-            if std::env::var_os("BK_WALK_TRACE").is_some()
-                && let Some(h) = hit
-                && !clears(Some(h))
-            {
-                eprintln!(
-                    "walk trace:   step blocked by surface {} normal {:?} top {:.3} distance {:.3} point {:?}",
-                    h.surface, h.normal, h.top, h.distance, h.point
-                );
-            }
-            clears(hit)
-        });
-                        // A step must land *somewhere*: lifting the body at a spot where nothing is below it
-                        // is how it walked off the walkway's seam and fell. Eight units is generous, so a
-                        // step down into a room still works while a step over a void does not.
-                        let lands = self
-                            .floor_under(here, raised, 8.0, radius)
-                            .is_some_and(|(_, travelled, _)| travelled <= 8.0);
-                        // And the lifted body must still be inside its sector. A slanted surface's
-                        // outward normal has a vertical component, so raising the body carries it
-                        // *through* the plane: on `10cargo` sector 333's 45° corner the lift moved the
-                        // centre 0.047 outward, which made the raised sweep read the wall as "behind
-                        // me", pass, and walk the body out of the room — the engine never does this,
-                        // because its step lives in the floor pass and `MoveThing` re-tests the hull
-                        // afterwards (`decomp/004e7950_sithCollision_MoveThing.c:251`).
-                        let inside = self.inside_sector_with_gates(here, [raised[0], raised[1], raised[2] - radius], 0.0, gates);
-
-    let advance = clears(self.sweep(here, raised, dir, left, radius, gates));
-    if std::env::var_os("BK_WALK_TRACE").is_some() {
-        eprintln!("walk trace:   step predicates clear {clear} lands {lands} inside {inside} advance {advance}");
-    }
-    if clear && lands && inside && advance {
-                            // The lift is a vertical move through the same search (`0x4e7950`): a body
-                            // stepping out of `06abarons`' pool rises through the water's adjoin into 34.
-                            here = self.sweep_rooms(here, at, [0.0, 0.0, 1.0], step, radius, gates, &mut Vec::new()).1;
-                            at = raised;
-                            continue;
-                        }
                     }
                     // `sithCollision_CollideHurt` (`0x4e9090`) — the player's move response
                     // (physicsType 1, no `0x20` type flag, so the restitution multiplier is
@@ -1761,6 +1715,140 @@ impl LevelGeometry {
             eprintln!("move: end at {:?} here {here} blocked {} from {:?}", at, blocked, pos);
         }
         (at, here, blocked || at != pos)
+    }
+
+    /// `sithPhysics_FindFloor` (`0x4f5550`) for a body with no physflag `0x80`: search straight down by
+    /// `range`, first with a ray and then with the body's own `radius` (the loop's second pass, which
+    /// actors and players take), and attach to the first record popped. The search carries `0x10`, so
+    /// only floor-flagged surfaces (`surfflags & 1`) and thingflag-`0x40` cog things count; a thing
+    /// record attaches when its **face** normal's z is at least 0.6 (`0x523190`), to that face
+    /// (`sithThing_AttachThingToThingFace`). `None` detaches.
+    pub fn find_floor(&self, sector: usize, pos: [f32; 3], radius: f32, range: f32, gates: Gates<'_>) -> Option<Attach> {
+        const DOWN: [f32; 3] = [0.0, 0.0, -1.0];
+        for r in [0.0, radius] {
+            let mut records = Vec::new();
+            self.sweep_rooms(sector, pos, DOWN, range, r, gates, &mut records);
+            let surface = records
+                .iter()
+                .filter(|hit| self.surface_flags.get(hit.surface).is_none_or(|flags| flags & 1 != 0))
+                .min_by(|a, b| a.distance.total_cmp(&b.distance))
+                .and_then(|hit| {
+                    let face = self.face_of.get(&hit.surface).and_then(|i| self.faces.get(*i))
+                        .or_else(|| self.floor_of.get(&hit.surface).and_then(|i| self.floors.get(*i)))
+                        .or_else(|| self.wall_of.get(&hit.surface).and_then(|i| self.walls.get(*i)))?;
+                    // The attach normal (`+0x44`) points into the room, toward the body standing on it.
+                    let normal = if dot(sub(pos, face.point), face.normal) < 0.0 {
+                        [-face.normal[0], -face.normal[1], -face.normal[2]]
+                    } else {
+                        face.normal
+                    };
+                    let flags = self.surface_flags.get(hit.surface).copied().unwrap_or(0);
+                    // `0x4f7430`: surface flags `0x1000` and `0x2000` scale the drag to 0.3 and 0.1.
+                    let friction = if flags & 0x3000 == 0 { 1.0 } else if flags & 0x2000 == 0 { 0.3 } else { 0.1 };
+                    Some((hit.distance, Attach { normal, point: face.point, surface: Some(hit.surface), friction }))
+                });
+            let mut thing: Option<(f32, Attach)> = None;
+            self.thing_contacts(pos, DOWN, range, r, sector, |solid, t, _, face, point| {
+                if solid.floor && face[2] >= 0.6 && thing.is_none_or(|(near, _)| t < near) {
+                    thing = Some((t, Attach { normal: face, point, surface: None, friction: 1.0 }));
+                }
+            });
+            let nearest = match (surface, thing) {
+                (Some(s), Some(t)) => Some(if t.0 < s.0 { t } else { s }),
+                (s, t) => s.or(t),
+            };
+            if let Some((_, attach)) = nearest {
+                return Some(attach);
+            }
+        }
+        None
+    }
+
+    /// One physics step of a body: `sithPhysics_UpdateAttachedThingPhysics` (`0x4f7430`) while it is
+    /// attached, gravity otherwise, then `sithThing_UpdateMove` (`0x4cc4c0`) -> one
+    /// `sithCollision_MoveThing` (`0x4e7950`) and its `FindFloor` tail.
+    ///
+    /// `height` is `sithPhysics_GetThingHeight` (`0x4f6210`): the attached hold keeps the body that far
+    /// above its floor, correcting at most `0.5 * dt` a step (`0x523198`). `thrusting` is the attached
+    /// update's "the body pushes itself" test for the slope pull. Returns the horizontal distance moved,
+    /// whether the sector changed, and whether the body attached this step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_body(
+        &self,
+        gates: Gates<'_>,
+        sector: &mut usize,
+        pos: &mut [f32; 3],
+        vel: &mut [f32; 3],
+        attach: &mut Option<Attach>,
+        dt: f32,
+        radius: f32,
+        height: f32,
+        gravity: f32,
+        thrusting: bool,
+        wet: bool,
+    ) -> (f32, bool, bool) {
+        if wet {
+            // `sithThing_EnterSector` (`0x4cd2c0`) detaches a body entering water, and the water
+            // branch of `FindFloor` never attaches one.
+            *attach = None;
+        }
+        let mut delta = match *attach {
+            Some(a) => {
+                let n = a.normal;
+                let c = n[2];
+                let mut d = dot(sub(*pos, a.point), n);
+                // Physflag `0x800` (the player's `0x4a4f`): the hold is measured along world up.
+                if c < 1.0 {
+                    d /= c;
+                }
+                // The player's slope pull: physflag `0x1`, a tilted floor, and a slippery one or a body
+                // pushing itself (`0x5231bc`/`0x5231c8` clamp `1 - friction` to [0.2, 0.8]).
+                if c < 1.0 && (a.friction < 0.8 || thrusting) {
+                    vel[2] -= gravity * dt * (1.0 - a.friction).clamp(0.2, 0.8);
+                }
+                let into = dot(*vel, n);
+                if into.abs() > 1e-5 {
+                    *vel = [vel[0] - n[0] * into, vel[1] - n[1] * into, vel[2] - n[2] * into];
+                }
+                for v in vel.iter_mut() {
+                    if v.abs() <= 1e-5 {
+                        *v = 0.0;
+                    }
+                }
+                let mut delta = [vel[0] * dt, vel[1] * dt, vel[2] * dt];
+                let error = d - height;
+                if error.abs() > 1e-5 {
+                    delta[2] -= error.clamp(-dt * 0.5, dt * 0.5);
+                }
+                delta
+            }
+            None => {
+                vel[2] -= gravity * dt;
+                [vel[0] * dt, vel[1] * dt, vel[2] * dt]
+            }
+        };
+        if dot(delta, delta) <= 1e-10 {
+            delta = [0.0; 3];
+        }
+        let start = *pos;
+        let (to, here, _) = self.move_body(*sector, *pos, delta, radius, gates, vel);
+        let crossed = here != *sector;
+        *pos = to;
+        *sector = here;
+        let moved = dot(sub(to, start), sub(to, start)).sqrt();
+        let mut landed = false;
+        // `MoveThing`'s tail: a physics body that moved searches for its floor while attached, or
+        // unattached with physflag `0x40` while its vertical speed is in [-2, 0.2] (`0x523018`,
+        // `0x52301c`). The attached reach is `GetThingHeight * 2` (physflags `0xc0`), the unattached one
+        // `moveSize + 0.005` (`0x523184`).
+        if !wet && moved > 1e-5 && (attach.is_some() || (-2.0..=0.2).contains(&vel[2])) {
+            let range = if attach.is_some() { height * 2.0 } else { radius + 0.005 };
+            let was = attach.is_some();
+            *attach = self.find_floor(*sector, *pos, radius, range, gates);
+            landed = !was && attach.is_some();
+        }
+        let flat = ((to[0] - start[0]).powi(2) + (to[1] - start[1]).powi(2)).sqrt();
+        (flat, crossed, landed)
     }
 
     /// `sithCamera_SearchSectorInRadius` (0x4c6050): pull a camera in to the first thing between it and
@@ -2759,19 +2847,20 @@ impl LevelGeometry {
 
 /// An 8 x 4 x 8 room, for tests: floor at z = -1, ceiling at z = 1, walls at |x|, |y| = 2.
 /// Normals point out of the room, which is the convention `.jkl` data gives. Shared so a test outside this
-/// module (main.rs's `walker_step`) can exercise the same geometry.
+/// module (main.rs's `step_body` tests) can exercise the same geometry. The planes name their surfaces
+/// and the maps file them, because the engine search reaches a polygon only through them.
 #[cfg(test)]
 pub(crate) fn test_room() -> Solids {
     Solids {
         things: Default::default(),
         boxes: Vec::new(),
         hull: Vec::new(),
-        floor_of: std::collections::HashMap::new(),
+        floor_of: [(0usize, 0usize)].into_iter().collect(),
         sectors: vec![vec![
-            Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.0], surface: usize::MAX },
-            Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 1.0], surface: usize::MAX },
-            Plane { normal: [1.0, 0.0, 0.0], point: [2.0, 0.0, 0.0], surface: usize::MAX },
-            Plane { normal: [-1.0, 0.0, 0.0], point: [-2.0, 0.0, 0.0], surface: usize::MAX },
+            Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.0], surface: 0 },
+            Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 1.0], surface: 3 },
+            Plane { normal: [1.0, 0.0, 0.0], point: [2.0, 0.0, 0.0], surface: 1 },
+            Plane { normal: [-1.0, 0.0, 0.0], point: [-2.0, 0.0, 0.0], surface: 2 },
             Plane { normal: [0.0, 1.0, 0.0], point: [0.0, 2.0, 0.0], surface: usize::MAX },
             Plane { normal: [0.0, -1.0, 0.0], point: [0.0, -2.0, 0.0], surface: usize::MAX },
         ]],
@@ -2804,10 +2893,10 @@ pub(crate) fn test_room() -> Solids {
         faces: vec![Face {
             normal: [0.0, 0.0, 1.0],
             point: [0.0, 0.0, 1.0],
-            verts: vec![[-2.0, -2.0, 1.0], [2.0, -2.0, 1.0], [2.0, 2.0, 1.0], [-2.0, 2.0, 1.0]],
+            verts: vec![[-2.0, 2.0, 1.0], [2.0, 2.0, 1.0], [2.0, -2.0, 1.0], [-2.0, -2.0, 1.0]],
             surface: 3,
         }],
-        face_of: std::collections::HashMap::new(),
+        face_of: [(3usize, 0usize)].into_iter().collect(),
         portal_faces: Vec::new(),
         surface_owner: Vec::new(),
         adjoin_flags: Vec::new(),
@@ -2907,6 +2996,7 @@ mod tests {
             half: None,
             yaw: 0.0,
             mesh: None,
+            floor: false,
         }]);
         let radius = 0.065f32;
         // The seat probes one radius above the body's centre (0.12), which puts the tabletop below
@@ -2943,13 +3033,13 @@ mod tests {
             half: Some([0.1, 0.1]),
             yaw: 0.0,
             mesh: None,
+            floor: false,
         }]);
         let radius = 0.065f32;
-        let step = 0.066f32;
         for top in [0.08f32, 0.3] {
             room.things.write().expect("things lock")[0].z_max = top;
             let (stopped, _, blocked) =
-                room.move_body(0, [0.0, -0.3, 0.095], [0.0, 1.0, 0.0], radius, step, Gates::default(), &mut [0.0; 3]);
+                room.move_body(0, [0.0, -0.3, 0.095], [0.0, 1.0, 0.0], radius, Gates::default(), &mut [0.0; 3]);
             assert!(blocked, "a model {top} high did not block the body");
             assert!(stopped[1] <= 0.2 - radius + 1e-4, "the body passed a model {top} high: {stopped:?}");
         }
@@ -3028,7 +3118,6 @@ mod tests {
             normal: [0.0, 0.0, 1.0],
             sector: 0,
             point: [0.0; 3],
-            top: 0.0,
             kind,
         });
         let crossing = CollisionRecord::Crossing { distance: 1.0, sector: 1 };
@@ -3068,19 +3157,19 @@ mod tests {
         let links = [ADJOIN_MOVE | ADJOIN_VISIBLE; 4];
 
         let shut = Gates { sectors: &[SECTOR_ADJOINS_OFF, 0, 0], adjoins: &links };
-        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, shut, &mut [0.0; 3]);
+        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, shut, &mut [0.0; 3]);
         assert_eq!(sector, 0, "a shut doorway must leave the body in its own room");
         assert!(blocked, "the body should report the contact that stopped it");
 
         let open = Gates { sectors: &[0, 0, 0], adjoins: &links };
-        let (pos, sector, _) = solids.move_body(0, start, step, radius, 0.066, open, &mut [0.0; 3]);
+        let (pos, sector, _) = solids.move_body(0, start, step, radius, open, &mut [0.0; 3]);
         assert_eq!(sector, 1, "an open doorway must let the body into the next room, ended at {pos:?}");
         assert!(pos[1] > start[1], "the body should be past the opening, not at it: {pos:?}");
 
         // And the other side of the same rule: an opening a script shut with `ClearAdjoinFlags(x, 2)`.
         let no_move = [ADJOIN_VISIBLE; 4];
         let barred = Gates { sectors: &[0, 0, 0], adjoins: &no_move };
-        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, 0.066, barred, &mut [0.0; 3]);
+        let (_pos, sector, blocked) = solids.move_body(0, start, step, radius, barred, &mut [0.0; 3]);
         assert_eq!(sector, 0, "an opening without `ADJOIN_MOVE` must stop the body");
         assert!(blocked, "a force field should report the contact");
     }
@@ -3300,6 +3389,7 @@ mod tests {
             half: Some([0.0125, 2.0]),
             yaw: 0.0,
             mesh: Some(vec![leaf].into()),
+            floor: false,
         }]);
         let r = 0.065;
         let on = solids.resting_floor(0, [0.3, 0.3, 1.0 + r], 0.1, r, false).expect("the leaf's top");
@@ -3391,6 +3481,7 @@ mod tests {
             half: None,
             yaw: 0.0,
             mesh: None,
+            floor: false,
         }]);
         let top = rest(&prop).expect("a solid thing's top is a floor");
         assert_eq!(top.height, 0.0);
@@ -3483,7 +3574,7 @@ mod tests {
         let gates = Gates { sectors: &[], adjoins: &[] };
         // The +x wall is x = 2 and the body is one radius (0.3) clear of it at x = 1.7.
         let (pos, _sector, blocked) =
-            room.move_body(0, [1.7, 0.0, -0.5], [0.0, 1.0, 0.0], 0.3, 0.066, gates, &mut [0.0; 3]);
+            room.move_body(0, [1.7, 0.0, -0.5], [0.0, 1.0, 0.0], 0.3, gates, &mut [0.0; 3]);
         assert!(
             pos[1] > 0.5,
             "a body touching a wall did not slide along it: y {} (blocked {blocked})",
@@ -3510,7 +3601,7 @@ mod tests {
         room.face_of.insert(9, room.faces.len() - 1);
         let gates = Gates { sectors: &[], adjoins: &[] };
         let (pos, _sector, _blocked) =
-            room.move_body(0, [0.0, 0.3, 0.0], [0.0, 1.0, 0.0], 0.1, 0.066, gates, &mut [0.0; 3]);
+            room.move_body(0, [0.0, 0.3, 0.0], [0.0, 1.0, 0.0], 0.1, gates, &mut [0.0; 3]);
         assert!(pos[1] > 0.9, "the body did not advance up the ramp: {pos:?}");
         assert!(pos[2] > 0.05, "the body did not climb the ramp: {pos:?}");
     }
@@ -3703,13 +3794,14 @@ mod tests {
             half: None,
             yaw: 0.0,
             mesh: None,
+            floor: false,
         }]);
         let r = 0.065;
         let dir = [0.0, 1.0, 0.0];
         // Touching already (the cylinder's span is 0.265): the sweep must still report the contact.
         let contact = room.sweep_things([0.0, 0.045, -0.5], dir, 0.5, r, 0);
         assert!(contact.is_some(), "a body already touching a leaf walked through it");
-        let (travel, normal, _) = contact.unwrap();
+        let (travel, normal) = contact.unwrap();
         assert_eq!(travel, 0.0, "an overlapped solid let the body advance {travel}");
         assert!(normal[1] < 0.0, "the contact did not push the body back: {normal:?}");
         // Walking *out* of an overlap is the escape direction, not a new contact.
@@ -3734,6 +3826,7 @@ mod tests {
             half: None,
             yaw: 0.0,
             mesh: None,
+            floor: false,
         }]);
         assert!(
             room.segment_thing([0.0, 0.0, -0.5], [2.0, 0.0, -0.5]),
@@ -3779,11 +3872,12 @@ mod tests {
             half: Some([0.2, 0.0125]),
             yaw: 0.0,
             mesh: None,
+            floor: false,
         }]);
         let r = 0.065;
         // Broad side at y = -0.025: the body stops at 0.0125 + 0.065 from the centre, where the
         // old 0.2-radius cylinder stopped at 0.265.
-        let (travel, normal, _) = room
+        let (travel, normal) = room
             .sweep_things([1.0, -0.3, -0.5], [0.0, 1.0, 0.0], 0.5, r, 0)
             .expect("the leaf did not stop the body");
         assert!((travel - 0.2225).abs() < 1e-4, "the leaf stopped at {travel}");
@@ -3796,7 +3890,7 @@ mod tests {
         );
         // The box turns with the thing's yaw: at 90 degrees the thin side faces world x.
         room.things.write().expect("things lock")[0].yaw = 90.0;
-        let (travel, normal, _) = room
+        let (travel, normal) = room
             .sweep_things([1.3, 0.0, -0.5], [-1.0, 0.0, 0.0], 0.5, r, 0)
             .expect("the turned leaf did not stop the body");
         assert!((travel - 0.2225).abs() < 1e-4, "the turned leaf stopped at {travel}");
@@ -3869,6 +3963,7 @@ mod tests {
             half: None,
             yaw: 0.0,
             mesh: None,
+            floor: false,
         }]);
         assert_eq!(geometry.things().len(), 1, "the geometry copy did not share its things");
     }
@@ -3904,5 +3999,39 @@ mod tests {
             vec![vec![(1, 3.0)], vec![(0, 3.0)]],
             "one opening carries the mirror row's distance for both directions"
         );
+    }
+
+    const FLAT: Attach = Attach { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, -1.0], surface: Some(0), friction: 1.0 };
+
+    /// `0x4f7430`: the hold moves an attached body toward `GetThingHeight` by at most `0.5 * dt`
+    /// (`0x523198`) a step, and the velocity loses its component along the floor normal.
+    #[test]
+    fn the_attached_hold_is_clamped_and_the_velocity_projected() {
+        let solids = room();
+        let (mut sector, mut pos, mut vel, mut attach) = (0usize, [0.0f32, 0.0, -0.5], [1.0f32, 0.0, -3.0], Some(FLAT));
+        solids.step_body(Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, 0.02, 0.065, 0.12, 4.0, false, false);
+        assert_eq!(vel, [1.0, 0.0, 0.0], "the floor-normal speed survived");
+        assert!((pos[2] - (-0.5 - 0.01)).abs() < 1e-6, "the hold moved {} in one 0.02 step, not 0.01", -0.5 - pos[2]);
+        assert!((pos[0] - 0.02).abs() < 1e-6, "the walk moved {}", pos[0]);
+        // Within one step's clamp, the hold lands on the height exactly.
+        let mut pos = [0.0f32, 0.0, -1.0 + 0.125];
+        solids.step_body(Gates::default(), &mut sector, &mut pos, &mut [0.0; 3], &mut Some(FLAT), 0.02, 0.065, 0.12, 4.0, false, false);
+        assert!((pos[2] - (-1.0 + 0.12)).abs() < 1e-6, "held at {}", pos[2]);
+    }
+
+    /// `0x4f5550`: an unattached body searches `moveSize + 0.005` (`0x523184`) down, an attached one
+    /// `2 * GetThingHeight` (physflags `0xc0`), and only a floor-flagged surface attaches.
+    #[test]
+    fn find_floor_reaches_by_attach_state_and_takes_only_floors() {
+        let mut solids = room();
+        let pos = [0.0f32, 0.0, -1.0 + 0.2];
+        assert_eq!(solids.find_floor(0, pos, 0.065, 0.065 + 0.005, Gates::default()), None, "0.2 is past the unattached reach");
+        let floor = solids.find_floor(0, pos, 0.065, 0.12 * 2.0, Gates::default()).expect("the attached reach finds the floor");
+        assert_eq!(floor.normal, [0.0, 0.0, 1.0]);
+        assert_eq!(floor.surface, Some(0));
+        solids.surface_flags = vec![0x4];
+        assert_eq!(solids.find_floor(0, pos, 0.065, 0.24, Gates::default()), None, "a surface without flag 1 attached");
+        solids.surface_flags = vec![0x2001];
+        assert_eq!(solids.find_floor(0, pos, 0.065, 0.24, Gates::default()).map(|a| a.friction), Some(0.1));
     }
 }

@@ -1066,11 +1066,9 @@ pub struct PlayerBody {
     pub pitch: f32,
     /// How high the eye sits above the body's centre.
     pub eye: f32,
-    /// How high the body's **centre** rests above its floor. `radius` for a body that fell onto the
-    /// surface (the swept sphere contact) and `sithPhysics_GetThingHeight` (`walkplayer`'s model insert,
-    /// 0.120114) for one a `warp` attached: retail's warped route poses read `coords` z at exactly
-    /// `floor + 0.120114` and hold it while walking, where the sphere contact is 0.055 lower.
-    pub rest: f32,
+    /// What the body is attached to (`sithPhysics_FindFloor`, `0x4f5550`); `None` while it falls or
+    /// swims. The attached update holds the body `GetThingHeight` above it.
+    pub attach: Option<crate::collide::Attach>,
     /// Physflag `0x100000` and `thing+0x48`: how far below a dry sector's adjoin the body's centre is,
     /// while that adjoin is within `sithPhysics_FindFloor`'s 0.05 upward search (`0x4f5550`).
     pub water_surface: Option<f32>,
@@ -1095,7 +1093,7 @@ impl Default for PlayerBody {
             yaw: 0.0,
             pitch: 0.0,
             eye: crate::PLAYER_EYE,
-            rest: crate::PLAYER_RADIUS,
+            attach: None,
             water_surface: None,
         }
     }
@@ -6157,11 +6155,10 @@ impl Runtime {
         fired
     }
 
-    /// Advance the player body from one frame's input and carry it through the same `walker_step`
-    /// the AI settle uses. Seating, a scrolling surface's carry, the sector's thrust, the water
-    /// state, run/walk scaling, drag, the fixed sub-step count, target assembly, jump, the sweep,
-    /// thing floors, velocity feedback, fall damage and fall death live here; the caller supplies
-    /// only the intent.
+    /// Advance the player body from one frame's input through `Solids::step_body`, the engine's
+    /// attached/unattached physics plus `MoveThing`. Seating, a scrolling surface's carry, the sector's
+    /// thrust, the water state, run/walk scaling, drag, the fixed sub-step count, target assembly, jump,
+    /// velocity feedback, fall damage and fall death live here; the caller supplies only the intent.
     ///
     /// The final pose is published onto the local player's thing, so camera, HUD, scripts and
     /// projectiles read one body. `teleport_player` and `respawn_player` are the only other writers.
@@ -6206,12 +6203,16 @@ impl Runtime {
         let target = walk_target(along * force, across * force, input.yaw);
         let drag = if body.grounded { rules.drag } else { rules.air_drag };
         let steps = integrate_walk(&mut body.vel, target, drag, dt, &mut body.step_rollover);
-        // Attached for this frame: only a jump detaches a standing body before its move.
-        let attached = body.grounded && !input.jump;
+        // A jump detaches the body (`sithPlayerActions_Jump`) before its move.
         if input.jump && body.grounded {
             body.vy = rules.jump_velocity(input.crouch);
             body.grounded = false;
+            body.attach = None;
         }
+        // `sithPhysics_GetThingHeight` (`0x4f6210`): the template's `height=`, else the model's
+        // insert height (`walkplayer`'s 0.120114), at least `moveSize + 0.005` (`0x523184`).
+        let height = template_insert("walkplayer")[2].max(radius + 0.005);
+        let thrusting = along != 0.0 || across != 0.0;
         // `SetSectorThrust` is half of a conveyor: `sithPhysics.c` adds `sector->thrust * dt` to a
         // body's velocity exactly like gravity, so an updraft column lifts what stands in it —
         // level 21's core tube is `'0.0 0.0 1.0'` at 4 to 5, level 10's power core pushes the body out.
@@ -6267,7 +6268,6 @@ impl Runtime {
             // Each sub-step moves by the projected velocity, the way the engine re-copies the
             // accumulated `0x234` into the move: a deflection inside one sub-step steers the
             // next, instead of every sub-step re-pushing into the wall at the frame's input.
-            let sub_dir = [step_vel[0], step_vel[1]];
             let was_wet = wet(sector);
             // `sithPhysics_UpdateUnderwaterThingPhysics` (`0x4f6d80`), vertical only: gravity is scaled
             // by `buoyancy` (`thing+0x224`), which `walkplayer` never sets and `sithThing_Reset`
@@ -6298,22 +6298,20 @@ impl Runtime {
                 step_vel[2] = vy;
                 held
             });
-            let (len, cross, step_landed) = crate::walker_step(
-                solids,
+            let (len, cross, step_landed) = solids.step_body(
                 gates,
                 &mut sector,
                 &mut pos,
-                &mut vy,
-                sub_dir,
                 &mut step_vel,
+                &mut body.attach,
                 SUB,
                 radius,
+                height,
                 if was_wet { 0.0 } else { gravity },
-                // A swimming body is detached (`sithThing_EnterSector`, `0x4cd2c0`): it does not step
-                // up a pool rim, it swims along it (`walk5_spawn` reaches sector 24 in the water).
-                !was_wet,
-                false,
+                thrusting,
+                was_wet,
             );
+            vy = step_vel[2];
             if let Some(held) = held {
                 vy = if step_landed { 0.0 } else { held };
             }
@@ -6323,7 +6321,6 @@ impl Runtime {
             // (`param_2 == 0`), at the sphere contact.
             if !was_wet && wet(sector) {
                 vy *= 0.25;
-                body.rest = radius;
             }
             step_vel[2] = vy;
             // `sithCollision_MoveThing` (`0x4e7950`) ends a physflag-`0x40` body's move with
@@ -6363,40 +6360,6 @@ impl Runtime {
                 landed = true;
             }
         }
-        // A body a `warp` attached rests on its surface by `sithPhysics_GetThingHeight`, not at the
-        // movement sphere's contact: `warp` runs `sithPhysics_FindFloor`, which attaches the thing and
-        // leaves it at the authored pose. The sweep lands it at `floor + radius` every frame; while a
-        // floor is inside the attached body's reach (`GetThingHeight * 1.1`, `0x523184`), put it back on
-        // the attach height. Retail's warped route poses read `coords` z at exactly that height and hold
-        // it while walking (the route trace measures the 0.055 the sphere contact is short by).
-        // `shortcut: this hold rides a 40-degree face up at `09fuelstation`'s pit mouth and the
-        // body walks into the shaft — `walk9_spawn`'s residual failure. Which rule of the engine's
-        // search rejects that face (the reach, or the per-hit acceptance behind
-        // `sithCollision_SearchForCollisions`'s `0x2802` masks) is the open decomp question on
-        // issue #23.`
-        // An attached body keeps its hold even when `CollideHurt` turned its walk into a slope into
-        // upward speed: `sithPhysics_UpdateAttachedThingPhysics` (`0x4f7430`) removes the velocity's
-        // component along the attached floor's normal every tick (`walk6_spawn`'s 2832/2577 corner).
-        if body.rest > radius + 1e-4 && (vy <= 0.0 || attached) {
-            let reach = (body.rest - radius) * 1.1 + 0.02;
-            if let Some(rest) =
-                solids.resting_floor(sector, [pos[0], pos[1], pos[2]], reach, radius, false)
-            {
-                let height = rest.height + body.rest;
-                if (height - pos[2]).abs() <= reach {
-                    // The hold is a vertical move and crosses adjoins like one (`0x4e7950`): standing
-                    // up on `06abarons`' waterpump carries the body from sector 34 into 35.
-                    let rise = height - pos[2];
-                    if rise.abs() > 1e-6 {
-                        let dir = [0.0, 0.0, rise.signum()];
-                        sector = solids.sweep_rooms(sector, pos, dir, rise.abs(), radius, gates, &mut Vec::new()).1;
-                    }
-                    pos[2] = height;
-                    vy = 0.0;
-                    landed = true;
-                }
-            }
-        }
         // The slid movement feeds the velocity, as `MoveThing` reports it at `thing + 0x264`.
         if achieved_len > 0.0 {
             let moved = [(pos[0] - before[0]) / dt.max(1e-4), (pos[1] - before[1]) / dt.max(1e-4)];
@@ -6409,7 +6372,7 @@ impl Runtime {
         }
         // Landing damage wants the engine's velocity units, not this world's gravity-scaled fall.
         let engine_impact = -impact_vy / crate::physics_scale().max(1.0).sqrt();
-        if vy == 0.0 && engine_impact > 2.5 {
+        if landed && engine_impact > 2.5 {
             let damage = crate::fall_damage(engine_impact);
             if damage > 0.0 {
                 println!(
@@ -6423,7 +6386,7 @@ impl Runtime {
         body.sector = sector;
         body.pos = Vec3::from(pos);
         body.last_move = achieved_len;
-        body.grounded = landed || body.vy == 0.0;
+        body.grounded = body.attach.is_some() || landed || body.vy == 0.0;
         // The engine's fall death (`sithPlayer.c:251`).
         if !body.fall_killed
             && crate::fall_death_rule(
@@ -6532,25 +6495,12 @@ impl Runtime {
                 .unwrap_or(0.065);
             let (resolved, _) = solids.resolve_stepped(sector, pos, radius);
             let mut next = [resolved[0], resolved[1], pos[2]];
-            // The player's own sweep settles the actor: a 0.6-unit downward probe plus the walker's
-            // containment and floor rule. `move_body` has no horizontal delta here, so this only
-            // lands the body and keeps it out of a wall.
-            let mut next_sector = sector;
-            let mut vy = -0.6;
-            let _ = crate::walker_step(
-                solids,
-                crate::collide::Gates::default(),
-                &mut next_sector,
-                &mut next,
-                &mut vy,
-                [0.0, 0.0],
-                &mut [0.0; 3],
-                1.0,
-                0.5,
-                0.0,
-                false,
-                true,
-            );
+            // A 0.6-unit downward settle probe: land on a floor if one is inside the reach, never fall.
+            // `shortcut: an actor walk is not the engine's physics; port actors when the AI moves them
+            // through `step_body`.`
+            if let Some(rest) = solids.resting_floor(sector, next, 0.6, 0.5, false) {
+                next[2] = rest.height + 0.5;
+            }
             // The walker's floor rule snaps to whatever floor is under the probe, so an actor that
             // steps off a catwalk was teleported to the room below in one sample (level 1's roaming
             // powerdroid: z 7.85 -> -3.74 in 100 ms). A drop deeper than the 0.6-unit probe is not a
@@ -6558,12 +6508,8 @@ impl Runtime {
             // runtime does not model for a walked actor.
             if next[2] < pos[2] - 0.6 {
                 next = pos;
-                next_sector = sector;
             }
             if let Some(thing) = self.things.get_mut(actor) {
-                if next_sector != sector {
-                    thing.sector = i32::try_from(next_sector).unwrap_or(thing.sector);
-                }
                 if next != thing.pos {
                     let moved_xy = (next[0] - pos[0]).abs() + (next[1] - pos[1]).abs();
                     thing.pos = next;
@@ -11549,7 +11495,7 @@ mod tests {
             yaw: 0.0,
             pitch: 0.0,
             eye: crate::PLAYER_EYE,
-            rest: crate::PLAYER_RADIUS,
+            attach: None,
             water_surface: None,
         }
     }
@@ -11868,6 +11814,7 @@ mod tests {
             half: None,
             yaw: 0.0,
             mesh: None,
+            floor: false,
         };
         let solids = crate::collide::Solids::default();
         solids.set_things(vec![slab.clone()]);
@@ -15213,7 +15160,9 @@ mod tests {
             surface: 1,
         };
         let solids = crate::collide::Solids {
-            sectors: vec![Vec::new()],
+            // The engine search reaches the floor polygon through the sector's plane and `floor_of`.
+            sectors: vec![vec![crate::collide::Plane { normal: [0.0, 0.0, -1.0], point: [0.0; 3], surface: 1 }]],
+            floor_of: [(1usize, 0usize)].into_iter().collect(),
             floors: vec![floor.clone()],
             faces: vec![floor],
             surface_owner: vec![0, 0],
@@ -15234,38 +15183,9 @@ mod tests {
             );
         }
         assert!(body.grounded, "the player body never landed");
-        assert!((body.pos.z - 0.065).abs() < 1e-3, "z {} after landing", body.pos.z);
+        // Attached, the body is held `GetThingHeight` (moveSize + 0.005 with no model insert) above it.
+        assert!((body.pos.z - 0.07).abs() < 1e-3, "z {} after landing", body.pos.z);
         assert_eq!(body.sector, 0);
-    }
-
-    /// A body a `warp` attached rests at `sithPhysics_GetThingHeight` (`walkplayer`'s 0.120114 model
-    /// insert), not at the movement sphere's 0.065 contact: retail's warped route poses hold
-    /// `coords` z at that height while walking, and the route trace measured the sphere contact
-    /// 0.055 low on every leg.
-    #[test]
-    fn a_warped_body_rests_at_the_model_height() {
-        let solids = floor_room();
-        let mut rt = Runtime::new(&Level::default());
-        let rules = crate::Rules::from_level(&Level::default());
-        let height = 0.120114f32;
-        let mut body = walk_body(Vec3::new(0.0, 0.0, -1.0 + height));
-        body.rest = height;
-        for _ in 0..60 {
-            rt.step_player(
-                &mut body,
-                &solids,
-                PlayerInput::default(),
-                &rules,
-                1.0 / 60.0,
-                crate::collide::Gates::default(),
-            );
-        }
-        assert!(
-            (body.pos.z - (-1.0 + height)).abs() < 1e-3,
-            "the attached body settled at {:.4}, not floor + {height:.4}",
-            body.pos.z
-        );
-        assert!(body.grounded, "the attached body is not standing on its surface");
     }
 
     #[test]
@@ -15327,7 +15247,8 @@ mod tests {
         let solids = crate::collide::test_room();
         let mut rt = Runtime::new(&Level::default());
         let rules = crate::Rules::from_level(&Level::default());
-        let base = -1.0 + rules.radius;
+        // Standing attached: `GetThingHeight` above the floor (moveSize + 0.005 with no model insert).
+        let base = -1.0 + rules.radius + 0.005;
         let mut body = walk_body(Vec3::new(0.0, 0.0, base));
         let mut peak = base;
         for frame in 0..90 {
