@@ -996,6 +996,7 @@ pub struct MoveState {
     pub collide: u32,
     pub flags: u32,
     pub attach: Option<Attach>,
+    pub attach_flags: u32,
 }
 
 impl MoveState {
@@ -1711,7 +1712,7 @@ impl LevelGeometry {
     ) -> ([f32; 3], usize, f32) {
         let mut state = MoveState {
             pos, sector, vel: *vel, remainder: delta, phys_flags: 0x4a4f,
-            kind: 10, move_type: 1, collide: 1, flags: 0, attach: None,
+            kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0,
         };
         let distance = self.move_thing_with(&mut state, delta, radius, 0,
             |state, dir, dist, radius, flags, search| {
@@ -1929,7 +1930,7 @@ impl LevelGeometry {
         let initial_sector = *sector;
         let mut state = MoveState {
             pos: *pos, sector: *sector, vel: *vel, remainder: [0.0; 3], phys_flags: 0x4a4f,
-            kind: 10, move_type: 1, collide: 1, flags: 0, attach: *attach,
+            kind: 10, move_type: 1, collide: 1, flags: 0, attach: *attach, attach_flags: 0,
         };
         let delta = Self::prepare_body(&mut state, dt, height, gravity, thrusting, wet);
         let traveled = self.move_thing_with(&mut state, delta, radius, 0,
@@ -1994,19 +1995,20 @@ impl LevelGeometry {
     /// `sithCollision_MoveThing` (0x4e7950) floor tail, using accumulated travel rather than displacement.
     pub fn finish_body(&self, state: &mut MoveState, radius: f32, height: f32, traveled: f32, gates: Gates<'_>) -> bool {
         if state.flags & 2 != 0 || state.move_type != 1 || traveled == 0.0 { return false; }
+        let attached = (state.attach.is_some() || state.attach_flags != 0) && state.attach_flags & 8 == 0;
+        if !attached && !(state.phys_flags & 0x40 != 0 && (-2.0..=0.2).contains(&state.vel[2])) {
+            return false;
+        }
         if gates.sectors.get(state.sector).is_some_and(|flags| flags & SECTOR_UNDERWATER != 0) {
             state.attach = None;
             return false;
         }
-        // The attached reach is `GetThingHeight * 2` (physflags `0xc0`), the unattached one
-        // `moveSize + 0.005` (`0x523184`); physflag `0x40` restricts the unattached vertical speed.
-        if state.attach.is_some() || state.phys_flags & 0x40 == 0 || (-2.0..=0.2).contains(&state.vel[2]) {
-            let range = if state.attach.is_some() { height * 2.0 } else { radius + 0.005 };
-            let was = state.attach.is_some();
-            self.find_floor(state.sector, state.pos, radius, range, gates, &mut state.attach);
-            return !was && state.attach.is_some();
-        }
-        false
+        // Flag-8 attachments take the unattached branch (0x4e7950:284); physflag `0x40`
+        // and vertical speed [-2, 0.2] are then both required before FindFloor.
+        let range = if attached { height * 2.0 } else { radius + 0.005 };
+        let was = state.attach.is_some();
+        self.find_floor(state.sector, state.pos, radius, range, gates, &mut state.attach);
+        !was && state.attach.is_some()
     }
 
     /// `sithCamera_SearchSectorInRadius` (0x4c6050): pull a camera in to the first thing between it and
@@ -4483,7 +4485,7 @@ mod tests {
         let solids = corridor();
         let mut state = MoveState {
             pos: [0.0, -1.0, 0.5], sector: 0, vel: [0.0, 1.0, 0.0], remainder: [0.0; 3],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None,
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0,
         };
         let traveled = solids.move_thing_with(&mut state, [0.0, 4.0, 0.0], 0.1, 0,
             |state, dir, distance, radius, flags, search| {
@@ -4512,10 +4514,36 @@ mod tests {
     }
 
     #[test]
+    fn floor_tail_requires_physflag_40_unless_attached_without_flag_8() {
+        let solids = room();
+        let mut state = MoveState {
+            pos: [0.0, 0.0, -0.94], sector: 0, vel: [0.0; 3], remainder: [0.0; 3],
+            phys_flags: 0, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0,
+        };
+        solids.finish_body(&mut state, 0.065, 0.12, 1.0, Gates::default());
+        assert_eq!(state.attach, None, "an unattached body without physflag 0x40 must not acquire a floor");
+
+        let prior = Some(Attach { surface: Some(77), ..FLAT });
+        state.attach = prior;
+        solids.finish_body(&mut state, 0.065, 0.12, 1.0, Gates::default());
+        assert_eq!(state.attach.unwrap().surface, Some(0), "ordinary attachments still search with physflag 0x40 clear");
+
+        state.attach = prior;
+        state.attach_flags = 8;
+        solids.finish_body(&mut state, 0.065, 0.12, 1.0, Gates::default());
+        assert_eq!(state.attach, prior, "flag-8 attachments use the unattached guard and must retain their support");
+
+        state.attach = None;
+        state.phys_flags = 0x40;
+        assert!(solids.finish_body(&mut state, 0.065, 0.12, 1.0, Gates::default()));
+        assert_eq!(state.attach.unwrap().surface, Some(0));
+    }
+
+    #[test]
     fn a_small_nonzero_folded_crease_still_projects_velocity_and_remainder() {
         let mut state = MoveState {
             pos: [0.0; 3], sector: 0, vel: [-1.0, 0.0, 0.0], remainder: [-1.0, 0.0, 0.0],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None,
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0,
         };
         assert!(Solids::collide_hurt(&mut state, [1.0, 1e-7, 0.0], 0.0, &mut Some([1.0, 0.0, 0.0])));
         assert_eq!(state.vel, [0.0; 3]);

@@ -6504,6 +6504,7 @@ impl Runtime {
         let name = player.and_then(|i| self.templates.get(i));
         crate::collide::MoveState {
             pos, sector, vel, remainder: [0.0; 3], attach: body.attach,
+            attach_flags: thing.map_or(0, |t| t.attach_flags),
             kind: player.map_or(10, |i| self.types.get(i).copied().unwrap_or(0) as u32),
             move_type: name.map_or(1, |n| match self.template_move.get(n).map(String::as_str) {
                 Some("physics") => 1, Some("path") => 2, _ => 0,
@@ -6544,6 +6545,7 @@ impl Runtime {
         state.vel = thing.vel;
         state.flags = thing.flags;
         state.phys_flags = thing.phys_flags;
+        state.attach_flags = thing.attach_flags;
         state.kind = rt.types.get(index).copied().unwrap_or(0) as u32;
     }
 
@@ -10959,16 +10961,27 @@ impl Runtime {
             // it switches `SITH_SECTOR_ADJOINSOFF` (0x80), and that is how every shipped door
             // script closes its own doorway (`00_door.cog`: `SetSectorAdjoins(doorSector, 0)` on
             // startup, `1` when it opens). `SectorAdjoins` is the same verb under its other spelling.
+            // `0x4f8de0`/`0x4f8e10` also hide/restore each owned adjoin via marker `0x20`, preserving MOVE.
             "setsectoradjoins" => {
                 let shut = idx(1) == 0;
+                let sector = idx(0);
                 let mut changed = false;
-                if let Some(flags) = self.sector_flags.get_mut(idx(0) as usize) {
-                    changed = (*flags & SECTOR_ADJOINS_OFF != 0) != shut;
-                    *flags = if shut {
-                        *flags | SECTOR_ADJOINS_OFF
-                    } else {
-                        *flags & !SECTOR_ADJOINS_OFF
-                    };
+                if let Some(sector_flags) = self.sector_flags.get_mut(sector as usize) {
+                    for (&owner, &row) in self.surface_sector.iter().zip(&self.surface_adjoin) {
+                        if owner != sector as i32 { continue; }
+                        let Some(flags) = usize::try_from(row).ok().and_then(|r| self.adjoin_flags.get_mut(r)) else { continue };
+                        let next = if shut && *flags & 1 != 0 {
+                            *flags & !1 | 0x20
+                        } else if !shut && *flags & 0x20 != 0 {
+                            *flags & !0x20 | 1
+                        } else {
+                            *flags
+                        };
+                        changed |= next != *flags;
+                        *flags = next;
+                    }
+                    changed |= (*sector_flags & SECTOR_ADJOINS_OFF != 0) != shut;
+                    *sector_flags = if shut { *sector_flags | SECTOR_ADJOINS_OFF } else { *sector_flags & !SECTOR_ADJOINS_OFF };
                 }
                 if changed {
                     self.adjoins_changes += 1;
@@ -12742,6 +12755,24 @@ mod tests {
             &[Value::Num(surface as f64), Value::Num(1.0), Value::Num(0.0), Value::Num(1.0)],
         );
         assert_eq!(refused, Value::Num(-1.0));
+    }
+
+    #[test]
+    fn sector_visibility_restores_only_adjoins_hidden_by_the_sector() {
+        let mut rt = door_runtime();
+        rt.surface_sector = vec![0, 0, 1, 0];
+        rt.surface_adjoin = vec![0, 1, 2, 3];
+        rt.adjoin_flags = vec![0x3, 0x2, 0x3, 0x103];
+        rt.call("SetSectorAdjoins", &[Value::Num(0.0), Value::Num(0.0)]);
+        assert_eq!(rt.adjoin_flags, [0x22, 0x2, 0x3, 0x122]);
+        assert_ne!(rt.sector_flags[0] & SECTOR_ADJOINS_OFF, 0);
+        // Hiding again still updates adjoins made visible while the sector flag remained set.
+        rt.adjoin_flags[0] |= 1;
+        rt.call("SetSectorAdjoins", &[Value::Num(0.0), Value::Num(0.0)]);
+        assert_eq!(rt.adjoin_flags[0], 0x22);
+        rt.call("SetSectorAdjoins", &[Value::Num(0.0), Value::Num(1.0)]);
+        assert_eq!(rt.adjoin_flags, [0x3, 0x2, 0x3, 0x103], "unmarked invisible and other-sector adjoins must retain their flags");
+        assert_eq!(rt.sector_flags[0] & SECTOR_ADJOINS_OFF, 0);
     }
 
     #[test]

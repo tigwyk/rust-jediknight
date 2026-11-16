@@ -7170,20 +7170,32 @@ contacts and a pre-consumed room sweep.
 Updated route provenance to the actual search/movement symbols and removed its source-text
 assertion test. Frozen inputs, expected traces, cadence, constants and gate bands were not edited.
 
+Post-review static corrections:
+
+- The floor tail requires physics flag `0x40` and vertical velocity in `[-2, 0.2]` for an
+  unattached mover or attachment flag `0x8`. Ordinary attachments bypass that predicate.
+  Added a regression covering all three attachment cases.
+- `SetSectorAdjoins` now applies `sithSurface_HideSectorAdjoin` (`0x4e5a10`) /
+  `ShowSectorAdjoin` (`0x4e5a30`) to the sector's owned rows, as the sector wrappers
+  (`0x4f8de0` / `0x4f8e10`) require. Visibility uses marker `0x20`; MOVE, other sectors and
+  originally invisible unmarked rows remain unchanged. Added a hide/re-hide/restore regression.
+- Migrated the remaining level-2/3/4/6 provenance rows and retired-test documentation.
+
 ### Verification
 
 The initial full release test run had 400 passes and four failures: two obsolete collision
 expectations/fixtures, an incomplete new VM fixture, and the source-text provenance test.
-After correcting those cases, the focused runs passed all 51 collision tests and the actual-VM
-crossing regression. The latter checks contact-time sender identity, exit-before-entry despite
+After correcting those cases and the post-review branches, all 405 release tests pass.
+The actual-VM crossing regression checks contact-time sender identity, exit-before-entry despite
 reversed link order, script warps, water damping, gate changes and untouched eye/body position bits.
-The release build passed with 47 warnings. The full suite was not rerun after the focused fixes.
+The final release build passed with 47 warnings.
 
-Fresh baseline and new executable measurements used the same frozen harness in this session.
+Fresh baseline and shared-stack executable measurements used the same frozen harness in this session,
+before the post-review corrections above. The table below measures `fbcd6ad`, not the final correction.
 Baseline executable SHA-256: `02f43767dab8ba5ad0ea624592bd5641843c6892f3a6cf10e3b54a8a03d0098f`.
 New executable SHA-256: `354bb3a4c303a979808c0ba667e27a0a7eb865d01826319aa5f4984735d93609`.
 
-| Check | Baseline `ca7b126` code | Shared-stack code |
+| Check | Baseline `ca7b126` code | Shared-stack `fbcd6ad` code |
 | --- | --- | --- |
 | Default trace gate | 8/9 pass; `walk6_spawn` fails | 8/9 pass; `walk6_spawn` fails |
 | `walk6_spawn` | travel1.08, off4, xy0.612, z0.217 | travel1.07, off5, xy0.521, z0.130 |
@@ -7198,12 +7210,18 @@ New executable SHA-256: `354bb3a4c303a979808c0ba667e27a0a7eb865d01826319aa5f4984
 sector mismatch despite smaller position errors. These are not passes or proof of retail parity.
 Keep the source-derived behavior; do not restore invented search rules to recover a gate result.
 
+The final correction reran the frozen level-1 slice at cutoff `684` and fixture epsilon `1.70`:
+342 compared fields, the same two sector mismatches at ticks `36`/`72` (expected `349`, actual `339`).
+Other frozen measurements above remain the `fbcd6ad` results; they were not rerun for the correction.
+
 ### Remaining limits and next static step
 
 This is not byte-identical Rust/x86 code or a complete port of generic engine collision handlers.
 The existing model-world-space tests, non-mesh approximations, child carry/push and other recorded
 subsystem deviations remain. Nested `TeleportThing` notifications drain after its current COG
 handler returns, not inside the verb; generic nested VM callback timing is not claimed.
+Legacy `Gates::passable` consumers still treat sector `0x80` as impassable; complete collision parity
+is not claimed.
 
 Exact open question for overlapping `0x400` surface queries: what caller-provided scratch value
 should represent retail's initially uninitialized `local_30`? Assembly reads the previous output
