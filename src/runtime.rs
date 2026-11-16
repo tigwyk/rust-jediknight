@@ -6360,16 +6360,6 @@ impl Runtime {
                 landed = true;
             }
         }
-        // The slid movement feeds the velocity, as `MoveThing` reports it at `thing + 0x264`.
-        if achieved_len > 0.0 {
-            let moved = [(pos[0] - before[0]) / dt.max(1e-4), (pos[1] - before[1]) / dt.max(1e-4)];
-            let want = body.vel;
-            let want_len = (want[0] * want[0] + want[1] * want[1]).sqrt();
-            let moved_len = (moved[0] * moved[0] + moved[1] * moved[1]).sqrt();
-            if moved_len < want_len * 0.99 {
-                body.vel = moved;
-            }
-        }
         // Landing damage wants the engine's velocity units, not this world's gravity-scaled fall.
         let engine_impact = -impact_vy / crate::physics_scale().max(1.0).sqrt();
         if landed && engine_impact > 2.5 {
@@ -15186,6 +15176,31 @@ mod tests {
         // Attached, the body is held `GetThingHeight` (moveSize + 0.005 with no model insert) above it.
         assert!((body.pos.z - 0.07).abs() < 1e-3, "z {} after landing", body.pos.z);
         assert_eq!(body.sector, 0);
+    }
+
+    #[test]
+    fn step_player_keeps_velocity_when_a_frame_has_leftover_physics_time() {
+        let solids = crate::collide::test_room();
+        let mut rt = Runtime::new(&Level::default());
+        let mut rules = crate::Rules::from_level(&Level::default());
+        rules.drag = 0.0;
+        rules.air_drag = 0.0;
+        let mut body = walk_body(Vec3::ZERO);
+        body.gravity = 0.0;
+        body.vel = [1.0, 0.0];
+
+        rt.step_player(
+            &mut body,
+            &solids,
+            PlayerInput::default(),
+            &rules,
+            0.03,
+            crate::collide::Gates::default(),
+        );
+
+        // UpdateMove stores distance at +0x264; it does not replace +0x1d4 velocity with distance / dt.
+        assert!((body.pos.x - 0.02).abs() < 1e-6, "one 50 Hz step must move the body");
+        assert!((body.vel[0] - 1.0).abs() < 1e-6, "leftover frame time must not slow the body");
     }
 
     #[test]

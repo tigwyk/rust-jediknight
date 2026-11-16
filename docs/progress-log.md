@@ -6880,3 +6880,27 @@ Leg movement, reported and not tuned:
 The table above is from `mt3d.exe`, which came before the thing-face `find_floor`, the `floor` flag and
 `thing_contacts`. Only the level-1 slice was rerun on the committed tree (`mt3d2.exe`, `6380a663…`), with
 the same 4 mismatches. The trace gate and `--walk all` have not been rerun on `9eab093`.
+
+## Issue #31 follow-up: table confirmation and velocity persistence
+
+The user confirms that the retail cantina table is solid and Kyle slides along its edge. This
+supersedes the static-read comment's claim that retail shows no table contact. The fixture is not
+grounds for removing the table or changing frozen captures.
+
+Commit `86a7d34` merges thing and surface records before the acceptance pass, removing the refused
+nearest-surface fallback. The level-1 slice on `mt3d4.exe` (SHA-256
+`58608db789eb3b08a2e3a496f8313497a8f43217a1ca52e41cc6aa53bcb4fcb2`) still reports four sector
+mismatches at ticks 36, 72, 108 and 144. The table/wall-3311 wedge persists. All 383 tests passed
+before the next correction.
+
+Static comparison then found a separate velocity-persistence mismatch in `Runtime::step_player`:
+after `CollideHurt` projects the velocity, the runtime could replace it with achieved displacement
+divided by frame time. `sithThing_UpdateMove` (`0x4cc4c0:49-51`) stores movement distance at `+0x264`;
+it does not use that distance to overwrite velocity at `+0x1d4`. The displacement-feedback block is
+deleted. A regression uses zero drag and a 0.03 s frame: one 0.02 s physics step moves 0.02 units,
+but velocity must remain 1 unit/s rather than falling to 2/3 unit/s.
+
+Verification: `cargo test --release step_player_` passed all 10 selected tests (374 filtered).
+No route or gate rerun after the velocity correction; its effect on the table wedge is unmeasured.
+The branch remains work in progress. The hold tail at `0x4f7430:491-534` adds the clamped correction
+to the same movement vector, not a separate move; that static read does not establish the wedge's cause.
