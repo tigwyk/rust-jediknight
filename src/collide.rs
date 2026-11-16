@@ -1919,6 +1919,12 @@ impl LevelGeometry {
                     let flags = self.surface_flags.get(hit.surface).copied().unwrap_or(0);
                     // `0x4f7430`: surface flags `0x1000` and `0x2000` scale the drag to 0.3 and 0.1.
                     let friction = if flags & 0x3000 == 0 { 1.0 } else if flags & 0x2000 == 0 { 0.3 } else { 0.1 };
+                    if std::env::var_os("BK_FLOOR_TRACE").is_some() {
+                        eprintln!(
+                            "floor: attach surface {} owner {:?} normal {:?} point {:?} pos {:?} r {radius} range {range} friction {friction}",
+                            hit.surface, self.surface_owner.get(hit.surface), normal, face.point, pos
+                        );
+                    }
                     *attach = Some(Attach { normal, point: face.point, surface: Some(hit.surface), thing: None, friction });
                     return;
                 }
