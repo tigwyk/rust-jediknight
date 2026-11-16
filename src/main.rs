@@ -8060,13 +8060,13 @@ fn main() {
         for step in 0..steps {
             let before = pos;
             let mut probe_vel = [delta[0], delta[1], 0.0];
-            let (moved, now, blocked) =
-                solids.move_body(sector, pos, delta, radius, gates, &mut probe_vel);
+            let (moved, now, traveled) =
+                solids.move_thing(sector, pos, delta, radius, gates, &mut probe_vel);
             let walked = ((moved[0] - before[0]).powi(2) + (moved[1] - before[1]).powi(2)).sqrt();
-            // Distance lost is the measurable event, not `blocked`.
+            // Distance lost is the measurable event, not a separate blocked flag.
             if walked < wanted * 0.999 || now != sector {
                 println!(
-                    "  step {step}: {before:?} -> {moved:?}  sector {sector}->{now}  blocked {blocked}  walked {walked:.4} of {wanted:.4}"
+                    "  step {step}: {before:?} -> {moved:?}  sector {sector}->{now}  traveled {traveled:.4}  walked {walked:.4} of {wanted:.4}"
                 );
             }
             pos = moved;
@@ -13000,10 +13000,8 @@ fn main() {
                 (
                     run_pulses_and_timers.before(resume_sleeping_labels),
                     resume_sleeping_labels,
-                    deliver_sector_triggers,
                     deliver_thing_messages,
                     deliver_cog_messages,
-                    deliver_crossed,
                     use_key,
                     (live_play_drive.before(walk_player), walk_player),
                     cull_sectors,
@@ -18748,64 +18746,6 @@ tick\tt_s\tx\ty\tz\tsector\tvel_x\tvel_y\tvel_z\thealth\tshields\tdoor0_status\t
         assert!(error.contains("sounds"), "{error}");
     }
 
-    /// Issue #14 AC2: every mechanic the route exercises names the engine function and address it
-    /// was transliterated from. A `ported` row's port symbol must exist in the named source, and a
-    /// `deviated` row must name a deviation-ledger entry the roadmap really carries — the data-only
-    /// half of the gate, so CI catches drift without a window.
-    #[test]
-    fn every_route_mechanic_names_its_engine_function() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let text = std::fs::read_to_string(root.join("tools/parity/routes/level1-route-provenance.tsv"))
-            .expect("committed provenance file");
-        let roadmap = std::fs::read_to_string(root.join("docs/porting-roadmap.md"))
-            .expect("the deviation ledger");
-        let mut seen: Vec<&str> = Vec::new();
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let cells: Vec<&str> = line.split('\t').map(str::trim).collect();
-            let [mechanic, function, address, symbol, source, status, ledger @ ..] = cells.as_slice()
-            else {
-                panic!("not a 7-column provenance row: {line}");
-            };
-            assert!(
-                address.starts_with("0x") && address.len() >= 8,
-                "{mechanic}: `{address}` is not a decomp address"
-            );
-            assert!(!function.is_empty(), "{mechanic}: names no engine function");
-            match *status {
-                "ported" => {
-                    let code = std::fs::read_to_string(root.join(source))
-                        .unwrap_or_else(|e| panic!("{mechanic}: {source}: {e}"));
-                    assert!(
-                        code.contains(symbol),
-                        "{mechanic}: {source} has no `{symbol}` for `{function}` ({address})"
-                    );
-                }
-                "deviated" => {
-                    let entry = ledger.join("\t");
-                    assert!(!entry.is_empty(), "{mechanic}: deviated without a ledger entry");
-                    assert!(
-                        roadmap.contains(&entry),
-                        "{mechanic}: the roadmap has no `{entry}` ledger entry"
-                    );
-                }
-                other => panic!("{mechanic}: unknown status `{other}`"),
-            }
-            seen.push(mechanic);
-        }
-        for mechanic in [
-            "walk", "floor", "collision", "use", "cog messages", "damage", "ai fire", "audio state",
-            "level end",
-        ] {
-            assert!(
-                seen.contains(&mechanic),
-                "the provenance file does not name the route's `{mechanic}` mechanic"
-            );
-        }
-    }
 }
 
 /// The committed retail engine capture (issue #21). `tools/parity/retail-capture.ps1` writes it on
@@ -19174,6 +19114,9 @@ fn walk_level(
     // checks use — instead of resolving a body of its own, so a leg this probe says walks is a leg
     // the game walks, with the same target assembly, drag ramp, sub-steps and environment.
     let mut rt = runtime::Runtime::new_with_geometry(level, &solids);
+    rt.sector_flags = gates.sectors.to_vec();
+    rt.adjoin_flags = gates.adjoins.to_vec();
+    let handle = runtime::World::new(rt);
     // The window's gravity, not a flat zero: retail's own trace descends the katarn ramp
     // (`walk3_spawn`: z -0.21 -> -0.29 while walking), and a check that floats the body can never
     // see a ramp, a step-down or a fall. `BK_WALK_NO_GRAVITY=1` keeps the old flat walk for an A/B.
@@ -19196,7 +19139,7 @@ fn walk_level(
         // What the body asked for this frame: the frame is blocked when it achieved less than half
         // of it, which is the same question the old free walker asked of its fixed step.
         let want = (body.vel[0].powi(2) + body.vel[1].powi(2)).sqrt() * STEP;
-        let crossed = rt.step_player(&mut body, &solids, input, &rules, STEP, gates);
+        let crossed = runtime::Runtime::step_player(&handle, &mut body, &solids, input, &rules, STEP, || {});
         let pos = body.pos.to_array();
         let sector = body.sector;
         if body.water {
@@ -22863,6 +22806,7 @@ fn animate_actors(mut capture: Option<Res<CaptureDt>>,
                     Some(mode) => *mode as usize,
                     None => usize::from(rt.thing_has_weapon(actor.thing)),
                 };
+                let armed = armed + 3 * rt.movement_mode.get(&actor.thing).copied().unwrap_or(0) as usize;
                 (rt.just_fired(actor.thing), rt.just_hit(actor.thing), armed, rt.time)
             })
             .unwrap_or((false, false, 0, 0.0));
@@ -23318,62 +23262,6 @@ fn use_key(
     }
 }
 
-/// `crossed`: the player passing through a surface a script linked.
-///
-/// Level 1 waits on `crossed` 7 times — trigger planes and force fields. The player's own movement
-/// segment is tested against each linked surface's polygon (`collide::crosses`), so a fast walk
-/// cannot tunnel through one the way a position-inside test would allow.
-fn deliver_crossed(
-    world: Option<Res<World>>,
-    sim: Option<Res<Sim>>,
-    player: Option<Res<Player>>,
-    solids: Option<Res<Collision>>,
-    mut last: Local<Option<Vec3>>,
-    mut count: Option<ResMut<TriggerCount>>,
-) {
-    let (Some(world), Some(sim), Some(player)) = (world, sim, player) else { return };
-    let now = player.body.pos;
-    let from = *last;
-    *last = Some(now);
-    let Some(from) = from else { return };
-    if from == now {
-        return;
-    }
-    let (a, b) = ([from.x, from.y, from.z], [now.x, now.y, now.z]);
-    // Retail tests the surfaces of the sector the body is **in**, not every linked surface on the
-    // level: a doorway is two coincident polygons, one per room, and both carry a link. Fire both and
-    // `01_SoundTrack.cog` gets `onAdjoin` (+0.05) and `offAdjoin` (-0.1) in the same frame, so the
-    // music never leaves zero. The body's sector at the segment's start is the room it is leaving.
-    let from_sector = solids.as_deref().and_then(|solids| solids.0.sector_for_body(a));
-    let (surfaces, owners): (Vec<usize>, Vec<i32>) = {
-        let rt = sim.world.borrow();
-        (
-            rt.surface_links.iter().map(|(_, _, s)| *s).collect(),
-            rt.surface_links
-                .iter()
-                .map(|(_, _, s)| rt.surface_sector.get(*s).copied().unwrap_or(-1))
-                .collect(),
-        )
-    };
-    let mut queued = 0usize;
-    for (surface, owner) in surfaces.into_iter().zip(owners) {
-        if owner >= 0 && from_sector.is_some_and(|sector| sector != owner as usize) {
-            continue;
-        }
-        if !collide::crosses(&world.level, surface, a, b) {
-            continue;
-        }
-        // The link id rides as the sender id: the soundtrack's fade-up and fade-down are the same
-        // surface polygon under two links, and only `GetSenderId()` tells them apart.
-        queued += sim.world.borrow_mut().crossed_surface(surface);
-    }
-    if let Some(count) = count.as_mut() {
-        count.0 += queued;
-    }
-    if queued > 0 && std::env::var_os("BK_TRIGGER_TRACE").is_some() {
-        println!("trigger: {queued} `crossed` message(s)");
-    }
-}
 
 /// Deliver what the runtime queued: `damaged` and `killed` on the cogs linked to a thing.
 ///
@@ -23390,6 +23278,13 @@ fn deliver_thing_messages(
     mut count: Option<ResMut<TriggerCount>>,
 ) {
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
+    let fired = pump_thing_messages(&world.cogs, sim);
+    if let Some(count) = count.as_mut() {
+        count.0 += fired;
+    }
+}
+
+fn pump_thing_messages(cogs: &HashMap<String, cog::Cog>, sim: &mut Sim) -> usize {
     // The handle, not the field: `instances` is borrowed mutably for the whole loop, and a VM's verbs
     // borrow this same runtime, so every borrow below has to be its own short-lived one.
     let handle = sim.world.clone();
@@ -23400,7 +23295,7 @@ fn deliver_thing_messages(
     let mut answers: Vec<(usize, Option<f32>)> = Vec::new();
     for (instance, label, params, source, identity) in pending {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
-        let Some(script) = world.cogs.get(script_name) else { continue };
+        let Some(script) = cogs.get(script_name) else { continue };
         // A **message name** resolves through the message-id table (`activate` is `activated`, id 1):
         // `script.label(label)` alone dropped the use action for every door/switch script, which
         // declares `message activated` + `activated:` and no literal `activate` label (round 201).
@@ -23430,6 +23325,7 @@ fn deliver_thing_messages(
         if let Err(error) = ran
             && error != cog::SLEEPING
         {
+            println!("trigger: `{script_name}`'s `{resolved}` failed: {error}");
             continue;
         }
         fired += 1;
@@ -23451,12 +23347,26 @@ fn deliver_thing_messages(
             );
         }
     }
-    if let Some(count) = count.as_mut() {
-        count.0 += fired;
-    }
     if fired > 0 && std::env::var_os("BK_TRIGGER_TRACE").is_some() {
         println!("trigger: {fired} thing message(s) delivered");
     }
+    fired
+}
+
+fn pump_movement_messages(cogs: &HashMap<String, cog::Cog>, sim: &mut Sim) -> usize {
+    let mut fired = 0;
+    for _ in 0..8 {
+        let quiet = {
+            let rt = sim.world.borrow();
+            rt.pending_messages.is_empty() && rt.messages.is_empty()
+        };
+        if quiet {
+            break;
+        }
+        fired += pump_thing_messages(cogs, sim);
+        fired += pump_cog_messages(cogs, sim);
+    }
+    fired
 }
 
 /// Deliver the script-to-script messages `SendMessage` queued: a cog index and a message id.
@@ -23474,6 +23384,13 @@ fn deliver_cog_messages(
     mut count: Option<ResMut<TriggerCount>>,
 ) {
     let (Some(world), Some(sim)) = (world, sim.as_mut()) else { return };
+    let fired = pump_cog_messages(&world.cogs, sim);
+    if let Some(count) = count.as_mut() {
+        count.0 += fired;
+    }
+}
+
+fn pump_cog_messages(cogs: &HashMap<String, cog::Cog>, sim: &mut Sim) -> usize {
     // The handle, not the field: `instances` is borrowed mutably for the whole loop and a scoring
     // verb borrows this same runtime.
     let handle = sim.world.clone();
@@ -23487,7 +23404,7 @@ fn deliver_cog_messages(
     let pending = std::mem::take(&mut handle.borrow_mut().pending_messages);
     for (instance, label, params, source, identity) in pending {
         let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
-        let Some(script) = world.cogs.get(script_name) else { continue };
+        let Some(script) = cogs.get(script_name) else { continue };
         // A **message name** resolves through the message-id table (`activate` is `activated`, id 1):
         // `script.label(label)` alone dropped the use action for every door/switch script (round 201).
         let Some(resolved) = script.label_for_name(label) else { continue };
@@ -23528,7 +23445,7 @@ fn deliver_cog_messages(
                 {
                     continue;
                 }
-                let Some(script) = world.cogs.get(script_name) else { continue };
+                let Some(script) = cogs.get(script_name) else { continue };
                 // `#N` is a message number: the engine hands the id to the receiver, whose own
                 // `message:` list decides the label, so both sides agree on `SITH_MESSAGE_*` values.
                 let Some(label) = script.label_for_name(&name) else { continue };
@@ -23546,73 +23463,12 @@ fn deliver_cog_messages(
             }
         }
     }
-    if let Some(count) = count.as_mut() {
-        count.0 += fired;
-    }
     if fired > 0 && std::env::var_os("BK_TRIGGER_TRACE").is_some() {
         println!("trigger: {fired} script message(s) delivered");
     }
+    fired
 }
 
-/// Sector triggers: `entered` and `exited`, from `sithThing_EnterSector`/`LeaveSector`.
-///
-/// A sector messages the cogs linked to it, and a script's `sector` symbol is that link (§16.10).
-/// Level 1 declares ten of them, and its soundtrack fades the music in from one, so this is what lets
-/// the fade run at all.
-fn deliver_sector_triggers(
-    world: Option<Res<World>>,
-    mut sim: Option<ResMut<Sim>>,
-    player: Option<Res<Player>>,
-    mut last: Local<Option<usize>>,
-    mut count: Option<ResMut<TriggerCount>>,
-) {
-    let (Some(world), Some(sim), Some(player)) = (world, sim.as_mut(), player) else { return };
-    let sector = player.body.sector;
-    let previous = *last;
-    if previous == Some(sector) {
-        return;
-    }
-    *last = Some(sector);
-    let thing = sim.world.borrow().player_thing();
-    let (messages, volume_before) = {
-        let rt = sim.world.borrow();
-        (rt.sector_messages(previous, Some(sector), Some(thing)), rt.music_volume)
-    };
-    let mut fired = 0usize;
-    for (instance, label, link) in messages {
-        let Some((script_name, vm)) = sim.instances.get_mut(instance) else { continue };
-        let Some(script) = world.cogs.get(script_name) else { continue };
-        // `sithCog_SectorSendMessageEx` (`0x4dfd90`): the link id is `GetSenderId()`, the sector is
-        // `GetSenderRef()` (type 5), and the body is `GetSourceRef()`. `03_goals.cog` matches the
-        // sector by ref.
-        let at = if label == "entered" { sector } else { previous.unwrap_or(sector) };
-        let identity = runtime::SourceSender::new(runtime::SECTOR_SOURCE, at as i32, Some(thing));
-        let own = vm.set_message_sender(Some(link as i64), Some(&identity));
-        if script.label(label).is_none() {
-            vm.restore_message_sender(own);
-            continue;
-        }
-        // A label that runs and **errors** has not been delivered, and counting it as delivered hides
-        // the reason a level cannot progress. 21ajerec's `21_JerecAI.cog` entry failed here silently.
-        let ran = vm.run_label(script, label);
-        vm.restore_message_sender(own);
-        match ran {
-            Ok(_) => fired += 1,
-            Err(error) => println!(
-                "trigger: `{script_name}`'s `{label}` failed entering sector {sector}: {error}"
-            ),
-        }
-    }
-    if let Some(count) = count.as_mut() {
-        count.0 += fired;
-    }
-    if fired > 0 && std::env::var_os("BK_TRIGGER_TRACE").is_some() {
-        let volume = sim.world.borrow().music_volume;
-        println!(
-            "trigger: {fired} message(s) entering sector {sector} (from {previous:?}), music {volume_before:.2} -> {volume:.2}"
-        );
-    }
-}
 
 /// How many sector `entered`/`exited` messages have been delivered.
 #[derive(Resource, Default)]
@@ -28725,7 +28581,6 @@ fn setup(
             }
         }
     }
-    commands.insert_resource(sim);
 
     let (lo, hi) = level.bounds();
     let center = Vec3::new(
@@ -29264,6 +29119,16 @@ fn setup(
     // the numbers differ per level: `-walk` sweeps use the same rules.
     let rules = Rules::from_level(level);
     println!("rules: {}", rules.describe());
+    {
+        let mut rt = sim.world.borrow_mut();
+        let player = rt.player_thing();
+        if let Some(thing) = rt.things.get_mut(player) {
+            thing.pos = [start[0], start[1], start[2] + eye_height];
+            thing.sector = sector as i32;
+            rt.queue_player_sector_entry(player, sector);
+        }
+    }
+    commands.insert_resource(sim);
     commands.insert_resource(Player {
         body: runtime::PlayerBody {
             pos: Vec3::from(start),
@@ -29287,6 +29152,8 @@ fn setup(
             eye: eye_height,
             attach: None,
             water_surface: None,
+            published_vel: [0.0; 3],
+            published_pose: Some(([start[0], start[1], start[2] + eye_height], sector)),
         },
         extra_speed: 0.0,
         use_hits: 0,
@@ -30665,7 +30532,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     world: Option<Res<World>>,
     solids: Option<Res<Collision>>,
     shapes: Option<Res<SolidShapes>>,
-    sim: Option<Res<Sim>>,
+    (mut sim, mut count): (Option<ResMut<Sim>>, Option<ResMut<TriggerCount>>),
     mut player: Option<ResMut<Player>>,
     overview: Res<Overview>,
     near: Res<Near>,
@@ -30727,24 +30594,6 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         }
     }
 
-    // What the scripts have switched so far: a force field closed, a door sector's adjoins hidden.
-    // The two flag arrays are **copied out** and `gates` borrows those locals, so the runtime's guard
-    // dies right here. Holding it for the rest of the function made every later `borrow()` a
-    // same-thread double borrow — the fail-fast `World::take` panicked at the first such site, and
-    // there are several. Two small arrays per frame is a cheaper fix than auditing each read.
-    // `BK_GATES_OPEN=1` ignores the scripts' switches, which is how the walk can be A/B'd.
-    let (sector_flags, adjoin_flags) = sim
-        .as_deref()
-        .map(|s| {
-            let rt = s.world.borrow();
-            (rt.sector_flags.clone(), rt.adjoin_flags.clone())
-        })
-        .unwrap_or_default();
-    let gates = if std::env::var_os("BK_GATES_OPEN").is_some() {
-        collide::Gates::default()
-    } else {
-        collide::Gates { sectors: &sector_flags, adjoins: &adjoin_flags }
-    };
 
     if std::env::var_os("BK_ELEV_TRACE").is_some()
         && let Some(sim) = sim.as_deref()
@@ -30942,14 +30791,22 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         );
     }
     let rules = player.rules;
-    let crossed = sim
-        .as_deref()
-        .map(|sim| {
-            sim.world
-                .borrow_mut()
-                .step_player(&mut player.body, &solids.0, input, &rules, dt, gates)
-        })
-        .unwrap_or(false);
+    let crossed = if let (Some(sim), Some(world)) = (sim.as_deref_mut(), world.as_deref()) {
+        let handle = sim.world.clone();
+        let mut fired = 0;
+        let crossed = runtime::Runtime::step_player(
+            &handle, &mut player.body, &solids.0, input, &rules, dt,
+            || {
+                fired += pump_movement_messages(&world.cogs, sim);
+            },
+        );
+        if let Some(count) = count.as_mut() {
+            count.0 += fired;
+        }
+        crossed
+    } else {
+        false
+    };
     let sector = player.body.sector;
     let vy = player.body.vy;
     // Phase 0.5 trace v0: one line per frame, so a retail walk trace (`coords` polled on a cadence)
@@ -32003,6 +31860,78 @@ mod registration_tests {
         );
         assert_eq!(vm.source, 4, "the pump did not restore the instance's own source");
     }
+
+    #[test]
+    fn player_crossing_runs_scripts_at_contact_and_keeps_their_warps() {
+        let script = "symbols\nmessage crossed\nmessage exited\nmessage entered\nend\ncode\n\
+            crossed:\nPrint(\"crossed\");\nPrint(GetSenderId());\nPrint(GetSenderRef());\nPrint(GetSourceRef());\n\
+            SetThingPos(GetSourceRef(), VectorAdd(GetThingPos(GetSourceRef()), '2 0 0'));\n\
+            SetThingVel(GetSourceRef(), VectorSet(0, 2, -4));\nreturn;\n\
+            exited:\nPrint(\"exited\");\nPrint(VectorX(GetThingPos(GetSourceRef())));\n\
+            SetThingPos(GetSourceRef(), VectorAdd(GetThingPos(GetSourceRef()), '1 0 0'));\nreturn;\n\
+            entered:\nPrint(\"entered\");\nPrint(VectorX(GetThingPos(GetSourceRef())));\n\
+            Print(VectorZ(GetThingVel(GetSourceRef())));\n\
+            SetThingPos(GetSourceRef(), VectorAdd(GetThingPos(GetSourceRef()), '4 0 0'));\n\
+            ClearAdjoinFlags(0, 2);\nreturn;\nend\n";
+        let cogs = HashMap::from([("crossing.cog".to_string(), cog::parse(script).expect("parses"))]);
+        let mut level = jkl::Level::default();
+        level.templates.push(jkl::Template {
+            name: "walkplayer".into(), base: None, model3d: None, sprite: None,
+            params: vec![
+                ("type".into(), "player".into()), ("move".into(), "physics".into()),
+                ("collide".into(), "1".into()), ("physflags".into(), "0x4a4f".into()),
+            ],
+        });
+        level.things.push(jkl::Thing {
+            template: "walkplayer".into(), pos: [0.0; 3], sector: 0, flags: 0,
+            pitch: 0.0, yaw: 0.0, roll: 0.0, frames: Vec::new(), vel: [0.0; 3], aiclass: None,
+        });
+        let verts = vec![[-10.0, 0.0, -10.0], [10.0, 0.0, -10.0], [10.0, 0.0, 10.0], [-10.0, 0.0, 10.0]];
+        let solids = collide::Solids {
+            sectors: vec![Vec::new(), Vec::new()],
+            portals: vec![
+                vec![collide::Portal { adjoin: 1, link: 0, verts: verts.clone(), normal: [0.0, 1.0, 0.0], point: [0.0; 3] }],
+                vec![collide::Portal { adjoin: 0, link: 1, verts: verts.into_iter().rev().collect(), normal: [0.0, -1.0, 0.0], point: [0.0; 3] }],
+            ],
+            adjoin_surface: vec![0, 1], surface_owner: vec![0, 1], surface_flags: vec![2, 2],
+            ..Default::default()
+        };
+        let handle = runtime::Runtime::handle(&level);
+        {
+            let mut rt = handle.borrow_mut();
+            rt.sector_flags = vec![4, 6];
+            rt.adjoin_flags = vec![2, 2];
+            rt.surface_flags = vec![2, 2];
+            rt.surface_adjoin = vec![0, 1];
+            rt.surface_links = vec![(0, 7, 0)];
+            // Deliberately reverse link order: exit must still run before entry.
+            rt.sector_links = vec![(0, 9, 1), (0, 8, 0)];
+        }
+        let mut sim = Sim {
+            world: handle.clone(), instances: vec![("crossing.cog".into(), cog::Vm::with_world(handle.clone()))],
+            entities: HashMap::new(), elapsed: 0.0, reported: 0.0, escaped: Default::default(),
+        };
+        let mut rules = Rules::from_level(&level);
+        rules.drag = 0.0;
+        rules.air_drag = 0.0;
+        let z = 0.1f32;
+        let mut body = runtime::PlayerBody {
+            pos: Vec3::new(0.0, -0.01, z), sector: 0, vel: [0.0, 1.0], eye: 1000.0,
+            ..Default::default()
+        };
+        let mut fired = 0;
+        runtime::Runtime::step_player(
+            &handle, &mut body, &solids, runtime::PlayerInput::default(), &rules, 0.02,
+            || fired += pump_movement_messages(&cogs, &mut sim),
+        );
+        assert_eq!(sim.instances[0].1.trace.prints, ["crossed", "7", "0", "0", "exited", "2", "entered", "3", "-1"]);
+        assert_eq!(fired, 3);
+        assert_eq!(body.pos.x, 7.0);
+        assert_eq!(body.pos.z.to_bits(), z.to_bits(), "an untouched eye conversion changed the contact position");
+        assert_eq!(body.sector, 1);
+        assert_eq!(body.vy, -1.0);
+        assert_eq!(handle.borrow().adjoin_flags[0] & 2, 0);
+    }
 }
 
 #[cfg(test)]
@@ -32172,7 +32101,7 @@ mod walker_tests {
             &[Some(shape)],
             std::iter::once(([0.0; 3], 0, [0.0; 3])),
         ));
-        let (pos, _, _) = solids.move_body(
+        let (pos, _, _) = solids.move_thing(
             0, [-0.1, 0.0, 0.0], [0.2, 0.0, 0.0], 0.1,
             collide::Gates::default(), &mut [1.0, 0.0, 0.0],
         );

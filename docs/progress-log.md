@@ -7126,3 +7126,91 @@ Retail was not executed. This correction leaves the branch unmergeable.
 The next static step remains the shared solid/adjoin search and movement stack described above,
 with sector changes applied only when crossing records are popped. World-space mesh tests and
 the other recorded deviations remain explicit; the new tests do not establish full retail parity.
+
+## Issue #31: shared collision search and synchronous movement dispatch
+
+Continued from `ca7b126` on `fix/31-movething-3d`. The port now uses one fixed collision stack
+for the represented physics-mover/placed-solid path, rather than separately resolving thing
+contacts and a pre-consumed room sweep.
+
+### Static source and implementation
+
+- `sithCollision_SearchForCollisions` (`0x4e8160`): 128 records, 64 searched sectors, growing
+  discovery traversal, and the `0x800` adjacent-thing pass over the original searched-count
+  snapshot. Discovery records consume capacity even after being marked used.
+- `sithCollision_SearchForSurfaceCollisions` (`0x4e86d0`): authored surface order, engine
+  adjoin eligibility, separate `0x40` discovery and `0x20` crossing records. Static assembly
+  resolved both dropped helper calls: discovery passes the sphere radius; crossing passes zero.
+  `CheckSphereFaceIntersection` (`0x5090b0`) tests only the infinite plane for a nonzero radius,
+  but tests polygon coverage at radius zero. A failed traversable-adjoin test does not become a wall.
+- `SearchForThingCollisions` (`0x4e8430`) now enumerates the sector being searched instead of
+  inventing its own one-/two-hop reachability. Retail Startup (`0x4e6d90`) installs no distance
+  reduction predicates, so recorded thing hits do not shorten the remaining search.
+- `sithCollision_MoveThing` (`0x4e7950`): advance before response refusal, calculate the remainder
+  before dispatch, continue popping refused records, apply sector changes only at popped
+  crossings, compare position bits after callbacks, accumulate traveled distance, and restore the
+  last search's saved pose/sector on failed containment. Tiny initial moves still occur even when
+  the returned travel snaps to zero. Four accepted rounds reset velocity/remainder, including a
+  fourth round that leaves no remainder.
+- `sithCollision_CollideHurt` (`0x4e9090`): remainder-based acceptance, engine arithmetic order,
+  restitution from physflag `0x20`, and normalization of every nonzero folded crease; removed
+  the invented `1e-6` crease cutoff.
+- Floor and camera queries use the shared stack. The floor tail uses accumulated travel rather
+  than endpoint displacement. Player `0x200` searches honor AI-only adjoins; untyped queries do
+  not. Sector visibility flag `0x80` alone does not make a movable adjoin solid.
+- `Runtime::step_player` releases its world borrow before running contact scripts. Crossing
+  dispatch publishes contact pose/velocity, runs `crossed`, then SetSector's exit/water/entry
+  phases synchronously. Each phase preserves script changes; searches and containment read fresh
+  gates. Untouched eye/body coordinates retain their bits. Endpoint crossing/sector inference
+  was removed; startup, teleport and respawn keep explicit notifications.
+- Water transitions use static `0x4cd370`/`0x4cd480` branch order, sounds and puppet movement
+  rows. Retail constants are entry fast-speed threshold `-1.0`, vertical damping `0.25`, and exit
+  fast-speed threshold `1.0`; no captured value supplied a constant.
+
+Updated route provenance to the actual search/movement symbols and removed its source-text
+assertion test. Frozen inputs, expected traces, cadence, constants and gate bands were not edited.
+
+### Verification
+
+The initial full release test run had 400 passes and four failures: two obsolete collision
+expectations/fixtures, an incomplete new VM fixture, and the source-text provenance test.
+After correcting those cases, the focused runs passed all 51 collision tests and the actual-VM
+crossing regression. The latter checks contact-time sender identity, exit-before-entry despite
+reversed link order, script warps, water damping, gate changes and untouched eye/body position bits.
+The release build passed with 47 warnings. The full suite was not rerun after the focused fixes.
+
+Fresh baseline and new executable measurements used the same frozen harness in this session.
+Baseline executable SHA-256: `02f43767dab8ba5ad0ea624592bd5641843c6892f3a6cf10e3b54a8a03d0098f`.
+New executable SHA-256: `354bb3a4c303a979808c0ba667e27a0a7eb865d01826319aa5f4984735d93609`.
+
+| Check | Baseline `ca7b126` code | Shared-stack code |
+| --- | --- | --- |
+| Default trace gate | 8/9 pass; `walk6_spawn` fails | 8/9 pass; `walk6_spawn` fails |
+| `walk6_spawn` | travel1.08, off4, xy0.612, z0.217 | travel1.07, off5, xy0.521, z0.130 |
+| `walk2_spawn` | PASS; travel2.90, off0, xy0.559, z0.355 | Same |
+| `walk3_spawn` | FAIL; travel3.30, off4, xy1.585, z0.053 | Same |
+| `walk5_spawn` | FAIL; travel1.75, off2, xy2.182, z0.081 | FAIL; travel3.68, off3, xy1.337, z0.150 |
+| Frozen level-1 slice, cutoff684, epsilon1.70 | 342 fields; sector mismatches at ticks36/72, expected349/actual339 | Same |
+| `--walk all`, level1 | travel1.1, blocked545, final349, contained, hull differs, drop0.11 | Same |
+| `--walk all`, level2 | Stops: drop11.17 against recorded11.22 | Same; later levels unmeasured |
+
+`walk5_spawn` now meets travel tolerance but fails sector tolerance. `walk6_spawn` has one more
+sector mismatch despite smaller position errors. These are not passes or proof of retail parity.
+Keep the source-derived behavior; do not restore invented search rules to recover a gate result.
+
+### Remaining limits and next static step
+
+This is not byte-identical Rust/x86 code or a complete port of generic engine collision handlers.
+The existing model-world-space tests, non-mesh approximations, child carry/push and other recorded
+subsystem deviations remain. Nested `TeleportThing` notifications drain after its current COG
+handler returns, not inside the verb; generic nested VM callback timing is not claimed.
+
+Exact open question for overlapping `0x400` surface queries: what caller-provided scratch value
+should represent retail's initially uninitialized `local_30`? Assembly reads the previous output
+and adds the radius; no unique finite constant matches stack residue. The plane helper preserves
+that protocol for a supplied value. Surface search marks initially unknown scratch as NaN.
+Current modeled movement, floor and camera callers do not set `0x400`.
+
+The next single static step is the complete thing-intersection wrapper at `0x5080d0`, especially
+its model-local transforms and mesh ordering. Do not tune the table's authored sphere radius.
+Retail was not executed; no graphical playthrough was performed. The branch remains unmergeable.

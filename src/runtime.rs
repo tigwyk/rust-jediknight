@@ -1072,6 +1072,10 @@ pub struct PlayerBody {
     /// Physflag `0x100000` and `thing+0x48`: how far below a dry sector's adjoin the body's centre is,
     /// while that adjoin is within `sithPhysics_FindFloor`'s 0.05 upward search (`0x4f5550`).
     pub water_surface: Option<f32>,
+    /// Last velocity published to the thing, so script impulses differ from ordinary physics feedback.
+    pub published_vel: [f32; 3],
+    /// Last published eye pose, used to consume script teleports without rounding untouched axes.
+    pub published_pose: Option<([f32; 3], usize)>,
 }
 
 impl Default for PlayerBody {
@@ -1095,6 +1099,8 @@ impl Default for PlayerBody {
             eye: crate::PLAYER_EYE,
             attach: None,
             water_surface: None,
+            published_vel: [0.0; 3],
+            published_pose: None,
         }
     }
 }
@@ -1165,6 +1171,8 @@ pub struct Runtime {
     /// A template's `move=`: `physics` goods fall and slide, `path` things follow keyframes, and a
     /// projectile flies its own `vel=`. Gravity applies only to the first kind.
     pub template_move: BTreeMap<String, String>,
+    /// A template's `collide=` mode, read by `MoveThing` when it selects search flags.
+    pub template_collide: BTreeMap<String, u32>,
     /// A template's `physflags=`: a created thing starts with it (the engine copies the template word),
     /// and the generic mover reads bit `0x1` (gravity) and its thruster exemption `0x400000`.
     pub template_phys_flags: BTreeMap<String, u32>,
@@ -1496,6 +1504,9 @@ pub struct Runtime {
     /// `SetArmedMode`/`SetMajorMode`: the puppet's armed state and its major mode.
     pub armed_mode: BTreeMap<usize, u32>,
     pub major_mode: BTreeMap<usize, u32>,
+    /// `sithPuppet_SetMoveMode`: land (0) or water (1), combined with the armed row when drawing.
+    pub movement_mode: BTreeMap<usize, u32>,
+    template_puppet: BTreeSet<String>,
     /// `SetCurWeapon`'s weapon thing, when a script named one.
     pub cur_weapon_thing: Option<usize>,
     /// `GetThingClassCog`: the cog a thing's class names.
@@ -2285,6 +2296,9 @@ impl Runtime {
             last_hit: BTreeMap::new(),
             armed_mode: BTreeMap::new(),
             major_mode: BTreeMap::new(),
+            movement_mode: BTreeMap::new(),
+            template_puppet: level.templates.iter().filter(|t| level.template_param(&t.name, "puppet").is_some())
+                .map(|t| t.name.to_ascii_lowercase()).collect(),
             cur_weapon_thing: None,
             thing_class_cog: BTreeMap::new(),
             thing_capture_cog: BTreeMap::new(),
@@ -2303,6 +2317,10 @@ impl Runtime {
             cog_names: Default::default(),
             messages_sent: 0,
             template_angvel,
+            template_collide: level.templates.iter().map(|t| {
+                let mode = level.template_param(&t.name, "collide").and_then(|s| s.parse().ok()).unwrap_or(0);
+                (t.name.to_ascii_lowercase(), mode)
+            }).collect(),
             template_vel: level
                 .templates
                 .iter()
@@ -6155,8 +6173,8 @@ impl Runtime {
         fired
     }
 
-    /// Advance the player body from one frame's input through `Solids::step_body`, the engine's
-    /// attached/unattached physics plus `MoveThing`. Seating, a scrolling surface's carry, the sector's
+    /// Advance the player body from one frame's input through attached/unattached physics and
+    /// `MoveThing`, releasing the runtime for synchronous contact scripts. Seating, scrolling carry,
     /// thrust, the water state, run/walk scaling, drag, the fixed sub-step count, target assembly, jump,
     /// velocity feedback, fall damage and fall death live here; the caller supplies only the intent.
     ///
@@ -6164,23 +6182,41 @@ impl Runtime {
     /// projectiles read one body. `teleport_player` and `respawn_player` are the only other writers.
     #[allow(clippy::too_many_arguments)]
     pub fn step_player(
-        &mut self,
+        world: &World,
         body: &mut PlayerBody,
         solids: &crate::collide::Solids,
         input: PlayerInput,
         rules: &crate::Rules,
         dt: f32,
-        gates: Gates<'_>,
+        mut dispatch: impl FnMut(),
     ) -> bool {
         // A script can move the body: `force_jump.cog`'s `SetThingVel(player, ...)` lands on the
         // player thing, and the walker consumes it as a one-shot impulse.
-        if let Some(index) = self.local_player() {
-            let vel = self.things[index].vel;
-            if vel != [0.0; 3] {
-                body.vy = vel[2];
-                self.things[index].vel = [0.0; 3];
+        {
+            let rt = world.borrow();
+            if let Some(index) = rt.local_player() {
+                let vel = rt.things[index].vel;
+                if vel.map(f32::to_bits) != body.published_vel.map(f32::to_bits) {
+                    body.vel = [vel[0], vel[1]];
+                    body.vy = vel[2];
+                }
+                if let Some((published, sector)) = body.published_pose {
+                    let thing = &rt.things[index];
+                    let mut pos = body.pos.to_array();
+                    for axis in 0..3 {
+                        if thing.pos[axis].to_bits() != published[axis].to_bits() {
+                            pos[axis] = if axis == 2 { thing.pos[axis] - body.eye } else { thing.pos[axis] };
+                            body.attach = None;
+                        }
+                    }
+                    body.pos = Vec3::from(pos);
+                    if thing.sector != sector as i32 && let Ok(sector) = usize::try_from(thing.sector) {
+                        body.sector = sector;
+                    }
+                }
             }
         }
+        world.borrow_mut().publish_player(body);
         let radius = rules.radius;
         // No seat before the move. `sithCommand_Warp` (`0x4eea40`) sets the position and leaves it, and
         // `sithPhysics_FindFloor` (`0x4f5550`) only ever lands a body through the move's sweep. The
@@ -6216,7 +6252,7 @@ impl Runtime {
         // `SetSectorThrust` is half of a conveyor: `sithPhysics.c` adds `sector->thrust * dt` to a
         // body's velocity exactly like gravity, so an updraft column lifts what stands in it —
         // level 21's core tube is `'0.0 0.0 1.0'` at 4 to 5, level 10's power core pushes the body out.
-        let thrust = self
+        let thrust = world.borrow()
             .sectors
             .get(body.sector)
             .map(|s| s.thrust)
@@ -6234,7 +6270,7 @@ impl Runtime {
             [body.pos.x, body.pos.y, body.pos.z - radius + 0.01],
         ) {
             Some((_, surface)) => {
-                let slide = self.surfaces.get(surface).map(|s| s.slide).unwrap_or([0.0; 2]);
+                let slide = world.borrow().surfaces.get(surface).map(|s| s.slide).unwrap_or([0.0; 2]);
                 if slide != [0.0; 2] && std::env::var_os("BK_SCROLL_TRACE").is_some() {
                     println!(
                         "scroll: surface {surface} carries the body at {slide:?} level units/second"
@@ -6261,8 +6297,9 @@ impl Runtime {
         let mut landed = false;
         let mut crossed = false;
         let mut step_vel = [dir[0], dir[1], vy];
-        let wet = |s: usize| gates.sectors.get(s).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0);
+        let wet = |s: usize| world.borrow().sector_flags.get(s).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0);
         let mut surface = body.water_surface;
+        let mut state = world.borrow().player_move_state(body, sector, pos, step_vel);
         for _ in 0..steps {
             const SUB: f32 = 1.0 / 50.0;
             // Each sub-step moves by the projected velocity, the way the engine re-copies the
@@ -6298,30 +6335,54 @@ impl Runtime {
                 step_vel[2] = vy;
                 held
             });
-            let (len, cross, step_landed) = solids.step_body(
-                gates,
-                &mut sector,
-                &mut pos,
-                &mut step_vel,
-                &mut body.attach,
-                SUB,
-                radius,
-                height,
-                if was_wet { 0.0 } else { gravity },
-                thrusting,
-                was_wet,
+            state.vel = step_vel;
+            state.attach = body.attach;
+            let delta = crate::collide::Solids::prepare_body(
+                &mut state, SUB, height, if was_wet { 0.0 } else { gravity }, thrusting, was_wet,
             );
+            let prepared_vz = state.vel[2];
+            let start = state.pos;
+            let previous = state.sector;
+            let traveled = solids.move_thing_with(
+                &mut state, delta, radius, 0,
+                |state, dir, distance, radius, flags, search| {
+                    let rt = world.borrow();
+                    solids.search_for_collisions(
+                        state.sector, state.pos, dir, distance, radius,
+                        Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
+                        flags, search,
+                    );
+                },
+                |state, surface, far| {
+                    Self::player_crossing(world, state, body.eye, surface, far, &mut dispatch);
+                },
+                |state| {
+                    let rt = world.borrow();
+                    solids.inside_sector_with_gates(
+                        state.sector, state.pos, 0.0,
+                        Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
+                    )
+                },
+            );
+            let step_landed = {
+                let rt = world.borrow();
+                solids.finish_body(
+                    &mut state, radius, height, traveled,
+                    Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
+                )
+            };
+            let len = ((state.pos[0] - start[0]).powi(2) + (state.pos[1] - start[1]).powi(2)).sqrt();
+            let cross = state.sector != previous;
+            pos = state.pos;
+            sector = state.sector;
+            step_vel = state.vel;
+            body.attach = state.attach;
             vy = step_vel[2];
             if let Some(held) = held {
-                vy = if step_landed { 0.0 } else { held };
+                vy = if step_landed { 0.0 } else if vy.to_bits() == prepared_vz.to_bits() { held } else { vy };
             }
-            // `sithThing_EnterWater` (`0x4cd370`): a physics body entering water keeps a quarter of
-            // its vertical speed (`0x522e8c`). `sithThing_EnterSector` (`0x4cd2c0`) also detaches it,
-            // which ends a warp's attach height: the next attach is the move's own `FindFloor`
-            // (`param_2 == 0`), at the sphere contact.
-            if !was_wet && wet(sector) {
-                vy *= 0.25;
-            }
+            // `sithThing_EnterWater` (`0x4cd370`) damps velocity synchronously in `player_crossing`,
+            // before the entered handler sees it; do not damp it again from sub-step endpoints.
             step_vel[2] = vy;
             // `sithCollision_MoveThing` (`0x4e7950`) ends a physflag-`0x40` body's move with
             // `FindFloor` while its vertical speed is in [-2, 0.2] (`0x523018`/`0x52301c`); in water
@@ -6329,7 +6390,12 @@ impl Runtime {
             if !wet(sector) {
                 surface = None;
             } else if (-2.0..=0.2).contains(&(vy / crate::physics_scale().max(1.0).sqrt())) {
-                surface = solids.water_surface(sector, pos, gates, |s| !wet(s));
+                let rt = world.borrow();
+                surface = solids.water_surface(
+                    sector, pos,
+                    Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
+                    |s| !rt.sector_flags.get(s).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0),
+                );
             }
             achieved_len = achieved_len.max(len);
             crossed |= cross;
@@ -6349,7 +6415,7 @@ impl Runtime {
         // `resting_floor` already seats the body on a lift's top, while a platform that rises into
         // it has to lift the body, which is what `sithPhysics_UpdateAttachedThingPhysics` does.
         if vy <= 0.0
-            && let Some(top) = self.elevator_floor([pos[0], pos[1], before[2]], radius)
+            && let Some(top) = world.borrow().elevator_floor([pos[0], pos[1], before[2]], radius)
         {
             let feet = pos[2] - radius;
             let before_feet = before[2] - radius;
@@ -6369,7 +6435,7 @@ impl Runtime {
                     "fall: landed at {:.1} u/s ({engine_impact:.1} in engine units), {damage:.0} damage",
                     -body.vy
                 );
-                self.hurt_player_fall(damage);
+                world.borrow_mut().hurt_player_fall(damage);
             }
         }
         body.vy = vy;
@@ -6381,7 +6447,7 @@ impl Runtime {
         if !body.fall_killed
             && crate::fall_death_rule(
                 -body.vy / crate::physics_scale().max(1.0).sqrt(),
-                gates.sectors.get(body.sector).copied().unwrap_or(0),
+                world.borrow().sector_flags.get(body.sector).copied().unwrap_or(0),
             )
         {
             body.fall_killed = true;
@@ -6393,7 +6459,7 @@ impl Runtime {
             if body.fall_fade <= 0.0 {
                 body.fall_killed = false;
                 body.fall_fade = 1.0;
-                self.hurt_player_fall(1000.0);
+                world.borrow_mut().hurt_player_fall(1000.0);
             }
         }
         // Water halves movement: the engine reads the surface under the feet (`SITH_SURFACE_WATER`
@@ -6401,17 +6467,196 @@ impl Runtime {
         // bit `SetSectorFlags(sector, 2)` sets for the shipped "passthru layer" water. It is read
         // after the move, so the next step's speed is the room the body is actually in.
         let feet = [body.pos.x, body.pos.y, body.pos.z - radius + 0.01];
-        body.water = self.in_water(solids, body.sector, feet, gates.sectors);
+        {
+            let rt = world.borrow();
+            body.water = rt.in_water(solids, body.sector, feet, &rt.sector_flags);
+        }
         if std::env::var_os("BK_WALK_TRACE").is_some() {
             eprintln!(
                 "walk trace: water {} sector {} (gate flags {:#x})",
                 body.water,
                 body.sector,
-                gates.sectors.get(body.sector).copied().unwrap_or(0),
+                world.borrow().sector_flags.get(body.sector).copied().unwrap_or(0),
             );
         }
-        self.publish_player(body);
+        {
+            let mut rt = world.borrow_mut();
+            if let Some(index) = rt.local_player() {
+                let thing = &mut rt.things[index];
+                body.yaw = thing.yaw.to_radians();
+                body.pitch = thing.pitch.to_radians();
+                thing.vel = [body.vel[0], body.vel[1], body.vy];
+                body.published_vel = thing.vel;
+                thing.flags = state.flags;
+                thing.phys_flags = state.phys_flags;
+            }
+            rt.publish_player(body);
+            body.published_pose = rt.local_player().map(|i| (rt.things[i].pos, body.sector));
+        }
         crossed
+    }
+
+    fn player_move_state(
+        &self, body: &PlayerBody, sector: usize, pos: [f32; 3], vel: [f32; 3],
+    ) -> crate::collide::MoveState {
+        let player = self.local_player();
+        let thing = player.and_then(|i| self.things.get(i));
+        let name = player.and_then(|i| self.templates.get(i));
+        crate::collide::MoveState {
+            pos, sector, vel, remainder: [0.0; 3], attach: body.attach,
+            kind: player.map_or(10, |i| self.types.get(i).copied().unwrap_or(0) as u32),
+            move_type: name.map_or(1, |n| match self.template_move.get(n).map(String::as_str) {
+                Some("physics") => 1, Some("path") => 2, _ => 0,
+            }),
+            collide: name.map_or(1, |n| self.template_collide.get(n).copied().unwrap_or(0)),
+            phys_flags: thing.map_or(0x4a4f, |t| t.phys_flags),
+            flags: thing.map_or(0, |t| t.flags),
+        }
+    }
+
+    /// Publish a canonical contact once, then preserve untouched body coordinates bit-for-bit.
+    fn player_move_phase(
+        world: &World, state: &mut crate::collide::MoveState, eye: f32, dispatch: &mut impl FnMut(),
+    ) {
+        let published = [state.pos[0], state.pos[1], state.pos[2] + eye];
+        let Some(index) = world.borrow().local_player() else { return };
+        {
+            let mut rt = world.borrow_mut();
+            let thing = &mut rt.things[index];
+            thing.pos = published;
+            thing.sector = state.sector as i32;
+            thing.vel = state.vel;
+            thing.flags = state.flags;
+            thing.phys_flags = state.phys_flags;
+        }
+        dispatch();
+        let rt = world.borrow();
+        let thing = &rt.things[index];
+        for axis in 0..3 {
+            if thing.pos[axis].to_bits() != published[axis].to_bits() {
+                state.pos[axis] = if axis == 2 { thing.pos[axis] - eye } else { thing.pos[axis] };
+                state.attach = None;
+            }
+        }
+        if let Ok(sector) = usize::try_from(thing.sector) {
+            state.sector = sector;
+        }
+        state.vel = thing.vel;
+        state.flags = thing.flags;
+        state.phys_flags = thing.phys_flags;
+        state.kind = rt.types.get(index).copied().unwrap_or(0) as u32;
+    }
+
+    /// `MoveThing` calls this at the contact, not at the frame's final endpoint.
+    fn player_crossing(
+        world: &World, state: &mut crate::collide::MoveState, eye: f32,
+        surface: Option<usize>, far: usize, dispatch: &mut impl FnMut(),
+    ) {
+        let player = world.borrow().local_player();
+        if let Some(surface) = surface {
+            {
+                let mut rt = world.borrow_mut();
+                if rt.surface_flags.get(surface).is_some_and(|f| f & 2 != 0) {
+                    rt.sith_cog_surface_send_message(surface, player, "crossed");
+                }
+            }
+            Self::player_move_phase(world, state, eye, dispatch);
+        }
+        if state.sector == far {
+            return;
+        }
+        {
+            let mut rt = world.borrow_mut();
+            if state.flags & 0x80100 == 0
+                && rt.sector_flags.get(state.sector).is_some_and(|f| f & 4 != 0)
+            {
+                rt.sith_cog_sector_send_message(state.sector, player, "exited");
+            }
+        }
+        let exit_position = state.pos.map(f32::to_bits);
+        // ExitSector may warp the body and skip unlinking. SetSector still calls EnterSector.
+        Self::player_move_phase(world, state, eye, dispatch);
+        if state.pos.map(f32::to_bits) == exit_position && let Some(player) = player {
+            world.borrow_mut().things[player].sector = -1;
+        }
+        state.sector = far;
+        let mut damp = false;
+        {
+            let mut rt = world.borrow_mut();
+            if let Some(player) = player {
+                rt.things[player].sector = far as i32;
+            }
+            let wet = rt.sector_flags.get(far).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0);
+            if wet && state.move_type == 1 {
+                let keep = player.and_then(|i| rt.things.get(i)).is_some_and(|t| t.attach_flags & 8 != 0);
+                if !keep {
+                    state.attach = None;
+                    if let Some(i) = player {
+                        rt.things[i].attach = None;
+                        rt.things[i].attach_flags = 0;
+                    }
+                }
+            }
+            let was_wet = state.flags & 0x2000000 != 0;
+            if wet != was_wet {
+                if wet {
+                    state.flags |= 0x2000000;
+                } else {
+                    state.flags &= !0x2000000;
+                }
+                if let Some(player) = player {
+                    let animated = rt.templates.get(player).is_some_and(|n| rt.template_puppet.contains(n));
+                    if animated {
+                        rt.movement_mode.insert(player, u32::from(wet));
+                    }
+                }
+                let destroy = state.flags & if wet { 0x8000000 } else { 0x10000000 } != 0;
+                if (!wet || !destroy) && let Some(player) = player {
+                    let mode = if wet {
+                        if state.move_type != 1 || state.vel[2] <= -1.0 { "enterwater" } else { "enterwaterslow" }
+                    } else {
+                        let speed = (state.vel[0] * state.vel[0] + state.vel[2] * state.vel[2] + state.vel[1] * state.vel[1]).sqrt();
+                        if state.move_type == 1 && speed < 1.0 { "exitwaterslow" } else { "exitwater" }
+                    };
+                    rt.queue_mode_sound(player, mode, [state.pos[0], state.pos[1], state.pos[2] + eye]);
+                }
+                if destroy {
+                    state.flags |= 2;
+                    if state.flags & 0x400 != 0 && state.flags & 0x100 == 0
+                        && let Some(player) = player
+                    {
+                        rt.sith_cog_thing_send_message(player, None, "removed");
+                    }
+                } else {
+                    if state.flags & 0x20000000 != 0 && state.flags & 0x100 == 0
+                        && let Some(player) = player
+                    {
+                        let identity = SourceSender {
+                            source_type: THING_SOURCE, source: player as i32, sender_type: 0,
+                            sender: i32::from(wet),
+                        };
+                        let scripts = [rt.thing_class_cog.get(&player).copied(), rt.thing_capture_cog.get(&player).copied()];
+                        for instance in scripts.into_iter().flatten() {
+                            rt.pending_messages.push((instance as usize, "splash", [0.0; 2], Some(0), Some(identity)));
+                        }
+                    }
+                    damp = wet;
+                }
+            }
+        }
+        Self::player_move_phase(world, state, eye, dispatch);
+        if damp && state.move_type == 1 {
+            state.vel[2] *= 0.25;
+        }
+        {
+            let mut rt = world.borrow_mut();
+            if state.flags & 0x80100 == 0
+                && rt.sector_flags.get(state.sector).is_some_and(|f| f & 4 != 0)
+            {
+                rt.sith_cog_sector_send_message(state.sector, player, "entered");
+            }
+        }
+        Self::player_move_phase(world, state, eye, dispatch);
     }
 
     /// Is a body standing in water at `feet`? Two rules, both the engine's: the surface under the
@@ -7359,29 +7604,6 @@ impl Runtime {
     }
 
 
-    /// `crossed`: a segment through a linked surface messages its scripts once per link, with the
-    /// surface's **link id** as the sender.
-    ///
-    /// Retail's `GetSenderId()` is the link id here, exactly as it is for `activate`;
-    /// `01_SoundTrack.cog` fades the bar's music **up** for `linkid=1` (`onAdjoin`) and **down** for
-    /// `linkid=0` (`offAdjoin`), so a message without it always chose the down branch and the
-    /// soundtrack never became audible (round: issue #13).
-    pub fn crossed_surface(&mut self, surface: usize) -> usize {
-        // `sithCollision_MoveThing` (`0x4e7950`) sends `crossed` with the moving body as the sender;
-        // this port delivers it for the player's body only.
-        let player = Some(self.player_thing());
-        let links = self.surface_links.clone();
-        let mut queued = 0;
-        for (instance, link, linked) in links {
-            if linked != surface || !self.link_hears(SURFACE_SOURCE, instance, link, surface, player) {
-                continue;
-            }
-            self.pending_messages
-                .push((instance, "crossed", [0.0; 2], Some(link as i64), None));
-            queued += 1;
-        }
-        queued
-    }
 
     /// Which cog instances a level's own `cogs` section links to its things, surfaces and sectors.
     ///
@@ -7935,6 +8157,7 @@ impl Runtime {
     /// point for a warp: the level's start, a scripted placement, or a gate pinning the body. It
     /// does not change the facing or the eye height; the caller sets those on the body first.
     pub fn teleport_player(&mut self, body: &mut PlayerBody, pos: [f32; 3], sector: Option<usize>) {
+        let previous = body.sector;
         body.pos = Vec3::from(pos);
         body.vy = 0.0;
         body.vel = [0.0; 2];
@@ -7942,7 +8165,30 @@ impl Runtime {
         if let Some(sector) = sector {
             body.sector = sector;
         }
+        body.attach = None;
+        body.published_vel = [0.0; 3];
         self.publish_player(body);
+        if let Some(player) = self.local_player() {
+            self.things[player].vel = [0.0; 3];
+            body.published_pose = Some((self.things[player].pos, body.sector));
+        }
+        if previous != body.sector && let Some(player) = self.local_player() {
+            let messages = self.sector_messages(Some(previous), None, Some(player));
+            for (instance, label, link) in messages {
+                self.pending_messages.push((instance, label, [0.0; 2], Some(link as i64),
+                    Some(SourceSender::new(SECTOR_SOURCE, previous as i32, Some(player)))));
+            }
+            self.queue_player_sector_entry(player, body.sector);
+        }
+    }
+
+    /// Explicit placement enters a sector without reconstructing a movement segment.
+    pub fn queue_player_sector_entry(&mut self, player: usize, sector: usize) {
+        if self.things.get(player).is_some_and(|t| t.flags & 0x80100 == 0)
+            && self.sector_flags.get(sector).is_some_and(|f| f & 4 != 0)
+        {
+            self.sith_cog_sector_send_message(sector, Some(player), "entered");
+        }
     }
 
     /// Put the player back on its feet at the level's own spawn: full health and shields, the
@@ -7967,7 +8213,11 @@ impl Runtime {
             thing.destroyed = false;
             thing.vel = [0.0; 3];
         }
+        let previous = body.sector;
         self.teleport_player(body, spawn, sector);
+        if previous == body.sector {
+            self.queue_player_sector_entry(player, body.sector);
+        }
         body.fall_killed = false;
         body.fall_fade = 1.0;
         self.player_shields = 100.0;
@@ -9212,6 +9462,7 @@ impl Runtime {
                 else {
                     return Value::Nil;
                 };
+                let previous = self.things.get(thing).and_then(|t| usize::try_from(t.sector).ok());
                 if let Some(t) = self.things.get_mut(thing) {
                     t.attach = None;
                     t.attach_flags = 0;
@@ -9222,6 +9473,17 @@ impl Runtime {
                     t.sector = from.4;
                     t.target = None;
                     t.vel = [0.0; 3];
+                }
+                if let Ok(sector) = usize::try_from(from.4) {
+                    if previous != Some(sector) {
+                        let messages = self.sector_messages(previous, None, Some(thing));
+                        for (instance, label, link) in messages {
+                            let old = previous.unwrap_or(sector);
+                            self.pending_messages.push((instance, label, [0.0; 2], Some(link as i64),
+                                Some(SourceSender::new(SECTOR_SOURCE, old as i32, Some(thing)))));
+                        }
+                        self.queue_player_sector_entry(thing, sector);
+                    }
                 }
                 Value::Nil
             }
@@ -11487,6 +11749,8 @@ mod tests {
             eye: crate::PLAYER_EYE,
             attach: None,
             water_surface: None,
+            published_vel: [0.0; 3],
+            published_pose: None,
         }
     }
 
@@ -15161,17 +15425,21 @@ mod tests {
             ..Default::default()
         };
         let mut rt = door_runtime();
+        rt.things[0].phys_flags = 0x4a4f;
+        rt.template_move.insert("walkplayer".into(), "physics".into());
+        rt.template_collide.insert("walkplayer".into(), 1);
         let rules = crate::Rules::from_level(&Level::default());
         let mut body = walk_body(Vec3::new(0.0, 0.0, 0.5));
         body.grounded = false;
+        let rt = World::new(rt);
         for _ in 0..200 {
-            rt.step_player(
+            Runtime::step_player(&rt,
                 &mut body,
                 &solids,
                 PlayerInput::default(),
                 &rules,
                 1.0 / 30.0,
-                crate::collide::Gates::default(),
+                || {},
             );
         }
         assert!(body.grounded, "the player body never landed");
@@ -15183,21 +15451,22 @@ mod tests {
     #[test]
     fn step_player_keeps_velocity_when_a_frame_has_leftover_physics_time() {
         let solids = crate::collide::test_room();
-        let mut rt = Runtime::new(&Level::default());
+        let rt = Runtime::new(&Level::default());
         let mut rules = crate::Rules::from_level(&Level::default());
         rules.drag = 0.0;
         rules.air_drag = 0.0;
         let mut body = walk_body(Vec3::ZERO);
         body.gravity = 0.0;
         body.vel = [1.0, 0.0];
+        let rt = World::new(rt);
 
-        rt.step_player(
+        Runtime::step_player(&rt,
             &mut body,
             &solids,
             PlayerInput::default(),
             &rules,
             0.03,
-            crate::collide::Gates::default(),
+            || {},
         );
 
         // UpdateMove stores distance at +0x264; it does not replace +0x1d4 velocity with distance / dt.
@@ -15208,7 +15477,7 @@ mod tests {
     #[test]
     fn step_player_reaches_the_walk_speed() {
         let solids = crate::collide::test_room();
-        let mut rt = Runtime::new(&Level::default());
+        let rt = Runtime::new(&Level::default());
         let rules = crate::Rules::from_level(&Level::default());
         let mut body = walk_body(Vec3::new(1.5, 0.0, -0.935));
         let input = PlayerInput {
@@ -15216,14 +15485,15 @@ mod tests {
             yaw: 90.0,
             ..PlayerInput::default()
         };
+        let rt = World::new(rt);
         for _ in 0..120 {
-            rt.step_player(
+            Runtime::step_player(&rt,
                 &mut body,
                 &solids,
                 input,
                 &rules,
                 1.0 / 60.0,
-                crate::collide::Gates::default(),
+                || {},
             );
         }
         let speed = (body.vel[0] * body.vel[0] + body.vel[1] * body.vel[1]).sqrt();
@@ -15238,7 +15508,7 @@ mod tests {
     #[test]
     fn step_player_strafes_right() {
         let solids = crate::collide::test_room();
-        let mut rt = Runtime::new(&Level::default());
+        let rt = Runtime::new(&Level::default());
         let rules = crate::Rules::from_level(&Level::default());
         let base = -1.0 + rules.radius;
         let mut body = walk_body(Vec3::new(-0.5, 0.0, base));
@@ -15246,14 +15516,15 @@ mod tests {
             strafe: 1.0,
             ..PlayerInput::default()
         };
+        let rt = World::new(rt);
         for _ in 0..60 {
-            rt.step_player(
+            Runtime::step_player(&rt,
                 &mut body,
                 &solids,
                 input,
                 &rules,
                 1.0 / 60.0,
-                crate::collide::Gates::default(),
+                || {},
             );
         }
         assert!(body.pos.x > -0.4, "D did not move the body right: {:?}", body.pos);
@@ -15262,24 +15533,25 @@ mod tests {
     #[test]
     fn step_player_jumps_and_lands() {
         let solids = crate::collide::test_room();
-        let mut rt = Runtime::new(&Level::default());
+        let rt = Runtime::new(&Level::default());
         let rules = crate::Rules::from_level(&Level::default());
         // Standing attached: `GetThingHeight` above the floor (moveSize + 0.005 with no model insert).
         let base = -1.0 + rules.radius + 0.005;
         let mut body = walk_body(Vec3::new(0.0, 0.0, base));
         let mut peak = base;
+        let rt = World::new(rt);
         for frame in 0..90 {
             let input = PlayerInput {
                 jump: frame == 0,
                 ..PlayerInput::default()
             };
-            rt.step_player(
+            Runtime::step_player(&rt,
                 &mut body,
                 &solids,
                 input,
                 &rules,
                 1.0 / 60.0,
-                crate::collide::Gates::default(),
+                || {},
             );
             peak = peak.max(body.pos.z);
         }
@@ -15298,7 +15570,11 @@ mod tests {
         level.templates.push(crate::jkl::Template {
             name: "walkplayer".into(),
             base: None,
-            params: vec![("health".into(), "100".into())],
+            params: vec![
+                ("health".into(), "100".into()), ("type".into(), "player".into()),
+                ("move".into(), "physics".into()), ("collide".into(), "1".into()),
+                ("physflags".into(), "0x4a4f".into()),
+            ],
             model3d: None,
             sprite: None,
         });
@@ -15346,14 +15622,15 @@ mod tests {
         let rules = crate::Rules::from_level(&Level::default());
         let base = -1.0 + rules.radius;
         let mut body = walk_body(Vec3::new(0.0, 0.0, base));
+        let rt = World::new(rt);
         for _ in 0..30 {
-            rt.step_player(
+            Runtime::step_player(&rt,
                 &mut body,
                 &solids,
                 PlayerInput::default(),
                 &rules,
                 1.0 / 60.0,
-                crate::collide::Gates::default(),
+                || {},
             );
         }
         assert!(
@@ -15379,14 +15656,15 @@ mod tests {
         let rules = crate::Rules::from_level(&Level::default());
         let base = -1.0 + rules.radius;
         let mut body = walk_body(Vec3::new(0.0, 0.0, base));
+        let rt = World::new(rt);
         for _ in 0..30 {
-            rt.step_player(
+            Runtime::step_player(&rt,
                 &mut body,
                 &solids,
                 PlayerInput::default(),
                 &rules,
                 1.0 / 60.0,
-                crate::collide::Gates::default(),
+                || {},
             );
         }
         assert!(
@@ -15406,27 +15684,28 @@ mod tests {
             ..PlayerInput::default()
         };
         let base = -1.0 + rules.radius;
-        let speed = |rt: &mut Runtime, body: &mut PlayerBody| {
+        let speed = |rt: Runtime, body: &mut PlayerBody| {
+            let rt = World::new(rt);
             for _ in 0..120 {
-                rt.step_player(
+                Runtime::step_player(&rt,
                     body,
                     &solids,
                     input,
                     &rules,
                     1.0 / 60.0,
-                    crate::collide::Gates::default(),
+                    || {},
                 );
             }
             (body.vel[0] * body.vel[0] + body.vel[1] * body.vel[1]).sqrt()
         };
-        let mut dry_rt = Runtime::new(&Level::default());
+        let dry_rt = Runtime::new(&Level::default());
         let mut dry = walk_body(Vec3::new(1.5, 0.0, base));
-        let dry_speed = speed(&mut dry_rt, &mut dry);
+        let dry_speed = speed(dry_rt, &mut dry);
         let mut wet_rt = Runtime::new(&Level::default());
         // `SITH_SURFACE_WATER` 0x20000 on the test room's floor (surface 0).
         wet_rt.surface_flags = vec![0x2_0000];
         let mut wet = walk_body(Vec3::new(1.5, 0.0, base));
-        let wet_speed = speed(&mut wet_rt, &mut wet);
+        let wet_speed = speed(wet_rt, &mut wet);
         assert!(wet.water, "the body on a water surface is not wet");
         assert!(
             (wet_speed - dry_speed * 0.5).abs() < dry_speed * 0.1,
@@ -15437,7 +15716,7 @@ mod tests {
     #[test]
     fn step_player_publishes_its_final_pose() {
         let solids = crate::collide::test_room();
-        let mut rt = player_runtime();
+        let rt = player_runtime();
         let rules = crate::Rules::from_level(&Level::default());
         let base = -1.0 + rules.radius;
         let mut body = walk_body(Vec3::new(0.0, 0.0, base));
@@ -15449,16 +15728,18 @@ mod tests {
             yaw: body.yaw,
             ..PlayerInput::default()
         };
+        let rt = World::new(rt);
         for _ in 0..10 {
-            rt.step_player(
+            Runtime::step_player(&rt,
                 &mut body,
                 &solids,
                 input,
                 &rules,
                 1.0 / 60.0,
-                crate::collide::Gates::default(),
+                || {},
             );
         }
+        let rt = rt.borrow();
         let player = rt.local_player().expect("the level's walkplayer");
         let thing = &rt.things[player];
         assert!((thing.pos[0] - body.pos.x).abs() < 1e-4, "x {:?} vs {:?}", thing.pos, body.pos);
@@ -15477,23 +15758,25 @@ mod tests {
     #[test]
     fn step_player_applies_fall_damage_to_the_runtime_player() {
         let solids = floor_room();
-        let mut rt = player_runtime();
+        let rt = player_runtime();
         let rules = crate::Rules::from_level(&Level::default());
         let base = -1.0 + rules.radius;
         let mut body = walk_body(Vec3::new(0.0, 0.0, base + 0.05));
         body.grounded = false;
         // `(3.5 - 2.5)^2 * 45` = 45 damage: a landing, not a fall death.
         body.vy = -3.5;
+        let rt = World::new(rt);
         for _ in 0..10 {
-            rt.step_player(
+            Runtime::step_player(&rt,
                 &mut body,
                 &solids,
                 PlayerInput::default(),
                 &rules,
                 1.0 / 60.0,
-                crate::collide::Gates::default(),
+                || {},
             );
         }
+        let rt = rt.borrow();
         let player = rt.local_player().expect("the level's walkplayer");
         let health = rt.things[player].health;
         assert!(
@@ -16718,14 +17001,15 @@ mod tests {
     fn a_surface_crossing_carries_the_link_id_as_the_sender() {
         let mut rt = door_runtime();
         rt.surface_links = vec![(0, 1, 206), (1, 0, 213), (2, 2, 206)];
-        assert_eq!(rt.crossed_surface(206), 2, "both links to surface 206 were messaged");
+        let player = Some(rt.player_thing());
+        assert_eq!(rt.sith_cog_surface_send_message(206, player, "crossed"), 2, "both links to surface 206 were messaged");
         let senders: Vec<(usize, Option<i64>)> = rt
             .pending_messages
             .iter()
             .map(|(instance, _, _, sender, _)| (*instance, *sender))
             .collect();
         assert_eq!(senders, vec![(0, Some(1)), (2, Some(2))], "a crossing lost its link id");
-        assert_eq!(rt.crossed_surface(213), 1, "the offAdjoin link was not messaged");
+        assert_eq!(rt.sith_cog_surface_send_message(213, player, "crossed"), 1, "the offAdjoin link was not messaged");
         assert_eq!(rt.pending_messages[2].3, Some(0), "link 0 must arrive as sender 0");
     }
 
