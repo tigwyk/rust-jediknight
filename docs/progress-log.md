@@ -6904,3 +6904,30 @@ Verification: `cargo test --release step_player_` passed all 10 selected tests (
 No route or gate rerun after the velocity correction; its effect on the table wedge is unmeasured.
 The branch remains work in progress. The hold tail at `0x4f7430:491-534` adds the clamped correction
 to the same movement vector, not a separate move; that static read does not establish the wedge's cause.
+
+### Same-session regression verification of `afbe4bf` against `86a7d34`
+
+`cargo test --release`: 384 passed, 0 failed. Release build completed.
+Compared both binaries in this session using the existing `ab.sh`:
+
+- `86a7d34`, `mt3d4.exe`: SHA-256
+  `58608db789eb3b08a2e3a496f8313497a8f43217a1ca52e41cc6aa53bcb4fcb2`.
+- `afbe4bf`, `afbe4bf.exe`: SHA-256
+  `0a9859925a4b7c0685cf906a205d18a8366238c851924cfb364a6c34c2e58dd5`.
+
+| Check | `86a7d34` | `afbe4bf` |
+|---|---|---|
+| Level-1 slice | 4 sector mismatches, ticks 36/72/108/144 | Same 4 mismatches |
+| Trace gate | 8 compared, 0 failures; `walk17_spawn` excluded by preflight | 9 compared, 1 failure: `walk6_spawn` |
+| `walk6_spawn` | travel 1.06, sectors off 2, xy 0.506, z 0.116 | travel 1.08, sectors off 4, xy 0.612, z 0.217 |
+| `walk17_spawn` | Excluded | PASS: travel 0.70, sectors off 0, xy 0.004, z 0.005 |
+| `--walk all`, level 1 | travel 1.4, blocked 471, sector 361, contained, hull agrees, drop 0.14 | travel 1.1, blocked 545, sector 349, contained, hull differs, drop 0.11 |
+| `--walk all`, level 2 | Stops: drop 11.17 against recorded 11.22 | Same assertion |
+
+The other seven compared trace legs have identical printed metrics. These results supersede the
+unmeasured status above. Velocity persistence changes the later level-1 walk, but does not resolve
+the slice's four sector mismatches. `walk17_spawn` passing does not prove that the headless walk has
+the app's solid-thing list. `walk6_spawn` regresses; no constants, fixtures or routes were changed.
+The level-2 assertion prevents measurement of later `--walk all` levels. Issue #31 remains incomplete
+and the branch remains unmergeable. Continue static comparison of the floor/attach path before
+another behavioral change; do not tune the regressed leg.
