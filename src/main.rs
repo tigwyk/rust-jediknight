@@ -19755,12 +19755,12 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     );
     // The assertions: containment varies for reasons the table shows, but a body must never be left
     // in the void and must never fall further than a step. Without these the sweep asserted nothing.
-    // The walk is the level's own spawn yaw, straight forward. Seven lines run off the level's
-    // geometry; each records its exact outcome in `WALK_OFF_THE_EDGE` above and is asserted there,
-    // so none of them can change silently. 11gorc and 10cargo still leave the world — 09fuelstation
-    // ends outside its sector and the rest stay contained — and the fall is a walk off the edge,
-    // not a collision drop-out. Level 18's shaft (`18Ascend`) lands.
-    // `shortcut: those seven lines are excluded from the worst-drop/stray bounds, upgrade when each
+    // The walk is the level's own spawn yaw, straight forward. Nine lines descend off the level's
+    // authored path; each records its exact outcome (void, containment, drop) in
+    // `WALK_OFF_THE_EDGE` above and is asserted there, so none can change silently. All nine stay
+    // contained today; the levels that drop *and* leave their sector are asserted separately in
+    // `WALK_STRAY` below. Level 18's shaft (`18Ascend`) lands.
+    // `shortcut: those nine lines are excluded from the worst-drop/stray bounds, upgrade when each
     // level's own floor under the spawn yaw is measured (gaps §5.9 has the walk traces for three of
     // them).`
     println!(
