@@ -38,6 +38,8 @@ pub struct Plane {
 pub struct ThingSolid {
     /// Collision centre in plan, and the thing's own z for the span's origin.
     pub centre: [f32; 3],
+    /// Authored thing position (`+0xb8`), independent of the plan box's offset centre.
+    pub origin: [f32; 3],
     pub radius: f32,
     pub z_min: f32,
     pub z_max: f32,
@@ -935,6 +937,46 @@ fn pop_collision(records: &mut [Option<CollisionRecord>]) -> Option<CollisionRec
     records[best?].take()
 }
 
+/// `sithIntersect_CheckSphereIntersection` (0x508540): the sphere gate before a thing's mesh test.
+#[allow(clippy::too_many_arguments)]
+fn sphere_intersection(
+    start: [f32; 3],
+    dir: [f32; 3],
+    dist: f32,
+    radius: f32,
+    centre: [f32; 3],
+    thing_radius: f32,
+    mesh: bool,
+    flags: u32,
+) -> Option<f32> {
+    let span = thing_radius + radius;
+    let offset = sub(centre, start);
+    if dist != 0.0 {
+        let along = dir[0] * offset[0] + dir[1] * offset[1] + dir[2] * offset[2];
+        if 0.0 <= along && along <= span + dist {
+            let offset = sub(centre, [
+                dir[0] * along + start[0],
+                dir[1] * along + start[1],
+                dir[2] * along + start[2],
+            ]);
+            let perpendicular = (offset[2] * offset[2] + offset[1] * offset[1] + offset[0] * offset[0]).sqrt();
+            if span <= perpendicular {
+                return None;
+            }
+            let entry = along - (span * span - perpendicular * perpendicular).sqrt();
+            return Some(if entry <= dist && 0.0 <= entry { entry } else { 0.0 });
+        }
+        if !mesh {
+            return None;
+        }
+    }
+    let distance = (offset[2] * offset[2] + offset[1] * offset[1] + offset[0] * offset[0]).sqrt();
+    if span <= distance {
+        return None;
+    }
+    Some(if flags & 0x400 == 0 { 0.0 } else { distance })
+}
+
 /// `sithIntersect_CheckSphereHit` (0x508be0): the travel distance at which a sphere first meets a plane.
 ///
 /// A body already closer than its radius (`gap < 0`) is touching, so the answer is `0`. A body moving
@@ -1490,6 +1532,11 @@ impl LevelGeometry {
                 continue;
             }
             if let Some(faces) = &thing.mesh {
+                // `CheckSphereThingIntersection` (0x5080d0:41-46) gates the mesh with the thing's
+                // authored size sphere, even when model vertices extend beyond that sphere.
+                if sphere_intersection(at, dir, left, radius, thing.origin, thing.radius, true, 0).is_none() {
+                    continue;
+                }
                 // Model normals point out of the solid; `face_contact` takes the level's into-solid
                 // convention, so each face is handed over turned around.
                 for face in faces.iter() {
@@ -2981,6 +3028,7 @@ mod tests {
         let mut room = seam_floor();
         room.set_things(vec![ThingSolid {
             centre: [0.5, 0.0, 0.0],
+            origin: [0.5, 0.0, 0.0],
             radius: 0.3,
             z_min: -0.1,
             z_max: 0.07,
@@ -3018,6 +3066,7 @@ mod tests {
         let mut room = seam_floor();
         room.set_things(vec![ThingSolid {
             centre: [0.0, 0.3, 0.0],
+            origin: [0.0, 0.3, 0.0],
             radius: 0.1,
             z_min: 0.0,
             z_max: 0.08,
@@ -3373,6 +3422,7 @@ mod tests {
         let solids = Solids::default();
         solids.set_things(vec![ThingSolid {
             centre: [0.0, 0.0, 1.0],
+            origin: [0.0, 0.0, 1.0],
             radius: 0.2,
             z_min: 0.99,
             z_max: 1.0,
@@ -3466,6 +3516,7 @@ mod tests {
         let prop = Solids::default();
         prop.set_things(vec![ThingSolid {
             centre: [0.0; 3],
+            origin: [0.0; 3],
             radius: 0.5,
             z_min: -1.0,
             z_max: 0.0,
@@ -3779,6 +3830,7 @@ mod tests {
         room.spheres = vec![([0.0, 0.0, 0.0], 8.0), ([0.0, 0.5, 0.0], 8.0), ([0.0, 1.0, 0.0], 8.0)];
         room.set_things(vec![ThingSolid {
             centre: [0.0, 0.3, -0.5],
+            origin: [0.0, 0.3, -0.5],
             radius: 0.2,
             z_min: -1.0,
             z_max: 0.0,
@@ -3811,6 +3863,7 @@ mod tests {
         let mut room = seam_floor();
         room.set_things(vec![ThingSolid {
             centre: [1.0, 0.0, -0.5],
+            origin: [1.0, 0.0, -0.5],
             radius: 0.5,
             z_min: -1.0,
             z_max: 0.0,
@@ -3857,6 +3910,7 @@ mod tests {
         let mut room = seam_floor();
         room.set_things(vec![ThingSolid {
             centre: [1.0, 0.0, -0.5],
+            origin: [1.0, 0.0, -0.5],
             radius: 0.2,
             z_min: -1.0,
             z_max: 0.0,
@@ -3948,6 +4002,7 @@ mod tests {
         let shared = geometry.clone();
         shared.set_things(vec![ThingSolid {
             centre: [1.0, 2.0, 3.0],
+            origin: [1.0, 2.0, 3.0],
             radius: 0.2,
             z_min: -1.0,
             z_max: 0.0,
@@ -3991,6 +4046,78 @@ mod tests {
             vec![vec![(1, 3.0)], vec![(0, 3.0)]],
             "one opening carries the mirror row's distance for both directions"
         );
+    }
+
+    #[test]
+    fn sphere_intersection_matches_the_engine_gate_branches() {
+        let start = [0.0; 3];
+        let dir = [1.0, 0.0, 0.0];
+        // 0x508540:19-39: strict tangency rejection, entry distance, and zero for an out-of-range root.
+        assert_eq!(sphere_intersection(start, dir, 2.0, 0.25, [2.0, 0.0, 0.0], 0.75, true, 0), Some(1.0));
+        assert_eq!(sphere_intersection(start, dir, 2.0, 0.25, [1.0, 1.0, 0.0], 0.75, true, 0), None);
+        assert_eq!(sphere_intersection(start, dir, 1.0, 0.25, [1.8, 0.9, 0.0], 0.75, true, 0), Some(0.0));
+        // 0x508540:41-54: only meshes fall back to an initial overlap when the centre is behind.
+        let behind = [-0.25, 0.0, 0.0];
+        assert_eq!(sphere_intersection(start, dir, 1.0, 0.25, behind, 0.25, false, 0), None);
+        assert_eq!(sphere_intersection(start, dir, 1.0, 0.25, behind, 0.25, true, 0), Some(0.0));
+        assert_eq!(sphere_intersection(start, dir, 1.0, 0.25, behind, 0.25, true, 0x400), Some(0.25));
+        assert_eq!(sphere_intersection(start, dir, 0.0, 0.25, behind, 0.25, false, 0), Some(0.0));
+    }
+
+    #[test]
+    fn a_mesh_outside_its_size_sphere_cannot_deflect_the_body() {
+        let solids = Solids::default();
+        solids.set_things(vec![ThingSolid {
+            centre: [0.0; 3],
+            origin: [0.0; 3],
+            radius: 0.5,
+            z_min: -1.0,
+            z_max: 1.0,
+            sector: 0,
+            half: Some([1.0; 2]),
+            yaw: 0.0,
+            mesh: Some(vec![Face {
+                normal: [-1.0, 0.0, 0.0],
+                point: [0.0; 3],
+                verts: vec![[0.0, -1.0, -1.0], [0.0, -1.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, -1.0]],
+                surface: usize::MAX,
+            }].into()),
+            floor: false,
+        }]);
+        let mut vel = [1.0, 0.0, 0.0];
+        let (end, sector, _) = solids.move_body(0, [-1.0, 0.61, 0.0], [2.0, 0.0, 0.0], 0.1, Gates::default(), &mut vel);
+        assert_eq!(end, [1.0, 0.61, 0.0]);
+        assert_eq!(sector, 0);
+        assert_eq!(vel, [1.0, 0.0, 0.0], "a rejected mesh must not reach CollideHurt");
+        let (end, _, _) = solids.move_body(0, [-1.0, 0.5, 0.0], [2.0, 0.0, 0.0], 0.1, Gates::default(), &mut vel);
+        assert!((end[0] + 0.1).abs() < 0.001, "a mesh inside the gate must still block: {end:?}");
+        assert!(vel[0].abs() < 0.001, "the accepted contact must project velocity");
+    }
+
+    #[test]
+    fn the_cantina_tables_second_edge_contact_fails_the_engine_sphere_gate() {
+        // 00table's authored origin and size; the next search after the first accepted edge response.
+        // 0x508540:24-31 gives perpendicular distance 0.14428146 > 0.070420 + 0.065.
+        assert_eq!(sphere_intersection(
+            [-10.431544, -5.433699, -1.1222925],
+            [0.583979, -0.7167128, -0.3811709],
+            0.001417,
+            0.065,
+            [-10.349864, -5.350090, -1.209447],
+            0.070420,
+            true,
+            0xa00,
+        ), None);
+        assert!(sphere_intersection(
+            [-10.435213, -5.439691, -1.131486],
+            [0.50642204, 0.8575079, 0.09064813],
+            0.017651, 0.065, [-10.349864, -5.350090, -1.209447], 0.070420, true, 0xa00,
+        ).is_some(), "the first table edge remains a real collision candidate");
+        assert_eq!(sphere_intersection(
+            [-10.239994, -5.4296784, -1.129886],
+            [-1.4550361e-5, 1.0, 0.0],
+            0.008561, 0.065, [-10.349864, -5.350090, -1.209447], 0.070420, true, 0xa00,
+        ), None, "the later wall/table crease must not receive a table record either");
     }
 
     const FLAT: Attach = Attach { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, -1.0], surface: Some(0), friction: 1.0 };

@@ -26396,6 +26396,7 @@ fn solid_things_at(
                 let (sin, cos) = yaw.to_radians().sin_cos();
                 let (mx, my) = ((lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5);
                 Some(collide::ThingSolid {
+                    origin: pos,
                     centre: [
                         pos[0] + mx * cos - my * sin,
                         pos[1] + mx * sin + my * cos,
@@ -26413,6 +26414,7 @@ fn solid_things_at(
             } else {
                 Some(collide::ThingSolid {
                     centre: pos,
+                    origin: pos,
                     radius: shape.radius,
                     z_min,
                     z_max,
@@ -32145,6 +32147,34 @@ mod rules_tests {
 mod walker_tests {
     use super::*;
 
+    #[test]
+    fn an_off_centre_model_keeps_the_placed_things_sphere_origin() {
+        let shape = SolidShape {
+            radius: 0.1,
+            lo: [0.0, -0.1, -0.1],
+            hi: [1.0, 0.1, 0.1],
+            half: Some([0.5, 0.1]),
+            mesh: Some(vec![collide::Face {
+                normal: [-1.0, 0.0, 0.0],
+                point: [0.05, 0.0, 0.0],
+                verts: vec![[0.05, -0.1, -0.1], [0.05, -0.1, 0.1], [0.05, 0.1, 0.1], [0.05, 0.1, -0.1]],
+                surface: usize::MAX,
+            }].into()),
+            floor: false,
+        };
+        let solids = collide::Solids::default();
+        solids.set_things(solid_things_at(
+            &[Some(shape)],
+            std::iter::once(([0.0; 3], 0, [0.0; 3])),
+        ));
+        let (pos, _, _) = solids.move_body(
+            0, [-0.1, 0.0, 0.0], [0.2, 0.0, 0.0], 0.1,
+            collide::Gates::default(), &mut [1.0, 0.0, 0.0],
+        );
+        assert!((pos[0] + 0.05).abs() < 0.001, "the bound midpoint hid a mesh contact at the thing origin: {pos:?}");
+        assert!(solids.segment_thing([-0.1, 0.0, 0.0], [1.1, 0.0, 0.0]), "the sight/shot box must retain its offset centre");
+    }
+
     /// Two floors either side of one doorway: a lower room (`0 <= x <= 1`, floor z=0) and
     /// a platform (`1 < x <= 3`, floor z=`RISER`) joined by an opening at x=1 that the body
     /// passes through above the step face. Planes' normals point out of the hull, which is
@@ -32289,6 +32319,7 @@ mod walker_tests {
         // Over the lower floor, at the ledge's own height.
         synced.set_things(vec![collide::ThingSolid {
             centre: [0.5, 0.0, 0.0],
+            origin: [0.5, 0.0, 0.0],
             radius: 0.4,
             z_min: -0.5,
             z_max: RISER,

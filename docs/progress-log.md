@@ -6931,3 +6931,69 @@ the app's solid-thing list. `walk6_spawn` regresses; no constants, fixtures or r
 The level-2 assertion prevents measurement of later `--walk all` levels. Issue #31 remains incomplete
 and the branch remains unmergeable. Continue static comparison of the floor/attach path before
 another behavioral change; do not tune the regressed leg.
+
+## Issue #31: static collision-chain diagnosis and the missing mesh gate
+
+Read the movement, collision-search, thing-intersection, response, floor and attachment chains before
+changing behavior. Ghidra independently confirms `sithIntersect_CheckSphereIntersection` at
+`0x508540`; REA evidence `ev_ec490bab2a637ce259d5ab0198aa746b6d224fa417191ae5d6da32c9206febdb`
+has no unresolved calls. Static target SHA-256:
+`12e8c8c3c078e7538733175f93dafa62e309973e814d8ecb975f04c3a57efe44`.
+Retail was not executed and frozen fixtures were not changed.
+
+`CheckSphereThingIntersection` (`0x5080d0:35-46`) always gates the target mesh against the authored
+thing-position sphere. Mesh admission ignores the sphere entry distance and uses the original
+movement length for the face search. The port skipped that gate and tested model faces directly.
+Level-1 thing210, `00table`, is at `(-10.349864,-5.350090,-1.209447)` in sector339, with authored
+`size=movesize=0.070420`; adding the player's 0.065 gives 0.135420. The table's raw bounds midpoint
+equals its origin, so the off-centre-model correction is not the explanation for this table.
+
+The first two table records in the existing `mv4.txt` trace pass the engine gate. The next search,
+line19, starts at `(-10.431544,-5.433699,-1.1222925)`, direction
+`(0.583979,-0.7167128,-0.3811709)`, length 0.001417. Its perpendicular distance from the table origin
+is 0.14428146, greater than 0.135420: the engine rejects it before looking at any face. The port
+instead accepts another table record at line20 and changes the crease, residual movement and
+velocity. The later wall/table contact at line161 independently fails the gate
+(perpendicular distance 0.13565071). These are impossible table responses at the supplied states;
+they do not establish the engine's later path after the first divergent response.
+
+The correction transliterates `0x508540`, including strict tangency rejection, mesh initial-overlap
+fallback, and successful out-of-range ray roots returning distance zero. Mesh contacts now use that
+gate before face iteration. Mesh sphere centres use the separately stored placed thing origin, not
+the model bounds' midpoint. Legacy sight/shot boxes retain their offset centres. Authored radii,
+mesh travel, non-mesh box placement and the chosen 0.02 s port cadence remain unchanged. Regressions
+cover the gate branches, the real table search values, rejected
+deflection versus an admitted solid contact, and an off-centre model's collision at its true origin.
+
+The static audit also establishes separate remaining differences, not grounds for claiming complete
+engine parity: one selected engine thing contact versus all port faces; lost feature/face identity;
+world-space versus model-space face tests; searched-sector admission; floor KEEP/attach/detach
+outcomes and parent velocity bookkeeping; traveled distance versus net displacement for the floor
+tail; and frame cadence/integration order. The retained cadence is an explicit port deviation.
+The trace contains no attachment-selection records, so an upward collision normal is not proof
+that `FindFloor` attached the player to the tabletop. No radius, insert offset or gate tolerance
+was fitted to a capture.
+
+### Verification of the origin-preserving sphere-gate build
+
+`cargo test --release`: 388 passed, 0 failed, including all four new regressions.
+`cargo build --release` completed. Same-session comparison used the existing parity commands,
+without changing captures, routes, thresholds or gate bands:
+
+- Baseline `afbe4bf.exe`: SHA-256
+  `0a9859925a4b7c0685cf906a205d18a8366238c851924cfb364a6c34c2e58dd5`.
+- Final `spherefinal.exe`: SHA-256
+  `7e011abace8bf9de1ca16d9c8523dd0f7e96f54a74ce699c80e1d07079edae2c`.
+
+| Check | Baseline | Sphere gate with separate origin |
+|---|---|---|
+| Level-1 slice, cut684, epsilon1.70 | 4 sector mismatches: ticks36/72/108/144 | 2 sector mismatches: ticks36/72 |
+| Trace gate | 9 compared, 1 failure: `walk6_spawn` | Identical printed results on all 9 legs |
+| `--walk all`, level1 | travel1.1, blocked545, final349, contained, hull differs, drop0.11 | Same |
+| `--walk all`, level2 | Stops: drop11.17 against recorded11.22 | Same assertion; later levels unmeasured |
+
+The gate removes statically impossible table responses and improves the slice, but the slice still
+fails. This is not evidence of complete retail table-slide parity, and issue #31 remains open.
+The next isolated static correction is `0x508400` candidate reduction: retain selected mesh/face
+identity and feature kind, emit one thing record, and use that same selected record in movement
+and floor eligibility. Do not use an upward collision normal as a substitute for attachment evidence.

@@ -11797,6 +11797,7 @@ mod tests {
     fn a_solid_things_model_is_a_floor() {
         let slab = crate::collide::ThingSolid {
             centre: [0.0, 0.0, 1.0],
+            origin: [0.0, 0.0, 1.0],
             radius: 0.5,
             z_min: -0.5,
             z_max: 1.0123,
