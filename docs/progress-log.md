@@ -6876,3 +6876,7 @@ Leg movement, reported and not tuned:
   The baseline passed through `resting_floor`'s edge reach.
 - **`02narshadda` walk-off row.** The rows are port measurements. 0.05 is the hold height
   (0.120114 against the old 0.065 contact). Re-record once the chain is in.
+
+The table above is from `mt3d.exe`, which came before the thing-face `find_floor`, the `floor` flag and
+`thing_contacts`. Only the level-1 slice was rerun on the committed tree (`mt3d2.exe`, `6380a663…`), with
+the same 4 mismatches. The trace gate and `--walk all` have not been rerun on `9eab093`.
