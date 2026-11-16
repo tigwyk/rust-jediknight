@@ -7033,8 +7033,38 @@ selection, refusing a tangent edge without exposing another face, per-mesh versu
 selection, side-before-top floor eligibility, faceless KEEP, and attachment identity on a
 thing/surface tie. The existing stack regression also covers plain-sphere/face and thing-edge/face
 ties. The solid-top settling fixture now uses an actual mesh face; a faceless sphere cannot
-manufacture that attachment. The release build completed with the existing 47 warnings.
+manufacture that attachment. The release build completed with 47 warnings.
 
 This does not change the retained 0.02 s cadence, model-space versus world-space face testing,
 searched-sector/adjoin handling, parent velocity bookkeeping or the floor tail's travel criterion.
 Retail was not executed. Frozen fixtures, routes, authored constants and gate bands remain unchanged.
+
+### Same-session A/B: `e9cd976` against `44b61c9`
+
+Ran the default trace gate, the level-1 slice, `--walk all`, and the explicit
+`walk2_spawn,walk3_spawn,walk5_spawn` gate set against both binaries in this session.
+
+- Baseline `e9cd976.exe`: SHA-256
+  `7e011abace8bf9de1ca16d9c8523dd0f7e96f54a74ce699c80e1d07079edae2c`.
+- `44b61c9`, `selection.exe`: SHA-256
+  `dd50e807ffca7f2e1f7552feccc084ca1f8184a4119ee1a6f0032726713cc330`.
+
+| Check | `e9cd976` | `44b61c9` |
+|---|---|---|
+| Default trace gate | 9 compared, `walk6_spawn` fails | Identical printed results on all 9 legs |
+| Level-1 slice, cut684, epsilon1.70 | 2 sector mismatches: ticks36/72 | Same |
+| `walk2_spawn` | PASS; travel2.90, off0, xy0.559, z0.355 | Same |
+| `walk3_spawn` | FAIL; travel3.37, off4, xy1.654, z0.052 | FAIL; travel3.30, off4, xy1.585, z0.053 |
+| `walk5_spawn` | FAIL; travel1.75, off2, xy2.179, z0.081 | FAIL; travel3.66, off3, xy1.325, z0.122 |
+| `--walk all`, level1 | travel1.1, blocked545, final349, contained, hull differs, drop0.11 | Same |
+| `--walk all`, level2 | Stops: drop11.17 against recorded11.22 | Same assertion; later levels unmeasured |
+
+For `walk5_spawn`, retail travel is 3.73: travel now enters its band, but sector samples regress
+from two mismatches to three, so the leg still fails. The selected-contact correction is justified
+by the engine branches and regressions, not by that route improvement. It does not resolve the
+cantina slice, and the branch remains unmergeable.
+
+Next single static step: replace the split room/thing movement result with the shared
+`SearchForCollisions` (`0x4e8160`) record stack. `MoveThing` must consume solid and adjoin records in
+pop order, applying `SetSector` only when it pops a crossing, rather than borrowing the sector
+precomputed by the room-only sweep. Preserve the current frozen checks and report every leg.
