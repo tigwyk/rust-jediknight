@@ -7461,3 +7461,16 @@ converging. Next single step: `integrate_walk` vs `sithControl_PlayerMovement` (
 first frames. Also queued: the step-2 `vz +0.4167` anomaly vs `0x4f7430:522-534` (the hold writes the
 move accumulator `+0x234..0x23c`, displacement not velocity). Four falsified hypotheses are on the
 issue's handoff (spawn attach writer, gravity 0, warp re-assertion, wrong hold height) — do not retry.
+
+### Correction 4: the coincidence pair was mis-stated
+
+Correction 3's sentence "−1.30 + 0.065 and −1.30 + 0.1201 differ by 0.055 and 2-dp z cannot separate
+them" is wrong arithmetic: those print −1.24 and −1.18, separated easily. The actual coincidence
+crosses floors: the old row's contact over **339's** floor (−1.25 + 0.065 = −1.185) against the hold
+over **349's** floor (−1.30 + 0.1201 = −1.1799) — both round to −1.18 at 2 dp. The old reading
+assumed the body was still over 339's floor when the fixture sample was taken in 349. Ledger row 146
+and the live-body comment at `main.rs:29145` carry the corrected wording; row 147's "sphere contact"
+parenthetical is corrected with them. Also closed: `MoveThing` ORs only `5/4/0x200/0x800` into
+`param_4` — nothing sets `0x40`, so the `0x4e7950:283` tail gate is satisfied for the player's normal
+movement. `BK_SOLID_TRACE` (the `Solid` arm of `move_thing_with`) joins the #30 instruments for the
+seed-decay window.

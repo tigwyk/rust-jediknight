@@ -29143,10 +29143,11 @@ fn setup(
             vy: 0.0,
             sector,
             // `sithPlayer_NewPlayer` (`0x4c8ec0`) sets the position and enters the sector; it never
-            // attaches and never runs a floor search, so the body starts at the level's authored height
-            // (0.120114 above the floor at level 1) and the first gravity sweep lands it at the sphere
-            // contact, `floor + radius` — retail's own `coords` goes −1.13 → −1.18 there. The value here
-            // is replaced by the first frame's landing.
+            // attaches, so the body starts at the level's authored height (0.120114 above 339's floor
+            // at level 1). The first move's `MoveThing` tail then attaches it (`0x4cc4c0:50` passes
+            // param_4 0) and the hold keeps it `floor + GetThingHeight`: −1.1299 over 339, −1.1799
+            // over 349's −1.30 floor — retail's `coords` −1.13 → −1.18 is that hold, not a sphere
+            // contact. The value here is replaced by the first frame's landing.
             grounded: !authored_spawn,
             gravity: rules.gravity.max(1.0),
             water: false,
