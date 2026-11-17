@@ -1308,6 +1308,13 @@ impl LevelGeometry {
                             if deferred && !search.sectors[..search.sector_count].contains(&portal.adjoin) {
                                 search.push(CollisionRecord::Adjoin { distance: touch, sector: portal.adjoin });
                             }
+                            if std::env::var_os("BK_CROSS_TRACE").is_some() {
+                                eprintln!(
+                                    "cross: surface {surface} -> sector {} dist {distance:.4} center {:?}",
+                                    portal.adjoin,
+                                    [start[0] + dir[0] * distance, start[1] + dir[1] * distance, start[2] + dir[2] * distance]
+                                );
+                            }
                             search.push(CollisionRecord::Crossing { distance, sector: portal.adjoin, surface });
                         }
                     }
@@ -1792,7 +1799,15 @@ impl LevelGeometry {
                     [dir[0] * remaining, dir[1] * remaining, dir[2] * remaining]
                 };
                 accepted = match record {
-                    CollisionRecord::Crossing { sector, surface, .. } => {
+                    CollisionRecord::Crossing { sector, surface, distance } => {
+                        // Consumed crossing (the push-site print in the search lists records a
+                        // nearer surface hit may still discard).
+                        if std::env::var_os("BK_CROSS_TRACE").is_some() {
+                            eprintln!(
+                                "cross: sector {} -> {} surface {surface} dist {distance:.4} pos {:?} attach {}",
+                                state.sector, sector, state.pos, state.attach.is_some()
+                            );
+                        }
                         let before = state.pos.map(f32::to_bits);
                         crossing(state, Some(surface), sector);
                         state.pos.map(f32::to_bits) != before
@@ -1900,6 +1915,12 @@ impl LevelGeometry {
                     let face = &solid.mesh.as_ref().unwrap()[mesh][face];
                     if face.normal[2] < 0.6 {
                         continue;
+                    }
+                    if std::env::var_os("BK_FLOOR_TRACE").is_some() {
+                        eprintln!(
+                            "floor: attach thing {} point {:?} pos {:?} r {radius} range {range}",
+                            target.thing, face.point, pos
+                        );
                     }
                     *attach = Some(Attach {
                         normal: face.normal, point: face.point, surface: None, thing: Some(target), friction: 1.0,
