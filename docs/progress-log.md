@@ -7553,3 +7553,31 @@ unchanged. The plan is committed as `tools/parity/routes/level2-disc.tsv`.
 
 Next: the ReeYees kills (things 249-252/347/348, sectors 622/625, z 3.53 — back up top, west), then
 the 8 s end-of-level timer; `countYees` reads 4 on medium (#35).
+
+## Round 305 — #28: level 2's exit chain fires; `jkEndLevel` from cog 44
+
+The chain, end to end, through the shipped scripts only (plan: `tools/parity/routes/level2-exit.tsv`):
+the round-304 disc walk (`gotdisk` via `pow_datadisk.cog` -> `user0(0)`), a warp into 622 north of
+the pit, bryar fire at medium's four live ReeYees (250/251/252/347; 249/348 ship the not-medium
+thingflags), then `wait 700`. Eight shots per target: roughly half land at that range and the chain
+needs four deaths. Verified in the run: 9 hits, four `rycrump*` deaths, four `killed` deliveries to
+`02_endlevel.cog`, and the live cog table reads `deadYees = 4`, `countYees = 4`, `gotdisk = 1`
+(`--cogstatus-after 44` behind `--exit-after`). The fourth `killed` sends `user0(1)`; `user0:` sleeps
+8 s (`pulse:` trace shows the resume at t+8.0) and calls `jkEndLevel(1)` — `level: `jkEndLevel`
+from cog 44` under `BK_LEVEL_TRACE=1`. The follow-up `capture: a script ended the level; staying in
+it for the measurement` is the replay's own measurement hold (`watch_level_complete` clears the flag
+in a capture run), not a failure.
+
+Diagnosis notes for whoever meets this again: the `--route-trace` replay is capture mode, so a
+finished level never prints `level N complete` — the observable is the `capture:` line above, or run
+without trace flags and read `end_level_called`. Two red herrings cost time: kills print
+`0 health left` while still counting (the port clamps then kills at `<= 0`, the engine at `< 0` after
+an unclamped subtract — the port's own gate is wider, so both fire), and the `pending:` trace only
+prints from `pump_thing_messages` while the `sighted:` prefix covers every label
+`pump_cog_messages` delivers, killed included.
+
+Collateral observation (not this round's scope): ~21 placed things die in the first second of level 2
+(among them the filtered ReeYees 249/348) without sending `killed` anywhere — `deadYees` stays 0
+until the shots land, so whatever removes them bypasses `damage_typed_from`. Worth its own look.
+
+Next: levels 3-5 exit chains the same probe-first way (#28's remaining legs).

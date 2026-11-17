@@ -1,0 +1,99 @@
+# Level-2 spawn-to-exit chain (issue #28). The full exit chain from the level's own spawn, through
+# `02_endlevel.cog` (placed cog 44):
+#
+# 1. The spawn-ledge walk takes the data disc (thing 15, sector 109) - `pow_datadisk.cog`
+#    `touched:` -> `TakeItem` -> `taken:` -> `SendMessageEx(master, user0, 0)` sets `gotdisk`.
+#    Legs derived from `--floor-at`/`--waypoints` probes (round 304, see `level2-disc.tsv`).
+# 2. A warp into sector 622 north of the floor pit, then bryar fire at each linked ReeYee
+#    (250, 251, 252, 347 - medium's live four; 249/348 carry the not-medium thingflags). Each
+#    death sends `killed`; the fourth sends `user0(1)`.
+# 3. `user0:` with gotdisk set -> `Sleep(8.0)` -> `jkEndLevel(1)` (verified: `level: `jkEndLevel`
+#    from cog 44` at t+8 s; a `--route-trace` run then reports `capture: a script ended the level`,
+#    which is the measurement mode holding the world, not a failure).
+#
+# 8 shots per ReeYee: the bryar lands roughly half its shots at this range, and the chain only
+# needs the four deaths. `wait 700` covers the 8 s sleep (240 ticks) with margin.
+#
+# kind	name	x	y	z	yaw_deg
+warp	spawn		-		-		-		-
+yaw	105
+input	216	1	0
+yaw	-90
+input	110	1	0
+yaw	-13
+input	75	1	0
+yaw	46
+input	40	1	0
+yaw	90
+input	70	1	0
+wait	36
+warp	shoot		-6.10	-12.60	3.56	-72
+yaw	-72
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+yaw	123
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+yaw	56
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+yaw	133
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+fire
+wait	30
+wait	700
