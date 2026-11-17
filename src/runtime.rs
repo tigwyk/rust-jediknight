@@ -217,7 +217,9 @@ fn encounter_capture() -> bool {
 
 #[derive(Clone)]
 pub struct ThingState {
-    /// The thing's model INSERT OFFSET, for CreateThing's marker-relative positioning.
+    /// `0x4fbe10`'s re-touch clock (`thing+0x148`, engine ms): `touched` is suppressed until it
+    /// passes, then set 500 ms ahead. 0 = never touched.
+    pub next_touch_ms: f64,
     pub insert: [f32; 3],
     pub pos: [f32; 3],
     pub yaw: f32,
@@ -1076,6 +1078,9 @@ pub struct PlayerBody {
     pub published_vel: [f32; 3],
     /// Last published eye pose, used to consume script teleports without rounding untouched axes.
     pub published_pose: Option<([f32; 3], usize)>,
+    /// Item things (type 5) whose volume the move sweep met, for the pickup gate — the engine
+    /// touches items from `MoveThing`'s own hit list (`0x4e7950`), never from standing still.
+    pub touched_items: Vec<usize>,
 }
 
 impl Default for PlayerBody {
@@ -1101,6 +1106,7 @@ impl Default for PlayerBody {
             water_surface: None,
             published_vel: [0.0; 3],
             published_pose: None,
+            touched_items: Vec::new(),
         }
     }
 }
@@ -2191,6 +2197,7 @@ impl Runtime {
                 .enumerate()
                 .map(|(index, t)| ThingState {
                     pos: t.pos,
+                    next_touch_ms: 0.0,
                     insert: template_insert(&t.template.to_ascii_lowercase()),
                     yaw: t.yaw,
                     pitch: t.pitch,
@@ -2790,6 +2797,7 @@ impl Runtime {
         let kind = self.template_types.get(&template).copied().unwrap_or(0);
         self.things.push(ThingState {
             pos,
+            next_touch_ms: 0.0,
             insert,
             owner: None,
             pitch: angles[0],
@@ -6411,6 +6419,9 @@ impl Runtime {
             crossed |= cross;
             landed |= step_landed;
         }
+        // `0x4fbe10`'s contact comes from the sweep itself: the item indexes the move arm passed
+        // through ride the frame's `MoveState`, so a body that did not move touches nothing.
+        body.touched_items.extend(state.touched.iter().copied());
         body.water_surface = surface;
         // `CollideHurt`'s projection lands on the frame velocity (`0x1d4`); the persisted walk
         // state is the frame velocity minus this frame's non-persisted carry and thrust adds
@@ -6513,6 +6524,7 @@ impl Runtime {
         let thing = player.and_then(|i| self.things.get(i));
         let name = player.and_then(|i| self.templates.get(i));
         crate::collide::MoveState {
+            touched: Vec::new(),
             pos, sector, vel, remainder: [0.0; 3], attach: body.attach,
             attach_flags: thing.map_or(0, |t| t.attach_flags),
             kind: player.map_or(10, |i| self.types.get(i).copied().unwrap_or(0) as u32),
@@ -6955,6 +6967,7 @@ impl Runtime {
         }
         self.things.push(ThingState {
             pos: spawn,
+            next_touch_ms: 0.0,
             insert: [0.0; 3],
             owner: usize::try_from(shooter).ok(),
             yaw,
@@ -7997,6 +8010,7 @@ impl Runtime {
         let kind = self.template_types.get(&explode).copied().unwrap_or(3);
         self.things.push(ThingState {
             pos: at,
+            next_touch_ms: 0.0,
             insert: [0.0; 3],
             owner: None,
             yaw: 0.0,
@@ -11706,6 +11720,7 @@ mod tests {
         let mut rt = Runtime::new(&Level::default());
         rt.things = vec![ThingState {
                 pos: [0.0; 3],
+                next_touch_ms: 0.0,
                 insert: [0.0; 3],
                 owner: None,
                 yaw: 0.0,
@@ -11774,6 +11789,7 @@ mod tests {
             water_surface: None,
             published_vel: [0.0; 3],
             published_pose: None,
+            touched_items: Vec::new(),
         }
     }
 
@@ -12094,6 +12110,8 @@ mod tests {
             yaw: 0.0,
             mesh: None,
             floor: false,
+            kind: 7,
+            item: false,
         };
         let solids = crate::collide::Solids::default();
         solids.set_things(vec![slab.clone()]);

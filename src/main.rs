@@ -26271,6 +26271,8 @@ fn solid_things_at(
                         pos[2],
                     ],
                     radius: shape.radius,
+                    kind: shape.kind,
+                    item: shape.item,
                     z_min,
                     z_max,
                     sector,
@@ -26288,6 +26290,8 @@ fn solid_things_at(
                     z_min,
                     z_max,
                     sector,
+                    kind: shape.kind,
+                    item: shape.item,
                     half: None,
                     yaw,
                     mesh,
@@ -26315,8 +26319,11 @@ struct SolidShape {
     mesh: Option<std::sync::Arc<[Vec<collide::Face>]>>,
     /// A cog-type thing with thingflag `0x40`: `FindFloor` may attach a body to it.
     floor: bool,
+    /// The engine thing type, for type-gated searches (`item_has_los`).
+    kind: u32,
+    /// Type 5: pass-through contact (pair handler `0x4fbe10` returns 0).
+    item: bool,
 }
-
 #[derive(Resource)]
 struct SolidShapes(Vec<Option<SolidShape>>);
 
@@ -26337,7 +26344,8 @@ impl SolidShapes {
             // doorway and was shoved around him 67 times in 90 frames (each push carried the body -x), ending
             // at (-0.54, 13.27), where retail's body walks straight to the closed door and stops at
             // (0.01, 13.20). Actors keep their own collision and AI; they are simply not in the *walker*'s list.
-            if crate::runtime::thing_type_of(&world.level, &thing.template) == 2 {
+            let kind = crate::runtime::thing_type_of(&world.level, &thing.template) as u32;
+            if kind == 2 {
                 out.push(None);
                 continue;
             }
@@ -26387,6 +26395,8 @@ impl SolidShapes {
                     ]),
                     mesh: loaded.map(|model| collision_faces(model).into()),
                     floor,
+                    kind,
+                    item: kind == 5,
                 },
                 _ => {
                     let span = model
@@ -26410,6 +26420,8 @@ impl SolidShapes {
                         half: None,
                         mesh: None,
                         floor,
+                        kind,
+                        item: kind == 5,
                     }
                 }
             };
@@ -27076,62 +27088,87 @@ fn show_taken(
     }
 }
 
-/// Walking over a powerup takes it: within a unit of the player's body, an item or weapon
-/// thing goes into the inventory and its model leaves the world.
+/// Walking into a powerup takes it: the move sweep met the item's collide volume.
 ///
-/// The engine delivers a `touched` message to the item's own cog, which calls `TakeItem`;
-/// this runs that script directly rather than through the bus. A template with no `cog=`
-/// falls back to `Runtime::take_item`'s stand-in bin.
+/// The engine's `0x4fbe10` (registered for pair (5,10), invoked swapped as (item, player) because
+/// the mirror matrix slot carries the arg-swap flag, `0x4e6f40`) gates the `touched` message:
+/// the player's thingflags must not carry `0x100`, `sithCollision_HasLOS(item, player)` must
+/// succeed, and the item's re-touch clock (`thing+0x148`) must be below the engine clock — then it
+/// sends `touched` and sets the clock 500 ms ahead. The handler returns 0, so the sweep passes
+/// through; the contact list it consumed is `PlayerBody::touched_items`. The script side
+/// (`touched` then `taken`) is `take_item_with_script`; a template with no `cog=` falls back to
+/// `Runtime::take_item`'s stand-in bin.
 fn collect_items(
     mut sim: Option<ResMut<Sim>>,
-    player: Option<Res<Player>>,
+    player: Option<ResMut<Player>>,
     world: Option<Res<World>>,
     mut commands: Commands,
 ) {
-    let (Some(sim), Some(player)) = (sim.as_mut(), player) else { return };
+    let (Some(sim), Some(mut player)) = (sim.as_mut(), player) else { return };
+    let contacts = std::mem::take(&mut player.body.touched_items);
+    if contacts.is_empty() {
+        return;
+    }
     // The runtime guard is dropped before any script runs, so it is a plain read here.
     let rt = sim.world.borrow();
     let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer"))
     else {
         return;
     };
-    let body = [player.body.pos.x, player.body.pos.y, player.body.pos.z];
-    // Contact, not proximity: the engine collects a thing when its collide volume meets the player's.
-    // `sithIntersect_CheckSphereThingIntersection` (0x5080d0) adds the mover's `movesize` (+0x2c) to
-    // the target's `size` (+0x30): `_powerup` ships size 0.1, movesize 0.01 (#51). The flat 1.0 that stood here swept up
-    // everything in a unit — level 1 starts the body beside a `shieldrecharge`, and the port took it
-    // (and, before the `taken` fix, took it again every frame) while retail's own save reads 100.
-    let radius_of = |name: &str| {
-        rt.templates
-            .iter()
-            .position(|t| t.eq_ignore_ascii_case(name))
-            .and_then(|i| rt.template_hit.get(&rt.templates[i].to_ascii_lowercase()).map(|(r, _)| *r))
-            .unwrap_or(0.065)
-    };
-    let reach_body = radius_of("walkplayer");
+    let clock_ms = rt.time as f64 * 1000.0;
+    // `0x4fbe10` reads the mover's thingflags word (`test ah,1` on the second argument, which the
+    // swap delivers as the player) and skips everything when bit `0x100` is set. A placement's
+    // `thingflags=` replaces the template's, the same effective word the solids build reads.
+    let player_flags = world.as_deref().map_or(0, |w| {
+        let placement = w.level.things.get(index).map(|t| t.flags).unwrap_or(0);
+        if placement != 0 {
+            placement
+        } else {
+            w.level
+                .template_param(&w.level.things[index].template, "thingflags")
+                .and_then(|raw| u32::from_str_radix(raw.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
+                .unwrap_or(0)
+        }
+    });
+    let gates = collide::Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags };
     let mut taken: Vec<usize> = Vec::new();
-    for (other, thing) in rt.things.iter().enumerate() {
-        if other == index || thing.destroyed {
+    for other in contacts {
+        if other == index {
             continue;
         }
-        if !is_pickup(rt.types.get(other).copied().unwrap_or(0), thing.damage) {
+        let Some(thing) = rt.things.get(other) else { continue };
+        if thing.destroyed || !is_pickup(rt.types.get(other).copied().unwrap_or(0), thing.damage) {
             continue;
         }
-        let d = ((thing.pos[0] - body[0]).powi(2)
-            + (thing.pos[1] - body[1]).powi(2)
-            + (thing.pos[2] - body[2]).powi(2))
-        .sqrt();
-        let item = rt.templates.get(other).cloned().unwrap_or_default();
-        let size = world.as_deref().and_then(|w| w.level.template_f32(&item, "size"));
-        let reach = reach_body + size.unwrap_or_else(|| radius_of(&item));
-        if d < reach {
-            taken.push(other);
+        if player_flags & 0x100 != 0 {
+            continue;
         }
+        if thing.next_touch_ms >= clock_ms {
+            continue;
+        }
+        let sector = thing.sector.max(0) as usize;
+        let clear = rt
+            .solids
+            .as_deref()
+            .map(|solids| solids.item_has_los(sector, thing.pos, player.body.pos.to_array(), gates))
+            .unwrap_or(true);
+        if !clear {
+            continue;
+        }
+        taken.push(other);
     }
     // Collect the results first, then touch the renderer's map: the runtime is borrowed
     // through `sim`, so removing entities inside the loop would borrow it twice.
     let mut picked: Vec<(usize, String, Option<String>)> = Vec::new();
     drop(rt);
+    for other in &taken {
+        // `0x4fbe10` sets the re-touch clock right after the message: 500 ms pass before the same
+        // item can touch again, whichever gate the script's own take leaves open.
+        let now_ms = sim.world.borrow().time as f64 * 1000.0;
+        if let Some(thing) = sim.world.borrow_mut().things.get_mut(*other) {
+            thing.next_touch_ms = now_ms + 500.0;
+        }
+    }
     for other in taken {
         let template = sim
             .world
@@ -29163,6 +29200,7 @@ fn setup(
             water_surface: None,
             published_vel: [0.0; 3],
             published_pose: Some(([start[0], start[1], start[2] + eye_height], sector)),
+            touched_items: Vec::new(),
         },
         extra_speed: 0.0,
         use_hits: 0,
@@ -32104,6 +32142,8 @@ mod walker_tests {
                 surface: usize::MAX,
             }]].into()),
             floor: false,
+            kind: 7,
+            item: false,
         };
         let solids = collide::Solids::default();
         solids.set_things(solid_things_at(
@@ -32277,6 +32317,8 @@ mod walker_tests {
                 surface: usize::MAX,
             }]].into()),
             floor: true,
+            kind: 7,
+            item: false,
         }]);
         let mut sector = 0usize;
         let (mut vel, mut attach) = ([0.0f32; 3], None);
