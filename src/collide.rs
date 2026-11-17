@@ -1754,6 +1754,28 @@ impl LevelGeometry {
             if at[2] + radius < thing.z_min {
                 continue;
             }
+            // An **item** takes the engine's own 3D sphere gate (`sithIntersect
+            // _CheckSphereIntersection`, `0x508540`: `span = thing size + mover radius`), not the
+            // furniture arms: a body held `GetThingHeight` over the floor still touches a flat
+            // item it walks over (level 2's disc is 0.023 tall), and nothing above the span does.
+            if thing.item {
+                if let Some(t) = sphere_intersection(at, dir, left, radius, thing.centre, thing.radius, false, 0) {
+                    let (dx, dy, dz) = (
+                        at[0] + dir[0] * t - thing.centre[0],
+                        at[1] + dir[1] * t - thing.centre[1],
+                        at[2] + dir[2] * t - thing.centre[2],
+                    );
+                    let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
+                    each(thing, Sweep {
+                        distance: t, normal: [dx / len, dy / len, dz / len],
+                        point: [at[0] + dir[0] * t, at[1] + dir[1] * t, at[2] + dir[2] * t],
+                        sector, surface: usize::MAX, kind: 1,
+                        thing: Some(ThingHit { thing: thing.index, mesh_face: None, item: false }),
+                    });
+                }
+                continue;
+            }
+            // A body whose feet are on or above the model's top can only meet the top, moving down.
             if thing.mesh.is_none() && at[2] - radius >= thing.z_max - 1e-4 {
                 if let Some((t, normal)) = thing.sweep_top(at, dir, left, radius) {
                     let point = [at[0] + dir[0] * t, at[1] + dir[1] * t, at[2] + dir[2] * t];

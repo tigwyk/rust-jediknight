@@ -26406,12 +26406,17 @@ impl SolidShapes {
                     // The model's plan footprint is far tighter than the template's `size=` (which is
                     // a body-sized radius, not the furniture's): `table4`'s is 0.154 while its model
                     // is ~0.1 wide. Blocking with the template radius sealed the cantina leg
-                    // (102 % -> 12 %) and level 4 (100 % -> 50 %).
+                    // (102 % -> 12 %) and level 4 (100 % -> 50 %). An **item** keeps the template's
+                    // `size=` (`thing+0x30`): the (5,10) handler's contact is the engine's 3D
+                    // sphere gate (`0x508540`, `span = size + mover`), and the plan clamp would
+                    // shrink level 2's disc (size 0.1, model 0.071, 0.023 tall) out of reach of a
+                    // body held `GetThingHeight` over the floor.
                     let radius = model
                         .map(|(lo, hi)| {
                             let plan = lo[0].abs().max(hi[0].abs()).max(lo[1].abs()).max(hi[1].abs());
                             radius.min(plan).max(0.02)
                         })
+                        .filter(|_| kind != 5)
                         .unwrap_or(radius);
                     SolidShape {
                         radius,
