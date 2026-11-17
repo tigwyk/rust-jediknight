@@ -7474,3 +7474,29 @@ parenthetical is corrected with them. Also closed: `MoveThing` ORs only `5/4/0x2
 `param_4` — nothing sets `0x40`, so the `0x4e7950:283` tail gate is satisfied for the player's normal
 movement. `BK_SOLID_TRACE` (the `Solid` arm of `move_thing_with`) joins the #30 instruments for the
 seed-decay window.
+
+## Round 302 — #30 closes as fixture-resolution noise; the engine byte-blocks the table, the port matches
+
+The escalation round's code-vs-fixture contradiction resolved by reading the capture harness the user
+opened (`tools/parity/retail-capture.ps1`, `Invoke-JkRouteTrace` at line 810), not by a run:
+
+- The spawn leg is a genuine fresh level start — `RouteWalk` **refuses** a pose for it
+  (`retail-capture.ps1:2575-2577`, "a warp row would make the spawn leg a different measurement"), so
+  the NewPlayer path and the byte-verified thing-search both apply, exactly as read.
+- The capture's own loop comments state the methodology: the movement key goes down **before** the
+  window is raised ("a 600 ms press entirely inside a paused window is one frame or none at the
+  engine's few-fps render rate"), every 600 ms segment ends with a console read that **freezes** the
+  game, and the engine runs **2-4 frames per segment** under software rendering.
+- The fixture header quantifies that noise itself: "one sample's displacement varies by up to a full
+  sample of travel — 0.9 units", and "two retail captures of the cantina leg already disagree by 0.18
+  units **and by a sector**".
+
+Against that floor, the two remaining slice mismatches (ticks 36/72, port sector 339 vs fixture 349,
+epsilon 1.70 positions already passing) are unresolvable by the fixture: the port grinds thing 210
+(`00table`, collide=3) for ~1.7 s — an outcome the byte-verified engine mandates (player thing-search
+runs: `0x4e7950+0x3C` `39 5d 28 / 75 0a / 0c 05`; pair (10,7) handler installed at matrix index 127;
+`CollideHurt` returns 1 moving into) — then converges to retail's exact resting pose by tick 144. A
+few-fps capture with 600 ms freeze-segmented windows cannot see those frames, and its own header says
+so. No port change; making the player pass through `collide=3` decor would deviate from the shipped
+code. Ledger row 147 now carries the closure; the `walk6_spawn` rest-height question is a different
+leg and stays open (retires on a user-run retail capture with 3+ dp z).
