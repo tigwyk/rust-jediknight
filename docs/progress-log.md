@@ -7528,3 +7528,28 @@ solids — its spawn-leg rows no longer match main either, pre-existing); walkin
 block on contact, no touch once the body exits the volume. #28's disc blocker (the body used to stop
 0.15 short, blocked by the item solid) is gone at the mechanism level; routing the descent to
 sector 109 stays #28's work.
+
+## Round 304 — #28: the disc is picked up; the item contact was the engine's 3D sphere
+
+The derived descent (all positions from `--floor-at`/`--waypoints` probes, yaws computed, one replay
+to verify): ledge 1.8 tier east to its edge (~x 10.15, y −12.9), step down to the 0.8 tier (sectors
+39/33/61), north-east across it, step down at x ~10.2 to the −0.16 level (61/106/107/108), west
+along y −11.2 into 109. First run reached 109 but arced over the disc (closest 0.174-0.115); the
+statics then showed the port was the wrong side of the engine, twice over:
+
+- `SolidShapes::build` clamps a non-mesh solid's radius to the model's plan bounds (the #31-era
+  furniture fix): the disc's 0.1 became 0.071.
+- `thing_contacts` routes a body whose feet are above a solid's top into the top-only arm (a port
+  invention for furniture) — the disc is 0.023 tall, so a body held `GetThingHeight` over the floor
+  (feet −0.32 vs top −0.326) could never contact it horizontally.
+
+The engine's (5,10) contact is the plain 3D sphere gate (`0x508540`, span = `size` + mover radius =
+0.165 for the disc) with no z-gate — that is how retail picks it up. Items now take that gate
+directly in `thing_contacts` (`sphere_intersection`, the `0x508540` transliteration) and keep their
+template `size=` in `build` (the furniture clamp is skipped for kind 5, with the reason in the
+comment). Verification: 407 tests pass; the same route plan picks the disc up through
+`pow_datadisk.cog` mid-leg (`picked up disc via pow_datadisk.cog`); level 1's shieldrecharge pickup
+unchanged. The plan is committed as `tools/parity/routes/level2-disc.tsv`.
+
+Next: the ReeYees kills (things 249-252/347/348, sectors 622/625, z 3.53 — back up top, west), then
+the 8 s end-of-level timer; `countYees` reads 4 on medium (#35).
