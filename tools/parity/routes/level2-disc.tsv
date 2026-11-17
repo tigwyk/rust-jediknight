@@ -1,0 +1,17 @@
+warp	spawn		-		-		-		-
+yaw	105
+input	216	1	0
+yaw	-90
+input	110	1	0
+yaw	-13
+input	75	1	0
+yaw	46
+input	40	1	0
+yaw	90
+input	70	1	0
+wait	36
+# Level 2: spawn ledge -> the disc (thing 15, sector 109). Derived from --floor-at/--waypoints
+# probes (round 304): the 1.8 tier east to its edge, step down to the 0.8 tier (39/33/61),
+# north-east across it, step down at x ~10.2 to the -0.16 level (61/106/107/108), west along
+# y -11.2 into 109 - the disc's 0x4fbe10 contact fires mid-leg ("picked up disc via
+# pow_datadisk.cog").
