@@ -7500,3 +7500,31 @@ few-fps capture with 600 ms freeze-segmented windows cannot see those frames, an
 so. No port change; making the player pass through `collide=3` decor would deviate from the shipped
 code. Ledger row 147 now carries the closure; the `walk6_spawn` rest-height question is a different
 leg and stays open (retires on a user-run retail capture with 3+ dp z).
+
+## Round 303 — #53: the item touch is the engine's `0x4fbe10`, gates and all
+
+The handler itself has no decomp file (`LAB_004fbe10`, 0x60 bytes before `sithItem_Initialize`), so
+it was read from the shipped image: player pointer exists; second arg's thingflags `& 0x100` skips;
+`sithCollision_HasLOS(p1, p2, 0)` must succeed; `p1+0x148` below the engine clock (`0x836c14`);
+`sithCog_ThingSendMessage(p1, p2, 0xe)` — receiver is `param_1` (its cog at `+0x29c` gets the
+message); `p1+0x148 = clock + 0x1f4`; returns 0. The dispatch order came from `0x4e7950:187-195`
+(`matrix[mover_type][hit_type]`, swap flag from `0x4e6f40`): registration `(5,10,…,0)` writes the
+mirror slot `[10][5]` with flag **1**, so the player's sweep invokes the handler **swapped** —
+p1 = item, p2 = player. Net semantics: gate on the *player's* thingflags `0x100`, LOS from *item* to
+player, the *item's* `+0x148` re-touch clock, `touched` to the *item's* cog with the player as
+sender, and the sweep continues (items never block a move).
+
+Port: `ThingSolid`/`SolidShape` carry `kind` + `item` (type 5); the move arm records item contacts
+into `MoveState.touched` and passes through; `PlayerBody.touched_items` carries the frame's contacts;
+`collect_items` replaces its proximity scan with the contact list plus the three gates and the 500 ms
+re-touch (`ThingState.next_touch_ms` against `Runtime.time` in ms); `Solids::item_has_los`
+transliterates the `0x2122` search (surfaces plus cog-type things only — a cog thing blocks the touch
+ray, an item never does). Two unit tests cover the pass-through/record and the LOS blockers.
+
+Verification: 407 tests pass; the level-1 route trace is **bit-identical** to main's binary in a
+same-session A/B (the committed `level1-route-port.tsv` oracle is stale from before #31's thing
+solids — its spawn-leg rows no longer match main either, pre-existing); walking level 1's
+`shieldrecharge` (thing 58) takes it through `pow_shields.cog` with the 500 ms re-touch spacing, no
+block on contact, no touch once the body exits the volume. #28's disc blocker (the body used to stop
+0.15 short, blocked by the item solid) is gone at the mechanism level; routing the descent to
+sector 109 stays #28's work.
