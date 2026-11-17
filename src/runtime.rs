@@ -6371,6 +6371,16 @@ impl Runtime {
                     Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
                 )
             };
+            if std::env::var_os("BK_STEP_TRACE").is_some() {
+                let kind = match &state.attach {
+                    Some(a) => if a.thing.is_some() { "thing" } else { "surface" },
+                    None => "none",
+                };
+                eprintln!(
+                    "step: z {:.4} vz {:.4} traveled {:.4} attach {kind} landed {step_landed} wet {was_wet}",
+                    state.pos[2], state.vel[2], traveled
+                );
+            }
             let len = ((state.pos[0] - start[0]).powi(2) + (state.pos[1] - start[1]).powi(2)).sqrt();
             let cross = state.sector != previous;
             pos = state.pos;

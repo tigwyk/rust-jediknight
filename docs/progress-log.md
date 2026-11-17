@@ -7370,3 +7370,94 @@ with retirement conditions.
 End state: tests 405, `--walk all` green with 9 pinned rows, trace gate 8/9 (`walk6_spawn` only,
 ledgered), slice 2 fields (ticks 36/72, ledgered). The 0.008 boundary and the three fall rows retire
 on a user-run retail capture (z at 3+ dp for the boundary; any trace for the falls).
+
+## Issue #30: closed by the crossing-record read — the sector flips are engine-legal
+
+No code change. The issue's acceptance was the post-chain re-measure (done in the #31 round: slice
+2 fields, ticks 36/72 sector 349->339, against main's single tick-144 flip). The static read then
+settled the mechanism: the engine writes the sector during movement only on a flag-`0x20` collision
+entry (`0x4e7950:157-172`, `SetSector` from the entry's adjoin) and on the containment restore, and
+`FindFloor` never writes it. The port's `move_thing_with` writes it in exactly the same two places
+(`src/collide.rs:1797`, `:1833`), `find_floor` writes only `attach`, and the `Crossing` record is
+emitted on the engine's own rule — sphere **center** reaching a passable portal's plane inside its
+polygon (`sphere_plane` at radius 0 plus `face_edge_mask` coverage, `0x5090b0`, `:1304-1311`),
+distance 0 included.
+
+So sector 339 at ticks 36/72 and `walk6_spawn`'s 290 at tick 124 are legal crossings: the ledgered
+hold-height pose puts the body's center across a boundary retail's center does not reach. No invented
+write exists to fix; the root stays on the deviation ledger and retires on the user-run capture
+(z at 3+ dp). Closed as completed with the handoff; reopen only if that capture shows retail resting
+at the port's height yet staying in 349 — that would be a crossing-order bug, not a pose root.
+
+### Correction: #30 reopened — the crossing attribution was wrong, measured and retracted
+
+The closure above attributed the slice's ticks-36/72 fields to engine-legal crossings driven by the
+ledgered rest-height root. Its own verification run (`BK_CROSS_TRACE`, a gated eprintln at the
+`Crossing` push) refuted that: the level-1 replay has **no crossing into 339 at all**; the port sits
+in the spawn sector at the authored height −1.1299 for ≥1.2 s (flat, no fall), then drops to the
+sphere contact −1.1799 and crosses into 349 between ticks 72 and 108. Retail is at −1.18 in 349
+within 1 s (ledger row 146). The port is *late* to a crossing retail makes earlier because the body
+never falls at spawn.
+
+−1.1299 is floor −1.25 + `GetThingHeight` 0.1201 (the hold target) and −1.1799 is floor + radius
+(the contact): the 0.055 gap is the same magnitude as the uniform −0.05 walk-off signature and the
+walk6 0.008 class, so all three may share one root — a player attach at spawn the engine never makes
+(row 146: `sithPlayer_NewPlayer` never calls `AttachThingToSurface`). Static facts that survived the
+retraction: the port's sector writes match the engine exactly (`0x4e7950:157-172` vs
+`move_thing_with:1797`/`:1833`); `surface_claims` is the ownership reconstruction of the engine's
+per-sector surface iteration (`0x4e86d0:42-156`); the engine's `0x1000` collide-box pretest skip has
+no port equivalent but zero shipped sectors author the bit (every `.jkl` scanned), so it is dead.
+
+#30 reopened with the corrected handoff. Next single step is static: pin from the decomp why the
+retail player rests at contact (read `0x4f5550:45-65` and `AttachThingToSurface`'s param_2/`+0x208`/
+`+0x34` semantics against the `MoveThing` tail at `0x4e7950:280-294`), then find where the port's
+`body.attach` is first `Some` at spawn and make it match. The `BK_CROSS_TRACE` hook sits uncommitted
+on `fix/30-cross-trace` for that round.
+
+### Correction 2: the `0x1000` "dead code" claim was a scan bug — the gate is live
+
+The claim above ("zero shipped sectors author the bit, every `.jkl` scanned") came from a broken
+scan: the GOB index maps each name to `(gob path, offset, size)` and the first pass decoded an empty
+string for every level, so it parsed zero `FLAGS` lines and reported NONE by construction. Re-run
+with the bytes actually read: level 1 has **292 of 462 sectors** at flag `0x1000` (distinct values
+0x1000/0x1004/0x1010/0x1050), `06bbarons` 297 of 850, and every level in the install carries some.
+The engine's surface-loop skip (`0x4e86d0:35-41`: sector flag `0x1000` and the sphere fully inside
+the sector box -> skip the whole per-surface search, so no surface, adjoin or crossing records from
+that sector) is live shipped behaviour with **no port equivalent** — a real unported gate, not dead
+code. It stands next to the attach/hold question as #30's second engine read.
+
+Also sharpened by the same round: the port's two-pass `find_floor` (`for r in [0.0, radius]`) is
+faithful — `0x4f5550:66-100` searches first at radius 0 and then, for thing kind 2/10 with a
+non-zero size, again at `local_1c = thing->size`. So the spawn attach itself is engine behaviour;
+the open question is why a retail player at the sphere contact never rises to
+`floor + GetThingHeight` (`AttachThingToSurface` param_2 / `+0x34` / `+0x208` semantics and the
+hold's comparison target in `0x4f7430`). And the engine's containment path (`0x4e7950:251-260`)
+restores the saved position and `SetSector(thing, param_2)` — the port's
+`crossing(state, None, saved.1)` matches; the engine additionally destroys attached children there
+(`:261-263`), which the port does not model (thing-children only, not the player path).
+
+### Correction 3: heights exonerated — both engines hold at `floor + GetThingHeight`
+
+Instrumented `step_player` per substep (`BK_STEP_TRACE`: z, vz, traveled, attach kind) and re-ran the
+level-1 replay. The freeze theory dissolved: physics runs from tick 1, the body attaches on its first
+move (`landed true`, surface attach), and the hold works. The z values decode cleanly: 339's floor is
+−1.25 → hold −1.1299 (what ticks 0-72 show); 349's floor is **−1.30** (surface 3372) → hold −1.1799 —
+and retail's fixture "−1.18 after 1 s in 349" is that same hold over 349's floor. The port's route
+samples converge to retail's exact resting pose (−9.77/−9.76, −4.75, −1.18, 349) by tick 144.
+
+Row 146's mechanism ("no engine path attaches the player; falls to the sphere contact") is refuted
+end-to-end: `0x4cc4c0:50` passes param_4 **0** so the `0x4e7950` FindFloor tail is live; the two-pass
+radius (`0x4f5550:66-100`) attaches; `0x4cde80` sets `+0x34 = 1`; `0x4f7430:491-535` holds
+`local_68 − H` at ±0.5·dt with `H = max(ky.3do insert 0.120114, size+0.005)` (+0x208 empty, thing
+kind 1 = model3d admits the insert). The old "−1.18 = floor −1.25 + 0.065" was a coincidence: over
+349's floor the two candidate heights differ by 0.055 and 2-dp z cannot separate them. Ledger row 146
+rewritten on the branch.
+
+What #30 actually is: the first ~2 s of horizontal progress. The plan seeds velocity (0.3726, 0.7844)
+and walks from tick 0; retail's first-window velocity is (0.32, **0.67**) — the seed carried — while
+the port's is (0.34, **0.07**): the seeded vel_y decays to ~0 within 0.6 s and the body crawls before
+converging. Next single step: `integrate_walk` vs `sithControl_PlayerMovement` (`0x4d8a00`) and
+`ApplyDrag` (`0x4f5d50`) — target/drag relaxation overwriting the seed, or `step_rollover` eating the
+first frames. Also queued: the step-2 `vz +0.4167` anomaly vs `0x4f7430:522-534` (the hold writes the
+move accumulator `+0x234..0x23c`, displacement not velocity). Four falsified hypotheses are on the
+issue's handoff (spawn attach writer, gravity 0, warp re-assertion, wrong hold height) — do not retry.
