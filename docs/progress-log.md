@@ -7555,6 +7555,7 @@ Next: the ReeYees kills (things 249-252/347/348, sectors 622/625, z 3.53 — bac
 the 8 s end-of-level timer; `countYees` reads 4 on medium (#35).
 
 ## Round 305 — #28: level 2's exit chain fires; `jkEndLevel` from cog 44
+## Round 306 — #28: levels 3-5 triaged; the spawn-homing bug filed (#66); level 4's corridor mapped
 
 The chain, end to end, through the shipped scripts only (plan: `tools/parity/routes/level2-exit.tsv`):
 the round-304 disc walk (`gotdisk` via `pow_datadisk.cog` -> `user0(0)`), a warp into 622 north of
@@ -7567,6 +7568,9 @@ needs four deaths. Verified in the run: 9 hits, four `rycrump*` deaths, four `ki
 from cog 44` under `BK_LEVEL_TRACE=1`. The follow-up `capture: a script ended the level; staying in
 it for the measurement` is the replay's own measurement hold (`watch_level_complete` clears the flag
 in a capture run), not a failure.
+The three #39 chain routes re-gate clean on the current binary (03katarn, 04escapehouse, 06abarons;
+exit 0 each), so the exit mechanics all still fire post-#63. What #28 still needs per level is the
+spawn walk, and the levels split three ways:
 
 Diagnosis notes for whoever meets this again: the `--route-trace` replay is capture mode, so a
 finished level never prints `level N complete` — the observable is the `capture:` line above, or run
@@ -7575,9 +7579,25 @@ without trace flags and read `end_level_called`. Two red herrings cost time: kil
 an unclamped subtract — the port's own gate is wider, so both fire), and the `pending:` trace only
 prints from `pump_thing_messages` while the `sighted:` prefix covers every label
 `pump_cog_messages` delivers, killed included.
+- **03katarn**: blocked by the spawn-homing bug (#66). The walkplayer sits in a 1.0 x 0.3 x 1.1
+  light-sliver (sector 405); the body wedges on the sliver's sloped cap (surface 3386) and the
+  escape — down through the one-sided floor adjoin 3383 -> 1088 (sector 140, the goal-0 room) —
+  never crosses. Engine refs in the issue: `CreateThing`'s `FindSectorInRadius` (`0x4cdcd0`),
+  `MoveThing`'s tail re-home (`0x4e7950:251-264`), the sweep's zero-distance crossing
+  (`0x4e86d0`). A `warp` to the same coordinates walks fine, so the walk itself is not the problem.
+- **06abarons**: same class, same symptom (settles frozen at (10.01, 15.48) in sector 35).
+- **04escapehouse**: spawns in a normal room and walks. `--waypoints s800;s643` maps the whole
+  descent (144 openings: attic NE climb, the long south run at z -7.7, the basement drop at sector
+  667->266, then back north to the exit switch's room 643 at (21.4, -37.8, -11.8)). ~35 gross legs
+  with two z-drops; the corridor data is in the #28 handoff. Deriving and verifying that walk is
+  the next route round.
 
 Collateral observation (not this round's scope): ~21 placed things die in the first second of level 2
 (among them the filtered ReeYees 249/348) without sending `killed` anywhere — `deadYees` stays 0
 until the shots land, so whatever removes them bypasses `damage_typed_from`. Worth its own look.
+Also this round: PR #65 refreshed `level1-route-port.tsv` from main's binary (the old oracle predated
+#31's thing solids) and `--walk all` passes (0 void, 0 no-floor).
 
 Next: levels 3-5 exit chains the same probe-first way (#28's remaining legs).
+Next: either #66's fix (unblocks two levels at once) or the 04escapehouse walk, whichever the next
+agent picks.
