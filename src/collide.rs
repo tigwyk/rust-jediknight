@@ -1812,7 +1812,20 @@ impl LevelGeometry {
                         crossing(state, Some(surface), sector);
                         state.pos.map(f32::to_bits) != before
                     }
-                    CollisionRecord::Solid(hit) => Self::collide_hurt(state, hit.normal, hit_distance, &mut crease),
+                    CollisionRecord::Solid(hit) => {
+                        // What stopped the move: the seed-decay window on #30 needs the face.
+                        if std::env::var_os("BK_SOLID_TRACE").is_some() {
+                            let what = hit.thing.map_or_else(
+                                || format!("surface {}", hit.surface),
+                                |t| format!("thing {}", t.thing),
+                            );
+                            eprintln!(
+                                "solid: {what} normal {:?} dist {hit_distance:.4} pos {:?}",
+                                hit.normal, state.pos
+                            );
+                        }
+                        Self::collide_hurt(state, hit.normal, hit_distance, &mut crease)
+                    }
                     CollisionRecord::Adjoin { .. } => unreachable!(),
                 };
                 if accepted { break; }
