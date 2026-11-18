@@ -7657,3 +7657,25 @@ round's decomp read, not something to tune.
 
 Next: the 03katarn and 06abarons spawn-to-exit routes (#28's remaining legs), and the first-second
 input ramp against the retail fixtures.
+
+## Round 309 — #28: the 03katarn route reaches the hall wall and files the thin-sector pin (#70)
+
+Level 3's spawn-to-exit route was derived probe-first from the authored spawn: the yard-to-goal
+corridor (`--waypoints s405;s250`, 54 openings), the prop field from the JKL's own thing rows with
+the templates' real `movesize=` (canopy 0.325, crate3 0.155, tuskan 0.065, chair3 0.254, table4
+0.154, garagedoor 0.914), and the two doors: `03_garage_door.cog` closes the garage adjoins at
+startup (`sectoradjoins(doorsector, 0)`), so the BFS's only yard exit is a dead end, and the real
+exit is the front door `03_FRONTDOOR.COG` opens on its trigger surface (`MoveToFrame(door1/2, 1,
+500)`). Measured on open ground: north walk 1.29 u/s, due-east 0.97; the apparent west "drift" was
+never the yard's 2.5 % floor — it is slide losses against the canopy columns and crates.
+
+Seven full-route runs and five segment runs converged on one deterministic dead end: the step from
+the yard into the hall funnels every approach to (0.60, −0.64), the mouth of light sliver **429**
+(0.47 x 0.10 x 1.0, `COLLIDEBOX`), and the body pins there on surfaces 3594/3596 at `dist 0.0000`
+until the 4-round cap zeroes it. The engine passes a 0.1-wide strip in one sub-step; filed as **#70**
+with the sector's own geometry, the contact trace and the engine references. Route work stops here
+per pitfalls §7 — that is a collision-chain question, not a leg to tune.
+
+06abarons' route was not attempted this round: its spawn walks (round 308), its corridor is unprobed,
+and the round went to level 3. Next: #70's fix (the crossing-out-of-a-thin-sector race), then the
+03katarn legs past the hall, and the 06abarons corridor fresh (`--waypoints s35;s418`).
