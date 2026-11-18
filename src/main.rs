@@ -28943,11 +28943,15 @@ fn setup(
     // 0.065 sweep does not see. `BK_PLAYER_CLEARANCE` probes a wider footprint only for placement,
     // leaving the collision radius (and the door width it fits through) alone.
     let clearance = env_f32("BK_PLAYER_CLEARANCE", PLAYER_RADIUS);
-    // `BK_SPAWN_AUTHORED=1`: reproduce the engine's load path (`sithPlayer_PlacePlayers` copies the
-    // player thing's position and sector; `sithPlayer_NewPlayer` sets them and resets movement) instead
-    // of resolving a standable point before play. The body then falls and slides from the authored
-    // pose exactly as retail's does; the normal path keeps the placement nudge for now.
-    let authored_spawn = std::env::var_os("BK_SPAWN_AUTHORED").is_some();
+    // The engine's load path is the default (`sithPlayer_PlacePlayers` copies the player thing's
+    // position and sector; `sithPlayer_NewPlayer` `0x4c8ec0` sets them and resets movement, and
+    // nothing in the engine ever relocates a spawn): the body falls and slides from the authored
+    // pose exactly as retail's does. The ring resolver below is a port invention that stood the
+    // body somewhere "clear" instead — on 03katarn it moved the walkplayer out of its light-sliver
+    // marker (sector 405) onto the slope of the sliver's own cap, north of the portal wall, where
+    // no sweep can cross back (#66). `BK_SPAWN_RESOLVE=1` keeps the old resolver for A/B.
+    let authored_spawn = std::env::var_os("BK_SPAWN_AUTHORED").is_some()
+        || std::env::var_os("BK_SPAWN_RESOLVE").is_none();
     if authored_spawn {
         println!("walker: authored spawn {start:?} in sector {sector} (no placement resolution)");
     }

@@ -7625,3 +7625,35 @@ seven checks including the 20-row retail prefix (1204 fields within 1e-6).
 
 Next: the route rounds regenerate oracles through `route-gate.ps1` itself, never an ad-hoc replay; and
 the binary's `sha256` goes in the handoff whenever a trace is cited as evidence.
+
+## Round 308 — #66: the spawn-homing bug was the spawn *placement*, not the collision chain
+
+The instrumented portal trace (`BK_PORTAL_TRACE`, since reverted) showed the 03katarn body never
+searched from south of the sliver's portal wall at all: its very first movement tick began at
+(-0.963, -4.947, -0.213), north of surface 3383's plane. That pose is `spawn_point`'s ring resolver
+(main.rs) — a port invention that walks a 16-point ring around the recorded walkplayer looking for a
+"clear" stand: step 0.4 at 135° from (-0.68, -5.23) is exactly (-0.963, -4.947), standing on the
+sliver's own sloped cap 3386 (floor + radius = -0.213), still homed to sector 405. From there no
+sweep can cross back (the portal is behind the start, `sphere_plane` rejects `above < 0`, engine
+`CheckSphereHit` `0x508be0` likewise), so the body wedges forever. The engine never relocates a
+spawn: `sithPlayer_PlacePlayers` copies the thing's position and sector and
+`sithPlayer_NewPlayer` (`0x4c8ec0`) sets them and resets movement — the body falls and slides from
+the authored pose.
+
+The fix makes the authored spawn the default (`BK_SPAWN_RESOLVE=1` keeps the ring resolver for A/B).
+Both #66 levels now walk from their authored spawns: 03katarn crosses into sector 369 within 72
+ticks, 06abarons moves off (10.58, 14.91). Re-gated same-build: `cargo test` 407 pass, `--walk all`
+passes, all four #39 chain routes exit 0, and level 1's route trace is byte-identical to the
+committed oracle (its spawn was never nudged, so the retail T2 spawn rows are untouched).
+
+Two **pre-existing** gate failures surfaced because the gates were actually run (they are not in CI,
+and the `target/release` binary the route gate uses was a week stale): `route-gate.ps1`'s retail
+prefix check fails at epsilon 1.7, and `trace-gate.ps1` fails `walk6_spawn` with 5 of 6 sector
+samples off. Both reproduce with `BK_SPAWN_RESOLVE=1` (and walk6 is a `--warp` leg the spawn flip
+cannot touch), so both predate this fix. The shared symptom is the first second: retail's body
+stands still ~0.6-1.0 s before walking (its input ramp drops short key holds) while the port walks
+from tick 0 — same start pose, same endpoint, different ramp. That input-ramp question is the next
+round's decomp read, not something to tune.
+
+Next: the 03katarn and 06abarons spawn-to-exit routes (#28's remaining legs), and the first-second
+input ramp against the retail fixtures.
