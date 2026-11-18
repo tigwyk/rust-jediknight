@@ -1952,42 +1952,89 @@ impl LevelGeometry {
         total
     }
 
-    /// `sithCollision_CollideHurt` (0x4e9090): projection and zero-distance crease response.
+    /// `sithCollision_CollideHurt` (`0x4e9090`): the slide response a solid contact answers with,
+    /// transliterated from `decomp/004e9090_sithCollision_CollideHurt.c` — same constants, same
+    /// branches, same order.
+    ///
+    /// The engine passes the thing, the contact normal, the hit record's distance (`record+0x20`, as
+    /// `sithCollision_HandleThingHitSurface` `0x4e8b40` hands it over) and a damage gate (the
+    /// surface's flags `& 0x80`; the thing-thing handler `0x4e8c50` passes 0). Fields: `+0x10`
+    /// moveType (physics = 1), `+0x1d0` physflags, `+0x1d4` velocity, `+0x268` the remaining-move
+    /// vector. The crease is the engine's static normal (`0x8b4bf0`) plus its active flag
+    /// (`0x8b4be4`), which `sithCollision_MoveThing` (`0x4e7950:89`) clears on entry — one crease
+    /// per move, the port's `crease` argument.
+    ///
+    /// Constants read from the shipped image's `.rdata`: the approach epsilon is `0x52300c`
+    /// (1e-5); the hard-landing curve `(v - 2.5)^2 * 45` past a 1.0 floor is `0x523034`/`0x523038`/
+    /// `0x523014` — the same curve `sithCollision_FallHurt` (`0x4e9550`) applies, and the port
+    /// charges it at the landing path (`fall_damage` on the attach), so that inline branch is a
+    /// deviation-ledger row rather than code here; the movement below is the engine's own.
+    ///
+    /// A fresh face (`distance != 0`, or no crease yet) stores the normal and cancels the
+    /// into-normal components of velocity and remainder scaled by 1.0001 — 1.9 under physflag
+    /// `0x20` — preserving the tangential component exactly. A second face met at distance 0
+    /// cancels plainly (no restitution), folds the stored crease against the new face
+    /// (`rdVector_Normalize3Acc` `0x449b97`), and cancels into that crease too.
     fn collide_hurt(state: &mut MoveState, n: [f32; 3], distance: f32, crease: &mut Option<[f32; 3]>) -> bool {
-        if state.move_type != 1 { return false; }
-        let into = -(state.remainder[1] * n[1] + state.remainder[2] * n[2] + state.remainder[0] * n[0]);
-        if into.abs() <= 1e-5 || into <= 0.0 { return false; }
-        let v_into = -(n[1] * state.vel[1] + n[2] * state.vel[2] + state.vel[0] * n[0]);
+        if state.move_type != 1 {
+            return false;
+        }
+        let raw = -(state.remainder[1] * n[1] + state.remainder[2] * n[2] + state.remainder[0] * n[0]);
+        let mut into = raw;
+        if raw.abs() <= 1e-5 {
+            into = 0.0;
+        }
+        if into <= 0.0 {
+            return false;
+        }
+        let restitution = if state.phys_flags & 0x20 != 0 { 1.9 } else { 1.0001 };
         if distance != 0.0 || crease.is_none() {
             *crease = Some(n);
-            let restitution = if state.phys_flags & 0x20 != 0 { 1.9 } else { 1.0001 };
+            let v_into = -(n[1] * state.vel[1] + n[2] * state.vel[2] + state.vel[0] * n[0]);
             if v_into > 0.0 {
                 let m = restitution * v_into;
-                for k in 0..3 { state.vel[k] = n[k] * m + state.vel[k]; }
+                for k in 0..3 {
+                    state.vel[k] = n[k] * m + state.vel[k];
+                }
             }
             let m = restitution * into;
-            for k in 0..3 { state.remainder[k] = n[k] * m + state.remainder[k]; }
-        } else {
-            for k in 0..3 { state.remainder[k] = n[k] * into + state.remainder[k]; }
-            if v_into > 0.0 {
-                for k in 0..3 { state.vel[k] = n[k] * v_into + state.vel[k]; }
+            for k in 0..3 {
+                state.remainder[k] = n[k] * m + state.remainder[k];
             }
-            let old = crease.unwrap();
-            let fold = -(n[0] * old[0] + n[2] * old[2] + n[1] * old[1]);
-            let mut c = [n[0] * fold + old[0], n[1] * fold + old[1], n[2] * fold + old[2]];
+        } else {
+            for k in 0..3 {
+                state.remainder[k] = n[k] * raw + state.remainder[k];
+            }
+            let v_into = -(n[1] * state.vel[1] + n[2] * state.vel[2] + state.vel[0] * n[0]);
+            if v_into > 0.0 {
+                for k in 0..3 {
+                    state.vel[k] = n[k] * v_into + state.vel[k];
+                }
+            }
+            // `rdVector_Normalize3Acc` (`0x449b97`): scale by 1/length unless the length is 0.0.
+            let stored = crease.unwrap();
+            let fold = -(n[0] * stored[0] + n[2] * stored[2] + n[1] * stored[1]);
+            let mut c = [n[0] * fold + stored[0], n[1] * fold + stored[1], n[2] * fold + stored[2]];
             let length = (c[0] * c[0] + c[2] * c[2] + c[1] * c[1]).sqrt();
             if length != 0.0 {
                 let inverse = 1.0 / length;
-                for component in &mut c { *component *= inverse; }
+                for component in &mut c {
+                    *component *= inverse;
+                }
             }
             *crease = Some(c);
-            let v_into = -(state.vel[1] * c[1] + state.vel[0] * c[0] + state.vel[2] * c[2]);
-            if v_into > 0.0 {
-                for k in 0..3 { state.vel[k] = v_into * c[k] + state.vel[k]; }
+            let v_crease = -(state.vel[1] * c[1] + state.vel[2] * c[2] + state.vel[0] * c[0]);
+            if v_crease > 0.0 {
+                for k in 0..3 {
+                    state.vel[k] = v_crease * c[k] + state.vel[k];
+                }
             }
-            let into = -(state.remainder[2] * c[2] + state.remainder[1] * c[1] + state.remainder[0] * c[0]);
-            if into > 0.0 {
-                for k in 0..3 { state.remainder[k] = into * c[k] + state.remainder[k]; }
+            let into_crease =
+                -(state.remainder[2] * c[2] + state.remainder[1] * c[1] + state.remainder[0] * c[0]);
+            if into_crease > 0.0 {
+                for k in 0..3 {
+                    state.remainder[k] = into_crease * c[k] + state.remainder[k];
+                }
             }
         }
         true
@@ -4813,6 +4860,118 @@ mod tests {
         assert!(Solids::collide_hurt(&mut state, [1.0, 1e-7, 0.0], 0.0, &mut Some([1.0, 0.0, 0.0])));
         assert_eq!(state.vel, [0.0; 3]);
         assert_eq!(state.remainder, [0.0; 3]);
+    }
+
+    /// `sithCollision_CollideHurt` (`0x4e9090:24-41`): a fresh face cancels only the into-normal
+    /// component. The tangential component of velocity and remainder survives, and the cancelled
+    /// component comes back as `(1.0001 - 1) * into` — the engine's slide restitution leaves a hair
+    /// of outward push (`0x4e9090:38-41` reads 1.0001 unless physflag `0x20` is set).
+    #[test]
+    fn a_single_face_slide_preserves_the_tangential_component() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [-1.0, 0.5, 0.0], remainder: [-1.0, 0.5, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+        };
+        let mut crease = None;
+        // A west wall's normal points east, into the room; the body moves north-west into it.
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease));
+        assert_eq!(crease, Some([1.0, 0.0, 0.0]), "the fresh face stores the crease normal");
+        assert_eq!(state.vel[1], 0.5, "the tangential velocity component is untouched");
+        assert_eq!(state.remainder[1], 0.5, "the tangential remainder component is untouched");
+        assert!((state.vel[0] - 0.0001).abs() < 1e-6, "{}", state.vel[0]);
+        assert!((state.remainder[0] - 0.0001).abs() < 1e-6, "{}", state.remainder[0]);
+        assert_eq!(state.vel[2], 0.0);
+        assert_eq!(state.remainder[2], 0.0);
+    }
+
+    /// The physflag-`0x20` bounce (`0x4e9090:38-41`): the same contact reflects the into-normal
+    /// component at restitution 1.9 instead of cancelling it.
+    #[test]
+    fn physflag_0x20_bounces_at_restitution_1_9() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [-1.0, 0.5, 0.0], remainder: [-1.0, 0.0, 0.0],
+            phys_flags: 0x20, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+        };
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut None));
+        assert!((state.vel[0] - 0.9).abs() < 1e-6, "1.9 * 1 - 1 reflected: {}", state.vel[0]);
+        assert!((state.remainder[0] - 0.9).abs() < 1e-6, "{}", state.remainder[0]);
+        assert_eq!(state.vel[1], 0.5, "even the bounce keeps the tangential component");
+    }
+
+    /// The two-face crease (`0x4e9090:71-112`): a second face met at distance 0 folds the stored
+    /// normal against itself (`rdVector_Normalize3Acc` `0x449b97`) and cancels into that crease.
+    /// With `n1 = +x` and `n2 = (x+y)/sqrt(2)` the fold is `normalize(n1 - n2 * (n2 . n1)) =
+    /// (x - y)/sqrt(2)`, and a remainder the first face slid to `[0.0001, -1, 0]` ends tangent to
+    /// the second face, riding the crease.
+    #[test]
+    fn a_second_face_at_zero_distance_folds_the_crease() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [0.0; 3], remainder: [-1.0, -1.0, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+        };
+        let mut crease = None;
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease));
+        assert!((state.remainder[0] - 0.0001).abs() < 1e-6, "{}", state.remainder[0]);
+        assert_eq!(state.remainder[1], -1.0);
+
+        let diag = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(Solids::collide_hurt(&mut state, [diag, diag, 0.0], 0.0, &mut crease));
+        let folded = crease.unwrap();
+        assert!((folded[0] - diag).abs() < 1e-6, "the fold is normalize([0.5, -0.5, 0]): {}", folded[0]);
+        assert!((folded[1] + diag).abs() < 1e-6, "{}", folded[1]);
+        assert_eq!(folded[2], 0.0);
+        // The remainder is tangent to the second face and parallel to the crease: the into-n2
+        // component `FRAC_1_SQRT_2 * (1 - 0.0001)` is gone, leaving [0.50005, -0.50005, 0].
+        let tangent = state.remainder[0] * diag + state.remainder[1] * diag;
+        assert!(tangent.abs() < 1e-4, "tangent to the second face: {tangent}");
+        assert!((state.remainder[0] - 0.50005).abs() < 1e-4, "{}", state.remainder[0]);
+        assert!((state.remainder[1] + 0.50005).abs() < 1e-4, "{}", state.remainder[1]);
+        // Its into-crease component is negative (it rides the crease outward), so the final
+        // cancellation (`0x4e9090:102-112`) does not fire — the direction stands.
+        let along = state.remainder[0] * folded[0] + state.remainder[1] * folded[1];
+        assert!(along > 0.0, "parallel to the folded crease: {along}");
+    }
+
+    /// `0x4e9090:42` gates the crease on `distance == 0`: a second face met at a nonzero distance
+    /// starts a fresh slide instead — the stored crease is replaced and restitution applies.
+    #[test]
+    fn a_second_face_at_nonzero_distance_starts_a_fresh_crease() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [0.0; 3], remainder: [-1.0, -1.0, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+        };
+        let mut crease = None;
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease));
+        // The first slide left the remainder at [0.0001, -1, 0]; the second face still has an
+        // approach of 1 along its normal, so the fresh branch runs with restitution.
+        assert!(Solids::collide_hurt(&mut state, [0.0, 1.0, 0.0], 0.5, &mut crease));
+        assert_eq!(crease, Some([0.0, 1.0, 0.0]), "the fresh branch replaced the stored normal");
+        assert!((state.remainder[0] - 0.0001).abs() < 1e-6, "{}", state.remainder[0]);
+        // The crease branch would cancel exactly (leaving 0); restitution leaves 0.0001.
+        assert!((state.remainder[1] - 0.0001).abs() < 1e-6, "{}", state.remainder[1]);
+    }
+
+    /// `0x4e9090:28-37`: an approach at or under the engine's 1e-5 epsilon (`0x52300c`) is zeroed
+    /// and refused — no slide, no crease. A move away from the face (negative into-normal) and a
+    /// non-physics mover are refused the same way (`0x4e9090:21-23`).
+    #[test]
+    fn an_approach_under_the_engine_epsilon_or_away_is_refused() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [-1.0, 0.0, 0.0], remainder: [-5e-6, 1.0, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+        };
+        let mut crease = None;
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease));
+        assert_eq!(crease, None);
+        assert_eq!(state.remainder, [-5e-6, 1.0, 0.0], "the state is untouched");
+        assert_eq!(state.vel, [-1.0, 0.0, 0.0]);
+
+        state.remainder = [1.0, 0.0, 0.0];
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease), "moving away");
+
+        state.remainder = [-1.0, 0.0, 0.0];
+        state.move_type = 0;
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease), "not a physics mover");
     }
 
     #[test]
