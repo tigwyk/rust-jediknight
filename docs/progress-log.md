@@ -7679,3 +7679,20 @@ per pitfalls §7 — that is a collision-chain question, not a leg to tune.
 06abarons' route was not attempted this round: its spawn walks (round 308), its corridor is unprobed,
 and the round went to level 3. Next: #70's fix (the crossing-out-of-a-thin-sector race), then the
 03katarn legs past the hall, and the 06abarons corridor fresh (`--waypoints s35;s418`).
+
+## Round 310 — #72/#73: the re-order is on the record; the movement inventions are on the ledger
+
+The zoom-out decision is now in the roadmap itself: the Phases section opens with the
+mechanics-before-breadth ordering (spec #72's collision-chain and control rounds precede any further
+level-acceptance work; #28 is closed into #7 and its legs reopen after movement reaches T2), and the
+deviation ledger gained a row for every port invention still living in the movement path, each naming
+its measurement and the sub-issue that retires it: the movement-path trio (`resting_floor`,
+`prepare_body`, `finish_body` → #77/#78), the placement trio (`spawn_point`'s opt-in ring resolver,
+`sector_for_body`, `standable` → #80), the partial containment transliteration
+(`inside_sector_with_gates` → #75) and the scripted input's full-strength ramp (→ #79). The
+`lateral step allowance` row now names #77 as the owner of its replacement. The pitfalls doc's chain
+section still names `sweep_rooms`/`move_body`/`doorway_advance`/`sector_after_lift`, which #31's
+landing already deleted — the ticket list (#74-#77) works from the code, not that stale list.
+
+No code change. Tickets #73-#80 are published as #72's sub-issues; the frontier is #73 (this round),
+#74, #75, #76 and #79.
