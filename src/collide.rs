@@ -29,6 +29,17 @@ pub struct Plane {
     pub surface: usize,
 }
 
+/// One surface of a sector's own `SURFACES` range, as `sithIntersect_IsSphereInSector`
+/// (JK.EXE `0x507f30`) walks it.
+#[derive(Clone, Copy, Debug)]
+pub struct ContainPlane {
+    pub normal: [f32; 3],
+    pub point: [f32; 3],
+    pub surfflags: u32,
+    /// The `World adjoins` row the surface names, `-1` when it is not an opening.
+    pub adjoin: i32,
+}
+
 /// A placed thing the walker collides with.
 ///
 /// `half` is `Some` only for a `collide=3` thing with a loaded model: the model's bounds give the
@@ -215,10 +226,9 @@ pub struct LevelGeometry {
     pub sectors: Vec<Vec<Plane>>,
     /// Per sector, only the planes that **bound** the cell: every vertex the sector claims is behind
     /// them. `sectors` carries every claimed surface's plane, because a wall patch inside the room
-    /// still has to stop a body; only this list may answer "is the body inside", which is what
-    /// `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`) asks.
-    /// Correction: engine containment tests all collision-flagged surfaces and movable adjoins, not
-    /// only this derived hull; `inside_sector_with_gates` performs that test.
+    /// still has to stop a body. Containment is not asked of either list: `containment` carries
+    /// the sector's own surfaces as `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`) walks
+    /// them, and `clearance` reads this hull.
     pub hull: Vec<Vec<Plane>>,
     /// Per sector, its `HASCOLLIDEBOX` bounds (`SITH_SECTOR_HASCOLLIDEBOX`, sector flag `0x1000`),
     /// from the file's `COLLIDEBOX` row (not the enclosing `BOUNDBOX`). `IsSphereInSector`
@@ -284,6 +294,12 @@ pub struct LevelGeometry {
     pub adjoin_surface: Vec<usize>,
     /// Sector-to-sector links with the adjoin row's attenuation, derived once from the mirrors.
     pub sector_adjoins: Vec<Vec<(i32, f32)>>,
+    /// Per sector, its own `SURFACES` range as `sithIntersect_IsSphereInSector` (JK.EXE
+    /// `0x507f30`) walks it: every surface's plane (normal pointing out of this sector), flag
+    /// word and `World adjoins` row. The walk counts a surface when the flags carry
+    /// `HAS_COLLISION` (`0x4`) or the adjoin row allows movement (`0x2`) — decided at call
+    /// time, because doors clear the move flag at runtime.
+    pub containment: Vec<Vec<ContainPlane>>,
 }
 
 /// The collision-facing name for the one geometry record.
@@ -667,6 +683,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     let mut hulls = Vec::with_capacity(level.sectors.len());
     let mut boxes = Vec::with_capacity(level.sectors.len());
     let mut portal_sets = Vec::with_capacity(level.sectors.len());
+    let mut contains = Vec::with_capacity(level.sectors.len());
     let mut spheres = Vec::with_capacity(level.sectors.len());
     for sector in &level.sectors {
         let (first, count) = sector.surfaces;
@@ -700,6 +717,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         let mut planes = Vec::new();
         let mut hull_planes = Vec::new();
         let mut portals = Vec::new();
+        let mut contain = Vec::new();
         for (surface_of, surface) in &owned {
             if surface.verts.len() < 3 {
                 continue;
@@ -753,6 +771,15 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
             } else {
                 normal
             };
+            // `sithIntersect_IsSphereInSector` (`0x507f30`) walks the sector's own surface list
+            // whatever the adjoin mirror table says, so every surface with a plane lands here and
+            // the counting rule (`0x4` or a move-flagged adjoin row) is applied at call time.
+            contain.push(ContainPlane {
+                normal: own,
+                point: pts[0],
+                surfflags: surface.surfflags,
+                adjoin: surface.adjoin,
+            });
             // An adjoined surface is an opening: the walker goes through it into the
             // sector its *mirror* adjoin belongs to, so it is remembered as a portal
             // rather than a wall.
@@ -809,6 +836,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         hulls.push(hull_planes);
         boxes.push(box_of);
         portal_sets.push(portals);
+        contains.push(contain);
         spheres.push((centre, radius.max(0.1)));
     }
     // The portal graph is **symmetric**. A link is discovered from whichever side owns the surface,
@@ -892,6 +920,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     // The solid things are filled by the caller, which has the models: see `solid_things` in `main`.
     Solids {
         sectors,
+        containment: contains,
         hull: hulls,
         boxes,
         portals: portal_sets,
@@ -2824,46 +2853,53 @@ impl LevelGeometry {
     }
 
     /// `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`, `sithIntersect.c:58`): is a body of
-    /// `radius` at `pos` still inside `sector`?
+    /// `radius` at `pos` still inside `sector`? One transliteration, in the engine's order:
     ///
-    /// Two parts, in the engine's order. First the sector's collide box (`HASCOLLIDEBOX`, flag
-    /// `0x1000`): if the sphere fits inside it the answer is **yes**, without testing a single
-    /// surface. Only a sphere outside that box is tested against the sector's bounding planes, where
-    /// a distance below the radius means outside. `sithCollision_MoveThing` calls this with radius 0
-    /// to decide whether to undo a move.
+    /// 1. the sector's collide box (`HASCOLLIDEBOX`, sector flag `0x1000` — `Solids::build`
+    ///    stores the box only for such sectors): a sphere that fits inside it is **in**, without
+    ///    testing a single surface;
+    /// 2. the sector's own surface list, where a surface counts when it has `HAS_COLLISION`
+    ///    (`0x4`) or its adjoin row allows movement (`flags & 2`, read at call time so a shut
+    ///    door stops counting): the plane distance `dot(pos - vertex0, normal)` snaps to zero
+    ///    within `1e-5` of it, and a distance below `radius` means outside.
+    ///
+    /// `sithCollision_MoveThing` calls this with radius 0 to decide whether to undo a move.
     pub fn inside_sector(&self, sector: usize, pos: [f32; 3], radius: f32) -> bool {
         self.inside_sector_with_gates(sector, pos, radius, Gates::default())
     }
 
     pub(crate) fn inside_sector_with_gates(&self, sector: usize, pos: [f32; 3], radius: f32, gates: Gates<'_>) -> bool {
+        // 0x507f30:18-24: the collide box, only when the sector flags carry 0x1000. The engine
+        // walks the surfaces when the sphere is outside the box on any axis (`pos - radius <= lo`
+        // or `hi <= pos + radius`), so "fits" is the strict complement.
         if let Some(Some((lo, hi))) = self.boxes.get(sector) {
-            let fits = (0..3).all(|k| pos[k] - radius > lo[k] && pos[k] + radius < hi[k]);
-            if fits {
+            if (0..3).all(|k| pos[k] - radius > lo[k] && pos[k] + radius < hi[k]) {
                 return true;
             }
         }
-        let inside = |normal: [f32; 3], point| {
-            let d = sub(pos, point);
-            let c = -(d[2] * normal[2] + d[1] * normal[1] + d[0] * normal[0]);
-            // `sithIntersect_IsSphereInSector` snaps a plane distance within `1e-5` of zero to zero
-            // (`_DAT_00523288` is 1e-5, `_DAT_00523284` is 0) before the radius test, so a body
-            // resting exactly on its own floor is inside it. Without the band, `floor + radius` as
-            // f32 lands a ten-millionth below the plane and the containment check rejects a body
-            // standing on solid ground (`18Ascend`'s spawn did exactly that, every frame).
-            let c = if c.abs() <= 1e-5 { 0.0 } else { c };
+        // 0x507f30:29-30: a surface counts when its flags carry 0x4 or its adjoin row's flags
+        // carry 0x2. The engine reads the adjoin flags through the surface's live pointer, so the
+        // runtime gates win over the file's word.
+        self.containment.get(sector).is_none_or(|surfaces| surfaces.iter().all(|s| {
+            let adjoin_move = usize::try_from(s.adjoin).is_ok_and(|row| {
+                gates.adjoins.get(row).copied()
+                    .or_else(|| self.adjoin_flags.get(row).copied())
+                    .unwrap_or(ADJOIN_MOVE)
+                    & ADJOIN_MOVE != 0
+            });
+            if s.surfflags & 0x4 == 0 && !adjoin_move {
+                return true;
+            }
+            // 0x507f30:33-45: `dot(pos - vertex0, normal)` (the port's normals point out, so the
+            // sign is flipped), |distance| <= 1e-5 (`_DAT_00523288`) snaps to 0
+            // (`_DAT_00523284`), and a distance below the radius means outside.
+            let d = sub(pos, s.point);
+            let mut c = -(d[0] * s.normal[0] + d[1] * s.normal[1] + d[2] * s.normal[2]);
+            if c.abs() <= 1e-5 {
+                c = 0.0;
+            }
             c >= radius
-        };
-        self.sectors.get(sector).is_none_or(|planes| planes.iter().all(|plane| inside(plane.normal, plane.point)))
-            && self.portals.get(sector).is_none_or(|portals| portals.iter().all(|portal| {
-                let surface = self.adjoin_surface.get(portal.link).copied().unwrap_or(usize::MAX);
-                if self.surface_claims.get(surface).is_some_and(|claims| !claims.contains(&sector)) {
-                    return true;
-                }
-                let flags = self.surface_flags.get(surface).copied().unwrap_or(0);
-                let adjoin = gates.adjoins.get(portal.link).copied()
-                    .or_else(|| self.adjoin_flags.get(portal.link).copied()).unwrap_or(ADJOIN_MOVE);
-                (flags & 4 == 0 && adjoin & ADJOIN_MOVE == 0) || inside(portal.normal, portal.point)
-            }))
+        }))
     }
 
     /// The sector a *body* of `radius` should start in.
@@ -3174,6 +3210,14 @@ pub(crate) fn test_room() -> Solids {
         boxes: Vec::new(),
         hull: Vec::new(),
         floor_of: [(0usize, 0usize)].into_iter().collect(),
+        containment: vec![vec![
+            ContainPlane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 1.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [1.0, 0.0, 0.0], point: [2.0, 0.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [-1.0, 0.0, 0.0], point: [-2.0, 0.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [0.0, 1.0, 0.0], point: [0.0, 2.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [0.0, -1.0, 0.0], point: [0.0, -2.0, 0.0], surfflags: 0x4, adjoin: -1 },
+        ]],
         sectors: vec![vec![
             Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.0], surface: 0 },
             Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 1.0], surface: 3 },
@@ -3338,6 +3382,9 @@ mod tests {
             sectors: vec![vec![Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surface: usize::MAX }]],
             spheres: vec![([0.0, 0.0, 0.0], 8.0)],
             portals: vec![Vec::new()],
+            containment: vec![vec![
+                ContainPlane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ]],
             floors: Vec::new(),
             walls: Vec::new(),
             wall_of: std::collections::HashMap::new(),
@@ -3490,6 +3537,14 @@ mod tests {
                 ],
                 vec![Portal { adjoin: 1, link: 3, verts: quad(8.0).into_iter().rev().collect(), normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0] }],
             ],
+            containment: vec![
+                vec![ContainPlane { normal: [0.0, 1.0, 0.0], point: [0.0, 0.0, 0.0], surfflags: 0, adjoin: 0 }],
+                vec![
+                    ContainPlane { normal: [0.0, -1.0, 0.0], point: [0.0, 0.0, 0.0], surfflags: 0, adjoin: 1 },
+                    ContainPlane { normal: [0.0, 1.0, 0.0], point: [0.0, 8.0, 0.0], surfflags: 0, adjoin: 2 },
+                ],
+                vec![ContainPlane { normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0], surfflags: 0, adjoin: 3 }],
+            ],
             ..Default::default()
         }
     }
@@ -3559,6 +3614,116 @@ mod tests {
         let closed = Gates { sectors: &[], adjoins: &[0] };
         assert!(!room.inside_sector_with_gates(0, outside, 0.0, open));
         assert!(room.inside_sector_with_gates(0, outside, 0.0, closed));
+    }
+
+    /// The floor `18Ascend`/`19A` ship: a slab with flags `0x80005` and file normal `(0, 0, 1)`
+    /// (into the room). `0x507f30:37-42` snaps a plane distance within `1e-5` of zero to zero
+    /// before the `fVar3 < param_2` test, so a body resting a ten-millionth *through* its own
+    /// floor is still inside at radius 0 — `MoveThing`'s containment call.
+    #[test]
+    fn containment_snaps_a_resting_body_onto_its_own_floor() {
+        let mut level = crate::jkl::Level::default();
+        level.vertices = vec![
+            [-2.0, -2.0, -1.3], [2.0, -2.0, -1.3], [2.0, 2.0, -1.3], [-2.0, 2.0, -1.3],
+        ];
+        level.surfaces = vec![crate::jkl::Surface {
+            material: 0,
+            surfflags: 0x80005,
+            geo: 4,
+            adjoin: -1,
+            verts: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+            intensities: vec![1.0; 4],
+            normal: [0.0, 0.0, 1.0],
+        }];
+        level.sectors = vec![crate::jkl::Sector { surfaces: (0, 1), ..Default::default() }];
+        let solids = build(&level);
+
+        assert!(solids.inside_sector(0, [0.0, 0.0, -1.2], 0.0), "a body above the floor is inside");
+        assert!(
+            solids.inside_sector(0, [0.0, 0.0, -1.3 - 3e-6], 0.0),
+            "3e-6 through the floor is inside the 1e-5 snap band"
+        );
+        assert!(
+            !solids.inside_sector(0, [0.0, 0.0, -1.3 - 2e-5], 0.0),
+            "2e-5 through the floor is past the band and outside"
+        );
+    }
+
+    /// The one-sided adjoin pair `03katarn` 3383/3177 (rows 1088/983): the near side's surface
+    /// carries the adjoin row, the far side's surface has adjoin `-1`. `0x507f30:29-30` counts the
+    /// near surface (its row has `MOVE`), so a body past the plane is outside the near sector and
+    /// the far sector's own list has nothing to test.
+    #[test]
+    fn a_body_past_a_one_sided_adjoin_plane_is_outside() {
+        let mut level = crate::jkl::Level::default();
+        level.vertices = vec![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]];
+        let face = |adjoin: i32| crate::jkl::Surface {
+            material: 0,
+            surfflags: 0,
+            geo: 4,
+            adjoin,
+            verts: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+            intensities: vec![1.0; 4],
+            normal: [0.0, -1.0, 0.0],
+        };
+        level.surfaces = vec![face(0), face(-1)];
+        level.sectors = vec![
+            crate::jkl::Sector { surfaces: (0, 1), ..Default::default() },
+            crate::jkl::Sector { surfaces: (1, 1), ..Default::default() },
+        ];
+        level.adjoins = vec![
+            crate::jkl::Adjoin { flags: 0x3, mirror: 1, dist: 0.0 },
+            crate::jkl::Adjoin { flags: 0x3, mirror: 0, dist: 0.0 },
+        ];
+        let solids = build(&level);
+
+        let past = [0.0, 0.1, 0.5];
+        assert!(!solids.inside_sector(0, past, 0.0), "past the move-flagged plane, out of the near sector");
+        assert!(solids.inside_sector(0, [0.0, -0.1, 0.5], 0.0), "on the near side, inside");
+        assert!(
+            solids.inside_sector(1, past, 0.0),
+            "the far side's own surface carries no adjoin row, so nothing counts"
+        );
+        // The row's move flag is read at call time: a shut link stops the surface from counting.
+        let shut = Gates { sectors: &[], adjoins: &[0] };
+        assert!(solids.inside_sector_with_gates(0, past, 0.0, shut), "a shut link does not count the plane");
+    }
+
+    /// `03katarn` sector 429: `FLAGS 0x1000` with a collide box, the thin sliver of #70. A sphere
+    /// that fits the box is in (`0x507f30:18-24`) without a single plane test — here a collision
+    /// floor at z 0.5 that the point at z 0.3 sits below, which the plane walk alone would reject.
+    #[test]
+    fn a_collidebox_sector_accepts_without_plane_tests() {
+        let mut level = crate::jkl::Level::default();
+        level.vertices = vec![
+            [0.430541, -0.70, 0.5], [0.90, -0.70, 0.5], [0.90, -0.60, 0.5], [0.430541, -0.60, 0.5],
+        ];
+        level.surfaces = vec![crate::jkl::Surface {
+            material: 0,
+            surfflags: 0x4,
+            geo: 4,
+            adjoin: -1,
+            verts: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+            intensities: vec![1.0; 4],
+            normal: [0.0, 0.0, 1.0],
+        }];
+        level.sectors = vec![crate::jkl::Sector {
+            flags: 0x1000,
+            surfaces: (0, 1),
+            boundbox: Some(([0.430541, -0.70, -0.199999], [0.90, -0.60, 0.80])),
+            ..Default::default()
+        }];
+        let solids = build(&level);
+
+        let at = [0.65, -0.65, 0.3];
+        assert!(
+            solids.inside_sector(0, at, 0.0),
+            "the box accepts the point without the plane tests"
+        );
+        assert!(
+            !solids.inside_sector(0, at, 0.9),
+            "a sphere too big for the box falls through to the plane walk, which rejects it"
+        );
     }
 
     /// `SearchForSurfaceCollisions` (0x4e86d0) checks the adjoin's movement flag, not sector visibility.
