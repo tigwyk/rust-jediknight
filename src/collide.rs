@@ -1298,7 +1298,32 @@ impl LevelGeometry {
         dist
     }
 
-    /// `sithCollision_SearchForSurfaceCollisions` (0x4e86d0): discovery and crossings are separate records.
+    /// `sithCollision_SearchForSurfaceCollisions` (`0x4e86d0`): one pass over the sector's own
+    /// surface list, in file order. A surface enters the pass only when it carries `HAS_COLLISION`
+    /// (`surfflags & 4`) or its adjoin column names a row (`0x4e86d0:47`).
+    ///
+    /// - `0x4e86d0:32-41` — the whole pass is skipped only when the sector has a collidebox
+    ///   (flag `0x1000`) and the sphere at the end of the move sits strictly inside it on every
+    ///   axis; every other sector runs the pass.
+    /// - `0x4e86d0:48-122` — adjoin flag routing: search flag `4` tests every row, otherwise the
+    ///   row's `1`/`2`/`0x10` bits against the search's `0x1100`/`0x100`/`0x200` bits decide
+    ///   doorway (test path) vs wall (solid path) for the surface.
+    /// - `0x4e86d0:53-75` — the radius leg (`sithIntersect_CheckSphereFaceIntersection` at the
+    ///   body's radius; a non-zero radius returns kind 4 **without coverage**) records the `0x40`
+    ///   touch — unless the search is deferred (`flags & 4 && flags & 1`) or the far sector is
+    ///   already in the searched list.
+    /// - `0x4e86d0:77-112` — unless `flags & 2`, a second intersection at radius 0 whose contact
+    ///   centre must land inside the portal polygon (`sithIntersect_TestSphereFaceHit`) records
+    ///   the `0x20` crossing, after the deferred touch when that leg also hits.
+    /// - `0x4e86d0:124-151` — the solid leg: a plane reject (`dot(end − v0, n) <= radius`), then
+    ///   `sithIntersect_CheckSphereFaceIntersectionEx` with coverage and the vertex refinement,
+    ///   then the directional gate `flags & 0x400 || dot(dir, hit_normal) < 0` (`_DAT_00523008`
+    ///   reads 0.0 from the shipped image), recording kind `hit | 2`.
+    ///
+    /// The port keeps solids and portals in two tables, so the file order is a merge by surface
+    /// id; the claims test drops the mirrored portals the engine's per-sector list never contains.
+    /// Both out-distance scratch slots (`local_30`/`local_1c`) survive rejected faces, so they are
+    /// never reset inside the pass.
     #[allow(clippy::too_many_arguments)]
     fn search_for_surface_collisions(
         &self, here: usize, start: [f32; 3], dir: [f32; 3], dist: f32, radius: f32,
@@ -3492,6 +3517,133 @@ mod tests {
             ],
             ..Default::default()
         }
+    }
+
+    /// 03katarn's thin light sector 429 as the shipped JKL places it (world 2 of the episode GOB's
+    /// `jkl\03katarn.jkl`): a 0.10-deep strip (`y −0.70..−0.60`) whose south mouth (surface 3590,
+    /// adjoin row 1159) spans `x 0.431..0.900`, whose north face at `y = −0.600` is the exit portal
+    /// (surface 3593, adjoin row 1161, `x 0.513..0.812`, `z −0.200..0.100`) between two walls
+    /// (surface 3594 `x 0.431..0.555`, surface 3592 `x 0.770..0.900`). Normals point out of the
+    /// claiming sector, as `Solids::build` stores them.
+    fn sliver() -> Solids {
+        let mouth = vec![
+            [0.431, -0.70, -0.20], [0.900, -0.70, -0.20], [0.900, -0.70, 0.80], [0.431, -0.70, 0.80],
+        ];
+        let exit = vec![
+            [0.513, -0.60, -0.20], [0.812, -0.60, -0.20], [0.812, -0.60, 0.10], [0.513, -0.60, 0.10],
+        ];
+        let wall = |x0: f32, x1: f32, surface: usize| Plane {
+            normal: [0.0, 1.0, 0.0],
+            point: [0.5 * (x0 + x1), -0.60, -0.05],
+            surface,
+        };
+        Solids {
+            sectors: vec![
+                Vec::new(),
+                vec![wall(0.431, 0.555, 102), wall(0.770, 0.900, 103)],
+                Vec::new(),
+            ],
+            faces: vec![
+                Face {
+                    normal: [0.0, 1.0, 0.0],
+                    point: [0.493, -0.60, -0.05],
+                    verts: vec![
+                        [0.431, -0.60, -0.20], [0.555, -0.60, -0.20], [0.555, -0.60, 0.10], [0.431, -0.60, 0.10],
+                    ],
+                    surface: 102,
+                },
+                Face {
+                    normal: [0.0, 1.0, 0.0],
+                    point: [0.835, -0.60, -0.05],
+                    verts: vec![
+                        [0.770, -0.60, -0.20], [0.900, -0.60, -0.20], [0.900, -0.60, 0.10], [0.770, -0.60, 0.10],
+                    ],
+                    surface: 103,
+                },
+            ],
+            face_of: std::collections::HashMap::from([(102, 0), (103, 1)]),
+            portals: vec![
+                vec![Portal { adjoin: 1, link: 0, verts: mouth.clone(), normal: [0.0, 1.0, 0.0], point: [0.665, -0.70, 0.30] }],
+                vec![
+                    Portal { adjoin: 0, link: 1, verts: mouth.into_iter().rev().collect(), normal: [0.0, -1.0, 0.0], point: [0.665, -0.70, 0.30] },
+                    Portal { adjoin: 2, link: 2, verts: exit.clone(), normal: [0.0, 1.0, 0.0], point: [0.6625, -0.60, -0.05] },
+                ],
+                vec![Portal { adjoin: 1, link: 3, verts: exit.into_iter().rev().collect(), normal: [0.0, -1.0, 0.0], point: [0.6625, -0.60, -0.05] }],
+            ],
+            adjoin_surface: vec![100, 100, 101, 101],
+            ..Default::default()
+        }
+    }
+
+    /// `sithCollision_SearchForSurfaceCollisions` (`0x4e86d0`) on 03katarn's own sliver numbers:
+    /// every distance below is the engine's arithmetic (`sithIntersect_CheckSphereHit`, `0x508be0`)
+    /// on that geometry, at the player's radius 0.065 and the `MoveThing` search flags a player
+    /// carries (`0x4e7950:46-57`: kind 10 sets `0x200`, no thing-attach leaves `0x1` clear so
+    /// `0x800` is set — `0xA00`).
+    #[test]
+    fn sliver_crossings_follow_the_engine_search_arithmetic() {
+        let solids = sliver();
+        let north = [0.0f32, 1.0, 0.0];
+        let mut search = CollisionSearch::new();
+        let mut run = |sector: usize, start: [f32; 3], distance: f32, search: &mut CollisionSearch| {
+            search.count = 0;
+            solids.search_for_collisions(
+                sector, start, north, distance, 0.065, Gates::default(), 0xA00, search,
+            );
+            let mut records = Vec::new();
+            while let Some(record) = search.pop() {
+                records.push(record);
+            }
+            records
+        };
+        let kinds = |records: &[CollisionRecord]| records.iter().map(|r| r.kind()).collect::<Vec<_>>();
+
+        // The mouth, from the yard: the centre closes `gap0 = 0.02`, the radius leg already
+        // overlaps (its `0x40` touch is consumed by the adjoin expansion, `0x4e8160:71`), and the
+        // crossing (`0x20`) lands at `gap0`.
+        let records = run(0, [0.657, -0.72, -0.08], 0.0258, &mut search);
+        assert_eq!(kinds(&records), vec![0x20], "only the crossing survives the expansion");
+        assert!((records[0].distance() - 0.02).abs() < 1e-6, "the crossing closes 0.02 of plane gap");
+        let CollisionRecord::Crossing { sector, surface, .. } = records[0] else { panic!("not a crossing") };
+        assert_eq!((sector, surface), (1, 100));
+
+        // Under the exit portal's span the strip passes clean: the crossing lands at
+        // `gap0 = 0.022`, and the flanking walls' contact points sit outside their polygons.
+        let records = run(1, [0.657, -0.622, -0.08], 0.0258, &mut search);
+        assert_eq!(kinds(&records), vec![0x20]);
+        assert!((records[0].distance() - 0.022).abs() < 1e-6);
+        let CollisionRecord::Crossing { sector, surface, .. } = records[0] else { panic!("not a crossing") };
+        assert_eq!((sector, surface), (2, 101));
+
+        // `0x508be0`'s own reject: parked 0.04 from the plane with only 0.0258 of move, the
+        // radius-0 leg starves and no `0x20` is recorded — the engine keeps the same silence at
+        // this pose. (The #70 repro parks here: 03katarn things 20/21, the shut `4x3door` leaves
+        // of `03_FRONTDOOR.COG`, hold the body at exactly this gap while the trap surface 2107 —
+        // which alone opens them, through `sithThing_AttachThingToSurface`'s `entered` at
+        // `0x4cde80:50` — lies beyond the door.) Both portals' touches are consumed by the
+        // expansion, so the record list is empty.
+        let records = run(1, [0.657, -0.64, -0.08], 0.0258, &mut search);
+        assert!(records.is_empty(), "both portals touch; neither crossing closes");
+
+        // The corner pose, under wall 3594's span: the exit portal's contact point (x = 0.50)
+        // misses its polygon, so beyond the consumed touches only the wall's overlapping-start
+        // solid lands — at 0.
+        let records = run(1, [0.50, -0.64, -0.08], 0.0258, &mut search);
+        assert_eq!(kinds(&records), vec![0x2 | 0x4]);
+        assert!(records[0].distance().abs() < 1e-6, "an overlapping start hits the wall at 0");
+        let CollisionRecord::Solid(hit) = records[0] else { panic!("not a solid") };
+        assert_eq!(hit.surface, 102);
+
+        // A retail frame's accumulated delta (`1.29 u/s * 0.069 s`, `sithThing_UpdateMove` at
+        // `0x4cc4c0` consuming one frame of the 50 Hz accumulator, `_DAT_005231ac`/`_DAT_005231b0`
+        // = 50.0/0.02 in the shipped image) closes the whole band in one move: the crossing fires
+        // from the deepest both-overlap pose.
+        let records = run(1, [0.657, -0.66, -0.08], 0.089, &mut search);
+        let crossing = records.iter().find_map(|record| match record {
+            CollisionRecord::Crossing { distance, .. } => Some(*distance),
+            _ => None,
+        }).expect("a frame-sized move still records the crossing");
+        assert!((crossing - 0.06).abs() < 1e-6, "the 0.1-wide strip is crossed in one frame's move");
     }
 
     #[test]
