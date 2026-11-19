@@ -7734,3 +7734,32 @@ one session: `--walk all` 0 void / 0 no-floor on both; trace gate 8/9 on both (o
 #79's anchor, byte-identical numbers on every leg); route gate 7/7 PASS on both with the same
 pre-existing tick-36 `reeyee02.wav` route-compare row failing identically; four chain routes exit 0
 on both. No leg moved — the change is a re-shape, not an arithmetic change.
+
+## Round 314 — #78: the floor finder and the seat are one transliteration
+
+`find_floor` is `sithPhysics_FindFloor` (`0x4f5550`): reach by attach state (`radius+0.005`
+unattached; `max(GetThingHeight, radius+0.005)` ×1.1, ×2 under physflags `0xc0`), the two-pass
+search (radius pass for kinds 2/10), the 0.6 standability face test (`0x523190`), the faceless
+stop, detach on exhausting both passes, and the water branch (kind 10 underwater: the 0.05 up
+surface search into `MoveState::water_surface`). The seat is `0x4f7430`'s ±0.5·dt error hold
+(`0x523198`) with the `GetThingHeight` rest and `0x4f5900`'s routing. Retired: `prepare_body`,
+`finish_body`'s reach/water halves, `step_player`'s manual water block, and the thing loop's
+plane-shortcut gravity stop with `actor_floor`/`actor_reach` — gravity bodies take the load-time
+creation attach (`sithThing_Initialize`'s `FindFloor(thing,1)`). 434 tests.
+
+Anchors on sha `296d81b7…`: `walk6_spawn` GREEN — trace gate 9/9 for the first time. The route
+gate's retail prefix passes epsilon on every position; `--route-compare` names 2 sector-sample
+columns left (tick 36 into 349 one sample late, tick 684 a doorway), recorded not tuned. The
+oracle regenerated through route-gate itself: the boot second now coasts (tick 72 reads sector
+349, the fixture's value). Walk rows re-recorded with engine reasons: 07yun 1.50→0.07, 10cargo
+0.08→0.13, the sarris pair 2.72→2.74 — the held-slide remainder under the 0.5·dt clamp.
+
+## Round 315 — #80: the contract — the placement resolver is gone, the ledger rows retire
+
+`spawn_point` (the ring resolver), the `authored_spawn` flag and the `BK_SPAWN_RESOLVE` /
+`BK_SPAWN_AUTHORED` switches are deleted; the authored pose is the only spawn path
+(`sithPlayer_NewPlayer` `0x4c8ec0` verbatim). `sector_for_body` and `standable` survive as probe
+code only, named in the ledger. The movement ledger rows close out: movement-path inventions
+retired (313-314), placement retired (this round), containment completed (311), scripted input
+completed (312). Fresh-binary regression: unit suite, `--walk all`, the walk legs, trace gate,
+route gate, four chain routes — hashes in #80's handoff.

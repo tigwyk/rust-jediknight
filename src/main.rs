@@ -28903,7 +28903,7 @@ fn setup(
             // `sithPlayer_NewPlayer` (`0x4c8ec0`) copies the `walkplayer` thing's position, with no
             // floor re-seed. The port used to add `PLAYER_RADIUS` here and then seat the body on a
             // floor probe, which placed the level-1 eye 0.055 units below the retail spawn camera
-            // (most of the first-frame parity gap; see `spawn_point` below).
+            // (most of the first-frame parity gap; the ring resolver that did it is retired, #80).
             player
                 .map(|t| t.pos)
                 .unwrap_or([eye.x, eye.y, eye.z - PLAYER_EYE]),
@@ -28945,63 +28945,15 @@ fn setup(
     // Clearance is not the collision radius: a body can be placed inside a table or NPC that the
     // 0.065 sweep does not see. `BK_PLAYER_CLEARANCE` probes a wider footprint only for placement,
     // leaving the collision radius (and the door width it fits through) alone.
-    let clearance = env_f32("BK_PLAYER_CLEARANCE", PLAYER_RADIUS);
-    // The engine's load path is the default (`sithPlayer_PlacePlayers` copies the player thing's
-    // position and sector; `sithPlayer_NewPlayer` `0x4c8ec0` sets them and resets movement, and
-    // nothing in the engine ever relocates a spawn): the body falls and slides from the authored
-    // pose exactly as retail's does. The ring resolver below is a port invention that stood the
-    // body somewhere "clear" instead — on 03katarn it moved the walkplayer out of its light-sliver
-    // marker (sector 405) onto the slope of the sliver's own cap, north of the portal wall, where
-    // no sweep can cross back (#66). `BK_SPAWN_RESOLVE=1` keeps the old resolver for A/B.
-    let authored_spawn = std::env::var_os("BK_SPAWN_AUTHORED").is_some()
-        || std::env::var_os("BK_SPAWN_RESOLVE").is_none();
-    if authored_spawn {
-        println!("walker: authored spawn {start:?} in sector {sector} (no placement resolution)");
-    }
-    match authored_spawn.then_some((start, sector)).or_else(|| {
-        spawn_point(&world.level, &solids, sector, start, clearance, "walkplayer")
-    }) {
-        Some((body, room)) => {
-            let nudged =
-                (body[0] - recorded[0]).abs() > 1e-3 || (body[1] - recorded[1]).abs() > 1e-3;
-            if nudged {
-                println!(
-                    "walker: spawn {recorded:?} was inside something; standing at ({:.2}, {:.2}) instead",
-                    body[0], body[1]
-                );
-                start = body;
-            } else {
-                start[0] = body[0];
-                start[1] = body[1];
-            }
-            sector = room;
-        }
-        None => {
-            // The recorded point may be a shaft below the playable room (18Ascend's
-            // 505). If no local point can stand, search upward for the nearest room
-            // with an actual floor instead of letting the body fall through the shaft.
-            let mut recovered = None;
-            for lift in [0.25, 0.5, 1.0, 2.0, 3.0, 4.0] {
-                let probe = [recorded[0], recorded[1], recorded[2] + lift];
-                if let Some(room) = solids.sector_for_body(probe)
-                    && room != sector
-                    && let Some(floor) = solids.floor_below(room, probe)
-                {
-                    recovered = Some(([probe[0], probe[1], floor + PLAYER_RADIUS], room));
-                    break;
-                }
-            }
-            if let Some((body, room)) = recovered {
-                println!("walker: spawn {recorded:?} had no floor; placed at {body:?} in sector {room}");
-                start = body;
-                sector = room;
-            } else {
-                println!(
-                    "walker: no clear spawn near {recorded:?} (sector {sector}) - the body may fall or overlap"
-                );
-            }
-        }
-    }
+    let _clearance = env_f32("BK_PLAYER_CLEARANCE", PLAYER_RADIUS);
+    // The engine's load path is the only spawn path (`sithPlayer_PlacePlayers` copies the player
+    // thing's position and sector; `sithPlayer_NewPlayer` `0x4c8ec0` sets them and resets movement,
+    // and nothing in the engine ever relocates a spawn): the body falls and slides from the authored
+    // pose exactly as retail's does. The ring resolver this block used to run (a port invention
+    // that stood the body somewhere "clear") was retired by #80 — it stood 03katarn's walkplayer on
+    // its own light-sliver's cap (#66) and the A/B it was kept for has run its course.
+    println!("walker: authored spawn {start:?} in sector {sector} (no placement resolution)");
+    
 
     // Experiment hook: `BK_SPAWN_SECTOR=<n>` puts the body in that sector's floor instead of the level's
     // start, and `BK_SPAWN_LIFT=<units>` raises it, so a fall can be watched where a level's own geometry
@@ -29197,7 +29149,7 @@ fn setup(
             // param_4 0) and the hold keeps it `floor + GetThingHeight`: −1.1299 over 339, −1.1799
             // over 349's −1.30 floor — retail's `coords` −1.13 → −1.18 is that hold, not a sphere
             // contact. The value here is replaced by the first frame's landing.
-            grounded: !authored_spawn,
+            grounded: false,
             gravity: rules.gravity.max(1.0),
             water: false,
             vel: [0.0; 2],
@@ -29652,124 +29604,6 @@ struct Player {
     extra_speed: f32,
 }
 
-/// Where to put the player: the level's `walkplayer` position, nudged out of anything it overlaps.
-///
-/// On some maps that position is a trigger volume's centre rather than a spot in the room — levels 1's
-/// records sector `339`, a sliver with no floor of its own — and on others it sits on top of an NPC, which
-/// is how the port ends up spawning inside one. The engine resolves placement against the collision world;
-/// this does the same cheaply: search outwards for a point with a floor under the footprint, no solid
-/// within it, and no other thing inside it.
-fn spawn_point(
-    level: &jkl::Level,
-    solids: &collide::Solids,
-    sector: usize,
-    at: [f32; 3],
-    radius: f32,
-    self_template: &str,
-) -> Option<([f32; 3], usize)> {
-    let thing_clearance = env_f32("BK_THING_CLEARANCE", 2.0);
-    // A thing that *is* the walkplayer is the spawn marker itself; anything else must be far enough away
-    // in the plane, or far enough vertically, not to be inside the body.
-    let clear_of_things = |p: [f32; 3]| {
-        level.things.iter().all(|t| {
-            if t.template.eq_ignore_ascii_case(self_template) {
-                return true;
-            }
-            // A body's width, not the collision radius: an NPC model is 0.7 units across and 1.8 tall, so
-            // `radius * 2` = 0.7 left the camera standing inside somebody. `--shot` showed a head and
-            // shoulders filling the frame, which is the "stuffed inside each other" report.
-            let (dx, dy) = (t.pos[0] - p[0], t.pos[1] - p[1]);
-            (dx * dx + dy * dy).sqrt() > thing_clearance
-                || (t.pos[2] - p[2]).abs() > 2.0
-        })
-    };
-    let mut best_roomy: Option<([f32; 3], usize, f32)> = None;
-    let ring = [0.0f32, 0.4, 0.8, 1.2, 1.8, 2.5, 3.5];
-    for step in ring {
-        for turn in 0..16 {
-            let angle = turn as f32 * std::f32::consts::TAU / 16.0;
-            let p = [
-                at[0] + angle.cos() * step,
-                at[1] + angle.sin() * step,
-                at[2],
-            ];
-            let Some((room, floor, _)) = solids.standable(sector, [p[0], p[1], p[2]], 1.0, radius)
-            else {
-                continue;
-            };
-            if !clear_of_things(p) {
-                continue;
-            }
-            // Room to stand, not merely a floor. The level places its `walkplayer` hard against geometry —
-            // 0.08 units from a wall on level 1, which is inside any body — and a camera with its face in a
-            // wall is what "spawned into something non-Euclidean" looks like. Require a body's width of
-            // clearance on all four sides, and take the most open point if nothing is perfect.
-            let body = [p[0], p[1], floor + radius];
-            // A floor imported from a neighbouring room is not a standing place in the
-            // recorded room. In particular, sector 339's tabletop volume must not be
-            // entered through sector 340's solid wall.
-            if !solids.room_contains(sector, body, radius) {
-                continue;
-            }
-            let mut tightest = f32::INFINITY;
-            for dir in [[1.0f32, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]] {
-                let gap = solids
-                    .sweep(room, body, dir, radius * 6.0, radius, collide::Gates::default())
-                    .map_or(radius * 6.0, |hit| hit.distance);
-                tightest = tightest.min(gap);
-            }
-            if tightest < radius * 1.5 {
-                // Remember it as a fallback; a genuinely open point is better.
-                if best_roomy.as_ref().is_none_or(|(_, _, t)| tightest > *t) {
-                    best_roomy = Some((body, room, tightest));
-                }
-                continue;
-            }
-            if clear_of_things(p) {
-                // The recorded sector is what the walker walks in; a nudge moves the *body*, not the room it
-            // believes it is in. Swapping the sector here changed how the lateral sweep answers and the body
-            // walked off the walkway.
-            let _ = room;
-            return Some((body, sector));
-            }
-        }
-    }
-    // Nothing satisfies both rules — a crowded room. Take the floor-standing point that is furthest from
-    // any thing: spawning a body's width from an NPC is worse than spawning a stride away.
-    let mut best: Option<([f32; 3], usize, f32)> = None;
-    for step in [0.0f32, 0.4, 0.8, 1.2, 1.8, 2.5, 3.5] {
-        for turn in 0..16 {
-            let angle = turn as f32 * std::f32::consts::TAU / 16.0;
-            let p = [at[0] + angle.cos() * step, at[1] + angle.sin() * step, at[2]];
-            let Some((room, floor, _)) = solids.standable(sector, p, 1.0, radius) else {
-                continue;
-            };
-            let body = [p[0], p[1], floor + radius];
-            if !solids.room_contains(sector, body, radius) {
-                continue;
-            }
-            let clearance = level
-                .things
-                .iter()
-                .filter(|t| !t.template.eq_ignore_ascii_case(self_template))
-                .map(|t| ((t.pos[0] - p[0]).powi(2) + (t.pos[1] - p[1]).powi(2)).sqrt())
-                .fold(f32::INFINITY, f32::min);
-            // Nearest acceptable, not clearest: moving the player three units to find elbow room would
-            // change where the level starts.
-            if clearance > radius {
-                return Some((body, sector));
-            }
-            if best.is_none_or(|(_, _, c)| clearance > c) {
-                best = Some((body, room, clearance));
-            }
-        }
-    }
-    if let Some((body, _, _)) = best_roomy {
-        return Some((body, sector));
-    }
-    best.filter(|(_, _, clearance)| *clearance > radius)
-        .map(|(body, _room, _)| (body, sector))
-}
 
 /// The engine's own yaw basis, and the only place the mapping lives.
 ///
