@@ -6351,6 +6351,7 @@ impl Runtime {
             let prepared_vz = state.vel[2];
             let start = state.pos;
             let previous = state.sector;
+            let mut step_landed = false;
             let traveled = solids.move_thing_with(
                 &mut state, delta, radius, 0,
                 |state, dir, distance, radius, flags, search| {
@@ -6371,14 +6372,14 @@ impl Runtime {
                         Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
                     )
                 },
+                |state| {
+                    let rt = world.borrow();
+                    step_landed = solids.finish_body(
+                        state, radius, height,
+                        Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
+                    );
+                },
             );
-            let step_landed = {
-                let rt = world.borrow();
-                solids.finish_body(
-                    &mut state, radius, height, traveled,
-                    Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
-                )
-            };
             if std::env::var_os("BK_STEP_TRACE").is_some() {
                 let kind = match &state.attach {
                     Some(a) => if a.thing.is_some() { "thing" } else { "surface" },

@@ -7696,3 +7696,37 @@ landing already deleted — the ticket list (#74-#77) works from the code, not t
 
 No code change. Tickets #73-#80 are published as #72's sub-issues; the frontier is #73 (this round),
 #74, #75, #76 and #79.
+
+## Round 312 — #77: the mover is one 0x4e7950 transliteration
+
+`move_thing_with` (`src/collide.rs`) now carries the whole `sithCollision_MoveThing` shape with
+per-leg decomp citations: the nearest-record consumption (the engine tie rule was already in
+`pop_collision`, `0x4e7120`), the advance to `start + hit * dir`, the remaining-move write, the
+crossing branch (surface message + `SetSector`, continue only when the position changed — both in
+the `crossing` callback), the solid slide dispatch (`collide_hurt`), the clean/stopped round split
+with the 1e-5 length snap, the four-round cap with `ResetThingMovement`'s reset, the containment
+restore from the LAST sub-step start, and — newly inside the mover — the FindFloor tail gate
+(`0x4e7950:279-296`): a physics thing that travelled re-runs FindFloor unless the caller passed
+`0x40`, with an unattached (or attach-flag-8) body requiring physflag `0x40` and a vertical speed
+in `[-2.0, 0.2]`. `finish_body` shrank to the FindFloor run itself (water detach + the
+`0x4f5550` reach) and is now the callback `move_thing_with` invokes from the tail — the gate it
+duplicated is deleted. The physflag-`0x20` impulse bleed (`0x4e7950:140-155`, `+0x228..0x230`) is
+elided and documented: only flag-`0x20` bodies consume it and no ported body carries the flag; the
+rider recursion has no ported children either.
+
+The lateral-step allowance row retired with it: no `STEP_UP` four-way raised test survives in the
+move path (it died with `move_body`; commit 4b72e61's face-top-edge rule lives only in
+`resolve_stepped`, the push-out), and `a_riser_blocks_a_body_below_its_top_and_passes_one_above_it`
+now pins the engine's rule — a riser is a wall to a body whose span meets it, open air above its
+top edge, and nothing lifts the body over it. New unit tests from the engine arithmetic:
+consumption order with the advance measured from the sub-step start, the containment restore, the
+tail gate (travel / attachment / flag 8 / landing speed / caller `0x40`), the riser rule, and the
+retired `floor_tail_requires_physflag_40...` became the two-seam pair (gate in the mover, run in
+`finish_body`). 420 tests green.
+
+Same-build A/B against the branch point `11cc0b1` (release sha `943a597d…`, built in
+`G:/GameDev/bk-w77-base`) and this round (sha `f95174f7…`, `G:/GameDev/bk-w77`), both gates run in
+one session: `--walk all` 0 void / 0 no-floor on both; trace gate 8/9 on both (only `walk6_spawn`,
+#79's anchor, byte-identical numbers on every leg); route gate 7/7 PASS on both with the same
+pre-existing tick-36 `reeyee02.wav` route-compare row failing identically; four chain routes exit 0
+on both. No leg moved — the change is a re-shape, not an arithmetic change.
