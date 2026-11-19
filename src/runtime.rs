@@ -3268,6 +3268,7 @@ impl Runtime {
         // load (`FindFloor(thing, 1)`, the forced reach), so an actor keeps the level's authored
         // height instead of sagging to its sphere contact first. The pass runs once, on the first
         // step that has a collider.
+        let mut creation_entered: Vec<(Option<usize>, Option<usize>, u32, usize)> = Vec::new();
         let seat_geometry = geometry.or(self.solids.as_deref());
         let mut seated_load = false;
         if !self.seated_load && let Some(solids) = seat_geometry {
@@ -3298,12 +3299,22 @@ impl Runtime {
                     move_type: 1, collide: 1, flags: t.flags, attach: t.floor_attach,
                     attach_flags: t.attach_flags, touched: Vec::new(), water_surface: None,
                 };
+                let prev_surface = state.attach.and_then(|a| a.surface);
                 solids.find_floor(
                     &mut state, radius, height,
                     Gates { sectors: &self.sector_flags, adjoins: &self.adjoin_flags },
                     true,
                 );
                 self.things[i].floor_attach = state.attach;
+                // The creation attach messages too (`AttachThingToSurface` sends regardless of its
+                // no-landing-effects flag).
+                let now_surface = state.attach.and_then(|a| a.surface);
+                let flags = self.things[i].flags;
+                if now_surface != prev_surface {
+                    // The collider is borrowed through the seat build below; the send is drained
+                    // with the per-tick transitions after it.
+                    creation_entered.push((prev_surface, now_surface, flags, i));
+                }
             }
         }
         // Latch, never reset: the load-time attach is once (`sithThing_Initialize`). Assigning
@@ -3361,6 +3372,10 @@ impl Runtime {
         // A projectile that dies on geometry is a miss in the encounter chronology; the call needs
         // `&mut self`, so the indices are collected in the mutable iteration and reported after it.
         let mut lost_shots: Vec<usize> = Vec::new();
+        // `sithThing_AttachThingToSurface` (`0x4cde80`): a body whose floor attach moved to a
+        // different surface messages that surface's cog `entered`; the send needs `&mut self`, so
+        // the transitions are collected in the mutable iteration and sent after it.
+        let mut surface_entered: Vec<(Option<usize>, Option<usize>, u32, usize)> = Vec::new();
         for (i, t) in self.things.iter_mut().enumerate() {
             if Some(i) == player_at {
                 // Path moves still run — a script can walk the player along frames — but the body's
@@ -3376,8 +3391,13 @@ impl Runtime {
             // move, the hold, the FindFloor tail); apply it and keep only the path/rotation
             // half of the generic loop here.
             if let Some((sector, pos, vel, attach, flat, crossed)) = seat[i].take() {
+                let prev_surface = t.floor_attach.and_then(|a| a.surface);
+                let now_surface = attach.and_then(|a| a.surface);
                 let attach_flipped = t.floor_attach.is_some() != attach.is_some();
                 let fell = (pos[2] - t.pos[2]).abs() > 1e-9;
+                if now_surface != prev_surface {
+                    surface_entered.push((prev_surface, now_surface, t.flags, i));
+                }
                 t.pos = pos;
                 t.sector = sector as i32;
                 t.vel = vel;
@@ -3525,6 +3545,9 @@ impl Runtime {
             if path_moved || flying {
                 moved.push(i);
             }
+        }
+        for (prev, now, flags, sender) in creation_entered.into_iter().chain(surface_entered) {
+            self.attach_surface_entered(prev, now, flags, Some(sender));
         }
         for index in lost_shots {
             self.note_shot_lost(index);
@@ -6425,11 +6448,23 @@ impl Runtime {
                     )
                 },
                 |state| {
-                    let rt = world.borrow();
-                    step_landed = solids.finish_body(
-                        state, radius, height,
-                        Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
-                    );
+                    // `sithThing_AttachThingToSurface` (`0x4cde80`): FindFloor's attach is the
+                    // engine's call site, and its message half fires when the attach *surface*
+                    // changed — the `landed` bool misses a move between surfaces.
+                    let prev = state.attach.and_then(|a| a.surface);
+                    {
+                        let rt = world.borrow();
+                        step_landed = solids.finish_body(
+                            state, radius, height,
+                            Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
+                        );
+                    }
+                    let now = state.attach.and_then(|a| a.surface);
+                    if now != prev {
+                        let player = world.borrow().local_player();
+                        let flags = state.flags;
+                        world.borrow_mut().attach_surface_entered(prev, now, flags, player);
+                    }
                 },
             );
             if std::env::var_os("BK_STEP_TRACE").is_some() {
@@ -7619,6 +7654,32 @@ impl Runtime {
         self.sith_cog_send_message_ex(SURFACE_SOURCE, surface, sender, msg)
     }
 
+    /// `sithThing_AttachThingToSurface` (`0x4cde80`): the message half of the attach. The engine
+    /// sends the surface's linked cog `entered` (id 6) when the new attach surface differs from the
+    /// previous one (its early return keeps a same-surface re-attach silent), the thing's flags are
+    /// clear of `0x80100`, and the surface's own surfflags carry `SITH_SURFACE_COG_LINKED` (2).
+    /// The send runs regardless of the no-landing-effects flag, so a creation attach fires too.
+    pub fn attach_surface_entered(
+        &mut self,
+        prev: Option<usize>,
+        new: Option<usize>,
+        thing_flags: u32,
+        sender: Option<usize>,
+    ) {
+        if thing_flags & 0x80100 != 0 {
+            return;
+        }
+        if let Some(surface) = new
+            && Some(surface) != prev
+            && self.surface_flags.get(surface).is_some_and(|f| f & 2 != 0)
+        {
+            if std::env::var_os("BK_ATTACH_TRACE").is_some() {
+                eprintln!("attach: thing {sender:?} entered surface {surface} (was {prev:?})");
+            }
+            self.sith_cog_surface_send_message(surface, sender, "entered");
+        }
+    }
+
     /// `sithCog_ThingSendMessage` (`0x4dfac0`): `sithCog_ThingSendMessageEx(thing, sender, msg, 0,
     /// 0, 0, 0)`. Every link to the thing hears it, plus the thing's own two script slots; the port
     /// has the link tables only (`wire_links`).
@@ -7726,7 +7787,16 @@ impl Runtime {
                         }
                         self.thing_links.push((index, link, target));
                     }
-                    crate::cog::SymKind::Surface => self.surface_links.push((index, link, target)),
+                    crate::cog::SymKind::Surface => {
+                        // `sithCog_LinkCog` (`0x4df610`): a surface link sets `SITH_SURFACE_COG_LINKED`
+                        // (2) in the surface's own surfflags — the word `AttachThingToSurface`'s
+                        // `entered` send tests. The shipped data usually carries the bit already; the
+                        // OR is the engine's rule, not an observation of the JKL.
+                        if let Some(flags) = self.surface_flags.get_mut(target) {
+                            *flags |= 2;
+                        }
+                        self.surface_links.push((index, link, target));
+                    }
                     crate::cog::SymKind::Sector => self.sector_links.push((index, link, target)),
                     _ => {}
                 }
@@ -17183,6 +17253,67 @@ mod tests {
         assert_eq!(senders, vec![(0, Some(1)), (2, Some(2))], "a crossing lost its link id");
         assert_eq!(rt.sith_cog_surface_send_message(213, player, "crossed"), 1, "the offAdjoin link was not messaged");
         assert_eq!(rt.pending_messages[2].3, Some(0), "link 0 must arrive as sender 0");
+    }
+
+    /// `sithThing_AttachThingToSurface` (`0x4cde80:50-52`): the attach sends the surface's linked
+    /// cog `entered` (id 6) when the attach surface **changed** — the engine's early return keeps an
+    /// attach to the *same* surface silent, so a move from surface to surface, or the first attach
+    /// (creation included), is what fires, not "was unattached, now attached".
+    #[test]
+    fn an_attach_that_changes_surface_sends_entered() {
+        let mut rt = door_runtime();
+        rt.surface_flags = vec![0x4, 0x4, 0x4];
+        rt.surface_flags[1] |= 2;
+        rt.surface_flags[2] |= 2;
+        rt.surface_links = vec![(0, 0, 1), (0, 1, 2)];
+        let player = Some(rt.player_thing());
+        // None -> surface 1: the creation/first attach, engine sends.
+        rt.attach_surface_entered(None, Some(1), 0, player);
+        assert_eq!(rt.pending_messages.len(), 1, "the first attach to a linked surface did not send");
+        assert_eq!(rt.pending_messages[0].1, "entered");
+        // surface 1 -> surface 1: the engine's early return, no message.
+        rt.attach_surface_entered(Some(1), Some(1), 0, player);
+        assert_eq!(rt.pending_messages.len(), 1, "a re-attach to the same surface sent again");
+        // surface 1 -> surface 2: a move between surfaces sends too.
+        rt.attach_surface_entered(Some(1), Some(2), 0, player);
+        assert_eq!(rt.pending_messages.len(), 2, "a move to a different linked surface did not send");
+        // A surface without the cog-linked bit never sends.
+        rt.attach_surface_entered(Some(2), Some(0), 0, player);
+        assert_eq!(rt.pending_messages.len(), 2, "an unlinked surface sent entered");
+    }
+
+    /// The same function's flag gate: a thing whose flags carry `0x80100` does not message the
+    /// surface's cog on attach; each sub-bit alone still sends.
+    #[test]
+    fn an_attach_does_not_send_when_the_thing_flags_carry_0x80100() {
+        let mut rt = door_runtime();
+        rt.surface_flags = vec![0x6];
+        rt.surface_links = vec![(0, 0, 0)];
+        rt.attach_surface_entered(None, Some(0), 0x80100, None);
+        assert!(rt.pending_messages.is_empty(), "a thing flagged 0x80100 sent entered");
+        rt.attach_surface_entered(None, Some(0), 0x80000, None);
+        rt.attach_surface_entered(None, Some(0), 0x100, None);
+        assert!(rt.pending_messages.is_empty(), "either 0x80100 bit alone suppresses the send");
+        rt.attach_surface_entered(None, Some(0), 0x4, None);
+        assert_eq!(rt.pending_messages.len(), 1, "flags clear of 0x80100 must still send");
+    }
+
+    /// `sithCog_LinkCog` (`0x4df610`): at link time a surface symbol ORs
+    /// `SITH_SURFACE_COG_LINKED` (2) into the surface's surfflags — the shipped data usually
+    /// carries the bit already; the OR is the rule. A `nolink` symbol sets nothing.
+    #[test]
+    fn link_cog_sets_the_surface_cog_linked_bit() {
+        let mut rt = door_runtime();
+        rt.surface_flags = vec![0x4, 0x4];
+        let script = crate::cog::parse("symbols\nsurface a\nsurface b nolink\nend\ncode\nstartup:\n    return;\nend\n").unwrap();
+        let scripts = std::collections::HashMap::from([("t.cog".to_string(), script)]);
+        rt.wire_links(
+            &[crate::jkl::CogInstance { script: "t.cog".into(), values: vec!["0".into(), "1".into()] }],
+            &scripts,
+        );
+        assert_eq!(rt.surface_flags[0], 0x6, "the linked surface did not gain the cog-linked bit");
+        assert_eq!(rt.surface_flags[1], 0x4, "a nolink surface gained the bit");
+        assert_eq!(rt.surface_links, vec![(0, 0, 0)], "the nolink symbol was recorded as a link");
     }
 
     /// `sithAI_CanWalk` (`0x4eb4b0`): the engine probes the step's destination and, finding nothing,
