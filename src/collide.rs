@@ -2292,9 +2292,11 @@ impl LevelGeometry {
     ) -> (f32, bool, bool) {
         let start = *pos;
         let initial_sector = *sector;
-        // shortcut: MoveState carries the player template's values (physflags 0x4a4f, kind 10,
-        // move 1, collide 1) — pass them through when a non-player body uses step_body; FindFloor's
-        // attached reach doubles under physflags 0xc0 (`0x4f5550:59-64`), and 0x4a4f takes the doubling.
+        // shortcut: the MoveState carries the player template's values (physflags 0x4a4f, kind
+        // 10, move 1, collide 1) — `step_body`'s only callers simulate the walkplayer (the fall
+        // probes and the walker tests), so the values are theirs; FindFloor's attached reach
+        // doubles under physflags 0xc0 (`0x4f5550:59-64`), and 0x4a4f takes the doubling. A
+        // non-player caller must thread its own flags through here instead.
         let mut state = MoveState {
             pos: *pos, sector: *sector, vel: *vel, remainder: [0.0; 3], phys_flags: 0x4a4f,
             kind: 10, move_type: 1, collide: 1, flags: 0, attach: *attach, attach_flags: 0,

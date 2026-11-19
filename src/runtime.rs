@@ -1117,17 +1117,29 @@ impl Default for PlayerBody {
 
 /// One frame of player intent. The app reads the keys and the body; the runtime turns this into
 /// a target velocity, integrates it at the engine's fixed rate, and applies a jump.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct PlayerInput {
     pub forward: f32,
     pub strafe: f32,
-    pub run: bool,
+    /// The engine ladder's speed multiplier (`0x4d8a00:19-41`): 1.0, 2.0 under always-run or
+    /// FAST, halved by SLOW or physflag `0x200000`. Kept as the value, not a bool, so the
+    /// halved state survives the trip — a `run: multiplier == 2.0` bool dropped Shift's 0.5
+    /// to 1.0 on the live keyboard path.
+    pub multiplier: f32,
     pub crouch: bool,
     pub jump: bool,
     /// The body's facing in radians. The walk is built in the body's frame.
     pub yaw: f32,
     /// `SetActorExtraSpeed`'s force-speed term.
     pub extra_speed: f32,
+}
+
+impl Default for PlayerInput {
+    /// The engine's resting ladder is 1.0 (`0x4d8a00:19`), not the derived 0.0: a defaulted
+    /// input must still walk.
+    fn default() -> Self {
+        Self { forward: 0.0, strafe: 0.0, multiplier: 1.0, crouch: false, jump: false, yaw: 0.0, extra_speed: 0.0 }
+    }
 }
 
 /// Map input in the body's frame to a world-space horizontal target.
@@ -3281,7 +3293,9 @@ impl Runtime {
                 self.things[i].floor_attach = state.attach;
             }
         }
-        self.seated_load = seated_load;
+        // Latch, never reset: the load-time attach is once (`sithThing_Initialize`). Assigning
+        // the per-tick flag here cleared it every other tick and re-ran the creation attach.
+        self.seated_load |= seated_load;
         // The seat itself, per tick, sampled before the mutable iteration because the swept move
         // borrows the collider. Each entry is the body's whole tick move: (sector, pos, vel,
         // floor attach, horizontal travel, whether the sector changed).
@@ -3350,6 +3364,7 @@ impl Runtime {
             // half of the generic loop here.
             if let Some((sector, pos, vel, attach, flat, crossed)) = seat[i].take() {
                 let attach_flipped = t.floor_attach.is_some() != attach.is_some();
+                let fell = (pos[2] - t.pos[2]).abs() > 1e-9;
                 t.pos = pos;
                 t.sector = sector as i32;
                 t.vel = vel;
@@ -3359,7 +3374,10 @@ impl Runtime {
                 if rotating {
                     turned.push(i);
                 }
-                if flat > 0.0 || crossed || attach_flipped || path_moved {
+                // `moved` must also see a pure vertical fall inside one sector: `flat` is the
+                // horizontal travel and the path arm only covers frame paths, so a dropping
+                // body would keep a stale drawn transform until it landed.
+                if flat > 0.0 || fell || crossed || attach_flipped || path_moved {
                     moved.push(i);
                 }
                 continue;
@@ -6250,7 +6268,7 @@ impl Runtime {
         let [along, across] = rules.speed(
             input.forward,
             input.strafe,
-            input.run,
+            input.multiplier,
             input.crouch,
             body.water,
         );

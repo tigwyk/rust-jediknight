@@ -8536,8 +8536,8 @@ fn main() {
         println!("controls: forward follows the camera and strafe is to its right on {checked} yaw/pitch pairs");
         // The engine's speed ratios, asserted once so a change to `speed` shows up here.
         let rules = Rules::from_level(&world.level);
-        let [along, _] = rules.speed(1.0, 0.0, false, false, false);
-        let [_, across] = rules.speed(0.0, 1.0, false, false, false);
+        let [along, _] = rules.speed(1.0, 0.0, 1.0, false, false);
+        let [_, across] = rules.speed(0.0, 1.0, 1.0, false, false);
         println!("controls: forward {along:.2} u/s, strafe {across:.2} ({:.0}%)", across / along * 100.0);
         assert!((across / along - 0.7).abs() < 0.02, "strafe is not 70% of forward");
 
@@ -8742,13 +8742,11 @@ fn main() {
         }
         println!("feel: released at {held:.2} u/s, 0.1 s later {:.2}", vel[0]);
         assert!(vel[0] < held * 0.9 && vel[0] > 0.0, "the walk does not slide to a stop");
-        let [along, _] = rules.speed(1.0, 0.0, false, false, false);
-        // `speed` returns `[along, across]`: the strafe component is the *second* slot, which is what
-        // the first version of this check got wrong.
-        let [_, strafe] = rules.speed(0.0, 1.0, false, false, false);
-        let [back, _] = rules.speed(-1.0, 0.0, false, false, false);
-        let [run, _] = rules.speed(1.0, 0.0, true, false, false);
-        let [crouch, _] = rules.speed(1.0, 0.0, false, true, false);
+        let [along, _] = rules.speed(1.0, 0.0, 1.0, false, false);
+        let [_, strafe] = rules.speed(0.0, 1.0, 1.0, false, false);
+        let [back, _] = rules.speed(-1.0, 0.0, 1.0, false, false);
+        let [run, _] = rules.speed(1.0, 0.0, 2.0, false, false);
+        let [crouch, _] = rules.speed(1.0, 0.0, 1.0, true, false);
         println!(
             "feel: forward {along:.2}, strafe {strafe:.2} ({:.0}%), back {back:.2} ({:.0}%), run {run:.2} ({:.0}%), crouch {crouch:.2} ({:.0}%)",
             strafe / along * 100.0,
@@ -29536,15 +29534,10 @@ impl Rules {
         self.extra_walk(extra_speed) * self.drag
     }
 
-    pub(crate) fn speed(&self, forward: f32, strafe: f32, run: bool, crouch: bool, water: bool) -> [f32; 2] {
-        // `move_multiplier`: FAST doubles, crouch *replaces* it with a half.
-        let multiplier = if crouch {
-            0.5
-        } else if run {
-            2.0
-        } else {
-            1.0
-        };
+    pub(crate) fn speed(&self, forward: f32, strafe: f32, multiplier: f32, crouch: bool, water: bool) -> [f32; 2] {
+        // `move_multiplier` arrives as the engine ladder's value (`0x4d8a00:19-41`: 1.0, 2.0
+        // FAST/always-run, ×0.5 SLOW/physflag `0x200000`); crouch *replaces* it with a half.
+        let multiplier = if crouch { 0.5 } else { multiplier };
         // Backing up is half speed; strafing is 0.7 of it; water halves everything.
         let forward = if forward < 0.0 { forward * 0.5 } else { forward };
         let strafe = strafe * 0.7;
@@ -30583,18 +30576,21 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         walker.control.poll(control::KEY_DUCK, keys.pressed(KeyCode::ControlLeft));
         walker.control.poll(control::KEY_SLOW, keys.pressed(KeyCode::ShiftLeft));
     } else if let Some(route) = replay_input {
-        if route.forward != 0.0 {
-            walker.control.poll(control::KEY_FORWARD, route.forward > 0.0);
-        }
-        if route.strafe != 0.0 {
-            walker.control.poll(control::KEY_SLIDE_RIGHT, route.strafe > 0.0);
-        }
+        // The engine's control read runs every frame: an unheld key reports 0 and the ramp
+        // releases. A row of 0 must therefore poll the key *up* — skipping the poll left the
+        // previous row latched and the body kept walking through waits — and the row's sign
+        // rides the binding scale below, so any nonzero row presses its key (a negative row
+        // used to press nothing at all).
+        walker.control.poll(control::KEY_FORWARD, route.forward != 0.0);
+        walker.control.poll(control::KEY_SLIDE_RIGHT, route.strafe != 0.0);
     } else {
         walker.control.poll(control::KEY_FORWARD, walk_hold);
     }
-    // The bindings. Live play binds full-scale keys (a counter-direction key is the engine's
-    // negated binding); the replay's analog row values ride the binding sensitivities — the
-    // engine's own per-binding scale — with the row's sign as the negate flag.
+    // The bindings. Live play binds full-scale keys; a counter-direction key is the engine's
+    // negated binding (the config's negative scale on the same axis: S backs up, A slides
+    // left — both carried +1.0 here once and each moved the wrong way); the replay's analog
+    // row values ride the binding sensitivities — the engine's own per-binding scale — with
+    // the row's sign as the negate flag.
     let (forward_bindings, slide_bindings) = match replay_input {
         Some(route) if route.forward != 0.0 || route.strafe != 0.0 => (
             vec![control::Binding::scaled(control::KEY_FORWARD, route.forward)],
@@ -30603,11 +30599,11 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         _ => (
             vec![
                 control::Binding::key(control::KEY_FORWARD),
-                control::Binding::scaled(control::KEY_FORWARD_BACK, 1.0),
+                control::Binding::scaled(control::KEY_FORWARD_BACK, -1.0),
             ],
             vec![
                 control::Binding::key(control::KEY_SLIDE_RIGHT),
-                control::Binding::scaled(control::KEY_SLIDE_LEFT, 1.0),
+                control::Binding::scaled(control::KEY_SLIDE_LEFT, -1.0),
             ],
         ),
     };
@@ -30654,7 +30650,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     let input = runtime::PlayerInput {
         forward: intent.axis_forward,
         strafe: intent.axis_slide,
-        run: intent.multiplier == 2.0,
+        multiplier: intent.multiplier,
         crouch: intent.duck,
         jump: intent.jump && player.body.grounded,
         yaw: player.body.yaw,
@@ -31918,18 +31914,20 @@ mod rules_tests {
         // adds a `thing + 0x144` term no recovered parser sees. The derivation is retired on the ledger.
         assert!((rules.walk - 1.2).abs() < 1e-4, "walk {}", rules.walk);
         // FAST doubles; crouch replaces that with a half; backwards is half; strafe 0.7.
-        assert_eq!(rules.speed(1.0, 0.0, false, false, false), [rules.walk, 0.0]);
-        assert_eq!(rules.speed(1.0, 0.0, true, false, false), [rules.walk * 2.0, 0.0]);
-        assert_eq!(rules.speed(1.0, 0.0, false, true, false), [rules.walk * 0.5, 0.0]);
-        assert_eq!(rules.speed(-1.0, 0.0, false, false, false), [-rules.walk * 0.5, 0.0]);
-        let strafe = rules.speed(0.0, 1.0, false, false, false);
+        assert_eq!(rules.speed(1.0, 0.0, 1.0, false, false), [rules.walk, 0.0]);
+        assert_eq!(rules.speed(1.0, 0.0, 2.0, false, false), [rules.walk * 2.0, 0.0]);
+        // SLOW's halved ladder value survives the trip as a value (the review fix).
+        assert_eq!(rules.speed(1.0, 0.0, 0.5, false, false), [rules.walk * 0.5, 0.0]);
+        assert_eq!(rules.speed(1.0, 0.0, 1.0, true, false), [rules.walk * 0.5, 0.0]);
+        assert_eq!(rules.speed(-1.0, 0.0, 1.0, false, false), [-rules.walk * 0.5, 0.0]);
+        let strafe = rules.speed(0.0, 1.0, 1.0, false, false);
         assert!((strafe[1] - rules.walk * 0.7).abs() < 1e-4, "strafe {}", strafe[1]);
-        // Crouch wins over run: the engine assigns 0.5 rather than multiplying.
-        assert_eq!(rules.speed(1.0, 0.0, true, true, false), [rules.walk * 0.5, 0.0]);
+        // Crouch wins over the ladder: the engine assigns 0.5 rather than multiplying.
+        assert_eq!(rules.speed(1.0, 0.0, 2.0, true, false), [rules.walk * 0.5, 0.0]);
         // Water halves whatever the other keys decided: crouching in water is a quarter.
-        assert_eq!(rules.speed(1.0, 0.0, false, false, true), [rules.walk * 0.5, 0.0]);
-        assert_eq!(rules.speed(1.0, 0.0, false, true, true), [rules.walk * 0.25, 0.0]);
-        assert_eq!(rules.speed(1.0, 0.0, true, false, true), [rules.walk, 0.0]);
+        assert_eq!(rules.speed(1.0, 0.0, 1.0, false, true), [rules.walk * 0.5, 0.0]);
+        assert_eq!(rules.speed(1.0, 0.0, 1.0, true, true), [rules.walk * 0.25, 0.0]);
+        assert_eq!(rules.speed(1.0, 0.0, 2.0, false, true), [rules.walk, 0.0]);
     }
 
     /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
