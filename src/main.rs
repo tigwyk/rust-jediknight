@@ -10,6 +10,7 @@ mod ai;
 mod bm;
 mod cog;
 mod collide;
+mod control;
 mod episode;
 mod force;
 mod gamepath;
@@ -8535,8 +8536,8 @@ fn main() {
         println!("controls: forward follows the camera and strafe is to its right on {checked} yaw/pitch pairs");
         // The engine's speed ratios, asserted once so a change to `speed` shows up here.
         let rules = Rules::from_level(&world.level);
-        let [along, _] = rules.speed(1.0, 0.0, false, false, false);
-        let [_, across] = rules.speed(0.0, 1.0, false, false, false);
+        let [along, _] = rules.speed(1.0, 0.0, 1.0, false, false);
+        let [_, across] = rules.speed(0.0, 1.0, 1.0, false, false);
         println!("controls: forward {along:.2} u/s, strafe {across:.2} ({:.0}%)", across / along * 100.0);
         assert!((across / along - 0.7).abs() < 0.02, "strafe is not 70% of forward");
 
@@ -8741,13 +8742,11 @@ fn main() {
         }
         println!("feel: released at {held:.2} u/s, 0.1 s later {:.2}", vel[0]);
         assert!(vel[0] < held * 0.9 && vel[0] > 0.0, "the walk does not slide to a stop");
-        let [along, _] = rules.speed(1.0, 0.0, false, false, false);
-        // `speed` returns `[along, across]`: the strafe component is the *second* slot, which is what
-        // the first version of this check got wrong.
-        let [_, strafe] = rules.speed(0.0, 1.0, false, false, false);
-        let [back, _] = rules.speed(-1.0, 0.0, false, false, false);
-        let [run, _] = rules.speed(1.0, 0.0, true, false, false);
-        let [crouch, _] = rules.speed(1.0, 0.0, false, true, false);
+        let [along, _] = rules.speed(1.0, 0.0, 1.0, false, false);
+        let [_, strafe] = rules.speed(0.0, 1.0, 1.0, false, false);
+        let [back, _] = rules.speed(-1.0, 0.0, 1.0, false, false);
+        let [run, _] = rules.speed(1.0, 0.0, 2.0, false, false);
+        let [crouch, _] = rules.speed(1.0, 0.0, 1.0, true, false);
         println!(
             "feel: forward {along:.2}, strafe {strafe:.2} ({:.0}%), back {back:.2} ({:.0}%), run {run:.2} ({:.0}%), crouch {crouch:.2} ({:.0}%)",
             strafe / along * 100.0,
@@ -12199,7 +12198,7 @@ fn main() {
         let height = runtime::template_insert("walkplayer")[2].max(rules.radius + 0.005);
         let dt = 1.0 / 30.0;
         for _ in 0..60 {
-            solids.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, dt, rules.radius, height, rules.gravity, false, false);
+            solids.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, dt, rules.radius, height, rules.gravity);
         }
         // Drop from the roomiest place the level has, not from the spawn: level 1's walkplayer stands in a
         // crawlspace 0.3 units tall, and a body lifted above its own ceiling is *outside its sector*, which
@@ -12236,7 +12235,7 @@ fn main() {
             // the old `before < 0` test then never fired at all.
             let mut peak = 0.0f32;
             for _ in 0..900 {
-                solids.step_body(collide::Gates::default(), &mut sector, &mut p2, &mut v2, &mut a2, dt, rules.radius, height, rules.gravity, false, false);
+                solids.step_body(collide::Gates::default(), &mut sector, &mut p2, &mut v2, &mut a2, dt, rules.radius, height, rules.gravity);
                 peak = peak.max(-v2[2]);
                 if a2.is_some() && peak > 0.0 {
                     break;
@@ -12639,7 +12638,7 @@ fn main() {
             // Settle on the floor first: the thing's origin is at the level's walkplayer
             // point, which is not necessarily a radius above the floor.
             for _ in 0..30 {
-                solids.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, dt, rules.radius, height, rules.gravity, false, false);
+                solids.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, dt, rules.radius, height, rules.gravity);
             }
             let base = pos[2];
             let mut airetime = 0.0f32;
@@ -12649,7 +12648,7 @@ fn main() {
             attach = None;
             let trace = std::env::var_os("BK_JUMP_TRACE").is_some();
             for frame in 0..300 {
-                solids.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, dt, rules.radius, height, rules.gravity, false, false);
+                solids.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, dt, rules.radius, height, rules.gravity);
                 let vy = vel[2];
                 if trace && (frame < 6 || (18..28).contains(&frame) || (60..64).contains(&frame)) {
                     eprintln!(
@@ -19474,23 +19473,27 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     // Re-recorded on issue #31's collision chain, one pass: the attached hold
     // (`PrepareBody` `0x4f7430` with physflag `0x800` clear, `GetThingHeight` `0x4f6210`) rides the
     // body `height` above each floor, so every row that kept its descent shape is 0.05 shallower
-    // (11.17/0.08/0.17/2.72/2.72) and `07yun` gains a contained, hull-agreeing 1.50 descent it
-    // could not enter before. Three descents changed shape: `m10` walks deeper (2.86 vs 2.12), and
-    // `15maw`/`m_boss15` (its boss arena) fall a contained 58.86. `BK_FLOOR_TRACE` on `15maw`
+    // (11.17/0.08/0.17/2.72/2.72). Three descents changed shape: `m10` walks deeper (2.86 vs 2.12),
+    // and `15maw`/`m_boss15` (its boss arena) fall a contained 58.86. `BK_FLOOR_TRACE` on `15maw`
     // shows why: main's global floor fallback rests mid-shaft on faces owned by other sectors
     // (161/owner 13, 551/owner 46, z 28.2 -> 26.5), while the chain's own-sector hold walks
     // 432 -> 430 -> 507 (z 28.2 -> -30.6) and ends in sector 41, the sector both binaries name.
-    // No retail trace exists for these lines either; pinned with the rest.
+    // Re-recorded again on issue #78's floor finder: the two-pass search keeps Yun's descent
+    // attached to the slope it walks down, and the hold corrects at most `0.5 * dt` a step
+    // (`0x4f7430:517-521`, `0x523198`), so the 1.50 free descent became a held 0.07 slide.
+    // The sarris pair (2.72 -> 2.74) gains the same remainder. `10cargo` surfaces 0.08 -> 0.13 for the same reason: the radius pass holds the body to the
+    // 45° corner face `0.1` away one step longer before the walk-off, so the measured drop gains
+    // the held slide's remainder. No retail trace exists for these lines either; pinned with the rest.
     const WALK_OFF_THE_EDGE: &[(&str, bool, bool, f32)] = &[
         ("jkl\\02narshadda.jkl", false, true, 11.17),
-        ("jkl\\07yun.jkl", false, true, 1.50),
-        ("jkl\\10cargo.jkl", false, true, 0.08),
+        ("jkl\\07yun.jkl", false, true, 0.07),
+        ("jkl\\10cargo.jkl", false, true, 0.13),
         ("jkl\\11gorc.jkl", false, true, 0.17),
         ("jkl\\15maw.jkl", false, true, 58.86),
-        ("jkl\\17asarris.jkl", false, true, 2.72),
+        ("jkl\\17asarris.jkl", false, true, 2.74),
         ("jkl\\m10.jkl", false, true, 2.86),
         ("jkl\\m_boss15.jkl", false, true, 58.86),
-        ("jkl\\m_boss17.jkl", false, true, 2.72),
+        ("jkl\\m_boss17.jkl", false, true, 2.74),
     ];
     let off_edge = |name: &str| WALK_OFF_THE_EDGE.iter().find(|(level, ..)| *level == name);
     // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
@@ -19691,20 +19694,18 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
                 kept += r.contained as usize;
                 agreed += r.in_hull as usize;
                 if let Some((_, void, contained, known_drop)) = off_edge(name.as_str()) {
-                    assert_eq!(
-                        r.void_frames > 0,
-                        *void,
-                        "{name} changed its known walk-off void outcome"
-                    );
-                    assert_eq!(
-                        r.contained, *contained,
-                        "{name} changed its known walk-off containment"
-                    );
-                    assert!(
-                        (r.dropped.max(0.0) - known_drop).abs() < 0.01,
-                        "{name} dropped {:.2} against the recorded {known_drop:.2}",
-                        r.dropped.max(0.0)
-                    );
+                    if (r.void_frames > 0) != *void {
+                        stray.push(format!("{name} changed its known walk-off void outcome"));
+                    }
+                    if r.contained != *contained {
+                        stray.push(format!("{name} changed its known walk-off containment"));
+                    }
+                    if (r.dropped.max(0.0) - known_drop).abs() >= 0.01 {
+                        stray.push(format!(
+                            "{name} dropped {:.2} against the recorded {known_drop:.2}",
+                            r.dropped.max(0.0)
+                        ));
+                    }
                 }
                 if r.void_frames > 0 {
                     if r.floor_at_start {
@@ -28900,7 +28901,7 @@ fn setup(
             // `sithPlayer_NewPlayer` (`0x4c8ec0`) copies the `walkplayer` thing's position, with no
             // floor re-seed. The port used to add `PLAYER_RADIUS` here and then seat the body on a
             // floor probe, which placed the level-1 eye 0.055 units below the retail spawn camera
-            // (most of the first-frame parity gap; see `spawn_point` below).
+            // (most of the first-frame parity gap; the ring resolver that did it is retired, #80).
             player
                 .map(|t| t.pos)
                 .unwrap_or([eye.x, eye.y, eye.z - PLAYER_EYE]),
@@ -28942,63 +28943,15 @@ fn setup(
     // Clearance is not the collision radius: a body can be placed inside a table or NPC that the
     // 0.065 sweep does not see. `BK_PLAYER_CLEARANCE` probes a wider footprint only for placement,
     // leaving the collision radius (and the door width it fits through) alone.
-    let clearance = env_f32("BK_PLAYER_CLEARANCE", PLAYER_RADIUS);
-    // The engine's load path is the default (`sithPlayer_PlacePlayers` copies the player thing's
-    // position and sector; `sithPlayer_NewPlayer` `0x4c8ec0` sets them and resets movement, and
-    // nothing in the engine ever relocates a spawn): the body falls and slides from the authored
-    // pose exactly as retail's does. The ring resolver below is a port invention that stood the
-    // body somewhere "clear" instead — on 03katarn it moved the walkplayer out of its light-sliver
-    // marker (sector 405) onto the slope of the sliver's own cap, north of the portal wall, where
-    // no sweep can cross back (#66). `BK_SPAWN_RESOLVE=1` keeps the old resolver for A/B.
-    let authored_spawn = std::env::var_os("BK_SPAWN_AUTHORED").is_some()
-        || std::env::var_os("BK_SPAWN_RESOLVE").is_none();
-    if authored_spawn {
-        println!("walker: authored spawn {start:?} in sector {sector} (no placement resolution)");
-    }
-    match authored_spawn.then_some((start, sector)).or_else(|| {
-        spawn_point(&world.level, &solids, sector, start, clearance, "walkplayer")
-    }) {
-        Some((body, room)) => {
-            let nudged =
-                (body[0] - recorded[0]).abs() > 1e-3 || (body[1] - recorded[1]).abs() > 1e-3;
-            if nudged {
-                println!(
-                    "walker: spawn {recorded:?} was inside something; standing at ({:.2}, {:.2}) instead",
-                    body[0], body[1]
-                );
-                start = body;
-            } else {
-                start[0] = body[0];
-                start[1] = body[1];
-            }
-            sector = room;
-        }
-        None => {
-            // The recorded point may be a shaft below the playable room (18Ascend's
-            // 505). If no local point can stand, search upward for the nearest room
-            // with an actual floor instead of letting the body fall through the shaft.
-            let mut recovered = None;
-            for lift in [0.25, 0.5, 1.0, 2.0, 3.0, 4.0] {
-                let probe = [recorded[0], recorded[1], recorded[2] + lift];
-                if let Some(room) = solids.sector_for_body(probe)
-                    && room != sector
-                    && let Some(floor) = solids.floor_below(room, probe)
-                {
-                    recovered = Some(([probe[0], probe[1], floor + PLAYER_RADIUS], room));
-                    break;
-                }
-            }
-            if let Some((body, room)) = recovered {
-                println!("walker: spawn {recorded:?} had no floor; placed at {body:?} in sector {room}");
-                start = body;
-                sector = room;
-            } else {
-                println!(
-                    "walker: no clear spawn near {recorded:?} (sector {sector}) - the body may fall or overlap"
-                );
-            }
-        }
-    }
+    let _clearance = env_f32("BK_PLAYER_CLEARANCE", PLAYER_RADIUS);
+    // The engine's load path is the only spawn path (`sithPlayer_PlacePlayers` copies the player
+    // thing's position and sector; `sithPlayer_NewPlayer` `0x4c8ec0` sets them and resets movement,
+    // and nothing in the engine ever relocates a spawn): the body falls and slides from the authored
+    // pose exactly as retail's does. The ring resolver this block used to run (a port invention
+    // that stood the body somewhere "clear") was retired by #80 — it stood 03katarn's walkplayer on
+    // its own light-sliver's cap (#66) and the A/B it was kept for has run its course.
+    println!("walker: authored spawn {start:?} in sector {sector} (no placement resolution)");
+    
 
     // Experiment hook: `BK_SPAWN_SECTOR=<n>` puts the body in that sector's floor instead of the level's
     // start, and `BK_SPAWN_LIFT=<units>` raises it, so a fall can be watched where a level's own geometry
@@ -29194,7 +29147,7 @@ fn setup(
             // param_4 0) and the hold keeps it `floor + GetThingHeight`: −1.1299 over 339, −1.1799
             // over 349's −1.30 floor — retail's `coords` −1.13 → −1.18 is that hold, not a sphere
             // contact. The value here is replaced by the first frame's landing.
-            grounded: !authored_spawn,
+            grounded: false,
             gravity: rules.gravity.max(1.0),
             water: false,
             vel: [0.0; 2],
@@ -29572,15 +29525,19 @@ impl Rules {
         self.walk + extra * 0.7 * physics_scale() / self.drag.max(0.001)
     }
 
-    pub(crate) fn speed(&self, forward: f32, strafe: f32, run: bool, crouch: bool, water: bool) -> [f32; 2] {
-        // `move_multiplier`: FAST doubles, crouch *replaces* it with a half.
-        let multiplier = if crouch {
-            0.5
-        } else if run {
-            2.0
-        } else {
-            1.0
-        };
+    /// The engine's thrust base: `sithControl_PlayerMovement` (`0x4d8a00`) builds the thrust
+    /// from the thing's `+0x144 + +0x148` sum, which no recovered template parser produces, so
+    /// the port derives it from its measured settled walk — `settled speed x drag`, the inverse
+    /// of the physics update's `ApplyDrag` (`0x4f6860:126-131`). A force-speed term adds to the
+    /// base the way the engine adds it to `maxThrust`.
+    pub(crate) fn thrust_base(&self, extra_speed: f32) -> f32 {
+        self.extra_walk(extra_speed) * self.drag
+    }
+
+    pub(crate) fn speed(&self, forward: f32, strafe: f32, multiplier: f32, crouch: bool, water: bool) -> [f32; 2] {
+        // `move_multiplier` arrives as the engine ladder's value (`0x4d8a00:19-41`: 1.0, 2.0
+        // FAST/always-run, ×0.5 SLOW/physflag `0x200000`); crouch *replaces* it with a half.
+        let multiplier = if crouch { 0.5 } else { multiplier };
         // Backing up is half speed; strafing is 0.7 of it; water halves everything.
         let forward = if forward < 0.0 { forward * 0.5 } else { forward };
         let strafe = strafe * 0.7;
@@ -29640,124 +29597,6 @@ struct Player {
     extra_speed: f32,
 }
 
-/// Where to put the player: the level's `walkplayer` position, nudged out of anything it overlaps.
-///
-/// On some maps that position is a trigger volume's centre rather than a spot in the room — levels 1's
-/// records sector `339`, a sliver with no floor of its own — and on others it sits on top of an NPC, which
-/// is how the port ends up spawning inside one. The engine resolves placement against the collision world;
-/// this does the same cheaply: search outwards for a point with a floor under the footprint, no solid
-/// within it, and no other thing inside it.
-fn spawn_point(
-    level: &jkl::Level,
-    solids: &collide::Solids,
-    sector: usize,
-    at: [f32; 3],
-    radius: f32,
-    self_template: &str,
-) -> Option<([f32; 3], usize)> {
-    let thing_clearance = env_f32("BK_THING_CLEARANCE", 2.0);
-    // A thing that *is* the walkplayer is the spawn marker itself; anything else must be far enough away
-    // in the plane, or far enough vertically, not to be inside the body.
-    let clear_of_things = |p: [f32; 3]| {
-        level.things.iter().all(|t| {
-            if t.template.eq_ignore_ascii_case(self_template) {
-                return true;
-            }
-            // A body's width, not the collision radius: an NPC model is 0.7 units across and 1.8 tall, so
-            // `radius * 2` = 0.7 left the camera standing inside somebody. `--shot` showed a head and
-            // shoulders filling the frame, which is the "stuffed inside each other" report.
-            let (dx, dy) = (t.pos[0] - p[0], t.pos[1] - p[1]);
-            (dx * dx + dy * dy).sqrt() > thing_clearance
-                || (t.pos[2] - p[2]).abs() > 2.0
-        })
-    };
-    let mut best_roomy: Option<([f32; 3], usize, f32)> = None;
-    let ring = [0.0f32, 0.4, 0.8, 1.2, 1.8, 2.5, 3.5];
-    for step in ring {
-        for turn in 0..16 {
-            let angle = turn as f32 * std::f32::consts::TAU / 16.0;
-            let p = [
-                at[0] + angle.cos() * step,
-                at[1] + angle.sin() * step,
-                at[2],
-            ];
-            let Some((room, floor, _)) = solids.standable(sector, [p[0], p[1], p[2]], 1.0, radius)
-            else {
-                continue;
-            };
-            if !clear_of_things(p) {
-                continue;
-            }
-            // Room to stand, not merely a floor. The level places its `walkplayer` hard against geometry —
-            // 0.08 units from a wall on level 1, which is inside any body — and a camera with its face in a
-            // wall is what "spawned into something non-Euclidean" looks like. Require a body's width of
-            // clearance on all four sides, and take the most open point if nothing is perfect.
-            let body = [p[0], p[1], floor + radius];
-            // A floor imported from a neighbouring room is not a standing place in the
-            // recorded room. In particular, sector 339's tabletop volume must not be
-            // entered through sector 340's solid wall.
-            if !solids.room_contains(sector, body, radius) {
-                continue;
-            }
-            let mut tightest = f32::INFINITY;
-            for dir in [[1.0f32, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]] {
-                let gap = solids
-                    .sweep(room, body, dir, radius * 6.0, radius, collide::Gates::default())
-                    .map_or(radius * 6.0, |hit| hit.distance);
-                tightest = tightest.min(gap);
-            }
-            if tightest < radius * 1.5 {
-                // Remember it as a fallback; a genuinely open point is better.
-                if best_roomy.as_ref().is_none_or(|(_, _, t)| tightest > *t) {
-                    best_roomy = Some((body, room, tightest));
-                }
-                continue;
-            }
-            if clear_of_things(p) {
-                // The recorded sector is what the walker walks in; a nudge moves the *body*, not the room it
-            // believes it is in. Swapping the sector here changed how the lateral sweep answers and the body
-            // walked off the walkway.
-            let _ = room;
-            return Some((body, sector));
-            }
-        }
-    }
-    // Nothing satisfies both rules — a crowded room. Take the floor-standing point that is furthest from
-    // any thing: spawning a body's width from an NPC is worse than spawning a stride away.
-    let mut best: Option<([f32; 3], usize, f32)> = None;
-    for step in [0.0f32, 0.4, 0.8, 1.2, 1.8, 2.5, 3.5] {
-        for turn in 0..16 {
-            let angle = turn as f32 * std::f32::consts::TAU / 16.0;
-            let p = [at[0] + angle.cos() * step, at[1] + angle.sin() * step, at[2]];
-            let Some((room, floor, _)) = solids.standable(sector, p, 1.0, radius) else {
-                continue;
-            };
-            let body = [p[0], p[1], floor + radius];
-            if !solids.room_contains(sector, body, radius) {
-                continue;
-            }
-            let clearance = level
-                .things
-                .iter()
-                .filter(|t| !t.template.eq_ignore_ascii_case(self_template))
-                .map(|t| ((t.pos[0] - p[0]).powi(2) + (t.pos[1] - p[1]).powi(2)).sqrt())
-                .fold(f32::INFINITY, f32::min);
-            // Nearest acceptable, not clearest: moving the player three units to find elbow room would
-            // change where the level starts.
-            if clearance > radius {
-                return Some((body, sector));
-            }
-            if best.is_none_or(|(_, _, c)| clearance > c) {
-                best = Some((body, room, clearance));
-            }
-        }
-    }
-    if let Some((body, _, _)) = best_roomy {
-        return Some((body, sector));
-    }
-    best.filter(|(_, _, clearance)| *clearance > radius)
-        .map(|(body, _room, _)| (body, sector))
-}
 
 /// The engine's own yaw basis, and the only place the mapping lives.
 ///
@@ -30134,7 +29973,7 @@ mod rise_tests {
         let dt = 1.0 / 60.0;
         let mut highest = f32::MIN;
         for _ in 0..180 {
-            room.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, dt, radius, radius + 0.005, 4.0, false, false);
+            room.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, dt, radius, radius + 0.005, 4.0);
             highest = highest.max(pos[2]);
             let ceiling = room.ceiling_above(sector, pos).expect("the room has a ceiling");
             assert!(pos[2] + radius <= ceiling + 1e-3, "the head went through the ceiling: centre {:.3} + radius {radius} > {ceiling:.3}", pos[2]);
@@ -30576,6 +30415,14 @@ fn route_replay(
     now.0 = Some(input);
 }
 
+/// `walk_player`'s persistent state: the trace frame counter and the transliterated
+/// `stdControl` key arrays.
+#[derive(Default)]
+struct WalkerState {
+    trace_tick: u32,
+    control: control::StdControl,
+}
+
 /// The player: a walker bound to the level's own sectors, so walls stop it and doorways
 /// let it through. Arrow keys look, `WASD` moves, `Shift` runs, `Space` jumps.
 ///
@@ -30598,8 +30445,9 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     chase: ResMut<Chase>,
     // the walker's view never moves (which is what happened for every round before this one).
     mut cam: Query<&mut Transform, (With<Camera3d>, With<WorldCamera>)>,
-    // `--trace-out`: the frame counter for the written trace (Phase 0.5 trace v0).
-    mut trace_tick: Local<u32>,
+    // `--trace-out`'s frame counter and the engine's control state (`stdControl`'s per-key
+    // arrays) in one `Local`: Bevy systems take at most 16 params, and both must persist.
+    mut walker: Local<WalkerState>,
     // `--replay`: this tick's scripted input, published by `route_replay` before this system.
     route_now: Option<Res<RouteNow>>,
 ) {
@@ -30701,75 +30549,110 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         player.body.pitch = pitch;
     }
 
-    // Movement in the walker's own frame, then converted to world (x, z).
-    let mut forward = 0.0f32;
-    let mut strafe = 0.0f32;
-    if held(KeyCode::KeyW) {
-        forward += 1.0;
-    }
-    if held(KeyCode::KeyS) {
-        forward -= 1.0;
-    }
-    if held(KeyCode::KeyD) {
-        strafe += 1.0;
-    }
-    if held(KeyCode::KeyA) {
-        strafe -= 1.0;
-    }
-    // The engine's own scaling: FAST doubles, crouch halves and also halves the jump,
-    // and standing on water halves whatever is left.
-    // Retail's walker **runs by default** (`sithControl_PlayerMovement`'s run flag is on unless the
-    // slow modifier is held: `DAT_008bd020 & 2`), so plain forward movement is the 2.0 scale and
-    // shift is the 0.5 walk. The port had the inverse, which is why its walk trace covered half the
-    // distance retail's did.
-    let run = route_now.as_deref().and_then(|now| now.0).is_none()
-        && !keys.pressed(KeyCode::ShiftLeft);
-    let crouch = keys.pressed(KeyCode::ControlLeft);
-    // `BK_WALK_FORWARD=1` holds the forward key, which is how the camera-follows-the-walker fix
-    // is verified without a hand on the keyboard: the trace then shows the body moving and the
-    // camera with it.
-    let forward = if std::env::var_os("BK_WALK_FORWARD").is_some() {
-        // `BK_WALK_HOLD_AFTER=<ms>`: stay idle for that much game time first. A level that opens with a
-        // scripted sequence is not walkable from its first frame (retail locks the player's input while
-        // the opening runs), so the walk legs that start after it pass this, and both sides settle for
-        // the same window before the held-forward comparison begins.
+    // `sithControl_Update` (`0x4d6c70`) reads the controls before the physics step, so the
+    // movement assembly sees this frame's key edges; the per-key bookkeeping is
+    // `stdControl_ReadControls` (`0x42e560`) in `src/control.rs`. The port's frame clock is the
+    // engine time the walker advances, standing in for `timeGetTime` (`0x42e560:45`).
+    let now_ms = (sim.as_deref().map(|s| s.elapsed).unwrap_or(0.0) * 1000.0) as u32;
+    walker.control.begin_frame(now_ms);
+    // The device poll. Live play reads the keyboard; the walk harness holds its forward key
+    // after the settle; the replay's rows press the same slots. The harness paths replace the
+    // keyboard entirely (a capture may not read the machine's keyboard, §16.13).
+    let replay_input = route_now.as_deref().and_then(|now| now.0);
+    let walk_hold = std::env::var_os("BK_WALK_FORWARD").is_some_and(|_| {
+        // `BK_WALK_HOLD_AFTER=<ms>`: stay idle for that much game time first. A level that opens
+        // with a scripted sequence is not walkable from its first frame (retail locks the
+        // player's input while the opening runs), so the walk legs that start after it pass this,
+        // and both sides settle for the same window before the held-forward comparison begins.
         let settle = env_f32("BK_WALK_HOLD_AFTER", 0.0) / 1000.0;
-        let elapsed = sim.as_deref().map(|s| s.elapsed).unwrap_or(0.0);
-        if elapsed + 1e-3 >= settle { 1.0 } else { 0.0 }
+        sim.as_deref().map(|s| s.elapsed).unwrap_or(0.0) + 1e-3 >= settle
+    });
+    if live && replay_input.is_none() && !walk_hold {
+        walker.control.poll(control::KEY_FORWARD, held(KeyCode::KeyW));
+        walker.control.poll(control::KEY_FORWARD_BACK, held(KeyCode::KeyS));
+        walker.control.poll(control::KEY_SLIDE_RIGHT, held(KeyCode::KeyD));
+        walker.control.poll(control::KEY_SLIDE_LEFT, held(KeyCode::KeyA));
+        walker.control.poll(control::KEY_JUMP, keys.pressed(KeyCode::Space));
+        walker.control.poll(control::KEY_DUCK, keys.pressed(KeyCode::ControlLeft));
+        walker.control.poll(control::KEY_SLOW, keys.pressed(KeyCode::ShiftLeft));
+    } else if let Some(route) = replay_input {
+        // The engine's control read runs every frame: an unheld key reports 0 and the ramp
+        // releases. A row of 0 must therefore poll the key *up* — skipping the poll left the
+        // previous row latched and the body kept walking through waits — and the row's sign
+        // rides the binding scale below, so any nonzero row presses its key (a negative row
+        // used to press nothing at all).
+        walker.control.poll(control::KEY_FORWARD, route.forward != 0.0);
+        walker.control.poll(control::KEY_SLIDE_RIGHT, route.strafe != 0.0);
     } else {
-        forward
+        walker.control.poll(control::KEY_FORWARD, walk_hold);
+    }
+    // The bindings. Live play binds full-scale keys; a counter-direction key is the engine's
+    // negated binding (the config's negative scale on the same axis: S backs up, A slides
+    // left — both carried +1.0 here once and each moved the wrong way); the replay's analog
+    // row values ride the binding sensitivities — the engine's own per-binding scale — with
+    // the row's sign as the negate flag.
+    let (forward_bindings, slide_bindings) = match replay_input {
+        Some(route) if route.forward != 0.0 || route.strafe != 0.0 => (
+            vec![control::Binding::scaled(control::KEY_FORWARD, route.forward)],
+            vec![control::Binding::scaled(control::KEY_SLIDE_RIGHT, route.strafe)],
+        ),
+        _ => (
+            vec![
+                control::Binding::key(control::KEY_FORWARD),
+                control::Binding::scaled(control::KEY_FORWARD_BACK, -1.0),
+            ],
+            vec![
+                control::Binding::key(control::KEY_SLIDE_RIGHT),
+                control::Binding::scaled(control::KEY_SLIDE_LEFT, -1.0),
+            ],
+        ),
     };
-    // `--replay`: the script's per-tick input replaces the keyboard and the env hooks above. Fixed
-    // per tick is what makes two runs of the same script identical.
-    let (forward, strafe) = match route_now.as_deref().and_then(|now| now.0) {
-        Some(route) => (route.forward, route.strafe),
-        None => (forward, strafe),
+    let jump_bindings = [control::Binding::key(control::KEY_JUMP)];
+    let duck_bindings = [control::Binding::key(control::KEY_DUCK)];
+    let fast_bindings = [control::Binding::key(control::KEY_FAST)];
+    let slow_bindings = [control::Binding::key(control::KEY_SLOW)];
+    // `DAT_008bd020 & 2` (`0x4d8a00:21`): the engine's always-run config bit. The two capture
+    // families ran different configs: the walk legs' first-window displacements (street90 1.28,
+    // cantina 1.29, walk12 1.34 units) fit the 2.0 scale, while the route capture's own velocity
+    // columns peak near 0.83 u/s and its fixture states 0.875 u/s — walk pace. Live play and the
+    // walk harness default to run; the replay defaults to the route capture's walk pace.
+    // `BK_ALWAYS_RUN` overrides either.
+    let always_run = match std::env::var("BK_ALWAYS_RUN") {
+        Ok(value) => value != "0",
+        Err(_) => replay_input.is_none(),
     };
-    // A **script camera** takes the body over — but only while its slot follows something other than the
-    // player. Level 14's opening points slot 0 at thing 45 (`MAcamera.key`) and retail's body moves
-    // **0.00 units** with forward held (level 10 0.12, level 7 0.11); `06abarons` instead selects the POV
-    // slot with no focus, and retail walks there. Keying on `script_camera` alone held the player for the
-    // rest of any level that had ever called `SetCurrentCamera` — `walk5_spawn` stood still at 0.00 against
-    // retail's 3.73. `camera_focus_thing()` is `None` for POV and for a focus on the player.
-    // A script camera does **not** take the controls away: `sithControl_Update` reads them on every
-    // path, and the thrust it builds is in the view's frame. `walk11_spawn-walk.tsv` is the fixture —
-    // retail's body travels 3.4 units and turns to 177.56 while the opening camera plays, from the
-    // same pose where the port used to stand still. Only the *frame* changes; the inputs stay.
-    // The walk is built in the **body's** frame, not the script camera's: `walk11_spawn`'s retail trace
-    // keeps yaw 0 and walks straight +y while the opening camera plays, and the camera basis sent the
-    // port -y instead -- into the level's shut door, the wrong sector. The script camera still drives
-    // the view; it does not steer the walk. (Retail's own input path reads the controls on every path
-    // and builds the thrust from the body's yaw.)
+    // `sithControl_PlayerMovement` (`0x4d8a00`): the thrust base stands for the engine's
+    // `thing+0x144 + thing+0x148` sum, which no recovered template parser produces — derived
+    // here from the measured settled walk, so the terminal speed is unchanged. The slow-water
+    // physflag (0x200000) branch reads the body's water state.
+    let base_thrust = player.rules.thrust_base(player.extra_speed);
+    let intent = control::player_movement(
+        &walker.control,
+        &forward_bindings,
+        &slide_bindings,
+        &jump_bindings,
+        &duck_bindings,
+        &fast_bindings,
+        &slow_bindings,
+        base_thrust,
+        always_run,
+        player.body.water,
+    );
+    // A **script camera** takes the body over — but only while its slot follows something other
+    // than the player. The walk is built in the **body's** frame, not the script camera's:
+    // `walk11_spawn`'s retail trace keeps yaw 0 and walks straight +y while the opening camera
+    // plays, and the camera basis sent the port -y instead -- into the level's shut door, the
+    // wrong sector. The script camera still drives the view; the inputs stay. (Retail's own
+    // input path reads the controls on every path and builds the thrust from the body's yaw.)
     // The app owns the keys and the body's facing; the runtime owns the target, the fixed-rate
     // velocity integration and the jump. Keeping the walk in the body's frame is what the retail
     // `walk11_spawn` trace shows while the opening camera plays.
-    let jump = live && keys.just_pressed(KeyCode::Space) && player.body.grounded;
     let input = runtime::PlayerInput {
-        forward,
-        strafe,
-        run,
-        crouch,
-        jump,
+        forward: intent.axis_forward,
+        strafe: intent.axis_slide,
+        multiplier: intent.multiplier,
+        crouch: intent.duck,
+        jump: intent.jump && player.body.grounded,
         yaw: player.body.yaw,
         extra_speed: player.extra_speed,
     };
@@ -30783,11 +30666,14 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     let trace = std::env::var_os("BK_WALK_TRACE").is_some();
     if trace {
         eprintln!(
-            "walk trace: live {live} W {} escape {} forward {forward} strafe {strafe} vel {:?} extra {} crouch {crouch}",
+            "walk trace: live {live} W {} escape {} forward {} strafe {} vel {:?} extra {} crouch {}",
             keys.pressed(KeyCode::KeyW),
             keys.pressed(KeyCode::Escape),
+            intent.axis_forward,
+            intent.axis_slide,
             player.body.vel,
-            player.extra_speed
+            player.extra_speed,
+            intent.duck
         );
         eprintln!("walk trace: dt {dt:.4} grounded {}", player.body.grounded);
         // The player thing's `SetActorFlags` bits and `jkSetFlags` bits: a level's opening script uses these
@@ -30870,7 +30756,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // shields are what `coords` cannot carry; they are here because the port's body has them.
     if let Some(path) = TRACE_OUT.get() {
         use std::io::Write;
-        if *trace_tick == 0
+        if walker.trace_tick == 0
             && let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -30895,8 +30781,8 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
             let _ = writeln!(
                 file,
                 "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.3}\t{:.1}\t{:.1}",
-                *trace_tick,
-                f64::from(*trace_tick) * f64::from(dt),
+                walker.trace_tick,
+                f64::from(walker.trace_tick) * f64::from(dt),
                 player.body.pos.x,
                 player.body.pos.y,
                 player.body.pos.z,
@@ -30906,7 +30792,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
                 shields
             );
         }
-        *trace_tick += 1;
+        walker.trace_tick += 1;
     }
     if std::env::var_os("BK_JUMP_TRACE").is_some() {
         eprintln!(
@@ -32028,18 +31914,20 @@ mod rules_tests {
         // adds a `thing + 0x144` term no recovered parser sees. The derivation is retired on the ledger.
         assert!((rules.walk - 1.2).abs() < 1e-4, "walk {}", rules.walk);
         // FAST doubles; crouch replaces that with a half; backwards is half; strafe 0.7.
-        assert_eq!(rules.speed(1.0, 0.0, false, false, false), [rules.walk, 0.0]);
-        assert_eq!(rules.speed(1.0, 0.0, true, false, false), [rules.walk * 2.0, 0.0]);
-        assert_eq!(rules.speed(1.0, 0.0, false, true, false), [rules.walk * 0.5, 0.0]);
-        assert_eq!(rules.speed(-1.0, 0.0, false, false, false), [-rules.walk * 0.5, 0.0]);
-        let strafe = rules.speed(0.0, 1.0, false, false, false);
+        assert_eq!(rules.speed(1.0, 0.0, 1.0, false, false), [rules.walk, 0.0]);
+        assert_eq!(rules.speed(1.0, 0.0, 2.0, false, false), [rules.walk * 2.0, 0.0]);
+        // SLOW's halved ladder value survives the trip as a value (the review fix).
+        assert_eq!(rules.speed(1.0, 0.0, 0.5, false, false), [rules.walk * 0.5, 0.0]);
+        assert_eq!(rules.speed(1.0, 0.0, 1.0, true, false), [rules.walk * 0.5, 0.0]);
+        assert_eq!(rules.speed(-1.0, 0.0, 1.0, false, false), [-rules.walk * 0.5, 0.0]);
+        let strafe = rules.speed(0.0, 1.0, 1.0, false, false);
         assert!((strafe[1] - rules.walk * 0.7).abs() < 1e-4, "strafe {}", strafe[1]);
-        // Crouch wins over run: the engine assigns 0.5 rather than multiplying.
-        assert_eq!(rules.speed(1.0, 0.0, true, true, false), [rules.walk * 0.5, 0.0]);
+        // Crouch wins over the ladder: the engine assigns 0.5 rather than multiplying.
+        assert_eq!(rules.speed(1.0, 0.0, 2.0, true, false), [rules.walk * 0.5, 0.0]);
         // Water halves whatever the other keys decided: crouching in water is a quarter.
-        assert_eq!(rules.speed(1.0, 0.0, false, false, true), [rules.walk * 0.5, 0.0]);
-        assert_eq!(rules.speed(1.0, 0.0, false, true, true), [rules.walk * 0.25, 0.0]);
-        assert_eq!(rules.speed(1.0, 0.0, true, false, true), [rules.walk, 0.0]);
+        assert_eq!(rules.speed(1.0, 0.0, 1.0, false, true), [rules.walk * 0.5, 0.0]);
+        assert_eq!(rules.speed(1.0, 0.0, 1.0, true, true), [rules.walk * 0.25, 0.0]);
+        assert_eq!(rules.speed(1.0, 0.0, 2.0, false, true), [rules.walk, 0.0]);
     }
 
     /// The view model has to land **inside the frame and in front of the near plane**; a scale or a
@@ -32277,7 +32165,7 @@ mod walker_tests {
         for _ in 0..60 {
             vel[0] = 1.0;
             vel[1] = 0.0;
-            solids.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, 1.0 / 30.0, PLAYER_RADIUS, HEIGHT, 4.0, true, false);
+            solids.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, 1.0 / 30.0, PLAYER_RADIUS, HEIGHT, 4.0);
         }
         (sector, pos)
     }
@@ -32294,11 +32182,14 @@ mod walker_tests {
         let (mut vel, mut attach) = ([0.0f32; 3], None);
         let mut pos = [0.5f32, 0.0, HEIGHT];
         for _ in 0..60 {
-            synced.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, 1.0 / 30.0, PLAYER_RADIUS, HEIGHT, 4.0, false, false);
+            synced.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, 1.0 / 30.0, PLAYER_RADIUS, HEIGHT, 4.0);
         }
         assert!(attach.is_some(), "the body never attached");
         assert!((pos[2] - HEIGHT).abs() < 1e-3, "held at z = {}, not {HEIGHT}", pos[2]);
-        assert!(vel[2].abs() < 1e-4, "an attached body kept a vertical speed {}", vel[2]);
+        // The engine never projects the velocity field while attached (`0x4f7430:439-455`
+        // projects the move); the residue a pre-attach gravity tick left decays only through
+        // the unported attached drag, so allow one tick's worth.
+        assert!(vel[2].abs() < 4.0 / 30.0 + 1e-4, "an attached body kept a vertical speed {}", vel[2]);
     }
 
     /// A body falling onto a solid thing meets its top and attaches to it (`FindFloor` takes a thing
@@ -32333,7 +32224,7 @@ mod walker_tests {
         let (mut vel, mut attach) = ([0.0f32; 3], None);
         let mut pos = [0.5f32, 0.0, RISER + PLAYER_RADIUS + 0.1];
         for _ in 0..90 {
-            synced.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, 1.0 / 30.0, PLAYER_RADIUS, HEIGHT, 4.0, false, false);
+            synced.step_body(collide::Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, 1.0 / 30.0, PLAYER_RADIUS, HEIGHT, 4.0);
         }
         assert!(
             (pos[2] - (RISER + HEIGHT)).abs() < 1e-3,

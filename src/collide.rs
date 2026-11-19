@@ -29,6 +29,17 @@ pub struct Plane {
     pub surface: usize,
 }
 
+/// One surface of a sector's own `SURFACES` range, as `sithIntersect_IsSphereInSector`
+/// (JK.EXE `0x507f30`) walks it.
+#[derive(Clone, Copy, Debug)]
+pub struct ContainPlane {
+    pub normal: [f32; 3],
+    pub point: [f32; 3],
+    pub surfflags: u32,
+    /// The `World adjoins` row the surface names, `-1` when it is not an opening.
+    pub adjoin: i32,
+}
+
 /// A placed thing the walker collides with.
 ///
 /// `half` is `Some` only for a `collide=3` thing with a loaded model: the model's bounds give the
@@ -215,10 +226,9 @@ pub struct LevelGeometry {
     pub sectors: Vec<Vec<Plane>>,
     /// Per sector, only the planes that **bound** the cell: every vertex the sector claims is behind
     /// them. `sectors` carries every claimed surface's plane, because a wall patch inside the room
-    /// still has to stop a body; only this list may answer "is the body inside", which is what
-    /// `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`) asks.
-    /// Correction: engine containment tests all collision-flagged surfaces and movable adjoins, not
-    /// only this derived hull; `inside_sector_with_gates` performs that test.
+    /// still has to stop a body. Containment is not asked of either list: `containment` carries
+    /// the sector's own surfaces as `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`) walks
+    /// them, and `clearance` reads this hull.
     pub hull: Vec<Vec<Plane>>,
     /// Per sector, its `HASCOLLIDEBOX` bounds (`SITH_SECTOR_HASCOLLIDEBOX`, sector flag `0x1000`),
     /// from the file's `COLLIDEBOX` row (not the enclosing `BOUNDBOX`). `IsSphereInSector`
@@ -284,6 +294,12 @@ pub struct LevelGeometry {
     pub adjoin_surface: Vec<usize>,
     /// Sector-to-sector links with the adjoin row's attenuation, derived once from the mirrors.
     pub sector_adjoins: Vec<Vec<(i32, f32)>>,
+    /// Per sector, its own `SURFACES` range as `sithIntersect_IsSphereInSector` (JK.EXE
+    /// `0x507f30`) walks it: every surface's plane (normal pointing out of this sector), flag
+    /// word and `World adjoins` row. The walk counts a surface when the flags carry
+    /// `HAS_COLLISION` (`0x4`) or the adjoin row allows movement (`0x2`) — decided at call
+    /// time, because doors clear the move flag at runtime.
+    pub containment: Vec<Vec<ContainPlane>>,
 }
 
 /// The collision-facing name for the one geometry record.
@@ -667,6 +683,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     let mut hulls = Vec::with_capacity(level.sectors.len());
     let mut boxes = Vec::with_capacity(level.sectors.len());
     let mut portal_sets = Vec::with_capacity(level.sectors.len());
+    let mut contains = Vec::with_capacity(level.sectors.len());
     let mut spheres = Vec::with_capacity(level.sectors.len());
     for sector in &level.sectors {
         let (first, count) = sector.surfaces;
@@ -700,6 +717,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         let mut planes = Vec::new();
         let mut hull_planes = Vec::new();
         let mut portals = Vec::new();
+        let mut contain = Vec::new();
         for (surface_of, surface) in &owned {
             if surface.verts.len() < 3 {
                 continue;
@@ -753,6 +771,15 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
             } else {
                 normal
             };
+            // `sithIntersect_IsSphereInSector` (`0x507f30`) walks the sector's own surface list
+            // whatever the adjoin mirror table says, so every surface with a plane lands here and
+            // the counting rule (`0x4` or a move-flagged adjoin row) is applied at call time.
+            contain.push(ContainPlane {
+                normal: own,
+                point: pts[0],
+                surfflags: surface.surfflags,
+                adjoin: surface.adjoin,
+            });
             // An adjoined surface is an opening: the walker goes through it into the
             // sector its *mirror* adjoin belongs to, so it is remembered as a portal
             // rather than a wall.
@@ -809,6 +836,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         hulls.push(hull_planes);
         boxes.push(box_of);
         portal_sets.push(portals);
+        contains.push(contain);
         spheres.push((centre, radius.max(0.1)));
     }
     // The portal graph is **symmetric**. A link is discovered from whichever side owns the surface,
@@ -892,6 +920,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     // The solid things are filled by the caller, which has the models: see `solid_things` in `main`.
     Solids {
         sectors,
+        containment: contains,
         hull: hulls,
         boxes,
         portals: portal_sets,
@@ -1043,6 +1072,10 @@ pub struct MoveState {
     pub flags: u32,
     pub attach_flags: u32,
     pub attach: Option<Attach>,
+    /// The water-surface distance `sithPhysics_FindFloor`'s water branch records (`thing+0x48`):
+    /// how far up the nearest dry-side crossing sits. `None` is the engine's "no crossing found",
+    /// which clears the in-water hold.
+    pub water_surface: Option<f32>,
     /// Level indexes of item things (type 5) whose volume the sweep met this move — the
     /// `0x4fbe10` pass-through contact list the pickup gate consumes.
     pub touched: Vec<usize>,
@@ -1298,7 +1331,32 @@ impl LevelGeometry {
         dist
     }
 
-    /// `sithCollision_SearchForSurfaceCollisions` (0x4e86d0): discovery and crossings are separate records.
+    /// `sithCollision_SearchForSurfaceCollisions` (`0x4e86d0`): one pass over the sector's own
+    /// surface list, in file order. A surface enters the pass only when it carries `HAS_COLLISION`
+    /// (`surfflags & 4`) or its adjoin column names a row (`0x4e86d0:47`).
+    ///
+    /// - `0x4e86d0:32-41` — the whole pass is skipped only when the sector has a collidebox
+    ///   (flag `0x1000`) and the sphere at the end of the move sits strictly inside it on every
+    ///   axis; every other sector runs the pass.
+    /// - `0x4e86d0:48-122` — adjoin flag routing: search flag `4` tests every row, otherwise the
+    ///   row's `1`/`2`/`0x10` bits against the search's `0x1100`/`0x100`/`0x200` bits decide
+    ///   doorway (test path) vs wall (solid path) for the surface.
+    /// - `0x4e86d0:53-75` — the radius leg (`sithIntersect_CheckSphereFaceIntersection` at the
+    ///   body's radius; a non-zero radius returns kind 4 **without coverage**) records the `0x40`
+    ///   touch — unless the search is deferred (`flags & 4 && flags & 1`) or the far sector is
+    ///   already in the searched list.
+    /// - `0x4e86d0:77-112` — unless `flags & 2`, a second intersection at radius 0 whose contact
+    ///   centre must land inside the portal polygon (`sithIntersect_TestSphereFaceHit`) records
+    ///   the `0x20` crossing, after the deferred touch when that leg also hits.
+    /// - `0x4e86d0:124-151` — the solid leg: a plane reject (`dot(end − v0, n) <= radius`), then
+    ///   `sithIntersect_CheckSphereFaceIntersectionEx` with coverage and the vertex refinement,
+    ///   then the directional gate `flags & 0x400 || dot(dir, hit_normal) < 0` (`_DAT_00523008`
+    ///   reads 0.0 from the shipped image), recording kind `hit | 2`.
+    ///
+    /// The port keeps solids and portals in two tables, so the file order is a merge by surface
+    /// id; the claims test drops the mirrored portals the engine's per-sector list never contains.
+    /// Both out-distance scratch slots (`local_30`/`local_1c`) survive rejected faces, so they are
+    /// never reset inside the pass.
     #[allow(clippy::too_many_arguments)]
     fn search_for_surface_collisions(
         &self, here: usize, start: [f32; 3], dir: [f32; 3], dist: f32, radius: f32,
@@ -1820,7 +1878,7 @@ impl LevelGeometry {
     ) -> ([f32; 3], usize, f32) {
         let mut state = MoveState {
             pos, sector, vel: *vel, remainder: delta, phys_flags: 0x4a4f,
-            kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+            kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
         };
         let distance = self.move_thing_with(&mut state, delta, radius, 0,
             |state, dir, dist, radius, flags, search| {
@@ -1834,19 +1892,59 @@ impl LevelGeometry {
                 state.sector = far;
             },
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
+            |_| {},
         );
         *vel = state.vel;
         (state.pos, state.sector, distance)
     }
 
-    /// `sithCollision_MoveThing` (0x4e7950): advance, dispatch, then renormalize the remainder.
-    /// Callbacks run synchronously; each search and final containment read the current world.
+    /// `sithCollision_MoveThing` (`0x4e7950`): the whole move loop, transliterated from
+    /// `decomp/004e7950_sithCollision_MoveThing.c` — same constants, same branches, same order.
+    ///
+    /// - `0x4e7950:40-45` — a zero-length move returns 0; `:46-57` the search flags take the
+    ///   engine's ORs (`5` for a thing that cannot collide, `4` for a path-rider, `0x200` for
+    ///   kind 10, `0x800` when nothing set `1`) through `MoveState::search_flags`.
+    /// - `0x4e7950:90-103` — while distance remains and fewer than four rounds ran: save the
+    ///   sub-step's start pose and sector, then ask `search_world` (the
+    ///   `sithCollision_SearchForCollisions` `0x4e8160` call).
+    /// - `0x4e7950:104-127` — consume the record stack nearest first (`sithCollision_PopStack`
+    ///   `0x4e7120`): a kind-`0x18` record loses an equal distance to a kind-`4` one.
+    /// - `0x4e7950:128-134` — a non-zero hit distance advances the thing to `start + hit * dir`,
+    ///   measured from the sub-step start, not the previous record's contact.
+    /// - `0x4e7950:135-139` — the remaining move is `dir * (dist - hit)`, or zero when the hit
+    ///   ate the move. The physflag-`0x20` impulse bleed of `:140-155`/`:197-204` (`+0x228..0x230`,
+    ///   fields only `sithPhysics_UpdatePlayerPhysics` `0x4f6860:30-32,138-149` fills, for
+    ///   flag-`0x20` bodies) is elided: no ported body carries the flag.
+    /// - `0x4e7950:156-196` — dispatch: a `0x20` crossing saves the position, messages a
+    ///   flag-`2` surface and calls `SetSector` (`:165-185`), continuing only when the position
+    ///   changed; a thing or surface solid takes the slide answer (`sithCollision_HandleThingHitSurface`
+    ///   -> `0x4e9090`, `collide_hurt`) as continue/stop (`:158-163`); an item contact answers 0
+    ///   (`0x4fbe10`).
+    /// - `0x4e7950:206-236` — a clean round runs the whole distance and zeroes the remainder; a
+    ///   stopped one renormalizes the remainder into the direction, snaps a `1e-5` (`0x52300c`)
+    ///   length to zero and counts the round. The travelled total takes the last hit (clean: the
+    ///   whole distance); `thingflags & 2` returns at once (`:235`).
+    /// - `0x4e7950:238-250` — past four rounds a physics thing's movement resets
+    ///   (`sithPhysics_ResetThingMovement` `0x4f61a0`: the port's `vel`/`remainder` fields), and
+    ///   a `1e-5` total snaps to zero.
+    /// - `0x4e7950:251-264` — a colliding physics thing that ended outside its sector
+    ///   (`sithIntersect_IsSphereInSector` at radius 0, `0x507f30`) restores the LAST sub-step's
+    ///   start pose and sector through `crossing(None, sector)`; the engine never searches for
+    ///   another sector.
+    /// - `0x4e7950:279-296` — the tail: a physics thing that travelled re-runs FindFloor through
+    ///   `floor_tail` unless the caller passed `0x40`; an unattached (or attach-flag-8) body must
+    ///   also carry physflag `0x40` and a vertical speed in `[-2.0, 0.2]` (`0x523018`/`0x52301c`).
+    ///
+    /// The rider recursion of `:61-88`/`:266-278` (a thing's children move with it, `0x34 & 2`
+    /// damage) has no ported equivalent: no ported thing carries children. Callbacks run
+    /// synchronously; each search and final containment read the current world.
     #[allow(clippy::too_many_arguments)]
     pub fn move_thing_with(
         &self, state: &mut MoveState, delta: [f32; 3], radius: f32, flags: u32,
         mut search_world: impl FnMut(&MoveState, [f32; 3], f32, f32, u32, &mut CollisionSearch),
         mut crossing: impl FnMut(&mut MoveState, Option<usize>, usize),
         mut contains: impl FnMut(&MoveState) -> bool,
+        mut floor_tail: impl FnMut(&mut MoveState),
     ) -> f32 {
         let mut left = (delta[0] * delta[0] + delta[2] * delta[2] + delta[1] * delta[1]).sqrt();
         if left <= 0.0 { return 0.0; }
@@ -1885,6 +1983,9 @@ impl LevelGeometry {
                                 state.sector, sector, state.pos, state.attach.is_some()
                             );
                         }
+                        // `0x4e7950:166-171`: the position is saved before the surface message;
+                        // a surface carrying flag 2 is messaged (`sithCog_SurfaceSendMessage`
+                        // mode 8) before `SetSector` — both live in the `crossing` callback.
                         let before = state.pos.map(f32::to_bits);
                         crossing(state, Some(surface), sector);
                         state.pos.map(f32::to_bits) != before
@@ -1948,122 +2049,235 @@ impl LevelGeometry {
             state.pos = saved.0;
             crossing(state, None, saved.1);
         }
-        // The physics caller runs FindFloor after this return, with freshly borrowed world flags.
+        // `0x4e7950:279-296` — the FindFloor tail.
+        if state.move_type == 1 {
+            if total == 0.0 { return total; }
+            if flags & 0x40 == 0 {
+                let attached = (state.attach.is_some() || state.attach_flags != 0)
+                    && state.attach_flags & 8 == 0;
+                if !attached {
+                    if state.phys_flags & 0x40 == 0 { return total; }
+                    if !(-2.0..=0.2).contains(&state.vel[2]) { return total; }
+                }
+                floor_tail(state);
+            }
+        }
         total
     }
 
-    /// `sithCollision_CollideHurt` (0x4e9090): projection and zero-distance crease response.
+    /// `sithCollision_CollideHurt` (`0x4e9090`): the slide response a solid contact answers with,
+    /// transliterated from `decomp/004e9090_sithCollision_CollideHurt.c` — same constants, same
+    /// branches, same order.
+    ///
+    /// The engine passes the thing, the contact normal, the hit record's distance (`record+0x20`, as
+    /// `sithCollision_HandleThingHitSurface` `0x4e8b40` hands it over) and a damage gate (the
+    /// surface's flags `& 0x80`; the thing-thing handler `0x4e8c50` passes 0). Fields: `+0x10`
+    /// moveType (physics = 1), `+0x1d0` physflags, `+0x1d4` velocity, `+0x268` the remaining-move
+    /// vector. The crease is the engine's static normal (`0x8b4bf0`) plus its active flag
+    /// (`0x8b4be4`), which `sithCollision_MoveThing` (`0x4e7950:89`) clears on entry — one crease
+    /// per move, the port's `crease` argument.
+    ///
+    /// Constants read from the shipped image's `.rdata`: the approach epsilon is `0x52300c`
+    /// (1e-5); the hard-landing curve `(v - 2.5)^2 * 45` past a 1.0 floor is `0x523034`/`0x523038`/
+    /// `0x523014` — the same curve `sithCollision_FallHurt` (`0x4e9550`) applies, and the port
+    /// charges it at the landing path (`fall_damage` on the attach), so that inline branch is a
+    /// deviation-ledger row rather than code here; the movement below is the engine's own.
+    ///
+    /// A fresh face (`distance != 0`, or no crease yet) stores the normal and cancels the
+    /// into-normal components of velocity and remainder scaled by 1.0001 — 1.9 under physflag
+    /// `0x20` — preserving the tangential component exactly. A second face met at distance 0
+    /// cancels plainly (no restitution), folds the stored crease against the new face
+    /// (`rdVector_Normalize3Acc` `0x449b97`), and cancels into that crease too.
     fn collide_hurt(state: &mut MoveState, n: [f32; 3], distance: f32, crease: &mut Option<[f32; 3]>) -> bool {
-        if state.move_type != 1 { return false; }
-        let into = -(state.remainder[1] * n[1] + state.remainder[2] * n[2] + state.remainder[0] * n[0]);
-        if into.abs() <= 1e-5 || into <= 0.0 { return false; }
-        let v_into = -(n[1] * state.vel[1] + n[2] * state.vel[2] + state.vel[0] * n[0]);
+        if state.move_type != 1 {
+            return false;
+        }
+        let raw = -(state.remainder[1] * n[1] + state.remainder[2] * n[2] + state.remainder[0] * n[0]);
+        let mut into = raw;
+        if raw.abs() <= 1e-5 {
+            into = 0.0;
+        }
+        if into <= 0.0 {
+            return false;
+        }
+        let restitution = if state.phys_flags & 0x20 != 0 { 1.9 } else { 1.0001 };
         if distance != 0.0 || crease.is_none() {
             *crease = Some(n);
-            let restitution = if state.phys_flags & 0x20 != 0 { 1.9 } else { 1.0001 };
+            let v_into = -(n[1] * state.vel[1] + n[2] * state.vel[2] + state.vel[0] * n[0]);
             if v_into > 0.0 {
                 let m = restitution * v_into;
-                for k in 0..3 { state.vel[k] = n[k] * m + state.vel[k]; }
+                for k in 0..3 {
+                    state.vel[k] = n[k] * m + state.vel[k];
+                }
             }
             let m = restitution * into;
-            for k in 0..3 { state.remainder[k] = n[k] * m + state.remainder[k]; }
-        } else {
-            for k in 0..3 { state.remainder[k] = n[k] * into + state.remainder[k]; }
-            if v_into > 0.0 {
-                for k in 0..3 { state.vel[k] = n[k] * v_into + state.vel[k]; }
+            for k in 0..3 {
+                state.remainder[k] = n[k] * m + state.remainder[k];
             }
-            let old = crease.unwrap();
-            let fold = -(n[0] * old[0] + n[2] * old[2] + n[1] * old[1]);
-            let mut c = [n[0] * fold + old[0], n[1] * fold + old[1], n[2] * fold + old[2]];
+        } else {
+            for k in 0..3 {
+                state.remainder[k] = n[k] * raw + state.remainder[k];
+            }
+            let v_into = -(n[1] * state.vel[1] + n[2] * state.vel[2] + state.vel[0] * n[0]);
+            if v_into > 0.0 {
+                for k in 0..3 {
+                    state.vel[k] = n[k] * v_into + state.vel[k];
+                }
+            }
+            // `rdVector_Normalize3Acc` (`0x449b97`): scale by 1/length unless the length is 0.0.
+            let stored = crease.unwrap();
+            let fold = -(n[0] * stored[0] + n[2] * stored[2] + n[1] * stored[1]);
+            let mut c = [n[0] * fold + stored[0], n[1] * fold + stored[1], n[2] * fold + stored[2]];
             let length = (c[0] * c[0] + c[2] * c[2] + c[1] * c[1]).sqrt();
             if length != 0.0 {
                 let inverse = 1.0 / length;
-                for component in &mut c { *component *= inverse; }
+                for component in &mut c {
+                    *component *= inverse;
+                }
             }
             *crease = Some(c);
-            let v_into = -(state.vel[1] * c[1] + state.vel[0] * c[0] + state.vel[2] * c[2]);
-            if v_into > 0.0 {
-                for k in 0..3 { state.vel[k] = v_into * c[k] + state.vel[k]; }
+            let v_crease = -(state.vel[1] * c[1] + state.vel[2] * c[2] + state.vel[0] * c[0]);
+            if v_crease > 0.0 {
+                for k in 0..3 {
+                    state.vel[k] = v_crease * c[k] + state.vel[k];
+                }
             }
-            let into = -(state.remainder[2] * c[2] + state.remainder[1] * c[1] + state.remainder[0] * c[0]);
-            if into > 0.0 {
-                for k in 0..3 { state.remainder[k] = into * c[k] + state.remainder[k]; }
+            let into_crease =
+                -(state.remainder[2] * c[2] + state.remainder[1] * c[1] + state.remainder[0] * c[0]);
+            if into_crease > 0.0 {
+                for k in 0..3 {
+                    state.remainder[k] = into_crease * c[k] + state.remainder[k];
+                }
             }
         }
         true
     }
 
-    /// `sithPhysics_FindFloor` (`0x4f5550`) for a body with no physflag `0x80`: search straight down by
-    /// `range`, first with a ray and then with the body's own `radius` (the loop's second pass, which
-    /// actors and players take), and attach to the first record popped. The search carries `0x10`, so
-    /// only floor-flagged surfaces (`surfflags & 1`) and thingflag-`0x40` cog things count; a thing
-    /// record attaches when its **face** normal's z is at least 0.6 (`0x523190`), to that face
-    /// (`sithThing_AttachThingToThingFace`). A record with no mesh/face preserves the existing attach;
-    /// only exhausting both passes detaches (`0x4f5550:79-104`).
+    /// `sithPhysics_FindFloor` (`0x4f5550`), transliterated — the engine's one floor finder and
+    /// seat, ray and radius passes, attach rules, water branch and detach.
+    ///
+    /// - `:27-29` a body with no sector does nothing (the port's sector is always valid).
+    /// - `:30-44` the search direction is world down carrying `0x10`, so only floor-flagged
+    ///   surfaces (`surfflags & 1`) and standable thing faces count; the physflag-`0x80` arm
+    ///   orients the search by the body instead, and no ported body carries `0x80` (the flags
+    ///   this port reads: 0x4a4f, 0x225, 0x201, 0x400000), so that arm is elided.
+    /// - `:45-65` the reach: an unattached, unforced call searches `radius + 0.005`
+    ///   (`0x523184` = −0.005); an attached or forced one searches
+    ///   `max(GetThingHeight, radius + 0.005)` doubled under physflags `0xc0`
+    ///   (`0x52318c` = 1.1 otherwise).
+    /// - `:67-100` two passes: a radius-0 ray, then — only for kinds 2 (item) and 10 (player),
+    ///   with a non-zero radius, and only when the ray attached nothing — the body's radius.
+    /// - `:71-94` the pop loop takes records nearest first: a flag-2 record attaches to its
+    ///   surface (`sithThing_AttachThingToSurface` `0x4cde80` records it without moving the
+    ///   body); a thing record whose face normal's z is at least 0.6 (`0x523190`) attaches to
+    ///   that face (`sithThing_AttachThingToThingFace`), and one with no mesh face stops the
+    ///   search keeping the current attach; records failing the test keep popping.
+    /// - `:102-104` exhausting both passes detaches (`sithThing_DetachThing` `0x4ce380`).
+    /// - `:106-123` the water branch: a **player (kind 10)** in an underwater sector searches
+    ///   0.05 up (`0x3d4ccccd`, radius 0, flag 1) for the nearest crossing whose far sector is
+    ///   dry; the distance is the thing's water-surface field (`+0x48`) and finding none clears
+    ///   it. Any other kind under water returns with the attach untouched.
+    ///
+    /// `force` is the engine's `param_2`: `sithThing_Initialize`'s creation attach passes 1,
+    /// which takes the attached reach regardless of the current attach state.
     pub fn find_floor(
-        &self, sector: usize, pos: [f32; 3], radius: f32, range: f32, gates: Gates<'_>, attach: &mut Option<Attach>,
+        &self, state: &mut MoveState, radius: f32, height: f32, gates: Gates<'_>, force: bool,
     ) {
+        let underwater =
+            gates.sectors.get(state.sector).is_some_and(|flags| flags & SECTOR_UNDERWATER != 0);
+        if underwater {
+            if state.kind == 10 {
+                state.water_surface = self.water_surface(state.sector, state.pos, gates, |s| {
+                    !gates.sectors.get(s).is_some_and(|flags| flags & SECTOR_UNDERWATER != 0)
+                });
+            }
+            return;
+        }
         const DOWN: [f32; 3] = [0.0, 0.0, -1.0];
-        for r in [0.0, radius] {
-            let mut search = CollisionSearch::new();
-            self.search_for_collisions(sector, pos, DOWN, range, r, gates, 0x2812, &mut search);
-            while let Some(record) = search.pop() {
-                let CollisionRecord::Solid(hit) = record else { continue };
-                if let Some(target) = hit.thing {
-                    let Some((mesh, face)) = target.mesh_face else { return };
-                    let things = self.things();
-                    let solid = things.iter().find(|solid| solid.index == target.thing).unwrap();
-                    let face = &solid.mesh.as_ref().unwrap()[mesh][face];
-                    if face.normal[2] < 0.6 {
-                        continue;
+        let flags = 0x2802 | 0x10;
+        let reach = if !force && state.attach.is_none() {
+            radius + 0.005
+        } else if state.phys_flags & 0xc0 == 0 {
+            height.max(radius + 0.005) * 1.1
+        } else {
+            height.max(radius + 0.005) * 2.0
+        };
+        if reach > 0.0 {
+            let mut pass = 0.0f32;
+            loop {
+                let mut search = CollisionSearch::new();
+                self.search_for_collisions(
+                    state.sector, state.pos, DOWN, reach, pass, gates, flags, &mut search,
+                );
+                let pos = state.pos;
+                while let Some(record) = search.pop() {
+                    let CollisionRecord::Solid(hit) = record else { continue };
+                    if let Some(target) = hit.thing {
+                        let Some((mesh, face)) = target.mesh_face else {
+                            // `:79-82` a thing record with no face stops the search.
+                            return;
+                        };
+                        let things = self.things();
+                        let solid = things.iter().find(|solid| solid.index == target.thing).unwrap();
+                        let face = &solid.mesh.as_ref().unwrap()[mesh][face];
+                        if face.normal[2] < 0.6 {
+                            continue;
+                        }
+                        if std::env::var_os("BK_FLOOR_TRACE").is_some() {
+                            eprintln!(
+                                "floor: attach thing {} point {:?} pos {:?} r {pass} reach {reach}",
+                                target.thing, face.point, pos
+                            );
+                        }
+                        state.attach = Some(Attach {
+                            normal: face.normal, point: face.point, surface: None, thing: Some(target), friction: 1.0,
+                        });
+                        return;
                     }
-                    if std::env::var_os("BK_FLOOR_TRACE").is_some() {
-                        eprintln!(
-                            "floor: attach thing {} point {:?} pos {:?} r {radius} range {range}",
-                            target.thing, face.point, pos
-                        );
+                    if let Some(face) = self.face_of.get(&hit.surface).and_then(|i| self.faces.get(*i))
+                        .or_else(|| self.floor_of.get(&hit.surface).and_then(|i| self.floors.get(*i)))
+                        .or_else(|| self.wall_of.get(&hit.surface).and_then(|i| self.walls.get(*i)))
+                    {
+                        // The attach normal (`+0x44`) points into the room, toward the body standing on it.
+                        let normal = if dot(sub(pos, face.point), face.normal) < 0.0 {
+                            [-face.normal[0], -face.normal[1], -face.normal[2]]
+                        } else {
+                            face.normal
+                        };
+                        let surface_flags = self.surface_flags.get(hit.surface).copied().unwrap_or(0);
+                        // `0x4f7430`: surface flags `0x1000` and `0x2000` scale the drag to 0.3 and 0.1.
+                        let friction =
+                            if surface_flags & 0x3000 == 0 { 1.0 } else if surface_flags & 0x2000 == 0 { 0.3 } else { 0.1 };
+                        if std::env::var_os("BK_FLOOR_TRACE").is_some() {
+                            eprintln!(
+                                "floor: attach surface {} owner {:?} normal {:?} point {:?} pos {:?} r {pass} reach {reach} friction {friction}",
+                                hit.surface, self.surface_owner.get(hit.surface), normal, face.point, pos
+                            );
+                        }
+                        state.attach =
+                            Some(Attach { normal, point: face.point, surface: Some(hit.surface), thing: None, friction });
+                        return;
                     }
-                    *attach = Some(Attach {
-                        normal: face.normal, point: face.point, surface: None, thing: Some(target), friction: 1.0,
-                    });
-                    return;
                 }
-                if let Some(face) = self.face_of.get(&hit.surface).and_then(|i| self.faces.get(*i))
-                    .or_else(|| self.floor_of.get(&hit.surface).and_then(|i| self.floors.get(*i)))
-                    .or_else(|| self.wall_of.get(&hit.surface).and_then(|i| self.walls.get(*i)))
-                {
-                    // The attach normal (`+0x44`) points into the room, toward the body standing on it.
-                    let normal = if dot(sub(pos, face.point), face.normal) < 0.0 {
-                        [-face.normal[0], -face.normal[1], -face.normal[2]]
-                    } else {
-                        face.normal
-                    };
-                    let flags = self.surface_flags.get(hit.surface).copied().unwrap_or(0);
-                    // `0x4f7430`: surface flags `0x1000` and `0x2000` scale the drag to 0.3 and 0.1.
-                    let friction = if flags & 0x3000 == 0 { 1.0 } else if flags & 0x2000 == 0 { 0.3 } else { 0.1 };
-                    if std::env::var_os("BK_FLOOR_TRACE").is_some() {
-                        eprintln!(
-                            "floor: attach surface {} owner {:?} normal {:?} point {:?} pos {:?} r {radius} range {range} friction {friction}",
-                            hit.surface, self.surface_owner.get(hit.surface), normal, face.point, pos
-                        );
-                    }
-                    *attach = Some(Attach { normal, point: face.point, surface: Some(hit.surface), thing: None, friction });
-                    return;
+                // `:96-100` the radius pass, kinds 2 and 10 only, once.
+                if pass != 0.0 || !matches!(state.kind, 2 | 10) || radius == 0.0 {
+                    break;
                 }
+                pass = radius;
             }
         }
-        *attach = None;
+        // `:102-104` both passes exhausted: detach.
+        state.attach = None;
     }
 
-    /// One physics step of a body: `sithPhysics_UpdateAttachedThingPhysics` (`0x4f7430`) while it is
-    /// attached, gravity otherwise, then `sithThing_UpdateMove` (`0x4cc4c0`) -> one
+    /// One physics step of a body: `sithPhysics_UpdateThing`'s routing (`0x4f5900:22-34`) — the
+    /// attached hold (`sithPhysics_UpdateAttachedThingPhysics` `0x4f7430`) while it is attached,
+    /// gravity otherwise — then `sithThing_UpdateMove` (`0x4cc4c0`) -> one
     /// `sithCollision_MoveThing` (`0x4e7950`) and its `FindFloor` tail.
     ///
     /// `height` is `sithPhysics_GetThingHeight` (`0x4f6210`): the attached hold keeps the body that far
-    /// above its floor, correcting at most `0.5 * dt` a step (`0x523198`). `thrusting` is the attached
-    /// update's "the body pushes itself" test for the slope pull. Returns the horizontal distance moved,
-    /// whether the sector changed, and whether the body attached this step.
-    #[allow(clippy::too_many_arguments)]
+    /// above its floor. Returns the horizontal distance moved, whether the sector changed, and whether
+    /// the body attached this step.
     pub fn step_body(
         &self,
         gates: Gates<'_>,
@@ -2075,33 +2289,37 @@ impl LevelGeometry {
         radius: f32,
         height: f32,
         gravity: f32,
-        thrusting: bool,
-        wet: bool,
     ) -> (f32, bool, bool) {
         let start = *pos;
         let initial_sector = *sector;
-        // shortcut: MoveState carries the player template's values (physflags 0x4a4f, kind 10,
-        // move 1, collide 1) — pass them through when a non-player body uses step_body; FindFloor's
-        // attached reach doubles under physflags 0xc0 (`0x4f5550:59-64`), and 0x4a4f takes the doubling.
+        // shortcut: the MoveState carries the player template's values (physflags 0x4a4f, kind
+        // 10, move 1, collide 1) — `step_body`'s only callers simulate the walkplayer (the fall
+        // probes and the walker tests), so the values are theirs; FindFloor's attached reach
+        // doubles under physflags 0xc0 (`0x4f5550:59-64`), and 0x4a4f takes the doubling. A
+        // non-player caller must thread its own flags through here instead.
         let mut state = MoveState {
             pos: *pos, sector: *sector, vel: *vel, remainder: [0.0; 3], phys_flags: 0x4a4f,
-            kind: 10, move_type: 1, collide: 1, flags: 0, attach: *attach, attach_flags: 0, touched: Vec::new(),
+            kind: 10, move_type: 1, collide: 1, flags: 0, attach: *attach, attach_flags: 0,
+            touched: Vec::new(), water_surface: None,
         };
-        let delta = Self::prepare_body(&mut state, dt, height, gravity, thrusting, wet);
+        let delta = Self::update_thing_physics(&mut state, dt, radius, height, gravity);
+        let mut landed = false;
         let traveled = self.move_thing_with(&mut state, delta, radius, 0,
             |state, dir, dist, radius, flags, search| {
                 self.search_for_collisions(state.sector, state.pos, dir, dist, radius, gates, flags, search);
             },
             |state, _, far| {
+                // `sithThing_EnterWater` (`0x4cd370`): a physics thing crossing into an
+                // underwater sector halves its vertical speed (`0x522e8c` = 0.25); it does
+                // not detach — FindFloor's water branch owns the seat under water.
                 if state.sector != far && gates.sectors.get(far).is_some_and(|flags| flags & SECTOR_UNDERWATER != 0) {
-                    state.attach = None;
                     state.vel[2] *= 0.25;
                 }
                 state.sector = far;
             },
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
+            |state| { landed = self.finish_body(state, radius, height, gates); },
         );
-        let landed = self.finish_body(&mut state, radius, height, traveled, gates);
         *pos = state.pos;
         *sector = state.sector;
         *vel = state.vel;
@@ -2110,59 +2328,103 @@ impl LevelGeometry {
         (flat, state.sector != initial_sector, landed)
     }
 
-    /// Physics preparation preceding `sithThing_UpdateMove` (0x4cc4c0), without borrowing runtime state.
-    pub fn prepare_body(state: &mut MoveState, dt: f32, height: f32, gravity: f32, thrusting: bool, wet: bool) -> [f32; 3] {
-        if wet { state.attach = None; }
-        let vel = &mut state.vel;
-        let mut delta = match state.attach {
-            Some(a) => {
-                let n = a.normal;
-                let c = n[2];
-                let mut d = dot(sub(state.pos, a.point), n);
-                // Physflag `0x800` (the player's `0x4a4f`): the hold is measured along world up.
-                if state.phys_flags & 0x800 != 0 && c < 1.0 { d /= c; }
-                // The player's slope pull: physflag `0x1`, a tilted floor, and a slippery one or a body
-                // pushing itself (`0x5231bc`/`0x5231c8` clamp `1 - friction` to [0.2, 0.8]).
-                if state.phys_flags & 1 != 0 && c < 1.0 && (a.friction < 0.8 || thrusting) {
-                    vel[2] -= gravity * dt * (1.0 - a.friction).clamp(0.2, 0.8);
-                }
-                let into = dot(*vel, n);
-                if into.abs() > 1e-5 {
-                    *vel = [vel[0] - n[0] * into, vel[1] - n[1] * into, vel[2] - n[2] * into];
-                }
-                for v in vel.iter_mut() {
-                    if v.abs() <= 1e-5 { *v = 0.0; }
-                }
-                let mut delta = [vel[0] * dt, vel[1] * dt, vel[2] * dt];
-                let error = d - height;
-                if error.abs() > 1e-5 { delta[2] -= error.clamp(-dt * 0.5, dt * 0.5); }
-                delta
-            }
+    /// `sithPhysics_UpdateThing`'s routing (`0x4f5900:22-34`) for the move a body assembles this
+    /// step: the attached hold while the body is attached (`0x34 & 3 != 0`), gravity otherwise
+    /// (`sithPhysics_UpdatePlayerPhysics`'s arm for kind 10, `sithPhysics_UpdateThingPhysics`'s
+    /// for the rest — both `vel.z -= gravity * dt`, `0x40000` halving read by the caller). The
+    /// underwater model (`0x4f6d80`) is the player walker's own; a body routed there is handled
+    /// by its caller before this.
+    pub fn update_thing_physics(
+        state: &mut MoveState, dt: f32, radius: f32, height: f32, gravity: f32,
+    ) -> [f32; 3] {
+        match state.attach {
+            Some(_) => Self::update_attached_thing_physics(state, dt, radius, height, gravity),
             None => {
-                vel[2] -= gravity * dt;
-                [vel[0] * dt, vel[1] * dt, vel[2] * dt]
+                state.vel[2] -= gravity * dt;
+                let delta = [state.vel[0] * dt, state.vel[1] * dt, state.vel[2] * dt];
+                if dot(delta, delta) <= 1e-10 { [0.0; 3] } else { delta }
             }
-        };
-        if dot(delta, delta) <= 1e-10 { delta = [0.0; 3]; }
-        delta
+        }
     }
 
-    /// `sithCollision_MoveThing` (0x4e7950) floor tail, using accumulated travel rather than displacement.
-    pub fn finish_body(&self, state: &mut MoveState, radius: f32, height: f32, traveled: f32, gates: Gates<'_>) -> bool {
-        if state.flags & 2 != 0 || state.move_type != 1 || traveled == 0.0 { return false; }
-        let attached = (state.attach.is_some() || state.attach_flags != 0) && state.attach_flags & 8 == 0;
-        if !attached && !(state.phys_flags & 0x40 != 0 && (-2.0..=0.2).contains(&state.vel[2])) {
-            return false;
+    /// `sithPhysics_UpdateAttachedThingPhysics` (`0x4f7430`), the half a ported attached body
+    /// exercises: the attached move's normal rules and the seat hold.
+    ///
+    /// Elided with citations (no ported body reaches them):
+    /// - the attached drag (`:186-208`, `sithPhysics_ApplyDrag` `0x4f5d50` on the velocity at
+    ///   `surfdrag * friction` a step): the walk integration already drags the horizontal axes
+    ///   (`integrate_walk`), so only a vertical residue can persist — bounded by the tail gate's
+    ///   [-2.0, 0.2] landing-speed window and cancelled at the next surface contact;
+    /// - the look and orientation halves (`:43-93`, physflags 0x100/0x1000/0x8000) and the
+    ///   angular integration (`:94-179`): the port's things carry no attached angular state;
+    /// - the walk-thrust arm (`:209-246`, physflag 0x2): the port's walk integration is
+    ///   `integrate_walk` on the control read issue #79 transliterated (`0x4d8a00`);
+    /// - the gravity kick that frees a heavy body off its seat (`:247-421`, gated on
+    ///   `mass != 0` and the sector's thrust holding it): the ported bodies that fall detach
+    ///   through this finder's exhausted passes instead, which is how the player walks off a
+    ///   ledge (no ported body relies on the thrust kick).
+    ///
+    /// What runs, in the engine's order:
+    /// - the attached distance `d` along the surface normal, divided by the normal's z for a
+    ///   physflag-`0x800` body on a tilt (`:76-80`, `_DAT_00523194` = 1.0);
+    /// - the player's slope pull (`:428-438`): kind 10 with physflag 1, a tilted floor, and
+    ///   either a slippery one (friction < 0.8) or a moving body decelerates `vel.z` by
+    ///   `gravity * dt * clamp(1 - friction, 0.2, 0.8)` (`0x5231bc`/`0x5231c8`);
+    /// - the move is the velocity (`:422-427`), its along-normal component is removed
+    ///   (`:439-455`) and tiny components snap to zero (`0x52319c` = 1e-5, `:456-485`);
+    /// - the hold (`:491-535`): the rest is `GetThingHeight` — a ceiling attach under physflag
+    ///   `0x10000` rests at `radius + 0.01` measured along the normal's rise (`0x5231cc` =
+    ///   −0.01) instead — and an error past 1e-5 is corrected into the move by at most
+    ///   `0.5 * dt` (`0x523198`) along the surface normal, negated: straight up for a
+    ///   physflag-`0x800` body (`:517-529`).
+    pub fn update_attached_thing_physics(
+        state: &mut MoveState, dt: f32, radius: f32, height: f32, gravity: f32,
+    ) -> [f32; 3] {
+        let Some(a) = state.attach else { return [0.0; 3] };
+        let n = a.normal;
+        let mut d = dot(sub(state.pos, a.point), n);
+        if state.phys_flags & 0x800 != 0 && n[2] < 1.0 { d /= n[2]; }
+        let moving = state.vel != [0.0; 3];
+        if state.kind == 10
+            && state.phys_flags & 1 != 0
+            && n[2] < 1.0
+            && (a.friction < 0.8 || moving)
+        {
+            state.vel[2] -= gravity * dt * (1.0 - a.friction).clamp(0.2, 0.8);
         }
-        if gates.sectors.get(state.sector).is_some_and(|flags| flags & SECTOR_UNDERWATER != 0) {
-            state.attach = None;
-            return false;
+        let mut mv = state.vel;
+        let into = dot(mv, n);
+        if into.abs() > 1e-5 {
+            mv = [mv[0] - n[0] * into, mv[1] - n[1] * into, mv[2] - n[2] * into];
         }
-        // Flag-8 attachments take the unattached branch (0x4e7950:284); physflag `0x40`
-        // and vertical speed [-2, 0.2] are then both required before FindFloor.
-        let range = if attached { height * 2.0 } else { radius + 0.005 };
+        for v in mv.iter_mut() {
+            if v.abs() <= 1e-5 { *v = 0.0; }
+        }
+        let mut delta = [mv[0] * dt, mv[1] * dt, mv[2] * dt];
+        let error = if state.phys_flags & 0x10000 == 0 {
+            d - height
+        } else {
+            n[2] * d - (radius + 0.01)
+        };
+        if error.abs() > 1e-5 {
+            let correction = error.clamp(-dt * 0.5, dt * 0.5);
+            if state.phys_flags & 0x800 != 0 {
+                delta[2] -= correction;
+            } else {
+                for k in 0..3 {
+                    delta[k] -= n[k] * correction;
+                }
+            }
+        }
+        if dot(delta, delta) <= 1e-10 { [0.0; 3] } else { delta }
+    }
+
+    /// The FindFloor run `move_thing_with`'s tail gate (`0x4e7950:279-296`) hands its callback:
+    /// `sithPhysics_FindFloor` (`0x4f5550`) itself, reach, passes, water branch and detach
+    /// included. Returns whether the body attached this move.
+    pub fn finish_body(&self, state: &mut MoveState, radius: f32, height: f32, gates: Gates<'_>) -> bool {
         let was = state.attach.is_some();
-        self.find_floor(state.sector, state.pos, radius, range, gates, &mut state.attach);
+        self.find_floor(state, radius, height, gates, false);
         !was && state.attach.is_some()
     }
 
@@ -2824,46 +3086,53 @@ impl LevelGeometry {
     }
 
     /// `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`, `sithIntersect.c:58`): is a body of
-    /// `radius` at `pos` still inside `sector`?
+    /// `radius` at `pos` still inside `sector`? One transliteration, in the engine's order:
     ///
-    /// Two parts, in the engine's order. First the sector's collide box (`HASCOLLIDEBOX`, flag
-    /// `0x1000`): if the sphere fits inside it the answer is **yes**, without testing a single
-    /// surface. Only a sphere outside that box is tested against the sector's bounding planes, where
-    /// a distance below the radius means outside. `sithCollision_MoveThing` calls this with radius 0
-    /// to decide whether to undo a move.
+    /// 1. the sector's collide box (`HASCOLLIDEBOX`, sector flag `0x1000` — `Solids::build`
+    ///    stores the box only for such sectors): a sphere that fits inside it is **in**, without
+    ///    testing a single surface;
+    /// 2. the sector's own surface list, where a surface counts when it has `HAS_COLLISION`
+    ///    (`0x4`) or its adjoin row allows movement (`flags & 2`, read at call time so a shut
+    ///    door stops counting): the plane distance `dot(pos - vertex0, normal)` snaps to zero
+    ///    within `1e-5` of it, and a distance below `radius` means outside.
+    ///
+    /// `sithCollision_MoveThing` calls this with radius 0 to decide whether to undo a move.
     pub fn inside_sector(&self, sector: usize, pos: [f32; 3], radius: f32) -> bool {
         self.inside_sector_with_gates(sector, pos, radius, Gates::default())
     }
 
     pub(crate) fn inside_sector_with_gates(&self, sector: usize, pos: [f32; 3], radius: f32, gates: Gates<'_>) -> bool {
+        // 0x507f30:18-24: the collide box, only when the sector flags carry 0x1000. The engine
+        // walks the surfaces when the sphere is outside the box on any axis (`pos - radius <= lo`
+        // or `hi <= pos + radius`), so "fits" is the strict complement.
         if let Some(Some((lo, hi))) = self.boxes.get(sector) {
-            let fits = (0..3).all(|k| pos[k] - radius > lo[k] && pos[k] + radius < hi[k]);
-            if fits {
+            if (0..3).all(|k| pos[k] - radius > lo[k] && pos[k] + radius < hi[k]) {
                 return true;
             }
         }
-        let inside = |normal: [f32; 3], point| {
-            let d = sub(pos, point);
-            let c = -(d[2] * normal[2] + d[1] * normal[1] + d[0] * normal[0]);
-            // `sithIntersect_IsSphereInSector` snaps a plane distance within `1e-5` of zero to zero
-            // (`_DAT_00523288` is 1e-5, `_DAT_00523284` is 0) before the radius test, so a body
-            // resting exactly on its own floor is inside it. Without the band, `floor + radius` as
-            // f32 lands a ten-millionth below the plane and the containment check rejects a body
-            // standing on solid ground (`18Ascend`'s spawn did exactly that, every frame).
-            let c = if c.abs() <= 1e-5 { 0.0 } else { c };
+        // 0x507f30:29-30: a surface counts when its flags carry 0x4 or its adjoin row's flags
+        // carry 0x2. The engine reads the adjoin flags through the surface's live pointer, so the
+        // runtime gates win over the file's word.
+        self.containment.get(sector).is_none_or(|surfaces| surfaces.iter().all(|s| {
+            let adjoin_move = usize::try_from(s.adjoin).is_ok_and(|row| {
+                gates.adjoins.get(row).copied()
+                    .or_else(|| self.adjoin_flags.get(row).copied())
+                    .unwrap_or(ADJOIN_MOVE)
+                    & ADJOIN_MOVE != 0
+            });
+            if s.surfflags & 0x4 == 0 && !adjoin_move {
+                return true;
+            }
+            // 0x507f30:33-45: `dot(pos - vertex0, normal)` (the port's normals point out, so the
+            // sign is flipped), |distance| <= 1e-5 (`_DAT_00523288`) snaps to 0
+            // (`_DAT_00523284`), and a distance below the radius means outside.
+            let d = sub(pos, s.point);
+            let mut c = -(d[0] * s.normal[0] + d[1] * s.normal[1] + d[2] * s.normal[2]);
+            if c.abs() <= 1e-5 {
+                c = 0.0;
+            }
             c >= radius
-        };
-        self.sectors.get(sector).is_none_or(|planes| planes.iter().all(|plane| inside(plane.normal, plane.point)))
-            && self.portals.get(sector).is_none_or(|portals| portals.iter().all(|portal| {
-                let surface = self.adjoin_surface.get(portal.link).copied().unwrap_or(usize::MAX);
-                if self.surface_claims.get(surface).is_some_and(|claims| !claims.contains(&sector)) {
-                    return true;
-                }
-                let flags = self.surface_flags.get(surface).copied().unwrap_or(0);
-                let adjoin = gates.adjoins.get(portal.link).copied()
-                    .or_else(|| self.adjoin_flags.get(portal.link).copied()).unwrap_or(ADJOIN_MOVE);
-                (flags & 4 == 0 && adjoin & ADJOIN_MOVE == 0) || inside(portal.normal, portal.point)
-            }))
+        }))
     }
 
     /// The sector a *body* of `radius` should start in.
@@ -3174,6 +3443,14 @@ pub(crate) fn test_room() -> Solids {
         boxes: Vec::new(),
         hull: Vec::new(),
         floor_of: [(0usize, 0usize)].into_iter().collect(),
+        containment: vec![vec![
+            ContainPlane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 1.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [1.0, 0.0, 0.0], point: [2.0, 0.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [-1.0, 0.0, 0.0], point: [-2.0, 0.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [0.0, 1.0, 0.0], point: [0.0, 2.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [0.0, -1.0, 0.0], point: [0.0, -2.0, 0.0], surfflags: 0x4, adjoin: -1 },
+        ]],
         sectors: vec![vec![
             Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.0], surface: 0 },
             Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 1.0], surface: 3 },
@@ -3251,7 +3528,7 @@ mod tests {
         let mut state = MoveState {
             pos: [0.0, 0.0, 0.0], sector: 0, vel: [0.0; 3], remainder: [1.8, 0.0, 0.0],
             phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0,
-            attach: None, attach_flags: 0, touched: Vec::new(),
+            attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
         };
         let travel = solids.move_thing_with(
             &mut state, [1.8, 0.0, 0.0], 0.065, 0,
@@ -3263,6 +3540,7 @@ mod tests {
             },
             |_, _, _| {},
             |_| true,
+            |_| {},
         );
         assert!((travel - 1.8).abs() < 1e-4, "the walker passes through the item, travel {travel}");
         assert_eq!(state.touched, vec![3], "the contact is recorded for the touch gate");
@@ -3338,6 +3616,9 @@ mod tests {
             sectors: vec![vec![Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surface: usize::MAX }]],
             spheres: vec![([0.0, 0.0, 0.0], 8.0)],
             portals: vec![Vec::new()],
+            containment: vec![vec![
+                ContainPlane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ]],
             floors: Vec::new(),
             walls: Vec::new(),
             wall_of: std::collections::HashMap::new(),
@@ -3490,8 +3771,143 @@ mod tests {
                 ],
                 vec![Portal { adjoin: 1, link: 3, verts: quad(8.0).into_iter().rev().collect(), normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0] }],
             ],
+            containment: vec![
+                vec![ContainPlane { normal: [0.0, 1.0, 0.0], point: [0.0, 0.0, 0.0], surfflags: 0, adjoin: 0 }],
+                vec![
+                    ContainPlane { normal: [0.0, -1.0, 0.0], point: [0.0, 0.0, 0.0], surfflags: 0, adjoin: 1 },
+                    ContainPlane { normal: [0.0, 1.0, 0.0], point: [0.0, 8.0, 0.0], surfflags: 0, adjoin: 2 },
+                ],
+                vec![ContainPlane { normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0], surfflags: 0, adjoin: 3 }],
+            ],
             ..Default::default()
         }
+    }
+
+    /// 03katarn's thin light sector 429 as the shipped JKL places it (world 2 of the episode GOB's
+    /// `jkl\03katarn.jkl`): a 0.10-deep strip (`y −0.70..−0.60`) whose south mouth (surface 3590,
+    /// adjoin row 1159) spans `x 0.431..0.900`, whose north face at `y = −0.600` is the exit portal
+    /// (surface 3593, adjoin row 1161, `x 0.513..0.812`, `z −0.200..0.100`) between two walls
+    /// (surface 3594 `x 0.431..0.555`, surface 3592 `x 0.770..0.900`). Normals point out of the
+    /// claiming sector, as `Solids::build` stores them.
+    fn sliver() -> Solids {
+        let mouth = vec![
+            [0.431, -0.70, -0.20], [0.900, -0.70, -0.20], [0.900, -0.70, 0.80], [0.431, -0.70, 0.80],
+        ];
+        let exit = vec![
+            [0.513, -0.60, -0.20], [0.812, -0.60, -0.20], [0.812, -0.60, 0.10], [0.513, -0.60, 0.10],
+        ];
+        let wall = |x0: f32, x1: f32, surface: usize| Plane {
+            normal: [0.0, 1.0, 0.0],
+            point: [0.5 * (x0 + x1), -0.60, -0.05],
+            surface,
+        };
+        Solids {
+            sectors: vec![
+                Vec::new(),
+                vec![wall(0.431, 0.555, 102), wall(0.770, 0.900, 103)],
+                Vec::new(),
+            ],
+            faces: vec![
+                Face {
+                    normal: [0.0, 1.0, 0.0],
+                    point: [0.493, -0.60, -0.05],
+                    verts: vec![
+                        [0.431, -0.60, -0.20], [0.555, -0.60, -0.20], [0.555, -0.60, 0.10], [0.431, -0.60, 0.10],
+                    ],
+                    surface: 102,
+                },
+                Face {
+                    normal: [0.0, 1.0, 0.0],
+                    point: [0.835, -0.60, -0.05],
+                    verts: vec![
+                        [0.770, -0.60, -0.20], [0.900, -0.60, -0.20], [0.900, -0.60, 0.10], [0.770, -0.60, 0.10],
+                    ],
+                    surface: 103,
+                },
+            ],
+            face_of: std::collections::HashMap::from([(102, 0), (103, 1)]),
+            portals: vec![
+                vec![Portal { adjoin: 1, link: 0, verts: mouth.clone(), normal: [0.0, 1.0, 0.0], point: [0.665, -0.70, 0.30] }],
+                vec![
+                    Portal { adjoin: 0, link: 1, verts: mouth.into_iter().rev().collect(), normal: [0.0, -1.0, 0.0], point: [0.665, -0.70, 0.30] },
+                    Portal { adjoin: 2, link: 2, verts: exit.clone(), normal: [0.0, 1.0, 0.0], point: [0.6625, -0.60, -0.05] },
+                ],
+                vec![Portal { adjoin: 1, link: 3, verts: exit.into_iter().rev().collect(), normal: [0.0, -1.0, 0.0], point: [0.6625, -0.60, -0.05] }],
+            ],
+            adjoin_surface: vec![100, 100, 101, 101],
+            ..Default::default()
+        }
+    }
+
+    /// `sithCollision_SearchForSurfaceCollisions` (`0x4e86d0`) on 03katarn's own sliver numbers:
+    /// every distance below is the engine's arithmetic (`sithIntersect_CheckSphereHit`, `0x508be0`)
+    /// on that geometry, at the player's radius 0.065 and the `MoveThing` search flags a player
+    /// carries (`0x4e7950:46-57`: kind 10 sets `0x200`, no thing-attach leaves `0x1` clear so
+    /// `0x800` is set — `0xA00`).
+    #[test]
+    fn sliver_crossings_follow_the_engine_search_arithmetic() {
+        let solids = sliver();
+        let north = [0.0f32, 1.0, 0.0];
+        let mut search = CollisionSearch::new();
+        let mut run = |sector: usize, start: [f32; 3], distance: f32, search: &mut CollisionSearch| {
+            search.count = 0;
+            solids.search_for_collisions(
+                sector, start, north, distance, 0.065, Gates::default(), 0xA00, search,
+            );
+            let mut records = Vec::new();
+            while let Some(record) = search.pop() {
+                records.push(record);
+            }
+            records
+        };
+        let kinds = |records: &[CollisionRecord]| records.iter().map(|r| r.kind()).collect::<Vec<_>>();
+
+        // The mouth, from the yard: the centre closes `gap0 = 0.02`, the radius leg already
+        // overlaps (its `0x40` touch is consumed by the adjoin expansion, `0x4e8160:71`), and the
+        // crossing (`0x20`) lands at `gap0`.
+        let records = run(0, [0.657, -0.72, -0.08], 0.0258, &mut search);
+        assert_eq!(kinds(&records), vec![0x20], "only the crossing survives the expansion");
+        assert!((records[0].distance() - 0.02).abs() < 1e-6, "the crossing closes 0.02 of plane gap");
+        let CollisionRecord::Crossing { sector, surface, .. } = records[0] else { panic!("not a crossing") };
+        assert_eq!((sector, surface), (1, 100));
+
+        // Under the exit portal's span the strip passes clean: the crossing lands at
+        // `gap0 = 0.022`, and the flanking walls' contact points sit outside their polygons.
+        let records = run(1, [0.657, -0.622, -0.08], 0.0258, &mut search);
+        assert_eq!(kinds(&records), vec![0x20]);
+        assert!((records[0].distance() - 0.022).abs() < 1e-6);
+        let CollisionRecord::Crossing { sector, surface, .. } = records[0] else { panic!("not a crossing") };
+        assert_eq!((sector, surface), (2, 101));
+
+        // `0x508be0`'s own reject: parked 0.04 from the plane with only 0.0258 of move, the
+        // radius-0 leg starves and no `0x20` is recorded — the engine keeps the same silence at
+        // this pose. (The #70 repro parks here: 03katarn things 20/21, the shut `4x3door` leaves
+        // of `03_FRONTDOOR.COG`, hold the body at exactly this gap while the trap surface 2107 —
+        // which alone opens them, through `sithThing_AttachThingToSurface`'s `entered` at
+        // `0x4cde80:50` — lies beyond the door.) Both portals' touches are consumed by the
+        // expansion, so the record list is empty.
+        let records = run(1, [0.657, -0.64, -0.08], 0.0258, &mut search);
+        assert!(records.is_empty(), "both portals touch; neither crossing closes");
+
+        // The corner pose, under wall 3594's span: the exit portal's contact point (x = 0.50)
+        // misses its polygon, so beyond the consumed touches only the wall's overlapping-start
+        // solid lands — at 0.
+        let records = run(1, [0.50, -0.64, -0.08], 0.0258, &mut search);
+        assert_eq!(kinds(&records), vec![0x2 | 0x4]);
+        assert!(records[0].distance().abs() < 1e-6, "an overlapping start hits the wall at 0");
+        let CollisionRecord::Solid(hit) = records[0] else { panic!("not a solid") };
+        assert_eq!(hit.surface, 102);
+
+        // A retail frame's accumulated delta (`1.29 u/s * 0.069 s`, `sithThing_UpdateMove` at
+        // `0x4cc4c0` consuming one frame of the 50 Hz accumulator, `_DAT_005231ac`/`_DAT_005231b0`
+        // = 50.0/0.02 in the shipped image) closes the whole band in one move: the crossing fires
+        // from the deepest both-overlap pose.
+        let records = run(1, [0.657, -0.66, -0.08], 0.089, &mut search);
+        let crossing = records.iter().find_map(|record| match record {
+            CollisionRecord::Crossing { distance, .. } => Some(*distance),
+            _ => None,
+        }).expect("a frame-sized move still records the crossing");
+        assert!((crossing - 0.06).abs() < 1e-6, "the 0.1-wide strip is crossed in one frame's move");
     }
 
     #[test]
@@ -3559,6 +3975,116 @@ mod tests {
         let closed = Gates { sectors: &[], adjoins: &[0] };
         assert!(!room.inside_sector_with_gates(0, outside, 0.0, open));
         assert!(room.inside_sector_with_gates(0, outside, 0.0, closed));
+    }
+
+    /// The floor `18Ascend`/`19A` ship: a slab with flags `0x80005` and file normal `(0, 0, 1)`
+    /// (into the room). `0x507f30:37-42` snaps a plane distance within `1e-5` of zero to zero
+    /// before the `fVar3 < param_2` test, so a body resting a ten-millionth *through* its own
+    /// floor is still inside at radius 0 — `MoveThing`'s containment call.
+    #[test]
+    fn containment_snaps_a_resting_body_onto_its_own_floor() {
+        let mut level = crate::jkl::Level::default();
+        level.vertices = vec![
+            [-2.0, -2.0, -1.3], [2.0, -2.0, -1.3], [2.0, 2.0, -1.3], [-2.0, 2.0, -1.3],
+        ];
+        level.surfaces = vec![crate::jkl::Surface {
+            material: 0,
+            surfflags: 0x80005,
+            geo: 4,
+            adjoin: -1,
+            verts: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+            intensities: vec![1.0; 4],
+            normal: [0.0, 0.0, 1.0],
+        }];
+        level.sectors = vec![crate::jkl::Sector { surfaces: (0, 1), ..Default::default() }];
+        let solids = build(&level);
+
+        assert!(solids.inside_sector(0, [0.0, 0.0, -1.2], 0.0), "a body above the floor is inside");
+        assert!(
+            solids.inside_sector(0, [0.0, 0.0, -1.3 - 3e-6], 0.0),
+            "3e-6 through the floor is inside the 1e-5 snap band"
+        );
+        assert!(
+            !solids.inside_sector(0, [0.0, 0.0, -1.3 - 2e-5], 0.0),
+            "2e-5 through the floor is past the band and outside"
+        );
+    }
+
+    /// The one-sided adjoin pair `03katarn` 3383/3177 (rows 1088/983): the near side's surface
+    /// carries the adjoin row, the far side's surface has adjoin `-1`. `0x507f30:29-30` counts the
+    /// near surface (its row has `MOVE`), so a body past the plane is outside the near sector and
+    /// the far sector's own list has nothing to test.
+    #[test]
+    fn a_body_past_a_one_sided_adjoin_plane_is_outside() {
+        let mut level = crate::jkl::Level::default();
+        level.vertices = vec![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]];
+        let face = |adjoin: i32| crate::jkl::Surface {
+            material: 0,
+            surfflags: 0,
+            geo: 4,
+            adjoin,
+            verts: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+            intensities: vec![1.0; 4],
+            normal: [0.0, -1.0, 0.0],
+        };
+        level.surfaces = vec![face(0), face(-1)];
+        level.sectors = vec![
+            crate::jkl::Sector { surfaces: (0, 1), ..Default::default() },
+            crate::jkl::Sector { surfaces: (1, 1), ..Default::default() },
+        ];
+        level.adjoins = vec![
+            crate::jkl::Adjoin { flags: 0x3, mirror: 1, dist: 0.0 },
+            crate::jkl::Adjoin { flags: 0x3, mirror: 0, dist: 0.0 },
+        ];
+        let solids = build(&level);
+
+        let past = [0.0, 0.1, 0.5];
+        assert!(!solids.inside_sector(0, past, 0.0), "past the move-flagged plane, out of the near sector");
+        assert!(solids.inside_sector(0, [0.0, -0.1, 0.5], 0.0), "on the near side, inside");
+        assert!(
+            solids.inside_sector(1, past, 0.0),
+            "the far side's own surface carries no adjoin row, so nothing counts"
+        );
+        // The row's move flag is read at call time: a shut link stops the surface from counting.
+        let shut = Gates { sectors: &[], adjoins: &[0] };
+        assert!(solids.inside_sector_with_gates(0, past, 0.0, shut), "a shut link does not count the plane");
+    }
+
+    /// `03katarn` sector 429: `FLAGS 0x1000` with a collide box, the thin sliver of #70. A sphere
+    /// that fits the box is in (`0x507f30:18-24`) without a single plane test — here a collision
+    /// floor at z 0.5 that the point at z 0.3 sits below, which the plane walk alone would reject.
+    #[test]
+    fn a_collidebox_sector_accepts_without_plane_tests() {
+        let mut level = crate::jkl::Level::default();
+        level.vertices = vec![
+            [0.430541, -0.70, 0.5], [0.90, -0.70, 0.5], [0.90, -0.60, 0.5], [0.430541, -0.60, 0.5],
+        ];
+        level.surfaces = vec![crate::jkl::Surface {
+            material: 0,
+            surfflags: 0x4,
+            geo: 4,
+            adjoin: -1,
+            verts: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+            intensities: vec![1.0; 4],
+            normal: [0.0, 0.0, 1.0],
+        }];
+        level.sectors = vec![crate::jkl::Sector {
+            flags: 0x1000,
+            surfaces: (0, 1),
+            boundbox: Some(([0.430541, -0.70, -0.199999], [0.90, -0.60, 0.80])),
+            ..Default::default()
+        }];
+        let solids = build(&level);
+
+        let at = [0.65, -0.65, 0.3];
+        assert!(
+            solids.inside_sector(0, at, 0.0),
+            "the box accepts the point without the plane tests"
+        );
+        assert!(
+            !solids.inside_sector(0, at, 0.9),
+            "a sphere too big for the box falls through to the plane walk, which rejects it"
+        );
     }
 
     /// `SearchForSurfaceCollisions` (0x4e86d0) checks the adjoin's movement flag, not sector visibility.
@@ -4614,8 +5140,9 @@ mod tests {
         let side = contact_face([0.8660254, 0.0, 0.5], [0.0; 3]);
         let solids = Solids::default();
         solids.set_things(vec![contact_model(vec![vec![top], vec![side]])]);
-        let mut attach = Some(FLAT);
-        solids.find_floor(0, [0.0, 0.0, 0.05], 0.065, 1.0, Gates::default(), &mut attach);
+        let mut state = floor_state([0.0, 0.0, 0.05], Some(FLAT), 10);
+        solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
+        let attach = state.attach;
         assert_eq!(attach, None, "the later mesh wins its equal-distance hit, then fails floor eligibility");
     }
 
@@ -4625,8 +5152,9 @@ mod tests {
         let top = contact_face([0.0, 0.0, 1.0], [0.0, 0.0, -0.1]);
         let solids = Solids::default();
         solids.set_things(vec![contact_model(vec![vec![side, top]])]);
-        let mut attach = Some(FLAT);
-        solids.find_floor(0, [0.0, 0.0, 0.5], 0.065, 1.0, Gates::default(), &mut attach);
+        let mut state = floor_state([0.0, 0.0, 0.5], Some(FLAT), 10);
+        solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
+        let attach = state.attach;
         assert_eq!(attach, None, "rejecting the selected side must not reveal another face of that mesh");
     }
 
@@ -4637,21 +5165,21 @@ mod tests {
         sphere.mesh = None;
         sphere.z_max = 0.2;
         solids.set_things(vec![sphere]);
-        let mut attach = Some(FLAT);
-        solids.find_floor(0, [0.0, 0.0, 0.3], 0.065, 2.0, Gates::default(), &mut attach);
-        assert_eq!(attach, Some(FLAT), "a faceless thing preserves the existing attachment");
-        attach = None;
-        solids.find_floor(0, [0.0, 0.0, 0.3], 0.065, 2.0, Gates::default(), &mut attach);
-        assert_eq!(attach, None, "a faceless thing must not invent a top-face attachment");
+        let mut state = floor_state([0.0, 0.0, 0.3], Some(FLAT), 10);
+        solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
+        assert_eq!(state.attach, Some(FLAT), "a faceless thing preserves the existing attachment");
+        let mut state = floor_state([0.0, 0.0, 0.3], None, 10);
+        solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
+        assert_eq!(state.attach, None, "a faceless thing must not invent a top-face attachment");
     }
 
     #[test]
     fn floor_ties_keep_the_selected_things_mesh_face_identity() {
         let solids = room();
         solids.set_things(vec![contact_model(vec![vec![contact_face([0.0, 0.0, 1.0], [0.0, 0.0, -1.0])]])]);
-        let mut attach = None;
-        solids.find_floor(0, [0.0; 3], 0.065, 2.0, Gates::default(), &mut attach);
-        let attach = attach.expect("the selected mesh face is a floor");
+        let mut state = floor_state([0.0, 0.0, -0.8], Some(FLAT), 10);
+        solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
+        let attach = state.attach.expect("the selected mesh face is a floor");
         assert_eq!(attach.thing, Some(ThingHit { thing: 77, mesh_face: Some((0, 0)), item: false }));
         assert_eq!(attach.surface, None, "the earlier thing face wins a tie with the sector floor");
         assert_eq!(attach.normal, [0.0, 0.0, 1.0]);
@@ -4660,40 +5188,123 @@ mod tests {
     const FLAT: Attach = Attach { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, -1.0], surface: Some(0), thing: None, friction: 1.0 };
 
     /// `0x4f7430`: the hold moves an attached body toward `GetThingHeight` by at most `0.5 * dt`
-    /// (`0x523198`) a step, and the velocity loses its component along the floor normal.
+    /// (`0x523198`) a step, and the *move* loses its component along the floor normal
+    /// (`:439-455`) — the velocity field itself keeps it, as in the engine.
     #[test]
-    fn the_attached_hold_is_clamped_and_the_velocity_projected() {
+    fn the_attached_hold_is_clamped_and_the_move_projected() {
         let solids = room();
         let (mut sector, mut pos, mut vel, mut attach) = (0usize, [0.0f32, 0.0, -0.5], [1.0f32, 0.0, -3.0], Some(FLAT));
-        solids.step_body(Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, 0.02, 0.065, 0.12, 4.0, false, false);
-        assert_eq!(vel, [1.0, 0.0, 0.0], "the floor-normal speed survived");
+        solids.step_body(Gates::default(), &mut sector, &mut pos, &mut vel, &mut attach, 0.02, 0.065, 0.12, 4.0);
+        assert_eq!(vel, [1.0, 0.0, -3.0], "the engine never projects the velocity field itself");
         assert!((pos[2] - (-0.5 - 0.01)).abs() < 1e-6, "the hold moved {} in one 0.02 step, not 0.01", -0.5 - pos[2]);
         assert!((pos[0] - 0.02).abs() < 1e-6, "the walk moved {}", pos[0]);
         // Within one step's clamp, the hold lands on the height exactly.
         let mut pos = [0.0f32, 0.0, -1.0 + 0.125];
-        solids.step_body(Gates::default(), &mut sector, &mut pos, &mut [0.0; 3], &mut Some(FLAT), 0.02, 0.065, 0.12, 4.0, false, false);
+        solids.step_body(Gates::default(), &mut sector, &mut pos, &mut [0.0; 3], &mut Some(FLAT), 0.02, 0.065, 0.12, 4.0);
         assert!((pos[2] - (-1.0 + 0.12)).abs() < 1e-6, "held at {}", pos[2]);
     }
 
-    /// `0x4f5550`: an unattached body searches `moveSize + 0.005` (`0x523184`) down, an attached one
-    /// `2 * GetThingHeight` (physflags `0xc0`), and only a floor-flagged surface attaches.
+    /// `0x4f7430:491-535`: the hold's rest is `GetThingHeight`, its correction runs along the
+    /// surface normal — straight up for a physflag-`0x800` body on a tilt (`:76-80` divides the
+    /// distance by the normal's rise first) — and a ceiling attach under physflag `0x10000` rests
+    /// at `radius + 0.01` along the rise (`0x5231cc`).
+    #[test]
+    fn the_hold_corrects_along_the_normal_or_world_up_by_physflag() {
+        let slope = Attach { normal: [0.0, -0.70710678, 0.70710678], point: [0.0, 0.0, 0.0], surface: Some(0), thing: None, friction: 1.0 };
+        let mut state = floor_state([0.0, 0.0, 0.2], Some(slope), 0);
+        state.phys_flags = 0;
+        let delta = Solids::update_attached_thing_physics(&mut state, 0.02, 0.065, 0.12, 4.0);
+        // d = 0.2 * cos45 = 0.14142; error = 0.02142; clamp 0.01 along the normal.
+        assert!((delta[1] - 0.00710678).abs() < 1e-4 && (delta[2] + 0.00710678).abs() < 1e-4,
+            "the correction follows the slope normal: {delta:?}");
+        let mut state = floor_state([0.0, 0.0, 0.2], Some(slope), 0);
+        state.phys_flags = 0x800;
+        let delta = Solids::update_attached_thing_physics(&mut state, 0.02, 0.065, 0.12, 4.0);
+        // d / cos45 = 0.2; error = 0.08; clamp 0.01 straight up.
+        assert!((delta[1]).abs() < 1e-6 && (delta[2] + 0.01).abs() < 1e-6,
+            "the 0x800 hold is vertical: {delta:?}");
+        let ceiling = Attach { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 1.0], surface: Some(0), thing: None, friction: 1.0 };
+        let mut state = floor_state([0.0, 0.0, 0.9], Some(ceiling), 0);
+        state.phys_flags = 0x10000;
+        let delta = Solids::update_attached_thing_physics(&mut state, 0.02, 0.065, 0.12, 4.0);
+        // rise * d - (radius + 0.01) = -0.1 - 0.075 = -0.175; clamp -0.01 along the normal.
+        assert!((delta[2] + 0.01).abs() < 1e-6, "the ceiling rest hangs below its seat: {delta:?}");
+    }
+
+    /// A test body for the floor finder: the player's own shape (kind 10, physflags 0x4a4f)
+    /// unless a case says otherwise.
+    fn floor_state(pos: [f32; 3], attach: Option<Attach>, kind: u32) -> MoveState {
+        MoveState {
+            pos, sector: 0, vel: [0.0; 3], remainder: [0.0; 3], phys_flags: 0x4a4f,
+            kind, move_type: 1, collide: 1, flags: 0, attach, attach_flags: 0,
+            touched: Vec::new(), water_surface: None,
+        }
+    }
+
+    /// `0x4f5550:45-65`: an unattached body searches `moveSize + 0.005` (`0x523184`) down, an
+    /// attached one `max(GetThingHeight, moveSize + 0.005)` — doubled under physflags `0xc0`
+    /// (`0x52318c` = 1.1 otherwise) — and only a floor-flagged surface attaches.
     #[test]
     fn find_floor_reaches_by_attach_state_and_takes_only_floors() {
         let mut solids = room();
         let pos = [0.0f32, 0.0, -1.0 + 0.2];
-        let mut attach = None;
-        solids.find_floor(0, pos, 0.065, 0.065 + 0.005, Gates::default(), &mut attach);
-        assert_eq!(attach, None, "0.2 is past the unattached reach");
-        solids.find_floor(0, pos, 0.065, 0.12 * 2.0, Gates::default(), &mut attach);
-        let floor = attach.expect("the attached reach finds the floor");
+        let mut state = floor_state(pos, None, 10);
+        solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
+        assert_eq!(state.attach, None, "0.2 is past the unattached reach of 0.07 to contact");
+        let mut state = floor_state(pos, Some(FLAT), 10);
+        solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
+        let floor = state.attach.expect("the attached reach finds the floor");
         assert_eq!(floor.normal, [0.0, 0.0, 1.0]);
         assert_eq!(floor.surface, Some(0));
         solids.surface_flags = vec![0x4];
-        solids.find_floor(0, pos, 0.065, 0.24, Gates::default(), &mut attach);
-        assert_eq!(attach, None, "a surface without flag 1 attached");
+        let mut state = floor_state(pos, Some(FLAT), 10);
+        solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
+        assert_eq!(state.attach, None, "a surface without flag 1 attached");
         solids.surface_flags = vec![0x2001];
-        solids.find_floor(0, pos, 0.065, 0.24, Gates::default(), &mut attach);
-        assert_eq!(attach.map(|a| a.friction), Some(0.1));
+        let mut state = floor_state(pos, Some(FLAT), 10);
+        solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
+        assert_eq!(state.attach.map(|a| a.friction), Some(0.1));
+    }
+
+    /// `0x4f5550:96-100`: only kinds 2 and 10 retry the search at the body's radius — a floor the
+    /// straight-down ray misses but the sphere reaches.
+    #[test]
+    fn the_radius_pass_is_for_items_and_players_only() {
+        let solids = Solids::default();
+        // A floor top whose polygon starts 0.03 east of the body: the radius-0 ray lands outside
+        // it, the 0.065 sphere reaches its edge.
+        solids.set_things(vec![ThingSolid {
+            index: 77, centre: [0.0; 3], origin: [0.0; 3], radius: 4.0,
+            z_min: -4.0, z_max: 4.0, sector: 0, half: None, yaw: 0.0,
+            mesh: Some(vec![vec![Face {
+                normal: [0.0, 0.0, 1.0],
+                point: [0.0, 0.0, -0.1],
+                verts: vec![[0.03, -2.0, -0.1], [2.0, -2.0, -0.1], [2.0, 2.0, -0.1], [0.03, 2.0, -0.1]],
+                surface: usize::MAX,
+            }]].into()),
+            floor: true, kind: 7, item: false,
+        }]);
+        let mut state = floor_state([0.0, 0.0, 0.0], None, 0);
+        solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
+        assert_eq!(state.attach, None, "a kind-0 body never takes the radius pass");
+        let mut state = floor_state([0.0, 0.0, 0.0], None, 10);
+        solids.find_floor(&mut state, 0.065, 0.12, Gates::default(), false);
+        assert!(state.attach.is_some(), "the player's radius pass reaches the offset floor");
+    }
+
+    /// `0x4f5550:106-123`: under water the player (kind 10) runs the surface search and no other
+    /// kind's attach is touched at all.
+    #[test]
+    fn under_water_only_the_player_runs_the_surface_branch() {
+        let solids = room();
+        let gates = Gates { sectors: &[SECTOR_UNDERWATER], adjoins: &[] };
+        let mut state = floor_state([0.0, 0.0, -0.5], Some(FLAT), 3);
+        solids.find_floor(&mut state, 0.065, 0.12, gates, false);
+        assert_eq!(state.attach, Some(FLAT), "a non-player keeps its seat under water");
+        let mut state = floor_state([0.0, 0.0, -0.5], Some(FLAT), 10);
+        solids.find_floor(&mut state, 0.065, 0.12, gates, false);
+        assert_eq!(state.attach, Some(FLAT), "the water branch never detaches");
+        assert_eq!(state.water_surface, None, "no dry crossing above means no surface hold");
     }
     #[test]
     fn adjoin_discovery_finds_a_thing_outside_the_crossing_polygon() {
@@ -4750,7 +5361,7 @@ mod tests {
         let solids = corridor();
         let mut state = MoveState {
             pos: [0.0, -1.0, 0.5], sector: 0, vel: [0.0, 1.0, 0.0], remainder: [0.0; 3],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
         };
         let traveled = solids.move_thing_with(&mut state, [0.0, 4.0, 0.0], 0.1, 0,
             |state, dir, distance, radius, flags, search| {
@@ -4764,11 +5375,136 @@ mod tests {
                 }
             },
             |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, Gates::default()),
+            |_| {},
         );
         assert_eq!(state.pos, [0.0, -1.0, 0.5]);
         assert_eq!(traveled, 4.0);
         assert_eq!(state.vel, [0.0; 3]);
         assert_eq!(state.remainder, [0.0; 3]);
+    }
+
+    /// `0x4e7950:104-134`: the stack is consumed nearest first, and each consumed record's hit
+    /// distance advances the thing from the SUB-STEP start — not from the previous record's
+    /// contact. The crossing at 0.3 only switches the sector (the position is unchanged, so the
+    /// loop continues, `:177-184`); the solid at 0.6 stops the round with `start + 0.6 * dir`.
+    #[test]
+    fn records_are_consumed_nearest_first_with_the_advance_from_the_sub_step_start() {
+        let solids = room();
+        let mut state = MoveState {
+            pos: [0.0, -1.0, 0.5], sector: 0, vel: [0.0, 1.0, 0.0], remainder: [0.0; 3],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
+        };
+        let mut first = true;
+        let traveled = solids.move_thing_with(&mut state, [0.0, 1.0, 0.0], 0.1, 0,
+            |_, _, _, _, _, search| {
+                if first {
+                    first = false;
+                    search.push(CollisionRecord::Crossing { distance: 0.3, sector: 7, surface: 0 });
+                    search.push(CollisionRecord::Solid(Sweep {
+                        distance: 0.6, normal: [0.0, -1.0, 0.0], point: [0.0, 1.0, 0.5],
+                        sector: 0, surface: 5, kind: 4, thing: None,
+                    }));
+                }
+            },
+            |state, surface, far| { if surface.is_some() { state.sector = far; } },
+            |_| true,
+            |_| {},
+        );
+        assert_eq!(state.sector, 7, "the nearer crossing was consumed before the solid");
+        assert!(
+            (state.pos[1] - -0.4).abs() < 1e-3,
+            "the advance is start + 0.6 * dir, not 0.3 + 0.6: {}",
+            state.pos[1]
+        );
+        assert!((traveled - 0.6).abs() < 1e-2, "the round's total is the hit distance: {traveled}");
+    }
+
+    /// `0x4e7950:251-264`: when the tail's containment (`IsSphereInSector` at radius 0) fails,
+    /// the thing's pose AND sector are restored from the LAST sub-step's start — the engine
+    /// never searches for another sector. The move itself still reports its travel.
+    #[test]
+    fn containment_failure_restores_the_last_sub_step_start() {
+        let solids = corridor();
+        let mut state = MoveState {
+            pos: [0.0, -1.0, 0.5], sector: 0, vel: [0.0, 1.0, 0.0], remainder: [0.0; 3],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
+        };
+        let traveled = solids.move_thing_with(&mut state, [0.0, 2.0, 0.0], 0.1, 0,
+            |state, dir, distance, radius, flags, search| {
+                solids.search_for_collisions(state.sector, state.pos, dir, distance, radius, Gates::default(), flags, search);
+            },
+            |state, _, far| { state.sector = far; },
+            |_| false,
+            |_| {},
+        );
+        assert_eq!(traveled, 2.0, "the move completed before the tail undid the pose");
+        assert_eq!(state.pos, [0.0, -1.0, 0.5]);
+        assert_eq!(state.sector, 0, "the restore returns the sub-step start sector");
+    }
+
+    /// `0x4e7950:279-296`: the tail runs FindFloor only for a physics thing that travelled,
+    /// without caller flag `0x40`, and — unattached, including attach-flag 8 (`:284`) — only
+    /// under physflag `0x40` with a vertical speed in `[-2.0, 0.2]` (`0x523018`/`0x52301c`);
+    /// an attached body always re-finds its floor.
+    #[test]
+    fn the_find_floor_tail_gates_on_travel_attachment_and_landing_speed() {
+        let solids = room();
+        let run = |attach: Option<Attach>, attach_flags: u32, phys_flags: u32, vel: [f32; 3], flags: u32| {
+            let mut state = MoveState {
+                pos: [0.0, 0.0, 0.0], sector: 0, vel, remainder: [0.0; 3],
+                phys_flags, kind: 10, move_type: 1, collide: 1, flags: 0,
+                attach, attach_flags, touched: Vec::new(), water_surface: None,
+            };
+            let mut ran = false;
+            solids.move_thing_with(&mut state, [0.0, 1.0, 0.0], 0.1, flags,
+                |_, _, _, _, _, _| {},
+                |_, _, _| {},
+                |_| true,
+                |_| { ran = true; },
+            );
+            ran
+        };
+        assert!(run(None, 0, 0x4a4f, [0.0, 1.0, -1.0], 0), "physflag 0x40 and a landing speed find the floor");
+        assert!(!run(None, 0, 0x4a4f & !0x40, [0.0, 1.0, -1.0], 0), "no physflag 0x40, no search");
+        assert!(!run(None, 0, 0x4a4f, [0.0, 1.0, -3.0], 0), "falling faster than -2.0, no search");
+        assert!(!run(None, 0, 0x4a4f, [0.0, 1.0, -1.0], 0x40), "caller flag 0x40 skips the tail");
+        assert!(!run(Some(FLAT), 8, 0, [0.0, 1.0, -1.0], 0), "attach flag 8 takes the unattached branch");
+        assert!(run(Some(FLAT), 8, 0x40, [0.0, 1.0, -1.0], 0), "attach flag 8 with physflag 0x40 and the band searches");
+        assert!(run(Some(FLAT), 0, 0, [0.0, 1.0, -9.0], 0), "an attached body always re-finds its floor");
+    }
+
+    /// `0x4e7950` has no lateral step: `sithThing_UpdateMove` (`0x4cc4c0`) hands the sphere one
+    /// move, and the slide (`0x4e9090`) is the only wall answer, so a riser is a wall to a body
+    /// whose span meets it (`0x508be0`: the plane gap closes at `above - radius`) and open air to
+    /// one whose contact centre sits above its top edge (the coverage test, `0x508990`). Nothing
+    /// in the loop may lift the body over it.
+    #[test]
+    fn a_riser_blocks_a_body_below_its_top_and_passes_one_above_it() {
+        let mut solids = room();
+        solids.sectors[0].push(Plane {
+            normal: [0.0, 1.0, 0.0], point: [0.0, 1.0, -0.75], surface: 9,
+        });
+        solids.faces.push(Face {
+            normal: [0.0, 1.0, 0.0],
+            point: [0.0, 1.0, -0.75],
+            verts: vec![[-1.0, 1.0, -1.0], [1.0, 1.0, -1.0], [1.0, 1.0, -0.5], [-1.0, 1.0, -0.5]],
+            surface: 9,
+        });
+        solids.face_of.insert(9, solids.faces.len() - 1);
+        let gates = Gates { sectors: &[], adjoins: &[] };
+        // Below the top: the sphere's span meets the face, so the plane gap (1.0 - 0.5 - 0.1)
+        // stops the body at the contact, sliding, with z untouched.
+        let (pos, _, _) = solids.move_thing(0, [0.0, 0.5, -0.7], [0.0, 1.0, 0.0], 0.1, gates, &mut [0.0, 1.0, 0.0]);
+        assert!(
+            (pos[1] - 0.9).abs() < 1e-3,
+            "the riser stopped the body at the sphere contact: {}",
+            pos[1]
+        );
+        assert_eq!(pos[2], -0.7, "no lateral step: the body was not lifted over the riser");
+        // Above the top: the contact centre is past the face's polygon, so no record at all.
+        let (pos, _, _) = solids.move_thing(0, [0.0, 0.5, -0.3], [0.0, 1.0, 0.0], 0.1, gates, &mut [0.0, 1.0, 0.0]);
+        assert!((pos[1] - 1.5).abs() < 1e-5, "a body above the riser's top edge walks over it: {}", pos[1]);
+        assert_eq!(pos[2], -0.3);
     }
 
     #[test]
@@ -4778,29 +5514,24 @@ mod tests {
         assert_eq!(traveled, 0.0);
     }
 
+    /// The FindFloor run itself (the gate lives in `move_thing_with` now): an attached body
+    /// re-searches at `2 * GetThingHeight` and can move to a new floor; the unattached reach is
+    /// `moveSize + 0.005`.
     #[test]
-    fn floor_tail_requires_physflag_40_unless_attached_without_flag_8() {
+    fn the_floor_tail_run_respects_the_attach_state() {
         let solids = room();
         let mut state = MoveState {
             pos: [0.0, 0.0, -0.94], sector: 0, vel: [0.0; 3], remainder: [0.0; 3],
-            phys_flags: 0, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+            phys_flags: 0, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
         };
-        solids.finish_body(&mut state, 0.065, 0.12, 1.0, Gates::default());
-        assert_eq!(state.attach, None, "an unattached body without physflag 0x40 must not acquire a floor");
-
         let prior = Some(Attach { surface: Some(77), ..FLAT });
         state.attach = prior;
-        solids.finish_body(&mut state, 0.065, 0.12, 1.0, Gates::default());
-        assert_eq!(state.attach.unwrap().surface, Some(0), "ordinary attachments still search with physflag 0x40 clear");
-
-        state.attach = prior;
-        state.attach_flags = 8;
-        solids.finish_body(&mut state, 0.065, 0.12, 1.0, Gates::default());
-        assert_eq!(state.attach, prior, "flag-8 attachments use the unattached guard and must retain their support");
+        solids.finish_body(&mut state, 0.065, 0.12, Gates::default());
+        assert_eq!(state.attach.unwrap().surface, Some(0), "an attached body re-searches at 2 * GetThingHeight");
 
         state.attach = None;
         state.phys_flags = 0x40;
-        assert!(solids.finish_body(&mut state, 0.065, 0.12, 1.0, Gates::default()));
+        assert!(solids.finish_body(&mut state, 0.065, 0.12, Gates::default()));
         assert_eq!(state.attach.unwrap().surface, Some(0));
     }
 
@@ -4808,11 +5539,123 @@ mod tests {
     fn a_small_nonzero_folded_crease_still_projects_velocity_and_remainder() {
         let mut state = MoveState {
             pos: [0.0; 3], sector: 0, vel: [-1.0, 0.0, 0.0], remainder: [-1.0, 0.0, 0.0],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
         };
         assert!(Solids::collide_hurt(&mut state, [1.0, 1e-7, 0.0], 0.0, &mut Some([1.0, 0.0, 0.0])));
         assert_eq!(state.vel, [0.0; 3]);
         assert_eq!(state.remainder, [0.0; 3]);
+    }
+
+    /// `sithCollision_CollideHurt` (`0x4e9090:24-41`): a fresh face cancels only the into-normal
+    /// component. The tangential component of velocity and remainder survives, and the cancelled
+    /// component comes back as `(1.0001 - 1) * into` — the engine's slide restitution leaves a hair
+    /// of outward push (`0x4e9090:38-41` reads 1.0001 unless physflag `0x20` is set).
+    #[test]
+    fn a_single_face_slide_preserves_the_tangential_component() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [-1.0, 0.5, 0.0], remainder: [-1.0, 0.5, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
+        };
+        let mut crease = None;
+        // A west wall's normal points east, into the room; the body moves north-west into it.
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease));
+        assert_eq!(crease, Some([1.0, 0.0, 0.0]), "the fresh face stores the crease normal");
+        assert_eq!(state.vel[1], 0.5, "the tangential velocity component is untouched");
+        assert_eq!(state.remainder[1], 0.5, "the tangential remainder component is untouched");
+        assert!((state.vel[0] - 0.0001).abs() < 1e-6, "{}", state.vel[0]);
+        assert!((state.remainder[0] - 0.0001).abs() < 1e-6, "{}", state.remainder[0]);
+        assert_eq!(state.vel[2], 0.0);
+        assert_eq!(state.remainder[2], 0.0);
+    }
+
+    /// The physflag-`0x20` bounce (`0x4e9090:38-41`): the same contact reflects the into-normal
+    /// component at restitution 1.9 instead of cancelling it.
+    #[test]
+    fn physflag_0x20_bounces_at_restitution_1_9() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [-1.0, 0.5, 0.0], remainder: [-1.0, 0.0, 0.0],
+            phys_flags: 0x20, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
+        };
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut None));
+        assert!((state.vel[0] - 0.9).abs() < 1e-6, "1.9 * 1 - 1 reflected: {}", state.vel[0]);
+        assert!((state.remainder[0] - 0.9).abs() < 1e-6, "{}", state.remainder[0]);
+        assert_eq!(state.vel[1], 0.5, "even the bounce keeps the tangential component");
+    }
+
+    /// The two-face crease (`0x4e9090:71-112`): a second face met at distance 0 folds the stored
+    /// normal against itself (`rdVector_Normalize3Acc` `0x449b97`) and cancels into that crease.
+    /// With `n1 = +x` and `n2 = (x+y)/sqrt(2)` the fold is `normalize(n1 - n2 * (n2 . n1)) =
+    /// (x - y)/sqrt(2)`, and a remainder the first face slid to `[0.0001, -1, 0]` ends tangent to
+    /// the second face, riding the crease.
+    #[test]
+    fn a_second_face_at_zero_distance_folds_the_crease() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [0.0; 3], remainder: [-1.0, -1.0, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
+        };
+        let mut crease = None;
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease));
+        assert!((state.remainder[0] - 0.0001).abs() < 1e-6, "{}", state.remainder[0]);
+        assert_eq!(state.remainder[1], -1.0);
+
+        let diag = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(Solids::collide_hurt(&mut state, [diag, diag, 0.0], 0.0, &mut crease));
+        let folded = crease.unwrap();
+        assert!((folded[0] - diag).abs() < 1e-6, "the fold is normalize([0.5, -0.5, 0]): {}", folded[0]);
+        assert!((folded[1] + diag).abs() < 1e-6, "{}", folded[1]);
+        assert_eq!(folded[2], 0.0);
+        // The remainder is tangent to the second face and parallel to the crease: the into-n2
+        // component `FRAC_1_SQRT_2 * (1 - 0.0001)` is gone, leaving [0.50005, -0.50005, 0].
+        let tangent = state.remainder[0] * diag + state.remainder[1] * diag;
+        assert!(tangent.abs() < 1e-4, "tangent to the second face: {tangent}");
+        assert!((state.remainder[0] - 0.50005).abs() < 1e-4, "{}", state.remainder[0]);
+        assert!((state.remainder[1] + 0.50005).abs() < 1e-4, "{}", state.remainder[1]);
+        // Its into-crease component is negative (it rides the crease outward), so the final
+        // cancellation (`0x4e9090:102-112`) does not fire — the direction stands.
+        let along = state.remainder[0] * folded[0] + state.remainder[1] * folded[1];
+        assert!(along > 0.0, "parallel to the folded crease: {along}");
+    }
+
+    /// `0x4e9090:42` gates the crease on `distance == 0`: a second face met at a nonzero distance
+    /// starts a fresh slide instead — the stored crease is replaced and restitution applies.
+    #[test]
+    fn a_second_face_at_nonzero_distance_starts_a_fresh_crease() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [0.0; 3], remainder: [-1.0, -1.0, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
+        };
+        let mut crease = None;
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease));
+        // The first slide left the remainder at [0.0001, -1, 0]; the second face still has an
+        // approach of 1 along its normal, so the fresh branch runs with restitution.
+        assert!(Solids::collide_hurt(&mut state, [0.0, 1.0, 0.0], 0.5, &mut crease));
+        assert_eq!(crease, Some([0.0, 1.0, 0.0]), "the fresh branch replaced the stored normal");
+        assert!((state.remainder[0] - 0.0001).abs() < 1e-6, "{}", state.remainder[0]);
+        // The crease branch would cancel exactly (leaving 0); restitution leaves 0.0001.
+        assert!((state.remainder[1] - 0.0001).abs() < 1e-6, "{}", state.remainder[1]);
+    }
+
+    /// `0x4e9090:28-37`: an approach at or under the engine's 1e-5 epsilon (`0x52300c`) is zeroed
+    /// and refused — no slide, no crease. A move away from the face (negative into-normal) and a
+    /// non-physics mover are refused the same way (`0x4e9090:21-23`).
+    #[test]
+    fn an_approach_under_the_engine_epsilon_or_away_is_refused() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [-1.0, 0.0, 0.0], remainder: [-5e-6, 1.0, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None,
+        };
+        let mut crease = None;
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease));
+        assert_eq!(crease, None);
+        assert_eq!(state.remainder, [-5e-6, 1.0, 0.0], "the state is untouched");
+        assert_eq!(state.vel, [-1.0, 0.0, 0.0]);
+
+        state.remainder = [1.0, 0.0, 0.0];
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease), "moving away");
+
+        state.remainder = [-1.0, 0.0, 0.0];
+        state.move_type = 0;
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease), "not a physics mover");
     }
 
     #[test]
