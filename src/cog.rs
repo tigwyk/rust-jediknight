@@ -1362,6 +1362,12 @@ impl Vm {
         if !matches!(&run, Err(e) if e == SLEEPING) {
             self.path.pop();
         }
+        // The engine's saved statement pointer walks out of a finished arm into the rest of this
+        // list: a `Sleep` as an arm's last statement used to end the label at the `if` itself, and
+        // every statement after the enclosing `if` was skipped (#84).
+        if matches!(run, Ok(Flow::Next)) {
+            return self.run_from(cog, body, index + 1);
+        }
         run
     }
 
@@ -1941,6 +1947,24 @@ end
         vm.now += 1.0;
         vm.run_label(&cog, "wait_a_bit").expect("resumes");
         assert_eq!(vm.var("x"), Value::Num(1.0), "the callee resumed past its own continuation");
+    }
+
+    /// A `Sleep` as an `if` arm's **last** statement must resume at the statement after the whole
+    /// `if` in the parent list — not exit the parent list. #84: the resume skipped every statement
+    /// that followed the enclosing `if`.
+    #[test]
+    fn a_sleep_at_an_if_arms_end_resumes_in_the_parent_list() {
+        let cog = parse(
+            "symbols\nfloat tail=0\nfloat tail2=0\nend\ncode\nstartup:\n\tif (1)\n\t{\n\t\tSleep(0.5);\n\t}\n\ttail = 1;\n\ttail2 = 2;\n\treturn;\nend\n",
+        )
+        .expect("parses");
+        let mut vm = Vm::new();
+        vm.run_label(&cog, "startup").expect("reaches the sleep");
+        assert!(vm.sleeping(), "`sleep` did not suspend the label");
+        vm.now += 1.0;
+        vm.run_label(&cog, "startup").expect("resumes");
+        assert_eq!(vm.var("tail"), Value::Num(1.0), "the statement after the `if` never ran");
+        assert_eq!(vm.var("tail2"), Value::Num(2.0), "the parent list ended early");
     }
 
     /// A pending `sleep` belongs to its own label: running a **different** message label while the
