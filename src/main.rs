@@ -26214,7 +26214,7 @@ fn draw_player_body(
 fn solid_things(world: &World, solids: &collide::Solids) -> Vec<collide::ThingSolid> {
     let _ = solids;
     solid_things_at(
-        &SolidShapes::build(world).0,
+        &SolidShapes::build(world).placements,
         world
             .level
             .things
@@ -26326,66 +26326,118 @@ struct SolidShape {
     item: bool,
 }
 #[derive(Resource)]
-struct SolidShapes(Vec<Option<SolidShape>>);
+struct SolidShapes {
+    /// Per placed thing, its shape (`None`: not an obstacle for the walker).
+    placements: Vec<Option<SolidShape>>,
+    /// The placed things' template names (lowercase): a runtime slot whose template no longer
+    /// matches is a destroyed thing's slot a `CreateThing` reused, and must not inherit the
+    /// dead placement's shape.
+    placement_templates: Vec<String>,
+    /// Every template's shape (`None`: not an obstacle), so a thing spawned at run time —
+    /// past the placements, or in a reused slot — collides with its own template's shape
+    /// (#83: the engine's thing list is the collision list, not the level file's).
+    by_template: HashMap<String, Option<SolidShape>>,
+}
 
 impl SolidShapes {
     fn build(world: &World) -> Self {
-        let mut out = Vec::with_capacity(world.level.things.len());
+        let mut placements = Vec::with_capacity(world.level.things.len());
         for thing in &world.level.things {
             // Player starts are not obstacles. The first is the local player (a body does not collide
             // with itself) and the rest are the level's multiplayer spawn markers, which single-player
             // retail neither draws nor places in the world.
             if is_local_player(&thing.template) {
-                out.push(None);
+                placements.push(None);
                 continue;
             }
+            let shape = Self::shape_for(world, &thing.template, thing.flags);
+            if let (Some(shape), true) = (&shape, std::env::var_os("BK_THINGS_TRACE").is_some()) {
+                eprintln!(
+                    "solid: `{}` at {:?} radius {:.3} z {:.3}..{:.3} collide {:?} model {:?}..{:?} half {:?} yaw {:.3} sector {}",
+                    thing.template,
+                    thing.pos,
+                    shape.radius,
+                    thing.pos[2] + shape.lo[2],
+                    thing.pos[2] + shape.hi[2],
+                    world.level.template_param(&thing.template, "collide"),
+                    shape.lo,
+                    shape.hi,
+                    shape.half,
+                    thing.yaw,
+                    thing.sector
+                );
+            }
+            placements.push(shape);
+        }
+        let placement_templates = world
+            .level
+            .things
+            .iter()
+            .map(|t| t.template.to_ascii_lowercase())
+            .collect();
+        // The engine gives every created thing its template's collision word
+        // (`sithThing_CreateThing` copies it), so the map is every template, not only the
+        // placed ones.
+        let by_template = world
+            .level
+            .templates
+            .iter()
+            .map(|t| {
+                let name = t.name.to_ascii_lowercase();
+                let shape = Self::shape_for(world, &t.name, 0);
+                (name, shape)
+            })
+            .collect();
+        Self { placements, placement_templates, by_template }
+    }
+
+    /// One template's shape. `placement_flags` is the placement's own `thingflags=` word when the
+    /// caller is placing a level thing (a placement's word replaces the template's), 0 when the
+    /// shape is the template's own (the map, or a spawned thing).
+    fn shape_for(world: &World, template: &str, placement_flags: u32) -> Option<SolidShape> {
             // An **actor** is not a fixed obstacle for a walking body. The engine's actor collision is soft:
             // the player walks through an NPC and the NPC gives way, where the port's cylinder list made every
             // actor a solid post. Level 11 shows it plainly -- the body walked into `gorc` standing in the
             // doorway and was shoved around him 67 times in 90 frames (each push carried the body -x), ending
             // at (-0.54, 13.27), where retail's body walks straight to the closed door and stops at
             // (0.01, 13.20). Actors keep their own collision and AI; they are simply not in the *walker*'s list.
-            let kind = crate::runtime::thing_type_of(&world.level, &thing.template) as u32;
+            let kind = crate::runtime::thing_type_of(&world.level, template) as u32;
             if kind == 2 {
-                out.push(None);
-                continue;
+                return None;
             }
-            let Some(radius) = crate::runtime::solid_radius(&world.level, &thing.template) else {
-                out.push(None);
-                continue;
-            };
+            let radius = crate::runtime::solid_radius(&world.level, template)?;
             // `sithThing_ParseThingArg` case 2 writes `collide=` to `+0x28`; only value 3 (and a
             // sphere-vs-thing case with a `collide=3` partner) selects mesh collision in
             // `sithIntersect_CheckSphereThingIntersection`. The model's bounds give the leaf its
             // thickness; the template's `size=` is a body-sized radius.
             let mesh = world
                 .level
-                .template_param(&thing.template, "collide")
+                .template_param(template, "collide")
                 .and_then(|value| value.trim().parse::<i32>().ok())
                 == Some(3);
             // `sithPhysics_FindFloor` searches with `0x10 | 0x2000` (`0x4f5550`): thingflag `0x40` and
             // thing type 7 (`cog`). A placement's `thingflags=` replaces the template's.
-            let flags = if thing.flags != 0 {
-                thing.flags
+            let flags = if placement_flags != 0 {
+                placement_flags
             } else {
                 world
                     .level
-                    .template_param(&thing.template, "thingflags")
+                    .template_param(template, "thingflags")
                     .and_then(|raw| u32::from_str_radix(raw.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
                     .unwrap_or(0)
             };
             let floor = flags & 0x40 != 0
-                && world.level.template_param(&thing.template, "type").is_some_and(|t| t.trim().eq_ignore_ascii_case("cog"));
+                && world.level.template_param(template, "type").is_some_and(|t| t.trim().eq_ignore_ascii_case("cog"));
             let loaded = world
                 .template_model
-                .get(&thing.template.to_ascii_lowercase())
+                .get(&template.to_ascii_lowercase())
                 .and_then(|name| world.models.get(name));
             let model = loaded.map(|model| {
                 let pose = tdo::pose_nodes(model, None, 0.0);
                 let (lo, hi) = bounds(model, &pose);
                 (lo, hi)
             });
-            let shape = match model {
+            Some(match model {
                 Some((lo, hi)) if mesh && hi[2] > lo[2] => SolidShape {
                     radius,
                     lo,
@@ -26430,40 +26482,35 @@ impl SolidShapes {
                         item: kind == 5,
                     }
                 }
-            };
-            if std::env::var_os("BK_THINGS_TRACE").is_some() {
-                eprintln!(
-                    "solid: `{}` at {:?} radius {:.3} z {:.3}..{:.3} collide {:?} model {:?}..{:?} half {:?} yaw {:.3} sector {}",
-                    thing.template,
-                    thing.pos,
-                    shape.radius,
-                    thing.pos[2] + shape.lo[2],
-                    thing.pos[2] + shape.hi[2],
-                    world.level.template_param(&thing.template, "collide"),
-                    shape.lo,
-                    shape.hi,
-                    shape.half,
-                    thing.yaw,
-                    thing.sector
-                );
-            }
-            out.push(Some(shape));
-        }
-        Self(out)
+            })
     }
 
     /// The solids for a runtime, whose things carry the moved positions and their own sectors.
-    fn place(&self, things: &[crate::runtime::ThingState]) -> Vec<collide::ThingSolid> {
+    /// A runtime slot keeps the placement's shape only while it is still that placement's
+    /// template; anything else resolves through the template map (#83).
+    fn place(&self, things: &[crate::runtime::ThingState], templates: &[String]) -> Vec<collide::ThingSolid> {
+        let resolved: Vec<Option<SolidShape>> = things
+            .iter()
+            .enumerate()
+            .map(|(i, thing)| {
+                let name = templates.get(i).map(|t| t.to_ascii_lowercase());
+                let is_placement = i < self.placement_templates.len()
+                    && name.as_deref() == Some(self.placement_templates[i].as_str());
+                if is_placement {
+                    self.placements[i].clone()
+                } else {
+                    name.and_then(|n| self.by_template.get(&n)).cloned().flatten()
+                }
+            })
+            .collect();
         solid_things_at(
-            &self.0,
+            &resolved,
             things
                 .iter()
-                .take(self.0.len())
                 .map(|thing| (thing.pos, thing.sector.max(0) as usize, [thing.pitch, thing.yaw, thing.roll])),
         )
     }
 }
-/// The player's sector light — what retail hands the POV pass as ambient
 /// (`rdCamera_SetAmbientLight` takes `sector->ambient + sector->extraLight`, clamped to 0..1).
 fn sector_light(sim: &Sim, level: &jkl::Level) -> f32 {
     let rt = sim.world.borrow();
@@ -27122,20 +27169,11 @@ fn collect_items(
         return;
     };
     let clock_ms = rt.time as f64 * 1000.0;
-    // `0x4fbe10` reads the mover's thingflags word (`test ah,1` on the second argument, which the
-    // swap delivers as the player) and skips everything when bit `0x100` is set. A placement's
-    // `thingflags=` replaces the template's, the same effective word the solids build reads.
-    let player_flags = world.as_deref().map_or(0, |w| {
-        let placement = w.level.things.get(index).map(|t| t.flags).unwrap_or(0);
-        if placement != 0 {
-            placement
-        } else {
-            w.level
-                .template_param(&w.level.things[index].template, "thingflags")
-                .and_then(|raw| u32::from_str_radix(raw.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
-                .unwrap_or(0)
-        }
-    });
+    // `0x4fbe10` reads the mover thing's **live** flags word (`test ah,1` on the swapped
+    // player argument): the runtime word since #85 — initialized to the effective
+    // placement-else-template value and carrying every `SetThingFlags`/`ClearThingFlags`
+    // since. The old placement-side read could not see a scripted pickup-disable.
+    let player_flags = rt.things.get(index).map(|t| t.flags).unwrap_or(0);
     let gates = collide::Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags };
     let mut taken: Vec<usize> = Vec::new();
     for other in contacts {
@@ -29106,7 +29144,7 @@ fn setup(
     // tighter fit for furniture.
     let shapes = SolidShapes::build(&world);
     solids.set_things(solid_things_at(
-        &shapes.0,
+        &shapes.placements,
         world
             .level
             .things
@@ -30455,9 +30493,12 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // A door or lift follows its frame path, and the engine collides a body against the thing where
     // it is now. The cylinders were built from the level file's own placements, so a leaf that had
     // already slid aside still blocked: `18Ascend` spawns the player between two elevator leaves and
-    // the frozen closed pair pinned the body for the whole leg.
+    // the frozen closed pair pinned the body for the whole leg. The things also resolve by template
+    // (#83): a `CreateThing` spawn — past the placements or in a destroyed thing's reused slot —
+    // collides with its own template's shape, not the placement list's word for that index.
     if let (Some(sim), Some(shapes)) = (sim.as_deref(), shapes.as_deref()) {
-        solids.0.set_things(shapes.place(&sim.world.borrow().things));
+        let world = sim.world.borrow();
+        solids.0.set_things(shapes.place(&world.things, &world.templates));
     }
     // `--overview` and `--near` exist to frame a fixed shot; a walker would fight them.
     if overview.overview || near.0.is_some() {
@@ -31715,7 +31756,7 @@ mod registration_tests {
     }
 
     /// Just enough `World` for a message pump: the real systems read the scripts, and nothing else.
-    fn bare_world(cogs: HashMap<String, cog::Cog>) -> World {
+    pub(super) fn bare_world(cogs: HashMap<String, cog::Cog>) -> World {
         World {
             level: jkl::Level::default(),
             palette: [[0; 3]; 256],
@@ -32025,6 +32066,54 @@ mod rules_tests {
 mod walker_tests {
     use super::*;
 
+
+    /// A thing spawned at run time — past the placements, or in a destroyed thing's reused slot —
+    /// collides with **its own template's** shape, not the placement list's word for that index
+    /// (#83: `CreateThing` pickups were invisible to the sweep).
+    #[test]
+    fn a_spawned_thing_collides_with_its_own_templates_shape() {
+        let mut world = super::registration_tests::bare_world(HashMap::new());
+        let template = |name: &str, size: &str| jkl::Template {
+            name: name.into(),
+            base: None,
+            params: vec![
+                ("type".into(), "cog".into()),
+                ("collide".into(), "1".into()),
+                ("size".into(), size.into()),
+            ],
+            model3d: None,
+            sprite: None,
+        };
+        world.level.templates.push(template("crate", "0.2"));
+        world.level.templates.push(template("barrel", "0.3"));
+        world.level.things.push(jkl::Thing {
+            template: "crate".into(),
+            pos: [0.0; 3],
+            pitch: 0.0,
+            yaw: 0.0,
+            roll: 0.0,
+            sector: 0,
+            flags: 0,
+            frames: Vec::new(),
+            vel: [0.0; 3],
+            aiclass: None,
+        });
+        let shapes = SolidShapes::build(&world);
+        // Slot 0 is the placement; slot 1 is a `CreateThingAtPos` barrel beyond the placements,
+        // and slot 2 is a destroyed crate's slot a barrel reuse took.
+        let thing_at = |x: f32| crate::runtime::ThingState {
+            pos: [x, 0.0, 0.0],
+            sector: 0,
+            ..Default::default()
+        };
+        let runtime_things = vec![thing_at(0.0), thing_at(5.0), thing_at(9.0)];
+        let templates = vec!["crate".to_string(), "barrel".to_string(), "barrel".to_string()];
+        let solids = shapes.place(&runtime_things, &templates);
+        assert_eq!(solids.len(), 3, "a spawned thing never joined the collision world");
+        assert_eq!(solids[1].radius, 0.3, "the spawned thing did not take its own template's sphere");
+        assert_eq!(solids[2].radius, 0.3, "a reused slot kept the destroyed placement's shape");
+        assert_eq!(solids[0].radius, 0.2, "the placement lost its own shape");
+    }
     #[test]
     fn an_off_centre_model_keeps_the_placed_things_sphere_origin() {
         let shape = SolidShape {

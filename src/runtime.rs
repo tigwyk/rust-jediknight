@@ -215,7 +215,7 @@ fn encounter_capture() -> bool {
     *ON
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ThingState {
     /// `0x4fbe10`'s re-touch clock (`thing+0x148`, engine ms): `touched` is suppressed until it
     /// passes, then set 500 ms ahead. 0 = never touched.
@@ -2223,7 +2223,20 @@ impl Runtime {
                     roll: t.roll,
                     head_pitch: 0.0,
                     sector: t.sector,
-                    flags: if excluded[index] { 0 } else { t.flags },
+                    // The **effective** word (`sithThing_ParseThingArg`): a placement's
+                    // `thingflags=` replaces the template's; a placement without one inherits
+                    // it. The live word is what `0x4fbe10`'s `test ah,1` and every other
+                    // thingflags read must see (#85).
+                    flags: if excluded[index] {
+                        0
+                    } else if t.flags != 0 {
+                        t.flags
+                    } else {
+                        template_thingflags
+                            .get(&t.template.to_ascii_lowercase())
+                            .copied()
+                            .unwrap_or(0)
+                    },
                     health: if excluded[index] {
                         0.0
                     } else {
@@ -11622,6 +11635,52 @@ mod tests {
         rt.time += 5.0;
         rt.step(None, 1.0 / 30.0);
         assert!(!rt.pending_messages.iter().any(|(_, label, _, _, _)| *label == "pulse"));
+    }
+
+    /// The runtime thing carries the **effective** flags word — a placement's `thingflags=`
+    /// replaces the template's, and a placement without one inherits the template's
+    /// (`sithThing_ParseThingArg`). #85: the word lived only in a placement-side read, so
+    /// `SetThingFlags(player, 0x100)` never reached the pickup gate (`0x4fbe10` reads the live
+    /// word, `test ah,1`).
+    #[test]
+    fn a_things_flags_word_is_the_effective_one_from_load() {
+        let mut level = Level::default();
+        level.templates.push(crate::jkl::Template {
+            name: "_item".into(),
+            base: None,
+            params: vec![
+                ("type".into(), "item".into()),
+                ("thingflags".into(), "0x100".into()),
+            ],
+            model3d: None,
+            sprite: None,
+        });
+        level.templates.push(crate::jkl::Template {
+            name: "flagged".into(),
+            base: Some("_item".into()),
+            params: Vec::new(),
+            model3d: None,
+            sprite: None,
+        });
+        let at = |flags: u32| crate::jkl::Thing {
+            template: "flagged".into(),
+            pos: [0.0; 3],
+            pitch: 0.0,
+            yaw: 0.0,
+            roll: 0.0,
+            sector: 0,
+            flags,
+            frames: Vec::new(),
+            vel: [0.0; 3],
+            aiclass: None,
+        };
+        // No placement word: the template's 0x100 is the effective word.
+        level.things.push(at(0));
+        // A placement word replaces the template's outright.
+        level.things.push(at(0x4));
+        let rt = Runtime::new(&level);
+        assert_eq!(rt.things[0].flags, 0x100, "the template's thingflags never reached the runtime word");
+        assert_eq!(rt.things[1].flags, 0x4, "the placement word did not replace the template's");
     }
 
     /// `AiGetMode` is the AI's own flag word — the same value `GetActorFlags` answers, which is what
