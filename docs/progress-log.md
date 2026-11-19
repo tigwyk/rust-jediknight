@@ -7763,3 +7763,7 @@ code only, named in the ledger. The movement ledger rows close out: movement-pat
 retired (313-314), placement retired (this round), containment completed (311), scripted input
 completed (312). Fresh-binary regression: unit suite, `--walk all`, the walk legs, trace gate,
 route gate, four chain routes — hashes in #80's handoff.
+
+## Round: #87 attach-time surface entered (commit 3a8d656)
+
+LinkCog (0x4df610) ORs SITH_SURFACE_COG_LINKED (2) into rt.surface_flags in wire_links; AttachThingToSurface (0x4cde80:50-52) sends entered (6) when the attach surface changes, flags clear of 0x80100, at the player floor tail, the per-tick seat apply and the load-time creation seat (drain deferred past the collider borrow). cargo test 440/440. Acceptance: 03katarn warp onto surface 2107 pad fires entered to cog 25, handler runs (enabled 1->0). Regression gates (--secret/--triggers/--attach/--soak/--tour/--force-grant/--walk all/trace-gate/route-gate/A-B) still owed; see the #87 handoff comment.
