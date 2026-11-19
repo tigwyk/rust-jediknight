@@ -7697,7 +7697,11 @@ landing already deleted — the ticket list (#74-#77) works from the code, not t
 No code change. Tickets #73-#80 are published as #72's sub-issues; the frontier is #73 (this round),
 #74, #75, #76 and #79.
 
-## Round 312 — #77: the mover is one 0x4e7950 transliteration
+## Round 312 — issue #79: the input ramp through the engine's control read
+
+Commit ff96a3a on `tick/79-input-ramp` (merged spec/72 as 5179d30). `src/control.rs` transliterates 0x42e560/0x42ee20/0x42eba0/0x42ead0/0x4d7010/0x4d6d70/0x4d8a00 with the image-read constants (0x522928=1.0, 0x522930=0.0, 0x522f08=0.0, 0x522f14=1.0, 0x522f1c=0.5, 0x522f24=0.7, 0x522f28=0.2, 0x5231a8=0.3); keyboard, walk harness and replay rows all drive it. 418 tests green; route gate all-PASS but the retail prefix (2 sector misses at ticks 36/72 — the spawn-seat oscillation in finish_body eats the seed and the first second, #78's home); trace gate 8/9 (walk6's five misses decompose into the fixture's capture lottery: W1 0.04 swallow, zero-frame W5, and a 0.012 stair-pin at the 315/290 seam); four chain routes exit 0. Oracle regenerated through route-gate.ps1 only (sha 1aa75941c2ec93d223cf88580e7f50d9c7e5194e0dbbebce334f652818f1bf80). Details in the issue #79 handoff.
+
+## Round 313 — #77: the mover is one 0x4e7950 transliteration
 
 `move_thing_with` (`src/collide.rs`) now carries the whole `sithCollision_MoveThing` shape with
 per-leg decomp citations: the nearest-record consumption (the engine tie rule was already in
