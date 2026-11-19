@@ -29,6 +29,17 @@ pub struct Plane {
     pub surface: usize,
 }
 
+/// One surface of a sector's own `SURFACES` range, as `sithIntersect_IsSphereInSector`
+/// (JK.EXE `0x507f30`) walks it.
+#[derive(Clone, Copy, Debug)]
+pub struct ContainPlane {
+    pub normal: [f32; 3],
+    pub point: [f32; 3],
+    pub surfflags: u32,
+    /// The `World adjoins` row the surface names, `-1` when it is not an opening.
+    pub adjoin: i32,
+}
+
 /// A placed thing the walker collides with.
 ///
 /// `half` is `Some` only for a `collide=3` thing with a loaded model: the model's bounds give the
@@ -215,10 +226,9 @@ pub struct LevelGeometry {
     pub sectors: Vec<Vec<Plane>>,
     /// Per sector, only the planes that **bound** the cell: every vertex the sector claims is behind
     /// them. `sectors` carries every claimed surface's plane, because a wall patch inside the room
-    /// still has to stop a body; only this list may answer "is the body inside", which is what
-    /// `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`) asks.
-    /// Correction: engine containment tests all collision-flagged surfaces and movable adjoins, not
-    /// only this derived hull; `inside_sector_with_gates` performs that test.
+    /// still has to stop a body. Containment is not asked of either list: `containment` carries
+    /// the sector's own surfaces as `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`) walks
+    /// them, and `clearance` reads this hull.
     pub hull: Vec<Vec<Plane>>,
     /// Per sector, its `HASCOLLIDEBOX` bounds (`SITH_SECTOR_HASCOLLIDEBOX`, sector flag `0x1000`),
     /// from the file's `COLLIDEBOX` row (not the enclosing `BOUNDBOX`). `IsSphereInSector`
@@ -284,6 +294,12 @@ pub struct LevelGeometry {
     pub adjoin_surface: Vec<usize>,
     /// Sector-to-sector links with the adjoin row's attenuation, derived once from the mirrors.
     pub sector_adjoins: Vec<Vec<(i32, f32)>>,
+    /// Per sector, its own `SURFACES` range as `sithIntersect_IsSphereInSector` (JK.EXE
+    /// `0x507f30`) walks it: every surface's plane (normal pointing out of this sector), flag
+    /// word and `World adjoins` row. The walk counts a surface when the flags carry
+    /// `HAS_COLLISION` (`0x4`) or the adjoin row allows movement (`0x2`) — decided at call
+    /// time, because doors clear the move flag at runtime.
+    pub containment: Vec<Vec<ContainPlane>>,
 }
 
 /// The collision-facing name for the one geometry record.
@@ -667,6 +683,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     let mut hulls = Vec::with_capacity(level.sectors.len());
     let mut boxes = Vec::with_capacity(level.sectors.len());
     let mut portal_sets = Vec::with_capacity(level.sectors.len());
+    let mut contains = Vec::with_capacity(level.sectors.len());
     let mut spheres = Vec::with_capacity(level.sectors.len());
     for sector in &level.sectors {
         let (first, count) = sector.surfaces;
@@ -700,6 +717,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         let mut planes = Vec::new();
         let mut hull_planes = Vec::new();
         let mut portals = Vec::new();
+        let mut contain = Vec::new();
         for (surface_of, surface) in &owned {
             if surface.verts.len() < 3 {
                 continue;
@@ -753,6 +771,15 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
             } else {
                 normal
             };
+            // `sithIntersect_IsSphereInSector` (`0x507f30`) walks the sector's own surface list
+            // whatever the adjoin mirror table says, so every surface with a plane lands here and
+            // the counting rule (`0x4` or a move-flagged adjoin row) is applied at call time.
+            contain.push(ContainPlane {
+                normal: own,
+                point: pts[0],
+                surfflags: surface.surfflags,
+                adjoin: surface.adjoin,
+            });
             // An adjoined surface is an opening: the walker goes through it into the
             // sector its *mirror* adjoin belongs to, so it is remembered as a portal
             // rather than a wall.
@@ -809,6 +836,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
         hulls.push(hull_planes);
         boxes.push(box_of);
         portal_sets.push(portals);
+        contains.push(contain);
         spheres.push((centre, radius.max(0.1)));
     }
     // The portal graph is **symmetric**. A link is discovered from whichever side owns the surface,
@@ -892,6 +920,7 @@ pub fn build(level: &crate::jkl::Level) -> Solids {
     // The solid things are filled by the caller, which has the models: see `solid_things` in `main`.
     Solids {
         sectors,
+        containment: contains,
         hull: hulls,
         boxes,
         portals: portal_sets,
@@ -1952,42 +1981,89 @@ impl LevelGeometry {
         total
     }
 
-    /// `sithCollision_CollideHurt` (0x4e9090): projection and zero-distance crease response.
+    /// `sithCollision_CollideHurt` (`0x4e9090`): the slide response a solid contact answers with,
+    /// transliterated from `decomp/004e9090_sithCollision_CollideHurt.c` — same constants, same
+    /// branches, same order.
+    ///
+    /// The engine passes the thing, the contact normal, the hit record's distance (`record+0x20`, as
+    /// `sithCollision_HandleThingHitSurface` `0x4e8b40` hands it over) and a damage gate (the
+    /// surface's flags `& 0x80`; the thing-thing handler `0x4e8c50` passes 0). Fields: `+0x10`
+    /// moveType (physics = 1), `+0x1d0` physflags, `+0x1d4` velocity, `+0x268` the remaining-move
+    /// vector. The crease is the engine's static normal (`0x8b4bf0`) plus its active flag
+    /// (`0x8b4be4`), which `sithCollision_MoveThing` (`0x4e7950:89`) clears on entry — one crease
+    /// per move, the port's `crease` argument.
+    ///
+    /// Constants read from the shipped image's `.rdata`: the approach epsilon is `0x52300c`
+    /// (1e-5); the hard-landing curve `(v - 2.5)^2 * 45` past a 1.0 floor is `0x523034`/`0x523038`/
+    /// `0x523014` — the same curve `sithCollision_FallHurt` (`0x4e9550`) applies, and the port
+    /// charges it at the landing path (`fall_damage` on the attach), so that inline branch is a
+    /// deviation-ledger row rather than code here; the movement below is the engine's own.
+    ///
+    /// A fresh face (`distance != 0`, or no crease yet) stores the normal and cancels the
+    /// into-normal components of velocity and remainder scaled by 1.0001 — 1.9 under physflag
+    /// `0x20` — preserving the tangential component exactly. A second face met at distance 0
+    /// cancels plainly (no restitution), folds the stored crease against the new face
+    /// (`rdVector_Normalize3Acc` `0x449b97`), and cancels into that crease too.
     fn collide_hurt(state: &mut MoveState, n: [f32; 3], distance: f32, crease: &mut Option<[f32; 3]>) -> bool {
-        if state.move_type != 1 { return false; }
-        let into = -(state.remainder[1] * n[1] + state.remainder[2] * n[2] + state.remainder[0] * n[0]);
-        if into.abs() <= 1e-5 || into <= 0.0 { return false; }
-        let v_into = -(n[1] * state.vel[1] + n[2] * state.vel[2] + state.vel[0] * n[0]);
+        if state.move_type != 1 {
+            return false;
+        }
+        let raw = -(state.remainder[1] * n[1] + state.remainder[2] * n[2] + state.remainder[0] * n[0]);
+        let mut into = raw;
+        if raw.abs() <= 1e-5 {
+            into = 0.0;
+        }
+        if into <= 0.0 {
+            return false;
+        }
+        let restitution = if state.phys_flags & 0x20 != 0 { 1.9 } else { 1.0001 };
         if distance != 0.0 || crease.is_none() {
             *crease = Some(n);
-            let restitution = if state.phys_flags & 0x20 != 0 { 1.9 } else { 1.0001 };
+            let v_into = -(n[1] * state.vel[1] + n[2] * state.vel[2] + state.vel[0] * n[0]);
             if v_into > 0.0 {
                 let m = restitution * v_into;
-                for k in 0..3 { state.vel[k] = n[k] * m + state.vel[k]; }
+                for k in 0..3 {
+                    state.vel[k] = n[k] * m + state.vel[k];
+                }
             }
             let m = restitution * into;
-            for k in 0..3 { state.remainder[k] = n[k] * m + state.remainder[k]; }
-        } else {
-            for k in 0..3 { state.remainder[k] = n[k] * into + state.remainder[k]; }
-            if v_into > 0.0 {
-                for k in 0..3 { state.vel[k] = n[k] * v_into + state.vel[k]; }
+            for k in 0..3 {
+                state.remainder[k] = n[k] * m + state.remainder[k];
             }
-            let old = crease.unwrap();
-            let fold = -(n[0] * old[0] + n[2] * old[2] + n[1] * old[1]);
-            let mut c = [n[0] * fold + old[0], n[1] * fold + old[1], n[2] * fold + old[2]];
+        } else {
+            for k in 0..3 {
+                state.remainder[k] = n[k] * raw + state.remainder[k];
+            }
+            let v_into = -(n[1] * state.vel[1] + n[2] * state.vel[2] + state.vel[0] * n[0]);
+            if v_into > 0.0 {
+                for k in 0..3 {
+                    state.vel[k] = n[k] * v_into + state.vel[k];
+                }
+            }
+            // `rdVector_Normalize3Acc` (`0x449b97`): scale by 1/length unless the length is 0.0.
+            let stored = crease.unwrap();
+            let fold = -(n[0] * stored[0] + n[2] * stored[2] + n[1] * stored[1]);
+            let mut c = [n[0] * fold + stored[0], n[1] * fold + stored[1], n[2] * fold + stored[2]];
             let length = (c[0] * c[0] + c[2] * c[2] + c[1] * c[1]).sqrt();
             if length != 0.0 {
                 let inverse = 1.0 / length;
-                for component in &mut c { *component *= inverse; }
+                for component in &mut c {
+                    *component *= inverse;
+                }
             }
             *crease = Some(c);
-            let v_into = -(state.vel[1] * c[1] + state.vel[0] * c[0] + state.vel[2] * c[2]);
-            if v_into > 0.0 {
-                for k in 0..3 { state.vel[k] = v_into * c[k] + state.vel[k]; }
+            let v_crease = -(state.vel[1] * c[1] + state.vel[2] * c[2] + state.vel[0] * c[0]);
+            if v_crease > 0.0 {
+                for k in 0..3 {
+                    state.vel[k] = v_crease * c[k] + state.vel[k];
+                }
             }
-            let into = -(state.remainder[2] * c[2] + state.remainder[1] * c[1] + state.remainder[0] * c[0]);
-            if into > 0.0 {
-                for k in 0..3 { state.remainder[k] = into * c[k] + state.remainder[k]; }
+            let into_crease =
+                -(state.remainder[2] * c[2] + state.remainder[1] * c[1] + state.remainder[0] * c[0]);
+            if into_crease > 0.0 {
+                for k in 0..3 {
+                    state.remainder[k] = into_crease * c[k] + state.remainder[k];
+                }
             }
         }
         true
@@ -2824,46 +2900,53 @@ impl LevelGeometry {
     }
 
     /// `sithIntersect_IsSphereInSector` (JK.EXE `0x507f30`, `sithIntersect.c:58`): is a body of
-    /// `radius` at `pos` still inside `sector`?
+    /// `radius` at `pos` still inside `sector`? One transliteration, in the engine's order:
     ///
-    /// Two parts, in the engine's order. First the sector's collide box (`HASCOLLIDEBOX`, flag
-    /// `0x1000`): if the sphere fits inside it the answer is **yes**, without testing a single
-    /// surface. Only a sphere outside that box is tested against the sector's bounding planes, where
-    /// a distance below the radius means outside. `sithCollision_MoveThing` calls this with radius 0
-    /// to decide whether to undo a move.
+    /// 1. the sector's collide box (`HASCOLLIDEBOX`, sector flag `0x1000` — `Solids::build`
+    ///    stores the box only for such sectors): a sphere that fits inside it is **in**, without
+    ///    testing a single surface;
+    /// 2. the sector's own surface list, where a surface counts when it has `HAS_COLLISION`
+    ///    (`0x4`) or its adjoin row allows movement (`flags & 2`, read at call time so a shut
+    ///    door stops counting): the plane distance `dot(pos - vertex0, normal)` snaps to zero
+    ///    within `1e-5` of it, and a distance below `radius` means outside.
+    ///
+    /// `sithCollision_MoveThing` calls this with radius 0 to decide whether to undo a move.
     pub fn inside_sector(&self, sector: usize, pos: [f32; 3], radius: f32) -> bool {
         self.inside_sector_with_gates(sector, pos, radius, Gates::default())
     }
 
     pub(crate) fn inside_sector_with_gates(&self, sector: usize, pos: [f32; 3], radius: f32, gates: Gates<'_>) -> bool {
+        // 0x507f30:18-24: the collide box, only when the sector flags carry 0x1000. The engine
+        // walks the surfaces when the sphere is outside the box on any axis (`pos - radius <= lo`
+        // or `hi <= pos + radius`), so "fits" is the strict complement.
         if let Some(Some((lo, hi))) = self.boxes.get(sector) {
-            let fits = (0..3).all(|k| pos[k] - radius > lo[k] && pos[k] + radius < hi[k]);
-            if fits {
+            if (0..3).all(|k| pos[k] - radius > lo[k] && pos[k] + radius < hi[k]) {
                 return true;
             }
         }
-        let inside = |normal: [f32; 3], point| {
-            let d = sub(pos, point);
-            let c = -(d[2] * normal[2] + d[1] * normal[1] + d[0] * normal[0]);
-            // `sithIntersect_IsSphereInSector` snaps a plane distance within `1e-5` of zero to zero
-            // (`_DAT_00523288` is 1e-5, `_DAT_00523284` is 0) before the radius test, so a body
-            // resting exactly on its own floor is inside it. Without the band, `floor + radius` as
-            // f32 lands a ten-millionth below the plane and the containment check rejects a body
-            // standing on solid ground (`18Ascend`'s spawn did exactly that, every frame).
-            let c = if c.abs() <= 1e-5 { 0.0 } else { c };
+        // 0x507f30:29-30: a surface counts when its flags carry 0x4 or its adjoin row's flags
+        // carry 0x2. The engine reads the adjoin flags through the surface's live pointer, so the
+        // runtime gates win over the file's word.
+        self.containment.get(sector).is_none_or(|surfaces| surfaces.iter().all(|s| {
+            let adjoin_move = usize::try_from(s.adjoin).is_ok_and(|row| {
+                gates.adjoins.get(row).copied()
+                    .or_else(|| self.adjoin_flags.get(row).copied())
+                    .unwrap_or(ADJOIN_MOVE)
+                    & ADJOIN_MOVE != 0
+            });
+            if s.surfflags & 0x4 == 0 && !adjoin_move {
+                return true;
+            }
+            // 0x507f30:33-45: `dot(pos - vertex0, normal)` (the port's normals point out, so the
+            // sign is flipped), |distance| <= 1e-5 (`_DAT_00523288`) snaps to 0
+            // (`_DAT_00523284`), and a distance below the radius means outside.
+            let d = sub(pos, s.point);
+            let mut c = -(d[0] * s.normal[0] + d[1] * s.normal[1] + d[2] * s.normal[2]);
+            if c.abs() <= 1e-5 {
+                c = 0.0;
+            }
             c >= radius
-        };
-        self.sectors.get(sector).is_none_or(|planes| planes.iter().all(|plane| inside(plane.normal, plane.point)))
-            && self.portals.get(sector).is_none_or(|portals| portals.iter().all(|portal| {
-                let surface = self.adjoin_surface.get(portal.link).copied().unwrap_or(usize::MAX);
-                if self.surface_claims.get(surface).is_some_and(|claims| !claims.contains(&sector)) {
-                    return true;
-                }
-                let flags = self.surface_flags.get(surface).copied().unwrap_or(0);
-                let adjoin = gates.adjoins.get(portal.link).copied()
-                    .or_else(|| self.adjoin_flags.get(portal.link).copied()).unwrap_or(ADJOIN_MOVE);
-                (flags & 4 == 0 && adjoin & ADJOIN_MOVE == 0) || inside(portal.normal, portal.point)
-            }))
+        }))
     }
 
     /// The sector a *body* of `radius` should start in.
@@ -3174,6 +3257,14 @@ pub(crate) fn test_room() -> Solids {
         boxes: Vec::new(),
         hull: Vec::new(),
         floor_of: [(0usize, 0usize)].into_iter().collect(),
+        containment: vec![vec![
+            ContainPlane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 1.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [1.0, 0.0, 0.0], point: [2.0, 0.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [-1.0, 0.0, 0.0], point: [-2.0, 0.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [0.0, 1.0, 0.0], point: [0.0, 2.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ContainPlane { normal: [0.0, -1.0, 0.0], point: [0.0, -2.0, 0.0], surfflags: 0x4, adjoin: -1 },
+        ]],
         sectors: vec![vec![
             Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, -1.0], surface: 0 },
             Plane { normal: [0.0, 0.0, 1.0], point: [0.0, 0.0, 1.0], surface: 3 },
@@ -3338,6 +3429,9 @@ mod tests {
             sectors: vec![vec![Plane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surface: usize::MAX }]],
             spheres: vec![([0.0, 0.0, 0.0], 8.0)],
             portals: vec![Vec::new()],
+            containment: vec![vec![
+                ContainPlane { normal: [0.0, 0.0, -1.0], point: [0.0, 0.0, 0.0], surfflags: 0x4, adjoin: -1 },
+            ]],
             floors: Vec::new(),
             walls: Vec::new(),
             wall_of: std::collections::HashMap::new(),
@@ -3490,6 +3584,14 @@ mod tests {
                 ],
                 vec![Portal { adjoin: 1, link: 3, verts: quad(8.0).into_iter().rev().collect(), normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0] }],
             ],
+            containment: vec![
+                vec![ContainPlane { normal: [0.0, 1.0, 0.0], point: [0.0, 0.0, 0.0], surfflags: 0, adjoin: 0 }],
+                vec![
+                    ContainPlane { normal: [0.0, -1.0, 0.0], point: [0.0, 0.0, 0.0], surfflags: 0, adjoin: 1 },
+                    ContainPlane { normal: [0.0, 1.0, 0.0], point: [0.0, 8.0, 0.0], surfflags: 0, adjoin: 2 },
+                ],
+                vec![ContainPlane { normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0], surfflags: 0, adjoin: 3 }],
+            ],
             ..Default::default()
         }
     }
@@ -3559,6 +3661,116 @@ mod tests {
         let closed = Gates { sectors: &[], adjoins: &[0] };
         assert!(!room.inside_sector_with_gates(0, outside, 0.0, open));
         assert!(room.inside_sector_with_gates(0, outside, 0.0, closed));
+    }
+
+    /// The floor `18Ascend`/`19A` ship: a slab with flags `0x80005` and file normal `(0, 0, 1)`
+    /// (into the room). `0x507f30:37-42` snaps a plane distance within `1e-5` of zero to zero
+    /// before the `fVar3 < param_2` test, so a body resting a ten-millionth *through* its own
+    /// floor is still inside at radius 0 — `MoveThing`'s containment call.
+    #[test]
+    fn containment_snaps_a_resting_body_onto_its_own_floor() {
+        let mut level = crate::jkl::Level::default();
+        level.vertices = vec![
+            [-2.0, -2.0, -1.3], [2.0, -2.0, -1.3], [2.0, 2.0, -1.3], [-2.0, 2.0, -1.3],
+        ];
+        level.surfaces = vec![crate::jkl::Surface {
+            material: 0,
+            surfflags: 0x80005,
+            geo: 4,
+            adjoin: -1,
+            verts: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+            intensities: vec![1.0; 4],
+            normal: [0.0, 0.0, 1.0],
+        }];
+        level.sectors = vec![crate::jkl::Sector { surfaces: (0, 1), ..Default::default() }];
+        let solids = build(&level);
+
+        assert!(solids.inside_sector(0, [0.0, 0.0, -1.2], 0.0), "a body above the floor is inside");
+        assert!(
+            solids.inside_sector(0, [0.0, 0.0, -1.3 - 3e-6], 0.0),
+            "3e-6 through the floor is inside the 1e-5 snap band"
+        );
+        assert!(
+            !solids.inside_sector(0, [0.0, 0.0, -1.3 - 2e-5], 0.0),
+            "2e-5 through the floor is past the band and outside"
+        );
+    }
+
+    /// The one-sided adjoin pair `03katarn` 3383/3177 (rows 1088/983): the near side's surface
+    /// carries the adjoin row, the far side's surface has adjoin `-1`. `0x507f30:29-30` counts the
+    /// near surface (its row has `MOVE`), so a body past the plane is outside the near sector and
+    /// the far sector's own list has nothing to test.
+    #[test]
+    fn a_body_past_a_one_sided_adjoin_plane_is_outside() {
+        let mut level = crate::jkl::Level::default();
+        level.vertices = vec![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]];
+        let face = |adjoin: i32| crate::jkl::Surface {
+            material: 0,
+            surfflags: 0,
+            geo: 4,
+            adjoin,
+            verts: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+            intensities: vec![1.0; 4],
+            normal: [0.0, -1.0, 0.0],
+        };
+        level.surfaces = vec![face(0), face(-1)];
+        level.sectors = vec![
+            crate::jkl::Sector { surfaces: (0, 1), ..Default::default() },
+            crate::jkl::Sector { surfaces: (1, 1), ..Default::default() },
+        ];
+        level.adjoins = vec![
+            crate::jkl::Adjoin { flags: 0x3, mirror: 1, dist: 0.0 },
+            crate::jkl::Adjoin { flags: 0x3, mirror: 0, dist: 0.0 },
+        ];
+        let solids = build(&level);
+
+        let past = [0.0, 0.1, 0.5];
+        assert!(!solids.inside_sector(0, past, 0.0), "past the move-flagged plane, out of the near sector");
+        assert!(solids.inside_sector(0, [0.0, -0.1, 0.5], 0.0), "on the near side, inside");
+        assert!(
+            solids.inside_sector(1, past, 0.0),
+            "the far side's own surface carries no adjoin row, so nothing counts"
+        );
+        // The row's move flag is read at call time: a shut link stops the surface from counting.
+        let shut = Gates { sectors: &[], adjoins: &[0] };
+        assert!(solids.inside_sector_with_gates(0, past, 0.0, shut), "a shut link does not count the plane");
+    }
+
+    /// `03katarn` sector 429: `FLAGS 0x1000` with a collide box, the thin sliver of #70. A sphere
+    /// that fits the box is in (`0x507f30:18-24`) without a single plane test — here a collision
+    /// floor at z 0.5 that the point at z 0.3 sits below, which the plane walk alone would reject.
+    #[test]
+    fn a_collidebox_sector_accepts_without_plane_tests() {
+        let mut level = crate::jkl::Level::default();
+        level.vertices = vec![
+            [0.430541, -0.70, 0.5], [0.90, -0.70, 0.5], [0.90, -0.60, 0.5], [0.430541, -0.60, 0.5],
+        ];
+        level.surfaces = vec![crate::jkl::Surface {
+            material: 0,
+            surfflags: 0x4,
+            geo: 4,
+            adjoin: -1,
+            verts: vec![(0, 0), (1, 1), (2, 2), (3, 3)],
+            intensities: vec![1.0; 4],
+            normal: [0.0, 0.0, 1.0],
+        }];
+        level.sectors = vec![crate::jkl::Sector {
+            flags: 0x1000,
+            surfaces: (0, 1),
+            boundbox: Some(([0.430541, -0.70, -0.199999], [0.90, -0.60, 0.80])),
+            ..Default::default()
+        }];
+        let solids = build(&level);
+
+        let at = [0.65, -0.65, 0.3];
+        assert!(
+            solids.inside_sector(0, at, 0.0),
+            "the box accepts the point without the plane tests"
+        );
+        assert!(
+            !solids.inside_sector(0, at, 0.9),
+            "a sphere too big for the box falls through to the plane walk, which rejects it"
+        );
     }
 
     /// `SearchForSurfaceCollisions` (0x4e86d0) checks the adjoin's movement flag, not sector visibility.
@@ -4813,6 +5025,118 @@ mod tests {
         assert!(Solids::collide_hurt(&mut state, [1.0, 1e-7, 0.0], 0.0, &mut Some([1.0, 0.0, 0.0])));
         assert_eq!(state.vel, [0.0; 3]);
         assert_eq!(state.remainder, [0.0; 3]);
+    }
+
+    /// `sithCollision_CollideHurt` (`0x4e9090:24-41`): a fresh face cancels only the into-normal
+    /// component. The tangential component of velocity and remainder survives, and the cancelled
+    /// component comes back as `(1.0001 - 1) * into` — the engine's slide restitution leaves a hair
+    /// of outward push (`0x4e9090:38-41` reads 1.0001 unless physflag `0x20` is set).
+    #[test]
+    fn a_single_face_slide_preserves_the_tangential_component() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [-1.0, 0.5, 0.0], remainder: [-1.0, 0.5, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+        };
+        let mut crease = None;
+        // A west wall's normal points east, into the room; the body moves north-west into it.
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease));
+        assert_eq!(crease, Some([1.0, 0.0, 0.0]), "the fresh face stores the crease normal");
+        assert_eq!(state.vel[1], 0.5, "the tangential velocity component is untouched");
+        assert_eq!(state.remainder[1], 0.5, "the tangential remainder component is untouched");
+        assert!((state.vel[0] - 0.0001).abs() < 1e-6, "{}", state.vel[0]);
+        assert!((state.remainder[0] - 0.0001).abs() < 1e-6, "{}", state.remainder[0]);
+        assert_eq!(state.vel[2], 0.0);
+        assert_eq!(state.remainder[2], 0.0);
+    }
+
+    /// The physflag-`0x20` bounce (`0x4e9090:38-41`): the same contact reflects the into-normal
+    /// component at restitution 1.9 instead of cancelling it.
+    #[test]
+    fn physflag_0x20_bounces_at_restitution_1_9() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [-1.0, 0.5, 0.0], remainder: [-1.0, 0.0, 0.0],
+            phys_flags: 0x20, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+        };
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut None));
+        assert!((state.vel[0] - 0.9).abs() < 1e-6, "1.9 * 1 - 1 reflected: {}", state.vel[0]);
+        assert!((state.remainder[0] - 0.9).abs() < 1e-6, "{}", state.remainder[0]);
+        assert_eq!(state.vel[1], 0.5, "even the bounce keeps the tangential component");
+    }
+
+    /// The two-face crease (`0x4e9090:71-112`): a second face met at distance 0 folds the stored
+    /// normal against itself (`rdVector_Normalize3Acc` `0x449b97`) and cancels into that crease.
+    /// With `n1 = +x` and `n2 = (x+y)/sqrt(2)` the fold is `normalize(n1 - n2 * (n2 . n1)) =
+    /// (x - y)/sqrt(2)`, and a remainder the first face slid to `[0.0001, -1, 0]` ends tangent to
+    /// the second face, riding the crease.
+    #[test]
+    fn a_second_face_at_zero_distance_folds_the_crease() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [0.0; 3], remainder: [-1.0, -1.0, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+        };
+        let mut crease = None;
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease));
+        assert!((state.remainder[0] - 0.0001).abs() < 1e-6, "{}", state.remainder[0]);
+        assert_eq!(state.remainder[1], -1.0);
+
+        let diag = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(Solids::collide_hurt(&mut state, [diag, diag, 0.0], 0.0, &mut crease));
+        let folded = crease.unwrap();
+        assert!((folded[0] - diag).abs() < 1e-6, "the fold is normalize([0.5, -0.5, 0]): {}", folded[0]);
+        assert!((folded[1] + diag).abs() < 1e-6, "{}", folded[1]);
+        assert_eq!(folded[2], 0.0);
+        // The remainder is tangent to the second face and parallel to the crease: the into-n2
+        // component `FRAC_1_SQRT_2 * (1 - 0.0001)` is gone, leaving [0.50005, -0.50005, 0].
+        let tangent = state.remainder[0] * diag + state.remainder[1] * diag;
+        assert!(tangent.abs() < 1e-4, "tangent to the second face: {tangent}");
+        assert!((state.remainder[0] - 0.50005).abs() < 1e-4, "{}", state.remainder[0]);
+        assert!((state.remainder[1] + 0.50005).abs() < 1e-4, "{}", state.remainder[1]);
+        // Its into-crease component is negative (it rides the crease outward), so the final
+        // cancellation (`0x4e9090:102-112`) does not fire — the direction stands.
+        let along = state.remainder[0] * folded[0] + state.remainder[1] * folded[1];
+        assert!(along > 0.0, "parallel to the folded crease: {along}");
+    }
+
+    /// `0x4e9090:42` gates the crease on `distance == 0`: a second face met at a nonzero distance
+    /// starts a fresh slide instead — the stored crease is replaced and restitution applies.
+    #[test]
+    fn a_second_face_at_nonzero_distance_starts_a_fresh_crease() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [0.0; 3], remainder: [-1.0, -1.0, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+        };
+        let mut crease = None;
+        assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease));
+        // The first slide left the remainder at [0.0001, -1, 0]; the second face still has an
+        // approach of 1 along its normal, so the fresh branch runs with restitution.
+        assert!(Solids::collide_hurt(&mut state, [0.0, 1.0, 0.0], 0.5, &mut crease));
+        assert_eq!(crease, Some([0.0, 1.0, 0.0]), "the fresh branch replaced the stored normal");
+        assert!((state.remainder[0] - 0.0001).abs() < 1e-6, "{}", state.remainder[0]);
+        // The crease branch would cancel exactly (leaving 0); restitution leaves 0.0001.
+        assert!((state.remainder[1] - 0.0001).abs() < 1e-6, "{}", state.remainder[1]);
+    }
+
+    /// `0x4e9090:28-37`: an approach at or under the engine's 1e-5 epsilon (`0x52300c`) is zeroed
+    /// and refused — no slide, no crease. A move away from the face (negative into-normal) and a
+    /// non-physics mover are refused the same way (`0x4e9090:21-23`).
+    #[test]
+    fn an_approach_under_the_engine_epsilon_or_away_is_refused() {
+        let mut state = MoveState {
+            pos: [0.0; 3], sector: 0, vel: [-1.0, 0.0, 0.0], remainder: [-5e-6, 1.0, 0.0],
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(),
+        };
+        let mut crease = None;
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease));
+        assert_eq!(crease, None);
+        assert_eq!(state.remainder, [-5e-6, 1.0, 0.0], "the state is untouched");
+        assert_eq!(state.vel, [-1.0, 0.0, 0.0]);
+
+        state.remainder = [1.0, 0.0, 0.0];
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease), "moving away");
+
+        state.remainder = [-1.0, 0.0, 0.0];
+        state.move_type = 0;
+        assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease), "not a physics mover");
     }
 
     #[test]
