@@ -10,6 +10,7 @@ mod ai;
 mod bm;
 mod cog;
 mod collide;
+mod control;
 mod episode;
 mod force;
 mod gamepath;
@@ -29572,6 +29573,15 @@ impl Rules {
         self.walk + extra * 0.7 * physics_scale() / self.drag.max(0.001)
     }
 
+    /// The engine's thrust base: `sithControl_PlayerMovement` (`0x4d8a00`) builds the thrust
+    /// from the thing's `+0x144 + +0x148` sum, which no recovered template parser produces, so
+    /// the port derives it from its measured settled walk — `settled speed x drag`, the inverse
+    /// of the physics update's `ApplyDrag` (`0x4f6860:126-131`). A force-speed term adds to the
+    /// base the way the engine adds it to `maxThrust`.
+    pub(crate) fn thrust_base(&self, extra_speed: f32) -> f32 {
+        self.extra_walk(extra_speed) * self.drag
+    }
+
     pub(crate) fn speed(&self, forward: f32, strafe: f32, run: bool, crouch: bool, water: bool) -> [f32; 2] {
         // `move_multiplier`: FAST doubles, crouch *replaces* it with a half.
         let multiplier = if crouch {
@@ -30576,6 +30586,14 @@ fn route_replay(
     now.0 = Some(input);
 }
 
+/// `walk_player`'s persistent state: the trace frame counter and the transliterated
+/// `stdControl` key arrays.
+#[derive(Default)]
+struct WalkerState {
+    trace_tick: u32,
+    control: control::StdControl,
+}
+
 /// The player: a walker bound to the level's own sectors, so walls stop it and doorways
 /// let it through. Arrow keys look, `WASD` moves, `Shift` runs, `Space` jumps.
 ///
@@ -30598,8 +30616,9 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     chase: ResMut<Chase>,
     // the walker's view never moves (which is what happened for every round before this one).
     mut cam: Query<&mut Transform, (With<Camera3d>, With<WorldCamera>)>,
-    // `--trace-out`: the frame counter for the written trace (Phase 0.5 trace v0).
-    mut trace_tick: Local<u32>,
+    // `--trace-out`'s frame counter and the engine's control state (`stdControl`'s per-key
+    // arrays) in one `Local`: Bevy systems take at most 16 params, and both must persist.
+    mut walker: Local<WalkerState>,
     // `--replay`: this tick's scripted input, published by `route_replay` before this system.
     route_now: Option<Res<RouteNow>>,
 ) {
@@ -30701,75 +30720,107 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
         player.body.pitch = pitch;
     }
 
-    // Movement in the walker's own frame, then converted to world (x, z).
-    let mut forward = 0.0f32;
-    let mut strafe = 0.0f32;
-    if held(KeyCode::KeyW) {
-        forward += 1.0;
-    }
-    if held(KeyCode::KeyS) {
-        forward -= 1.0;
-    }
-    if held(KeyCode::KeyD) {
-        strafe += 1.0;
-    }
-    if held(KeyCode::KeyA) {
-        strafe -= 1.0;
-    }
-    // The engine's own scaling: FAST doubles, crouch halves and also halves the jump,
-    // and standing on water halves whatever is left.
-    // Retail's walker **runs by default** (`sithControl_PlayerMovement`'s run flag is on unless the
-    // slow modifier is held: `DAT_008bd020 & 2`), so plain forward movement is the 2.0 scale and
-    // shift is the 0.5 walk. The port had the inverse, which is why its walk trace covered half the
-    // distance retail's did.
-    let run = route_now.as_deref().and_then(|now| now.0).is_none()
-        && !keys.pressed(KeyCode::ShiftLeft);
-    let crouch = keys.pressed(KeyCode::ControlLeft);
-    // `BK_WALK_FORWARD=1` holds the forward key, which is how the camera-follows-the-walker fix
-    // is verified without a hand on the keyboard: the trace then shows the body moving and the
-    // camera with it.
-    let forward = if std::env::var_os("BK_WALK_FORWARD").is_some() {
-        // `BK_WALK_HOLD_AFTER=<ms>`: stay idle for that much game time first. A level that opens with a
-        // scripted sequence is not walkable from its first frame (retail locks the player's input while
-        // the opening runs), so the walk legs that start after it pass this, and both sides settle for
-        // the same window before the held-forward comparison begins.
+    // `sithControl_Update` (`0x4d6c70`) reads the controls before the physics step, so the
+    // movement assembly sees this frame's key edges; the per-key bookkeeping is
+    // `stdControl_ReadControls` (`0x42e560`) in `src/control.rs`. The port's frame clock is the
+    // engine time the walker advances, standing in for `timeGetTime` (`0x42e560:45`).
+    let now_ms = (sim.as_deref().map(|s| s.elapsed).unwrap_or(0.0) * 1000.0) as u32;
+    walker.control.begin_frame(now_ms);
+    // The device poll. Live play reads the keyboard; the walk harness holds its forward key
+    // after the settle; the replay's rows press the same slots. The harness paths replace the
+    // keyboard entirely (a capture may not read the machine's keyboard, §16.13).
+    let replay_input = route_now.as_deref().and_then(|now| now.0);
+    let walk_hold = std::env::var_os("BK_WALK_FORWARD").is_some_and(|_| {
+        // `BK_WALK_HOLD_AFTER=<ms>`: stay idle for that much game time first. A level that opens
+        // with a scripted sequence is not walkable from its first frame (retail locks the
+        // player's input while the opening runs), so the walk legs that start after it pass this,
+        // and both sides settle for the same window before the held-forward comparison begins.
         let settle = env_f32("BK_WALK_HOLD_AFTER", 0.0) / 1000.0;
-        let elapsed = sim.as_deref().map(|s| s.elapsed).unwrap_or(0.0);
-        if elapsed + 1e-3 >= settle { 1.0 } else { 0.0 }
+        sim.as_deref().map(|s| s.elapsed).unwrap_or(0.0) + 1e-3 >= settle
+    });
+    if live && replay_input.is_none() && !walk_hold {
+        walker.control.poll(control::KEY_FORWARD, held(KeyCode::KeyW));
+        walker.control.poll(control::KEY_FORWARD_BACK, held(KeyCode::KeyS));
+        walker.control.poll(control::KEY_SLIDE_RIGHT, held(KeyCode::KeyD));
+        walker.control.poll(control::KEY_SLIDE_LEFT, held(KeyCode::KeyA));
+        walker.control.poll(control::KEY_JUMP, keys.pressed(KeyCode::Space));
+        walker.control.poll(control::KEY_DUCK, keys.pressed(KeyCode::ControlLeft));
+        walker.control.poll(control::KEY_SLOW, keys.pressed(KeyCode::ShiftLeft));
+    } else if let Some(route) = replay_input {
+        if route.forward != 0.0 {
+            walker.control.poll(control::KEY_FORWARD, route.forward > 0.0);
+        }
+        if route.strafe != 0.0 {
+            walker.control.poll(control::KEY_SLIDE_RIGHT, route.strafe > 0.0);
+        }
     } else {
-        forward
+        walker.control.poll(control::KEY_FORWARD, walk_hold);
+    }
+    // The bindings. Live play binds full-scale keys (a counter-direction key is the engine's
+    // negated binding); the replay's analog row values ride the binding sensitivities — the
+    // engine's own per-binding scale — with the row's sign as the negate flag.
+    let (forward_bindings, slide_bindings) = match replay_input {
+        Some(route) if route.forward != 0.0 || route.strafe != 0.0 => (
+            vec![control::Binding::scaled(control::KEY_FORWARD, route.forward)],
+            vec![control::Binding::scaled(control::KEY_SLIDE_RIGHT, route.strafe)],
+        ),
+        _ => (
+            vec![
+                control::Binding::key(control::KEY_FORWARD),
+                control::Binding::scaled(control::KEY_FORWARD_BACK, 1.0),
+            ],
+            vec![
+                control::Binding::key(control::KEY_SLIDE_RIGHT),
+                control::Binding::scaled(control::KEY_SLIDE_LEFT, 1.0),
+            ],
+        ),
     };
-    // `--replay`: the script's per-tick input replaces the keyboard and the env hooks above. Fixed
-    // per tick is what makes two runs of the same script identical.
-    let (forward, strafe) = match route_now.as_deref().and_then(|now| now.0) {
-        Some(route) => (route.forward, route.strafe),
-        None => (forward, strafe),
+    let jump_bindings = [control::Binding::key(control::KEY_JUMP)];
+    let duck_bindings = [control::Binding::key(control::KEY_DUCK)];
+    let fast_bindings = [control::Binding::key(control::KEY_FAST)];
+    let slow_bindings = [control::Binding::key(control::KEY_SLOW)];
+    // `DAT_008bd020 & 2` (`0x4d8a00:21`): the engine's always-run config bit. The two capture
+    // families ran different configs: the walk legs' first-window displacements (street90 1.28,
+    // cantina 1.29, walk12 1.34 units) fit the 2.0 scale, while the route capture's own velocity
+    // columns peak near 0.83 u/s and its fixture states 0.875 u/s — walk pace. Live play and the
+    // walk harness default to run; the replay defaults to the route capture's walk pace.
+    // `BK_ALWAYS_RUN` overrides either.
+    let always_run = match std::env::var("BK_ALWAYS_RUN") {
+        Ok(value) => value != "0",
+        Err(_) => replay_input.is_none(),
     };
-    // A **script camera** takes the body over — but only while its slot follows something other than the
-    // player. Level 14's opening points slot 0 at thing 45 (`MAcamera.key`) and retail's body moves
-    // **0.00 units** with forward held (level 10 0.12, level 7 0.11); `06abarons` instead selects the POV
-    // slot with no focus, and retail walks there. Keying on `script_camera` alone held the player for the
-    // rest of any level that had ever called `SetCurrentCamera` — `walk5_spawn` stood still at 0.00 against
-    // retail's 3.73. `camera_focus_thing()` is `None` for POV and for a focus on the player.
-    // A script camera does **not** take the controls away: `sithControl_Update` reads them on every
-    // path, and the thrust it builds is in the view's frame. `walk11_spawn-walk.tsv` is the fixture —
-    // retail's body travels 3.4 units and turns to 177.56 while the opening camera plays, from the
-    // same pose where the port used to stand still. Only the *frame* changes; the inputs stay.
-    // The walk is built in the **body's** frame, not the script camera's: `walk11_spawn`'s retail trace
-    // keeps yaw 0 and walks straight +y while the opening camera plays, and the camera basis sent the
-    // port -y instead -- into the level's shut door, the wrong sector. The script camera still drives
-    // the view; it does not steer the walk. (Retail's own input path reads the controls on every path
-    // and builds the thrust from the body's yaw.)
+    // `sithControl_PlayerMovement` (`0x4d8a00`): the thrust base stands for the engine's
+    // `thing+0x144 + thing+0x148` sum, which no recovered template parser produces — derived
+    // here from the measured settled walk, so the terminal speed is unchanged. The slow-water
+    // physflag (0x200000) branch reads the body's water state.
+    let base_thrust = player.rules.thrust_base(player.extra_speed);
+    let intent = control::player_movement(
+        &walker.control,
+        &forward_bindings,
+        &slide_bindings,
+        &jump_bindings,
+        &duck_bindings,
+        &fast_bindings,
+        &slow_bindings,
+        base_thrust,
+        always_run,
+        player.body.water,
+    );
+    // A **script camera** takes the body over — but only while its slot follows something other
+    // than the player. The walk is built in the **body's** frame, not the script camera's:
+    // `walk11_spawn`'s retail trace keeps yaw 0 and walks straight +y while the opening camera
+    // plays, and the camera basis sent the port -y instead -- into the level's shut door, the
+    // wrong sector. The script camera still drives the view; the inputs stay. (Retail's own
+    // input path reads the controls on every path and builds the thrust from the body's yaw.)
     // The app owns the keys and the body's facing; the runtime owns the target, the fixed-rate
     // velocity integration and the jump. Keeping the walk in the body's frame is what the retail
     // `walk11_spawn` trace shows while the opening camera plays.
-    let jump = live && keys.just_pressed(KeyCode::Space) && player.body.grounded;
     let input = runtime::PlayerInput {
-        forward,
-        strafe,
-        run,
-        crouch,
-        jump,
+        forward: intent.axis_forward,
+        strafe: intent.axis_slide,
+        run: intent.multiplier == 2.0,
+        crouch: intent.duck,
+        jump: intent.jump && player.body.grounded,
         yaw: player.body.yaw,
         extra_speed: player.extra_speed,
     };
@@ -30783,11 +30834,14 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     let trace = std::env::var_os("BK_WALK_TRACE").is_some();
     if trace {
         eprintln!(
-            "walk trace: live {live} W {} escape {} forward {forward} strafe {strafe} vel {:?} extra {} crouch {crouch}",
+            "walk trace: live {live} W {} escape {} forward {} strafe {} vel {:?} extra {} crouch {}",
             keys.pressed(KeyCode::KeyW),
             keys.pressed(KeyCode::Escape),
+            intent.axis_forward,
+            intent.axis_slide,
             player.body.vel,
-            player.extra_speed
+            player.extra_speed,
+            intent.duck
         );
         eprintln!("walk trace: dt {dt:.4} grounded {}", player.body.grounded);
         // The player thing's `SetActorFlags` bits and `jkSetFlags` bits: a level's opening script uses these
@@ -30870,7 +30924,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // shields are what `coords` cannot carry; they are here because the port's body has them.
     if let Some(path) = TRACE_OUT.get() {
         use std::io::Write;
-        if *trace_tick == 0
+        if walker.trace_tick == 0
             && let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -30895,8 +30949,8 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
             let _ = writeln!(
                 file,
                 "{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{:.3}\t{:.1}\t{:.1}",
-                *trace_tick,
-                f64::from(*trace_tick) * f64::from(dt),
+                walker.trace_tick,
+                f64::from(walker.trace_tick) * f64::from(dt),
                 player.body.pos.x,
                 player.body.pos.y,
                 player.body.pos.z,
@@ -30906,7 +30960,7 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
                 shields
             );
         }
-        *trace_tick += 1;
+        walker.trace_tick += 1;
     }
     if std::env::var_os("BK_JUMP_TRACE").is_some() {
         eprintln!(
