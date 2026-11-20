@@ -861,18 +861,42 @@ pub fn rotate_by_angles(v: [f32; 3], pitch: f32, yaw: f32, roll: f32) -> [f32; 3
         r[2] * v[0] + l[2] * v[1] + u[2] * v[2],
     ]
 }
-/// Turn `before` toward `wanted` by at most `rate * dt` degrees, taking the short way round.
+/// The flat forward vector of a yaw in degrees: the engine's `lvec`, whose z the turn blend keeps
+/// flattened (`sithAI_SetLookFrame` zeroes the look vector's z before blending).
+fn forward_of_yaw(yaw: f32) -> [f32; 2] {
+    let (sin, cos) = yaw.to_radians().sin_cos();
+    [-sin, cos]
+}
+
+/// The yaw of a flat unit vector: the inverse of `forward_of_yaw`.
+fn yaw_of_forward(f: [f32; 2]) -> f32 {
+    (-f[0]).atan2(f[1]).to_degrees()
+}
+
+/// One tick of the engine's turn blend, `sithAI_sub_4EA630` (`0x4ea630`) on a yaw-only body.
 ///
-/// The engine turns a thing with `maxrotthrust=`, an angular rate; snapping the yaw instead made
-/// every AI face the player the moment it noticed them, so engagements started and finished faster
-/// than retail's.
-fn turn_toward(before: f32, wanted: f32, rate: f32, dt: f32) -> f32 {
-    let mut delta = (wanted - before + 180.0).rem_euclid(360.0) - 180.0;
-    let limit = rate.max(0.0) * dt.max(0.0);
-    if delta.abs() > limit {
-        delta = limit * delta.signum();
+/// While the AI flag `0x8` is set (written by `ai_set_look_frame`), the body's forward vector is
+/// blended toward the stored look vector by `forward += look * maxrotthrust * _DAT_00523058 * dt`
+/// (the constant is **0.1**, read from `JK.EXE`'s `.rdata`) and renormalised — an ease-out vector
+/// blend, not a constant angular rate. The blend ends, clearing `0x8`, when the look vector is
+/// within `_DAT_00523054` = **0.01** of the body's right axis and not behind it. The body's right
+/// vector is rebuilt flat as `(lvec.y, -lvec.x)`, which is what the engine's cross product with the
+/// world up produces.
+fn turn_blend(forward: [f32; 2], look: [f32; 2], rotthrust: f32, dt: f32) -> ([f32; 2], bool) {
+    let rvec = [forward[1], -forward[0]];
+    if (rvec[0] * look[0] + rvec[1] * look[1]).abs() <= 0.01
+        && forward[0] * look[0] + forward[1] * look[1] >= 0.0
+    {
+        return (forward, true);
     }
-    before + delta
+    let k = rotthrust * 0.1 * dt.max(0.0);
+    let blended = [forward[0] + look[0] * k, forward[1] + look[1] * k];
+    let len = (blended[0] * blended[0] + blended[1] * blended[1]).sqrt();
+    if len < 0.01 {
+        // `rdVector_Normalize3` of a collapsed blend copies the look vector.
+        return (look, false);
+    }
+    ([blended[0] / len, blended[1] / len], false)
 }
 
 /// `sithAIAwareness_ProcessEvent`'s floor (`0x52315c`): a propagated event stops crossing adjoins
@@ -1752,6 +1776,15 @@ pub struct Runtime {
     /// When each actor's `jump` may nudge again: the handler (`0x50abf0`, event `0x400`) sets its own
     /// next check to `now + the class line's first number` (`jump 2000.0, 3.0, 3.0`).
     pub ai_jump: BTreeMap<usize, f32>,
+    /// The engine's `ai + 0x6f`: the speed argument the last `sithAI_SetMoveThing` (`0x4eac90`)
+    /// carried (dodge passes 2.5, `sithAI_Jump` 2.0), multiplying `maxthrust` in the walk step.
+    pub ai_move_speed: BTreeMap<usize, f32>,
+    /// The engine's `ai + 0xa3` jump lockout, in seconds: `sithAI_Jump` sets `now + 2000` ms and
+    /// `sithAI_SetMoveThing` refuses a new move while the lockout holds and the actor is moving.
+    pub ai_move_lock: BTreeMap<usize, f32>,
+    /// The engine's `ai + 0x65` look **direction** (`sithAI_SetLookFrame`, `0x4eab80`): the flat
+    /// unit vector the body blends its facing toward. Presence tracks the flag `0x8` turn.
+    pub ai_look_dir: BTreeMap<usize, [f32; 2]>,
     /// Each actor's home anchor: where it was placed. `returnhome`'s handler (`0x50bd70`) walks the
     /// actor back to `ai + 0x93` (`SetMoveThing`) and then turns it there (`SetLookFrame`), so the
     /// anchor is the thing's spawn position. Set when the instincts are attached to the live runtime.
@@ -1835,7 +1868,8 @@ pub struct Runtime {
     pub template_speed: BTreeMap<String, f32>,
     /// An actor template's turn rate, `maxrotthrust=` in degrees a second (`_actor` 180, a Ree-Yees
     /// gunner 70). The body turns at this rate; it does not snap.
-    pub template_turn: BTreeMap<String, f32>,
+    pub template_rotthrust: BTreeMap<String, f32>,
+    pub template_jumpspeed: BTreeMap<String, f32>,
     /// Redbook music: `(start track, end track, loop-back track)` as `PlaySong` set it.
     pub music: Option<(i32, i32, i32)>,
     /// `jkEndLevel(flag)`: the level is finished; the campaign advances when the app notices.
@@ -2685,6 +2719,9 @@ impl Runtime {
             ai_special: BTreeMap::new(),
             ai_dodge: BTreeMap::new(),
             ai_jump: BTreeMap::new(),
+            ai_move_speed: BTreeMap::new(),
+            ai_move_lock: BTreeMap::new(),
+            ai_look_dir: BTreeMap::new(),
             ai_home: BTreeMap::new(),
             ai_trace_source: BTreeMap::new(),
             ai_flee_until: BTreeMap::new(),
@@ -2717,20 +2754,30 @@ impl Runtime {
                     (t.name.to_ascii_lowercase(), thrust / drag)
                 })
                 .collect(),
-            // `maxrotthrust` is an angular *thrust*, not a rate: the engine's `ApplyDrag` decays
-            // rotation the same way it decays velocity, so the steady turn is `maxrotthrust / drag`
-            // — a Ree-Yees gunner's 70 over the same `surfdrag` 3 is 23 degrees a second, which is
-            // what spaces retail's engagements out (its door series is still neutral at 8 s).
-            template_turn: level
+            // The raw `maxrotthrust=` the engine's turn blend reads from the thing (`thing + 0x14c`,
+            // the same field `sithControl_PlayerMovement` scales mouse pitch by): the blend in
+            // `ai_turn_blend` multiplies it by `_DAT_00523058` = 0.1. The port's old settled
+            // `maxrotthrust / surfdrag` rate retired with `turn_toward`.
+            template_rotthrust: level
                 .templates
                 .iter()
                 .map(|t| {
-                    let thrust = level.template_f32(&t.name, "maxrotthrust").unwrap_or(180.0);
-                    let drag = level
-                        .template_f32(&t.name, "surfdrag")
-                        .filter(|d| *d > 0.0)
-                        .unwrap_or(3.0);
-                    (t.name.to_ascii_lowercase(), thrust / drag)
+                    (
+                        t.name.to_ascii_lowercase(),
+                        level.template_f32(&t.name, "maxrotthrust").unwrap_or(180.0),
+                    )
+                })
+                .collect(),
+            // `jumpspeed=` (`_actor` 1.5): what `sithPlayerActions_JumpWithVel` adds to the velocity
+            // when `sithAI_Jump`'s puppet play has no keyframes to drive.
+            template_jumpspeed: level
+                .templates
+                .iter()
+                .map(|t| {
+                    (
+                        t.name.to_ascii_lowercase(),
+                        level.template_f32(&t.name, "jumpspeed").unwrap_or(1.5),
+                    )
                 })
                 .collect(),
             last_hold: 0.0,
@@ -4154,8 +4201,122 @@ impl Runtime {
         self.sound_classes
             .get(class)?
             .get(mode)?
+
             .first()
             .map(|(wav, _)| wav.clone())
+    }
+
+    /// `sithAI_SetMoveThing` (`0x4eac90`): store a walk destination with its **speed argument**
+    /// (`ai + 0x6f`; dodge's handler passes 2.5, `sithAI_Jump` 2.0), play the soundclass's mode-5
+    /// ("moving", the engine's mode table read out of `JK.EXE` at `0x54b40c`) first entry, and set
+    /// the moving flag `0x1`. A new move is refused while the jump lockout (`ai + 0xa3`) holds and
+    /// the actor is already moving.
+    fn ai_set_move_thing(&mut self, actor: usize, point: [f32; 3], speed: f32) {
+        let flags = self.ai_flags.get(&actor).copied().unwrap_or(0);
+        if self.time >= self.ai_move_lock.get(&actor).copied().unwrap_or(0.0) || flags & 0x1 == 0 {
+            self.ai_move_speed.insert(actor, speed);
+            self.ai_move.insert(actor, point);
+            if let Some(at) = self.things.get(actor).map(|t| t.pos) {
+                self.queue_mode_sound(actor, "moving", at);
+            }
+            *self.ai_flags.entry(actor).or_insert(0) |= 0x1;
+        }
+    }
+
+    /// `sithAI_Jump` (`0x4eacf0`): a move at speed **2.0** (`0x40000000`) toward the stored
+    /// destination, puppet play mode `0x1b`, and — when the puppet cannot drive the body —
+    /// `sithPlayerActions_JumpWithVel` (`0x4fc270`), which adds `jumpspeed` straight up. The
+    /// 2000 ms lockout and the moving flag close it.
+    fn ai_jump_move(&mut self, actor: usize, pos: [f32; 3]) {
+        let template = self
+            .templates
+            .get(actor)
+            .cloned()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let jumpspeed = self
+            .template_jumpspeed
+            .get(&template)
+            .copied()
+            .unwrap_or(1.5);
+        self.ai_move_speed.insert(actor, 2.0);
+        self.ai_move.insert(actor, pos);
+        self.play_mode.insert(actor, 0x1b);
+        // shortcut: the port's puppet records the mode but has no keyframes to move the body, so
+        // the engine's JumpWithVel fallback runs unconditionally; drop this when puppets animate.
+        if let Some(thing) = self.things.get_mut(actor) {
+            thing.vel[2] += jumpspeed;
+        }
+        self.ai_move_lock.insert(actor, self.time + 2.0);
+        *self.ai_flags.entry(actor).or_insert(0) |= 0x1;
+    }
+
+    /// `sithAI_SetLookFrame` (`0x4eab80`): the one way an actor starts turning. The look vector is
+    /// `point - position`, normalised; the head pitch is clamped into the template's
+    /// `minheadpitch`/`maxheadpitch` (the engine's `SetHeadPYR` for a puppet thing); the z is
+    /// flattened and the vector renormalised; flag `0x8` arms the blend in `ai_turn_blend`.
+    fn ai_set_look_frame(&mut self, actor: usize, point: [f32; 3]) {
+        let Some(pos) = self.things.get(actor).map(|t| t.pos) else {
+            return;
+        };
+        let d = [point[0] - pos[0], point[1] - pos[1], point[2] - pos[2]];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len == 0.0 {
+            return;
+        }
+        let template = self
+            .templates
+            .get(actor)
+            .cloned()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let min = self
+            .template_minheadpitch
+            .get(&template)
+            .copied()
+            .unwrap_or(-80.0);
+        let max = self
+            .template_maxheadpitch
+            .get(&template)
+            .copied()
+            .unwrap_or(80.0);
+        if let Some(thing) = self.things.get_mut(actor) {
+            thing.head_pitch = (d[2] / len).asin().to_degrees().clamp(min, max);
+        }
+        let flat = (d[0] * d[0] + d[1] * d[1]).sqrt();
+        self.ai_look_dir.insert(actor, [d[0] / flat, d[1] / flat]);
+        *self.ai_flags.entry(actor).or_insert(0) |= 0x8;
+    }
+
+    /// `sithAI_Tick`'s flag-`0x8` arm: run the blend once per ticked actor, before the instinct
+    /// pass of the frame (the engine runs it in the thing update, ahead of `sithAI_Process`).
+    fn ai_turn_blend(&mut self, actor: usize, dt: f32) {
+        if self.ai_flags.get(&actor).copied().unwrap_or(0) & 0x8 == 0 {
+            return;
+        }
+        let Some(look) = self.ai_look_dir.get(&actor).copied() else {
+            return;
+        };
+        let Some(yaw) = self.things.get(actor).map(|t| t.yaw) else {
+            return;
+        };
+        let template = self
+            .templates
+            .get(actor)
+            .cloned()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let rotthrust = self
+            .template_rotthrust
+            .get(&template)
+            .copied()
+            .unwrap_or(180.0);
+        let (forward, done) = turn_blend(forward_of_yaw(yaw), look, rotthrust, dt);
+        if done {
+            *self.ai_flags.entry(actor).or_insert(0) &= !0x8;
+        } else if let Some(thing) = self.things.get_mut(actor) {
+            thing.yaw = yaw_of_forward(forward);
+        }
     }
 
     /// Queue the random row of the actor's own class for a sound mode at `at` — what
@@ -4229,7 +4390,7 @@ impl Runtime {
             return false;
         }
         let point = [from[0] - dx / flat * step, from[1] - dy / flat * step, from[2]];
-        self.ai_move.insert(actor, point);
+        self.ai_set_move_thing(actor, point, 2.5);
         self.ai_dodge.insert(actor, self.time + 1.0);
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} dodges {step:.2} away from thing {attacker} to {point:?}");
@@ -5043,7 +5204,7 @@ impl Runtime {
         let dir = [dx / flat, dy / flat];
         let rotated = [dir[0] * cos - dir[1] * sin, dir[0] * sin + dir[1] * cos];
         let point = [from[0] - rotated[0] * step, from[1] - rotated[1] * step, from[2]];
-        self.ai_move.insert(actor, point);
+        self.ai_set_move_thing(actor, point, 2.5);
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} dodges the shot from {shot:?} sideways to {point:?}");
         }
@@ -5112,8 +5273,12 @@ impl Runtime {
             // is `vel * dt`), so this is a real but small unstick toward the target.
             t.vel[0] += dir[0] * 0.1;
             t.vel[1] += dir[1] * 0.1;
-            t.yaw = (-dir[0]).atan2(dir[1]).to_degrees();
         }
+        // `FUN_0050abf0`'s event-`0x400` arm ends in `sithAI_Jump(ai, ai + 0x68, 1.0)`: the move
+        // destination it already holds, taken at speed 2.0 with the puppet's `0x1b` jump play, the
+        // `jumpspeed` hop and the 2000 ms lockout. The yaw snap the port had here is not engine
+        // behaviour — the handler never sets a look frame, so the body keeps its facing.
+        self.ai_jump_move(actor, goal);
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} is blocked and nudges toward {goal:?} (jump)");
         }
@@ -5524,7 +5689,7 @@ impl Runtime {
         let mut fired = 0;
         self.walked.clear();
         self.walk_vel.clear();
-        let mut shots: Vec<(usize, String, f32, usize)> = Vec::new();
+        let mut shots: Vec<(usize, String, f32, usize, [f32; 3])> = Vec::new();
         // Every actor with an instinct class, **plus** any actor a script gave a destination to.
         // `AISetMovePos`/`AISetMoveFrame` are gated on `controlType == SITH_CT_AI` in the engine, which
         // an actor has whether or not its template names an `aiclass=` — level 1's 8t88 has no class but
@@ -5557,6 +5722,9 @@ impl Runtime {
                 }
                 continue;
             }
+            // `sithAI_Tick` (`0x4ea5e0`): the turn blend runs for every ticked actor with the
+            // flag-`0x8` look frame, ahead of this frame's instinct pass.
+            self.ai_turn_blend(index, dt);
             let Some(thing) = self.things.get_mut(index) else { continue };
             if thing.destroyed || self.types.get(index).copied() != Some(2) {
                 continue;
@@ -5581,15 +5749,9 @@ impl Runtime {
                     .unwrap_or(0.065);
                 [from[0], from[1], from[2] + radius + 0.01]
             };
-            // `maxrotthrust=` is the angular rate the body can turn at (50-85 degrees a second for
-            // level 1's gunners). Snapping the yaw let every actor face the player the instant it
-            // noticed them, which is what made the port's fights start and finish faster than
-            // retail's; the turn is accumulated here and clamped once, below.
-            let turn_rate = self
-                .template_turn
-                .get(&ai_template)
-                .copied()
-                .unwrap_or(180.0);
+            // Turning is the engine's blend, not a rate: `ai_turn_blend` (run once per actor at the
+            // top of this loop) eases the body's forward vector toward the last look frame while
+            // flag `0x8` holds, so no per-site clamp is accumulated here.
             let mut want_yaw = yaw;
             // A scripted destination wins over the chase: `AISetMovePos`/`AISetMoveThing` are how
             // `00_AIPatrol.cog` and the sidekick scripts walk a puppet somewhere. `AISetMoveThing`
@@ -5792,7 +5954,7 @@ impl Runtime {
                 let range = (sx * sx + sy * sy).sqrt().max(1e-4);
                 let (sin, cos) = yaw.to_radians().sin_cos();
                 eprintln!(
-                    "ai: sees {index} range {range:.2} dot {:.2} ready {ready} yaw {yaw:.1} rate {turn_rate:.1} from {from:?} target {target:?}",
+                    "ai: sees {index} range {range:.2} dot {:.2} ready {ready} yaw {yaw:.1} from {from:?} target {target:?}",
                     (cos * sy - sin * sx) / range
                 );
             }
@@ -5972,9 +6134,10 @@ impl Runtime {
                 let idle_yaw = look_yaw.or_else(|| self.ai_randomturn.get(&index).copied());
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.ai_target = None;
-                    if let Some(yaw) = idle_yaw {
-                        thing.yaw = turn_toward(thing.yaw, yaw, turn_rate, dt);
-                    }
+                }
+                if let Some(yaw) = idle_yaw {
+                    let dir = forward_of_yaw(yaw);
+                    self.ai_set_look_frame(index, [from[0] + dir[0], from[1] + dir[1], from[2]]);
                 }
                 continue;
             }
@@ -5987,7 +6150,8 @@ impl Runtime {
                     from[2],
                 ];
                 let speed = self.template_speed.get(&ai_template).copied().unwrap_or(0.0)
-                    * self.actor_speed.get(&index).copied().unwrap_or(1.0);
+                * self.actor_speed.get(&index).copied().unwrap_or(1.0)
+                * self.ai_move_speed.get(&index).copied().unwrap_or(1.0);
                 if speed > 0.0 {
                     let step = (speed * dt).min(len);
                     let next = [
@@ -6002,9 +6166,10 @@ impl Runtime {
                     if let Some(thing) = self.things.get_mut(index) {
                         thing.pos = next;
                         thing.ai_target = Some(goal);
-                        thing.yaw =
-                            turn_toward(thing.yaw, (-away[0]).atan2(away[1]).to_degrees(), turn_rate, dt);
                     }
+                    // The flee walk turns by look frame at the point it runs to, like every other
+                    // engine turn site.
+                    self.ai_set_look_frame(index, [from[0] + away[0] / len, from[1] + away[1] / len, from[2]]);
                     self.walked.push(index);
                     let dt = dt.max(1e-4);
                     self.walk_vel
@@ -6090,9 +6255,11 @@ impl Runtime {
             let dy = goal[1] - from[1];
             let reach = (dx * dx + dy * dy).sqrt();
             // `sithAI.c:814` steps the actor by `maxThrust * dt * moveSpeed`, so a scripted
-            // `AISetMoveSpeed` scales the template's walking speed rather than replacing it.
+            // `AISetMoveSpeed` — and the speed argument the last `sithAI_SetMoveThing` carried
+            // (dodge 2.5, jump 2.0) — scales the template's walking speed rather than replacing it.
             let speed = self.template_speed.get(&ai_template).copied().unwrap_or(0.0)
                 * self.actor_speed.get(&index).copied().unwrap_or(1.0)
+                * self.ai_move_speed.get(&index).copied().unwrap_or(1.0)
                 * pace;
             // A scripted destination that never progresses: the template carries no `maxthrust`, so
             // the walk speed is zero and the actor stands on its order forever (round 307 found the
@@ -6201,10 +6368,8 @@ impl Runtime {
                     // actors keep their placed facing for the whole encounter.
                     if (scripted.is_some() || sighted)
                         && (facing.0.abs() > 1e-4 || facing.1.abs() > 1e-4)
-                        && let Some(thing) = self.things.get_mut(index)
                     {
-                        let wanted = (-facing.0).atan2(facing.1).to_degrees();
-                        thing.yaw = turn_toward(thing.yaw, wanted, turn_rate, dt);
+                        self.ai_set_look_frame(index, face);
                     }
                     continue;
                 }
@@ -6289,11 +6454,15 @@ impl Runtime {
             //   intArg[9] ms between burst shots
             // so a `peddefault.ai` gunner and a `rydefault.ai` one fire at different rates, from
             // different ranges and with different accuracy — as the shipped files say.
-            // The one clamp for this frame's desired facing: `maxrotthrust * dt`. It has to happen
-            // for every active actor, not just the ones about to fire — an actor that is still
-            // turning spends most frames behind its `ai_wait` and would never rotate otherwise.
-            if let Some(thing) = self.things.get_mut(index) {
-                thing.yaw = turn_toward(yaw, want_yaw, turn_rate, dt);
+            // The frame's desired facing becomes the look frame — `sithAI_SetLookFrame`, the one
+            // way an engine actor starts turning — and the blend at the top of the next tick eases
+            // the body toward it. A look is only set while the body is not already facing there, so
+            // the flag `0x8` clears once the blend finishes and stays clear until the desire moves
+            // again, the way the engine's event-driven handlers leave it.
+            let delta = (want_yaw - yaw).rem_euclid(360.0);
+            if delta.min(360.0 - delta) > 0.6 {
+                let dir = forward_of_yaw(want_yaw);
+                self.ai_set_look_frame(index, [from[0] + dir[0], from[1] + dir[1], from[2]]);
             }
             let mut shooting_at = aim.unwrap_or(target);
             // An engine actor has a *target* only once the detection roll registered it
@@ -6443,11 +6612,11 @@ impl Runtime {
                 continue;
             }
             // A script that names a fire target is telling the actor to shoot *that*, so it turns to
-            // it first — `00_AITurnCoat.cog` turns an actor on the victim behind it.
-            if aim.is_some()
-                && let Some(thing) = self.things.get_mut(index)
-            {
-                thing.yaw = (-sx).atan2(sy).to_degrees();
+            // it first — `00_AITurnCoat.cog` turns an actor on a victim behind it. The engine's
+            // `sithAICmd_PrimaryFire` sets a **look frame**, so the body eases onto the victim
+            // instead of snapping; the facing gate below still reads the pre-turn yaw.
+            if aim.is_some() {
+                self.ai_set_look_frame(index, shooting_at);
             }
             let yaw = self.things.get(index).map(|t| t.yaw).unwrap_or(yaw);
             // `minDot`: the actor fires only once it is facing the target, which is what makes it
@@ -6484,9 +6653,11 @@ impl Runtime {
             // What the shot is aimed at: the scripted `AISetFireTarget` thing when one is named,
             // otherwise the player. That is the engine's own target, not the aim point.
             let target_thing = self.ai_fire_target.get(&index).copied().unwrap_or(player);
-            shots.push((index, weapon, error, target_thing));
+            shots.push((index, weapon, error, target_thing, shooting_at));
+            // The engine's fire path sets the look frame, never the yaw: the body blends onto the
+            // target while the shot itself flies at where the aim already points.
+            self.ai_set_look_frame(index, shooting_at);
             if let Some(thing) = self.things.get_mut(index) {
-                thing.yaw = (-sx).atan2(sy).to_degrees();
                 // `sithActor_UpdateAimJoints`: the aim points at the target in **three** dimensions.
                 // Without the elevation an actor shoots level at a player standing on a ledge and the
                 // bolt passes underneath — the bug the player had until round 109.
@@ -6525,9 +6696,9 @@ impl Runtime {
             }
         }
         let mut shooters: Vec<usize> = Vec::new();
-        for (index, weapon, error, target) in shots {
+        for (index, weapon, error, target, aim) in shots {
             if self
-                .fire_toward(index as i64, &weapon, error, None, Some(target))
+                .fire_toward(index as i64, &weapon, error, None, Some(target), Some(aim))
                 .is_some()
             {
                 // The renderer plays a puppet's `fire` track off this: the engine's
@@ -7267,12 +7438,15 @@ impl Runtime {
         error: f32,
         sound: Option<&str>,
     ) -> Option<usize> {
-        self.fire_toward(shooter, template, error, sound, None)
+        self.fire_toward(shooter, template, error, sound, None, None)
     }
 
     /// [`Self::fire_with_spread`] with the thing the shooter has as a target (the AI's own target,
     /// recorded in the encounter chronology). A shot nothing names — the player's weapon, a scripted
-    /// `FireProjectile` — passes `None`.
+    /// `FireProjectile` — passes `None`. An AI shot also names its **aim point** (`aim`): the engine's
+    /// `sithAI_FireWeapon` (`0x4eba10`) fires along the AI's stored aim vector (`ai + 0x79`), not
+    /// along the body's orientation, so the bolt leaves at its target however far the body's own
+    /// turn blend still has to go.
     fn fire_toward(
         &mut self,
         shooter: i64,
@@ -7280,6 +7454,7 @@ impl Runtime {
         error: f32,
         sound: Option<&str>,
         target: Option<usize>,
+        aim: Option<[f32; 3]>,
     ) -> Option<usize> {
         // Every shot the runtime spawns, counted where it is actually spawned. A check that samples
         // live things misses a bolt that dies between two frames, and at 10 fps that is most of them.
@@ -7298,7 +7473,7 @@ impl Runtime {
         // The engine's basis is `forward = (-sin yaw, cos yaw)`, `right = (cos yaw, sin yaw)`; the
         // template velocity is in the shooter's own frame (`x` right, `y` forward).
         let flat = [speed[0] * cos - speed[1] * sin, speed[0] * sin + speed[1] * cos];
-        // Pitch tilts that horizontal aim up or down and the template's own z rides along, so a shot
+        // Pitch tilts that horizontal aim up and down and the template's own z rides along, so a shot
         // aimed 30 degrees up leaves with `speed * sin(30)` in z. `rotate_by_angles` is the engine's
         // `rdMatrix_Build34`, whose yaw starts at +Y; this world's camera yaw starts at +X, so the
         // rotation is written out here rather than reused.
@@ -7308,6 +7483,17 @@ impl Runtime {
             flat[1] * cp,
             (flat[0] * flat[0] + flat[1] * flat[1]).sqrt() * sp + speed[2] * cp,
         ];
+        if let Some(aim) = aim {
+            // The AI's aim vector: the template's whole speed magnitude along the direction to the
+            // aim point, replacing the body-orientation heading.
+            let d = [aim[0] - pos[0], aim[1] - pos[1], aim[2] - pos[2]];
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let mag = (forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2])
+                .sqrt();
+            if len > 1e-4 {
+                forward = [d[0] / len * mag, d[1] / len * mag, d[2] / len * mag];
+            }
+        }
         if error > 0.0 {
             forward = Self::jitter_aim(forward, error);
         }
@@ -12913,12 +13099,33 @@ mod tests {
     }
 
     #[test]
-    fn a_body_turns_at_its_own_rate() {
-        assert!((turn_toward(0.0, 60.0, 16.0, 0.6) - 9.6).abs() < 1e-4);
-        assert!((turn_toward(0.0, 5.0, 16.0, 0.6) - 5.0).abs() < 1e-4, "a small turn is reached");
-        // The short way: 350 -> 10 is +20, not -340.
-        assert!((turn_toward(350.0, 10.0, 100.0, 0.1) - 360.0).abs() < 1e-4);
-        assert!((turn_toward(10.0, 350.0, 100.0, 0.1)).abs() < 1e-4);
+    fn a_body_blends_toward_its_look_frame() {
+        // 90 degrees off, `maxrotthrust` 180 (so k = 180 * 0.1 * dt): forward [1,0] is yaw -90,
+        // look [0,1] is yaw 0, and one 1/30 s tick blends to normalize([1,0.6]) = yaw -59.04 —
+        // 30.96 degrees of the 90 covered.
+        let (f, done) = turn_blend([1.0, 0.0], [0.0, 1.0], 180.0, 1.0 / 30.0);
+        assert!(!done);
+        assert!((yaw_of_forward(f) + 59.04).abs() < 0.01, "yaw {}", yaw_of_forward(f));
+        // Aligned within the engine's 0.01 right-axis band and not behind: the blend ends without
+        // moving the body further.
+        let (f, done) = turn_blend([1.0, 0.0], [0.9999999, 0.0], 180.0, 1.0 / 30.0);
+        assert!(done);
+        assert_eq!(f, [1.0, 0.0]);
+        // The blend decays the remaining angle roughly exponentially: three more ticks at k = 0.6
+        // bring the remaining 59 degrees to 14.8.
+        let (f, _) = turn_blend(f_next(-59.04), [0.0, 1.0], 180.0, 1.0 / 30.0);
+        let (f, _) = turn_blend(f, [0.0, 1.0], 180.0, 1.0 / 30.0);
+        let (f, _) = turn_blend(f, [0.0, 1.0], 180.0, 1.0 / 30.0);
+        assert!((yaw_of_forward(f) + 14.82).abs() < 0.05, "yaw {}", yaw_of_forward(f));
+        // A collapsed blend copies the look vector (`rdVector_Normalize3` of the zero vector): the
+        // exact opposite with k = 1 lands on zero.
+        let (f, done) = turn_blend([-1.0, 0.0], [1.0, 0.0], 30.0, 1.0 / 3.0);
+        assert!(!done);
+        assert_eq!(f, [1.0, 0.0]);
+    }
+
+    fn f_next(deg: f32) -> [f32; 2] {
+        forward_of_yaw(deg)
     }
 
     #[test]
@@ -13203,7 +13410,7 @@ mod tests {
         rt.encounter_events_enabled = true;
 
         rt.time = 4.0;
-        let landed = rt.fire_toward(0, &bolt, 0.0, None, Some(9)).expect("projectile");
+        let landed = rt.fire_toward(0, &bolt, 0.0, None, Some(9), None).expect("projectile");
         rt.note_shot_landed(landed);
         match rt.encounter_events.last() {
             Some(EncounterEvent::ShotLanded { t, target, .. }) => {
@@ -13214,7 +13421,7 @@ mod tests {
         }
 
         rt.time = 5.0;
-        let missed = rt.fire_toward(0, &bolt, 0.0, None, Some(9)).expect("projectile");
+        let missed = rt.fire_toward(0, &bolt, 0.0, None, Some(9), None).expect("projectile");
         rt.note_shot_lost(missed);
         match rt.encounter_events.last() {
             Some(EncounterEvent::Miss { t, target, .. }) => {
@@ -13237,7 +13444,7 @@ mod tests {
         rt.template_damage.insert(bolt.clone(), 12.0);
         rt.encounter_events_enabled = true;
         rt.time = 4.0;
-        let shot = rt.fire_toward(0, &bolt, 0.0, None, Some(9)).expect("projectile");
+        let shot = rt.fire_toward(0, &bolt, 0.0, None, Some(9), None).expect("projectile");
         rt.life_left.insert(shot, 0.01);
         rt.step(None, 1.0 / 60.0);
         let miss = rt.encounter_events.iter().any(|event| {
@@ -14945,11 +15152,13 @@ mod tests {
             "the nudge was {:?}",
             rt.things[1].vel
         );
-        assert!(
-            (rt.things[1].yaw + 90.0).abs() < 1e-3,
-            "the actor did not face its +X target: yaw {}",
-            rt.things[1].yaw
-        );
+        // `sithAI_Jump` (`0x4eacf0`): the move runs at speed 2.0, the puppet play mode is the jump
+        // `0x1b`, the `jumpspeed` (1.5) hop is added straight up, and the 2000 ms lockout arms. The
+        // handler never sets a look frame, so the body's yaw is untouched.
+        assert_eq!(rt.ai_move_speed.get(&1), Some(&2.0));
+        assert_eq!(rt.play_mode.get(&1), Some(&0x1b));
+        assert!((rt.things[1].vel[2] - 1.5).abs() < 1e-5, "vel {:?}", rt.things[1].vel);
+        assert_eq!(rt.ai_move_lock.get(&1), Some(&2.0));
         // The handler's own 2000 ms clock: an immediate second event does nothing.
         assert!(
             !rt.emit_ai_event(1, 0x400, None),
@@ -15363,13 +15572,23 @@ mod tests {
             Some([0.7, 0.0, 0.0]),
             "a second hit inside the 1 s cooldown moved the body again"
         );
-        // … and after it, the step is measured from where the body now is.
+        // … and after it, the step is measured from where the body now is — but only once the
+        // moving bit the first dodge's `SetMoveThing` set has cleared on arrival: `SetMoveThing`
+        // refuses a new move for a moving actor outside the jump lockout, exactly as the engine
+        // (`0x4eac90`) does.
         rt.time = 1.1;
         rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
         assert_eq!(
             rt.ai_move.get(&1).copied(),
+            Some([0.7, 0.0, 0.0]),
+            "a moving actor dodged again before arriving"
+        );
+        *rt.ai_flags.get_mut(&1).unwrap() &= !0x1;
+        rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
+        assert_eq!(
+            rt.ai_move.get(&1).copied(),
             Some([1.2, 0.0, 0.0]),
-            "the dodge did not re-arm after its cooldown"
+            "the dodge did not re-arm once the actor had arrived"
         );
     }
 

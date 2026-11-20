@@ -7771,3 +7771,27 @@ LinkCog (0x4df610) ORs SITH_SURFACE_COG_LINKED (2) into rt.surface_flags in wire
 ## Round: #91 the perception chain (commit pending)
 
 CheckSightThing (0x4eb090) transliterated as Runtime::check_sight_thing and wired into both sight sites (`sighted` and the LookForTarget scan): 3D eye distance with the target radius removed twice, the sideways-component cone, the segment pair as the 0x102 sweep stand-in. Ai::cone's angle test retired into ai::cone_holds (fovcos = cos(fov·0.5), 0x523128 = 0.5 read from the shipped image; fov ≥ 180 keeps a rear blind wedge, fov 90 accepts only ~17° off axis). FirstThingInView (0x4eb790) and GetThingsInView (0x4ebe80) ported as first_thing_in_view/get_things_in_view with the adjoin-depth recursion (Runtime::adjoin_depth = the two sides' `dist` column, nonzero on every shipped level). Constants from the image: 0x523060/64/68 = 0/−1/1, 0x523070/74 = 0.5/90. cargo test 444/444 (circlestrafe and the --ai chase fixtures re-aimed at the body: their yaws sat inside the old fov≥180 all-round bypass). Gates: --ai, --ai-live, --soak, --tour, --walk all, encounter, trace 9/9 green; route-gate fails 1 field identically on the 06b77dc baseline (tick 36 sector 349 vs 339, pre-existing). Unmapped, noted in the handoff: GetThingsInView's three surface/texture adjoin tests, the cloak rules, the type-2/7 thing ray.
+
+## Round: #92 movement and turning (commit pending)
+
+The engine's turning is a blend, not a rate: sithAI_SetLookFrame (0x4eab80) stores the flattened
+look vector (ai+0x65) and sets AI flag 0x8; sithAI_Tick (0x4ea5e0) runs sub_4EA630 (0x4ea630),
+which blends lvec toward it by maxrotthrust (thing+0x14c) * _DAT_00523058 * dt and rebuilds
+rvec/uvec, clearing 0x8 once |rvec·look| <= _DAT_00523054 and the body is not behind. Constants
+read from the shipped image: 0x523050 = 0.0, 0x523054 = 0.01, 0x523058 = 0.1, 0x522b28..30 =
+(0,0,1). The port's turn_toward (constant maxrotthrust/surfdrag rate) and all three instant yaw
+snaps (jump, scripted aim, every shot) retired into turn_blend + Runtime::ai_set_look_frame /
+ai_turn_blend; template_turn retired for template_rotthrust (the raw field the engine reads).
+
+sithAI_SetMoveThing (0x4eac90) ported as ai_set_move_thing: speed argument ai+0x6f (dodge 2.5,
+jump 2.0) now multiplies the walk step, soundclass mode 5 ("moving", the engine mode table at
+JK.EXE 0x54b40c: 5 = moving) plays, flag 0x1 sets, and the jump lockout gate (ai+0xa3, moving
+only) holds. sithAI_Jump (0x4eacf0) ported as ai_jump_move and wired into jump_from_obstacle's
+event-0x400 arm: move at speed 2.0, puppet play 0x1b, JumpWithVel's jumpspeed hop (shortcut: the
+port's puppet cannot drive the body, so the vel fallback runs unconditionally), now+2000 lockout.
+
+sithAI_FireWeapon (0x4eba10) reads for its direction ai+0x79 — the AI's aim vector, not the body
+orientation — so fire_toward gained an aim point: the AI's bolt leaves at its target however far
+the turn blend has to go. Without it the retired shot snap made every AI bolt fly along a
+mid-blend body yaw, and the encounter gate's first door shot missed (5 failures); with it the
+gate returns to 0 failures against the 0b1e980 baseline's 0.
