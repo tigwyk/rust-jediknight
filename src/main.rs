@@ -26295,7 +26295,9 @@ fn solid_things_at(
                     half: Some(half),
                     yaw,
                     mesh,
-                    floor: shape.floor,
+                    thing_flags: shape.thing_flags,
+                    collide: shape.collide,
+                    owner: None,
                 })
             } else {
                 Some(collide::ThingSolid {
@@ -26311,7 +26313,9 @@ fn solid_things_at(
                     half: None,
                     yaw,
                     mesh,
-                    floor: shape.floor,
+                    thing_flags: shape.thing_flags,
+                    collide: shape.collide,
+                    owner: None,
                 })
             }
         })
@@ -26333,8 +26337,10 @@ struct SolidShape {
     half: Option<[f32; 2]>,
     /// `collide=3`: geoset 0's faces in model space (see [`collision_faces`]).
     mesh: Option<std::sync::Arc<[Vec<collide::Face>]>>,
-    /// A cog-type thing with thingflag `0x40`: `FindFloor` may attach a body to it.
-    floor: bool,
+    /// The thingflags word (`+0x0`) for the search gates of `0x4e8430`.
+    thing_flags: u32,
+    /// The `collide=` word (`+0x28`): 3 selects the mesh arm of `0x5080d0`.
+    collide: u32,
     /// The engine thing type, for type-gated searches (`item_has_los`).
     kind: u32,
     /// Type 5: pass-through contact (pair handler `0x4fbe10` returns 0).
@@ -26410,29 +26416,25 @@ impl SolidShapes {
     /// caller is placing a level thing (a placement's word replaces the template's), 0 when the
     /// shape is the template's own (the map, or a spawned thing).
     fn shape_for(world: &World, template: &str, placement_flags: u32) -> Option<SolidShape> {
-            // An **actor** is not a fixed obstacle for a walking body. The engine's actor collision is soft:
-            // the player walks through an NPC and the NPC gives way, where the port's cylinder list made every
-            // actor a solid post. Level 11 shows it plainly -- the body walked into `gorc` standing in the
-            // doorway and was shoved around him 67 times in 90 frames (each push carried the body -x), ending
-            // at (-0.54, 13.27), where retail's body walks straight to the closed door and stops at
-            // (0.01, 13.20). Actors keep their own collision and AI; they are simply not in the *walker*'s list.
+            // An **actor** is back in the list (#100): the engine admits (10,2) through the pair
+            // matrix (`LAB_004ed210` = `ThingCollisionHandler` + an AI bump event), so a walking
+            // body meets an actor's `size=` sphere and stops. The old exclusion was the port's own
+            // soft-collision stand-in; the round-307 cylinder note in the ledger row is history.
             let kind = crate::runtime::thing_type_of(&world.level, template) as u32;
-            if kind == 2 {
-                return None;
-            }
             let radius = crate::runtime::solid_radius(&world.level, template)?;
             // `sithThing_ParseThingArg` case 2 writes `collide=` to `+0x28`; only value 3 (and a
             // sphere-vs-thing case with a `collide=3` partner) selects mesh collision in
-            // `sithIntersect_CheckSphereThingIntersection`. The model's bounds give the leaf its
-            // thickness; the template's `size=` is a body-sized radius.
-            let mesh = world
+            // `sithIntersect_CheckSphereThingIntersection`. `solid_radius` above already returned
+            // `None` for `collide=0`, so the word here is 1..3.
+            let collide = world
                 .level
                 .template_param(template, "collide")
                 .and_then(|value| value.trim().parse::<i32>().ok())
-                == Some(3);
-            // `sithPhysics_FindFloor` searches with `0x10 | 0x2000` (`0x4f5550`): thingflag `0x40` and
-            // thing type 7 (`cog`). A placement's `thingflags=` replaces the template's.
-            let flags = if placement_flags != 0 {
+                .unwrap_or(1) as u32;
+            let mesh = collide == 3;
+            // The thingflags word (`+0x0`) the search gates read (`0x4e8430:33-35`). A placement's
+            // `thingflags=` replaces the template's.
+            let thing_flags = if placement_flags != 0 {
                 placement_flags
             } else {
                 world
@@ -26441,8 +26443,6 @@ impl SolidShapes {
                     .and_then(|raw| u32::from_str_radix(raw.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
                     .unwrap_or(0)
             };
-            let floor = flags & 0x40 != 0
-                && world.level.template_param(template, "type").is_some_and(|t| t.trim().eq_ignore_ascii_case("cog"));
             let loaded = world
                 .template_model
                 .get(&template.to_ascii_lowercase())
@@ -26462,37 +26462,29 @@ impl SolidShapes {
                         (hi[1] - lo[1]).abs() * 0.5,
                     ]),
                     mesh: loaded.map(|model| collision_faces(model).into()),
-                    floor,
+                    thing_flags,
+                    collide,
                     kind,
                     item: kind == 5,
                 },
                 _ => {
+                    // The movement sphere keeps the template's own `size=` (`+0x30`): the engine's
+                    // `0x508540` gate is exactly that value, and the old plan-footprint clamp was a
+                    // port invention (it sealed gaps after the round-124 template-radius revert;
+                    // the real culprit then was sphere-testing the `collide=3` furniture that the
+                    // mesh arm owns now).
                     let span = model
                         .map(|(lo, hi)| (lo[2], hi[2]))
                         .filter(|(lo, hi)| hi > lo)
                         .unwrap_or((-radius, radius));
-                    // The model's plan footprint is far tighter than the template's `size=` (which is
-                    // a body-sized radius, not the furniture's): `table4`'s is 0.154 while its model
-                    // is ~0.1 wide. Blocking with the template radius sealed the cantina leg
-                    // (102 % -> 12 %) and level 4 (100 % -> 50 %). An **item** keeps the template's
-                    // `size=` (`thing+0x30`): the (5,10) handler's contact is the engine's 3D
-                    // sphere gate (`0x508540`, `span = size + mover`), and the plan clamp would
-                    // shrink level 2's disc (size 0.1, model 0.071, 0.023 tall) out of reach of a
-                    // body held `GetThingHeight` over the floor.
-                    let radius = model
-                        .map(|(lo, hi)| {
-                            let plan = lo[0].abs().max(hi[0].abs()).max(lo[1].abs()).max(hi[1].abs());
-                            radius.min(plan).max(0.02)
-                        })
-                        .filter(|_| kind != 5)
-                        .unwrap_or(radius);
                     SolidShape {
                         radius,
                         lo: [-radius, -radius, span.0],
                         hi: [radius, radius, span.1],
                         half: None,
                         mesh: None,
-                        floor,
+                        thing_flags,
+                        collide,
                         kind,
                         item: kind == 5,
                     }
@@ -32141,7 +32133,8 @@ mod walker_tests {
                 verts: vec![[0.05, -0.1, -0.1], [0.05, -0.1, 0.1], [0.05, 0.1, 0.1], [0.05, 0.1, -0.1]],
                 surface: usize::MAX,
             }]].into()),
-            floor: false,
+            thing_flags: 0,
+            collide: 3,
             kind: 7,
             item: false,
         };
@@ -32319,7 +32312,9 @@ mod walker_tests {
                 verts: vec![[0.1, -0.4, RISER], [0.9, -0.4, RISER], [0.9, 0.4, RISER], [0.1, 0.4, RISER]],
                 surface: usize::MAX,
             }]].into()),
-            floor: true,
+            thing_flags: 0x40,
+            collide: 3,
+            owner: None,
             kind: 7,
             item: false,
         }]);
