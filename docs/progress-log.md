@@ -7849,3 +7849,68 @@ sensedanger keeps its two mapped-field substitutions. Full battery on 29a30498: 
 encounter gate 0 failures under BK_EXIT_FRAMES=300, --soak/--soak-all/--tour/--cog-check
 green. The windowed legs (--ai-live) are orchestrator-owned on this box: two agent windowed
 runs hung in presentation and were killed; the agents run headless only now.
+
+## Round #100 — sphere-thing intersection unit (issue #100)
+
+Branch `tick/100-intersection`, commits a52ef0e/6f80874/89b41c9. `check_sphere_thing_intersection`
+is all of `0x5080d0` (mesh gate `flags & 0x80`, non-mesh sphere arm with the centre-to-contact
+normal, zero-mesh `collide=3` = no contact; the `bVar14` mover-collide-3 reverse is unreachable for
+the `collide=1` walker and stays a documented remainder). `thing_contacts` ports `0x4e8430`'s full
+admission order incl. the `0x4e6d90` pair matrix (with `AddCollisionHandler`'s mirrors), the `0x200`
+exclusion, the owner chain and the attach exclusion; `search_for_collisions` threads the mover
+(`FindFloor` passes `None`, the engine's `mover=0`). Inventions deleted: `sweep_plan`, `sweep_top`,
+the `z_min` prefilter, `shape_for`'s plan-radius clamp and actor exclusion; `_decor` is `type=cog`
+(7), so furniture rides the (10,7) cell. `LAB_004ed210` was read from the shipped image (capstone on
+the `.text` bytes at `0x4ed210`): `ThingCollisionHandler` + an AI bump event (`sithAI_EmitEvent`
+arg 4) per actor side with an AI at `+0x278`; the AI event is unported. 465 unit tests green.
+Gates: `--walk all`, `--cog-check`, `--soak-all`, `--tour`, encounter `0 failures` green; trace gate
+3 legs red (walk_cantina 15 %, walk_street45/90 51 %) and the route replay's use step never fires —
+all one cause: the engine-true (10,2) admission meets the frozen authored actors (`reeyeesgun` 182,
+`reeyeesbhgun` 240) that retail's AI has walked away, and without `ThingCollisionHandler`'s
+`ApplyForce` push-back (#101) the walker pins in the actor+wall wedge. Route gate's retail-compare
+FAIL is pre-existing on the integration tip (b18b9bc: tick 36 sector 349 vs 339).
+
+## Round spec #99 integration — #101, #102, #103 merged and #104's gate reconciliation
+
+#103 (`3ac5f63`, merge `cfa9f51`): the item handler `0x4fbe10` runs at the swept contact inside
+`move_thing_with` with the contact pose's LOS and an integer-ms `+0x148` clock; level 2 takes the disk
+through `pow_datadisk.cog`. #101 (`ff6209e`, merge `9a3ade2`): `CollideHurt`'s inline charge, the
+surface/thing contact handlers with `ApplyForce`, and the persisted slope velocity (`0x4f7430:439-489`);
+crate impulses survive both thing orders. #102 (`1acf9dc`, merge `0c0a517`): live `FindFloor` scope,
+`GetThingHeight`'s `height=`, the attach physics half and the moving thing-face support replacing
+`elevator_floor`; spawn and AI keep `floor_under` as placement probes.
+
+#104 on the integration branch: `--things`' landing assertion takes `CollideHurt`'s restitution residue
+(`0.0001 * g * dt`, `vel.z 1.33e-5` measured) instead of exact zero; the walk-off rows return to their
+pre-#78 values (Yun 1.50, `10cargo` 0.08, sarris 2.72) because the persisted velocity removes the held
+slide; the route plan's `exit_tunnel` warp moves to y 13.4, past Rodians 289/290 that the engine's (10,2)
+admission now collides with (user decision), and the port oracle is re-recorded from that build. Stage 5
+and 6 rows refreshed.
+
+Checks on the integration source: 469 unit tests; `--things`, `--walk all`, `--attach`, `--collide`,
+`--fall`, `--pickup`, `--hit`, `--soak-all`, `--tour`, `--cog-check` pass; encounter 0 failures; route
+gate events/anti-synthetic/oracle PASS. Open: trace gate `walk6_spawn` (5 sectors off; the body ends in
+290 instead of retail's 315 at the same pose within 0.01 units), and the route's retail prefix compare
+worsens from 1 mismatch (b18b9bc, same session) to 3 (ticks 36/72/108, sector 339 against 349): the
+spawn body is pinned between surface 3311, table 210 and the intro Rodian 207, which retail slides past.
+
+Follow-up on the integration branch (`184d883`): pushed bodies now run the attached drag arm
+(`0x4f7430:180-208`, `sithPhysics_ApplyDrag` `0x4f5d50`). Before it, an actor or crate bumped by the
+#101 contact response kept its push velocity forever (Rodian 207 slid north at 0.2 u/s for the whole
+route). With drag the bumped actors stop, so the frozen actors block harder: trace leg `walk_cantina`
+drops from 68 % to 24 % of retail's travel and the route's retail prefix compare reads 4 mismatches
+(ticks 36-144, sector 339 against 349). The port oracle is re-recorded from this build.
+
+Root cause of the spawn and cantina wedges, found by reading the capture harness and the level's cogs:
+it is the measurement window, not the collision port. `retail-capture.ps1 -RouteWalk` sends
+`disableai on` only at the route start, at least 1.2 s after `parse section things`
+(`Start-Sleep 1200` before the route, plus console latency). `01_initialry.cog` sleeps 0.5 s and then
+`AISetMovePos`es Rodian 207 (speed 3.0) to ghost 258 at (-10.35, -4.85) in sector 349, so retail's
+intro Rodian has left the spawn path before tick 0, and retail's body walks through the place the level
+file puts it. The port's `--no-ai` freezes the AI from frame 0, so 207 stays at its authored spot in the
+spawn path. Two port-side facts keep a simple AI pre-roll from fixing it: with a 72-tick AI-on pre-roll
+the port's 207 walks 0.17 units toward ghost 258 and then re-targets the player ("walks on aim" at
+t = 0.77 s) and fires, because the port's AI scheduler is still an approximation; and the pre-roll would
+move the replay's tick 0. Open question for the user: retail's Rodian 207 (and the cantina actors 181,
+182, 272) positions at the route's tick 0, which only a retail `coords`/thing dump at the route start
+can answer.

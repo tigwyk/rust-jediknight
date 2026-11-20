@@ -84,6 +84,13 @@ input	180	1	0
 # (`0x4c8070`) sends `sighted` to `01_goal0.cog`, which reports the objective, and `01_endlevel.cog`'s
 # `user0` sets goal bin 100 = 3, sleeps 3 s and calls `jkEndLevel(1)`. The trailing `wait` outlasts that
 # sleep, so the last sample carries `level_end` 1 — the level finished through its own scripts.
+# Spec #99 moved `exit_tunnel` from y 12.0 to y 13.4: two Rodians (things 289/290, `reeyeesbhgun`,
+# y ~13.1) stand in the tunnel, and with AI off they never move. The engine collides the player with
+# actors (pair (10,2), `LAB_004ed210`), so the old hold was slowed by them and the `use` at y 13.38
+# picked Rodian 289 instead of the door. Where retail's AI leaves them before `disableai` is not
+# captured (#106), and the old segment only passed while the port walked through actors. The new warp
+# starts past them (0.26 clear of their centres, more than the two radii) and the hold walks up to the
+# door before the `use`.
 warp	exit_door		1.280000	9.620000	6.357114	105.000000
 use
 wait	72
@@ -93,7 +100,7 @@ warp	exit_upper		-2.519000	11.001000	6.757114	110.000000
 input	36	1	0
 warp	exit_low		-6.150000	9.650000	4.357114	0.000000
 input	36	1	0
-warp	exit_tunnel		-4.050000	12.000000	4.357114	0.000000
+warp	exit_tunnel		-4.050000	13.400000	4.357114	0.000000
 input	144	1	0
 use
 wait	72
