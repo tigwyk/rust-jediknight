@@ -6928,12 +6928,14 @@ impl Runtime {
             self.transmit_awareness(sector, 2, pos, AI_AWARE_WEAPON, Some(shooter));
         }
         // `sithThing`'s thing-collision callback (`0x4ed24d`) raises AI event 4 when an actor's
-        // body touches another thing. This build's actor walk has no solver, so the contact is
-        // tested directly: an actor carrying `specialattack` that overlaps the player emits 4.
+        // body touches another thing. A player move into an actor reaches it through the swept
+        // contact (`LAB_004ed210`, `thing_collision_handler`); an actor's own walk is still unswept
+        // here, so only an actor that walked this tick tests its overlap with the player directly.
         let player = self.player_thing();
         let mut contacts: Vec<usize> = Vec::new();
         for (index, class) in &self.ai {
             if *index == player
+                || !self.walked.contains(index)
                 || class.instinct("SpecialAttack").is_none()
                 || self.time < self.ai_special.get(index).copied().unwrap_or(0.0)
             {
@@ -7256,7 +7258,10 @@ impl Runtime {
             if body.fall_fade <= 0.0 {
                 body.fall_killed = false;
                 body.fall_fade = 1.0;
-                world.borrow_mut().hurt_player_fall(1000.0, 0);
+                let mut rt = world.borrow_mut();
+                // Self-inflicted, like `CollideHurt`'s `DamageThing(thing, thing, ..)`; 0 would name thing 0.
+                let source = rt.local_player().map_or(-1, |index| index as i64);
+                rt.hurt_player_fall(1000.0, source);
             }
         }
         // Water halves movement: the engine reads the surface under the feet (`SITH_SURFACE_WATER`
@@ -7418,6 +7423,8 @@ impl Runtime {
         );
     }
 
+    /// `sithCollision_MoveThing`'s closing `sithPhysics_FindFloor(thing, 0)` (`0x4e7950:279-294`)
+    /// for a non-player body, then the attach change it causes.
     fn update_floor_attach(
         &mut self, solids: &crate::collide::Solids, index: usize, state: &mut crate::collide::MoveState,
         radius: f32, height: f32,
@@ -7598,6 +7605,9 @@ impl Runtime {
         }
     }
 
+    /// `sithCollision_CollideHurt`'s inline charge (`0x4e9090:56-60`): the `hitdamaged` mode
+    /// sound (`0x35`) and `sithThing_DamageThing(thing, thing, damage, 0x40)`, applied at the
+    /// contact pose before the move continues.
     fn charge_contact(
         rt: &mut ContactRuntime<'_>, mover: Option<usize>, state: &mut crate::collide::MoveState, damage: f32,
     ) {
@@ -7618,6 +7628,9 @@ impl Runtime {
         rt.dispatch(state);
     }
 
+    /// The impact sound shared by `sithCollision_HandleThingHitSurface` (`0x4e8b40:29-38`) and
+    /// `sithCollision_ThingCollisionHandler` (`0x4e8c50:87-95`): above 0.15 (`0x523020`) of
+    /// approach speed, mode `hitmetal` (`0x2f`) or `hithard` (`0x2e`).
     fn contact_impact_sound(
         rt: &mut ContactRuntime<'_>, mover: Option<usize>, state: &crate::collide::MoveState, speed: f32, metal: bool,
     ) {
@@ -7836,6 +7849,9 @@ impl Runtime {
             .filter(|index| *index < self.things.len())
     }
 
+    /// `sithPhysics_GetThingHeight` (`0x4f6210`) for a placed thing (or the `walkplayer` template
+    /// when `index` is `None`): the template's `height=` when set, else the model insert. Template
+    /// keys are lowercase, so a mixed-case placed name retries lowercased.
     fn thing_height(&self, index: Option<usize>, radius: f32) -> f32 {
         let name = index.and_then(|i| self.templates.get(i)).map_or("walkplayer", String::as_str);
         let insert = index.map_or_else(|| template_insert(name)[2], |i| self.things[i].insert[2]);
@@ -7868,6 +7884,10 @@ impl Runtime {
         }))
     }
 
+    /// The rider half of a thing-face attach: `sithThing_AttachThingToThingFace` (`0x4ce050:71-74`)
+    /// stores the rider's offset in the parent's frame ([`Runtime::floor_local_anchor`]); this
+    /// returns the face attach and the displacement that restores that offset after the parent
+    /// moved, or `None` once the parent is gone, flagged `0x80002`, or has no face.
     fn floor_rider_motion(
         &self, solids: &crate::collide::Solids, previous: crate::collide::Attach,
         pos: [f32; 3], anchor: Option<[f32; 3]>,
@@ -7916,6 +7936,8 @@ impl Runtime {
         }
     }
 
+    /// The player's `sithPhysics_FindFloor(thing, 0)` at the end of `sithCollision_MoveThing`
+    /// (`0x4e7950:279-294`), then the attach change, contact publish and landing it causes.
     fn player_find_floor(
         world: &World, solids: &crate::collide::Solids, state: &mut crate::collide::MoveState,
         radius: f32, height: f32, eye: f32, dispatch: &mut impl FnMut(),

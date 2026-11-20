@@ -87,9 +87,10 @@ input	180	1	0
 # Spec #99 moved `exit_tunnel` from y 12.0 to y 13.4: two Rodians (things 289/290, `reeyeesbhgun`,
 # y ~13.1) stand in the tunnel, and with AI off they never move. The engine collides the player with
 # actors (pair (10,2), `LAB_004ed210`), so the old hold was slowed by them and the `use` at y 13.38
-# picked Rodian 289 instead of the door. Retail's `disableai` leaves them in the same place, so the old
-# segment only passed while the port walked through actors. The new warp starts past them (0.26 clear
-# of their centres, more than the two radii) and the hold walks up to the door before the `use`.
+# picked Rodian 289 instead of the door. Where retail's AI leaves them before `disableai` is not
+# captured (#106), and the old segment only passed while the port walked through actors. The new warp
+# starts past them (0.26 clear of their centres, more than the two radii) and the hold walks up to the
+# door before the `use`.
 warp	exit_door		1.280000	9.620000	6.357114	105.000000
 use
 wait	72

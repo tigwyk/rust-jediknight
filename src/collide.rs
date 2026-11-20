@@ -2101,6 +2101,9 @@ impl LevelGeometry {
         self.find_floor_for(state, radius, height, gates, force, None, [0.0, 0.0, 1.0]);
     }
 
+    /// `sithPhysics_FindFloor` (`0x4f5550`), the whole body: [`Solids::find_floor`] calls it for
+    /// an anonymous body standing world-up. `thing` is the searching body (excluded from its own
+    /// search) and `up` its own up vector, which the floor probe runs against.
     pub fn find_floor_for(
         &self, state: &mut MoveState, radius: f32, height: f32, gates: Gates<'_>, force: bool,
         thing: Option<usize>, up: [f32; 3],
@@ -2307,11 +2310,12 @@ impl LevelGeometry {
     }
 
     /// The drag arm of `sithPhysics_UpdateAttachedThingPhysics` (`0x4f7430:180-208`) for a body
-    /// with no thrust of its own (the port's pushed actors, crates and goods; the player's drag
-    /// is `integrate_walk`'s). Friction clamps into `[0.25, 1.0]` (`0x5231c4`, `0x523194`); a
-    /// body `ApplyForce` just pushed (physflag `0x8000`) skips one drag step and clears the
-    /// flag; static drag applies only above friction 0.8 (`0x5231c8`) outside a thrust sector
-    /// (sector flag 8).
+    /// with no thrust of its own (the port's pushed actors, crates and goods). Friction clamps into
+    /// `[0.25, 1.0]` (`0x5231c4`, `0x523194`); a body `ApplyForce` just pushed (physflag `0x8000`)
+    /// skips one drag step and clears the flag; static drag applies only above friction 0.8
+    /// (`0x5231c8`) outside a thrust sector (sector flag 8). Remainder: the player's drag is
+    /// `integrate_walk`'s, which folds thrust and drag together and does not take the one-step
+    /// `0x8000` skip, so a pushed player keeps the flag set.
     pub fn apply_attached_drag(
         state: &mut MoveState, surf_drag: f32, static_drag: f32, thrust_sector: bool, dt: f32,
     ) {
@@ -4949,8 +4953,8 @@ mod tests {
         );
     }
 
-    /// A `collide=3` door leaf is its model's 0.025-thick box, not the template's 0.2 `size=`
-    /// cylinder: retail lets the body stand much closer to the leaf before it stops.
+    /// A `collide=3` door leaf collides as its model's faces (two quads 0.025 apart), not as the
+    /// template's 0.2 `size=` sphere: retail lets the body stand much closer to the leaf before it stops.
     #[test]
     fn a_thin_model_leaf_collides_as_its_mesh() {
         // A `collide=3` leaf is its model's faces (`0x5080d0`): two 0.2 x 1.0 quads 0.025 apart,
