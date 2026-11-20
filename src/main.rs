@@ -6892,7 +6892,7 @@ fn main() {
         assert!(!added.is_empty(), "taking `{template}` changed no inventory bin");
         println!(
             "pickup: `{template}` at {pos:?} via {} -> {added:?} (inventory {:?}, was {:?})",
-            scripted.map(|(cog_name, _)| cog_name).unwrap_or_else(|| "the runtime rule".into()),
+            scripted.as_deref().unwrap_or("the runtime rule"),
             rt.inv,
             before
         );
@@ -13030,7 +13030,6 @@ fn main() {
                     .chain()
                     .run_if(no_screen_open),
                 (
-                    collect_items,
                     // The sight ray needs the level's collision geometry: `share_collider` hands the
                     // solid things to the runtime, and until it runs `Runtime::solids` is `None`, which
                     // the sight test reads as "nothing blocks". Before this constraint the first tick
@@ -13045,7 +13044,7 @@ fn main() {
                     ai_shots.after(share_collider).after(walk_player),
                     play_requested_sounds,
                     music_follows_scripts,
-                    show_taken,
+                    show_taken.after(walk_player),
                     animate_actors,
                     actors_follow_runtime,
                     things_follow_geomode,
@@ -15973,27 +15972,23 @@ fn run_level_cogs(gobs: &gob::GobSet, level: &jkl::Level, filter: &str) {
 /// `--run`: start the level's placed scripts against a live world and step it, which
 /// is the difference between parsing the game's logic and acting on it.
 
-/// Take an item the way its own script does: run the item's cog `touched` label with the
-/// player as `GetSourceRef` and the item as `GetSenderRef`, then its `taken` label.
-///
-/// The engine's `TakeItem` calls `sithItem_SetItemTaken`, which runs exactly that `taken`
-/// label; here the verb only removes the thing, so the label is run explicitly. That is what
-/// makes the inventory bin the *script's* number (`bin=40` in `pow_bacta.cog`) instead of
-/// this build's stand-in.
+/// Exercise an explicit script pickup in `--pickup`, without the movement or registered COG
+/// instances that play uses. The item script owns the inventory bin; run `taken` only if
+/// `touched` actually called `TakeItem`.
 fn take_item_with_script(
     world: &World,
     sim_world: &runtime::World,
     level: &jkl::Level,
     item: usize,
     template: &str,
-) -> Option<(String, Vec<i32>)> {
+) -> Option<String> {
     let cog_name = level.template_param(template, "cog")?.to_ascii_lowercase();
     let script = world.cogs.get(&cog_name)?;
     let values = level
         .cogs
         .iter()
         .find(|i| i.script.eq_ignore_ascii_case(&cog_name))
-        .map(|i| i.values.clone())
+        .map(|i| i.values.as_slice())
         .unwrap_or_default();
     let player = sim_world
         .borrow()
@@ -16001,7 +15996,7 @@ fn take_item_with_script(
         .iter()
         .position(|t| t.eq_ignore_ascii_case("walkplayer"))?;
     let mut vm = cog::Vm::with_world(sim_world.clone());
-    script.bind(&mut vm, &values);
+    script.bind(&mut vm, values);
     // The item is the trigger, the player is the source: `player = GetSourceRef()` and
     // `powerup = GetSenderRef()` in the shipped powerup scripts.
     vm.sender = item as i64;
@@ -16023,9 +16018,7 @@ fn take_item_with_script(
             rt.inv.get(&60)
         );
     }
-    let mut bins: Vec<i32> = sim_world.borrow().inv.keys().copied().collect();
-    bins.sort();
-    Some((cog_name, bins))
+    Some(cog_name)
 }
 
 /// What one `run_level` pass found: the verbs nothing answers, plus the counts a gate reports on.
@@ -27148,137 +27141,6 @@ fn show_taken(
     }
 }
 
-/// Walking into a powerup takes it: the move sweep met the item's collide volume.
-///
-/// The engine's `0x4fbe10` (registered for pair (5,10), invoked swapped as (item, player) because
-/// the mirror matrix slot carries the arg-swap flag, `0x4e6f40`) gates the `touched` message:
-/// the player's thingflags must not carry `0x100`, `sithCollision_HasLOS(item, player)` must
-/// succeed, and the item's re-touch clock (`thing+0x148`) must be below the engine clock — then it
-/// sends `touched` and sets the clock 500 ms ahead. The handler returns 0, so the sweep passes
-/// through; the contact list it consumed is `PlayerBody::touched_items`. The script side
-/// (`touched` then `taken`) is `take_item_with_script`; a template with no `cog=` falls back to
-/// `Runtime::take_item`'s stand-in bin.
-fn collect_items(
-    mut sim: Option<ResMut<Sim>>,
-    player: Option<ResMut<Player>>,
-    world: Option<Res<World>>,
-    mut commands: Commands,
-) {
-    let (Some(sim), Some(mut player)) = (sim.as_mut(), player) else { return };
-    let contacts = std::mem::take(&mut player.body.touched_items);
-    if contacts.is_empty() {
-        return;
-    }
-    // The runtime guard is dropped before any script runs, so it is a plain read here.
-    let rt = sim.world.borrow();
-    let Some(index) = rt.templates.iter().position(|t| t.eq_ignore_ascii_case("walkplayer"))
-    else {
-        return;
-    };
-    let clock_ms = rt.time as f64 * 1000.0;
-    // `0x4fbe10` reads the mover thing's **live** flags word (`test ah,1` on the swapped
-    // player argument): the runtime word since #85 — initialized to the effective
-    // placement-else-template value and carrying every `SetThingFlags`/`ClearThingFlags`
-    // since. The old placement-side read could not see a scripted pickup-disable.
-    let player_flags = rt.things.get(index).map(|t| t.flags).unwrap_or(0);
-    let gates = collide::Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags };
-    let mut taken: Vec<usize> = Vec::new();
-    for other in contacts {
-        if other == index {
-            continue;
-        }
-        let Some(thing) = rt.things.get(other) else { continue };
-        if thing.destroyed || !is_pickup(rt.types.get(other).copied().unwrap_or(0), thing.damage) {
-            continue;
-        }
-        if player_flags & 0x100 != 0 {
-            continue;
-        }
-        if thing.next_touch_ms >= clock_ms {
-            continue;
-        }
-        let sector = thing.sector.max(0) as usize;
-        let clear = rt
-            .solids
-            .as_deref()
-            .map(|solids| solids.item_has_los(sector, thing.pos, player.body.pos.to_array(), gates))
-            .unwrap_or(true);
-        if !clear {
-            continue;
-        }
-        taken.push(other);
-    }
-    // Collect the results first, then touch the renderer's map: the runtime is borrowed
-    // through `sim`, so removing entities inside the loop would borrow it twice.
-    let mut picked: Vec<(usize, String, Option<String>)> = Vec::new();
-    drop(rt);
-    for other in &taken {
-        // `0x4fbe10` sets the re-touch clock right after the message: 500 ms pass before the same
-        // item can touch again, whichever gate the script's own take leaves open.
-        let now_ms = sim.world.borrow().time as f64 * 1000.0;
-        if let Some(thing) = sim.world.borrow_mut().things.get_mut(*other) {
-            thing.next_touch_ms = now_ms + 500.0;
-        }
-    }
-    for other in taken {
-        let template = sim
-            .world
-            .borrow()
-            .templates
-            .get(other)
-            .cloned()
-            .unwrap_or_default();
-        // The item's own script first: `touched` then `taken`, which is where the engine's
-        // `TakeItem` ends up. A template with no `cog=` falls back to the runtime's rule.
-        let scripted = world.as_deref().and_then(|world| {
-            take_item_with_script(world, &sim.world, &world.level, other, &template)
-                .map(|(cog_name, _)| cog_name)
-        });
-        if scripted.is_none() {
-            sim.world.borrow_mut().take_item(other as i64, index as i64);
-        }
-        picked.push((other, template, scripted));
-    }
-    for (other, template, scripted) in picked {
-        println!(
-            "picked up {template} via {}",
-            scripted.unwrap_or_else(|| "the runtime rule".into())
-        );
-        if let Some(entities) = sim.entities.remove(&other) {
-            for entity in entities {
-                commands.entity(entity).despawn();
-            }
-        }
-    }
-}
-
-/// Whether walking into a thing picks it up: the engine's collect step takes items and *dropped*
-/// weapons, so a live projectile is not one.
-///
-/// `fire` gives every shot its template's weapon type and a `damage=`, which is the difference the
-/// port has: without it a bolt that came within the pickup radius was collected (as `+elaser`) before
-/// it could hit, so the player was immune to close-range fire. `--warp` at level 1's upper door found
-/// it: retail's body there is being shot, while the port's stayed at full health even though its AI
-/// fired at it.
-fn is_pickup(kind: i32, damage: f32) -> bool {
-    matches!(kind, 3 | 5) && damage <= 0.0
-}
-
-#[cfg(test)]
-mod pickup_tests {
-    use super::is_pickup;
-
-    /// Items and dropped weapons are picked up; a thing carrying damage is a shot in flight.
-    #[test]
-    fn a_live_projectile_is_not_a_pickup() {
-        assert!(is_pickup(5, 0.0), "an item is a pickup");
-        assert!(is_pickup(3, 0.0), "a dropped weapon is a pickup");
-        assert!(!is_pickup(3, 12.0), "a 12-damage projectile must not be picked up");
-        assert!(!is_pickup(5, 12.0), "anything carrying damage is a live shot");
-        assert!(!is_pickup(2, 0.0), "an actor is not a pickup");
-    }
-}
-
 /// How many `Sleep`/`WaitForMessage` calls a statement tree contains, for `--triggers`.
 fn count_wait_calls(stmts: &[cog::Stmt]) -> usize {
     fn walk(stmt: &cog::Stmt, n: &mut usize) {
@@ -29206,7 +29068,6 @@ fn setup(
             water_surface: None,
             published_vel: [0.0; 3],
             published_pose: Some(([start[0], start[1], start[2] + eye_height], sector)),
-            touched_items: Vec::new(),
         },
         extra_speed: 0.0,
         use_hits: 0,
@@ -30467,6 +30328,38 @@ struct WalkerState {
     control: control::StdControl,
 }
 
+/// Spawned items do not come from the placed class-COG loop. Give them the same instance
+/// before a movement sweep can address their template's script.
+fn bind_spawned_item_cogs(world: &World, sim: &mut Sim) {
+    let spawned = std::mem::take(&mut sim.world.borrow_mut().item_cog_spawns);
+    for item in spawned {
+        let name = {
+            let rt = sim.world.borrow();
+            if rt.things[item].destroyed {
+                continue;
+            }
+            world.level.template_param(&rt.templates[item], "cog").map(str::to_ascii_lowercase)
+        };
+        let Some(name) = name else { continue };
+        let Some(script) = world.cogs.get(&name) else { continue };
+        let mut vm = cog::Vm::with_world(sim.world.clone());
+        script.bind(&mut vm, &[]);
+        vm.sender_ref = item as i64;
+        vm.source = item as i64;
+        let instance = sim.instances.len();
+        vm.cog_index = instance as i32;
+        vm.script_name = name.clone();
+        if script.label("startup").is_some() {
+            let _ = vm.run_label(script, "startup");
+        }
+        sim.instances.push((name, vm));
+        let mut rt = sim.world.borrow_mut();
+        rt.thing_class_cog.insert(item, instance as i32);
+        rt.thing_links.push((instance, 0, item));
+        rt.pending_messages.push((instance, "created", [0.0; 2], Some(item as i64), None));
+    }
+}
+
 /// The player: a walker bound to the level's own sectors, so walls stop it and doorways
 /// let it through. Arrow keys look, `WASD` moves, `Shift` runs, `Space` jumps.
 ///
@@ -30495,6 +30388,12 @@ fn walk_player(capture: Option<Res<CaptureDt>>,
     // `--replay`: this tick's scripted input, published by `route_replay` before this system.
     route_now: Option<Res<RouteNow>>,
 ) {
+    if let Some(sim) = sim.as_deref_mut() {
+        sim.world.borrow_mut().advance_game_clock(sim_dt(&time, capture.as_deref()));
+        if let Some(world) = world.as_deref() {
+            bind_spawned_item_cogs(world, sim);
+        }
+    }
     let (Some(solids), Some(player)) = (solids, player.as_mut()) else { return };
     // A door or lift follows its frame path, and the engine collides a body against the thing where
     // it is now. The cylinders were built from the level file's own placements, so a leaf that had
@@ -31920,6 +31819,117 @@ mod registration_tests {
         assert_eq!(body.sector, 1);
         assert_eq!(body.vy, -1.0);
         assert_eq!(handle.borrow().adjoin_flags[0] & 2, 0);
+    }
+
+    #[test]
+    fn swept_item_touch_uses_contact_pose_and_dispatches_before_the_deadline_write() {
+        let script = cog::parse(
+            "symbols\nmessage touched\nmessage taken\nend\ncode\ntouched:\n\
+             Print(GetSenderRef()); Print(GetSourceRef()); Print(VectorX(GetThingPos(GetSourceRef())));\
+             return;\nexplicit:\nTakeItem(1, 0); return;\n\
+             taken:\nPrint(GetSenderRef()); Print(GetSourceRef()); ChangeInv(GetSourceRef(), 45, 1); return;\nend\n",
+        ).expect("touch script parses");
+        let cogs = HashMap::from([("touch.cog".into(), script)]);
+        let mut level = jkl::Level::default();
+        for (name, kind, pos) in [
+            ("walkplayer", "player", [0.0; 3]),
+            ("shelf", "item", [0.5, 0.0, 0.1875]),
+            ("occluder", "cog", [0.75, 0.0, 0.09375]),
+        ] {
+            level.templates.push(jkl::Template {
+                name: name.into(), base: None, model3d: None, sprite: None,
+                params: vec![("type".into(), kind.into()), ("move".into(), "physics".into()),
+                    ("collide".into(), "1".into())],
+            });
+            level.things.push(jkl::Thing {
+                template: name.into(), pos, sector: 0, flags: 0,
+                pitch: 0.0, yaw: 0.0, roll: 0.0, frames: Vec::new(), vel: [0.0; 3], aiclass: None,
+            });
+        }
+        let handle = runtime::Runtime::handle(&level);
+        {
+            let mut rt = handle.borrow_mut();
+            rt.thing_class_cog.insert(1, 0);
+            rt.thing_links.push((0, 0, 1));
+        }
+        let solids = collide::Solids::default();
+        let place = |blocker: [f32; 3]| {
+            solids.set_things(vec![
+                collide::ThingSolid {
+                    index: 1, centre: [0.5, 0.0, 0.1875], origin: [0.5, 0.0, 0.1875],
+                    sector: 0, radius: 0.125, z_min: 0.18, z_max: 0.19, half: None, yaw: 0.0,
+                    mesh: None, thing_flags: 0, collide: 1, owner: None, kind: 5, item: true,
+                },
+                collide::ThingSolid {
+                    index: 2, centre: blocker, origin: blocker,
+                    sector: 0, radius: 0.04, z_min: 0.05, z_max: 0.14, half: None, yaw: 0.0,
+                    mesh: None, thing_flags: 0x200, collide: 1, owner: None, kind: 7, item: false,
+                },
+            ]);
+        };
+        let behind_item = [0.75, 0.0, 0.09375];
+        place(behind_item);
+        let mut sim = Sim {
+            world: handle.clone(), instances: vec![("touch.cog".into(), cog::Vm::with_world(handle.clone()))],
+            entities: HashMap::new(), elapsed: 0.0, reported: 0.0, escaped: Default::default(),
+        };
+        let mut rules = Rules::from_level(&level);
+        rules.drag = 0.0;
+        rules.air_drag = 0.0;
+        rules.radius = 0.125;
+        let sweep = |sim: &mut Sim, old_deadline| {
+            let mut body = runtime::PlayerBody { vel: [50.0, 0.0], ..Default::default() };
+            runtime::Runtime::step_player(
+                &handle, &mut body, &solids, runtime::PlayerInput::default(), &rules, 0.02,
+                || {
+                    if pump_movement_messages(&cogs, sim) != 0 {
+                        assert_eq!(handle.borrow().things[1].next_touch_ms, old_deadline);
+                    }
+                },
+            );
+            assert_eq!(body.pos.x, 1.0, "the item did not block the move");
+            body.pos.to_array()
+        };
+        sweep(&mut sim, 0);
+        assert!(sim.instances[0].1.trace.prints.is_empty(), "clock 0 rejects deadline 0");
+        handle.borrow_mut().advance_game_clock(0.02);
+        let end = sweep(&mut sim, 0);
+        let prints = &sim.instances[0].1.trace.prints;
+        assert_eq!(prints.len(), 3, "the class COG heard exactly one touch");
+        assert_eq!(prints[..2], ["1", "0"]);
+        let contact_x = prints[2].parse::<f32>().expect("contact x");
+        assert!((0.33..0.34).contains(&contact_x), "the script saw x={contact_x}");
+        assert_eq!(handle.borrow().things[1].next_touch_ms, 520);
+        assert!(!solids.item_has_los(0, [0.5, 0.0, 0.1875], end, collide::Gates::default()),
+            "the final pose could not see the item");
+
+        handle.borrow_mut().advance_game_clock(0.5);
+        sweep(&mut sim, 520);
+        assert_eq!(sim.instances[0].1.trace.prints.len(), 3, "an equal deadline is not past");
+        {
+            let mut rt = handle.borrow_mut();
+            rt.advance_game_clock(0.01);
+            rt.things[0].flags |= 0x100;
+        }
+        sweep(&mut sim, 520);
+        assert_eq!(sim.instances[0].1.trace.prints.len(), 3, "player flag 0x100 blocks touches");
+        handle.borrow_mut().things[0].flags &= !0x100;
+        place([0.417, 0.0, 0.09375]);
+        sweep(&mut sim, 520);
+        assert_eq!(sim.instances[0].1.trace.prints.len(), 3, "contact LOS blocks touches");
+        assert_eq!(handle.borrow().things[1].next_touch_ms, 520, "rejected touches do not stamp");
+        place(behind_item);
+        sweep(&mut sim, 520);
+        assert_eq!(sim.instances[0].1.trace.prints.len(), 6, "the first later frame can touch again");
+        assert_eq!(handle.borrow().things[1].next_touch_ms, 1030);
+
+        // An explicit COG `TakeItem` bypasses all contact gates, including the new deadline.
+        sim.instances[0].1.run_label(&cogs["touch.cog"], "explicit").expect("explicit COG take");
+        pump_movement_messages(&cogs, &mut sim);
+        assert_eq!(sim.instances[0].1.trace.prints[6..], ["1", "0"]);
+        let rt = handle.borrow();
+        assert!(rt.things[1].destroyed);
+        assert_eq!(rt.inv.get(&45), Some(&1.0));
     }
 }
 
