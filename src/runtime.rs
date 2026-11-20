@@ -7126,7 +7126,6 @@ impl Runtime {
             None => [0.0; 2],
         };
         let gravity = body.gravity;
-        let dispatch = std::cell::RefCell::new(&mut dispatch);
         body.vy += thrust[2] * dt;
         let before = body.pos.to_array();
         let dir = [
@@ -7237,6 +7236,12 @@ impl Runtime {
                 },
                 |state, item| {
                     Self::sith_item_player_touch(world, solids, state, body.eye, item, &mut *dispatch.borrow_mut());
+                },
+                |state, hit, crease| {
+                    let mut dispatch = dispatch.borrow_mut();
+                    let mover = world.borrow().local_player();
+                    let mut rt = ContactRuntime::Player { world, eye: body.eye, dispatch: &mut *dispatch };
+                    Self::solid_contact(solids, &mut rt, mover, state, hit, crease)
                 },
             );
             if std::env::var_os("BK_STEP_TRACE").is_some() {
@@ -7398,7 +7403,7 @@ impl Runtime {
             pos: start, sector, vel: t.vel, remainder: [0.0; 3], phys_flags: t.phys_flags,
             kind, move_type: 1, collide: self.template_collide.get(name).copied().unwrap_or(1),
             flags: t.flags, attach: t.floor_attach, attach_flags: t.attach_flags, owner: t.owner,
-            water_surface: None, touched: Vec::new(),
+            water_surface: None,
         };
         // `sithPhysics_UpdateThingPhysics` (`0x4f6270`): the sector drive joins velocity before
         // the move, except under physflag 0x400000.
@@ -7439,6 +7444,7 @@ impl Runtime {
                 let rt = rt.borrow();
                 solids.finish_body(state, radius, height, Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags });
             },
+            |_, _| {},
             |state, hit, crease| {
                 Self::solid_contact(solids, &mut ContactRuntime::Tick(&mut rt.borrow_mut()), Some(index), state, hit, crease)
             },

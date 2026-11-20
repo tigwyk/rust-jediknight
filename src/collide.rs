@@ -1806,6 +1806,7 @@ impl LevelGeometry {
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
             |_| {},
             |_, _| {},
+            |state, hit, crease| self.probe_contact(state, hit, crease),
         );
         *vel = state.vel;
         (state.pos, state.sector, distance)
@@ -1830,8 +1831,8 @@ impl LevelGeometry {
     ///   flag-`0x20` bodies) is elided: no ported body carries the flag.
     /// - `0x4e7950:156-196` — dispatch: a `0x20` crossing saves the position, messages a
     ///   flag-`2` surface and calls `SetSector` (`:165-185`), continuing only when the position
-    ///   changed; a thing or surface solid takes the slide answer (`sithCollision_HandleThingHitSurface`
-    ///   -> `0x4e9090`, `collide_hurt`) as continue/stop (`:158-163`); an item contact calls
+    ///   changed; a thing or surface solid takes its handler's answer as continue/stop
+    ///   (`:158-163`); an item contact calls
     ///   `0x4fbe10` at the advanced pose and answers 0.
     /// - `0x4e7950:206-236` — a clean round runs the whole distance and zeroes the remainder; a
     ///   stopped one renormalizes the remainder into the direction, snaps a `1e-5` (`0x52300c`)
@@ -1859,6 +1860,7 @@ impl LevelGeometry {
         mut contains: impl FnMut(&MoveState) -> bool,
         mut floor_tail: impl FnMut(&mut MoveState),
         mut touch_item: impl FnMut(&mut MoveState, usize),
+        mut solid_contact: impl FnMut(&mut MoveState, Sweep, &mut Option<[f32; 3]>) -> bool,
     ) -> f32 {
         let mut left = (delta[0] * delta[0] + delta[2] * delta[2] + delta[1] * delta[1]).sqrt();
         if left <= 0.0 { return 0.0; }
@@ -2242,6 +2244,7 @@ impl LevelGeometry {
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
             |state| { landed = self.finish_body(state, radius, height, gates); },
             |_, _| {},
+            |state, hit, crease| self.probe_contact(state, hit, crease),
         );
         *pos = state.pos;
         *sector = state.sector;
@@ -3453,6 +3456,7 @@ mod tests {
                 |state, item| {
                     assert!(contact.replace((item, state.pos)).is_none());
                 },
+                |state, hit, crease| solids.probe_contact(state, hit, crease),
             );
             assert_eq!(travel, dx, "an item did not obstruct the sweep");
             assert_eq!(state.pos, [dx, 0.0, 0.0]);
@@ -5517,6 +5521,7 @@ mod tests {
             |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, Gates::default()),
             |_| {},
             |_, _| {},
+            |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
         assert_eq!(state.pos, [0.0, -1.0, 0.5]);
         assert_eq!(traveled, 4.0);
@@ -5551,6 +5556,7 @@ mod tests {
             |_| true,
             |_| {},
             |_, _| {},
+            |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
         assert_eq!(state.sector, 7, "the nearer crossing was consumed before the solid");
         assert!(
@@ -5579,6 +5585,7 @@ mod tests {
             |_| false,
             |_| {},
             |_, _| {},
+            |state, hit, crease| solids.probe_contact(state, hit, crease),
         );
         assert_eq!(traveled, 2.0, "the move completed before the tail undid the pose");
         assert_eq!(state.pos, [0.0, -1.0, 0.5]);
@@ -5605,6 +5612,7 @@ mod tests {
                 |_| true,
                 |_| { ran = true; },
                 |_, _| {},
+                |state, hit, crease| solids.probe_contact(state, hit, crease),
             );
             ran
         };
