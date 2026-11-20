@@ -5990,9 +5990,12 @@ fn main() {
             .unwrap_or(rt.ai_standoff);
         let gap = standoff + 0.5;
         rt.things[actor].pos = at;
-        // Off to one side, so "turned toward it" is observable rather than already true. The
-        // 200-degree cone is 100 either side, so 80 is inside it — 179 would not be.
-        rt.things[actor].yaw = 80.0;
+        // Off to one side, so "turned toward it" is observable rather than already true. The body
+        // sits along +X and `forward = (−sin yaw, cos yaw)`, so yaw −70 looks 20° off it — ahead
+        // of the axis and outside the 200-degree class's rear wedge (`|rvec·d| < fovcos + 1`),
+        // where the old yaw 80 sat behind the actor and only passed because fov ≥ 180 bypassed
+        // the port's old angle cone.
+        rt.things[actor].yaw = -70.0;
         rt.things[player].pos = [at[0] + gap, at[1], at[2]];
         let start = rt.things[actor].pos;
         let before_angle = rt.things[actor].yaw;

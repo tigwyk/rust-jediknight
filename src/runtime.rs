@@ -1613,6 +1613,9 @@ pub struct Runtime {
     /// Each `World adjoins` row's `SITH_SURFACE_ADJOIN_*` word: `SetAdjoinFlags`/
     /// `ClearAdjoinFlags` switch these, which is how a force field opens and closes.
     pub adjoin_flags: Vec<u16>,
+    /// Per `World adjoins` row, the two sides' `dist` column summed — the depth
+    /// `sithAI_GetThingsInView` (`0x4ebe80`) adds when it recurses through the opening.
+    pub adjoin_depth: Vec<f32>,
     /// Surface → the adjoin row it carries (`-1` for a wall), so a script's `surface` symbol
     /// reaches its `pAdjoin` without the runtime holding the whole level.
     pub surface_adjoin: Vec<i32>,
@@ -2566,6 +2569,14 @@ impl Runtime {
                 .collect(),
             sector_ambient_light: level.sectors.iter().map(|s| s.ambient_light).collect(),
             adjoin_flags: level.adjoins.iter().map(|a| a.flags).collect(),
+            // `sithAI_GetThingsInView` (`0x4ebe80`) recurses with
+            // `depth + adjoin.dist + mirror.dist` — the `World adjoins` `dist` column of both
+            // sides of the opening, nonzero on every shipped level.
+            adjoin_depth: level
+                .adjoins
+                .iter()
+                .map(|a| a.dist + usize::try_from(a.mirror).ok().and_then(|m| level.adjoins.get(m)).map_or(0.0, |m| m.dist))
+                .collect(),
             surface_adjoin: level.surfaces.iter().map(|s| s.adjoin).collect(),
             surface_sector,
             surface_geomode: level
@@ -4717,30 +4728,20 @@ impl Runtime {
                 let Some(class) = self.ai.get(&index).cloned() else {
                     return false;
                 };
-                let player_radius = self
-                    .templates
-                    .get(player)
-                    .and_then(|name| self.template_hit.get(&name.to_ascii_lowercase()))
-                    .map(|(radius, _)| *radius)
-                    .unwrap_or(0.065);
-                let (dx, dy, dz) = (
-                    ctx.target[0] - ctx.eye[0],
-                    ctx.target[1] - ctx.eye[1],
-                    ctx.target[2] - ctx.eye[2],
+                // `sithAI_CheckSightThing` (`0x4eb090`, #91's transliteration) is the scan's
+                // whole sight test: the eye `sithAI_sub_4EAD60` raises above the body, the range
+                // gate that removes the target's radius twice, the sideways-component cone, then
+                // the collision ray — surfaces and solid things both.
+                let sight = self.check_sight_thing(
+                    index, ctx.eye, player, class.fovcos(), class.sightdist,
                 );
-                let range = ((dx * dx + dy * dy + dz * dz).sqrt() - player_radius).max(0.0);
-                let in_cone = class.cone(ctx.eye, ctx.yaw, ctx.target)
-                    && range <= class.sightdist;
-                let (blocked, thing_blocked) = self.solids.as_ref().map_or((false, false), |s| {
-                    (s.segment_blocked(ctx.eye, ctx.target), s.segment_thing(ctx.eye, ctx.target))
-                });
                 if std::env::var("BK_AI_TRACE").is_ok_and(|v| v == "2") {
                     eprintln!(
-                        "ai: {index} `{}` scan at {:.2} s range {range:.2} cone {in_cone} blocked {blocked} thing {thing_blocked} flags {flags:#x}",
+                        "ai: {index} `{}` scan at {:.2} s sight {sight} flags {flags:#x}",
                         ctx.template, self.time
                     );
                 }
-                if in_cone && !blocked && !thing_blocked && self.can_detect(index, player) {
+                if sight == 0 && self.can_detect(index, player) {
                     self.ai_detected.insert(index);
                     self.remember(index, ctx.target, "lookfortarget");
                     let flags = self.ai_flags.entry(index).or_insert(0);
@@ -4748,6 +4749,10 @@ impl Runtime {
                     if let Some(sector) = self.things.get(player).map(|t| t.sector) {
                         self.transmit_awareness(sector, 0, ctx.from, AI_AWARE_SIGHT, Some(player));
                     }
+                    let range = ((ctx.target[0] - ctx.eye[0]).powi(2)
+                        + (ctx.target[1] - ctx.eye[1]).powi(2)
+                        + (ctx.target[2] - ctx.eye[2]).powi(2))
+                    .sqrt();
                     if std::env::var_os("BK_AI_TRACE").is_some() {
                         eprintln!(
                             "ai: {index} `{}` LookForTarget finds the body at {range:.2}",
@@ -5218,6 +5223,201 @@ impl Runtime {
         crate::cog::pseudo_random() < self.detect_chance(actor, target) as f64
     }
 
+    /// `sithAI_CheckSightThing` (`0x4eb090`): the engine's one sight test, transliterated.
+    /// Returns its code: `0` visible, `1` out of range, `2` outside the class's cone, `3` no line
+    /// (or no target).
+    ///
+    /// - The distance is the **3D** eye→target length with the target's radius removed, and the
+    ///   range gate `sightdist < dist − radius` removes it a **second** time, so a body whose edge
+    ///   is inside `sightdist` stays visible out to `sightdist + 2·radius` of centre.
+    /// - The cone is the sideways-component test ([`crate::ai::cone_holds`]) over the observer's
+    ///   yaw frame: `lvec = (−sin yaw, cos yaw)`, `rvec = (cos yaw, sin yaw)`.
+    /// - The engine's cloak rules (`thingflags & 0x2000000` on either side return 3) are not
+    ///   modelled — the same ledger entry as `detect_chance`'s dark-sector rule.
+    /// - The engine's collision sweep (flags `0x102`) stops on surfaces and on type-2/7 things and
+    ///   counts the target itself as visible; the port's stand-in is the `segment_blocked` +
+    ///   `segment_thing` pair, which covers surfaces and placed solid things but not other actors'
+    ///   bodies.
+    pub fn check_sight_thing(
+        &self,
+        observer: usize,
+        eye: [f32; 3],
+        target: usize,
+        fovcos: f32,
+        sightdist: f32,
+    ) -> u8 {
+        let Some(t) = self.things.get(target) else { return 3; };
+        let tpos = t.pos;
+        let radius = self
+            .templates
+            .get(target)
+            .and_then(|name| self.template_hit.get(&name.to_ascii_lowercase()))
+            .map(|(r, _)| *r)
+            .unwrap_or(0.065);
+        let d = [tpos[0] - eye[0], tpos[1] - eye[1], tpos[2] - eye[2]];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let dist = (len - radius).max(0.0);
+        // `param_5 < fVar9 - r` on a `fVar9` that already removed the radius: twice.
+        if sightdist < dist - radius {
+            return 1;
+        }
+        if fovcos > -1.0 && len > 1e-4 {
+            let yaw = self.things.get(observer).map(|t| t.yaw).unwrap_or(0.0);
+            let (sin, cos) = yaw.to_radians().sin_cos();
+            if !crate::ai::cone_holds(
+                fovcos,
+                [-sin, cos, 0.0],
+                [cos, sin, 0.0],
+                [d[0] / len, d[1] / len, d[2] / len],
+            ) {
+                return 2;
+            }
+        }
+        if self.solids.as_ref().is_some_and(|s| {
+            s.segment_blocked(eye, tpos) || s.segment_thing(eye, tpos)
+        }) {
+            return 3;
+        }
+        0
+    }
+
+    /// `sithAI_FirstThingInView` (`0x4eb790`): collect the things inside a frustum, in sector
+    /// walk order, up to `max_count` of them. The engine's caller is `sithWeapon_GetAimOrient`
+    /// (`0x4d5c60`, the aim assist) — the AI scan itself goes through
+    /// `Runtime::check_sight_thing` instead.
+    ///
+    /// `hfov`/`vfov` are **total** cone degrees; the engine stores their limits as
+    /// `sin(fov · 0.5)` (`stdMath_SinCos(90 − fov · 0.5)` reads the cosine — `0x523070 = 0.5`,
+    /// `0x523074 = 90` in the shipped image). A negative fov refuses the whole call, as in the
+    /// engine.
+    pub fn first_thing_in_view(
+        &self,
+        start_sector: usize,
+        eye: [f32; 3],
+        yaw: f32,
+        hfov: f32,
+        vfov: f32,
+        max_count: usize,
+        type_mask: u32,
+        max_dist: f32,
+    ) -> Vec<usize> {
+        if !(hfov >= 0.0 && vfov >= 0.0) {
+            return Vec::new();
+        }
+        let (sin, cos) = yaw.to_radians().sin_cos();
+        let frame = ([cos, sin, 0.0], [-sin, cos, 0.0], [0.0, 0.0, 1.0]);
+        let mut by_sector = std::collections::BTreeMap::new();
+        for (index, thing) in self.things.iter().enumerate() {
+            if !thing.destroyed {
+                by_sector
+                    .entry(thing.sector.max(0) as usize)
+                    .or_insert_with(Vec::new)
+                    .push(index);
+            }
+        }
+        let mut out = Vec::new();
+        let mut visited = std::collections::BTreeSet::new();
+        self.get_things_in_view(
+            start_sector, eye, frame, hfov, vfov, max_count, type_mask, max_dist, 0.0,
+            &mut by_sector, &mut visited, &mut out,
+        );
+        out
+    }
+
+    /// `sithAI_GetThingsInView` (`0x4ebe80`): one sector's things inside the frustum, then a
+    /// recursion through the sector's passable adjoins, at most `0x80` sectors per call (the
+    /// engine's per-render-tick visit cap — one call is one tick, so a visit set is the same
+    /// rule).
+    ///
+    /// A thing qualifies when its type's bit is in `type_mask`, its `thingflags` carry none of
+    /// `0x80202`, and `|uvec·d| ≤ vlim`, `|rvec·d| ≤ hlim`, `lvec·d ≥ 0` for the normalized
+    /// eye→thing direction — note the **vertical** limit is the same kind of sideways test as
+    /// the horizontal one, over the frame's up row.
+    ///
+    /// The engine also admits an opening whose surface has no geometry, a scrolled surface flag,
+    /// or a transparent material (`iVar4 == 0 || surface+0x1c == 0 || surface+0x18&2 ||
+    /// texture+0x1c&1`); those three tests are not mapped to port data yet — the port recurses
+    /// through every adjoin whose flag word still has `0x1` and that faces the look direction
+    /// (`lvec·outward_normal > 0`; the engine's normals point into the sector, so its test reads
+    /// `< 0`).
+    fn get_things_in_view(
+        &self,
+        sector: usize,
+        eye: [f32; 3],
+        frame: ([f32; 3], [f32; 3], [f32; 3]),
+        hfov: f32,
+        vfov: f32,
+        max_count: usize,
+        type_mask: u32,
+        max_dist: f32,
+        depth: f32,
+        by_sector: &mut std::collections::BTreeMap<usize, Vec<usize>>,
+        visited: &mut std::collections::BTreeSet<usize>,
+        out: &mut Vec<usize>,
+    ) {
+        if visited.len() >= 0x80 || !visited.insert(sector) {
+            return;
+        }
+        let (rvec, lvec, uvec) = frame;
+        let hlim = (hfov * 0.5).to_radians().sin();
+        let vlim = (vfov * 0.5).to_radians().sin();
+        if let Some(things) = by_sector.remove(&sector) {
+            for index in things {
+                if out.len() >= max_count {
+                    return;
+                }
+                let ty = self.types.get(index).copied().unwrap_or(0) as u32;
+                if type_mask & (1 << (ty & 0x1f)) == 0 {
+                    continue;
+                }
+                let Some(thing) = self.things.get(index) else { continue };
+                if thing.flags & 0x80202 != 0 {
+                    continue;
+                }
+                let d = [
+                    thing.pos[0] - eye[0],
+                    thing.pos[1] - eye[1],
+                    thing.pos[2] - eye[2],
+                ];
+                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                if len <= 1e-4 {
+                    out.push(index);
+                    continue;
+                }
+                let dir = [d[0] / len, d[1] / len, d[2] / len];
+                let up = uvec[0] * dir[0] + uvec[1] * dir[1] + uvec[2] * dir[2];
+                let right = rvec[0] * dir[0] + rvec[1] * dir[1] + rvec[2] * dir[2];
+                let look = lvec[0] * dir[0] + lvec[1] * dir[1] + lvec[2] * dir[2];
+                if up <= vlim && up >= -vlim && right <= hlim && right >= -hlim && look >= 0.0 {
+                    out.push(index);
+                }
+            }
+        }
+        if depth <= max_dist
+            && let Some(solids) = self.solids.as_ref()
+            && let Some(portals) = solids.portals.get(sector)
+        {
+            for portal in portals {
+                let visible = self
+                    .adjoin_flags
+                    .get(portal.link)
+                    .map_or(crate::collide::ADJOIN_VISIBLE, |f| *f)
+                    & crate::collide::ADJOIN_VISIBLE
+                    != 0;
+                let ahead = lvec[0] * portal.normal[0]
+                    + lvec[1] * portal.normal[1]
+                    + lvec[2] * portal.normal[2];
+                if visible && ahead > 0.0 {
+                    let step = self.adjoin_depth.get(portal.link).copied().unwrap_or(0.0);
+                    self.get_things_in_view(
+                        portal.adjoin, eye, frame, hfov, vfov, max_count, type_mask, max_dist,
+                        depth + step, by_sector, visited, out,
+                    );
+                }
+            }
+        }
+    }
+
     /// Adopt the committed capture's AI phase at the encounter's origin clock.
     ///
     /// The engine's `rand()` state (`0x0054F750`) is the capture's own word, so every AI roll after
@@ -5409,14 +5609,15 @@ impl Runtime {
             });
             // No instinct class means no sight and no instincts: a class-less actor still walks a
             // destination a script gave it, but it never spots the player on its own.
-            // Sight needs a **clear line**. `Ai::sees` is distance and cone only, so without
-            // this an actor sees — and shoots — straight through walls. The engine casts its own
-            // sight ray (`sithAI.c`); one segment test is the same rule here.
+            // Sight is `sithAI_CheckSightThing` (`0x4eb090`, `Runtime::check_sight_thing`) from
+            // the eye `sithAI_sub_4EAD60` raises above the body: the engine's one test covers the
+            // range (the target's radius removed twice), the class's sideways-component cone, and
+            // the collision ray — where the port's old pair tested `Ai::sees` from the body origin
+            // and only then the two segment tests.
             let ai_on = !self.ai_cleared.contains(&index);
             let sighted = ai_on
-                && ai.as_ref().is_some_and(|ai| ai.sees(from, yaw, target))
-                && self.solids.as_ref().is_none_or(|s| {
-                    !s.segment_blocked(eye, target) && !s.segment_thing(eye, target)
+                && ai.as_ref().is_some_and(|ai| {
+                    self.check_sight_thing(index, eye, player, ai.fovcos(), ai.sightdist) == 0
                 });
             // `sithAI_CanDetectSightThing` (`0x4ec140`): a clear line is not the same as noticing. The
             // engine rolls its detection chance whenever it refreshes a target; the port rolls it when
@@ -16750,7 +16951,9 @@ mod tests {
         let base = rt.things[0].clone();
         let mut actor = base.clone();
         actor.pos = [0.5, 0.0, 0.0];
-        actor.yaw = 180.0; // facing the body at the origin, so it is in sight
+        // yaw 90 faces −X (`forward = (−sin yaw, cos yaw)`), straight at the body at the origin —
+        // the old yaw 180 faced −Y and only passed because fov 180 bypassed the old angle cone.
+        actor.yaw = 90.0;
         let mut player = base.clone();
         player.pos = [0.0, 0.0, 0.0];
         rt.things = vec![player, actor];
@@ -18077,10 +18280,10 @@ mod tests {
         );
     }
 
-    /// The scan's range gate is `sithAI_CheckSightThing`'s **radius-subtracted** distance, not
-    /// `Ai::sees`'s plain `sightdist`: a body whose edge is inside the class's range is visible even
-    /// when its centre is outside it. `Ai::sees` refuses this target (5.05 > 5.0); the scan accepts it
-    /// because 5.05 - 0.065 <= 5.0.
+    /// The scan's range gate is `sithAI_CheckSightThing`'s **twice** radius-subtracted distance
+    /// (`param_5 < dist − r` on a `dist` that already removed `r`): a body stays visible out to
+    /// `sightdist + 2·radius` of centre. `Ai::sees` refuses this target (5.05 > 5.0); the scan
+    /// accepts it because the eye→centre length 5.0506 − 2 × 0.065 = 4.92 <= 5.0.
     #[test]
     fn the_scan_accepts_a_body_edge_inside_sightdist() {
         let mut rt = door_runtime();
@@ -18110,6 +18313,100 @@ mod tests {
             rt.ai_last_seen.contains_key(&1),
             "the scan must accept a body whose edge is inside sightdist"
         );
+    }
+
+    /// `sithAI_CheckSightThing` (`0x4eb090`) returns the engine's own codes: 0 visible, 1 out of
+    /// range (after the radius leaves the distance **twice**), 2 outside the class's cone, 3 no
+    /// line. Worked from the decompiled arithmetic: eye at the origin, player radius 0.065,
+    /// sightdist 5, fov 180 (`fovcos = 0`: the whole front hemisphere).
+    #[test]
+    fn check_sight_thing_returns_the_engine_codes() {
+        let mut rt = door_runtime();
+        let mut actor = rt.things[0].clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        actor.yaw = 0.0; // looks along +Y
+        let mut player = rt.things[0].clone();
+        player.pos = [0.0, 5.10, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "greedo".into()];
+        let fovcos = (180.0f32 * 0.5).to_radians().cos(); // 0
+        // 5.10 − 2 × 0.065 = 4.97 <= 5: visible where a single subtraction (5.035) would refuse.
+        assert_eq!(rt.check_sight_thing(1, [0.0, 0.0, 0.0], 0, fovcos, 5.0), 0);
+        // 5.20 − 0.13 = 5.07 > 5: out of range.
+        rt.things[0].pos = [0.0, 5.20, 0.0];
+        assert_eq!(rt.check_sight_thing(1, [0.0, 0.0, 0.0], 0, fovcos, 5.0), 1);
+        // Behind the facing at any range: code 2 (fovcos 0 rejects the rear hemisphere).
+        rt.things[0].pos = [0.0, -3.0, 0.0];
+        assert_eq!(rt.check_sight_thing(1, [0.0, 0.0, 0.0], 0, fovcos, 5.0), 2);
+        // A wall between the two: code 3.
+        rt.things[0].pos = [0.0, 3.0, 0.0];
+        let mut solids = crate::collide::test_room();
+        solids.walls.push(crate::collide::Face {
+            normal: [0.0, -1.0, 0.0],
+            point: [0.0, 1.0, 0.0],
+            verts: vec![[-1.0, 1.0, -1.0], [1.0, 1.0, -1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0]],
+            surface: 9,
+        });
+        rt.solids = Some(std::sync::Arc::new(solids));
+        assert_eq!(rt.check_sight_thing(1, [0.0, 0.0, 0.0], 0, fovcos, 5.0), 3);
+    }
+
+    /// `sithAI_FirstThingInView`/`sithAI_GetThingsInView` (`0x4eb790`/`0x4ebe80`): the frustum
+    /// collects the sector's own things, drops the one behind the frame, and recurses through an
+    /// adjoin that faces the look direction — gated by the adjoin's `dist` depth, which the
+    /// engine accumulates on every hop.
+    #[test]
+    fn first_thing_in_view_walks_the_adjoins_by_depth() {
+        let mut rt = door_runtime();
+        let quad = || vec![[-1.0, 0.0, -1.0], [1.0, 0.0, -1.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]];
+        rt.solids = Some(std::sync::Arc::new(crate::collide::Solids {
+            portals: vec![
+                vec![crate::collide::Portal {
+                    adjoin: 1, link: 0, verts: quad(), normal: [0.0, 1.0, 0.0], point: [0.0, 0.0, 0.0],
+                }],
+                vec![
+                    crate::collide::Portal {
+                        adjoin: 0, link: 1, verts: quad(), normal: [0.0, -1.0, 0.0], point: [0.0, 0.0, 0.0],
+                    },
+                    crate::collide::Portal {
+                        adjoin: 2, link: 2, verts: quad(), normal: [0.0, 1.0, 0.0], point: [0.0, 8.0, 0.0],
+                    },
+                ],
+                vec![crate::collide::Portal {
+                    adjoin: 1, link: 3, verts: quad(), normal: [0.0, -1.0, 0.0], point: [0.0, 8.0, 0.0],
+                }],
+            ],
+            ..crate::collide::test_room()
+        }));
+        let mut thing = rt.things[0].clone();
+        thing.pos = [0.0, 1.0, 0.0];
+        thing.sector = 0;
+        let ahead = thing.clone();
+        let mut behind = thing.clone();
+        behind.pos = [0.0, -1.0, 0.0];
+        let mut next_room = thing.clone();
+        next_room.pos = [0.0, 8.0, 0.0];
+        next_room.sector = 1;
+        let mut far_room = thing.clone();
+        far_room.pos = [0.0, 16.0, 0.0];
+        far_room.sector = 2;
+        rt.things = vec![ahead, behind, next_room, far_room];
+        rt.types = vec![2, 2, 2, 2];
+        // corridor links: 0 (sector 0 -> 1), 2 (1 -> 2); depth 3 per hop. The engine enters a
+        // child when the **parent's** depth is still inside `max_dist` (`param_3 <= max` before
+        // the loop), so the child runs one hop deeper than the limit itself.
+        rt.adjoin_depth = vec![3.0, 0.0, 3.0, 0.0];
+        // yaw 0 looks along +Y, straight down the corridor. max_dist 2.5: root depth 0 passes,
+        // sector 1 (depth 3) refuses its own adjoin, so the far room never runs.
+        let found = rt.first_thing_in_view(0, [0.0, 0.0, 0.0], 0.0, 90.0, 90.0, 8, 1 << 2, 2.5);
+        assert_eq!(found, vec![0, 2], "the thing behind the frame is dropped; one hop in");
+        // max_dist 3 lets sector 1's own adjoin pass, which reaches the far room.
+        let found = rt.first_thing_in_view(0, [0.0, 0.0, 0.0], 0.0, 90.0, 90.0, 8, 1 << 2, 3.0);
+        assert_eq!(found, vec![0, 2, 3]);
+        // A type outside the mask never lands.
+        rt.types = vec![2, 2, 3, 2];
+        let found = rt.first_thing_in_view(0, [0.0, 0.0, 0.0], 0.0, 90.0, 90.0, 8, 1 << 2, 3.0);
+        assert_eq!(found, vec![0, 3]);
     }
 
     /// A captured deadline of 0 is **due now**: `sithAI_Process` calls the instinct update when
