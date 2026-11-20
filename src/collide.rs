@@ -192,42 +192,18 @@ impl LevelGeometry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// `sithCollision_HasLOS` (0x4e7500) as the item handler `0x4fbe10` uses it: with flags
-    /// `0x2122` the search admits surfaces and **cog-type things only** (`0x4e8430`'s `0x2000`
-    /// filter), and the segment is clear when nothing meets it before the target — the first
-    /// non-self hit must be the player itself. Bit `0x1` skips the port's thing arm; the type-7
-    /// blockers are tested directly here, as their own radius-0 sphere sweep.
+    /// `sithCollision_HasLOS` (0x4e7500) as the item handler `0x4fbe10` uses it. The
+    /// `0x2122` search admits surfaces and type-7 things. Neither the item nor the player
+    /// survives the type filter, so any remaining record blocks the ray.
     pub fn item_has_los(
         &self, sector: usize, from: [f32; 3], to: [f32; 3], gates: Gates<'_>,
     ) -> bool {
         let delta = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
-        let dist = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
-        if dist <= 1e-5 {
-            return true;
-        }
-        let dir = [delta[0] / dist, delta[1] / dist, delta[2] / dist];
+        let dist = (delta[0] * delta[0] + delta[2] * delta[2] + delta[1] * delta[1]).sqrt();
+        let dir = if dist == 0.0 { delta } else { delta.map(|axis| axis / dist) };
         let mut search = CollisionSearch::new();
-        self.search_for_collisions(sector, None, from, dir, dist, 0.0, gates, 0x1 | 0x22, &mut search);
-        for index in 0..search.count {
-            if let Some(record) = search.records[index] {
-                if record.distance() < dist - 1e-4 {
-                    return false;
-                }
-            }
-        }
-        let things = self.things();
-        for thing in things.iter() {
-            if thing.kind != 7 {
-                continue;
-            }
-            if let Some(entry) = sphere_intersection(from, dir, dist, 0.0, thing.centre, thing.radius, false, 0)
-            {
-                if entry < dist - 1e-4 {
-                    return false;
-                }
-            }
-        }
-        true
+        self.search_for_collisions(sector, None, from, dir, dist, 0.0, gates, 0x2122, &mut search);
+        search.pop().is_none()
     }
 }
 
@@ -954,9 +930,6 @@ pub struct MoveState {
     /// how far up the nearest dry-side crossing sits. `None` is the engine's "no crossing found",
     /// which clears the in-water hold.
     pub water_surface: Option<f32>,
-    /// Level indexes of item things (type 5) whose volume the sweep met this move — the
-    /// `0x4fbe10` pass-through contact list the pickup gate consumes.
-    pub touched: Vec<usize>,
 }
 
 impl MoveState {
@@ -1804,7 +1777,7 @@ impl LevelGeometry {
     ) -> ([f32; 3], usize, f32) {
         let mut state = MoveState {
             pos, sector, vel: *vel, remainder: delta, phys_flags: 0x4a4f,
-            kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let distance = self.move_thing_with(&mut state, delta, radius, 0,
             |state, dir, dist, radius, flags, search| {
@@ -1819,6 +1792,7 @@ impl LevelGeometry {
             },
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
             |_| {},
+            |_, _| {},
         );
         *vel = state.vel;
         (state.pos, state.sector, distance)
@@ -1844,8 +1818,8 @@ impl LevelGeometry {
     /// - `0x4e7950:156-196` — dispatch: a `0x20` crossing saves the position, messages a
     ///   flag-`2` surface and calls `SetSector` (`:165-185`), continuing only when the position
     ///   changed; a thing or surface solid takes the slide answer (`sithCollision_HandleThingHitSurface`
-    ///   -> `0x4e9090`, `collide_hurt`) as continue/stop (`:158-163`); an item contact answers 0
-    ///   (`0x4fbe10`).
+    ///   -> `0x4e9090`, `collide_hurt`) as continue/stop (`:158-163`); an item contact calls
+    ///   `0x4fbe10` at the advanced pose and answers 0.
     /// - `0x4e7950:206-236` — a clean round runs the whole distance and zeroes the remainder; a
     ///   stopped one renormalizes the remainder into the direction, snaps a `1e-5` (`0x52300c`)
     ///   length to zero and counts the round. The travelled total takes the last hit (clean: the
@@ -1871,6 +1845,7 @@ impl LevelGeometry {
         mut crossing: impl FnMut(&mut MoveState, Option<usize>, usize),
         mut contains: impl FnMut(&MoveState) -> bool,
         mut floor_tail: impl FnMut(&mut MoveState),
+        mut touch_item: impl FnMut(&mut MoveState, usize),
     ) -> f32 {
         let mut left = (delta[0] * delta[0] + delta[2] * delta[2] + delta[1] * delta[1]).sqrt();
         if left <= 0.0 { return 0.0; }
@@ -1916,15 +1891,9 @@ impl LevelGeometry {
                         crossing(state, Some(surface), sector);
                         state.pos.map(f32::to_bits) != before
                     }
-                    CollisionRecord::Solid(hit) if hit.thing.is_some_and(|t| t.item) => {
-                        // `0x4fbe10` (pair (5,10), invoked swapped as (item, player)) always returns
-                        // 0: the contact is recorded and the sweep keeps going — the walker passes
-                        // through the item's volume. The touch gates run at the consumer.
-                        if let Some(contact) = hit.thing {
-                            if !state.touched.contains(&contact.thing) {
-                                state.touched.push(contact.thing);
-                            }
-                        }
+                    CollisionRecord::Solid(Sweep { thing: Some(contact), .. }) if contact.item => {
+                        // `0x4e6f40` swaps the (10,5) pair: `0x4fbe10` receives item, then player.
+                        touch_item(state, contact.thing);
                         false
                     }
                     CollisionRecord::Solid(hit) => {
@@ -2248,11 +2217,11 @@ impl LevelGeometry {
         let mut state = MoveState {
             pos: *pos, sector: *sector, vel: *vel, remainder: [0.0; 3], phys_flags: 0x4a4f,
             kind: 10, move_type: 1, collide: 1, flags: 0, attach: *attach, attach_flags: 0,
-            touched: Vec::new(), water_surface: None, owner: None,
+            water_surface: None, owner: None,
         };
         let delta = Self::update_thing_physics(&mut state, dt, radius, height, gravity);
         let mut landed = false;
-        let traveled = self.move_thing_with(&mut state, delta, radius, 0,
+        self.move_thing_with(&mut state, delta, radius, 0,
             |state, dir, dist, radius, flags, search| {
                 self.search_for_collisions(state.sector, Some(state), state.pos, dir, dist, radius, gates, flags, search);
             },
@@ -2267,6 +2236,7 @@ impl LevelGeometry {
             },
             |state| self.inside_sector_with_gates(state.sector, state.pos, 0.0, gates),
             |state| { landed = self.finish_body(state, radius, height, gates); },
+            |_, _| {},
         );
         *pos = state.pos;
         *sector = state.sector;
@@ -3332,48 +3302,49 @@ mod tests {
     use super::*;
     use super::test_room as room;
 
-    /// `0x4fbe10` (pair (5,10)) returns 0 for every item contact: the sweep records the item and
-    /// keeps going — an item never stops the walker, and the recorded index is the touch.
+    /// `0x508540`: the 3D sphere span is `size + movesize`; a tangent misses, but an entry
+    /// at the end of the sweep counts. A contact runs the item handler and never stops travel.
     #[test]
-    fn an_item_is_passed_through_and_recorded() {
+    fn an_item_touch_dispatches_at_swept_reach_without_stopping_the_body() {
         let solids = boxed();
-        // An item mid-room, on the body's path along +x.
-        solids.set_things(vec![ThingSolid {
-            index: 3,
-            centre: [1.0, 0.0, 0.0],
-            origin: [1.0, 0.0, 0.0],
-            radius: 0.1,
-            z_min: -0.1,
-            z_max: 0.1,
-            sector: 0,
-            half: None,
-            yaw: 0.0,
-            mesh: None,
-            thing_flags: 0,
-            collide: 1,
-            owner: None,
-            kind: 5,
-            item: true,
-        }]);
-        let mut state = MoveState {
-            pos: [0.0, 0.0, 0.0], sector: 0, vel: [0.0; 3], remainder: [1.8, 0.0, 0.0],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0,
-            attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+        let run = |z: f32, dx: f32| {
+            let pos = [0.5, 0.0, z];
+            solids.set_things(vec![ThingSolid {
+                centre: pos, origin: pos, radius: 0.125, z_min: z - 0.01, z_max: z + 0.01,
+                item: true, ..gate_thing(5, 0)
+            }]);
+            let mut state = walker();
+            let mut contact = None;
+            let travel = solids.move_thing_with(
+                &mut state, [dx, 0.0, 0.0], 0.125, 0,
+                |state, dir, distance, radius, flags, search| {
+                    solids.search_for_collisions(
+                        state.sector, Some(state), state.pos, dir, distance, radius,
+                        Gates::default(), flags, search,
+                    );
+                },
+                |_, _, _| {},
+                |_| true,
+                |_| {},
+                |state, item| {
+                    assert!(contact.replace((item, state.pos)).is_none());
+                },
+            );
+            assert_eq!(travel, dx, "an item did not obstruct the sweep");
+            assert_eq!(state.pos, [dx, 0.0, 0.0]);
+            contact
         };
-        let travel = solids.move_thing_with(
-            &mut state, [1.8, 0.0, 0.0], 0.065, 0,
-            |state, dir, distance, radius, flags, search| {
-                solids.search_for_collisions(
-                    state.sector, Some(state), state.pos, dir, distance, radius,
-                    Gates::default(), flags, search,
-                );
-            },
-            |_, _, _| {},
-            |_| true,
-            |_| {},
-        );
-        assert!((travel - 1.8).abs() < 1e-4, "the walker passes through the item, travel {travel}");
-        assert_eq!(state.touched, vec![3], "the contact is recorded for the touch gate");
+        assert_eq!(run(0.0, 0.25), Some((4, [0.25, 0.0, 0.0])), "entry at the endpoint");
+        assert_eq!(run(0.0, 0.249), None, "short of the entry");
+        assert_eq!(run(0.0, 0.0), None, "no sweep when stationary");
+        for z in [-0.1875, 0.1875] {
+            let (item, at) = run(z, 1.0).expect("low ledge or shelf within sphere reach");
+            assert_eq!(item, 4);
+            assert!((0.33..0.34).contains(&at[0]), "contact at {at:?}");
+        }
+        for z in [-0.251, -0.25, 0.25, 0.251] {
+            assert_eq!(run(z, 1.0), None, "tangent or out of reach at z={z}");
+        }
     }
 
     /// A walker-shaped mover for the admission tests: type 10, no owner, not attached.
@@ -3381,7 +3352,7 @@ mod tests {
         MoveState {
             pos: [0.0, 0.0, 0.0], sector: 0, vel: [0.0; 3], remainder: [1.0, 0.0, 0.0],
             phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0,
-            attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            attach: None, attach_flags: 0, water_surface: None, owner: None,
         }
     }
 
@@ -5297,7 +5268,7 @@ mod tests {
         MoveState {
             pos, sector: 0, vel: [0.0; 3], remainder: [0.0; 3], phys_flags: 0x4a4f,
             kind, move_type: 1, collide: 1, flags: 0, attach, attach_flags: 0,
-            touched: Vec::new(), water_surface: None, owner: None,
+            water_surface: None, owner: None,
         }
     }
 
@@ -5432,7 +5403,7 @@ mod tests {
         let solids = corridor();
         let mut state = MoveState {
             pos: [0.0, -1.0, 0.5], sector: 0, vel: [0.0, 1.0, 0.0], remainder: [0.0; 3],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let traveled = solids.move_thing_with(&mut state, [0.0, 4.0, 0.0], 0.1, 0,
             |state, dir, distance, radius, flags, search| {
@@ -5447,6 +5418,7 @@ mod tests {
             },
             |state| solids.inside_sector_with_gates(state.sector, state.pos, 0.0, Gates::default()),
             |_| {},
+            |_, _| {},
         );
         assert_eq!(state.pos, [0.0, -1.0, 0.5]);
         assert_eq!(traveled, 4.0);
@@ -5463,7 +5435,7 @@ mod tests {
         let solids = room();
         let mut state = MoveState {
             pos: [0.0, -1.0, 0.5], sector: 0, vel: [0.0, 1.0, 0.0], remainder: [0.0; 3],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let mut first = true;
         let traveled = solids.move_thing_with(&mut state, [0.0, 1.0, 0.0], 0.1, 0,
@@ -5480,6 +5452,7 @@ mod tests {
             |state, surface, far| { if surface.is_some() { state.sector = far; } },
             |_| true,
             |_| {},
+            |_, _| {},
         );
         assert_eq!(state.sector, 7, "the nearer crossing was consumed before the solid");
         assert!(
@@ -5498,7 +5471,7 @@ mod tests {
         let solids = corridor();
         let mut state = MoveState {
             pos: [0.0, -1.0, 0.5], sector: 0, vel: [0.0, 1.0, 0.0], remainder: [0.0; 3],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let traveled = solids.move_thing_with(&mut state, [0.0, 2.0, 0.0], 0.1, 0,
             |state, dir, distance, radius, flags, search| {
@@ -5507,6 +5480,7 @@ mod tests {
             |state, _, far| { state.sector = far; },
             |_| false,
             |_| {},
+            |_, _| {},
         );
         assert_eq!(traveled, 2.0, "the move completed before the tail undid the pose");
         assert_eq!(state.pos, [0.0, -1.0, 0.5]);
@@ -5524,7 +5498,7 @@ mod tests {
             let mut state = MoveState {
                 pos: [0.0, 0.0, 0.0], sector: 0, vel, remainder: [0.0; 3],
                 phys_flags, kind: 10, move_type: 1, collide: 1, flags: 0,
-                attach, attach_flags, touched: Vec::new(), water_surface: None, owner: None,
+                attach, attach_flags, water_surface: None, owner: None,
             };
             let mut ran = false;
             solids.move_thing_with(&mut state, [0.0, 1.0, 0.0], 0.1, flags,
@@ -5532,6 +5506,7 @@ mod tests {
                 |_, _, _| {},
                 |_| true,
                 |_| { ran = true; },
+                |_, _| {},
             );
             ran
         };
@@ -5593,7 +5568,7 @@ mod tests {
         let solids = room();
         let mut state = MoveState {
             pos: [0.0, 0.0, -0.94], sector: 0, vel: [0.0; 3], remainder: [0.0; 3],
-            phys_flags: 0, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            phys_flags: 0, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let prior = Some(Attach { surface: Some(77), ..FLAT });
         state.attach = prior;
@@ -5610,7 +5585,7 @@ mod tests {
     fn a_small_nonzero_folded_crease_still_projects_velocity_and_remainder() {
         let mut state = MoveState {
             pos: [0.0; 3], sector: 0, vel: [-1.0, 0.0, 0.0], remainder: [-1.0, 0.0, 0.0],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         assert!(Solids::collide_hurt(&mut state, [1.0, 1e-7, 0.0], 0.0, &mut Some([1.0, 0.0, 0.0])));
         assert_eq!(state.vel, [0.0; 3]);
@@ -5625,7 +5600,7 @@ mod tests {
     fn a_single_face_slide_preserves_the_tangential_component() {
         let mut state = MoveState {
             pos: [0.0; 3], sector: 0, vel: [-1.0, 0.5, 0.0], remainder: [-1.0, 0.5, 0.0],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let mut crease = None;
         // A west wall's normal points east, into the room; the body moves north-west into it.
@@ -5645,7 +5620,7 @@ mod tests {
     fn physflag_0x20_bounces_at_restitution_1_9() {
         let mut state = MoveState {
             pos: [0.0; 3], sector: 0, vel: [-1.0, 0.5, 0.0], remainder: [-1.0, 0.0, 0.0],
-            phys_flags: 0x20, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            phys_flags: 0x20, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut None));
         assert!((state.vel[0] - 0.9).abs() < 1e-6, "1.9 * 1 - 1 reflected: {}", state.vel[0]);
@@ -5662,7 +5637,7 @@ mod tests {
     fn a_second_face_at_zero_distance_folds_the_crease() {
         let mut state = MoveState {
             pos: [0.0; 3], sector: 0, vel: [0.0; 3], remainder: [-1.0, -1.0, 0.0],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let mut crease = None;
         assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease));
@@ -5693,7 +5668,7 @@ mod tests {
     fn a_second_face_at_nonzero_distance_starts_a_fresh_crease() {
         let mut state = MoveState {
             pos: [0.0; 3], sector: 0, vel: [0.0; 3], remainder: [-1.0, -1.0, 0.0],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let mut crease = None;
         assert!(Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.25, &mut crease));
@@ -5713,7 +5688,7 @@ mod tests {
     fn an_approach_under_the_engine_epsilon_or_away_is_refused() {
         let mut state = MoveState {
             pos: [0.0; 3], sector: 0, vel: [-1.0, 0.0, 0.0], remainder: [-5e-6, 1.0, 0.0],
-            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, touched: Vec::new(), water_surface: None, owner: None,
+            phys_flags: 0x4a4f, kind: 10, move_type: 1, collide: 1, flags: 0, attach: None, attach_flags: 0, water_surface: None, owner: None,
         };
         let mut crease = None;
         assert!(!Solids::collide_hurt(&mut state, [1.0, 0.0, 0.0], 0.5, &mut crease));

@@ -6,9 +6,9 @@
 # `jkEndLevel(1)`.
 #
 # mechanic	engine_function	address	port_symbol	source	status	ledger
-pickup	sithIntersect_CheckSphereThingIntersection	0x5080d0	collect_items	src/main.rs	ported	
-pickup	sithItem_SetItemTaken	0x4fbea0	take_item_with_script	src/main.rs	ported	
-pickup	FUN_004fbe10	0x4fbe10	collect_items	src/main.rs	deviated	item touch gates
+pickup	sithIntersect_CheckSphereThingIntersection	0x5080d0	check_sphere_thing_intersection	src/collide.rs	ported	
+pickup	sithItem_SetItemTaken	0x4fbea0	takeitem	src/runtime.rs	ported	
+pickup	FUN_004fbe10	0x4fbe10	sith_item_player_touch	src/runtime.rs	ported	
 fire	sithWeapon_WeaponFireProjectile	0x4d45a0	fire_with_spread	src/runtime.rs	ported	
 damage	sithActor_DamageActor	0x4ecc90	damage_typed	src/runtime.rs	ported	
 damage	sithActor_KillActor	0x4ecfe0	damage_typed_from	src/runtime.rs	ported	
