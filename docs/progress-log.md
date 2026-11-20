@@ -7849,3 +7849,23 @@ sensedanger keeps its two mapped-field substitutions. Full battery on 29a30498: 
 encounter gate 0 failures under BK_EXIT_FRAMES=300, --soak/--soak-all/--tour/--cog-check
 green. The windowed legs (--ai-live) are orchestrator-owned on this box: two agent windowed
 runs hung in presentation and were killed; the agents run headless only now.
+
+## Round #100 — sphere-thing intersection unit (issue #100)
+
+Branch `tick/100-intersection`, commits a52ef0e/6f80874/89b41c9. `check_sphere_thing_intersection`
+is all of `0x5080d0` (mesh gate `flags & 0x80`, non-mesh sphere arm with the centre-to-contact
+normal, zero-mesh `collide=3` = no contact; the `bVar14` mover-collide-3 reverse is unreachable for
+the `collide=1` walker and stays a documented remainder). `thing_contacts` ports `0x4e8430`'s full
+admission order incl. the `0x4e6d90` pair matrix (with `AddCollisionHandler`'s mirrors), the `0x200`
+exclusion, the owner chain and the attach exclusion; `search_for_collisions` threads the mover
+(`FindFloor` passes `None`, the engine's `mover=0`). Inventions deleted: `sweep_plan`, `sweep_top`,
+the `z_min` prefilter, `shape_for`'s plan-radius clamp and actor exclusion; `_decor` is `type=cog`
+(7), so furniture rides the (10,7) cell. `LAB_004ed210` was read from the shipped image (capstone on
+the `.text` bytes at `0x4ed210`): `ThingCollisionHandler` + an AI bump event (`sithAI_EmitEvent`
+arg 4) per actor side with an AI at `+0x278`; the AI event is unported. 465 unit tests green.
+Gates: `--walk all`, `--cog-check`, `--soak-all`, `--tour`, encounter `0 failures` green; trace gate
+3 legs red (walk_cantina 15 %, walk_street45/90 51 %) and the route replay's use step never fires —
+all one cause: the engine-true (10,2) admission meets the frozen authored actors (`reeyeesgun` 182,
+`reeyeesbhgun` 240) that retail's AI has walked away, and without `ThingCollisionHandler`'s
+`ApplyForce` push-back (#101) the walker pins in the actor+wall wedge. Route gate's retail-compare
+FAIL is pre-existing on the integration tip (b18b9bc: tick 36 sector 349 vs 339).
