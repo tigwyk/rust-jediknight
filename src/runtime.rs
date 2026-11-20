@@ -1319,6 +1319,12 @@ pub struct Runtime {
     /// Every one of these is named by a shipped script — `cog\force_pull.cog` and
     /// `cog\force_grip.cog` — which is why they exist at all (§16.5).
     pub actor_flags: std::collections::BTreeMap<usize, u32>,
+    /// The AI's **own mode word** (`ai + 8` in `sithAI_Create`, `0x4e9cb0`): the word every instinct
+    /// handler tests and `AISetMode`/`AIClearMode`/`AiGetMode` address. It starts at `0x1004` (the
+    /// awake bit `0x4` plus the one-shot latch `0x1000` that only the awareness sweep's event 2
+    /// clears). Kept apart from `actor_flags` because the engine's AI bit `0x8` ("turning") collides
+    /// with `AF_INVULNERABLE` `0x8` on the sithActor word.
+    pub ai_flags: std::collections::BTreeMap<usize, u32>,
     /// `AISetMoveSpeed`: a multiplier on the actor's walking speed, clamped 0..2 by the engine
     /// (`sithCogFunctionAI.c:16`). Absent means 1.
     pub actor_speed: std::collections::BTreeMap<usize, f32>,
@@ -2451,6 +2457,7 @@ impl Runtime {
             mana_max: MANA_MAX,
             actor_flags: Default::default(),
             actor_speed: Default::default(),
+            ai_flags: Default::default(),
             item_flags: Default::default(),
             life_left: Default::default(),
             life_total: Default::default(),
@@ -4181,7 +4188,7 @@ impl Runtime {
     /// weight (`dodge 0.1, 0.1` for a grunt, `0.3, 0.1` for a boss). Returns whether it reacted, which
     /// is what stops `sithAI_EmitEvent`'s dispatch.
     fn dodge_from_damage(&mut self, actor: usize, attacker: usize) -> bool {
-        if self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x1 != 0 {
+        if self.ai_flags.get(&actor).copied().unwrap_or(0) & 0x1 != 0 {
             return false;
         }
         let Some(step) = self
@@ -4234,7 +4241,7 @@ impl Runtime {
     /// the cloak rules the helper also applies are not modelled, and the arm's sound (mode `0x4f`) has
     /// no name in the port's table, so it is not played.
     fn sensedanger_from_awareness(&mut self, actor: usize, weight: f32) -> bool {
-        let flags = self.actor_flags.get(&actor).copied().unwrap_or(0);
+        let flags = self.ai_flags.get(&actor).copied().unwrap_or(0);
         if flags & 0x4 == 0 || flags & 0x800 != 0 {
             return false;
         }
@@ -4273,7 +4280,7 @@ impl Runtime {
         {
             return false;
         }
-        self.actor_flags.insert(actor, (flags & !0x4) | 0x800);
+        self.ai_flags.insert(actor, (flags & !0x4) | 0x800);
         self.remember(actor, source_pos, "surprise");
         if self
             .ai
@@ -4292,7 +4299,7 @@ impl Runtime {
     }
 
     fn sensedanger_from_damage(&mut self, actor: usize, attacker: usize) -> bool {
-        let flags = self.actor_flags.get(&actor).copied().unwrap_or(0);
+        let flags = self.ai_flags.get(&actor).copied().unwrap_or(0);
         if flags & 0x4 == 0 || flags & 0x800 != 0 {
             return false;
         }
@@ -4314,7 +4321,7 @@ impl Runtime {
         ) else {
             return false;
         };
-        self.actor_flags.insert(actor, (flags & !0x4) | 0x800);
+        self.ai_flags.insert(actor, (flags & !0x4) | 0x800);
         // `ai[0x70]` is the target thing (`withdraw`'s slot); the port's chase reads the target's
         // last-seen position.
         self.remember(actor, target_pos, "surprise");
@@ -4457,7 +4464,7 @@ impl Runtime {
         if thing.flags & 0x202 != 0 || thing.health <= 0.0 {
             return false;
         }
-        let flags = self.actor_flags.get(&actor).copied().unwrap_or(0);
+        let flags = self.ai_flags.get(&actor).copied().unwrap_or(0);
         if flags & 0x2000 != 0 {
             return false;
         }
@@ -4465,7 +4472,7 @@ impl Runtime {
             if event != 2 {
                 return false;
             }
-            self.actor_flags.insert(actor, flags & !0x1000);
+            self.ai_flags.insert(actor, flags & !0x1000);
         }
         let Some(class) = self.ai.get(&actor).cloned() else {
             return false;
@@ -4578,7 +4585,7 @@ impl Runtime {
     /// `_DAT_005232a0` 0.5) and steps `arg0` units along the **negated** rotated direction: a sideways
     /// dodge, not a retreat.
     fn dodge_from_shot(&mut self, actor: usize, shot: [f32; 3]) -> bool {
-        if self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x200 == 0 {
+        if self.ai_flags.get(&actor).copied().unwrap_or(0) & 0x200 == 0 {
             return false;
         }
         let Some(step) = self
@@ -4651,7 +4658,7 @@ impl Runtime {
         let Some(t) = self.things.get(actor) else {
             return false;
         };
-        if t.attach.is_some() || self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x1 == 0 {
+        if t.attach.is_some() || self.ai_flags.get(&actor).copied().unwrap_or(0) & 0x1 == 0 {
             return false;
         }
         let Some(dist) = self
@@ -4738,7 +4745,7 @@ impl Runtime {
         let distance = (dx * dx + dy * dy + dz * dz).sqrt();
         let mut chance = 1.0f32;
         if distance >= DETECT_NEAR {
-            if self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x200 == 0 {
+            if self.ai_flags.get(&actor).copied().unwrap_or(0) & 0x200 == 0 {
                 chance = 0.5;
             }
             // The decomp's inner gate: `seen->flags & 4` (the target's own invisibility bit) and
@@ -4832,7 +4839,7 @@ impl Runtime {
             if self.types.get(*index).copied() != Some(2) {
                 continue;
             }
-            self.actor_flags.insert(*index, phase.flags);
+            self.ai_flags.insert(*index, phase.flags);
             if phase.fire_ms > 0
                 && let Some(body) = self.things.get_mut(*index)
             {
@@ -4913,7 +4920,7 @@ impl Runtime {
             // `06_hidethings1.cog`, `00_cameratricks.cog` "shuts off dark jedi"), and with it set the
             // engine's instincts do nothing at all; the actor stays standing until a script clears it
             // (`aiclearmode(turret, 0x2000)` in `06_turrettrap.cog`).
-            if self.actor_flags.get(&index).copied().unwrap_or(0) & 0x2000 != 0 {
+            if self.ai_flags.get(&index).copied().unwrap_or(0) & 0x2000 != 0 {
                 if let Some(thing) = self.things.get_mut(index) {
                     thing.ai_target = None;
                 }
@@ -4929,7 +4936,7 @@ impl Runtime {
             if ai
                 .as_ref()
                 .is_some_and(|class| class.instinct("OpenDoors").is_some())
-                && self.actor_flags.get(&index).copied().unwrap_or(0) & 0x1 != 0
+                && self.ai_flags.get(&index).copied().unwrap_or(0) & 0x1 != 0
                 && self.time >= self.ai_opendoors.get(&index).copied().unwrap_or(0.0)
                 && let Some(body) = self.things.get(index)
             {
@@ -4947,7 +4954,7 @@ impl Runtime {
             // Cleared here and set by the step below, so it means "moved this tick" — the engine sets
             // it while the AI has a move, and the port never wrote it, which left `jump` unreachable
             // from a real walk and let `dodge` fire mid-stride.
-            *self.actor_flags.entry(index).or_insert(0) &= !0x1;
+            *self.ai_flags.entry(index).or_insert(0) &= !0x1;
             // The firing cadence gates the *shot*, not the legs: an actor that has just
             // fired keeps walking, which is what makes it close the distance instead of
             // stopping for a second every shot.
@@ -4988,7 +4995,7 @@ impl Runtime {
                         .max(1.0);
                     if crate::cog::pseudo_random() < chance
                         && let Some(mode) = talk_mode(
-                            self.actor_flags.get(&index).copied().unwrap_or(0),
+                            self.ai_flags.get(&index).copied().unwrap_or(0),
                             health / max_health,
                         )
                     {
@@ -5011,7 +5018,7 @@ impl Runtime {
                 let due = self.ai_lobfire.get(&index).copied().unwrap_or(self.time);
                 if self.time >= due {
                     self.ai_lobfire.insert(index, self.time + 1.0);
-                    let flags = self.actor_flags.get(&index).copied().unwrap_or(0);
+                    let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
                     self.armed_mode.insert(index, u32::from(flags & 0x200 != 0));
                 }
             }
@@ -5078,7 +5085,7 @@ impl Runtime {
                         // `(flags & 0xffff_fffb) | 0x232` (clear awake, set engaged/searching) and
                         // broadcasts `CreateTransmittingEvent(player->sector, actor->pos, kind 0,
                         // 3.0, player)`. The engaged bit makes it once per acquisition, not per frame.
-                        let flags = self.actor_flags.entry(index).or_insert(0);
+                        let flags = self.ai_flags.entry(index).or_insert(0);
                         // Only a class that owns the instinct runs its handler, so only those alert
                         // the neighbourhood; the sight refresh for everyone else stays silent.
                         let broadcasts = ai
@@ -5184,7 +5191,7 @@ impl Runtime {
                             crate::cog::pseudo_random(),
                         ) {
                             self.damage_typed(player as i64, damage, DAMAGE_SABER);
-                            *self.actor_flags.entry(index).or_insert(0) |= 0x400;
+                            *self.ai_flags.entry(index).or_insert(0) |= 0x400;
                             self.play_mode.insert(index, mode);
                             self.ai_saber_cool
                                 .insert(index, self.time + (cooldown / 1000.0).max(0.0));
@@ -5194,7 +5201,7 @@ impl Runtime {
                                 );
                             }
                         } else {
-                            *self.actor_flags.entry(index).or_insert(0) &= !0x400;
+                            *self.ai_flags.entry(index).or_insert(0) &= !0x400;
                         }
                     }
                 }
@@ -5233,7 +5240,7 @@ impl Runtime {
             // so the same side converges, and makes the player its target. The engine's own helper
             // (`sithAI_sub_4EAD60`) refreshes the target through `CheckSightThing`; the port's `sighted`
             // is that same range/cone/clear-line test.
-            let sense_flags = self.actor_flags.get(&index).copied().unwrap_or(0);
+            let sense_flags = self.ai_flags.get(&index).copied().unwrap_or(0);
             if sense_flags & 0x4 != 0
                 && sense_flags & 0x800 == 0
                 && !self.player_dead
@@ -5249,7 +5256,7 @@ impl Runtime {
                     // 1's bartender and `nman1` then walked through the player's own view (round 307).
                     if sighted && crate::cog::pseudo_random() < chance as f64 {
                         // `flags & ~0x4 | 0x800`, exactly the handler's two writes.
-                        self.actor_flags.insert(index, (sense_flags & !0x4) | 0x800);
+                        self.ai_flags.insert(index, (sense_flags & !0x4) | 0x800);
                         self.remember(index, target, "sensedanger");
                         // The handler also writes its target into `ai[0x70]` (`param_1[0x70] = player`),
                         // which is the slot `withdraw` reads — so a class with `Withdraw` but **no**
@@ -5322,7 +5329,7 @@ impl Runtime {
                 // awake actor that has not acquired anything stands at its authored facing, which is
                 // what retail's own door series shows for `greedo` 236.
                 let follows = ai.as_ref().is_some_and(|class| class.instinct("Follow").is_some());
-                if !follows || self.actor_flags.get(&index).copied().unwrap_or(0) & 0x2 == 0 {
+                if !follows || self.ai_flags.get(&index).copied().unwrap_or(0) & 0x2 == 0 {
                     return None;
                 }
                 // `listen` (`0x50a6f0`): the record is scanned **kind 2, then 1, then 0**, and the handler's own
@@ -5387,7 +5394,7 @@ impl Runtime {
                 // set by the handlers that act (`LookForTarget`'s find, the fire handlers, `AISetMode`)
                 // and cleared when an actor goes back to sleep (`sensedanger`'s `& ~0x4 | 0x800`), so an
                 // actor that has never engaged does not walk home, and one that has done its fight does.
-                if self.actor_flags.get(&index).copied().unwrap_or(0) & 0x4 == 0 {
+                if self.ai_flags.get(&index).copied().unwrap_or(0) & 0x4 == 0 {
                     return None;
                 }
                 let home = self.ai_home.get(&index).copied()?;
@@ -5526,7 +5533,7 @@ impl Runtime {
                     // `FUN_0050aa80`'s branch B: once the class interval passes on an actor that is
                     // engaged (`0x200`), it clears that word and sets the awake bit again — the scan
                     // itself (branch A) only runs while `0x4` is set.
-                    let flags = self.actor_flags.entry(index).or_insert(0);
+                    let flags = self.ai_flags.entry(index).or_insert(0);
                     if self.time >= due && *flags & 0x4 == 0 && *flags & 0x200 != 0 {
                         *flags = (*flags & 0xffff_f9dd) | 0x4;
                     }
@@ -5591,7 +5598,7 @@ impl Runtime {
                                 // `ai flags = (ai flags & 0xffff_fffb) | 0x232` — the find **clears**
                                 // the awake bit and sets the engaged/searching word, so `returnhome`
                                 // (`& 4`) stops until the class's interval wakes the actor again.
-                                let flags = self.actor_flags.entry(index).or_insert(0);
+                                let flags = self.ai_flags.entry(index).or_insert(0);
                                 *flags = (*flags & 0xffff_fffb) | 0x232;
                                 // …and the same branch broadcasts the find: `CreateTransmittingEvent(
                                 // player->sector, actor->pos, kind 0, 3.0, player)` — the spotter puts
@@ -5817,7 +5824,7 @@ impl Runtime {
             // port never wrote it, which left `jump` unreachable from a real walk and let `dodge`
             // fire mid-stride. It is cleared at the top of the tick and when the destination is met.
             if !turret && speed > 0.0 && reach > standoff {
-                *self.actor_flags.entry(index).or_insert(0) |= 0x1;
+                *self.ai_flags.entry(index).or_insert(0) |= 0x1;
             }
 
             // The line to the *destination* is what decides whether a route is needed: testing the
@@ -5960,7 +5967,7 @@ impl Runtime {
                 self.ai_route.remove(&index);
                 // Arrived: the AI's moving bit clears with the destination, even for a class-less
                 // scripted actor that is no longer ticked from here on.
-                *self.actor_flags.entry(index).or_insert(0) &= !0x1;
+                *self.ai_flags.entry(index).or_insert(0) &= !0x1;
             }
             // The instinct that fires. An actor whose class has no `PrimaryFire` never
             // shoots, however close the player is, and a scripted walk does not shoot at what it
@@ -10088,9 +10095,13 @@ impl Runtime {
                 }
                 Value::Nil
             }
-            // `sithCogFunctionAI_AISetMode` is `actor->flags |= mode` and `AIClearMode` is
-            // `actor->flags &= ~mode` (`sithCogFunctionAI.c:237`), which is exactly the actor-flag arm below.
-            "setactorflags" | "aisetmode" => {
+            // `SetActorFlags` writes the **sithActor** word (`actor->flags`, `sithCogFunctionAI.c:237`)
+            // — grip's hold, blindness, invulnerability. `AISetMode` is a different engine verb that
+            // writes the AI's **own** mode word (`ai + 8`, `FUN_00500f50`): the word every instinct
+            // handler tests. The two words were conflated in one map until the flag-word split; the
+            // engine's AI bit 0x8 ("turning", `SetLookFrame`) collides with `AF_INVULNERABLE` 0x8, so
+            // keeping them apart is what lets the AI word carry the engine's bits 1:1.
+            "setactorflags" => {
                 let actor = ti(0);
                 let mode = idx(1) as u32;
                 if mode & AF_INVULNERABLE != 0
@@ -10107,6 +10118,16 @@ impl Runtime {
                     );
                 }
                 *self.actor_flags.entry(actor).or_insert(0) |= mode;
+                Value::Nil
+            }
+            // `sithCogFunctionAI_AISetMode` (`FUN_00500f50`): `ai flags |= mode`, and when the word
+            // changes it raises the scheduler's mode-change event (`sithAI_EmitEvent(ai, 0x100,
+            // oldflags)`), which is what wakes the instincts whose registry mask carries 0x100.
+            "aisetmode" => {
+                let actor = ti(0);
+                let mode = idx(1) as u32;
+                let old = *self.ai_flags.entry(actor).or_insert(0);
+                *self.ai_flags.entry(actor).or_insert(0) |= mode;
                 // `aisetmode(enemy, 0x200)` is how `00_aisleep.cog` wakes an actor; the same write
                 // puts a script-disabled actor back into the AI (`sithCogFunctionAI.c`). The bit is
                 // the engine's *engaged* word (`sithAI_CheckSightThing` writes the same `0x200`), so a
@@ -10118,16 +10139,24 @@ impl Runtime {
                 }
                 Value::Nil
             }
-            "clearactorflags" | "aiclearmode" => {
+            "clearactorflags" => {
                 let actor = ti(0);
                 let mode = idx(1) as u32;
                 if mode & AF_INVULNERABLE != 0 && std::env::var_os("BK_HIT_TRACE").is_some() {
                     eprintln!(
                         "hit: ClearActorFlags({actor}, {mode:#x}) from cog {} `{}` clears the freeze",
-                        self.caller_cog, self.caller_script
+                        self.caller_cog,
+                        self.caller_script
                     );
                 }
                 *self.actor_flags.entry(actor).or_insert(0) &= !mode;
+                Value::Nil
+            }
+            "aiclearmode" => {
+                let actor = ti(0);
+                let mode = idx(1) as u32;
+                let old = *self.ai_flags.entry(actor).or_insert(0);
+                *self.ai_flags.entry(actor).or_insert(0) &= !mode;
                 // `01_initialry.cog` starts with `AIClearMode(joery, 0x606)`: the level's first
                 // enemy is walked in by its script and must not acquire or shoot on the way. The
                 // engine's tick is switched off by these bits; the port runs the AI regardless,
@@ -10142,9 +10171,10 @@ impl Runtime {
                 Value::Nil
             }
             "getactorflags" => Value::Num(self.actor_flags.get(&ti(0)).copied().unwrap_or(0) as f64),
-            // `AiGetMode(thing)` reads the AI's own flag word — the same value `GetActorFlags` answers,
-            // which is what `actor_*.cog` tests with `BitTest(AiGetMode(me), 0x800)`.
-            "aigetmode" => Value::Num(self.actor_flags.get(&ti(0)).copied().unwrap_or(0) as f64),
+            // `AiGetMode(thing)` reads the AI's own flag word (`ai + 8`) — the word `AISetMode`
+            // writes and every instinct tests, which is what `actor_*.cog` means by
+            // `BitTest(AiGetMode(me), 0x800)`.
+            "aigetmode" => Value::Num(self.ai_flags.get(&ti(0)).copied().unwrap_or(0) as f64),
             // `sithCogFunction_GetMasterCog` pushes the master's cog index, or -1 when none is set;
             // `SetMasterCog` stores one and clears it when the index resolves to no cog, which is
             // what `sithCog_GetCogByIndex(-1)` returning NULL does. `GetSelfCog` is the VM's own.
@@ -11782,14 +11812,19 @@ mod tests {
         assert_eq!(rt.things[1].flags, 0x4, "the placement word did not replace the template's");
     }
 
-    /// `AiGetMode` is the AI's own flag word — the same value `GetActorFlags` answers, which is what
-    /// `actor_*.cog`'s `BitTest(AiGetMode(me), 0x800)` reads to stay out of the way of a fight.
+    /// `AiGetMode` is the AI's own flag word (`ai + 8`), and the flag-word split keeps it apart from
+    /// the sithActor word `GetActorFlags`/`SetActorFlags` answer: `AISetMode` writes only the AI
+    /// word, and `SetActorFlags` writes only the actor word (the engine's AI bit `0x8` collides with
+    /// `AF_INVULNERABLE` `0x8`, so the two must not be one map).
     #[test]
     fn ai_get_mode_reads_the_script_word() {
         let mut rt = door_runtime();
         rt.call("aisetmode", &[Value::Num(1.0), Value::Num(0x800 as f64)]);
         assert_eq!(rt.call("aigetmode", &[Value::Num(1.0)]).num(), 0x800 as f64);
-        assert_eq!(rt.call("getactorflags", &[Value::Num(1.0)]).num(), 0x800 as f64);
+        assert_eq!(rt.call("getactorflags", &[Value::Num(1.0)]).num(), 0.0);
+        rt.call("setactorflags", &[Value::Num(1.0), Value::Num(0x8 as f64)]);
+        assert_eq!(rt.call("aigetmode", &[Value::Num(1.0)]).num(), 0x800 as f64);
+        assert_eq!(rt.call("getactorflags", &[Value::Num(1.0)]).num(), 0x8 as f64);
     }
 
     /// `SetThingLook` aims a thing along a direction (`sithPhysics_SetThingLook`, `0x4f5a80`) and
@@ -12619,8 +12654,8 @@ mod tests {
             ],
         );
         assert_eq!(crate::cog::random_state(), 811_474_043, "the capture's own rand() word");
-        assert_eq!(rt.actor_flags[&1], 1586);
-        assert_eq!(rt.actor_flags[&2], 4);
+        assert_eq!(rt.ai_flags[&1], 1586);
+        assert_eq!(rt.ai_flags[&2], 4);
         assert!((rt.things[1].ai_wait - 0.104).abs() < 1e-6, "first shot {}", rt.things[1].ai_wait);
         assert!((rt.ai_scan[&1] - 0.75).abs() < 1e-6, "scan at {}", rt.ai_scan[&1]);
         assert!((rt.ai_detect_at[&1] - 0.504).abs() < 1e-6);
@@ -13790,7 +13825,7 @@ mod tests {
             ),
         );
         // `aisetmode(actor, 0x2000)`: asleep.
-        rt.actor_flags.insert(1, 0x2000);
+        rt.ai_flags.insert(1, 0x2000);
         let asleep_at = rt.things[1].pos;
         for _ in 0..30 {
             rt.time += 1.0 / 30.0;
@@ -13800,7 +13835,7 @@ mod tests {
         assert_eq!(rt.things[1].pos, asleep_at, "a switched-off actor walked");
 
         // `aiclearmode(0x2000)`: back to normal.
-        rt.actor_flags.insert(1, 0);
+        rt.ai_flags.insert(1, 0);
         for _ in 0..30 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
@@ -13838,7 +13873,7 @@ mod tests {
         );
         assert!(!rt.ai_detected.contains(&1), "the actor was engaged before the script said so");
         rt.call("aisetmode", &[Value::Num(1.0), Value::Num(0x200 as f64)]);
-        assert_eq!(rt.actor_flags.get(&1).copied(), Some(0x200));
+        assert_eq!(rt.ai_flags.get(&1).copied(), Some(0x200));
         assert!(rt.ai_detected.contains(&1), "aisetmode(0x200) did not engage the actor");
         for _ in 0..30 {
             rt.time += 1.0 / 30.0;
@@ -13915,7 +13950,7 @@ mod tests {
         // The engine's scheduler (`sithAI_InstinctUpdate`) runs `Follow` only while its word `0x2`,
         // the bit `LookForTarget`'s acquisition sets, is in the AI flags; a sound moves an actor that
         // has already registered a target.
-        rt.actor_flags.insert(1, 0x2);
+        rt.ai_flags.insert(1, 0x2);
         // Newest first: a fresh shot 5 units along +x (out of earshot), an older one 1.5 units along
         // +y (inside it). The guard must walk toward the one it can hear.
         // Kind 2 is the listener's first slot; the older kind-1 record is the fallback.
@@ -13951,7 +13986,7 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "tuskan".into(), "door".into()];
         rt.types = vec![10, 2, 0];
         rt.template_speed.insert("tuskan".into(), 1.0);
-        rt.actor_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
+        rt.ai_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
         rt.sector_adjoins = vec![Vec::new(); 8];
         rt.ai.insert(
             1,
@@ -14042,13 +14077,13 @@ mod tests {
             crate::ai::parse("alignment=-1.0, rank=0.5, fov=90, sightdist=2.0\n\nLookForTarget 1000\n"),
         );
         // Awake, the way `AISetMode` leaves an actor before it scans.
-        rt.actor_flags.insert(1, 0x4);
+        rt.ai_flags.insert(1, 0x4);
         rt.sector_adjoins = vec![Vec::new(); 8];
         for _ in 0..10 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
         }
-        let flags = rt.actor_flags.get(&1).copied().unwrap_or(0);
+        let flags = rt.ai_flags.get(&1).copied().unwrap_or(0);
         assert_eq!(flags & 0x4, 0, "the find kept the awake bit: flags {flags:#x}");
         assert_eq!(flags & 0x200, 0x200, "the find did not set the searching bit: {flags:#x}");
         let sector = rt.things[0].sector;
@@ -14080,7 +14115,7 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
         rt.types = vec![10, 2];
         rt.template_speed.insert("tuskan".into(), 1.0);
-        rt.actor_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
+        rt.ai_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
         rt.ai.insert(
             1,
             crate::ai::parse(
@@ -14129,7 +14164,7 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
         rt.types = vec![10, 2];
         rt.template_speed.insert("tuskan".into(), 1.0);
-        rt.actor_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
+        rt.ai_flags.insert(1, 0x2); // acquired: `Follow`'s scheduler word (see the nearer-sound test)
         let class = |chance: &str| {
             crate::ai::parse(&format!(
                 "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen {chance}\nFollow 0.5, 0.1\n"
@@ -14217,7 +14252,7 @@ mod tests {
                 "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\nLobFire 2000.0, 0.8, 0.5, 4.0, 0.20, 0\n",
             ),
         );
-        rt.actor_flags.insert(1, 0x200);
+        rt.ai_flags.insert(1, 0x200);
         rt.ai_tick(0, 1.0 / 30.0);
         assert_eq!(
             rt.armed_mode.get(&1).copied(),
@@ -14225,7 +14260,7 @@ mod tests {
             "an awake actor with `LobFire` did not draw its weapon"
         );
         // The handler's own 1000 ms interval: the bit clearing does not holster until it expires.
-        rt.actor_flags.insert(1, 0);
+        rt.ai_flags.insert(1, 0);
         for _ in 0..20 {
             rt.time += 1.0 / 30.0;
             rt.ai_tick(0, 1.0 / 30.0);
@@ -14399,7 +14434,7 @@ mod tests {
                 "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\nJump 2000.0, 3.0, 3.0\n",
             ),
         );
-        rt.actor_flags.insert(1, 0x1);
+        rt.ai_flags.insert(1, 0x1);
         rt.things[1].ai_target = Some([3.0, 0.0, 0.0]);
         assert!(
             rt.emit_ai_event(1, 0x400, None),
@@ -14422,7 +14457,7 @@ mod tests {
         );
         // A standing actor is refused by the engine's moving bit.
         rt.ai_jump.clear();
-        rt.actor_flags.insert(1, 0);
+        rt.ai_flags.insert(1, 0);
         assert!(
             !rt.emit_ai_event(1, 0x400, None),
             "a standing actor took the jump event"
@@ -14456,7 +14491,7 @@ mod tests {
                     "alignment=-1.0, rank=0.5, fov=180, sightdist=5.0\n\nJump 2000.0, 3.0, 3.0\n",
                 ),
             );
-            rt.actor_flags.insert(1, 0x1);
+            rt.ai_flags.insert(1, 0x1);
             rt.things[1].ai_target = Some([3.0, 0.0, 0.065]);
             let floor = crate::collide::Face {
                 normal: [0.0, 0.0, -1.0],
@@ -14546,7 +14581,7 @@ mod tests {
         rt.ai_tick(0, 0.05);
         assert!(rt.things[1].pos[0] > 0.0, "the actor did not walk");
         assert_ne!(
-            rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x1,
+            rt.ai_flags.get(&1).copied().unwrap_or(0) & 0x1,
             0,
             "a walking actor did not set the moving bit"
         );
@@ -14556,7 +14591,7 @@ mod tests {
         rt.ai_move.remove(&1);
         rt.ai_tick(0, 0.05);
         assert_eq!(
-            rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x1,
+            rt.ai_flags.get(&1).copied().unwrap_or(0) & 0x1,
             0,
             "an idle actor kept the moving bit"
         );
@@ -14610,7 +14645,7 @@ mod tests {
                 vec![("happy1.wav".to_string(), 0.8)],
             )]),
         );
-        rt.actor_flags.insert(1, 0x200);
+        rt.ai_flags.insert(1, 0x200);
         let class = |chance: &str| {
             crate::ai::parse(&format!(
                 "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\n\
@@ -14668,7 +14703,7 @@ mod tests {
                 vec![("fear1.wav".to_string(), 1.0)],
             )]),
         );
-        rt.actor_flags.insert(1, 0x4);
+        rt.ai_flags.insert(1, 0x4);
         // `transmit_awareness` needs a sector-adjoin table long enough to hold the actor's sector;
         // `door_runtime`'s default level has no adjoins, so give it empty lists.
         rt.sector_adjoins = vec![Vec::new(); 8];
@@ -14680,7 +14715,7 @@ mod tests {
             ),
         );
         rt.ai_tick(0, 1.0 / 30.0);
-        let flags = rt.actor_flags.get(&1).copied().unwrap_or(0);
+        let flags = rt.ai_flags.get(&1).copied().unwrap_or(0);
         assert_ne!(flags & 0x800, 0, "the sighted awake actor did not alert");
         assert_eq!(flags & 0x4, 0, "the handler clears the awake bit when it alerts");
         assert_eq!(rt.sounds.len(), 1, "the alert played no fear sound");
@@ -14727,11 +14762,11 @@ mod tests {
                      SenseDanger {args}\n"
                 )),
             );
-            rt.actor_flags.insert(1, flags);
+            rt.ai_flags.insert(1, flags);
             rt.sector_adjoins = vec![Vec::new(); 8];
             rt.ai_tick(0, 1.0 / 30.0);
             (
-                rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x800,
+                rt.ai_flags.get(&1).copied().unwrap_or(0) & 0x800,
                 rt.sounds.len(),
                 rt.sector_awareness.len(),
             )
@@ -14858,7 +14893,7 @@ mod tests {
             if let Some(text) = class {
                 rt.ai.insert(1, crate::ai::parse(text));
             }
-            rt.actor_flags.insert(1, flags);
+            rt.ai_flags.insert(1, flags);
             rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
             rt.ai_move.get(&1).copied()
         };
@@ -14890,7 +14925,7 @@ mod tests {
         rt.template_vel.insert("+bryarbolt".into(), [0.0, 7.0, 0.0]);
         rt.template_typeflags.insert("+bryarbolt".into(), bolt_typeflags);
         rt.template_thingflags.insert("+bryarbolt".into(), 0x20000001);
-        rt.actor_flags.insert(1, flags);
+        rt.ai_flags.insert(1, flags);
         rt.ai.insert(
             1,
             crate::ai::parse(&format!(
@@ -14911,21 +14946,21 @@ mod tests {
         let mut rt = shot_dodge_runtime(0x200, 90.0, 0x20440d, 5.0);
         rt.sector_adjoins = vec![Vec::new(); 8]; // both things sit in sector 7 (`door_runtime`)
         // A latched actor drops every event but 2 — the engine's own rate limit.
-        rt.actor_flags.insert(1, 0x200 | 0x1000);
+        rt.ai_flags.insert(1, 0x200 | 0x1000);
         assert!(!rt.emit_ai_event(1, 0x1000, Some(0)), "the latch let a shot through");
         // Awareness in the actor's sector is the event-2 producer; it disarms the latch.
         rt.time += 0.5;
         rt.transmit_awareness(7, 0, [2.0, 0.0, 0.0], 3.0, None);
         assert_eq!(
-            rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x1000,
+            rt.ai_flags.get(&1).copied().unwrap_or(0) & 0x1000,
             0,
             "event 2 must clear the one-shot latch"
         );
         // And the sweep reaches a thing at most once per tick.
-        rt.actor_flags.insert(1, 0x200 | 0x1000);
+        rt.ai_flags.insert(1, 0x200 | 0x1000);
         rt.transmit_awareness(7, 0, [2.0, 0.0, 0.0], 3.5, None);
         assert_eq!(
-            rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x1000,
+            rt.ai_flags.get(&1).copied().unwrap_or(0) & 0x1000,
             0x1000,
             "a second awareness event in the same tick must not re-raise event 2"
         );
@@ -15115,7 +15150,7 @@ mod tests {
         let before = rt.things[0].health;
         rt.ai_tick(0, 1.0 / 30.0);
         assert!(rt.things[0].health < before, "the saber did not hit the target");
-        assert_eq!(rt.actor_flags.get(&1).copied().unwrap_or(0) & 0x400, 0x400);
+        assert_eq!(rt.ai_flags.get(&1).copied().unwrap_or(0) & 0x400, 0x400);
         let after = rt.things[0].health;
         rt.ai_tick(0, 1.0 / 30.0);
         assert_eq!(rt.things[0].health, after, "the saber ignored its cooldown");
@@ -15186,10 +15221,10 @@ mod tests {
                  SenseDanger 0.10, 1.00\n",
             ),
         );
-        rt.actor_flags.insert(1, 0x4);
+        rt.ai_flags.insert(1, 0x4);
         rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
         assert_eq!(rt.things[1].health, 99.5, "the damage did not apply");
-        let flags = rt.actor_flags.get(&1).copied().unwrap_or(0);
+        let flags = rt.ai_flags.get(&1).copied().unwrap_or(0);
         assert_eq!(flags & 0x4, 0, "the awake bit survived the surprise");
         assert_ne!(flags & 0x800, 0, "the alert bit was not set");
         assert_eq!(rt.sounds.len(), 1, "no surprise sound was queued");
@@ -15226,12 +15261,12 @@ mod tests {
             ),
         );
         rt.sector_adjoins = vec![Vec::new(); 8]; // the arm re-broadcasts into sector 7
-        rt.actor_flags.insert(1, 0x4);
+        rt.ai_flags.insert(1, 0x4);
         // A whisper of an event (`strength 1.0`) against the line's 3.0 weight: the arm runs.
         rt.sector_awareness
             .insert((7, 1), (1.0, [2.0, 0.0, 0.0], rt.time, Some(2)));
         assert!(rt.emit_ai_event(1, 2, None), "the heard source did not alert the actor");
-        let flags = rt.actor_flags.get(&1).copied().unwrap_or(0);
+        let flags = rt.ai_flags.get(&1).copied().unwrap_or(0);
         assert_eq!(flags & 0x4, 0, "the arm did not clear the hurt word");
         assert_ne!(flags & 0x800, 0, "the arm did not set the alert bit");
         assert_eq!(
@@ -15261,7 +15296,7 @@ mod tests {
                  SenseDanger 0.30, 1.00\n",
             ),
         );
-        quiet.actor_flags.insert(1, 0x4);
+        quiet.ai_flags.insert(1, 0x4);
         quiet
             .sector_awareness
             .insert((7, 1), (1.0, [2.0, 0.0, 0.0], quiet.time, Some(2)));
@@ -15405,11 +15440,11 @@ mod tests {
                     "alignment=-1.0, rank=0.5, fov=90, sightdist=5.0\n\n{lines}"
                 )),
             );
-            rt.actor_flags.insert(1, 0x4);
+            rt.ai_flags.insert(1, 0x4);
             rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
             (
                 rt.ai_move.get(&1).copied(),
-                rt.actor_flags.get(&1).copied().unwrap_or(0),
+                rt.ai_flags.get(&1).copied().unwrap_or(0),
                 rt.sounds.len(),
             )
         };
@@ -15446,20 +15481,20 @@ mod tests {
                     "alignment=-1.0, rank=0.5, fov=90, sightdist=5.0\n\nDodge 0.3, 0.3\n",
                 ),
             );
-            rt.actor_flags.insert(1, 0x200);
+            rt.ai_flags.insert(1, 0x200);
             setup(&mut rt);
             rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
-            (rt.ai_move.contains_key(&1), rt.actor_flags.get(&1).copied().unwrap_or(0))
+            (rt.ai_move.contains_key(&1), rt.ai_flags.get(&1).copied().unwrap_or(0))
         };
         assert!(sample(&|_| {}).0, "the plain case did not dodge");
         assert!(!sample(&|rt| rt.things[1].flags = 0x202).0, "a 0x202 thing reacted");
         assert!(!sample(&|rt| rt.things[1].health = 0.0).0, "a dead body reacted");
         assert!(!sample(&|rt| {
-            rt.actor_flags.insert(1, 0x200 | 0x2000);
+            rt.ai_flags.insert(1, 0x200 | 0x2000);
         })
         .0, "an AI switched off reacted");
         let (moved, flags) = sample(&|rt| {
-            rt.actor_flags.insert(1, 0x200 | 0x1000);
+            rt.ai_flags.insert(1, 0x200 | 0x1000);
         });
         assert!(!moved, "the 0x1000 latch let an event through");
         assert_ne!(flags & 0x1000, 0, "the latch cleared without event 2");
@@ -15491,7 +15526,7 @@ mod tests {
             rt.templates = vec!["walkplayer".into(), "tuskan".into()];
             rt.types = vec![10, 2];
             rt.template_move.insert("walkplayer".into(), "physics".into());
-            rt.actor_flags.insert(1, actor_flags);
+            rt.ai_flags.insert(1, actor_flags);
             rt.detect_chance(1, 0)
         };
         let moving = [1.0, 0.0, 0.0];
@@ -15547,7 +15582,7 @@ mod tests {
             rt.templates = vec!["walkplayer".into(), "tuskan".into()];
             rt.types = vec![10, 2];
             rt.template_move.insert("walkplayer".into(), "physics".into());
-            rt.actor_flags.insert(1, 0x200);
+        rt.ai_flags.insert(1, 0x200);
             rt.sector_ambient_light = vec![ambient];
             rt.detect_chance(1, 0)
         };
@@ -16170,7 +16205,7 @@ mod tests {
             rt.templates = vec!["walkplayer".into(), "tuskan".into()];
             rt.types = vec![10, 2];
             rt.template_move.insert("walkplayer".into(), "physics".into());
-            rt.actor_flags.insert(1, 0x200);
+            rt.ai_flags.insert(1, 0x200);
             rt.sector_ambient_light = vec![0.1];
             if saber {
                 rt.saber.insert(
@@ -16211,7 +16246,7 @@ mod tests {
         rt.template_move.insert("walkplayer".into(), "physics".into());
         rt.template_weapon.insert("tuskan".into(), "blaster".into());
         rt.template_vel.insert("blaster".into(), [0.0, 7.0, 0.0]);
-        rt.actor_flags.insert(1, 0x200);
+        rt.ai_flags.insert(1, 0x200);
         rt.ai.insert(
             1,
             crate::ai::parse(
@@ -16256,7 +16291,7 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
         rt.types = vec![10, 2];
         rt.template_move.insert("walkplayer".into(), "physics".into());
-        rt.actor_flags.insert(1, 0x200);
+        rt.ai_flags.insert(1, 0x200);
         rt.ai.insert(
             1,
             crate::ai::parse(
@@ -16520,9 +16555,9 @@ mod tests {
             ),
         );
         // Awake (`AISetMode(..., 0x4)`) and not yet alerted: what `sensedanger` acts on.
-        rt.actor_flags.insert(1, 0x4);
+        rt.ai_flags.insert(1, 0x4);
         rt.ai_tick(0, 1.0 / 30.0);
-        let flags = rt.actor_flags.get(&1).copied().unwrap_or(0);
+        let flags = rt.ai_flags.get(&1).copied().unwrap_or(0);
         assert_eq!(flags & 0x800, 0x800, "the surprise did not set the alert bit: {flags:#x}");
         assert!(
             rt.ai_withdraw.contains_key(&1),
@@ -16640,7 +16675,7 @@ mod tests {
         rt.templates = vec!["walkplayer".into(), "tuskan".into()];
         rt.types = vec![10, 2];
         rt.template_move.insert("walkplayer".into(), "physics".into());
-        rt.actor_flags.insert(1, 0x1004);
+        rt.ai_flags.insert(1, 0x1004);
         rt.ai.insert(
             1,
             crate::ai::parse(
@@ -16771,7 +16806,7 @@ mod tests {
         rt.template_weapon.insert("reeyeesgun".into(), "blaster".into());
         rt.template_vel.insert("blaster".into(), [0.0, 8.0, 0.0]);
         rt.template_damage.insert("blaster".into(), 10.0);
-        rt.actor_flags.insert(1, 0x200);
+        rt.ai_flags.insert(1, 0x200);
         rt.ai.insert(
             1,
             crate::ai::parse(
@@ -17421,7 +17456,7 @@ mod tests {
         // "Moving" is an intent, not a frame: the blocked actor still carries the bit, which is what
         // lets the `0x400` it emitted reach the `jump` handler.
         assert_ne!(
-            gated.actor_flags.get(&1).copied().unwrap_or(0) & 0x1,
+            gated.ai_flags.get(&1).copied().unwrap_or(0) & 0x1,
             0,
             "a blocked-but-walking actor lost the moving bit"
         );
@@ -17549,7 +17584,7 @@ mod tests {
         // would not hear an actor's activate.
         rt.link_masks.insert((THING_SOURCE, 0, 3, 2), 0x405);
         // `FUN_0050abc0` runs the activate only while the AI flag word's bit `0x1` (moved) is set.
-        rt.actor_flags.insert(1, 0x1);
+        rt.ai_flags.insert(1, 0x1);
 
         rt.ai_tick(0, 0.1);
         assert!(
@@ -17563,7 +17598,7 @@ mod tests {
         // The handler writes `now + 1000 ms` into its own state (`0x50abc0`), so a moving actor does
         // not message the same door again inside that window.
         rt.pending_messages.clear();
-        rt.actor_flags.insert(1, 0x1);
+        rt.ai_flags.insert(1, 0x1);
         rt.time = 0.5;
         rt.ai_tick(0, 0.1);
         assert!(
@@ -17571,7 +17606,7 @@ mod tests {
             "the handler ran again inside its 1000 ms re-arm: {:?}",
             rt.pending_messages
         );
-        rt.actor_flags.insert(1, 0x1);
+        rt.ai_flags.insert(1, 0x1);
         rt.time = 1.01;
         rt.ai_tick(0, 0.1);
         assert!(
@@ -17599,7 +17634,7 @@ mod tests {
             crate::ai::parse("alignment=-1.0, rank=0.5, fov=180\n\nOpenDoors\n"),
         );
         far.thing_links.push((0, 3, 2));
-        far.actor_flags.insert(1, 0x1);
+        far.ai_flags.insert(1, 0x1);
         far.ai_tick(0, 0.1);
         assert!(
             far.pending_messages.is_empty(),
@@ -17621,7 +17656,7 @@ mod tests {
         quiet.types = vec![10, 2, 0];
         quiet.ai.insert(1, crate::ai::parse("alignment=-1.0, rank=0.5, fov=180\n\nLookForTarget 500.0\n"));
         quiet.thing_links.push((0, 3, 2));
-        quiet.actor_flags.insert(1, 0x1);
+        quiet.ai_flags.insert(1, 0x1);
         quiet.ai_tick(0, 0.1);
         assert!(
             quiet.pending_messages.is_empty(),
@@ -17658,7 +17693,7 @@ mod tests {
         // The scan runs only while the AI's awake bit is set (`FUN_0050aa80`'s branch A); a class
         // launched with `aisetmode(actor, 0x200)` — the shipped wake — is re-woken by branch B on its
         // first interval, which is what puts `0x4` back.
-        rt.actor_flags.insert(1, 0x200);
+        rt.ai_flags.insert(1, 0x200);
         // Facing away: outside the 90-degree cone, so the scan must not find the body even though the
         // range (2.0) is well inside `sightdist` (5.0).
         rt.ai_tick(0, 0.1);
@@ -17722,7 +17757,7 @@ mod tests {
         );
         // Awake (the scan's own gate) and `0x200`, which holds `sithAI_CanDetectSightThing`'s chance
         // at 1.0 — this grades the sight ray, not the random draw.
-        rt.actor_flags.insert(1, 0x204);
+        rt.ai_flags.insert(1, 0x204);
         assert!(
             !rt.solids.as_ref().unwrap().segment_blocked([0.0, 0.0, 0.5], [0.0, 2.0, 0.5]),
             "the fixture must leave the thing-origin line clear"
@@ -17760,7 +17795,7 @@ mod tests {
         let ai = rt.ai[&1].clone();
         // The plain range test the scan used to apply refuses this body...
         assert!(!ai.sees([0.0, 0.0, 0.575], 0.0, [0.0, 5.05, 0.5]), "sanity: centre is out of range");
-        rt.actor_flags.insert(1, 0x204);
+        rt.ai_flags.insert(1, 0x204);
         rt.ai_last_seen.clear();
         rt.ai_tick(0, 0.1);
         assert!(

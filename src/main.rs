@@ -354,7 +354,7 @@ fn print_actor_moves(world: Option<&World>, sim: Option<&Sim>) {
                 println!(
                     "actor-moves: thing {index} ({}) moved {d:.2} units from its placement, ai flags {:#x}",
                     placed.template,
-                    rt.actor_flags.get(&index).copied().unwrap_or(0)
+                    rt.ai_flags.get(&index).copied().unwrap_or(0)
                 );
                 shown += 1;
             }
@@ -382,7 +382,7 @@ fn print_actor_moves(world: Option<&World>, sim: Option<&Sim>) {
             .unwrap_or("?");
         println!(
             "actor-moves: thing {index} ({template}) is walking {speed:.2} u/s, ai flags {:#x}",
-            rt.actor_flags.get(index).copied().unwrap_or(0)
+            rt.ai_flags.get(index).copied().unwrap_or(0)
         );
     }
 }
@@ -28604,13 +28604,12 @@ fn setup(
                 && let Some(raw) = world.ai_classes.get(&class.to_ascii_lowercase())
             {
                 rt.ai.insert(index, ai::parse(raw));
-                // Retail's own `aistatus` at load prints `Flags=0x1004` for every placed class actor
-                // (`tools/parity/aistatus-01narshadda.txt`: `gonkroam.ai` and `rydefault.ai` alike) —
-                // the awake bit `0x4` `sensedanger` requires, plus `0x1000`. The port left these at
-                // zero, so no placed actor was awake and the instinct that alerts on sight could never
-                // run (round 307).
-                let prior = rt.actor_flags.get(&index).copied().unwrap_or(0);
-                rt.actor_flags.insert(index, prior | 0x1004);
+                // `sithAI_Create` (`0x4e9cb0`) writes `ai+8 = 0x1004` for every placed class actor:
+                // the awake bit `0x4` `sensedanger` requires, plus the one-shot latch `0x1000`.
+                // Retail's own `aistatus` at load prints the same `Flags=0x1004` for `gonkroam.ai`
+                // and `rydefault.ai` alike.
+                let prior = rt.ai_flags.get(&index).copied().unwrap_or(0);
+                rt.ai_flags.insert(index, prior | 0x1004);
                 // `returnhome` walks the actor back to its own anchor (`ai + 0x93`), which is the
                 // placed position: record it now, while the level's things are still where they spawned.
                 let home = rt.things[index].pos;
