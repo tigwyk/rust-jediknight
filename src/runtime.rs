@@ -884,13 +884,18 @@ fn yaw_of_forward(f: [f32; 2]) -> f32 {
 /// world up produces.
 fn turn_blend(forward: [f32; 2], look: [f32; 2], rotthrust: f32, dt: f32) -> ([f32; 2], bool) {
     let rvec = [forward[1], -forward[0]];
-    if (rvec[0] * look[0] + rvec[1] * look[1]).abs() <= 0.01
-        && forward[0] * look[0] + forward[1] * look[1] >= 0.0
-    {
+    let along = forward[0] * look[0] + forward[1] * look[1];
+    let across = (rvec[0] * look[0] + rvec[1] * look[1]).abs();
+    if across <= 0.01 && along >= 0.0 {
         return (forward, true);
     }
     let k = rotthrust * 0.1 * dt.max(0.0);
-    let blended = [forward[0] + look[0] * k, forward[1] + look[1] * k];
+    // Dead astern (`0x4ea630`): the engine steps along the **right vector** there
+    // (`fVar6 = *pfVar2 * param_2 + *(float *)(iVar3 + 0x94)`), because `look * k` against an
+    // opposite forward renormalises back to the same forward — the blend would never turn a
+    // target exactly behind. Every other case steps along the look vector.
+    let step = if along < 0.0 && across <= 0.01 { rvec } else { look };
+    let blended = [forward[0] + step[0] * k, forward[1] + step[1] * k];
     let len = (blended[0] * blended[0] + blended[1] * blended[1]).sqrt();
     if len < 0.01 {
         // `rdVector_Normalize3` of a collapsed blend copies the look vector.
@@ -4322,12 +4327,20 @@ impl Runtime {
             .get(&template)
             .copied()
             .unwrap_or(80.0);
-        if let Some(thing) = self.things.get_mut(actor) {
-            thing.head_pitch = (d[2] / len).asin().to_degrees().clamp(min, max);
+        // The head moves only while the actor word's bit `0x1` is set (`*(byte *)(iVar6 + 0x130)
+        // & 1`, `0x4eab80`) — the engine leaves the pitch alone otherwise.
+        if self.actor_flags.get(&actor).copied().unwrap_or(0) & 0x1 != 0 {
+            if let Some(thing) = self.things.get_mut(actor) {
+                thing.head_pitch = (d[2] / len).asin().to_degrees().clamp(min, max);
+            }
         }
         let flat = (d[0] * d[0] + d[1] * d[1]).sqrt();
-        self.ai_look_dir.insert(actor, [d[0] / flat, d[1] / flat]);
-        *self.ai_flags.entry(actor).or_insert(0) |= 0x8;
+        // Straight up/down has no flat direction: the engine's zeroed z leaves a zero vector and
+        // the blend holds the body's facing rather than dividing by zero.
+        if flat > 1e-6 {
+            self.ai_look_dir.insert(actor, [d[0] / flat, d[1] / flat]);
+            *self.ai_flags.entry(actor).or_insert(0) |= 0x8;
+        }
     }
 
     /// `sithAI_Tick`'s flag-`0x8` arm: run the blend once per ticked actor, before the instinct
@@ -4701,6 +4714,9 @@ impl Runtime {
         !attached
     }
 
+    /// `sithAI_EmitEvent` (`0x4e9f80`): gate, let only event 2 through the `0x1000` one-shot
+    /// latch, dispatch by the registry mask to the first reacting instinct, loop while the mode
+    /// word changes, and message the actor's cogs (`0x18`, `aievent`) on `0x100`.
     pub fn emit_ai_event(&mut self, actor: usize, mut event: u32, source: Option<usize>) -> bool {
         // `sithAI_EmitEvent` (`0x4e9f80`) loops: dispatch, then — when a handler changed the mode
         // word — re-dispatch as the 0x100 mode-change event with the old word as its argument, until
@@ -4875,13 +4891,8 @@ impl Runtime {
         dt: f32,
         ctx: &AiCtx,
     ) -> bool {
-        let rearm = |rt: &mut Self, next: f32| {
-            if let Some(slots) = rt.ai_inst.get_mut(&index) {
-                if let Some(clock) = slots.get_mut(slot) {
-                    *clock = next;
-                }
-            }
-        };
+        // Thin wrapper so the arms read `rearm(self, t)`; the body is `ai_rearm`'s.
+        let rearm = |rt: &mut Self, next: f32| rt.ai_rearm(index, slot, next);
         match instinct.name.to_ascii_lowercase().as_str() {
             // `talk` (`0x50be20`): idle chatter on its own clock — the handler re-arms at
             // `now + fltArg[0]` before it decides anything, rolls fltArg[1], and picks the mood
@@ -4889,7 +4900,7 @@ impl Runtime {
             "talk" => {
                 rearm(
                     self,
-                    self.time + (instinct.weight / 1000.0).max(0.05),
+                    self.time + instinct.weight / 1000.0,
                 );
                 let chance = instinct.args.first().copied().unwrap_or(0.0) as f64;
                 let max_health = self
@@ -4909,7 +4920,7 @@ impl Runtime {
                 false
             }
             // `lookfortarget` (`0x50aa80`, accept `0x204`): see `sithAICmd_LookForTarget`.
-            "lookfortarget" => self.sithAICmd_LookForTarget(index, slot, instinct, player, ctx),
+            "lookfortarget" => self.sith_ai_cmd_look_for_target(index, slot, instinct, player, ctx),
             // `sensedanger` (`0x50b9b0`, accept 4 reject 0x800): the scheduler branch looks the
             // player over once a second while awake and not yet alerted — with **no** random roll:
             // the handler's only gate past the mode word is `fltArg[1] != 0` (the class line's
@@ -4980,12 +4991,12 @@ impl Runtime {
                 true
             }
             // `opendoors` (`0x50abc0`): see `sithAICmd_OpenDoors`.
-            "opendoors" => self.sithAICmd_OpenDoors(index, ctx),
+            "opendoors" => self.sith_ai_cmd_open_doors(index, ctx),
             // `hitandrun` (`0x50bb90`, accept `0xc00`): see `sithAICmd_HitAndRun`.
-            "hitandrun" => self.sithAICmd_HitAndRun(index, slot, instinct, player),
+            "hitandrun" => self.sith_ai_cmd_hit_and_run(index, slot, instinct, player),
             // `lobfire` (`0x509cd0`, accept 2): see `sithAICmd_LobFire` — the scheduler branch
             // fires the lobbed shot itself.
-            "lobfire" => self.sithAICmd_LobFire(index, slot, instinct, player, ctx),
+            "lobfire" => self.sith_ai_cmd_lobfire(index, slot, instinct, player, ctx),
             // `retreat` (`0x50bc60`, accept 2 reject 0x800): when health falls under
             // `fltArg[0] x max` and a `fltArg[1]` roll passes, set the alert bit and remember the
             // player in the target slot (the port's `ai_withdraw` walk stands in for the
@@ -5031,7 +5042,7 @@ impl Runtime {
                 });
                 let (sin, cos) = (angle * side).to_radians().sin_cos();
                 let (vx, vy) = (-tx, -ty);
-                let interval = (instinct.weight / 1000.0).max(0.05);
+                let interval = instinct.weight / 1000.0;
                 self.ai_strafe_goal.insert(
                     index,
                     [
@@ -5057,7 +5068,7 @@ impl Runtime {
     /// `sithAICmd_OpenDoors` (`0x50abc0`): while the moving bit `0x1` is set, run the player's own
     /// activate action on the actor's body. Returns 0 — the engine's `now + 1000` re-arm is the
     /// same value the scheduler's default arm already wrote, so the handler adds nothing.
-    fn sithAICmd_OpenDoors(&mut self, index: usize, ctx: &AiCtx) -> bool {
+    fn sith_ai_cmd_open_doors(&mut self, index: usize, ctx: &AiCtx) -> bool {
         if self.ai_flags.get(&index).copied().unwrap_or(0) & 0x1 == 0 {
             return false;
         }
@@ -5086,7 +5097,7 @@ impl Runtime {
     /// **B** (`0x200` set) — the memory-decay wake: `arg1 != 0 && last_seen + arg1 < now` writes
     /// `(flags & 0xfffff9dd) | 4` and levels the head (`SetHeadPYR` with the zero vector at
     /// `0x522af8`), return 1.
-    fn sithAICmd_LookForTarget(
+    fn sith_ai_cmd_look_for_target(
         &mut self,
         index: usize,
         slot: usize,
@@ -5102,7 +5113,7 @@ impl Runtime {
             if flags & 0x4 == 0 {
                 return false;
             }
-            self.ai_rearm(index, slot, self.time + (instinct.weight / 1000.0).max(0.05));
+            self.ai_rearm(index, slot, self.time + instinct.weight / 1000.0);
             if !self
                 .things
                 .get(player)
@@ -5121,7 +5132,9 @@ impl Runtime {
                     ctx.template, self.time
                 );
             }
-            if sight == 0 && self.can_detect(index, player) {
+            // `sub_4EAD60` rolls the detect chance only when the target was **not** already
+            // visible (`if (local_4 != 0)`); a held target is never lost to a bad roll.
+            if sight == 0 && (!self.ai_detected.contains(&index) || self.can_detect(index, player)) {
                 self.ai_detected.insert(index);
                 self.remember(index, ctx.target, "lookfortarget");
                 self.ai_flags
@@ -5139,7 +5152,15 @@ impl Runtime {
                 }
                 return true;
             }
-            if instinct.weight == 0.0 {
+            // `arg0 == 0` (`_DAT_00523294` = 0.0): the engine rewrites the class's own float
+            // argument to 500 (`0x43fa0000`, `param_2 + 0xc`) — a persistent class edit, not a
+            // one-off re-arm — and the next pass runs at the rewritten interval.
+            if instinct.weight == 0.0
+                && let Some(class) = self.ai.get_mut(&index)
+                && let Some(first) = class.instincts.get_mut(slot)
+                && first.weight == 0.0
+            {
+                first.weight = 500.0;
                 self.ai_rearm(index, slot, self.time + 0.5);
             }
             return false;
@@ -5171,7 +5192,7 @@ impl Runtime {
     ///   return that (non-zero: the engine's handler signals "acted", though the word did not
     ///   change, so no cascade follows).
     /// - Neither bit: reset the accumulator, return 0.
-    fn sithAICmd_HitAndRun(
+    fn sith_ai_cmd_hit_and_run(
         &mut self,
         index: usize,
         slot: usize,
@@ -5214,7 +5235,7 @@ impl Runtime {
     /// re-arm at `now + 500`. Every path returns 0 — this handler never raises the cascade. The
     /// event-`0x100` branch (holster/draw with the awake bit, `sithPuppet_SetArmedMode`) lives in
     /// `emit_ai_event`'s dispatch.
-    fn sithAICmd_LobFire(
+    fn sith_ai_cmd_lobfire(
         &mut self,
         index: usize,
         slot: usize,
@@ -5240,7 +5261,7 @@ impl Runtime {
                 crate::cog::pseudo_random() < instinct.args.get(4).copied().unwrap_or(0.0) as f64,
             );
             matches!(
-                self.sithAI_FireWeapon(
+                self.sith_ai_fire_weapon(
                     index,
                     player,
                     ctx.target,
@@ -5262,7 +5283,7 @@ impl Runtime {
             return false;
         }
         *self.ai_flags.entry(index).or_insert(0) |= 0x400;
-        let at = self.time + (instinct.weight / 1000.0).max(0.05);
+        let at = self.time + instinct.weight / 1000.0;
         self.ai_fire_lock.insert(index, at);
         self.ai_rearm(index, slot, at);
         self.last_shot.insert(index, self.time);
@@ -5443,7 +5464,7 @@ impl Runtime {
             return false;
         }
         self.ai_jump
-            .insert(actor, self.time + (weight / 1000.0).max(0.05));
+            .insert(actor, self.time + weight / 1000.0);
         if let Some(t) = self.things.get_mut(actor) {
             // `_DAT_005232e4` = 0.1: the engine's velocities are level units a second (`thing + 0x234`
             // is `vel * dt`), so this is a real but small unstick toward the target.
@@ -6665,7 +6686,7 @@ impl Runtime {
             {
                 let accuracy = ai.as_ref().map(|c| c.accuracy);
                 if !matches!(
-                    self.sithAI_FireWeapon(index, dtarget, dpos, 0.0, f32::MAX, -1.0, err, mode, fl, accuracy),
+                    self.sith_ai_fire_weapon(index, dtarget, dpos, 0.0, f32::MAX, -1.0, err, mode, fl, accuracy),
                     FireOutcome::Refused
                 ) {
                     self.last_shot.insert(index, self.time);
@@ -6848,7 +6869,7 @@ impl Runtime {
             let accuracy = if blind { None } else { ai.as_ref().map(|c| c.accuracy) };
             // The engine's handler fires `sithAI_FireWeapon` synchronously and schedules its
             // cadence only on a fired (or deferred) shot; a refusal retries in 250 ms (`0xfa`).
-            let outcome = self.sithAI_FireWeapon(
+            let outcome = self.sith_ai_fire_weapon(
                 index,
                 target_thing,
                 shooting_at,
@@ -7647,7 +7668,7 @@ impl Runtime {
     /// (`sithAI_sub_4EAD60` `0x4ead60`). A template without `fireoffset=` transforms the zero
     /// vector and the bolt leaves the body's origin, as the engine's does; the player's
     /// one-unit-ahead fallback in `fire_toward` is a player-path stand-in, not this rule.
-    fn sithAI_FirePoint(&self, index: usize) -> [f32; 3] {
+    fn sith_ai_fire_point(&self, index: usize) -> [f32; 3] {
         let Some(t) = self.things.get(index) else { return [0.0; 3] };
         let offset = self
             .templates
@@ -7679,7 +7700,7 @@ impl Runtime {
     /// fire point, then the lead (`fl & 1`), the lob (`fl & 2`) and the accuracy-gated jitter in
     /// the engine's order. `accuracy = None` skips the gate, which is the engine's `BlindFire`
     /// inline path (`0x509b30` calls `RandomFireVector` directly).
-    fn sithAI_FireWeapon(
+    fn sith_ai_fire_weapon(
         &mut self,
         index: usize,
         target: usize,
@@ -7693,7 +7714,10 @@ impl Runtime {
         accuracy: Option<f32>,
     ) -> FireOutcome {
         let Some(t) = self.things.get(index) else { return FireOutcome::Refused };
-        let (yaw, flags) = (t.yaw, t.flags);
+        // `sithAI_FireWeapon`'s puppet branch tests the **actor word** (`thing + 0x130`,
+        // `puVar1[0x4c] & 0x20000`), not the thing's own flags — since #90's split that word is
+        // `actor_flags`.
+        let (yaw, flags) = (t.yaw, self.actor_flags.get(&index).copied().unwrap_or(0));
         let weapon = self
             .templates
             .get(index)
@@ -7711,13 +7735,16 @@ impl Runtime {
         if weapon.is_empty() {
             return FireOutcome::Refused;
         }
-        let eye = self.sithAI_FirePoint(index);
+        let eye = self.sith_ai_fire_point(index);
         let d = [target_pos[0] - eye[0], target_pos[1] - eye[1], target_pos[2] - eye[2]];
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
         if len < 1e-6 {
             return FireOutcome::Refused;
         }
         let mut dir = [d[0] / len, d[1] / len, d[2] / len];
+        // The aim vector as the engine stores it (`ai + 0x79`): the lob reads this original,
+        // never the lead-adjusted direction.
+        let aim = dir;
         let radius = self
             .templates
             .get(target)
@@ -7800,7 +7827,9 @@ impl Runtime {
         if fl & 2 != 0 && speed > 0.0 {
             // The lob: scale by the weapon speed, lift z by the gravity arc for that flight
             // time, renormalise, and hand `WeaponFire` the magnitude as its speed parameter.
-            let mut v = [dir[0] * speed, dir[1] * speed, dir[2] * speed];
+            // The engine lobs from the **original aim vector** (`param_1[0x79..0x7b]`), not the
+            // lead-adjusted `dir` — the two only differ when both `fl & 1` and `fl & 2` are set.
+            let mut v = [aim[0] * speed, aim[1] * speed, aim[2] * speed];
             v[2] += (dist / speed) * 0.5 * self.gravity;
             let vlen = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
             if vlen > 1e-6 {
@@ -13559,11 +13588,13 @@ mod tests {
         let (f, _) = turn_blend(f, [0.0, 1.0], 180.0, 1.0 / 30.0);
         let (f, _) = turn_blend(f, [0.0, 1.0], 180.0, 1.0 / 30.0);
         assert!((yaw_of_forward(f) + 14.82).abs() < 0.05, "yaw {}", yaw_of_forward(f));
-        // A collapsed blend copies the look vector (`rdVector_Normalize3` of the zero vector): the
-        // exact opposite with k = 1 lands on zero.
+        // Dead astern (`0x4ea630`): with k = 1 the engine steps along the **right vector**, not
+        // the look vector — `look * k` against an opposite forward renormalises to the same
+        // forward, so the blend could never turn a target exactly behind. rvec of [-1, 0] is
+        // [0, 1]: normalize([-1, 1]) = a 45-degree step.
         let (f, done) = turn_blend([-1.0, 0.0], [1.0, 0.0], 30.0, 1.0 / 3.0);
         assert!(!done);
-        assert_eq!(f, [1.0, 0.0]);
+        assert_eq!(f, [-0.70710677, 0.70710677]);
     }
 
     fn f_next(deg: f32) -> [f32; 2] {
@@ -19410,7 +19441,7 @@ mod tests {
         rt.walk_vel.insert(0, [2.0, 0.0]);
         // `ai_tick` clears `walk_vel` before its walk phase repopulates it, so the lead's read is
         // driven directly here — the arithmetic under test is `FireWeapon`'s own.
-        let outcome = rt.sithAI_FireWeapon(1, 0, [0.0, 2.0, 0.0], 0.0, 9.0, 0.0, 0.0, 0, 1, Some(1.0));
+        let outcome = rt.sith_ai_fire_weapon(1, 0, [0.0, 2.0, 0.0], 0.0, 9.0, 0.0, 0.0, 0, 1, Some(1.0));
         assert!(matches!(outcome, FireOutcome::Shot(_)), "refused: {outcome:?}");
         assert_eq!(rt.shots_fired, 1);
         let shot = rt.things.len() - 1;
@@ -19432,7 +19463,7 @@ mod tests {
              LobFire 2500.0, 0.8, 0.5, 4.0, 0.20, 0\n",
         );
         rt.gravity = 4.0;
-        match rt.sithAI_FireWeapon(1, 0, [0.0, 3.0, 0.0], 0.5, 4.0, 0.8, 0.0, 0, 2, Some(1.0)) {
+        match rt.sith_ai_fire_weapon(1, 0, [0.0, 3.0, 0.0], 0.5, 4.0, 0.8, 0.0, 0, 2, Some(1.0)) {
             FireOutcome::Shot(shot) => {
                 // dist = 3 - 0.065 = 2.935; lift = (2.935/4) * 0.5 * 4 = 1.4675.
                 let lift = (2.935_f32 / 4.0) * 0.5 * 4.0;
@@ -19456,7 +19487,7 @@ mod tests {
         );
         rt.template_fire_offset.insert("reeyeesgun".into(), [0.0, 2.0, 0.5]);
         rt.things[1].pitch = 30.0;
-        match rt.sithAI_FireWeapon(1, 0, [0.0, 3.0, 1.0], 0.0, 9.0, 0.0, 0.0, 0, 0, Some(1.0)) {
+        match rt.sith_ai_fire_weapon(1, 0, [0.0, 3.0, 1.0], 0.0, 9.0, 0.0, 0.0, 0, 0, Some(1.0)) {
             FireOutcome::Shot(shot) => {
                 // The full basis at yaw 0: `lvec = (0, cp, sp)`, `rvec = (1, 0, 0)` and
                 // `uvec = (0, -sp, cp)` — the up vector's y tilts back with the pitch, which is
@@ -19482,7 +19513,10 @@ mod tests {
             "alignment=-1.0, rank=0.5, fov=360, sightdist=9.0, accuracy=1.0\n\n\
              PrimaryFire 750.0, 0.0, 9.0, 0.0, 0.0, 500.0, 0.0, 0.0, 0.0, 0.0\n",
         );
-        rt.things[1].flags |= 0x20000;
+        // The engine tests the **actor word** (`thing + 0x130`, `puVar1[0x4c] & 0x20000`), not
+        // the thing's own flags.
+        rt.actor_flags
+            .insert(1, rt.actor_flags.get(&1).copied().unwrap_or(0) | 0x20000);
         rt.ai_tick(0, 0.1);
         assert_eq!(rt.shots_fired, 0, "the puppet actor fired inline");
         assert!(rt.ai_deferred_fire.contains_key(&1), "the shot was not stored");
