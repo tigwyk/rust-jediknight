@@ -354,7 +354,7 @@ fn print_actor_moves(world: Option<&World>, sim: Option<&Sim>) {
                 println!(
                     "actor-moves: thing {index} ({}) moved {d:.2} units from its placement, ai flags {:#x}",
                     placed.template,
-                    rt.actor_flags.get(&index).copied().unwrap_or(0)
+                    rt.ai_flags.get(&index).copied().unwrap_or(0)
                 );
                 shown += 1;
             }
@@ -382,7 +382,7 @@ fn print_actor_moves(world: Option<&World>, sim: Option<&Sim>) {
             .unwrap_or("?");
         println!(
             "actor-moves: thing {index} ({template}) is walking {speed:.2} u/s, ai flags {:#x}",
-            rt.actor_flags.get(index).copied().unwrap_or(0)
+            rt.ai_flags.get(index).copied().unwrap_or(0)
         );
     }
 }
@@ -5990,9 +5990,12 @@ fn main() {
             .unwrap_or(rt.ai_standoff);
         let gap = standoff + 0.5;
         rt.things[actor].pos = at;
-        // Off to one side, so "turned toward it" is observable rather than already true. The
-        // 200-degree cone is 100 either side, so 80 is inside it — 179 would not be.
-        rt.things[actor].yaw = 80.0;
+        // Off to one side, so "turned toward it" is observable rather than already true. The body
+        // sits along +X and `forward = (−sin yaw, cos yaw)`, so yaw −70 looks 20° off it — ahead
+        // of the axis and outside the 200-degree class's rear wedge (`|rvec·d| < fovcos + 1`),
+        // where the old yaw 80 sat behind the actor and only passed because fov ≥ 180 bypassed
+        // the port's old angle cone.
+        rt.things[actor].yaw = -70.0;
         rt.things[player].pos = [at[0] + gap, at[1], at[2]];
         let start = rt.things[actor].pos;
         let before_angle = rt.things[actor].yaw;
@@ -6400,8 +6403,20 @@ fn main() {
             "AISetFireTarget",
             &[cog::Value::Num(actor as f64), cog::Value::Num(victim as f64)],
         );
-        let before_player_shot = rt.ai_tick(player, 1.0 / 30.0);
-        rt.things[actor].ai_wait = 0.0;
+        // The engine's fire path sets a look frame, so the actor blends onto the victim over
+        // several ticks before its facing passes the instinct's `minDot` gate and the shot leaves.
+        let mut before_player_shot = 0;
+        for _ in 0..120 {
+            rt.things[actor].ai_wait = 0.0;
+            before_player_shot += rt.ai_tick(player, 1.0 / 30.0);
+            if before_player_shot > 0 {
+                break;
+            }
+        }
+        // The blend finishes after the shot; let the body settle onto the target.
+        for _ in 0..120 {
+            rt.ai_tick(player, 1.0 / 30.0);
+        }
         let aimed = rt.things[actor].yaw;
         let to_target = (-(spot[0] - at[0])).atan2(spot[1] - at[1]).to_degrees();
         println!(
@@ -28604,13 +28619,12 @@ fn setup(
                 && let Some(raw) = world.ai_classes.get(&class.to_ascii_lowercase())
             {
                 rt.ai.insert(index, ai::parse(raw));
-                // Retail's own `aistatus` at load prints `Flags=0x1004` for every placed class actor
-                // (`tools/parity/aistatus-01narshadda.txt`: `gonkroam.ai` and `rydefault.ai` alike) —
-                // the awake bit `0x4` `sensedanger` requires, plus `0x1000`. The port left these at
-                // zero, so no placed actor was awake and the instinct that alerts on sight could never
-                // run (round 307).
-                let prior = rt.actor_flags.get(&index).copied().unwrap_or(0);
-                rt.actor_flags.insert(index, prior | 0x1004);
+                // `sithAI_Create` (`0x4e9cb0`) writes `ai+8 = 0x1004` for every placed class actor:
+                // the awake bit `0x4` `sensedanger` requires, plus the one-shot latch `0x1000`.
+                // Retail's own `aistatus` at load prints the same `Flags=0x1004` for `gonkroam.ai`
+                // and `rydefault.ai` alike.
+                let prior = rt.ai_flags.get(&index).copied().unwrap_or(0);
+                rt.ai_flags.insert(index, prior | 0x1004);
                 // `returnhome` walks the actor back to its own anchor (`ai + 0x93`), which is the
                 // placed position: record it now, while the level's things are still where they spawned.
                 let home = rt.things[index].pos;

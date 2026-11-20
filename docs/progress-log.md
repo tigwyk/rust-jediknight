@@ -7767,3 +7767,85 @@ route gate, four chain routes — hashes in #80's handoff.
 ## Round: #87 attach-time surface entered (commit 3a8d656)
 
 LinkCog (0x4df610) ORs SITH_SURFACE_COG_LINKED (2) into rt.surface_flags in wire_links; AttachThingToSurface (0x4cde80:50-52) sends entered (6) when the attach surface changes, flags clear of 0x80100, at the player floor tail, the per-tick seat apply and the load-time creation seat (drain deferred past the collider borrow). cargo test 440/440. Acceptance: 03katarn warp onto surface 2107 pad fires entered to cog 25, handler runs (enabled 1->0). Regression gates (--secret/--triggers/--attach/--soak/--tour/--force-grant/--walk all/trace-gate/route-gate/A-B) still owed; see the #87 handoff comment.
+
+## Round: #91 the perception chain (commit pending)
+
+CheckSightThing (0x4eb090) transliterated as Runtime::check_sight_thing and wired into both sight sites (`sighted` and the LookForTarget scan): 3D eye distance with the target radius removed twice, the sideways-component cone, the segment pair as the 0x102 sweep stand-in. Ai::cone's angle test retired into ai::cone_holds (fovcos = cos(fov·0.5), 0x523128 = 0.5 read from the shipped image; fov ≥ 180 keeps a rear blind wedge, fov 90 accepts only ~17° off axis). FirstThingInView (0x4eb790) and GetThingsInView (0x4ebe80) ported as first_thing_in_view/get_things_in_view with the adjoin-depth recursion (Runtime::adjoin_depth = the two sides' `dist` column, nonzero on every shipped level). Constants from the image: 0x523060/64/68 = 0/−1/1, 0x523070/74 = 0.5/90. cargo test 444/444 (circlestrafe and the --ai chase fixtures re-aimed at the body: their yaws sat inside the old fov≥180 all-round bypass). Gates: --ai, --ai-live, --soak, --tour, --walk all, encounter, trace 9/9 green; route-gate fails 1 field identically on the 06b77dc baseline (tick 36 sector 349 vs 339, pre-existing). Unmapped, noted in the handoff: GetThingsInView's three surface/texture adjoin tests, the cloak rules, the type-2/7 thing ray.
+
+## Round: #92 movement and turning (commit pending)
+
+The engine's turning is a blend, not a rate: sithAI_SetLookFrame (0x4eab80) stores the flattened
+look vector (ai+0x65) and sets AI flag 0x8; sithAI_Tick (0x4ea5e0) runs sub_4EA630 (0x4ea630),
+which blends lvec toward it by maxrotthrust (thing+0x14c) * _DAT_00523058 * dt and rebuilds
+rvec/uvec, clearing 0x8 once |rvec·look| <= _DAT_00523054 and the body is not behind. Constants
+read from the shipped image: 0x523050 = 0.0, 0x523054 = 0.01, 0x523058 = 0.1, 0x522b28..30 =
+(0,0,1). The port's turn_toward (constant maxrotthrust/surfdrag rate) and all three instant yaw
+snaps (jump, scripted aim, every shot) retired into turn_blend + Runtime::ai_set_look_frame /
+ai_turn_blend; template_turn retired for template_rotthrust (the raw field the engine reads).
+
+sithAI_SetMoveThing (0x4eac90) ported as ai_set_move_thing: speed argument ai+0x6f (dodge 2.5,
+jump 2.0) now multiplies the walk step, soundclass mode 5 ("moving", the engine mode table at
+JK.EXE 0x54b40c: 5 = moving) plays, flag 0x1 sets, and the jump lockout gate (ai+0xa3, moving
+only) holds. sithAI_Jump (0x4eacf0) ported as ai_jump_move and wired into jump_from_obstacle's
+event-0x400 arm: move at speed 2.0, puppet play 0x1b, JumpWithVel's jumpspeed hop (shortcut: the
+port's puppet cannot drive the body, so the vel fallback runs unconditionally), now+2000 lockout.
+
+sithAI_FireWeapon (0x4eba10) reads for its direction ai+0x79 — the AI's aim vector, not the body
+orientation — so fire_toward gained an aim point: the AI's bolt leaves at its target however far
+the turn blend has to go. Without it the retired shot snap made every AI bolt fly along a
+mid-blend body yaw, and the encounter gate's first door shot missed (5 failures); with it the
+gate returns to 0 failures against the 0b1e980 baseline's 0.
+
+## Round: #96 the level-3 engagement at the data-derived vantage (commit none — evidence round)
+
+No code change: every acceptance criterion already holds on 4b8af59 through the landed
+scheduler/perception/fire work. Measured at the ledger row's own vantage
+(`--start 03katarn --warp -0.76,-4.74,-0.20,-53`, the `katarn_ai_193` row computed from
+`--thing-list`'s thing 193 data position): the port now fires **zero** bolts and lands zero hits
+over 1800 frames (30 s) — round 284's two `+ebow` bolts were a pre-#90 code state; with
+sithAI_Create's ai_flags 0x1004 dormancy the port is idle exactly as retail's own captures are
+(aistatus-03katarn-193.txt: static idle words, HUD 100/50). The engagement start is data-derived
+on every side that grades it: the encounter gate's pose is the fixture's walkplayer placement
+seeded by the engine's route_door.tsv capture, the level-3 vantage is map data, and the port's AI
+path picks no nearest actor (the nearest-actor picks are `--fire`/`--hit`/`--fire-demo` harness
+probes only). Level-3 script setup path runs (kyle.cog's freeze/clear seen in the probe).
+Gates on c9006143 (= 4b8af59, branch carries no delta, A/B trivially identical): unit 458/458,
+`--ai`, `--soak`, `--tour`, `--cog-check` (0 stubbed), encounter gate 0 failures (13 paired
+hits, settled 22.0 vs 22.3), `--walk all` 34/34, trace 9/9, route gate's tick-36 sector residue
+pre-existing. `--ai-live` skipped: windowed leg, box hazard.
+### Round: #94 the recovered handlers as transliterations (tick/94-handlers, 3911db4 + merge ce2c1bb)
+
+`sithAICmd_LookForTarget` (0x50aa80), `sithAICmd_OpenDoors` (0x50abc0), `sithAICmd_HitAndRun`
+(0x50bb90) and `sithAICmd_LobFire` (0x509cd0, the scheduler branch #93 left to this ticket) are
+engine-named functions replacing their re-derived dispatch arms. New constants read from the
+shipped image: `_DAT_00523294 = 0.0` (LookForTarget arg0 rewrite to 500), `_DAT_005232f4 = -1000.0`
+(HitAndRun's per-pass second), `0x522af8 = (0,0,0)` (branch B's SetHeadPYR), and the soundclass
+mode table base `0x54b408` (mode 0x4c = `alert`, 0x52 = `flee`) — the earlier "5 = moving" read is
+off by one (5 = lwalkhard; 4 = moving). HitAndRun now counts on the mode word's 0x400 (which
+PrimaryFire sets on every committed fire) instead of the port's last_shot window, clears 0x800 on
+the re-engage pass, and hands the target to the withdraw walk. LobFire fires `sithAI_FireWeapon`
+with fl = 2, arms the fire lockout `ai + 0xa2` at `now + arg0`, and stops the fight on a 0x202
+player.
+
+Headless gate note: the encounter gate under `BK_HEADLESS=1 BK_SKIP_WINDOW=1` needs
+`BK_EXIT_FRAMES=300` — the windowed gate's real stop is the frame-297 screenshot, and a headless
+run without the frame budget overruns 23 frames (one extra shot at 10 433 ms, 399 extra actor
+samples) or truncates the trace at 297 (false kills). At 300 the gate is 0 failures, and the port's
+encounter trace is byte-identical to the 3aa3765 baseline binary under the same invocation. Also:
+`BK_ENCOUNTER_OUT` exported in a shell flips `encounter_events_enabled` for the unit tests — run
+`cargo test` with it unset.
+
+## Round: #97 the AI contract — the ledger rows close
+
+Spec #89's contract: the AI ledger rows retire on the landed tickets. AI turning (#92's
+SetLookFrame + sub_4EA630 blend), dodge and sensedanger's engine gates (#95), AI detection
+(#90's armed passes + #91's CheckSightThing + #94's LookForTarget), the engagement vantage
+(#96's evidence round — the 0x1004 dormancy matches retail's static capture), the AI events
+(2/4/0x100/0x800 emitted; 0x200 is dead mask content the engine never produces either), and
+the projectile spawn (#93's engine fire point with fireoffset, lead, lob and the accuracy
+gate). AI chatter keeps its named ceiling (the one-shot 2D pipe until the audio-mixer spec);
+sensedanger keeps its two mapped-field substitutions. Full battery on 29a30498: 460 tests,
+--walk all 34/34, trace gate 9/9, route oracle PASS (tick-36 sector residue pre-existing),
+encounter gate 0 failures under BK_EXIT_FRAMES=300, --soak/--soak-all/--tour/--cog-check
+green. The windowed legs (--ai-live) are orchestrator-owned on this box: two agent windowed
+runs hung in presentation and were killed; the agents run headless only now.

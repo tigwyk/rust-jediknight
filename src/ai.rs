@@ -81,9 +81,10 @@ impl Ai {
 
     /// Whether the actor can see a point: inside `sightdist` and inside the cone.
     ///
-    /// `fov=` is read as a **total** cone in degrees (`rybdefault.ai` says 200), which is what
-    /// the field's name suggests; the engine's own use of it is not recovered, so a value over
-    /// 360 is clamped rather than wrapping.
+    /// The cone here is the engine's own sideways-component gate ([`Self::cone`]); the plain
+    /// `sightdist` range is this port's convenience for the callers that only need a rough
+    /// "in view" answer (`sithAI_CheckSightThing` itself removes the target's radius and is
+    /// ported as `Runtime::check_sight_thing`).
     pub fn sees(&self, from: [f32; 3], yaw: f32, to: [f32; 3]) -> bool {
         let dx = to[0] - from[0];
         let dy = to[1] - from[1];
@@ -92,35 +93,62 @@ impl Ai {
         if reach <= 0.001 || reach > self.sightdist.max(0.001) {
             return false;
         }
-        self.cone(from, yaw, to)
+        let (sin, cos) = yaw.to_radians().sin_cos();
+        // The engine's frame rows: `lvec = (-sin yaw, cos yaw)` is the facing (`yaw_axes`), and
+        // `rvec = (cos yaw, sin yaw)` the row `sithAI_CheckSightThing` takes the sideways
+        // component over.
+        self.cone([-sin, cos, 0.0], [cos, sin, 0.0], [dx / reach, dy / reach, dz / reach])
     }
 
-    /// The class's horizontal view cone alone, no range test.
+    /// The class's `fov=` as the engine stores it: `sithAIClass_LoadEntry` (`0x4f15c0`) writes
+    /// `cos(fov · 0.5)` into `class+0x1c`, the multiplier `_DAT_00523128 = 0.5` in the shipped
+    /// image. The word is a **cosine**, negative for any class wider than 180 degrees, and that
+    /// sign is what picks the cone branch below.
+    pub fn fovcos(&self) -> f32 {
+        (self.fov * 0.5).to_radians().cos()
+    }
+
+    /// The class's horizontal view gate, exactly `sithAI_CheckSightThing`'s cone block
+    /// (`0x4eb090`): a **sideways-component** test, not an angle test.
     ///
-    /// `sithAI_CheckSightThing` (`0x4eb090`) applies the cone and the range as separate gates: the
-    /// range is compared against the distance **after the target's own radius is removed**, which is
-    /// why the scan cannot use [`Self::sees`]'s plain `sightdist` test.
-    pub fn cone(&self, from: [f32; 3], yaw: f32, to: [f32; 3]) -> bool {
-        let dx = to[0] - from[0];
-        let dy = to[1] - from[1];
-        // `sithAI_CheckSightThing` applies the cone only when its angle argument is
-        // **positive**, and that argument is the cosine of the half angle: a class whose `fov=` is
-        // 180 has `cos 90 = 0` and is therefore not coned at all. A point-blank actor facing away
-        // (level 1's `reeyeesgun` at 0.34 units, cone `false`, `off 107`) sees the body in retail.
-        if self.fov <= 0.0 || self.fov >= 180.0 {
-            return true;
-        }
-        // The engine's facing is `forward = (-sin yaw, cos yaw)` (`sithCamera`'s own frame, held by
-        // the port's `yaw_axes`), so the facing direction is yaw turned a quarter turn.
-        let facing = yaw.to_radians() + std::f32::consts::FRAC_PI_2;
-        let target = dy.atan2(dx);
-        let mut delta = (target - facing).to_degrees().abs() % 360.0;
-        if delta > 180.0 {
-            delta = 360.0 - delta;
-        }
-        delta <= (self.fov.min(360.0) / 2.0)
+    /// - `fovcos <= -1` (fov 360 or more): no cone at all.
+    /// - `fovcos >= 0`: reject the hemisphere behind the facing (`lvec·d < 0`), then reject
+    ///   `1 − fovcos < |rvec·d|`. A 90-degree class accepts only `asin(1 − cos 45°) ≈ 17°` either
+    ///   side of its axis — far narrower than the 45° an angle reading suggests.
+    /// - `fovcos < 0`: reject only targets **behind** whose `|rvec·d| < fovcos + 1`, which leaves
+    ///   a blind wedge dead astern. A 200-degree class does not see all round.
+    pub fn cone(&self, lvec: [f32; 3], rvec: [f32; 3], dir: [f32; 3]) -> bool {
+        cone_holds(self.fovcos(), lvec, rvec, dir)
     }
 
+}
+
+/// `sithAI_CheckSightThing`'s cone block (`0x4eb090`): a **sideways-component** test, not an
+/// angle test. `fovcos` is the class word `cos(fov · 0.5)` (`sithAIClass_LoadEntry` `0x4f15c0`).
+///
+/// - `fovcos <= -1` (fov 360 or more): no cone at all.
+/// - `fovcos >= 0`: reject the hemisphere behind the facing (`lvec·d < 0`), then reject
+///   `1 − fovcos < |rvec·d|`. A 90-degree class accepts only `asin(1 − cos 45°) ≈ 17°` either
+///   side of its axis — far narrower than the 45° an angle reading suggests.
+/// - `fovcos < 0`: reject only targets **behind** whose `|rvec·d| < fovcos + 1`, which leaves
+///   a blind wedge dead astern. A 200-degree class does not see all round.
+pub fn cone_holds(fovcos: f32, lvec: [f32; 3], rvec: [f32; 3], dir: [f32; 3]) -> bool {
+    if fovcos <= -1.0 {
+        return true;
+    }
+    let lateral = (rvec[0] * dir[0] + rvec[1] * dir[1] + rvec[2] * dir[2]).abs();
+    let ahead = lvec[0] * dir[0] + lvec[1] * dir[1] + lvec[2] * dir[2];
+    if fovcos >= 0.0 {
+        if ahead < 0.0 {
+            return false;
+        }
+        if 1.0 - fovcos < lateral {
+            return false;
+        }
+    } else if ahead < 0.0 && lateral < fovcos + 1.0 {
+        return false;
+    }
+    true
 }
 
 /// Parse one `.ai` file. Unknown lines are ignored rather than rejected: the shipped files
@@ -246,24 +274,47 @@ OpenDoors
 
     #[test]
     fn sight_uses_distance_and_the_cone() {
-        // 200 degrees has a *negative* cosine half angle, so the engine's cone gate
-        // (`sithAI_CheckSightThing` applies it only when the cosine is positive) never fires:
-        // such a class sees all round. A coned class is what exercises the cone.
+        // fov 200 has a *negative* fovcos, so the cone rejects only the rear wedge
+        // (`|rvec·d| < fovcos + 1 = 0.8264` dead astern): a wide class sees almost all round.
         let wide = parse(RYB);
         let at = [0.0, 0.0, 0.0];
         assert!(wide.sees(at, 0.0, [3.0, 0.0, 0.0]));
         assert!(!wide.sees(at, 0.0, [8.0, 0.0, 0.0]), "beyond sightdist=5");
-        assert!(wide.sees(at, 0.0, [-3.0, 0.1, 0.0]), "200 degrees is all round in the engine");
+        assert!(wide.sees(at, 0.0, [-3.0, 0.1, 0.0]), "level with the axis is ahead, seen");
 
         let coned = parse(&RYB.replace("fov=200", "fov=90"));
         // The engine's facing is `forward = (-sin yaw, cos yaw)`: yaw 0 looks along +Y, which is
-        // what retail's own door gunner does when it fires down +Y at yaw 0. 90 degrees total means
-        // 45 either side: 40 degrees off that axis is seen, 50 is not.
-        assert!(coned.sees(at, 0.0, [2.5, 3.0, 0.0]));
+        // what retail's own door gunner does when it fires down +Y at yaw 0. The sideways gate is
+        // `|rvec·d| <= 1 - cos 45° = 0.2929`, i.e. asin(0.2929) ≈ 17° either side of the axis —
+        // not the 45° the fov number suggests.
+        let off = |deg: f32, dist: f32| [dist * deg.to_radians().sin(), dist * deg.to_radians().cos(), 0.0];
+        assert!(coned.sees(at, 0.0, off(15.0, 3.0)), "15 degrees off axis is inside the sideways gate");
+        assert!(!coned.sees(at, 0.0, off(20.0, 3.0)), "20 degrees off axis fails |rvec·d| <= 0.2929");
         assert!(!coned.sees(at, 0.0, [3.0, 0.0, 0.0]), "yaw 0 must not look along +X");
         assert!(!coned.sees(at, 0.0, [0.0, -3.0, 0.0]));
         // Yaw -90 turns the same cone onto +X.
         assert!(coned.sees(at, -90.0, [3.0, 0.0, 0.0]));
+    }
+
+    /// `sithAIClass_LoadEntry` (`0x4f15c0`) stores `fov=` as `cos(fov · 0.5)` — the multiplier
+    /// `_DAT_00523128 = 0.5` in the shipped image — so the class word is a cosine, negative for
+    /// any class wider than 180 degrees.
+    #[test]
+    fn fovcos_is_the_cosine_of_half_the_total_fov() {
+        assert!((parse(RYB).fovcos() - 100.0f32.to_radians().cos()).abs() < 1e-6);
+        assert!(parse(&RYB.replace("fov=200", "fov=180")).fovcos().abs() < 1e-6);
+        assert!((parse(&RYB.replace("fov=200", "fov=90")).fovcos() - 45.0f32.to_radians().cos()).abs() < 1e-6);
+    }
+
+    /// fov > 180 (`fovcos < 0`): `sithAI_CheckSightThing` rejects only targets behind **and**
+    /// within `|rvec·d| < fovcos + 1` of the rear axis — a blind wedge dead astern, not the
+    /// all-round sight the port's old angle test gave a 200-degree class.
+    #[test]
+    fn a_wide_class_keeps_a_rear_blind_wedge() {
+        let wide = parse(RYB); // fov 200, fovcos = cos 100° ≈ -0.1736
+        let at = [0.0, 0.0, 0.0];
+        assert!(!wide.sees(at, 0.0, [0.0, -3.0, 0.0]), "dead astern is inside the rear wedge");
+        assert!(wide.sees(at, 0.0, [-3.0, -0.4, 0.0]), "far to the side is outside the wedge");
     }
 
     /// `sithAI_CheckSightThing` measures `sightdist` over the **full** vector: it subtracts the two
