@@ -2447,7 +2447,7 @@ impl LevelGeometry {
             .any(|face| sphere_face(pos, radius, face))
     }
 
-    /// A world-surface diagnostic using the floor search's sector and hit order.
+    /// Recovery probe for spawn and authored AI positioning, not the runtime FindFloor.
     pub fn floor_under(
         &self,
         sector: usize,
@@ -2455,12 +2455,45 @@ impl LevelGeometry {
         height: f32,
         radius: f32,
     ) -> Option<(f32, f32, usize)> {
-        self.floor_candidates(sector, pos, height, radius).into_iter().next()
-            .map(|(floor, travelled, owner, _, _)| (floor, travelled, owner))
+        // `floor_candidates` is the one loop; this picks the highest landing, which is the surface the
+        // sphere meets first falling from `pos`. Both callers share it so a probe cannot drift from
+        // the recovery tool's answer.
+        let mut best: Option<(f32, f32, usize)> = None;
+        for (floor, travelled, owner, _, _) in self.floor_candidates(sector, pos, height, radius) {
+            if best.is_none_or(|(near, _, _)| floor > near) {
+                best = Some((floor, travelled, owner));
+            }
+        }
+        // `BK_FLOOR_TRACE`: a landing *below the body's own sector floor* is how a body ends up standing on
+        // something its room does not call a floor (level 5's plateau). Naming the face and both normals
+        // there is the only way to tell a legitimate off-sector landing from the plateau.
+        if std::env::var_os("BK_FLOOR_TRACE").is_some()
+            && let Some((floor, _, owner)) = best
+        {
+            let here = self.floor_below(sector, pos);
+            if here.is_none_or(|h| floor < h - 0.03)
+                && let Some(&(_, _, fowner, normal, surface)) = self
+                    .floor_candidates(sector, pos, height, radius)
+                    .iter()
+                    .find(|(f, _, _, _, _)| (*f - floor).abs() < 1e-6)
+            {
+                eprintln!(
+                    "floor: landing {floor:.4} on surface {surface} owner {fowner} (body sector {sector} floor {here:?}) file normal {normal:?} room normal {:?} pos {pos:?}",
+                    self.sectors
+                        .get(fowner)
+                        .and_then(|planes| planes.iter().find(|p| p.surface == surface))
+                        .map(|p| p.normal),
+                );
+                let _ = owner;
+            }
+        }
+        best
     }
 
-    /// Surface hits in `PopStack` order: height, travel, sector claim, outward normal, surface id.
-    /// This diagnostic uses the ordinary forced reach and omits thing hits.
+    /// Every face a downward sphere sweep from `pos` lands on, as `(floor height, distance travelled,
+    /// owning sector, the face's own normal, surface id)`. The recovery probe picks the highest of these; the
+    /// `--floor-at` probe prints them all, which is what makes a floor disagreement a table instead of
+    /// an argument.
     pub fn floor_candidates(
         &self,
         sector: usize,
@@ -2468,25 +2501,107 @@ impl LevelGeometry {
         height: f32,
         radius: f32,
     ) -> Vec<(f32, f32, usize, [f32; 3], usize)> {
-        let range = height * 1.1;
-        let mut hits = Vec::new();
-        let mut search = CollisionSearch::new();
-        self.search_for_collisions(
-            sector, None, pos, [0.0, 0.0, -1.0], range, radius, Gates::default(), 0x13, &mut search,
-        );
-        while let Some(record) = search.pop() {
-            let CollisionRecord::Solid(hit) = record else { continue };
-            let Some(attach) = self.surface_attach(hit) else { continue };
-            let n = attach.normal;
-            if n[2] <= 0.0 { continue; }
-            let floor = pos[2] - dot(sub(pos, attach.point), n) / n[2];
-            hits.push((floor, hit.distance, hit.sector, n.map(|v| -v), hit.surface));
+        // The engine searches the body's room and its adjoins, not every face in the world. A global
+        // scan lets a body land on an unrelated tabletop or ledge: level 1's start (sector 339) is the
+        // table-top volume, whose correct downward contact is the room floor at -1.25, not the table
+        // top at -0.95. Choosing the latter put the body on the tables, where their cylinders blocked
+        // every walk direction.
+        //
+        // Start in the recorded room and expand through the level's portals. The build mirrors each
+        // link so a one-sided claim still lets a body out of a trigger volume. Do not cross a portal
+        // whose movement bit is shut: that is the same reachability rule `sweep_rooms` uses.
+        let range = (height * 1.1).max(radius + 0.005);
+        let mut reachable = vec![false; self.sectors.len()];
+        let mut pending = Vec::new();
+        if sector < self.sectors.len() {
+            reachable[sector] = true;
+            pending.push(sector);
         }
-        hits
+        while let Some(room) = pending.pop() {
+            for portal in self.portals.get(room).into_iter().flatten() {
+                let next = portal.adjoin;
+                if next >= self.sectors.len() || reachable[next] {
+                    continue;
+                }
+                if self.adjoin_flags.get(portal.link).is_some_and(|f| f & ADJOIN_MOVE == 0) {
+                    continue;
+                }
+                // A link is a wall opening, not a floor connection: only the room the probe
+                // actually lies in may supply a floor. Hull planes alone are not containment:
+                // level 1's shared sliver 340 spans the tables but its polygons do not, so it
+                // used to lend a floor to the tabletop volume through a solid wall.
+                if !self.room_contains(next, pos, radius) {
+                    continue;
+                }
+                reachable[next] = true;
+                pending.push(next);
+            }
+        }
+        let mut out = Vec::new();
+        let scan = |scope: &[bool], out: &mut Vec<(f32, f32, usize, [f32; 3], usize)>| {
+            for face in &self.faces {
+                let owner = self.surface_owner.get(face.surface).copied().unwrap_or(sector);
+                // An unowned face (a hand-built test fixture, or a surface no sector claims) is in
+                // scope only when it belongs to the seed room, never to a neighbouring room.
+                if !scope.get(owner).copied().unwrap_or(owner == sector) {
+                    continue;
+                }
+                // A vertical face is not a floor, and a downward one is a ceiling.
+                if face.normal[2].abs() < 0.2 {
+                    continue;
+                }
+                // The engine's floor search counts only floor-flagged surfaces: `FindFloor` sets
+                // the search's `0x10` bit for a thing without physflag `0x80` (the `walkplayer`
+                // inherits `_actor`'s `0x4a4f`), and `SearchForSurfaceCollisions` then requires
+                // `surfflags & 1` (`0x4e86d0` lines 125-126). A wall-only face — `09fuelstation`'s
+                // 40-degree pit-mouth 9278, flags `0x4` — is never a floor. A surface the table
+                // does not know (a fixture face without a level surface) still passes.
+                if self
+                    .surface_flags
+                    .get(face.surface)
+                    .is_some_and(|flags| flags & 1 == 0)
+                {
+                    continue;
+                }
+                // `.jkl` plane normals point **out of the room**, while
+                // `sithCollision_SearchForSurfaceCollisions` tests into-room normals
+                // (`dot(search_dir, normal) < 0` accepts a floor for a downward sweep). Flipping the
+                // face toward the body is that normalisation, not a deviation.
+                let normal = if dot(sub(pos, face.point), face.normal) < 0.0 {
+                    [-face.normal[0], -face.normal[1], -face.normal[2]]
+                } else {
+                    face.normal
+                };
+                if normal[2] < 0.2 {
+                    continue;
+                }
+                let Some(t) = sphere_plane(pos, [0.0, 0.0, -1.0], range, radius, normal, face.point, 0, &mut 0.0)
+                else {
+                    continue;
+                };
+                let at = [pos[0], pos[1], pos[2] - t];
+                if !sphere_face(at, radius, face) {
+                    continue;
+                }
+                let floor = at[2] - radius;
+                out.push((floor, pos[2] - at[2], owner, face.normal, face.surface));
+            }
+        };
+        scan(&reachable, &mut out);
+        if out.is_empty() {
+            // The shipped data does not always tile: a walkway slab or a trigger sliver can sit in a
+            // sector with no portal to the room below it. Only then fall back to the global scan; it
+            // is a rescue for a disconnected room, never a preferred landing while a reachable face
+            // exists. The body's vertical pass still refuses a contact above its current height.
+            out.clear();
+            let all = vec![true; self.sectors.len()];
+            scan(&all, &mut out);
+        }
+        out
     }
 }
 
-/// What a body's feet come to rest on: the single floor answer every motion caller shares.
+/// The feet height and contact details reported by the authored AI placement probe.
 ///
 /// `height` is the **feet** height, not the centre: a swept sphere stops with its centre one
 /// `radius` above a face, a sector plane and a solid thing's top are already feet heights, so every
@@ -2503,25 +2618,12 @@ pub struct Rest {
 }
 
 impl LevelGeometry {
-    /// The one floor rule: the player, AI settling, actor grounding and gravity landing all ask
-    /// this, and no caller keeps a second support rule behind it.
+    /// AI positioning's recovery probe, not the live `FindFloor` attachment path.
     ///
-    /// In the engine's own order, highest answer wins:
-    ///
-    /// 1. the downward sphere sweep's faces — a catwalk slab, a ramp, a face-only floor;
-    /// 2. a sector's own floor **plane** where its data has no face inside the engine's floor
-    ///    reach (`18Ascend`'s shaft opening), and the planes of the sectors around a body whose
-    ///    sector carries no floor plane at all (`19A`'s 723, level 18's spawn);
-    /// 3. a solid thing's model top (`collide=`, `ThingSolid::z_max`) — a crate, a catwalk, a lift.
-    ///
-    /// `reach` is how far below the feet a surface may be and still count: the walker passes this
-    /// frame's fall, so a body in the air is not caught by a floor it has not reached. Motion
-    /// callers that want the floor under a body wherever it is (actor grounding) pass
-    /// `f32::INFINITY` and compare the answer with their own reach.
-    ///
-    /// `lift` is the one exception a **placement** needs: `true` lets the answer sit up to the plane
-    /// query's own 0.05 tolerance above the body, and the caller decides whether to raise it (the
-    /// player's initial seat). Every motion caller passes `false`; a falling body never lifts.
+    /// `shortcut: include the world-face, plane and model-top estimates until walked AI
+    /// drives the swept physics mover instead of directly placing its next position.`
+    /// Highest reachable estimate wins. `reach` limits the drop and `lift` permits the
+    /// plane query's 0.05 tolerance above the feet.
     pub fn resting_floor(
         &self,
         sector: usize,

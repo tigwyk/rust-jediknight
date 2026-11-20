@@ -7095,21 +7095,13 @@ impl Runtime {
                     |state, item| Self::sith_item_player_touch(world, solids, state, body.eye, item, &mut *dispatch.borrow_mut()),
                 );
             } else {
-                let mut rt = world.borrow_mut();
-                let player = rt.local_player();
-                let previous = state.attach.take();
-                state.attach_flags = 0;
-                rt.floor_transition(&mut state, previous, player, false);
+                Self::player_detach_floor(world, &mut state, body.eye, &mut *dispatch.borrow_mut());
             }
         }
         // A jump inherits the surface or parent's velocity on detach (0x4ce380).
         if input.jump && body.grounded {
             state.vel[2] = rules.jump_velocity(input.crouch);
-            let mut rt = world.borrow_mut();
-            let player = rt.local_player();
-            let previous = state.attach.take();
-            state.attach_flags = 0;
-            rt.floor_transition(&mut state, previous, player, false);
+            Self::player_detach_floor(world, &mut state, body.eye, &mut *dispatch.borrow_mut());
             body.grounded = false;
         }
         let gravity = body.gravity;
@@ -7661,6 +7653,19 @@ impl Runtime {
             }
         }
         landed && state.attach.is_some()
+    }
+
+    fn player_detach_floor(
+        world: &World, state: &mut crate::collide::MoveState, eye: f32, dispatch: &mut impl FnMut(),
+    ) {
+        let Some(previous) = state.attach.take() else { return };
+        state.attach_flags = 0;
+        {
+            let mut rt = world.borrow_mut();
+            let player = rt.local_player();
+            rt.floor_transition(state, Some(previous), player, false);
+        }
+        Self::player_move_phase(world, state, eye, dispatch);
     }
 
     fn thing_up(&self, index: usize) -> [f32; 3] {
@@ -17584,10 +17589,9 @@ mod tests {
         for (frame, z) in [(0.6, 0.3), (0.4, 0.2)] {
             {
                 let mut rt = world.borrow_mut();
-                let lift = &mut rt.things[parent];
-                lift.frame = frame;
-                lift.pos[2] = z;
-                lift.target = None;
+                rt.things[parent].target = Some((frame, 6.0));
+                assert!(rt.things[parent].step(0.2));
+                assert_eq!(rt.things[parent].pos[2], z);
             }
             pose(z);
             for _ in 0..5 { tick(&mut body); }
