@@ -219,7 +219,7 @@ fn encounter_capture() -> bool {
 pub struct ThingState {
     /// `0x4fbe10`'s re-touch clock (`thing+0x148`, engine ms): `touched` is suppressed until it
     /// passes, then set 500 ms ahead. 0 = never touched.
-    pub next_touch_ms: f64,
+    pub next_touch_ms: u32,
     pub insert: [f32; 3],
     pub pos: [f32; 3],
     pub yaw: f32,
@@ -1120,9 +1120,6 @@ pub struct PlayerBody {
     pub published_vel: [f32; 3],
     /// Last published eye pose, used to consume script teleports without rounding untouched axes.
     pub published_pose: Option<([f32; 3], usize)>,
-    /// Item things (type 5) whose volume the move sweep met, for the pickup gate — the engine
-    /// touches items from `MoveThing`'s own hit list (`0x4e7950`), never from standing still.
-    pub touched_items: Vec<usize>,
 }
 
 impl Default for PlayerBody {
@@ -1148,7 +1145,6 @@ impl Default for PlayerBody {
             water_surface: None,
             published_vel: [0.0; 3],
             published_pose: None,
-            touched_items: Vec::new(),
         }
     }
 }
@@ -1580,6 +1576,8 @@ pub struct Runtime {
     pub cur_weapon_thing: Option<usize>,
     /// `GetThingClassCog`: the cog a thing's class names.
     pub thing_class_cog: BTreeMap<usize, i32>,
+    /// Spawned items awaiting their template COG instance before movement can touch them.
+    pub item_cog_spawns: Vec<usize>,
     /// `CaptureThing`'s cog: the engine stores the calling cog at `thing + 0x2a0`, and the thing's
     /// `damaged`/`killed` messages go there (`FUN_00502e40`). One cog per thing; a later capture
     /// replaces it.
@@ -1695,6 +1693,8 @@ pub struct Runtime {
     pub bin_due: Vec<(f32, i32, i32, usize, f32)>,
     /// Seconds this world has been stepped, which the hold timers read.
     pub time: f32,
+    /// The millisecond game clock (`0x836c14`) sampled by the item collision handler.
+    game_clock: std::time::Duration,
     /// `SetFireWait`: the player's weapon cooldown, and the level time the next shot is allowed at.
     /// `sithWeapon_SetFireWait` arms `nextFire = now + wait`, and a negative wait clears both.
     pub fire_wait: f32,
@@ -2319,7 +2319,7 @@ impl Runtime {
                 .enumerate()
                 .map(|(index, t)| ThingState {
                     pos: t.pos,
-                    next_touch_ms: 0.0,
+                    next_touch_ms: 0,
                     insert: template_insert(&t.template.to_ascii_lowercase()),
                     yaw: t.yaw,
                     pitch: t.pitch,
@@ -2444,6 +2444,7 @@ impl Runtime {
                 .map(|t| t.name.to_ascii_lowercase()).collect(),
             cur_weapon_thing: None,
             thing_class_cog: BTreeMap::new(),
+            item_cog_spawns: Vec::new(),
             thing_capture_cog: BTreeMap::new(),
             class_skill: BTreeMap::new(),
             saber_enabled: true,
@@ -2692,6 +2693,7 @@ impl Runtime {
             bin_due: Vec::new(),
             bin_wait: BTreeMap::new(),
             time: 0.0,
+            game_clock: std::time::Duration::ZERO,
             fire_wait: 0.0,
             next_fire: 0.0,
             master_cog: None,
@@ -2965,7 +2967,7 @@ impl Runtime {
         let kind = self.template_types.get(&template).copied().unwrap_or(0);
         self.things.push(ThingState {
             pos,
-            next_touch_ms: 0.0,
+            next_touch_ms: 0,
             insert,
             owner: None,
             pitch: angles[0],
@@ -3016,6 +3018,9 @@ impl Runtime {
         self.templates.push(template);
         self.types.push(kind);
         let index = self.things.len() - 1;
+        if kind == 5 {
+            self.item_cog_spawns.push(index);
+        }
         // A created thing inherits its template's mass, exactly like `physflags` (`sithThing_CreateThing`
         // copies both), and the gravity arm is gated on it.
         let mass = self
@@ -3431,7 +3436,7 @@ impl Runtime {
                     pos: t.pos, sector, vel: t.vel, remainder: [0.0; 3],
                     phys_flags: t.phys_flags, kind: self.types.get(i).copied().unwrap_or(0) as u32,
                     move_type: 1, collide: 1, flags: t.flags, attach: t.floor_attach,
-                    attach_flags: t.attach_flags, touched: Vec::new(), water_surface: None, owner: None,
+                    attach_flags: t.attach_flags, water_surface: None, owner: None,
                 };
                 let prev_surface = state.attach.and_then(|a| a.surface);
                 solids.find_floor(
@@ -7001,6 +7006,12 @@ impl Runtime {
         fired
     }
 
+    /// `sithTime_Advance` (`0x4dd640`): advance once before movement, not per move sub-step.
+    /// Keep the fractional remainder of a pinned port frame; the engine clock reads whole ms.
+    pub fn advance_game_clock(&mut self, dt: f32) {
+        self.game_clock += std::time::Duration::from_secs_f32(dt.clamp(0.01, 0.5));
+    }
+
     /// Advance the player body from one frame's input through attached/unattached physics and
     /// `MoveThing`, releasing the runtime for synchronous contact scripts. Seating, scrolling carry,
     /// thrust, the water state, run/walk scaling, drag, the fixed sub-step count, target assembly, jump,
@@ -7016,7 +7027,7 @@ impl Runtime {
         input: PlayerInput,
         rules: &crate::Rules,
         dt: f32,
-        mut dispatch: impl FnMut(),
+        dispatch: impl FnMut(),
     ) -> bool {
         // A script can move the body: `force_jump.cog`'s `SetThingVel(player, ...)` lands on the
         // player thing, and the walker consumes it as a one-shot impulse.
@@ -7128,6 +7139,7 @@ impl Runtime {
         let wet = |s: usize| world.borrow().sector_flags.get(s).is_some_and(|f| f & crate::collide::SECTOR_UNDERWATER != 0);
         let mut surface = body.water_surface;
         let mut state = world.borrow().player_move_state(body, sector, pos, step_vel);
+        let dispatch = std::cell::RefCell::new(dispatch);
         for _ in 0..steps {
             const SUB: f32 = 1.0 / 50.0;
             // Each sub-step moves by the projected velocity, the way the engine re-copies the
@@ -7188,7 +7200,7 @@ impl Runtime {
                     );
                 },
                 |state, surface, far| {
-                    Self::player_crossing(world, state, body.eye, surface, far, &mut dispatch);
+                    Self::player_crossing(world, state, body.eye, surface, far, &mut *dispatch.borrow_mut());
                 },
                 |state| {
                     let rt = world.borrow();
@@ -7217,6 +7229,9 @@ impl Runtime {
                         let flags = state.flags;
                         world.borrow_mut().sith_thing_attach_thing_to_surface(prev, now, flags, player);
                     }
+                },
+                |state, item| {
+                    Self::sith_item_player_touch(world, solids, state, body.eye, item, &mut *dispatch.borrow_mut());
                 },
             );
             if std::env::var_os("BK_STEP_TRACE").is_some() {
@@ -7251,9 +7266,6 @@ impl Runtime {
             crossed |= cross;
             landed |= step_landed;
         }
-        // `0x4fbe10`'s contact comes from the sweep itself: the item indexes the move arm passed
-        // through ride the frame's `MoveState`, so a body that did not move touches nothing.
-        body.touched_items.extend(state.touched.iter().copied());
         body.water_surface = surface;
         // `CollideHurt`'s projection lands on the frame velocity (`0x1d4`); the persisted walk
         // state is the frame velocity minus this frame's non-persisted carry and thrust adds
@@ -7356,7 +7368,6 @@ impl Runtime {
         let thing = player.and_then(|i| self.things.get(i));
         let name = player.and_then(|i| self.templates.get(i));
         crate::collide::MoveState {
-            touched: Vec::new(),
             pos, sector, vel, remainder: [0.0; 3], attach: body.attach,
             water_surface: body.water_surface,
             attach_flags: thing.map_or(0, |t| t.attach_flags),
@@ -7403,6 +7414,37 @@ impl Runtime {
         state.phys_flags = thing.phys_flags;
         state.attach_flags = thing.attach_flags;
         state.kind = rt.types.get(index).copied().unwrap_or(0) as u32;
+    }
+
+    /// `0x4fbe10`: player flag, item-to-player LOS, strict millisecond deadline, send, stamp.
+    fn sith_item_player_touch(
+        world: &World, solids: &crate::collide::Solids, state: &mut crate::collide::MoveState,
+        eye: f32, item: usize, dispatch: &mut impl FnMut(),
+    ) {
+        if state.flags & 0x100 != 0 {
+            return;
+        }
+        let sent = {
+            let mut rt = world.borrow_mut();
+            let Some(player) = rt.local_player() else { return };
+            let Some(thing) = rt.things.get(item) else { return };
+            if thing.destroyed || thing.flags & 0x80002 != 0 || rt.types.get(item) != Some(&5) {
+                return;
+            }
+            let Ok(sector) = usize::try_from(thing.sector) else { return };
+            if !solids.item_has_los(sector, thing.pos, state.pos, rt.gates())
+                || thing.next_touch_ms >= rt.game_clock.as_millis() as u32
+            {
+                return;
+            }
+            rt.sith_cog_item_send_message(item, player, "touched")
+        };
+        if sent {
+            Self::player_move_phase(world, state, eye, dispatch);
+        }
+        let mut rt = world.borrow_mut();
+        let now = rt.game_clock.as_millis() as u32;
+        rt.things[item].next_touch_ms = now.wrapping_add(500);
     }
 
     /// `MoveThing` calls this at the contact, not at the frame's final endpoint.
@@ -8018,7 +8060,7 @@ impl Runtime {
         }
         self.things.push(ThingState {
             pos: spawn,
-            next_touch_ms: 0.0,
+            next_touch_ms: 0,
             insert: [0.0; 3],
             owner: usize::try_from(shooter).ok(),
             yaw,
@@ -8664,6 +8706,27 @@ impl Runtime {
         self.sith_cog_send_message_ex(THING_SOURCE, thing, sender, msg)
     }
 
+    /// `sithCog_ThingSendMessageEx` (`0x4dfaf0`) for the item's `touched`/`taken` paths:
+    /// class COG, capture COG, then the links whose mask admits the player.
+    fn sith_cog_item_send_message(&mut self, item: usize, player: usize, msg: &'static str) -> bool {
+        let identity = Some(SourceSender::new(THING_SOURCE, item as i32, Some(player)));
+        let class = self.thing_class_cog.get(&item).map(|&i| i as usize);
+        let capture = self.thing_capture_cog.get(&item).map(|&i| i as usize);
+        let before = self.pending_messages.len();
+        for instance in [class, capture].into_iter().flatten() {
+            self.pending_messages.push((instance, msg, [0.0; 2], Some(0), identity));
+        }
+        for &(instance, link, target) in &self.thing_links {
+            // Placed class instances are also registered as link 0 for the existing message bus.
+            if target == item && !(link == 0 && Some(instance) == class)
+                && self.link_hears(THING_SOURCE, instance, link, item, Some(player))
+            {
+                self.pending_messages.push((instance, msg, [0.0; 2], Some(link as i64), identity));
+            }
+        }
+        self.pending_messages.len() != before
+    }
+
     /// `sithCog_SectorSendMessage` (`0x4dfd60`): `sithCog_SectorSendMessageEx(sector, sender, msg,
     /// 0, 0, 0, 0)`.
     pub fn sith_cog_sector_send_message(
@@ -9099,7 +9162,7 @@ impl Runtime {
         let kind = self.template_types.get(&explode).copied().unwrap_or(3);
         self.things.push(ThingState {
             pos: at,
-            next_touch_ms: 0.0,
+            next_touch_ms: 0,
             insert: [0.0; 3],
             owner: None,
             yaw: 0.0,
@@ -9902,6 +9965,7 @@ impl Runtime {
     /// length.
     pub fn restore(&mut self, save: &Snapshot) {
         self.time = save.time;
+        self.game_clock = std::time::Duration::try_from_secs_f32(save.time).unwrap_or_default();
         for (index, saved) in save.things.iter().enumerate() {
             let Some(thing) = self.things.get_mut(index) else { break };
             thing.pos = saved.pos;
@@ -9913,6 +9977,7 @@ impl Runtime {
             thing.flags = saved.flags;
             thing.jk_flags = saved.jk_flags;
             thing.destroyed = saved.destroyed;
+            thing.next_touch_ms = 0;
             thing.frame = saved.frame;
         }
         self.inv = save.inv.clone();
@@ -11753,17 +11818,21 @@ impl Runtime {
                 Value::Nil
             }
             "getcurinvweapon" => Value::Num(self.cur_bin as f64),
-            // `TakeItem(item, player)`: the item leaves the world. The inventory is the
-            // script's job — `sithItem_SetItemTaken` runs the item's own `taken` label,
-            // which calls `ChangeInv` — so this only removes the thing. A script-less item
-            // is handled by `Runtime::take_item` on the direct path.
+            // `sithItem_SetItemTaken` (`0x4fbea0`) sends `taken` for the local player;
+            // the item's COG owns the inventory effect, not the collision handler.
             "takeitem" => {
-                let index = usize::try_from(idx(0)).unwrap_or(usize::MAX);
+                let item = idx(0);
+                let index = usize::try_from(item).unwrap_or(usize::MAX);
                 let template = self.templates.get(index).cloned().unwrap_or_default();
-                if let Some(thing) = self.thing_mut(idx(0)) {
-                    thing.destroyed = true;
+                if let Some(player) = self.local_player()
+                    && idx(1) == player as i64
+                    && self.types.get(index) == Some(&5)
+                    && self.things.get(index).is_some_and(|thing| !thing.destroyed)
+                {
+                    self.sith_cog_item_send_message(index, player, "taken");
                 }
-                if index != usize::MAX {
+                if let Some(thing) = self.thing_mut(item) {
+                    thing.destroyed = true;
                     self.note_taken(index, &template);
                 }
                 Value::Nil
@@ -13098,7 +13167,7 @@ mod tests {
         let mut rt = Runtime::new(&Level::default());
         rt.things = vec![ThingState {
                 pos: [0.0; 3],
-                next_touch_ms: 0.0,
+                next_touch_ms: 0,
                 insert: [0.0; 3],
                 owner: None,
                 yaw: 0.0,
@@ -13168,7 +13237,6 @@ mod tests {
             water_surface: None,
             published_vel: [0.0; 3],
             published_pose: None,
-            touched_items: Vec::new(),
         }
     }
 
