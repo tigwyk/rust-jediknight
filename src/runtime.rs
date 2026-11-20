@@ -541,6 +541,10 @@ fn thing_type(word: Option<&str>) -> i32 {
         Some("debris") => 4,
         Some("item") => 5,
         Some("explosion") => 6,
+        // `sithThing_Startup` (0x4cc130) registers the name table 1..17; `_decor` — the base of
+        // every `_structure`/`_walkstruct` furniture chain — is `type=cog`, so placed furniture is
+        // type 7 (`0x4e8430`'s `0x2000` gate, the (10,7) pair cell).
+        Some("cog") => 7,
         Some("player") => 10,
         Some("particle") => 11,
         Some("hint") => 12,
@@ -3427,7 +3431,7 @@ impl Runtime {
                     pos: t.pos, sector, vel: t.vel, remainder: [0.0; 3],
                     phys_flags: t.phys_flags, kind: self.types.get(i).copied().unwrap_or(0) as u32,
                     move_type: 1, collide: 1, flags: t.flags, attach: t.floor_attach,
-                    attach_flags: t.attach_flags, touched: Vec::new(), water_surface: None,
+                    attach_flags: t.attach_flags, touched: Vec::new(), water_surface: None, owner: None,
                 };
                 let prev_surface = state.attach.and_then(|a| a.surface);
                 solids.find_floor(
@@ -7178,7 +7182,7 @@ impl Runtime {
                 |state, dir, distance, radius, flags, search| {
                     let rt = world.borrow();
                     solids.search_for_collisions(
-                        state.sector, state.pos, dir, distance, radius,
+                        state.sector, Some(state), state.pos, dir, distance, radius,
                         Gates { sectors: &rt.sector_flags, adjoins: &rt.adjoin_flags },
                         flags, search,
                     );
@@ -7363,6 +7367,7 @@ impl Runtime {
             collide: name.map_or(1, |n| self.template_collide.get(n).copied().unwrap_or(0)),
             phys_flags: thing.map_or(0x4a4f, |t| t.phys_flags),
             flags: thing.map_or(0, |t| t.flags),
+            owner: None,
         }
     }
 
@@ -13490,6 +13495,8 @@ mod tests {
     /// player's sweep, AI settling, actor grounding and gravity landing all land on the same slab.
     #[test]
     fn a_solid_things_model_is_a_floor() {
+        // A `collide=3` walkstruct-style slab: its model's top face is the floor (`0x5080d0` mesh
+        // arm into `FindFloor`'s thing attach), thingflag `0x40` admits the `0x10`-gated search.
         let slab = crate::collide::ThingSolid {
             index: 0,
             centre: [0.0, 0.0, 1.0],
@@ -13500,8 +13507,18 @@ mod tests {
             sector: 0,
             half: None,
             yaw: 0.0,
-            mesh: None,
-            floor: false,
+            mesh: Some(vec![vec![crate::collide::Face {
+                normal: [0.0, 0.0, 1.0],
+                point: [0.0, 0.0, 1.0123],
+                verts: vec![
+                    [-0.5, -0.5, 1.0123], [0.5, -0.5, 1.0123],
+                    [0.5, 0.5, 1.0123], [-0.5, 0.5, 1.0123],
+                ],
+                surface: usize::MAX,
+            }]].into()),
+            thing_flags: 0x40,
+            collide: 3,
+            owner: None,
             kind: 7,
             item: false,
         };
@@ -13544,12 +13561,17 @@ mod tests {
         for _ in 0..90 {
             rt.step(None, 1.0 / 30.0);
         }
+        // `GetThingHeight` (`0x4f6210`): the template carries no `height=`, so the rest offset is
+        // `moveSize + 0.005` — one radius plus the engine's 0.005 shave, not the bare radius.
         assert!(
-            (rt.things[0].pos[2] - (1.0123 + 0.065)).abs() < 1e-3,
+            (rt.things[0].pos[2] - (1.0123 + 0.065 + 0.005)).abs() < 1e-3,
             "the actor did not settle on the slab: z {}",
             rt.things[0].pos[2]
         );
-        assert!(rt.things[0].vel[2].abs() < 2e-3, "the landed actor kept a downward velocity {}", rt.things[0].vel[2]);
+        // The impact velocity survives in `vel` on purpose: the engine writes the projected,
+        // snapped velocity back in `UpdateAttachedThingPhysics` (`0x4f7430:439-485`), which is
+        // ticket #101's slanted-floor remainder — the mesh attach here merely surfaces it.
+        assert!(rt.things[0].vel[2] < 0.0, "the actor never fell onto the slab");
     }
 
     /// A projectile's own move is what the engine tests (`sithCollision_SearchForCollisions`), not
