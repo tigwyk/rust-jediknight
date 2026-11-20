@@ -7869,3 +7869,27 @@ all one cause: the engine-true (10,2) admission meets the frozen authored actors
 `reeyeesbhgun` 240) that retail's AI has walked away, and without `ThingCollisionHandler`'s
 `ApplyForce` push-back (#101) the walker pins in the actor+wall wedge. Route gate's retail-compare
 FAIL is pre-existing on the integration tip (b18b9bc: tick 36 sector 349 vs 339).
+
+## Round spec #99 integration — #101, #102, #103 merged and #104's gate reconciliation
+
+#103 (`3ac5f63`, merge `cfa9f51`): the item handler `0x4fbe10` runs at the swept contact inside
+`move_thing_with` with the contact pose's LOS and an integer-ms `+0x148` clock; level 2 takes the disk
+through `pow_datadisk.cog`. #101 (`ff6209e`, merge `9a3ade2`): `CollideHurt`'s inline charge, the
+surface/thing contact handlers with `ApplyForce`, and the persisted slope velocity (`0x4f7430:439-489`);
+crate impulses survive both thing orders. #102 (`1acf9dc`, merge `0c0a517`): live `FindFloor` scope,
+`GetThingHeight`'s `height=`, the attach physics half and the moving thing-face support replacing
+`elevator_floor`; spawn and AI keep `floor_under` as placement probes.
+
+#104 on the integration branch: `--things`' landing assertion takes `CollideHurt`'s restitution residue
+(`0.0001 * g * dt`, `vel.z 1.33e-5` measured) instead of exact zero; the walk-off rows return to their
+pre-#78 values (Yun 1.50, `10cargo` 0.08, sarris 2.72) because the persisted velocity removes the held
+slide; the route plan's `exit_tunnel` warp moves to y 13.4, past Rodians 289/290 that the engine's (10,2)
+admission now collides with (user decision), and the port oracle is re-recorded from that build. Stage 5
+and 6 rows refreshed.
+
+Checks on the integration source: 469 unit tests; `--things`, `--walk all`, `--attach`, `--collide`,
+`--fall`, `--pickup`, `--hit`, `--soak-all`, `--tour`, `--cog-check` pass; encounter 0 failures; route
+gate events/anti-synthetic/oracle PASS. Open: trace gate `walk6_spawn` (5 sectors off; the body ends in
+290 instead of retail's 315 at the same pose within 0.01 units), and the route's retail prefix compare
+worsens from 1 mismatch (b18b9bc, same session) to 3 (ticks 36/72/108, sector 339 against 349): the
+spawn body is pinned between surface 3311, table 210 and the intro Rodian 207, which retail slides past.

@@ -10153,7 +10153,15 @@ fn main() {
                 0,
                 "a created debris thing did not keep its template's gravity bit"
             );
-            assert_eq!(chip.vel[2], 0.0, "a landed debris chip kept falling");
+            // A resting unattached physics thing is not at exactly zero: each step gravity pulls it
+            // into the floor and `CollideHurt` (`0x4e9090`) restores it at restitution 1.0001, so
+            // it keeps `0.0001 * g * dt` upward, the engine's own residue for one 1/30 s step.
+            let residue = 1.0e-4 * rt.gravity / 30.0;
+            assert!(
+                (0.0..=residue + 1.0e-7).contains(&chip.vel[2]),
+                "a landed debris chip kept falling: vel.z {} (the restitution residue is {residue})",
+                chip.vel[2]
+            );
             assert!(
                 rt.solids
                     .as_ref()
@@ -19498,16 +19506,23 @@ fn walk_all(gobs: &gob::GobSet, frames: u32) {
     // The sarris pair (2.72 -> 2.74) gains the same remainder. `10cargo` surfaces 0.08 -> 0.13 for the same reason: the radius pass holds the body to the
     // 45° corner face `0.1` away one step longer before the walk-off, so the measured drop gains
     // the held slide's remainder. No retail trace exists for these lines either; pinned with the rest.
+    // Re-recorded on spec #99 (#101): `UpdateAttachedThingPhysics` now writes the projected,
+    // snapped velocity back into the thing (`0x4f7430:439-489`) instead of projecting only the
+    // move. The along-normal velocity no longer builds up under the hold, so the held slide's
+    // remainder is gone and the three rows return to their pre-#78 values: Yun 0.07 -> 1.50,
+    // `10cargo` 0.13 -> 0.08, the sarris pair 2.74 -> 2.72. Measured the same on #101 alone and
+    // on #101 + #102. Both sarris walks take a 149-point `CollideHurt` charge (`0x4e9090:56-60`)
+    // on that drop, a world-surface contact from the authored spawn.
     const WALK_OFF_THE_EDGE: &[(&str, bool, bool, f32)] = &[
         ("jkl\\02narshadda.jkl", false, true, 11.17),
-        ("jkl\\07yun.jkl", false, true, 0.07),
-        ("jkl\\10cargo.jkl", false, true, 0.13),
+        ("jkl\\07yun.jkl", false, true, 1.50),
+        ("jkl\\10cargo.jkl", false, true, 0.08),
         ("jkl\\11gorc.jkl", false, true, 0.17),
         ("jkl\\15maw.jkl", false, true, 58.86),
-        ("jkl\\17asarris.jkl", false, true, 2.74),
+        ("jkl\\17asarris.jkl", false, true, 2.72),
         ("jkl\\m10.jkl", false, true, 2.86),
         ("jkl\\m_boss15.jkl", false, true, 58.86),
-        ("jkl\\m_boss17.jkl", false, true, 2.74),
+        ("jkl\\m_boss17.jkl", false, true, 2.72),
     ];
     let off_edge = |name: &str| WALK_OFF_THE_EDGE.iter().find(|(level, ..)| *level == name);
     // `BK_WALK_ONLY=<substring>`: one level, with its traces, instead of the whole install.
