@@ -1860,6 +1860,16 @@ pub struct Runtime {
     pub ai_classes: BTreeMap<String, String>,
     /// Per-template `weapon=` — the template an actor fires.
     pub template_weapon: BTreeMap<String, String>,
+    /// (`thing + 0x55`; the Ree-Yees punches with `+ry_punch` at `fltArg[7]` chance 1.00).
+    pub template_weapon2: BTreeMap<String, String>,
+    /// A puppet-flagged actor's deferred shot (`sithAI_FireWeapon` stores `fl|8`, the error and
+    /// the mode when the thing carries `0x20000`): fired when the fire track reaches its marker.
+    /// The port has no marker clock, so the next fire pass is the stand-in.
+    pub ai_deferred_fire: BTreeMap<usize, (u32, f32, u32, usize)>,
+    /// The engine's fire lockout `ai + 0xa2`: `LobFire` arms it and `sithAI_FireWeapon` refuses
+    /// while it is in the future.
+    pub ai_fire_lock: BTreeMap<usize, f32>,
+
     /// How close an actor walks to the player before it stops: this build's standoff, since
     /// the engine's is in the instinct args.
     pub ai_standoff: f32,
@@ -1937,6 +1947,29 @@ struct AttachEntered {
     flags: u32,
     sender: usize,
 }
+
+/// `sithAI_FireWeapon` (`0x4eba10`) outcome. `Deferred` is the engine's own "return 1" for a
+/// puppet-flagged actor: the handler schedules its cadence and sets `0x400` while the bolt
+/// itself waits for the fire track's marker.
+#[derive(Debug)]
+enum FireOutcome {
+    Refused,
+    Deferred,
+    Shot(usize),
+}
+
+/// The aim `sithAI_FireWeapon` computed from its own arithmetic (the sight direction with the
+/// lead, lob and accuracy-jitter rules applied), handed to the shared spawn path so an AI bolt
+/// leaves along the engine's direction from the engine's fire point rather than the body's yaw.
+#[derive(Clone, Copy)]
+struct AiAim {
+    dir: [f32; 3],
+    /// `WeaponFire`'s speed parameter: the lobbed shot's `len / weaponspeed`.
+    speed_scale: f32,
+    /// `ai + 0x82`: the oriented `fireoffset=` point the bolt is born at.
+    origin: [f32; 3],
+}
+
 
 impl Runtime {
     pub fn new(level: &Level) -> Self {
@@ -2696,6 +2729,17 @@ impl Runtime {
                         .map(|w| (t.name.to_ascii_lowercase(), w.to_ascii_lowercase()))
                 })
                 .collect(),
+            template_weapon2: level
+                .templates
+                .iter()
+                .filter_map(|t| {
+                    level
+                        .template_param(&t.name, "weapon2")
+                        .map(|w| (t.name.to_ascii_lowercase(), w.to_ascii_lowercase()))
+                })
+                .collect(),
+            ai_deferred_fire: BTreeMap::new(),
+            ai_fire_lock: BTreeMap::new(),
             ai_standoff: 0.25,
             ai_move: BTreeMap::new(),
             ai_chase: BTreeMap::new(),
@@ -5687,9 +5731,10 @@ impl Runtime {
             });
         }
         let mut fired = 0;
+        let mut shooters: Vec<usize> = Vec::new();
         self.walked.clear();
         self.walk_vel.clear();
-        let mut shots: Vec<(usize, String, f32, usize, [f32; 3])> = Vec::new();
+
         // Every actor with an instinct class, **plus** any actor a script gave a destination to.
         // `AISetMovePos`/`AISetMoveFrame` are gated on `controlType == SITH_CT_AI` in the engine, which
         // an actor has whether or not its template names an `aiclass=` — level 1's 8t88 has no class but
@@ -6476,6 +6521,23 @@ impl Runtime {
             // range, and its `minDot` facing test — so one line per refusal is enough to tell an AI
             // that is asleep from one that is merely still turning.
             let fire_trace = std::env::var("BK_AI_TRACE").is_ok_and(|v| v == "2");
+            // The puppet-deferred shot (`sithAI_FireWeapon`'s `0x20000` branch) leaves with its
+            // gates skipped — the stored `fl` carries the engine's own bit 8. The engine fires it
+            // when the fire track reaches its marker; the port's stand-in is this next pass,
+            // before any readiness or sight gate, like the marker itself.
+            if let Some((fl, err, mode, dtarget)) = self.ai_deferred_fire.remove(&index)
+                && let Some(dpos) = self.things.get(dtarget).map(|t| t.pos)
+            {
+                let accuracy = ai.as_ref().map(|c| c.accuracy);
+                if !matches!(
+                    self.sithAI_FireWeapon(index, dtarget, dpos, 0.0, f32::MAX, -1.0, err, mode, fl, accuracy),
+                    FireOutcome::Refused
+                ) {
+                    self.last_shot.insert(index, self.time);
+                    fired += 1;
+                }
+            }
+
             // `sithAICmd_BlindFire` (`0x509b30`): an actor that has lost sight but still remembers where
             // the body was fires at **that** point — the engine tests the remembered spot against the
             // class's cos limit and a fixed 10-unit reach, rolls the instinct's chance, and fires with
@@ -6529,9 +6591,10 @@ impl Runtime {
                 }
             };
             let (delay_ms, min_dot, max_dist, error, min_dist) = if blind {
-                // Every shipped line is `750, 0.80, 0, 0.8, 0.0, 0.30`: delay, chance, unused, cos
-                // limit, minimum distance, spread. The reach is the engine's fixed 10 units.
-                (arg(0), arg(2), 10.0, arg(4), arg(3))
+                // Every shipped line is `750, 0.80, 0, 0.8, 0.0, 0.30`: delay, chance, unused cos
+                // limit, minimum distance, spread. The reach is the engine's fixed 10 units, and
+                // `0x509b30` scales the spread by `fltArg[5] / dist` before `RandomFireVector`.
+                (arg(0), arg(2), 10.0, arg(5), arg(3))
             } else if turret_shot {
                 // `turretfire`'s shipped line is `750, 75, 160, 160, 5.0, 0.20, 500, 10000, 0`: delay,
                 // then the aim-head sweep (±arg2 yaw, ±arg3 pitch), the damaged-health fraction
@@ -6602,15 +6665,6 @@ impl Runtime {
                 continue;
             }
             let (sx, sy) = (shooting_at[0] - from[0], shooting_at[1] - from[1]);
-            let range = (sx * sx + sy * sy).sqrt();
-            if range > max_dist.max(0.001) || range < min_dist {
-                if fire_trace {
-                    eprintln!(
-                        "ai: {index} range {range:.2} outside {instinct} [{min_dist:.2}, {max_dist:.2}]"
-                    );
-                }
-                continue;
-            }
             // A script that names a fire target is telling the actor to shoot *that*, so it turns to
             // it first — `00_AITurnCoat.cog` turns an actor on a victim behind it. The engine's
             // `sithAICmd_PrimaryFire` sets a **look frame**, so the body eases onto the victim
@@ -6618,46 +6672,81 @@ impl Runtime {
             if aim.is_some() {
                 self.ai_set_look_frame(index, shooting_at);
             }
-            let yaw = self.things.get(index).map(|t| t.yaw).unwrap_or(yaw);
-            // `minDot`: the actor fires only once it is facing the target, which is what makes it
-            // turn before shooting rather than snap. The engine's facing is `(-sin yaw, cos yaw)`.
-            let (sin, cos) = yaw.to_radians().sin_cos();
-            let facing = (-sin, cos);
-            let dot = if range > 1e-4 {
-                (facing.1 * sy + facing.0 * sx) / range
-            } else {
-                1.0
-            };
-            if dot < min_dot {
-                if fire_trace {
-                    eprintln!("ai: {index} facing dot {dot:.2} < {instinct} minDot {min_dot:.2}");
+            // `sithAICmd_PrimaryFire` (`0x509e40`) rolls `fltArg[6]` for the lead flag and
+            // `fltArg[7]` for the second weapon, in that order and each only when its argument is
+            // non-zero, before `sithAI_FireWeapon` runs (which draws the accuracy gate next).
+            // The range, facing and visibility gates themselves are `sithAI_FireWeapon`'s own.
+            let mut fl = 0u32;
+            let mut mode = 0u32;
+            if !blind && !turret_shot {
+                if arg(6) != 0.0 && crate::cog::pseudo_random() <= arg(6) as f64 {
+                    fl |= 1;
                 }
-                continue;
+                if arg(7) != 0.0 && crate::cog::pseudo_random() <= arg(7) as f64 {
+                    mode = 1;
+                }
             }
-            let Some(weapon) = self
-                .templates
-                .get(index)
-                .and_then(|name| self.template_weapon.get(name).cloned())
-            else {
-                continue;
-            };
             // `BK_AI_TRACE=2`: when the shot actually leaves, so an acquisition delay can be measured
             // against a level's spawn (the ledger's spawn-combat row).
             if fire_trace {
-                let damage = self.template_damage.get(&weapon.to_ascii_lowercase()).copied().unwrap_or(-1.0);
                 eprintln!(
-                    "ai: {index} fires {instinct} `{weapon}` at {range:.2} damage {damage} (time {:.2} s)",
+                    "ai: {index} fires {instinct} at ({sx:.2},{sy:.2}) fl {fl} mode {mode} (time {:.2} s)",
                     self.time
                 );
             }
             // What the shot is aimed at: the scripted `AISetFireTarget` thing when one is named,
             // otherwise the player. That is the engine's own target, not the aim point.
             let target_thing = self.ai_fire_target.get(&index).copied().unwrap_or(player);
-            shots.push((index, weapon, error, target_thing, shooting_at));
-            // The engine's fire path sets the look frame, never the yaw: the body blends onto the
-            // target while the shot itself flies at where the aim already points.
-            self.ai_set_look_frame(index, shooting_at);
-            if let Some(thing) = self.things.get_mut(index) {
+            // `BlindFire`'s inline path (`0x509b30`) scales `fltArg[5]` by the remembered
+            // distance before `RandomFireVector`, and has no accuracy gate of its own.
+            let err = if blind {
+                let dz = shooting_at[2] - from[2];
+                let len = (sx * sx + sy * sy + dz * dz).sqrt();
+                if len > 1e-6 {
+                    error / len
+                } else {
+                    0.0
+                }
+            } else {
+                error
+            };
+            let accuracy = if blind { None } else { ai.as_ref().map(|c| c.accuracy) };
+            // The engine's handler fires `sithAI_FireWeapon` synchronously and schedules its
+            // cadence only on a fired (or deferred) shot; a refusal retries in 250 ms (`0xfa`).
+            let outcome = self.sithAI_FireWeapon(
+                index,
+                target_thing,
+                shooting_at,
+                min_dist,
+                max_dist,
+                min_dot,
+                err,
+                mode,
+                fl,
+                accuracy,
+            );
+            let committed = !matches!(outcome, FireOutcome::Refused);
+            if committed {
+                if let FireOutcome::Shot(shot) = outcome {
+                    shooters.push(index);
+                    // `sithCog_ThingSendMessage(shooter, projectile, 0x24)` — the `fired`
+                    // message, delivered with the new thing next frame.
+                    self.send_thing_message(index, "fired", [shot as f64, 0.0]);
+                }
+                fired += 1;
+                // `sithAICmd_PrimaryFire` (`0x509e40`) sets the AI mode bit `0x400` when
+                // `FireWeapon` returns fired — the bit `HitAndRun` (`0x50bb90`) counts on.
+                *self.ai_flags.entry(index).or_insert(0) |= 0x400;
+                // The renderer plays a puppet's `fire` track off `last_shot`: the engine's
+                // `sithPuppet_UpdateThingMove` picks the action track while the actor shoots.
+                self.last_shot.insert(index, self.time);
+                // #92: the engine's fire path sets a **look frame** (`sithAI_SetLookFrame`), never
+                // the yaw — the body blends onto the target while the bolt flies at the AI's aim.
+                self.ai_set_look_frame(index, shooting_at);
+            } else if let Some(thing) = self.things.get_mut(index) {
+                thing.ai_wait = 0.25;
+            }
+            if committed && let Some(thing) = self.things.get_mut(index) {
                 // `sithActor_UpdateAimJoints`: the aim points at the target in **three** dimensions.
                 // Without the elevation an actor shoots level at a player standing on a ledge and the
                 // bolt passes underneath — the bug the player had until round 109.
@@ -6695,19 +6784,7 @@ impl Runtime {
                 }
             }
         }
-        let mut shooters: Vec<usize> = Vec::new();
-        for (index, weapon, error, target, aim) in shots {
-            if self
-                .fire_toward(index as i64, &weapon, error, None, Some(target), Some(aim))
-                .is_some()
-            {
-                // The renderer plays a puppet's `fire` track off this: the engine's
-                // `sithPuppet_UpdateThingMove` picks the action track while the actor is shooting.
-                self.last_shot.insert(index, self.time);
-                shooters.push(index);
-                fired += 1;
-            }
-        }
+
         // `sithAIAwareness_CreateTransmittingEvent` (`0x4f2a90`) + `ProcessEvent` (`0x4f2c30`):
         // firing raises an event at the shooter with strength 4.0, and the engine's propagation
         // carries it through the adjoin graph for the shooter's own side. The record is the
@@ -7431,6 +7508,189 @@ impl Runtime {
         [unit[0] / len * speed, unit[1] / len * speed, unit[2] / len * speed]
     }
 
+    /// The engine's fire point `ai + 0x82`: `pos + orient * thing[0x17c]`
+    /// (`sithAI_sub_4EAD60` `0x4ead60`). A template without `fireoffset=` transforms the zero
+    /// vector and the bolt leaves the body's origin, as the engine's does; the player's
+    /// one-unit-ahead fallback in `fire_toward` is a player-path stand-in, not this rule.
+    fn sithAI_FirePoint(&self, index: usize) -> [f32; 3] {
+        let Some(t) = self.things.get(index) else { return [0.0; 3] };
+        let offset = self
+            .templates
+            .get(index)
+            .and_then(|name| self.template_fire_offset.get(&name.to_ascii_lowercase()))
+            .copied()
+            .unwrap_or([0.0; 3]);
+        let (s, c) = t.yaw.to_radians().sin_cos();
+        let (sp, cp) = t.pitch.to_radians().sin_cos();
+        let lvec = [-s * cp, c * cp, sp];
+        let rvec = [c, s, 0.0];
+        let uvec = [s * sp, -c * sp, cp];
+        [
+            t.pos[0] + lvec[0] * offset[1] + rvec[0] * offset[0] + uvec[0] * offset[2],
+            t.pos[1] + lvec[1] * offset[1] + rvec[1] * offset[0] + uvec[1] * offset[2],
+            t.pos[2] + lvec[2] * offset[1] + rvec[2] * offset[0] + uvec[2] * offset[2],
+        ]
+    }
+
+    /// `sithAI_FireWeapon` (`0x4eba10`), transliterated. The port's fire block calls this with the
+    /// instinct's own numbers after its readiness and sight gates (the engine's `ai[0x7d] == 0`
+    /// visibility check is the port's `can_see`, and `ai[0xa2]` is `ai_fire_lock`).
+    ///
+    /// The gates, in the engine's order: the lockout, `minD <= ai[0x7c] <= maxD` on the
+    /// radius-subtracted 3D eye distance (`CheckSightThing` `0x4eb090` writes
+    /// `max(len - r, 0)`), and the facing `|rvec . dir| <= 1 - dotTol` with **no behind test**.
+    /// A thing flagged `0x20000` (a puppet) defers instead: the engine stores `fl|8`, the error
+    /// and the mode, and plays the fire track. The fired direction is the sight line off the
+    /// fire point, then the lead (`fl & 1`), the lob (`fl & 2`) and the accuracy-gated jitter in
+    /// the engine's order. `accuracy = None` skips the gate, which is the engine's `BlindFire`
+    /// inline path (`0x509b30` calls `RandomFireVector` directly).
+    fn sithAI_FireWeapon(
+        &mut self,
+        index: usize,
+        target: usize,
+        target_pos: [f32; 3],
+        min_d: f32,
+        max_d: f32,
+        dot_tol: f32,
+        err: f32,
+        mode: u32,
+        fl: u32,
+        accuracy: Option<f32>,
+    ) -> FireOutcome {
+        let Some(t) = self.things.get(index) else { return FireOutcome::Refused };
+        let (yaw, flags) = (t.yaw, t.flags);
+        let weapon = self
+            .templates
+            .get(index)
+            .and_then(|name| {
+                let name = name.to_ascii_lowercase();
+                let w = if mode == 0 {
+                    self.template_weapon.get(&name)
+                } else {
+                    self.template_weapon2.get(&name).or(self.template_weapon.get(&name))
+                };
+                w.cloned()
+            })
+            // The engine's weapon is `thing + 0x54/0x55`; a thing with none set refuses.
+            .unwrap_or_default();
+        if weapon.is_empty() {
+            return FireOutcome::Refused;
+        }
+        let eye = self.sithAI_FirePoint(index);
+        let d = [target_pos[0] - eye[0], target_pos[1] - eye[1], target_pos[2] - eye[2]];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if len < 1e-6 {
+            return FireOutcome::Refused;
+        }
+        let mut dir = [d[0] / len, d[1] / len, d[2] / len];
+        let radius = self
+            .templates
+            .get(target)
+            .and_then(|name| self.template_hit.get(&name.to_ascii_lowercase()))
+            .map(|(r, _)| *r)
+            .unwrap_or(0.065);
+        let dist = (len - radius).max(0.0);
+        let speed = self
+            .template_vel
+            .get(&weapon)
+            .copied()
+            .map(|v| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt())
+            .unwrap_or(0.0);
+        if fl & 8 == 0 {
+            if self.ai_fire_lock.get(&index).is_some_and(|at| *at > self.time) {
+                return FireOutcome::Refused;
+            }
+            if dist < min_d || max_d < dist {
+                if std::env::var_os("BK_AI_TRACE").is_some() {
+                    eprintln!("ai: {index} fire range {dist:.2} outside [{min_d:.2}, {max_d:.2}]");
+                }
+                return FireOutcome::Refused;
+            }
+            let (s, c) = yaw.to_radians().sin_cos();
+            if (c * dir[0] + s * dir[1]).abs() > 1.0 - dot_tol {
+                if std::env::var_os("BK_AI_TRACE").is_some() {
+                    eprintln!(
+                        "ai: {index} fire facing |rvec.dir| {:.2} > {:.2}",
+                        (c * dir[0] + s * dir[1]).abs(),
+                        1.0 - dot_tol
+                    );
+                }
+                return FireOutcome::Refused;
+            }
+            if flags & 0x20000 != 0 {
+                self.ai_deferred_fire
+                    .insert(index, (fl | 8, err, mode, target));
+                self.play_mode
+                    .insert(index, if mode == 0 { 8 } else { 0x12 } as i32);
+                return FireOutcome::Deferred;
+            }
+        }
+        // The lead (`p7 & 1`): a target of thing type 1 that is moving is led by its velocity
+        // plus the bolt's flight time along the current line, accepted only while the adjusted
+        // line stays within `dot > 0.5` of the original.
+        if fl & 1 != 0 && speed > 0.0 {
+            // The engine reads the target's physics velocity (`thing + 0x1d4`), which drag holds
+            // near zero for a standing body. The port's `ThingState::vel` is not that record —
+            // the player's keeps its spawn-fall value while standing — so the lead rides the
+            // per-tick `walk_vel` the AI walk phase maintains, and a body with no live record is
+            // not led at all rather than bent by a stale vector.
+            let is_actor = target == 0
+                || self
+                .templates
+                .get(target)
+                .and_then(|name| self.template_types.get(&name.to_ascii_lowercase()))
+                .is_some_and(|ty| *ty == 1)
+                || self.templates.get(target).is_none();
+            let vel = self
+                .walk_vel
+                .get(&target)
+                .map(|v| [v[0], v[1], 0.0])
+                .unwrap_or([0.0; 3]);
+            if is_actor && vel != [0.0; 3] {
+                let cand = [
+                    vel[0] + dir[0] * speed,
+                    vel[1] + dir[1] * speed,
+                    vel[2] + dir[2] * speed,
+                ];
+                let clen = (cand[0] * cand[0] + cand[1] * cand[1] + cand[2] * cand[2]).sqrt();
+                if clen > 1e-6 {
+                    let cand = [cand[0] / clen, cand[1] / clen, cand[2] / clen];
+                    if cand[0] * dir[0] + cand[1] * dir[1] + cand[2] * dir[2] > 0.5 {
+                        dir = cand;
+                    }
+                }
+            }
+        }
+        let mut speed_scale = 1.0;
+        if fl & 2 != 0 && speed > 0.0 {
+            // The lob: scale by the weapon speed, lift z by the gravity arc for that flight
+            // time, renormalise, and hand `WeaponFire` the magnitude as its speed parameter.
+            let mut v = [dir[0] * speed, dir[1] * speed, dir[2] * speed];
+            v[2] += (dist / speed) * 0.5 * self.gravity;
+            let vlen = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            if vlen > 1e-6 {
+                dir = [v[0] / vlen, v[1] / vlen, v[2] / vlen];
+                speed_scale = vlen / speed;
+            }
+        }
+        if err != 0.0 && dist != 0.0 {
+            // The accuracy gate: the engine draws one number even when the shot stays clean,
+            // and jitters only when `class.accuracy < rand()/32768`.
+            let jitter = match accuracy {
+                Some(acc) => (acc as f64) < crate::cog::pseudo_random(),
+                None => true,
+            };
+            if jitter {
+                dir = Self::jitter_aim(dir, err);
+            }
+        }
+        let aim = AiAim { dir, speed_scale, origin: eye };
+        match self.fire_toward(index as i64, &weapon, 0.0, None, Some(target), Some(aim)) {
+            Some(shot) => FireOutcome::Shot(shot),
+            None => FireOutcome::Refused,
+        }
+    }
+
     fn fire_with_spread(
         &mut self,
         shooter: i64,
@@ -7443,10 +7703,8 @@ impl Runtime {
 
     /// [`Self::fire_with_spread`] with the thing the shooter has as a target (the AI's own target,
     /// recorded in the encounter chronology). A shot nothing names — the player's weapon, a scripted
-    /// `FireProjectile` — passes `None`. An AI shot also names its **aim point** (`aim`): the engine's
-    /// `sithAI_FireWeapon` (`0x4eba10`) fires along the AI's stored aim vector (`ai + 0x79`), not
-    /// along the body's orientation, so the bolt leaves at its target however far the body's own
-    /// turn blend still has to go.
+    /// `FireProjectile` — passes `None`.
+
     fn fire_toward(
         &mut self,
         shooter: i64,
@@ -7454,7 +7712,7 @@ impl Runtime {
         error: f32,
         sound: Option<&str>,
         target: Option<usize>,
-        aim: Option<[f32; 3]>,
+        aim: Option<AiAim>,
     ) -> Option<usize> {
         // Every shot the runtime spawns, counted where it is actually spawned. A check that samples
         // live things misses a bolt that dies between two frames, and at 10 fps that is most of them.
@@ -7477,26 +7735,31 @@ impl Runtime {
         // aimed 30 degrees up leaves with `speed * sin(30)` in z. `rotate_by_angles` is the engine's
         // `rdMatrix_Build34`, whose yaw starts at +Y; this world's camera yaw starts at +X, so the
         // rotation is written out here rather than reused.
-        let (sp, cp) = pitch.to_radians().sin_cos();
-        let mut forward = [
-            flat[0] * cp,
-            flat[1] * cp,
-            (flat[0] * flat[0] + flat[1] * flat[1]).sqrt() * sp + speed[2] * cp,
-        ];
-        if let Some(aim) = aim {
-            // The AI's aim vector: the template's whole speed magnitude along the direction to the
-            // aim point, replacing the body-orientation heading.
-            let d = [aim[0] - pos[0], aim[1] - pos[1], aim[2] - pos[2]];
-            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            let mag = (forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2])
-                .sqrt();
-            if len > 1e-4 {
-                forward = [d[0] / len * mag, d[1] / len * mag, d[2] / len * mag];
+        let forward = match aim {
+            // `sithAI_FireWeapon` (`0x4eba10`) already applied its lead, lob and accuracy rules to
+            // this direction off the eye; the yaw/pitch build below is the player's own aim.
+            Some(a) => {
+                let mag =
+                    (speed[0] * speed[0] + speed[1] * speed[1] + speed[2] * speed[2]).sqrt();
+                [
+                    a.dir[0] * mag * a.speed_scale,
+                    a.dir[1] * mag * a.speed_scale,
+                    a.dir[2] * mag * a.speed_scale,
+                ]
             }
-        }
-        if error > 0.0 {
-            forward = Self::jitter_aim(forward, error);
-        }
+            None => {
+                let (sp, cp) = pitch.to_radians().sin_cos();
+                let mut f = [
+                    flat[0] * cp,
+                    flat[1] * cp,
+                    (flat[0] * flat[0] + flat[1] * flat[1]).sqrt() * sp + speed[2] * cp,
+                ];
+                if error > 0.0 {
+                    f = Self::jitter_aim(f, error);
+                }
+                f
+            }
+        };
         let health = self.template_health.get(&template).copied().unwrap_or(1.0);
         let kind = self.template_types.get(&template).copied().unwrap_or(3);
         // The shot starts at full damage and loses it in flight when the weapon decays.
@@ -7521,7 +7784,11 @@ impl Runtime {
         // The engine's muzzle is the template's `fireoffset=`, in level units and the shooter's frame
         // (x lateral, y forward, z up). A template that names no offset falls back to a unit ahead of
         // the eye.
-        let muzzle = {
+        let muzzle = if let Some(a) = aim {
+            // The engine's `ai + 0x82`, built by `sithAI_sub_4EAD60` (`0x4ead60`) as
+            // `pos + orient * thing[0x17c]` — the same point the sight direction came from.
+            a.origin
+        } else {
             let len = (forward[0] * forward[0] + forward[1] * forward[1]).sqrt().max(1e-4);
             let ahead = [forward[0] / len, forward[1] / len];
             // The offset belongs to the **shooter's** template (`reeyeesgun`, `greedo`):
@@ -7539,15 +7806,19 @@ impl Runtime {
                 // The real offset, even when it sits inside the shooter's body: `impacts` skips
                 // the owner, so nothing needs the old "push it out" distance.
                 //
-                // `sithWeapon_FireProjectile` does `rdMatrix_TransformVector34Acc(offset,
-                // &senderOrient)` — the offset is in the shooter's own frame, whose model +Y is
-                // forward and +X is **right**. With yaw 0 facing +X and up +Z, that right is
-                // (0, -1), which is `(ahead[1], -ahead[0])` for a general heading.
-                Some([x, y, z]) => [
-                    pos[0] + ahead[0] * y + ahead[1] * x,
-                    pos[1] + ahead[1] * y - ahead[0] * x,
-                    pos[2] + z,
-                ],
+                // `rdMatrix_TransformVector34(offset, orient)` — the offset rides the shooter's
+                // whole oriented basis, pitch included: `lvec` forward, `rvec` right, `uvec` up.
+                Some([x, y, z]) => {
+                    let (sp, cp) = pitch.to_radians().sin_cos();
+                    let lvec = [-sin * cp, cos * cp, sp];
+                    let rvec = [cos, sin, 0.0];
+                    let uvec = [sin * sp, -cos * sp, cp];
+                    [
+                        pos[0] + lvec[0] * y + rvec[0] * x + uvec[0] * z,
+                        pos[1] + lvec[1] * y + rvec[1] * x + uvec[1] * z,
+                        pos[2] + lvec[2] * y + rvec[2] * x + uvec[2] * z,
+                    ]
+                }
                 // `sithWeapon_FireProjectile` (`0x4d5f20`) spawns at the **weapon thing's** position,
                 // adding the offset only when it is not the sentinel — and a shipper's weapon thing sits
                 // in the actor's hand. This build has no separate weapon thing, so the fallback is a
@@ -13299,8 +13570,10 @@ mod tests {
                  PrimaryFire 750.0, 0.8, 3.5, 0.20, 0.0, 500.0, 0.0, 0.0, 0.0, 0.0\n",
             ),
         );
-        // Already engaged, so the sight roll makes no draw of its own: the first draw of the tick is
-        // the shot delay's jitter.
+        // Already engaged, so the sight roll makes no draw of its own. The first draws of the
+        // tick are `sithAI_FireWeapon`'s accuracy gate (`error` 0.20, class accuracy 0.5) and its
+        // jitter cone when the gate passes; the shot delay's jitter draws after them, exactly as
+        // the engine's handler writes its cadence after `FireWeapon` returns.
         rt.ai_detected.insert(1);
         rt.time = 1.0;
         rt.seed_capture_phase(
@@ -13311,7 +13584,7 @@ mod tests {
         rt.ai_tick(0, 0.1);
         assert_eq!(rt.shots_fired, 1, "the gunner did not fire");
         assert!(
-            (rt.things[1].ai_wait - 0.759_494_0).abs() < 1e-5,
+            (rt.things[1].ai_wait - 0.649_868_8).abs() < 1e-5,
             "the delay came from another stream: {}",
             rt.things[1].ai_wait
         );
@@ -18662,5 +18935,220 @@ mod tests {
         );
         assert!((scan_clock(&rt, 1) - 4.304).abs() < 1e-4, "the scan waited {}", scan_clock(&rt, 1));
         assert!((rt.ai_detect_at[&1] - 4.529).abs() < 1e-4, "the pass waited {:?}", rt.ai_detect_at[&1]);
+    }
+    /// The #93 fire-chain fixture: an engaged gunner one unit from the player, on the door
+    /// runtime, with the weapon's speed pinned so every direction test can read `vel` directly.
+    fn fire_chain_runtime(class: &str) -> Runtime {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut player = base.clone();
+        player.pos = [0.0, 2.0, 0.0];
+        let mut gunner = base.clone();
+        gunner.pos = [0.0, 0.0, 0.0];
+        gunner.yaw = 0.0;
+        rt.things = vec![player, gunner];
+        rt.templates = vec!["walkplayer".into(), "reeyeesgun".into()];
+        rt.types = vec![10, 2];
+        rt.template_weapon.insert("reeyeesgun".into(), "+elaser".into());
+        rt.template_vel.insert("+elaser".into(), [0.0, 4.0, 0.0]);
+        rt.ai.insert(1, crate::ai::parse(class));
+        rt.ai_detected.insert(1);
+        rt.time = 1.0;
+        rt
+    }
+
+    /// `sithAI_FireWeapon` (`0x4eba10`): the facing gate is `|rvec·dir| <= 1 - minDot` with **no
+    /// behind test**, so a target straight behind the gunner still fires and one broadside does
+    /// not. The port's old `forward·dir >= minDot` refused the shot behind.
+    #[test]
+    fn the_fire_gate_is_the_engines_sideways_cone() {
+        let class = "alignment=-1.0, rank=0.5, fov=360, sightdist=9.0, accuracy=1.0\n\n\
+                     PrimaryFire 750.0, 0.8, 9.0, 0.0, 0.0, 500.0, 0.0, 0.0, 0.0, 0.0\n";
+        let mut behind = fire_chain_runtime(class);
+        // A zero turn rate pins the body's own facing, so the gate is read on the pre-turn
+        // orient exactly as the engine's scheduler does mid-blend.
+        behind.template_rotthrust.insert("reeyeesgun".into(), 0.0);
+        rt_things_set_pos(&mut behind, 0, [0.0, -2.0, 0.0]);
+        behind.ai_tick(0, 0.1);
+        assert_eq!(behind.shots_fired, 1, "a target straight behind must still fire");
+        let mut broadside = fire_chain_runtime(class);
+        broadside.template_rotthrust.insert("reeyeesgun".into(), 0.0);
+        rt_things_set_pos(&mut broadside, 0, [2.0, 0.0, 0.0]);
+        broadside.ai_tick(0, 0.1);
+        assert_eq!(broadside.shots_fired, 0, "a broadside target is outside the cone");
+    }
+
+    /// The range gate is the engine's `minD <= ai[0x7c] <= maxD`: the radius-subtracted **3D
+    /// eye** distance (`CheckSightThing` `0x4eb090` writes `max(len - r, 0)`), not the port's old
+    /// flat 2D body distance.
+    #[test]
+    fn the_fire_range_is_the_eye_distance_less_the_targets_radius() {
+        let class = "alignment=-1.0, rank=0.5, fov=360, sightdist=9.0, accuracy=1.0\n\n\
+                     PrimaryFire 750.0, 0.0, 1.4, 0.0, 0.0, 500.0, 0.0, 0.0, 0.0, 0.0\n";
+        let mut rt = fire_chain_runtime(class);
+        // 3D distance 1.5 minus the player's 0.065 radius is 1.435: outside a 1.4 `maxDist`,
+        // while the old flat 2D distance (1.2) was inside it.
+        rt_things_set_pos(&mut rt, 0, [0.0, 1.2, 0.9]);
+        rt.ai_tick(0, 0.1);
+        assert_eq!(rt.shots_fired, 0, "the 3D eye distance was not the gate");
+
+        let mut rt = fire_chain_runtime(class);
+        rt_things_set_pos(&mut rt, 0, [0.0, 1.2, 0.9]);
+        // The same pose against a 1.44 reach: 1.435 is inside.
+        let class = "alignment=-1.0, rank=0.5, fov=360, sightdist=9.0, accuracy=1.0\n\n\
+                     PrimaryFire 750.0, 0.0, 1.44, 0.0, 0.0, 500.0, 0.0, 0.0, 0.0, 0.0\n";
+        rt.ai.insert(1, crate::ai::parse(class));
+        rt.ai_tick(0, 0.1);
+        assert_eq!(rt.shots_fired, 1, "a radius-subtracted 1.435 was refused inside a 1.44 reach");
+    }
+
+    /// The accuracy gate: the engine jitters only when `class.accuracy < rand()/32768`
+    /// (`0x4eba10`), so a class with `accuracy=1.0` fires an exact line however large its
+    /// `error` argument is. The port always jittered.
+    #[test]
+    fn a_perfectly_accurate_actor_shoots_a_clean_line() {
+        let mut rt = fire_chain_runtime(
+            "alignment=-1.0, rank=0.5, fov=360, sightdist=9.0, accuracy=1.0\n\n\
+             PrimaryFire 750.0, 0.0, 9.0, 0.20, 0.0, 500.0, 0.0, 0.0, 0.0, 0.0\n",
+        );
+        crate::cog::set_random_seed(811_474_043);
+        rt.ai_tick(0, 0.1);
+        assert_eq!(rt.shots_fired, 1);
+        let shot = rt.things.len() - 1;
+        let vel = rt.things[shot].vel;
+        assert!((vel[0] - 0.0).abs() < 1e-4 && (vel[1] - 4.0).abs() < 1e-4 && (vel[2] - 0.0).abs() < 1e-4,
+            "accuracy 1.0 still jittered: {vel:?}");
+    }
+
+    /// The lead shot (`p7 & 1`): with the target an actor and moving, the engine aims along
+    /// `norm(target.vel + dir * weaponspeed)` when that stays within `dot > 0.5` of the line.
+    #[test]
+    fn a_leading_actor_aims_ahead_of_its_target() {
+        let mut rt = fire_chain_runtime(
+            "alignment=-1.0, rank=0.5, fov=360, sightdist=9.0, accuracy=1.0\n\n\
+             PrimaryFire 750.0, 0.0, 9.0, 0.0, 0.0, 500.0, 1.0, 0.0, 0.0, 0.0\n",
+        );
+        rt.walk_vel.insert(0, [2.0, 0.0]);
+        // `ai_tick` clears `walk_vel` before its walk phase repopulates it, so the lead's read is
+        // driven directly here — the arithmetic under test is `FireWeapon`'s own.
+        let outcome = rt.sithAI_FireWeapon(1, 0, [0.0, 2.0, 0.0], 0.0, 9.0, 0.0, 0.0, 0, 1, Some(1.0));
+        assert!(matches!(outcome, FireOutcome::Shot(_)), "refused: {outcome:?}");
+        assert_eq!(rt.shots_fired, 1);
+        let shot = rt.things.len() - 1;
+        let vel = rt.things[shot].vel;
+        let len = (2.0f32 * 2.0 + 4.0 * 4.0).sqrt();
+        assert!(
+            (vel[0] - 2.0 * 4.0 / len).abs() < 1e-4 && (vel[1] - 4.0 * 4.0 / len).abs() < 1e-4,
+            "the shot did not lead the target's velocity: {vel:?}"
+        );
+    }
+
+    /// The lob (`p7 & 2`): the engine scales the direction by the weapon speed, lifts z by
+    /// `(dist/speed) * 0.5 * gravity`, renormalises, and passes the speed scale `len/speed` to
+    /// `WeaponFire` — so the bolt leaves with exactly the arced velocity vector.
+    #[test]
+    fn a_lob_shot_arcs_with_gravity() {
+        let mut rt = fire_chain_runtime(
+            "alignment=-1.0, rank=0.5, fov=360, sightdist=9.0, accuracy=1.0\n\n\
+             LobFire 2500.0, 0.8, 0.5, 4.0, 0.20, 0\n",
+        );
+        rt.gravity = 4.0;
+        match rt.sithAI_FireWeapon(1, 0, [0.0, 3.0, 0.0], 0.5, 4.0, 0.8, 0.0, 0, 2, Some(1.0)) {
+            FireOutcome::Shot(shot) => {
+                // dist = 3 - 0.065 = 2.935; lift = (2.935/4) * 0.5 * 4 = 1.4675.
+                let lift = (2.935_f32 / 4.0) * 0.5 * 4.0;
+                let vel = rt.things[shot].vel;
+                assert!((vel[0] - 0.0).abs() < 1e-4, "{vel:?}");
+                assert!((vel[1] - 4.0).abs() < 1e-4, "{vel:?}");
+                assert!((vel[2] - lift).abs() < 1e-4, "the lob did not lift z by {lift}: {vel:?}");
+            }
+            other => panic!("the lob shot was refused: {other:?}"),
+        }
+    }
+
+    /// The fire point: the engine's `WeaponFire` receives `ai + 0x82`, which `sub_4EAD60` built
+    /// as `pos + orient * thing[0x17c]` — the template's `fireoffset=` through the whole oriented
+    /// basis (forward `lvec`, right `rvec`, up `uvec`), pitch included.
+    #[test]
+    fn the_fire_point_is_the_oriented_fireoffset() {
+        let mut rt = fire_chain_runtime(
+            "alignment=-1.0, rank=0.5, fov=360, sightdist=9.0, accuracy=1.0\n\n\
+             PrimaryFire 750.0, 0.0, 9.0, 0.0, 0.0, 500.0, 0.0, 0.0, 0.0, 0.0\n",
+        );
+        rt.template_fire_offset.insert("reeyeesgun".into(), [0.0, 2.0, 0.5]);
+        rt.things[1].pitch = 30.0;
+        match rt.sithAI_FireWeapon(1, 0, [0.0, 3.0, 1.0], 0.0, 9.0, 0.0, 0.0, 0, 0, Some(1.0)) {
+            FireOutcome::Shot(shot) => {
+                // The full basis at yaw 0: `lvec = (0, cp, sp)`, `rvec = (1, 0, 0)` and
+                // `uvec = (0, -sp, cp)` — the up vector's y tilts back with the pitch, which is
+                // what `rdMatrix_TransformVector34` multiplies the offset's z by.
+                let (s, c) = 30f32.to_radians().sin_cos();
+                let want = [0.0, 2.0 * c - 0.5 * s, 2.0 * s + 0.5 * c];
+                let pos = rt.things[shot].pos;
+                for i in 0..3 {
+                    assert!((pos[i] - want[i]).abs() < 1e-4, "fire point {pos:?} != {want:?}");
+                }
+            }
+            other => panic!("the shot was refused: {other:?}"),
+        }
+    }
+
+    /// A thing flagged `0x20000` (a puppet actor) does not fire inline: the engine stores the
+    /// shot (`fl|8`, error, mode) and plays the fire track, and the bolt leaves when the track
+    /// reaches its fire marker. The port has no marker clock, so the deferred shot leaves on the
+    /// actor's next fire pass — no shipped level-1/2 template carries the flag.
+    #[test]
+    fn a_puppet_flagged_actor_defers_its_shot() {
+        let mut rt = fire_chain_runtime(
+            "alignment=-1.0, rank=0.5, fov=360, sightdist=9.0, accuracy=1.0\n\n\
+             PrimaryFire 750.0, 0.0, 9.0, 0.0, 0.0, 500.0, 0.0, 0.0, 0.0, 0.0\n",
+        );
+        rt.things[1].flags |= 0x20000;
+        rt.ai_tick(0, 0.1);
+        assert_eq!(rt.shots_fired, 0, "the puppet actor fired inline");
+        assert!(rt.ai_deferred_fire.contains_key(&1), "the shot was not stored");
+        assert_eq!(rt.play_mode.get(&1), Some(&(8)), "the fire track was not played");
+        // The marker stand-in: the stored shot leaves on the next pass with its gates skipped.
+        rt.things[1].ai_wait = 0.0;
+        rt.ai_tick(0, 0.1);
+        assert_eq!(rt.shots_fired, 1, "the deferred shot never left");
+        // The puppet flag is still set, so the actor's own cadence defers its next shot again —
+        // the engine's marker loop does the same while `0x20000` stays on the thing.
+    }
+
+    /// `sithAICmd_PrimaryFire` (`0x509e40`) sets AI mode bit `0x400` when `FireWeapon` returns
+    /// fired — the bit `HitAndRun` (`0x50bb90`) counts on, which the port used to set only in
+    /// saberfighting.
+    #[test]
+    fn firing_sets_the_hit_and_run_mode_bit() {
+        let mut rt = fire_chain_runtime(
+            "alignment=-1.0, rank=0.5, fov=360, sightdist=9.0, accuracy=1.0\n\n\
+             PrimaryFire 750.0, 0.0, 9.0, 0.0, 0.0, 500.0, 0.0, 0.0, 0.0, 0.0\n",
+        );
+        rt.ai_tick(0, 0.1);
+        assert_eq!(rt.shots_fired, 1);
+        assert!(rt.ai_flags.get(&1).is_some_and(|f| f & 0x400 != 0), "no 0x400 after firing");
+    }
+
+    /// `mode 1` fires the second weapon (`thing[0x55]`, the template's `weapon2=`) and plays the
+    /// `0x48` sound row; the primaryfire handler rolls it against `fltArg[7]` (the Ree-Yees
+    /// punches with `weapon2=+ry_punch` at chance 1.00).
+    #[test]
+    fn a_fire2_roll_switches_to_the_second_weapon() {
+        let mut rt = fire_chain_runtime(
+            "alignment=-1.0, rank=0.5, fov=360, sightdist=9.0, accuracy=1.0\n\n\
+             PrimaryFire 1500.0, 0.6, 9.0, 0.00, 0.0, 200.0, 0.0, 1.00, 0.00, 0.00\n",
+        );
+        rt.template_vel.insert("+ry_punch".into(), [0.0, 2.0, 0.0]);
+        rt.template_weapon2.insert("reeyeesgun".into(), "+ry_punch".into());
+        rt.ai_tick(0, 0.1);
+        assert_eq!(rt.shots_fired, 1);
+        let shot = rt.things.len() - 1;
+        let vel = rt.things[shot].vel;
+        assert!((vel[1] - 2.0).abs() < 1e-4, "the first weapon fired, not weapon2: {vel:?}");
+    }
+
+    fn rt_things_set_pos(rt: &mut Runtime, index: usize, pos: [f32; 3]) {
+        rt.things[index].pos = pos;
     }
 }
