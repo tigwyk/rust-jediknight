@@ -9045,36 +9045,33 @@ impl Runtime {
             a.pos[1] - a.vel[1] * dt,
             a.pos[2] - a.vel[2] * dt,
         ];
-        let (sx, sy, sz) = (a.pos[0] - from[0], a.pos[1] - from[1], a.pos[2] - from[2]);
-        // Closest approach of the segment to the target's vertical axis, in plan.
-        let len2 = sx * sx + sy * sy;
-        let closest = if len2 > 1e-12 {
-            ((b.pos[0] - from[0]) * sx + (b.pos[1] - from[1]) * sy) / len2
-        } else {
-            1.0
-        }
-        .clamp(0.0, 1.0);
-        let (cx, cy, cz) = (
-            from[0] + sx * closest,
-            from[1] + sy * closest,
-            from[2] + sz * closest,
+        // The engine sweeps the projectile's whole step (`sithCollision_MoveThing`), so the hit
+        // test is the **3D distance between the bolt's step segment and the body's axis
+        // segment** — not a plan sweep with an instantaneous z test. A descending (lob) bolt
+        // has no plan motion at all, and the plan-sweep form took its `len2 == 0` default (the
+        // segment's far endpoint), skipping the body's z-band entirely (#93's encounter
+        // regression: bolts passing 0.024 units away with no hit).
+        let (t_bolt, t_axis) = closest_segment_parameters(
+            from,
+            a.pos,
+            [b.pos[0], b.pos[1], b.pos[2]],
+            [b.pos[0], b.pos[1], b.pos[2] + height],
         );
-        let flat = ((cx - b.pos[0]).powi(2) + (cy - b.pos[1]).powi(2)).sqrt();
+        let (px, py, pz) = (
+            from[0] + (a.pos[0] - from[0]) * t_bolt,
+            from[1] + (a.pos[1] - from[1]) * t_bolt,
+            from[2] + (a.pos[2] - from[2]) * t_bolt,
+        );
+        let qz = b.pos[2] + height * t_axis;
+        let dist = ((px - b.pos[0]).powi(2) + (py - b.pos[1]).powi(2) + (pz - qz).powi(2)).sqrt();
         if std::env::var_os("BK_SHOT_TRACE").is_some() {
             eprintln!(
-                "shot trace: shot {shot} -> target {target} ({name}) from {from:?} to {:?} closest flat {flat:.3} (limit {:.3}) cz {cz:.3} body {:.3}..{:.3}",
+                "shot trace: shot {shot} -> target {target} ({name}) from {from:?} to {:?} closest 3d {dist:.3} (limit {:.3}) at bolt t {t_bolt:.2}",
                 a.pos,
                 radius + bolt,
-                b.pos[2],
-                b.pos[2] + height
             );
         }
-        if flat > radius + bolt {
-            return None;
-        }
-        let low = b.pos[2];
-        let high = b.pos[2] + height;
-        (cz >= low - bolt && cz <= high + bolt).then_some(closest)
+        (dist <= radius + bolt).then_some(t_bolt)
     }
 
     pub fn shot_hits(&self, shot: usize, target: usize) -> bool {
@@ -12151,6 +12148,45 @@ impl Runtime {
             _ => Value::Num(0.0),
         }
     }
+}
+
+/// The clamped closest points between two segments (Ericson, *Real-Time Collision Detection*
+/// §5.1.9), as the projectile hit test needs them: the bolt's swept step against the body's
+/// vertical axis. Degenerate segments fall back to point-segment parameters.
+fn closest_segment_parameters(p0: [f32; 3], p1: [f32; 3], q0: [f32; 3], q1: [f32; 3]) -> (f32, f32) {
+    let d1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+    let d2 = [q1[0] - q0[0], q1[1] - q0[1], q1[2] - q0[2]];
+    let r = [p0[0] - q0[0], p0[1] - q0[1], p0[2] - q0[2]];
+    let a = d1.iter().map(|v| v * v).sum::<f32>();
+    let e = d2.iter().map(|v| v * v).sum::<f32>();
+    let f = d2.iter().zip(r.iter()).map(|(u, v)| u * v).sum::<f32>();
+    let (mut s, mut t);
+    if a <= 1e-12 && e <= 1e-12 {
+        return (0.0, 0.0);
+    }
+    if a <= 1e-12 {
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
+    } else {
+        let c = d1.iter().zip(r.iter()).map(|(u, v)| u * v).sum::<f32>();
+        if e <= 1e-12 {
+            t = 0.0;
+            s = (-c / a).clamp(0.0, 1.0);
+        } else {
+            let b = d1.iter().zip(d2.iter()).map(|(u, v)| u * v).sum::<f32>();
+            let denom = a * e - b * b;
+            s = if denom > 1e-12 { ((b * f - c * e) / denom).clamp(0.0, 1.0) } else { 0.0 };
+            t = (b * s + f) / e;
+            if t < 0.0 {
+                t = 0.0;
+                s = (-c / a).clamp(0.0, 1.0);
+            } else if t > 1.0 {
+                t = 1.0;
+                s = ((b - c) / a).clamp(0.0, 1.0);
+            }
+        }
+    }
+    (s, t)
 }
 /// The per-pass facts the scheduler's handlers share with the frame's motion half: computed once
 /// per actor per tick, before the instinct pass (`sithAI_Process` runs decisions before
@@ -18942,6 +18978,28 @@ mod tests {
         assert!((vel[1] - 2.0).abs() < 1e-4, "the first weapon fired, not weapon2: {vel:?}");
     }
 
+    /// #93's encounter regression, root-caused: the hit test swept in **plan only**, so a
+    /// descending (lob) bolt with no plan motion took the `len2 == 0` default — the segment's
+    /// far endpoint — and skipped the body's z-band entirely. The engine sweeps the whole step
+    /// (`sithCollision_MoveThing`): a bolt crossing the band mid-step hits.
+    #[test]
+    fn a_falling_bolt_crossing_the_body_band_mid_step_hits() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        // A standing body 0.18 tall at the origin, and a bolt descending through x = 0.05
+        // (inside the radius sum 0.115): this tick it steps from z +0.3 to z -0.3 — straight
+        // through the band.
+        let mut bolt = base.clone();
+        bolt.pos = [0.05, 0.0, -0.3];
+        bolt.vel = [0.0, 0.0, -6.0];
+        bolt.damage = 10.0;
+        rt.things = vec![base, bolt];
+        rt.templates = vec!["walkplayer".into(), "+bolt".into()];
+        rt.types = vec![10, 0];
+        rt.template_hit.insert("+bolt".into(), (0.05, 0.1));
+        let hits = rt.impacts(1, 0.1);
+        assert!(!hits.is_empty(), "the falling bolt tunneled through the body's z-band");
+    }
     fn rt_things_set_pos(rt: &mut Runtime, index: usize, pos: [f32; 3]) {
         rt.things[index].pos = pos;
     }
