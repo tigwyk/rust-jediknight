@@ -1770,9 +1770,8 @@ pub struct Runtime {
     pub ai_special: BTreeMap<usize, f32>,
     // (sensedanger's clock lives in `ai_inst`: the scheduler arms now+1000 and the alert's 0x800
     // write stops the next pass through the registry's reject word.)
-    /// When each actor may dodge again. `dodge`'s damage path (`0x50b360` event 1) sets its own
-    /// cooldown to `now + 1000` ms (`ai + 0xa3`), and the shot-passing path has none of its own.
-    pub ai_dodge: BTreeMap<usize, f32>,
+    // (`dodge`'s own cooldown clock is retired: its damage path writes the shared move lockout
+    // `ai_move_lock`, the engine's `ai + 0xa3`, at `now + 1000` ms.)
     /// When each actor's `jump` may nudge again: the handler (`0x50abf0`, event `0x400`) sets its own
     /// next check to `now + the class line's first number` (`jump 2000.0, 3.0, 3.0`).
     pub ai_jump: BTreeMap<usize, f32>,
@@ -2761,7 +2760,6 @@ impl Runtime {
             ai_saber: BTreeMap::new(),
             ai_saber_cool: BTreeMap::new(),
             ai_special: BTreeMap::new(),
-            ai_dodge: BTreeMap::new(),
             ai_jump: BTreeMap::new(),
             ai_move_speed: BTreeMap::new(),
             ai_move_lock: BTreeMap::new(),
@@ -4419,7 +4417,7 @@ impl Runtime {
             return false;
         };
         let step = step as f32;
-        if step == 0.0 || self.time < self.ai_dodge.get(&actor).copied().unwrap_or(0.0) {
+        if step == 0.0 {
             return false;
         }
         let (Some(from), Some(to)) = (
@@ -4428,18 +4426,26 @@ impl Runtime {
         ) else {
             return false;
         };
-        let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
-        let flat = (dx * dx + dy * dy).sqrt();
-        if flat < 1e-4 {
+        // The engine steps along the full 3D `norm(attacker - self) * -fltArg[1]`; there is no
+        // cooldown clock of the handler's own — the moving bit `0x1` is the gate, and the 1000 ms
+        // `ai + 0xa3` lockout the handler writes only refuses a move for a body already moving.
+        let dir = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        if len < 1e-4 {
             return false;
         }
-        let point = [from[0] - dx / flat * step, from[1] - dy / flat * step, from[2]];
+        let point = [
+            from[0] - dir[0] / len * step,
+            from[1] - dir[1] / len * step,
+            from[2] - dir[2] / len * step,
+        ];
         self.ai_set_move_thing(actor, point, 2.5);
-        self.ai_dodge.insert(actor, self.time + 1.0);
+        self.ai_move_lock.insert(actor, self.time + 1.0);
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} dodges {step:.2} away from thing {attacker} to {point:?}");
         }
-        true
+        // The handler returns 0 (`0x50b360`), so the damage event keeps dispatching.
+        false
     }
 
     /// `sensedanger`'s damage path (`0x50b9b0`, event 1): an **awake** actor (`0x4`) that has not
@@ -4450,7 +4456,7 @@ impl Runtime {
     /// `sensedanger`'s event-2 arm (`0x50b9ff`): an actor that has been hurt but is not alert yet
     /// (`0x4` set, `0x800` clear) hears something in its own sector and, if the record's source is a
     /// visible thing within its `heardist`, takes that thing as its target, raises the alert word and
-    /// re-broadcasts the event at **8.0**.
+    /// re-broadcasts the event at **4.0** (`0x40800000`).
     ///
     /// The gates, read off the disassembly: the instinct's own weight must beat the record's strength
     /// (that is why a gunshot usually silences this arm — its awareness is stronger than a 0.3 weight),
@@ -4508,9 +4514,9 @@ impl Runtime {
         {
             self.ai_withdraw.entry(actor).or_insert((source, None));
         }
-        // `0x4f2a90(ai->sector, thing.pos, 1, 8.0f, thing)`: the arm shouts the event on at twice the
-        // distance of a whisper, which is what pulls the rest of the room out of `sleep`.
-        self.transmit_awareness(sector, 1, from, 8.0, Some(source));
+        // `0x4f2a90(ai->sector, thing.pos, 1, 0x40800000, thing)`: the arm re-broadcasts the event
+        // at **4.0**, which is what pulls the rest of the room out of `sleep`.
+        self.transmit_awareness(sector, 1, from, 4.0, Some(source));
         if std::env::var_os("BK_AI_TRACE").is_some() {
             eprintln!("ai: {actor} heard thing {source} in sector {sector} and alerts");
         }
@@ -4969,15 +4975,14 @@ impl Runtime {
                 false
             }
             // `sensedanger` (`0x50b9b0`, accept 4 reject 0x800): the scheduler branch looks the
-            // player over once a second while awake and not yet alerted; a roll under fltArg[1]
-            // that sees the player alerts: `flags & ~4 | 0x800`, the fear sound, a kind-1
-            // awareness event at 3.0, and the player in the target slot.
+            // player over once a second while awake and not yet alerted — with **no** random roll:
+            // the handler's only gate past the mode word is `fltArg[1] != 0` (the class line's
+            // second number; `0.00`, most shipped lines, disables it). A sighted player alerts:
+            // `flags & ~4 | 0x800`, the fear sound, a kind-1 awareness event at 3.0, and the
+            // player in the target slot.
             "sensedanger" => {
-                let chance = instinct.args.first().copied().unwrap_or(0.0);
-                if chance == 0.0 || self.player_dead || !ctx.sighted {
-                    return false;
-                }
-                if crate::cog::pseudo_random() >= chance as f64 {
+                let enabled = instinct.args.first().copied().unwrap_or(0.0);
+                if enabled == 0.0 || self.player_dead || !ctx.sighted {
                     return false;
                 }
                 let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
@@ -6035,14 +6040,17 @@ impl Runtime {
                 let sector = self.things.get(index).map(|t| t.sector).unwrap_or(-1);
                 // A sound record moves the body only through `follow`, and the engine's scheduler
                 // (`sithAI_InstinctUpdate`, `0x4e9e90`) runs an instinct only while its registered
-                // word accepts the AI flag word: `Follow`'s is **`0x2`**
-                // (`tools/parity/aistatus-01narshadda.txt`, the `rydefault.ai` row 5), the bit
-                // `FUN_0050aa80`'s acquisition word (`0x232`) sets. `listen` alone never walks: it is
-                // event-driven, and the one event that carries a source thing is **damage**. So an
-                // awake actor that has not acquired anything stands at its authored facing, which is
-                // what retail's own door series shows for `greedo` 236.
+                // accept word intersects the AI flag word **and its reject word does not**:
+                // `Follow`'s is accept `0x2`, reject `0x800` (`sithAICmd_Startup`'s registry,
+                // `0x5091b0`) — the bit `FUN_0050aa80`'s acquisition word (`0x232`) sets, and the
+                // alert bit every danger handler raises. An alerted actor does not walk its
+                // follow instinct. `listen` alone never walks: it is event-driven, and the one
+                // event that carries a source thing is **damage**. So an awake actor that has not
+                // acquired anything stands at its authored facing, which is what retail's own door
+                // series shows for `greedo` 236.
                 let follows = ai.as_ref().is_some_and(|class| class.instinct("Follow").is_some());
-                if !follows || self.ai_flags.get(&index).copied().unwrap_or(0) & 0x2 == 0 {
+                let flags = self.ai_flags.get(&index).copied().unwrap_or(0);
+                if !follows || flags & 0x2 == 0 || flags & 0x800 != 0 {
                     return None;
                 }
                 // `listen` (`0x50a6f0`): the record is scanned **kind 2, then 1, then 0**, and the handler's own
@@ -14987,6 +14995,42 @@ mod tests {
         );
     }
 
+    /// `Follow`'s registry row (`sithAICmd_Startup`, `0x5091b0`) is accept `0x2`, reject `0x800`:
+    /// the engine's scheduler never runs the instinct's move while the alert bit every danger
+    /// handler raises is in the AI flag word. An alerted actor keeps its ground instead of walking
+    /// a sound record its `Follow` would otherwise accept.
+    #[test]
+    fn an_alerted_actor_does_not_walk_its_follow_instinct() {
+        let mut rt = door_runtime();
+        let base = rt.things[0].clone();
+        let mut actor = base.clone();
+        actor.pos = [0.0, 0.0, 0.0];
+        let mut player = base.clone();
+        player.pos = [-9.0, 0.0, 0.0];
+        rt.things = vec![player, actor];
+        rt.templates = vec!["walkplayer".into(), "tuskan".into()];
+        rt.types = vec![10, 2];
+        rt.template_speed.insert("tuskan".into(), 1.0);
+        rt.ai.insert(
+            1,
+            crate::ai::parse(
+                "alignment=-1.0, rank=0.5, fov=90, sightdist=2.0, heardist=2.0\n\nListen 1.0\nFollow 0.5, 0.1\n",
+            ),
+        );
+        // Acquired (`0x2`) **and** alerted (`0x800`): the reject word wins.
+        rt.ai_flags.insert(1, 0x2 | 0x800);
+        rt.sector_awareness.insert((7, 1), (3.0, [0.0, 1.5, 0.0], 0.0, None));
+        for _ in 0..40 {
+            rt.time += 1.0 / 30.0;
+            rt.ai_tick(0, 1.0 / 30.0);
+        }
+        let p = rt.things[1].pos;
+        assert!(
+            p[0].abs() < 1e-3 && p[1].abs() < 1e-3,
+            "an alerted actor walked its follow instinct: {p:?}"
+        );
+    }
+
     /// The awareness record is keyed by **event kind**, not by alignment: `CreateTransmittingEvent`'s
     /// third argument is a 0..2 slot (`0x4f2c30`), and every call site passes 0, 1 or 2 — the engine
     /// has no notion of a light-side shot. The port keyed the record by the shooter's alignment, so a
@@ -15839,8 +15883,9 @@ mod tests {
 
     /// `dodge`'s damage path (`0x50b360`, event 1): `sithActor_DamageActor` emits AI event 1 with the
     /// attacker, and the handler steps the actor `arg0` units **away** from it through
-    /// `sithAI_SetMoveThing`, with its own 1000 ms cooldown. Shipped classes are small steps: grunts
-    /// ship `dodge 0.1, 0.1`, bosses `0.3, 0.1`.
+    /// `sithAI_SetMoveThing`, writing the engine's shared 1000 ms move lockout (`ai + 0xa3`) — its
+    /// only gate is the clear moving bit. Shipped classes are small steps: grunts ship
+    /// `dodge 0.1, 0.1`, bosses `0.3, 0.1`.
     #[test]
     fn an_actor_that_is_hit_dodges_away_from_its_attacker() {
         let mut rt = door_runtime();
@@ -15871,7 +15916,8 @@ mod tests {
             Some([0.7, 0.0, 0.0]),
             "the actor did not step 0.3 away from its attacker"
         );
-        // Its own cooldown: another hit inside a second leaves the destination alone …
+        // The moving bit the first dodge's `SetMoveThing` set: another hit while it holds leaves
+        // the destination alone — the handler's only gate (`0x50b360`).
         rt.things[1].pos = [1.5, 0.0, 0.0];
         rt.things[2].pos = [3.5, 0.0, 0.0];
         rt.time = 0.5;
@@ -15898,6 +15944,19 @@ mod tests {
             rt.ai_move.get(&1).copied(),
             Some([1.2, 0.0, 0.0]),
             "the dodge did not re-arm once the actor had arrived"
+        );
+        // The engine has **no** handler cooldown: once the body has arrived (bit `0x1` clear) it
+        // dodges again even inside the 1000 ms `ai + 0xa3` lockout the first dodge wrote, which
+        // `SetMoveThing` applies only to a body that is already moving (`0x4eac90`).
+        rt.things[1].pos = [1.5, 0.0, 0.0];
+        rt.things[2].pos = [3.5, 0.0, 0.0];
+        rt.time = 0.6;
+        *rt.ai_flags.get_mut(&1).unwrap() &= !0x1;
+        rt.damage_typed_from(1, 5.0, DAMAGE_IMPACT, 2);
+        assert_eq!(
+            rt.ai_move.get(&1).copied(),
+            Some([1.2, 0.0, 0.0]),
+            "an arrived actor inside the lockout window did not dodge"
         );
     }
 
@@ -16304,8 +16363,8 @@ mod tests {
         );
         assert_eq!(
             rt.sector_awareness.get(&(7, 1)).map(|(s, _, _, _)| *s),
-            Some(8.0),
-            "the arm did not re-broadcast the event at 8.0"
+            Some(4.0),
+            "the arm did not re-broadcast the event at 4.0"
         );
         // The engine's own order is weight > strength: a louder record silences the arm.
         let mut quiet = door_runtime();
@@ -16482,8 +16541,11 @@ mod tests {
         assert_eq!(sounds, 1);
         let (moved, flags, sounds) = hit(false);
         assert!(moved.is_some(), "the dodge-first class did not dodge");
-        assert_eq!(flags & 0x4, 0x4, "the dodge-first class alerted after dodging");
-        assert_eq!(sounds, 0, "the dodge-first class played the surprise anyway");
+        // `dodge` returns 0 (`0x50b360`), so the dispatch does not stop at it: the same damage
+        // event continues to `sensedanger`, whose non-zero return is what ends the chain.
+        assert_eq!(flags & 0x4, 0, "the dodge-first class did not alert as well");
+        assert_ne!(flags & 0x800, 0);
+        assert_eq!(sounds, 1, "the dodge-first class skipped the surprise");
     }
 
     /// `sithAI_EmitEvent`'s own outer gates: a thing whose `flags` carry `0x202` has no AI, a dead body
