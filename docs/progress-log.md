@@ -7893,3 +7893,24 @@ gate events/anti-synthetic/oracle PASS. Open: trace gate `walk6_spawn` (5 sector
 290 instead of retail's 315 at the same pose within 0.01 units), and the route's retail prefix compare
 worsens from 1 mismatch (b18b9bc, same session) to 3 (ticks 36/72/108, sector 339 against 349): the
 spawn body is pinned between surface 3311, table 210 and the intro Rodian 207, which retail slides past.
+
+Follow-up on the integration branch (`184d883`): pushed bodies now run the attached drag arm
+(`0x4f7430:180-208`, `sithPhysics_ApplyDrag` `0x4f5d50`). Before it, an actor or crate bumped by the
+#101 contact response kept its push velocity forever (Rodian 207 slid north at 0.2 u/s for the whole
+route). With drag the bumped actors stop, so the frozen actors block harder: trace leg `walk_cantina`
+drops from 68 % to 24 % of retail's travel and the route's retail prefix compare reads 4 mismatches
+(ticks 36-144, sector 339 against 349). The port oracle is re-recorded from this build.
+
+Root cause of the spawn and cantina wedges, found by reading the capture harness and the level's cogs:
+it is the measurement window, not the collision port. `retail-capture.ps1 -RouteWalk` sends
+`disableai on` only at the route start, at least 1.2 s after `parse section things`
+(`Start-Sleep 1200` before the route, plus console latency). `01_initialry.cog` sleeps 0.5 s and then
+`AISetMovePos`es Rodian 207 (speed 3.0) to ghost 258 at (-10.35, -4.85) in sector 349, so retail's
+intro Rodian has left the spawn path before tick 0, and retail's body walks through the place the level
+file puts it. The port's `--no-ai` freezes the AI from frame 0, so 207 stays at its authored spot in the
+spawn path. Two port-side facts keep a simple AI pre-roll from fixing it: with a 72-tick AI-on pre-roll
+the port's 207 walks 0.17 units toward ghost 258 and then re-targets the player ("walks on aim" at
+t = 0.77 s) and fires, because the port's AI scheduler is still an approximation; and the pre-roll would
+move the replay's tick 0. Open question for the user: retail's Rodian 207 (and the cantina actors 181,
+182, 272) positions at the route's tick 0, which only a retail `coords`/thing dump at the route start
+can answer.
